@@ -11,6 +11,7 @@
 //! [`OverviewSurface`] owns the Wayland objects.
 
 use crate::model::ShellModel;
+use crate::notifications::Urgency;
 use crate::tiles::{Tile, TileState};
 
 /// Canvas backing pixel format (matches `wl_shm` `Argb8888`).
@@ -378,6 +379,125 @@ impl SwitcherCanvas {
     }
 }
 
+/// Notification banner stack: one row per banner (002 notifications).
+const BANNER_PAD: i32 = 12;
+const BANNER_GAP: i32 = 8;
+const BANNER_ROW_H: i32 = 56;
+const BANNER_ROW_EXPANDED_H: i32 = 96;
+/// Fixed strip width the panel requests from the compositor.
+pub const BANNER_STRIP_W: i32 = 360;
+/// How many banners are ever drawn (the center caps the queue here).
+pub const MAX_DRAWN_BANNERS: usize = 3;
+
+/// Strip height for banners with these expanded flags.
+pub fn banner_strip_height(expanded: &[bool]) -> i32 {
+    let mut height = BANNER_PAD * 2;
+    for (i, expanded) in expanded.iter().enumerate() {
+        if i > 0 {
+            height += BANNER_GAP;
+        }
+        height += if *expanded {
+            BANNER_ROW_EXPANDED_H
+        } else {
+            BANNER_ROW_H
+        };
+    }
+    height
+}
+
+/// Pixel canvas for one banner frame, with no Wayland dependency.
+/// Rows render oldest-first: plain fill normally, highlighted fill
+/// with an accent border for critical urgency, taller rows expanded.
+#[derive(Debug, Default)]
+pub struct BannerCanvas {
+    width: i32,
+    height: i32,
+    pixels: Vec<u8>,
+}
+
+impl BannerCanvas {
+    /// Blank canvas; zero-size canvases hold no pixels and draw nothing.
+    pub fn new(width: i32, height: i32) -> Self {
+        let len = (width.max(0) as usize)
+            .saturating_mul(height.max(0) as usize)
+            .saturating_mul(BYTES_PER_PIXEL);
+        let mut pixels = vec![0u8; len];
+        let (chunks, _) = pixels.as_chunks_mut::<BYTES_PER_PIXEL>();
+        for px in chunks {
+            px.copy_from_slice(&BG);
+        }
+        Self {
+            width,
+            height,
+            pixels,
+        }
+    }
+
+    /// Raw `Argb8888` bytes, row-major.
+    pub fn pixels(&self) -> &[u8] {
+        &self.pixels
+    }
+
+    /// Draw `(urgency, expanded)` rows top to bottom.
+    pub fn render(&mut self, rows: &[(Urgency, bool)]) {
+        if self.width <= 0 || self.height <= 0 {
+            return;
+        }
+        let mut y = BANNER_PAD;
+        for (urgency, expanded) in rows.iter().take(MAX_DRAWN_BANNERS) {
+            let h = if *expanded {
+                BANNER_ROW_EXPANDED_H
+            } else {
+                BANNER_ROW_H
+            };
+            let critical = *urgency == Urgency::Critical;
+            self.rect(
+                BANNER_PAD,
+                y,
+                self.width - BANNER_PAD * 2,
+                h,
+                if critical { BLOCK_SELECTED } else { BLOCK },
+            );
+            if critical {
+                self.border(
+                    BANNER_PAD - 3,
+                    y - 3,
+                    self.width - BANNER_PAD * 2 + 6,
+                    h + 6,
+                    3,
+                    ACCENT,
+                );
+            }
+            y += h + BANNER_GAP;
+        }
+    }
+
+    fn put(&mut self, x: i32, y: i32, color: [u8; 4]) {
+        if x < 0 || y < 0 || x >= self.width || y >= self.height {
+            return;
+        }
+        let at = (y as usize * self.width as usize + x as usize) * BYTES_PER_PIXEL;
+        if let Some(slot) = self.pixels.get_mut(at..at + BYTES_PER_PIXEL) {
+            slot.copy_from_slice(&color);
+        }
+    }
+
+    fn rect(&mut self, x: i32, y: i32, w: i32, h: i32, color: [u8; 4]) {
+        for dy in 0..h {
+            for dx in 0..w {
+                self.put(x + dx, y + dy, color);
+            }
+        }
+    }
+
+    fn border(&mut self, x: i32, y: i32, w: i32, h: i32, thick: i32, color: [u8; 4]) {
+        self.rect(x, y, w, thick, color);
+        self.rect(x, y + h - thick, w, thick, color);
+        self.rect(x, y, thick, h, color);
+        self.rect(x + w - thick, y, thick, h, color);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,6 +679,36 @@ mod tests {
         assert_eq!(strip_pixel(&pixels, width, 1234 + 7, 9 + 2), BG);
         // Sound dot brick: error.
         assert_eq!(strip_pixel(&pixels, width, 1212 + 7, 9 + 7), WARN);
+    }
+
+    #[test]
+    fn banner_rows_highlight_critical_and_expand() {
+        // One normal row, one expanded critical row.
+        let rows = [(Urgency::Normal, false), (Urgency::Critical, true)];
+        let height = banner_strip_height(&[false, true]);
+        assert_eq!(
+            height,
+            12 * 2 + BANNER_ROW_H + BANNER_GAP + BANNER_ROW_EXPANDED_H
+        );
+        let mut canvas = BannerCanvas::new(BANNER_STRIP_W, height);
+        canvas.render(&rows);
+        // First row plain fill.
+        let at = |x: i32, y: i32| {
+            let at = (y as usize * BANNER_STRIP_W as usize + x as usize) * BYTES_PER_PIXEL;
+            <[u8; 4]>::try_from(&canvas.pixels()[at..at + BYTES_PER_PIXEL]).unwrap()
+        };
+        assert_eq!(at(20, 12 + 10), BLOCK);
+        // Second row highlighted with an accent border.
+        let y1 = 12 + BANNER_ROW_H + BANNER_GAP;
+        assert_eq!(at(20, y1 + 10), BLOCK_SELECTED);
+        assert_eq!(at(12 - 2, y1 - 2), ACCENT);
+        // Padding stays backdrop.
+        assert_eq!(at(5, 5), BG);
+        // Empty draws nothing but backdrop.
+        let mut empty = BannerCanvas::new(BANNER_STRIP_W, height);
+        empty.render(&[]);
+        let (chunks, _) = empty.pixels().as_chunks::<4>();
+        assert!(chunks.iter().all(|px| *px == BG));
     }
 
     #[test]

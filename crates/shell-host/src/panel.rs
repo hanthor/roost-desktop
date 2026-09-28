@@ -48,8 +48,10 @@ use crate::apps::{AppProvider, LaunchTracker};
 use crate::control::{ControlClient, ControlError, Handled};
 use crate::favorites::Favorites;
 use crate::model::ShellModel;
+use crate::notifications::{NotificationCenter, Urgency};
 use crate::overview::{
-    paint_panel, OverviewCanvas, SwitcherCanvas, BYTES_PER_PIXEL, SWITCHER_STRIP_H,
+    banner_strip_height, paint_panel, BannerCanvas, OverviewCanvas, SwitcherCanvas, BANNER_STRIP_W,
+    BYTES_PER_PIXEL, SWITCHER_STRIP_H,
 };
 use crate::search::{SearchAction, SearchHub, SearchResult, WindowProvider};
 use crate::tiles::{TileSet, TileState};
@@ -60,6 +62,8 @@ pub const PANEL_NAMESPACE: &str = "rwd-shell-panel";
 pub const OVERVIEW_NAMESPACE: &str = "rwd-shell-overview";
 /// Namespace advertised for the Alt-Tab switcher layer surface.
 pub const SWITCHER_NAMESPACE: &str = "rwd-shell-switcher";
+/// Namespace advertised for the notification banner layer surface.
+pub const BANNER_NAMESPACE: &str = "rwd-shell-banner";
 /// Fixed panel height in logical pixels; also the exclusive zone.
 pub const PANEL_HEIGHT: u32 = 32;
 
@@ -154,6 +158,13 @@ pub struct ShellHost {
     switcher: Option<SwitcherSurface>,
     /// What the switcher buffer currently shows; repaint on change.
     switcher_key: Option<SwitcherPaintKey>,
+    /// Local notification center (filled by the 004 daemon later;
+    /// banners render from it meanwhile in tests).
+    center: NotificationCenter,
+    /// Live banner layer surface while banners are queued.
+    banners: Option<BannerSurface>,
+    /// What the banner buffer currently shows; repaint on change.
+    banner_key: Option<BannerPaintKey>,
     /// Panel size last painted (repaint on configure resize).
     panel_size: Option<(i32, i32)>,
     /// Status tiles (clock plus service presence), refreshed on a slow
@@ -222,6 +233,27 @@ struct SwitcherSurface {
 struct SwitcherPaintKey {
     selection: Option<u64>,
     entries: usize,
+    width: i32,
+    height: i32,
+}
+
+/// Live banner layer surface and its configured size.
+struct BannerSurface {
+    surface: WlSurface,
+    layer: ZwlrLayerSurfaceV1,
+    backing: Option<ShmBacking>,
+    width: i32,
+    height: i32,
+    /// Last requested height (re-request only on change, paint only at
+    /// the configured size).
+    requested_height: i32,
+}
+
+/// Repaint the banner strip when any of these change: visible banner
+/// ids with urgency and expand flags, plus the configured size.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BannerPaintKey {
+    rows: Vec<(u64, Urgency, bool)>,
     width: i32,
     height: i32,
 }
@@ -360,6 +392,9 @@ impl ShellHost {
             paint_key: None,
             switcher: None,
             switcher_key: None,
+            center: NotificationCenter::new(),
+            banners: None,
+            banner_key: None,
             panel_size: None,
             panel_backing: None,
             tiles: TileSet::system(),
@@ -410,6 +445,112 @@ impl ShellHost {
             switcher.surface.destroy();
         }
         self.switcher_key = None;
+    }
+
+    /// The host's notification center (the 004 daemon files through
+    /// here; tests file directly).
+    pub fn notification_center(&mut self) -> &mut NotificationCenter {
+        &mut self.center
+    }
+
+    /// Tear down the banner surface, if any (same explicit-destroy
+    /// rule as the overview and switcher).
+    fn destroy_banners(&mut self) {
+        if let Some(banners) = self.banners.take() {
+            banners.layer.destroy();
+            banners.surface.destroy();
+        }
+        self.banner_key = None;
+    }
+
+    /// Reconcile the banner surface with the notification center (call
+    /// after every center mutation and per loop tick): create the
+    /// bottom-right strip while banners queue, destroy it when the
+    /// queue drains, repaint when the visible rows or size change.
+    /// Pure no-op without attached Wayland globals.
+    fn update_banners(&mut self) {
+        let rows: Vec<(u64, Urgency, bool)> = self
+            .center
+            .banners()
+            .iter()
+            .map(|n| (n.id, n.urgency, n.expanded))
+            .collect();
+        if rows.is_empty() {
+            self.destroy_banners();
+            return;
+        }
+        let Some(wayland) = self.wayland.clone() else {
+            return;
+        };
+        if self.banners.is_none() {
+            let surface = wayland.compositor.create_surface(&wayland.qh, ());
+            let layer = wayland.layer_shell.get_layer_surface(
+                &surface,
+                None,
+                Layer::Overlay,
+                BANNER_NAMESPACE.to_owned(),
+                &wayland.qh,
+                (),
+            );
+            layer.set_anchor(Anchor::Bottom | Anchor::Right);
+            let expanded: Vec<bool> = rows.iter().map(|(_, _, expanded)| *expanded).collect();
+            let want = banner_strip_height(&expanded);
+            layer.set_size(BANNER_STRIP_W as u32, want as u32);
+            layer.set_exclusive_zone(0);
+            layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+            surface.commit();
+            self.banners = Some(BannerSurface {
+                surface,
+                layer,
+                backing: None,
+                width: 0,
+                height: 0,
+                requested_height: want,
+            });
+            self.banner_key = None;
+        }
+        let banners = self.banners.as_mut().expect("created above");
+        if banners.width <= 0 || banners.height <= 0 {
+            return;
+        }
+        // The row set changed height (expand toggles, queue growth):
+        // re-request once; the configure round-trip repaints at the
+        // new size.
+        let expanded: Vec<bool> = rows.iter().map(|(_, _, expanded)| *expanded).collect();
+        let want = banner_strip_height(&expanded);
+        if want != banners.requested_height {
+            banners.layer.set_size(BANNER_STRIP_W as u32, want as u32);
+            banners.surface.commit();
+            banners.requested_height = want;
+            return;
+        }
+        let key = BannerPaintKey {
+            rows: rows.clone(),
+            width: banners.width,
+            height: banners.height,
+        };
+        if self.banner_key.as_ref() == Some(&key) {
+            return;
+        }
+        let mut canvas = BannerCanvas::new(banners.width, banners.height);
+        let cells: Vec<(Urgency, bool)> = rows
+            .iter()
+            .map(|(_, urgency, expanded)| (*urgency, *expanded))
+            .collect();
+        canvas.render(&cells);
+        if let Some(backing) = shm_upload(
+            &wayland.shm,
+            &wayland.qh,
+            canvas.pixels(),
+            banners.width,
+            banners.height,
+        ) {
+            banners.surface.attach(Some(&backing.buffer), 0, 0);
+            banners.surface.damage(0, 0, banners.width, banners.height);
+            banners.surface.commit();
+            banners.backing = Some(backing);
+            self.banner_key = Some(key);
+        }
     }
 
     /// Reconcile the switcher surface with the model overlay (call
@@ -868,6 +1009,19 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for ShellHost {
                             switcher.height = height as i32;
                         }
                     }
+                } else if state
+                    .banners
+                    .as_ref()
+                    .is_some_and(|banners| &banners.layer == proxy)
+                {
+                    proxy.ack_configure(serial);
+                    // Size arrives here; the next update pass paints.
+                    if let Some(banners) = state.banners.as_mut() {
+                        if width > 0 && height > 0 {
+                            banners.width = width as i32;
+                            banners.height = height as i32;
+                        }
+                    }
                 } else {
                     proxy.ack_configure(serial);
                 }
@@ -889,6 +1043,12 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for ShellHost {
                     .is_some_and(|switcher| &switcher.layer == proxy)
                 {
                     state.destroy_switcher();
+                } else if state
+                    .banners
+                    .as_ref()
+                    .is_some_and(|banners| &banners.layer == proxy)
+                {
+                    state.destroy_banners();
                 }
             }
             _ => {}
@@ -987,6 +1147,7 @@ pub fn run_panel_with_control(
             host.update_overview(control.revision());
             host.update_switcher();
             host.update_panel_status();
+            host.update_banners();
             queue
                 .flush()
                 .map_err(|e| PanelError::Flush(e.to_string()))?;
@@ -1030,14 +1191,16 @@ mod tests {
             TestCompositor, SEAT_NAME,
         };
         use wayland_client::{
-            protocol::{wl_compositor::WlCompositor, wl_registry},
+            protocol::{wl_compositor::WlCompositor, wl_registry, wl_shm::WlShm},
             Connection, Dispatch, EventQueue, QueueHandle,
         };
         use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1;
 
         use crate::control::{ControlClient, Handled};
 
-        use super::super::{is_would_block, PanelConfig, ShellHost, PANEL_NAMESPACE};
+        use super::super::{
+            is_would_block, PanelConfig, ShellHost, BANNER_NAMESPACE, PANEL_NAMESPACE,
+        };
         use crate::apps::AppProvider;
         use crate::favorites::Favorites;
 
@@ -1062,6 +1225,7 @@ mod tests {
         struct Collector {
             compositor: Option<(u32, u32)>,
             layer_shell: Option<(u32, u32)>,
+            shm: Option<(u32, u32)>,
         }
 
         impl Dispatch<wl_registry::WlRegistry, ()> for Collector {
@@ -1082,10 +1246,62 @@ mod tests {
                     match interface.as_str() {
                         "wl_compositor" => state.compositor = Some((name, version)),
                         "zwlr_layer_shell_v1" => state.layer_shell = Some((name, version)),
+                        "wl_shm" => state.shm = Some((name, version)),
                         _ => {}
                     }
                 }
             }
+        }
+
+        /// Bind compositor, layer-shell, and shm on the panel queue and
+        /// attach the host (banner/switcher surfaces need all three).
+        fn attach_host(
+            comp: &mut TestCompositor,
+            conn: &Connection,
+            queue: &mut EventQueue<ShellHost>,
+            host: &mut ShellHost,
+        ) {
+            let qh = queue.handle();
+            let mut aux = conn.new_event_queue();
+            let aux_qh = aux.handle();
+            let mut collector = Collector::default();
+            let aux_registry = conn.display().get_registry(&aux_qh, ());
+            for _ in 0..PUMP_ROUNDS {
+                aux.flush().unwrap();
+                comp.pump();
+                if let Some(guard) = aux.prepare_read() {
+                    guard.read().unwrap();
+                }
+                aux.dispatch_pending(&mut collector).unwrap();
+                if collector.compositor.is_some()
+                    && collector.layer_shell.is_some()
+                    && collector.shm.is_some()
+                {
+                    break;
+                }
+            }
+            let (compositor_name, compositor_version) =
+                collector.compositor.expect("wl_compositor advertised");
+            let (layer_name, layer_version) = collector
+                .layer_shell
+                .expect("zwlr_layer_shell_v1 advertised");
+            let (shm_name, shm_version) = collector.shm.expect("wl_shm advertised");
+            let compositor: WlCompositor = aux_registry.bind::<WlCompositor, _, _>(
+                compositor_name,
+                compositor_version.min(6),
+                &qh,
+                (),
+            );
+            let layer_shell: ZwlrLayerShellV1 = aux_registry.bind::<ZwlrLayerShellV1, _, _>(
+                layer_name,
+                layer_version.min(5),
+                &qh,
+                (),
+            );
+            let shm: WlShm =
+                aux_registry.bind::<WlShm, _, _>(shm_name, shm_version.min(1), &qh, ());
+            drop((aux, aux_registry, collector));
+            host.attach_wayland(compositor, layer_shell, shm, qh);
         }
 
         fn pump_server(
@@ -1179,6 +1395,90 @@ mod tests {
                 }
             }
             assert!(!host.is_running(), "close stops the panel loop");
+        }
+
+        /// Banner surfaces follow the notification queue: notify opens
+        /// a bottom-right overlay strip under our namespace, draining
+        /// the queue destroys it again (explicit destroy, like the
+        /// overview and switcher).
+        #[test]
+        fn banners_surface_appears_and_destroys_with_queue() {
+            use crate::notifications::Urgency;
+
+            let mut comp = TestCompositor::new();
+            comp.state.set_output_size(1280, 800);
+            let (server_stream, client_stream) = UnixStream::pair().unwrap();
+            comp.add_client(server_stream);
+            let conn = Connection::from_socket(client_stream).unwrap();
+            let mut queue = conn.new_event_queue();
+            let (mut host, _dir) = test_host();
+            attach_host(&mut comp, &conn, &mut queue, &mut host);
+
+            let first = host.notification_center().notify(
+                "app",
+                "t1",
+                "b1",
+                vec![],
+                crate::notifications::Urgency::Normal,
+                None,
+            );
+            let crit = host.notification_center().notify(
+                "app",
+                "t2",
+                "b2",
+                vec![],
+                Urgency::Critical,
+                None,
+            );
+            host.update_banners();
+            for _ in 0..PUMP_ROUNDS {
+                pump_server(&mut comp, &mut queue, &mut host);
+                host.update_banners();
+                if comp
+                    .state
+                    .panel_surfaces()
+                    .iter()
+                    .any(|s| s.namespace == BANNER_NAMESPACE && s.configured)
+                {
+                    break;
+                }
+            }
+            let banners: Vec<_> = comp
+                .state
+                .panel_surfaces()
+                .into_iter()
+                .filter(|s| s.namespace == BANNER_NAMESPACE)
+                .collect();
+            assert_eq!(banners.len(), 1, "one banner strip tracked");
+            assert!(banners[0].configured, "banner acked the configure");
+            assert_eq!(
+                banners[0].layer,
+                smithay::wayland::shell::wlr_layer::Layer::Overlay
+            );
+
+            // Draining the queue destroys the surface server-side too.
+            host.notification_center().dismiss(first).unwrap();
+            host.notification_center().dismiss(crit).unwrap();
+            host.update_banners();
+            for _ in 0..PUMP_ROUNDS {
+                pump_server(&mut comp, &mut queue, &mut host);
+                host.update_banners();
+                if comp
+                    .state
+                    .panel_surfaces()
+                    .iter()
+                    .all(|s| s.namespace != BANNER_NAMESPACE)
+                {
+                    break;
+                }
+            }
+            assert!(
+                comp.state
+                    .panel_surfaces()
+                    .iter()
+                    .all(|s| s.namespace != BANNER_NAMESPACE),
+                "banner strip destroyed with the queue"
+            );
         }
 
         /// The binary's overview feed: a control client handshaked
