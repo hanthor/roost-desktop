@@ -31,3 +31,7 @@ spektacular plan new --data '{"name":"20260927170317-a01f0011-001-nested-composi
 ```
 
 The plan workflow should refresh its draft from the current source and the linked spek. Complete its walkthrough and review before starting implementation. The implementation workflow starts with the corresponding full plan name after approval. See [Spektacular](https://github.com/hivecommons/spektacular) for the current workflow and CLI details.
+
+## License
+
+GPL-3.0-or-later. See [LICENSE](LICENSE).

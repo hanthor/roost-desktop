@@ -2,6 +2,7 @@
 name = "rwd-shell-control"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 
 # Wave 2 stream 1 owns this crate. Workspace pins live in the root Cargo.toml.
 

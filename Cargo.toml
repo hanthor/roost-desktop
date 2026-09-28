@@ -8,6 +8,9 @@ members = [
 
 # Pinned per ADR 0001 (docs/adr/0001-nested-backend-smithay-pin.md).
 # Exact pins keep the Gate #1 verification reproducible.
+[workspace.package]
+license = "GPL-3.0-or-later"
+
 [workspace.dependencies]
 smithay = { version = "=0.7.0", default-features = false, features = ["wayland_frontend"] }
 calloop = "=0.14.4"
