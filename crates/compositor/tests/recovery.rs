@@ -352,8 +352,13 @@ fn shell_death_exhausts_bounded_restart_budget() {
         cmd
     };
 
-    // Spawn the shell child under supervision; it is alive.
-    sup.spawn(&mut Command::new("sleep")).unwrap();
+    // Spawn the shell child under supervision; it is alive. The child
+    // must be long-lived: bare `sleep` exits immediately, which turns
+    // the aliveness assert below into a scheduling race (CI caught it
+    // as Exited(Some(1)) vs Running).
+    let mut first = Command::new("sleep");
+    first.arg("60");
+    sup.spawn(&mut first).unwrap();
     assert!(sup.has_child());
     assert_eq!(
         sup.poll(&mut remake, clock.now_ms()).unwrap(),
