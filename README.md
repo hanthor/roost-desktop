@@ -4,6 +4,10 @@ A new, independent Wayland desktop session with a GNOME-inspired everyday workfl
 
 The compositor is a long-lived Rust process built with Smithay. The shell UI runs as a supervised Wayland client. The first delivery target is a nested developer preview that can map ordinary applications and recover its shell UI after a shell crash.
 
+## Getting started
+
+**New to the project?** Start with [Development guide](docs/development.md) — it covers setup, project structure, and how to run the nested preview.
+
 ## Project status
 
 Design and planning only; no compositor implementation has started. The planning framework covers baseline research, the nested recovery slice, shell parity, hardware/app compatibility, secure system integration, optional extensions, and release readiness.
