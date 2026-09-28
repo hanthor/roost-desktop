@@ -7,13 +7,14 @@
 # Starts a private Xvfb (unless DISPLAY already works), builds and runs
 # the nested compositor with its supervised shell, then drives the
 # Milestone-1 journey with real X input and captures a screenshot per
-# stage: baseline, Super-tap overview, typed search, Enter, Escape
-# return, Super+PageDown workspace switch, Alt+Tab switcher drive.
+# stage: baseline, Super-tap overview, typed search, Enter (which must
+# launch the probe app below), Escape return, Super+PageDown workspace
+# switch, Alt+Tab switcher drive.
 # Exits nonzero on any failure (dead process, panic in logs, missing
 # or byte-identical screenshots, no workspace-switch or switcher-step
-# line in the log). PNGs plus logs land in the
-# artifacts dir for upload; a human reviews the frames, the script only
-# proves the session lived and visibly reacted.
+# line in the log, probe app never launched). PNGs plus logs land in
+# the artifacts dir for upload; a human reviews the frames, the script
+# proves the session lived, visibly reacted, and launched from search.
 #
 # Environment hygiene: DISPLAY is set for child processes only and only
 # when this script started the Xvfb itself.
@@ -45,6 +46,23 @@ mkdir -p "$ARTIFACTS"
 LOG="$ARTIFACTS/nested.log"
 OWNED_XVFB=""
 COMPOSITOR_PID=""
+
+# Launch probe: a fake app only this journey can see. Its Exec
+# touches the marker, proving overview search actually launched it.
+# XDG_DATA_HOME redirects shell discovery (inherited by the
+# supervised shell child); the query below matches nothing else.
+PROBE_HOME="$ARTIFACTS/probe-home"
+MARKER="$ARTIFACTS/launch-marker"
+rm -f "$MARKER"
+mkdir -p "$PROBE_HOME/applications"
+cat >"$PROBE_HOME/applications/rwdterm-probe.desktop" <<EOF
+[Desktop Entry]
+Name=Rwdterm Probe
+Exec=touch "$MARKER"
+Type=Application
+EOF
+XDG_DATA_HOME="$PROBE_HOME"
+export XDG_DATA_HOME
 
 cleanup() {
     if [ -n "$COMPOSITOR_PID" ] && kill -0 "$COMPOSITOR_PID" 2>/dev/null; then
@@ -158,13 +176,33 @@ xdotool key Super_L
 sleep 2
 shot "02-overview.png"
 
-# Typing filters; Enter picks; Escape returns.
-xdotool type "term"
+# Typing filters; Enter picks; Escape returns. The query matches
+# only the probe app, so Enter must spawn it (marker below).
+xdotool type "rwdterm"
 sleep 2
 shot "03-search.png"
 xdotool key Return
 sleep 2
 shot "04-after-enter.png"
+
+# The probe's Exec touches the marker: search-to-launch worked end
+# to end. Slow provider threads get a few more Returns (the query
+# stays buffered while the overview is open).
+LAUNCHED=""
+for _ in $(seq 1 6); do
+    if [ -f "$MARKER" ]; then
+        LAUNCHED=1
+        break
+    fi
+    xdotool key Return
+    sleep 3
+done
+if [ -z "$LAUNCHED" ]; then
+    echo "rwd-journey: probe app never launched (no marker at $MARKER)" >&2
+    tail -30 "$LOG" >&2 || true
+    exit 1
+fi
+echo "rwd-journey: probe app launched"
 xdotool key Escape
 sleep 2
 shot "05-after-escape.png"
