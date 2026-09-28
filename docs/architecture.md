@@ -22,7 +22,7 @@ Use Smithay/calloop's event model initially. Pointer/input/frame paths must not 
 
 ## Delivery tiers
 
-1. **Nested developer preview:** nested compositor, floating windows, focus/workspaces, one shell host, overview trigger/window list, restart and resynchronization, software/common accelerated rendering, lock prototype, lifecycle harness. Not a secure daily-driver session.
+1. **Nested developer preview:** nested compositor, floating windows, focus/workspaces, one shell host, overview trigger/window list, restart and resynchronization, GLES-over-EGL rendering, lock prototype, lifecycle harness. The pinned nested backend has no software-rendering fallback, so this tier requires a working EGL implementation ([ADR 0001](adr/0001-nested-backend-smithay-pin.md)); Mesa llvmpipe satisfies it in VMs and CI. Not a secure daily-driver session.
 2. **Daily-driver candidate:** DRM/KMS via logind/libseat, multi-output/hotplug, XWayland, clipboard/drag-and-drop, IME/accessibility, secure lock/auth, suspend/resume, portals, settings/session integration, support matrix, conformance and fault tests. Ship only after security/usability gates.
 3. **Later measured work:** tiling variants, VRR/HDR/color improvements, public extension distribution, remote desktop, more GPU configurations.
 

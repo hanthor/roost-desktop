@@ -22,7 +22,7 @@
 
 The exact support matrix is selected in spec 000 and maintained by spec 003. At minimum, qualification should cover:
 
-- A nested/software-rendered CI environment for deterministic lifecycle and protocol cases.
+- A nested CI environment for deterministic lifecycle and protocol cases. The pinned nested backend renders GLES-over-EGL with no software fallback, so this environment must provide EGL; a software Mesa driver such as llvmpipe satisfies it without a GPU.
 - At least one integrated GPU and one discrete GPU reference configuration before broad hardware claims.
 - Single output and mixed 60/120 Hz multi-output where hardware supports it.
 - Native Wayland GTK and Qt clients, XWayland clients, and mixed-DPI layouts at 100%, 125%, 150%, and 200% where the client/output path supports them.
