@@ -11,6 +11,8 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
+      # smithay links system libxkbcommon via the xkbcommon crate.
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev pkg-config
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
