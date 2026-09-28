@@ -426,3 +426,14 @@ Confirm the nested window, panel placement, window mapping, and recovery overlay
 - `crates/compositor/tests/launch_script.rs`
 
 **Discoveries**: Wayland `EventQueue::flush` fails with the private `WaylandError`, so the panel maps it to a message-only `Flush(String)` variant to keep diagnostics content-free. `WlRegistry::bind` returns the proxy directly (no `Result`), unlike `GlobalList::bind`.
+
+### 2026-09-28 — Fix: supervision diagnostics and SIGTERM shutdown (live findings)
+
+**What was done**: Two defects found in the Xvfb live smoke run, both fixed and re-proven live. (1) `ShellDriver` re-emitted exit events on every backoff-wait tick (10 duplicate death reports per kill); it now reports each absence once (`reported_down` transition flag, cleared on respawn/relaunch). (2) SIGTERM bypassed `Drop` and orphaned the shell on a dead socket; `run` now registers `SIGTERM`/`SIGINT` via `signal-hook` and shuts the loop down gracefully so the supervisor kills the child — proven live (one `ShellExited` + one `RestartScheduled` per kill; SIGTERM takes both processes down with a clean stats line).
+
+**Files changed**:
+- `crates/compositor/src/supervise.rs`
+- `crates/compositor/src/runtime.rs`
+- `Cargo.toml`
+- `Cargo.lock`
+- `crates/compositor/Cargo.toml`

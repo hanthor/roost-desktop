@@ -354,6 +354,10 @@ pub struct ShellDriver {
     wayland_display: String,
     control_socket: std::path::PathBuf,
     events: Vec<SupervisorEvent>,
+    /// Whether the current absence was already reported. The
+    /// supervisor repeats `Exited` while a restart backoff is pending,
+    /// so without this every tick would log a duplicate death.
+    reported_down: bool,
 }
 
 impl ShellDriver {
@@ -370,6 +374,7 @@ impl ShellDriver {
             wayland_display,
             control_socket,
             events: Vec::new(),
+            reported_down: false,
         }
     }
 
@@ -389,12 +394,21 @@ impl ShellDriver {
             command
         };
         match supervisor.poll(&mut remake, now_ms) {
-            Ok(ChildEvent::Running) => ShellStatus::Running,
+            Ok(ChildEvent::Running) => {
+                self.reported_down = false;
+                ShellStatus::Running
+            }
             Ok(ChildEvent::Exited(code)) => {
-                self.events.push(SupervisorEvent::ShellExited { code });
+                // Report the transition once; backoff-wait repeats of
+                // the same absence stay silent.
+                if !self.reported_down {
+                    self.events.push(SupervisorEvent::ShellExited { code });
+                    let delay_ms = supervisor.backoff_remaining_ms(now_ms);
+                    self.events
+                        .push(SupervisorEvent::RestartScheduled { delay_ms });
+                    self.reported_down = true;
+                }
                 let delay_ms = supervisor.backoff_remaining_ms(now_ms);
-                self.events
-                    .push(SupervisorEvent::RestartScheduled { delay_ms });
                 ShellStatus::Waiting { delay_ms }
             }
             Err(SuperviseError::BudgetExhausted) => {
@@ -413,9 +427,11 @@ impl ShellDriver {
 
     /// Restore the full restart budget for an operator-requested
     /// relaunch (overlay action). Keeps a live child; the next
-    /// [`poll`](Self::poll) respawns when none is held.
+    /// [`poll`](Self::poll) respawns when none is held. A relaunch is
+    /// a new episode, so a pending absence reports again afterwards.
     pub fn reset_budget(&mut self) {
         self.supervisor.reset_budget();
+        self.reported_down = false;
     }
 
     /// Restarts performed so far (initial spawn excluded).
@@ -568,6 +584,43 @@ mod tests {
         // Operator relaunch restores the budget and respawns.
         driver.reset_budget();
         assert_eq!(driver.poll(200), ShellStatus::Running);
+    }
+
+    #[test]
+    fn driver_reports_each_absence_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut driver = ShellDriver::new(
+            RestartPolicy::new(5, 10_000, 10_000),
+            std::path::PathBuf::from("/bin/false"),
+            "rwd-test.sock".to_owned(),
+            dir.path().join("control.sock"),
+        );
+        assert_eq!(driver.poll(0), ShellStatus::Running);
+        // Reap the instant exit: first Waiting carries the two
+        // transition events.
+        let mut waited = false;
+        for _ in 0..10_000 {
+            match driver.poll(0) {
+                ShellStatus::Waiting { .. } => {
+                    waited = true;
+                    break;
+                }
+                ShellStatus::Running => std::thread::yield_now(),
+                other => panic!("unexpected driver status: {other:?}"),
+            }
+        }
+        assert!(waited);
+        // Backoff-wait repeats of the same absence stay silent.
+        for _ in 0..5 {
+            assert!(matches!(driver.poll(0), ShellStatus::Waiting { .. }));
+        }
+        let events = driver.drain_events();
+        assert_eq!(events.len(), 2, "one death, one report: {events:?}");
+        assert!(matches!(events[0], SupervisorEvent::ShellExited { .. }));
+        assert!(matches!(
+            events[1],
+            SupervisorEvent::RestartScheduled { .. }
+        ));
     }
 
     #[test]

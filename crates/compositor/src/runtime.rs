@@ -471,7 +471,21 @@ impl Runtime {
 pub fn run(session: &NestedSession) -> Result<RunStats, RuntimeError> {
     let (mut runtime, mut event_loop) = Runtime::launch(session)?;
     let prev_env = apply_nested_env(&session.socket_name);
+    // Graceful shutdown on SIGTERM/SIGINT: ending the loop drops the
+    // runtime, whose supervisor kills the shell child (ADR 0003 kill
+    // on exit). Without this a signal would bypass `Drop` and orphan
+    // the shell on a dead socket. The flag write is the only work done
+    // in the handler; the loop observes it below.
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
+        signal_hook::flag::register(signal, std::sync::Arc::clone(&shutdown))
+            .map_err(|e| RuntimeError::Loop(format!("signal handler failed: {e}")))?;
+    }
     loop {
+        if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+            restore_env(prev_env);
+            return Ok(runtime.stats);
+        }
         let dispatched = event_loop
             .dispatch(Some(FRAME_BUDGET), &mut runtime)
             .map_err(|e| RuntimeError::Loop(e.to_string()));
