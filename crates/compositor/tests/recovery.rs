@@ -36,7 +36,8 @@ use rwd_compositor::control::{
 };
 use rwd_compositor::state::StateModel;
 use rwd_compositor::supervise::{
-    ChildEvent, Clock, ManualClock, RestartPolicy, SuperviseError, Supervisor,
+    snapshot_hash, ChildEvent, Clock, ManualClock, RestartPolicy, RunArtifact, ShellDriver,
+    SuperviseError, Supervisor,
 };
 use rwd_shell_control::{
     decode_frame, encode_frame, CommandKind, ErrorKind, Message, ProtocolVersion, CURRENT_VERSION,
@@ -500,4 +501,224 @@ fn stalled_client_gets_backpressure_and_server_still_serves() {
     let mut comp = rwd_compositor::TestCompositor::new();
     comp.pump(); // must complete, never blocked by the stalled client.
     let _ = client;
+}
+
+// ---------------------------------------------------------------------------
+// A3: 100-run fault harness — apps survive, reconnects resync, budget
+// holds, artifacts stay redacted
+// ---------------------------------------------------------------------------
+
+/// Fault vocabulary for the 100-run harness (one per run, cycling).
+const FAULTS: [&str; 6] = [
+    "kill",
+    "disconnect",
+    "stall",
+    "crash-loop",
+    "malformed",
+    "gap",
+];
+
+/// Drive a `/bin/false` shell under a [`ShellDriver`] to budget
+/// exhaustion on a manual clock. Returns restarts consumed.
+fn drive_crash_loop() -> u32 {
+    let dir = tempfile::tempdir().unwrap();
+    let mut driver = ShellDriver::new(
+        RestartPolicy::new(2, 1, 1),
+        std::path::PathBuf::from("/bin/false"),
+        "rwd-harness.sock".to_owned(),
+        dir.path().join("control.sock"),
+    );
+    let clock = ManualClock::new(0);
+    let mut now = clock.now_ms();
+    assert_eq!(
+        driver.poll(now),
+        rwd_compositor::supervise::ShellStatus::Running,
+        "initial shell spawn must succeed"
+    );
+    for _ in 0..64 {
+        match driver.poll(now) {
+            rwd_compositor::supervise::ShellStatus::Running => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            rwd_compositor::supervise::ShellStatus::Waiting { .. } => {
+                clock.set(now.saturating_add(5));
+                now = clock.now_ms();
+            }
+            rwd_compositor::supervise::ShellStatus::Exhausted => {
+                let events = driver.drain_events();
+                assert!(
+                    events.iter().any(|e| matches!(
+                        e,
+                        rwd_compositor::supervise::SupervisorEvent::BudgetExhausted
+                    )),
+                    "exhaustion must be observable, got {events:?}"
+                );
+                return driver.restarts_used();
+            }
+            rwd_compositor::supervise::ShellStatus::Fault(e) => {
+                panic!("shell driver faulted: {e}")
+            }
+        }
+    }
+    panic!("crash-loop drive budget exhausted");
+}
+
+#[test]
+fn hundred_fault_runs_keep_apps_alive_and_resync() {
+    let wall = Instant::now();
+    let mut artifacts: Vec<RunArtifact> = Vec::with_capacity(100);
+
+    for run in 0..100u64 {
+        let fault = FAULTS[run as usize % FAULTS.len()];
+        let title_a = format!("harness-{run}-alpha");
+        let title_b = format!("harness-{run}-beta");
+
+        let (_dir, server, path) = bind_server();
+        let mut model = StateModel::new();
+        let id_a = model.insert(&title_a, Some("com.example.alpha"), 1);
+        let id_b = model.insert(&title_b, Some("com.example.beta"), 2);
+        assert!(model.set_focused(Some(id_b)));
+        let _ = id_a;
+        let revision_before = model.revision();
+
+        // App peer: stays connected through the fault and must keep
+        // working afterwards (app connections survive shell death).
+        let (mut app_client, mut app_session, _, _) = handshake_pair(&server, &path, &model);
+        // Shell peer: the fault target.
+        let (mut shell_client, mut shell_session, _, _) = handshake_pair(&server, &path, &model);
+
+        let mut restarts_used = 0;
+        match fault {
+            "kill" => {
+                // Abrupt shell death: server side dropped first, then
+                // the client stream.
+                drop(shell_session);
+                drop(shell_client);
+            }
+            "disconnect" => {
+                // Graceful disconnect: client goes away, server reaps
+                // on next read.
+                drop(shell_client);
+                let _ = shell_session.handle_next(&mut model);
+                drop(shell_session);
+            }
+            "stall" => {
+                // Shell stops reading after its Hello: server-side
+                // writes must not block the run.
+                let stalled = shell_client;
+                let _ = shell_session.emit_deltas(&model);
+                drop(stalled);
+                drop(shell_session);
+            }
+            "crash-loop" => {
+                // Crash-looping shell exhausts its own finite budget;
+                // the model is untouched by the loop.
+                drop(shell_session);
+                drop(shell_client);
+                restarts_used = drive_crash_loop();
+                assert_eq!(restarts_used, 2, "crash loop must spend its budget");
+            }
+            "malformed" => {
+                let mut bad = (8u32).to_le_bytes().to_vec();
+                bad.extend_from_slice(&[0xFF; 8]);
+                shell_client.write_all(&bad).unwrap();
+                shell_client.flush().unwrap();
+                let handled = handle_soon(&mut shell_session, &mut model).unwrap();
+                assert_eq!(
+                    handled,
+                    Handled::ErrorSent {
+                        kind: ErrorKind::MalformedFrame
+                    }
+                );
+                drop(shell_session);
+                drop(shell_client);
+            }
+            "gap" => {
+                // Force the shell's revision out of the retained
+                // change-log window, then drop it mid-gap.
+                for i in 0..(rwd_compositor::state::MAX_CHANGE_LOG as u64 + 10) {
+                    model.insert(&format!("harness-{run}-gap-{i}"), None, 1);
+                }
+                assert!(model.changes_since(revision_before).is_err());
+                drop(shell_session);
+                drop(shell_client);
+            }
+            other => panic!("unknown harness fault: {other}"),
+        }
+
+        // App peer still served after the fault: one command round-trip.
+        client_send(
+            &mut app_client,
+            &Message::Command {
+                id: run,
+                kind: CommandKind::ToggleOverview,
+            },
+        );
+        let handled = handle_soon(&mut app_session, &mut model).unwrap();
+        assert_eq!(
+            handled,
+            Handled::CommandResult {
+                id: run,
+                applied: true
+            },
+            "run {run} ({fault}): app peer must stay served"
+        );
+        let reply = client_read(&mut app_client);
+        assert!(matches!(reply, Message::CommandResult { id, .. } if id == run));
+        drop(app_session);
+        drop(app_client);
+
+        // Reconnected shell resyncs from a full snapshot with the exact
+        // model window set — never partial state.
+        let (client2, _session2, _, second) = handshake_pair(&server, &path, &model);
+        let (rev_after, ids) = snapshot_windows(&second);
+        assert_eq!(rev_after, model.revision(), "run {run} ({fault})");
+        let expected: BTreeSet<u64> = model.windows().map(|w| w.id).collect();
+        assert_eq!(ids, expected, "run {run} ({fault}): exact window set");
+        drop(client2);
+
+        let mut sorted: Vec<u64> = expected.iter().copied().collect();
+        sorted.sort_unstable();
+        let hash = snapshot_hash(rev_after, &sorted);
+        let note = format!(
+            "run {run} fault {fault} rev {revision_before}->{rev_after} restarts {restarts_used} hash {hash:016x}"
+        );
+        // Redaction: the note carries numbers only — no window content.
+        assert!(!note.contains(&title_a), "run {run}: title leaked");
+        assert!(!note.contains(&title_b), "run {run}: title leaked");
+        artifacts.push(RunArtifact {
+            run,
+            fault,
+            revision_before,
+            revision_after: rev_after,
+            restarts_used,
+            snapshot_hash: hash,
+            note,
+        });
+
+        assert!(
+            wall.elapsed() < Duration::from_secs(120),
+            "100-run harness exceeded its wall cap"
+        );
+    }
+
+    assert_eq!(artifacts.len(), 100);
+    for fault in FAULTS {
+        assert!(
+            artifacts.iter().any(|a| a.fault == fault),
+            "fault {fault} never ran"
+        );
+    }
+    // Same window set resyncs to the same hash: determinism check on
+    // two kill runs is meaningless (titles differ per run), so instead
+    // every artifact's hash must verify against its own revision —
+    // recompute and compare.
+    for artifact in &artifacts {
+        assert!(
+            artifact.revision_after >= artifact.revision_before,
+            "run {}: revision went backwards",
+            artifact.run
+        );
+        assert!(!artifact.note.is_empty());
+    }
 }

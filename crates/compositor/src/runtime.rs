@@ -1,10 +1,10 @@
 //! Nested session runtime (001 T1, ADR 0001).
 //!
 //! Owns the Smithay winit/calloop session: backend creation, client
-//! acceptance over a private socket, output setup, per-tick dispatch, and
-//! frame production. Window management, input routing, shell supervision,
-//! and the control channel attach in later tasks; this module only drives
-//! the loop and keeps the host environment untouched.
+//! acceptance over a private socket, output setup, per-tick dispatch,
+//! frame production, window management, input routing, shell supervision
+//! (T5), and the control channel. The loop keeps the host environment
+//! untouched.
 //!
 //! The loop shape follows upstream `examples/minimal.rs` at the pinned
 //! revision (manual repaint each round, toplevels stacked at the origin);
@@ -38,8 +38,10 @@ use smithay::{
 };
 
 use crate::control::ControlHub;
+use crate::overlay::{overlay_key_for_keycode, Overlay, OverlayWindow};
 use crate::state::TokenStore;
-use crate::windows::{translate_input, WindowManager};
+use crate::supervise::{RecoveryAction, RestartPolicy, ShellDriver, ShellStatus};
+use crate::windows::{translate_input, ManagerInput, WindowManager};
 
 use crate::{ClientState, State};
 
@@ -61,6 +63,10 @@ pub struct NestedSession {
     pub width: i32,
     /// Output height in physical pixels.
     pub height: i32,
+    /// Shell binary to supervise. `None` selects
+    /// [`resolve_shell_bin`]: `RWD_SHELL_BIN`, then the
+    /// `rwd-shell-host` sibling of this binary, then `PATH`.
+    pub shell_bin: Option<std::path::PathBuf>,
 }
 
 impl NestedSession {
@@ -70,6 +76,7 @@ impl NestedSession {
             socket_name,
             width,
             height,
+            shell_bin: None,
         }
     }
 
@@ -83,6 +90,29 @@ impl NestedSession {
     }
 }
 
+/// Shell binary for a session: explicit config, then `RWD_SHELL_BIN`,
+/// then the `rwd-shell-host` sibling of this binary when it exists,
+/// else a `PATH` lookup at spawn time.
+pub fn resolve_shell_bin(configured: Option<&std::path::Path>) -> std::path::PathBuf {
+    if let Some(path) = configured {
+        return path.to_owned();
+    }
+    if let Ok(path) = std::env::var("RWD_SHELL_BIN") {
+        if !path.is_empty() {
+            return std::path::PathBuf::from(path);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join("rwd-shell-host");
+            if sibling.is_file() {
+                return sibling;
+            }
+        }
+    }
+    std::path::PathBuf::from("rwd-shell-host")
+}
+
 /// Summary of one nested run, for diagnostics (no sensitive content).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RunStats {
@@ -90,6 +120,8 @@ pub struct RunStats {
     pub frames: u64,
     /// Wayland clients accepted.
     pub clients: u64,
+    /// Shell restarts consumed (initial spawn excluded).
+    pub shell_restarts: u32,
 }
 
 /// Ways the nested runtime can fail to start or run.
@@ -145,6 +177,8 @@ pub struct Runtime {
     output: Output,
     manager: WindowManager,
     control: ControlHub,
+    shell: ShellDriver,
+    overlay: Overlay,
     exit: bool,
     stats: RunStats,
 }
@@ -171,8 +205,16 @@ impl Runtime {
         let manager = WindowManager::new(&mut state);
         let tokens = std::rc::Rc::new(TokenStore::new());
         let control_path = control_socket_path(&session.socket_name);
-        let control = ControlHub::bind(control_path, tokens, crate::SEAT_NAME)
+        let control = ControlHub::bind(control_path.clone(), tokens, crate::SEAT_NAME)
             .map_err(|e| RuntimeError::Socket(e.to_string()))?;
+        let shell_policy = RestartPolicy::default();
+        let shell = ShellDriver::new(
+            shell_policy,
+            resolve_shell_bin(session.shell_bin.as_deref()),
+            session.socket_name.clone(),
+            control_path,
+        );
+        let overlay = Overlay::new(shell_policy.max_attempts);
 
         let output = Output::new(
             "rwd-0".to_owned(),
@@ -229,14 +271,17 @@ impl Runtime {
             output,
             manager,
             control,
+            shell,
+            overlay,
             exit: false,
             stats: RunStats::default(),
         };
         Ok((runtime, event_loop))
     }
 
-    /// Handle one backend event. Input routing arrives in T2; here only
-    /// resize, redraw, and close affect the loop.
+    /// Handle one backend event. While the recovery overlay is visible
+    /// it keeps focus and input (GNOME shield shape): every event goes
+    /// to the overlay and windows hear nothing.
     fn on_winit_event(&mut self, event: WinitEvent) {
         match event {
             WinitEvent::Resized { size, .. } => {
@@ -250,15 +295,76 @@ impl Runtime {
             WinitEvent::CloseRequested => self.exit = true,
             WinitEvent::Input(event) => {
                 if let Some(input) = translate_input(event) {
-                    self.manager.on_input(&mut self.state, input);
+                    self.on_manager_input(input);
                 }
             }
             WinitEvent::Redraw | WinitEvent::Focus(_) => {}
         }
     }
 
-    /// Dispatch clients, reconcile windows, produce one frame, and
-    /// report whether to continue.
+    /// Route one backend input event: to the recovery overlay while it
+    /// is visible, else to the window manager.
+    fn on_manager_input(&mut self, input: ManagerInput) {
+        if !self.overlay.visible {
+            self.manager.on_input(&mut self.state, input);
+            return;
+        }
+        let ManagerInput::Key {
+            keycode,
+            pressed: true,
+            ..
+        } = input
+        else {
+            return;
+        };
+        let Some(key) = overlay_key_for_keycode(keycode) else {
+            return;
+        };
+        match self.overlay.apply_key(key) {
+            None => {}
+            Some(RecoveryAction::ListWindows) => self.refresh_overlay(),
+            Some(RecoveryAction::RelaunchShell) => {
+                self.overlay.record_restart();
+                self.shell.reset_budget();
+            }
+            Some(RecoveryAction::ShowOverlay) => self.overlay.hide(),
+        }
+    }
+
+    /// Windows currently mapped, as overlay list entries served from
+    /// compositor state (no shell IPC needed).
+    fn overlay_windows(&self) -> Vec<OverlayWindow> {
+        self.manager
+            .model()
+            .snapshot()
+            .windows
+            .iter()
+            .map(|window| OverlayWindow {
+                id: window.id,
+                title: window.title.clone(),
+            })
+            .collect()
+    }
+
+    /// Show the recovery overlay with a fresh window list, or refresh
+    /// the visible list in place (selection survives when its id does).
+    fn refresh_overlay(&mut self) {
+        if self.overlay.visible {
+            let titles: Vec<(u64, String)> = self
+                .overlay_windows()
+                .iter()
+                .map(|window| (window.id, window.title.clone()))
+                .collect();
+            self.overlay.refresh_from_snapshot(&titles);
+        } else {
+            self.overlay.show(self.overlay_windows());
+        }
+    }
+
+    /// Dispatch clients, reconcile windows, supervise the shell, produce
+    /// one frame, and report whether to continue. The shell step never
+    /// blocks the tick: absence shows the overlay, exhaustion stays
+    /// calm, and every outcome is logged redacted (codes/counts only).
     fn tick(&mut self) -> Result<bool, RuntimeError> {
         self.display
             .dispatch_clients(&mut self.state)
@@ -271,15 +377,37 @@ impl Runtime {
         for id in activated {
             self.manager.focus(&mut self.state, Some(id));
         }
+        match self.shell.poll(crate::state::system_millis()) {
+            ShellStatus::Running => {
+                if self.overlay.visible {
+                    self.overlay.hide();
+                }
+            }
+            ShellStatus::Waiting { .. } | ShellStatus::Fault(_) | ShellStatus::Exhausted => {
+                self.refresh_overlay()
+            }
+        }
+        for event in self.shell.drain_events() {
+            eprintln!("rwd-compositor: shell supervision: {event:?}");
+        }
+        self.stats.shell_restarts = self.shell.restarts_used();
         self.render()?;
         Ok(!self.exit)
     }
 
     /// Render all mapped toplevels stacked at the origin, then send frame
-    /// callbacks. T2 replaces the stacking with real window management.
+    /// callbacks. While the recovery overlay is visible the background
+    /// shifts to a deep red (provisional overlay visual; full overlay
+    /// text rendering is deferred) so the shell-absent state is
+    /// unmistakable.
     fn render(&mut self) -> Result<(), RuntimeError> {
         let size = self.backend.window_size();
         let damage = Rectangle::from_size(size);
+        let background = if self.overlay.visible {
+            Color32F::new(0.20, 0.08, 0.10, 1.0)
+        } else {
+            Color32F::new(0.08, 0.09, 0.11, 1.0)
+        };
         {
             let (renderer, mut framebuffer) = self
                 .backend
@@ -304,7 +432,7 @@ impl Runtime {
                 .render(&mut framebuffer, size, Transform::Normal)
                 .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
             frame
-                .clear(Color32F::new(0.08, 0.09, 0.11, 1.0), &[damage])
+                .clear(background, &[damage])
                 .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
             draw_render_elements(&mut frame, 1.0, &elements, &[damage])
                 .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;

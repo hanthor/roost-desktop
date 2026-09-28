@@ -1,6 +1,6 @@
 // Wave 2 stream 4 owns this file: shell supervision (restart budget,
-// backoff) and recovery-affordance scope. Do not edit from any other
-// stream.
+// backoff) and recovery-affordance scope. The 001 plan (T5) additionally
+// drives it from the nested runtime loop.
 //
 // Implements the compositor-owned side of ADR 0003 ("Nested supervision
 // and recovery affordance"): the compositor spawns the shell as a child
@@ -303,6 +303,176 @@ impl Drop for Supervisor {
     }
 }
 
+impl Supervisor {
+    /// Milliseconds until the next restart is allowed at `now_ms`
+    /// (zero when a restart could run now). Pure check for diagnostics
+    /// and the shell driver; never spawns or advances state.
+    pub fn backoff_remaining_ms(&self, now_ms: u64) -> u64 {
+        self.next_allowed_ms.saturating_sub(now_ms)
+    }
+}
+
+/// Observable supervision outcomes (001 T5): restart, resync, and
+/// exhaustion surface as values carrying only codes, delays, and counts —
+/// never window content or secrets — so diagnostics stay privacy-safe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupervisorEvent {
+    /// The shell child exited (code mirrors `ExitStatus::code`: `None`
+    /// for signal kills or unobserved exits).
+    ShellExited { code: Option<i32> },
+    /// A restart is armed after `delay_ms` (budget remains).
+    RestartScheduled { delay_ms: u64 },
+    /// The restart budget is spent; the shell stays down until an
+    /// operator-requested relaunch.
+    BudgetExhausted,
+}
+
+/// What [`ShellDriver::poll`] found this tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShellStatus {
+    /// Shell child held and alive (or freshly respawned).
+    Running,
+    /// No live shell; a restart is armed after the delay. The
+    /// compositor-owned overlay covers the session meanwhile.
+    Waiting { delay_ms: u64 },
+    /// Restart budget spent; calm and observable, no spinning.
+    Exhausted,
+    /// Supervision itself faulted (spawn/wait error text, no content).
+    /// Treated like absence: the overlay covers the session.
+    Fault(String),
+}
+
+/// One supervised shell child bound to a nested session (001 T5).
+///
+/// Owns a [`Supervisor`] plus the remake recipe: the shell binary with
+/// the session's `WAYLAND_DISPLAY` and `RWD_CONTROL_SOCKET` set for the
+/// child only. Drive with [`poll`](Self::poll) once per compositor tick
+/// and drain [`events`](Self::drain_events) for redacted diagnostics.
+pub struct ShellDriver {
+    supervisor: Supervisor,
+    bin: std::path::PathBuf,
+    wayland_display: String,
+    control_socket: std::path::PathBuf,
+    events: Vec<SupervisorEvent>,
+}
+
+impl ShellDriver {
+    /// Driver with no child yet; the first [`poll`](Self::poll) spawns.
+    pub fn new(
+        policy: RestartPolicy,
+        bin: std::path::PathBuf,
+        wayland_display: String,
+        control_socket: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            supervisor: Supervisor::new(policy),
+            bin,
+            wayland_display,
+            control_socket,
+            events: Vec::new(),
+        }
+    }
+
+    /// Non-blocking supervision step at `now_ms`. Never blocks the
+    /// compositor tick: spawn failures and dead children report as
+    /// values, and every outcome is also appended as a
+    /// [`SupervisorEvent`] for [`drain_events`](Self::drain_events).
+    pub fn poll(&mut self, now_ms: u64) -> ShellStatus {
+        let supervisor = &mut self.supervisor;
+        let bin = &self.bin;
+        let wayland_display = &self.wayland_display;
+        let control_socket = &self.control_socket;
+        let mut remake = || {
+            let mut command = Command::new(bin);
+            command.env("WAYLAND_DISPLAY", wayland_display);
+            command.env("RWD_CONTROL_SOCKET", control_socket);
+            command
+        };
+        match supervisor.poll(&mut remake, now_ms) {
+            Ok(ChildEvent::Running) => ShellStatus::Running,
+            Ok(ChildEvent::Exited(code)) => {
+                self.events.push(SupervisorEvent::ShellExited { code });
+                let delay_ms = supervisor.backoff_remaining_ms(now_ms);
+                self.events
+                    .push(SupervisorEvent::RestartScheduled { delay_ms });
+                ShellStatus::Waiting { delay_ms }
+            }
+            Err(SuperviseError::BudgetExhausted) => {
+                self.events.push(SupervisorEvent::BudgetExhausted);
+                ShellStatus::Exhausted
+            }
+            Err(e) => ShellStatus::Fault(e.to_string()),
+        }
+    }
+
+    /// Take the pending supervision events, oldest first. Events carry
+    /// only codes, delays, and counts — safe to log verbatim.
+    pub fn drain_events(&mut self) -> Vec<SupervisorEvent> {
+        std::mem::take(&mut self.events)
+    }
+
+    /// Restore the full restart budget for an operator-requested
+    /// relaunch (overlay action). Keeps a live child; the next
+    /// [`poll`](Self::poll) respawns when none is held.
+    pub fn reset_budget(&mut self) {
+        self.supervisor.reset_budget();
+    }
+
+    /// Restarts performed so far (initial spawn excluded).
+    pub fn restarts_used(&self) -> u32 {
+        self.supervisor.restarts_used()
+    }
+
+    /// Whether a child handle is currently held.
+    pub fn has_child(&self) -> bool {
+        self.supervisor.has_child()
+    }
+
+    /// Policy this driver enforces.
+    pub fn policy(&self) -> RestartPolicy {
+        self.supervisor.policy()
+    }
+}
+
+/// Redacted per-run evidence for one nested fault run (001 T5).
+///
+/// Built only from revisions, counts, and hashes — never titles, tokens,
+/// or frame content — so retained artifacts are privacy-safe by
+/// construction. The 100-run harness records one per run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunArtifact {
+    /// Zero-based run index within the harness.
+    pub run: u64,
+    /// Fault injected this run (fixed vocabulary, e.g. `"kill"`).
+    pub fault: &'static str,
+    /// Compositor revision before the fault.
+    pub revision_before: u64,
+    /// Compositor revision after reconnect/resync.
+    pub revision_after: u64,
+    /// Shell restarts consumed this run.
+    pub restarts_used: u32,
+    /// Hash of `(revision_after, sorted window ids)`: proves the exact
+    /// window set resynced without storing any content.
+    pub snapshot_hash: u64,
+    /// Human note built from numbers only (no titles or tokens).
+    pub note: String,
+}
+
+/// Hash `(revision, sorted window ids)` for [`RunArtifact::snapshot_hash`].
+/// FNV-1a over fixed integers: content-free and deterministic.
+pub fn snapshot_hash(revision: u64, window_ids: &[u64]) -> u64 {
+    const OFFSET: u64 = 0xcbf29ce484222325;
+    const PRIME: u64 = 0x100000001b3;
+    let mut hash = OFFSET;
+    for word in std::iter::once(revision).chain(window_ids.iter().copied()) {
+        for byte in word.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(PRIME);
+        }
+    }
+    hash
+}
+
 /// Recovery affordance available while the shell is absent (ADR 0003:
 /// compositor-owned emergency overlay on the existing input + GLES
 /// path; a separate recovery client is deferred).
@@ -333,6 +503,79 @@ mod tests {
 
     fn true_cmd() -> Command {
         Command::new("/bin/true")
+    }
+
+    #[test]
+    fn driver_spawns_shell_with_session_env_and_reports_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let control = dir.path().join("control.sock");
+        let mut driver = ShellDriver::new(
+            RestartPolicy::new(1, 1_000, 1_000),
+            std::path::PathBuf::from("/bin/true"),
+            "rwd-test.sock".to_owned(),
+            control,
+        );
+        assert_eq!(driver.poll(0), ShellStatus::Running);
+        assert!(driver.has_child());
+        assert!(driver.drain_events().is_empty());
+        assert_eq!(driver.restarts_used(), 0);
+    }
+
+    #[test]
+    fn driver_missing_binary_faults_without_spinning() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut driver = ShellDriver::new(
+            RestartPolicy::new(1, 1_000, 1_000),
+            dir.path().join("no-such-shell"),
+            "rwd-test.sock".to_owned(),
+            dir.path().join("control.sock"),
+        );
+        assert!(matches!(driver.poll(0), ShellStatus::Fault(_)));
+        // Spawn failure arms the backoff: same tick reports waiting,
+        // never a hot respawn loop.
+        assert!(matches!(
+            driver.poll(0),
+            ShellStatus::Waiting { .. } | ShellStatus::Fault(_)
+        ));
+    }
+
+    #[test]
+    fn driver_reset_budget_relaunches_after_exhaustion() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut driver = ShellDriver::new(
+            RestartPolicy::new(1, 1, 1),
+            std::path::PathBuf::from("/bin/false"),
+            "rwd-test.sock".to_owned(),
+            dir.path().join("control.sock"),
+        );
+        let reap_exit = |driver: &mut ShellDriver, now: u64| {
+            for _ in 0..10_000 {
+                match driver.poll(now) {
+                    ShellStatus::Waiting { .. } => return,
+                    ShellStatus::Running => std::thread::yield_now(),
+                    other => panic!("unexpected driver status: {other:?}"),
+                }
+            }
+            panic!("exit reap budget exhausted");
+        };
+        assert_eq!(driver.poll(0), ShellStatus::Running);
+        reap_exit(&mut driver, 0);
+        // Past the backoff: the one budgeted restart respawns.
+        assert_eq!(driver.poll(100), ShellStatus::Running);
+        assert_eq!(driver.restarts_used(), 1);
+        reap_exit(&mut driver, 100);
+        assert_eq!(driver.poll(200), ShellStatus::Exhausted);
+        // Operator relaunch restores the budget and respawns.
+        driver.reset_budget();
+        assert_eq!(driver.poll(200), ShellStatus::Running);
+    }
+
+    #[test]
+    fn snapshot_hash_is_deterministic_and_content_free() {
+        let ids = [3u64, 1, 2];
+        assert_eq!(snapshot_hash(7, &ids), snapshot_hash(7, &ids));
+        assert_ne!(snapshot_hash(7, &ids), snapshot_hash(8, &ids));
+        assert_ne!(snapshot_hash(7, &ids), snapshot_hash(7, &[1, 2, 4]));
     }
 
     #[test]

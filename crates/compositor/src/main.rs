@@ -9,7 +9,7 @@ use std::process::ExitCode;
 
 use rwd_compositor::runtime::{run, NestedSession};
 
-/// `rwd-compositor [--socket NAME] [--width W] [--height H]`.
+/// `rwd-compositor [--socket NAME] [--width W] [--height H] [--shell-bin PATH]`.
 fn main() -> ExitCode {
     let mut session = NestedSession::default_for_pid();
     let mut args = std::env::args().skip(1);
@@ -30,16 +30,25 @@ fn main() -> ExitCode {
                     session.height = value;
                 }
             }
+            "--shell-bin" => {
+                if let Some(path) = args.next() {
+                    session.shell_bin = Some(path.into());
+                }
+            }
             "--help" | "-h" => {
                 println!("rwd-compositor: nested RWD session (001 developer preview)");
                 println!();
-                println!("Usage: rwd-compositor [--socket NAME] [--width W] [--height H]");
+                println!(
+                    "Usage: rwd-compositor [--socket NAME] [--width W] [--height H] [--shell-bin PATH]"
+                );
                 println!();
                 println!("Starts one isolated nested Wayland session on a private");
                 println!("socket (default rwd-nested-<pid>) and drives it until the");
                 println!("window closes. Needs a host Wayland/X session with EGL.");
-                println!("WAYLAND_DISPLAY is set for this process only and restored");
-                println!("on shutdown; the host display session is never touched.");
+                println!("The shell binary (default: RWD_SHELL_BIN, else the");
+                println!("rwd-shell-host sibling) is spawned supervised with a");
+                println!("finite restart budget; WAYLAND_DISPLAY is set for this");
+                println!("process only and restored on shutdown.");
                 return ExitCode::SUCCESS;
             }
             other => {
@@ -55,8 +64,8 @@ fn main() -> ExitCode {
     match run(&session) {
         Ok(stats) => {
             println!(
-                "rwd-compositor: shutdown after {} frames, {} clients",
-                stats.frames, stats.clients
+                "rwd-compositor: shutdown after {} frames, {} clients, {} shell restarts",
+                stats.frames, stats.clients, stats.shell_restarts
             );
             ExitCode::SUCCESS
         }

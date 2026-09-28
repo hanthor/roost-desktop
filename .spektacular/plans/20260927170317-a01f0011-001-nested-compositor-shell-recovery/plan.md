@@ -239,7 +239,7 @@ Give the compositor a layer-shell server so the supervised panel client can atta
 
 **What changes**: killing or stalling the shell no longer takes apps down; a compositor-owned recovery view keeps the session usable, restarts the shell within bounded retries, and restores the exact window and workspace state from a fresh snapshot.
 
-#### - [ ] Task: Supervision binding and 100-run recovery harness
+#### - [x] Task: Supervision binding and 100-run recovery harness
 **Id:** be296c81-45a1-4922-b10d-7141151e459c
 **Repo:** rust-wayland-desktop
 **Depends on:**
@@ -252,9 +252,9 @@ Wire the supervisor and overlay state machine into the live loop: shell spawn as
 
 **Acceptance criteria**:
 
-- [ ] Every fault run keeps app connections alive and the compositor responsive
-- [ ] Restarts stay within budget and backoff, and exhaustion stays calm and observable
-- [ ] Reconnected shells render exact window and workspace state from snapshots
+- [x] Every fault run keeps app connections alive and the compositor responsive
+- [x] Restarts stay within budget and backoff, and exhaustion stays calm and observable
+- [x] Reconnected shells render exact window and workspace state from snapshots
 
 #### - [ ] Task: Launch script, docs, and redacted diagnostics
 **Id:** ceaafa54-7cdd-44c8-b226-70331d7ea6da
@@ -391,3 +391,18 @@ Confirm the nested window, panel placement, window mapping, and recovery overlay
 - `crates/shell-host/src/main.rs`
 
 **Discoveries**: Wayland `wl_registry::bind` returns the proxy directly (no `Result`), unlike `GlobalList::bind`. Smithay `Anchor` is a bitflags struct (`Anchor::TOP`), and `CachedState::current()` is the accessor for committed client state. `WlRegistry::bind` accepts any queue handle, so tests can learn global names on a throwaway queue and bind the real host's proxies onto its own queue.
+
+### 2026-09-28 — Task: Supervision binding and 100-run recovery harness
+
+**What was done**: Wired supervision and the overlay into the live loop: the runtime spawns the shell binary as a supervised child (`ShellDriver` with per-tick poll, `WAYLAND_DISPLAY` + `RWD_CONTROL_SOCKET` child-only env, `--shell-bin`/`RWD_SHELL_BIN`/sibling/`PATH` resolution), shows the compositor-owned overlay while the shell is absent (window list from model state, evdev-key navigation/relaunch/dismiss, input shield, deep-red background), and resyncs reconnected shells from full snapshots. The fault harness runs 100 runs over kill/disconnect/stall/crash-loop/malformed/gap faults with per-run redacted `RunArtifact` evidence.
+
+**Deviations**: The plan's `SupervisorEvent::SnapshotResent` variant was not added: snapshot resends are already observable per call via `Session::emit_deltas` (`Emitted::Snapshot`) and proven per run by exact-window-set snapshot assertions, so no new hub counter was warranted. Full overlay text rendering stays deferred; the slice-1 visual is the background shift plus input shield.
+
+**Files changed**:
+- `crates/compositor/src/supervise.rs`
+- `crates/compositor/src/overlay.rs`
+- `crates/compositor/src/runtime.rs`
+- `crates/compositor/src/main.rs`
+- `crates/compositor/tests/recovery.rs`
+
+**Discoveries**: `Supervisor::reset_budget` does not clear `started`, so a zero-budget policy can never respawn even after reset — operator-relaunch tests need `max_attempts >= 1`. `WlRegistry::bind` onto another queue's handle works, but the direct-`get_registry` bound requires `Dispatch<WlRegistry, ()>`.

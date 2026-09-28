@@ -15,7 +15,7 @@
 //! compositor state, safe with no shell process running. All code here
 //! is original.
 
-use crate::supervise::RecoveryAction;
+pub use crate::supervise::RecoveryAction;
 
 /// One entry in the overlay's compositor-served window list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +72,55 @@ pub fn action_for(key: OverlayKey) -> Option<RecoveryAction> {
         OverlayKey::Activate => Some(RecoveryAction::ListWindows),
         OverlayKey::Relaunch => Some(RecoveryAction::RelaunchShell),
         OverlayKey::Dismiss => Some(RecoveryAction::ShowOverlay),
+    }
+}
+
+/// Linux evdev key codes driving the overlay while it holds focus.
+/// Basis: `linux/input-event-codes.h` (`KEY_ESC`, `KEY_ENTER`, `KEY_R`,
+/// `KEY_UP`, `KEY_DOWN`). The runtime feeds pressed keys here only while
+/// the overlay is visible; anything else falls through to the windows.
+pub mod keycode {
+    /// Dismiss the overlay.
+    pub const ESC: u32 = 1;
+    /// Confirm the selection against the compositor-served list.
+    pub const ENTER: u32 = 28;
+    /// Request an immediate shell relaunch.
+    pub const R: u32 = 19;
+    /// Move selection towards the first window.
+    pub const UP: u32 = 103;
+    /// Move selection towards the last window.
+    pub const DOWN: u32 = 108;
+}
+
+/// Map a pressed key code to its overlay key, if the overlay handles it.
+pub fn overlay_key_for_keycode(keycode: u32) -> Option<OverlayKey> {
+    match keycode {
+        keycode::UP => Some(OverlayKey::Up),
+        keycode::DOWN => Some(OverlayKey::Down),
+        keycode::ENTER => Some(OverlayKey::Activate),
+        keycode::R => Some(OverlayKey::Relaunch),
+        keycode::ESC => Some(OverlayKey::Dismiss),
+        _ => None,
+    }
+}
+
+impl Overlay {
+    /// Apply one overlay key: navigation mutates the selection inline,
+    /// other keys report their [`RecoveryAction`] for the runtime to
+    /// carry out (refresh, relaunch, dismiss). Returns `None` for pure
+    /// navigation.
+    pub fn apply_key(&mut self, key: OverlayKey) -> Option<RecoveryAction> {
+        match key {
+            OverlayKey::Up => {
+                self.select_prev();
+                None
+            }
+            OverlayKey::Down => {
+                self.select_next();
+                None
+            }
+            _ => action_for(key),
+        }
     }
 }
 
@@ -318,5 +367,52 @@ mod tests {
         // Navigation keys are handled by select_next/select_prev instead.
         assert_eq!(action_for(OverlayKey::Up), None);
         assert_eq!(action_for(OverlayKey::Down), None);
+    }
+
+    #[test]
+    fn keycodes_map_to_overlay_keys() {
+        assert_eq!(overlay_key_for_keycode(keycode::UP), Some(OverlayKey::Up));
+        assert_eq!(
+            overlay_key_for_keycode(keycode::DOWN),
+            Some(OverlayKey::Down)
+        );
+        assert_eq!(
+            overlay_key_for_keycode(keycode::ENTER),
+            Some(OverlayKey::Activate)
+        );
+        assert_eq!(
+            overlay_key_for_keycode(keycode::R),
+            Some(OverlayKey::Relaunch)
+        );
+        assert_eq!(
+            overlay_key_for_keycode(keycode::ESC),
+            Some(OverlayKey::Dismiss)
+        );
+        assert_eq!(overlay_key_for_keycode(30), None);
+    }
+
+    #[test]
+    fn apply_key_navigates_inline_and_reports_actions() {
+        let mut overlay = Overlay::new(3);
+        overlay.show(windows(&[1, 2, 3]));
+        assert_eq!(overlay.selected, Some(1));
+
+        assert_eq!(overlay.apply_key(OverlayKey::Down), None);
+        assert_eq!(overlay.selected, Some(2));
+        assert_eq!(overlay.apply_key(OverlayKey::Up), None);
+        assert_eq!(overlay.selected, Some(1));
+
+        assert_eq!(
+            overlay.apply_key(OverlayKey::Activate),
+            Some(RecoveryAction::ListWindows)
+        );
+        assert_eq!(
+            overlay.apply_key(OverlayKey::Relaunch),
+            Some(RecoveryAction::RelaunchShell)
+        );
+        assert_eq!(
+            overlay.apply_key(OverlayKey::Dismiss),
+            Some(RecoveryAction::ShowOverlay)
+        );
     }
 }
