@@ -62,11 +62,19 @@ impl XkbFeed {
     }
 
     /// Feed over a server keymap string (the keymap event payload).
+    /// A trailing NUL terminator (the fd payload includes one) is
+    /// stripped: the xkb compiler takes a `CString`.
     pub fn from_string(keymap: String) -> Option<Self> {
+        let trimmed = keymap.trim_end_matches('\0').to_owned();
+        // Never hand xkbcommon a string its own CString::new would
+        // panic on: without a feed the shell runs deaf but alive.
+        if trimmed.is_empty() || trimmed.bytes().any(|b| b == 0) {
+            return None;
+        }
         let context = Context::new(0);
         let keymap = Keymap::new_from_string(
             &context,
-            keymap,
+            trimmed,
             KEYMAP_FORMAT_TEXT_V1,
             KEYMAP_COMPILE_NO_FLAGS,
         )?;
@@ -190,5 +198,22 @@ mod tests {
     #[test]
     fn garbage_keymap_string_refuses() {
         assert!(XkbFeed::from_string("not a keymap".to_owned()).is_none());
+    }
+
+    #[test]
+    fn nul_terminated_server_keymap_loads() {
+        use xkbcommon::xkb::KEYMAP_FORMAT_TEXT_V1;
+
+        // Server keymap fds carry a trailing NUL, which xkbcommon's
+        // own CString::new would panic on (CI journey crash): the
+        // feed must strip it and translate identically.
+        let feed = us_feed();
+        let dumped = feed._keymap.get_as_string(KEYMAP_FORMAT_TEXT_V1);
+        assert!(!dumped.is_empty());
+        let mut terminated = dumped;
+        terminated.push('\0');
+        let mut reloaded = XkbFeed::from_string(terminated).expect("trailing NUL must be stripped");
+        assert_eq!(reloaded.key(EV_A, true), KeyAction::Text("a".to_owned()));
+        assert_eq!(reloaded.key(EV_RETURN, true), KeyAction::Submit);
     }
 }
