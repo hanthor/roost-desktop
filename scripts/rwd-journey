@@ -162,10 +162,11 @@ for shot_file in 01-baseline 02-overview 03-search 04-after-enter 05-after-escap
         echo "rwd-journey: missing screenshot $path" >&2
         exit 1
     fi
-    # 1280x800 scrot PNGs of a rendered scene are hundreds of KB; a
-    # black or failed frame compresses to a few KB.
+    # Guard only against corrupt/empty captures: an empty desktop is
+    # legitimately near-black and compresses tiny. Visible reaction is
+    # proven by the baseline-vs-overview diff below, not by size.
     size=$(wc -c <"$path")
-    if [ "$size" -lt 20000 ]; then
+    if [ "$size" -lt 1500 ]; then
         echo "rwd-journey: suspiciously small screenshot $path ($size bytes)" >&2
         exit 1
     fi

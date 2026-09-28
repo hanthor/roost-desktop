@@ -22,6 +22,7 @@
 //! snapshot before ordered changes.
 
 use std::fmt;
+use std::os::unix::io::AsFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -29,7 +30,8 @@ use wayland_client::{
     delegate_noop,
     globals::{registry_queue_init, BindError, GlobalListContents},
     protocol::{
-        wl_compositor::WlCompositor, wl_output::WlOutput, wl_registry, wl_surface::WlSurface,
+        wl_buffer::WlBuffer, wl_compositor::WlCompositor, wl_output::WlOutput, wl_registry,
+        wl_shm::Format, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_surface::WlSurface,
     },
     Connection, Dispatch, QueueHandle,
 };
@@ -46,10 +48,13 @@ use crate::apps::{AppProvider, LaunchTracker};
 use crate::control::{ControlClient, ControlError, Handled};
 use crate::favorites::Favorites;
 use crate::model::ShellModel;
+use crate::overview::{paint_panel, OverviewCanvas, BYTES_PER_PIXEL};
 use crate::search::{SearchAction, SearchHub, SearchResult, WindowProvider};
 
 /// Namespace advertised for the panel layer surface.
 pub const PANEL_NAMESPACE: &str = "rwd-shell-panel";
+/// Namespace advertised for the overview layer surface.
+pub const OVERVIEW_NAMESPACE: &str = "rwd-shell-overview";
 /// Fixed panel height in logical pixels; also the exclusive zone.
 pub const PANEL_HEIGHT: u32 = 32;
 
@@ -84,6 +89,9 @@ pub enum PanelError {
     /// Compositor does not offer `zwlr_layer_shell_v1` (no fallback
     /// surface role: misplacing the panel silently would be worse).
     NoLayerShell(BindError),
+    /// Compositor does not offer `wl_shm` (the shell draws its
+    /// surfaces into shared-memory buffers).
+    NoShm(BindError),
     /// Event-loop dispatch failed (e.g. compositor went away).
     Dispatch(wayland_client::DispatchError),
     /// Control channel failed (connect, handshake, or snapshot).
@@ -101,6 +109,7 @@ impl fmt::Display for PanelError {
             Self::NoLayerShell(err) => {
                 write!(f, "compositor offers no zwlr_layer_shell_v1: {err}")
             }
+            Self::NoShm(err) => write!(f, "compositor offers no wl_shm: {err}"),
             Self::Dispatch(err) => write!(f, "event loop dispatch failed: {err}"),
             Self::Control(err) => write!(f, "control channel failed: {err}"),
             Self::Flush(err) => write!(f, "event queue flush failed: {err}"),
@@ -129,6 +138,91 @@ pub struct ShellHost {
     favorites: Favorites,
     /// Launch feedback for spawned apps.
     launcher: LaunchTracker,
+    /// Wayland globals for dynamic surface management (`None` in
+    /// unit tests, which never touch the wire).
+    wayland: Option<WaylandHandles>,
+    /// Live overview layer surface while the intent is open.
+    overview: Option<OverviewSurface>,
+    /// What the overview buffer currently shows; repaint on change.
+    paint_key: Option<PaintKey>,
+    /// Panel size last painted (repaint on configure resize).
+    panel_size: Option<(i32, i32)>,
+    /// Panel buffer backing (pool fd must outlive the buffer).
+    panel_backing: Option<ShmBacking>,
+}
+
+/// Cloned Wayland globals the host keeps for creating surfaces after
+/// startup (the overview appears and disappears with the intent).
+#[derive(Debug, Clone)]
+struct WaylandHandles {
+    compositor: WlCompositor,
+    layer_shell: ZwlrLayerShellV1,
+    shm: WlShm,
+    qh: QueueHandle<ShellHost>,
+}
+
+/// One shm buffer plus everything that must outlive it: the pool
+/// and, crucially, the memfd itself (the compositor maps it; dropping
+/// the fd first corrupts the scanout).
+struct ShmBacking {
+    _file: std::fs::File,
+    _pool: WlShmPool,
+    buffer: WlBuffer,
+}
+
+/// Live overview layer surface and its configured size.
+struct OverviewSurface {
+    surface: WlSurface,
+    layer: ZwlrLayerSurfaceV1,
+    backing: Option<ShmBacking>,
+    width: i32,
+    height: i32,
+}
+
+/// Repaint the overview when any of these change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PaintKey {
+    revision: Option<u64>,
+    selected: Option<u64>,
+    windows: usize,
+    favorites: usize,
+    width: i32,
+    height: i32,
+}
+
+/// Upload `pixels` (`Argb8888`, `width` x `height`) into a fresh shm
+/// buffer. The returned backing owns the memfd: drop it only after
+/// the buffer is detached or replaced.
+fn shm_upload(
+    shm: &WlShm,
+    qh: &QueueHandle<ShellHost>,
+    pixels: &[u8],
+    width: i32,
+    height: i32,
+) -> Option<ShmBacking> {
+    if pixels.is_empty() || width <= 0 || height <= 0 {
+        return None;
+    }
+    let fd = rustix::fs::memfd_create("rwd-shm", rustix::fs::MemfdFlags::CLOEXEC).ok()?;
+    let mut file = std::fs::File::from(fd);
+    file.set_len(pixels.len() as u64).ok()?;
+    use std::io::Write;
+    file.write_all(pixels).ok()?;
+    let pool = shm.create_pool(file.as_fd(), pixels.len() as i32, qh, ());
+    let buffer = pool.create_buffer(
+        0,
+        width,
+        height,
+        width * BYTES_PER_PIXEL as i32,
+        Format::Argb8888,
+        qh,
+        (),
+    );
+    Some(ShmBacking {
+        _file: file,
+        _pool: pool,
+        buffer,
+    })
 }
 
 /// What activating one overview search hit did.
@@ -216,6 +310,131 @@ impl ShellHost {
             search,
             favorites,
             launcher: LaunchTracker::new(),
+            wayland: None,
+            overview: None,
+            paint_key: None,
+            panel_size: None,
+            panel_backing: None,
+        }
+    }
+
+    /// Hand the host the Wayland globals after binding (the run
+    /// functions call this; tests leave `wayland` empty and every
+    /// surface op below no-ops without it).
+    pub fn attach_wayland(
+        &mut self,
+        compositor: WlCompositor,
+        layer_shell: ZwlrLayerShellV1,
+        shm: WlShm,
+        qh: QueueHandle<ShellHost>,
+    ) {
+        self.wayland = Some(WaylandHandles {
+            compositor,
+            layer_shell,
+            shm,
+            qh,
+        });
+    }
+
+    /// Reconcile the overview surface with the intent (call after
+    /// every [`sync_overview`](Self::sync_overview)): create the
+    /// layer surface when the intent opens, destroy it when it
+    /// closes, repaint when model truth or the configured size
+    /// changes. Pure no-op without attached Wayland globals.
+    fn update_overview(&mut self, revision: Option<u64>) {
+        if !self.model.is_overview_open() {
+            if self.overview.is_some() {
+                // Dropping the proxies destroys the surfaces server-side.
+                self.overview = None;
+                self.paint_key = None;
+            }
+            return;
+        }
+        let Some(wayland) = self.wayland.clone() else {
+            return;
+        };
+        if self.overview.is_none() {
+            let surface = wayland.compositor.create_surface(&wayland.qh, ());
+            let layer = wayland.layer_shell.get_layer_surface(
+                &surface,
+                None,
+                Layer::Overlay,
+                OVERVIEW_NAMESPACE.to_owned(),
+                &wayland.qh,
+                (),
+            );
+            layer.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
+            layer.set_exclusive_zone(0);
+            layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+            surface.commit();
+            self.overview = Some(OverviewSurface {
+                surface,
+                layer,
+                backing: None,
+                width: 0,
+                height: 0,
+            });
+            self.paint_key = None;
+        }
+        let overview = self.overview.as_mut().expect("created above");
+        if overview.width <= 0 || overview.height <= 0 {
+            return;
+        }
+        let key = PaintKey {
+            revision,
+            selected: self.model.selected(),
+            windows: self.model.windows().len(),
+            favorites: self.favorites.ids().len(),
+            width: overview.width,
+            height: overview.height,
+        };
+        if self.paint_key == Some(key) {
+            return;
+        }
+        let mut canvas = OverviewCanvas::new(overview.width, overview.height);
+        canvas.render(&self.model, self.favorites.ids().len());
+        if let Some(backing) = shm_upload(
+            &wayland.shm,
+            &wayland.qh,
+            canvas.pixels(),
+            overview.width,
+            overview.height,
+        ) {
+            overview.surface.attach(Some(&backing.buffer), 0, 0);
+            overview
+                .surface
+                .damage(0, 0, overview.width, overview.height);
+            overview.surface.commit();
+            // The old backing drops here, after the new buffer is
+            // committed — the compositor never reads a freed mapping.
+            overview.backing = Some(backing);
+            self.paint_key = Some(key);
+        }
+    }
+
+    /// Paint the panel strip into a fresh shm buffer and attach it.
+    fn paint_panel_surface(&mut self, width: i32) {
+        let height = self.panel.height as i32;
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        if self.panel_size == Some((width, height)) && self.panel_backing.is_some() {
+            return;
+        }
+        let Some(wayland) = self.wayland.clone() else {
+            return;
+        };
+        let mut pixels = vec![0u8; width as usize * height as usize * BYTES_PER_PIXEL];
+        paint_panel(&mut pixels, width, height);
+        let Some(surface) = self.surface.as_ref() else {
+            return;
+        };
+        if let Some(backing) = shm_upload(&wayland.shm, &wayland.qh, &pixels, width, height) {
+            surface.attach(Some(&backing.buffer), 0, 0);
+            surface.damage(0, 0, width, height);
+            surface.commit();
+            self.panel_backing = Some(backing);
+            self.panel_size = Some((width, height));
         }
     }
 
@@ -327,14 +546,6 @@ impl ShellHost {
         self.running
     }
 
-    /// Acknowledge a configure and re-commit so the panel takes effect.
-    fn ack_configure(&mut self, layer_surface: &ZwlrLayerSurfaceV1, serial: u32) {
-        layer_surface.ack_configure(serial);
-        if let Some(surface) = &self.surface {
-            surface.commit();
-        }
-    }
-
     /// Replace the overview state with the control client's live model:
     /// current window list, workspaces, selection, and the compositor's
     /// overview-open intent (002 R1). The panel renders only this
@@ -441,11 +652,45 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for ShellHost {
         _qh: &QueueHandle<Self>,
     ) {
         match event {
-            LayerSurfaceEvent::Configure { serial, .. } => {
-                state.ack_configure(proxy, serial);
+            LayerSurfaceEvent::Configure {
+                serial,
+                width,
+                height,
+            } => {
+                if state.layer_surface.as_ref() == Some(proxy) {
+                    proxy.ack_configure(serial);
+                    // First configure carries the arranged width: paint
+                    // the strip and commit the buffer with it.
+                    state.paint_panel_surface(width as i32);
+                    if let Some(surface) = state.surface.as_ref() {
+                        surface.commit();
+                    }
+                } else if state
+                    .overview
+                    .as_ref()
+                    .is_some_and(|overview| &overview.layer == proxy)
+                {
+                    proxy.ack_configure(serial);
+                    // Size arrives here; the next update pass paints.
+                    if let Some(overview) = state.overview.as_mut() {
+                        if width > 0 && height > 0 {
+                            overview.width = width as i32;
+                            overview.height = height as i32;
+                        }
+                    }
+                } else {
+                    proxy.ack_configure(serial);
+                }
             }
             LayerSurfaceEvent::Closed => {
-                state.running = false;
+                if state.layer_surface.as_ref() == Some(proxy) {
+                    // Losing the panel ends the loop (supervised restart
+                    // brings it back); losing the overview just drops it.
+                    state.running = false;
+                } else {
+                    state.overview = None;
+                    state.paint_key = None;
+                }
             }
             _ => {}
         }
@@ -457,6 +702,9 @@ delegate_noop!(ShellHost: ignore WlCompositor);
 delegate_noop!(ShellHost: ignore WlSurface);
 delegate_noop!(ShellHost: ignore WlOutput);
 delegate_noop!(ShellHost: ignore ZwlrLayerShellV1);
+delegate_noop!(ShellHost: ignore WlShm);
+delegate_noop!(ShellHost: ignore WlShmPool);
+delegate_noop!(ShellHost: ignore WlBuffer);
 
 /// Connect plus event-loop setup kept together for `main`: builds the
 /// connection, queue, and host, then dispatches until close.
@@ -485,8 +733,10 @@ pub fn run_panel_with_control(
     let layer_shell: ZwlrLayerShellV1 = globals
         .bind(&qh, 3..=5, ())
         .map_err(PanelError::NoLayerShell)?;
+    let shm: WlShm = globals.bind(&qh, 1..=1, ()).map_err(PanelError::NoShm)?;
 
     let mut host = ShellHost::new(panel, AppProvider::system(), Favorites::system());
+    host.attach_wayland(compositor.clone(), layer_shell.clone(), shm, qh.clone());
     host.create_panel_surface(&compositor, &layer_shell, &qh);
     drop((globals, compositor, layer_shell));
 
@@ -509,6 +759,7 @@ pub fn run_panel_with_control(
                 .dispatch_pending(&mut host)
                 .map_err(PanelError::Dispatch)?;
             drive_control(control, &mut host);
+            host.update_overview(control.revision());
             queue
                 .flush()
                 .map_err(|e| PanelError::Flush(e.to_string()))?;

@@ -1811,6 +1811,7 @@ name = "rwd-shell-host"
 version = "0.1.0"
 dependencies = [
  "freedesktop-desktop-entry",
+ "rustix 0.38.44",
  "rwd-compositor",
  "rwd-shell-control",
  "serde_json",
