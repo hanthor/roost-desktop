@@ -159,11 +159,16 @@ with sync_playwright() as p:
     page.goto(url)
     page.wait_for_timeout(5000)
     open(os.path.join(artifacts, "chromium-ready"), "w").write("ready")
-    # Idle until the harness closes the window (Alt+F4 polite close):
-    # a dead browser connection ends the loop so the script exits on
-    # its own; close() is best-effort once the browser is already gone.
-    for _ in range(120):
-        time.sleep(1)
+    # Idle until the harness closes the window (Alt+F4 polite close).
+    # `is_connected()` alone never flips without traffic, so each
+    # iteration does a real round-trip: once the browser is gone the
+    # call raises (or the flag drops) and the script exits on its own.
+    # close() is best-effort once the browser is already gone.
+    for _ in range(90):
+        try:
+            page.wait_for_timeout(1000)
+        except Exception:
+            break
         if not browser.is_connected():
             break
     try:
