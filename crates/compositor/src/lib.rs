@@ -1,10 +1,10 @@
 //! Headless compositor core for the 001 nested slice.
 //!
 //! This crate owns the Smithay `Display` plus the protocol states the
-//! slice needs first (compositor, shm, xdg-shell). Rendering backends,
-//! seats, and the shell control channel arrive in later steps; the
-//! [`TestCompositor`] helper drives the display manually so integration
-//! tests stay deterministic without an event loop or GPU.
+//! slice needs first (compositor, shm, xdg-shell, layer-shell). Rendering
+//! backends, seats, and the shell control channel arrive in later steps;
+//! the [`TestCompositor`] helper drives the display manually so
+//! integration tests stay deterministic without an event loop or GPU.
 
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
@@ -23,14 +23,16 @@ use smithay::{
         buffer::BufferHandler,
         compositor::{CompositorClientState, CompositorHandler, CompositorState},
         output::{OutputHandler, OutputManagerState},
-        shell::xdg::{
-            PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+        shell::{
+            wlr_layer::WlrLayerShellState,
+            xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState},
         },
         shm::{ShmHandler, ShmState},
     },
 };
 
 pub mod control;
+pub mod layer;
 pub mod overlay;
 pub mod runtime;
 pub mod state;
@@ -48,6 +50,8 @@ pub struct State {
     // Kept alive for the seat global; input routing (R4) attaches here later.
     #[allow(dead_code)]
     seat: Seat<State>,
+    pub(crate) layer_shell_state: WlrLayerShellState,
+    pub(crate) panel_surfaces: Vec<layer::PanelSurface>,
 }
 
 /// Per-client data: the compositor state slice each client sees.
@@ -169,7 +173,8 @@ impl Default for TestCompositor {
 
 impl State {
     /// Protocol state shared by the headless test helper and the nested
-    /// runtime: compositor, shm, xdg-shell, seat, and output globals.
+    /// runtime: compositor, shm, xdg-shell, layer-shell, seat, and output
+    /// globals.
     pub fn new(dh: &DisplayHandle) -> Self {
         let mut seat_state = SeatState::new();
         let seat = seat_state.new_wl_seat(dh, SEAT_NAME);
@@ -180,12 +185,15 @@ impl State {
             _output_manager_state: OutputManagerState::new_with_xdg_output::<State>(dh),
             seat_state,
             seat,
+            layer_shell_state: WlrLayerShellState::new::<State>(dh),
+            panel_surfaces: Vec::new(),
         }
     }
 }
 
 impl TestCompositor {
-    /// Create the display and advertise compositor, shm, and xdg-shell.
+    /// Create the display and advertise compositor, shm, xdg-shell, and
+    /// layer-shell.
     pub fn new() -> Self {
         let display: Display<State> = Display::new().unwrap();
         let dh = display.handle();

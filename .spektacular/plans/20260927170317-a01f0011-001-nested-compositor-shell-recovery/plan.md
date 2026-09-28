@@ -217,7 +217,7 @@ Join the shell model and control client to the live compositor: snapshot on conn
 - [x] Selecting a window focuses it through token-gated activation
 - [x] Revision gaps always trigger a fresh snapshot, never partial state
 
-#### - [ ] Task: Layer-shell panel bring-up
+#### - [x] Task: Layer-shell panel bring-up
 **Id:** 33c4c8c0-cd0f-4942-b02c-abe4781355d7
 **Repo:** rust-wayland-desktop
 **Depends on:**
@@ -231,9 +231,9 @@ Give the compositor a layer-shell server so the supervised panel client can atta
 
 **Acceptance criteria**:
 
-- [ ] The shell panel attaches as a top-anchored layer surface with exclusive zone
-- [ ] The shell binary runs against the nested compositor without fallback roles
-- [ ] Panel configure and close events behave per protocol
+- [x] The shell panel attaches as a top-anchored layer surface with exclusive zone
+- [x] The shell binary runs against the nested compositor without fallback roles
+- [x] Panel configure and close events behave per protocol
 
 ### Milestone 3: Shell crashes disappear into a recovery overlay while apps keep running
 
@@ -374,3 +374,20 @@ Confirm the nested window, panel placement, window mapping, and recovery overlay
 - `crates/shell-host/tests/live_roundtrip.rs`
 
 **Discoveries**: `ControlHub` must age freshly accepted peers one full poll round before handshaking, otherwise the client's `Hello` has not arrived yet and the handshake consumes a `WouldBlock`. Shell `ControlClient` surfaces `WouldBlock` between frames, so live tests drive both sides with bounded poll loops and no sleeps.
+
+### 2026-09-28 — Task: Layer-shell panel bring-up
+
+**What was done**: Added the compositor layer-shell server (`WlrLayerShellState` plus a `PanelSurface` record per mapped surface: namespace, layer, acked-configure flag) with initial configure on map, and lifted the shell's deferred-runtime guard so the panel attaches live with no fallback roles. Proven by protocol tests and a live attach of the real `ShellHost` against the real server.
+
+**Deviations**: None. The panel keeps its top-anchored full-width strip, 32px exclusive zone, and on-demand keyboard interactivity; the missing-global error stays clear and fallback-free.
+
+**Files changed**:
+- `crates/compositor/src/lib.rs`
+- `crates/compositor/src/layer.rs`
+- `crates/compositor/src/runtime.rs`
+- `crates/compositor/Cargo.toml`
+- `crates/compositor/tests/layer.rs`
+- `crates/shell-host/src/panel.rs`
+- `crates/shell-host/src/main.rs`
+
+**Discoveries**: Wayland `wl_registry::bind` returns the proxy directly (no `Result`), unlike `GlobalList::bind`. Smithay `Anchor` is a bitflags struct (`Anchor::TOP`), and `CachedState::current()` is the accessor for committed client state. `WlRegistry::bind` accepts any queue handle, so tests can learn global names on a throwaway queue and bind the real host's proxies onto its own queue.

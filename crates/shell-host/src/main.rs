@@ -3,10 +3,10 @@
 // R3/R5 and ADR 0003.
 //
 // The compositor spawns this binary as a supervised child with a
-// nested-session WAYLAND_DISPLAY set for the child only (ADR 0003). Live
-// runtime against our test compositor is DEFERRED: it has no layer-shell
-// yet, so the binary reports that clearly instead of falling back to a
-// misplaced surface role.
+// nested-session WAYLAND_DISPLAY set for the child only (ADR 0003). The
+// panel attaches to the compositor's layer-shell global; without it the
+// binary reports that clearly instead of falling back to a misplaced
+// surface role.
 
 use std::process::ExitCode;
 

@@ -8,7 +8,9 @@
 //!
 //! The loop shape follows upstream `examples/minimal.rs` at the pinned
 //! revision (manual repaint each round, toplevels stacked at the origin);
-//! damage tracking and layer-shell arrive with later tasks.
+//! damage tracking arrives with a later task. Layer-shell is served from
+//! [`State`](crate::State) (see [`crate::layer`]) so the supervised panel
+//! attaches over this same display.
 
 use std::ffi::OsString;
 use std::sync::Arc;

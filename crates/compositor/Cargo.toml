@@ -14,4 +14,5 @@ rwd-shell-control = { path = "../shell-control-schema", version = "0.1.0" }
 [dev-dependencies]
 wayland-client.workspace = true
 wayland-protocols = { workspace = true, features = ["client"] }
+wayland-protocols-wlr = { workspace = true, features = ["client"] }
 tempfile = "3"

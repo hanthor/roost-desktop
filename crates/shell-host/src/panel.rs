@@ -5,16 +5,13 @@
 //! creates one top-anchored layer surface carrying the Activities trigger
 //! and window list. No UI logic runs inside the compositor process.
 //!
-//! # Deferred runtime
+//! # Live runtime
 //!
-//! Our test compositor does not implement layer-shell yet, so running this
-//! binary end to end is **deferred**: against a compositor without
-//! `zwlr_layer_shell_v1` the binary exits with a clear error instead of
-//! guessing a fallback surface role (a fallback would silently misplace
-//! the panel). The code below must compile and its structure — connect,
-//! bind, create top-anchored surface, ack configures, run until closed —
-//! must match the protocol. Live-compositor bring-up happens with the
-//! compositor's layer-shell support, not here.
+//! The compositor serves `zwlr_layer_shell_v1` (see `rwd_compositor::layer`),
+//! so this binary attaches for real: connect, bind, create the top-anchored
+//! surface, ack configures, run until closed. Against a compositor without
+//! the global it exits with a clear error instead of guessing a fallback
+//! surface role (a fallback would silently misplace the panel).
 //!
 //! # Supervision seam (ADR 0003)
 //!
@@ -76,8 +73,8 @@ pub enum PanelError {
     Registry(wayland_client::globals::GlobalError),
     /// Compositor does not offer `wl_compositor`.
     NoCompositor(BindError),
-    /// Compositor does not offer `zwlr_layer_shell_v1` (our test
-    /// compositor today: live runtime deferred, see module docs).
+    /// Compositor does not offer `zwlr_layer_shell_v1` (no fallback
+    /// surface role: misplacing the panel silently would be worse).
     NoLayerShell(BindError),
     /// Event-loop dispatch failed (e.g. compositor went away).
     Dispatch(wayland_client::DispatchError),
@@ -89,10 +86,9 @@ impl fmt::Display for PanelError {
             Self::Connect(err) => write!(f, "cannot connect via WAYLAND_DISPLAY: {err}"),
             Self::Registry(err) => write!(f, "registry snapshot failed: {err}"),
             Self::NoCompositor(err) => write!(f, "compositor offers no wl_compositor: {err}"),
-            Self::NoLayerShell(err) => write!(
-                f,
-                "compositor offers no zwlr_layer_shell_v1 (layer-shell runtime deferred): {err}"
-            ),
+            Self::NoLayerShell(err) => {
+                write!(f, "compositor offers no zwlr_layer_shell_v1: {err}")
+            }
             Self::Dispatch(err) => write!(f, "event loop dispatch failed: {err}"),
         }
     }
@@ -243,5 +239,158 @@ mod tests {
         assert_eq!(config.namespace, PANEL_NAMESPACE);
         assert_eq!(config.height, PANEL_HEIGHT);
         assert!(config.height > 0, "exclusive zone must reserve space");
+    }
+
+    /// Live attach of the real [`ShellHost`] against the compositor's
+    /// layer-shell server: the panel surface appears server-side with our
+    /// namespace, the configure round-trip acks, and server close stops
+    /// the loop. Headless and deterministic: a socketpair client plus a
+    /// bounded pump budget, no sleeps.
+    mod live {
+        use std::os::unix::net::UnixStream;
+
+        use rwd_compositor::TestCompositor;
+        use wayland_client::{
+            protocol::{wl_compositor::WlCompositor, wl_registry},
+            Connection, Dispatch, EventQueue, QueueHandle,
+        };
+        use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1;
+
+        use crate::model::ShellModel;
+
+        use super::super::{PanelConfig, ShellHost, PANEL_NAMESPACE};
+
+        const PUMP_ROUNDS: usize = 200;
+
+        /// Registry observer on a throwaway queue, used only to learn
+        /// global names before binding on the panel queue.
+        #[derive(Default)]
+        struct Collector {
+            compositor: Option<(u32, u32)>,
+            layer_shell: Option<(u32, u32)>,
+        }
+
+        impl Dispatch<wl_registry::WlRegistry, ()> for Collector {
+            fn event(
+                state: &mut Self,
+                _: &wl_registry::WlRegistry,
+                event: <wl_registry::WlRegistry as wayland_client::Proxy>::Event,
+                _: &(),
+                _: &Connection,
+                _: &QueueHandle<Self>,
+            ) {
+                if let wl_registry::Event::Global {
+                    name,
+                    interface,
+                    version,
+                } = event
+                {
+                    match interface.as_str() {
+                        "wl_compositor" => state.compositor = Some((name, version)),
+                        "zwlr_layer_shell_v1" => state.layer_shell = Some((name, version)),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        fn pump_server(
+            comp: &mut TestCompositor,
+            queue: &mut EventQueue<ShellHost>,
+            host: &mut ShellHost,
+        ) {
+            queue.flush().unwrap();
+            comp.pump();
+            if let Some(guard) = queue.prepare_read() {
+                guard.read().unwrap();
+            }
+            queue.dispatch_pending(host).unwrap();
+        }
+
+        #[test]
+        fn panel_attaches_acknowledges_and_stops_on_close() {
+            let mut comp = TestCompositor::new();
+            let (server_stream, client_stream) = UnixStream::pair().unwrap();
+            comp.add_client(server_stream);
+            let conn = Connection::from_socket(client_stream).unwrap();
+
+            // Learn global names on a throwaway queue first, then bind
+            // them onto the panel queue for the real host.
+            let mut queue = conn.new_event_queue();
+            let qh = queue.handle();
+            let mut aux = conn.new_event_queue();
+            let aux_qh = aux.handle();
+            let mut collector = Collector::default();
+            let aux_registry = conn.display().get_registry(&aux_qh, ());
+            for _ in 0..PUMP_ROUNDS {
+                aux.flush().unwrap();
+                comp.pump();
+                if let Some(guard) = aux.prepare_read() {
+                    guard.read().unwrap();
+                }
+                aux.dispatch_pending(&mut collector).unwrap();
+                if collector.compositor.is_some() && collector.layer_shell.is_some() {
+                    break;
+                }
+            }
+            let (compositor_name, compositor_version) =
+                collector.compositor.expect("wl_compositor advertised");
+            let (layer_name, layer_version) = collector
+                .layer_shell
+                .expect("zwlr_layer_shell_v1 advertised");
+            let compositor: WlCompositor = aux_registry.bind::<WlCompositor, _, _>(
+                compositor_name,
+                compositor_version.min(6),
+                &qh,
+                (),
+            );
+            let layer_shell: ZwlrLayerShellV1 = aux_registry.bind::<ZwlrLayerShellV1, _, _>(
+                layer_name,
+                layer_version.min(5),
+                &qh,
+                (),
+            );
+            drop((aux, aux_registry, collector));
+
+            let mut host = ShellHost {
+                model: ShellModel::new(),
+                panel: PanelConfig::default(),
+                running: true,
+                surface: None,
+                layer_surface: None,
+            };
+            host.create_panel_surface(&compositor, &layer_shell, &qh);
+            drop((compositor, layer_shell));
+
+            // The real panel surface arrives server-side with our
+            // namespace, and the configure round-trip acks through the
+            // real dispatch path.
+            for _ in 0..PUMP_ROUNDS {
+                pump_server(&mut comp, &mut queue, &mut host);
+                if comp
+                    .state
+                    .panel_surfaces()
+                    .first()
+                    .is_some_and(|panel| panel.configured)
+                {
+                    break;
+                }
+            }
+            let panels = comp.state.panel_surfaces();
+            assert_eq!(panels.len(), 1, "one panel surface tracked");
+            assert_eq!(panels[0].namespace, PANEL_NAMESPACE);
+            assert!(panels[0].configured, "panel acked the configure");
+            assert!(host.is_running(), "panel keeps running");
+
+            // Server close stops the loop: the supervised-crash seam.
+            comp.state.layer_surfaces()[0].send_close();
+            for _ in 0..PUMP_ROUNDS {
+                pump_server(&mut comp, &mut queue, &mut host);
+                if !host.is_running() {
+                    break;
+                }
+            }
+            assert!(!host.is_running(), "close stops the panel loop");
+        }
     }
 }
