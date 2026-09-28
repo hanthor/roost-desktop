@@ -1,0 +1,8 @@
+[package]
+name = "rwd-greeter"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[dependencies]
+greetd_ipc.workspace = true
