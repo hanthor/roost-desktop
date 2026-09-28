@@ -1,0 +1,29 @@
+schema: 3
+written_by: dev
+skills_version: dev
+name: rust-wayland-desktop
+command: spektacular
+agent: codex
+spec_trigger_threshold: moderate
+auto_commit: "off"
+debug:
+    enabled: false
+spec:
+    provider: file
+    id_method: timestamp
+    config:
+        directory: specs
+plan:
+    provider: file
+    strict_spec_changes: true
+    config:
+        directory: plans
+    task_id:
+        provider: uuid
+changelog:
+    provider: file
+    config:
+        directory: changelog
+repos:
+    - name: rust-wayland-desktop
+      location: .

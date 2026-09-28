@@ -1,0 +1,15 @@
+schema: 2
+description: Independent Rust Wayland desktop session; currently in architecture and planning.
+role: product-and-implementation
+source:
+  provider: file
+  config:
+    location: ..
+knowledge:
+  provider: file
+  config:
+    location: knowledge
+changelog:
+  provider: file
+  config:
+    directory: changelog
