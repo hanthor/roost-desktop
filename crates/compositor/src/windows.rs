@@ -114,6 +114,12 @@ pub struct WindowManager {
     /// Switcher drive events queued for the hub broadcast, drained by
     /// the runtime after each input event.
     switcher_queue: Vec<SwitcherAction>,
+    /// Last hub overview flag seen (set by the runtime each tick).
+    overview_open: bool,
+    /// Window focused before the overview parked keyboard focus.
+    pre_overview_focus: Option<u64>,
+    /// Overview surface keyboard focus is parked on, if parked.
+    overview_held: Option<WlSurface>,
 }
 
 impl WindowManager {
@@ -143,7 +149,22 @@ impl WindowManager {
             alt_held: false,
             switcher_open: false,
             switcher_queue: Vec::new(),
+            overview_open: false,
+            pre_overview_focus: None,
+            overview_held: None,
         }
+    }
+
+    /// Record the hub overview flag (the runtime calls this each tick
+    /// after polling control). The next [`reconcile`](Self::reconcile)
+    /// steers focus.
+    pub fn set_overview_open(&mut self, open: bool) {
+        self.overview_open = open;
+    }
+
+    /// Whether keyboard focus is currently parked on the overview.
+    pub fn overview_focus_held(&self) -> bool {
+        self.overview_held.is_some()
     }
 
     /// Compositor-owned state model (revisioned windows/focus).
@@ -222,7 +243,58 @@ impl WindowManager {
         // arrived with a surface's first commits (e.g. initial
         // maximized) applies after the surface is mapped.
         self.drain_window_requests(state);
+        // Overview focus parks last so newly mapped windows never
+        // hold focus past this tick while the overview is open.
+        self.reconcile_overview_focus(state);
         let _ = seen;
+    }
+
+    /// Park keyboard (and selection) focus on the shell overview while
+    /// open; restore the previous window on dismiss. Explicit `focus`
+    /// calls lose to the park until the overview closes. A vanished
+    /// overview surface restores early so keys never route into a dead
+    /// surface.
+    fn reconcile_overview_focus(&mut self, state: &mut State) {
+        let surface = state.overview_surface();
+        if self.overview_open {
+            match (surface, self.overview_held.clone()) {
+                (Some(target), held) if held.as_ref() != Some(&target) => {
+                    if held.is_none() {
+                        self.pre_overview_focus = self.model.focused();
+                    }
+                    if let Some(previous) = self.model.focused() {
+                        self.configure(previous, false);
+                    }
+                    self.model.set_focused(None);
+                    let serial = SERIAL_COUNTER.next_serial();
+                    if let Some(keyboard) = self.keyboard.clone() {
+                        keyboard.set_focus(state, Some(target.clone()), serial);
+                    }
+                    state.sync_selection_focus(Some(&target));
+                    eprintln!("rwd-compositor: overview focus parked");
+                    self.overview_held = Some(target);
+                }
+                (None, Some(_)) => {
+                    self.restore_pre_overview_focus(state);
+                }
+                _ => {}
+            }
+        } else if self.overview_held.is_some() {
+            self.restore_pre_overview_focus(state);
+        }
+    }
+
+    /// Restore the pre-overview window (or the topmost live one) after
+    /// dismiss or surface loss.
+    fn restore_pre_overview_focus(&mut self, state: &mut State) {
+        self.overview_held = None;
+        let restore = self
+            .pre_overview_focus
+            .filter(|id| self.windows.contains_key(id))
+            .or_else(|| self.stacking.last().copied());
+        self.pre_overview_focus = None;
+        self.apply_focus(state, restore);
+        eprintln!("rwd-compositor: overview focus restored");
     }
 
     /// Register one toplevel: model insert with cascaded geometry,

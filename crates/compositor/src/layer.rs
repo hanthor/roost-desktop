@@ -24,6 +24,11 @@ use smithay::{
 
 use crate::State;
 
+/// Namespace the shell advertises for its overview layer surface
+/// (mirrors `rwd_shell_host::OVERVIEW_NAMESPACE`; the crates cannot
+/// share the const without a dependency cycle).
+pub const OVERVIEW_NAMESPACE: &str = "rwd-shell-overview";
+
 /// Arrange one layer surface against the output: axes anchored on
 /// both edges take the output size, other axes take the client's
 /// requested size.
@@ -188,5 +193,15 @@ impl State {
     /// driving by the runtime and tests.
     pub fn layer_surfaces(&self) -> Vec<LayerSurface> {
         self.layer_shell_state.layer_surfaces().collect()
+    }
+
+    /// The shell's overview layer surface, if currently mapped. The
+    /// window manager parks keyboard (and selection) focus here while
+    /// the overview is open.
+    pub fn overview_surface(&self) -> Option<WlSurface> {
+        self.panel_surfaces
+            .iter()
+            .find(|record| record.namespace == OVERVIEW_NAMESPACE)
+            .map(|record| record.surface.clone())
     }
 }

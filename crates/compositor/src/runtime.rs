@@ -412,6 +412,10 @@ impl Runtime {
         for id in activated {
             self.manager.focus(&mut self.state, Some(id));
         }
+        // Overview focus follows the hub flag (shell commands and
+        // runtime triggers converge here); the next reconcile parks
+        // or restores keyboard focus.
+        self.manager.set_overview_open(self.control.overview_open());
         match self.shell.poll(crate::state::system_millis()) {
             ShellStatus::Running => {
                 if self.overlay.visible {

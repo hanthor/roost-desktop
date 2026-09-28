@@ -14,6 +14,7 @@
 
 use std::os::unix::net::UnixStream;
 
+use rwd_compositor::layer::OVERVIEW_NAMESPACE;
 use rwd_compositor::windows::{
     ManagerInput, TileSide, WindowLayout, WindowManager, ALT_LEFT_KEYCODE, ARROW_DOWN_KEYCODE,
     ARROW_LEFT_KEYCODE, ARROW_RIGHT_KEYCODE, ARROW_UP_KEYCODE, ESCAPE_KEYCODE, F4_KEYCODE,
@@ -38,6 +39,10 @@ use wayland_client::{
 use wayland_protocols::xdg::shell::client::{
     xdg_surface::XdgSurface, xdg_toplevel::XdgToplevel, xdg_wm_base::XdgWmBase,
 };
+use wayland_protocols_wlr::layer_shell::v1::client::{
+    zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
+    zwlr_layer_surface_v1::{Anchor, Event as LayerSurfaceEvent, ZwlrLayerSurfaceV1},
+};
 
 const PUMP_ROUNDS: usize = 200;
 /// Button code for BTN_LEFT, sent in the pointer-button test.
@@ -55,6 +60,8 @@ struct Client {
     toplevel: Option<XdgToplevel>,
     keyboard: Option<WlKeyboard>,
     pointer: Option<WlPointer>,
+    layer_shell: Option<ZwlrLayerShellV1>,
+    overview_layer: Option<ZwlrLayerSurfaceV1>,
     synced: bool,
     configured: bool,
     /// (keycode, pressed) in arrival order.
@@ -123,6 +130,10 @@ impl Dispatch<WlRegistry, ()> for Client {
                 "xdg_wm_base" => {
                     state.xdg_base =
                         Some(registry.bind::<XdgWmBase, _, _>(name, version.min(7), qh, ()));
+                }
+                "zwlr_layer_shell_v1" => {
+                    state.layer_shell =
+                        Some(registry.bind::<ZwlrLayerShellV1, _, _>(name, version.min(5), qh, ()));
                 }
                 _ => {}
             }
@@ -275,6 +286,22 @@ empty_dispatch!(WlDisplay);
 empty_dispatch!(WlCompositor);
 empty_dispatch!(WlSurface);
 empty_dispatch!(WlSeat);
+empty_dispatch!(ZwlrLayerShellV1);
+
+impl Dispatch<ZwlrLayerSurfaceV1, ()> for Client {
+    fn event(
+        _: &mut Self,
+        layer: &ZwlrLayerSurfaceV1,
+        event: <ZwlrLayerSurfaceV1 as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let LayerSurfaceEvent::Configure { serial, .. } = event {
+            layer.ack_configure(serial);
+        }
+    }
+}
 
 /// Pump the server and drain one client queue until `done` or the round
 /// budget runs out. Single-threaded by design: neither side blocks, and
@@ -634,6 +661,26 @@ fn release(manager: &mut WindowManager, comp: &mut TestCompositor, keycode: u32)
             time: 5001,
         },
     );
+}
+
+/// Evdev `a`: a bare key proving delivery by who records it.
+const KEY_A: u32 = 30;
+
+/// One pump round across three clients (single `pump` calls run one
+/// round each, so three sequential calls drain one shared tick).
+#[allow(clippy::too_many_arguments)]
+fn drain3(
+    comp: &mut TestCompositor,
+    queue_a: &mut EventQueue<Client>,
+    client_a: &mut Client,
+    queue_b: &mut EventQueue<Client>,
+    client_b: &mut Client,
+    queue_c: &mut EventQueue<Client>,
+    client_c: &mut Client,
+) {
+    pump(comp, queue_a, client_a, |_| true);
+    pump(comp, queue_b, client_b, |_| true);
+    pump(comp, queue_c, client_c, |_| true);
 }
 
 #[test]
@@ -1050,4 +1097,106 @@ fn disconnect_unmaps_window_and_falls_back_focus() {
     assert_eq!(remaining[0].id, f.id_b);
     assert!(f.manager.geometry(f.id_a).is_none());
     assert_eq!(f.manager.model().focused(), Some(f.id_b));
+}
+
+#[test]
+fn overview_parks_keyboard_focus_and_restores_on_dismiss() {
+    let mut f = two_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+
+    // Third client: the shell overview layer surface.
+    let (conn_c, mut queue_c, mut client_c) = connect(&mut f.comp);
+    let qh_c = queue_c.handle();
+    let surface_c = client_c
+        .compositor
+        .as_ref()
+        .unwrap()
+        .create_surface(&qh_c, ());
+    let layer_c = client_c.layer_shell.as_ref().unwrap().get_layer_surface(
+        &surface_c,
+        None,
+        Layer::Top,
+        OVERVIEW_NAMESPACE.to_owned(),
+        &qh_c,
+        (),
+    );
+    layer_c.set_size(0, 200);
+    layer_c.set_anchor(Anchor::Top | Anchor::Left | Anchor::Right);
+    layer_c.set_exclusive_zone(0);
+    surface_c.commit();
+    client_c.overview_layer = Some(layer_c);
+    client_c.synced = false;
+    conn_c.display().sync(&qh_c, ());
+    pump(&mut f.comp, &mut queue_c, &mut client_c, |c| c.synced);
+    f.manager.reconcile(&mut f.comp.state);
+    assert!(f.comp.state.overview_surface().is_some());
+    assert!(client_c.overview_layer.is_some());
+    assert!(!f.manager.overview_focus_held());
+
+    // Opening the overview parks focus: the model unfocuses and keys
+    // reach the overview surface owner, not the windows.
+    f.manager.set_overview_open(true);
+    f.manager.reconcile(&mut f.comp.state);
+    assert!(f.manager.overview_focus_held());
+    assert_eq!(f.manager.model().focused(), None);
+    f.client_a.keys.clear();
+    f.client_b.keys.clear();
+    client_c.keys.clear();
+    press(&mut f.manager, &mut f.comp, KEY_A);
+    release(&mut f.manager, &mut f.comp, KEY_A);
+    for _ in 0..3 {
+        drain3(
+            &mut f.comp,
+            &mut f.queue_a,
+            &mut f.client_a,
+            &mut f.queue_b,
+            &mut f.client_b,
+            &mut queue_c,
+            &mut client_c,
+        );
+    }
+    assert!(f.client_a.keys.is_empty(), "parked keys leaked to A");
+    assert!(f.client_b.keys.is_empty(), "parked keys leaked to B");
+    assert_eq!(
+        client_c.keys,
+        vec![(KEY_A, true), (KEY_A, false)],
+        "parked keys must reach the overview owner"
+    );
+
+    // Dismiss restores the pre-overview window and delivery with it.
+    f.manager.set_overview_open(false);
+    f.manager.reconcile(&mut f.comp.state);
+    assert!(!f.manager.overview_focus_held());
+    assert_eq!(f.manager.model().focused(), Some(f.id_a));
+    press(&mut f.manager, &mut f.comp, KEY_A);
+    release(&mut f.manager, &mut f.comp, KEY_A);
+    for _ in 0..3 {
+        drain3(
+            &mut f.comp,
+            &mut f.queue_a,
+            &mut f.client_a,
+            &mut f.queue_b,
+            &mut f.client_b,
+            &mut queue_c,
+            &mut client_c,
+        );
+    }
+    assert_eq!(
+        f.client_a.keys,
+        vec![(KEY_A, true), (KEY_A, false)],
+        "restored keys must reach A again"
+    );
+    assert_eq!(client_c.keys.len(), 2, "dismissed keys must not reach C");
+
+    // A vanished overview surface restores early too, so keys never
+    // route into a dead surface.
+    f.manager.set_overview_open(true);
+    f.manager.reconcile(&mut f.comp.state);
+    assert!(f.manager.overview_focus_held());
+    drop((conn_c, queue_c, client_c));
+    f.comp.pump();
+    f.comp.pump();
+    f.manager.reconcile(&mut f.comp.state);
+    assert!(!f.manager.overview_focus_held());
+    assert_eq!(f.manager.model().focused(), Some(f.id_a));
 }
