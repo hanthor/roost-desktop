@@ -40,8 +40,13 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     },
 };
 
+use std::sync::Arc;
+
+use crate::apps::{AppProvider, LaunchTracker};
 use crate::control::{ControlClient, ControlError, Handled};
+use crate::favorites::Favorites;
 use crate::model::ShellModel;
+use crate::search::{SearchAction, SearchHub, SearchResult, WindowProvider};
 
 /// Namespace advertised for the panel layer surface.
 pub const PANEL_NAMESPACE: &str = "rwd-shell-panel";
@@ -113,9 +118,177 @@ pub struct ShellHost {
     running: bool,
     surface: Option<WlSurface>,
     layer_surface: Option<ZwlrLayerSurfaceV1>,
+    /// Desktop entries backing launch hits (shared with the hub).
+    apps: Arc<AppProvider>,
+    /// Live-window snapshot backing switch-to-instance hits (shared
+    /// with the hub; refreshed on every [`sync_overview`](Self::sync_overview)).
+    windows: Arc<WindowProvider>,
+    /// Async bounded search over the providers above.
+    search: SearchHub,
+    /// Pinned favorites for the overview grid.
+    favorites: Favorites,
+    /// Launch feedback for spawned apps.
+    launcher: LaunchTracker,
+}
+
+/// What activating one overview search hit did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HitOutcome {
+    /// Window focused through the token gate (request id for
+    /// `CommandResult` correlation); the overview dismisses after.
+    Focused {
+        /// Activation command request id.
+        request: u64,
+    },
+    /// App spawned (OS pid); feedback flows from
+    /// [`ShellHost::launch_states`].
+    Launched {
+        /// Spawned process id.
+        pid: u32,
+    },
+}
+
+/// Ways hit activation can fail without touching focus.
+#[derive(Debug)]
+pub enum HitError {
+    /// Control channel failed (activation or dismissal send).
+    Control(ControlError),
+    /// Spawn failed; nothing was launched.
+    Launch(std::io::Error),
+    /// The focused window left the model between search and Enter.
+    StaleWindow {
+        /// Compositor window id with no live entry.
+        window: u64,
+    },
+    /// The launched app id has no known desktop entry.
+    UnknownApp {
+        /// Requested app id.
+        app_id: String,
+    },
+}
+
+impl fmt::Display for HitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Control(err) => write!(f, "overview command failed: {err}"),
+            Self::Launch(err) => write!(f, "launch failed: {err}"),
+            Self::StaleWindow { window } => {
+                write!(f, "window {window} closed before activation")
+            }
+            Self::UnknownApp { app_id } => write!(f, "no desktop entry for {app_id}"),
+        }
+    }
+}
+
+impl std::error::Error for HitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Control(err) => Some(err),
+            Self::Launch(err) => Some(err),
+            Self::StaleWindow { .. } | Self::UnknownApp { .. } => None,
+        }
+    }
 }
 
 impl ShellHost {
+    /// Host over explicit workflow state (002 T2).
+    ///
+    /// Providers merge windows first (switch-to-instance beats fresh
+    /// launch), then desktop entries. Production passes
+    /// [`AppProvider::system`](crate::apps::AppProvider::system) and
+    /// [`Favorites::system`](crate::favorites::Favorites::system);
+    /// tests inject temp-dir state.
+    pub fn new(panel: PanelConfig, apps: AppProvider, favorites: Favorites) -> Self {
+        let windows: Arc<WindowProvider> = Arc::new(WindowProvider::new());
+        let apps: Arc<AppProvider> = Arc::new(apps);
+        let search = SearchHub::new(vec![
+            windows.clone() as Arc<dyn crate::search::SearchProvider>,
+            apps.clone() as Arc<dyn crate::search::SearchProvider>,
+        ]);
+        Self {
+            model: ShellModel::new(),
+            panel,
+            running: true,
+            surface: None,
+            layer_surface: None,
+            apps,
+            windows,
+            search,
+            favorites,
+            launcher: LaunchTracker::new(),
+        }
+    }
+
+    /// Pinned favorites for the overview grid.
+    pub fn favorites(&self) -> &Favorites {
+        &self.favorites
+    }
+
+    /// Pin or unpin a favorite (persistence is the caller's `save`).
+    pub fn favorites_mut(&mut self) -> &mut Favorites {
+        &mut self.favorites
+    }
+
+    /// Start answering overview search text; returns the generation.
+    /// Never blocks: providers resolve on worker threads.
+    pub fn search_query(&self, text: &str) -> u64 {
+        self.search.query(text)
+    }
+
+    /// Drop in-flight answers (e.g. overview closed mid-query).
+    pub fn search_cancel(&self) {
+        self.search.cancel();
+    }
+
+    /// Nonblocking drain of the current answer, merged and bounded.
+    pub fn search_collect(&mut self) -> Vec<SearchResult> {
+        self.search.collect()
+    }
+
+    /// Current launch feedback per app id (reaps exited children).
+    pub fn launch_states(
+        &mut self,
+    ) -> std::collections::HashMap<String, Vec<crate::apps::LaunchState>> {
+        self.launcher.states()
+    }
+
+    /// Activate one search hit (002 T2 Enter behavior).
+    ///
+    /// Focus hits select the window in the host model and activate
+    /// through the token gate, then ask the compositor to dismiss the
+    /// overview (GNOME parallel: picking from the overview returns to
+    /// the app). Launch hits spawn detached and dismiss best-effort:
+    /// a dismissal send failure after a successful spawn must not
+    /// report the launch as failed.
+    pub fn activate_hit(
+        &mut self,
+        control: &mut ControlClient,
+        hit: &SearchResult,
+    ) -> Result<HitOutcome, HitError> {
+        match &hit.action {
+            SearchAction::Focus { window } => {
+                if !self.model.select_window(*window) {
+                    return Err(HitError::StaleWindow { window: *window });
+                }
+                let request = control
+                    .activate_window(*window)
+                    .map_err(HitError::Control)?;
+                control.toggle_overview().map_err(HitError::Control)?;
+                Ok(HitOutcome::Focused { request })
+            }
+            SearchAction::Launch { app_id } => {
+                let entry = self
+                    .apps
+                    .entry(app_id)
+                    .ok_or_else(|| HitError::UnknownApp {
+                        app_id: app_id.clone(),
+                    })?;
+                let pid = self.launcher.launch(entry).map_err(HitError::Launch)?;
+                let _ = control.toggle_overview();
+                Ok(HitOutcome::Launched { pid })
+            }
+        }
+    }
     /// Create the panel `wl_surface` plus its top-anchored layer surface.
     ///
     /// `output` is `None` so the compositor places the panel on the
@@ -174,6 +347,8 @@ impl ShellHost {
             let _ = self.model.select_window(selected);
         }
         self.model.set_overview_open(model.is_overview_open());
+        // Keep switch-to-instance answers on compositor truth.
+        self.windows.refresh(&self.model);
     }
 }
 
@@ -311,13 +486,7 @@ pub fn run_panel_with_control(
         .bind(&qh, 3..=5, ())
         .map_err(PanelError::NoLayerShell)?;
 
-    let mut host = ShellHost {
-        model: ShellModel::new(),
-        panel,
-        running: true,
-        surface: None,
-        layer_surface: None,
-    };
+    let mut host = ShellHost::new(panel, AppProvider::system(), Favorites::system());
     host.create_panel_surface(&compositor, &layer_shell, &qh);
     drop((globals, compositor, layer_shell));
 
@@ -374,6 +543,7 @@ mod tests {
     /// bounded pump budget, no sleeps.
     mod live {
         use std::os::unix::net::UnixStream;
+        use std::rc::Rc;
 
         use rwd_compositor::{
             control::ControlHub,
@@ -387,11 +557,25 @@ mod tests {
         use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1;
 
         use crate::control::{ControlClient, Handled};
-        use crate::model::ShellModel;
 
         use super::super::{is_would_block, PanelConfig, ShellHost, PANEL_NAMESPACE};
+        use crate::apps::AppProvider;
+        use crate::favorites::Favorites;
 
         const PUMP_ROUNDS: usize = 200;
+
+        /// Host with empty entries and temp-dir favorites: no HOME or
+        /// system app-dir side effects in tests. The guard keeps the
+        /// dir (and the favorites file) alive for the test body.
+        fn test_host() -> (ShellHost, tempfile::TempDir) {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let host = ShellHost::new(
+                PanelConfig::default(),
+                AppProvider::new(Vec::new()),
+                Favorites::load(dir.path().join(crate::favorites::FAVORITES_FILE)),
+            );
+            (host, dir)
+        }
 
         /// Registry observer on a throwaway queue, used only to learn
         /// global names before binding on the panel queue.
@@ -483,13 +667,7 @@ mod tests {
             );
             drop((aux, aux_registry, collector));
 
-            let mut host = ShellHost {
-                model: ShellModel::new(),
-                panel: PanelConfig::default(),
-                running: true,
-                surface: None,
-                layer_surface: None,
-            };
+            let (mut host, _dir) = test_host();
             host.create_panel_surface(&compositor, &layer_shell, &qh);
             drop((compositor, layer_shell));
 
@@ -561,13 +739,7 @@ mod tests {
                 }
             }
 
-            let mut host = ShellHost {
-                model: ShellModel::new(),
-                panel: PanelConfig::default(),
-                running: true,
-                surface: None,
-                layer_surface: None,
-            };
+            let (mut host, _dir) = test_host();
             host.sync_overview(&client);
             assert_eq!(host.model.windows().len(), 2);
             let titles: Vec<&str> = host
@@ -617,6 +789,219 @@ mod tests {
             host.sync_overview(&client);
             assert!(host.model.is_overview_open());
             assert_eq!(host.model.windows().len(), 3);
+        }
+
+        /// Search answers through the host: after a sync the window
+        /// provider offers switch-to-instance hits for live titles.
+        #[test]
+        fn host_search_finds_synced_windows() {
+            use crate::search::SearchAction;
+
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("control.sock");
+            let mut model = StateModel::new();
+            model.insert("alpha", Some("com.example.alpha"), 0);
+            let mut hub =
+                ControlHub::bind(socket_path.clone(), Rc::new(TokenStore::new()), SEAT_NAME)
+                    .unwrap();
+
+            let mut client = ControlClient::connect(&socket_path).unwrap();
+            client.send_hello().unwrap();
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.await_hello() {
+                    Ok(()) => break,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("hello failed: {e}"),
+                }
+            }
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.poll() {
+                    Ok(Handled::Snapshot { .. }) => break,
+                    Ok(_) => continue,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("snapshot poll failed: {e}"),
+                }
+            }
+
+            let (mut host, _favdir) = test_host();
+            host.sync_overview(&client);
+            host.search_query("alp");
+            let mut hits = Vec::new();
+            for _ in 0..100 {
+                hits = host.search_collect();
+                if !hits.is_empty() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(hits.len(), 1, "one live window matches");
+            assert!(
+                matches!(hits[0].action, SearchAction::Focus { .. }),
+                "window hits switch to the instance"
+            );
+        }
+
+        /// Enter on a window hit focuses through the token gate and
+        /// dismisses the overview; the compositor confirms both.
+        #[test]
+        fn activate_window_hit_focuses_and_dismisses() {
+            use crate::search::SearchResult;
+            use rwd_shell_control::CommandStatus;
+
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("control.sock");
+            let mut model = StateModel::new();
+            let id_a = model.insert("alpha", Some("com.example.alpha"), 0);
+            let id_b = model.insert("beta", Some("com.example.beta"), 0);
+            assert!(model.set_focused(Some(id_a)));
+            let mut hub =
+                ControlHub::bind(socket_path.clone(), Rc::new(TokenStore::new()), SEAT_NAME)
+                    .unwrap();
+
+            let mut client = ControlClient::connect(&socket_path).unwrap();
+            client.send_hello().unwrap();
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.await_hello() {
+                    Ok(()) => break,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("hello failed: {e}"),
+                }
+            }
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.poll() {
+                    Ok(Handled::Snapshot { .. }) => break,
+                    Ok(_) => continue,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("snapshot poll failed: {e}"),
+                }
+            }
+
+            let (mut host, _favdir) = test_host();
+            host.sync_overview(&client);
+            hub.set_overview(true);
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.poll() {
+                    Ok(Handled::Overview { open: true }) => break,
+                    Ok(_) => continue,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("overview poll failed: {e}"),
+                }
+            }
+            host.sync_overview(&client);
+            assert!(host.model.is_overview_open());
+
+            let hit = SearchResult::focus("beta", None, id_b);
+            let request = match host.activate_hit(&mut client, &hit) {
+                Ok(super::super::HitOutcome::Focused { request }) => request,
+                other => panic!("expected focus, got {other:?}"),
+            };
+            assert_eq!(host.model.selected(), Some(id_b));
+
+            // The hub applies the activation, then the dismissal flip.
+            // Results are matched by request id: the dismissal toggle
+            // has its own id and must not stand in for the activation.
+            let mut result = None;
+            let mut dismissed = false;
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.poll() {
+                    Ok(Handled::CommandResult { id, status }) => {
+                        if id == request {
+                            result = Some(status);
+                        }
+                    }
+                    Ok(Handled::Overview { open }) => {
+                        if !open {
+                            dismissed = true;
+                        }
+                    }
+                    Ok(_) => continue,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("result poll failed: {e}"),
+                }
+                if result.is_some() && dismissed {
+                    break;
+                }
+            }
+            assert_eq!(result, Some(CommandStatus::Applied));
+            assert!(dismissed, "overview dismisses after picking");
+            assert_eq!(model.focused(), Some(id_b));
+        }
+
+        /// Enter on a closed window reports stale without touching the
+        /// control channel.
+        #[test]
+        fn activate_stale_window_hit_is_not_sent() {
+            use crate::search::SearchResult;
+            use std::os::unix::net::UnixStream as StdUnixStream;
+
+            let (mut host, _favdir) = test_host();
+            let (stream, _peer) = StdUnixStream::pair().expect("socketpair");
+            let mut client = ControlClient::new(stream).expect("client");
+            let hit = SearchResult::focus("gone", None, 99);
+            match host.activate_hit(&mut client, &hit) {
+                Err(super::super::HitError::StaleWindow { window }) => {
+                    assert_eq!(window, 99);
+                }
+                other => panic!("expected stale window, got {other:?}"),
+            }
+        }
+
+        /// Enter on an app hit spawns detached and reports the pid;
+        /// unknown ids fail before any spawn.
+        #[test]
+        fn activate_launch_hit_spawns_and_tracks() {
+            use crate::apps::discover;
+            use crate::search::SearchResult;
+
+            let apps_dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                apps_dir.path().join("run.desktop"),
+                "[Desktop Entry]\nName=Runner\nExec=/bin/true\nType=Application\n",
+            )
+            .unwrap();
+            let fav_dir = tempfile::tempdir().unwrap();
+            let mut host = ShellHost::new(
+                PanelConfig::default(),
+                AppProvider::new(discover(&[apps_dir.path().to_owned()])),
+                Favorites::load(fav_dir.path().join(crate::favorites::FAVORITES_FILE)),
+            );
+            let (stream, _peer) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+            let mut client = ControlClient::new(stream).expect("client");
+
+            let hit = SearchResult::launch("Runner", "run");
+            match host.activate_hit(&mut client, &hit) {
+                Ok(super::super::HitOutcome::Launched { pid }) => {
+                    assert!(pid > 0);
+                }
+                other => panic!("expected launch, got {other:?}"),
+            }
+            let mut exited = false;
+            for _ in 0..100 {
+                if host.launch_states().get("run").is_some_and(|states| {
+                    states
+                        .iter()
+                        .any(|s| matches!(s, crate::apps::LaunchState::Exited { code: Some(0) }))
+                }) {
+                    exited = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(exited, "tracker reports the clean exit");
+
+            let bogus = SearchResult::launch("Bogus", "nope.desktop");
+            match host.activate_hit(&mut client, &bogus) {
+                Err(super::super::HitError::UnknownApp { app_id }) => {
+                    assert_eq!(app_id, "nope.desktop");
+                }
+                other => panic!("expected unknown app, got {other:?}"),
+            }
         }
     }
 }

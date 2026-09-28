@@ -270,6 +270,22 @@ impl ControlClient {
         self.send_hello()
     }
 
+    /// Activate one window by id with its latest token (002 T2).
+    ///
+    /// Selects in the shadow model first, so the activation target is
+    /// explicit — callers holding their own view state (the host model)
+    /// must not assume the shadow shares their selection. Unknown ids
+    /// fail before anything is sent. Returns the request id for
+    /// `CommandResult` correlation.
+    pub fn activate_window(&mut self, window: u64) -> Result<u64, ControlError> {
+        if !self.model.select_window(window) {
+            return Err(ControlError::Unexpected(format!(
+                "window {window} not in snapshot"
+            )));
+        }
+        self.activate_selected()
+    }
+
     /// Activate the currently selected window with its latest token.
     ///
     /// Overview flow: [`select_window`](crate::model::ShellModel::select_window)
@@ -288,6 +304,21 @@ impl ControlClient {
                 ControlError::Unexpected(format!("no activation token for window {window}"))
             })?;
         self.send_activation(token)
+    }
+
+    /// Ask the compositor to flip the overview intent (002 T2).
+    ///
+    /// The overview answers Enter-on-empty and post-activation dismissal
+    /// through this: the shell never flips its flag locally and waits
+    /// for the compositor's `Overview` broadcast instead. Returns the
+    /// request id for `CommandResult` correlation.
+    pub fn toggle_overview(&mut self) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::ToggleOverview,
+        })?;
+        Ok(id)
     }
 
     /// Request activation of the currently selected window.
@@ -884,6 +915,49 @@ mod tests {
                 assert_eq!(status, CommandStatus::Applied);
             }
             other => panic!("expected CommandResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn toggle_overview_sends_unit_command_with_fresh_id() {
+        let (mut client, mut peer) = handshook();
+        let id = client.toggle_overview().expect("toggle");
+        assert_eq!(id, INITIAL_REQUEST_ID);
+        match server_read(&mut peer) {
+            Message::Command {
+                id: wire_id,
+                kind: CommandKind::ToggleOverview,
+            } => assert_eq!(wire_id, id, "wire id matches returned id"),
+            other => panic!("expected ToggleOverview command, got {other:?}"),
+        }
+        // Toggle needs no selection: it works on an empty model too.
+        assert_eq!(client.model().selected(), None);
+    }
+
+    #[test]
+    fn activate_window_targets_by_id_not_shadow_selection() {
+        let (mut client, mut peer) = handshook();
+        server_write(&mut peer, &snapshot_rev7());
+        assert!(matches!(
+            client.poll().expect("snapshot"),
+            Handled::Snapshot { .. }
+        ));
+        // Shadow selection is window 7; activating 8 must name 8.
+        let id = client.activate_window(8).expect("activate by id");
+        match server_read(&mut peer) {
+            Message::Command {
+                id: wire_id,
+                kind: CommandKind::ActivateWindow { window, .. },
+            } => {
+                assert_eq!(wire_id, id);
+                assert_eq!(window, 8);
+            }
+            other => panic!("expected ActivateWindow for 8, got {other:?}"),
+        }
+        // Unknown ids fail before anything is sent.
+        match client.activate_window(99) {
+            Err(ControlError::Unexpected(_)) => {}
+            other => panic!("expected Unknown-window refusal, got {other:?}"),
         }
     }
 
