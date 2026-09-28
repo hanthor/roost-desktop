@@ -43,6 +43,9 @@ while [ $# -gt 0 ]; do
 done
 
 mkdir -p "$ARTIFACTS"
+# Absolute: the shell rejects relative XDG_DATA_HOME, and the probe
+# marker must resolve identically in the script and in spawned apps.
+ARTIFACTS="$(cd "$ARTIFACTS" && pwd)"
 LOG="$ARTIFACTS/nested.log"
 OWNED_XVFB=""
 COMPOSITOR_PID=""
