@@ -236,12 +236,13 @@ fn client_read(client: &mut UnixStream) -> Message {
 }
 
 /// Read frames until the `CommandResult` for `id` arrives, skipping
-/// interleaved `Changes` deltas the hub emits after model mutations.
+/// interleaved `Changes` deltas the hub emits after model mutations and
+/// `Overview` intents (UI state outside the ordered model stream).
 fn read_result(client: &mut UnixStream, id: u64) -> CommandStatus {
     for _ in 0..HUB_ROUNDS {
         match client_read(client) {
             Message::CommandResult { id: back, status } if back == id => return status,
-            Message::Changes { .. } => continue,
+            Message::Changes { .. } | Message::Overview { .. } => continue,
             other => panic!("expected CommandResult for {id}, got {other:?}"),
         }
     }

@@ -81,6 +81,19 @@ fn drive(h: &mut Harness, client: &mut ControlClient) -> Handled {
     panic!("drive budget exhausted");
 }
 
+/// Like [`drive`], but skips compositor overview intents: `Overview`
+/// frames are UI state outside the ordered model stream, so tests
+/// awaiting model frames (deltas, results, resnapshots) step past them.
+fn drive_model(h: &mut Harness, client: &mut ControlClient) -> Handled {
+    for _ in 0..ROUNDS {
+        let handled = drive(h, client);
+        if !matches!(handled, Handled::Overview { .. }) {
+            return handled;
+        }
+    }
+    panic!("drive budget exhausted");
+}
+
 /// Drive the hub until `client.await_hello()` succeeds.
 fn drive_hello(h: &mut Harness, client: &mut ControlClient) {
     for _ in 0..ROUNDS {
@@ -102,9 +115,15 @@ fn live_client(h: &mut Harness) -> ControlClient {
     client.send_hello().unwrap();
     drive_hello(h, &mut client);
     match drive(h, &mut client) {
-        Handled::Snapshot { .. } => client,
+        Handled::Snapshot { .. } => {}
         other => panic!("expected initial Snapshot, got {other:?}"),
     }
+    // Newcomers join mid-state: the hub states the current intent next.
+    match drive(h, &mut client) {
+        Handled::Overview { open } => assert!(!open, "fresh hub starts closed"),
+        other => panic!("expected newcomer Overview, got {other:?}"),
+    }
+    client
 }
 
 #[test]
@@ -137,11 +156,11 @@ fn activate_selected_drives_token_gated_focus() {
     let request = client.activate_selected().unwrap();
 
     // First the hub's focus-A delta arrives, then the CommandResult.
-    match drive(&mut h, &mut client) {
+    match drive_model(&mut h, &mut client) {
         Handled::Changes { .. } => {}
         other => panic!("expected focus delta first, got {other:?}"),
     }
-    match drive(&mut h, &mut client) {
+    match drive_model(&mut h, &mut client) {
         Handled::CommandResult { id, status } => {
             assert_eq!(id, request, "result echoes the request id");
             assert_eq!(status, CommandStatus::Applied);
@@ -152,7 +171,7 @@ fn activate_selected_drives_token_gated_focus() {
 
     // The activation's own focus delta follows and moves the overview
     // selection back to B.
-    match drive(&mut h, &mut client) {
+    match drive_model(&mut h, &mut client) {
         Handled::Changes { .. } => {}
         other => panic!("expected trailing focus delta, got {other:?}"),
     }
@@ -177,7 +196,7 @@ fn revision_gap_overflow_resnapshots_whole_state() {
 
     // The first frame after the gap is a full Snapshot, never a partial
     // Changes onto the stale base.
-    match drive(&mut h, &mut client) {
+    match drive_model(&mut h, &mut client) {
         Handled::Snapshot { revision } => assert_eq!(revision, current),
         other => panic!("gap must resnapshot whole state, got {other:?}"),
     }

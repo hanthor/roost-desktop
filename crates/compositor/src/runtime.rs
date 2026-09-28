@@ -41,7 +41,9 @@ use crate::control::ControlHub;
 use crate::overlay::{overlay_key_for_keycode, Overlay, OverlayWindow};
 use crate::state::TokenStore;
 use crate::supervise::{RecoveryAction, RestartPolicy, ShellDriver, ShellStatus};
-use crate::windows::{translate_input, ManagerInput, WindowManager};
+use crate::windows::{
+    translate_input, ManagerInput, TriggerAction, TriggerState, WindowManager, ESCAPE_KEYCODE,
+};
 
 use crate::{ClientState, State};
 
@@ -179,6 +181,7 @@ pub struct Runtime {
     control: ControlHub,
     shell: ShellDriver,
     overlay: Overlay,
+    triggers: TriggerState,
     exit: bool,
     stats: RunStats,
 }
@@ -273,6 +276,7 @@ impl Runtime {
             control,
             shell,
             overlay,
+            triggers: TriggerState::default(),
             exit: false,
             stats: RunStats::default(),
         };
@@ -303,9 +307,33 @@ impl Runtime {
     }
 
     /// Route one backend input event: to the recovery overlay while it
-    /// is visible, else to the window manager.
+    /// is visible, else through the overview triggers to the window
+    /// manager. Trigger events still reach clients (tap toggles without
+    /// breaking Super-combos); only Escape-closes is consumed, so a
+    /// closing keypress never double-acts on client UI.
     fn on_manager_input(&mut self, input: ManagerInput) {
         if !self.overlay.visible {
+            if let ManagerInput::Key {
+                keycode: ESCAPE_KEYCODE,
+                pressed: true,
+                ..
+            } = input
+            {
+                if self.control.overview_open() {
+                    self.control.set_overview(false);
+                    return;
+                }
+            }
+            let action = self.triggers.feed(
+                &input,
+                self.control.overview_open(),
+                self.manager.pointer_pos().y,
+            );
+            match action {
+                TriggerAction::None => {}
+                TriggerAction::Toggle => self.control.set_overview(!self.control.overview_open()),
+                TriggerAction::Open => self.control.set_overview(true),
+            }
             self.manager.on_input(&mut self.state, input);
             return;
         }

@@ -72,6 +72,12 @@ pub struct WindowManager {
 }
 
 impl WindowManager {
+    /// Last known pointer position, for position-less events (button
+    /// presses) that need a location, e.g. the Activities-strip trigger.
+    pub fn pointer_pos(&self) -> Point<f64, Logical> {
+        self.pointer_pos
+    }
+
     /// Empty manager; attaches keyboard and pointer capabilities to the
     /// state's seat and keeps their handles for input routing.
     pub fn new(state: &mut State) -> Self {
@@ -415,6 +421,7 @@ fn contains(geometry: Rectangle<i32, Logical>, pos: Point<f64, Logical>) -> bool
 }
 
 /// Backend input event kinds this manager consumes from the runtime.
+#[derive(Debug, Clone, Copy)]
 pub enum ManagerInput {
     Key {
         keycode: u32,
@@ -430,6 +437,87 @@ pub enum ManagerInput {
         pressed: bool,
         time: u32,
     },
+}
+
+/// Overview trigger keycodes (evdev, 002 R1).
+pub const SUPER_LEFT_KEYCODE: u32 = 125;
+pub const SUPER_RIGHT_KEYCODE: u32 = 126;
+pub const ESCAPE_KEYCODE: u32 = 1;
+/// Hot-corner trigger region in logical pixels from the top-left.
+pub const HOT_CORNER_PX: f64 = 8.0;
+/// Activities-strip trigger: button presses in the top strip open the
+/// overview (the panel owns that strip; matches shell `PANEL_HEIGHT`).
+pub const ACTIVITIES_STRIP_PX: f64 = 32.0;
+
+/// What an input event means for the overview (002 R1), decided purely
+/// from the event plus the current intent and pointer height. The
+/// runtime applies the action to the hub and still forwards the event,
+/// except Escape-closes which it consumes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerAction {
+    /// No overview meaning; normal routing.
+    None,
+    /// Flip the overview intent.
+    Toggle,
+    /// Open the overview.
+    Open,
+}
+
+/// Tap-detecting overview trigger state: a lone Super press+release
+/// toggles, while any other input in between cancels the tap so client
+/// Super-combos keep working. Hot corner and Activities strip open.
+#[derive(Debug, Default)]
+pub struct TriggerState {
+    super_armed: bool,
+}
+
+impl TriggerState {
+    /// Decide the overview action for one input event. `overview_open`
+    /// is the hub intent; `pointer_y` is the last known pointer height
+    /// for strip clicks (buttons carry no position).
+    pub fn feed(
+        &mut self,
+        input: &ManagerInput,
+        overview_open: bool,
+        pointer_y: f64,
+    ) -> TriggerAction {
+        match *input {
+            ManagerInput::Key {
+                keycode, pressed, ..
+            } if keycode == SUPER_LEFT_KEYCODE || keycode == SUPER_RIGHT_KEYCODE => {
+                if pressed {
+                    self.super_armed = true;
+                    TriggerAction::None
+                } else if self.super_armed {
+                    self.super_armed = false;
+                    TriggerAction::Toggle
+                } else {
+                    TriggerAction::None
+                }
+            }
+            ManagerInput::Motion { pos, .. } => {
+                self.super_armed = false;
+                if !overview_open && pos.x < HOT_CORNER_PX && pos.y < HOT_CORNER_PX {
+                    TriggerAction::Open
+                } else {
+                    TriggerAction::None
+                }
+            }
+            ManagerInput::Button { pressed, .. } => {
+                let strip = pressed && pointer_y < ACTIVITIES_STRIP_PX;
+                self.super_armed = false;
+                if strip {
+                    TriggerAction::Toggle
+                } else {
+                    TriggerAction::None
+                }
+            }
+            ManagerInput::Key { .. } => {
+                self.super_armed = false;
+                TriggerAction::None
+            }
+        }
+    }
 }
 
 impl WindowManager {
@@ -475,5 +563,123 @@ pub fn translate_input(event: InputEvent<WinitInput>) -> Option<ManagerInput> {
             time: (event.time() / 1000) as u32,
         }),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(keycode: u32, pressed: bool) -> ManagerInput {
+        ManagerInput::Key {
+            keycode,
+            pressed,
+            time: 0,
+        }
+    }
+
+    fn motion(x: f64, y: f64) -> ManagerInput {
+        ManagerInput::Motion {
+            pos: (x, y).into(),
+            time: 0,
+        }
+    }
+
+    fn button(pressed: bool) -> ManagerInput {
+        ManagerInput::Button {
+            button: 0x110,
+            pressed,
+            time: 0,
+        }
+    }
+
+    #[test]
+    fn lone_super_tap_toggles() {
+        let mut triggers = TriggerState::default();
+        assert_eq!(
+            triggers.feed(&key(SUPER_LEFT_KEYCODE, true), false, 100.0),
+            TriggerAction::None,
+            "press alone arms without acting"
+        );
+        assert_eq!(
+            triggers.feed(&key(SUPER_LEFT_KEYCODE, false), false, 100.0),
+            TriggerAction::Toggle
+        );
+        // Right Super taps too.
+        assert_eq!(
+            triggers.feed(&key(SUPER_RIGHT_KEYCODE, true), true, 100.0),
+            TriggerAction::None
+        );
+        assert_eq!(
+            triggers.feed(&key(SUPER_RIGHT_KEYCODE, false), true, 100.0),
+            TriggerAction::Toggle
+        );
+    }
+
+    #[test]
+    fn super_combo_does_not_toggle() {
+        let mut triggers = TriggerState::default();
+        assert_eq!(
+            triggers.feed(&key(SUPER_LEFT_KEYCODE, true), false, 100.0),
+            TriggerAction::None
+        );
+        // Any other key in between cancels the tap (Super+T etc.).
+        assert_eq!(
+            triggers.feed(&key(20, true), false, 100.0),
+            TriggerAction::None
+        );
+        assert_eq!(
+            triggers.feed(&key(SUPER_LEFT_KEYCODE, false), false, 100.0),
+            TriggerAction::None,
+            "release after a combo is not a tap"
+        );
+    }
+
+    #[test]
+    fn hot_corner_opens_only_when_closed() {
+        let mut triggers = TriggerState::default();
+        assert_eq!(
+            triggers.feed(&motion(2.0, 3.0), false, 3.0),
+            TriggerAction::Open
+        );
+        assert_eq!(
+            triggers.feed(&motion(2.0, 3.0), true, 3.0),
+            TriggerAction::None,
+            "no re-open while already open"
+        );
+        assert_eq!(
+            triggers.feed(&motion(400.0, 300.0), false, 300.0),
+            TriggerAction::None
+        );
+    }
+
+    #[test]
+    fn strip_click_toggles_and_disarms_super() {
+        let mut triggers = TriggerState::default();
+        assert_eq!(
+            triggers.feed(&key(SUPER_LEFT_KEYCODE, true), false, 100.0),
+            TriggerAction::None
+        );
+        // Click in the Activities strip: toggles, and the earlier Super
+        // press must not linger as an armed tap.
+        assert_eq!(
+            triggers.feed(&button(true), false, 10.0),
+            TriggerAction::Toggle
+        );
+        assert_eq!(
+            triggers.feed(&key(SUPER_LEFT_KEYCODE, false), false, 100.0),
+            TriggerAction::None,
+            "strip click consumed the armed Super"
+        );
+        // Clicks below the strip do nothing.
+        assert_eq!(
+            triggers.feed(&button(true), false, 200.0),
+            TriggerAction::None
+        );
+        // Releases never toggle.
+        assert_eq!(
+            triggers.feed(&button(false), false, 10.0),
+            TriggerAction::None
+        );
     }
 }

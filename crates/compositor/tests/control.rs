@@ -326,7 +326,14 @@ fn activation_token_live_store_allows_once_then_denies_replay() {
     let validate = store.clone().validator("seat0".to_owned());
     let validator = move |token: &ActivationToken, app_id: Option<&str>| validate(&token.0, app_id);
     let minter = std::rc::Rc::new(store.clone().minter("seat0".to_owned()));
-    let mut session = Session::handshake_with(conn, &model, validator, minter).unwrap();
+    let mut session = Session::handshake_with(
+        conn,
+        &model,
+        validator,
+        minter,
+        std::rc::Rc::new(std::cell::Cell::new(false)),
+    )
+    .unwrap();
     assert!(matches!(client_read(&mut client), Message::Hello { .. }));
     assert!(matches!(client_read(&mut client), Message::Snapshot { .. }));
 

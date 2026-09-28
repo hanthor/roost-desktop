@@ -149,6 +149,12 @@ pub enum Handled {
         /// received yet on this connection).
         have: Option<u64>,
     },
+    /// Compositor overview intent (002 R1): the shell-facing open state.
+    /// Carries no revision — UI state, not model truth.
+    Overview {
+        /// Whether the overview should be open.
+        open: bool,
+    },
 }
 
 /// Shell-side control client over a connected Unix socket.
@@ -369,6 +375,13 @@ impl ControlClient {
                 Ok(Handled::Changes { to_revision })
             }
             Message::CommandResult { id, status } => Ok(Handled::CommandResult { id, status }),
+            Message::Overview { open } => {
+                // 002 R1: overview intent is UI state, not model truth —
+                // never touches revision, `needs_snapshot`, or the window
+                // list.
+                self.model.set_overview_open(open);
+                Ok(Handled::Overview { open })
+            }
             Message::Error { kind, message } => {
                 if kind == ErrorKind::RevisionGap {
                     // Compositor-side gap signal: same handling as a local
@@ -449,6 +462,7 @@ fn message_label(msg: &Message) -> &'static str {
         Message::Command { .. } => "Command",
         Message::CommandResult { .. } => "CommandResult",
         Message::Error { .. } => "Error",
+        Message::Overview { .. } => "Overview",
     }
 }
 
@@ -683,6 +697,35 @@ mod tests {
         assert_eq!(model.selected(), Some(7));
         assert_eq!(model.workspaces(), &[1, 2]);
         assert!(!model.is_overview_open(), "snapshot keeps UI flag");
+    }
+
+    #[test]
+    fn overview_intent_sets_flag_without_touching_revision() {
+        let (mut client, mut peer) = handshook();
+        server_write(&mut peer, &snapshot_rev7());
+        assert!(matches!(
+            client.poll().expect("snapshot"),
+            Handled::Snapshot { .. }
+        ));
+        server_write(&mut peer, &Message::Overview { open: true });
+        match client.poll().expect("poll overview") {
+            Handled::Overview { open } => assert!(open),
+            other => panic!("expected Overview, got {other:?}"),
+        }
+        let model = client.model();
+        assert!(model.is_overview_open());
+        assert_eq!(model.selected(), Some(7), "intent keeps selection");
+        assert_eq!(model.windows().len(), 2, "intent keeps the list");
+        assert_eq!(client.revision(), Some(7), "intent is not model truth");
+        assert!(!client.needs_snapshot());
+
+        server_write(&mut peer, &Message::Overview { open: false });
+        assert!(matches!(
+            client.poll().expect("poll overview close"),
+            Handled::Overview { open: false }
+        ));
+        assert!(!client.model().is_overview_open());
+        assert_eq!(client.revision(), Some(7));
     }
 
     #[test]

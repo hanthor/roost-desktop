@@ -280,6 +280,10 @@ pub struct Session<'a> {
     validator: TokenValidator<'a>,
     minter: TokenMinter,
     last_revision: u64,
+    /// Shared overview intent with the hub (002 R1): the shell-facing
+    /// open state flipped by `ToggleOverview` commands and runtime
+    /// triggers, broadcast back as [`Message::Overview`].
+    overview: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
 impl std::fmt::Debug for Session<'_> {
@@ -302,6 +306,7 @@ impl<'a> Session<'a> {
             model,
             deny_all_tokens,
             std::rc::Rc::new(|_| String::new()),
+            std::rc::Rc::new(std::cell::Cell::new(false)),
         )
     }
 
@@ -311,18 +316,22 @@ impl<'a> Session<'a> {
     /// from one [`TokenStore`](crate::state::TokenStore)
     /// ([`minter`](crate::state::TokenStore::minter) /
     /// [`validator`](crate::state::TokenStore::validator)); the default
-    /// minter issues empty tokens that can never validate.
+    /// minter issues empty tokens that can never validate. The shared
+    /// `overview` cell joins the hub's overview intent so shell
+    /// `ToggleOverview` commands flip state the hub broadcasts.
     pub fn handshake_with(
         conn: ControlConn,
         model: &StateModel,
         validator: impl Fn(&ActivationToken, Option<&str>) -> bool + 'a,
         minter: TokenMinter,
+        overview: std::rc::Rc<std::cell::Cell<bool>>,
     ) -> Result<Self, ControlError> {
         let mut session = Self {
             conn,
             validator: Box::new(validator),
             minter,
             last_revision: 0,
+            overview,
         };
         let msg = match session.conn.read_frame() {
             Ok(msg) => msg,
@@ -380,6 +389,13 @@ impl<'a> Session<'a> {
             .write_frame(&snapshot_message(model, &*self.minter))?;
         self.last_revision = revision;
         Ok(revision)
+    }
+
+    /// Send the current overview intent (002 R1). Best-effort like the
+    /// rest of the nonblocking plane: a `WouldBlock` caller keeps the
+    /// hub dirty flag set and retries next round.
+    pub fn send_overview(&mut self, open: bool) -> Result<(), ControlError> {
+        self.conn.write_frame(&Message::Overview { open })
     }
 
     /// Catch the shell up from [`last_revision`](Self::last_revision):
@@ -476,7 +492,7 @@ impl<'a> Session<'a> {
                 Ok(Handled::HelloResync { revision })
             }
             Message::Command { id, kind } => {
-                let status = apply_command(model, &self.validator, &kind);
+                let status = apply_command(model, &self.validator, &self.overview, &kind);
                 let applied = matches!(status, CommandStatus::Applied);
                 self.conn
                     .write_frame(&Message::CommandResult { id, status })?;
@@ -485,6 +501,7 @@ impl<'a> Session<'a> {
             Message::Snapshot { .. }
             | Message::Changes { .. }
             | Message::CommandResult { .. }
+            | Message::Overview { .. }
             | Message::Error { .. } => {
                 let _ = self.conn.write_frame(&Message::Error {
                     kind: ErrorKind::UnknownCommand,
@@ -518,6 +535,7 @@ fn message_kind(msg: &Message) -> &'static str {
         Message::Command { .. } => "Command",
         Message::CommandResult { .. } => "CommandResult",
         Message::Error { .. } => "Error",
+        Message::Overview { .. } => "Overview",
     }
 }
 
@@ -586,6 +604,7 @@ fn state_op(change: &StateChange, mint: &dyn Fn(Option<&str>) -> String) -> Opti
 fn apply_command(
     model: &mut StateModel,
     validator: &dyn Fn(&ActivationToken, Option<&str>) -> bool,
+    overview: &std::cell::Cell<bool>,
     kind: &CommandKind,
 ) -> CommandStatus {
     match kind {
@@ -617,7 +636,12 @@ fn apply_command(
                 }
             }
         }
-        CommandKind::ToggleOverview => CommandStatus::Applied,
+        CommandKind::ToggleOverview => {
+            // Flip the hub-shared intent; the hub broadcasts the new
+            // state as `Message::Overview` (002 R1).
+            overview.set(!overview.get());
+            CommandStatus::Applied
+        }
     }
 }
 
@@ -646,6 +670,13 @@ pub struct ControlHub {
     fresh: Vec<UnixStream>,
     store: std::rc::Rc<TokenStore>,
     seat: String,
+    /// Shell-facing overview intent (002 R1), shared with every live
+    /// session: shell `ToggleOverview` commands and runtime triggers
+    /// flip it, and [`poll`](Self::poll) broadcasts the result.
+    overview: std::rc::Rc<std::cell::Cell<bool>>,
+    /// Intent value last broadcast to all sessions; a mismatch means a
+    /// flip is still owed (or a newcomer joined mid-state).
+    overview_sent: bool,
 }
 
 impl ControlHub {
@@ -665,6 +696,8 @@ impl ControlHub {
             sessions: Vec::new(),
             pending: Vec::new(),
             fresh: Vec::new(),
+            overview: std::rc::Rc::new(std::cell::Cell::new(false)),
+            overview_sent: false,
             store,
             seat: seat.to_owned(),
         })
@@ -678,6 +711,18 @@ impl ControlHub {
     /// Live session count, for diagnostics (never sensitive content).
     pub fn session_count(&self) -> usize {
         self.sessions.len()
+    }
+
+    /// Shell-facing overview intent (002 R1).
+    pub fn overview_open(&self) -> bool {
+        self.overview.get()
+    }
+
+    /// Set the overview intent; the next [`poll`](Self::poll) broadcasts
+    /// the flip to every live session as [`Message::Overview`].
+    /// Idempotent: setting the current value sends nothing.
+    pub fn set_overview(&self, open: bool) {
+        self.overview.set(open);
     }
 
     /// One nonblocking round: accept waiting peers, advance pending
@@ -718,6 +763,20 @@ impl ControlHub {
                 self.sessions.swap_remove(i);
             }
         }
+        // Broadcast overview flips (002 R1): best-effort per session,
+        // staying dirty until every live session holds the intent.
+        if self.overview.get() != self.overview_sent {
+            let open = self.overview.get();
+            let mut all_sent = true;
+            for session in &mut self.sessions {
+                if session.send_overview(open).is_err() {
+                    all_sent = false;
+                }
+            }
+            if all_sent {
+                self.overview_sent = open;
+            }
+        }
         activated
     }
 
@@ -737,7 +796,14 @@ impl ControlHub {
             let validator =
                 move |token: &ActivationToken, app_id: Option<&str>| validate(&token.0, app_id);
             let minter = std::rc::Rc::new(self.store.clone().minter(self.seat.clone()));
-            if let Ok(session) = Session::handshake_with(conn, model, validator, minter) {
+            let overview = self.overview.clone();
+            let open = overview.get();
+            if let Ok(mut session) =
+                Session::handshake_with(conn, model, validator, minter, overview)
+            {
+                // Newcomers join mid-state: tell them the intent now
+                // (best-effort; the poll broadcast covers the rest).
+                let _ = session.send_overview(open);
                 self.sessions.push(session);
             }
         }

@@ -116,6 +116,14 @@ impl ShellModel {
         true
     }
 
+    /// Set the overview flag from a compositor intent (`Handled::Overview`).
+    ///
+    /// Preserves window order and selection; a selected id survives when
+    /// it is still present.
+    pub fn set_overview_open(&mut self, open: bool) {
+        self.overview_open = open;
+    }
+
     /// Flip the overview open/closed state, returning the new state.
     ///
     /// Toggling is local UI state and works with any window list,
@@ -244,6 +252,19 @@ mod tests {
         model.apply_window_list(two_windows(), vec![0]);
         model.toggle_overview();
         model.toggle_overview();
+        assert_eq!(model.selected(), Some(1));
+    }
+
+    #[test]
+    fn set_overview_open_from_compositor_intent_preserves_state() {
+        let mut model = ShellModel::new();
+        model.apply_window_list(two_windows(), vec![0]);
+        model.set_overview_open(true);
+        assert!(model.is_overview_open());
+        assert_eq!(model.selected(), Some(1));
+        assert_eq!(model.windows().len(), 2);
+        model.set_overview_open(false);
+        assert!(!model.is_overview_open());
         assert_eq!(model.selected(), Some(1));
     }
 }

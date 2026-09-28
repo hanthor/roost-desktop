@@ -49,7 +49,11 @@ impl ProtocolVersion {
     /// wire-incompatible with `0.1` despite the minor bump; both sides
     /// always ship from this workspace, and a mixed pair fails closed at
     /// decode time.
-    pub const CURRENT: Self = Self { major: 0, minor: 2 };
+    ///
+    /// `0.3` appends the compositor-to-shell `Overview` message (002
+    /// overview triggers). Enum variants serialize by index and the new
+    /// variant sits last, so earlier discriminants are untouched.
+    pub const CURRENT: Self = Self { major: 0, minor: 3 };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
     pub const fn new(major: u16, minor: u16) -> Self {
@@ -229,6 +233,16 @@ pub enum Message {
         kind: ErrorKind,
         /// Diagnostics; never sensitive application content.
         message: String,
+    },
+    /// Compositor-to-shell overview intent (002 R1). The compositor
+    /// detects Super, Activities-strip, and hot-corner triggers — the
+    /// shell never sees global input — and broadcasts the resulting
+    /// open state; the shell renders from its model and answers with
+    /// intent commands. Carries no revision: it is UI state, not model
+    /// truth, and never replaces snapshot resync.
+    Overview {
+        /// Whether the overview should be open.
+        open: bool,
     },
 }
 
@@ -451,7 +465,8 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
         Message::Hello { .. }
         | Message::Command { .. }
         | Message::CommandResult { .. }
-        | Message::Error { .. } => {}
+        | Message::Error { .. }
+        | Message::Overview { .. } => {}
     }
     Ok(())
 }
@@ -490,8 +505,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_2() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 2));
+    fn current_version_is_0_3() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 3));
     }
 
     #[test]
@@ -500,8 +515,9 @@ mod tests {
         assert!(ours.is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 0).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 1).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 3).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(1, 2).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 2).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 4).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(1, 3).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }
 

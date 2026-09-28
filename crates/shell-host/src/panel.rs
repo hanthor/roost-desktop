@@ -163,8 +163,9 @@ impl ShellHost {
     }
 
     /// Replace the overview state with the control client's live model:
-    /// current window list, workspaces, and selection. The panel renders
-    /// only this compositor truth.
+    /// current window list, workspaces, selection, and the compositor's
+    /// overview-open intent (002 R1). The panel renders only this
+    /// compositor truth.
     fn sync_overview(&mut self, client: &ControlClient) {
         let model = client.model();
         self.model
@@ -172,6 +173,7 @@ impl ShellHost {
         if let Some(selected) = model.selected() {
             let _ = self.model.select_window(selected);
         }
+        self.model.set_overview_open(model.is_overview_open());
     }
 }
 
@@ -595,6 +597,25 @@ mod tests {
             }
             assert_eq!(client.revision(), Some(want));
             host.sync_overview(&client);
+            assert_eq!(host.model.windows().len(), 3);
+
+            // Compositor overview intent reaches the host model on sync.
+            assert!(!host.model.is_overview_open());
+            hub.set_overview(true);
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.poll() {
+                    Ok(Handled::Overview { open }) => {
+                        assert!(open);
+                        break;
+                    }
+                    Ok(_) => continue,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("overview poll failed: {e}"),
+                }
+            }
+            host.sync_overview(&client);
+            assert!(host.model.is_overview_open());
             assert_eq!(host.model.windows().len(), 3);
         }
     }
