@@ -47,6 +47,7 @@ struct Client {
     layer_surface: Option<ZwlrLayerSurfaceV1>,
     synced: bool,
     configured: bool,
+    configured_size: Option<(u32, u32)>,
     last_serial: u32,
     closed: bool,
 }
@@ -133,9 +134,14 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for Client {
         _: &QueueHandle<Self>,
     ) {
         match event {
-            LayerEvent::Configure { serial, .. } => {
+            LayerEvent::Configure {
+                serial,
+                width,
+                height,
+            } => {
                 proxy.ack_configure(serial);
                 state.configured = true;
+                state.configured_size = Some((width, height));
                 state.last_serial = serial;
                 if let Some(surface) = &state.surface {
                     surface.commit();
@@ -204,6 +210,53 @@ fn attach_panel(queue: &EventQueue<Client>, client: &mut Client) {
     surface.commit();
     client.surface = Some(surface);
     client.layer_surface = Some(layer_surface);
+}
+
+/// Attach a fullscreen overlay surface on all anchors with no requested
+/// size, mirroring the shell overview surface.
+fn attach_fullscreen(queue: &EventQueue<Client>, client: &mut Client) {
+    let qh = queue.handle();
+    let surface = client.compositor.as_ref().unwrap().create_surface(&qh, ());
+    let layer_surface = client.layer_shell.as_ref().unwrap().get_layer_surface(
+        &surface,
+        None,
+        ClientLayer::Overlay,
+        "rwd-shell-overview".to_owned(),
+        &qh,
+        (),
+    );
+    layer_surface.set_anchor(
+        ClientAnchor::Top | ClientAnchor::Bottom | ClientAnchor::Left | ClientAnchor::Right,
+    );
+    layer_surface.set_exclusive_zone(0);
+    layer_surface.set_keyboard_interactivity(ClientKeyboard::None);
+    surface.commit();
+    client.surface = Some(surface);
+    client.layer_surface = Some(layer_surface);
+}
+
+#[test]
+fn arrange_gives_stretched_axes_output_size() {
+    let mut comp = TestCompositor::new();
+    comp.state.set_output_size(1280, 800);
+
+    // Panel strip: stretched horizontally, client height kept. The
+    // bare initial configure is 0x0; arranged geometry follows the
+    // first commit, so wait for a nonzero size.
+    let (_conn, mut queue, mut client) = connect(&mut comp);
+    attach_panel(&queue, &mut client);
+    pump(&mut comp, &mut queue, &mut client, |_, c| {
+        c.configured_size.is_some_and(|(w, h)| w > 0 && h > 0)
+    });
+    assert_eq!(client.configured_size, Some((1280, PANEL_HEIGHT)));
+
+    // Overview: stretched on both axes, no requested size.
+    let (_conn2, mut queue2, mut client2) = connect(&mut comp);
+    attach_fullscreen(&queue2, &mut client2);
+    pump(&mut comp, &mut queue2, &mut client2, |_, c| {
+        c.configured_size.is_some_and(|(w, h)| w > 0 && h > 0)
+    });
+    assert_eq!(client2.configured_size, Some((1280, 800)));
 }
 
 #[test]

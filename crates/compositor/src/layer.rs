@@ -12,12 +12,60 @@
 use smithay::{
     delegate_layer_shell,
     reexports::wayland_server::protocol::{wl_output::WlOutput, wl_surface::WlSurface},
-    wayland::shell::wlr_layer::{
-        Layer, LayerSurface, LayerSurfaceConfigure, WlrLayerShellHandler, WlrLayerShellState,
+    utils::{Logical, Size},
+    wayland::{
+        compositor,
+        shell::wlr_layer::{
+            Anchor, Layer, LayerSurface, LayerSurfaceCachedState, LayerSurfaceConfigure,
+            WlrLayerShellHandler, WlrLayerShellState,
+        },
     },
 };
 
 use crate::State;
+
+/// Arrange one layer surface against the output: axes anchored on
+/// both edges take the output size, other axes take the client's
+/// requested size.
+///
+/// Pure sizing — callers decide when to send. Sizing must run on
+/// commit, not in `new_layer_surface`: the client's size/anchor
+/// requests only arrive after the surface exists, so arranging at
+/// creation always sees the default (empty) client state.
+pub fn arranged_size(surface: &LayerSurface, output: Size<i32, Logical>) -> Size<i32, Logical> {
+    let (requested, anchor) = compositor::with_states(surface.wl_surface(), |states| {
+        let mut cached = states.cached_state.get::<LayerSurfaceCachedState>();
+        let current = cached.current();
+        (current.size, current.anchor)
+    });
+    let width = if anchor.contains(Anchor::LEFT) && anchor.contains(Anchor::RIGHT) {
+        output.w
+    } else {
+        requested.w
+    };
+    let height = if anchor.contains(Anchor::TOP) && anchor.contains(Anchor::BOTTOM) {
+        output.h
+    } else {
+        requested.h
+    };
+    Size::from((width.max(0), height.max(0)))
+}
+
+/// Re-arrange every layer surface after a commit and send a configure
+/// only where the arranged size changed. The runtime calls this from
+/// its commit handler: client size/anchor requests land with the
+/// commit, so this is the earliest point the real geometry is known.
+pub fn arrange_after_commit(state: &State) {
+    for surface in state.layer_shell_state.layer_surfaces() {
+        let size = arranged_size(&surface, state.output_size);
+        if surface.current_state().size != Some(size) {
+            surface.with_pending_state(|pending| {
+                pending.size = Some(size);
+            });
+            surface.send_pending_configure();
+        }
+    }
+}
 
 /// Server-side record of one mapped layer surface (the slice-1 panel).
 #[derive(Debug, Clone)]
@@ -44,8 +92,10 @@ impl WlrLayerShellHandler for State {
         layer: Layer,
         namespace: String,
     ) {
-        // Suggest geometry right away so the client can ack and commit;
-        // the client carries its own size/anchor/zone requests.
+        // Bare initial configure (the protocol requires one before
+        // the first commit); real geometry follows on commit via
+        // `arrange_after_commit`, once the client's size/anchor
+        // requests have arrived.
         surface.send_configure();
         self.panel_surfaces.push(PanelSurface {
             namespace,
@@ -72,6 +122,61 @@ impl WlrLayerShellHandler for State {
 }
 
 delegate_layer_shell!(State);
+
+/// Where a layer surface belongs in the render stack.
+fn layer_order(layer: Layer) -> u8 {
+    match layer {
+        Layer::Background => 0,
+        Layer::Bottom => 1,
+        Layer::Top => 2,
+        Layer::Overlay => 3,
+    }
+}
+
+/// Render placement for mapped layer surfaces: position from the
+/// client anchor, size from the last configured server state.
+/// Surfaces with no configured size yet are skipped. Sorted
+/// background-to-overlay; callers draw windows first, then these.
+pub fn layer_layout(state: &State) -> Vec<(WlSurface, (i32, i32), Layer)> {
+    let output = state.output_size;
+    let mut placed = Vec::new();
+    for record in &state.panel_surfaces {
+        let Some(handle) = state
+            .layer_shell_state
+            .layer_surfaces()
+            .find(|surface| surface.wl_surface() == &record.surface)
+        else {
+            continue;
+        };
+        let Some(size) = handle.current_state().size else {
+            continue;
+        };
+        let anchor = compositor::with_states(handle.wl_surface(), |states| {
+            states
+                .cached_state
+                .get::<LayerSurfaceCachedState>()
+                .current()
+                .anchor
+        });
+        let x = if anchor.contains(Anchor::LEFT) {
+            0
+        } else if anchor.contains(Anchor::RIGHT) {
+            output.w - size.w
+        } else {
+            (output.w - size.w) / 2
+        };
+        let y = if anchor.contains(Anchor::TOP) {
+            0
+        } else if anchor.contains(Anchor::BOTTOM) {
+            output.h - size.h
+        } else {
+            (output.h - size.h) / 2
+        };
+        placed.push((record.surface.clone(), (x, y), record.layer));
+    }
+    placed.sort_by_key(|(_, _, layer)| layer_order(*layer));
+    placed
+}
 
 impl State {
     /// Layer surfaces the server currently tracks (the slice-1 panel).

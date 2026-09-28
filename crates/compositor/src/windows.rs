@@ -439,6 +439,11 @@ pub enum ManagerInput {
     },
 }
 
+/// X11 keycodes are kernel evdev numbers plus 8; the winit backend
+/// normalizes back to evdev in [`translate_input`] so every table in
+/// this file stays in evdev keycodes on all backends.
+pub const XKB_X11_OFFSET: u32 = 8;
+
 /// Overview trigger keycodes (evdev, 002 R1).
 pub const SUPER_LEFT_KEYCODE: u32 = 125;
 pub const SUPER_RIGHT_KEYCODE: u32 = 126;
@@ -546,7 +551,11 @@ impl WindowManager {
 pub fn translate_input(event: InputEvent<WinitInput>) -> Option<ManagerInput> {
     match event {
         InputEvent::Keyboard { event } => Some(ManagerInput::Key {
-            keycode: event.key_code().into(),
+            // The winit backend reports X11 keycodes (kernel evdev
+            // number plus 8); normalize back to evdev so trigger and
+            // overlay tables written in evdev keycodes match on every
+            // backend. X keycodes below 8 cannot occur; saturate.
+            keycode: u32::from(event.key_code()).saturating_sub(XKB_X11_OFFSET),
             pressed: event.state() == KeyState::Pressed,
             time: (event.time() / 1000) as u32,
         }),

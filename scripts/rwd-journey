@@ -115,8 +115,30 @@ fi
 echo "rwd-journey: window $WID"
 
 # Focus the nested window so keys land in the compositor. No
-# windowactivate: the private Xvfb runs no window manager, so
-# _NET_ACTIVE_WINDOW is unsupported — a click focuses instead.
+# window manager runs here: windowactivate (which needs
+# _NET_ACTIVE_WINDOW) fails, and bare keystrokes go to a void focus.
+# Target the backend window by name and set the X input focus
+# directly; a click follows so pointer state is sane too. The name
+# search retries: cold Mesa warmup can map the window visibly before
+# the title lands, and unrelated early windows must not satisfy it.
+WID=""
+for _ in $(seq 1 60); do
+    if ! kill -0 "$COMPOSITOR_PID" 2>/dev/null; then
+        echo "rwd-journey: compositor died waiting for its window" >&2
+        tail -30 "$LOG" >&2 || true
+        exit 1
+    fi
+    WID="$(xdotool search --name Smithay 2>/dev/null | head -1 || true)"
+    if [ -n "$WID" ]; then
+        break
+    fi
+    sleep 1
+done
+if [ -z "$WID" ]; then
+    echo "rwd-journey: no Smithay window found" >&2
+    exit 1
+fi
+xdotool windowfocus --sync "$WID"
 xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2)) click 1
 sleep 3
 

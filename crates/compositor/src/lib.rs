@@ -52,6 +52,9 @@ pub struct State {
     seat: Seat<State>,
     pub(crate) layer_shell_state: WlrLayerShellState,
     pub(crate) panel_surfaces: Vec<layer::PanelSurface>,
+    /// Output geometry layer surfaces arrange against (set by the
+    /// runtime; defaults to zero, which configures zero sizes).
+    pub(crate) output_size: smithay::utils::Size<i32, smithay::utils::Logical>,
 }
 
 /// Per-client data: the compositor state slice each client sees.
@@ -100,6 +103,7 @@ impl CompositorHandler for State {
 
     fn commit(&mut self, surface: &wl_surface::WlSurface) {
         on_commit_buffer_handler::<State>(surface);
+        crate::layer::arrange_after_commit(self);
     }
 }
 
@@ -187,7 +191,14 @@ impl State {
             seat,
             layer_shell_state: WlrLayerShellState::new::<State>(dh),
             panel_surfaces: Vec::new(),
+            output_size: Default::default(),
         }
+    }
+
+    /// Set the output geometry for layer-surface arrange (the nested
+    /// runtime calls this with its session size at launch).
+    pub fn set_output_size(&mut self, width: i32, height: i32) {
+        self.output_size = smithay::utils::Size::from((width, height));
     }
 }
 

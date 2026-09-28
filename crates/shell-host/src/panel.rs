@@ -341,13 +341,20 @@ impl ShellHost {
     /// layer surface when the intent opens, destroy it when it
     /// closes, repaint when model truth or the configured size
     /// changes. Pure no-op without attached Wayland globals.
+    /// Tear down the overview surface, if any. Destructor requests go
+    /// out explicitly: dropping the proxies alone never notifies the
+    /// server, which would keep scanning out the orphaned surface.
+    fn destroy_overview(&mut self) {
+        if let Some(overview) = self.overview.take() {
+            overview.layer.destroy();
+            overview.surface.destroy();
+        }
+        self.paint_key = None;
+    }
+
     fn update_overview(&mut self, revision: Option<u64>) {
         if !self.model.is_overview_open() {
-            if self.overview.is_some() {
-                // Dropping the proxies destroys the surfaces server-side.
-                self.overview = None;
-                self.paint_key = None;
-            }
+            self.destroy_overview();
             return;
         }
         let Some(wayland) = self.wayland.clone() else {
@@ -687,9 +694,12 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for ShellHost {
                     // Losing the panel ends the loop (supervised restart
                     // brings it back); losing the overview just drops it.
                     state.running = false;
-                } else {
-                    state.overview = None;
-                    state.paint_key = None;
+                } else if state
+                    .overview
+                    .as_ref()
+                    .is_some_and(|overview| &overview.layer == proxy)
+                {
+                    state.destroy_overview();
                 }
             }
             _ => {}
@@ -710,6 +720,34 @@ delegate_noop!(ShellHost: ignore WlBuffer);
 /// connection, queue, and host, then dispatches until close.
 pub fn run_panel(panel: PanelConfig) -> Result<(), PanelError> {
     run_panel_with_control(panel, None)
+}
+
+/// Nonblocking Wayland pump for the control-paced loop below:
+/// `dispatch_pending` dispatches queued events but never reads the
+/// socket, so a zero-timeout poll gates one socket read per iteration.
+/// Without this, server events (e.g. overview configures) wait in the
+/// kernel buffer until the next `roundtrip`/`blocking_dispatch`.
+fn pump_wayland(
+    conn: &Connection,
+    queue: &mut wayland_client::EventQueue<ShellHost>,
+    host: &mut ShellHost,
+) -> Result<(), PanelError> {
+    let backend = conn.backend();
+    let fd = backend.poll_fd();
+    let mut fds = [rustix::event::PollFd::new(
+        &fd,
+        rustix::event::PollFlags::IN,
+    )];
+    let readable = rustix::event::poll(&mut fds, 0)
+        .map(|n| n > 0)
+        .unwrap_or(false);
+    if readable {
+        if let Some(guard) = queue.prepare_read() {
+            guard.read().map_err(|e| PanelError::Flush(e.to_string()))?;
+        }
+    }
+    queue.dispatch_pending(host).map_err(PanelError::Dispatch)?;
+    Ok(())
 }
 
 /// [`run_panel`] plus the live overview feed: when `control_path` is
@@ -755,9 +793,7 @@ pub fn run_panel_with_control(
         // blocking on Wayland events, so control frames land while the
         // user is idle. Pure panel runs keep the blocking loop below.
         while host.is_running() {
-            queue
-                .dispatch_pending(&mut host)
-                .map_err(PanelError::Dispatch)?;
+            pump_wayland(&conn, &mut queue, &mut host)?;
             drive_control(control, &mut host);
             host.update_overview(control.revision());
             queue

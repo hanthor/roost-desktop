@@ -205,6 +205,7 @@ impl Runtime {
             Display::new().map_err(|e| RuntimeError::Loop(e.to_string()))?;
         let dh = display.handle();
         let mut state = State::new(&dh);
+        state.set_output_size(session.width, session.height);
         let manager = WindowManager::new(&mut state);
         let tokens = std::rc::Rc::new(TokenStore::new());
         let control_path = control_socket_path(&session.socket_name);
@@ -441,7 +442,7 @@ impl Runtime {
                 .backend
                 .bind()
                 .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-            let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = self
+            let mut elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = self
                 .manager
                 .visible_windows()
                 .iter()
@@ -456,8 +457,22 @@ impl Runtime {
                     )
                 })
                 .collect();
+            // Layer shell above windows: panel strip, then overview.
+            for (surface, (x, y), _) in crate::layer::layer_layout(&self.state) {
+                elements.extend(render_elements_from_surface_tree(
+                    renderer,
+                    &surface,
+                    (x, y),
+                    1.0,
+                    1.0,
+                    Kind::Unspecified,
+                ));
+            }
+            // The winit EGL surface presents bottom-up (see the Y-flip
+            // in the backend's own damage path), so the output
+            // transform mirrors vertically; placements stay top-down.
             let mut frame = renderer
-                .render(&mut framebuffer, size, Transform::Normal)
+                .render(&mut framebuffer, size, Transform::Flipped180)
                 .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
             frame
                 .clear(background, &[damage])
@@ -480,6 +495,11 @@ impl Runtime {
                 Some(Duration::ZERO),
                 |_, _| Some(output.clone()),
             );
+        }
+        for (surface, _, _) in crate::layer::layer_layout(&self.state) {
+            send_frames_surface_tree(&surface, &output, time, Some(Duration::ZERO), |_, _| {
+                Some(output.clone())
+            });
         }
         self.backend
             .submit(Some(&[damage]))
