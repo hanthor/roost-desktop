@@ -579,6 +579,48 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_vocabulary_carries_no_content() {
+        // Planted stand-ins for sensitive content: no diagnostic
+        // string may ever contain window titles or tokens.
+        let title = "Secret Project Window";
+        let token = "deadbeef-dead-beef-dead-beefdeadbeef";
+        let rendered = [
+            format!("{:?}", SupervisorEvent::ShellExited { code: Some(1) }),
+            format!("{:?}", SupervisorEvent::RestartScheduled { delay_ms: 250 }),
+            format!("{:?}", SupervisorEvent::BudgetExhausted),
+            format!("{:?}", ShellStatus::Running),
+            format!("{:?}", ShellStatus::Waiting { delay_ms: 250 }),
+            format!("{:?}", ShellStatus::Exhausted),
+            format!("{:?}", ShellStatus::Fault("spawn failed".to_owned())),
+        ];
+        // Exact strings lock the redaction-safe vocabulary against
+        // future content-carrying additions.
+        assert_eq!(rendered[0], "ShellExited { code: Some(1) }");
+        assert_eq!(rendered[1], "RestartScheduled { delay_ms: 250 }");
+        assert_eq!(rendered[2], "BudgetExhausted");
+        assert_eq!(rendered[3], "Running");
+        assert_eq!(rendered[4], "Waiting { delay_ms: 250 }");
+        assert_eq!(rendered[5], "Exhausted");
+        for event in &rendered {
+            assert!(!event.contains(title), "diagnostic leaked: {event}");
+            assert!(!event.contains(token), "diagnostic leaked: {event}");
+        }
+        // Artifact notes follow the numbers-only convention (mirrors
+        // the 100-run harness assertion per run).
+        let note = format!(
+            "run {} fault {} rev {}->{} restarts {} hash {:016x}",
+            0,
+            "kill",
+            3,
+            4,
+            1,
+            snapshot_hash(4, &[7])
+        );
+        assert!(!note.contains(title));
+        assert!(!note.contains(token));
+    }
+
+    #[test]
     fn backoff_sequence_doubles() {
         let policy = RestartPolicy::new(8, 100, 10_000);
         let delays: Vec<u64> = (0..6).map(|a| policy.next_delay(a)).collect();

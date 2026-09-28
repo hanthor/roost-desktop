@@ -22,6 +22,8 @@
 //! snapshot before ordered changes.
 
 use std::fmt;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use wayland_client::{
     delegate_noop,
@@ -38,6 +40,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     },
 };
 
+use crate::control::{ControlClient, ControlError, Handled};
 use crate::model::ShellModel;
 
 /// Namespace advertised for the panel layer surface.
@@ -78,6 +81,10 @@ pub enum PanelError {
     NoLayerShell(BindError),
     /// Event-loop dispatch failed (e.g. compositor went away).
     Dispatch(wayland_client::DispatchError),
+    /// Control channel failed (connect, handshake, or snapshot).
+    Control(ControlError),
+    /// Event-queue flush failed (message only; no content).
+    Flush(String),
 }
 
 impl fmt::Display for PanelError {
@@ -90,6 +97,8 @@ impl fmt::Display for PanelError {
                 write!(f, "compositor offers no zwlr_layer_shell_v1: {err}")
             }
             Self::Dispatch(err) => write!(f, "event loop dispatch failed: {err}"),
+            Self::Control(err) => write!(f, "control channel failed: {err}"),
+            Self::Flush(err) => write!(f, "event queue flush failed: {err}"),
         }
     }
 }
@@ -152,6 +161,83 @@ impl ShellHost {
             surface.commit();
         }
     }
+
+    /// Replace the overview state with the control client's live model:
+    /// current window list, workspaces, and selection. The panel renders
+    /// only this compositor truth.
+    fn sync_overview(&mut self, client: &ControlClient) {
+        let model = client.model();
+        self.model
+            .apply_window_list(model.windows().to_vec(), model.workspaces().to_vec());
+        if let Some(selected) = model.selected() {
+            let _ = self.model.select_window(selected);
+        }
+    }
+}
+
+/// Whether a control error is just "nothing to read yet".
+fn is_would_block(err: &ControlError) -> bool {
+    matches!(err, ControlError::Io(e) if e.kind() == std::io::ErrorKind::WouldBlock)
+}
+
+/// Connect the control channel and complete the handshake plus the
+/// initial snapshot, with bounded retries (startup only; the steady
+/// loop never blocks). Returns a client holding live overview state.
+fn attach_control(path: &Path) -> Result<ControlClient, PanelError> {
+    let mut control = ControlClient::connect(path)
+        .map_err(ControlError::Io)
+        .map_err(PanelError::Control)?;
+    control.send_hello().map_err(PanelError::Control)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match control.await_hello() {
+            Ok(()) => break,
+            Err(e) if is_would_block(&e) => {
+                if Instant::now() >= deadline {
+                    return Err(PanelError::Control(ControlError::Unexpected(
+                        "control hello timeout".to_owned(),
+                    )));
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(e) => return Err(PanelError::Control(e)),
+        }
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match control.poll() {
+            Ok(Handled::Snapshot { .. }) => break,
+            Ok(_) => {}
+            Err(e) if is_would_block(&e) => {
+                if Instant::now() >= deadline {
+                    return Err(PanelError::Control(ControlError::Unexpected(
+                        "control snapshot timeout".to_owned(),
+                    )));
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            Err(e) => return Err(PanelError::Control(e)),
+        }
+    }
+    Ok(control)
+}
+
+/// One nonblocking control step inside the panel loop: apply whatever
+/// frame is waiting into the overview model, re-request the snapshot
+/// after a revision gap, and log (never crash on) typed errors — the
+/// connection stays usable.
+fn drive_control(control: &mut ControlClient, host: &mut ShellHost) {
+    match control.poll() {
+        Err(e) if is_would_block(&e) => {}
+        Ok(Handled::Gap { .. }) => {
+            host.sync_overview(control);
+            if let Err(e) = control.request_snapshot() {
+                eprintln!("rwd-shell-host: control resnapshot failed: {e}");
+            }
+        }
+        Ok(_) => host.sync_overview(control),
+        Err(e) => eprintln!("rwd-shell-host: control error: {e}"),
+    }
 }
 
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for ShellHost {
@@ -198,6 +284,19 @@ delegate_noop!(ShellHost: ignore ZwlrLayerShellV1);
 /// Connect plus event-loop setup kept together for `main`: builds the
 /// connection, queue, and host, then dispatches until close.
 pub fn run_panel(panel: PanelConfig) -> Result<(), PanelError> {
+    run_panel_with_control(panel, None)
+}
+
+/// [`run_panel`] plus the live overview feed: when `control_path` is
+/// set, the panel also speaks the control channel — handshake and
+/// initial snapshot up front, then one nonblocking control step per
+/// panel-loop iteration keeps the overview model on compositor truth.
+/// The compositor sets `RWD_CONTROL_SOCKET` for the supervised child;
+/// running without it leaves a panel with an empty overview.
+pub fn run_panel_with_control(
+    panel: PanelConfig,
+    control_path: Option<PathBuf>,
+) -> Result<(), PanelError> {
     let conn = Connection::connect_to_env().map_err(PanelError::Connect)?;
     let (globals, mut queue) =
         registry_queue_init::<ShellHost>(&conn).map_err(PanelError::Registry)?;
@@ -220,11 +319,36 @@ pub fn run_panel(panel: PanelConfig) -> Result<(), PanelError> {
     host.create_panel_surface(&compositor, &layer_shell, &qh);
     drop((globals, compositor, layer_shell));
 
+    let mut control = match control_path {
+        Some(path) => {
+            let client = attach_control(&path)?;
+            host.sync_overview(&client);
+            Some(client)
+        }
+        None => None,
+    };
+
     queue.roundtrip(&mut host).map_err(PanelError::Dispatch)?;
-    while host.is_running() {
-        queue
-            .blocking_dispatch(&mut host)
-            .map_err(PanelError::Dispatch)?;
+    if let Some(control) = control.as_mut() {
+        // Provisional pacing: poll both sides at 200 Hz instead of
+        // blocking on Wayland events, so control frames land while the
+        // user is idle. Pure panel runs keep the blocking loop below.
+        while host.is_running() {
+            queue
+                .dispatch_pending(&mut host)
+                .map_err(PanelError::Dispatch)?;
+            drive_control(control, &mut host);
+            queue
+                .flush()
+                .map_err(|e| PanelError::Flush(e.to_string()))?;
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    } else {
+        while host.is_running() {
+            queue
+                .blocking_dispatch(&mut host)
+                .map_err(PanelError::Dispatch)?;
+        }
     }
     Ok(())
 }
@@ -249,16 +373,21 @@ mod tests {
     mod live {
         use std::os::unix::net::UnixStream;
 
-        use rwd_compositor::TestCompositor;
+        use rwd_compositor::{
+            control::ControlHub,
+            state::{StateModel, TokenStore},
+            TestCompositor, SEAT_NAME,
+        };
         use wayland_client::{
             protocol::{wl_compositor::WlCompositor, wl_registry},
             Connection, Dispatch, EventQueue, QueueHandle,
         };
         use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1;
 
+        use crate::control::{ControlClient, Handled};
         use crate::model::ShellModel;
 
-        use super::super::{PanelConfig, ShellHost, PANEL_NAMESPACE};
+        use super::super::{is_would_block, PanelConfig, ShellHost, PANEL_NAMESPACE};
 
         const PUMP_ROUNDS: usize = 200;
 
@@ -391,6 +520,82 @@ mod tests {
                 }
             }
             assert!(!host.is_running(), "close stops the panel loop");
+        }
+
+        /// The binary's overview feed: a control client handshaked
+        /// against a live hub fills the host model from the snapshot,
+        /// then follows a later delta — the same `sync_overview` path
+        /// `run_panel_with_control` drives per loop.
+        #[test]
+        fn control_feeds_overview_model() {
+            use std::rc::Rc;
+
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("control.sock");
+            let mut model = StateModel::new();
+            model.insert("alpha", Some("com.example.alpha"), 0);
+            model.insert("beta", Some("com.example.beta"), 0);
+            let mut hub =
+                ControlHub::bind(socket_path.clone(), Rc::new(TokenStore::new()), SEAT_NAME)
+                    .unwrap();
+
+            let mut client = ControlClient::connect(&socket_path).unwrap();
+            client.send_hello().unwrap();
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.await_hello() {
+                    Ok(()) => break,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("hello failed: {e}"),
+                }
+            }
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.poll() {
+                    Ok(Handled::Snapshot { .. }) => break,
+                    Ok(_) => continue,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("snapshot poll failed: {e}"),
+                }
+            }
+
+            let mut host = ShellHost {
+                model: ShellModel::new(),
+                panel: PanelConfig::default(),
+                running: true,
+                surface: None,
+                layer_surface: None,
+            };
+            host.sync_overview(&client);
+            assert_eq!(host.model.windows().len(), 2);
+            let titles: Vec<&str> = host
+                .model
+                .windows()
+                .iter()
+                .map(|w| w.title.as_str())
+                .collect();
+            assert!(titles.contains(&"alpha"));
+            assert!(titles.contains(&"beta"));
+
+            // A later model change flows through hub deltas into the
+            // overview on the next sync.
+            model.insert("gamma", Some("com.example.gamma"), 0);
+            let want = model.revision();
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.poll() {
+                    Ok(_) => {
+                        if client.revision() == Some(want) {
+                            break;
+                        }
+                    }
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("delta poll failed: {e}"),
+                }
+            }
+            assert_eq!(client.revision(), Some(want));
+            host.sync_overview(&client);
+            assert_eq!(host.model.windows().len(), 3);
         }
     }
 }

@@ -8,6 +8,7 @@ license.workspace = true
 
 [dev-dependencies]
 rwd-compositor = { path = "../compositor" }
+tempfile = "3"
 
 [dependencies]
 wayland-client.workspace = true

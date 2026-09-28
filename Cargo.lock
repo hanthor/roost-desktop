@@ -1637,6 +1637,7 @@ dependencies = [
  "tempfile",
  "wayland-client",
  "wayland-protocols",
+ "wayland-protocols-wlr",
 ]
 
 [[package]]
@@ -1664,6 +1665,7 @@ dependencies = [
  "rwd-compositor",
  "rwd-shell-control",
  "smithay",
+ "tempfile",
  "wayland-client",
  "wayland-protocols",
  "wayland-protocols-wlr",

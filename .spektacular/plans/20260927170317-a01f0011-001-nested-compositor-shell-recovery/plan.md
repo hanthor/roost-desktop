@@ -256,7 +256,7 @@ Wire the supervisor and overlay state machine into the live loop: shell spawn as
 - [x] Restarts stay within budget and backoff, and exhaustion stays calm and observable
 - [x] Reconnected shells render exact window and workspace state from snapshots
 
-#### - [ ] Task: Launch script, docs, and redacted diagnostics
+#### - [x] Task: Launch script, docs, and redacted diagnostics
 **Id:** ceaafa54-7cdd-44c8-b226-70331d7ea6da
 **Repo:** rust-wayland-desktop
 **Depends on:**
@@ -269,9 +269,9 @@ Finish the repeatable proof path: one documented launch command, crash and recon
 
 **Acceptance criteria**:
 
-- [ ] One command reproduces the nested crash and reconnect journey
-- [ ] Failure artifacts are complete and contain no sensitive content
-- [ ] Provisional decisions that hardened are recorded in ADRs
+- [x] One command reproduces the nested crash and reconnect journey
+- [x] Failure artifacts are complete and contain no sensitive content
+- [x] Provisional decisions that hardened are recorded in ADRs
 
 #### - [ ] Task: Live-session visual verification
 **Id:** 6efa92a9-7f1e-4dbb-ad20-13b7901ae3b2
@@ -406,3 +406,23 @@ Confirm the nested window, panel placement, window mapping, and recovery overlay
 - `crates/compositor/tests/recovery.rs`
 
 **Discoveries**: `Supervisor::reset_budget` does not clear `started`, so a zero-budget policy can never respawn even after reset — operator-relaunch tests need `max_attempts >= 1`. `WlRegistry::bind` onto another queue's handle works, but the direct-`get_registry` bound requires `Dispatch<WlRegistry, ()>`.
+
+### 2026-09-28 — Task: Launch script, docs, and redacted diagnostics
+
+**What was done**: Added the one-command journey (`scripts/rwd-nested run/kill-shell/shell-pid` with artifact dirs) and its doc (`docs/nested-session.md`: launch, crash/reconnect journey, env hygiene, grab notes, artifact conventions, provisional visuals). Closed the live shell loop the journey needs: the shell binary now feeds its overview from the control channel (`run_panel_with_control` on `RWD_CONTROL_SOCKET`, handshake plus per-loop nonblocking sync with gap resnapshot). Hardened ADRs 0001–0003 to Decided with implementation evidence (postcard codec, `TokenStore` random Bearer [REDACTED] with xdg-activation binding deferred to 004). Diagnostics locked by a vocabulary test plus a launcher contract test.
+
+**Deviations**: None beyond the recorded ADR updates. The shell's 200 Hz poll loop is provisional pacing for the shell binary only; compositor critical paths never wait on it.
+
+**Files changed**:
+- `scripts/rwd-nested`
+- `docs/nested-session.md`
+- `docs/adr/0001-nested-backend-smithay-pin.md`
+- `docs/adr/0002-shell-control-ipc-envelope.md`
+- `docs/adr/0003-nested-supervision-and-recovery.md`
+- `crates/shell-host/src/panel.rs`
+- `crates/shell-host/src/main.rs`
+- `crates/shell-host/Cargo.toml`
+- `crates/compositor/src/supervise.rs`
+- `crates/compositor/tests/launch_script.rs`
+
+**Discoveries**: Wayland `EventQueue::flush` fails with the private `WaylandError`, so the panel maps it to a message-only `Flush(String)` variant to keep diagnostics content-free. `WlRegistry::bind` returns the proxy directly (no `Result`), unlike `GlobalList::bind`.
