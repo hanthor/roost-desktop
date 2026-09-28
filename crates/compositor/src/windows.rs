@@ -578,6 +578,23 @@ impl WindowManager {
         self.windows.get(&id).map(|window| window.layout)
     }
 
+    /// Ask a window's client to close (polite `close` request). The
+    /// client unmaps itself; `reconcile` drops it on the next tick and
+    /// focus falls back. False for unknown ids.
+    pub fn close_window(&self, id: u64) -> bool {
+        let Some(window) = self.windows.get(&id) else {
+            return false;
+        };
+        window.surface.send_close();
+        eprintln!("rwd-compositor: window {id} close requested");
+        true
+    }
+
+    /// Close the focused window, if any.
+    pub fn close_focused(&self) -> bool {
+        self.model.focused().is_some_and(|id| self.close_window(id))
+    }
+
     /// Work area a maximized window fills: the output minus the shell
     /// panel strip ([`WORK_AREA_TOP`]).
     fn work_area(state: &State) -> Rectangle<i32, Logical> {
@@ -886,6 +903,10 @@ pub const ARROW_UP_KEYCODE: u32 = 103;
 pub const ARROW_DOWN_KEYCODE: u32 = 108;
 pub const ARROW_LEFT_KEYCODE: u32 = 105;
 pub const ARROW_RIGHT_KEYCODE: u32 = 106;
+/// Close-window keybinding (evdev, GNOME shape): Alt+F4 asks the
+/// focused client to close (polite `close` request; the client unmaps
+/// itself). The press is consumed; releases still reach clients.
+pub const F4_KEYCODE: u32 = 62;
 /// Top inset of the maximized/tiled work area: the shell panel strip
 /// (matches shell-host `PANEL_HEIGHT` and the Activities-strip
 /// trigger height above).
@@ -976,6 +997,8 @@ impl WindowManager {
     /// never reach clients (taps queue `Step`, Shift reverses,
     /// releases are swallowed), Alt release queues `Commit`, Escape
     /// queues `Cancel`; the Alt/Escape releases still reach clients.
+    /// Alt+F4 asks the focused client to close (cancelling an open
+    /// switcher with it); its press is consumed too.
     pub fn on_input(&mut self, state: &mut State, input: ManagerInput) {
         match input {
             ManagerInput::Key {
@@ -994,6 +1017,19 @@ impl WindowManager {
                         self.push_switcher(SwitcherAction::Step {
                             forward: !self.shift_held,
                         });
+                    }
+                } else if keycode == F4_KEYCODE && self.alt_held {
+                    // Alt+F4 closes the focused window politely. An open
+                    // switcher cancels with it: committing onto a window
+                    // the user just closed would surprise. Press and
+                    // release both stay invisible: a client that never
+                    // saw the press must not see the release either.
+                    if pressed {
+                        if self.switcher_open {
+                            self.switcher_open = false;
+                            self.push_switcher(SwitcherAction::Cancel);
+                        }
+                        self.close_focused();
                     }
                 } else if pressed && keycode == ESCAPE_KEYCODE && self.switcher_open {
                     self.switcher_open = false;

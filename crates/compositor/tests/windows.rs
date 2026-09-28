@@ -16,8 +16,8 @@ use std::os::unix::net::UnixStream;
 
 use rwd_compositor::windows::{
     ManagerInput, TileSide, WindowLayout, WindowManager, ALT_LEFT_KEYCODE, ARROW_DOWN_KEYCODE,
-    ARROW_LEFT_KEYCODE, ARROW_RIGHT_KEYCODE, ARROW_UP_KEYCODE, ESCAPE_KEYCODE, PAGE_DOWN_KEYCODE,
-    PAGE_UP_KEYCODE, SHIFT_LEFT_KEYCODE, SUPER_LEFT_KEYCODE, TAB_KEYCODE,
+    ARROW_LEFT_KEYCODE, ARROW_RIGHT_KEYCODE, ARROW_UP_KEYCODE, ESCAPE_KEYCODE, F4_KEYCODE,
+    PAGE_DOWN_KEYCODE, PAGE_UP_KEYCODE, SHIFT_LEFT_KEYCODE, SUPER_LEFT_KEYCODE, TAB_KEYCODE,
 };
 use rwd_compositor::TestCompositor;
 use rwd_shell_control::SwitcherAction;
@@ -68,6 +68,8 @@ struct Client {
     /// Every advertised toplevel state array (raw wire bytes), in
     /// arrival order.
     configure_states: Vec<Vec<u8>>,
+    /// Whether the server asked this client to close.
+    close_requested: bool,
 }
 
 /// Whether a raw xdg-toplevel state array carries `want` (native-endian
@@ -188,14 +190,19 @@ impl Dispatch<XdgToplevel, ()> for Client {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let wayland_protocols::xdg::shell::client::xdg_toplevel::Event::Configure {
-            width,
-            height,
-            states,
-        } = event
-        {
-            state.configure_sizes.push((width, height));
-            state.configure_states.push(states);
+        match &event {
+            wayland_protocols::xdg::shell::client::xdg_toplevel::Event::Configure {
+                width,
+                height,
+                states,
+            } => {
+                state.configure_sizes.push((*width, *height));
+                state.configure_states.push(states.clone());
+            }
+            wayland_protocols::xdg::shell::client::xdg_toplevel::Event::Close => {
+                state.close_requested = true;
+            }
+            _ => {}
         }
     }
 }
@@ -989,6 +996,41 @@ fn super_arrows_drive_layouts_and_consume() {
         "arrow presses must be consumed, got: {:?}",
         f.client_b.keys
     );
+}
+
+#[test]
+fn alt_f4_politely_closes_focused_window() {
+    let mut f = two_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    f.client_b.keys.clear();
+
+    // Alt+F4 asks beta to close and consumes the press.
+    press(&mut f.manager, &mut f.comp, ALT_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, F4_KEYCODE);
+    release(&mut f.manager, &mut f.comp, F4_KEYCODE);
+    release(&mut f.manager, &mut f.comp, ALT_LEFT_KEYCODE);
+    assert!(f.manager.take_switcher_queue().is_empty());
+    pump(&mut f.comp, &mut f.queue_b, &mut f.client_b, |c| {
+        c.close_requested
+    });
+    assert!(f.client_b.close_requested);
+    assert!(
+        !f.client_b.keys.iter().any(|(key, _)| *key == F4_KEYCODE),
+        "F4 press must be consumed, got: {:?}",
+        f.client_b.keys
+    );
+
+    // The client honors the request by going away; reconcile drops it
+    // and focus falls back to alpha.
+    drop((f.conn_b, f.queue_b, f.client_b));
+    f.comp.pump();
+    f.comp.pump();
+    f.manager.reconcile(&mut f.comp.state);
+    assert!(f.manager.model().window(f.id_b).is_none());
+    assert_eq!(f.manager.model().focused(), Some(f.id_a));
+    assert!(!f.manager.close_window(999));
 }
 
 #[test]
