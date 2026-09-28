@@ -1,0 +1,175 @@
+#!/bin/sh
+# rwd-journey — scripted nested-session screenshot journey for CI.
+#
+# Usage:
+#   scripts/rwd-journey [--display :98] [--artifacts DIR] [--socket NAME]
+#
+# Starts a private Xvfb (unless DISPLAY already works), builds and runs
+# the nested compositor with its supervised shell, then drives the
+# Milestone-1 journey with real X input and captures a screenshot per
+# stage: baseline, Super-tap overview, typed search, Enter, Escape
+# return. Exits nonzero on any failure (dead process, panic in logs,
+# missing or byte-identical screenshots). PNGs plus logs land in the
+# artifacts dir for upload; a human reviews the frames, the script only
+# proves the session lived and visibly reacted.
+#
+# Environment hygiene: DISPLAY is set for child processes only and only
+# when this script started the Xvfb itself.
+set -eu
+
+unset CDPATH
+ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+DISPLAY_ARG=""
+ARTIFACTS="$ROOT/journey-artifacts"
+SOCKET="rwd-journey-$$"
+WIDTH=1280
+HEIGHT=800
+
+usage() {
+    sed -n '2,20p' "$0"
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --display) DISPLAY_ARG="$2"; shift 2 ;;
+        --artifacts) ARTIFACTS="$2"; shift 2 ;;
+        --socket) SOCKET="$2"; shift 2 ;;
+        --help|-h) usage; exit 0 ;;
+        *) echo "rwd-journey: unknown argument $1" >&2; usage >&2; exit 1 ;;
+    esac
+done
+
+mkdir -p "$ARTIFACTS"
+LOG="$ARTIFACTS/nested.log"
+OWNED_XVFB=""
+COMPOSITOR_PID=""
+
+cleanup() {
+    if [ -n "$COMPOSITOR_PID" ] && kill -0 "$COMPOSITOR_PID" 2>/dev/null; then
+        kill "$COMPOSITOR_PID" 2>/dev/null || true
+        wait "$COMPOSITOR_PID" 2>/dev/null || true
+    fi
+    if [ -n "$OWNED_XVFB" ]; then
+        kill "$OWNED_XVFB" 2>/dev/null || true
+        wait "$OWNED_XVFB" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT INT TERM
+
+display_works() {
+    xdotool getdisplaygeometry >/dev/null 2>&1
+}
+
+if [ -n "$DISPLAY_ARG" ]; then
+    DISPLAY="$DISPLAY_ARG"
+    export DISPLAY
+fi
+if ! display_works; then
+    DISPLAY=":98"
+    export DISPLAY
+    echo "rwd-journey: starting Xvfb on $DISPLAY"
+    Xvfb "$DISPLAY" -screen 0 "${WIDTH}x${HEIGHT}x24" >"$ARTIFACTS/xvfb.log" 2>&1 &
+    OWNED_XVFB=$!
+    for _ in $(seq 1 30); do
+        if display_works; then
+            break
+        fi
+        sleep 1
+    done
+    display_works || {
+        echo "rwd-journey: Xvfb never answered on $DISPLAY" >&2
+        exit 1
+    }
+fi
+echo "rwd-journey: display $DISPLAY geometry $(xdotool getdisplaygeometry)"
+
+echo "rwd-journey: building"
+cargo build --quiet --manifest-path "$ROOT/Cargo.toml" \
+    -p rwd-compositor -p rwd-shell-host
+
+echo "rwd-journey: starting compositor on socket $SOCKET"
+"$ROOT/target/debug/rwd-compositor" --socket "$SOCKET" \
+    --shell-bin "$ROOT/target/debug/rwd-shell-host" \
+    >"$LOG" 2>&1 &
+COMPOSITOR_PID=$!
+
+echo "rwd-journey: waiting for the nested window"
+WID=""
+for _ in $(seq 1 60); do
+    if ! kill -0 "$COMPOSITOR_PID" 2>/dev/null; then
+        echo "rwd-journey: compositor died during startup" >&2
+        tail -30 "$LOG" >&2 || true
+        exit 1
+    fi
+    WID="$(xdotool search --onlyvisible "" 2>/dev/null | head -1 || true)"
+    if [ -n "$WID" ]; then
+        break
+    fi
+    sleep 1
+done
+if [ -z "$WID" ]; then
+    echo "rwd-journey: no nested window appeared" >&2
+    tail -30 "$LOG" >&2 || true
+    exit 1
+fi
+echo "rwd-journey: window $WID"
+
+# Focus the nested window so keys land in the compositor.
+xdotool windowactivate "$WID"
+xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2)) click 1
+sleep 3
+
+shot() {
+    scrot -u "$ARTIFACTS/$1" >/dev/null
+    echo "rwd-journey: shot $1"
+}
+
+shot "01-baseline.png"
+
+# Lone Super tap: overview opens (tap, not hold — no chord).
+xdotool key Super_L
+sleep 2
+shot "02-overview.png"
+
+# Typing filters; Enter picks; Escape returns.
+xdotool type "term"
+sleep 2
+shot "03-search.png"
+xdotool key Return
+sleep 2
+shot "04-after-enter.png"
+xdotool key Escape
+sleep 2
+shot "05-after-escape.png"
+
+echo "rwd-journey: asserting"
+if ! kill -0 "$COMPOSITOR_PID" 2>/dev/null; then
+    echo "rwd-journey: compositor died mid-journey" >&2
+    tail -30 "$LOG" >&2 || true
+    exit 1
+fi
+if grep -q "panicked" "$LOG"; then
+    echo "rwd-journey: panic in nested log" >&2
+    grep "panicked" "$LOG" >&2
+    exit 1
+fi
+for shot_file in 01-baseline 02-overview 03-search 04-after-enter 05-after-escape; do
+    path="$ARTIFACTS/$shot_file.png"
+    if [ ! -s "$path" ]; then
+        echo "rwd-journey: missing screenshot $path" >&2
+        exit 1
+    fi
+    # 1280x800 scrot PNGs of a rendered scene are hundreds of KB; a
+    # black or failed frame compresses to a few KB.
+    size=$(wc -c <"$path")
+    if [ "$size" -lt 20000 ]; then
+        echo "rwd-journey: suspiciously small screenshot $path ($size bytes)" >&2
+        exit 1
+    fi
+done
+if cmp -s "$ARTIFACTS/01-baseline.png" "$ARTIFACTS/02-overview.png"; then
+    echo "rwd-journey: overview shot identical to baseline (Super did nothing visible)" >&2
+    exit 1
+fi
+
+echo "rwd-journey: OK, artifacts in $ARTIFACTS"

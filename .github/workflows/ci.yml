@@ -17,3 +17,24 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+
+  journey:
+    runs-on: ubuntu-latest
+    needs: [check]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+      # Nested session needs a display plus X input/capture tools; the
+      # journey asserts liveness and visible reaction, humans review
+      # the uploaded frames.
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev pkg-config xvfb xdotool x11-apps scrot shellcheck
+      - run: shellcheck scripts/rwd-journey scripts/rwd-nested
+      - run: scripts/rwd-journey --artifacts journey-artifacts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: journey-shots
+          path: journey-artifacts/
+          retention-days: 14
