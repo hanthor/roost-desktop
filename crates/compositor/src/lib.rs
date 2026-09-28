@@ -17,7 +17,7 @@ use smithay::{
     input::{Seat, SeatHandler, SeatState},
     reexports::wayland_server::{
         backend::{ClientData, ClientId, DisconnectReason},
-        protocol::{wl_buffer, wl_seat, wl_surface},
+        protocol::{wl_buffer, wl_output, wl_seat, wl_surface},
         Client, Display, DisplayHandle,
     },
     utils::Serial,
@@ -66,12 +66,32 @@ pub struct State {
     /// Output geometry layer surfaces arrange against (set by the
     /// runtime; defaults to zero, which configures zero sizes).
     pub(crate) output_size: smithay::utils::Size<i32, smithay::utils::Logical>,
+    /// Client window-state requests awaiting the manager's next
+    /// `reconcile` drain (002 window actions).
+    pub(crate) window_requests: Vec<(wl_surface::WlSurface, WindowRequest)>,
 }
 
 /// Per-client data: the compositor state slice each client sees.
 #[derive(Default)]
 pub(crate) struct ClientState {
     compositor_state: CompositorClientState,
+}
+
+/// Client-initiated window state request (002 window actions).
+/// The xdg-shell handlers only queue these on [`State`]; the window
+/// manager drains and applies them once per tick in `reconcile`, so
+/// protocol input and scene mutation stay on one call path for live
+/// events and tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WindowRequest {
+    /// Client asked to be maximized.
+    Maximize,
+    /// Client asked to leave maximized.
+    Unmaximize,
+    /// Client asked to cover the output.
+    Fullscreen,
+    /// Client asked to leave fullscreen.
+    Unfullscreen,
 }
 
 impl ClientData for ClientState {
@@ -100,6 +120,44 @@ impl XdgShellHandler for State {
         _positioner: PositionerState,
         _token: u32,
     ) {
+    }
+
+    /// Queue a client maximize request for the manager drain. The
+    /// bare `send_configure` default would leave the client hanging
+    /// in a state the scene never applies.
+    fn maximize_request(&mut self, surface: ToplevelSurface) {
+        self.window_requests
+            .push((surface.wl_surface().clone(), WindowRequest::Maximize));
+    }
+
+    /// Queue a client unmaximize request for the manager drain.
+    fn unmaximize_request(&mut self, surface: ToplevelSurface) {
+        self.window_requests
+            .push((surface.wl_surface().clone(), WindowRequest::Unmaximize));
+    }
+
+    /// Queue a client fullscreen request for the manager drain.
+    fn fullscreen_request(
+        &mut self,
+        surface: ToplevelSurface,
+        _output: Option<wl_output::WlOutput>,
+    ) {
+        self.window_requests
+            .push((surface.wl_surface().clone(), WindowRequest::Fullscreen));
+    }
+
+    /// Queue a client unfullscreen request for the manager drain.
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        self.window_requests
+            .push((surface.wl_surface().clone(), WindowRequest::Unfullscreen));
+    }
+}
+
+impl State {
+    /// Drain queued client window-state requests (the manager calls
+    /// this from `reconcile`).
+    pub(crate) fn take_window_requests(&mut self) -> Vec<(wl_surface::WlSurface, WindowRequest)> {
+        std::mem::take(&mut self.window_requests)
     }
 }
 
@@ -221,6 +279,7 @@ impl State {
             data_device_state: DataDeviceState::new::<State>(dh),
             panel_surfaces: Vec::new(),
             output_size: Default::default(),
+            window_requests: Vec::new(),
         }
     }
 

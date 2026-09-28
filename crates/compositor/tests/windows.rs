@@ -15,7 +15,8 @@
 use std::os::unix::net::UnixStream;
 
 use rwd_compositor::windows::{
-    ManagerInput, WindowManager, ALT_LEFT_KEYCODE, ESCAPE_KEYCODE, PAGE_DOWN_KEYCODE,
+    ManagerInput, TileSide, WindowLayout, WindowManager, ALT_LEFT_KEYCODE, ARROW_DOWN_KEYCODE,
+    ARROW_LEFT_KEYCODE, ARROW_RIGHT_KEYCODE, ARROW_UP_KEYCODE, ESCAPE_KEYCODE, PAGE_DOWN_KEYCODE,
     PAGE_UP_KEYCODE, SHIFT_LEFT_KEYCODE, SUPER_LEFT_KEYCODE, TAB_KEYCODE,
 };
 use rwd_compositor::TestCompositor;
@@ -64,6 +65,19 @@ struct Client {
     pointer_buttons: Vec<(u32, bool)>,
     /// Every advertised toplevel size, in arrival order.
     configure_sizes: Vec<(i32, i32)>,
+    /// Every advertised toplevel state array (raw wire bytes), in
+    /// arrival order.
+    configure_states: Vec<Vec<u8>>,
+}
+
+/// Whether a raw xdg-toplevel state array carries `want` (native-endian
+/// uints on the wire: 1=maximized, 2=fullscreen, 4=activated per the
+/// xdg-shell protocol enum).
+fn has_state(states: &[u8], want: u32) -> bool {
+    let (chunks, _) = states.as_chunks::<4>();
+    chunks
+        .iter()
+        .any(|chunk| u32::from_ne_bytes(*chunk) == want)
 }
 
 impl Client {
@@ -177,10 +191,11 @@ impl Dispatch<XdgToplevel, ()> for Client {
         if let wayland_protocols::xdg::shell::client::xdg_toplevel::Event::Configure {
             width,
             height,
-            ..
+            states,
         } = event
         {
             state.configure_sizes.push((width, height));
+            state.configure_states.push(states);
         }
     }
 }
@@ -743,6 +758,237 @@ fn alt_tab_steps_commits_and_cancels_without_leaking_keys() {
     release(&mut f.manager, &mut f.comp, ALT_LEFT_KEYCODE);
     // Alt release after a cancel commits nothing.
     assert!(f.manager.take_switcher_queue().is_empty());
+}
+
+/// Two windows on a 1280x800 output for layout tests.
+fn layout_windows() -> Fixture {
+    let mut f = two_windows();
+    f.comp.state.set_output_size(1280, 800);
+    f
+}
+
+#[test]
+fn maximize_fills_work_area_and_restores() {
+    let mut f = layout_windows();
+    let before = f.manager.geometry(f.id_a).unwrap();
+    assert!(f.manager.set_maximized(&mut f.comp.state, f.id_a, true));
+    assert_eq!(
+        f.manager.window_layout(f.id_a),
+        Some(WindowLayout::Maximized)
+    );
+    let maxed = f.manager.geometry(f.id_a).unwrap();
+    assert_eq!((maxed.loc.x, maxed.loc.y), (0, 32));
+    assert_eq!((maxed.size.w, maxed.size.h), (1280, 768));
+    // The client is told the work-area size with the Maximized state.
+    pump(&mut f.comp, &mut f.queue_a, &mut f.client_a, |c| {
+        c.configure_sizes.last() == Some(&(1280, 768))
+    });
+    assert!(
+        f.client_a
+            .configure_states
+            .last()
+            .is_some_and(|states| has_state(states, 1)),
+        "expected Maximized advertised, got: {:?}",
+        f.client_a.configure_states.last()
+    );
+    // Restore returns the stashed floating geometry.
+    assert!(f.manager.set_maximized(&mut f.comp.state, f.id_a, false));
+    assert_eq!(
+        f.manager.window_layout(f.id_a),
+        Some(WindowLayout::Floating)
+    );
+    assert_eq!(f.manager.geometry(f.id_a).unwrap(), before);
+    assert!(!f.manager.set_maximized(&mut f.comp.state, 999, true));
+}
+
+#[test]
+fn tile_halves_toggle_and_fullscreen_cover() {
+    let mut f = layout_windows();
+    assert!(f
+        .manager
+        .set_tiled(&mut f.comp.state, f.id_a, TileSide::Left));
+    assert_eq!(
+        f.manager.window_layout(f.id_a),
+        Some(WindowLayout::Tiled(TileSide::Left))
+    );
+    let left = f.manager.geometry(f.id_a).unwrap();
+    assert_eq!((left.loc.x, left.loc.y), (0, 32));
+    assert_eq!((left.size.w, left.size.h), (640, 768));
+    assert!(f
+        .manager
+        .set_tiled(&mut f.comp.state, f.id_a, TileSide::Right));
+    let right = f.manager.geometry(f.id_a).unwrap();
+    assert_eq!((right.loc.x, right.loc.y), (640, 32));
+    assert_eq!((right.size.w, right.size.h), (640, 768));
+    // Moving between managed layouts keeps the original restore.
+    assert!(f.manager.restore_window(f.id_a));
+    assert_eq!(f.manager.geometry(f.id_a).unwrap().loc.x, 0);
+
+    assert!(f.manager.set_fullscreen(&mut f.comp.state, f.id_b, true));
+    assert_eq!(
+        f.manager.window_layout(f.id_b),
+        Some(WindowLayout::Fullscreen)
+    );
+    let full = f.manager.geometry(f.id_b).unwrap();
+    assert_eq!((full.loc.x, full.loc.y), (0, 0));
+    assert_eq!((full.size.w, full.size.h), (1280, 800));
+    pump(&mut f.comp, &mut f.queue_b, &mut f.client_b, |c| {
+        c.configure_states
+            .last()
+            .is_some_and(|states| has_state(states, 2))
+    });
+    assert!(f.manager.set_fullscreen(&mut f.comp.state, f.id_b, false));
+    assert_eq!(
+        f.manager.window_layout(f.id_b),
+        Some(WindowLayout::Floating)
+    );
+}
+
+#[test]
+fn manual_move_from_managed_layout_restores_first() {
+    let mut f = layout_windows();
+    assert!(f
+        .manager
+        .set_tiled(&mut f.comp.state, f.id_a, TileSide::Left));
+    // Drag-off shape: back to the stashed floating geometry plus delta.
+    assert!(f.manager.move_window(f.id_a, 10, 20));
+    assert_eq!(
+        f.manager.window_layout(f.id_a),
+        Some(WindowLayout::Floating)
+    );
+    let moved = f.manager.geometry(f.id_a).unwrap();
+    assert_eq!((moved.loc.x, moved.loc.y), (10, 20));
+    assert_eq!((moved.size.w, moved.size.h), (800, 600));
+}
+
+#[test]
+fn client_maximize_request_applies_on_reconcile() {
+    let mut f = layout_windows();
+    f.client_b.toplevel.as_ref().unwrap().set_maximized();
+    f.queue_b.flush().unwrap();
+    f.comp.pump();
+    f.manager.reconcile(&mut f.comp.state);
+    assert_eq!(
+        f.manager.window_layout(f.id_b),
+        Some(WindowLayout::Maximized)
+    );
+    assert_eq!(f.manager.geometry(f.id_b).unwrap().size.h, 768);
+    // And back off again through the protocol.
+    f.client_b.toplevel.as_ref().unwrap().unset_maximized();
+    f.queue_b.flush().unwrap();
+    f.comp.pump();
+    f.manager.reconcile(&mut f.comp.state);
+    assert_eq!(
+        f.manager.window_layout(f.id_b),
+        Some(WindowLayout::Floating)
+    );
+}
+
+#[test]
+fn transient_dialog_centers_above_parent() {
+    let mut f = layout_windows();
+    // Beta sits cascaded at (32,32); the dialog centers on it, which a
+    // plain cascade to (64,64) would never produce. The dialog shares
+    // beta's connection: Wayland object ids are connection-scoped, so
+    // a cross-client parent is a protocol error, not a placement.
+    let qh = f.queue_b.handle();
+    let surface = f
+        .client_b
+        .compositor
+        .as_ref()
+        .unwrap()
+        .create_surface(&qh, ());
+    let dialog_xdg = f
+        .client_b
+        .xdg_base
+        .as_ref()
+        .unwrap()
+        .get_xdg_surface(&surface, &qh, ());
+    let dialog_top = dialog_xdg.get_toplevel(&qh, ());
+    dialog_top.set_title("dialog".to_owned());
+    dialog_top.set_parent(f.client_b.toplevel.as_ref());
+    surface.commit();
+    f.conn_b.display().sync(&qh, ());
+    // The sync barrier is enough: the server processed the dialog
+    // commit (and its parent) before answering it.
+    pump(&mut f.comp, &mut f.queue_b, &mut f.client_b, |c| c.synced);
+    f.manager.reconcile(&mut f.comp.state);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    let _keep_alive = (surface, dialog_xdg, dialog_top);
+
+    let id_c = f
+        .manager
+        .model()
+        .windows()
+        .find(|w| w.title == "dialog")
+        .unwrap()
+        .id;
+    // Dialog takes focus and stacks directly above its parent.
+    assert_eq!(f.manager.model().focused(), Some(id_c));
+    // Directly above beta: last two in stacking order are beta, dialog.
+    let visible = f.manager.visible_windows();
+    assert_eq!(visible.len(), 3);
+    let geo = f.manager.geometry(id_c).unwrap();
+    assert_eq!((geo.loc.x, geo.loc.y), (32, 32));
+}
+
+#[test]
+fn super_arrows_drive_layouts_and_consume() {
+    let mut f = layout_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    f.client_b.keys.clear();
+
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, ARROW_UP_KEYCODE);
+    release(&mut f.manager, &mut f.comp, ARROW_UP_KEYCODE);
+    assert_eq!(
+        f.manager.window_layout(f.id_b),
+        Some(WindowLayout::Maximized)
+    );
+    press(&mut f.manager, &mut f.comp, ARROW_LEFT_KEYCODE);
+    release(&mut f.manager, &mut f.comp, ARROW_LEFT_KEYCODE);
+    assert_eq!(
+        f.manager.window_layout(f.id_b),
+        Some(WindowLayout::Tiled(TileSide::Left))
+    );
+    // Repeat toggles back to floating.
+    press(&mut f.manager, &mut f.comp, ARROW_LEFT_KEYCODE);
+    release(&mut f.manager, &mut f.comp, ARROW_LEFT_KEYCODE);
+    assert_eq!(
+        f.manager.window_layout(f.id_b),
+        Some(WindowLayout::Floating)
+    );
+    press(&mut f.manager, &mut f.comp, ARROW_RIGHT_KEYCODE);
+    release(&mut f.manager, &mut f.comp, ARROW_RIGHT_KEYCODE);
+    assert_eq!(
+        f.manager.window_layout(f.id_b),
+        Some(WindowLayout::Tiled(TileSide::Right))
+    );
+    press(&mut f.manager, &mut f.comp, ARROW_DOWN_KEYCODE);
+    release(&mut f.manager, &mut f.comp, ARROW_DOWN_KEYCODE);
+    assert_eq!(
+        f.manager.window_layout(f.id_b),
+        Some(WindowLayout::Floating)
+    );
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+
+    // No arrow press reached the client; releases still did (modifiers
+    // must not stick), so only releases are observed.
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert!(
+        !f.client_b.keys.iter().any(|(key, pressed)| [
+            ARROW_UP_KEYCODE,
+            ARROW_DOWN_KEYCODE,
+            ARROW_LEFT_KEYCODE,
+            ARROW_RIGHT_KEYCODE
+        ]
+        .contains(key)
+            && *pressed),
+        "arrow presses must be consumed, got: {:?}",
+        f.client_b.keys
+    );
 }
 
 #[test]

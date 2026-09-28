@@ -37,7 +37,7 @@ use wayland_protocols::xdg::shell::server::xdg_toplevel;
 
 use crate::{
     state::{StateModel, WindowUpdate},
-    State,
+    State, WindowRequest,
 };
 use rwd_shell_control::SwitcherAction;
 
@@ -52,6 +52,37 @@ const CASCADE_STEP: i32 = 32;
 struct ManagedWindow {
     surface: ToplevelSurface,
     geometry: Rectangle<i32, Logical>,
+    /// Current presentation layout (floating, maximized, tiled, or
+    /// fullscreen). Manager-local like geometry: the shell never sees
+    /// it, it only sees the resulting geometry through rendering.
+    layout: WindowLayout,
+    /// Geometry to restore when leaving a non-floating layout. Stashed
+    /// on leaving floating, cleared by manual move/resize (a fresh
+    /// start, GNOME shape).
+    restore: Option<Rectangle<i32, Logical>>,
+}
+
+/// Compositor-side presentation layout (002 window actions).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowLayout {
+    /// Normal floating window at its own geometry.
+    #[default]
+    Floating,
+    /// Fills the work area (output minus the panel strip).
+    Maximized,
+    /// Fills one work-area half.
+    Tiled(TileSide),
+    /// Covers the whole output, including the panel strip.
+    Fullscreen,
+}
+
+/// Which work-area half a tiled window fills.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TileSide {
+    /// Left half.
+    Left,
+    /// Right half.
+    Right,
 }
 
 /// Floating window manager over one workspace.
@@ -147,8 +178,9 @@ impl WindowManager {
     }
 
     /// Reconcile live surfaces with the model: map new toplevels, drop
-    /// dead ones, and sync titles. Called once per loop tick after client
-    /// dispatch, and directly by tests.
+    /// dead ones, sync titles, and drain client window-state requests.
+    /// Called once per loop tick after client dispatch, and directly
+    /// by tests.
     pub fn reconcile(&mut self, state: &mut State) {
         let live: Vec<ToplevelSurface> = state.toplevels();
         let mut seen = Vec::with_capacity(live.len());
@@ -186,6 +218,10 @@ impl WindowManager {
         if stranded {
             self.focus_topmost(state, active);
         }
+        // Client window-state requests drain last so a request that
+        // arrived with a surface's first commits (e.g. initial
+        // maximized) applies after the surface is mapped.
+        self.drain_window_requests(state);
         let _ = seen;
     }
 
@@ -208,13 +244,48 @@ impl WindowManager {
             ManagedWindow {
                 surface: surface.clone(),
                 geometry,
+                layout: WindowLayout::Floating,
+                restore: None,
             },
         );
         self.surface_index.insert(surface.wl_surface().clone(), id);
         self.stacking.push(id);
+        self.place_transient(surface, id);
         self.configure(id, true);
         self.apply_focus(state, Some(id));
         id
+    }
+
+    /// Stack a transient directly above its parent and center it
+    /// there, so dialogs open over (and with focus over) the window
+    /// that spawned them. Parentless windows and orphans keep their
+    /// cascaded geometry and stacking slot.
+    fn place_transient(&mut self, surface: &ToplevelSurface, id: u64) {
+        let Some(parent_wl) = read_parent(surface) else {
+            return;
+        };
+        let Some(parent_id) = self.surface_index.get(&parent_wl).copied() else {
+            return;
+        };
+        if parent_id == id {
+            return;
+        }
+        self.stacking.retain(|other| *other != id);
+        let pos = self
+            .stacking
+            .iter()
+            .position(|other| *other == parent_id)
+            .map(|i| i + 1)
+            .unwrap_or(self.stacking.len());
+        self.stacking.insert(pos.min(self.stacking.len()), id);
+        if let Some(parent_geo) = self.geometry(parent_id) {
+            if let Some(window) = self.windows.get_mut(&id) {
+                let size = window.geometry.size;
+                let x = (parent_geo.loc.x + (parent_geo.size.w - size.w) / 2).max(0);
+                let y = (parent_geo.loc.y + (parent_geo.size.h - size.h) / 2).max(0);
+                window.geometry.loc = (x, y).into();
+            }
+        }
     }
 
     /// Remove one window from the model and the index. Focus falls back
@@ -227,6 +298,31 @@ impl WindowManager {
         self.model.remove(id);
         let fallback = self.stacking.last().copied();
         self.apply_focus(state, fallback);
+    }
+
+    /// Apply queued client window-state requests (maximize, unmaximize,
+    /// fullscreen, unfullscreen). Unknown or already-gone surfaces are
+    /// dropped: a client that asked and vanished needs nothing.
+    fn drain_window_requests(&mut self, state: &mut State) {
+        for (wl, request) in state.take_window_requests() {
+            let Some(id) = self.surface_index.get(&wl).copied() else {
+                continue;
+            };
+            match request {
+                WindowRequest::Maximize => {
+                    self.set_maximized(state, id, true);
+                }
+                WindowRequest::Unmaximize => {
+                    self.set_maximized(state, id, false);
+                }
+                WindowRequest::Fullscreen => {
+                    self.set_fullscreen(state, id, true);
+                }
+                WindowRequest::Unfullscreen => {
+                    self.set_fullscreen(state, id, false);
+                }
+            }
+        }
     }
 
     /// Copy the client's current title into the model entry.
@@ -281,18 +377,44 @@ impl WindowManager {
         }
     }
 
-    /// Send a configure advertising this window's geometry and
-    /// activation flag.
+    /// Send a configure advertising this window's geometry, activation
+    /// flag, and presentation state.
     fn configure(&self, id: u64, activated: bool) {
         let Some(window) = self.windows.get(&id) else {
             return;
         };
+        let layout = window.layout;
         window.surface.with_pending_state(|pending| {
             pending.size = Some(window.geometry.size);
             if activated {
                 pending.states.set(xdg_toplevel::State::Activated);
             } else {
                 pending.states.unset(xdg_toplevel::State::Activated);
+            }
+            // Exactly one presentation state: managed layouts advertise
+            // theirs, floating advertises none.
+            for state in [
+                xdg_toplevel::State::Maximized,
+                xdg_toplevel::State::Fullscreen,
+                xdg_toplevel::State::TiledLeft,
+                xdg_toplevel::State::TiledRight,
+            ] {
+                pending.states.unset(state);
+            }
+            match layout {
+                WindowLayout::Floating => {}
+                WindowLayout::Maximized => {
+                    pending.states.set(xdg_toplevel::State::Maximized);
+                }
+                WindowLayout::Fullscreen => {
+                    pending.states.set(xdg_toplevel::State::Fullscreen);
+                }
+                WindowLayout::Tiled(TileSide::Left) => {
+                    pending.states.set(xdg_toplevel::State::TiledLeft);
+                }
+                WindowLayout::Tiled(TileSide::Right) => {
+                    pending.states.set(xdg_toplevel::State::TiledRight);
+                }
             }
         });
         window.surface.send_configure();
@@ -401,8 +523,13 @@ impl WindowManager {
         true
     }
 
-    /// Move a window by a delta, keeping it on its workspace.
+    /// Move a window by a delta, keeping it on its workspace. A manual
+    /// move from a managed layout restores the stashed geometry first
+    /// (GNOME drag-off shape), then applies the delta.
     pub fn move_window(&mut self, id: u64, dx: i32, dy: i32) -> bool {
+        if !self.restore_layout(id) {
+            return false;
+        }
         let Some(window) = self.windows.get_mut(&id) else {
             return false;
         };
@@ -411,9 +538,14 @@ impl WindowManager {
         true
     }
 
-    /// Resize a window and advertise the new size via configure.
+    /// Resize a window and advertise the new size via configure. A
+    /// manual resize from a managed layout restores the stashed
+    /// geometry first, then applies the new size.
     pub fn resize_window(&mut self, id: u64, width: i32, height: i32) -> bool {
         if width <= 0 || height <= 0 {
+            return false;
+        }
+        if !self.restore_layout(id) {
             return false;
         }
         let Some(window) = self.windows.get_mut(&id) else {
@@ -421,6 +553,125 @@ impl WindowManager {
         };
         window.geometry.size = (width, height).into();
         self.configure(id, self.model.focused() == Some(id));
+        true
+    }
+
+    /// Return a window to floating: pop the stashed geometry when one
+    /// was kept, otherwise keep the current geometry. Returns false
+    /// for unknown ids.
+    fn restore_layout(&mut self, id: u64) -> bool {
+        let Some(window) = self.windows.get_mut(&id) else {
+            return false;
+        };
+        if window.layout != WindowLayout::Floating {
+            if let Some(restore) = window.restore.take() {
+                window.geometry = restore;
+            }
+            window.layout = WindowLayout::Floating;
+            window.restore = None;
+        }
+        true
+    }
+
+    /// Current presentation layout, if the window is managed.
+    pub fn window_layout(&self, id: u64) -> Option<WindowLayout> {
+        self.windows.get(&id).map(|window| window.layout)
+    }
+
+    /// Work area a maximized window fills: the output minus the shell
+    /// panel strip ([`WORK_AREA_TOP`]).
+    fn work_area(state: &State) -> Rectangle<i32, Logical> {
+        let (w, h) = (state.output_size.w.max(0), state.output_size.h.max(0));
+        Rectangle {
+            loc: (0, WORK_AREA_TOP).into(),
+            size: (w, (h - WORK_AREA_TOP).max(0)).into(),
+        }
+    }
+
+    /// One work-area half for tiled windows.
+    fn tile_area(state: &State, side: TileSide) -> Rectangle<i32, Logical> {
+        let work = Self::work_area(state);
+        let half = work.size.w / 2;
+        let (x, w) = match side {
+            TileSide::Left => (work.loc.x, half),
+            TileSide::Right => (work.loc.x + work.size.w - half, half),
+        };
+        Rectangle {
+            loc: (x, work.loc.y).into(),
+            size: (w, work.size.h).into(),
+        }
+    }
+
+    /// Whole output, including the panel strip, for fullscreen windows.
+    fn fullscreen_area(state: &State) -> Rectangle<i32, Logical> {
+        Rectangle {
+            loc: (0, 0).into(),
+            size: (state.output_size.w.max(0), state.output_size.h.max(0)).into(),
+        }
+    }
+
+    /// Maximize a window into the work area, stashing its floating
+    /// geometry for restore. Idempotent; false for unknown ids.
+    pub fn set_maximized(&mut self, state: &mut State, id: u64, maximized: bool) -> bool {
+        if maximized {
+            self.apply_layout(state, id, WindowLayout::Maximized)
+        } else {
+            self.restore_window(id)
+        }
+    }
+
+    /// Cover the output with a window, stashing its floating geometry.
+    /// Idempotent; false for unknown ids.
+    pub fn set_fullscreen(&mut self, state: &mut State, id: u64, fullscreen: bool) -> bool {
+        if fullscreen {
+            self.apply_layout(state, id, WindowLayout::Fullscreen)
+        } else {
+            self.restore_window(id)
+        }
+    }
+
+    /// Tile a window into one work-area half, stashing its floating
+    /// geometry. Idempotent; false for unknown ids.
+    pub fn set_tiled(&mut self, state: &mut State, id: u64, side: TileSide) -> bool {
+        self.apply_layout(state, id, WindowLayout::Tiled(side))
+    }
+
+    /// Return a window to floating and re-advertise its geometry.
+    /// False for unknown ids.
+    pub fn restore_window(&mut self, id: u64) -> bool {
+        let changed = self
+            .window_layout(id)
+            .is_some_and(|layout| layout != WindowLayout::Floating);
+        if !self.restore_layout(id) {
+            return false;
+        }
+        self.configure(id, self.model.focused() == Some(id));
+        if changed {
+            eprintln!("rwd-compositor: window {id} Floating");
+        }
+        true
+    }
+
+    /// Apply one managed layout: stash the floating geometry once
+    /// (moving between managed layouts keeps the original restore),
+    /// set the computed geometry, and advertise the new state.
+    fn apply_layout(&mut self, state: &mut State, id: u64, layout: WindowLayout) -> bool {
+        let area = match layout {
+            WindowLayout::Floating => return self.restore_window(id),
+            WindowLayout::Maximized => Self::work_area(state),
+            WindowLayout::Tiled(side) => Self::tile_area(state, side),
+            WindowLayout::Fullscreen => Self::fullscreen_area(state),
+        };
+        let Some(window) = self.windows.get_mut(&id) else {
+            return false;
+        };
+        if window.layout == WindowLayout::Floating {
+            window.restore = Some(window.geometry);
+        }
+        window.layout = layout;
+        window.geometry = area;
+        self.configure(id, self.model.focused() == Some(id));
+        eprintln!("rwd-compositor: window {id} {layout:?}");
         true
     }
 
@@ -567,6 +818,16 @@ fn read_app_id(surface: &ToplevelSurface) -> Option<String> {
     })
 }
 
+/// Read the client's transient parent from the toplevel role data.
+fn read_parent(surface: &ToplevelSurface) -> Option<WlSurface> {
+    with_states(surface.wl_surface(), |states| {
+        states
+            .data_map
+            .get::<XdgToplevelSurfaceData>()
+            .and_then(|data| data.lock().unwrap().parent.clone())
+    })
+}
+
 fn contains(geometry: Rectangle<i32, Logical>, pos: Point<f64, Logical>) -> bool {
     let x = geometry.loc.x as f64;
     let y = geometry.loc.y as f64;
@@ -618,6 +879,17 @@ pub const SHIFT_RIGHT_KEYCODE: u32 = 54;
 pub const TAB_KEYCODE: u32 = 15;
 pub const ALT_LEFT_KEYCODE: u32 = 56;
 pub const ALT_RIGHT_KEYCODE: u32 = 100;
+/// Window-action keybindings (evdev, GNOME shape): Super+Up maximizes,
+/// Super+Down restores, Super+Left/Right tiles that half (repeat
+/// toggles back to floating). Presses are consumed.
+pub const ARROW_UP_KEYCODE: u32 = 103;
+pub const ARROW_DOWN_KEYCODE: u32 = 108;
+pub const ARROW_LEFT_KEYCODE: u32 = 105;
+pub const ARROW_RIGHT_KEYCODE: u32 = 106;
+/// Top inset of the maximized/tiled work area: the shell panel strip
+/// (matches shell-host `PANEL_HEIGHT` and the Activities-strip
+/// trigger height above).
+pub const WORK_AREA_TOP: i32 = 32;
 /// Hot-corner trigger region in logical pixels from the top-left.
 pub const HOT_CORNER_PX: f64 = 8.0;
 /// Activities-strip trigger: button presses in the top strip open the
@@ -749,9 +1021,12 @@ impl WindowManager {
         std::mem::take(&mut self.switcher_queue)
     }
 
-    /// Super+PageUp/PageDown workspace switching (Shift: move focused
-    /// window and follow); those presses are consumed, everything else
-    /// — modifiers included — still reaches clients.
+    /// Super-chord window actions (002 workspaces and window actions).
+    /// PageUp/PageDown switches workspace (Shift: moves the focused
+    /// window and follows it); arrows drive managed layouts on the
+    /// focused window (Up maximizes, Down restores, Left/Right tiles
+    /// that half, repeat toggles back). Those presses are consumed,
+    /// everything else — modifiers included — still reaches clients.
     fn on_workspace_key(&mut self, state: &mut State, keycode: u32, pressed: bool, time: u32) {
         if pressed
             && self.super_held
@@ -772,8 +1047,43 @@ impl WindowManager {
                     self.model.active_workspace()
                 );
             }
+        } else if pressed && self.super_held && Self::is_arrow(keycode) {
+            if let Some(id) = self.model.focused() {
+                match keycode {
+                    ARROW_UP_KEYCODE => {
+                        self.set_maximized(state, id, true);
+                    }
+                    ARROW_DOWN_KEYCODE => {
+                        self.restore_window(id);
+                    }
+                    ARROW_LEFT_KEYCODE => {
+                        self.toggle_tiled(state, id, TileSide::Left);
+                    }
+                    ARROW_RIGHT_KEYCODE => {
+                        self.toggle_tiled(state, id, TileSide::Right);
+                    }
+                    _ => {}
+                }
+            }
         } else {
             self.keyboard_key(state, keycode, pressed, time);
+        }
+    }
+
+    /// Whether `keycode` is a layout-chord arrow.
+    fn is_arrow(keycode: u32) -> bool {
+        matches!(
+            keycode,
+            ARROW_UP_KEYCODE | ARROW_DOWN_KEYCODE | ARROW_LEFT_KEYCODE | ARROW_RIGHT_KEYCODE
+        )
+    }
+
+    /// Tile a side, toggling back to floating on repeat (GNOME shape).
+    fn toggle_tiled(&mut self, state: &mut State, id: u64, side: TileSide) -> bool {
+        if self.window_layout(id) == Some(WindowLayout::Tiled(side)) {
+            self.restore_window(id)
+        } else {
+            self.set_tiled(state, id, side)
         }
     }
 

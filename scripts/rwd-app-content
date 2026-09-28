@@ -7,9 +7,11 @@
 # Starts a private Xvfb (unless DISPLAY already works), builds and runs
 # the nested compositor with its supervised shell, then launches headed
 # Chromium via Playwright as a Wayland client of the nested session and
-# captures our compositor showing the app. Exits nonzero on any failure
-# (dead process, panic in logs, missing/identical screenshots, or no
-# app-content pixels). PNGs plus logs land in the artifacts dir.
+# captures our compositor showing the app, then Super+Left tiles it
+# and captures the tiled frame. Exits nonzero on any failure (dead
+# process, panic in logs, missing/identical screenshots, no
+# app-content pixels, or no tile-left layout in the log). PNGs plus
+# logs land in the artifacts dir.
 #
 # Chromium runs DISPLAY-less with --ozone-platform=wayland, so a mapped
 # window proves the ozone path through our xdg-shell, shm scanout, and
@@ -184,6 +186,14 @@ fi
 sleep 2
 scrot "$ARTIFACTS/02-app.png" >/dev/null
 echo "rwd-app-content: shot 02-app.png"
+
+# Super+Left tiles the focused Chromium into the left half; the shot
+# must differ from the floating frame and the layout line lands in
+# the nested log (asserted below).
+xdotool key Super_L+Left
+sleep 2
+scrot "$ARTIFACTS/03-tiled.png" >/dev/null
+echo "rwd-app-content: shot 03-tiled.png"
 touch "$DONE"
 wait "$CHROMIUM_PID" 2>/dev/null || true
 CHROMIUM_PID=""
@@ -199,7 +209,7 @@ if grep -q "panicked" "$LOG"; then
     grep "panicked" "$LOG" >&2
     exit 1
 fi
-for shot_file in 01-baseline 02-app; do
+for shot_file in 01-baseline 02-app 03-tiled; do
     path="$ARTIFACTS/$shot_file.png"
     if [ ! -s "$path" ]; then
         echo "rwd-app-content: missing screenshot $path" >&2
@@ -208,6 +218,15 @@ for shot_file in 01-baseline 02-app; do
 done
 if cmp -s "$ARTIFACTS/01-baseline.png" "$ARTIFACTS/02-app.png"; then
     echo "rwd-app-content: app shot identical to baseline (no app window visible)" >&2
+    exit 1
+fi
+if cmp -s "$ARTIFACTS/02-app.png" "$ARTIFACTS/03-tiled.png"; then
+    echo "rwd-app-content: tiled shot identical to floating (Super+Left did nothing visible)" >&2
+    exit 1
+fi
+if ! grep -q "Tiled(Left)" "$LOG"; then
+    echo "rwd-app-content: no tile-left layout in nested log" >&2
+    tail -30 "$LOG" >&2 || true
     exit 1
 fi
 if GREEN_MIN_ENV="$GREEN_MIN" "$PW_ENV/bin/python" - "$ARTIFACTS/02-app.png" <<'PYEOF'
