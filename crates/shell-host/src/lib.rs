@@ -8,6 +8,9 @@
 //!   workspace crate).
 //! - [`panel`] — Wayland client setup for the top-anchored Activities
 //!   panel surface.
+//! - [`control`] — shell-side control-protocol client (Hello, snapshot,
+//!   ordered changes with gap resnapshot, token activation commands).
 
+pub mod control;
 pub mod model;
 pub mod panel;

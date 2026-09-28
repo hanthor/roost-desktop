@@ -124,6 +124,33 @@ impl ShellModel {
         self.overview_open = !self.overview_open;
         self.overview_open
     }
+
+    /// Replace state from a plain snapshot view.
+    ///
+    /// Same semantics as [`ShellModel::apply_window_list`]: order kept,
+    /// first-active-wins, overview flag untouched. This is the method the
+    /// control-protocol adapter (`control.rs`) calls after mapping the
+    /// schema `Snapshot` into a [`SnapshotView`].
+    pub fn apply_snapshot_view(&mut self, snapshot: SnapshotView) {
+        self.apply_window_list(snapshot.windows, snapshot.workspaces);
+    }
+}
+
+/// Plain snapshot payload owned by `shell-host` (no dependency on any
+/// other workspace crate).
+///
+/// Schema-mapping seam: `control.rs` translates the protocol's `Snapshot
+/// { windows, workspaces }` into this view (`WindowInfo.focused` maps to
+/// [`WindowEntry::active`]; workspace ids narrow from the schema's `u64`
+/// to the `u32` ids this model keeps). This file never imports
+/// `rwd-shell-control`, so the wire format can evolve without churning
+/// the view model.
+#[derive(Debug, Clone, Default)]
+pub struct SnapshotView {
+    /// Window list in display order.
+    pub windows: Vec<WindowEntry>,
+    /// Workspace ids (sorted and deduped on apply).
+    pub workspaces: Vec<u32>,
 }
 
 #[cfg(test)]

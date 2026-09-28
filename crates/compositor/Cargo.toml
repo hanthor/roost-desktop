@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 smithay.workspace = true
+rwd-shell-control = { path = "../shell-control-schema", version = "0.1.0" }
 
 [dev-dependencies]
 wayland-client.workspace = true

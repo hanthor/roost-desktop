@@ -28,6 +28,8 @@ use smithay::{
     },
 };
 
+pub mod control;
+pub mod overlay;
 pub mod state;
 pub mod supervise;
 

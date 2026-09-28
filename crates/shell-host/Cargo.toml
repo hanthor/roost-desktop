@@ -11,3 +11,4 @@ wayland-client.workspace = true
 wayland-protocols = { workspace = true, features = ["client"] }
 wayland-protocols-wlr = { workspace = true, features = ["client"] }
 smithay = { workspace = true }
+rwd-shell-control = { path = "../shell-control-schema", version = "0.1.0" }

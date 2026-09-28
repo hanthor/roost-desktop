@@ -497,6 +497,7 @@ dependencies = [
 name = "rwd-compositor"
 version = "0.1.0"
 dependencies = [
+ "rwd-shell-control",
  "smithay",
  "tempfile",
  "wayland-client",
@@ -515,6 +516,7 @@ dependencies = [
 name = "rwd-shell-host"
 version = "0.1.0"
 dependencies = [
+ "rwd-shell-control",
  "smithay",
  "wayland-client",
  "wayland-protocols",
