@@ -375,6 +375,14 @@ impl WindowManager {
         } else if let Some(keyboard) = self.keyboard.clone() {
             keyboard.set_focus(state, None, serial);
         }
+        // Clipboard offers follow keyboard focus, with or without a
+        // keyboard capability attached.
+        let surface = id.and_then(|id| {
+            self.windows
+                .get(&id)
+                .map(|window| window.surface.wl_surface().clone())
+        });
+        state.sync_device_focus(surface.as_ref());
     }
 
     /// Send a configure advertising this window's geometry, activation

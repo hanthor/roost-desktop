@@ -18,7 +18,7 @@ use smithay::{
     reexports::wayland_server::{
         backend::{ClientData, ClientId, DisconnectReason},
         protocol::{wl_buffer, wl_output, wl_seat, wl_surface},
-        Client, Display, DisplayHandle,
+        Client, Display, DisplayHandle, Resource,
     },
     utils::Serial,
     wayland::{
@@ -27,7 +27,8 @@ use smithay::{
         output::{OutputHandler, OutputManagerState},
         selection::{
             data_device::{
-                ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+                set_data_device_focus, ClientDndGrabHandler, DataDeviceHandler, DataDeviceState,
+                ServerDndGrabHandler,
             },
             SelectionHandler,
         },
@@ -58,6 +59,10 @@ pub struct State {
     // Kept alive for the seat global; input routing (R4) attaches here later.
     #[allow(dead_code)]
     seat: Seat<State>,
+    /// Display handle for client lookups that need no round-trip
+    /// (clipboard focus follows keyboard focus by resolving the
+    /// focused surface to its client).
+    dh: DisplayHandle,
     pub(crate) layer_shell_state: WlrLayerShellState,
     /// Clipboard/drag-and-drop manager (toolkit clients such as GTK
     /// and Chromium refuse a display without this global).
@@ -185,8 +190,10 @@ impl ShmHandler for State {
 impl OutputHandler for State {}
 
 /// Clipboard/drag-and-drop: advertised so toolkit clients accept the
-/// display. Selections are tracked, not served: no client content
-/// crosses this boundary yet.
+/// display. Client copy/paste round-trips through the smithay
+/// selection state; clipboard focus mirrors keyboard focus (see
+/// [`State::sync_device_focus`]). Server-initiated selection content
+/// and drag-and-drop pointer grabs are not served yet.
 impl SelectionHandler for State {
     type SelectionUserData = ();
 }
@@ -220,6 +227,15 @@ impl State {
     /// Seat for capability attachment and input routing.
     pub(crate) fn seat_mut(&mut self) -> &mut Seat<State> {
         &mut self.seat
+    }
+
+    /// Mirror keyboard focus into clipboard focus: the newly focused
+    /// client's data device receives the current selection offer, if
+    /// any. `None` clears clipboard focus. Surfaces from gone clients
+    /// resolve to no client, which also clears.
+    pub(crate) fn sync_device_focus(&mut self, surface: Option<&wl_surface::WlSurface>) {
+        let client = surface.and_then(|s| self.dh.get_client(s.id()).ok());
+        set_data_device_focus(&self.dh, &self.seat, client);
     }
 
     /// Number of currently mapped toplevel surfaces.
@@ -275,6 +291,7 @@ impl State {
             _output_manager_state: OutputManagerState::new_with_xdg_output::<State>(dh),
             seat_state,
             seat,
+            dh: dh.clone(),
             layer_shell_state: WlrLayerShellState::new::<State>(dh),
             data_device_state: DataDeviceState::new::<State>(dh),
             panel_surfaces: Vec::new(),
