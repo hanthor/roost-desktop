@@ -1,7 +1,8 @@
 //! Headless compositor core for the 001 nested slice.
 //!
 //! This crate owns the Smithay `Display` plus the protocol states the
-//! slice needs first (compositor, shm, xdg-shell, layer-shell). Rendering
+//! slice needs first (compositor, shm, xdg-shell, layer-shell,
+//! data-device). Rendering
 //! backends, seats, and the shell control channel arrive in later steps;
 //! the [`TestCompositor`] helper drives the display manually so
 //! integration tests stay deterministic without an event loop or GPU.
@@ -11,7 +12,8 @@ use std::sync::Arc;
 
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_output, delegate_seat, delegate_shm, delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
+    delegate_xdg_shell,
     input::{Seat, SeatHandler, SeatState},
     reexports::wayland_server::{
         backend::{ClientData, ClientId, DisconnectReason},
@@ -23,6 +25,12 @@ use smithay::{
         buffer::BufferHandler,
         compositor::{CompositorClientState, CompositorHandler, CompositorState},
         output::{OutputHandler, OutputManagerState},
+        selection::{
+            data_device::{
+                ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+            },
+            SelectionHandler,
+        },
         shell::{
             wlr_layer::WlrLayerShellState,
             xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState},
@@ -51,6 +59,9 @@ pub struct State {
     #[allow(dead_code)]
     seat: Seat<State>,
     pub(crate) layer_shell_state: WlrLayerShellState,
+    /// Clipboard/drag-and-drop manager (toolkit clients such as GTK
+    /// and Chromium refuse a display without this global).
+    data_device_state: DataDeviceState,
     pub(crate) panel_surfaces: Vec<layer::PanelSurface>,
     /// Output geometry layer surfaces arrange against (set by the
     /// runtime; defaults to zero, which configures zero sizes).
@@ -115,6 +126,22 @@ impl ShmHandler for State {
 
 impl OutputHandler for State {}
 
+/// Clipboard/drag-and-drop: advertised so toolkit clients accept the
+/// display. Selections are tracked, not served: no client content
+/// crosses this boundary yet.
+impl SelectionHandler for State {
+    type SelectionUserData = ();
+}
+
+impl ClientDndGrabHandler for State {}
+impl ServerDndGrabHandler for State {}
+
+impl DataDeviceHandler for State {
+    fn data_device_state(&self) -> &DataDeviceState {
+        &self.data_device_state
+    }
+}
+
 impl SeatHandler for State {
     type KeyboardFocus = wl_surface::WlSurface;
     type PointerFocus = wl_surface::WlSurface;
@@ -158,6 +185,7 @@ impl State {
 }
 
 delegate_xdg_shell!(State);
+delegate_data_device!(State);
 delegate_compositor!(State);
 delegate_shm!(State);
 delegate_seat!(State);
@@ -190,6 +218,7 @@ impl State {
             seat_state,
             seat,
             layer_shell_state: WlrLayerShellState::new::<State>(dh),
+            data_device_state: DataDeviceState::new::<State>(dh),
             panel_surfaces: Vec::new(),
             output_size: Default::default(),
         }
@@ -203,8 +232,8 @@ impl State {
 }
 
 impl TestCompositor {
-    /// Create the display and advertise compositor, shm, xdg-shell, and
-    /// layer-shell.
+    /// Create the display and advertise compositor, shm, xdg-shell,
+    /// layer-shell, and the data-device manager.
     pub fn new() -> Self {
         let display: Display<State> = Display::new().unwrap();
         let dh = display.handle();
