@@ -147,16 +147,46 @@ impl OverviewCanvas {
             );
         }
     }
+
+    /// Search box row with the live query in micro-glyphs plus a
+    /// caret block. Called after [`render`](Self::render); unknown
+    /// chars (and spaces) leave gaps. Clipped, never panics.
+    pub fn draw_query(&mut self, query: &str) {
+        const PAD: i32 = 8;
+        const QUERY_Y: i32 = 32;
+        const MAX_QUERY_CHARS: usize = 48;
+        let shown: String = query.chars().take(MAX_QUERY_CHARS).collect();
+        let glyphs = shown.chars().count() as i32;
+        let box_w = (glyphs + 1) * GLYPH_ADVANCE + PAD * 2;
+        let box_h = 5 * FONT_SCALE + PAD * 2;
+        self.rect(ORIGIN_X, QUERY_Y, box_w, box_h, BLOCK);
+        self.border(ORIGIN_X, QUERY_Y, box_w, box_h, 2, ACCENT);
+        let stride = self.width as usize * BYTES_PER_PIXEL;
+        let mut gx = ORIGIN_X + PAD;
+        let gy = QUERY_Y + PAD;
+        for ch in shown.chars() {
+            if ch == ' ' {
+                gx += GLYPH_ADVANCE;
+                continue;
+            }
+            if let Some(glyph) = glyph_index(ch) {
+                blit_glyph(&mut self.pixels, stride, gx, gy, glyph, ACCENT);
+            }
+            gx += GLYPH_ADVANCE;
+        }
+        self.rect(gx, gy, FONT_SCALE, 5 * FONT_SCALE, ACCENT);
+    }
 }
 
 /// Paint the panel strip: backdrop plus a lighter Activities corner.
 /// Error-indicator color (opaque brick).
 const WARN: [u8; 4] = [0xc0, 0x40, 0x30, 0xff];
 
-/// 3x5 micro-glyphs for the panel clock (`0-9` then `:`), rows top to
-/// bottom, low three bits left to right. Enough for `HH:MM` at strip
-/// scale; fuller text waits for the toolkit.
-const GLYPHS: [[u8; 5]; 11] = [
+/// 3x5 micro-glyphs (`0-9`, `:`, then `a-z`), rows top to bottom,
+/// low three bits left to right. Enough for the panel clock and the
+/// overview search box at strip scale; fuller text waits for the
+/// toolkit.
+const GLYPHS: [[u8; 5]; 37] = [
     [0b111, 0b101, 0b101, 0b101, 0b111], // 0
     [0b010, 0b110, 0b010, 0b010, 0b111], // 1
     [0b111, 0b001, 0b111, 0b100, 0b111], // 2
@@ -168,6 +198,32 @@ const GLYPHS: [[u8; 5]; 11] = [
     [0b111, 0b101, 0b111, 0b101, 0b111], // 8
     [0b111, 0b101, 0b111, 0b001, 0b111], // 9
     [0b000, 0b010, 0b000, 0b010, 0b000], // :
+    [0b010, 0b000, 0b010, 0b101, 0b011], // a
+    [0b100, 0b100, 0b110, 0b101, 0b110], // b
+    [0b000, 0b011, 0b100, 0b100, 0b011], // c
+    [0b001, 0b001, 0b011, 0b101, 0b011], // d
+    [0b000, 0b010, 0b101, 0b110, 0b010], // e
+    [0b001, 0b001, 0b111, 0b001, 0b001], // f
+    [0b000, 0b011, 0b101, 0b011, 0b001], // g (descender clipped)
+    [0b100, 0b100, 0b110, 0b101, 0b101], // h
+    [0b010, 0b000, 0b010, 0b010, 0b010], // i
+    [0b001, 0b000, 0b001, 0b101, 0b010], // j
+    [0b100, 0b101, 0b110, 0b101, 0b101], // k
+    [0b010, 0b010, 0b010, 0b010, 0b010], // l
+    [0b000, 0b101, 0b111, 0b101, 0b101], // m
+    [0b000, 0b110, 0b101, 0b101, 0b101], // n
+    [0b000, 0b010, 0b101, 0b101, 0b010], // o
+    [0b000, 0b110, 0b101, 0b110, 0b100], // p
+    [0b000, 0b011, 0b101, 0b011, 0b001], // q
+    [0b000, 0b101, 0b110, 0b100, 0b100], // r
+    [0b011, 0b100, 0b010, 0b001, 0b110], // s
+    [0b010, 0b111, 0b010, 0b010, 0b010], // t
+    [0b000, 0b101, 0b101, 0b101, 0b111], // u
+    [0b000, 0b101, 0b101, 0b101, 0b010], // v
+    [0b000, 0b101, 0b101, 0b111, 0b101], // w
+    [0b000, 0b101, 0b010, 0b101, 0b101], // x
+    [0b000, 0b101, 0b101, 0b011, 0b001], // y (descender clipped)
+    [0b000, 0b111, 0b001, 0b010, 0b111], // z
 ];
 /// Glyph advance (3px glyph + 1px tracking) times the strip scale.
 const FONT_SCALE: i32 = 3;
@@ -207,10 +263,15 @@ fn blit_glyph(pixels: &mut [u8], stride: usize, x: i32, y: i32, glyph: u8, color
     }
 }
 
+/// Micro-glyph index, or `None` for a gap. ASCII uppercase folds
+/// to lowercase: 3x5 cells cannot distinguish case, and matching is
+/// case-insensitive anyway.
 fn glyph_index(ch: char) -> Option<u8> {
     match ch {
         '0'..='9' => Some(ch as u8 - b'0'),
         ':' => Some(10),
+        'a'..='z' => Some(11 + (ch as u8 - b'a')),
+        'A'..='Z' => Some(11 + (ch as u8 - b'A')),
         _ => None,
     }
 }
@@ -583,7 +644,29 @@ mod tests {
     fn zero_size_canvas_draws_nothing() {
         let mut canvas = OverviewCanvas::new(0, 0);
         canvas.render(&two_windows(), 5);
+        canvas.draw_query("term");
         assert!(canvas.pixels().is_empty());
+    }
+
+    #[test]
+    fn query_row_shows_box_glyphs_and_caret() {
+        let mut canvas = OverviewCanvas::new(1280, 800);
+        canvas.render(&ShellModel::new(), 0);
+        canvas.draw_query("ab");
+        // Box border is accent, interior carries glyph pixels: the
+        // `a` cell's top row (010) has its middle pixel set.
+        assert_eq!(pixel(&canvas, ORIGIN_X, 32), ACCENT);
+        let gx = ORIGIN_X + 8;
+        let gy = 32 + 8;
+        assert_eq!(pixel(&canvas, gx + 3, gy), ACCENT);
+        assert_eq!(pixel(&canvas, gx, gy), BLOCK);
+        // Caret block sits one advance past the last glyph.
+        let caret_x = gx + 2 * GLYPH_ADVANCE;
+        assert_eq!(pixel(&canvas, caret_x + 1, gy + 2), ACCENT);
+        // Unknown chars leave gaps without panicking.
+        canvas.draw_query("a%b");
+        // Far corner stays backdrop.
+        assert_eq!(pixel(&canvas, 1270, 790), BG);
     }
 
     #[test]

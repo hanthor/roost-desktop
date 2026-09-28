@@ -30,10 +30,18 @@ use wayland_client::{
     delegate_noop,
     globals::{registry_queue_init, BindError, GlobalListContents},
     protocol::{
-        wl_buffer::WlBuffer, wl_compositor::WlCompositor, wl_output::WlOutput, wl_registry,
-        wl_shm::Format, wl_shm::WlShm, wl_shm_pool::WlShmPool, wl_surface::WlSurface,
+        wl_buffer::WlBuffer,
+        wl_compositor::WlCompositor,
+        wl_keyboard::{Event as KeyEvent, KeyState, KeymapFormat, WlKeyboard},
+        wl_output::WlOutput,
+        wl_registry,
+        wl_seat::{Capability, Event as SeatEvent, WlSeat},
+        wl_shm::Format,
+        wl_shm::WlShm,
+        wl_shm_pool::WlShmPool,
+        wl_surface::WlSurface,
     },
-    Connection, Dispatch, QueueHandle,
+    Connection, Dispatch, QueueHandle, WEnum,
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
@@ -47,6 +55,7 @@ use std::sync::Arc;
 use crate::apps::{AppProvider, LaunchTracker};
 use crate::control::{ControlClient, ControlError, Handled};
 use crate::favorites::Favorites;
+use crate::keyboard::{KeyAction, XkbFeed};
 use crate::model::ShellModel;
 use crate::notifications::{NotificationCenter, Urgency};
 use crate::overview::{
@@ -101,6 +110,9 @@ pub enum PanelError {
     /// Compositor does not offer `wl_shm` (the shell draws its
     /// surfaces into shared-memory buffers).
     NoShm(BindError),
+    /// Compositor does not offer `wl_seat` (overview search needs
+    /// the keyboard; running deaf would hide that).
+    NoSeat(BindError),
     /// Event-loop dispatch failed (e.g. compositor went away).
     Dispatch(wayland_client::DispatchError),
     /// Control channel failed (connect, handshake, or snapshot).
@@ -119,6 +131,7 @@ impl fmt::Display for PanelError {
                 write!(f, "compositor offers no zwlr_layer_shell_v1: {err}")
             }
             Self::NoShm(err) => write!(f, "compositor offers no wl_shm: {err}"),
+            Self::NoSeat(err) => write!(f, "compositor offers no wl_seat: {err}"),
             Self::Dispatch(err) => write!(f, "event loop dispatch failed: {err}"),
             Self::Control(err) => write!(f, "control channel failed: {err}"),
             Self::Flush(err) => write!(f, "event queue flush failed: {err}"),
@@ -177,6 +190,20 @@ pub struct ShellHost {
     panel_paint_key: Option<PanelPaintKey>,
     /// Panel buffer backing (pool fd must outlive the buffer).
     panel_backing: Option<ShmBacking>,
+    /// Seat owning our keyboard (`None` in unit tests, which never
+    /// touch the wire).
+    seat: Option<WlSeat>,
+    /// Server keyboard for overview search input.
+    keyboard: Option<WlKeyboard>,
+    /// xkb state behind the keyboard; `None` until the first keymap
+    /// arrives, while which keys are ignored.
+    xkb: Option<XkbFeed>,
+    /// Live overview search text (re-queried on every edit).
+    search_text: String,
+    /// Enter arrived while open: the run loop activates the top hit.
+    pending_submit: bool,
+    /// Escape arrived while open: the run loop dismisses the overview.
+    pending_dismiss: bool,
 }
 
 /// Cloned Wayland globals the host keeps for creating surfaces after
@@ -208,7 +235,7 @@ struct OverviewSurface {
 }
 
 /// Repaint the overview when any of these change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct PaintKey {
     revision: Option<u64>,
     selected: Option<u64>,
@@ -217,6 +244,7 @@ struct PaintKey {
     active_workspace: u32,
     width: i32,
     height: i32,
+    query: String,
 }
 
 /// Live switcher layer surface and its configured size.
@@ -400,6 +428,12 @@ impl ShellHost {
             tiles: TileSet::system(),
             tiles_refreshed: None,
             panel_paint_key: None,
+            seat: None,
+            keyboard: None,
+            xkb: None,
+            search_text: String::new(),
+            pending_submit: false,
+            pending_dismiss: false,
         }
     }
 
@@ -642,7 +676,9 @@ impl ShellHost {
             );
             layer.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
             layer.set_exclusive_zone(0);
-            layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+            // The overview takes typed search: declare it so the
+            // compositor parks keyboard focus here while open.
+            layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
             surface.commit();
             self.overview = Some(OverviewSurface {
                 surface,
@@ -665,12 +701,14 @@ impl ShellHost {
             active_workspace: self.model.active_workspace(),
             width: overview.width,
             height: overview.height,
+            query: self.search_text.clone(),
         };
-        if self.paint_key == Some(key) {
+        if self.paint_key.as_ref() == Some(&key) {
             return;
         }
         let mut canvas = OverviewCanvas::new(overview.width, overview.height);
         canvas.render(&self.model, self.favorites.ids().len());
+        canvas.draw_query(&self.search_text);
         if let Some(backing) = shm_upload(
             &wayland.shm,
             &wayland.qh,
@@ -767,6 +805,61 @@ impl ShellHost {
     /// Never blocks: providers resolve on worker threads.
     pub fn search_query(&self, text: &str) -> u64 {
         self.search.query(text)
+    }
+
+    /// Attach the seat keyboard path (the run functions call this
+    /// after binding; tests leave keyboard empty and every key op
+    /// below no-ops without it).
+    pub fn attach_seat(&mut self, seat: WlSeat, qh: &QueueHandle<ShellHost>) {
+        let keyboard = seat.get_keyboard(qh, ());
+        self.seat = Some(seat);
+        self.keyboard = Some(keyboard);
+    }
+
+    /// Live overview search text (what the next paint shows).
+    pub fn search_text(&self) -> &str {
+        &self.search_text
+    }
+
+    /// Consume a pending Enter activation, if any.
+    pub fn take_submit(&mut self) -> bool {
+        std::mem::take(&mut self.pending_submit)
+    }
+
+    /// Consume a pending Escape dismissal, if any.
+    pub fn take_dismiss(&mut self) -> bool {
+        std::mem::take(&mut self.pending_dismiss)
+    }
+
+    /// Feed one server key event (evdev code) into overview search.
+    /// Text edits re-query the hub; submit/dismiss arm the flags the
+    /// run loop consumes with a control client. Everything applies
+    /// only while the overview is open: keys arriving otherwise (the
+    /// compositor parked focus elsewhere) must not type into a
+    /// hidden box or fire activations.
+    pub fn on_key(&mut self, key: u32, pressed: bool) {
+        let Some(feed) = self.xkb.as_mut() else {
+            return;
+        };
+        if !self.model.is_overview_open() {
+            // Keep press/release tracking current, but change nothing:
+            // the action belongs to a hidden box.
+            let _ = feed.key(key, pressed);
+            return;
+        }
+        match feed.key(key, pressed) {
+            KeyAction::Text(text) => {
+                self.search_text.push_str(&text);
+                self.search.query(&self.search_text);
+            }
+            KeyAction::Erase => {
+                self.search_text.pop();
+                self.search.query(&self.search_text);
+            }
+            KeyAction::Submit => self.pending_submit = true,
+            KeyAction::Dismiss => self.pending_dismiss = true,
+            KeyAction::None => {}
+        }
     }
 
     /// Drop in-flight answers (e.g. overview closed mid-query).
@@ -932,6 +1025,21 @@ fn attach_control(path: &Path) -> Result<ControlClient, PanelError> {
 /// frame is waiting into the overview model, re-request the snapshot
 /// after a revision gap, and log (never crash on) typed errors — the
 /// connection stays usable.
+/// Consume overview key actions armed by [`ShellHost::on_key`]:
+/// Enter activates the top collected hit through the normal path,
+/// Escape dismisses via the hub. Best-effort like the hits
+/// themselves: a failed activation must not wedge the loop.
+fn drive_key_actions(host: &mut ShellHost, control: &mut ControlClient) {
+    if host.take_submit() {
+        if let Some(hit) = host.search_collect().into_iter().next() {
+            let _ = host.activate_hit(control, &hit);
+        }
+    }
+    if host.take_dismiss() {
+        let _ = control.toggle_overview();
+    }
+}
+
 fn drive_control(control: &mut ControlClient, host: &mut ShellHost) {
     match control.poll() {
         Err(e) if is_would_block(&e) => {}
@@ -1056,6 +1164,71 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for ShellHost {
     }
 }
 
+impl Dispatch<WlSeat, ()> for ShellHost {
+    fn event(
+        state: &mut Self,
+        seat: &WlSeat,
+        event: SeatEvent,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        // Late keyboard capability (e.g. seat bound before the
+        // compositor attached input): acquire once, then hold.
+        if let SeatEvent::Capabilities { capabilities } = event {
+            let offers_keyboard = matches!(
+                capabilities,
+                WEnum::Value(caps) if caps.contains(Capability::Keyboard)
+            );
+            if offers_keyboard && state.keyboard.is_none() {
+                state.keyboard = Some(seat.get_keyboard(qh, ()));
+            }
+        }
+    }
+}
+
+impl Dispatch<WlKeyboard, ()> for ShellHost {
+    fn event(
+        state: &mut Self,
+        _: &WlKeyboard,
+        event: KeyEvent,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            KeyEvent::Keymap { format, fd, size } => {
+                if matches!(format, WEnum::Value(KeymapFormat::XkbV1)) {
+                    if let Some(feed) = XkbFeed::from_fd(&fd, size) {
+                        state.xkb = Some(feed);
+                    }
+                }
+            }
+            KeyEvent::Enter { .. } | KeyEvent::Leave { .. } => {}
+            KeyEvent::Key {
+                key,
+                state: key_state,
+                ..
+            } => {
+                let pressed = matches!(key_state, WEnum::Value(KeyState::Pressed));
+                state.on_key(key, pressed);
+            }
+            KeyEvent::Modifiers {
+                mods_depressed,
+                mods_latched,
+                mods_locked,
+                group,
+                ..
+            } => {
+                if let Some(feed) = state.xkb.as_mut() {
+                    feed.update_mask(mods_depressed, mods_latched, mods_locked, group);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 // The remaining bound globals carry no events the panel handles.
 delegate_noop!(ShellHost: ignore WlCompositor);
 delegate_noop!(ShellHost: ignore WlSurface);
@@ -1121,9 +1294,11 @@ pub fn run_panel_with_control(
         .bind(&qh, 3..=5, ())
         .map_err(PanelError::NoLayerShell)?;
     let shm: WlShm = globals.bind(&qh, 1..=1, ()).map_err(PanelError::NoShm)?;
+    let seat: WlSeat = globals.bind(&qh, 1..=9, ()).map_err(PanelError::NoSeat)?;
 
     let mut host = ShellHost::new(panel, AppProvider::system(), Favorites::system());
     host.attach_wayland(compositor.clone(), layer_shell.clone(), shm, qh.clone());
+    host.attach_seat(seat.clone(), &qh);
     host.create_panel_surface(&compositor, &layer_shell, &qh);
     drop((globals, compositor, layer_shell));
 
@@ -1144,6 +1319,7 @@ pub fn run_panel_with_control(
         while host.is_running() {
             pump_wayland(&conn, &mut queue, &mut host)?;
             drive_control(control, &mut host);
+            drive_key_actions(&mut host, control);
             host.update_overview(control.revision());
             host.update_switcher();
             host.update_panel_status();
@@ -1741,6 +1917,58 @@ mod tests {
             assert!(
                 matches!(hits[0].action, SearchAction::Focus { .. }),
                 "window hits switch to the instance"
+            );
+        }
+
+        /// Overview keys type, erase, submit, and dismiss — but only
+        /// while open. Closed-overview keys must not touch the buffer
+        /// or arm activations (focus is elsewhere then).
+        #[test]
+        fn overview_keys_feed_search_only_while_open() {
+            use crate::keyboard::XkbFeed;
+
+            // Evdev codes on a `us` layout.
+            const A: u32 = 30;
+            const B: u32 = 48;
+            const SPACE: u32 = 57;
+            const SHIFT: u32 = 42;
+            const BACKSPACE: u32 = 14;
+            const RETURN: u32 = 28;
+            const ESCAPE: u32 = 1;
+
+            let (mut host, _favdir) = test_host();
+            host.xkb = XkbFeed::from_names("evdev", "pc105", "us", "", None);
+
+            host.on_key(A, true);
+            host.on_key(RETURN, true);
+            assert_eq!(host.search_text(), "", "closed overview types nothing");
+            assert!(!host.take_submit(), "closed overview submits nothing");
+            assert!(!host.take_dismiss(), "closed overview dismisses nothing");
+
+            host.model.set_overview_open(true);
+            host.on_key(A, true);
+            host.on_key(A, false);
+            host.on_key(SPACE, true);
+            host.on_key(SPACE, false);
+            host.on_key(B, true);
+            host.on_key(B, false);
+            assert_eq!(host.search_text(), "a b");
+            host.on_key(BACKSPACE, true);
+            assert_eq!(host.search_text(), "a ");
+            host.on_key(RETURN, true);
+            assert!(host.take_submit(), "enter arms submit");
+            assert!(!host.take_submit(), "submit is single-shot");
+            host.on_key(ESCAPE, true);
+            assert!(host.take_dismiss(), "escape arms dismiss");
+
+            host.on_key(SHIFT, true);
+            host.on_key(A, true);
+            host.on_key(A, false);
+            host.on_key(SHIFT, false);
+            assert!(
+                host.search_text().ends_with('A'),
+                "shift applies through the feed, got {:?}",
+                host.search_text()
             );
         }
 

@@ -20,3 +20,4 @@ freedesktop-desktop-entry.workspace = true
 serde_json.workspace = true
 rustix.workspace = true
 jiff.workspace = true
+xkbcommon.workspace = true
