@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["crates/compositor"]
+
+# Pinned per ADR 0001 (docs/adr/0001-nested-backend-smithay-pin.md).
+# Exact pins keep the Gate #1 verification reproducible.
+[workspace.dependencies]
+smithay = { version = "=0.7.0", default-features = false, features = ["wayland_frontend"] }
+calloop = "=0.14.4"
+wayland-protocols = "=0.32.13"
+wayland-server = "=0.31.14"
+wayland-client = "=0.31.15"

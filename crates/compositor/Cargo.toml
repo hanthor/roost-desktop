@@ -1,0 +1,12 @@
+[package]
+name = "rwd-compositor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+smithay.workspace = true
+
+[dev-dependencies]
+wayland-client.workspace = true
+wayland-protocols = { workspace = true, features = ["client"] }
+tempfile = "3"
