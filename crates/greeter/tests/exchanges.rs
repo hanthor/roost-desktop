@@ -166,3 +166,12 @@ fn session_crash_after_start_is_observable() {
     drop(client);
     handle.join().unwrap();
 }
+
+#[test]
+fn fixture_dir_enumerates_with_default() {
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let out = rwd_greeter::session::enumerate_dirs(&[&dir]);
+    assert_eq!(out.entries.len(), 2);
+    assert_eq!(out.entries[0].name, "RWD");
+    assert_eq!(out.skipped, 1);
+}

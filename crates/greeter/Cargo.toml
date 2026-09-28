@@ -6,3 +6,6 @@ license.workspace = true
 
 [dependencies]
 greetd_ipc.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
