@@ -2973,7 +2973,6 @@ dependencies = [
  "roost-shell-control",
  "rustix 0.38.44",
  "serde_json",
- "smithay",
  "tempfile",
  "wayland-client",
  "wayland-protocols",
