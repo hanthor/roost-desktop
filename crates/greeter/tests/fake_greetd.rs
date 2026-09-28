@@ -2,6 +2,9 @@
 //! `greetd_ipc` wire over a socketpair from a canned script. Never
 //! touches PAM or a display.
 
+// Shared across integration targets that each use a subset.
+#![allow(dead_code)]
+
 use std::os::unix::net::UnixStream;
 
 use greetd_ipc::{codec::SyncCodec, Request, Response};
