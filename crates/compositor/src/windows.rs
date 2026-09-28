@@ -382,7 +382,7 @@ impl WindowManager {
                 .get(&id)
                 .map(|window| window.surface.wl_surface().clone())
         });
-        state.sync_device_focus(surface.as_ref());
+        state.sync_selection_focus(surface.as_ref());
     }
 
     /// Send a configure advertising this window's geometry, activation

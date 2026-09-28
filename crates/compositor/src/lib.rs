@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_output, delegate_primary_selection,
+    delegate_seat, delegate_shm, delegate_xdg_shell,
     input::{Seat, SeatHandler, SeatState},
     reexports::wayland_server::{
         backend::{ClientData, ClientId, DisconnectReason},
@@ -29,6 +29,9 @@ use smithay::{
             data_device::{
                 set_data_device_focus, ClientDndGrabHandler, DataDeviceHandler, DataDeviceState,
                 ServerDndGrabHandler,
+            },
+            primary_selection::{
+                set_primary_focus, PrimarySelectionHandler, PrimarySelectionState,
             },
             SelectionHandler,
         },
@@ -67,6 +70,8 @@ pub struct State {
     /// Clipboard/drag-and-drop manager (toolkit clients such as GTK
     /// and Chromium refuse a display without this global).
     data_device_state: DataDeviceState,
+    /// Middle-click primary selection beside the clipboard.
+    primary_selection_state: PrimarySelectionState,
     pub(crate) panel_surfaces: Vec<layer::PanelSurface>,
     /// Output geometry layer surfaces arrange against (set by the
     /// runtime; defaults to zero, which configures zero sizes).
@@ -190,10 +195,11 @@ impl ShmHandler for State {
 impl OutputHandler for State {}
 
 /// Clipboard/drag-and-drop: advertised so toolkit clients accept the
-/// display. Client copy/paste round-trips through the smithay
-/// selection state; clipboard focus mirrors keyboard focus (see
-/// [`State::sync_device_focus`]). Server-initiated selection content
-/// and drag-and-drop pointer grabs are not served yet.
+/// display. Client copy/paste and primary selection round-trip
+/// through the smithay selection state; both focuses mirror keyboard
+/// focus (see [`State::sync_selection_focus`]). Server-initiated
+/// selection content and drag-and-drop pointer grabs are not served
+/// yet.
 impl SelectionHandler for State {
     type SelectionUserData = ();
 }
@@ -204,6 +210,12 @@ impl ServerDndGrabHandler for State {}
 impl DataDeviceHandler for State {
     fn data_device_state(&self) -> &DataDeviceState {
         &self.data_device_state
+    }
+}
+
+impl PrimarySelectionHandler for State {
+    fn primary_selection_state(&self) -> &PrimarySelectionState {
+        &self.primary_selection_state
     }
 }
 
@@ -229,13 +241,14 @@ impl State {
         &mut self.seat
     }
 
-    /// Mirror keyboard focus into clipboard focus: the newly focused
-    /// client's data device receives the current selection offer, if
-    /// any. `None` clears clipboard focus. Surfaces from gone clients
+    /// Mirror keyboard focus into selection focus: the newly focused
+    /// client's data device and primary device receive the current
+    /// offers, if any. `None` clears both. Surfaces from gone clients
     /// resolve to no client, which also clears.
-    pub(crate) fn sync_device_focus(&mut self, surface: Option<&wl_surface::WlSurface>) {
+    pub(crate) fn sync_selection_focus(&mut self, surface: Option<&wl_surface::WlSurface>) {
         let client = surface.and_then(|s| self.dh.get_client(s.id()).ok());
-        set_data_device_focus(&self.dh, &self.seat, client);
+        set_data_device_focus(&self.dh, &self.seat, client.clone());
+        set_primary_focus(&self.dh, &self.seat, client);
     }
 
     /// Number of currently mapped toplevel surfaces.
@@ -260,6 +273,7 @@ impl State {
 
 delegate_xdg_shell!(State);
 delegate_data_device!(State);
+delegate_primary_selection!(State);
 delegate_compositor!(State);
 delegate_shm!(State);
 delegate_seat!(State);
@@ -294,6 +308,7 @@ impl State {
             dh: dh.clone(),
             layer_shell_state: WlrLayerShellState::new::<State>(dh),
             data_device_state: DataDeviceState::new::<State>(dh),
+            primary_selection_state: PrimarySelectionState::new::<State>(dh),
             panel_surfaces: Vec::new(),
             output_size: Default::default(),
             window_requests: Vec::new(),
