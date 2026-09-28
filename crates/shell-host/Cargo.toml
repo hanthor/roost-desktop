@@ -1,0 +1,12 @@
+[package]
+name = "rwd-shell-host"
+version = "0.1.0"
+edition = "2021"
+
+# Wave 2 stream 3 owns this crate. Workspace pins live in the root Cargo.toml.
+
+[dependencies]
+wayland-client.workspace = true
+wayland-protocols = { workspace = true, features = ["client"] }
+wayland-protocols-wlr = { workspace = true, features = ["client"] }
+smithay = { workspace = true }

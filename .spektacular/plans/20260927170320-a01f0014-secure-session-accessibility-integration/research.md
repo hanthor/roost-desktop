@@ -15,6 +15,12 @@ document_status: draft
 4. Same-UID process threat assumptions under target distributions and viable credential binding for shell/portal/lock services.
 5. AT-SPI behavior across toolkit candidates, Orca workflows, recovery UI, and locked session.
 6. Existing settings/service APIs and semantic compatibility per supported distro.
+7. dconf/GSettings interop (R9): app-level settings ride along free in
+   any session, but desktop-level `org.gnome.desktop.*` schemas (font,
+   theme, idle delay, keybindings) have no RWD counterpart. Decide:
+   shim schemas, documented divergence, or a translating settings
+   daemon — and name where shell/toolkit spikes source font/theme/scale
+   until then. Do not let spikes hardcode these sources first.
 
 ## Evidence sources to pin
 

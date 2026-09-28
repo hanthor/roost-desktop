@@ -28,6 +28,9 @@ use smithay::{
     },
 };
 
+pub mod state;
+pub mod supervise;
+
 /// Compositor dispatch state: protocol states plus their handlers.
 pub struct State {
     compositor_state: CompositorState,

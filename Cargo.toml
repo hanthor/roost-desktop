@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/compositor"]
+members = [
+    "crates/compositor",
+    "crates/shell-control-schema",
+    "crates/shell-host",
+]
 
 # Pinned per ADR 0001 (docs/adr/0001-nested-backend-smithay-pin.md).
 # Exact pins keep the Gate #1 verification reproducible.
@@ -8,5 +12,7 @@ members = ["crates/compositor"]
 smithay = { version = "=0.7.0", default-features = false, features = ["wayland_frontend"] }
 calloop = "=0.14.4"
 wayland-protocols = "=0.32.13"
+wayland-protocols-wlr = "=0.3.12"
 wayland-server = "=0.31.14"
 wayland-client = "=0.31.15"
+postcard = "=1.1.3"
