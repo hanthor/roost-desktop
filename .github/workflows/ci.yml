@@ -29,7 +29,9 @@ jobs:
       # Nested session needs a display plus X input/capture tools; the
       # journey asserts liveness and visible reaction, humans review
       # the uploaded frames.
-      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev pkg-config xvfb xdotool x11-apps scrot shellcheck
+      # libxkbcommon-x11 is dlopened at winit-backend startup (not at
+      # build time), so the nested run needs it even though check does not.
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev pkg-config xvfb xdotool x11-apps scrot shellcheck
       - run: shellcheck scripts/rwd-journey scripts/rwd-nested
       - run: scripts/rwd-journey --artifacts journey-artifacts
       - uses: actions/upload-artifact@v4
