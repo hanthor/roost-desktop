@@ -16,7 +16,9 @@
 # Chromium runs DISPLAY-less with --ozone-platform=wayland, so a mapped
 # window proves the ozone path through our xdg-shell, shm scanout, and
 # the data-device global toolkit clients require. The playwright venv
-# lives outside the artifacts dir to keep the upload small.
+# lives outside the artifacts dir to keep the upload small. After the
+# tiled frame, Alt+F4 politely closes Chromium (its exit, unprompted
+# by any kill, proves the xdg_toplevel close path on a real client).
 set -eu
 
 unset CDPATH
@@ -134,8 +136,7 @@ python3 -m venv "$PW_ENV"
 "$PW_ENV/bin/python" -m playwright install --with-deps chromium
 
 READY="$ARTIFACTS/chromium-ready"
-DONE="$ARTIFACTS/chromium-done"
-rm -f "$READY" "$DONE"
+rm -f "$READY"
 cat >"$ARTIFACTS/chromium_app.py" <<'PYEOF'
 import os, sys, time
 from playwright.sync_api import sync_playwright
@@ -158,11 +159,17 @@ with sync_playwright() as p:
     page.goto(url)
     page.wait_for_timeout(5000)
     open(os.path.join(artifacts, "chromium-ready"), "w").write("ready")
-    for _ in range(90):
+    # Idle until the harness closes the window (Alt+F4 polite close):
+    # a dead browser connection ends the loop so the script exits on
+    # its own; close() is best-effort once the browser is already gone.
+    for _ in range(120):
         time.sleep(1)
-        if os.path.exists(os.path.join(artifacts, "chromium-done")):
+        if not browser.is_connected():
             break
-    browser.close()
+    try:
+        browser.close()
+    except Exception:
+        pass
 PYEOF
 WAYLAND_DISPLAY="$SOCKET" \
     "$PW_ENV/bin/python" "$ARTIFACTS/chromium_app.py" "$ARTIFACTS" \
@@ -194,9 +201,28 @@ xdotool key Super_L+Left
 sleep 2
 scrot "$ARTIFACTS/03-tiled.png" >/dev/null
 echo "rwd-app-content: shot 03-tiled.png"
-touch "$DONE"
+
+# Alt+F4 asks Chromium to close politely; it must exit on its own —
+# no kill, no DONE file. A lingering process means the chord or the
+# close request regressed, and the run fails here instead of hanging
+# on wait (the EXIT trap still cleans up).
+xdotool key Alt_L+F4
+CLOSED=""
+for _ in $(seq 1 30); do
+    if ! kill -0 "$CHROMIUM_PID" 2>/dev/null; then
+        CLOSED=1
+        break
+    fi
+    sleep 2
+done
+if [ -z "$CLOSED" ]; then
+    echo "rwd-app-content: chromium ignored Alt+F4 polite close" >&2
+    tail -30 "$LOG" >&2 || true
+    exit 1
+fi
 wait "$CHROMIUM_PID" 2>/dev/null || true
 CHROMIUM_PID=""
+echo "rwd-app-content: chromium exited on polite close"
 
 echo "rwd-app-content: asserting"
 if ! kill -0 "$COMPOSITOR_PID" 2>/dev/null; then
@@ -226,6 +252,11 @@ if cmp -s "$ARTIFACTS/02-app.png" "$ARTIFACTS/03-tiled.png"; then
 fi
 if ! grep -q "Tiled(Left)" "$LOG"; then
     echo "rwd-app-content: no tile-left layout in nested log" >&2
+    tail -30 "$LOG" >&2 || true
+    exit 1
+fi
+if ! grep -q "close requested" "$LOG"; then
+    echo "rwd-app-content: no polite close in nested log" >&2
     tail -30 "$LOG" >&2 || true
     exit 1
 fi
