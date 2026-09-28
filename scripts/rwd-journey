@@ -121,7 +121,9 @@ xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2)) click 1
 sleep 3
 
 shot() {
-    scrot -u "$ARTIFACTS/$1" >/dev/null
+    # Root capture, not a window shot: with no window manager there is
+    # no frame to redirect, and the private Xvfb shows only our window.
+    scrot "$ARTIFACTS/$1" >/dev/null
     echo "rwd-journey: shot $1"
 }
 
