@@ -510,12 +510,20 @@ fn snapshot_view(windows: &[WindowInfo], workspaces: &[WorkspaceInfo]) -> Snapsh
     SnapshotView {
         windows: windows
             .iter()
-            .map(|w| WindowEntry::new(w.id, w.title.clone(), w.focused))
+            .map(|w| {
+                WindowEntry::new(w.id, w.title.clone(), w.focused)
+                    .with_workspace(u32::try_from(w.workspace).unwrap_or(u32::MAX))
+            })
             .collect(),
         workspaces: workspaces
             .iter()
             .map(|ws| u32::try_from(ws.id).unwrap_or(u32::MAX))
             .collect(),
+        active_workspace: workspaces
+            .iter()
+            .find(|ws| ws.active)
+            .map(|ws| u32::try_from(ws.id).unwrap_or(u32::MAX))
+            .unwrap_or(0),
     }
 }
 
@@ -554,6 +562,14 @@ fn apply_ops(
                 }
             }
             StateOp::WorkspaceChanged(info) => {
+                // Active is exclusive: a newly-active workspace clears
+                // the flag everywhere else, so a single op per switch
+                // converges the shadow without a resnapshot.
+                if info.active {
+                    for ws in shadow_workspaces.iter_mut() {
+                        ws.active = ws.id == info.id;
+                    }
+                }
                 if let Some(slot) = shadow_workspaces.iter_mut().find(|ws| ws.id == info.id) {
                     *slot = info.clone();
                 } else {

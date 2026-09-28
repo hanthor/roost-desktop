@@ -186,6 +186,7 @@ struct PaintKey {
     selected: Option<u64>,
     windows: usize,
     favorites: usize,
+    active_workspace: u32,
     width: i32,
     height: i32,
 }
@@ -392,6 +393,7 @@ impl ShellHost {
             selected: self.model.selected(),
             windows: self.model.windows().len(),
             favorites: self.favorites.ids().len(),
+            active_workspace: self.model.active_workspace(),
             width: overview.width,
             height: overview.height,
         };
@@ -561,6 +563,7 @@ impl ShellHost {
         let model = client.model();
         self.model
             .apply_window_list(model.windows().to_vec(), model.workspaces().to_vec());
+        self.model.set_active_workspace(model.active_workspace());
         if let Some(selected) = model.selected() {
             let _ = self.model.select_window(selected);
         }

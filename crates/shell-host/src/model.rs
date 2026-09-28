@@ -16,7 +16,8 @@
 ///
 /// `id` is the compositor-issued opaque window id (never reused during a
 /// compositor session per the 001 spec); `title` is untrusted
-/// client-provided text; `active` marks the focused/selected window.
+/// client-provided text; `active` marks the focused/selected window;
+/// `workspace` scopes overview rendering to the active workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowEntry {
     /// Compositor-issued opaque window id.
@@ -25,6 +26,8 @@ pub struct WindowEntry {
     pub title: String,
     /// Whether this window is the currently active one.
     pub active: bool,
+    /// Workspace this window belongs to (0 when unknown).
+    pub workspace: u32,
 }
 
 impl WindowEntry {
@@ -34,7 +37,14 @@ impl WindowEntry {
             id,
             title: title.into(),
             active,
+            workspace: 0,
         }
+    }
+
+    /// Attach the workspace, for overview filtering.
+    pub fn with_workspace(mut self, workspace: u32) -> Self {
+        self.workspace = workspace;
+        self
     }
 }
 
@@ -46,6 +56,7 @@ impl WindowEntry {
 pub struct ShellModel {
     windows: Vec<WindowEntry>,
     workspaces: Vec<u32>,
+    active_workspace: u32,
     overview_open: bool,
 }
 
@@ -63,6 +74,17 @@ impl ShellModel {
     /// Known workspace ids, sorted and deduplicated.
     pub fn workspaces(&self) -> &[u32] {
         &self.workspaces
+    }
+
+    /// Active workspace id scoping overview rendering.
+    pub fn active_workspace(&self) -> u32 {
+        self.active_workspace
+    }
+
+    /// Track the compositor's active workspace (snapshot application
+    /// and exclusive `WorkspaceChanged` ops converge here).
+    pub fn set_active_workspace(&mut self, workspace: u32) {
+        self.active_workspace = workspace;
     }
 
     /// Whether the overview is currently open.
@@ -136,11 +158,13 @@ impl ShellModel {
     /// Replace state from a plain snapshot view.
     ///
     /// Same semantics as [`ShellModel::apply_window_list`]: order kept,
-    /// first-active-wins, overview flag untouched. This is the method the
+    /// first-active-wins, overview flag untouched. The view's active
+    /// workspace scopes overview rendering. This is the method the
     /// control-protocol adapter (`control.rs`) calls after mapping the
     /// schema `Snapshot` into a [`SnapshotView`].
     pub fn apply_snapshot_view(&mut self, snapshot: SnapshotView) {
         self.apply_window_list(snapshot.windows, snapshot.workspaces);
+        self.set_active_workspace(snapshot.active_workspace);
     }
 }
 
@@ -159,6 +183,8 @@ pub struct SnapshotView {
     pub windows: Vec<WindowEntry>,
     /// Workspace ids (sorted and deduped on apply).
     pub workspaces: Vec<u32>,
+    /// Active workspace id scoping overview rendering.
+    pub active_workspace: u32,
 }
 
 #[cfg(test)]
@@ -253,6 +279,24 @@ mod tests {
         model.toggle_overview();
         model.toggle_overview();
         assert_eq!(model.selected(), Some(1));
+    }
+
+    #[test]
+    fn apply_snapshot_view_scopes_active_workspace() {
+        let mut model = ShellModel::new();
+        model.apply_snapshot_view(SnapshotView {
+            windows: vec![
+                WindowEntry::new(1, "alpha", false).with_workspace(0),
+                WindowEntry::new(2, "beta", true).with_workspace(1),
+            ],
+            workspaces: vec![1, 0, 1],
+            active_workspace: 1,
+        });
+        assert_eq!(model.active_workspace(), 1);
+        assert_eq!(model.workspaces(), &[0, 1]);
+        assert_eq!(model.selected(), Some(2));
+        model.set_active_workspace(0);
+        assert_eq!(model.active_workspace(), 0);
     }
 
     #[test]

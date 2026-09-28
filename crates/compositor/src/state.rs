@@ -58,6 +58,9 @@ pub enum StateChange {
     WindowUpdated { window: WindowEntry },
     /// Keyboard focus moved (None = no window focused).
     FocusChanged { focused: Option<u64> },
+    /// Active workspace switched; empty non-active workspaces were
+    /// pruned from the list at the same revision.
+    ActiveWorkspaceChanged { previous: u32, active: u32 },
 }
 
 /// Full copy of the model at one revision, for snapshot-on-reconnect.
@@ -69,6 +72,8 @@ pub struct Snapshot {
     pub windows: Vec<WindowEntry>,
     /// Known workspace ids, sorted and deduplicated.
     pub workspaces: Vec<u32>,
+    /// Active workspace id.
+    pub active: u32,
     /// Focused window id, if any.
     pub focused: Option<u64>,
 }
@@ -97,23 +102,36 @@ pub struct WindowUpdate {
 }
 
 /// Compositor-owned revisioned window/workspace/focus model.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct StateModel {
     revision: u64,
     windows: BTreeMap<u64, WindowEntry>,
     workspaces: Vec<u32>,
+    active: u32,
     focused: Option<u64>,
     next_id: u64,
     changes: VecDeque<(u64, StateChange)>,
 }
 
+impl Default for StateModel {
+    /// Empty model: workspace 0 registered and active, no windows.
+    fn default() -> Self {
+        Self {
+            revision: 0,
+            windows: BTreeMap::new(),
+            workspaces: vec![0],
+            active: 0,
+            focused: None,
+            next_id: 1,
+            changes: VecDeque::new(),
+        }
+    }
+}
+
 impl StateModel {
     /// Empty model at revision 0. Ids start at 1 (0 is never issued).
     pub fn new() -> Self {
-        Self {
-            next_id: 1,
-            ..Self::default()
-        }
+        Self::default()
     }
 
     /// Current revision; bumped by exactly one per successful mutation.
@@ -139,6 +157,37 @@ impl StateModel {
     /// Focused window id, if any.
     pub fn focused(&self) -> Option<u64> {
         self.focused
+    }
+
+    /// Active workspace id (defaults to 0; always registered).
+    pub fn active_workspace(&self) -> u32 {
+        self.active
+    }
+
+    /// Switch the active workspace, registering it if new and pruning
+    /// empty non-active workspaces at the same revision. Idempotent:
+    /// re-selecting the active workspace returns true without a bump.
+    /// Appends `ActiveWorkspaceChanged`.
+    pub fn set_active_workspace(&mut self, workspace: u32) -> bool {
+        if self.active == workspace {
+            return true;
+        }
+        let previous = self.active;
+        self.active = workspace;
+        self.register_workspace(workspace);
+        self.prune_workspaces();
+        self.commit(StateChange::ActiveWorkspaceChanged {
+            previous,
+            active: workspace,
+        });
+        true
+    }
+
+    /// Drop workspace ids with no windows except the active one. The
+    /// list converges through snapshots; removals carry no delta op.
+    fn prune_workspaces(&mut self) {
+        self.workspaces
+            .retain(|id| *id == self.active || self.windows.values().any(|w| w.workspace == *id));
     }
 
     /// Number of retained change-log entries (bounded by [`MAX_CHANGE_LOG`]).
@@ -174,6 +223,7 @@ impl StateModel {
         if self.windows.remove(&id).is_none() {
             return false;
         }
+        self.prune_workspaces();
         self.commit(StateChange::WindowRemoved { id });
         if self.focused == Some(id) {
             self.focused = None;
@@ -240,6 +290,7 @@ impl StateModel {
             revision: self.revision,
             windows: self.windows.values().cloned().collect(),
             workspaces: self.workspaces.clone(),
+            active: self.active,
             focused: self.focused,
         }
     }
@@ -595,7 +646,8 @@ mod tests {
         assert!(m.set_focused(Some(a)));
         let snap = m.snapshot();
         assert_eq!(snap.revision, m.revision());
-        assert_eq!(snap.workspaces, vec![1, 2]);
+        assert_eq!(snap.workspaces, vec![0, 1, 2]);
+        assert_eq!(snap.active, 0);
         assert_eq!(snap.focused, Some(a));
         let ids: Vec<u64> = snap.windows.iter().map(|w| w.id).collect();
         assert_eq!(ids, vec![a.min(b), a.max(b)]);
@@ -794,5 +846,59 @@ mod tests {
         let title = m.window(id2).unwrap().title.clone();
         assert!(title.len() <= MAX_TITLE_LEN);
         assert!(emoji.starts_with(&title));
+    }
+
+    #[test]
+    fn active_workspace_defaults_to_zero_and_is_registered() {
+        let m = StateModel::new();
+        assert_eq!(m.active_workspace(), 0);
+        assert_eq!(m.workspaces(), &[0]);
+        assert_eq!(m.snapshot().active, 0);
+    }
+
+    #[test]
+    fn set_active_registers_prunes_and_logs() {
+        let mut m = StateModel::new();
+        let a = m.insert("a", None, 0);
+        let b = m.insert("b", None, 5);
+        // Idempotent reselect: no bump, no change.
+        let rev = m.revision();
+        assert!(m.set_active_workspace(0));
+        assert_eq!(m.revision(), rev);
+        // Switch registers nothing new here (5 known) and logs one change.
+        assert!(m.set_active_workspace(5));
+        assert_eq!(m.active_workspace(), 5);
+        assert_eq!(m.workspaces(), &[0, 5]);
+        let tail = m.changes_since(rev).unwrap();
+        assert!(matches!(
+            tail.last().unwrap().1,
+            StateChange::ActiveWorkspaceChanged {
+                previous: 0,
+                active: 5
+            }
+        ));
+        // Switching away prunes the emptied workspace 0... except it
+        // still holds window a. Move a over, then 0 drops on next switch.
+        assert!(m.update(
+            a,
+            WindowUpdate {
+                workspace: Some(5),
+                ..Default::default()
+            }
+        ));
+        assert!(m.set_active_workspace(0));
+        assert_eq!(m.workspaces(), &[0, 5]);
+        assert!(m.set_active_workspace(5));
+        assert_eq!(m.workspaces(), &[5]);
+        let _ = b;
+    }
+
+    #[test]
+    fn remove_prunes_emptied_workspaces() {
+        let mut m = StateModel::new();
+        let a = m.insert("a", None, 3);
+        assert_eq!(m.workspaces(), &[0, 3]);
+        assert!(m.remove(a));
+        assert_eq!(m.workspaces(), &[0]);
     }
 }

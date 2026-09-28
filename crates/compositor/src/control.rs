@@ -556,7 +556,7 @@ fn snapshot_message(model: &StateModel, mint: &dyn Fn(Option<&str>) -> String) -
             .map(|id| WorkspaceInfo {
                 id: *id as u64,
                 name: None,
-                active: false,
+                active: *id == snap.active,
             })
             .collect(),
     }
@@ -593,6 +593,15 @@ fn state_op(change: &StateChange, mint: &dyn Fn(Option<&str>) -> String) -> Opti
         }
         StateChange::FocusChanged { focused: Some(id) } => Some(StateOp::WindowFocused { id: *id }),
         StateChange::FocusChanged { focused: None } => None,
+        // Active is exclusive shell-side (applying active:true clears
+        // the rest), so one op carries the switch.
+        StateChange::ActiveWorkspaceChanged { active, .. } => {
+            Some(StateOp::WorkspaceChanged(WorkspaceInfo {
+                id: *active as u64,
+                name: None,
+                active: true,
+            }))
+        }
     }
 }
 
@@ -623,18 +632,15 @@ fn apply_command(
             CommandStatus::Applied
         }
         CommandKind::FocusWorkspace { workspace } => {
-            // The R4 model tracks workspace membership but no active
-            // workspace, so a known workspace is accepted without mutation.
-            let known = u32::try_from(*workspace)
-                .map(|ws| model.workspaces().contains(&ws))
-                .unwrap_or(false);
-            if known {
-                CommandStatus::Applied
-            } else {
-                CommandStatus::Denied {
-                    reason: "unknown workspace".to_owned(),
-                }
-            }
+            // Dynamic workspaces: any representable id switches
+            // (registering if new); focus lands on the tick's reconcile.
+            let Ok(workspace) = u32::try_from(*workspace) else {
+                return CommandStatus::Denied {
+                    reason: "workspace id out of range".to_owned(),
+                };
+            };
+            model.set_active_workspace(workspace);
+            CommandStatus::Applied
         }
         CommandKind::ToggleOverview => {
             // Flip the hub-shared intent; the hub broadcasts the new

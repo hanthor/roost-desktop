@@ -8,8 +8,9 @@
 # the nested compositor with its supervised shell, then drives the
 # Milestone-1 journey with real X input and captures a screenshot per
 # stage: baseline, Super-tap overview, typed search, Enter, Escape
-# return. Exits nonzero on any failure (dead process, panic in logs,
-# missing or byte-identical screenshots). PNGs plus logs land in the
+# return, Super+PageDown workspace switch. Exits nonzero on any failure
+# (dead process, panic in logs, missing or byte-identical screenshots,
+# no workspace-switch line in the log). PNGs plus logs land in the
 # artifacts dir for upload; a human reviews the frames, the script only
 # proves the session lived and visibly reacted.
 #
@@ -167,6 +168,13 @@ xdotool key Escape
 sleep 2
 shot "05-after-escape.png"
 
+# Super+PageDown chord: switch to workspace 1. Both workspaces are
+# empty, so the shot matches baseline pixel-wise; the compositor's
+# "workspace now" log line is the signal, asserted below.
+xdotool key Super_L+Page_Down
+sleep 2
+shot "06-workspace.png"
+
 echo "rwd-journey: asserting"
 if ! kill -0 "$COMPOSITOR_PID" 2>/dev/null; then
     echo "rwd-journey: compositor died mid-journey" >&2
@@ -178,7 +186,12 @@ if grep -q "panicked" "$LOG"; then
     grep "panicked" "$LOG" >&2
     exit 1
 fi
-for shot_file in 01-baseline 02-overview 03-search 04-after-enter 05-after-escape; do
+if ! grep -q "rwd-compositor: workspace now 1" "$LOG"; then
+    echo "rwd-journey: no workspace switch in nested log" >&2
+    tail -30 "$LOG" >&2 || true
+    exit 1
+fi
+for shot_file in 01-baseline 02-overview 03-search 04-after-enter 05-after-escape 06-workspace; do
     path="$ARTIFACTS/$shot_file.png"
     if [ ! -s "$path" ]; then
         echo "rwd-journey: missing screenshot $path" >&2

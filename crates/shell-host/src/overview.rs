@@ -111,7 +111,14 @@ impl OverviewCanvas {
     pub fn render(&mut self, model: &ShellModel, fav_count: usize) {
         self.rect(0, 0, self.width, self.height, BG);
         let selected = model.selected();
-        for (i, window) in model.windows().iter().take(MAX_DRAWN_WINDOWS).enumerate() {
+        let active = model.active_workspace();
+        let windows: Vec<&crate::model::WindowEntry> = model
+            .windows()
+            .iter()
+            .filter(|w| w.workspace == active)
+            .take(MAX_DRAWN_WINDOWS)
+            .collect();
+        for (i, window) in windows.iter().enumerate() {
             let col = i as i32 % COLS;
             let row = i as i32 / COLS;
             let x = ORIGIN_X + col * (BLOCK_W + GAP);
@@ -215,6 +222,29 @@ mod tests {
             ACCENT
         );
         assert_eq!(pixel(&canvas, ORIGIN_X, FAV_Y - 10), BG);
+    }
+
+    #[test]
+    fn render_shows_only_active_workspace() {
+        use crate::model::SnapshotView;
+        let mut model = ShellModel::new();
+        model.apply_snapshot_view(SnapshotView {
+            windows: vec![
+                WindowEntry::new(1, "alpha", false).with_workspace(0),
+                WindowEntry::new(2, "beta", true).with_workspace(1),
+            ],
+            workspaces: vec![0, 1],
+            active_workspace: 1,
+        });
+        // Only beta (ws 1) draws: first block is the selected fill.
+        let mut canvas = OverviewCanvas::new(1280, 800);
+        canvas.render(&model, 0);
+        assert_eq!(pixel(&canvas, ORIGIN_X + 10, ORIGIN_Y + 10), BLOCK_SELECTED);
+        // Flip to workspace 0: the same slot now shows plain alpha.
+        model.set_active_workspace(0);
+        let mut canvas = OverviewCanvas::new(1280, 800);
+        canvas.render(&model, 0);
+        assert_eq!(pixel(&canvas, ORIGIN_X + 10, ORIGIN_Y + 10), BLOCK);
     }
 
     #[test]

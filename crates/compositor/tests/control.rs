@@ -74,7 +74,10 @@ fn hello_accept_replies_version_and_snapshot() {
     };
     assert_eq!(revision, 0);
     assert!(windows.is_empty());
-    assert!(workspaces.is_empty());
+    // Workspace 0 is always registered and active on an empty model.
+    assert_eq!(workspaces.len(), 1);
+    assert_eq!(workspaces[0].id, 0);
+    assert!(workspaces[0].active);
     assert_eq!(session.last_revision(), 0);
 }
 
@@ -400,8 +403,16 @@ fn focus_workspace_and_toggle_overview() {
 
     for (id, kind, applied) in [
         (11u64, CommandKind::FocusWorkspace { workspace: 1 }, true),
-        (12u64, CommandKind::FocusWorkspace { workspace: 999 }, false),
+        // Dynamic workspaces: unknown ids switch (registering if new).
+        (12u64, CommandKind::FocusWorkspace { workspace: 999 }, true),
         (13u64, CommandKind::ToggleOverview, true),
+        (
+            14u64,
+            CommandKind::FocusWorkspace {
+                workspace: u64::MAX,
+            },
+            false,
+        ),
     ] {
         client_write(&mut client, &Message::Command { id, kind });
         let handled = session.handle_next(&mut model).unwrap();
@@ -412,4 +423,61 @@ fn focus_workspace_and_toggle_overview() {
         assert_eq!(back, id);
         assert_eq!(status == CommandStatus::Applied, applied);
     }
+    assert_eq!(model.active_workspace(), 999);
+}
+
+#[test]
+fn focus_workspace_announces_active_and_resnapshots() {
+    let mut model = StateModel::new();
+    let _ = model.insert("term", None, 0);
+    let (conn, mut client) = pair();
+    let mut session = handshake(conn, &mut client, &model);
+    assert!(matches!(client_read(&mut client), Message::Hello { .. }));
+    assert!(matches!(client_read(&mut client), Message::Snapshot { .. }));
+
+    client_write(
+        &mut client,
+        &Message::Command {
+            id: 1,
+            kind: CommandKind::FocusWorkspace { workspace: 1 },
+        },
+    );
+    assert_eq!(
+        session.handle_next(&mut model).unwrap(),
+        Handled::CommandResult {
+            id: 1,
+            applied: true
+        }
+    );
+    assert!(matches!(
+        client_read(&mut client),
+        Message::CommandResult { .. }
+    ));
+    // The switch streams as a single active-exclusive delta op.
+    let emitted = session.emit_deltas(&model).unwrap();
+    assert!(matches!(emitted, Emitted::Changes { .. }));
+    let Message::Changes { ops, .. } = client_read(&mut client) else {
+        panic!("expected Changes after FocusWorkspace");
+    };
+    assert!(
+        ops.iter().any(|op| matches!(
+            op,
+            StateOp::WorkspaceChanged(w) if w.id == 1 && w.active
+        )),
+        "unexpected ops: {ops:?}"
+    );
+
+    // A fresh handshake snapshots the moved active flag.
+    let (conn2, mut client2) = pair();
+    let _ = handshake(conn2, &mut client2, &model);
+    assert!(matches!(client_read(&mut client2), Message::Hello { .. }));
+    let Message::Snapshot { workspaces, .. } = client_read(&mut client2) else {
+        panic!("expected Snapshot on re-handshake");
+    };
+    let (zero, one) = (
+        workspaces.iter().find(|w| w.id == 0).unwrap(),
+        workspaces.iter().find(|w| w.id == 1).unwrap(),
+    );
+    assert!(!zero.active);
+    assert!(one.active);
 }

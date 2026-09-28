@@ -69,6 +69,10 @@ pub struct WindowManager {
     keyboard: Option<KeyboardHandle<State>>,
     pointer: Option<PointerHandle<State>>,
     pointer_pos: Point<f64, Logical>,
+    /// Super held (either side) for workspace keybindings.
+    super_held: bool,
+    /// Shift held (either side) for move-window keybindings.
+    shift_held: bool,
 }
 
 impl WindowManager {
@@ -93,6 +97,8 @@ impl WindowManager {
             keyboard,
             pointer,
             pointer_pos: (0.0, 0.0).into(),
+            super_held: false,
+            shift_held: false,
         }
     }
 
@@ -107,12 +113,21 @@ impl WindowManager {
     }
 
     /// Windows bottom-to-top with their geometry, for frame production.
+    /// Only the active workspace renders; other workspaces keep their
+    /// surfaces mapped but hidden.
     pub fn visible_windows(&self) -> Vec<(ToplevelSurface, Rectangle<i32, Logical>)> {
+        let active = self.model.active_workspace();
         self.stacking
             .iter()
+            .copied()
+            .filter(|id| {
+                self.model
+                    .window(*id)
+                    .is_some_and(|entry| entry.workspace == active)
+            })
             .filter_map(|id| {
                 self.windows
-                    .get(id)
+                    .get(&id)
                     .map(|w| (w.surface.clone(), w.geometry))
             })
             .collect()
@@ -145,6 +160,19 @@ impl WindowManager {
         for id in gone {
             self.unmap(state, id);
         }
+        // Focus tracks the active workspace: a model-level switch (e.g.
+        // shell FocusWorkspace) that strands focus on a hidden window
+        // refocuses the new topmost here, converging seat focus and
+        // Activated states on the next tick.
+        let active = self.model.active_workspace();
+        let stranded = self
+            .model
+            .focused()
+            .and_then(|id| self.model.window(id))
+            .is_some_and(|entry| entry.workspace != active);
+        if stranded {
+            self.focus_topmost(state, active);
+        }
         let _ = seen;
     }
 
@@ -153,7 +181,9 @@ impl WindowManager {
     fn map(&mut self, state: &mut State, surface: &ToplevelSurface) -> u64 {
         let title = read_title(surface).unwrap_or_else(|| "untitled".to_owned());
         let app_id = read_app_id(surface);
-        let id = self.model.insert(&title, app_id.as_deref(), 0);
+        let id = self
+            .model
+            .insert(&title, app_id.as_deref(), self.model.active_workspace());
         let offset = self.cascade % 320;
         self.cascade = self.cascade.wrapping_add(CASCADE_STEP);
         let geometry = Rectangle {
@@ -255,12 +285,18 @@ impl WindowManager {
         window.surface.send_configure();
     }
 
-    /// Topmost window containing `pos`, if any.
+    /// Topmost window containing `pos`, if any. Only the active
+    /// workspace is hit-testable; hidden workspaces never take focus.
     pub fn window_at(&self, pos: Point<f64, Logical>) -> Option<u64> {
+        let active = self.model.active_workspace();
         self.stacking.iter().rev().copied().find(|id| {
-            self.windows
-                .get(id)
-                .is_some_and(|w| contains(w.geometry, pos))
+            self.model.window(*id).is_some_and(|entry| {
+                entry.workspace == active
+                    && self
+                        .windows
+                        .get(id)
+                        .is_some_and(|w| contains(w.geometry, pos))
+            })
         })
     }
 
@@ -370,19 +406,121 @@ impl WindowManager {
         true
     }
 
-    /// Move a window to another workspace (the single-workspace slice
-    /// still tracks membership for the shell contract).
-    pub fn move_to_workspace(&mut self, id: u64, workspace: u32) -> bool {
+    /// Move a window to another workspace (registered if new). Focus
+    /// follows the window when it leaves the active workspace.
+    pub fn move_to_workspace(&mut self, state: &mut State, id: u64, workspace: u32) -> bool {
         if !self.windows.contains_key(&id) {
             return false;
         }
-        self.model.update(
+        if !self.model.update(
             id,
             WindowUpdate {
                 workspace: Some(workspace),
                 ..Default::default()
             },
-        )
+        ) {
+            return false;
+        }
+        if Some(id) == self.model.focused()
+            && self
+                .model
+                .window(id)
+                .is_some_and(|entry| entry.workspace != self.model.active_workspace())
+        {
+            self.focus_topmost(state, self.model.active_workspace());
+        }
+        true
+    }
+
+    /// Switch the active workspace, focusing its topmost window (or
+    /// nothing when empty). Returns false for unknown ids.
+    pub fn switch_workspace(&mut self, state: &mut State, workspace: u32) -> bool {
+        if !self.model.workspaces().contains(&workspace) {
+            return false;
+        }
+        if !self.model.set_active_workspace(workspace) {
+            return false;
+        }
+        self.focus_topmost(state, workspace);
+        true
+    }
+
+    /// Switch relative to the active workspace (-1 previous, +1 next)
+    /// over the sorted known ids. Unknown target ids are created,
+    /// matching dynamic-workspace policy.
+    pub fn switch_relative(&mut self, state: &mut State, delta: i32) -> bool {
+        let known = self.model.workspaces();
+        let active = self.model.active_workspace();
+        let pos = known.iter().position(|id| *id == active);
+        let target = match (pos, delta) {
+            (Some(i), _) => {
+                let next = i as i32 + delta;
+                if next < 0 {
+                    return false;
+                }
+                known.get(next as usize).copied().or_else(|| {
+                    // Past the last workspace: create the next id.
+                    (delta > 0).then(|| known.iter().max().copied().unwrap_or(0) + 1)
+                })
+            }
+            // Active unknown cannot happen (always registered), but a
+            // first workspace still needs creation on +1.
+            (None, _) if delta > 0 => Some(active + 1),
+            (None, _) => None,
+        };
+        let Some(target) = target else {
+            return false;
+        };
+        if !self.model.set_active_workspace(target) {
+            return false;
+        }
+        self.focus_topmost(state, target);
+        true
+    }
+
+    /// Move the focused window one workspace over and follow it.
+    /// Returns false with no focused window.
+    pub fn move_focused_relative(&mut self, state: &mut State, delta: i32) -> bool {
+        let Some(id) = self.model.focused() else {
+            return false;
+        };
+        let Some(entry) = self.model.window(id) else {
+            return false;
+        };
+        let current = entry.workspace;
+        let target = if delta < 0 {
+            current.saturating_sub(delta.unsigned_abs())
+        } else {
+            current.saturating_add(delta.unsigned_abs())
+        };
+        if !self.move_to_workspace(state, id, target) {
+            return false;
+        }
+        if !self.model.set_active_workspace(target) {
+            return false;
+        }
+        self.apply_focus(state, Some(id));
+        true
+    }
+
+    /// Track Super/Shift hold state for workspace keybindings. The
+    /// modifier events themselves still forward to clients.
+    fn track_workspace_modifiers(&mut self, keycode: u32, pressed: bool) {
+        if keycode == SUPER_LEFT_KEYCODE || keycode == SUPER_RIGHT_KEYCODE {
+            self.super_held = pressed;
+        } else if keycode == SHIFT_LEFT_KEYCODE || keycode == SHIFT_RIGHT_KEYCODE {
+            self.shift_held = pressed;
+        }
+    }
+
+    /// Focus the topmost window on `workspace`, or unfocus when empty.
+    fn focus_topmost(&mut self, state: &mut State, workspace: u32) {
+        let topmost = self.stacking.iter().rev().copied().find(|id| {
+            self.model
+                .window(*id)
+                .is_some_and(|entry| entry.workspace == workspace)
+        });
+        self.apply_focus(state, topmost);
     }
 
     /// Geometry of one window, for frame production and tests.
@@ -448,6 +586,13 @@ pub const XKB_X11_OFFSET: u32 = 8;
 pub const SUPER_LEFT_KEYCODE: u32 = 125;
 pub const SUPER_RIGHT_KEYCODE: u32 = 126;
 pub const ESCAPE_KEYCODE: u32 = 1;
+/// Workspace keybindings (evdev): Super+PageUp/PageDown switches the
+/// active workspace, holding Shift as well moves the focused window
+/// and follows it.
+pub const PAGE_UP_KEYCODE: u32 = 104;
+pub const PAGE_DOWN_KEYCODE: u32 = 109;
+pub const SHIFT_LEFT_KEYCODE: u32 = 42;
+pub const SHIFT_RIGHT_KEYCODE: u32 = 54;
 /// Hot-corner trigger region in logical pixels from the top-left.
 pub const HOT_CORNER_PX: f64 = 8.0;
 /// Activities-strip trigger: button presses in the top strip open the
@@ -527,6 +672,9 @@ impl TriggerState {
 
 impl WindowManager {
     /// Dispatch one backend input event into focus and delivery.
+    /// Super+PageUp/PageDown switches workspace (with Shift: moves the
+    /// focused window and follows it); those presses are consumed, all
+    /// other keys — modifiers included — still reach clients.
     pub fn on_input(&mut self, state: &mut State, input: ManagerInput) {
         match input {
             ManagerInput::Key {
@@ -534,7 +682,29 @@ impl WindowManager {
                 pressed,
                 time,
             } => {
-                self.keyboard_key(state, keycode, pressed, time);
+                self.track_workspace_modifiers(keycode, pressed);
+                if pressed
+                    && self.super_held
+                    && (keycode == PAGE_UP_KEYCODE || keycode == PAGE_DOWN_KEYCODE)
+                {
+                    let delta = if keycode == PAGE_UP_KEYCODE { -1 } else { 1 };
+                    let switched = if self.shift_held {
+                        self.move_focused_relative(state, delta)
+                    } else {
+                        self.switch_relative(state, delta)
+                    };
+                    // Greppable end-to-end signal for the CI journey: the
+                    // switch happened (empty workspaces look identical on
+                    // screen, so pixels alone cannot prove it).
+                    if switched {
+                        eprintln!(
+                            "rwd-compositor: workspace now {}",
+                            self.model.active_workspace()
+                        );
+                    }
+                } else {
+                    self.keyboard_key(state, keycode, pressed, time);
+                }
             }
             ManagerInput::Motion { pos, time } => self.pointer_motion(state, pos, time),
             ManagerInput::Button {

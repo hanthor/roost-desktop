@@ -14,7 +14,10 @@
 
 use std::os::unix::net::UnixStream;
 
-use rwd_compositor::windows::WindowManager;
+use rwd_compositor::windows::{
+    ManagerInput, WindowManager, PAGE_DOWN_KEYCODE, PAGE_UP_KEYCODE, SHIFT_LEFT_KEYCODE,
+    SUPER_LEFT_KEYCODE,
+};
 use rwd_compositor::TestCompositor;
 use smithay::utils::{Logical, Point};
 use wayland_client::{
@@ -537,11 +540,121 @@ fn move_and_resize_update_geometry_and_advertise_size() {
 #[test]
 fn move_to_workspace_updates_model() {
     let mut f = two_windows();
-    assert!(f.manager.move_to_workspace(f.id_a, 3));
+    assert!(f.manager.move_to_workspace(&mut f.comp.state, f.id_a, 3));
     assert_eq!(f.manager.model().window(f.id_a).unwrap().workspace, 3);
     // Untouched windows keep their workspace.
     assert_eq!(f.manager.model().window(f.id_b).unwrap().workspace, 0);
-    assert!(!f.manager.move_to_workspace(999, 3));
+    assert!(!f.manager.move_to_workspace(&mut f.comp.state, 999, 3));
+}
+
+#[test]
+fn switch_relative_creates_next_and_clamps_at_first() {
+    let mut f = two_windows();
+    // +1 past the only workspace creates id 1; it is empty, so focus
+    // clears while both windows stay mapped-but-hidden on 0.
+    assert!(f.manager.switch_relative(&mut f.comp.state, 1));
+    assert_eq!(f.manager.model().active_workspace(), 1);
+    assert_eq!(f.manager.model().focused(), None);
+    assert_eq!(f.manager.model().workspaces(), &[0, 1]);
+    assert!(f.manager.visible_windows().is_empty());
+    // -1 returns to 0 and refocuses its topmost window.
+    assert!(f.manager.switch_relative(&mut f.comp.state, -1));
+    assert_eq!(f.manager.model().active_workspace(), 0);
+    assert!(f.manager.model().focused().is_some());
+    assert_eq!(f.manager.visible_windows().len(), 2);
+    // -1 at the first workspace is a no-op.
+    assert!(!f.manager.switch_relative(&mut f.comp.state, -1));
+    assert_eq!(f.manager.model().active_workspace(), 0);
+    // Unknown direct ids are rejected: dynamic creation arrives via the
+    // hub's FocusWorkspace command, not the manager API.
+    assert!(!f.manager.switch_workspace(&mut f.comp.state, 77));
+}
+
+#[test]
+fn move_focused_relative_moves_window_and_follows() {
+    let mut f = two_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    assert!(f.manager.move_focused_relative(&mut f.comp.state, 1));
+    assert_eq!(f.manager.model().window(f.id_b).unwrap().workspace, 1);
+    assert_eq!(f.manager.model().active_workspace(), 1);
+    assert_eq!(f.manager.model().focused(), Some(f.id_b));
+    // Only beta renders now; alpha stays mapped-but-hidden on 0.
+    let visible = f.manager.visible_windows();
+    assert_eq!(visible.len(), 1);
+    // Hidden windows are not hit-testable: motion over alpha's old spot
+    // (outside beta's geometry) leaves focus on beta.
+    f.manager
+        .pointer_motion(&mut f.comp.state, alpha_only(), 4000);
+    assert_eq!(f.manager.model().focused(), Some(f.id_b));
+    // No focused window: the move is rejected.
+    assert!(f.manager.focus(&mut f.comp.state, None));
+    assert!(!f.manager.move_focused_relative(&mut f.comp.state, 1));
+}
+
+fn press(manager: &mut WindowManager, comp: &mut TestCompositor, keycode: u32) {
+    manager.on_input(
+        &mut comp.state,
+        ManagerInput::Key {
+            keycode,
+            pressed: true,
+            time: 5000,
+        },
+    );
+}
+
+fn release(manager: &mut WindowManager, comp: &mut TestCompositor, keycode: u32) {
+    manager.on_input(
+        &mut comp.state,
+        ManagerInput::Key {
+            keycode,
+            pressed: false,
+            time: 5001,
+        },
+    );
+}
+
+#[test]
+fn super_page_keys_switch_and_shift_moves_focused() {
+    let mut f = two_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    f.client_b.keys.clear();
+
+    // Super+PageDown switches to a fresh workspace 1.
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, PAGE_DOWN_KEYCODE);
+    release(&mut f.manager, &mut f.comp, PAGE_DOWN_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    assert_eq!(f.manager.model().active_workspace(), 1);
+    // The switch press is consumed: the client never observes PageDown
+    // (wire keycode is evdev minus 8, as in `focused_client_...`). Only
+    // the Super press arrives: the releases land after the switch
+    // strands focus on the empty workspace, so waiting for a release
+    // would stall the pump.
+    pump(&mut f.comp, &mut f.queue_b, &mut f.client_b, |c| {
+        !c.keys.is_empty()
+    });
+    assert!(
+        !f.client_b
+            .keys
+            .iter()
+            .any(|(key, _)| *key == PAGE_DOWN_KEYCODE - 8),
+        "PageDown must be consumed, got: {:?}",
+        f.client_b.keys
+    );
+
+    // Super+Shift+PageUp moves beta back to 0 and follows it.
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, PAGE_UP_KEYCODE);
+    release(&mut f.manager, &mut f.comp, PAGE_UP_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    assert_eq!(f.manager.model().window(f.id_b).unwrap().workspace, 0);
+    assert_eq!(f.manager.model().active_workspace(), 0);
+    assert_eq!(f.manager.model().focused(), Some(f.id_b));
 }
 
 #[test]

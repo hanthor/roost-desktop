@@ -14,7 +14,8 @@ fn snapshot_sync_then_incremental_then_gap_resnapshot() {
     let snap = m.snapshot();
     assert_eq!(snap.revision, m.revision());
     assert_eq!(snap.windows.len(), 2);
-    assert_eq!(snap.workspaces, vec![1, 2]);
+    assert_eq!(snap.workspaces, vec![0, 1, 2]);
+    assert_eq!(snap.active, 0);
     assert_eq!(snap.focused, Some(b));
 
     // Incremental catch-up from the snapshot revision.
