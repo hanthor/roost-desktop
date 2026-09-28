@@ -145,10 +145,47 @@ identity.
 
 ## Open follow-ups
 
-1. EGL runtime probe on dev hardware (Mesa install; this machine has
-   Vulkan ICDs but no libEGL) — blocks running nested builds here.
-2. Read anvil + upstream tests at tag `v0.7.0`; record deviations.
-3. Control codec choice (postcard vs bincode) + exact frame schema in
-   plan Phase 0.
+1. ~~EGL runtime probe on dev hardware~~ — done 2026-09-27, see
+   “Follow-up results” below.
+2. ~~Read anvil + upstream tests at tag `v0.7.0`~~ — done 2026-09-27,
+   see “Follow-up results” below.
+3. Control codec: postcard 1.1.3 recommended (see “Follow-up
+   results”); exact frame schema and sign-off remain plan Phase 0.
 4. Threat-model review stays a 004 gate; same-UID limits are labeled
    development-only in the 001 ADRs.
+
+## Follow-up results (2026-09-27)
+
+### EGL probe — present, headless nuance recorded
+
+Mesa EGL 25.2.8 is installed (`libegl-mesa0`, DRI modules). `eglinfo`
+reports EGL 1.5 / OpenGL_ES on the **surfaceless** platform; GBM,
+Wayland, and X11 platforms fail to initialize here (no seat or host
+display — expected). Consequence: the GLES nested backend can run on
+this machine only under a host Wayland/X session (or Xvfb-class
+stand-in for smoke tests); surfaceless EGL covers offscreen/CI paths,
+not windowed WSI. Windowed WSI stays unverified until a nested run on
+a live session.
+
+### Anvil review at tag v0.7.0 — smallvil is the slice-1 template
+
+`anvil/src/winit.rs` (`run_winit`): `EventLoop::try_new`,
+`Display::new`, `winit::init::<GlesRenderer>()`, one `Output`, dmabuf
+global with default feedback (v3 fallback + `bind_wl_display` for
+Mesa), `AnvilState::init`, manual `dispatch_new_events` pump loop,
+damage-tracked repaint. Full anvil pulls in `desktop::Space`,
+`OutputDamageTracker`, dmabuf feedback, and xwayland — all deferrable
+for slice 1. `smallvil/` (~480 lines: `main.rs`, `winit.rs`,
+`state.rs`, `input.rs`, handlers) uses the same backend plus
+`ListeningSocketSource::new_auto` and is the recommended starting
+shape alongside `examples/minimal.rs`. No deviations that threaten the
+plan; dmabuf/space/damage are explicit later additions, not hidden
+requirements.
+
+### Codec recommendation — postcard 1.1.3
+
+postcard 1.1.3 (serde-native, tiny, deterministic, no config surface)
+over bincode 3.0.0 (MSRV 1.85.0, config variants are a footgun for a
+version-negotiated protocol). Wire plan: our own u32 length prefix,
+decode from the already-capped slice so the 1 MiB limit is enforced
+before deserialization. Sign-off stays with plan Phase 0.
