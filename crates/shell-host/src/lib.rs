@@ -18,3 +18,4 @@ pub mod model;
 pub mod overview;
 pub mod panel;
 pub mod search;
+pub mod tiles;

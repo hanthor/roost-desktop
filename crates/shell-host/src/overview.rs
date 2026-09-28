@@ -11,6 +11,7 @@
 //! [`OverviewSurface`] owns the Wayland objects.
 
 use crate::model::ShellModel;
+use crate::tiles::{Tile, TileState};
 
 /// Canvas backing pixel format (matches `wl_shm` `Argb8888`).
 pub const BYTES_PER_PIXEL: usize = 4;
@@ -148,7 +149,72 @@ impl OverviewCanvas {
 }
 
 /// Paint the panel strip: backdrop plus a lighter Activities corner.
-pub fn paint_panel(pixels: &mut [u8], width: i32, height: i32) {
+/// Error-indicator color (opaque brick).
+const WARN: [u8; 4] = [0xc0, 0x40, 0x30, 0xff];
+
+/// 3x5 micro-glyphs for the panel clock (`0-9` then `:`), rows top to
+/// bottom, low three bits left to right. Enough for `HH:MM` at strip
+/// scale; fuller text waits for the toolkit.
+const GLYPHS: [[u8; 5]; 11] = [
+    [0b111, 0b101, 0b101, 0b101, 0b111], // 0
+    [0b010, 0b110, 0b010, 0b010, 0b111], // 1
+    [0b111, 0b001, 0b111, 0b100, 0b111], // 2
+    [0b111, 0b001, 0b111, 0b001, 0b111], // 3
+    [0b101, 0b101, 0b111, 0b001, 0b001], // 4
+    [0b111, 0b100, 0b111, 0b001, 0b111], // 5
+    [0b111, 0b100, 0b111, 0b101, 0b111], // 6
+    [0b111, 0b001, 0b010, 0b010, 0b010], // 7
+    [0b111, 0b101, 0b111, 0b101, 0b111], // 8
+    [0b111, 0b101, 0b111, 0b001, 0b111], // 9
+    [0b000, 0b010, 0b000, 0b010, 0b000], // :
+];
+/// Glyph advance (3px glyph + 1px tracking) times the strip scale.
+const FONT_SCALE: i32 = 3;
+const GLYPH_ADVANCE: i32 = 4 * FONT_SCALE;
+/// Indicator square size and spacing at the strip's right edge.
+const DOT_SIZE: i32 = 14;
+const DOT_GAP: i32 = 8;
+const DOT_MARGIN: i32 = 10;
+
+fn put_pixel(pixels: &mut [u8], stride: usize, x: i32, y: i32, color: [u8; 4]) {
+    if x < 0 || y < 0 {
+        return;
+    }
+    let at = y as usize * stride + x as usize * BYTES_PER_PIXEL;
+    if let Some(slot) = pixels.get_mut(at..at + BYTES_PER_PIXEL) {
+        slot.copy_from_slice(&color);
+    }
+}
+
+fn blit_glyph(pixels: &mut [u8], stride: usize, x: i32, y: i32, glyph: u8, color: [u8; 4]) {
+    for row in 0..5 {
+        for col in 0..3 {
+            if GLYPHS[glyph as usize][row as usize] & (1 << (2 - col)) != 0 {
+                for dy in 0..FONT_SCALE {
+                    for dx in 0..FONT_SCALE {
+                        put_pixel(
+                            pixels,
+                            stride,
+                            x + col * FONT_SCALE + dx,
+                            y + row * FONT_SCALE + dy,
+                            color,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn glyph_index(ch: char) -> Option<u8> {
+    match ch {
+        '0'..='9' => Some(ch as u8 - b'0'),
+        ':' => Some(10),
+        _ => None,
+    }
+}
+
+pub fn paint_panel(pixels: &mut [u8], width: i32, height: i32, clock: &str, tiles: &[Tile]) {
     let stride = width as usize * BYTES_PER_PIXEL;
     for (i, byte) in pixels.iter_mut().enumerate() {
         let channel = i % BYTES_PER_PIXEL;
@@ -163,6 +229,50 @@ pub fn paint_panel(pixels: &mut [u8], width: i32, height: i32) {
                 slot.copy_from_slice(&corner);
             }
         }
+    }
+    // Centered clock (`HH:MM` only; anything else is skipped glyph by
+    // glyph so a malformed string degrades to gaps, never garbage).
+    let text_w = clock.chars().count() as i32 * GLYPH_ADVANCE - (FONT_SCALE - 1);
+    let mut cx = (width - text_w) / 2;
+    let cy = (height - 5 * FONT_SCALE) / 2;
+    for ch in clock.chars() {
+        if let Some(glyph) = glyph_index(ch) {
+            blit_glyph(pixels, stride, cx, cy, glyph, ACCENT);
+        }
+        cx += GLYPH_ADVANCE;
+    }
+    // Right-edge indicators in strip order: filled when ready, hollow
+    // when loading/disconnected, brick when error. The power tile
+    // fills from the bottom by battery percent when known.
+    let mut dx = width - DOT_MARGIN - DOT_SIZE;
+    for tile in tiles {
+        let y0 = (height - DOT_SIZE) / 2;
+        let (fill, frame) = match tile.state {
+            TileState::Ready => (ACCENT, ACCENT),
+            TileState::Error => (WARN, WARN),
+            TileState::Loading | TileState::Disconnected => (BG, ACCENT),
+        };
+        for y in 0..DOT_SIZE {
+            for x in 0..DOT_SIZE {
+                let edge = x == 0 || y == 0 || x == DOT_SIZE - 1 || y == DOT_SIZE - 1;
+                let level_ok = tile
+                    .level
+                    .is_some_and(|level| y >= DOT_SIZE - DOT_SIZE * level as i32 / 100);
+                let color = if edge {
+                    frame
+                } else if tile.level.is_some() {
+                    if level_ok {
+                        fill
+                    } else {
+                        BG
+                    }
+                } else {
+                    fill
+                };
+                put_pixel(pixels, stride, dx + x, y0 + y, color);
+            }
+        }
+        dx -= DOT_SIZE + DOT_GAP;
     }
 }
 
@@ -402,5 +512,68 @@ mod tests {
         canvas.pixels()[at..at + BYTES_PER_PIXEL]
             .try_into()
             .unwrap()
+    }
+
+    fn strip_pixel(pixels: &[u8], width: i32, x: i32, y: i32) -> [u8; 4] {
+        let at = (y as usize * width as usize + x as usize) * BYTES_PER_PIXEL;
+        pixels[at..at + BYTES_PER_PIXEL].try_into().unwrap()
+    }
+
+    #[test]
+    fn panel_paints_clock_and_honest_tiles() {
+        use crate::tiles::{ServiceKind, Tile};
+        let tiles = [
+            Tile {
+                kind: ServiceKind::Network,
+                state: TileState::Ready,
+                level: None,
+            },
+            Tile {
+                kind: ServiceKind::Power,
+                state: TileState::Ready,
+                level: Some(50),
+            },
+            Tile {
+                kind: ServiceKind::Sound,
+                state: TileState::Error,
+                level: None,
+            },
+        ];
+        let width = 1280;
+        let mut pixels = vec![0u8; width as usize * 32 * BYTES_PER_PIXEL];
+        paint_panel(&mut pixels, width, 32, "12:34", &tiles);
+        // Clock "12:34" centered: digit 1 lights, colon lights.
+        let cx = (width - (5 * GLYPH_ADVANCE - (FONT_SCALE - 1))) / 2;
+        let cy = (32 - 5 * FONT_SCALE) / 2;
+        assert_eq!(strip_pixel(&pixels, width, cx + 4, cy + 1), ACCENT);
+        assert_eq!(
+            strip_pixel(&pixels, width, cx + 2 * GLYPH_ADVANCE + 4, cy + 4),
+            ACCENT
+        );
+        // Backdrop between furniture stays backdrop.
+        assert_eq!(strip_pixel(&pixels, width, 500, 16), BG);
+        // Network dot (rightmost) filled: ready.
+        assert_eq!(strip_pixel(&pixels, width, 1256 + 7, 9 + 7), ACCENT);
+        // Power dot half-filled from the bottom by its level.
+        assert_eq!(strip_pixel(&pixels, width, 1234 + 7, 9 + 12), ACCENT);
+        assert_eq!(strip_pixel(&pixels, width, 1234 + 7, 9 + 2), BG);
+        // Sound dot brick: error.
+        assert_eq!(strip_pixel(&pixels, width, 1212 + 7, 9 + 7), WARN);
+    }
+
+    #[test]
+    fn panel_hollow_dots_when_disconnected() {
+        use crate::tiles::{ServiceKind, Tile};
+        let tiles = [Tile {
+            kind: ServiceKind::Network,
+            state: TileState::Disconnected,
+            level: None,
+        }];
+        let width = 1280;
+        let mut pixels = vec![0u8; width as usize * 32 * BYTES_PER_PIXEL];
+        paint_panel(&mut pixels, width, 32, "", &tiles);
+        // Hollow: accent frame, backdrop interior.
+        assert_eq!(strip_pixel(&pixels, width, 1256, 9), ACCENT);
+        assert_eq!(strip_pixel(&pixels, width, 1256 + 7, 9 + 7), BG);
     }
 }

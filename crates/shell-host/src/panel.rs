@@ -52,6 +52,7 @@ use crate::overview::{
     paint_panel, OverviewCanvas, SwitcherCanvas, BYTES_PER_PIXEL, SWITCHER_STRIP_H,
 };
 use crate::search::{SearchAction, SearchHub, SearchResult, WindowProvider};
+use crate::tiles::{TileSet, TileState};
 
 /// Namespace advertised for the panel layer surface.
 pub const PANEL_NAMESPACE: &str = "rwd-shell-panel";
@@ -155,6 +156,14 @@ pub struct ShellHost {
     switcher_key: Option<SwitcherPaintKey>,
     /// Panel size last painted (repaint on configure resize).
     panel_size: Option<(i32, i32)>,
+    /// Status tiles (clock plus service presence), refreshed on a slow
+    /// tick so absent services never block the loop.
+    tiles: TileSet,
+    /// Last tile probe, for throttling (probes are cheap local reads,
+    /// but 200 Hz would still be waste).
+    tiles_refreshed: Option<std::time::Instant>,
+    /// What the panel buffer currently shows; repaint on change.
+    panel_paint_key: Option<PanelPaintKey>,
     /// Panel buffer backing (pool fd must outlive the buffer).
     panel_backing: Option<ShmBacking>,
 }
@@ -213,6 +222,15 @@ struct SwitcherSurface {
 struct SwitcherPaintKey {
     selection: Option<u64>,
     entries: usize,
+    width: i32,
+    height: i32,
+}
+
+/// Repaint the panel strip when any of these change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PanelPaintKey {
+    clock: String,
+    states: [(TileState, Option<u8>); 3],
     width: i32,
     height: i32,
 }
@@ -344,6 +362,9 @@ impl ShellHost {
             switcher_key: None,
             panel_size: None,
             panel_backing: None,
+            tiles: TileSet::system(),
+            tiles_refreshed: None,
+            panel_paint_key: None,
         }
     }
 
@@ -529,19 +550,37 @@ impl ShellHost {
     }
 
     /// Paint the panel strip into a fresh shm buffer and attach it.
+    /// Repaints when the size, clock minute, or tile states change;
+    /// called on configure and from the slow status tick.
     fn paint_panel_surface(&mut self, width: i32) {
         let height = self.panel.height as i32;
         if width <= 0 || height <= 0 {
             return;
         }
-        if self.panel_size == Some((width, height)) && self.panel_backing.is_some() {
+        let tiles = self.tiles.tiles();
+        let key = PanelPaintKey {
+            clock: self.tiles.clock.clone(),
+            states: tiles.map(|tile| (tile.state, tile.level)),
+            width,
+            height,
+        };
+        if self.panel_size == Some((width, height))
+            && self.panel_backing.is_some()
+            && self.panel_paint_key.as_ref() == Some(&key)
+        {
             return;
         }
         let Some(wayland) = self.wayland.clone() else {
             return;
         };
         let mut pixels = vec![0u8; width as usize * height as usize * BYTES_PER_PIXEL];
-        paint_panel(&mut pixels, width, height);
+        paint_panel(
+            &mut pixels,
+            width,
+            height,
+            &self.tiles.clock,
+            &[self.tiles.network, self.tiles.power, self.tiles.sound],
+        );
         let Some(surface) = self.surface.as_ref() else {
             return;
         };
@@ -551,6 +590,25 @@ impl ShellHost {
             surface.commit();
             self.panel_backing = Some(backing);
             self.panel_size = Some((width, height));
+            self.panel_paint_key = Some(key);
+        }
+    }
+
+    /// Slow-tick status refresh for the run loop: re-probe services at
+    /// most every two seconds, repainting the strip when the clock
+    /// minute or any tile changed. Pure no-op without attached
+    /// Wayland globals.
+    fn update_panel_status(&mut self) {
+        let now = std::time::Instant::now();
+        let due = self
+            .tiles_refreshed
+            .is_none_or(|last| now.duration_since(last) >= std::time::Duration::from_secs(2));
+        if due {
+            self.tiles.refresh();
+            self.tiles_refreshed = Some(now);
+        }
+        if let Some((width, _)) = self.panel_size {
+            self.paint_panel_surface(width);
         }
     }
 
@@ -928,6 +986,7 @@ pub fn run_panel_with_control(
             drive_control(control, &mut host);
             host.update_overview(control.revision());
             host.update_switcher();
+            host.update_panel_status();
             queue
                 .flush()
                 .map_err(|e| PanelError::Flush(e.to_string()))?;
@@ -938,6 +997,7 @@ pub fn run_panel_with_control(
             queue
                 .blocking_dispatch(&mut host)
                 .map_err(PanelError::Dispatch)?;
+            host.update_panel_status();
         }
     }
     Ok(())
