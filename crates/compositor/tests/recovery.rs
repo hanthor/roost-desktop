@@ -152,7 +152,7 @@ fn snapshot_windows(msg: &Message) -> (u64, BTreeSet<u64>) {
 fn malformed_frame_rejected_with_typed_error_and_session_survives() {
     let (_dir, server, path) = bind_server();
     let mut model = StateModel::new();
-    let w = model.insert("term", 1);
+    let w = model.insert("term", None, 1);
     assert!(model.set_focused(Some(w)));
 
     let (mut client, mut session, _, _) = handshake_pair(&server, &path, &model);
@@ -299,9 +299,9 @@ fn stale_major_rejected_with_typed_error_and_server_accepts_next_client() {
 fn revision_gap_forces_full_resnapshot_not_delta() {
     let (_dir, server, path) = bind_server();
     let mut model = StateModel::new();
-    let a = model.insert("term", 1);
+    let a = model.insert("term", None, 1);
     let _ = a;
-    model.insert("browser", 2);
+    model.insert("browser", None, 2);
 
     let (mut client, mut session, _, first) = handshake_pair(&server, &path, &model);
     let (rev0, _) = snapshot_windows(&first);
@@ -310,7 +310,7 @@ fn revision_gap_forces_full_resnapshot_not_delta() {
 
     // Force the shell's revision out of the retained change-log window.
     for i in 0..(rwd_compositor::state::MAX_CHANGE_LOG as u64 + 10) {
-        model.insert(&format!("w{i}"), 1);
+        model.insert(&format!("w{i}"), None, 1);
     }
     assert!(
         model.changes_since(rev0).is_err(),
@@ -400,8 +400,8 @@ fn shell_death_exhausts_bounded_restart_budget() {
 fn disconnect_then_reconnect_receives_full_snapshot() {
     let (_dir, server, path) = bind_server();
     let mut model = StateModel::new();
-    let a = model.insert("term", 1);
-    let b = model.insert("browser", 2);
+    let a = model.insert("term", None, 1);
+    let b = model.insert("browser", None, 2);
     assert!(model.set_focused(Some(b)));
     let _ = a;
 
@@ -441,6 +441,7 @@ fn stalled_client_gets_backpressure_and_server_still_serves() {
     for i in 0..200 {
         model.insert(
             &format!("window-{i}-with-a-fairly-long-title-to-fill-frames"),
+            None,
             1,
         );
     }
@@ -454,6 +455,7 @@ fn stalled_client_gets_backpressure_and_server_still_serves() {
                 app_id: None,
                 workspace: u64::from(w.workspace),
                 focused: w.focused,
+                activation_token: String::new(),
             })
             .collect(),
         workspaces: model

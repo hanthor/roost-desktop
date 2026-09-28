@@ -164,6 +164,13 @@ pub struct ControlClient {
 }
 
 impl ControlClient {
+    /// Connect to the compositor's control socket and wrap the stream.
+    /// Sends nothing: call [`hello`](Self::hello) first, then await the
+    /// full snapshot before trusting any delta.
+    pub fn connect(path: &std::path::Path) -> io::Result<Self> {
+        Self::new(UnixStream::connect(path)?)
+    }
+
     /// Wrap a connected stream, switching it to nonblocking mode.
     ///
     /// Starts with no revision and [`ControlClient::needs_snapshot`] set:
@@ -257,6 +264,26 @@ impl ControlClient {
         self.send_hello()
     }
 
+    /// Activate the currently selected window with its latest token.
+    ///
+    /// Overview flow: [`select_window`](crate::model::ShellModel::select_window)
+    /// first, then this. The token comes from the shadow `WindowInfo` of
+    /// the last snapshot or delta — never cached across resyncs, since
+    /// every snapshot mints fresh one-use tokens. Returns the request id
+    /// for `CommandResult` correlation.
+    pub fn activate_selected(&mut self) -> Result<u64, ControlError> {
+        let window = self.model.selected().ok_or(ControlError::NoActiveWindow)?;
+        let token = self
+            .shadow_windows
+            .iter()
+            .find(|w| w.id == window)
+            .map(|w| ActivationToken::new(w.activation_token.clone()))
+            .ok_or_else(|| {
+                ControlError::Unexpected(format!("no activation token for window {window}"))
+            })?;
+        self.send_activation(token)
+    }
+
     /// Request activation of the currently selected window.
     ///
     /// Builds the schema `Command` carrying the compositor-minted
@@ -264,7 +291,8 @@ impl ControlClient {
     /// request id so the caller can correlate the later `CommandResult`.
     /// The target is the model's selected window — the overview-list
     /// behavior this mirrors always activates out of an explicit
-    /// selection.
+    /// selection. Prefer [`activate_selected`](Self::activate_selected),
+    /// which sources the token from the latest shadow state.
     pub fn send_activation(&mut self, token: ActivationToken) -> Result<u64, ControlError> {
         let window = self.model.selected().ok_or(ControlError::NoActiveWindow)?;
         let id = self.alloc_request_id();
@@ -525,6 +553,7 @@ mod tests {
             app_id: Some("org.example.App".to_owned()),
             workspace,
             focused,
+            activation_token: format!("token-{id}"),
         }
     }
 

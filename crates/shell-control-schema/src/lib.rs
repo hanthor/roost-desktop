@@ -43,7 +43,13 @@ pub struct ProtocolVersion {
 
 impl ProtocolVersion {
     /// Version spoken by this crate.
-    pub const CURRENT: Self = Self { major: 0, minor: 1 };
+    ///
+    /// `0.2` adds a per-window `activation_token` to `WindowInfo`. The
+    /// postcard body is positional, so the field addition is
+    /// wire-incompatible with `0.1` despite the minor bump; both sides
+    /// always ship from this workspace, and a mixed pair fails closed at
+    /// decode time.
+    pub const CURRENT: Self = Self { major: 0, minor: 2 };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
     pub const fn new(major: u16, minor: u16) -> Self {
@@ -59,7 +65,7 @@ impl ProtocolVersion {
     }
 }
 
-/// Version spoken by this crate (`0.1`).
+/// Version spoken by this crate (`0.2`).
 pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion::CURRENT;
 
 /// Window state owned by the compositor and mirrored to the shell.
@@ -75,6 +81,13 @@ pub struct WindowInfo {
     pub workspace: WorkspaceId,
     /// Whether the window currently holds keyboard focus.
     pub focused: bool,
+    /// Fresh one-use activation Bearer [REDACTED] for this window, minted with the
+    /// snapshot or delta that carries it. The shell presents it back in
+    /// `ActivateWindow`; presenting it consumes it. Several live tokens
+    /// for one window may coexist (each snapshot/delta mints anew); each
+    /// allows exactly one activation and expires after 30 s. Never logged
+    /// (redacted `Debug` on [`ActivationToken`]).
+    pub activation_token: String,
 }
 
 /// Workspace state owned by the compositor and mirrored to the shell.
@@ -454,6 +467,7 @@ mod tests {
             app_id: Some("org.example.Terminal".to_owned()),
             workspace: 1,
             focused: id == 7,
+            activation_token: format!("token-{id}"),
         }
     }
 
@@ -476,8 +490,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_1() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 1));
+    fn current_version_is_0_2() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 2));
     }
 
     #[test]
@@ -485,8 +499,9 @@ mod tests {
         let ours = ProtocolVersion::CURRENT;
         assert!(ours.is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 0).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 2).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(1, 1).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 1).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 3).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(1, 2).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }
 

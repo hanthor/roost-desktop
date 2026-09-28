@@ -23,10 +23,11 @@
 //! stale-version, and unknown-kind frames, with the offending frame dropped.
 //!
 //! Activation policy: [`Session`] validates `ActivateWindow` commands through
-//! a caller-supplied `Fn(&ActivationToken) -> bool` so policy stays
-//! injectable. The default ([`deny_all_tokens`]) denies everything
-//! (fail-closed); production policy (30 s expiry, one-use, seat binding,
-//! `app_id` match) is compositor policy code per ADR 0002, not protocol
+//! a caller-supplied `Fn(&ActivationToken, Option<&str>) -> bool` (token,
+//! target window `app_id`) so policy stays injectable. The default
+//! ([`deny_all_tokens`]) denies everything (fail-closed); the live policy
+//! (30 s expiry, one-use, seat binding, `app_id` match) is the
+//! [`TokenStore`](crate::state::TokenStore) per ADR 0002, not protocol
 //! behavior.
 //!
 //! Reference patterns (framing/versioning discipline, snapshot-on-connect)
@@ -41,7 +42,7 @@ use rwd_shell_control::{
     ErrorKind, Message, ProtocolVersion, StateOp, WorkspaceInfo, CURRENT_VERSION, MAX_FRAME_BYTES,
 };
 
-use crate::state::{StateChange, StateModel, WindowEntry};
+use crate::state::{StateChange, StateModel, TokenStore, WindowEntry};
 
 /// Failure of a control-channel operation.
 #[derive(Debug)]
@@ -204,8 +205,10 @@ impl ControlConn {
 ///
 /// This is the [`Session`] default so that forgetting to wire real policy
 /// denies rather than allows (ADR 0002 policy: 30 s expiry, one-use, seat
-/// binding, `app_id` match — compositor policy code, injected here).
-pub fn deny_all_tokens(_: &ActivationToken) -> bool {
+/// binding, `app_id` match — compositor policy code, injected here). The
+/// expected `app_id` is the target window's, looked up from the model by
+/// [`apply_command`].
+pub fn deny_all_tokens(_: &ActivationToken, _: Option<&str>) -> bool {
     false
 }
 
@@ -257,18 +260,25 @@ pub enum Emitted {
     },
 }
 
+/// Token-check hook for `ActivateWindow` commands.
+pub type TokenValidator<'a> = Box<dyn Fn(&ActivationToken, Option<&str>) -> bool + 'a>;
+/// Per-window activation-token minter for snapshots and deltas.
+pub type TokenMinter = std::rc::Rc<dyn Fn(Option<&str>) -> String>;
+
 /// Authenticated control session over a [`ControlConn`].
 ///
-/// The session owns the connection, the token-check hook, and the last
-/// revision the shell is known to hold. The [`StateModel`] itself is passed
-/// per call (`&mut` where commands may mutate, `&` otherwise) so callers can
-/// drive the model between session calls. Build with [`handshake`](Self::handshake)
-/// (fail-closed tokens) or [`handshake_with`](Self::handshake_with) (custom
-/// policy); the handshake sends our `Hello` plus a full snapshot, so every
-/// (re)connect starts from complete state.
+/// The session owns the connection, the token-check hook, the per-window
+/// token minter, and the last revision the shell is known to hold. The
+/// [`StateModel`] itself is passed per call (`&mut` where commands may
+/// mutate, `&` otherwise) so callers can drive the model between session
+/// calls. Build with [`handshake`](Self::handshake) (fail-closed tokens)
+/// or [`handshake_with`](Self::handshake_with) (live policy); the
+/// handshake sends our `Hello` plus a full snapshot, so every (re)connect
+/// starts from complete state.
 pub struct Session<'a> {
     conn: ControlConn,
-    validator: Box<dyn Fn(&ActivationToken) -> bool + 'a>,
+    validator: TokenValidator<'a>,
+    minter: TokenMinter,
     last_revision: u64,
 }
 
@@ -287,19 +297,31 @@ impl<'a> Session<'a> {
     /// (caller drops this result's absence — there is no session to use).
     /// Uses [`deny_all_tokens`] (fail-closed).
     pub fn handshake(conn: ControlConn, model: &StateModel) -> Result<Self, ControlError> {
-        Self::handshake_with(conn, model, deny_all_tokens)
+        Self::handshake_with(
+            conn,
+            model,
+            deny_all_tokens,
+            std::rc::Rc::new(|_| String::new()),
+        )
     }
 
     /// [`handshake`](Self::handshake) with an injectable activation-token
-    /// policy for `ActivateWindow` commands.
+    /// policy for `ActivateWindow` commands plus the per-window token
+    /// minter used for snapshots and deltas. In live sessions both come
+    /// from one [`TokenStore`](crate::state::TokenStore)
+    /// ([`minter`](crate::state::TokenStore::minter) /
+    /// [`validator`](crate::state::TokenStore::validator)); the default
+    /// minter issues empty tokens that can never validate.
     pub fn handshake_with(
         conn: ControlConn,
         model: &StateModel,
-        validator: impl Fn(&ActivationToken) -> bool + 'a,
+        validator: impl Fn(&ActivationToken, Option<&str>) -> bool + 'a,
+        minter: TokenMinter,
     ) -> Result<Self, ControlError> {
         let mut session = Self {
             conn,
             validator: Box::new(validator),
+            minter,
             last_revision: 0,
         };
         let msg = match session.conn.read_frame() {
@@ -350,21 +372,27 @@ impl<'a> Session<'a> {
     }
 
     /// Send a full snapshot of `model` (on-request path; the handshake and
-    /// gap paths call this internally).
+    /// gap paths call this internally). Every window carries a freshly
+    /// minted activation token from this session's minter.
     pub fn send_snapshot(&mut self, model: &StateModel) -> Result<u64, ControlError> {
         let revision = model.revision();
-        self.conn.write_frame(&snapshot_message(model))?;
+        self.conn
+            .write_frame(&snapshot_message(model, &*self.minter))?;
         self.last_revision = revision;
         Ok(revision)
     }
 
     /// Catch the shell up from [`last_revision`](Self::last_revision):
     /// incremental `Changes` when the change log covers the gap, else a
-    /// fresh snapshot (resnapshot rule).
+    /// fresh snapshot (resnapshot rule). New token-bearing entries mint
+    /// through this session's minter.
     pub fn emit_deltas(&mut self, model: &StateModel) -> Result<Emitted, ControlError> {
         match model.changes_since(self.last_revision) {
             Ok(entries) => {
-                let ops: Vec<StateOp> = entries.iter().filter_map(|(_, c)| state_op(c)).collect();
+                let ops: Vec<StateOp> = entries
+                    .iter()
+                    .filter_map(|(_, c)| state_op(c, &*self.minter))
+                    .collect();
                 let to = model.revision();
                 let from = self.last_revision;
                 if ops.is_empty() {
@@ -493,12 +521,17 @@ fn message_kind(msg: &Message) -> &'static str {
     }
 }
 
-/// Build the full-snapshot message for `model`.
-fn snapshot_message(model: &StateModel) -> Message {
+/// Build the full-snapshot message for `model`, minting one activation
+/// token per window through `mint`.
+fn snapshot_message(model: &StateModel, mint: &dyn Fn(Option<&str>) -> String) -> Message {
     let snap = model.snapshot();
     Message::Snapshot {
         revision: snap.revision,
-        windows: snap.windows.iter().map(window_to_wire).collect(),
+        windows: snap
+            .windows
+            .iter()
+            .map(|w| window_to_wire(w, mint))
+            .collect(),
         workspaces: snap
             .workspaces
             .iter()
@@ -511,29 +544,34 @@ fn snapshot_message(model: &StateModel) -> Message {
     }
 }
 
-/// Map one model window to its wire mirror (`app_id` is unknown to the
-/// [`StateModel`], so it is always `None`).
-fn window_to_wire(w: &WindowEntry) -> rwd_shell_control::WindowInfo {
+/// Map one model window to its wire mirror, minting its activation token
+/// through `mint` (bound to the window's `app_id`).
+fn window_to_wire(
+    w: &WindowEntry,
+    mint: &dyn Fn(Option<&str>) -> String,
+) -> rwd_shell_control::WindowInfo {
     rwd_shell_control::WindowInfo {
         id: w.id,
         title: w.title.clone(),
-        app_id: None,
+        app_id: w.app_id.clone(),
         workspace: w.workspace as u64,
         focused: w.focused,
+        activation_token: mint(w.app_id.as_deref()),
     }
 }
 
-/// Map one model change to its wire op. Clearing focus has no wire
-/// counterpart (focus is carried on the window entries and the
-/// `WindowFocused` op), so it maps to `None` and only advances the cursor.
-fn state_op(change: &StateChange) -> Option<StateOp> {
+/// Map one model change to its wire op, minting tokens for restated
+/// windows through `mint`. Clearing focus has no wire counterpart (focus
+/// is carried on the window entries and the `WindowFocused` op), so it
+/// maps to `None` and only advances the cursor.
+fn state_op(change: &StateChange, mint: &dyn Fn(Option<&str>) -> String) -> Option<StateOp> {
     match change {
         StateChange::WindowInserted { window } => {
-            Some(StateOp::WindowOpened(window_to_wire(window)))
+            Some(StateOp::WindowOpened(window_to_wire(window, mint)))
         }
         StateChange::WindowRemoved { id } => Some(StateOp::WindowClosed { id: *id }),
         StateChange::WindowUpdated { window } => {
-            Some(StateOp::WindowOpened(window_to_wire(window)))
+            Some(StateOp::WindowOpened(window_to_wire(window, mint)))
         }
         StateChange::FocusChanged { focused: Some(id) } => Some(StateOp::WindowFocused { id: *id }),
         StateChange::FocusChanged { focused: None } => None,
@@ -542,22 +580,24 @@ fn state_op(change: &StateChange) -> Option<StateOp> {
 
 /// Apply one shell command against `model`, gating `ActivateWindow` on the
 /// injected token hook. Unknown ids are per-request denials
-/// (`CommandResult::Denied`), not protocol errors.
+/// (`CommandResult::Denied`), not protocol errors. The validator sees the
+/// target window's `app_id` from the model, so tokens bind to the window
+/// they were minted for.
 fn apply_command(
     model: &mut StateModel,
-    validator: &dyn Fn(&ActivationToken) -> bool,
+    validator: &dyn Fn(&ActivationToken, Option<&str>) -> bool,
     kind: &CommandKind,
 ) -> CommandStatus {
     match kind {
         CommandKind::ActivateWindow { window, token } => {
-            if !validator(token) {
-                return CommandStatus::Denied {
-                    reason: "activation token rejected".to_owned(),
-                };
-            }
-            if model.window(*window).is_none() {
+            let Some(entry) = model.window(*window) else {
                 return CommandStatus::Denied {
                     reason: "unknown window".to_owned(),
+                };
+            };
+            if !validator(token, entry.app_id.as_deref()) {
+                return CommandStatus::Denied {
+                    reason: "activation token rejected".to_owned(),
                 };
             }
             let _ = model.set_focused(Some(*window));
@@ -584,4 +624,130 @@ fn apply_command(
 /// Our protocol version, for handshake replies.
 pub fn our_version() -> ProtocolVersion {
     CURRENT_VERSION
+}
+
+/// Live control-plane driver: accepts shell connections, handshakes them
+/// into [`Session`]s against one [`TokenStore`], emits deltas, and applies
+/// commands — one nonblocking round per [`poll`](Self::poll), so slow or
+/// dead shells never stall compositor input/frame paths (spec R6).
+///
+/// Sessions hold `'static` policy closures over an `Rc<TokenStore>`, so the
+/// hub owns the store outright with no borrow of the runtime. Windows the
+/// shell activated this round are returned for Wayland-side focus; the hub
+/// only mutates the model.
+pub struct ControlHub {
+    listener: UnixListener,
+    socket_path: std::path::PathBuf,
+    sessions: Vec<Session<'static>>,
+    /// Peers accepted in an earlier round: their `Hello` is due now.
+    pending: Vec<UnixStream>,
+    /// Peers accepted this round: handshake next round, once their
+    /// `Hello` has had a full tick to arrive.
+    fresh: Vec<UnixStream>,
+    store: std::rc::Rc<TokenStore>,
+    seat: String,
+}
+
+impl ControlHub {
+    /// Bind `socket_path` (removing a stale file first) and start
+    /// nonblocking. Fails fast when the path cannot be bound.
+    pub fn bind(
+        socket_path: std::path::PathBuf,
+        store: std::rc::Rc<TokenStore>,
+        seat: &str,
+    ) -> std::io::Result<Self> {
+        let _ = std::fs::remove_file(&socket_path);
+        let listener = UnixListener::bind(&socket_path)?;
+        listener.set_nonblocking(true)?;
+        Ok(Self {
+            listener,
+            socket_path,
+            sessions: Vec::new(),
+            pending: Vec::new(),
+            fresh: Vec::new(),
+            store,
+            seat: seat.to_owned(),
+        })
+    }
+
+    /// Bound control socket path (hand this to the shell child).
+    pub fn socket_path(&self) -> &std::path::Path {
+        &self.socket_path
+    }
+
+    /// Live session count, for diagnostics (never sensitive content).
+    pub fn session_count(&self) -> usize {
+        self.sessions.len()
+    }
+
+    /// One nonblocking round: accept waiting peers, advance pending
+    /// handshakes, catch live sessions up, and apply one command frame
+    /// per session. Returns the model ids of windows the shell activated
+    /// this round, so the runtime can apply Wayland-side focus.
+    pub fn poll(&mut self, model: &mut StateModel) -> Vec<u64> {
+        while let Ok((stream, _)) = self.listener.accept() {
+            let _ = stream.set_nonblocking(true);
+            self.fresh.push(stream);
+        }
+        self.advance_pending(model);
+        self.pending = std::mem::take(&mut self.fresh);
+        let mut activated = Vec::new();
+        let mut i = 0;
+        while i < self.sessions.len() {
+            let alive = {
+                let session = &mut self.sessions[i];
+                let before = model.focused();
+                let deltas_ok = session.emit_deltas(model).is_ok();
+                let cmd_ok = match session.handle_next(model) {
+                    Ok(_) => true,
+                    Err(ControlError::WouldBlock) => true,
+                    Err(_) => false,
+                };
+                if deltas_ok && cmd_ok {
+                    if model.focused() != before {
+                        activated.extend(model.focused());
+                    }
+                    true
+                } else {
+                    false
+                }
+            };
+            if alive {
+                i += 1;
+            } else {
+                self.sessions.swap_remove(i);
+            }
+        }
+        activated
+    }
+
+    /// Try each aged peer's handshake once. Peers were accepted a full
+    /// round ago, so a well-behaved peer's `Hello` is already waiting; a
+    /// still-silent peer is dropped and must reconnect. One attempt per
+    /// connection (`ControlConn` owns its stream, so a half-open
+    /// handshake cannot be resumed) keeps silent peers from pinning slots.
+    fn advance_pending(&mut self, model: &StateModel) {
+        let pending = std::mem::take(&mut self.pending);
+        for stream in pending {
+            let conn = match ControlConn::new(stream) {
+                Ok(conn) => conn,
+                Err(_) => continue,
+            };
+            let validate = self.store.clone().validator(self.seat.clone());
+            let validator =
+                move |token: &ActivationToken, app_id: Option<&str>| validate(&token.0, app_id);
+            let minter = std::rc::Rc::new(self.store.clone().minter(self.seat.clone()));
+            if let Ok(session) = Session::handshake_with(conn, model, validator, minter) {
+                self.sessions.push(session);
+            }
+        }
+    }
+}
+
+impl Drop for ControlHub {
+    /// Best-effort socket cleanup; a stale file would block the next bind
+    /// (which also removes it first).
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.socket_path);
+    }
 }

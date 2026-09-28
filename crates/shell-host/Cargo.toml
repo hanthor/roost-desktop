@@ -6,6 +6,9 @@ license.workspace = true
 
 # Wave 2 stream 3 owns this crate. Workspace pins live in the root Cargo.toml.
 
+[dev-dependencies]
+rwd-compositor = { path = "../compositor" }
+
 [dependencies]
 wayland-client.workspace = true
 wayland-protocols = { workspace = true, features = ["client"] }

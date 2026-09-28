@@ -6,8 +6,8 @@ use rwd_compositor::state::{DenyReason, StateModel, TokenDecision, TokenPolicy, 
 #[test]
 fn snapshot_sync_then_incremental_then_gap_resnapshot() {
     let mut m = StateModel::new();
-    let a = m.insert("term", 1);
-    let b = m.insert("browser", 2);
+    let a = m.insert("term", None, 1);
+    let b = m.insert("browser", None, 2);
     assert!(m.set_focused(Some(b)));
 
     // Snapshot-on-connect carries everything.

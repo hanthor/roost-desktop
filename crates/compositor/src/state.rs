@@ -36,6 +36,9 @@ pub struct WindowEntry {
     pub id: u64,
     /// Untrusted client-provided title, length-capped on insert/update.
     pub title: String,
+    /// Client-supplied application id, if known. Activation tokens bind
+    /// to this value (ADR 0002).
+    pub app_id: Option<String>,
     /// Workspace this window belongs to.
     pub workspace: u32,
     /// Compositor-controlled active hint (e.g. on the active workspace).
@@ -85,6 +88,8 @@ pub struct RevisionGap {
 pub struct WindowUpdate {
     /// Replace the title (re-capped as on insert).
     pub title: Option<String>,
+    /// Replace the application id (`Some(None)` clears it).
+    pub app_id: Option<Option<String>>,
     /// Move the window to another workspace (auto-registered if new).
     pub workspace: Option<u32>,
     /// Replace the active hint.
@@ -146,12 +151,13 @@ impl StateModel {
     /// The title is capped to [`MAX_TITLE_LEN`] bytes first; the workspace
     /// is registered in the workspace list if new. Bumps the revision and
     /// appends `WindowInserted`.
-    pub fn insert(&mut self, title: &str, workspace: u32) -> u64 {
+    pub fn insert(&mut self, title: &str, app_id: Option<&str>, workspace: u32) -> u64 {
         let id = self.next_id();
         self.register_workspace(workspace);
         let window = WindowEntry {
             id,
             title: cap_title(title),
+            app_id: app_id.map(str::to_owned),
             workspace,
             active: false,
             focused: Some(id) == self.focused,
@@ -189,6 +195,9 @@ impl StateModel {
         };
         if let Some(title) = patch.title {
             window.title = cap_title(&title);
+        }
+        if let Some(app_id) = patch.app_id {
+            window.app_id = app_id;
         }
         if let Some(workspace) = patch.workspace {
             window.workspace = workspace;
@@ -328,6 +337,148 @@ pub enum TokenDecision {
 /// token from the compositor's token table before acting on it.
 pub struct TokenPolicy;
 
+/// Stateful one-use activation-token store (ADR 0002, 001 T2).
+///
+/// [`TokenPolicy`] stays a pure function; this owner mints unguessable
+/// tokens, binds them to a seat plus `app_id`, and removes each token on
+/// its first successful presentation. Operates on plain strings so the
+/// state model keeps its no-wire-dependency seam; `control.rs` adapts the
+/// wire activation-token type to `&str` at the boundary.
+///
+/// Time comes from an injected millisecond clock (`SystemTime` in
+/// production, manual in tests) so expiry stays deterministic under test.
+pub struct TokenStore {
+    // `RefCell` (not a lock): the store is only touched from the single
+    // compositor thread, and the [`Session`](crate::control::Session)
+    // validator needs shared-reference access with one-use removal.
+    tokens: std::cell::RefCell<std::collections::HashMap<String, StoredToken>>,
+    max_age_ms: u64,
+}
+
+/// One minted token and the presentation it authorizes. The minting
+/// `purpose` is a caller-side label only; authorization binds seat,
+/// `app_id`, and age.
+#[derive(Debug, Clone)]
+struct StoredToken {
+    seat: String,
+    app_id: Option<String>,
+    issued_at_ms: u64,
+}
+
+impl TokenStore {
+    /// Empty store with the default 30 s token lifetime.
+    pub fn new() -> Self {
+        Self {
+            tokens: std::cell::RefCell::new(std::collections::HashMap::new()),
+            max_age_ms: TokenPolicy::MAX_AGE_MS,
+        }
+    }
+
+    /// Number of live (unconsumed) tokens.
+    pub fn len(&self) -> usize {
+        self.tokens.borrow().len()
+    }
+
+    /// Whether no live tokens are held.
+    pub fn is_empty(&self) -> bool {
+        self.tokens.borrow().is_empty()
+    }
+
+    /// Mint a token for `purpose` on `seat` for `app_id`, valid from
+    /// `now_ms`. The token is a 128-bit random hex string.
+    pub fn issue(&self, _purpose: &str, seat: &str, app_id: Option<&str>, now_ms: u64) -> String {
+        let mut tokens = self.tokens.borrow_mut();
+        Self::prune_in(&mut tokens, self.max_age_ms, now_ms);
+        let token = format!("{:032x}", rand::random::<u128>());
+        tokens.insert(
+            token.clone(),
+            StoredToken {
+                seat: seat.to_owned(),
+                app_id: app_id.map(str::to_owned),
+                issued_at_ms: now_ms,
+            },
+        );
+        token
+    }
+
+    /// Validate one presentation: unknown tokens deny as expired,
+    /// mismatches deny with their reason, and an allowed token is removed
+    /// (one-use) before returning.
+    pub fn consume(
+        &self,
+        token: &str,
+        seat: &str,
+        app_id: Option<&str>,
+        now_ms: u64,
+    ) -> TokenDecision {
+        let mut tokens = self.tokens.borrow_mut();
+        Self::prune_in(&mut tokens, self.max_age_ms, now_ms);
+        let Some(stored) = tokens.get(token) else {
+            return TokenDecision::Deny {
+                reason: DenyReason::Expired,
+            };
+        };
+        let decision = TokenPolicy::validate(
+            stored.issued_at_ms,
+            now_ms,
+            self.max_age_ms,
+            stored.seat == seat,
+            stored.app_id.as_deref() == app_id,
+        );
+        if decision == TokenDecision::Allow {
+            tokens.remove(token);
+        }
+        decision
+    }
+
+    /// Minting closure for [`crate::control::Session`]: mints one token
+    /// per window per snapshot or delta, bound to `seat` and the window's
+    /// `app_id`, using the system clock. By-value `Rc` so live sessions
+    /// can hold the closure without borrowing the runtime.
+    pub fn minter(
+        self: std::rc::Rc<Self>,
+        seat: String,
+    ) -> impl Fn(Option<&str>) -> String + 'static {
+        move |app_id| self.issue("activate-window", &seat, app_id, system_millis())
+    }
+
+    /// Validator closure for [`crate::control::Session`]: checks one
+    /// presentation against this store with the system clock, removing
+    /// each allowed token (one-use). The expected `app_id` is the target
+    /// window's, supplied by the caller from the model.
+    pub fn validator(
+        self: std::rc::Rc<Self>,
+        seat: String,
+    ) -> impl Fn(&str, Option<&str>) -> bool + 'static {
+        move |token, app_id| {
+            self.consume(token, &seat, app_id, system_millis()) == TokenDecision::Allow
+        }
+    }
+
+    fn prune_in(
+        tokens: &mut std::collections::HashMap<String, StoredToken>,
+        max_age_ms: u64,
+        now_ms: u64,
+    ) {
+        tokens.retain(|_, stored| now_ms.saturating_sub(stored.issued_at_ms) <= max_age_ms);
+    }
+}
+
+impl Default for TokenStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Milliseconds since the Unix epoch, for token issue/expiry in live
+/// sessions. Tests pass explicit timestamps instead.
+pub fn system_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 impl TokenPolicy {
     /// Default token lifetime: 30 s (ADR 0002).
     pub const MAX_AGE_MS: u64 = 30_000;
@@ -370,7 +521,7 @@ mod tests {
     fn revision_monotonic_across_mutations() {
         let mut m = StateModel::new();
         assert_eq!(m.revision(), 0);
-        let a = m.insert("a", 1);
+        let a = m.insert("a", None, 1);
         assert_eq!(m.revision(), 1);
         m.update(
             a,
@@ -394,8 +545,8 @@ mod tests {
     #[test]
     fn changes_since_returns_tail_and_detects_gaps() {
         let mut m = StateModel::new();
-        let a = m.insert("a", 1);
-        let b = m.insert("b", 2);
+        let a = m.insert("a", None, 1);
+        let b = m.insert("b", None, 2);
         let tail = m.changes_since(1).unwrap();
         assert_eq!(tail.len(), 1);
         assert_eq!(tail[0].0, 2);
@@ -420,7 +571,7 @@ mod tests {
     fn prune_beyond_cap_forces_gap_then_resnapshot() {
         let mut m = StateModel::new();
         for i in 0..(MAX_CHANGE_LOG as u64 + 10) {
-            m.insert(&format!("w{i}"), 1);
+            m.insert(&format!("w{i}"), None, 1);
         }
         assert_eq!(m.change_log_len(), MAX_CHANGE_LOG);
         let oldest: u64 = m.changes.front().unwrap().0;
@@ -439,8 +590,8 @@ mod tests {
     #[test]
     fn snapshot_is_complete_and_ordered() {
         let mut m = StateModel::new();
-        let b = m.insert("b", 2);
-        let a = m.insert("a", 1);
+        let b = m.insert("b", None, 2);
+        let a = m.insert("a", None, 1);
         assert!(m.set_focused(Some(a)));
         let snap = m.snapshot();
         assert_eq!(snap.revision, m.revision());
@@ -457,10 +608,10 @@ mod tests {
     #[test]
     fn ids_are_generational_and_never_reused() {
         let mut m = StateModel::new();
-        let a = m.insert("a", 1);
-        let b = m.insert("b", 1);
+        let a = m.insert("a", None, 1);
+        let b = m.insert("b", None, 1);
         assert!(m.remove(a));
-        let c = m.insert("c", 1);
+        let c = m.insert("c", None, 1);
         assert!(c != a && c != b && c > b);
         assert!(m.window(a).is_none());
         // Update/remove of the retired id stay no-ops with no revision bump.
@@ -478,7 +629,7 @@ mod tests {
     #[test]
     fn removing_focused_window_clears_focus() {
         let mut m = StateModel::new();
-        let a = m.insert("a", 1);
+        let a = m.insert("a", None, 1);
         assert!(m.set_focused(Some(a)));
         assert!(m.remove(a));
         assert_eq!(m.focused(), None);
@@ -536,10 +687,97 @@ mod tests {
     }
 
     #[test]
+    fn token_store_allows_fresh_token_once_then_denies_replay() {
+        let store = TokenStore::new();
+        assert!(store.is_empty());
+        let token = store.issue("activate", "seat0", Some("app1"), 1_000);
+        assert_eq!(store.len(), 1);
+        assert_eq!(
+            store.consume(&token, "seat0", Some("app1"), 1_000),
+            TokenDecision::Allow
+        );
+        assert!(store.is_empty());
+        // One-use: the consumed token is unknown, denied as expired.
+        assert_eq!(
+            store.consume(&token, "seat0", Some("app1"), 1_000),
+            TokenDecision::Deny {
+                reason: DenyReason::Expired
+            }
+        );
+    }
+
+    #[test]
+    fn token_store_denies_seat_and_app_mismatch_without_consuming() {
+        let store = TokenStore::new();
+        let token = store.issue("activate", "seat0", Some("app1"), 1_000);
+        assert_eq!(
+            store.consume(&token, "other-seat", Some("app1"), 1_000),
+            TokenDecision::Deny {
+                reason: DenyReason::SeatMismatch
+            }
+        );
+        assert_eq!(
+            store.consume(&token, "seat0", Some("other-app"), 1_000),
+            TokenDecision::Deny {
+                reason: DenyReason::AppMismatch
+            }
+        );
+        // Anonymous token presented with an app id also mismatches.
+        let anon = store.issue("activate", "seat0", None, 1_000);
+        assert_eq!(
+            store.consume(&anon, "seat0", Some("app1"), 1_000),
+            TokenDecision::Deny {
+                reason: DenyReason::AppMismatch
+            }
+        );
+        // Mismatches do not consume: both tokens still validate.
+        assert_eq!(
+            store.consume(&token, "seat0", Some("app1"), 1_000),
+            TokenDecision::Allow
+        );
+        assert_eq!(
+            store.consume(&anon, "seat0", None, 1_000),
+            TokenDecision::Allow
+        );
+    }
+
+    #[test]
+    fn token_store_denies_expired_and_unknown_tokens() {
+        let store = TokenStore::new();
+        let token = store.issue("activate", "seat0", Some("app1"), 0);
+        assert_eq!(
+            store.consume(&token, "seat0", Some("app1"), TokenPolicy::MAX_AGE_MS + 1),
+            TokenDecision::Deny {
+                reason: DenyReason::Expired
+            }
+        );
+        assert_eq!(
+            store.consume("never-issued", "seat0", Some("app1"), 1_000),
+            TokenDecision::Deny {
+                reason: DenyReason::Expired
+            }
+        );
+    }
+
+    #[test]
+    fn token_store_validator_closure_allows_once_then_denies() {
+        use std::rc::Rc;
+        let store = Rc::new(TokenStore::new());
+        // Live closures use the system clock, so issue fresh.
+        let token = store.issue("activate", "seat0", Some("app1"), system_millis());
+        let validate = store.clone().validator("seat0".to_owned());
+        assert!(validate(&token, Some("app1")));
+        assert!(!validate(&token, Some("app1")));
+        // Wrong app is denied even with a fresh token.
+        let other = store.issue("activate", "seat0", Some("app1"), system_millis());
+        assert!(!validate(&other, Some("app2")));
+    }
+
+    #[test]
     fn title_capped_on_insert_and_update() {
         let mut m = StateModel::new();
         let long = "x".repeat(MAX_TITLE_LEN + 100);
-        let id = m.insert(&long, 1);
+        let id = m.insert(&long, None, 1);
         assert_eq!(m.window(id).unwrap().title.len(), MAX_TITLE_LEN);
         let exact = "y".repeat(MAX_TITLE_LEN);
         assert!(m.update(
@@ -552,7 +790,7 @@ mod tests {
         assert_eq!(m.window(id).unwrap().title, exact);
         // Multibyte: truncation lands on a char boundary.
         let emoji = "é".repeat(MAX_TITLE_LEN);
-        let id2 = m.insert(&emoji, 1);
+        let id2 = m.insert(&emoji, None, 1);
         let title = m.window(id2).unwrap().title.clone();
         assert!(title.len() <= MAX_TITLE_LEN);
         assert!(emoji.starts_with(&title));

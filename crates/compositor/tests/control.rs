@@ -7,7 +7,7 @@ use std::time::Duration;
 use rwd_compositor::control::{
     ControlConn, ControlError, ControlServer, Emitted, Handled, Session,
 };
-use rwd_compositor::state::{StateModel, MAX_CHANGE_LOG};
+use rwd_compositor::state::{system_millis, StateModel, TokenStore, MAX_CHANGE_LOG};
 use rwd_shell_control::{
     decode_frame, encode_frame, ActivationToken, CommandKind, CommandStatus, DecodeError,
     ErrorKind, Message, ProtocolVersion, StateOp, CURRENT_VERSION,
@@ -142,7 +142,7 @@ fn snapshot_then_changes_flow() {
     };
     assert_eq!(revision, 0);
 
-    let id = model.insert("term", 1);
+    let id = model.insert("term", None, 1);
     let emitted = session.emit_deltas(&model).unwrap();
     assert_eq!(
         emitted,
@@ -256,7 +256,7 @@ fn revision_gap_triggers_resnapshot() {
 
     // Push the change log past its cap so revision 0 is unrecoverable.
     for i in 0..(MAX_CHANGE_LOG as u64 + 10) {
-        model.insert(&format!("w{i}"), 1);
+        model.insert(&format!("w{i}"), None, 1);
     }
     let current = model.revision();
     assert!(model.changes_since(0).is_err());
@@ -277,7 +277,7 @@ fn revision_gap_triggers_resnapshot() {
 #[test]
 fn activation_token_denied_by_default() {
     let mut model = StateModel::new();
-    let id = model.insert("term", 1);
+    let id = model.insert("term", None, 1);
     let (conn, mut client) = pair();
     let mut session = handshake(conn, &mut client, &model);
     assert!(matches!(client_read(&mut client), Message::Hello { .. }));
@@ -313,9 +313,79 @@ fn activation_token_denied_by_default() {
 }
 
 #[test]
+fn activation_token_live_store_allows_once_then_denies_replay() {
+    let mut model = StateModel::new();
+    let id = model.insert("term", None, 1);
+    let store = std::rc::Rc::new(TokenStore::new());
+    // Live minter/validator use the system clock, so issue fresh.
+    let raw = store.issue("activate", "seat0", None, system_millis());
+
+    // The session validates through the live store (one-use, seat-bound).
+    let (conn, mut client) = pair();
+    client_write(&mut client, &hello_current());
+    let validate = store.clone().validator("seat0".to_owned());
+    let validator = move |token: &ActivationToken, app_id: Option<&str>| validate(&token.0, app_id);
+    let minter = std::rc::Rc::new(store.clone().minter("seat0".to_owned()));
+    let mut session = Session::handshake_with(conn, &model, validator, minter).unwrap();
+    assert!(matches!(client_read(&mut client), Message::Hello { .. }));
+    assert!(matches!(client_read(&mut client), Message::Snapshot { .. }));
+
+    // First presentation applies and focuses the window.
+    client_write(
+        &mut client,
+        &Message::Command {
+            id: 1,
+            kind: CommandKind::ActivateWindow {
+                window: id,
+                token: ActivationToken::new(raw.clone()),
+            },
+        },
+    );
+    let handled = session.handle_next(&mut model).unwrap();
+    assert_eq!(
+        handled,
+        Handled::CommandResult {
+            id: 1,
+            applied: true
+        }
+    );
+    let Message::CommandResult { id: back, status } = client_read(&mut client) else {
+        panic!("expected CommandResult for activation");
+    };
+    assert_eq!(back, 1);
+    assert_eq!(status, CommandStatus::Applied);
+    assert_eq!(model.focused(), Some(id));
+
+    // Replay of the same token is denied; focus is untouched.
+    client_write(
+        &mut client,
+        &Message::Command {
+            id: 2,
+            kind: CommandKind::ActivateWindow {
+                window: id,
+                token: ActivationToken::new(raw),
+            },
+        },
+    );
+    let handled = session.handle_next(&mut model).unwrap();
+    assert_eq!(
+        handled,
+        Handled::CommandResult {
+            id: 2,
+            applied: false
+        }
+    );
+    let Message::CommandResult { status, .. } = client_read(&mut client) else {
+        panic!("expected CommandResult for replay");
+    };
+    assert!(matches!(status, CommandStatus::Denied { .. }));
+    assert_eq!(model.focused(), Some(id));
+}
+
+#[test]
 fn focus_workspace_and_toggle_overview() {
     let mut model = StateModel::new();
-    let _ = model.insert("term", 1);
+    let _ = model.insert("term", None, 1);
     let (conn, mut client) = pair();
     let mut session = handshake(conn, &mut client, &model);
     assert!(matches!(client_read(&mut client), Message::Hello { .. }));

@@ -6,6 +6,9 @@ license.workspace = true
 
 [dependencies]
 smithay.workspace = true
+calloop.workspace = true
+rand.workspace = true
+wayland-protocols.workspace = true
 rwd-shell-control = { path = "../shell-control-schema", version = "0.1.0" }
 
 [dev-dependencies]
