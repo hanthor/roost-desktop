@@ -1,7 +1,8 @@
 # Greeter VM acceptance (manual)
 
 Scripted CI covers the conversation, picker, and failure paths
-against the fake daemon. These runs need a real VM and stay manual.
+against the fake daemon. These runs need a real VM with real
+credentials and stay manual.
 
 ## Cold boot to login screen
 
