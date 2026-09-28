@@ -114,8 +114,9 @@ if [ -z "$WID" ]; then
 fi
 echo "rwd-journey: window $WID"
 
-# Focus the nested window so keys land in the compositor.
-xdotool windowactivate "$WID"
+# Focus the nested window so keys land in the compositor. No
+# windowactivate: the private Xvfb runs no window manager, so
+# _NET_ACTIVE_WINDOW is unsupported — a click focuses instead.
 xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2)) click 1
 sleep 3
 
