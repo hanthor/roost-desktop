@@ -166,6 +166,108 @@ pub fn paint_panel(pixels: &mut [u8], width: i32, height: i32) {
     }
 }
 
+/// Alt-Tab switcher strip: MRU-ordered blocks with the selection
+/// highlighted, centered in a bottom-anchored strip surface.
+const SWITCHER_SLOT_W: i32 = 160;
+const SWITCHER_SLOT_H: i32 = 100;
+const SWITCHER_GAP: i32 = 16;
+const SWITCHER_PAD: i32 = 24;
+/// Fixed strip height the panel requests from the compositor.
+pub const SWITCHER_STRIP_H: i32 = SWITCHER_PAD * 2 + SWITCHER_SLOT_H;
+/// How many MRU entries are ever drawn (older ones stay reachable by
+/// stepping; the strip never grows unbounded).
+pub const MAX_DRAWN_SWITCHER: usize = 10;
+
+/// Pixel canvas for one switcher frame, with no Wayland dependency.
+#[derive(Debug, Default)]
+pub struct SwitcherCanvas {
+    width: i32,
+    height: i32,
+    pixels: Vec<u8>,
+}
+
+impl SwitcherCanvas {
+    /// Blank canvas; zero-size canvases hold no pixels and draw nothing.
+    pub fn new(width: i32, height: i32) -> Self {
+        let len = (width.max(0) as usize)
+            .saturating_mul(height.max(0) as usize)
+            .saturating_mul(BYTES_PER_PIXEL);
+        let mut pixels = vec![0u8; len];
+        let (chunks, _) = pixels.as_chunks_mut::<BYTES_PER_PIXEL>();
+        for px in chunks {
+            px.copy_from_slice(&BG);
+        }
+        Self {
+            width,
+            height,
+            pixels,
+        }
+    }
+
+    /// Raw `Argb8888` bytes, row-major.
+    pub fn pixels(&self) -> &[u8] {
+        &self.pixels
+    }
+
+    /// Draw `order` (MRU, front = most recent) centered, highlighting
+    /// `selected`. Pure backdrop when empty.
+    pub fn render(&mut self, order: &[u64], selected: Option<u64>) {
+        let shown = order.len().min(MAX_DRAWN_SWITCHER);
+        if shown == 0 || self.width <= 0 || self.height <= 0 {
+            return;
+        }
+        let row_w = shown as i32 * SWITCHER_SLOT_W + (shown as i32 - 1) * SWITCHER_GAP;
+        let mut x = (self.width - row_w) / 2;
+        let y = (self.height - SWITCHER_SLOT_H) / 2;
+        for id in order.iter().take(shown) {
+            let is_selected = selected == Some(*id);
+            self.rect(
+                x,
+                y,
+                SWITCHER_SLOT_W,
+                SWITCHER_SLOT_H,
+                if is_selected { BLOCK_SELECTED } else { BLOCK },
+            );
+            if is_selected {
+                self.border(
+                    x - 4,
+                    y - 4,
+                    SWITCHER_SLOT_W + 8,
+                    SWITCHER_SLOT_H + 8,
+                    4,
+                    ACCENT,
+                );
+            }
+            x += SWITCHER_SLOT_W + SWITCHER_GAP;
+        }
+    }
+
+    fn put(&mut self, x: i32, y: i32, color: [u8; 4]) {
+        if x < 0 || y < 0 || x >= self.width || y >= self.height {
+            return;
+        }
+        let at = (y as usize * self.width as usize + x as usize) * BYTES_PER_PIXEL;
+        if let Some(slot) = self.pixels.get_mut(at..at + BYTES_PER_PIXEL) {
+            slot.copy_from_slice(&color);
+        }
+    }
+
+    fn rect(&mut self, x: i32, y: i32, w: i32, h: i32, color: [u8; 4]) {
+        for dy in 0..h {
+            for dx in 0..w {
+                self.put(x + dx, y + dy, color);
+            }
+        }
+    }
+
+    fn border(&mut self, x: i32, y: i32, w: i32, h: i32, thick: i32, color: [u8; 4]) {
+        self.rect(x, y, w, thick, color);
+        self.rect(x, y + h - thick, w, thick, color);
+        self.rect(x, y, thick, h, color);
+        self.rect(x + w - thick, y, thick, h, color);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,5 +354,53 @@ mod tests {
         let mut canvas = OverviewCanvas::new(0, 0);
         canvas.render(&two_windows(), 5);
         assert!(canvas.pixels().is_empty());
+    }
+
+    #[test]
+    fn switcher_renders_mru_order_with_selection() {
+        let mut canvas = SwitcherCanvas::new(1280, SWITCHER_STRIP_H);
+        canvas.render(&[3, 1, 2], Some(1));
+        // Three slots, centered: slot 0 (id 3) plain, slot 1 (id 1)
+        // selected, slot 2 (id 2) plain.
+        let row_w = 3 * SWITCHER_SLOT_W + 2 * SWITCHER_GAP;
+        let x0 = (1280 - row_w) / 2;
+        let y = (SWITCHER_STRIP_H - SWITCHER_SLOT_H) / 2;
+        assert_eq!(pixel_at(&canvas, x0 + 10, y + 10), BLOCK);
+        assert_eq!(
+            pixel_at(&canvas, x0 + SWITCHER_SLOT_W + SWITCHER_GAP + 10, y + 10),
+            BLOCK_SELECTED
+        );
+        assert_eq!(
+            pixel_at(&canvas, x0 + SWITCHER_SLOT_W + SWITCHER_GAP - 2, y - 2),
+            ACCENT
+        );
+        assert_eq!(
+            pixel_at(
+                &canvas,
+                x0 + 2 * (SWITCHER_SLOT_W + SWITCHER_GAP) + 10,
+                y + 10
+            ),
+            BLOCK
+        );
+        // Strip padding stays backdrop.
+        assert_eq!(pixel_at(&canvas, 5, 5), BG);
+    }
+
+    #[test]
+    fn switcher_empty_is_pure_backdrop() {
+        let mut canvas = SwitcherCanvas::new(1280, SWITCHER_STRIP_H);
+        canvas.render(&[], None);
+        let (chunks, _) = canvas.pixels().as_chunks::<4>();
+        assert!(chunks.iter().all(|px| *px == BG));
+        let mut tiny = SwitcherCanvas::new(0, 0);
+        tiny.render(&[1], Some(1));
+        assert!(tiny.pixels().is_empty());
+    }
+
+    fn pixel_at(canvas: &SwitcherCanvas, x: i32, y: i32) -> [u8; 4] {
+        let at = (y as usize * 1280 + x as usize) * BYTES_PER_PIXEL;
+        canvas.pixels()[at..at + BYTES_PER_PIXEL]
+            .try_into()
+            .unwrap()
     }
 }

@@ -336,6 +336,12 @@ impl Runtime {
                 TriggerAction::Open => self.control.set_overview(true),
             }
             self.manager.on_input(&mut self.state, input);
+            // Alt-Tab drive: forward whatever the manager queued into
+            // the hub broadcast; the next hub poll delivers it to the
+            // shell, which owns MRU order and rendering.
+            for action in self.manager.take_switcher_queue() {
+                self.control.queue_switcher(action);
+            }
             return;
         }
         let ManagerInput::Key {

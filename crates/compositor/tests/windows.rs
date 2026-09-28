@@ -15,10 +15,11 @@
 use std::os::unix::net::UnixStream;
 
 use rwd_compositor::windows::{
-    ManagerInput, WindowManager, PAGE_DOWN_KEYCODE, PAGE_UP_KEYCODE, SHIFT_LEFT_KEYCODE,
-    SUPER_LEFT_KEYCODE,
+    ManagerInput, WindowManager, ALT_LEFT_KEYCODE, ESCAPE_KEYCODE, PAGE_DOWN_KEYCODE,
+    PAGE_UP_KEYCODE, SHIFT_LEFT_KEYCODE, SUPER_LEFT_KEYCODE, TAB_KEYCODE,
 };
 use rwd_compositor::TestCompositor;
+use rwd_shell_control::SwitcherAction;
 use smithay::utils::{Logical, Point};
 use wayland_client::{
     protocol::{
@@ -453,10 +454,10 @@ fn focused_client_receives_keyboard_input() {
     f.client_a.keys.clear();
     f.client_b.keys.clear();
 
-    // Smithay forwards `key.raw() - 8` on the wire (the XKB keycode
-    // system starts at 8), so the client observes the evdev keycode.
+    // Smithay takes XKB codespace and sends `raw - 8` on the wire,
+    // so the client observes the evdev keycode we fed in.
     const KEY_IN: u32 = 30;
-    const KEY_WIRE: u32 = KEY_IN - 8;
+    const KEY_WIRE: u32 = KEY_IN;
     assert!(f
         .manager
         .keyboard_key(&mut f.comp.state, KEY_IN, true, 2000));
@@ -628,10 +629,9 @@ fn super_page_keys_switch_and_shift_moves_focused() {
     release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
     assert_eq!(f.manager.model().active_workspace(), 1);
     // The switch press is consumed: the client never observes PageDown
-    // (wire keycode is evdev minus 8, as in `focused_client_...`). Only
-    // the Super press arrives: the releases land after the switch
-    // strands focus on the empty workspace, so waiting for a release
-    // would stall the pump.
+    // (wire carries the evdev code). Only the Super press arrives: the
+    // releases land after the switch strands focus on the empty
+    // workspace, so waiting for a release would stall the pump.
     pump(&mut f.comp, &mut f.queue_b, &mut f.client_b, |c| {
         !c.keys.is_empty()
     });
@@ -639,7 +639,7 @@ fn super_page_keys_switch_and_shift_moves_focused() {
         !f.client_b
             .keys
             .iter()
-            .any(|(key, _)| *key == PAGE_DOWN_KEYCODE - 8),
+            .any(|(key, _)| *key == PAGE_DOWN_KEYCODE),
         "PageDown must be consumed, got: {:?}",
         f.client_b.keys
     );
@@ -655,6 +655,94 @@ fn super_page_keys_switch_and_shift_moves_focused() {
     assert_eq!(f.manager.model().window(f.id_b).unwrap().workspace, 0);
     assert_eq!(f.manager.model().active_workspace(), 0);
     assert_eq!(f.manager.model().focused(), Some(f.id_b));
+}
+
+#[test]
+fn alt_tab_steps_commits_and_cancels_without_leaking_keys() {
+    let mut f = two_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    f.client_b.keys.clear();
+
+    // Tab without Alt is ordinary input: forwarded, nothing queued.
+    press(&mut f.manager, &mut f.comp, TAB_KEYCODE);
+    assert!(f.manager.take_switcher_queue().is_empty());
+    pump(&mut f.comp, &mut f.queue_b, &mut f.client_b, |c| {
+        !c.keys.is_empty()
+    });
+    assert_eq!(f.client_b.keys.len(), 1);
+    release(&mut f.manager, &mut f.comp, TAB_KEYCODE);
+
+    // Alt+Tab queues a forward step and consumes the Tab press.
+    // Drain the in-flight plain-Tab release first so the consumed-key
+    // assertion below only sees chord traffic.
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    f.client_b.keys.clear();
+    press(&mut f.manager, &mut f.comp, ALT_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, TAB_KEYCODE);
+    assert_eq!(
+        f.manager.take_switcher_queue(),
+        vec![SwitcherAction::Step { forward: true }]
+    );
+    // Shift+Tab steps back.
+    press(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, TAB_KEYCODE);
+    release(&mut f.manager, &mut f.comp, TAB_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    assert_eq!(
+        f.manager.take_switcher_queue(),
+        vec![SwitcherAction::Step { forward: false }]
+    );
+    // No Tab event reached the client; the Alt press did.
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert!(
+        !f.client_b.keys.iter().any(|(key, _)| *key == TAB_KEYCODE),
+        "Tab must be consumed, got: {:?}",
+        f.client_b.keys
+    );
+
+    // Alt release commits the open session but still forwards, so app
+    // modifiers never stick.
+    let before = f.client_b.keys.len();
+    release(&mut f.manager, &mut f.comp, ALT_LEFT_KEYCODE);
+    assert_eq!(
+        f.manager.take_switcher_queue(),
+        vec![SwitcherAction::Commit]
+    );
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert_eq!(f.client_b.keys.len(), before + 1);
+
+    // Escape with no open session is ordinary input: forwarded, no
+    // Cancel queued.
+    press(&mut f.manager, &mut f.comp, ESCAPE_KEYCODE);
+    assert!(f.manager.take_switcher_queue().is_empty());
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert_eq!(f.client_b.keys.len(), before + 2);
+    release(&mut f.manager, &mut f.comp, ESCAPE_KEYCODE);
+
+    // Escape with an open session cancels and is consumed.
+    press(&mut f.manager, &mut f.comp, ALT_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, TAB_KEYCODE);
+    assert_eq!(
+        f.manager.take_switcher_queue(),
+        vec![SwitcherAction::Step { forward: true }]
+    );
+    // Drain first: the Alt press above is still in flight, and only a
+    // synced count proves the cancel press adds nothing.
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    let before_cancel = f.client_b.keys.len();
+    press(&mut f.manager, &mut f.comp, ESCAPE_KEYCODE);
+    assert_eq!(
+        f.manager.take_switcher_queue(),
+        vec![SwitcherAction::Cancel]
+    );
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert_eq!(f.client_b.keys.len(), before_cancel);
+    release(&mut f.manager, &mut f.comp, ESCAPE_KEYCODE);
+    release(&mut f.manager, &mut f.comp, ALT_LEFT_KEYCODE);
+    // Alt release after a cancel commits nothing.
+    assert!(f.manager.take_switcher_queue().is_empty());
 }
 
 #[test]

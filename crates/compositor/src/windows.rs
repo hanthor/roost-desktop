@@ -39,6 +39,7 @@ use crate::{
     state::{StateModel, WindowUpdate},
     State,
 };
+use rwd_shell_control::SwitcherAction;
 
 /// Default floating size for a newly mapped window.
 const DEFAULT_WIDTH: i32 = 800;
@@ -73,6 +74,15 @@ pub struct WindowManager {
     super_held: bool,
     /// Shift held (either side) for move-window keybindings.
     shift_held: bool,
+    /// Alt held (either side) for the Alt-Tab switcher.
+    alt_held: bool,
+    /// Whether an Alt-Tab switcher session is open (Alt held past a
+    /// Tab tap). Guards Escape-cancel consumption and Alt-release
+    /// commit so plain Escape/Alt keep reaching clients.
+    switcher_open: bool,
+    /// Switcher drive events queued for the hub broadcast, drained by
+    /// the runtime after each input event.
+    switcher_queue: Vec<SwitcherAction>,
 }
 
 impl WindowManager {
@@ -99,6 +109,9 @@ impl WindowManager {
             pointer_pos: (0.0, 0.0).into(),
             super_held: false,
             shift_held: false,
+            alt_held: false,
+            switcher_open: false,
+            switcher_queue: Vec::new(),
         }
     }
 
@@ -368,9 +381,14 @@ impl WindowManager {
         let Some(keyboard) = self.keyboard.clone() else {
             return false;
         };
+        // Smithay's keyboard input takes XKB codespace (evdev + 8):
+        // it feeds the code straight to xkbcommon and sends
+        // `raw - 8` on the wire, so passing our evdev tables through
+        // unchanged would mistranslate every key and panic on codes
+        // below 8 (Escape, digits) once a client holds keyboard focus.
         keyboard.input::<(), _>(
             state,
-            keycode.into(),
+            keycode.saturating_add(XKB_X11_OFFSET).into(),
             if pressed {
                 KeyState::Pressed
             } else {
@@ -593,6 +611,13 @@ pub const PAGE_UP_KEYCODE: u32 = 104;
 pub const PAGE_DOWN_KEYCODE: u32 = 109;
 pub const SHIFT_LEFT_KEYCODE: u32 = 42;
 pub const SHIFT_RIGHT_KEYCODE: u32 = 54;
+/// Alt-Tab switcher keybindings (evdev): Tab while Alt is held steps
+/// the shell switcher (Shift+Tab steps back), Alt release commits,
+/// Escape cancels. The Tab press is consumed; Alt press/release still
+/// reach clients so app modifiers never stick.
+pub const TAB_KEYCODE: u32 = 15;
+pub const ALT_LEFT_KEYCODE: u32 = 56;
+pub const ALT_RIGHT_KEYCODE: u32 = 100;
 /// Hot-corner trigger region in logical pixels from the top-left.
 pub const HOT_CORNER_PX: f64 = 8.0;
 /// Activities-strip trigger: button presses in the top strip open the
@@ -675,6 +700,10 @@ impl WindowManager {
     /// Super+PageUp/PageDown switches workspace (with Shift: moves the
     /// focused window and follows it); those presses are consumed, all
     /// other keys — modifiers included — still reach clients.
+    /// Alt-Tab drives the shell switcher: Tab events while Alt is held
+    /// never reach clients (taps queue `Step`, Shift reverses,
+    /// releases are swallowed), Alt release queues `Commit`, Escape
+    /// queues `Cancel`; the Alt/Escape releases still reach clients.
     pub fn on_input(&mut self, state: &mut State, input: ManagerInput) {
         match input {
             ManagerInput::Key {
@@ -683,27 +712,26 @@ impl WindowManager {
                 time,
             } => {
                 self.track_workspace_modifiers(keycode, pressed);
-                if pressed
-                    && self.super_held
-                    && (keycode == PAGE_UP_KEYCODE || keycode == PAGE_DOWN_KEYCODE)
-                {
-                    let delta = if keycode == PAGE_UP_KEYCODE { -1 } else { 1 };
-                    let switched = if self.shift_held {
-                        self.move_focused_relative(state, delta)
-                    } else {
-                        self.switch_relative(state, delta)
-                    };
-                    // Greppable end-to-end signal for the CI journey: the
-                    // switch happened (empty workspaces look identical on
-                    // screen, so pixels alone cannot prove it).
-                    if switched {
-                        eprintln!(
-                            "rwd-compositor: workspace now {}",
-                            self.model.active_workspace()
-                        );
+                self.track_switcher_modifiers(keycode, pressed);
+                if keycode == TAB_KEYCODE && self.alt_held {
+                    // The whole chord stays invisible to apps: taps queue
+                    // steps, releases are swallowed (an app that never saw
+                    // the press must not see the release either).
+                    if pressed {
+                        self.switcher_open = true;
+                        self.push_switcher(SwitcherAction::Step {
+                            forward: !self.shift_held,
+                        });
                     }
+                } else if pressed && keycode == ESCAPE_KEYCODE && self.switcher_open {
+                    self.switcher_open = false;
+                    self.push_switcher(SwitcherAction::Cancel);
                 } else {
-                    self.keyboard_key(state, keycode, pressed, time);
+                    if !pressed && self.switcher_open && self.is_alt(keycode) {
+                        self.switcher_open = false;
+                        self.push_switcher(SwitcherAction::Commit);
+                    }
+                    self.on_workspace_key(state, keycode, pressed, time);
                 }
             }
             ManagerInput::Motion { pos, time } => self.pointer_motion(state, pos, time),
@@ -713,6 +741,61 @@ impl WindowManager {
                 time,
             } => self.pointer_button(state, button, pressed, time),
         }
+    }
+
+    /// Queued switcher drive events, drained by the runtime into the
+    /// hub broadcast after each input event.
+    pub fn take_switcher_queue(&mut self) -> Vec<SwitcherAction> {
+        std::mem::take(&mut self.switcher_queue)
+    }
+
+    /// Super+PageUp/PageDown workspace switching (Shift: move focused
+    /// window and follow); those presses are consumed, everything else
+    /// — modifiers included — still reaches clients.
+    fn on_workspace_key(&mut self, state: &mut State, keycode: u32, pressed: bool, time: u32) {
+        if pressed
+            && self.super_held
+            && (keycode == PAGE_UP_KEYCODE || keycode == PAGE_DOWN_KEYCODE)
+        {
+            let delta = if keycode == PAGE_UP_KEYCODE { -1 } else { 1 };
+            let switched = if self.shift_held {
+                self.move_focused_relative(state, delta)
+            } else {
+                self.switch_relative(state, delta)
+            };
+            // Greppable end-to-end signal for the CI journey: the
+            // switch happened (empty workspaces look identical on
+            // screen, so pixels alone cannot prove it).
+            if switched {
+                eprintln!(
+                    "rwd-compositor: workspace now {}",
+                    self.model.active_workspace()
+                );
+            }
+        } else {
+            self.keyboard_key(state, keycode, pressed, time);
+        }
+    }
+
+    /// Whether `keycode` is either Alt side.
+    fn is_alt(&self, keycode: u32) -> bool {
+        keycode == ALT_LEFT_KEYCODE || keycode == ALT_RIGHT_KEYCODE
+    }
+
+    /// Track Alt hold state for the switcher. The modifier events
+    /// themselves still forward to clients.
+    fn track_switcher_modifiers(&mut self, keycode: u32, pressed: bool) {
+        if self.is_alt(keycode) {
+            self.alt_held = pressed;
+        }
+    }
+
+    /// Queue one switcher drive event with a greppable trail for the
+    /// CI journey (an empty switcher renders nothing, so pixels alone
+    /// cannot prove the drive arrived).
+    fn push_switcher(&mut self, action: SwitcherAction) {
+        eprintln!("rwd-compositor: switcher {action:?}");
+        self.switcher_queue.push(action);
     }
 }
 

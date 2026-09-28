@@ -39,7 +39,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 
 use rwd_shell_control::{
     decode_frame, encode_frame, ActivationToken, CommandKind, CommandStatus, DecodeError,
-    ErrorKind, Message, ProtocolVersion, StateOp, WorkspaceInfo, CURRENT_VERSION, MAX_FRAME_BYTES,
+    ErrorKind, Message, ProtocolVersion, StateOp, SwitcherAction, WorkspaceInfo, CURRENT_VERSION,
+    MAX_FRAME_BYTES,
 };
 
 use crate::state::{StateChange, StateModel, TokenStore, WindowEntry};
@@ -398,6 +399,11 @@ impl<'a> Session<'a> {
         self.conn.write_frame(&Message::Overview { open })
     }
 
+    /// Send one Alt-Tab switcher drive event (002 workspaces).
+    pub fn send_switcher(&mut self, action: SwitcherAction) -> Result<(), ControlError> {
+        self.conn.write_frame(&Message::Switcher { action })
+    }
+
     /// Catch the shell up from [`last_revision`](Self::last_revision):
     /// incremental `Changes` when the change log covers the gap, else a
     /// fresh snapshot (resnapshot rule). New token-bearing entries mint
@@ -502,6 +508,7 @@ impl<'a> Session<'a> {
             | Message::Changes { .. }
             | Message::CommandResult { .. }
             | Message::Overview { .. }
+            | Message::Switcher { .. }
             | Message::Error { .. } => {
                 let _ = self.conn.write_frame(&Message::Error {
                     kind: ErrorKind::UnknownCommand,
@@ -536,6 +543,7 @@ fn message_kind(msg: &Message) -> &'static str {
         Message::CommandResult { .. } => "CommandResult",
         Message::Error { .. } => "Error",
         Message::Overview { .. } => "Overview",
+        Message::Switcher { .. } => "Switcher",
     }
 }
 
@@ -683,6 +691,10 @@ pub struct ControlHub {
     /// Intent value last broadcast to all sessions; a mismatch means a
     /// flip is still owed (or a newcomer joined mid-state).
     overview_sent: bool,
+    /// Alt-Tab drive events awaiting broadcast. Unlike the overview
+    /// intent (level), steps are discrete events: each one is sent to
+    /// every live session exactly once, retained until all sends land.
+    switcher_queue: Vec<SwitcherAction>,
 }
 
 impl ControlHub {
@@ -704,6 +716,7 @@ impl ControlHub {
             fresh: Vec::new(),
             overview: std::rc::Rc::new(std::cell::Cell::new(false)),
             overview_sent: false,
+            switcher_queue: Vec::new(),
             store,
             seat: seat.to_owned(),
         })
@@ -729,6 +742,12 @@ impl ControlHub {
     /// Idempotent: setting the current value sends nothing.
     pub fn set_overview(&self, open: bool) {
         self.overview.set(open);
+    }
+
+    /// Queue one Alt-Tab drive event; the next [`poll`](Self::poll)
+    /// broadcasts it to every live session as [`Message::Switcher`].
+    pub fn queue_switcher(&mut self, action: SwitcherAction) {
+        self.switcher_queue.push(action);
     }
 
     /// One nonblocking round: accept waiting peers, advance pending
@@ -782,6 +801,25 @@ impl ControlHub {
             if all_sent {
                 self.overview_sent = open;
             }
+        }
+        // Broadcast switcher drive events (002 workspaces): each queued
+        // action goes to every live session exactly once; actions that
+        // miss a session stay queued for the next poll.
+        if !self.switcher_queue.is_empty() {
+            let pending = std::mem::take(&mut self.switcher_queue);
+            let mut unsent = Vec::with_capacity(pending.len());
+            for action in pending {
+                let mut all_sent = true;
+                for session in &mut self.sessions {
+                    if session.send_switcher(action).is_err() {
+                        all_sent = false;
+                    }
+                }
+                if !all_sent {
+                    unsent.push(action);
+                }
+            }
+            self.switcher_queue = unsent;
         }
         activated
     }

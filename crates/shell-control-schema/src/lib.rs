@@ -53,7 +53,10 @@ impl ProtocolVersion {
     /// `0.3` appends the compositor-to-shell `Overview` message (002
     /// overview triggers). Enum variants serialize by index and the new
     /// variant sits last, so earlier discriminants are untouched.
-    pub const CURRENT: Self = Self { major: 0, minor: 3 };
+    ///
+    /// `0.4` appends the compositor-to-shell `Switcher` message (002
+    /// Alt-Tab drive), again last for the same reason.
+    pub const CURRENT: Self = Self { major: 0, minor: 4 };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
     pub const fn new(major: u16, minor: u16) -> Self {
@@ -244,6 +247,32 @@ pub enum Message {
         /// Whether the overview should be open.
         open: bool,
     },
+    /// Compositor-to-shell Alt-Tab switcher drive (002 workspaces).
+    /// The compositor owns global key state (Alt held, Tab taps,
+    /// Alt release, Escape) and the shell owns MRU order and
+    /// rendering: each Tab tap broadcasts one `Step`, Alt release
+    /// broadcasts `Commit`, Escape broadcasts `Cancel`. The shell
+    /// answers a commit with `ActivateWindow` for its selected id.
+    /// Carries no revision: UI state, like `Overview`.
+    Switcher {
+        /// What the switcher should do.
+        action: SwitcherAction,
+    },
+}
+
+/// One Alt-Tab switcher drive event (compositor to shell).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SwitcherAction {
+    /// Advance the switcher selection (`forward`: Tab vs Shift+Tab).
+    /// Opens the switcher when closed.
+    Step {
+        /// True for Tab, false for Shift+Tab.
+        forward: bool,
+    },
+    /// Activate the current selection; closes the switcher.
+    Commit,
+    /// Close the switcher without activating.
+    Cancel,
 }
 
 /// Compositor-minted activation Bearer [REDACTED] authorizing one privileged window action.
@@ -466,7 +495,8 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
         | Message::Command { .. }
         | Message::CommandResult { .. }
         | Message::Error { .. }
-        | Message::Overview { .. } => {}
+        | Message::Overview { .. }
+        | Message::Switcher { .. } => {}
     }
     Ok(())
 }
@@ -505,8 +535,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_3() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 3));
+    fn current_version_is_0_4() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 4));
     }
 
     #[test]
@@ -516,9 +546,23 @@ mod tests {
         assert!(ProtocolVersion::new(0, 0).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 1).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 2).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 4).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(1, 3).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 3).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 4).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 5).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
+    }
+
+    #[test]
+    fn roundtrip_switcher() {
+        for action in [
+            SwitcherAction::Step { forward: true },
+            SwitcherAction::Step { forward: false },
+            SwitcherAction::Commit,
+            SwitcherAction::Cancel,
+        ] {
+            roundtrip(&Message::Switcher { action });
+        }
     }
 
     #[test]

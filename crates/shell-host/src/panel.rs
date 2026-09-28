@@ -48,13 +48,17 @@ use crate::apps::{AppProvider, LaunchTracker};
 use crate::control::{ControlClient, ControlError, Handled};
 use crate::favorites::Favorites;
 use crate::model::ShellModel;
-use crate::overview::{paint_panel, OverviewCanvas, BYTES_PER_PIXEL};
+use crate::overview::{
+    paint_panel, OverviewCanvas, SwitcherCanvas, BYTES_PER_PIXEL, SWITCHER_STRIP_H,
+};
 use crate::search::{SearchAction, SearchHub, SearchResult, WindowProvider};
 
 /// Namespace advertised for the panel layer surface.
 pub const PANEL_NAMESPACE: &str = "rwd-shell-panel";
 /// Namespace advertised for the overview layer surface.
 pub const OVERVIEW_NAMESPACE: &str = "rwd-shell-overview";
+/// Namespace advertised for the Alt-Tab switcher layer surface.
+pub const SWITCHER_NAMESPACE: &str = "rwd-shell-switcher";
 /// Fixed panel height in logical pixels; also the exclusive zone.
 pub const PANEL_HEIGHT: u32 = 32;
 
@@ -145,6 +149,10 @@ pub struct ShellHost {
     overview: Option<OverviewSurface>,
     /// What the overview buffer currently shows; repaint on change.
     paint_key: Option<PaintKey>,
+    /// Live switcher layer surface while Alt-Tab is held.
+    switcher: Option<SwitcherSurface>,
+    /// What the switcher buffer currently shows; repaint on change.
+    switcher_key: Option<SwitcherPaintKey>,
     /// Panel size last painted (repaint on configure resize).
     panel_size: Option<(i32, i32)>,
     /// Panel buffer backing (pool fd must outlive the buffer).
@@ -187,6 +195,24 @@ struct PaintKey {
     windows: usize,
     favorites: usize,
     active_workspace: u32,
+    width: i32,
+    height: i32,
+}
+
+/// Live switcher layer surface and its configured size.
+struct SwitcherSurface {
+    surface: WlSurface,
+    layer: ZwlrLayerSurfaceV1,
+    backing: Option<ShmBacking>,
+    width: i32,
+    height: i32,
+}
+
+/// Repaint the switcher strip when any of these change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SwitcherPaintKey {
+    selection: Option<u64>,
+    entries: usize,
     width: i32,
     height: i32,
 }
@@ -314,6 +340,8 @@ impl ShellHost {
             wayland: None,
             overview: None,
             paint_key: None,
+            switcher: None,
+            switcher_key: None,
             panel_size: None,
             panel_backing: None,
         }
@@ -351,6 +379,85 @@ impl ShellHost {
             overview.surface.destroy();
         }
         self.paint_key = None;
+    }
+
+    /// Tear down the switcher surface, if any. Same explicit-destroy
+    /// rule as the overview: proxies alone never notify the server.
+    fn destroy_switcher(&mut self) {
+        if let Some(switcher) = self.switcher.take() {
+            switcher.layer.destroy();
+            switcher.surface.destroy();
+        }
+        self.switcher_key = None;
+    }
+
+    /// Reconcile the switcher surface with the model overlay (call
+    /// after every [`sync_overview`](Self::sync_overview)): create the
+    /// bottom-anchored strip when Alt-Tab opens, destroy it on commit
+    /// or cancel, repaint when the MRU selection or size changes.
+    /// Pure no-op without attached Wayland globals.
+    fn update_switcher(&mut self) {
+        if !self.model.is_switcher_open() {
+            self.destroy_switcher();
+            return;
+        }
+        let Some(wayland) = self.wayland.clone() else {
+            return;
+        };
+        if self.switcher.is_none() {
+            let surface = wayland.compositor.create_surface(&wayland.qh, ());
+            let layer = wayland.layer_shell.get_layer_surface(
+                &surface,
+                None,
+                Layer::Overlay,
+                SWITCHER_NAMESPACE.to_owned(),
+                &wayland.qh,
+                (),
+            );
+            layer.set_anchor(Anchor::Bottom | Anchor::Left | Anchor::Right);
+            layer.set_size(0, SWITCHER_STRIP_H as u32);
+            layer.set_exclusive_zone(0);
+            layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+            surface.commit();
+            self.switcher = Some(SwitcherSurface {
+                surface,
+                layer,
+                backing: None,
+                width: 0,
+                height: 0,
+            });
+            self.switcher_key = None;
+        }
+        let switcher = self.switcher.as_mut().expect("created above");
+        if switcher.width <= 0 || switcher.height <= 0 {
+            return;
+        }
+        let key = SwitcherPaintKey {
+            selection: self.model.switcher_selection(),
+            entries: self.model.mru_order().len(),
+            width: switcher.width,
+            height: switcher.height,
+        };
+        if self.switcher_key == Some(key) {
+            return;
+        }
+        let mut canvas = SwitcherCanvas::new(switcher.width, switcher.height);
+        canvas.render(self.model.mru_order(), self.model.switcher_selection());
+        if let Some(backing) = shm_upload(
+            &wayland.shm,
+            &wayland.qh,
+            canvas.pixels(),
+            switcher.width,
+            switcher.height,
+        ) {
+            switcher.surface.attach(Some(&backing.buffer), 0, 0);
+            switcher
+                .surface
+                .damage(0, 0, switcher.width, switcher.height);
+            switcher.surface.commit();
+            switcher.backing = Some(backing);
+            self.switcher_key = Some(key);
+        }
     }
 
     fn update_overview(&mut self, revision: Option<u64>) {
@@ -568,6 +675,8 @@ impl ShellHost {
             let _ = self.model.select_window(selected);
         }
         self.model.set_overview_open(model.is_overview_open());
+        self.model
+            .apply_switcher_state(model.is_switcher_open(), model.switcher_selection());
         // Keep switch-to-instance answers on compositor truth.
         self.windows.refresh(&self.model);
     }
@@ -688,6 +797,19 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for ShellHost {
                             overview.height = height as i32;
                         }
                     }
+                } else if state
+                    .switcher
+                    .as_ref()
+                    .is_some_and(|switcher| &switcher.layer == proxy)
+                {
+                    proxy.ack_configure(serial);
+                    // Size arrives here; the next update pass paints.
+                    if let Some(switcher) = state.switcher.as_mut() {
+                        if width > 0 && height > 0 {
+                            switcher.width = width as i32;
+                            switcher.height = height as i32;
+                        }
+                    }
                 } else {
                     proxy.ack_configure(serial);
                 }
@@ -703,6 +825,12 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for ShellHost {
                     .is_some_and(|overview| &overview.layer == proxy)
                 {
                     state.destroy_overview();
+                } else if state
+                    .switcher
+                    .as_ref()
+                    .is_some_and(|switcher| &switcher.layer == proxy)
+                {
+                    state.destroy_switcher();
                 }
             }
             _ => {}
@@ -799,6 +927,7 @@ pub fn run_panel_with_control(
             pump_wayland(&conn, &mut queue, &mut host)?;
             drive_control(control, &mut host);
             host.update_overview(control.revision());
+            host.update_switcher();
             queue
                 .flush()
                 .map_err(|e| PanelError::Flush(e.to_string()))?;
@@ -1079,6 +1208,128 @@ mod tests {
             host.sync_overview(&client);
             assert!(host.model.is_overview_open());
             assert_eq!(host.model.windows().len(), 3);
+        }
+
+        /// Alt-Tab drive round trip: hub-queued steps open the host
+        /// switcher on the MRU previous window, commit activates
+        /// through the token gate, cancel closes without touching
+        /// focus. Same `sync_overview` path the run loop drives.
+        #[test]
+        fn switcher_drive_steps_and_commits() {
+            use rwd_shell_control::{CommandStatus, SwitcherAction};
+
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("control.sock");
+            let mut model = StateModel::new();
+            let id_a = model.insert("alpha", Some("com.example.alpha"), 0);
+            let id_b = model.insert("beta", Some("com.example.beta"), 0);
+            assert!(model.set_focused(Some(id_a)));
+            let mut hub =
+                ControlHub::bind(socket_path.clone(), Rc::new(TokenStore::new()), SEAT_NAME)
+                    .unwrap();
+
+            let mut client = ControlClient::connect(&socket_path).unwrap();
+            client.send_hello().unwrap();
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.await_hello() {
+                    Ok(()) => break,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("hello failed: {e}"),
+                }
+            }
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.poll() {
+                    Ok(Handled::Snapshot { .. }) => break,
+                    Ok(_) => continue,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("snapshot poll failed: {e}"),
+                }
+            }
+
+            let (mut host, _dir) = test_host();
+            host.sync_overview(&client);
+            assert_eq!(host.model.mru_order(), &[id_a, id_b]);
+
+            // One step opens the switcher on the MRU previous window.
+            hub.queue_switcher(SwitcherAction::Step { forward: true });
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.poll() {
+                    Ok(Handled::Switcher { selection, .. }) => {
+                        assert_eq!(selection, Some(id_b));
+                        break;
+                    }
+                    Ok(_) => continue,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("switcher poll failed: {e}"),
+                }
+            }
+            host.sync_overview(&client);
+            assert!(host.model.is_switcher_open());
+            assert_eq!(host.model.switcher_selection(), Some(id_b));
+
+            // Commit activates the selection through the token gate.
+            hub.queue_switcher(SwitcherAction::Commit);
+            let mut committed = false;
+            let mut applied = false;
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.poll() {
+                    Ok(Handled::Switcher {
+                        action: SwitcherAction::Commit,
+                        ..
+                    }) => {
+                        committed = true;
+                    }
+                    Ok(Handled::CommandResult { status, .. }) => {
+                        assert_eq!(status, CommandStatus::Applied);
+                        applied = true;
+                    }
+                    Ok(_) => continue,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("commit poll failed: {e}"),
+                }
+                if committed && applied {
+                    break;
+                }
+            }
+            assert!(committed, "commit drive arrived");
+            assert!(applied, "activation applied");
+            assert_eq!(model.focused(), Some(id_b));
+            host.sync_overview(&client);
+            assert!(!host.model.is_switcher_open());
+
+            // Step then cancel: focus stays where the commit left it.
+            hub.queue_switcher(SwitcherAction::Step { forward: true });
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.poll() {
+                    Ok(Handled::Switcher { .. }) => break,
+                    Ok(_) => continue,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("restep poll failed: {e}"),
+                }
+            }
+            hub.queue_switcher(SwitcherAction::Cancel);
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.poll() {
+                    Ok(Handled::Switcher {
+                        action: SwitcherAction::Cancel,
+                        ..
+                    }) => {
+                        break;
+                    }
+                    Ok(_) => continue,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("cancel poll failed: {e}"),
+                }
+            }
+            assert_eq!(model.focused(), Some(id_b));
+            host.sync_overview(&client);
+            assert!(!host.model.is_switcher_open());
         }
 
         /// Search answers through the host: after a sync the window

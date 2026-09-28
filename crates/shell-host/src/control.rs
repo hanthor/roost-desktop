@@ -33,8 +33,8 @@ use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 
 use rwd_shell_control::{
-    ActivationToken, CommandKind, CommandStatus, DecodeError, ErrorKind, Message, WindowInfo,
-    WorkspaceInfo, CURRENT_VERSION, MAX_FRAME_BYTES,
+    ActivationToken, CommandKind, CommandStatus, DecodeError, ErrorKind, Message, SwitcherAction,
+    WindowInfo, WorkspaceInfo, CURRENT_VERSION, MAX_FRAME_BYTES,
 };
 
 use crate::model::{ShellModel, SnapshotView, WindowEntry};
@@ -154,6 +154,16 @@ pub enum Handled {
     Overview {
         /// Whether the overview should be open.
         open: bool,
+    },
+    /// Compositor Alt-Tab drive applied to the shell switcher (002
+    /// workspaces). `selection` is the switcher selection after
+    /// applying (the commit target, or `None` when closed/empty).
+    /// Carries no revision — UI state, not model truth.
+    Switcher {
+        /// Drive event that was applied.
+        action: SwitcherAction,
+        /// Current switcher selection, if any.
+        selection: Option<u64>,
     },
 }
 
@@ -413,6 +423,26 @@ impl ControlClient {
                 self.model.set_overview_open(open);
                 Ok(Handled::Overview { open })
             }
+            Message::Switcher { action } => {
+                // 002 workspaces: switcher drive is UI state too — never
+                // touches revision or `needs_snapshot`. A commit selects
+                // and activates through the token path, like the
+                // overview's Enter path.
+                let selection = match action {
+                    SwitcherAction::Step { forward } => self.model.switcher_step(forward),
+                    SwitcherAction::Cancel => {
+                        self.model.switcher_cancel();
+                        None
+                    }
+                    SwitcherAction::Commit => self.model.switcher_commit(),
+                };
+                if matches!(action, SwitcherAction::Commit) {
+                    if let Some(id) = selection {
+                        self.activate_window(id)?;
+                    }
+                }
+                Ok(Handled::Switcher { action, selection })
+            }
             Message::Error { kind, message } => {
                 if kind == ErrorKind::RevisionGap {
                     // Compositor-side gap signal: same handling as a local
@@ -494,6 +524,7 @@ fn message_label(msg: &Message) -> &'static str {
         Message::CommandResult { .. } => "CommandResult",
         Message::Error { .. } => "Error",
         Message::Overview { .. } => "Overview",
+        Message::Switcher { .. } => "Switcher",
     }
 }
 

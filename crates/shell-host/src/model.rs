@@ -52,12 +52,24 @@ impl WindowEntry {
 ///
 /// Rendering reads this; the (later) control-protocol adapter writes it.
 /// Selection is single: at most one window is `active` at a time.
+///
+/// MRU order derives here from `active` transitions (002 workspaces):
+/// every selection and snapshot application refreshes it, and Alt-Tab
+/// renders from it — the compositor never sends recency, it only sends
+/// the switcher drive events.
 #[derive(Debug, Default)]
 pub struct ShellModel {
     windows: Vec<WindowEntry>,
     workspaces: Vec<u32>,
     active_workspace: u32,
     overview_open: bool,
+    /// Most-recently-active window ids, front = most recent. Holds only
+    /// known ids; refreshed on selection and on every list replacement.
+    mru: Vec<u64>,
+    /// Alt-Tab switcher overlay: open while Alt is held.
+    switcher_open: bool,
+    /// Index into [`mru`](Self::mru_order) of the switcher selection.
+    switcher_index: usize,
 }
 
 impl ShellModel {
@@ -122,6 +134,7 @@ impl ShellModel {
         sorted.sort_unstable();
         sorted.dedup();
         self.workspaces = sorted;
+        self.refresh_mru();
     }
 
     /// Select a window by id, marking it active and clearing the others.
@@ -135,6 +148,7 @@ impl ShellModel {
         for window in &mut self.windows {
             window.active = window.id == id;
         }
+        self.touch_mru(id);
         true
     }
 
@@ -165,6 +179,112 @@ impl ShellModel {
     pub fn apply_snapshot_view(&mut self, snapshot: SnapshotView) {
         self.apply_window_list(snapshot.windows, snapshot.workspaces);
         self.set_active_workspace(snapshot.active_workspace);
+    }
+
+    /// Most-recently-active window ids, front = most recent. The
+    /// Alt-Tab switcher renders and steps through this order.
+    pub fn mru_order(&self) -> &[u64] {
+        &self.mru
+    }
+
+    /// Whether the Alt-Tab switcher overlay is open.
+    pub fn is_switcher_open(&self) -> bool {
+        self.switcher_open
+    }
+
+    /// Current switcher selection, if the switcher is open and nonempty.
+    pub fn switcher_selection(&self) -> Option<u64> {
+        self.switcher_open
+            .then(|| self.mru.get(self.switcher_index).copied())
+            .flatten()
+    }
+
+    /// Move `id` to the MRU front (no-op for unknown ids).
+    fn touch_mru(&mut self, id: u64) {
+        if !self.windows.iter().any(|w| w.id == id) {
+            return;
+        }
+        self.mru.retain(|known| *known != id);
+        self.mru.insert(0, id);
+    }
+
+    /// Rebuild MRU after a list replacement: survivors keep their
+    /// relative order, new ids arrive in list order at the front, and
+    /// the selected window goes first. An open switcher re-clamps to
+    /// the new list, closing when nothing remains.
+    fn refresh_mru(&mut self) {
+        self.mru
+            .retain(|id| self.windows.iter().any(|w| w.id == *id));
+        for window in self.windows.iter().rev() {
+            if !self.mru.contains(&window.id) {
+                self.mru.insert(0, window.id);
+            }
+        }
+        if let Some(selected) = self.selected() {
+            self.touch_mru(selected);
+        }
+        if self.switcher_open {
+            if self.mru.is_empty() {
+                self.switcher_open = false;
+                self.switcher_index = 0;
+            } else {
+                self.switcher_index = self.switcher_index.min(self.mru.len() - 1);
+            }
+        }
+    }
+
+    /// Advance the switcher selection, opening it on first step. The
+    /// first step lands past the current window (`mru[1]`); further
+    /// steps wrap around. Returns the new selection, or `None` with no
+    /// windows (the switcher stays closed).
+    pub fn switcher_step(&mut self, forward: bool) -> Option<u64> {
+        if self.mru.is_empty() {
+            return None;
+        }
+        if !self.switcher_open {
+            self.switcher_open = true;
+            self.switcher_index = if self.mru.len() >= 2 { 1 } else { 0 };
+        } else if forward {
+            self.switcher_index = (self.switcher_index + 1) % self.mru.len();
+        } else {
+            self.switcher_index = self
+                .switcher_index
+                .checked_sub(1)
+                .unwrap_or(self.mru.len() - 1);
+        }
+        self.mru.get(self.switcher_index).copied()
+    }
+
+    /// Commit the switcher: close it and return the selection for the
+    /// caller to activate. Returns `None` when closed or empty.
+    pub fn switcher_commit(&mut self) -> Option<u64> {
+        let selection = self.switcher_selection();
+        self.switcher_open = false;
+        self.switcher_index = 0;
+        selection
+    }
+
+    /// Cancel the switcher without activating.
+    pub fn switcher_cancel(&mut self) {
+        self.switcher_open = false;
+        self.switcher_index = 0;
+    }
+
+    /// Mirror another model's switcher overlay (host sync path, after
+    /// the window list already matches): open with the same selection
+    /// when it names a known window, else close.
+    pub fn apply_switcher_state(&mut self, open: bool, selection: Option<u64>) {
+        match (open, selection) {
+            (true, Some(id)) => {
+                if let Some(index) = self.mru.iter().position(|known| *known == id) {
+                    self.switcher_open = true;
+                    self.switcher_index = index;
+                } else {
+                    self.switcher_cancel();
+                }
+            }
+            _ => self.switcher_cancel(),
+        }
     }
 }
 
@@ -297,6 +417,91 @@ mod tests {
         assert_eq!(model.selected(), Some(2));
         model.set_active_workspace(0);
         assert_eq!(model.active_workspace(), 0);
+    }
+
+    #[test]
+    fn mru_tracks_selection_churn_most_recent_first() {
+        let mut model = ShellModel::new();
+        model.apply_window_list(
+            vec![
+                WindowEntry::new(1, "a", true),
+                WindowEntry::new(2, "b", false),
+                WindowEntry::new(3, "c", false),
+            ],
+            vec![0],
+        );
+        // Snapshot order with the selected window first.
+        assert_eq!(model.mru_order(), &[1, 2, 3]);
+        assert!(model.select_window(3));
+        assert_eq!(model.mru_order(), &[3, 1, 2]);
+        assert!(model.select_window(2));
+        assert_eq!(model.mru_order(), &[2, 3, 1]);
+        // Unknown selections change nothing.
+        assert!(!model.select_window(99));
+        assert_eq!(model.mru_order(), &[2, 3, 1]);
+    }
+
+    #[test]
+    fn mru_survives_resync_with_relative_order() {
+        let mut model = ShellModel::new();
+        model.apply_window_list(
+            vec![
+                WindowEntry::new(1, "a", false),
+                WindowEntry::new(2, "b", false),
+                WindowEntry::new(3, "c", true),
+            ],
+            vec![0],
+        );
+        assert!(model.select_window(2));
+        assert_eq!(model.mru_order(), &[2, 3, 1]);
+        // Window 3 closes; survivors keep order, newcomer 4 fronts.
+        model.apply_window_list(
+            vec![
+                WindowEntry::new(4, "d", true),
+                WindowEntry::new(1, "a", false),
+                WindowEntry::new(2, "b", false),
+            ],
+            vec![0],
+        );
+        assert_eq!(model.mru_order(), &[4, 2, 1]);
+    }
+
+    #[test]
+    fn switcher_steps_from_previous_and_wraps() {
+        let mut model = ShellModel::new();
+        model.apply_window_list(two_windows(), vec![0]);
+        assert!(!model.is_switcher_open());
+        // First step skips the current window (id 1).
+        assert_eq!(model.switcher_step(true), Some(2));
+        assert!(model.is_switcher_open());
+        assert_eq!(model.switcher_selection(), Some(2));
+        // Wrap around both directions.
+        assert_eq!(model.switcher_step(true), Some(1));
+        assert_eq!(model.switcher_step(true), Some(2));
+        assert_eq!(model.switcher_step(false), Some(1));
+        // Commit closes and yields the selection for activation.
+        assert_eq!(model.switcher_commit(), Some(1));
+        assert!(!model.is_switcher_open());
+        assert_eq!(model.switcher_selection(), None);
+        // Commit while closed yields nothing.
+        assert_eq!(model.switcher_commit(), None);
+    }
+
+    #[test]
+    fn switcher_cancel_closes_without_selection() {
+        let mut model = ShellModel::new();
+        model.apply_window_list(two_windows(), vec![0]);
+        assert_eq!(model.switcher_step(true), Some(2));
+        model.switcher_cancel();
+        assert!(!model.is_switcher_open());
+        assert_eq!(model.switcher_selection(), None);
+    }
+
+    #[test]
+    fn switcher_stays_closed_with_no_windows() {
+        let mut model = ShellModel::new();
+        assert_eq!(model.switcher_step(true), None);
+        assert!(!model.is_switcher_open());
     }
 
     #[test]
