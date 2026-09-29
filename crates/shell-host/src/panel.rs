@@ -51,7 +51,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     },
 };
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::apps::{entry_from_file, AppEntry, AppProvider, LaunchTracker};
 use crate::control::{ControlClient, ControlError, Handled};
@@ -61,12 +61,13 @@ use crate::dock::{
 };
 use crate::favorites::Favorites;
 use crate::icons::Artwork;
+use crate::intake::NotificationBus;
 use crate::keyboard::{KeyAction, XkbFeed};
 use crate::model::ShellModel;
 use crate::notifications::{NotificationCenter, Urgency};
 use crate::overview::{
-    banner_strip_height, paint_panel, BannerCanvas, OverviewCanvas, SwitcherCanvas, ACCENT,
-    BANNER_STRIP_W, BYTES_PER_PIXEL, SWITCHER_STRIP_H,
+    banner_hit, banner_strip_height, paint_panel, BannerCanvas, BannerHit, BannerRow,
+    OverviewCanvas, SwitcherCanvas, ACCENT, BANNER_STRIP_W, BYTES_PER_PIXEL, SWITCHER_STRIP_H,
 };
 use crate::popup::{paint_popup, panel_layout, popup_box, PopupBody, PopupState, POPUP_HEIGHT};
 use crate::search::{SearchAction, SearchHub, SearchResult, WindowProvider};
@@ -184,9 +185,9 @@ pub struct ShellHost {
     switcher: Option<SwitcherSurface>,
     /// What the switcher buffer currently shows; repaint on change.
     switcher_key: Option<SwitcherPaintKey>,
-    /// Local notification center (filled by the 004 daemon later;
-    /// banners render from it meanwhile in tests).
-    center: NotificationCenter,
+    /// Local notification center, shared with the intake bus edge
+    /// (wire arrivals file here; banners render from it).
+    center: Arc<Mutex<NotificationCenter>>,
     /// Live banner layer surface while banners are queued.
     banners: Option<BannerSurface>,
     /// What the banner buffer currently shows; repaint on change.
@@ -217,6 +218,11 @@ pub struct ShellHost {
     /// True while the pointer is over the dock surface (set on enter,
     /// cleared on panel enter): routes button presses to the dock.
     pointer_on_dock: bool,
+    /// True while the pointer is over the banner surface (set on
+    /// enter, cleared on panel or dock enter): routes button presses
+    /// to [`ShellHost::press_banner`]. The banner never takes keyboard
+    /// focus; this flag only steers presses.
+    pointer_on_banner: bool,
     /// Open calendar/menu popup, if any.
     popup: PopupState,
     /// Bottom dock layer surface and its arranged size (`None` before
@@ -236,6 +242,8 @@ pub struct ShellHost {
     indicators: IndicatorHost,
     /// D-Bus edge behind the indicator host.
     watcher: WatcherBus,
+    /// D-Bus edge behind the notification center.
+    notifications: NotificationBus,
     /// Resolved icon artwork keyed (theme, name, size). Cleared
     /// wholesale when the snapshot theme changes.
     icon_cache: std::collections::HashMap<(String, String, u32), Artwork>,
@@ -326,13 +334,49 @@ struct BannerSurface {
     requested_height: i32,
 }
 
+/// One visible banner's paint inputs: identity and chrome plus the
+/// painted text, so an in-place replace repaints even when the id,
+/// urgency, and expand flag all stay the same.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BannerKeyRow {
+    id: u64,
+    urgency: Urgency,
+    expanded: bool,
+    summary: String,
+    body: String,
+    has_actions: bool,
+}
+
 /// Repaint the banner strip when any of these change: visible banner
-/// ids with urgency and expand flags, plus the configured size.
+/// rows (identity, urgency, expand flag, and painted text), plus the
+/// configured size.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BannerPaintKey {
-    rows: Vec<(u64, Urgency, bool)>,
+    rows: Vec<BannerKeyRow>,
     width: i32,
     height: i32,
+}
+
+/// Visible banner paint rows behind [`BannerPaintKey`]: identity and
+/// chrome plus the painted text, so an in-place replace repaints even
+/// when the id, urgency, and expand flag all stay the same. Shared by
+/// [`ShellHost::update_banners`] and the flood test, which pins the
+/// row set bounded and stable under load.
+fn banner_key_rows(center: &NotificationCenter) -> Vec<BannerKeyRow> {
+    // The lock is uncontended on the tick path; a poisoned center
+    // reads as no banners (same rule as the paint path below).
+    center
+        .banners()
+        .iter()
+        .map(|n| BannerKeyRow {
+            id: n.id,
+            urgency: n.urgency,
+            expanded: n.expanded,
+            summary: n.summary().to_owned(),
+            body: n.body().to_owned(),
+            has_actions: !n.pending_actions().is_empty(),
+        })
+        .collect()
 }
 
 /// Repaint the dock strip when any of these change: item order,
@@ -352,6 +396,9 @@ struct DockPaintKey {
 struct PanelPaintKey {
     clock: String,
     states: [(TileState, Option<u8>); 3],
+    /// Queued unread notifications behind the bar presence marker;
+    /// the strip repaints within one slow tick of queue changes.
+    unread: usize,
     width: i32,
     height: i32,
     /// Open popup: calendar carries the day of month (midnight
@@ -470,6 +517,8 @@ impl ShellHost {
             windows.clone() as Arc<dyn crate::search::SearchProvider>,
             apps.clone() as Arc<dyn crate::search::SearchProvider>,
         ]);
+        let center = Arc::new(Mutex::new(NotificationCenter::new()));
+        let notifications = NotificationBus::new(center.clone());
         Self {
             model: ShellModel::new(),
             panel,
@@ -486,7 +535,7 @@ impl ShellHost {
             paint_key: None,
             switcher: None,
             switcher_key: None,
-            center: NotificationCenter::new(),
+            center,
             banners: None,
             banner_key: None,
             panel_size: None,
@@ -499,6 +548,7 @@ impl ShellHost {
             pointer: None,
             pointer_pos: None,
             pointer_on_dock: false,
+            pointer_on_banner: false,
             popup: PopupState::default(),
             dock_layer: None,
             dock_surface: None,
@@ -510,6 +560,7 @@ impl ShellHost {
             published_wallpaper: None,
             indicators: IndicatorHost::new(),
             watcher: WatcherBus::new(),
+            notifications,
             icon_cache: std::collections::HashMap::new(),
             icon_theme: crate::settings::DEFAULT_ICON_THEME.to_owned(),
             pending_dock: Vec::new(),
@@ -564,10 +615,29 @@ impl ShellHost {
         self.switcher_key = None;
     }
 
-    /// The host's notification center (the 004 daemon files through
-    /// here; tests file directly).
-    pub fn notification_center(&mut self) -> &mut NotificationCenter {
-        &mut self.center
+    /// The host's notification center (the intake bus files through
+    /// here; tests file directly). Shared with the bus edge, so wire
+    /// arrivals show up in banners without a copy.
+    pub fn notification_center(&self) -> Arc<Mutex<NotificationCenter>> {
+        self.center.clone()
+    }
+
+    /// Load the persisted notification queue from `path` into the
+    /// shared center, replacing whatever it holds. Missing, corrupt,
+    /// or version-skewed files read as empty. The loaded path sticks
+    /// to the center, so later mutations persist back to it.
+    pub fn restore_notification_queue(&mut self, path: &Path) {
+        if let Ok(mut center) = self.center.lock() {
+            *center = NotificationCenter::load(path);
+        }
+    }
+
+    /// Load the persisted queue from the system state file at host
+    /// start. Same fail-closed rule as
+    /// [`ShellHost::restore_notification_queue`]: a bad file never
+    /// blocks the panel.
+    pub fn load_notification_queue(&mut self) {
+        self.restore_notification_queue(&NotificationCenter::system_path());
     }
 
     /// Tear down the banner surface, if any (same explicit-destroy
@@ -586,12 +656,11 @@ impl ShellHost {
     /// queue drains, repaint when the visible rows or size change.
     /// Pure no-op without attached Wayland globals.
     fn update_banners(&mut self) {
-        let rows: Vec<(u64, Urgency, bool)> = self
+        let rows: Vec<BannerKeyRow> = self
             .center
-            .banners()
-            .iter()
-            .map(|n| (n.id, n.urgency, n.expanded))
-            .collect();
+            .lock()
+            .map(|center| banner_key_rows(&center))
+            .unwrap_or_default();
         if rows.is_empty() {
             self.destroy_banners();
             return;
@@ -610,7 +679,7 @@ impl ShellHost {
                 (),
             );
             layer.set_anchor(Anchor::Bottom | Anchor::Right);
-            let expanded: Vec<bool> = rows.iter().map(|(_, _, expanded)| *expanded).collect();
+            let expanded: Vec<bool> = rows.iter().map(|row| row.expanded).collect();
             let want = banner_strip_height(&expanded);
             layer.set_size(BANNER_STRIP_W as u32, want as u32);
             layer.set_exclusive_zone(0);
@@ -633,7 +702,7 @@ impl ShellHost {
         // The row set changed height (expand toggles, queue growth):
         // re-request once; the configure round-trip repaints at the
         // new size.
-        let expanded: Vec<bool> = rows.iter().map(|(_, _, expanded)| *expanded).collect();
+        let expanded: Vec<bool> = rows.iter().map(|row| row.expanded).collect();
         let want = banner_strip_height(&expanded);
         if want != banners.requested_height {
             banners.layer.set_size(BANNER_STRIP_W as u32, want as u32);
@@ -650,9 +719,15 @@ impl ShellHost {
             return;
         }
         let mut canvas = BannerCanvas::new(banners.width, banners.height);
-        let cells: Vec<(Urgency, bool)> = rows
+        let cells: Vec<BannerRow<'_>> = rows
             .iter()
-            .map(|(_, urgency, expanded)| (*urgency, *expanded))
+            .map(|row| BannerRow {
+                summary: &row.summary,
+                body: &row.body,
+                urgency: row.urgency,
+                expanded: row.expanded,
+                has_actions: row.has_actions,
+            })
             .collect();
         canvas.render(&cells);
         if let Some(backing) = shm_upload(
@@ -668,6 +743,48 @@ impl ShellHost {
             banners.backing = Some(backing);
             self.banner_key = Some(key);
         }
+    }
+
+    /// Press at banner-surface coordinates: the dismiss box closes
+    /// the banner, anywhere else on the row invokes its `default`
+    /// action (falling back to dismiss when the banner offers no
+    /// default key). Routes through [`NotificationBus`] so the app
+    /// hears `ActionInvoked` / `NotificationClosed`, then reconciles
+    /// the strip. Never touches window selection or keyboard focus:
+    /// the banner layer keeps `KeyboardInteractivity::None` and this
+    /// path owns no selection, opens nothing, and edits no text.
+    pub fn press_banner(&mut self, x: i32, y: i32) {
+        let rows: Vec<(u64, bool, bool)> = self
+            .center
+            .lock()
+            .map(|center| {
+                center
+                    .banners()
+                    .iter()
+                    .map(|n| (n.id, n.expanded, n.pending_actions().contains(&"default")))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if rows.is_empty() {
+            return;
+        }
+        // The strip is always requested at the fixed width, so
+        // headless presses hit-test against the same geometry the
+        // canvas paints.
+        let expanded: Vec<bool> = rows.iter().map(|(_, expanded, _)| *expanded).collect();
+        let (index, dismiss) = match banner_hit(&expanded, BANNER_STRIP_W, x, y) {
+            BannerHit::ActionRow(index) => (index, !rows[index].2),
+            BannerHit::Dismiss(index) => (index, true),
+            BannerHit::Miss => return,
+        };
+        let id = rows[index].0 as u32;
+        if dismiss {
+            // Reason 2: dismissed by the user (freedesktop close reasons).
+            let _ = self.notifications.dismiss_banner(id, 2);
+        } else {
+            let _ = self.notifications.invoke_action(id, "default");
+        }
+        self.update_banners();
     }
 
     /// Reconcile the switcher surface with the model overlay (call
@@ -812,10 +929,10 @@ impl ShellHost {
     }
 
     /// Paint the panel strip into a fresh shm buffer and attach it.
-    /// Repaints when the size, clock minute, tile states, or popup
-    /// change; called on configure and from the slow status tick.
-    /// `height` is the arranged surface height: strip-only, or strip
-    /// plus the popup band while a popup is open.
+    /// Repaints when the size, clock minute, tile states, unread
+    /// count, or popup change; called on configure and from the slow
+    /// status tick. `height` is the arranged surface height:
+    /// strip-only, or strip plus the popup band while a popup is open.
     fn paint_panel_surface(&mut self, width: i32, height: i32) {
         if width <= 0 || height <= 0 {
             return;
@@ -828,9 +945,15 @@ impl ShellHost {
             PopupBody::Menu(index) => (1u8, index as u32),
             PopupBody::IndicatorMenu(index) => (2u8, index as u32),
         });
+        let unread = self
+            .center
+            .lock()
+            .map(|center| center.unread_count())
+            .unwrap_or(0);
         let key = PanelPaintKey {
             clock: self.tiles.clock.clone(),
             states: tiles.map(|tile| (tile.state, tile.level)),
+            unread,
             width,
             height,
             popup,
@@ -854,6 +977,11 @@ impl ShellHost {
             return;
         }
         let Some(wayland) = self.wayland.clone() else {
+            // No compositor attached (unit tests): record the key so
+            // the slow-tick repaint decision stays observable. The shm
+            // upload below still needs Wayland, and `panel_backing`
+            // stays `None`, so a later attach repaints for real.
+            self.panel_paint_key = Some(key);
             return;
         };
         let mut pixels = vec![0u8; width as usize * height as usize * BYTES_PER_PIXEL];
@@ -864,6 +992,7 @@ impl ShellHost {
             strip_h,
             &self.tiles.clock,
             &[self.tiles.network, self.tiles.power, self.tiles.sound],
+            unread,
         );
         if let Some(body) = self.popup.body() {
             if height > strip_h {
@@ -918,6 +1047,7 @@ impl ShellHost {
             self.publish_wallpaper();
             self.sync_icon_theme();
             self.poll_indicators();
+            self.poll_notifications();
         }
         if let Some((width, height)) = self.panel_size {
             self.paint_panel_surface(width, height);
@@ -1363,6 +1493,13 @@ impl ShellHost {
         if self.indicators.items() != before.as_slice() {
             self.panel_paint_key = None;
         }
+    }
+
+    /// Take the notifications role when free: the intake edge files
+    /// wire arrivals into the shared center on its own threads, so
+    /// the tick only ensures the name. Silent no-op without a bus.
+    fn poll_notifications(&mut self) {
+        self.notifications.ensure();
     }
 
     /// Open an indicator's menu, fetching its rows first. An empty
@@ -1989,16 +2126,32 @@ impl Dispatch<WlPointer, ()> for ShellHost {
                 if Some(&surface) == state.surface.as_ref() {
                     state.pointer_pos = Some((surface_x, surface_y));
                     state.pointer_on_dock = false;
+                    state.pointer_on_banner = false;
                 } else if Some(&surface) == state.dock_surface.as_ref() {
                     state.pointer_pos = Some((surface_x, surface_y));
                     state.pointer_on_dock = true;
+                    state.pointer_on_banner = false;
+                } else if state
+                    .banners
+                    .as_ref()
+                    .is_some_and(|banners| banners.surface == surface)
+                {
+                    state.pointer_pos = Some((surface_x, surface_y));
+                    state.pointer_on_dock = false;
+                    state.pointer_on_banner = true;
                 }
             }
             PointerEvent::Leave { surface, .. } => {
-                if Some(&surface) == state.surface.as_ref()
+                let tracked = Some(&surface) == state.surface.as_ref()
                     || Some(&surface) == state.dock_surface.as_ref()
-                {
+                    || state
+                        .banners
+                        .as_ref()
+                        .is_some_and(|banners| banners.surface == surface);
+                if tracked {
                     state.pointer_pos = None;
+                    state.pointer_on_dock = false;
+                    state.pointer_on_banner = false;
                 }
             }
             PointerEvent::Motion {
@@ -2021,6 +2174,10 @@ impl Dispatch<WlPointer, ()> for ShellHost {
                 if let (true, Some((x, y))) = (pressed_now, state.pointer_pos) {
                     if state.pointer_on_dock {
                         state.press_dock(x as i32, y as i32, button);
+                    } else if state.pointer_on_banner {
+                        if button == BTN_LEFT {
+                            state.press_banner(x as i32, y as i32);
+                        }
                     } else if button == BTN_LEFT {
                         state.press_panel(x as i32, y as i32);
                     }
@@ -2099,6 +2256,7 @@ pub fn run_panel_with_control(
     let seat: WlSeat = globals.bind(&qh, 1..=9, ()).map_err(PanelError::NoSeat)?;
 
     let mut host = ShellHost::new(panel, AppProvider::system(), Favorites::system());
+    host.load_notification_queue();
     host.attach_wayland(compositor.clone(), layer_shell.clone(), shm, qh.clone());
     host.attach_seat(seat.clone(), &qh);
     host.create_panel_surface(&compositor, &layer_shell, &qh);
@@ -2728,22 +2886,23 @@ mod tests {
             let (mut host, _dir) = test_host();
             attach_host(&mut comp, &conn, &mut queue, &mut host);
 
-            let first = host.notification_center().notify(
-                "app",
-                "t1",
-                "b1",
-                vec![],
-                crate::notifications::Urgency::Normal,
-                None,
-            );
-            let crit = host.notification_center().notify(
-                "app",
-                "t2",
-                "b2",
-                vec![],
-                Urgency::Critical,
-                None,
-            );
+            let first = host
+                .notification_center()
+                .lock()
+                .expect("center lock")
+                .notify(
+                    "app",
+                    "t1",
+                    "b1",
+                    vec![],
+                    crate::notifications::Urgency::Normal,
+                    None,
+                );
+            let crit = host
+                .notification_center()
+                .lock()
+                .expect("center lock")
+                .notify("app", "t2", "b2", vec![], Urgency::Critical, None);
             host.update_banners();
             for _ in 0..PUMP_ROUNDS {
                 pump_server(&mut comp, &mut queue, &mut host);
@@ -2771,8 +2930,16 @@ mod tests {
             );
 
             // Draining the queue destroys the surface server-side too.
-            host.notification_center().dismiss(first).unwrap();
-            host.notification_center().dismiss(crit).unwrap();
+            host.notification_center()
+                .lock()
+                .expect("center lock")
+                .dismiss(first)
+                .unwrap();
+            host.notification_center()
+                .lock()
+                .expect("center lock")
+                .dismiss(crit)
+                .unwrap();
             host.update_banners();
             for _ in 0..PUMP_ROUNDS {
                 pump_server(&mut comp, &mut queue, &mut host);
@@ -2792,6 +2959,285 @@ mod tests {
                     .iter()
                     .all(|s| s.namespace != BANNER_NAMESPACE),
                 "banner strip destroyed with the queue"
+            );
+        }
+
+        /// Banner presses route without Wayland: the dismiss box
+        /// closes, the row body invokes `default`. The consumed
+        /// action key proves the body press invoked rather than
+        /// dismissed (dismiss never consumes keys); history survives
+        /// both either way.
+        #[test]
+        fn banner_presses_invoke_default_or_dismiss() {
+            use crate::notifications::NotificationAction;
+            use crate::overview::{banner_row_boxes, BANNER_STRIP_W};
+
+            let (mut host, _dir) = test_host();
+            let center = host.notification_center();
+            let action = |id: &str| NotificationAction {
+                id: id.to_owned(),
+                label: format!("label-{id}"),
+            };
+            let invoked = center.lock().expect("center lock").notify(
+                "app",
+                "Hello",
+                "a stub body",
+                vec![action("default")],
+                crate::notifications::Urgency::Normal,
+                None,
+            );
+            center.lock().expect("center lock").notify(
+                "app",
+                "Plain",
+                "",
+                vec![],
+                crate::notifications::Urgency::Normal,
+                None,
+            );
+
+            // Row body on the `default` banner invokes the key.
+            let boxes = banner_row_boxes(&[false, false], BANNER_STRIP_W, 0).expect("row 0");
+            host.press_banner(boxes.row.0 + 10, boxes.row.1 + 40);
+            {
+                let guard = center.lock().expect("center lock");
+                let live: Vec<u64> = guard.banners().iter().map(|n| n.id).collect();
+                assert!(!live.contains(&invoked), "invoke clears the banner");
+                assert_eq!(live.len(), 1, "only the pressed banner leaves");
+                let entry = guard
+                    .history()
+                    .iter()
+                    .find(|n| n.id == invoked)
+                    .expect("history");
+                assert!(
+                    entry.pending_actions().is_empty(),
+                    "body press invoked default (dismiss consumes nothing)"
+                );
+                assert_eq!(guard.history().len(), 2, "invoke keeps history");
+            }
+
+            // The plain banner slid into row 0; its dismiss box closes
+            // it, and the body of a banner with no default key falls
+            // back to dismiss.
+            let boxes = banner_row_boxes(&[false], BANNER_STRIP_W, 0).expect("row 0");
+            host.press_banner(boxes.dismiss.0 + 2, boxes.dismiss.1 + 2);
+            assert!(
+                center.lock().expect("center lock").banners().is_empty(),
+                "dismiss press closes"
+            );
+        }
+
+        /// Banner presses never take keyboard focus and never disturb
+        /// window selection: action, dismiss, and miss presses leave
+        /// the selected window, the closed overview, and the empty
+        /// search box exactly alone. (The layer itself is created with
+        /// `KeyboardInteractivity::None`; this pins the press path.)
+        #[test]
+        fn banner_presses_never_touch_selection_or_focus() {
+            use crate::model::WindowEntry;
+            use crate::notifications::NotificationAction;
+            use crate::overview::{banner_row_boxes, BANNER_STRIP_W};
+
+            let (mut host, _dir) = test_host();
+            host.model.apply_window_list(
+                vec![
+                    WindowEntry::new(1, "a", true),
+                    WindowEntry::new(2, "b", false),
+                ],
+                vec![0],
+            );
+            assert_eq!(host.model.selected(), Some(1));
+            let center = host.notification_center();
+            center.lock().expect("center lock").notify(
+                "app",
+                "Hello",
+                "a stub body",
+                vec![NotificationAction {
+                    id: "default".to_owned(),
+                    label: "Open".to_owned(),
+                }],
+                crate::notifications::Urgency::Critical,
+                None,
+            );
+
+            // Action-row press invokes.
+            let boxes = banner_row_boxes(&[false], BANNER_STRIP_W, 0).expect("row 0");
+            host.press_banner(boxes.row.0 + 10, boxes.row.1 + 40);
+            // Re-file and dismiss-press.
+            center.lock().expect("center lock").notify(
+                "app",
+                "Again",
+                "",
+                vec![],
+                crate::notifications::Urgency::Normal,
+                None,
+            );
+            let boxes = banner_row_boxes(&[false], BANNER_STRIP_W, 0).expect("row 0");
+            host.press_banner(boxes.dismiss.0 + 2, boxes.dismiss.1 + 2);
+            // Miss press on the drained queue.
+            host.press_banner(4, 4);
+
+            assert_eq!(host.model.selected(), Some(1), "selection stable");
+            assert!(!host.model.is_overview_open(), "overview stays shut");
+            assert!(host.search_text().is_empty(), "no key text typed");
+            assert!(!host.take_submit() && !host.take_dismiss(), "no key arms");
+        }
+
+        /// Bar presence marker: the panel paint key carries the
+        /// center's unread count, so one slow tick picks up queue
+        /// changes; zero unread leaves the marker out.
+        #[test]
+        fn bar_marker_key_tracks_unread_within_one_tick() {
+            use crate::notifications::Urgency;
+
+            let (mut host, _dir) = test_host();
+            host.panel_size = Some((1280, 32));
+            host.tiles.clock = "12:34".to_owned();
+            // Pin the slow-tick throttle: probes stay fixed and each
+            // tick below only exercises the repaint decision.
+            let tick = |host: &mut ShellHost| {
+                host.tiles_refreshed = Some(std::time::Instant::now());
+                host.update_panel_status();
+            };
+            tick(&mut host);
+            let quiet = host.panel_paint_key.clone().expect("tick records key");
+            assert_eq!(quiet.unread, 0, "no marker at zero");
+
+            let id = host
+                .notification_center()
+                .lock()
+                .expect("center lock")
+                .notify("app", "t", "b", vec![], Urgency::Normal, None);
+            tick(&mut host);
+            let marked = host.panel_paint_key.clone().expect("tick records key");
+            assert_eq!(marked.unread, 1, "marker visible with unread queued");
+            assert_ne!(quiet, marked, "queue change repaints within one tick");
+
+            host.notification_center()
+                .lock()
+                .expect("center lock")
+                .dismiss(id)
+                .unwrap();
+            tick(&mut host);
+            let cleared = host.panel_paint_key.clone().expect("tick records key");
+            assert_eq!(cleared.unread, 0, "marker hidden when none");
+            assert_eq!(quiet, cleared, "drain restores the quiet key");
+        }
+
+        /// Flood through the host: ten thousand notifies keep the
+        /// banner paint rows bounded, newest-kept, and stable — the
+        /// same key twice with no mutation between, and the panel
+        /// marker tracks the capped unread count within one tick.
+        #[test]
+        fn flood_keeps_banner_rows_bounded_and_stable() {
+            use super::super::banner_key_rows;
+            use crate::notifications::{Urgency, MAX_BANNERS, MAX_HISTORY};
+
+            let (mut host, _dir) = test_host();
+            host.panel_size = Some((1280, 32));
+            host.tiles.clock = "12:34".to_owned();
+            let center = host.notification_center();
+            for _ in 0..10_000 {
+                center.lock().expect("center lock").notify(
+                    "app",
+                    "flood",
+                    "body",
+                    vec![],
+                    Urgency::Normal,
+                    None,
+                );
+            }
+            {
+                let guard = center.lock().expect("center lock");
+                assert_eq!(guard.history().len(), MAX_HISTORY, "history capped");
+                assert_eq!(guard.unread_count(), MAX_BANNERS, "unread capped");
+                let rows = banner_key_rows(&guard);
+                assert_eq!(
+                    rows.len(),
+                    MAX_BANNERS,
+                    "paint rows never grow past the cap"
+                );
+                let newest: Vec<u64> = guard.banners().iter().map(|n| n.id).collect();
+                assert_eq!(
+                    rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+                    newest,
+                    "paint rows track the newest banners"
+                );
+                // No mutation between builds: the key is stable.
+                assert_eq!(rows, banner_key_rows(&guard), "paint rows stable at rest");
+            }
+            // One slow tick picks up the capped marker (not 10k).
+            host.tiles_refreshed = Some(std::time::Instant::now());
+            host.update_panel_status();
+            let key = host.panel_paint_key.clone().expect("tick records key");
+            assert_eq!(key.unread, MAX_BANNERS, "marker shows the capped queue");
+        }
+
+        /// Restart rehydrates the unread list: save the queue, rebuild
+        /// the host from it (the same `restore_notification_queue`
+        /// seam `run_panel_with_control` drives via
+        /// `load_notification_queue`), and the banners shown before
+        /// are the banners shown after.
+        #[test]
+        fn restart_rehydrates_the_unread_list() {
+            use crate::notifications::Urgency;
+
+            let dir = tempfile::tempdir().expect("tempdir");
+            let queue = dir.path().join("notifications.json");
+            let (host, _guard) = test_host();
+            let center = host.notification_center();
+            let first = center.lock().expect("center lock").notify(
+                "app",
+                "first",
+                "b1",
+                vec![],
+                Urgency::Normal,
+                None,
+            );
+            let second = center.lock().expect("center lock").notify(
+                "app",
+                "second",
+                "b2",
+                vec![],
+                Urgency::Critical,
+                None,
+            );
+            center
+                .lock()
+                .expect("center lock")
+                .save(&queue)
+                .expect("save");
+            let before: Vec<(u64, String, String)> = center
+                .lock()
+                .expect("center lock")
+                .banners()
+                .iter()
+                .map(|n| (n.id, n.summary().to_owned(), n.body().to_owned()))
+                .collect();
+            assert_eq!(before.len(), 2);
+            drop(center);
+            drop(host);
+
+            // Rebuilt host over the saved file.
+            let (mut restarted, _guard) = test_host();
+            restarted.restore_notification_queue(&queue);
+            let after: Vec<(u64, String, String)> = restarted
+                .notification_center()
+                .lock()
+                .expect("center lock")
+                .banners()
+                .iter()
+                .map(|n| (n.id, n.summary().to_owned(), n.body().to_owned()))
+                .collect();
+            assert_eq!(after, before, "restart preserves the unread list");
+            assert_eq!((first, second), (before[0].0, before[1].0));
+            // The rehydrated center keeps filing onto the same file.
+            assert_eq!(
+                restarted
+                    .notification_center()
+                    .lock()
+                    .expect("center lock")
+                    .queue_path(),
+                Some(queue.as_path())
             );
         }
 
@@ -3344,6 +3790,7 @@ mod tests {
             super::super::PanelPaintKey {
                 clock: "12:34".to_owned(),
                 states: [(crate::tiles::TileState::Ready, None); 3],
+                unread: 0,
                 width: 1280,
                 height: 32,
                 popup: None,

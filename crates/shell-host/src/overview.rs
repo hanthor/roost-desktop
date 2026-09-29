@@ -283,6 +283,10 @@ pub(crate) fn glyph_index(ch: char) -> Option<u8> {
     }
 }
 
+/// Top-bar strip: backdrop, Activities corner, centered clock, right-edge
+/// service dots, and — while `unread > 0` — one filled presence square
+/// left of the leftmost tile cell. At zero the marker cell stays
+/// backdrop, so an empty queue paints exactly the old strip.
 pub fn paint_panel(
     pixels: &mut [u8],
     width: i32,
@@ -290,6 +294,7 @@ pub fn paint_panel(
     strip_h: i32,
     clock: &str,
     tiles: &[Tile],
+    unread: usize,
 ) {
     let stride = width as usize * BYTES_PER_PIXEL;
     for (i, byte) in pixels.iter_mut().enumerate() {
@@ -352,6 +357,21 @@ pub fn paint_panel(
             }
         }
         dx -= DOT_SIZE + DOT_GAP;
+    }
+    // Unread presence marker: one small filled square a gap left of
+    // the leftmost tile cell. Painted only while `unread > 0`; at
+    // zero this cell keeps the backdrop filled above.
+    if unread > 0 {
+        const MARKER_SIZE: i32 = 6;
+        let cells = tiles.len().max(1) as i32;
+        let leftmost = width - DOT_MARGIN - DOT_SIZE - (cells - 1) * (DOT_SIZE + DOT_GAP);
+        let mx = leftmost - DOT_GAP - MARKER_SIZE;
+        let my = (strip_h - MARKER_SIZE) / 2;
+        for y in 0..MARKER_SIZE {
+            for x in 0..MARKER_SIZE {
+                put_pixel(pixels, stride, mx + x, my + y, ACCENT);
+            }
+        }
     }
 }
 
@@ -483,6 +503,107 @@ pub fn banner_strip_height(expanded: &[bool]) -> i32 {
     height
 }
 
+/// Dismiss-box fill, distinct from every row fill and text ink.
+const DISMISS_FILL: [u8; 4] = [0x86, 0x2e, 0x2e, 0xff];
+/// Dismiss-box edge, in pixels.
+pub const BANNER_DISMISS_SIZE: i32 = 16;
+/// Body-line ink (dimmer than the summary's accent).
+const BODY_TEXT: [u8; 4] = [0x9a, 0x92, 0x92, 0xff];
+/// Glyph text height at strip scale.
+const BANNER_LINE_H: i32 = 5 * FONT_SCALE;
+
+/// One banner row's paint inputs: visible text plus chrome flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BannerRow<'a> {
+    /// Summary line (empty paints no bar).
+    pub summary: &'a str,
+    /// Body text (empty paints no body bar).
+    pub body: &'a str,
+    /// Row fill and border follow urgency.
+    pub urgency: Urgency,
+    /// Taller row with extra body bars.
+    pub expanded: bool,
+    /// Accent underline marks an invokable action row.
+    pub has_actions: bool,
+}
+
+/// Press target inside the banner strip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BannerHit {
+    /// The row body: invokes the banner's `default` action.
+    ActionRow(usize),
+    /// The row's dismiss box: closes the banner.
+    Dismiss(usize),
+    /// No banner row under the point.
+    Miss,
+}
+
+/// Screen boxes for one banner row: the full row plus its dismiss box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BannerRowBoxes {
+    /// Full row rect `(x, y, w, h)` in strip coordinates.
+    pub row: (i32, i32, i32, i32),
+    /// Dismiss box rect `(x, y, w, h)` in strip coordinates.
+    pub dismiss: (i32, i32, i32, i32),
+}
+
+/// Dismiss box for a row at `(row_x, row_top)` with width `row_w`:
+/// top-right, inset by 4 pixels.
+fn dismiss_box(row_x: i32, row_top: i32, row_w: i32) -> (i32, i32, i32, i32) {
+    (
+        row_x + row_w - BANNER_DISMISS_SIZE - 4,
+        row_top + 4,
+        BANNER_DISMISS_SIZE,
+        BANNER_DISMISS_SIZE,
+    )
+}
+
+/// Boxes for the `index`-th row over `expanded` flags in a `width`
+/// strip, or `None` past the drawn rows. Same geometry the canvas
+/// paints, so presses land where the pixels are.
+pub fn banner_row_boxes(expanded: &[bool], width: i32, index: usize) -> Option<BannerRowBoxes> {
+    if index >= expanded.len().min(MAX_DRAWN_BANNERS) {
+        return None;
+    }
+    let mut top = BANNER_PAD;
+    for (i, is_expanded) in expanded.iter().enumerate().take(MAX_DRAWN_BANNERS) {
+        let height = if *is_expanded {
+            BANNER_ROW_EXPANDED_H
+        } else {
+            BANNER_ROW_H
+        };
+        if i == index {
+            let row = (BANNER_PAD, top, width - BANNER_PAD * 2, height);
+            return Some(BannerRowBoxes {
+                row,
+                dismiss: dismiss_box(row.0, row.1, row.2),
+            });
+        }
+        top += height + BANNER_GAP;
+    }
+    None
+}
+
+/// Hit-test a banner-strip press: the dismiss box closes, anywhere
+/// else on the row invokes, everywhere else misses.
+pub fn banner_hit(expanded: &[bool], width: i32, x: i32, y: i32) -> BannerHit {
+    for index in 0..expanded.len().min(MAX_DRAWN_BANNERS) {
+        let Some(boxes) = banner_row_boxes(expanded, width, index) else {
+            continue;
+        };
+        let (rx, ry, rw, rh) = boxes.row;
+        if x < rx || x >= rx + rw || y < ry || y >= ry + rh {
+            continue;
+        }
+        let (dx, dy, dw, dh) = boxes.dismiss;
+        if x >= dx && x < dx + dw && y >= dy && y < dy + dh {
+            return BannerHit::Dismiss(index);
+        }
+        return BannerHit::ActionRow(index);
+    }
+    BannerHit::Miss
+}
+
 /// Pixel canvas for one banner frame, with no Wayland dependency.
 /// Rows render oldest-first: plain fill normally, highlighted fill
 /// with an accent border for critical urgency, taller rows expanded.
@@ -516,23 +637,30 @@ impl BannerCanvas {
         &self.pixels
     }
 
-    /// Draw `(urgency, expanded)` rows top to bottom.
-    pub fn render(&mut self, rows: &[(Urgency, bool)]) {
+    /// Draw rows top to bottom with the strip micro-glyphs: urgency
+    /// fill and border, a bright summary line, dim body lines (three
+    /// more when expanded), an accent underline on action rows, and
+    /// a dismiss box per row. Unsupported glyphs degrade to gaps
+    /// like the panel clock; lines clip at the dismiss box.
+    /// Geometry matches [`banner_row_boxes`] so presses land where
+    /// the pixels are.
+    pub fn render(&mut self, rows: &[BannerRow<'_>]) {
         if self.width <= 0 || self.height <= 0 {
             return;
         }
         let mut y = BANNER_PAD;
-        for (urgency, expanded) in rows.iter().take(MAX_DRAWN_BANNERS) {
-            let h = if *expanded {
+        for row in rows.iter().take(MAX_DRAWN_BANNERS) {
+            let h = if row.expanded {
                 BANNER_ROW_EXPANDED_H
             } else {
                 BANNER_ROW_H
             };
-            let critical = *urgency == Urgency::Critical;
+            let row_w = self.width - BANNER_PAD * 2;
+            let critical = row.urgency == Urgency::Critical;
             self.rect(
                 BANNER_PAD,
                 y,
-                self.width - BANNER_PAD * 2,
+                row_w,
                 h,
                 if critical { BLOCK_SELECTED } else { BLOCK },
             );
@@ -546,7 +674,40 @@ impl BannerCanvas {
                     ACCENT,
                 );
             }
+            // Text lines inside the row, clear of the dismiss box.
+            let text_max = row_w - 8 - (BANNER_DISMISS_SIZE + 8);
+            let per_line = (text_max / GLYPH_ADVANCE).max(1) as usize;
+            let tx = BANNER_PAD + 8;
+            self.draw_line(row.summary, tx, y + 6, per_line, ACCENT);
+            let mut rest = row.body;
+            let mut ly = y + 6 + BANNER_LINE_H + 4;
+            let lines = if row.expanded { 3 } else { 1 };
+            for _ in 0..lines {
+                let take: usize = rest.chars().take(per_line).map(|c| c.len_utf8()).sum();
+                let (line, next) = rest.split_at(take.min(rest.len()));
+                self.draw_line(line, tx, ly, per_line, BODY_TEXT);
+                rest = next;
+                ly += BANNER_LINE_H + 3;
+            }
+            if row.has_actions {
+                self.rect(BANNER_PAD + 8, y + h - 7, row_w - 16, 3, ACCENT);
+            }
+            let (dx, dy, dw, dh) = dismiss_box(BANNER_PAD, y, row_w);
+            self.rect(dx, dy, dw, dh, DISMISS_FILL);
             y += h + BANNER_GAP;
+        }
+    }
+
+    /// One micro-glyph line: unknown glyphs leave gaps, the line
+    /// never runs past `max_chars`.
+    fn draw_line(&mut self, text: &str, x: i32, y: i32, max_chars: usize, color: [u8; 4]) {
+        let stride = self.width as usize * BYTES_PER_PIXEL;
+        let mut gx = x;
+        for ch in text.chars().take(max_chars) {
+            if let Some(glyph) = glyph_index(ch) {
+                blit_glyph(&mut self.pixels, stride, gx, y, glyph, color);
+            }
+            gx += GLYPH_ADVANCE;
         }
     }
 
@@ -727,6 +888,132 @@ mod tests {
         assert!(tiny.pixels().is_empty());
     }
 
+    fn banner_row<'a>(summary: &'a str, body: &'a str) -> BannerRow<'a> {
+        BannerRow {
+            summary,
+            body,
+            urgency: Urgency::Normal,
+            expanded: false,
+            has_actions: true,
+        }
+    }
+
+    #[test]
+    fn banner_paints_summary_body_and_dismiss_pixels() {
+        let width = BANNER_STRIP_W;
+        let height = banner_strip_height(&[false]);
+        let mut canvas = BannerCanvas::new(width, height);
+        canvas.render(&[banner_row("hello", "a stub body")]);
+        let boxes = banner_row_boxes(&[false], width, 0).expect("first row boxes");
+        // Summary `h` (0b100/0b100/0b110/0b101/0b101) sets its first
+        // cell at the line origin; the second cell stays row fill.
+        let (sx, sy) = (boxes.row.0 + 8, boxes.row.1 + 6);
+        assert_eq!(
+            strip_pixel(canvas.pixels(), width, sx, sy),
+            ACCENT,
+            "summary glyph paints"
+        );
+        assert_eq!(
+            strip_pixel(canvas.pixels(), width, sx + FONT_SCALE, sy),
+            BLOCK,
+            "summary gap stays fill"
+        );
+        // Body `a` (0b010/0b000/0b010/0b101/0b011) leaves its first
+        // cell empty and sets the second.
+        let by = boxes.row.1 + 6 + BANNER_LINE_H + 4;
+        assert_eq!(
+            strip_pixel(canvas.pixels(), width, sx, by),
+            BLOCK,
+            "body gap stays fill"
+        );
+        assert_eq!(
+            strip_pixel(canvas.pixels(), width, sx + FONT_SCALE, by),
+            BODY_TEXT,
+            "body glyph paints"
+        );
+        // The dismiss box paints its own fill.
+        assert_eq!(
+            strip_pixel(
+                canvas.pixels(),
+                width,
+                boxes.dismiss.0 + 2,
+                boxes.dismiss.1 + 2
+            ),
+            DISMISS_FILL,
+            "dismiss affordance paints"
+        );
+        // An action row carries the accent underline.
+        assert_eq!(
+            strip_pixel(
+                canvas.pixels(),
+                width,
+                boxes.row.0 + 20,
+                boxes.row.1 + boxes.row.3 - 6
+            ),
+            ACCENT,
+            "action row marks its row"
+        );
+    }
+
+    #[test]
+    fn banner_text_changes_pixels_and_empty_body_paints_nothing() {
+        let width = BANNER_STRIP_W;
+        let height = banner_strip_height(&[false]);
+        let mut first = BannerCanvas::new(width, height);
+        first.render(&[banner_row("hello", "a stub body")]);
+        let mut second = BannerCanvas::new(width, height);
+        second.render(&[banner_row("world", "a stub body")]);
+        assert_ne!(
+            first.pixels(),
+            second.pixels(),
+            "distinct summaries paint distinctly"
+        );
+        let mut bodiless = BannerCanvas::new(width, height);
+        bodiless.render(&[banner_row("hello", "")]);
+        assert_ne!(first.pixels(), bodiless.pixels(), "body presence paints");
+        // The body-glyph probe lands on plain row fill when empty.
+        let by = BANNER_PAD + 6 + BANNER_LINE_H + 4;
+        assert_eq!(
+            strip_pixel(bodiless.pixels(), width, BANNER_PAD + 8 + FONT_SCALE, by),
+            BLOCK,
+            "empty body paints no glyphs"
+        );
+    }
+
+    #[test]
+    fn banner_hit_maps_action_row_vs_dismiss_vs_miss() {
+        let width = BANNER_STRIP_W;
+        let expanded = [false, true];
+        let first = banner_row_boxes(&expanded, width, 0).expect("row 0");
+        let second = banner_row_boxes(&expanded, width, 1).expect("row 1");
+        assert!(
+            second.row.1 > first.row.1 + first.row.3,
+            "second row stacks below the first"
+        );
+        // Row bodies invoke, including on the taller expanded row.
+        assert_eq!(
+            banner_hit(&expanded, width, first.row.0 + 10, first.row.1 + 40),
+            BannerHit::ActionRow(0)
+        );
+        assert_eq!(
+            banner_hit(&expanded, width, second.row.0 + 10, second.row.1 + 60),
+            BannerHit::ActionRow(1)
+        );
+        // Dismiss boxes close.
+        assert_eq!(
+            banner_hit(&expanded, width, first.dismiss.0 + 2, first.dismiss.1 + 2),
+            BannerHit::Dismiss(0)
+        );
+        // Margins, gaps, and empty queues miss.
+        assert_eq!(banner_hit(&expanded, width, 0, 0), BannerHit::Miss);
+        assert_eq!(
+            banner_hit(&expanded, width, first.row.0 + 10, first.row.1 - 2),
+            BannerHit::Miss
+        );
+        assert_eq!(banner_hit(&[], width, 20, 20), BannerHit::Miss);
+        assert!(banner_row_boxes(&expanded, width, 2).is_none());
+    }
+
     fn pixel_at(canvas: &SwitcherCanvas, x: i32, y: i32) -> [u8; 4] {
         let at = (y as usize * 1280 + x as usize) * BYTES_PER_PIXEL;
         canvas.pixels()[at..at + BYTES_PER_PIXEL]
@@ -761,7 +1048,7 @@ mod tests {
         ];
         let width = 1280;
         let mut pixels = vec![0u8; width as usize * 32 * BYTES_PER_PIXEL];
-        paint_panel(&mut pixels, width, 32, 32, "12:34", &tiles);
+        paint_panel(&mut pixels, width, 32, 32, "12:34", &tiles, 0);
         // Clock "12:34" centered: digit 1 lights, colon lights.
         let cx = (width - (5 * GLYPH_ADVANCE - (FONT_SCALE - 1))) / 2;
         let cy = (32 - 5 * FONT_SCALE) / 2;
@@ -783,8 +1070,24 @@ mod tests {
 
     #[test]
     fn banner_rows_highlight_critical_and_expand() {
-        // One normal row, one expanded critical row.
-        let rows = [(Urgency::Normal, false), (Urgency::Critical, true)];
+        // One normal row, one expanded critical row (empty text keeps
+        // the probes on fills and borders; text pixels own their test).
+        let rows = [
+            BannerRow {
+                summary: "",
+                body: "",
+                urgency: Urgency::Normal,
+                expanded: false,
+                has_actions: false,
+            },
+            BannerRow {
+                summary: "",
+                body: "",
+                urgency: Urgency::Critical,
+                expanded: true,
+                has_actions: false,
+            },
+        ];
         let height = banner_strip_height(&[false, true]);
         assert_eq!(
             height,
@@ -812,6 +1115,34 @@ mod tests {
     }
 
     #[test]
+    fn panel_marks_unread_and_stays_clean_at_zero() {
+        use crate::tiles::{ServiceKind, Tile};
+        let tiles = [Tile {
+            kind: ServiceKind::Network,
+            state: TileState::Ready,
+            level: None,
+        }];
+        let width = 1280;
+        let paint = |unread: usize| {
+            let mut pixels = vec![0u8; width as usize * 32 * BYTES_PER_PIXEL];
+            paint_panel(&mut pixels, width, 32, 32, "12:34", &tiles, unread);
+            pixels
+        };
+        // One tile at 1280: cell starts at 1256, so the marker square
+        // sits at x 1242..1248, y 13..19 — probe its middle.
+        let quiet = paint(0);
+        assert_eq!(strip_pixel(&quiet, width, 1245, 16), BG);
+        let marked = paint(1);
+        assert_eq!(strip_pixel(&marked, width, 1245, 16), ACCENT);
+        assert_ne!(quiet, marked, "unread paints the marker");
+        // Presence only: deeper queues keep the same marker pixel.
+        assert_eq!(strip_pixel(&paint(9), width, 1245, 16), ACCENT);
+        // The marker never disturbs its neighbours.
+        assert_eq!(strip_pixel(&marked, width, 1256, 9), ACCENT);
+        assert_eq!(strip_pixel(&marked, width, 500, 16), BG);
+    }
+
+    #[test]
     fn panel_hollow_dots_when_disconnected() {
         use crate::tiles::{ServiceKind, Tile};
         let tiles = [Tile {
@@ -821,7 +1152,7 @@ mod tests {
         }];
         let width = 1280;
         let mut pixels = vec![0u8; width as usize * 32 * BYTES_PER_PIXEL];
-        paint_panel(&mut pixels, width, 32, 32, "", &tiles);
+        paint_panel(&mut pixels, width, 32, 32, "", &tiles, 0);
         // Hollow: accent frame, backdrop interior.
         assert_eq!(strip_pixel(&pixels, width, 1256, 9), ACCENT);
         assert_eq!(strip_pixel(&pixels, width, 1256 + 7, 9 + 7), BG);

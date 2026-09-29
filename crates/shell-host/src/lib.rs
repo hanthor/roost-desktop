@@ -16,6 +16,7 @@ pub mod control;
 pub mod dock;
 pub mod favorites;
 pub mod icons;
+pub mod intake;
 pub mod keyboard;
 pub mod model;
 pub mod notifications;

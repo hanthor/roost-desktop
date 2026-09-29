@@ -560,6 +560,7 @@ mod tests {
             32,
             "12:34",
             &sample_tiles(),
+            0,
         );
         let mut with_popup = plain.clone();
         paint_popup(
