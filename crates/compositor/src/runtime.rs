@@ -59,15 +59,15 @@ const DEFAULT_HEIGHT: i32 = 800;
 /// Nested session configuration: socket identity plus output geometry.
 #[derive(Debug, Clone)]
 pub struct NestedSession {
-    /// Private Wayland socket name, e.g. `rwd-nested-<pid>`.
+    /// Private Wayland socket name, e.g. `roost-nested-<pid>`.
     pub socket_name: String,
     /// Output width in physical pixels.
     pub width: i32,
     /// Output height in physical pixels.
     pub height: i32,
     /// Shell binary to supervise. `None` selects
-    /// [`resolve_shell_bin`]: `RWD_SHELL_BIN`, then the
-    /// `rwd-shell-host` sibling of this binary, then `PATH`.
+    /// [`resolve_shell_bin`]: `ROOST_SHELL_BIN`, then the
+    /// `roost-shell-host` sibling of this binary, then `PATH`.
     pub shell_bin: Option<std::path::PathBuf>,
 }
 
@@ -85,7 +85,7 @@ impl NestedSession {
     /// Default session: unique socket name from our pid, default size.
     pub fn default_for_pid() -> Self {
         Self::new(
-            format!("rwd-nested-{}", std::process::id()),
+            format!("roost-nested-{}", std::process::id()),
             DEFAULT_WIDTH,
             DEFAULT_HEIGHT,
         )
@@ -107,24 +107,24 @@ pub fn current_exe_dir() -> Option<std::path::PathBuf> {
         .and_then(|exe| exe.parent().map(|dir| dir.to_owned()))
 }
 
-/// Shell binary for a session: explicit config, then `RWD_SHELL_BIN`,
-/// then the `rwd-shell-host` sibling of this binary when it exists,
+/// Shell binary for a session: explicit config, then `ROOST_SHELL_BIN`,
+/// then the `roost-shell-host` sibling of this binary when it exists,
 /// else a `PATH` lookup at spawn time.
 pub fn resolve_shell_bin(configured: Option<&std::path::Path>) -> std::path::PathBuf {
     if let Some(path) = configured {
         return path.to_owned();
     }
-    if let Ok(path) = std::env::var("RWD_SHELL_BIN") {
+    if let Ok(path) = std::env::var("ROOST_SHELL_BIN") {
         if !path.is_empty() {
             return std::path::PathBuf::from(path);
         }
     }
     if let Some(dir) = current_exe_dir() {
-        if let Some(sibling) = sibling_binary(&dir, "rwd-shell-host") {
+        if let Some(sibling) = sibling_binary(&dir, "roost-shell-host") {
             return sibling;
         }
     }
-    std::path::PathBuf::from("rwd-shell-host")
+    std::path::PathBuf::from("roost-shell-host")
 }
 
 /// Summary of one nested run, for diagnostics (no sensitive content).
@@ -199,12 +199,12 @@ pub struct Runtime {
 }
 
 /// Control socket path for a session: alongside the Wayland socket in the
-/// runtime dir, so one session owns both (`rwd-<name>.control`).
+/// runtime dir, so one session owns both (`roost-<name>.control`).
 pub fn control_socket_path(socket_name: &str) -> std::path::PathBuf {
     let dir = std::env::var_os("XDG_RUNTIME_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    dir.join(format!("rwd-{socket_name}.control"))
+    dir.join(format!("roost-{socket_name}.control"))
 }
 
 impl Runtime {
@@ -233,11 +233,11 @@ impl Runtime {
         let overlay = Overlay::new(shell_policy.max_attempts);
 
         let output = Output::new(
-            "rwd-0".to_owned(),
+            "roost-0".to_owned(),
             PhysicalProperties {
                 size: (0, 0).into(),
                 subpixel: Subpixel::Unknown,
-                make: "RWD".to_owned(),
+                make: "Roost".to_owned(),
                 model: "Nested".to_owned(),
             },
         );
@@ -439,7 +439,7 @@ impl Runtime {
             }
         }
         for event in self.shell.drain_events() {
-            eprintln!("rwd-compositor: shell supervision: {event:?}");
+            eprintln!("roost-compositor: shell supervision: {event:?}");
         }
         self.stats.shell_restarts = self.shell.restarts_used();
         self.render()?;

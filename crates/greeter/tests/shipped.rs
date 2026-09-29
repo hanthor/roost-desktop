@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use rwd_greeter::session::enumerate_dirs;
+use roost_greeter::session::enumerate_dirs;
 
 fn share_sessions() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -14,7 +14,7 @@ fn share_sessions() -> std::path::PathBuf {
 }
 
 #[test]
-fn shipped_rwd_desktop_parses_to_session_launcher() {
+fn shipped_roost_desktop_parses_to_session_launcher() {
     let dir = share_sessions();
     assert!(dir.is_dir(), "missing {}", dir.display());
     let found = enumerate_dirs(std::slice::from_ref(&dir.as_path()));
@@ -23,11 +23,11 @@ fn shipped_rwd_desktop_parses_to_session_launcher() {
     let entry = found
         .entries
         .iter()
-        .find(|entry| entry.name == "RWD")
-        .expect("shipped rwd.desktop must enumerate as RWD");
+        .find(|entry| entry.name == "Roost")
+        .expect("shipped roost.desktop must enumerate as Roost");
     assert_eq!(
         entry.command,
-        vec!["rwd-session".to_string()],
+        vec!["roost-session".to_string()],
         "greeter must launch the session binary, not the compositor directly"
     );
 }

@@ -10,16 +10,16 @@
 
 use std::process::ExitCode;
 
-use rwd_shell_host::panel::{run_panel_with_control, PanelConfig};
+use roost_shell_host::panel::{run_panel_with_control, PanelConfig};
 
 fn main() -> ExitCode {
     // Set by the supervised compositor child recipe (ADR 0003); absent
     // when run by hand against any compositor.
-    let control_path = std::env::var_os("RWD_CONTROL_SOCKET").map(std::path::PathBuf::from);
+    let control_path = std::env::var_os("ROOST_CONTROL_SOCKET").map(std::path::PathBuf::from);
     match run_panel_with_control(PanelConfig::default(), control_path) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("rwd-shell-host: {err}");
+            eprintln!("roost-shell-host: {err}");
             ExitCode::FAILURE
         }
     }

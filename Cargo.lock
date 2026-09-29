@@ -1833,6 +1833,57 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "roost-compositor"
+version = "0.1.0"
+dependencies = [
+ "calloop 0.14.4",
+ "rand",
+ "roost-shell-control",
+ "signal-hook",
+ "smithay",
+ "tempfile",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-wlr",
+]
+
+[[package]]
+name = "roost-greeter"
+version = "0.1.0"
+dependencies = [
+ "greetd_ipc",
+ "gtk4",
+ "libadwaita",
+ "tempfile",
+]
+
+[[package]]
+name = "roost-shell-control"
+version = "0.1.0"
+dependencies = [
+ "postcard",
+ "serde",
+]
+
+[[package]]
+name = "roost-shell-host"
+version = "0.1.0"
+dependencies = [
+ "freedesktop-desktop-entry",
+ "jiff",
+ "roost-compositor",
+ "roost-shell-control",
+ "rustix 0.38.44",
+ "serde_json",
+ "smithay",
+ "tempfile",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-wlr",
+ "xkbcommon",
+]
+
+[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1872,57 +1923,6 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
-
-[[package]]
-name = "rwd-compositor"
-version = "0.1.0"
-dependencies = [
- "calloop 0.14.4",
- "rand",
- "rwd-shell-control",
- "signal-hook",
- "smithay",
- "tempfile",
- "wayland-client",
- "wayland-protocols",
- "wayland-protocols-wlr",
-]
-
-[[package]]
-name = "rwd-greeter"
-version = "0.1.0"
-dependencies = [
- "greetd_ipc",
- "gtk4",
- "libadwaita",
- "tempfile",
-]
-
-[[package]]
-name = "rwd-shell-control"
-version = "0.1.0"
-dependencies = [
- "postcard",
- "serde",
-]
-
-[[package]]
-name = "rwd-shell-host"
-version = "0.1.0"
-dependencies = [
- "freedesktop-desktop-entry",
- "jiff",
- "rustix 0.38.44",
- "rwd-compositor",
- "rwd-shell-control",
- "serde_json",
- "smithay",
- "tempfile",
- "wayland-client",
- "wayland-protocols",
- "wayland-protocols-wlr",
- "xkbcommon",
-]
 
 [[package]]
 name = "same-file"

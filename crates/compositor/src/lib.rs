@@ -233,7 +233,7 @@ impl SeatHandler for State {
 
 /// Wayland seat name shared by the protocol state, the token store's
 /// seat binding, and the control hub.
-pub const SEAT_NAME: &str = "rwd-seat";
+pub const SEAT_NAME: &str = "roost-seat";
 
 impl State {
     /// Seat for capability attachment and input routing.

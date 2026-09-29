@@ -295,7 +295,7 @@ impl ShellModel {
 /// { windows, workspaces }` into this view (`WindowInfo.focused` maps to
 /// [`WindowEntry::active`]; workspace ids narrow from the schema's `u64`
 /// to the `u32` ids this model keeps). This file never imports
-/// `rwd-shell-control`, so the wire format can evolve without churning
+/// `roost-shell-control`, so the wire format can evolve without churning
 /// the view model.
 #[derive(Debug, Clone, Default)]
 pub struct SnapshotView {

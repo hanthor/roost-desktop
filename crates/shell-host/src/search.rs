@@ -200,7 +200,7 @@ impl SearchHub {
                 });
             };
             if std::thread::Builder::new()
-                .name(format!("rwd-search-{}", provider.id()))
+                .name(format!("roost-search-{}", provider.id()))
                 .spawn(run)
                 .is_err()
             {

@@ -1,11 +1,11 @@
 // Greeter entry point: builds the login window from the model.
 // Daemon conversation wiring lands with the walkthrough task.
 use gtk4::gio::prelude::*;
-use rwd_greeter::{model::GreeterModel, session::enumerate_system, ui};
+use roost_greeter::{model::GreeterModel, session::enumerate_system, ui};
 
 fn main() {
     let app = libadwaita::Application::builder()
-        .application_id("asia.reilly.rwd.greeter")
+        .application_id("asia.reilly.roost.greeter")
         .build();
     app.connect_activate(|app| {
         let model = GreeterModel::new();

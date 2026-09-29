@@ -39,7 +39,7 @@ use crate::{
     state::{StateModel, WindowUpdate},
     State, WindowRequest,
 };
-use rwd_shell_control::SwitcherAction;
+use roost_shell_control::SwitcherAction;
 
 /// Default floating size for a newly mapped window.
 const DEFAULT_WIDTH: i32 = 800;
@@ -299,7 +299,7 @@ impl WindowManager {
                         keyboard.set_focus(state, Some(target.clone()), serial);
                     }
                     state.sync_selection_focus(Some(&target));
-                    eprintln!("rwd-compositor: overview focus parked");
+                    eprintln!("roost-compositor: overview focus parked");
                     self.overview_held = Some(target);
                 }
                 (None, Some(_)) => {
@@ -322,7 +322,7 @@ impl WindowManager {
             .or_else(|| self.stacking.last().copied());
         self.pre_overview_focus = None;
         self.apply_focus(state, restore);
-        eprintln!("rwd-compositor: overview focus restored");
+        eprintln!("roost-compositor: overview focus restored");
     }
 
     /// Register one toplevel: model insert with cascaded geometry,
@@ -711,7 +711,7 @@ impl WindowManager {
             return false;
         };
         window.surface.send_close();
-        eprintln!("rwd-compositor: window {id} close requested");
+        eprintln!("roost-compositor: window {id} close requested");
         true
     }
 
@@ -1037,7 +1037,7 @@ impl WindowManager {
         // flipped (strip and floating can look alike with one narrow
         // window, so pixels alone cannot prove it).
         eprintln!(
-            "rwd-compositor: session mode now {}",
+            "roost-compositor: session mode now {}",
             if scroll { "scroll" } else { "gnome" }
         );
         true
@@ -1097,7 +1097,7 @@ impl WindowManager {
         }
         self.configure(id, self.model.focused() == Some(id));
         if changed {
-            eprintln!("rwd-compositor: window {id} Floating");
+            eprintln!("roost-compositor: window {id} Floating");
         }
         true
     }
@@ -1122,7 +1122,7 @@ impl WindowManager {
         window.layout = layout;
         window.geometry = area;
         self.configure(id, self.model.focused() == Some(id));
-        eprintln!("rwd-compositor: window {id} {layout:?}");
+        eprintln!("roost-compositor: window {id} {layout:?}");
         true
     }
 
@@ -1561,7 +1561,7 @@ impl WindowManager {
             // screen, so pixels alone cannot prove it).
             if switched {
                 eprintln!(
-                    "rwd-compositor: workspace now {}",
+                    "roost-compositor: workspace now {}",
                     self.model.active_workspace()
                 );
             }
@@ -1642,7 +1642,7 @@ impl WindowManager {
     /// CI journey (an empty switcher renders nothing, so pixels alone
     /// cannot prove the drive arrived).
     fn push_switcher(&mut self, action: SwitcherAction) {
-        eprintln!("rwd-compositor: switcher {action:?}");
+        eprintln!("roost-compositor: switcher {action:?}");
         self.switcher_queue.push(action);
     }
 }

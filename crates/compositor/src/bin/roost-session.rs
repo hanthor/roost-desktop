@@ -1,7 +1,7 @@
 //! Session launcher binary (tunaOS image slice).
 //!
-//! `rwd-session` is what greeters and `wayland-sessions/*.desktop` files
-//! execute: it resolves the `rwd-compositor` sibling of this binary (else a
+//! `roost-session` is what greeters and `wayland-sessions/*.desktop` files
+//! execute: it resolves the `roost-compositor` sibling of this binary (else a
 //! `PATH` lookup) and replaces itself with it, pinning `--shell-bin` to the
 //! same resolution the compositor would compute. Extra arguments pass
 //! through untouched.
@@ -9,17 +9,17 @@
 use std::ffi::OsString;
 use std::process::ExitCode;
 
-use rwd_compositor::runtime::{current_exe_dir, resolve_shell_bin, sibling_binary};
+use roost_compositor::runtime::{current_exe_dir, resolve_shell_bin, sibling_binary};
 
 /// Compositor binary for this session: sibling of the launcher when the
 /// install placed them side by side, else a `PATH` lookup at exec time.
 fn resolve_compositor_bin() -> std::path::PathBuf {
     if let Some(dir) = current_exe_dir() {
-        if let Some(sibling) = sibling_binary(&dir, "rwd-compositor") {
+        if let Some(sibling) = sibling_binary(&dir, "roost-compositor") {
             return sibling;
         }
     }
-    std::path::PathBuf::from("rwd-compositor")
+    std::path::PathBuf::from("roost-compositor")
 }
 
 /// Full child command: compositor, pinned shell, then caller arguments.
@@ -37,14 +37,14 @@ fn session_argv(
 }
 
 fn print_help() {
-    println!("rwd-session: launch one RWD desktop session (image entry point)");
+    println!("roost-session: launch one Roost desktop session (image entry point)");
     println!();
-    println!("Usage: rwd-session [--socket NAME] [--width W] [--height H]");
+    println!("Usage: roost-session [--socket NAME] [--width W] [--height H]");
     println!();
-    println!("Resolves the rwd-compositor sibling of this binary (else PATH)");
+    println!("Resolves the roost-compositor sibling of this binary (else PATH)");
     println!("and replaces itself with it, pinning --shell-bin to the");
-    println!("RWD_SHELL_BIN / sibling / PATH chain. All other arguments");
-    println!("pass through to rwd-compositor unchanged.");
+    println!("ROOST_SHELL_BIN / sibling / PATH chain. All other arguments");
+    println!("pass through to roost-compositor unchanged.");
 }
 
 fn main() -> ExitCode {
@@ -61,7 +61,7 @@ fn main() -> ExitCode {
         use std::os::unix::process::CommandExt;
         let err = std::process::Command::new(&argv[0]).args(&argv[1..]).exec();
         eprintln!(
-            "rwd-session: cannot exec {}: {err}",
+            "roost-session: cannot exec {}: {err}",
             argv[0].to_string_lossy()
         );
         ExitCode::FAILURE
@@ -75,7 +75,7 @@ fn main() -> ExitCode {
             Ok(status) => ExitCode::from(status.code().unwrap_or(1) as u8),
             Err(err) => {
                 eprintln!(
-                    "rwd-session: cannot run {}: {err}",
+                    "roost-session: cannot run {}: {err}",
                     argv[0].to_string_lossy()
                 );
                 ExitCode::FAILURE
@@ -91,8 +91,8 @@ mod tests {
     #[test]
     fn argv_pins_shell_before_passthrough() {
         let argv = session_argv(
-            std::path::Path::new("/usr/bin/rwd-compositor"),
-            std::path::Path::new("/usr/bin/rwd-shell-host"),
+            std::path::Path::new("/usr/bin/roost-compositor"),
+            std::path::Path::new("/usr/bin/roost-shell-host"),
             &[OsString::from("--socket"), OsString::from("s0")],
         );
         let text: Vec<String> = argv
@@ -102,9 +102,9 @@ mod tests {
         assert_eq!(
             text,
             vec![
-                "/usr/bin/rwd-compositor",
+                "/usr/bin/roost-compositor",
                 "--shell-bin",
-                "/usr/bin/rwd-shell-host",
+                "/usr/bin/roost-shell-host",
                 "--socket",
                 "s0",
             ]
@@ -114,8 +114,8 @@ mod tests {
     #[test]
     fn argv_without_extra_is_just_the_pin() {
         let argv = session_argv(
-            std::path::Path::new("rwd-compositor"),
-            std::path::Path::new("rwd-shell-host"),
+            std::path::Path::new("roost-compositor"),
+            std::path::Path::new("roost-shell-host"),
             &[],
         );
         assert_eq!(argv.len(), 3);
@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn sibling_binary_finds_and_rejects() {
-        let dir = std::env::temp_dir().join("rwd-session-test");
+        let dir = std::env::temp_dir().join("roost-session-test");
         std::fs::create_dir_all(&dir).expect("test dir");
         let present = dir.join("present-bin");
         std::fs::write(&present, b"x").expect("test file");

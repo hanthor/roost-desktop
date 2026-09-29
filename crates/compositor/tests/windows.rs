@@ -1,6 +1,6 @@
 //! T2 window mapping, input routing, and focus-policy tests.
 //!
-//! Headless end-to-end coverage for `rwd_compositor::windows` with no
+//! Headless end-to-end coverage for `roost_compositor::windows` with no
 //! backend: real protocol clients over a socketpair map xdg_toplevels,
 //! then the test drives [`WindowManager`] directly (reconcile, focus,
 //! pointer/keyboard delivery, move/resize/workspace) and observes the
@@ -14,15 +14,15 @@
 
 use std::os::unix::net::UnixStream;
 
-use rwd_compositor::layer::OVERVIEW_NAMESPACE;
-use rwd_compositor::windows::{
+use roost_compositor::layer::OVERVIEW_NAMESPACE;
+use roost_compositor::windows::{
     ManagerInput, SessionMode, TileSide, WindowLayout, WindowManager, ALT_LEFT_KEYCODE,
     ARROW_DOWN_KEYCODE, ARROW_LEFT_KEYCODE, ARROW_RIGHT_KEYCODE, ARROW_UP_KEYCODE, ESCAPE_KEYCODE,
     F4_KEYCODE, PAGE_DOWN_KEYCODE, PAGE_UP_KEYCODE, R_KEYCODE, SHIFT_LEFT_KEYCODE,
     SUPER_LEFT_KEYCODE, TAB_KEYCODE, T_KEYCODE,
 };
-use rwd_compositor::TestCompositor;
-use rwd_shell_control::SwitcherAction;
+use roost_compositor::TestCompositor;
+use roost_shell_control::SwitcherAction;
 use smithay::utils::{Logical, Point};
 use wayland_client::{
     protocol::{

@@ -2,7 +2,7 @@
 //!
 //! 001 spec R3 + ADR 0002: the shell host talks to the compositor over a
 //! dedicated Unix socket whose frames are `u32-LE length + postcard body`
-//! (see `rwd-shell-control`). This client owns the shell side of that
+//! (see `roost-shell-control`). This client owns the shell side of that
 //! conversation: the `Hello` handshake, full-`Snapshot` application into
 //! [`ShellModel`], ordered `Changes` application with revision-gap
 //! resnapshot, and activation commands carrying compositor-minted tokens.
@@ -32,7 +32,7 @@
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 
-use rwd_shell_control::{
+use roost_shell_control::{
     ActivationToken, CommandKind, CommandStatus, DecodeError, ErrorKind, Message, SwitcherAction,
     WindowInfo, WorkspaceInfo, CURRENT_VERSION, MAX_FRAME_BYTES,
 };
@@ -463,7 +463,7 @@ impl ControlClient {
 
     /// Encode and write one frame. `WouldBlock` propagates to the caller.
     fn write_message(&mut self, msg: &Message) -> Result<(), ControlError> {
-        let frame = rwd_shell_control::encode_frame(msg);
+        let frame = roost_shell_control::encode_frame(msg);
         self.stream.write_all(&frame)?;
         Ok(())
     }
@@ -485,7 +485,7 @@ impl ControlClient {
                     }));
                 }
                 if self.read_buf.len() >= 4 + len {
-                    let msg = rwd_shell_control::decode_frame(&self.read_buf[..4 + len])?;
+                    let msg = roost_shell_control::decode_frame(&self.read_buf[..4 + len])?;
                     self.read_buf.drain(..4 + len);
                     return Ok(msg);
                 }
@@ -567,9 +567,9 @@ fn snapshot_view(windows: &[WindowInfo], workspaces: &[WorkspaceInfo]) -> Snapsh
 fn apply_ops(
     shadow_windows: &mut Vec<WindowInfo>,
     shadow_workspaces: &mut Vec<WorkspaceInfo>,
-    ops: &[rwd_shell_control::StateOp],
+    ops: &[roost_shell_control::StateOp],
 ) {
-    use rwd_shell_control::StateOp;
+    use roost_shell_control::StateOp;
     for op in ops {
         match op {
             StateOp::WindowOpened(info) => {
@@ -614,7 +614,7 @@ fn apply_ops(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rwd_shell_control::{decode_frame, encode_frame, ProtocolVersion, WindowId, WorkspaceId};
+    use roost_shell_control::{decode_frame, encode_frame, ProtocolVersion, WindowId, WorkspaceId};
 
     fn pair() -> (ControlClient, UnixStream) {
         let (ours, peer) = UnixStream::pair().expect("socketpair");
@@ -820,9 +820,9 @@ mod tests {
                 from_revision: 7,
                 to_revision: 9,
                 ops: vec![
-                    rwd_shell_control::StateOp::WindowOpened(window(9, "Editor", 2, false)),
-                    rwd_shell_control::StateOp::WindowFocused { id: 9 },
-                    rwd_shell_control::StateOp::WindowClosed { id: 7 },
+                    roost_shell_control::StateOp::WindowOpened(window(9, "Editor", 2, false)),
+                    roost_shell_control::StateOp::WindowFocused { id: 9 },
+                    roost_shell_control::StateOp::WindowClosed { id: 7 },
                 ],
             },
         );
@@ -856,7 +856,7 @@ mod tests {
             &Message::Changes {
                 from_revision: 3,
                 to_revision: 4,
-                ops: vec![rwd_shell_control::StateOp::WindowClosed { id: 8 }],
+                ops: vec![roost_shell_control::StateOp::WindowClosed { id: 8 }],
             },
         );
         match client.poll().expect("poll gap") {

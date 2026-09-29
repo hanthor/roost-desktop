@@ -1,6 +1,6 @@
 //! T6 launch-command reproducibility check.
 //!
-//! The documented one-command journey (`scripts/rwd-nested`, described
+//! The documented one-command journey (`scripts/roost-nested`, described
 //! in `docs/nested-session.md`) is a shell script, so this test pins
 //! its contract instead of executing a nested session: the script
 //! exists, is executable, passes `sh -n`, and documents the crash
@@ -21,7 +21,7 @@ fn workspace_root() -> PathBuf {
 
 #[test]
 fn launch_script_reproduces_the_documented_journey() {
-    let script = workspace_root().join("scripts").join("rwd-nested");
+    let script = workspace_root().join("scripts").join("roost-nested");
     let meta = std::fs::metadata(&script).expect("launcher script exists");
     #[cfg(unix)]
     assert_ne!(
@@ -39,7 +39,7 @@ fn launch_script_reproduces_the_documented_journey() {
 
     let body = std::fs::read_to_string(&script).expect("launcher reads");
     for token in [
-        "rwd-compositor",
+        "roost-compositor",
         "--shell-bin",
         "run",
         "shell-pid",
@@ -56,10 +56,10 @@ fn launch_script_reproduces_the_documented_journey() {
     let doc = std::fs::read_to_string(workspace_root().join("docs").join("nested-session.md"))
         .expect("journey doc exists");
     for token in [
-        "scripts/rwd-nested run",
+        "scripts/roost-nested run",
         "kill-shell",
         "WAYLAND_DISPLAY",
-        "RWD_CONTROL_SOCKET",
+        "ROOST_CONTROL_SOCKET",
         "nested.log",
     ] {
         assert!(doc.contains(token), "journey doc must cover {token}");

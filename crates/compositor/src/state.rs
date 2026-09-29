@@ -1,7 +1,7 @@
 //! Revisioned compositor-owned state model (001 R4, ADR 0002).
 //!
 //! Plain Rust types only (`u64` revisions/ids, `String` titles): this module
-//! intentionally does NOT depend on the `rwd-shell-control` crate (owned by
+//! intentionally does NOT depend on the `roost-shell-control` crate (owned by
 //! another stream). Field names and shapes are kept mechanical so the later
 //! mapping to the wire schema is a direct rename.
 //!

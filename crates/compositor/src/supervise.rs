@@ -345,7 +345,7 @@ pub enum ShellStatus {
 /// One supervised shell child bound to a nested session (001 T5).
 ///
 /// Owns a [`Supervisor`] plus the remake recipe: the shell binary with
-/// the session's `WAYLAND_DISPLAY` and `RWD_CONTROL_SOCKET` set for the
+/// the session's `WAYLAND_DISPLAY` and `ROOST_CONTROL_SOCKET` set for the
 /// child only. Drive with [`poll`](Self::poll) once per compositor tick
 /// and drain [`events`](Self::drain_events) for redacted diagnostics.
 pub struct ShellDriver {
@@ -390,7 +390,7 @@ impl ShellDriver {
         let mut remake = || {
             let mut command = Command::new(bin);
             command.env("WAYLAND_DISPLAY", wayland_display);
-            command.env("RWD_CONTROL_SOCKET", control_socket);
+            command.env("ROOST_CONTROL_SOCKET", control_socket);
             command
         };
         match supervisor.poll(&mut remake, now_ms) {
@@ -528,7 +528,7 @@ mod tests {
         let mut driver = ShellDriver::new(
             RestartPolicy::new(1, 1_000, 1_000),
             std::path::PathBuf::from("/bin/true"),
-            "rwd-test.sock".to_owned(),
+            "roost-test.sock".to_owned(),
             control,
         );
         assert_eq!(driver.poll(0), ShellStatus::Running);
@@ -543,7 +543,7 @@ mod tests {
         let mut driver = ShellDriver::new(
             RestartPolicy::new(1, 1_000, 1_000),
             dir.path().join("no-such-shell"),
-            "rwd-test.sock".to_owned(),
+            "roost-test.sock".to_owned(),
             dir.path().join("control.sock"),
         );
         assert!(matches!(driver.poll(0), ShellStatus::Fault(_)));
@@ -561,7 +561,7 @@ mod tests {
         let mut driver = ShellDriver::new(
             RestartPolicy::new(1, 1, 1),
             std::path::PathBuf::from("/bin/false"),
-            "rwd-test.sock".to_owned(),
+            "roost-test.sock".to_owned(),
             dir.path().join("control.sock"),
         );
         let reap_exit = |driver: &mut ShellDriver, now: u64| {
@@ -592,7 +592,7 @@ mod tests {
         let mut driver = ShellDriver::new(
             RestartPolicy::new(5, 10_000, 10_000),
             std::path::PathBuf::from("/bin/false"),
-            "rwd-test.sock".to_owned(),
+            "roost-test.sock".to_owned(),
             dir.path().join("control.sock"),
         );
         assert_eq!(driver.poll(0), ShellStatus::Running);

@@ -1,5 +1,5 @@
 [package]
-name = "rwd-greeter"
+name = "roost-greeter"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true

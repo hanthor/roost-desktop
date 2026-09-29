@@ -1,7 +1,0 @@
-[Desktop Entry]
-Name=RWD
-Comment=Rust Wayland Desktop (GNOME-style shell with optional scrollable tiling)
-Exec=rwd-session
-TryExec=rwd-session
-Type=Application
-DesktopNames=rwd

@@ -7,7 +7,7 @@
 
 use std::os::unix::net::UnixStream;
 
-use rwd_compositor::TestCompositor;
+use roost_compositor::TestCompositor;
 use wayland_client::{
     protocol::{
         wl_callback::WlCallback, wl_data_device::WlDataDevice,
@@ -170,7 +170,7 @@ fn data_device_manager_binds_and_source_offers() {
 
 // --- Copy/paste round-trip between two focused clients ---
 
-use rwd_compositor::windows::{ManagerInput, WindowManager};
+use roost_compositor::windows::{ManagerInput, WindowManager};
 use wayland_client::protocol::{
     wl_compositor::WlCompositor,
     wl_data_offer::WlDataOffer,
@@ -190,10 +190,10 @@ use wayland_protocols::xdg::shell::client::{
 
 /// Bytes the copy side serves; small enough to fit any pipe buffer so
 /// the source can write without a concurrent reader.
-const PASTE_BYTES: &[u8] = b"rwd-clipboard-round-trip";
+const PASTE_BYTES: &[u8] = b"roost-clipboard-round-trip";
 /// Same for the primary selection side (distinct so a crossed wire
 /// between the two selections fails loudly).
-const PRIMARY_BYTES: &[u8] = b"rwd-primary-round-trip";
+const PRIMARY_BYTES: &[u8] = b"roost-primary-round-trip";
 /// Evdev `a`: a bare key whose press hands the copy side an honest
 /// serial for `set_selection`.
 const KEY_A: u32 = 30;

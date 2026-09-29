@@ -4,25 +4,25 @@ One command starts the 001 nested desktop slice: a supervised compositor
 session with the shell panel attached.
 
 ```sh
-scripts/rwd-nested run [--socket NAME] [--shell-bin PATH] [--artifacts DIR]
+scripts/roost-nested run [--socket NAME] [--shell-bin PATH] [--artifacts DIR]
 ```
 
-Defaults: socket `rwd-nested-<pid>`, shell binary from the workspace
+Defaults: socket `roost-nested-<pid>`, shell binary from the workspace
 build, artifacts under
-`$XDG_STATE_HOME/rwd-nested/<socket>` (else
-`~/.local/state/rwd-nested/<socket>`). The script builds both binaries,
-starts `rwd-compositor` on a private socket, and records
+`$XDG_STATE_HOME/roost-nested/<socket>` (else
+`~/.local/state/roost-nested/<socket>`). The script builds both binaries,
+starts `roost-compositor` on a private socket, and records
 `nested.log` plus `compositor.pid` in the artifacts dir. Needs a host
 Wayland/X session with EGL (llvmpipe is fine); headless CI cannot run
 it — automation covers the same paths headless (see below).
 
 ## Crash and reconnect journey
 
-1. Launch with `scripts/rwd-nested run`. The nested window appears;
+1. Launch with `scripts/roost-nested run`. The nested window appears;
    the panel attaches as a top strip.
 2. Open application clients inside the session (e.g.
    `WAYLAND_DISPLAY=<socket> <app>` from another terminal).
-3. Kill the shell: `scripts/rwd-nested kill-shell --socket <socket>`.
+3. Kill the shell: `scripts/roost-nested kill-shell --socket <socket>`.
    Application windows stay mapped and the background shifts to deep
    red: the compositor-owned recovery overlay covers the session.
 4. The compositor respawns the shell within its finite restart budget
@@ -39,7 +39,7 @@ it — automation covers the same paths headless (see below).
 `WAYLAND_DISPLAY` points at the private socket for the compositor
 process and its shell child only. The parent shell and the host
 session are never mutated; shutdown restores the previous value.
-`RWD_CONTROL_SOCKET` hands the shell child its control socket path
+`ROOST_CONTROL_SOCKET` hands the shell child its control socket path
 (overview feed); without it the panel runs with an empty overview.
 Neither variable is exported by the launcher into your shell.
 

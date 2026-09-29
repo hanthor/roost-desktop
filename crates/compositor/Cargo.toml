@@ -1,5 +1,5 @@
 [package]
-name = "rwd-compositor"
+name = "roost-compositor"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
@@ -10,7 +10,7 @@ calloop.workspace = true
 signal-hook.workspace = true
 rand.workspace = true
 wayland-protocols.workspace = true
-rwd-shell-control = { path = "../shell-control-schema", version = "0.1.0" }
+roost-shell-control = { path = "../shell-control-schema", version = "0.1.0" }
 
 [dev-dependencies]
 wayland-client.workspace = true

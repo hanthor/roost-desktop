@@ -1,7 +1,7 @@
 //! Compositor-side control channel (001 R4/R6, ADR 0002).
 //!
 //! Private local IPC between the compositor (authoritative) and the shell
-//! host. Wire types and framing live in the `rwd-shell-control` crate
+//! host. Wire types and framing live in the `roost-shell-control` crate
 //! (version handshake, length-prefixed frames, 1 MiB cap); this module owns
 //! the compositor side: accept, handshake, snapshots, change deltas, and
 //! command dispatch over a [`StateModel`].
@@ -37,7 +37,7 @@
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 
-use rwd_shell_control::{
+use roost_shell_control::{
     decode_frame, encode_frame, ActivationToken, CommandKind, CommandStatus, DecodeError,
     ErrorKind, Message, ProtocolVersion, StateOp, SwitcherAction, WorkspaceInfo, CURRENT_VERSION,
     MAX_FRAME_BYTES,
@@ -575,8 +575,8 @@ fn snapshot_message(model: &StateModel, mint: &dyn Fn(Option<&str>) -> String) -
 fn window_to_wire(
     w: &WindowEntry,
     mint: &dyn Fn(Option<&str>) -> String,
-) -> rwd_shell_control::WindowInfo {
-    rwd_shell_control::WindowInfo {
+) -> roost_shell_control::WindowInfo {
+    roost_shell_control::WindowInfo {
         id: w.id,
         title: w.title.clone(),
         app_id: w.app_id.clone(),

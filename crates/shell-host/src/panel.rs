@@ -7,7 +7,7 @@
 //!
 //! # Live runtime
 //!
-//! The compositor serves `zwlr_layer_shell_v1` (see `rwd_compositor::layer`),
+//! The compositor serves `zwlr_layer_shell_v1` (see `roost_compositor::layer`),
 //! so this binary attaches for real: connect, bind, create the top-anchored
 //! surface, ack configures, run until closed. Against a compositor without
 //! the global it exits with a clear error instead of guessing a fallback
@@ -66,13 +66,13 @@ use crate::search::{SearchAction, SearchHub, SearchResult, WindowProvider};
 use crate::tiles::{TileSet, TileState};
 
 /// Namespace advertised for the panel layer surface.
-pub const PANEL_NAMESPACE: &str = "rwd-shell-panel";
+pub const PANEL_NAMESPACE: &str = "roost-shell-panel";
 /// Namespace advertised for the overview layer surface.
-pub const OVERVIEW_NAMESPACE: &str = "rwd-shell-overview";
+pub const OVERVIEW_NAMESPACE: &str = "roost-shell-overview";
 /// Namespace advertised for the Alt-Tab switcher layer surface.
-pub const SWITCHER_NAMESPACE: &str = "rwd-shell-switcher";
+pub const SWITCHER_NAMESPACE: &str = "roost-shell-switcher";
 /// Namespace advertised for the notification banner layer surface.
-pub const BANNER_NAMESPACE: &str = "rwd-shell-banner";
+pub const BANNER_NAMESPACE: &str = "roost-shell-banner";
 /// Fixed panel height in logical pixels; also the exclusive zone.
 pub const PANEL_HEIGHT: u32 = 32;
 
@@ -308,7 +308,7 @@ fn shm_upload(
     if pixels.is_empty() || width <= 0 || height <= 0 {
         return None;
     }
-    let fd = rustix::fs::memfd_create("rwd-shm", rustix::fs::MemfdFlags::CLOEXEC).ok()?;
+    let fd = rustix::fs::memfd_create("roost-shm", rustix::fs::MemfdFlags::CLOEXEC).ok()?;
     let mut file = std::fs::File::from(fd);
     file.set_len(pixels.len() as u64).ok()?;
     use std::io::Write;
@@ -1046,11 +1046,11 @@ fn drive_control(control: &mut ControlClient, host: &mut ShellHost) {
         Ok(Handled::Gap { .. }) => {
             host.sync_overview(control);
             if let Err(e) = control.request_snapshot() {
-                eprintln!("rwd-shell-host: control resnapshot failed: {e}");
+                eprintln!("roost-shell-host: control resnapshot failed: {e}");
             }
         }
         Ok(_) => host.sync_overview(control),
-        Err(e) => eprintln!("rwd-shell-host: control error: {e}"),
+        Err(e) => eprintln!("roost-shell-host: control error: {e}"),
     }
 }
 
@@ -1276,7 +1276,7 @@ fn pump_wayland(
 /// set, the panel also speaks the control channel — handshake and
 /// initial snapshot up front, then one nonblocking control step per
 /// panel-loop iteration keeps the overview model on compositor truth.
-/// The compositor sets `RWD_CONTROL_SOCKET` for the supervised child;
+/// The compositor sets `ROOST_CONTROL_SOCKET` for the supervised child;
 /// running without it leaves a panel with an empty overview.
 pub fn run_panel_with_control(
     panel: PanelConfig,
@@ -1361,7 +1361,7 @@ mod tests {
         use std::os::unix::net::UnixStream;
         use std::rc::Rc;
 
-        use rwd_compositor::{
+        use roost_compositor::{
             control::ControlHub,
             state::{StateModel, TokenStore},
             TestCompositor, SEAT_NAME,
@@ -1752,7 +1752,7 @@ mod tests {
         /// focus. Same `sync_overview` path the run loop drives.
         #[test]
         fn switcher_drive_steps_and_commits() {
-            use rwd_shell_control::{CommandStatus, SwitcherAction};
+            use roost_shell_control::{CommandStatus, SwitcherAction};
 
             let dir = tempfile::tempdir().unwrap();
             let socket_path = dir.path().join("control.sock");
@@ -1977,7 +1977,7 @@ mod tests {
         #[test]
         fn activate_window_hit_focuses_and_dismisses() {
             use crate::search::SearchResult;
-            use rwd_shell_control::CommandStatus;
+            use roost_shell_control::CommandStatus;
 
             let dir = tempfile::tempdir().unwrap();
             let socket_path = dir.path().join("control.sock");

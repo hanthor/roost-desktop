@@ -1,8 +1,8 @@
 #!/bin/sh
-# rwd-scroll-proof — scroll-mode strip proof inside the nested session.
+# roost-scroll-proof — scroll-mode strip proof inside the nested session.
 #
 # Usage:
-#   scripts/rwd-scroll-proof [--display :98] [--artifacts DIR] [--socket NAME]
+#   scripts/roost-scroll-proof [--display :98] [--artifacts DIR] [--socket NAME]
 #
 # Starts a private Xvfb (unless DISPLAY already works), builds and runs
 # the nested compositor with its supervised shell, then opens three
@@ -22,7 +22,7 @@ unset CDPATH
 ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
 DISPLAY_ARG=""
 ARTIFACTS="$ROOT/scroll-proof-artifacts"
-SOCKET="rwd-scroll-proof-$$"
+SOCKET="roost-scroll-proof-$$"
 WIDTH=1280
 HEIGHT=800
 
@@ -36,7 +36,7 @@ while [ $# -gt 0 ]; do
         --artifacts) ARTIFACTS="$2"; shift 2 ;;
         --socket) SOCKET="$2"; shift 2 ;;
         --help|-h) usage; exit 0 ;;
-        *) echo "rwd-scroll-proof: unknown argument $1" >&2; usage >&2; exit 1 ;;
+        *) echo "roost-scroll-proof: unknown argument $1" >&2; usage >&2; exit 1 ;;
     esac
 done
 
@@ -73,7 +73,7 @@ fi
 if ! display_works; then
     DISPLAY=":98"
     export DISPLAY
-    echo "rwd-scroll-proof: starting Xvfb on $DISPLAY"
+    echo "roost-scroll-proof: starting Xvfb on $DISPLAY"
     Xvfb "$DISPLAY" -screen 0 "${WIDTH}x${HEIGHT}x24" >"$ARTIFACTS/xvfb.log" 2>&1 &
     OWNED_XVFB=$!
     for _ in $(seq 1 30); do
@@ -81,27 +81,27 @@ if ! display_works; then
         sleep 1
     done
     if ! display_works; then
-        echo "rwd-scroll-proof: Xvfb never answered on $DISPLAY" >&2
+        echo "roost-scroll-proof: Xvfb never answered on $DISPLAY" >&2
         exit 1
     fi
 fi
 
-echo "rwd-scroll-proof: display $DISPLAY geometry $(xdotool getdisplaygeometry)"
-echo "rwd-scroll-proof: building"
+echo "roost-scroll-proof: display $DISPLAY geometry $(xdotool getdisplaygeometry)"
+echo "roost-scroll-proof: building"
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" \
-    -p rwd-compositor -p rwd-shell-host
+    -p roost-compositor -p roost-shell-host
 
-echo "rwd-scroll-proof: starting compositor on socket $SOCKET"
-"$ROOT/target/debug/rwd-compositor" --socket "$SOCKET" \
-    --shell-bin "$ROOT/target/debug/rwd-shell-host" \
+echo "roost-scroll-proof: starting compositor on socket $SOCKET"
+"$ROOT/target/debug/roost-compositor" --socket "$SOCKET" \
+    --shell-bin "$ROOT/target/debug/roost-shell-host" \
     >"$LOG" 2>&1 &
 COMPOSITOR_PID=$!
 
-echo "rwd-scroll-proof: waiting for the nested window"
+echo "roost-scroll-proof: waiting for the nested window"
 WID=""
 for _ in $(seq 1 60); do
     if ! kill -0 "$COMPOSITOR_PID" 2>/dev/null; then
-        echo "rwd-scroll-proof: compositor died during startup" >&2
+        echo "roost-scroll-proof: compositor died during startup" >&2
         tail -30 "$LOG" >&2 || true
         exit 1
     fi
@@ -112,17 +112,17 @@ for _ in $(seq 1 60); do
     sleep 1
 done
 if [ -z "$WID" ]; then
-    echo "rwd-scroll-proof: no Smithay window found" >&2
+    echo "roost-scroll-proof: no Smithay window found" >&2
     tail -30 "$LOG" >&2 || true
     exit 1
 fi
-echo "rwd-scroll-proof: window $WID"
-echo "rwd-scroll-proof: nested geometry $(xdotool getwindowgeometry "$WID" | tr '\n' ' ')"
+echo "roost-scroll-proof: window $WID"
+echo "roost-scroll-proof: nested geometry $(xdotool getwindowgeometry "$WID" | tr '\n' ' ')"
 xdotool windowfocus --sync "$WID"
 sleep 3
 
 # One browser, three green pages: three xdg-toplevels in map order.
-PW_ENV="${RUNNER_TEMP:-/tmp}/rwd-pw-scroll-$$"
+PW_ENV="${RUNNER_TEMP:-/tmp}/roost-pw-scroll-$$"
 python3 -m venv "$PW_ENV"
 "$PW_ENV/bin/pip" install --quiet playwright pillow
 "$PW_ENV/bin/python" -m playwright install --with-deps chromium
@@ -135,7 +135,7 @@ from playwright.sync_api import sync_playwright
 
 artifacts = sys.argv[1]
 url = ("data:text/html,<html><body style='margin:0;background:%2300c853'>"
-       "<h1 style='color:white;font-size:64px'>RWD-SCROLL</h1></body></html>")
+       "<h1 style='color:white;font-size:64px'>Roost-SCROLL</h1></body></html>")
 
 os.environ.pop("DISPLAY", None)
 with sync_playwright() as p:
@@ -173,31 +173,31 @@ CHROMIUM_PID=$!
 for _ in $(seq 1 60); do
     [ -f "$READY" ] && break
     if ! kill -0 "$CHROMIUM_PID" 2>/dev/null; then
-        echo "rwd-scroll-proof: chromium exited before ready" >&2
+        echo "roost-scroll-proof: chromium exited before ready" >&2
         tail -30 "$ARTIFACTS/chromium.log" >&2 || true
         exit 1
     fi
     sleep 2
 done
 if [ ! -f "$READY" ]; then
-    echo "rwd-scroll-proof: chromium never signalled ready" >&2
+    echo "roost-scroll-proof: chromium never signalled ready" >&2
     tail -30 "$ARTIFACTS/chromium.log" >&2 || true
     exit 1
 fi
 sleep 2
 scrot "$ARTIFACTS/01-float.png" >/dev/null
-echo "rwd-scroll-proof: shot 01-float.png"
+echo "roost-scroll-proof: shot 01-float.png"
 
 # Whole-session toggle into the strip.
 xdotool key Super_L+Shift+t
 sleep 3
 if ! grep -q "session mode now scroll" "$LOG"; then
-    echo "rwd-scroll-proof: no scroll mode line in nested log" >&2
+    echo "roost-scroll-proof: no scroll mode line in nested log" >&2
     tail -30 "$LOG" >&2 || true
     exit 1
 fi
 scrot "$ARTIFACTS/02-strip.png" >/dev/null
-echo "rwd-scroll-proof: shot 02-strip.png"
+echo "roost-scroll-proof: shot 02-strip.png"
 
 # Focus the first column, then cycle it wider with Super+R.
 xdotool key Super_L+Left
@@ -207,7 +207,7 @@ sleep 1
 xdotool key Super_L+r
 sleep 2
 scrot "$ARTIFACTS/03-preset.png" >/dev/null
-echo "rwd-scroll-proof: shot 03-preset.png"
+echo "roost-scroll-proof: shot 03-preset.png"
 
 # Wheel the strip right (buttons 4/5 are wheel up/down on X). If the
 # nested backend yields no axis events the frame stays identical and
@@ -218,51 +218,51 @@ for _ in $(seq 1 6); do
     sleep 1
 done
 scrot "$ARTIFACTS/04-wheel.png" >/dev/null
-echo "rwd-scroll-proof: shot 04-wheel.png"
+echo "roost-scroll-proof: shot 04-wheel.png"
 
 # Toggle back to floating.
 xdotool key Super_L+Shift+t
 sleep 3
 if ! grep -q "session mode now gnome" "$LOG"; then
-    echo "rwd-scroll-proof: no gnome mode line in nested log" >&2
+    echo "roost-scroll-proof: no gnome mode line in nested log" >&2
     tail -30 "$LOG" >&2 || true
     exit 1
 fi
 scrot "$ARTIFACTS/05-back.png" >/dev/null
-echo "rwd-scroll-proof: shot 05-back.png"
+echo "roost-scroll-proof: shot 05-back.png"
 
 kill "$CHROMIUM_PID" 2>/dev/null || true
 wait "$CHROMIUM_PID" 2>/dev/null || true
 CHROMIUM_PID=""
 
-echo "rwd-scroll-proof: asserting"
+echo "roost-scroll-proof: asserting"
 if ! kill -0 "$COMPOSITOR_PID" 2>/dev/null; then
-    echo "rwd-scroll-proof: compositor died mid-run" >&2
+    echo "roost-scroll-proof: compositor died mid-run" >&2
     tail -30 "$LOG" >&2 || true
     exit 1
 fi
 if grep -q "panicked" "$LOG"; then
-    echo "rwd-scroll-proof: panic in nested log" >&2
+    echo "roost-scroll-proof: panic in nested log" >&2
     grep "panicked" "$LOG" >&2
     exit 1
 fi
 for shot_file in 01-float 02-strip 03-preset 04-wheel 05-back; do
     path="$ARTIFACTS/$shot_file.png"
     if [ ! -s "$path" ]; then
-        echo "rwd-scroll-proof: missing screenshot $path" >&2
+        echo "roost-scroll-proof: missing screenshot $path" >&2
         exit 1
     fi
 done
 if cmp -s "$ARTIFACTS/01-float.png" "$ARTIFACTS/02-strip.png"; then
-    echo "rwd-scroll-proof: strip shot identical to float (toggle did nothing visible)" >&2
+    echo "roost-scroll-proof: strip shot identical to float (toggle did nothing visible)" >&2
     exit 1
 fi
 if cmp -s "$ARTIFACTS/02-strip.png" "$ARTIFACTS/03-preset.png"; then
-    echo "rwd-scroll-proof: preset shot identical to strip (Super+R did nothing visible)" >&2
+    echo "roost-scroll-proof: preset shot identical to strip (Super+R did nothing visible)" >&2
     exit 1
 fi
 if cmp -s "$ARTIFACTS/04-wheel.png" "$ARTIFACTS/05-back.png"; then
-    echo "rwd-scroll-proof: back-to-gnome shot identical to wheel (toggle back did nothing)" >&2
+    echo "roost-scroll-proof: back-to-gnome shot identical to wheel (toggle back did nothing)" >&2
     exit 1
 fi
 
@@ -303,27 +303,27 @@ def close(a, b, tol):
 
 
 greens, gaps = runs(f"{artifacts}/02-strip.png")
-print(f"rwd-scroll-proof: 02 columns {greens} gaps {gaps}")
+print(f"roost-scroll-proof: 02 columns {greens} gaps {gaps}")
 # Default columns: 616 wide with 16 gaps, overflowing past the edge.
 widths = [e - s + 1 for s, e in greens[:2]]
 gapwidths = [e - s + 1 for s, e in gaps[:1]]
 if len(greens) < 2 or not all(close(x, 616, 6) for x in widths):
-    print("rwd-scroll-proof: 02-strip lacks two 616-wide columns", file=sys.stderr)
+    print("roost-scroll-proof: 02-strip lacks two 616-wide columns", file=sys.stderr)
     sys.exit(1)
 if not gapwidths or not close(gapwidths[0], 16, 6):
-    print("rwd-scroll-proof: 02-strip lacks a 16px gap", file=sys.stderr)
+    print("roost-scroll-proof: 02-strip lacks a 16px gap", file=sys.stderr)
     sys.exit(1)
 
 greens, gaps = runs(f"{artifacts}/03-preset.png")
-print(f"rwd-scroll-proof: 03 columns {greens} gaps {gaps}")
+print(f"roost-scroll-proof: 03 columns {greens} gaps {gaps}")
 # First column cycled to 2/3 (826); the rest unchanged.
 if not greens or not close(greens[0][1] - greens[0][0] + 1, 826, 6):
-    print("rwd-scroll-proof: 03-preset first column is not 826 wide", file=sys.stderr)
+    print("roost-scroll-proof: 03-preset first column is not 826 wide", file=sys.stderr)
     sys.exit(1)
 PYEOF
 
 if cmp -s "$ARTIFACTS/03-preset.png" "$ARTIFACTS/04-wheel.png"; then
-    echo "rwd-scroll-proof: wheel delivered no axis on nested path; keys-only fallback stands"
+    echo "roost-scroll-proof: wheel delivered no axis on nested path; keys-only fallback stands"
 else
     "$PW_ENV/bin/python" - "$ARTIFACTS" <<'PYEOF'
 import sys
@@ -356,15 +356,15 @@ def first_gap(path):
 
 before = first_gap(f"{artifacts}/03-preset.png")
 after = first_gap(f"{artifacts}/04-wheel.png")
-print(f"rwd-scroll-proof: wheel first-gap {before} -> {after}")
+print(f"roost-scroll-proof: wheel first-gap {before} -> {after}")
 if before is None or after is None:
-    print("rwd-scroll-proof: gap scan failed after wheel", file=sys.stderr)
+    print("roost-scroll-proof: gap scan failed after wheel", file=sys.stderr)
     sys.exit(1)
 shift = before - after
 if not 0 < shift <= 810:
-    print(f"rwd-scroll-proof: wheel shift {shift} out of range", file=sys.stderr)
+    print(f"roost-scroll-proof: wheel shift {shift} out of range", file=sys.stderr)
     sys.exit(1)
 PYEOF
 fi
 
-echo "rwd-scroll-proof: OK, artifacts in $ARTIFACTS"
+echo "roost-scroll-proof: OK, artifacts in $ARTIFACTS"

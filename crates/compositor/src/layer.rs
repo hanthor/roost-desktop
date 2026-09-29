@@ -25,9 +25,9 @@ use smithay::{
 use crate::State;
 
 /// Namespace the shell advertises for its overview layer surface
-/// (mirrors `rwd_shell_host::OVERVIEW_NAMESPACE`; the crates cannot
+/// (mirrors `roost_shell_host::OVERVIEW_NAMESPACE`; the crates cannot
 /// share the const without a dependency cycle).
-pub const OVERVIEW_NAMESPACE: &str = "rwd-shell-overview";
+pub const OVERVIEW_NAMESPACE: &str = "roost-shell-overview";
 
 /// Arrange one layer surface against the output: axes anchored on
 /// both edges take the output size, other axes take the client's
@@ -76,7 +76,7 @@ pub fn arrange_after_commit(state: &State) {
 #[derive(Debug, Clone)]
 pub struct PanelSurface {
     /// Namespace the client advertised (the shell panel uses
-    /// `rwd-shell-panel`).
+    /// `roost-shell-panel`).
     pub namespace: String,
     /// Layer the surface was created on (the panel uses top).
     pub layer: Layer,

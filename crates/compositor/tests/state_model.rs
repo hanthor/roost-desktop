@@ -1,7 +1,7 @@
 //! Public-API round trip for the revisioned state model: insert, snapshot,
 //! incremental sync, and gap-triggered resnapshot.
 
-use rwd_compositor::state::{DenyReason, StateModel, TokenDecision, TokenPolicy, WindowUpdate};
+use roost_compositor::state::{DenyReason, StateModel, TokenDecision, TokenPolicy, WindowUpdate};
 
 #[test]
 fn snapshot_sync_then_incremental_then_gap_resnapshot() {

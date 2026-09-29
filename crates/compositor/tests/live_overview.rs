@@ -15,11 +15,11 @@ use std::os::unix::net::UnixStream;
 use std::rc::Rc;
 use std::time::Duration;
 
-use rwd_compositor::control::ControlHub;
-use rwd_compositor::state::TokenStore;
-use rwd_compositor::windows::WindowManager;
-use rwd_compositor::{TestCompositor, SEAT_NAME};
-use rwd_shell_control::{
+use roost_compositor::control::ControlHub;
+use roost_compositor::state::TokenStore;
+use roost_compositor::windows::WindowManager;
+use roost_compositor::{TestCompositor, SEAT_NAME};
+use roost_shell_control::{
     decode_frame, encode_frame, ActivationToken, CommandKind, CommandStatus, Message,
     CURRENT_VERSION,
 };
