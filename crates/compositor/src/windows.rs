@@ -74,6 +74,11 @@ pub enum WindowLayout {
     Tiled(TileSide),
     /// Covers the whole output, including the panel strip.
     Fullscreen,
+    /// One column of the scroll-mode strip. The session [`SessionMode`]
+    /// flag owns whether the strip is active; this variant is only the
+    /// stash vehicle so entering the strip preserves floating geometry
+    /// through the existing stash-once/restore path.
+    Strip,
 }
 
 /// Which work-area half a tiled window fills.
@@ -83,6 +88,18 @@ pub enum TileSide {
     Left,
     /// Right half.
     Right,
+}
+
+/// Session-wide window-management mode (scrollable-tiling spec).
+/// Manager-local like [`WindowLayout`]: the shell never sees it, it
+/// only sees resulting geometry through rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SessionMode {
+    /// Normal floating desktop (the default).
+    #[default]
+    Gnome,
+    /// Horizontal scrollable strip; every window is a column.
+    Scroll,
 }
 
 /// Floating window manager over one workspace.
@@ -114,6 +131,9 @@ pub struct WindowManager {
     /// Switcher drive events queued for the hub broadcast, drained by
     /// the runtime after each input event.
     switcher_queue: Vec<SwitcherAction>,
+    /// Session window-management mode (scrollable-tiling spec).
+    /// Gnome by default; Super+Shift+T flips the whole session.
+    mode: SessionMode,
     /// Last hub overview flag seen (set by the runtime each tick).
     overview_open: bool,
     /// Window focused before the overview parked keyboard focus.
@@ -144,6 +164,7 @@ impl WindowManager {
             keyboard,
             pointer,
             pointer_pos: (0.0, 0.0).into(),
+            mode: SessionMode::Gnome,
             super_held: false,
             shift_held: false,
             alt_held: false,
@@ -482,7 +503,7 @@ impl WindowManager {
                 pending.states.unset(state);
             }
             match layout {
-                WindowLayout::Floating => {}
+                WindowLayout::Floating | WindowLayout::Strip => {}
                 WindowLayout::Maximized => {
                     pending.states.set(xdg_toplevel::State::Maximized);
                 }
@@ -707,6 +728,83 @@ impl WindowManager {
         }
     }
 
+    /// Gap between scroll-mode strip columns (niri default).
+    const STRIP_GAP: i32 = 16;
+    /// Default strip column width as a work-area fraction (niri
+    /// default-column-width).
+    const STRIP_DEFAULT_PROPORTION: f64 = 0.5;
+
+    /// Current session mode (scrollable-tiling spec).
+    pub fn session_mode(&self) -> SessionMode {
+        self.mode
+    }
+
+    /// Column sequence position of `id` within its own workspace
+    /// (stacking order, bottom-to-top), if managed.
+    fn strip_index(&self, id: u64) -> Option<usize> {
+        let workspace = self.model.window(id)?.workspace;
+        self.stacking
+            .iter()
+            .copied()
+            .filter(|other| {
+                self.model
+                    .window(*other)
+                    .is_some_and(|entry| entry.workspace == workspace)
+            })
+            .position(|other| other == id)
+    }
+
+    /// One strip column rectangle for `id`: full work-area height,
+    /// default-proportion width with gaps between columns (niri
+    /// gaps-twice formula). Columns past the right edge overflow;
+    /// the strip never squeezes to fit. Falls back to the work area
+    /// for unknown ids.
+    fn strip_column_area(&self, state: &State, id: u64) -> Rectangle<i32, Logical> {
+        let work = Self::work_area(state);
+        let gap = Self::STRIP_GAP;
+        let width = ((work.size.w - gap) as f64 * Self::STRIP_DEFAULT_PROPORTION) as i32 - gap;
+        let width = width.max(1);
+        let index = self.strip_index(id).unwrap_or(0) as i32;
+        Rectangle {
+            loc: (work.loc.x + index * (width + gap), work.loc.y).into(),
+            size: (width, work.size.h).into(),
+        }
+    }
+
+    /// Flip the whole session between floating and strip modes,
+    /// re-laying out every window in place. Entering the strip stashes
+    /// floating geometry through the existing stash-once path;
+    /// leaving restores every strip column. Windows in other managed
+    /// layouts keep their layout (forced membership is later work).
+    pub fn set_scroll(&mut self, state: &mut State, scroll: bool) -> bool {
+        self.mode = if scroll {
+            SessionMode::Scroll
+        } else {
+            SessionMode::Gnome
+        };
+        if scroll {
+            let ids: Vec<u64> = self.windows.keys().copied().collect();
+            for id in ids {
+                self.apply_layout(state, id, WindowLayout::Strip);
+            }
+        } else {
+            let ids: Vec<u64> = self.windows.keys().copied().collect();
+            for id in ids {
+                if self.window_layout(id) == Some(WindowLayout::Strip) {
+                    self.restore_window(id);
+                }
+            }
+        }
+        // Greppable end-to-end signal for the CI proof: the mode
+        // flipped (strip and floating can look alike with one narrow
+        // window, so pixels alone cannot prove it).
+        eprintln!(
+            "rwd-compositor: session mode now {}",
+            if scroll { "scroll" } else { "gnome" }
+        );
+        true
+    }
+
     /// Maximize a window into the work area, stashing its floating
     /// geometry for restore. Idempotent; false for unknown ids.
     pub fn set_maximized(&mut self, state: &mut State, id: u64, maximized: bool) -> bool {
@@ -758,6 +856,7 @@ impl WindowManager {
             WindowLayout::Maximized => Self::work_area(state),
             WindowLayout::Tiled(side) => Self::tile_area(state, side),
             WindowLayout::Fullscreen => Self::fullscreen_area(state),
+            WindowLayout::Strip => self.strip_column_area(state, id),
         };
         let Some(window) = self.windows.get_mut(&id) else {
             return false;
@@ -987,6 +1086,10 @@ pub const ARROW_RIGHT_KEYCODE: u32 = 106;
 /// focused client to close (polite `close` request; the client unmaps
 /// itself). The press is consumed; releases still reach clients.
 pub const F4_KEYCODE: u32 = 62;
+/// Session-mode toggle key (evdev): Super+Shift+T flips the whole
+/// session between floating and strip modes. The press is consumed;
+/// the release still reaches clients.
+pub const T_KEYCODE: u32 = 20;
 /// Top inset of the maximized/tiled work area: the shell panel strip
 /// (matches shell-host `PANEL_HEIGHT` and the Activities-strip
 /// trigger height above).
@@ -1144,7 +1247,14 @@ impl WindowManager {
     /// that half, repeat toggles back). Those presses are consumed,
     /// everything else — modifiers included — still reaches clients.
     fn on_workspace_key(&mut self, state: &mut State, keycode: u32, pressed: bool, time: u32) {
-        if pressed
+        if pressed && self.super_held && self.shift_held && keycode == T_KEYCODE {
+            // Whole-session mode toggle (scrollable-tiling spec):
+            // Super+Shift+T flips floating/strip and re-lays out every
+            // window in place. Consumed like the other Super chords;
+            // the release still reaches clients.
+            let scroll = self.mode != SessionMode::Scroll;
+            self.set_scroll(state, scroll);
+        } else if pressed
             && self.super_held
             && (keycode == PAGE_UP_KEYCODE || keycode == PAGE_DOWN_KEYCODE)
         {

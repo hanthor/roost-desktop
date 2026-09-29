@@ -16,9 +16,10 @@ use std::os::unix::net::UnixStream;
 
 use rwd_compositor::layer::OVERVIEW_NAMESPACE;
 use rwd_compositor::windows::{
-    ManagerInput, TileSide, WindowLayout, WindowManager, ALT_LEFT_KEYCODE, ARROW_DOWN_KEYCODE,
-    ARROW_LEFT_KEYCODE, ARROW_RIGHT_KEYCODE, ARROW_UP_KEYCODE, ESCAPE_KEYCODE, F4_KEYCODE,
-    PAGE_DOWN_KEYCODE, PAGE_UP_KEYCODE, SHIFT_LEFT_KEYCODE, SUPER_LEFT_KEYCODE, TAB_KEYCODE,
+    ManagerInput, SessionMode, TileSide, WindowLayout, WindowManager, ALT_LEFT_KEYCODE,
+    ARROW_DOWN_KEYCODE, ARROW_LEFT_KEYCODE, ARROW_RIGHT_KEYCODE, ARROW_UP_KEYCODE, ESCAPE_KEYCODE,
+    F4_KEYCODE, PAGE_DOWN_KEYCODE, PAGE_UP_KEYCODE, SHIFT_LEFT_KEYCODE, SUPER_LEFT_KEYCODE,
+    TAB_KEYCODE, T_KEYCODE,
 };
 use rwd_compositor::TestCompositor;
 use rwd_shell_control::SwitcherAction;
@@ -1199,4 +1200,196 @@ fn overview_parks_keyboard_focus_and_restores_on_dismiss() {
     f.manager.reconcile(&mut f.comp.state);
     assert!(!f.manager.overview_focus_held());
     assert_eq!(f.manager.model().focused(), Some(f.id_a));
+}
+
+#[test]
+fn fresh_session_defaults_to_gnome_mode() {
+    let f = two_windows();
+    assert_eq!(f.manager.session_mode(), SessionMode::Gnome);
+    assert_eq!(
+        f.manager.window_layout(f.id_a),
+        Some(WindowLayout::Floating)
+    );
+    assert_eq!(
+        f.manager.window_layout(f.id_b),
+        Some(WindowLayout::Floating)
+    );
+}
+
+#[test]
+fn super_shift_t_toggle_round_trip_restores_floating() {
+    let mut f = layout_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    f.client_a.keys.clear();
+    f.client_b.keys.clear();
+
+    let before_a = f.manager.geometry(f.id_a).unwrap();
+    let before_b = f.manager.geometry(f.id_b).unwrap();
+    let mut before_ids: Vec<u64> = f.manager.model().windows().map(|w| w.id).collect();
+    before_ids.sort();
+
+    // Super+Shift+T flips floating into the strip. The T press is
+    // consumed like the other Super chords; the release still reaches
+    // the client so modifiers never stick.
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, T_KEYCODE);
+    assert_eq!(f.manager.session_mode(), SessionMode::Scroll);
+    assert_eq!(f.manager.window_layout(f.id_a), Some(WindowLayout::Strip));
+    assert_eq!(f.manager.window_layout(f.id_b), Some(WindowLayout::Strip));
+    release(&mut f.manager, &mut f.comp, T_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    for (name, client) in [("alpha", &f.client_a), ("beta", &f.client_b)] {
+        assert!(
+            !client
+                .keys
+                .iter()
+                .any(|(key, pressed)| *key == T_KEYCODE && *pressed),
+            "{name} observed a consumed T press: {:?}",
+            client.keys
+        );
+    }
+    assert!(
+        f.client_b
+            .keys
+            .iter()
+            .any(|(key, pressed)| *key == T_KEYCODE && !pressed),
+        "T release must still reach the focused client, got: {:?}",
+        f.client_b.keys
+    );
+
+    // Toggling back restores the exact floating geometry with no
+    // window lost.
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, T_KEYCODE);
+    assert_eq!(f.manager.session_mode(), SessionMode::Gnome);
+    release(&mut f.manager, &mut f.comp, T_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    let mut after_ids: Vec<u64> = f.manager.model().windows().map(|w| w.id).collect();
+    after_ids.sort();
+    assert_eq!(after_ids, before_ids, "toggle round trip lost a window");
+    assert_eq!(
+        f.manager.window_layout(f.id_a),
+        Some(WindowLayout::Floating)
+    );
+    assert_eq!(
+        f.manager.window_layout(f.id_b),
+        Some(WindowLayout::Floating)
+    );
+    assert_eq!(f.manager.geometry(f.id_a).unwrap(), before_a);
+    assert_eq!(f.manager.geometry(f.id_b).unwrap(), before_b);
+}
+
+#[test]
+fn strip_geometry_gaps_overflow_and_advertise() {
+    let mut f = layout_windows();
+    // Third column: the strip overflows past the right edge instead of
+    // squeezing to fit.
+    let (conn_c, mut queue_c, mut client_c) = connect(&mut f.comp);
+    map_toplevel(&mut f.comp, &conn_c, &mut queue_c, &mut client_c, "gamma");
+    f.manager.reconcile(&mut f.comp.state);
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    sync_client(&mut f.comp, &conn_c, &mut queue_c, &mut client_c);
+    let id_c = f
+        .manager
+        .model()
+        .windows()
+        .find(|w| w.title == "gamma")
+        .unwrap()
+        .id;
+    let floating: Vec<_> = [f.id_a, f.id_b, id_c]
+        .into_iter()
+        .map(|id| (id, f.manager.geometry(id).unwrap()))
+        .collect();
+
+    assert!(f.manager.set_scroll(&mut f.comp.state, true));
+    assert_eq!(f.manager.session_mode(), SessionMode::Scroll);
+
+    // Work area is 1280x768 (800 minus the 32px panel); the default
+    // column is (1280 - 16) * 0.5 - 16 = 616 wide at full work height,
+    // stepped by 616 + 16 = 632 per column.
+    let mut xs: Vec<i32> = [f.id_a, f.id_b, id_c]
+        .into_iter()
+        .map(|id| {
+            let geo = f.manager.geometry(id).unwrap();
+            assert_eq!((geo.loc.y, geo.size.w, geo.size.h), (32, 616, 768));
+            assert_eq!(f.manager.window_layout(id), Some(WindowLayout::Strip));
+            geo.loc.x
+        })
+        .collect();
+    xs.sort();
+    assert_eq!(xs, vec![0, 632, 1264]);
+
+    // The strip size is advertised through configure with no managed
+    // xdg state (same as floating).
+    pump(&mut f.comp, &mut f.queue_a, &mut f.client_a, |c| {
+        c.configure_sizes.last() == Some(&(616, 768))
+    });
+    pump(&mut f.comp, &mut f.queue_b, &mut f.client_b, |c| {
+        c.configure_sizes.last() == Some(&(616, 768))
+    });
+    pump(&mut f.comp, &mut queue_c, &mut client_c, |c| {
+        c.configure_sizes.last() == Some(&(616, 768))
+    });
+    for (name, states) in [
+        ("alpha", f.client_a.configure_states.last()),
+        ("beta", f.client_b.configure_states.last()),
+        ("gamma", client_c.configure_states.last()),
+    ] {
+        let states = states.expect("strip configure must advertise state");
+        assert!(
+            !has_state(states, 1) && !has_state(states, 2),
+            "{name} advertised a managed state in strip mode: {states:?}"
+        );
+    }
+
+    // Leaving the strip restores every floating geometry exactly.
+    assert!(f.manager.set_scroll(&mut f.comp.state, false));
+    assert_eq!(f.manager.session_mode(), SessionMode::Gnome);
+    for (id, geo) in &floating {
+        assert_eq!(f.manager.window_layout(*id), Some(WindowLayout::Floating));
+        assert_eq!(f.manager.geometry(*id).unwrap(), *geo);
+    }
+}
+
+#[test]
+fn super_t_without_shift_does_not_toggle() {
+    let mut f = layout_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    f.client_b.keys.clear();
+
+    // Bare Super+T is ordinary input: forwarded to the client (which is
+    // also what disarms the Super-tap), and the session stays gnome.
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, T_KEYCODE);
+    assert_eq!(f.manager.session_mode(), SessionMode::Gnome);
+    release(&mut f.manager, &mut f.comp, T_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    assert_eq!(f.manager.session_mode(), SessionMode::Gnome);
+    assert_eq!(
+        f.manager.window_layout(f.id_b),
+        Some(WindowLayout::Floating)
+    );
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert_eq!(
+        f.client_b
+            .keys
+            .iter()
+            .filter(|(key, _)| *key == T_KEYCODE)
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![(T_KEYCODE, true), (T_KEYCODE, false)],
+        "unshifted T must reach the client whole, got: {:?}",
+        f.client_b.keys
+    );
 }
