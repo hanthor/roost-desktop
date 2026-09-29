@@ -473,6 +473,7 @@ fn stalled_client_gets_backpressure_and_server_still_serves() {
                 active: false,
             })
             .collect(),
+        locked: false,
     };
     let mut pressured = false;
     for _ in 0..500 {

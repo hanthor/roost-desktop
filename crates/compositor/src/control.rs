@@ -285,6 +285,15 @@ pub struct Session<'a> {
     /// open state flipped by `ToggleOverview` commands and runtime
     /// triggers, broadcast back as [`Message::Overview`].
     overview: std::rc::Rc<std::cell::Cell<bool>>,
+    /// Compositor-owned session-lock flag shared with the hub: the
+    /// runtime (idle timeout) and `Lock` commands flip it, and every
+    /// snapshot/delta path reads it. The flag lives here in the
+    /// compositor, never in the restartable shell.
+    locked: std::rc::Rc<std::cell::Cell<bool>>,
+    /// Lock value the shell last received. A flip forces a fresh
+    /// snapshot (resnapshot rule for lock transitions): locking strips
+    /// window content, unlocking restores it.
+    locked_sent: bool,
     /// Window ids the shell asked to close this round (`CloseWindow`
     /// commands the mirror applied). Drained by [`ControlHub::poll`]
     /// so the runtime can send the polite client close.
@@ -312,6 +321,7 @@ impl<'a> Session<'a> {
             deny_all_tokens,
             std::rc::Rc::new(|_| String::new()),
             std::rc::Rc::new(std::cell::Cell::new(false)),
+            std::rc::Rc::new(std::cell::Cell::new(false)),
         )
     }
 
@@ -323,20 +333,27 @@ impl<'a> Session<'a> {
     /// [`validator`](crate::state::TokenStore::validator)); the default
     /// minter issues empty tokens that can never validate. The shared
     /// `overview` cell joins the hub's overview intent so shell
-    /// `ToggleOverview` commands flip state the hub broadcasts.
+    /// `ToggleOverview` commands flip state the hub broadcasts; the
+    /// shared `locked` cell joins the hub's session-lock flag so every
+    /// (re)connect snapshot carries the current lock state (a shell
+    /// restart while locked stays locked).
     pub fn handshake_with(
         conn: ControlConn,
         model: &StateModel,
         validator: impl Fn(&ActivationToken, Option<&str>) -> bool + 'a,
         minter: TokenMinter,
         overview: std::rc::Rc<std::cell::Cell<bool>>,
+        locked: std::rc::Rc<std::cell::Cell<bool>>,
     ) -> Result<Self, ControlError> {
+        let locked_sent = locked.get();
         let mut session = Self {
             conn,
             validator: Box::new(validator),
             minter,
             last_revision: 0,
             overview,
+            locked,
+            locked_sent,
             closed: Vec::new(),
         };
         let msg = match session.conn.read_frame() {
@@ -388,12 +405,16 @@ impl<'a> Session<'a> {
 
     /// Send a full snapshot of `model` (on-request path; the handshake and
     /// gap paths call this internally). Every window carries a freshly
-    /// minted activation token from this session's minter.
+    /// minted activation token from this session's minter. Carries the
+    /// session-lock flag (stripping window content while locked) and
+    /// records it as sent for the lock-transition resnapshot rule.
     pub fn send_snapshot(&mut self, model: &StateModel) -> Result<u64, ControlError> {
         let revision = model.revision();
+        let locked = self.locked.get();
         self.conn
-            .write_frame(&snapshot_message(model, &*self.minter))?;
+            .write_frame(&snapshot_message(model, &*self.minter, locked))?;
         self.last_revision = revision;
+        self.locked_sent = locked;
         Ok(revision)
     }
 
@@ -412,8 +433,20 @@ impl<'a> Session<'a> {
     /// Catch the shell up from [`last_revision`](Self::last_revision):
     /// incremental `Changes` when the change log covers the gap, else a
     /// fresh snapshot (resnapshot rule). New token-bearing entries mint
-    /// through this session's minter.
+    /// through this session's minter. A lock transition since the last
+    /// send forces a fresh snapshot (locking strips window content,
+    /// unlocking restores it); while locked with no transition, deltas
+    /// are suppressed (never leak titles) and only the cursor advances.
     pub fn emit_deltas(&mut self, model: &StateModel) -> Result<Emitted, ControlError> {
+        if self.locked.get() != self.locked_sent {
+            let revision = self.send_snapshot(model)?;
+            return Ok(Emitted::Snapshot { revision });
+        }
+        if self.locked.get() {
+            let to = model.revision();
+            self.last_revision = to;
+            return Ok(Emitted::Idle { revision: to });
+        }
         match model.changes_since(self.last_revision) {
             Ok(entries) => {
                 let ops: Vec<StateOp> = entries
@@ -503,7 +536,8 @@ impl<'a> Session<'a> {
                 Ok(Handled::HelloResync { revision })
             }
             Message::Command { id, kind } => {
-                let (status, closed) = apply_command(model, &self.validator, &self.overview, &kind);
+                let (status, closed) =
+                    apply_command(model, &self.validator, &self.overview, &self.locked, &kind);
                 if let Some(window) = closed {
                     self.closed.push(window);
                 }
@@ -556,16 +590,26 @@ fn message_kind(msg: &Message) -> &'static str {
 }
 
 /// Build the full-snapshot message for `model`, minting one activation
-/// token per window through `mint`.
-fn snapshot_message(model: &StateModel, mint: &dyn Fn(Option<&str>) -> String) -> Message {
+/// token per window through `mint`. While `locked` the snapshot carries
+/// the flag with no window content (empty list): the lock screen shows
+/// no titles, and the restartable shell must not retain any.
+/// Workspaces are structural ids only and pass through unchanged.
+fn snapshot_message(
+    model: &StateModel,
+    mint: &dyn Fn(Option<&str>) -> String,
+    locked: bool,
+) -> Message {
     let snap = model.snapshot();
     Message::Snapshot {
         revision: snap.revision,
-        windows: snap
-            .windows
-            .iter()
-            .map(|w| window_to_wire(w, mint))
-            .collect(),
+        windows: if locked {
+            Vec::new()
+        } else {
+            snap.windows
+                .iter()
+                .map(|w| window_to_wire(w, mint))
+                .collect()
+        },
         workspaces: snap
             .workspaces
             .iter()
@@ -575,6 +619,7 @@ fn snapshot_message(model: &StateModel, mint: &dyn Fn(Option<&str>) -> String) -
                 active: *id == snap.active,
             })
             .collect(),
+        locked,
     }
 }
 
@@ -634,6 +679,7 @@ fn apply_command(
     model: &mut StateModel,
     validator: &dyn Fn(&ActivationToken, Option<&str>) -> bool,
     overview: &std::cell::Cell<bool>,
+    locked: &std::cell::Cell<bool>,
     kind: &CommandKind,
 ) -> (CommandStatus, Option<u64>) {
     match kind {
@@ -688,6 +734,13 @@ fn apply_command(
             }
             (CommandStatus::Applied, Some(*window))
         }
+        CommandKind::Lock => {
+            // Manual lock from the shell (session-lock set path):
+            // engage the compositor-owned flag; idempotent, always
+            // applied. The next poll snapshots the stripped state.
+            locked.set(true);
+            (CommandStatus::Applied, None)
+        }
     }
 }
 
@@ -734,6 +787,10 @@ pub struct ControlHub {
     /// Intent value last broadcast to all sessions; a mismatch means a
     /// flip is still owed (or a newcomer joined mid-state).
     overview_sent: bool,
+    /// Compositor-owned session-lock flag (session-lock): flipped by
+    /// the runtime (idle timeout) or `Lock` commands, shared with every
+    /// live session so snapshots carry it; the shell never owns it.
+    locked: std::rc::Rc<std::cell::Cell<bool>>,
     /// Alt-Tab drive events awaiting broadcast. Unlike the overview
     /// intent (level), steps are discrete events: each one is sent to
     /// every live session exactly once, retained until all sends land.
@@ -759,6 +816,7 @@ impl ControlHub {
             fresh: Vec::new(),
             overview: std::rc::Rc::new(std::cell::Cell::new(false)),
             overview_sent: false,
+            locked: std::rc::Rc::new(std::cell::Cell::new(false)),
             switcher_queue: Vec::new(),
             store,
             seat: seat.to_owned(),
@@ -785,6 +843,20 @@ impl ControlHub {
     /// Idempotent: setting the current value sends nothing.
     pub fn set_overview(&self, open: bool) {
         self.overview.set(open);
+    }
+
+    /// Whether the session is locked (compositor-owned flag).
+    pub fn is_locked(&self) -> bool {
+        self.locked.get()
+    }
+
+    /// Set the session-lock flag; the next [`poll`](Self::poll) carries
+    /// it to every live session as a (possibly content-stripped)
+    /// [`Message::Snapshot`]. Idempotent. Unlock clears through session
+    /// auth (see [`crate::unlock`]), never through this path from the
+    /// shell.
+    pub fn set_locked(&self, locked: bool) {
+        self.locked.set(locked);
     }
 
     /// Queue one Alt-Tab drive event; the next [`poll`](Self::poll)
@@ -892,9 +964,10 @@ impl ControlHub {
                 move |token: &ActivationToken, app_id: Option<&str>| validate(&token.0, app_id);
             let minter = std::rc::Rc::new(self.store.clone().minter(self.seat.clone()));
             let overview = self.overview.clone();
+            let locked = self.locked.clone();
             let open = overview.get();
             if let Ok(mut session) =
-                Session::handshake_with(conn, model, validator, minter, overview)
+                Session::handshake_with(conn, model, validator, minter, overview, locked)
             {
                 // Newcomers join mid-state: tell them the intent now
                 // (best-effort; the poll broadcast covers the rest).

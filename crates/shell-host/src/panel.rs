@@ -71,12 +71,12 @@ use crate::overview::{
     SWITCHER_STRIP_H,
 };
 use crate::popup::{
-    calendar_clock_row, calendar_weekday_row, network_rows, paint_popup, panel_layout, popup_box,
-    sound_rows, tile_row_at, PopupBody, PopupState, POPUP_HEIGHT,
+    calendar_clock_row, calendar_weekday_row, lock_rows, network_rows, paint_popup, panel_layout,
+    popup_box, sound_rows, tile_row_at, PopupBody, PopupState, POPUP_HEIGHT,
 };
 use crate::search::{SearchAction, SearchHub, SearchResult, WindowProvider};
 use crate::settings::ClockFormat;
-use crate::tiles::{TileSet, TileState, NETWORK_TILE_INDEX, SOUND_TILE_INDEX};
+use crate::tiles::{TileSet, TileState, NETWORK_TILE_INDEX, POWER_TILE_INDEX, SOUND_TILE_INDEX};
 use crate::watcher::{
     indicator_at, indicator_cells, indicator_right_x, menu_row_at, paint_indicators, IndicatorHost,
     IndicatorIcon, ItemInfo, WatcherBus,
@@ -257,6 +257,10 @@ pub struct ShellHost {
     /// Dock switch/close actions awaiting the control client (the run
     /// loop's driver consumes them; launch and pin run immediately).
     pending_dock: Vec<DockAction>,
+    /// Manual lock request armed by a power-menu press (the run
+    /// loop's driver sends it; the lock screen engages when the
+    /// compositor's locked snapshot lands).
+    pending_lock: bool,
     /// xkb state behind the keyboard; `None` until the first keymap
     /// arrives, while which keys are ignored.
     xkb: Option<XkbFeed>,
@@ -594,6 +598,7 @@ impl ShellHost {
             icon_cache: std::collections::HashMap::new(),
             icon_theme: crate::settings::DEFAULT_ICON_THEME.to_owned(),
             pending_dock: Vec::new(),
+            pending_lock: false,
             xkb: None,
             search_text: String::new(),
             overview_failure: None,
@@ -1066,6 +1071,7 @@ impl ShellHost {
                     self.indicators.items(),
                     &rows,
                     &sound,
+                    &lock_rows(),
                     self.tiles.settings.clock_format,
                     self.tiles.prefs.clock_show_weekday,
                 );
@@ -1231,6 +1237,17 @@ impl ShellHost {
                     return;
                 }
             }
+            // Row presses inside the open power menu arm a manual
+            // lock request; the run loop's driver sends it, and the
+            // lock screen engages when the locked snapshot lands.
+            if index == POWER_TILE_INDEX {
+                let open_box = popup_box(&layout, PopupBody::Menu(index));
+                if open_box.contains(x, y) {
+                    self.fire_lock_row(&open_box, y);
+                    self.apply_popup_size();
+                    return;
+                }
+            }
         }
         let open_box = self.popup.body().map(|body| popup_box(&layout, body));
         self.popup.press(&layout, open_box, x, y);
@@ -1367,6 +1384,25 @@ impl ShellHost {
             }
             _ => {}
         }
+    }
+
+    /// Fire the power menu row under the popup point: the single
+    /// lock row arms a manual lock request the run loop's driver
+    /// sends; the menu stays open until the lock screen engages.
+    fn fire_lock_row(&mut self, open_box: &crate::popup::Rect, y: i32) {
+        let rows = lock_rows();
+        let Some(row) = tile_row_at(open_box, y, rows.len()) else {
+            return;
+        };
+        if !rows[row].enabled {
+            return;
+        }
+        self.pending_lock = true;
+    }
+
+    /// Take an armed manual lock request for the run loop's driver.
+    pub fn take_lock(&mut self) -> bool {
+        std::mem::take(&mut self.pending_lock)
     }
 
     /// Pinned favorites for the overview grid.
@@ -1509,6 +1545,20 @@ impl ShellHost {
                 Ok(HitOutcome::Launched { pid })
             }
         }
+    }
+
+    /// Lock the session at once from the shell trigger surface
+    /// (manual lock).
+    ///
+    /// Sends the tokenless `Lock` command over the control channel
+    /// like [`activate_hit`](Self::activate_hit) sends its commands:
+    /// a send failure reports [`HitError::Control`] and nothing is
+    /// flipped locally — the lock screen engages when the
+    /// compositor's locked snapshot lands (read through
+    /// [`ControlClient::locked`](crate::control::ControlClient::locked)).
+    /// Returns the request id for `CommandResult` correlation.
+    pub fn lock_now(&self, control: &mut ControlClient) -> Result<u64, HitError> {
+        control.lock().map_err(HitError::Control)
     }
 
     /// Press overview result `index` (the app-launch and
@@ -2196,6 +2246,16 @@ fn drive_dock_actions(host: &mut ShellHost, control: &mut ControlClient) {
     }
 }
 
+/// Consume an armed manual lock request through the control client.
+/// Best-effort like dock actions: a failed send must not wedge the
+/// loop, and nothing flips locally — the lock screen engages when
+/// the compositor's locked snapshot lands.
+fn drive_lock_actions(host: &mut ShellHost, control: &mut ControlClient) {
+    if host.take_lock() {
+        let _ = host.lock_now(control);
+    }
+}
+
 fn drive_control(control: &mut ControlClient, host: &mut ShellHost) {
     match control.poll() {
         Err(e) if is_would_block(&e) => {}
@@ -2582,6 +2642,7 @@ pub fn run_panel_with_control(
             drive_control(control, &mut host);
             drive_key_actions(&mut host, control);
             drive_dock_actions(&mut host, control);
+            drive_lock_actions(&mut host, control);
             host.update_overview(control.revision());
             host.update_switcher();
             host.update_panel_status();
@@ -3221,6 +3282,84 @@ mod tests {
                 );
             }
             assert_eq!(host.tiles.sound_pending(), None);
+        }
+
+        /// Power menu press on the lock row arms a manual lock
+        /// request: the row paints enabled, the press arms it, and
+        /// the drain consumes it exactly once.
+        #[test]
+        fn power_menu_lock_row_press_arms_manual_lock() {
+            use crate::popup::{lock_rows, panel_layout, popup_box, PopupBody, TILE_ROWS_TOP};
+            use crate::tiles::POWER_TILE_INDEX;
+            assert_eq!(lock_rows().len(), 1, "single lock row");
+            assert!(lock_rows()[0].enabled, "lock row always fires");
+            let (mut host, _dir) = test_host();
+            host.panel_size = Some((1280, 32));
+            host.tiles.clock = "12:34".to_owned();
+            let layout = panel_layout(1280, 32, &host.tiles.clock);
+            let power_tile = layout.tiles[POWER_TILE_INDEX];
+            host.press_panel(power_tile.x + power_tile.w / 2, 16);
+            assert_eq!(host.popup.body(), Some(PopupBody::Menu(POWER_TILE_INDEX)));
+            let layout = panel_layout(1280, 32, &host.tiles.clock);
+            let open_box = popup_box(&layout, PopupBody::Menu(POWER_TILE_INDEX));
+            let y = open_box.y + TILE_ROWS_TOP + 2;
+            assert!(!host.take_lock(), "nothing armed before the press");
+            host.press_panel(open_box.x + open_box.w / 2, y);
+            assert!(host.take_lock(), "lock row press arms the request");
+            assert!(!host.take_lock(), "drain consumes it once");
+        }
+
+        /// Armed lock request leaves over the control channel through
+        /// the run-loop driver: press arms, the driver sends Lock, and
+        /// the hub applies it to the locked snapshot.
+        #[test]
+        fn armed_lock_request_drives_lock_command() {
+            use crate::popup::{panel_layout, popup_box, PopupBody, TILE_ROWS_TOP};
+            use crate::tiles::POWER_TILE_INDEX;
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("control.sock");
+            let mut model = StateModel::new();
+            let mut hub =
+                ControlHub::bind(socket_path.clone(), Rc::new(TokenStore::new()), SEAT_NAME)
+                    .unwrap();
+            let (mut host, _favdir) = test_host();
+            host.panel_size = Some((1280, 32));
+            host.tiles.clock = "12:34".to_owned();
+            let layout = panel_layout(1280, 32, &host.tiles.clock);
+            let power_tile = layout.tiles[POWER_TILE_INDEX];
+            host.press_panel(power_tile.x + power_tile.w / 2, 16);
+            let layout = panel_layout(1280, 32, &host.tiles.clock);
+            let open_box = popup_box(&layout, PopupBody::Menu(POWER_TILE_INDEX));
+            host.press_panel(open_box.x + open_box.w / 2, open_box.y + TILE_ROWS_TOP + 2);
+            let mut client = ControlClient::connect(&socket_path).unwrap();
+            client.send_hello().unwrap();
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.await_hello() {
+                    Ok(()) => break,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("hello failed: {e}"),
+                }
+            }
+            super::drive_lock_actions(&mut host, &mut client);
+            let mut locked_seen = false;
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.poll() {
+                    Ok(Handled::Snapshot { .. }) => {
+                        if client.locked() {
+                            locked_seen = true;
+                        }
+                    }
+                    Ok(_) => continue,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("lock poll failed: {e}"),
+                }
+                if locked_seen {
+                    break;
+                }
+            }
+            assert!(locked_seen, "armed press drives Lock to the hub");
         }
 
         /// `paint_panel_surface` carries indicator pixels: the shm
@@ -4230,6 +4369,80 @@ mod tests {
             assert_eq!(result, Some(CommandStatus::Applied));
             assert!(dismissed, "overview dismisses after picking");
             assert_eq!(model.focused(), Some(id_b));
+        }
+
+        /// Manual lock from the shell trigger engages the lock screen
+        /// at once: the trigger sends `Lock`, the hub applies it, and
+        /// the locked, content-free snapshot lands on the display
+        /// value with no window content.
+        #[test]
+        fn manual_lock_engages_lock_screen_at_once() {
+            use roost_shell_control::CommandStatus;
+
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("control.sock");
+            let mut model = StateModel::new();
+            model.insert("alpha", Some("com.example.alpha"), 0);
+            model.insert("beta", Some("com.example.beta"), 0);
+            let mut hub =
+                ControlHub::bind(socket_path.clone(), Rc::new(TokenStore::new()), SEAT_NAME)
+                    .unwrap();
+
+            let mut client = ControlClient::connect(&socket_path).unwrap();
+            client.send_hello().unwrap();
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.await_hello() {
+                    Ok(()) => break,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("hello failed: {e}"),
+                }
+            }
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.poll() {
+                    Ok(Handled::Snapshot { .. }) => break,
+                    Ok(_) => continue,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("snapshot poll failed: {e}"),
+                }
+            }
+            let (host, _favdir) = test_host();
+            assert!(!client.locked(), "unlocked snapshot first");
+            assert_eq!(client.model().windows().len(), 2);
+
+            let request = host.lock_now(&mut client).expect("lock send");
+
+            let mut result = None;
+            let mut locked_seen = false;
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.poll() {
+                    Ok(Handled::CommandResult { id, status }) => {
+                        if id == request {
+                            result = Some(status);
+                        }
+                    }
+                    Ok(Handled::Snapshot { .. }) => {
+                        if client.locked() {
+                            locked_seen = true;
+                        }
+                    }
+                    Ok(_) => continue,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("lock poll failed: {e}"),
+                }
+                if result.is_some() && locked_seen {
+                    break;
+                }
+            }
+            assert_eq!(result, Some(CommandStatus::Applied));
+            assert!(locked_seen, "locked snapshot lands at once");
+            assert!(client.locked(), "display reads the snapshot flag");
+            assert!(
+                client.model().windows().is_empty(),
+                "no window content while locked"
+            );
         }
 
         /// Enter on a closed window reports stale without touching the

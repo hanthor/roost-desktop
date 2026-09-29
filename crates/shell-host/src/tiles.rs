@@ -26,6 +26,8 @@ pub const NM_PATH: &str = "/org/freedesktop/NetworkManager";
 pub const NM_IFACE: &str = "org.freedesktop.NetworkManager";
 /// Strip index of the network tile (strip order: network, power, sound).
 pub const NETWORK_TILE_INDEX: usize = 0;
+/// Strip index of the power tile (strip order: network, power, sound).
+pub const POWER_TILE_INDEX: usize = 1;
 /// Strip index of the sound tile (strip order: network, power, sound).
 pub const SOUND_TILE_INDEX: usize = 2;
 /// Bounded wait per radio round trip so a hung service cannot stall

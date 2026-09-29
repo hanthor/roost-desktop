@@ -345,10 +345,12 @@ fn fixture() -> Fixture {
         revision,
         windows,
         workspaces,
+        locked,
     } = client_read(&mut control)
     else {
         panic!("expected Snapshot after Hello");
     };
+    assert!(!locked);
     assert_eq!(revision, manager.model().revision());
     assert_eq!(windows.len(), 2);
     let token_a = windows

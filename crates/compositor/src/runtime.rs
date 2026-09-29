@@ -14,7 +14,7 @@
 
 use std::ffi::OsString;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use calloop::EventLoop;
 use smithay::{
@@ -38,6 +38,7 @@ use smithay::{
 };
 
 use crate::control::ControlHub;
+use crate::lock::{content_visible, SessionLock, DEFAULT_IDLE_TIMEOUT_MS};
 use crate::overlay::{overlay_key_for_keycode, Overlay, OverlayWindow};
 use crate::state::TokenStore;
 use crate::supervise::{RecoveryAction, RestartPolicy, ShellDriver, ShellStatus};
@@ -45,6 +46,7 @@ use crate::wallpaper::Wallpaper;
 use crate::windows::{
     translate_input, ManagerInput, TriggerAction, TriggerState, WindowManager, ESCAPE_KEYCODE,
 };
+use roost_greeter::client::GreeterClient;
 
 use crate::{ClientState, State};
 
@@ -196,6 +198,15 @@ pub struct Runtime {
     overlay: Overlay,
     wallpaper: Wallpaper,
     triggers: TriggerState,
+    /// Compositor-owned session lock: flag plus idle accumulator fed
+    /// from input timestamps. The hub mirror carries the flag to shell
+    /// snapshots; the shell never owns it.
+    lock: SessionLock,
+    /// Real-time anchor of the last input event. Input stamps live on
+    /// the backend event clock while idle is measured here, so each
+    /// tick evaluates the lock in the input base as
+    /// `last_stamp + anchor.elapsed()`.
+    idle_since: Instant,
     exit: bool,
     stats: RunStats,
 }
@@ -293,6 +304,8 @@ impl Runtime {
             overlay,
             wallpaper: Wallpaper::new(),
             triggers: TriggerState::default(),
+            lock: SessionLock::new(DEFAULT_IDLE_TIMEOUT_MS),
+            idle_since: Instant::now(),
             exit: false,
             stats: RunStats::default(),
         };
@@ -322,12 +335,75 @@ impl Runtime {
         }
     }
 
-    /// Route one backend input event: to the recovery overlay while it
-    /// is visible, else through the overview triggers to the window
-    /// manager. Trigger events still reach clients (tap toggles without
+    /// Current time in the input-timestamp base: the newest input stamp
+    /// plus real time elapsed since it arrived. The backend event clock
+    /// and the system clock share no base, so the stamp anchors the
+    /// base and only the gap is measured here.
+    fn lock_now_ms(&self) -> u64 {
+        self.lock.last_input_ms().saturating_add(
+            self.idle_since
+                .elapsed()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX),
+        )
+    }
+
+    /// Whether the session is locked (hub flag: what the snapshots say).
+    fn is_locked(&self) -> bool {
+        self.control.is_locked()
+    }
+
+    /// Engage the lock: flag (idle machine plus hub mirror for
+    /// snapshots), overview dismissed, and the exclusive lock surface
+    /// up with an empty list — no window titles while locked.
+    fn engage_lock(&mut self) {
+        self.lock.lock();
+        self.control.set_locked(true);
+        self.control.set_overview(false);
+        self.overlay.show(Vec::new());
+    }
+
+    /// Attempt unlock against the live daemon: verify `password` for
+    /// `user` through the greeter login path and clear the lock on
+    /// success (see [`crate::unlock`]). No socket configured or no
+    /// daemon reachable fails closed — the session stays locked and
+    /// silent; auth is never invented. Returns whether the session is
+    /// unlocked afterwards.
+    pub fn try_unlock(&mut self, user: &str, password: &str) -> bool {
+        let Some(path) = crate::unlock::greetd_socket_path() else {
+            return false;
+        };
+        let Ok(mut client) = GreeterClient::connect(&path) else {
+            return false;
+        };
+        let now_ms = self.lock_now_ms();
+        crate::unlock::unlock_session(
+            &mut self.lock,
+            &self.control,
+            &mut self.overlay,
+            now_ms,
+            user,
+            password,
+            &mut client,
+        )
+    }
+
+    /// Route one backend input event: consumed by the lock surface while
+    /// locked (credential entry submits through [`try_unlock`](Self::try_unlock);
+    /// windows hear nothing), else to the recovery overlay while it is visible,
+    /// else through the overview triggers to the window manager.
+    /// Trigger events still reach clients (tap toggles without
     /// breaking Super-combos); only Escape-closes is consumed, so a
     /// closing keypress never double-acts on client UI.
     fn on_manager_input(&mut self, input: ManagerInput) {
+        // Every timestamped event feeds the idle accumulator first,
+        // including events consumed below: activity is activity.
+        self.lock.note_input(input_time(&input));
+        self.idle_since = Instant::now();
+        if self.is_locked() {
+            return;
+        }
         if !self.overlay.visible {
             if let ManagerInput::Key {
                 keycode: ESCAPE_KEYCODE,
@@ -430,18 +506,40 @@ impl Runtime {
         for id in outcome.closed {
             self.manager.close_window(id);
         }
+        // Adopt a control-command lock (manual lock set path): the hub
+        // flag flipped without the idle machine, so mirror it locally,
+        // dismiss the overview, and raise the exclusive surface.
+        if self.control.is_locked() && !self.lock.is_locked() {
+            self.lock.lock();
+            self.control.set_overview(false);
+            self.overlay.show(Vec::new());
+        }
+        // Idle timeout from input timestamps: lock the untouched session.
+        if !self.is_locked() && self.lock.check_timeout(self.lock_now_ms()) {
+            self.engage_lock();
+        }
         // Overview focus follows the hub flag (shell commands and
         // runtime triggers converge here); the next reconcile parks
         // or restores keyboard focus.
         self.manager.set_overview_open(self.control.overview_open());
-        match self.shell.poll(crate::state::system_millis()) {
-            ShellStatus::Running => {
-                if self.overlay.visible {
-                    self.overlay.hide();
-                }
+        // While locked the overlay stays up with its empty list no
+        // matter what the shell does: a shell restart while locked
+        // keeps the lock screen up. Otherwise the shell step never
+        // blocks the tick as before.
+        if self.is_locked() {
+            if !self.overlay.visible {
+                self.overlay.show(Vec::new());
             }
-            ShellStatus::Waiting { .. } | ShellStatus::Fault(_) | ShellStatus::Exhausted => {
-                self.refresh_overlay()
+        } else {
+            match self.shell.poll(crate::state::system_millis()) {
+                ShellStatus::Running => {
+                    if self.overlay.visible {
+                        self.overlay.hide();
+                    }
+                }
+                ShellStatus::Waiting { .. } | ShellStatus::Fault(_) | ShellStatus::Exhausted => {
+                    self.refresh_overlay()
+                }
             }
         }
         for event in self.shell.drain_events() {
@@ -456,11 +554,17 @@ impl Runtime {
     /// callbacks. While the recovery overlay is visible the background
     /// shifts to a deep red (provisional overlay visual; full overlay
     /// text rendering is deferred) so the shell-absent state is
-    /// unmistakable.
+    /// unmistakable. While locked nothing beneath the lock surface may
+    /// show — no windows, no layer-shell chrome (panel, notifications),
+    /// no wallpaper — over a dark lock background.
     fn render(&mut self) -> Result<(), RuntimeError> {
         let size = self.backend.window_size();
         let damage = Rectangle::from_size(size);
-        let background = if self.overlay.visible {
+        let locked = self.is_locked();
+        let show_content = content_visible(locked);
+        let background = if locked {
+            Color32F::new(0.03, 0.05, 0.12, 1.0)
+        } else if self.overlay.visible {
             Color32F::new(0.20, 0.08, 0.10, 1.0)
         } else {
             Color32F::new(0.08, 0.09, 0.11, 1.0)
@@ -470,42 +574,49 @@ impl Runtime {
                 .backend
                 .bind()
                 .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-            let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = self
-                .manager
-                .visible_windows()
-                .iter()
-                .flat_map(|(surface, geometry)| {
-                    render_elements_from_surface_tree(
+            let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = if show_content {
+                self.manager
+                    .visible_windows()
+                    .iter()
+                    .flat_map(|(surface, geometry)| {
+                        render_elements_from_surface_tree(
+                            renderer,
+                            surface.wl_surface(),
+                            (geometry.loc.x, geometry.loc.y),
+                            1.0,
+                            1.0,
+                            Kind::Unspecified,
+                        )
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            // Layer shell above windows: panel strip, then overview.
+            // Hidden with everything else while locked.
+            let mut elements = elements;
+            if show_content {
+                for (surface, (x, y), _) in crate::layer::layer_layout(&self.state) {
+                    elements.extend(render_elements_from_surface_tree(
                         renderer,
-                        surface.wl_surface(),
-                        (geometry.loc.x, geometry.loc.y),
+                        &surface,
+                        (x, y),
                         1.0,
                         1.0,
                         Kind::Unspecified,
-                    )
-                })
-                .collect();
-            // Layer shell above windows: panel strip, then overview.
-            let mut elements = elements;
-            for (surface, (x, y), _) in crate::layer::layer_layout(&self.state) {
-                elements.extend(render_elements_from_surface_tree(
-                    renderer,
-                    &surface,
-                    (x, y),
-                    1.0,
-                    1.0,
-                    Kind::Unspecified,
-                ));
+                    ));
+                }
             }
             // Settings wallpaper behind everything. Skipped under the
             // recovery overlay so the shell-absent red stays
-            // unmistakable. Drawn in its own pass: mixing element
+            // unmistakable, and while locked so no content leaks.
+            // Drawn in its own pass: mixing element
             // types in one list needs DMA import bounds this backend
             // does not satisfy.
-            let paper = if self.overlay.visible {
-                None
-            } else {
+            let paper = if show_content && !self.overlay.visible {
                 self.wallpaper.element(renderer, size.w, size.h)
+            } else {
+                None
             };
             // The winit EGL surface presents bottom-up (see the Y-flip
             // in the backend's own damage path), so the output
@@ -588,5 +699,17 @@ pub fn run(session: &NestedSession) -> Result<RunStats, RuntimeError> {
                 return done.map(|_| runtime.stats);
             }
         }
+    }
+}
+
+/// Input-event timestamp in the backend event base, for the session-lock
+/// idle accumulator. Every [`ManagerInput`] variant carries one; axis
+/// scroll counts as activity like any other event.
+fn input_time(input: &ManagerInput) -> u64 {
+    match *input {
+        ManagerInput::Key { time, .. }
+        | ManagerInput::Motion { time, .. }
+        | ManagerInput::Button { time, .. }
+        | ManagerInput::Axis { time, .. } => u64::from(time),
     }
 }

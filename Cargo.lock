@@ -2929,8 +2929,10 @@ name = "roost-compositor"
 version = "0.1.0"
 dependencies = [
  "calloop 0.14.4",
+ "greetd_ipc",
  "image",
  "rand",
+ "roost-greeter",
  "roost-shell-control",
  "signal-hook",
  "smithay",

@@ -59,7 +59,14 @@ impl ProtocolVersion {
     ///
     /// `0.5` appends the shell-to-compositor `CloseWindow` command
     /// (dock quit), again last for the same reason.
-    pub const CURRENT: Self = Self { major: 0, minor: 5 };
+    ///
+    /// `0.6` appends `locked` to the compositor-to-shell `Snapshot` and
+    /// the shell-to-compositor `Lock` command (session-lock). The struct
+    /// field sits last and the enum variant sits last, so earlier
+    /// positions are untouched; like `0.2`, the body is still
+    /// wire-incompatible with older peers despite the minor bump, and
+    /// both sides always ship from this workspace.
+    pub const CURRENT: Self = Self { major: 0, minor: 6 };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
     pub const fn new(major: u16, minor: u16) -> Self {
@@ -166,6 +173,11 @@ pub enum CommandKind {
         /// Window to close.
         window: WindowId,
     },
+    /// Lock the session immediately (manual lock from the shell).
+    /// Idempotent and tokenless like `ToggleOverview`: the shell is a
+    /// trusted local peer, and locking hides rather than reveals.
+    /// Unlock is never a command: it goes through session auth.
+    Lock,
 }
 
 /// Outcome of one shell command, matched by request id.
@@ -216,6 +228,11 @@ pub enum Message {
         windows: Vec<WindowInfo>,
         /// All workspaces.
         workspaces: Vec<WorkspaceInfo>,
+        /// Whether the session is locked. While set, `windows` carries
+        /// no content (empty): the lock screen shows no titles, and a
+        /// restartable shell must not retain any. The flag is the only
+        /// lock state on the wire — never credentials.
+        locked: bool,
     },
     /// Ordered incremental updates from `from_revision` to `to_revision`.
     /// A gap against the shell's revision forces a resnapshot.
@@ -546,8 +563,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_5() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 5));
+    fn current_version_is_0_6() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 6));
     }
 
     #[test]
@@ -560,7 +577,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 3).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 4).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 5).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 6).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 6).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 7).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }
@@ -590,6 +608,14 @@ mod tests {
             revision: 42,
             windows: vec![sample_window(7), sample_window(8)],
             workspaces: vec![sample_workspace(1), sample_workspace(2)],
+            locked: false,
+        });
+        // Locked snapshots carry the flag with no window content.
+        roundtrip(&Message::Snapshot {
+            revision: 43,
+            windows: vec![],
+            workspaces: vec![sample_workspace(1)],
+            locked: true,
         });
     }
 
@@ -621,6 +647,7 @@ mod tests {
             CommandKind::FocusWorkspace { workspace: 2 },
             CommandKind::ToggleOverview,
             CommandKind::CloseWindow { window: 7 },
+            CommandKind::Lock,
         ] {
             roundtrip(&Message::Command { id: 99, kind });
         }
@@ -724,6 +751,7 @@ mod tests {
             revision: 1,
             windows: vec![window],
             workspaces: vec![],
+            locked: false,
         };
         let frame = encode_frame(&msg);
         match decode_frame(&frame) {
@@ -743,6 +771,7 @@ mod tests {
             revision: 1,
             windows: vec![window],
             workspaces: vec![],
+            locked: false,
         };
         roundtrip(&msg);
     }

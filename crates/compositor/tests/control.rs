@@ -68,12 +68,14 @@ fn hello_accept_replies_version_and_snapshot() {
         revision,
         windows,
         workspaces,
+        locked,
     } = client_read(&mut client)
     else {
         panic!("expected Snapshot after Hello");
     };
     assert_eq!(revision, 0);
     assert!(windows.is_empty());
+    assert!(!locked);
     // Workspace 0 is always registered and active on an empty model.
     assert_eq!(workspaces.len(), 1);
     assert_eq!(workspaces[0].id, 0);
@@ -334,6 +336,7 @@ fn activation_token_live_store_allows_once_then_denies_replay() {
         &model,
         validator,
         minter,
+        std::rc::Rc::new(std::cell::Cell::new(false)),
         std::rc::Rc::new(std::cell::Cell::new(false)),
     )
     .unwrap();

@@ -312,6 +312,7 @@ pub fn paint_popup(
     indicators: &[crate::watcher::IndicatorItem],
     network: &[TileRow],
     sound: &[TileRow],
+    power: &[TileRow],
     clock_format: ClockFormat,
     show_weekday: bool,
 ) {
@@ -342,6 +343,8 @@ pub fn paint_popup(
                 network
             } else if tile.kind == crate::tiles::ServiceKind::Sound {
                 sound
+            } else if tile.kind == crate::tiles::ServiceKind::Power {
+                power
             } else {
                 &[]
             };
@@ -539,6 +542,17 @@ pub fn sound_rows(muted: Option<bool>, volume: Option<f64>, pending: bool) -> [T
         volume_row(false, volume, pending),
         volume_row(true, volume, pending),
     ]
+}
+
+/// Power tile menu rows: a single lock row. Locking is a
+/// tokenless fire-and-forget command, so the row is always
+/// enabled — there is no pending or unknown state to disable
+/// on, unlike the toggle rows.
+pub fn lock_rows() -> [TileRow; 1] {
+    [TileRow {
+        label: "lock now".to_owned(),
+        enabled: true,
+    }]
 }
 
 /// One mute row: pending reads as waiting, a known flag names its
@@ -1083,6 +1097,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             ClockFormat::TwentyFour,
             false,
         );
@@ -1103,6 +1118,7 @@ mod tests {
             PopupBody::Menu(1),
             today,
             &sample_tiles(),
+            &[],
             &[],
             &[],
             &[],
