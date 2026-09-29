@@ -70,9 +70,12 @@ use crate::overview::{
     BannerRow, OverviewCanvas, SwitcherCanvas, ACCENT, BANNER_STRIP_W, BYTES_PER_PIXEL,
     SWITCHER_STRIP_H,
 };
-use crate::popup::{paint_popup, panel_layout, popup_box, PopupBody, PopupState, POPUP_HEIGHT};
+use crate::popup::{
+    network_rows, paint_popup, panel_layout, popup_box, sound_rows, tile_row_at, PopupBody,
+    PopupState, POPUP_HEIGHT,
+};
 use crate::search::{SearchAction, SearchHub, SearchResult, WindowProvider};
-use crate::tiles::{TileSet, TileState};
+use crate::tiles::{TileSet, TileState, NETWORK_TILE_INDEX, SOUND_TILE_INDEX};
 use crate::watcher::{
     indicator_at, indicator_cells, indicator_right_x, menu_row_at, paint_indicators, IndicatorHost,
     IndicatorIcon, ItemInfo, WatcherBus,
@@ -1025,6 +1028,21 @@ impl ShellHost {
             if height > strip_h {
                 let layout = panel_layout(width, strip_h, &self.tiles.clock);
                 let tiles = [self.tiles.network, self.tiles.power, self.tiles.sound];
+                // Toggle rows paint from the cached radio and mixer
+                // states, never the wire: the slow tick owns every
+                // D-Bus read.
+                let radio = self.tiles.radio_state();
+                let rows = network_rows(
+                    radio.map(|state| state.wireless),
+                    radio.map(|state| state.networking),
+                    self.tiles.network_pending().is_some(),
+                );
+                let output = self.tiles.sound_state();
+                let sound = sound_rows(
+                    output.map(|state| state.muted),
+                    output.map(|state| state.volume),
+                    self.tiles.sound_pending().is_some(),
+                );
                 paint_popup(
                     &mut pixels,
                     width,
@@ -1033,6 +1051,8 @@ impl ShellHost {
                     today,
                     &tiles,
                     self.indicators.items(),
+                    &rows,
+                    &sound,
                 );
             }
         }
@@ -1069,6 +1089,8 @@ impl ShellHost {
             .tiles_refreshed
             .is_none_or(|last| now.duration_since(last) >= std::time::Duration::from_secs(2));
         if due {
+            self.tiles.ensure_radio();
+            self.tiles.ensure_sound();
             self.tiles.refresh();
             self.tiles_refreshed = Some(now);
             self.publish_wallpaper();
@@ -1159,9 +1181,95 @@ impl ShellHost {
                 return;
             }
         }
+        // Row presses inside the open network menu fire the radio
+        // toggle; the menu stays open on the pending face, and anything
+        // else falls through to the strip.
+        if let Some(PopupBody::Menu(index)) = self.popup.body() {
+            if index == NETWORK_TILE_INDEX {
+                let open_box = popup_box(&layout, PopupBody::Menu(index));
+                if open_box.contains(x, y) {
+                    self.fire_network_row(&open_box, y);
+                    self.apply_popup_size();
+                    return;
+                }
+            }
+            // Row presses inside the open sound menu fire mute or
+            // volume; same pending-face shape as the network menu.
+            if index == SOUND_TILE_INDEX {
+                let open_box = popup_box(&layout, PopupBody::Menu(index));
+                if open_box.contains(x, y) {
+                    self.fire_sound_row(&open_box, y);
+                    self.apply_popup_size();
+                    return;
+                }
+            }
+        }
         let open_box = self.popup.body().map(|body| popup_box(&layout, body));
         self.popup.press(&layout, open_box, x, y);
         self.apply_popup_size();
+    }
+
+    /// Fire the network menu row under the popup point: row 0 toggles
+    /// wifi, row 1 toggles networking. Disabled rows (pending toggle
+    /// or unknown radio state) never fire; a refused write reports
+    /// why on stderr and the menu stays open.
+    fn fire_network_row(&mut self, open_box: &crate::popup::Rect, y: i32) {
+        let radio = self.tiles.radio_state();
+        let rows = network_rows(
+            radio.map(|state| state.wireless),
+            radio.map(|state| state.networking),
+            self.tiles.network_pending().is_some(),
+        );
+        let Some(row) = tile_row_at(open_box, y, rows.len()) else {
+            return;
+        };
+        if !rows[row].enabled {
+            return;
+        }
+        match row {
+            0 => {
+                self.tiles
+                    .set_wifi_enabled(!radio.map(|state| state.wireless).unwrap_or(true));
+            }
+            1 => {
+                self.tiles
+                    .set_networking_enabled(!radio.map(|state| state.networking).unwrap_or(true));
+            }
+            _ => {}
+        }
+    }
+
+    /// Fire the sound menu row under the popup point: row 0 toggles
+    /// mute, row 1 nudges volume down, row 2 nudges volume up.
+    /// Disabled rows (pending toggle, unknown output state, or a
+    /// volume bound) never fire; a refused write reports why on
+    /// stderr and the menu stays open.
+    fn fire_sound_row(&mut self, open_box: &crate::popup::Rect, y: i32) {
+        let output = self.tiles.sound_state();
+        let rows = sound_rows(
+            output.map(|state| state.muted),
+            output.map(|state| state.volume),
+            self.tiles.sound_pending().is_some(),
+        );
+        let Some(row) = tile_row_at(open_box, y, rows.len()) else {
+            return;
+        };
+        if !rows[row].enabled {
+            return;
+        }
+        match row {
+            0 => {
+                self.tiles
+                    .set_muted(!output.map(|state| state.muted).unwrap_or(false));
+            }
+            1 => {
+                self.tiles.volume_down();
+            }
+            2 => {
+                self.tiles.volume_up();
+            }
+            _ => {}
+        }
     }
 
     /// Pinned favorites for the overview grid.
@@ -2729,6 +2837,110 @@ mod tests {
             host.popup.open(PopupBody::IndicatorMenu(0));
             host.press_panel(open_box.x + open_box.w / 2, open_box.y + 10 + 24 + 12);
             assert!(!host.popup.is_open(), "disabled row press dismisses");
+        }
+
+        /// Row press inside the open sound menu with no bus fires
+        /// nothing: no toggle arms, the menu stays open, and the tile
+        /// keeps its sysfs state.
+        #[test]
+        fn sound_menu_row_press_without_bus_keeps_menu_open() {
+            use crate::popup::{panel_layout, popup_box, tile_row_at, PopupBody, TILE_ROWS_TOP};
+            use crate::tiles::SOUND_TILE_INDEX;
+            let (mut host, _dir) = test_host();
+            host.panel_size = Some((1280, 32));
+            host.tiles.clock = "12:34".to_owned();
+            // Sound tile press opens the sound menu (strip order:
+            // network, power, sound).
+            let layout = panel_layout(1280, 32, &host.tiles.clock);
+            let sound_tile = layout.tiles[SOUND_TILE_INDEX];
+            host.press_panel(sound_tile.x + sound_tile.w / 2, 16);
+            assert_eq!(host.popup.body(), Some(PopupBody::Menu(SOUND_TILE_INDEX)));
+            let layout = panel_layout(1280, 32, &host.tiles.clock);
+            let open_box = popup_box(&layout, PopupBody::Menu(SOUND_TILE_INDEX));
+            // First-row center: inside the box, on row 0.
+            let y = open_box.y + TILE_ROWS_TOP + 2;
+            assert_eq!(tile_row_at(&open_box, y, 3), Some(0));
+            host.press_panel(open_box.x + open_box.w / 2, y);
+            assert_eq!(
+                host.popup.body(),
+                Some(PopupBody::Menu(SOUND_TILE_INDEX)),
+                "no-bus row press keeps the menu open"
+            );
+            assert_eq!(host.tiles.sound_pending(), None);
+        }
+
+        /// Row press inside the open network menu with no bus fires
+        /// nothing: no toggle arms, the menu stays open, and the tile
+        /// keeps its sysfs state.
+        #[test]
+        fn network_menu_row_press_without_bus_keeps_menu_open() {
+            use crate::popup::{panel_layout, popup_box, tile_row_at, PopupBody, TILE_ROWS_TOP};
+            use crate::tiles::NETWORK_TILE_INDEX;
+            let (mut host, _dir) = test_host();
+            host.panel_size = Some((1280, 32));
+            host.tiles.clock = "12:34".to_owned();
+            // Rightmost tile press opens the network menu.
+            host.press_panel(1260, 16);
+            assert_eq!(host.popup.body(), Some(PopupBody::Menu(NETWORK_TILE_INDEX)));
+            let layout = panel_layout(1280, 32, &host.tiles.clock);
+            let open_box = popup_box(&layout, PopupBody::Menu(NETWORK_TILE_INDEX));
+            // First-row center: inside the box, on row 0.
+            let y = open_box.y + TILE_ROWS_TOP + 2;
+            assert_eq!(tile_row_at(&open_box, y, 2), Some(0));
+            host.press_panel(open_box.x + open_box.w / 2, y);
+            assert_eq!(
+                host.popup.body(),
+                Some(PopupBody::Menu(NETWORK_TILE_INDEX)),
+                "no-bus row press keeps the menu open"
+            );
+            assert_eq!(host.tiles.network_pending(), None);
+        }
+
+        /// Row presses across every row of both menus with no bus
+        /// fire nothing: each disabled row is skipped, both menus
+        /// stay open, and no toggle arms.
+        #[test]
+        fn menu_row_presses_without_bus_skip_every_disabled_row() {
+            use crate::popup::{panel_layout, popup_box, PopupBody, TILE_ROWS_TOP, TILE_ROW_H};
+            use crate::tiles::{NETWORK_TILE_INDEX, SOUND_TILE_INDEX};
+            let (mut host, _dir) = test_host();
+            host.panel_size = Some((1280, 32));
+            host.tiles.clock = "12:34".to_owned();
+
+            // Network menu: press every toggle row.
+            host.press_panel(1260, 16);
+            assert_eq!(host.popup.body(), Some(PopupBody::Menu(NETWORK_TILE_INDEX)));
+            let layout = panel_layout(1280, 32, &host.tiles.clock);
+            let open_box = popup_box(&layout, PopupBody::Menu(NETWORK_TILE_INDEX));
+            for row in 0..2 {
+                let y = open_box.y + TILE_ROWS_TOP + row * TILE_ROW_H + 2;
+                host.press_panel(open_box.x + open_box.w / 2, y);
+                assert_eq!(
+                    host.popup.body(),
+                    Some(PopupBody::Menu(NETWORK_TILE_INDEX)),
+                    "disabled network row {row} skips"
+                );
+            }
+            assert_eq!(host.tiles.network_pending(), None);
+            host.close_popup();
+
+            // Sound menu: press every toggle row.
+            let layout = panel_layout(1280, 32, &host.tiles.clock);
+            let sound_tile = layout.tiles[SOUND_TILE_INDEX];
+            host.press_panel(sound_tile.x + sound_tile.w / 2, 16);
+            assert_eq!(host.popup.body(), Some(PopupBody::Menu(SOUND_TILE_INDEX)));
+            let layout = panel_layout(1280, 32, &host.tiles.clock);
+            let open_box = popup_box(&layout, PopupBody::Menu(SOUND_TILE_INDEX));
+            for row in 0..3 {
+                let y = open_box.y + TILE_ROWS_TOP + row * TILE_ROW_H + 2;
+                host.press_panel(open_box.x + open_box.w / 2, y);
+                assert_eq!(
+                    host.popup.body(),
+                    Some(PopupBody::Menu(SOUND_TILE_INDEX)),
+                    "disabled sound row {row} skips"
+                );
+            }
+            assert_eq!(host.tiles.sound_pending(), None);
         }
 
         /// `paint_panel_surface` carries indicator pixels: the shm

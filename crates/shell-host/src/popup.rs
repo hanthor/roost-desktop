@@ -292,8 +292,11 @@ fn paint_box(pixels: &mut [u8], stride: usize, rect: &Rect) {
 }
 
 /// Paint the open popup band below the strip. `today` is the date the
-/// calendar highlights; `tiles` feeds the menu rows. No-ops on
-/// degenerate sizes.
+/// calendar highlights; `tiles` feeds the menu rows, `network`
+/// carries the network tile's toggle rows (painted only under the
+/// network menu), and `sound` carries the sound tile's toggle rows
+/// (painted only under the sound menu). No-ops on degenerate sizes.
+#[allow(clippy::too_many_arguments)]
 pub fn paint_popup(
     pixels: &mut [u8],
     width: i32,
@@ -302,6 +305,8 @@ pub fn paint_popup(
     today: jiff::civil::Date,
     tiles: &[Tile; 3],
     indicators: &[crate::watcher::IndicatorItem],
+    network: &[TileRow],
+    sound: &[TileRow],
 ) {
     let rect = popup_box(layout, body);
     if rect.w <= 0 || rect.h <= 0 {
@@ -324,7 +329,14 @@ pub fn paint_popup(
                 state: TileState::Disconnected,
                 level: None,
             });
-            paint_menu(pixels, stride, &rect, tile);
+            let rows = if tile.kind == crate::tiles::ServiceKind::Network {
+                network
+            } else if tile.kind == crate::tiles::ServiceKind::Sound {
+                sound
+            } else {
+                &[]
+            };
+            paint_menu(pixels, stride, &rect, tile, rows);
         }
         PopupBody::IndicatorMenu(index) => {
             if let Some(item) = indicators.get(index) {
@@ -392,8 +404,149 @@ fn paint_calendar(pixels: &mut [u8], stride: usize, rect: &Rect, today: jiff::ci
 /// Dim brick for out-of-month filler days.
 const WARN_DIM: [u8; 4] = [0x60, 0x38, 0x30, 0xff];
 
-/// Service name, state word, and optional level row.
-fn paint_menu(pixels: &mut [u8], stride: usize, rect: &Rect, tile: Tile) {
+/// One tile menu toggle row: label plus whether it fires. Disabled
+/// rows paint dimmed and never fire (like indicator menu rows).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TileRow {
+    /// Row label.
+    pub label: String,
+    /// False rows paint dimmed and never fire.
+    pub enabled: bool,
+}
+
+/// Row height for tile menu toggle rows (matches indicator menus).
+pub const TILE_ROW_H: i32 = 24;
+
+/// Top offset of the first toggle row within a tile menu box: below
+/// the name and state lines `paint_menu` always paints.
+pub const TILE_ROWS_TOP: i32 = 10 + 2 * (5 * FONT_SCALE + 10);
+
+/// Network tile menu rows: wifi toggle plus network toggle. Labels
+/// name the action; rows disable while a toggle is pending or the
+/// radio state is unknown (no bus: pure sysfs, nothing to toggle).
+pub fn network_rows(
+    wireless: Option<bool>,
+    networking: Option<bool>,
+    pending: bool,
+) -> [TileRow; 2] {
+    [
+        flag_row("wifi", wireless, pending),
+        flag_row("network", networking, pending),
+    ]
+}
+
+/// Sound tile menu rows: mute toggle plus volume down/up. Labels
+/// name the action; rows disable while a toggle is pending or the
+/// output state is unknown (no bus: pure sysfs, nothing to toggle).
+/// Volume rows also disable at their bound (down at silence, up at
+/// full).
+pub fn sound_rows(muted: Option<bool>, volume: Option<f64>, pending: bool) -> [TileRow; 3] {
+    [
+        mute_row(muted, pending),
+        volume_row(false, volume, pending),
+        volume_row(true, volume, pending),
+    ]
+}
+
+/// One mute row: pending reads as waiting, a known flag names its
+/// flip, an unknown flag reads as unavailable and never fires.
+fn mute_row(muted: Option<bool>, pending: bool) -> TileRow {
+    if pending {
+        TileRow {
+            label: "mute waiting".to_owned(),
+            enabled: false,
+        }
+    } else {
+        match muted {
+            Some(true) => TileRow {
+                label: "unmute".to_owned(),
+                enabled: true,
+            },
+            Some(false) => TileRow {
+                label: "mute".to_owned(),
+                enabled: true,
+            },
+            None => TileRow {
+                label: "mute unavailable".to_owned(),
+                enabled: false,
+            },
+        }
+    }
+}
+
+/// One volume row (`up` picks the direction): pending reads as
+/// waiting, an unknown volume reads as unavailable and never fires,
+/// and the bound in that direction reads as the limit and never
+/// fires.
+fn volume_row(up: bool, volume: Option<f64>, pending: bool) -> TileRow {
+    let name = if up { "volume up" } else { "volume down" };
+    if pending {
+        return TileRow {
+            label: format!("{name} waiting"),
+            enabled: false,
+        };
+    }
+    let Some(volume) = volume else {
+        return TileRow {
+            label: format!("{name} unavailable"),
+            enabled: false,
+        };
+    };
+    if !up && volume <= 0.0 {
+        return TileRow {
+            label: "volume at minimum".to_owned(),
+            enabled: false,
+        };
+    }
+    if up && volume >= 1.0 {
+        return TileRow {
+            label: "volume at maximum".to_owned(),
+            enabled: false,
+        };
+    }
+    TileRow {
+        label: format!("turn {name}"),
+        enabled: true,
+    }
+}
+
+/// One radio flag row: pending reads as waiting, a known flag names
+/// its flip, an unknown flag reads as unavailable and never fires.
+fn flag_row(name: &str, enabled: Option<bool>, pending: bool) -> TileRow {
+    if pending {
+        TileRow {
+            label: format!("{name} waiting"),
+            enabled: false,
+        }
+    } else {
+        match enabled {
+            Some(true) => TileRow {
+                label: format!("turn {name} off"),
+                enabled: true,
+            },
+            Some(false) => TileRow {
+                label: format!("turn {name} on"),
+                enabled: true,
+            },
+            None => TileRow {
+                label: format!("{name} unavailable"),
+                enabled: false,
+            },
+        }
+    }
+}
+
+/// Toggle row under the menu-box point, if any.
+pub fn tile_row_at(rect: &Rect, y: i32, count: usize) -> Option<usize> {
+    if count == 0 || y < rect.y + TILE_ROWS_TOP {
+        return None;
+    }
+    let row = ((y - rect.y - TILE_ROWS_TOP) / TILE_ROW_H) as usize;
+    (row < count).then_some(row)
+}
+
+/// Service name, state word, optional level row, and toggle rows.
+fn paint_menu(pixels: &mut [u8], stride: usize, rect: &Rect, tile: Tile, rows: &[TileRow]) {
     use crate::tiles::ServiceKind;
     let name = match tile.kind {
         ServiceKind::Clock => "clock",
@@ -425,6 +578,26 @@ fn paint_menu(pixels: &mut [u8], stride: usize, rect: &Rect, tile: Tile) {
             &format!("{level} pct"),
             ACCENT,
         );
+    }
+    const DIM: [u8; 4] = [0x4a, 0x44, 0x44, 0xff];
+    let max_chars = ((rect.w - 24) / GLYPH_ADVANCE).max(1) as usize;
+    for (index, row) in rows.iter().enumerate() {
+        let gy = rect.y + TILE_ROWS_TOP + index as i32 * TILE_ROW_H;
+        if gy + TILE_ROW_H > rect.y + rect.h {
+            break;
+        }
+        let color = if row.enabled { ACCENT } else { DIM };
+        let mut gx = rect.x + 12;
+        for ch in row.label.chars().take(max_chars) {
+            if ch == ' ' {
+                gx += GLYPH_ADVANCE;
+                continue;
+            }
+            if let Some(glyph) = glyph_index(ch) {
+                blit_glyph(pixels, stride, gx, gy, glyph, color);
+            }
+            gx += GLYPH_ADVANCE;
+        }
     }
 }
 
@@ -528,6 +701,176 @@ mod tests {
         assert!(rect.x + rect.w <= 200);
     }
 
+    #[test]
+    fn network_rows_name_the_flip_and_disable_when_unknown_or_pending() {
+        let row = |label: &str, enabled: bool| TileRow {
+            label: label.to_owned(),
+            enabled,
+        };
+        assert_eq!(
+            network_rows(Some(true), Some(true), false),
+            [row("turn wifi off", true), row("turn network off", true)]
+        );
+        assert_eq!(
+            network_rows(Some(false), Some(false), false),
+            [row("turn wifi on", true), row("turn network on", true)]
+        );
+        assert_eq!(
+            network_rows(None, None, false),
+            [
+                row("wifi unavailable", false),
+                row("network unavailable", false)
+            ]
+        );
+        assert_eq!(
+            network_rows(Some(true), Some(true), true),
+            [row("wifi waiting", false), row("network waiting", false)]
+        );
+    }
+
+    #[test]
+    fn sound_rows_name_the_flip_and_disable_when_unknown_pending_or_bound() {
+        let row = |label: &str, enabled: bool| TileRow {
+            label: label.to_owned(),
+            enabled,
+        };
+        assert_eq!(
+            sound_rows(Some(false), Some(0.5), false),
+            [
+                row("mute", true),
+                row("turn volume down", true),
+                row("turn volume up", true)
+            ]
+        );
+        assert_eq!(
+            sound_rows(Some(true), Some(0.5), false),
+            [
+                row("unmute", true),
+                row("turn volume down", true),
+                row("turn volume up", true)
+            ]
+        );
+        assert_eq!(
+            sound_rows(Some(false), Some(0.0), false),
+            [
+                row("mute", true),
+                row("volume at minimum", false),
+                row("turn volume up", true)
+            ]
+        );
+        assert_eq!(
+            sound_rows(Some(false), Some(1.0), false),
+            [
+                row("mute", true),
+                row("turn volume down", true),
+                row("volume at maximum", false)
+            ]
+        );
+        assert_eq!(
+            sound_rows(None, None, false),
+            [
+                row("mute unavailable", false),
+                row("volume down unavailable", false),
+                row("volume up unavailable", false)
+            ]
+        );
+        assert_eq!(
+            sound_rows(Some(false), Some(0.5), true),
+            [
+                row("mute waiting", false),
+                row("volume down waiting", false),
+                row("volume up waiting", false)
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_services_explain_instead_of_dead_toggles() {
+        // No radio on the bus: every network toggle is skipped and
+        // each row explains itself instead of offering a dead flip.
+        let network = network_rows(None, None, false);
+        assert!(
+            network.iter().all(|row| !row.enabled),
+            "absent radio skips every toggle"
+        );
+        for row in &network {
+            assert!(
+                row.label.contains("unavailable"),
+                "menu explains the absence: {}",
+                row.label
+            );
+        }
+        assert!(
+            !network.iter().any(|row| row.label.starts_with("turn ")),
+            "no dead toggle labels without a service"
+        );
+        // No sound server on the bus: same honest shape — skipped
+        // toggles, explaining text, never a live-looking row.
+        let sound = sound_rows(None, None, false);
+        assert!(
+            sound.iter().all(|row| !row.enabled),
+            "absent mixer skips every toggle"
+        );
+        for row in &sound {
+            assert!(
+                row.label.contains("unavailable"),
+                "menu explains the absence: {}",
+                row.label
+            );
+        }
+        assert!(
+            !sound.iter().any(|row| row.label == "mute"
+                || row.label == "unmute"
+                || row.label.starts_with("turn ")),
+            "no dead toggle labels without a service"
+        );
+    }
+
+    #[test]
+    fn tile_row_at_hits_three_rows_in_order() {
+        let rect = Rect {
+            x: 972,
+            y: 40,
+            w: 300,
+            h: 200,
+        };
+        assert_eq!(tile_row_at(&rect, rect.y + TILE_ROWS_TOP + 2, 3), Some(0));
+        assert_eq!(
+            tile_row_at(&rect, rect.y + TILE_ROWS_TOP + TILE_ROW_H + 2, 3),
+            Some(1)
+        );
+        assert_eq!(
+            tile_row_at(&rect, rect.y + TILE_ROWS_TOP + 2 * TILE_ROW_H + 2, 3),
+            Some(2)
+        );
+        assert_eq!(
+            tile_row_at(&rect, rect.y + TILE_ROWS_TOP + 3 * TILE_ROW_H, 3),
+            None
+        );
+    }
+
+    #[test]
+    fn tile_row_at_hits_two_rows_in_order() {
+        let rect = Rect {
+            x: 972,
+            y: 40,
+            w: 300,
+            h: 200,
+        };
+        assert_eq!(tile_row_at(&rect, rect.y + TILE_ROWS_TOP + 2, 2), Some(0));
+        assert_eq!(
+            tile_row_at(&rect, rect.y + TILE_ROWS_TOP + TILE_ROW_H + 2, 2),
+            Some(1)
+        );
+        // Above the rows and past the last row: no hit.
+        assert_eq!(tile_row_at(&rect, rect.y + TILE_ROWS_TOP - 1, 2), None);
+        assert_eq!(
+            tile_row_at(&rect, rect.y + TILE_ROWS_TOP + 2 * TILE_ROW_H, 2),
+            None
+        );
+        assert_eq!(tile_row_at(&rect, rect.y + TILE_ROWS_TOP + 2, 0), None);
+    }
+
     fn sample_tiles() -> [Tile; 3] {
         [
             Tile {
@@ -571,6 +914,8 @@ mod tests {
             today,
             &sample_tiles(),
             &[],
+            &[],
+            &[],
         );
         // Popup paints below the strip and leaves the strip itself alone.
         assert_eq!(
@@ -589,6 +934,8 @@ mod tests {
             PopupBody::Menu(1),
             today,
             &sample_tiles(),
+            &[],
+            &[],
             &[],
         );
         assert_ne!(
