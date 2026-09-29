@@ -18,8 +18,8 @@ use rwd_compositor::layer::OVERVIEW_NAMESPACE;
 use rwd_compositor::windows::{
     ManagerInput, SessionMode, TileSide, WindowLayout, WindowManager, ALT_LEFT_KEYCODE,
     ARROW_DOWN_KEYCODE, ARROW_LEFT_KEYCODE, ARROW_RIGHT_KEYCODE, ARROW_UP_KEYCODE, ESCAPE_KEYCODE,
-    F4_KEYCODE, PAGE_DOWN_KEYCODE, PAGE_UP_KEYCODE, SHIFT_LEFT_KEYCODE, SUPER_LEFT_KEYCODE,
-    TAB_KEYCODE, T_KEYCODE,
+    F4_KEYCODE, PAGE_DOWN_KEYCODE, PAGE_UP_KEYCODE, R_KEYCODE, SHIFT_LEFT_KEYCODE,
+    SUPER_LEFT_KEYCODE, TAB_KEYCODE, T_KEYCODE,
 };
 use rwd_compositor::TestCompositor;
 use rwd_shell_control::SwitcherAction;
@@ -2079,4 +2079,269 @@ fn gnome_client_fullscreen_request_applies_on_reconcile() {
         f.manager.window_layout(f.id_b),
         Some(WindowLayout::Floating)
     );
+}
+
+/// No R press reached any client: preset-cycle presses are consumed
+/// and only releases (plus bare modifiers) are observed.
+fn assert_no_r_press(f: &ThreeFixture) {
+    for (name, client) in [
+        ("alpha", &f.client_a),
+        ("beta", &f.client_b),
+        ("gamma", &f.client_c),
+    ] {
+        assert!(
+            !client
+                .keys
+                .iter()
+                .any(|(key, pressed)| *key == R_KEYCODE && *pressed),
+            "{name} observed a consumed R press: {:?}",
+            client.keys
+        );
+    }
+    assert!(
+        [&f.client_a, &f.client_b, &f.client_c]
+            .iter()
+            .any(|c| c.keys.contains(&(R_KEYCODE, false))),
+        "R release must still reach a client",
+    );
+}
+
+#[test]
+fn scroll_preset_forward_cycles_and_wraps() {
+    let mut f = three_windows();
+    assert!(f.manager.set_scroll(&mut f.comp.state, true));
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    sync_three(&mut f);
+    clear_three(&mut f);
+    // Preset widths on the 1280px work area via the gaps-twice
+    // formula (((1280 - 16) * p) as i32 - 16): 1/3 -> 405,
+    // 1/2 -> 616, 2/3 -> 826.
+    assert_eq!(f.manager.geometry(f.id_a).unwrap().size.w, 616);
+
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    // 1/2 -> 2/3: the focused column widens and later columns shift
+    // right (beta 826 + 16 = 842, gamma 842 + 616 + 16 = 1474).
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(f.manager.geometry(f.id_a).unwrap().size.w, 826);
+    assert_eq!(column_xs(&f), (0, 842, 1474));
+    assert_eq!(f.manager.model().focused(), Some(f.id_a));
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    // 2/3 -> 1/3: beta 405 + 16 = 421, gamma 421 + 616 + 16 = 1053.
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(f.manager.geometry(f.id_a).unwrap().size.w, 405);
+    assert_eq!(column_xs(&f), (0, 421, 1053));
+    assert_eq!(f.manager.model().focused(), Some(f.id_a));
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    // 1/3 -> 1/2 wraps back to the default strip geometry.
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(f.manager.geometry(f.id_a).unwrap().size.w, 616);
+    assert_eq!(column_xs(&f), (0, 632, 1264));
+    assert_eq!(f.manager.model().focused(), Some(f.id_a));
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+
+    // Full work height throughout the cycle.
+    for id in [f.id_a, f.id_b, f.id_c] {
+        let geo = f.manager.geometry(id).unwrap();
+        assert_eq!((geo.loc.y, geo.size.h), (32, 768));
+        assert_eq!(f.manager.window_layout(id), Some(WindowLayout::Strip));
+    }
+    sync_three(&mut f);
+    assert_no_r_press(&f);
+}
+
+#[test]
+fn scroll_preset_backward_cycles() {
+    let mut f = three_windows();
+    assert!(f.manager.set_scroll(&mut f.comp.state, true));
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    sync_three(&mut f);
+    clear_three(&mut f);
+
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    // 1/2 -> 1/3 backward from the default.
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(f.manager.geometry(f.id_a).unwrap().size.w, 405);
+    assert_eq!(column_xs(&f), (0, 421, 1053));
+    assert_eq!(f.manager.model().focused(), Some(f.id_a));
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    // 1/3 -> 2/3 wraps backward past the start.
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(f.manager.geometry(f.id_a).unwrap().size.w, 826);
+    assert_eq!(column_xs(&f), (0, 842, 1474));
+    assert_eq!(f.manager.model().focused(), Some(f.id_a));
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    // 2/3 -> 1/2 returns to the default.
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(f.manager.geometry(f.id_a).unwrap().size.w, 616);
+    assert_eq!(column_xs(&f), (0, 632, 1264));
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+
+    sync_three(&mut f);
+    assert_no_r_press(&f);
+}
+
+#[test]
+fn scroll_preset_cycle_keeps_other_columns() {
+    let mut f = three_windows();
+    assert!(f.manager.set_scroll(&mut f.comp.state, true));
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    sync_three(&mut f);
+    clear_three(&mut f);
+
+    // Give beta a 2/3 preset first: alpha 616 at 0, beta 826 at 632,
+    // gamma 616 at 632 + 826 + 16 = 1474.
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(f.manager.geometry(f.id_b).unwrap().size.w, 826);
+    assert_eq!(column_xs(&f), (0, 632, 1474));
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+
+    // Cycling alpha leaves beta's preset (and gamma's default) alone:
+    // alpha 826 at 0, beta 826 at 842, gamma 616 at 842 + 826 + 16.
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(f.manager.geometry(f.id_a).unwrap().size.w, 826);
+    assert_eq!(f.manager.geometry(f.id_b).unwrap().size.w, 826);
+    assert_eq!(f.manager.geometry(f.id_c).unwrap().size.w, 616);
+    assert_eq!(column_xs(&f), (0, 842, 1684));
+    assert_eq!(f.manager.model().focused(), Some(f.id_a));
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+
+    sync_three(&mut f);
+    assert_no_r_press(&f);
+}
+
+#[test]
+fn gnome_super_r_forwards_to_client() {
+    let mut f = layout_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    f.client_b.keys.clear();
+    let before_a = f.manager.geometry(f.id_a).unwrap();
+    let before_b = f.manager.geometry(f.id_b).unwrap();
+
+    // No R binding in gnome mode: the press forwards untouched and
+    // nothing re-lays out.
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(f.manager.session_mode(), SessionMode::Gnome);
+    assert_eq!(
+        f.manager.window_layout(f.id_b),
+        Some(WindowLayout::Floating)
+    );
+    assert_eq!(f.manager.geometry(f.id_a).unwrap(), before_a);
+    assert_eq!(f.manager.geometry(f.id_b).unwrap(), before_b);
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert_eq!(
+        f.client_b
+            .keys
+            .iter()
+            .filter(|(key, _)| *key == R_KEYCODE)
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![(R_KEYCODE, true), (R_KEYCODE, false)],
+        "gnome R must reach the client whole, got: {:?}",
+        f.client_b.keys
+    );
+}
+
+#[test]
+fn scroll_preset_survives_toggle_and_restores_floating() {
+    let mut f = layout_windows();
+    let before_a = f.manager.geometry(f.id_a).unwrap();
+    let before_b = f.manager.geometry(f.id_b).unwrap();
+    assert!(f.manager.set_scroll(&mut f.comp.state, true));
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    f.client_a.keys.clear();
+
+    // Cycle the focused column to 2/3 through the real chord.
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(f.manager.geometry(f.id_a).unwrap().size.w, 826);
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+
+    // Toggling back restores the exact floating geometry cycled
+    // columns stashed on entry.
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, T_KEYCODE);
+    assert_eq!(f.manager.session_mode(), SessionMode::Gnome);
+    release(&mut f.manager, &mut f.comp, T_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    assert_eq!(
+        f.manager.window_layout(f.id_a),
+        Some(WindowLayout::Floating)
+    );
+    assert_eq!(f.manager.geometry(f.id_a).unwrap(), before_a);
+    assert_eq!(f.manager.geometry(f.id_b).unwrap(), before_b);
+
+    // Re-entering scroll remembers the preset choice: alpha is still
+    // 2/3 wide with beta at 826 + 16 = 842.
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, T_KEYCODE);
+    assert_eq!(f.manager.session_mode(), SessionMode::Scroll);
+    release(&mut f.manager, &mut f.comp, T_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    assert_eq!(f.manager.geometry(f.id_a).unwrap().size.w, 826);
+    assert_eq!(f.manager.geometry(f.id_b).unwrap().size.w, 616);
+    assert_eq!(
+        (
+            f.manager.geometry(f.id_a).unwrap().loc.x,
+            f.manager.geometry(f.id_b).unwrap().loc.x
+        ),
+        (0, 842)
+    );
+}
+
+#[test]
+fn scroll_preset_shrink_reclamps_offset() {
+    let mut f = three_windows();
+    assert!(f.manager.set_scroll(&mut f.comp.state, true));
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_c)));
+    // Three 616-wide columns with 16px gaps total 1880px on a 1280px
+    // work area: scroll to the 600px max first.
+    axis(&mut f.manager, &mut f.comp, 0.0, 100_000.0);
+    assert_eq!(f.manager.strip_offset(), 600.0);
+    assert_eq!(column_xs(&f), (-600, 32, 664));
+    sync_three(&mut f);
+    clear_three(&mut f);
+
+    // Cycling the focused last column narrower (1/2 -> 1/3 = 405)
+    // shrinks the strip to 616 + 616 + 405 + 32 = 1669px, so the max
+    // scroll drops to 389px and the stranded offset must re-clamp:
+    // alpha 0 - 389, beta 616 + 16 - 389 = 243, gamma 1264 - 389.
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(f.manager.geometry(f.id_c).unwrap().size.w, 405);
+    assert_eq!(f.manager.strip_offset(), 389.0);
+    assert_eq!(column_xs(&f), (-389, 243, 875));
+    assert_eq!(f.manager.model().focused(), Some(f.id_c));
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+
+    // No blank tail: the last column ends exactly at the work edge.
+    let gamma = f.manager.geometry(f.id_c).unwrap();
+    assert_eq!((gamma.loc.y, gamma.size.h), (32, 768));
+    assert_eq!(gamma.loc.x + gamma.size.w, 1280);
+    sync_three(&mut f);
+    assert_no_r_press(&f);
 }

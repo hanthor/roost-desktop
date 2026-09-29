@@ -60,6 +60,9 @@ struct ManagedWindow {
     /// on leaving floating, cleared by manual move/resize (a fresh
     /// start, GNOME shape).
     restore: Option<Rectangle<i32, Logical>>,
+    /// Strip width-preset slot (`STRIP_PRESETS` index) chosen with
+    /// Super+R; `None` means the default. Survives mode toggles.
+    preset: Option<usize>,
 }
 
 /// Compositor-side presentation layout (002 window actions).
@@ -343,6 +346,7 @@ impl WindowManager {
                 geometry,
                 layout: WindowLayout::Floating,
                 restore: None,
+                preset: None,
             },
         );
         self.surface_index.insert(surface.wl_surface().clone(), id);
@@ -393,7 +397,8 @@ impl WindowManager {
     }
 
     /// Remove one window from the model and the index. Focus falls back
-    /// to the topmost remaining window, if any.
+    /// to the topmost remaining window, if any. In scroll mode the
+    /// remaining columns close ranks behind it.
     fn unmap(&mut self, state: &mut State, id: u64) {
         if let Some(window) = self.windows.remove(&id) {
             self.surface_index.remove(window.surface.wl_surface());
@@ -402,6 +407,9 @@ impl WindowManager {
         self.model.remove(id);
         let fallback = self.stacking.last().copied();
         self.apply_focus(state, fallback);
+        if self.mode == SessionMode::Scroll {
+            self.relayout_strip(state);
+        }
     }
 
     /// Apply queued client window-state requests (maximize, unmaximize,
@@ -746,19 +754,44 @@ impl WindowManager {
 
     /// Gap between scroll-mode strip columns (niri default).
     const STRIP_GAP: i32 = 16;
-    /// Default strip column width as a work-area fraction (niri
+    /// Strip column width presets as work-area fractions, cycled with
+    /// Super+R (niri preset-column-widths).
+    const STRIP_PRESETS: [f64; 3] = [1.0 / 3.0, 1.0 / 2.0, 2.0 / 3.0];
+    /// Default preset slot: 1/2 of the work area (niri
     /// default-column-width).
-    const STRIP_DEFAULT_PROPORTION: f64 = 0.5;
+    const STRIP_DEFAULT_PRESET: usize = 1;
+
+    /// Work-area fraction for `id`'s strip column: its chosen preset
+    /// or the default.
+    fn strip_proportion(&self, id: u64) -> f64 {
+        let slot = self
+            .windows
+            .get(&id)
+            .and_then(|window| window.preset)
+            .unwrap_or(Self::STRIP_DEFAULT_PRESET);
+        Self::STRIP_PRESETS[slot % Self::STRIP_PRESETS.len()]
+    }
+
+    /// One column width for a work area at a proportion (niri
+    /// gaps-twice formula), shared by layout and scroll clamping.
+    fn strip_width(work_w: i32, proportion: f64) -> i32 {
+        (((work_w - Self::STRIP_GAP) as f64 * proportion) as i32 - Self::STRIP_GAP).max(1)
+    }
 
     /// Current session mode (scrollable-tiling spec).
     pub fn session_mode(&self) -> SessionMode {
         self.mode
     }
 
-    /// Column sequence position of `id` within its own workspace
-    /// (stacking order, bottom-to-top), if managed.
-    fn strip_index(&self, id: u64) -> Option<usize> {
-        let workspace = self.model.window(id)?.workspace;
+    /// Same-workspace strip columns bottom-to-top with resolved
+    /// widths, for `id`'s workspace (falls back to active).
+    fn strip_columns(&self, state: &State, id: u64) -> Vec<(u64, i32)> {
+        let work = Self::work_area(state);
+        let workspace = self
+            .model
+            .window(id)
+            .map(|entry| entry.workspace)
+            .unwrap_or_else(|| self.model.active_workspace());
         self.stacking
             .iter()
             .copied()
@@ -767,21 +800,42 @@ impl WindowManager {
                     .window(*other)
                     .is_some_and(|entry| entry.workspace == workspace)
             })
-            .position(|other| other == id)
+            .map(|other| {
+                let width = Self::strip_width(work.size.w, self.strip_proportion(other));
+                (other, width)
+            })
+            .collect()
+    }
+
+    /// Total strip extent (columns plus inner gaps) for clamping.
+    fn strip_total(total_widths: &[(u64, i32)]) -> i32 {
+        if total_widths.is_empty() {
+            0
+        } else {
+            total_widths
+                .iter()
+                .map(|(_, w)| w + Self::STRIP_GAP)
+                .sum::<i32>()
+                - Self::STRIP_GAP
+        }
     }
 
     /// One strip column rectangle for `id`: full work-area height,
-    /// default-proportion width with gaps between columns (niri
+    /// preset-proportion width with gaps between columns (niri
     /// gaps-twice formula). Columns past the right edge overflow;
-    /// the strip never squeezes to fit. Falls back to the work area
-    /// for unknown ids.
+    /// the strip never squeezes to fit.
     fn strip_column_area(&self, state: &State, id: u64) -> Rectangle<i32, Logical> {
         let work = Self::work_area(state);
-        let gap = Self::STRIP_GAP;
-        let width = ((work.size.w - gap) as f64 * Self::STRIP_DEFAULT_PROPORTION) as i32 - gap;
-        let width = width.max(1);
-        let index = self.strip_index(id).unwrap_or(0) as i32;
-        let x = work.loc.x + index * (width + gap) - self.strip_offset as i32;
+        let columns = self.strip_columns(state, id);
+        let mut x = work.loc.x - self.strip_offset as i32;
+        let mut width = Self::strip_width(work.size.w, self.strip_proportion(id));
+        for (other, w) in &columns {
+            if *other == id {
+                width = *w;
+                break;
+            }
+            x += w + Self::STRIP_GAP;
+        }
         Rectangle {
             loc: (x, work.loc.y).into(),
             size: (width, work.size.h).into(),
@@ -802,21 +856,50 @@ impl WindowManager {
             return false;
         }
         let work = Self::work_area(state);
-        let gap = Self::STRIP_GAP;
-        let width = ((work.size.w - gap) as f64 * Self::STRIP_DEFAULT_PROPORTION) as i32 - gap;
-        let width = width.max(1);
-        let count = self.strip_order().len() as i32;
-        let total = if count > 0 {
-            count * (width + gap) - gap
-        } else {
-            0
-        };
+        let widths: Vec<(u64, i32)> = self
+            .strip_order()
+            .iter()
+            .map(|id| {
+                (
+                    *id,
+                    Self::strip_width(work.size.w, self.strip_proportion(*id)),
+                )
+            })
+            .collect();
+        let total = Self::strip_total(&widths);
         let max = (total - work.size.w).max(0) as f64;
         let next = (self.strip_offset + horizontal + vertical).clamp(0.0, max);
         if next == self.strip_offset {
             return true;
         }
         self.strip_offset = next;
+        self.relayout_strip(state);
+        true
+    }
+
+    /// Step the focused column through the width presets (positive
+    /// cycles forward, negative backward, wrapping). Only strip
+    /// columns participate; other layouts and gnome mode are
+    /// untouched. False with no focused strip column.
+    fn cycle_preset(&mut self, state: &mut State, direction: i32) -> bool {
+        let Some(focused) = self.model.focused() else {
+            return false;
+        };
+        if self.mode != SessionMode::Scroll
+            || self.window_layout(focused) != Some(WindowLayout::Strip)
+        {
+            return false;
+        }
+        let count = Self::STRIP_PRESETS.len() as i32;
+        let current = self
+            .windows
+            .get(&focused)
+            .and_then(|window| window.preset)
+            .unwrap_or(Self::STRIP_DEFAULT_PRESET) as i32;
+        let next = (current + direction).rem_euclid(count) as usize;
+        if let Some(window) = self.windows.get_mut(&focused) {
+            window.preset = Some(next);
+        }
         self.relayout_strip(state);
         true
     }
@@ -898,9 +981,25 @@ impl WindowManager {
         true
     }
 
-    /// Re-resolve every strip column (after slot moves). Windows in
-    /// other managed layouts keep theirs.
+    /// Re-resolve every strip column (after slot moves, preset
+    /// steps, unmaps). Windows in other managed layouts keep theirs.
+    /// The view offset clamps to the new overflow first so a shrink
+    /// never strands blank space at the strip end.
     fn relayout_strip(&mut self, state: &mut State) {
+        let work = Self::work_area(state);
+        let widths: Vec<(u64, i32)> = self
+            .strip_order()
+            .iter()
+            .map(|id| {
+                (
+                    *id,
+                    Self::strip_width(work.size.w, self.strip_proportion(*id)),
+                )
+            })
+            .collect();
+        let total = Self::strip_total(&widths);
+        let max = (total - work.size.w).max(0) as f64;
+        self.strip_offset = self.strip_offset.clamp(0.0, max);
         let ids: Vec<u64> = self.windows.keys().copied().collect();
         for id in ids {
             if self.window_layout(id) == Some(WindowLayout::Strip) {
@@ -1254,6 +1353,11 @@ pub const F4_KEYCODE: u32 = 62;
 /// session between floating and strip modes. The press is consumed;
 /// the release still reaches clients.
 pub const T_KEYCODE: u32 = 20;
+/// Strip preset-cycle key (evdev): Super+R steps the focused column
+/// forward through the width presets, Super+Shift+R backward. Only
+/// consumed in scroll mode; in gnome mode the press reaches clients
+/// exactly as before (no R binding exists today).
+pub const R_KEYCODE: u32 = 19;
 /// Top inset of the maximized/tiled work area: the shell panel strip
 /// (matches shell-host `PANEL_HEIGHT` and the Activities-strip
 /// trigger height above).
@@ -1432,6 +1536,16 @@ impl WindowManager {
             // the release still reaches clients.
             let scroll = self.mode != SessionMode::Scroll;
             self.set_scroll(state, scroll);
+        } else if pressed && self.super_held && keycode == R_KEYCODE {
+            // Strip preset cycling: Super+R steps forward,
+            // Super+Shift+R backward through 1/3–1/2–2/3. Scroll-only:
+            // gnome mode forwards the press untouched (no R binding).
+            if self.mode == SessionMode::Scroll {
+                let direction = if self.shift_held { -1 } else { 1 };
+                self.cycle_preset(state, direction);
+            } else {
+                self.keyboard_key(state, keycode, pressed, time);
+            }
         } else if pressed
             && self.super_held
             && (keycode == PAGE_UP_KEYCODE || keycode == PAGE_DOWN_KEYCODE)
