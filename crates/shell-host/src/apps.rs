@@ -137,6 +137,17 @@ fn from_crate_entry(entry: &CrateEntry) -> Option<AppEntry> {
         .parse_exec()
         .ok()?
         .into_iter()
+        .map(|arg| {
+            // The Exec parser splits on whitespace but leaves the
+            // spec's double-quote grouping in place, so a quoted
+            // argument arrives with its quotes attached. Strip one
+            // surrounding pair per argument; without this a probe like
+            // Exec=touch "<marker>" touches a quote-named file.
+            arg.strip_prefix('"')
+                .and_then(|inner| inner.strip_suffix('"'))
+                .unwrap_or(&arg)
+                .to_owned()
+        })
         .map(OsString::from)
         .collect();
     if argv.is_empty() {
@@ -433,6 +444,30 @@ mod tests {
             SearchAction::Launch {
                 app_id: "term".to_owned()
             }
+        );
+    }
+
+    #[test]
+    fn quoted_exec_arg_survives_discovery_unquoted() {
+        // Probe shape from the CI journey: Exec=touch "<abs marker>".
+        // The desktop-entry spec quotes Exec arguments; argv must not
+        // carry the quote characters into the spawn.
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_entry(
+            dir.path(),
+            "probe.desktop",
+            "[Desktop Entry]\nName=Rwdterm Probe\nExec=touch \"/tmp/rwd-marker\"\nType=Application\n",
+        );
+        let apps = discover(&[dir.path().to_owned()]);
+        let app = apps
+            .iter()
+            .find(|a| a.name == "Rwdterm Probe")
+            .expect("probe");
+        assert_eq!(
+            app.argv,
+            vec![OsString::from("touch"), OsString::from("/tmp/rwd-marker")],
+            "quoted Exec arg keeps its quotes: {:?}",
+            app.argv
         );
     }
 
