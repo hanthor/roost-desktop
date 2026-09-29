@@ -56,23 +56,24 @@ use std::sync::Arc;
 use crate::apps::{entry_from_file, AppEntry, AppProvider, LaunchTracker};
 use crate::control::{ControlClient, ControlError, Handled};
 use crate::dock::{
-    dock_items, dock_press, dock_slot_at, paint_dock_stacked, read_stack, stack_cell_at,
+    dock_items, dock_press, dock_slot_at, paint_dock_stacked_with_icons, read_stack, stack_cell_at,
     stack_shown, DockAction, DockItem, StackEntry, DOCK_H, STACK_GRID_H,
 };
 use crate::favorites::Favorites;
+use crate::icons::Artwork;
 use crate::keyboard::{KeyAction, XkbFeed};
 use crate::model::ShellModel;
 use crate::notifications::{NotificationCenter, Urgency};
 use crate::overview::{
-    banner_strip_height, paint_panel, BannerCanvas, OverviewCanvas, SwitcherCanvas, BANNER_STRIP_W,
-    BYTES_PER_PIXEL, SWITCHER_STRIP_H,
+    banner_strip_height, paint_panel, BannerCanvas, OverviewCanvas, SwitcherCanvas, ACCENT,
+    BANNER_STRIP_W, BYTES_PER_PIXEL, SWITCHER_STRIP_H,
 };
 use crate::popup::{paint_popup, panel_layout, popup_box, PopupBody, PopupState, POPUP_HEIGHT};
 use crate::search::{SearchAction, SearchHub, SearchResult, WindowProvider};
 use crate::tiles::{TileSet, TileState};
 use crate::watcher::{
     indicator_at, indicator_cells, indicator_right_x, menu_row_at, paint_indicators, IndicatorHost,
-    WatcherBus,
+    IndicatorIcon, ItemInfo, WatcherBus,
 };
 
 /// Namespace advertised for the panel layer surface.
@@ -235,6 +236,11 @@ pub struct ShellHost {
     indicators: IndicatorHost,
     /// D-Bus edge behind the indicator host.
     watcher: WatcherBus,
+    /// Resolved icon artwork keyed (theme, name, size). Cleared
+    /// wholesale when the snapshot theme changes.
+    icon_cache: std::collections::HashMap<(String, String, u32), Artwork>,
+    /// Theme the cache was built under.
+    icon_theme: String,
     /// Dock switch/close actions awaiting the control client (the run
     /// loop's driver consumes them; launch and pin run immediately).
     pending_dock: Vec<DockAction>,
@@ -504,6 +510,8 @@ impl ShellHost {
             published_wallpaper: None,
             indicators: IndicatorHost::new(),
             watcher: WatcherBus::new(),
+            icon_cache: std::collections::HashMap::new(),
+            icon_theme: crate::settings::DEFAULT_ICON_THEME.to_owned(),
             pending_dock: Vec::new(),
             xkb: None,
             search_text: String::new(),
@@ -908,6 +916,7 @@ impl ShellHost {
             self.tiles.refresh();
             self.tiles_refreshed = Some(now);
             self.publish_wallpaper();
+            self.sync_icon_theme();
             self.poll_indicators();
         }
         if let Some((width, height)) = self.panel_size {
@@ -1211,6 +1220,98 @@ impl ShellHost {
         }
     }
 
+    /// Sync the artwork cache with the snapshot theme: a theme flip
+    /// clears the cache and bumps both paint revisions so bars and
+    /// docks repaint with the new artwork on this same tick.
+    fn sync_icon_theme(&mut self) {
+        let current = self.tiles.settings.icon_theme.clone();
+        if current == self.icon_theme {
+            return;
+        }
+        self.icon_theme = current;
+        self.icon_cache.clear();
+        self.panel_paint_key = None;
+        self.dock_paint_key = None;
+    }
+
+    /// Resolve `name` to artwork at `px` through the host cache,
+    /// falling back to a fresh lookup on a miss. `None` means the
+    /// caller keeps its placeholder.
+    pub fn icon_art(&mut self, name: &str, px: u32) -> Option<Artwork> {
+        let key = (self.icon_theme.clone(), name.to_owned(), px);
+        if let Some(art) = self.icon_cache.get(&key) {
+            return Some(art.clone());
+        }
+        let art = crate::icons::resolve(&self.icon_theme, name, px)?;
+        self.icon_cache.insert(key, art.clone());
+        // Bound the cache: theme art is small, but a hostile name
+        // stream must not grow it without limit.
+        if self.icon_cache.len() > 512 {
+            self.icon_cache.clear();
+        }
+        Some(art)
+    }
+
+    /// Select an item's icon from its properties: attention pixmap,
+    /// normal pixmap, attention name, normal name, then the service
+    /// fallback. Names resolve through the artwork cache; symbolic
+    /// names re-tint toward the shell accent at fetch time.
+    fn build_icon(&mut self, info: &ItemInfo) -> IndicatorIcon {
+        if info.needs_attention() {
+            if let Some(icon) = info.attention_pixmap_icon() {
+                return icon;
+            }
+        }
+        if let Some(icon) = info.pixmap_icon() {
+            return icon;
+        }
+        if info.needs_attention() {
+            if let Some(icon) = self.cached_name(&info.attention_name) {
+                return icon;
+            }
+        }
+        if let Some(icon) = self.cached_name(&info.icon_name) {
+            return icon;
+        }
+        IndicatorIcon::Named(info.service.clone())
+    }
+
+    /// Resolve a theme name through the cache with symbolic
+    /// re-tint. Empty names miss so the caller falls through.
+    fn cached_name(&mut self, name: &str) -> Option<IndicatorIcon> {
+        if name.is_empty() {
+            return None;
+        }
+        let art = self.icon_art(name, crate::watcher::INDICATOR_CELL as u32)?;
+        let art = if name.ends_with("-symbolic") {
+            crate::icons::retint(&art, crate::overview::ACCENT)
+        } else {
+            art
+        };
+        Some(IndicatorIcon::Pixmap {
+            width: art.size as i32,
+            height: art.size as i32,
+            argb: art.argb,
+        })
+    }
+
+    /// Resolve a dock item's app artwork through the host cache:
+    /// the desktop entry's icon name at dock size, with symbolic
+    /// names re-tinted like tray icons. `None` keeps the
+    /// initial-letter fallback (unknown entries, stacks, misses).
+    fn dock_icon(&mut self, item: &DockItem) -> Option<Artwork> {
+        let name = self.apps.entry(&item.app_id)?.icon.clone()?;
+        if name.is_empty() {
+            return None;
+        }
+        let art = self.icon_art(&name, crate::dock::DOCK_ICON_PX)?;
+        Some(if name.ends_with("-symbolic") {
+            crate::icons::retint(&art, ACCENT)
+        } else {
+            art
+        })
+    }
+
     /// Poll the indicator edge: take the watcher role when free,
     /// drop vanished clients, and refresh hosted icons. Empty host
     /// without a bus, by design.
@@ -1228,8 +1329,19 @@ impl ShellHost {
             .collect();
         self.watcher.forget(&gone);
         for service in &live {
-            if let Some(item) = self.watcher.fetch_item(service) {
-                self.indicators.upsert(item);
+            if let Some(info) = self.watcher.fetch_info(service) {
+                let icon = self.build_icon(&info);
+                let menu = self
+                    .indicators
+                    .get(service)
+                    .map(|item| item.menu.clone())
+                    .unwrap_or_default();
+                self.indicators.upsert(crate::watcher::IndicatorItem {
+                    service: info.service.clone(),
+                    title: info.title.clone(),
+                    icon,
+                    menu,
+                });
             }
         }
         self.indicators.retain_registered(&live);
@@ -1390,12 +1502,13 @@ impl ShellHost {
             return;
         };
         let mut pixels = vec![0u8; width as usize * height as usize * BYTES_PER_PIXEL];
+        let icons: Vec<Option<Artwork>> = items.iter().map(|item| self.dock_icon(item)).collect();
         let grid = if self.open_stack.is_some() {
             Some(self.stack_cache.as_slice())
         } else {
             None
         };
-        paint_dock_stacked(&mut pixels, width, height, &items, grid);
+        paint_dock_stacked_with_icons(&mut pixels, width, height, &items, grid, &icons);
         let Some(dock) = self.dock_surface.as_ref() else {
             return;
         };
@@ -2051,6 +2164,7 @@ mod tests {
     mod live {
         use std::os::unix::net::UnixStream;
         use std::rc::Rc;
+        use std::sync::Mutex;
 
         use roost_compositor::{
             control::ControlHub,
@@ -3155,6 +3269,435 @@ mod tests {
                 }
                 other => panic!("expected unknown app, got {other:?}"),
             }
+        }
+
+        /// Env mutation is process-global while Rust runs tests in
+        /// parallel threads, so every env-touching test below holds
+        /// this lock (same pattern as the icons.rs fixture tests).
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+        struct EnvRestore {
+            data_home: Option<std::ffi::OsString>,
+            data_dirs: Option<std::ffi::OsString>,
+            home: Option<std::ffi::OsString>,
+        }
+
+        impl EnvRestore {
+            /// Point the icon resolver at `tmp`, away from real
+            /// system dirs.
+            fn install(tmp: &tempfile::TempDir) -> EnvRestore {
+                let prev = EnvRestore {
+                    data_home: std::env::var_os("XDG_DATA_HOME"),
+                    data_dirs: std::env::var_os("XDG_DATA_DIRS"),
+                    home: std::env::var_os("HOME"),
+                };
+                std::env::set_var("XDG_DATA_HOME", tmp.path());
+                std::env::set_var("XDG_DATA_DIRS", tmp.path().join("empty-dirs"));
+                std::env::set_var("HOME", tmp.path().join("home"));
+                prev
+            }
+
+            fn restore(key: &str, value: &Option<std::ffi::OsString>) {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+
+        impl Drop for EnvRestore {
+            fn drop(&mut self) {
+                EnvRestore::restore("XDG_DATA_HOME", &self.data_home);
+                EnvRestore::restore("XDG_DATA_DIRS", &self.data_dirs);
+                EnvRestore::restore("HOME", &self.home);
+            }
+        }
+
+        /// Theme tree holding one PNG icon: `<tmp>/icons/<theme>`
+        /// with a `32x32/apps` raster. Caller holds `ENV_LOCK` and
+        /// installs `EnvRestore` over the result.
+        fn icon_theme_fixture(theme: &str, name: &str) -> tempfile::TempDir {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let path = tmp
+                .path()
+                .join("icons")
+                .join(theme)
+                .join("32x32/apps")
+                .join(format!("{name}.png"));
+            std::fs::create_dir_all(path.parent().expect("fixture parent")).expect("mkdirs");
+            let mut img = image::RgbaImage::new(32, 32);
+            for px in img.pixels_mut() {
+                *px = image::Rgba([0, 128, 255, 255]);
+            }
+            img.save(&path).expect("save png");
+            tmp
+        }
+
+        fn dummy_artwork() -> crate::icons::Artwork {
+            crate::icons::Artwork {
+                size: 32,
+                argb: vec![0; 32 * 32 * 4],
+            }
+        }
+
+        fn some_panel_key() -> super::super::PanelPaintKey {
+            super::super::PanelPaintKey {
+                clock: "12:34".to_owned(),
+                states: [(crate::tiles::TileState::Ready, None); 3],
+                width: 1280,
+                height: 32,
+                popup: None,
+                indicators: Vec::new(),
+            }
+        }
+
+        fn some_dock_key() -> super::super::DockPaintKey {
+            super::super::DockPaintKey {
+                items: vec![("org.example.True.desktop".to_owned(), vec![], false, true)],
+                width: 1280,
+                height: crate::dock::DOCK_H,
+                stack: None,
+            }
+        }
+
+        /// A snapshot theme flip clears the artwork cache and bumps
+        /// both paint keys so bars and docks repaint with the new
+        /// artwork on the same tick.
+        #[test]
+        fn sync_icon_theme_clears_cache_and_bumps_paint_keys_on_flip() {
+            let (mut host, _dir) = test_host();
+            host.icon_cache.insert(
+                (host.icon_theme.clone(), "roost-cached".to_owned(), 32),
+                dummy_artwork(),
+            );
+            host.panel_paint_key = Some(some_panel_key());
+            host.dock_paint_key = Some(some_dock_key());
+            host.tiles.settings.icon_theme = "HighContrast".to_owned();
+
+            host.sync_icon_theme();
+
+            assert!(host.icon_cache.is_empty(), "theme flip drops cached art");
+            assert_eq!(host.panel_paint_key, None, "panel repaints after flip");
+            assert_eq!(host.dock_paint_key, None, "dock repaints after flip");
+            assert_eq!(host.icon_theme, "HighContrast");
+        }
+
+        /// Same theme on the snapshot is a no-op: cache and paint
+        /// keys survive the tick.
+        #[test]
+        fn sync_icon_theme_is_noop_when_theme_unchanged() {
+            let (mut host, _dir) = test_host();
+            host.icon_cache.insert(
+                (host.icon_theme.clone(), "roost-cached".to_owned(), 32),
+                dummy_artwork(),
+            );
+            host.panel_paint_key = Some(some_panel_key());
+            host.dock_paint_key = Some(some_dock_key());
+            host.tiles.settings.icon_theme = host.icon_theme.clone();
+
+            host.sync_icon_theme();
+
+            assert_eq!(host.icon_cache.len(), 1, "cache survives no-op sync");
+            assert!(host.panel_paint_key.is_some(), "panel key survives");
+            assert!(host.dock_paint_key.is_some(), "dock key survives");
+        }
+
+        /// A bogus name resolves to `None` and leaves no entry
+        /// behind: misses must not fill the bounded cache.
+        #[test]
+        fn icon_art_returns_none_for_bogus_name_without_caching() {
+            let _lock = ENV_LOCK.lock().expect("env lock");
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let _env = EnvRestore::install(&tmp);
+            let (mut host, _dir) = test_host();
+            host.icon_theme = "CacheTheme".to_owned();
+
+            assert_eq!(host.icon_art("no-such-roost-icon", 32), None);
+            assert!(
+                host.icon_cache.is_empty(),
+                "misses must not pollute the cache"
+            );
+        }
+
+        /// A fixture PNG resolves through the host, and the second
+        /// call serves the cached artwork without growing the map.
+        #[test]
+        fn icon_art_caches_resolved_artwork() {
+            let _lock = ENV_LOCK.lock().expect("env lock");
+            let tmp = icon_theme_fixture("CacheTheme", "roost-cache-icon");
+            let _env = EnvRestore::install(&tmp);
+            let (mut host, _dir) = test_host();
+            host.icon_theme = "CacheTheme".to_owned();
+
+            let first = host
+                .icon_art("roost-cache-icon", 32)
+                .expect("fixture icon resolves");
+            assert_eq!(first.size, 32);
+            assert_eq!(first.argb.len(), 32 * 32 * 4);
+            assert_eq!(host.icon_cache.len(), 1);
+
+            let second = host
+                .icon_art("roost-cache-icon", 32)
+                .expect("cached icon resolves");
+            assert_eq!(first, second, "second call serves cached artwork");
+            assert_eq!(host.icon_cache.len(), 1, "repeat hit adds no entry");
+        }
+
+        /// Host with one pinned entry carrying `icon`: the dock item
+        /// under test.
+        fn dock_icon_test_host(icon: Option<&str>) -> (ShellHost, tempfile::TempDir) {
+            use crate::apps::AppEntry;
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut host = ShellHost::new(
+                PanelConfig::default(),
+                AppProvider::new(vec![AppEntry {
+                    app_id: "org.example.True.desktop".to_owned(),
+                    name: "True".to_owned(),
+                    generic_name: None,
+                    keywords: Vec::new(),
+                    argv: vec![std::ffi::OsString::from("/bin/true")],
+                    icon: icon.map(str::to_owned),
+                }]),
+                Favorites::load(dir.path().join(crate::favorites::FAVORITES_FILE)),
+            );
+            host.favorites.pin("org.example.True.desktop");
+            (host, dir)
+        }
+
+        /// A pinned app's desktop-entry icon resolves through the
+        /// host cache at dock size; misses and icon-less entries
+        /// keep the fallback.
+        #[test]
+        fn dock_icon_resolves_pinned_app_through_cache() {
+            let _lock = ENV_LOCK.lock().expect("env lock");
+            let tmp = icon_theme_fixture("DockTheme", "roost-dock-app");
+            let _env = EnvRestore::install(&tmp);
+            let (mut host, _dir) = dock_icon_test_host(Some("roost-dock-app"));
+            host.icon_theme = "DockTheme".to_owned();
+            let items = host.dock_items();
+            assert_eq!(items.len(), 1, "pinned app composes one item");
+
+            let art = host
+                .dock_icon(&items[0])
+                .expect("pinned app artwork resolves");
+            assert_eq!(art.size, crate::dock::DOCK_ICON_PX);
+            assert_eq!(
+                art.argb.len(),
+                crate::dock::DOCK_ICON_PX as usize * crate::dock::DOCK_ICON_PX as usize * 4
+            );
+            assert_eq!(
+                host.icon_cache.len(),
+                1,
+                "resolution goes through the cache"
+            );
+            let again = host.dock_icon(&items[0]).expect("cached artwork");
+            assert_eq!(art, again, "repeat hit serves cached artwork");
+
+            // Icon-less entries and unknown ids keep the fallback.
+            let (mut bare, _dir) = dock_icon_test_host(None);
+            bare.icon_theme = "DockTheme".to_owned();
+            let bare_items = bare.dock_items();
+            assert_eq!(bare.dock_icon(&bare_items[0]), None);
+            assert!(
+                bare.icon_cache.is_empty(),
+                "misses must not pollute the cache"
+            );
+        }
+
+        /// A theme flip on the tick clears dock artwork and arms a
+        /// repaint, and the next resolve serves the new theme's art.
+        #[test]
+        fn dock_repaint_picks_up_new_theme_art_on_flip() {
+            use image::Rgba;
+            let _lock = ENV_LOCK.lock().expect("env lock");
+            let tmp = tempfile::tempdir().expect("tempdir");
+            for (theme, pixel) in [
+                ("DockFlipA", Rgba([200, 10, 10, 255])),
+                ("DockFlipB", Rgba([10, 10, 200, 255])),
+            ] {
+                let path = tmp.path().join("icons").join(theme).join("32x32/apps");
+                std::fs::create_dir_all(&path).expect("mkdirs");
+                let mut img = image::RgbaImage::new(32, 32);
+                for px in img.pixels_mut() {
+                    *px = pixel;
+                }
+                img.save(path.join("roost-dock-flip.png"))
+                    .expect("save png");
+            }
+            let _env = EnvRestore::install(&tmp);
+            let (mut host, _dir) = dock_icon_test_host(Some("roost-dock-flip"));
+            host.icon_theme = "DockFlipA".to_owned();
+            host.dock_paint_key = Some(some_dock_key());
+
+            let items = host.dock_items();
+            let before = host.dock_icon(&items[0]).expect("theme A art");
+            assert_eq!(host.icon_cache.len(), 1);
+
+            // The slow tick runs this sync before repainting the
+            // dock on the same pass: cache drops, repaint armed.
+            host.tiles.settings.icon_theme = "DockFlipB".to_owned();
+            host.sync_icon_theme();
+            assert!(host.icon_cache.is_empty(), "theme flip drops cached art");
+            assert_eq!(host.dock_paint_key, None, "dock repaints on the same tick");
+
+            let after = host.dock_icon(&items[0]).expect("theme B art");
+            assert_ne!(before, after, "repaint serves the new theme's artwork");
+        }
+
+        /// Tray `ItemInfo` builder (no bus): SNI pixmap words are
+        /// `w` x `h` filler bytes of the right length.
+        fn tray_info(status: &str, service: &str) -> crate::watcher::ItemInfo {
+            crate::watcher::ItemInfo {
+                service: service.to_owned(),
+                title: "Tray".to_owned(),
+                status: status.to_owned(),
+                icon_name: String::new(),
+                icon_pixmap: Vec::new(),
+                attention_name: String::new(),
+                attention_pixmap: Vec::new(),
+            }
+        }
+
+        fn tray_bytes(w: i32, h: i32, seed: u8) -> Vec<u8> {
+            vec![seed; w as usize * h as usize * 4]
+        }
+
+        /// Attention pixmap wins while the item needs attention.
+        #[test]
+        fn build_icon_attention_pixmap_wins_when_needs_attention() {
+            use crate::watcher::{argb_to_shm, IndicatorIcon};
+            let (mut host, _dir) = test_host();
+            let normal = tray_bytes(2, 2, 0x11);
+            let attention = tray_bytes(1, 1, 0x22);
+            let mut info = tray_info("NeedsAttention", "test.tray");
+            info.icon_pixmap = vec![(2, 2, normal)];
+            info.attention_pixmap = vec![(1, 1, attention.clone())];
+            assert_eq!(
+                host.build_icon(&info),
+                IndicatorIcon::Pixmap {
+                    width: 1,
+                    height: 1,
+                    argb: argb_to_shm(&attention),
+                }
+            );
+        }
+
+        /// Normal pixmap wins while passive, even with a larger
+        /// attention pixmap present.
+        #[test]
+        fn build_icon_normal_pixmap_wins_when_passive() {
+            use crate::watcher::{argb_to_shm, IndicatorIcon};
+            let (mut host, _dir) = test_host();
+            let normal = tray_bytes(2, 2, 0x11);
+            let attention = tray_bytes(4, 4, 0x22);
+            let mut info = tray_info("Passive", "test.tray");
+            info.icon_pixmap = vec![(2, 2, normal.clone())];
+            info.attention_pixmap = vec![(4, 4, attention)];
+            assert_eq!(
+                host.build_icon(&info),
+                IndicatorIcon::Pixmap {
+                    width: 2,
+                    height: 2,
+                    argb: argb_to_shm(&normal),
+                }
+            );
+        }
+
+        /// Attention name resolves through the theme fixture at
+        /// indicator size when no pixmap applies.
+        #[test]
+        fn build_icon_attention_name_resolves_via_theme_fixture() {
+            use crate::watcher::{IndicatorIcon, INDICATOR_CELL};
+            let _lock = ENV_LOCK.lock().expect("env lock");
+            let tmp = icon_theme_fixture("TrayTheme", "roost-tray-attention");
+            let _env = EnvRestore::install(&tmp);
+            let (mut host, _dir) = test_host();
+            host.icon_theme = "TrayTheme".to_owned();
+            let mut info = tray_info("NeedsAttention", "test.tray");
+            info.attention_name = "roost-tray-attention".to_owned();
+            match host.build_icon(&info) {
+                IndicatorIcon::Pixmap {
+                    width,
+                    height,
+                    argb,
+                } => {
+                    assert_eq!((width, height), (INDICATOR_CELL, INDICATOR_CELL));
+                    assert_eq!(
+                        argb.len(),
+                        INDICATOR_CELL as usize * INDICATOR_CELL as usize * 4
+                    );
+                }
+                other => panic!("attention name must resolve, got {other:?}"),
+            }
+        }
+
+        /// Unknown (and empty) names fall through to the service
+        /// fallback; misses must not pollute the artwork cache.
+        #[test]
+        fn build_icon_unknown_names_fall_back_to_named_service() {
+            use crate::watcher::IndicatorIcon;
+            let _lock = ENV_LOCK.lock().expect("env lock");
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let _env = EnvRestore::install(&tmp);
+            let (mut host, _dir) = test_host();
+            host.icon_theme = "TrayTheme".to_owned();
+            let mut info = tray_info("Active", "test.tray");
+            info.icon_name = "no-such-roost-tray-icon".to_owned();
+            info.attention_name = "no-such-roost-tray-attention".to_owned();
+            assert_eq!(
+                host.build_icon(&info),
+                IndicatorIcon::Named("test.tray".to_owned())
+            );
+            let empty = tray_info("NeedsAttention", "test.tray");
+            assert_eq!(
+                host.build_icon(&empty),
+                IndicatorIcon::Named("test.tray".to_owned())
+            );
+            assert!(
+                host.icon_cache.is_empty(),
+                "name misses must not pollute the cache"
+            );
+        }
+
+        /// A `-symbolic` name re-tints toward the shell accent: RGB
+        /// becomes [`crate::overview::ACCENT`], alpha is preserved.
+        #[test]
+        fn build_icon_symbolic_name_retints_toward_accent() {
+            use crate::watcher::IndicatorIcon;
+            let _lock = ENV_LOCK.lock().expect("env lock");
+            let tmp = icon_theme_fixture("TrayTheme", "roost-tray-symbolic");
+            let _env = EnvRestore::install(&tmp);
+            let (mut host, _dir) = test_host();
+            host.icon_theme = "TrayTheme".to_owned();
+            let mut info = tray_info("Active", "test.tray");
+            info.icon_name = "roost-tray-symbolic".to_owned();
+            match host.build_icon(&info) {
+                IndicatorIcon::Pixmap { argb, .. } => {
+                    assert!(!argb.is_empty(), "symbolic icon must decode");
+                    let accent = crate::overview::ACCENT;
+                    let (chunks, _) = argb.as_chunks::<4>();
+                    for px in chunks {
+                        assert_eq!(&px[0..3], &accent[0..3], "RGB re-tints to ACCENT");
+                        // The fixture PNG is fully opaque.
+                        assert_eq!(px[3], 255, "alpha is preserved");
+                    }
+                }
+                other => panic!("symbolic name must resolve, got {other:?}"),
+            }
+        }
+
+        /// Menu preservation across `poll_indicators` is not driven
+        /// headless: without a bus the poll returns early, and with
+        /// one it would prune the host via `retain_registered`, so
+        /// the carry (`get` + `upsert`) needs the live-bus harness.
+        /// This pins the documented precondition instead: a
+        /// disconnected edge yields no info, in which case a poll
+        /// keeps whatever the host already holds.
+        #[test]
+        fn poll_menu_preservation_needs_live_bus_not_driven_headless() {
+            let bus = crate::watcher::WatcherBus::new();
+            assert_eq!(bus.fetch_info("test.indicator"), None);
+            assert!(bus.registered().is_empty());
         }
     }
 }

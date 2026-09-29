@@ -23,3 +23,5 @@ rustix.workspace = true
 jiff.workspace = true
 xkbcommon.workspace = true
 zbus.workspace = true
+image.workspace = true
+resvg.workspace = true

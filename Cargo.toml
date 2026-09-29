@@ -33,3 +33,4 @@ jiff = "0.2"
 xkbcommon = "=0.8.0"
 zbus = "5"
 image = "0.25"
+resvg = { version = "0.48", default-features = false, features = ["raster-images"] }

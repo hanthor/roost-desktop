@@ -32,7 +32,7 @@ pub fn parse_clock_format(value: &str) -> ClockFormat {
 
 /// Plain snapshot the paint code reads. Defaults render exactly as the
 /// shell did before settings existed.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellSettings {
     /// Bar clock format.
     pub clock_format: ClockFormat,
@@ -40,6 +40,24 @@ pub struct ShellSettings {
     /// compositor background hook lands; carried now so the read path
     /// is proven for more than one key.
     pub wallpaper_uri: Option<String>,
+    /// Icon theme name. Defaults to the GNOME default; unknown or
+    /// absent values keep the current theme — never reset.
+    pub icon_theme: String,
+}
+
+/// Default icon theme when the settings key is absent.
+pub const DEFAULT_ICON_THEME: &str = "Adwaita";
+
+impl Default for ShellSettings {
+    /// Clock and wallpaper as before; icon theme falls back to the
+    /// GNOME default rather than an empty name no theme matches.
+    fn default() -> Self {
+        Self {
+            clock_format: ClockFormat::default(),
+            wallpaper_uri: None,
+            icon_theme: DEFAULT_ICON_THEME.to_owned(),
+        }
+    }
 }
 
 /// String-valued settings source. The production backend reads the
@@ -112,6 +130,8 @@ pub const CLOCK_FORMAT_KEY: &str = "clock-format";
 pub const BACKGROUND_SCHEMA: &str = "org.gnome.desktop.background";
 /// Picture URI key.
 pub const PICTURE_URI_KEY: &str = "picture-uri";
+/// Icon theme name key.
+pub const ICON_THEME_KEY: &str = "icon-theme";
 
 /// Refresh a snapshot from a backend. Unknown or absent values keep
 /// their current (default) settings — never reset, never panic.
@@ -122,6 +142,11 @@ pub fn refresh(settings: &mut ShellSettings, backend: &dyn SettingsBackend) {
     if let Some(uri) = backend.string(BACKGROUND_SCHEMA, PICTURE_URI_KEY) {
         if !uri.trim().is_empty() {
             settings.wallpaper_uri = Some(uri);
+        }
+    }
+    if let Some(theme) = backend.string(INTERFACE_SCHEMA, ICON_THEME_KEY) {
+        if !theme.trim().is_empty() {
+            settings.icon_theme = theme;
         }
     }
 }
@@ -178,5 +203,29 @@ mod tests {
         let mut settings = ShellSettings::default();
         refresh(&mut settings, &backend);
         assert_eq!(settings.wallpaper_uri, None);
+    }
+
+    #[test]
+    fn default_icon_theme_is_gnome_default() {
+        assert_eq!(ShellSettings::default().icon_theme, DEFAULT_ICON_THEME);
+        assert_eq!(DEFAULT_ICON_THEME, "Adwaita");
+    }
+
+    #[test]
+    fn refresh_applies_icon_theme_and_keeps_on_absent_or_blank() {
+        let backend =
+            MapBackend::with_values(&[(INTERFACE_SCHEMA, ICON_THEME_KEY, "HighContrast")]);
+        let mut settings = ShellSettings::default();
+        refresh(&mut settings, &backend);
+        assert_eq!(settings.icon_theme, "HighContrast");
+
+        // Absent key keeps the previously read theme.
+        refresh(&mut settings, &MapBackend::default());
+        assert_eq!(settings.icon_theme, "HighContrast");
+
+        // Blank value is ignored, like the wallpaper URI.
+        let blank = MapBackend::with_values(&[(INTERFACE_SCHEMA, ICON_THEME_KEY, "   ")]);
+        refresh(&mut settings, &blank);
+        assert_eq!(settings.icon_theme, "HighContrast");
     }
 }

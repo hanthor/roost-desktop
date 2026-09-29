@@ -68,6 +68,54 @@ pub struct IndicatorItem {
     pub menu: Vec<MenuEntry>,
 }
 
+/// Raw StatusNotifier properties for one item: identity, status,
+/// and both icon channels. Name resolution happens in the caller
+/// (which owns the artwork cache), so this stays bus-shaped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemInfo {
+    /// Registration string (`bus name` or `bus name/path`).
+    pub service: String,
+    /// Item title for fallback paint.
+    pub title: String,
+    /// Item status (`Active`, `Passive`, `NeedsAttention`).
+    pub status: String,
+    /// Normal icon theme name.
+    pub icon_name: String,
+    /// Normal icon pixmaps (`a(iiay)` payload).
+    pub icon_pixmap: Vec<(i32, i32, Vec<u8>)>,
+    /// Attention icon theme name.
+    pub attention_name: String,
+    /// Attention icon pixmaps.
+    pub attention_pixmap: Vec<(i32, i32, Vec<u8>)>,
+}
+
+impl ItemInfo {
+    /// Largest normal pixmap as an icon, if any.
+    pub fn pixmap_icon(&self) -> Option<IndicatorIcon> {
+        pixmaps_icon(&self.icon_pixmap)
+    }
+
+    /// Largest attention pixmap as an icon, if any.
+    pub fn attention_pixmap_icon(&self) -> Option<IndicatorIcon> {
+        pixmaps_icon(&self.attention_pixmap)
+    }
+
+    /// True while the item requests attention.
+    pub fn needs_attention(&self) -> bool {
+        self.status == "NeedsAttention"
+    }
+}
+
+/// Largest pixmap in a payload as an icon, if any is usable.
+fn pixmaps_icon(pixmaps: &[(i32, i32, Vec<u8>)]) -> Option<IndicatorIcon> {
+    let (w, h, bytes) = pick_pixmap(pixmaps.to_vec())?;
+    Some(IndicatorIcon::Pixmap {
+        width: w,
+        height: h,
+        argb: argb_to_shm(&bytes),
+    })
+}
+
 /// Wire-free indicator set: register, refresh, remove by service.
 #[derive(Debug, Default)]
 pub struct IndicatorHost {
@@ -469,9 +517,11 @@ impl WatcherBus {
             .unwrap_or_default()
     }
 
-    /// Fetch one item's live properties into an [`IndicatorItem`].
+    /// Raw item properties for icon selection. The caller decides
+    /// which name to resolve (attention vs normal) and decodes
+    /// through its own artwork cache; this edge stays paint-free.
     /// `None` when the item vanished or its properties unreadable.
-    pub fn fetch_item(&self, service: &str) -> Option<IndicatorItem> {
+    pub fn fetch_info(&self, service: &str) -> Option<ItemInfo> {
         let conn = self.conn.as_ref()?;
         let (bus, path) = split_service(service);
         let item = zbus::blocking::Proxy::new(
@@ -486,33 +536,43 @@ impl WatcherBus {
             .ok()
             .filter(|t: &String| !t.is_empty())
             .unwrap_or_else(|| service.to_owned());
-        let icon = self.fetch_icon(&item, service);
-        Some(IndicatorItem {
+        let status: String = item.get_property("Status").unwrap_or_default();
+        let icon_name: String = item.get_property("IconName").unwrap_or_default();
+        let icon_pixmap: Vec<(i32, i32, Vec<u8>)> =
+            item.get_property("IconPixmap").unwrap_or_default();
+        let attention_name: String = item.get_property("AttentionIconName").unwrap_or_default();
+        let attention_pixmap: Vec<(i32, i32, Vec<u8>)> =
+            item.get_property("AttentionIconPixmap").unwrap_or_default();
+        Some(ItemInfo {
             service: service.to_owned(),
             title,
-            icon,
-            menu: Vec::new(),
+            status,
+            icon_name,
+            icon_pixmap,
+            attention_name,
+            attention_pixmap,
         })
     }
 
-    /// Current icon for an item proxy: largest pixmap wins, theme
-    /// name otherwise, service id when neither is set.
-    fn fetch_icon(&self, item: &zbus::blocking::Proxy, service: &str) -> IndicatorIcon {
-        if let Ok(pixmaps) = item.get_property::<Vec<(i32, i32, Vec<u8>)>>("IconPixmap") {
-            if let Some((w, h, bytes)) = pick_pixmap(pixmaps) {
-                return IndicatorIcon::Pixmap {
-                    width: w,
-                    height: h,
-                    argb: argb_to_shm(&bytes),
-                };
+    /// Fetch one item's live properties into an [`IndicatorItem`].
+    /// `None` when the item vanished or its properties unreadable.
+    /// Theme names stay unresolved here: the host resolves them
+    /// through its artwork cache after this returns.
+    pub fn fetch_item(&self, service: &str) -> Option<IndicatorItem> {
+        let info = self.fetch_info(service)?;
+        let icon = info.pixmap_icon().unwrap_or_else(|| {
+            if info.icon_name.is_empty() {
+                IndicatorIcon::Named(info.service.clone())
+            } else {
+                IndicatorIcon::Named(info.icon_name.clone())
             }
-        }
-        if let Ok(name) = item.get_property::<String>("IconName") {
-            if !name.is_empty() {
-                return IndicatorIcon::Named(name);
-            }
-        }
-        IndicatorIcon::Named(service.to_owned())
+        });
+        Some(IndicatorItem {
+            service: info.service,
+            title: info.title,
+            icon,
+            menu: Vec::new(),
+        })
     }
 
     /// Fetch one item's menu rows (one level). Empty when the item
@@ -741,6 +801,63 @@ mod tests {
         // A trailing partial word has no full pixel and is dropped.
         assert_eq!(argb_to_shm(&[0xaa, 0x11, 0x22, 0x33, 0x00]).len(), 4);
         assert!(argb_to_shm(&[]).is_empty());
+    }
+
+    fn item_info(status: &str) -> ItemInfo {
+        ItemInfo {
+            service: "test.service".to_owned(),
+            title: "Test".to_owned(),
+            status: status.to_owned(),
+            icon_name: String::new(),
+            icon_pixmap: Vec::new(),
+            attention_name: String::new(),
+            attention_pixmap: Vec::new(),
+        }
+    }
+
+    /// SNI (`a(iiay)`) payload bytes: `w` x `h` words of filler.
+    fn pixmap_bytes(w: i32, h: i32, seed: u8) -> Vec<u8> {
+        vec![seed; w as usize * h as usize * BYTES_PER_PIXEL]
+    }
+
+    #[test]
+    fn item_info_needs_attention_only_for_needs_attention() {
+        assert!(item_info("NeedsAttention").needs_attention());
+        for status in ["Active", "Passive", "", "needsattention", "NeedsAttention "] {
+            assert!(
+                !item_info(status).needs_attention(),
+                "status {status:?} must not read as attention"
+            );
+        }
+    }
+
+    #[test]
+    fn item_info_pixmap_icon_picks_largest_valid() {
+        // Same selection semantics as `pick_pixmap`: corrupt and
+        // empty entries lose to the largest well-formed payload.
+        let small = pixmap_bytes(2, 2, 0x11);
+        let large = pixmap_bytes(4, 4, 0x22);
+        let mut info = item_info("Active");
+        info.icon_pixmap = vec![(2, 2, small), (8, 8, vec![0u8; 7]), (4, 4, large.clone())];
+        assert_eq!(
+            info.pixmap_icon(),
+            Some(IndicatorIcon::Pixmap {
+                width: 4,
+                height: 4,
+                argb: argb_to_shm(&large),
+            })
+        );
+        // No usable entry means no icon.
+        info.icon_pixmap = vec![(8, 8, vec![0u8; 7])];
+        assert_eq!(info.pixmap_icon(), None);
+    }
+
+    #[test]
+    fn item_info_attention_pixmap_icon_none_when_empty() {
+        assert_eq!(item_info("NeedsAttention").attention_pixmap_icon(), None);
+        let mut info = item_info("NeedsAttention");
+        info.attention_pixmap = vec![(0, 8, Vec::new())];
+        assert_eq!(info.attention_pixmap_icon(), None);
     }
 
     /// Test-only dbusmenu layout builder: mirrors the wire shape the
@@ -989,6 +1106,9 @@ mod tests {
             0xb0, 0xc0,
         ];
 
+        /// 1x1 attention pixmap, distinct from the normal icon.
+        const ATTENTION_PIXMAP: [u8; 4] = [0xee, 0x11, 0x22, 0x33];
+
         struct StubItem {
             activated: Arc<AtomicBool>,
         }
@@ -1001,6 +1121,11 @@ mod tests {
             }
 
             #[zbus(property)]
+            fn status(&self) -> String {
+                "NeedsAttention".to_owned()
+            }
+
+            #[zbus(property)]
             fn icon_name(&self) -> String {
                 String::new()
             }
@@ -1008,6 +1133,16 @@ mod tests {
             #[zbus(property)]
             fn icon_pixmap(&self) -> Vec<(i32, i32, Vec<u8>)> {
                 vec![(2, 2, PIXMAP.to_vec())]
+            }
+
+            #[zbus(property)]
+            fn attention_icon_name(&self) -> String {
+                "stub-attention".to_owned()
+            }
+
+            #[zbus(property)]
+            fn attention_icon_pixmap(&self) -> Vec<(i32, i32, Vec<u8>)> {
+                vec![(1, 1, ATTENTION_PIXMAP.to_vec())]
             }
 
             #[zbus(property)]
@@ -1171,6 +1306,27 @@ mod tests {
                     height: 2,
                     argb: argb_to_shm(&PIXMAP),
                 }
+            );
+
+            let info = bus.fetch_info(&service).expect("stub info fetches");
+            assert_eq!(info.service, service);
+            assert_eq!(info.title, "StubIndicator");
+            assert_eq!(info.status, "NeedsAttention");
+            assert!(info.needs_attention());
+            assert_eq!(info.icon_name, String::new());
+            assert_eq!(info.icon_pixmap, vec![(2, 2, PIXMAP.to_vec())]);
+            assert_eq!(info.attention_name, "stub-attention");
+            assert_eq!(
+                info.attention_pixmap,
+                vec![(1, 1, ATTENTION_PIXMAP.to_vec())]
+            );
+            assert_eq!(
+                info.attention_pixmap_icon(),
+                Some(IndicatorIcon::Pixmap {
+                    width: 1,
+                    height: 1,
+                    argb: argb_to_shm(&ATTENTION_PIXMAP),
+                })
             );
 
             let menu = bus.fetch_menu(&service);

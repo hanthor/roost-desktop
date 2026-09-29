@@ -15,6 +15,7 @@ pub mod apps;
 pub mod control;
 pub mod dock;
 pub mod favorites;
+pub mod icons;
 pub mod keyboard;
 pub mod model;
 pub mod notifications;

@@ -8,6 +8,7 @@
 //! switch/close through the control client).
 
 use crate::apps::{entry_from_file, AppProvider};
+use crate::icons::Artwork;
 use crate::model::WindowEntry;
 use crate::overview::{
     blit_glyph, glyph_index, put_pixel, ACCENT, BG, BYTES_PER_PIXEL, FONT_SCALE, GLYPH_ADVANCE,
@@ -358,21 +359,76 @@ pub fn stack_cell_origin(width: i32, index: usize) -> (i32, i32) {
     )
 }
 
+/// Edge length of dock artwork in pixels: the icon-square
+/// interior (`DOCK_SLOT` minus the frame padding on both sides).
+pub const DOCK_ICON_PX: u32 = 40;
+
 /// Paint the dock strip: icon squares with the app's initial, an
 /// accent frame plus underline while running.
 pub fn paint_dock(pixels: &mut [u8], width: i32, height: i32, items: &[DockItem]) {
     paint_dock_stacked(pixels, width, height, items, None);
 }
 
+/// Blit square `art` centered on (`cx`, `cy`) into a `w` x `h` box,
+/// nearest-sampling. Out-of-buffer pixels are clipped.
+pub fn blit_artwork(
+    pixels: &mut [u8],
+    stride: usize,
+    cx: i32,
+    cy: i32,
+    w: i32,
+    h: i32,
+    art: &Artwork,
+) {
+    if w <= 0 || h <= 0 || art.size == 0 {
+        return;
+    }
+    let size = art.size as i32;
+    for dy in 0..h {
+        for dx in 0..w {
+            let sx = (dx * size / w).clamp(0, size - 1) as usize;
+            let sy = (dy * size / h).clamp(0, size - 1) as usize;
+            let from = (sy * art.size as usize + sx) * BYTES_PER_PIXEL;
+            let (x, y) = (cx + dx, cy + dy);
+            if x < 0 || y < 0 {
+                continue;
+            }
+            let into = (y as usize * stride) + (x as usize * BYTES_PER_PIXEL);
+            if let (Some(src), Some(dst)) = (
+                art.argb.get(from..from + BYTES_PER_PIXEL),
+                pixels.get_mut(into..into + BYTES_PER_PIXEL),
+            ) {
+                dst.copy_from_slice(src);
+            }
+        }
+    }
+}
+
 /// Paint the dock strip with an optional open folder-stack grid in
 /// the band above the icons. A stack item paints with a double
-/// frame so the grid's source stays visible.
+/// frame so the grid's source stays visible. Items without artwork
+/// fall back to the app's initial.
 pub fn paint_dock_stacked(
     pixels: &mut [u8],
     width: i32,
     height: i32,
     items: &[DockItem],
     grid: Option<&[StackEntry]>,
+) {
+    let blank = vec![None; items.len()];
+    paint_dock_stacked_with_icons(pixels, width, height, items, grid, &blank);
+}
+
+/// Paint the dock strip with per-item theme artwork: `icons[i]`
+/// replaces item `i`'s initial when `Some`, resolved by the caller
+/// through the host icon cache. `None` keeps the initial fallback.
+pub fn paint_dock_stacked_with_icons(
+    pixels: &mut [u8],
+    width: i32,
+    height: i32,
+    items: &[DockItem],
+    grid: Option<&[StackEntry]>,
+    icons: &[Option<Artwork>],
 ) {
     const DIM: [u8; 4] = [0x4a, 0x44, 0x44, 0xff];
     let stride = width as usize * BYTES_PER_PIXEL;
@@ -412,12 +468,23 @@ pub fn paint_dock_stacked(
                 }
             }
         }
-        // App initial, centered.
-        if let Some(initial) = item.name.chars().next() {
-            if let Some(glyph) = glyph_index(initial) {
-                let gx = x0 + (DOCK_SLOT - 4 * FONT_SCALE) / 2;
-                let gy = y_origin + (DOCK_H - 5 * FONT_SCALE) / 2 - 2;
-                blit_glyph(pixels, stride, gx, gy, glyph, ACCENT);
+        // Theme artwork replaces the initial; without it the
+        // app's initial paints centered as before.
+        match icons.get(index).and_then(|slot| slot.as_ref()) {
+            Some(art) => {
+                let side = (art.size as i32).min(DOCK_SLOT - 2 * pad).max(1);
+                let ox = x0 + (DOCK_SLOT - side) / 2;
+                let oy = y_origin + (DOCK_H - side) / 2;
+                blit_artwork(pixels, stride, ox, oy, side, side, art);
+            }
+            None => {
+                if let Some(initial) = item.name.chars().next() {
+                    if let Some(glyph) = glyph_index(initial) {
+                        let gx = x0 + (DOCK_SLOT - 4 * FONT_SCALE) / 2;
+                        let gy = y_origin + (DOCK_H - 5 * FONT_SCALE) / 2 - 2;
+                        blit_glyph(pixels, stride, gx, gy, glyph, ACCENT);
+                    }
+                }
             }
         }
         // Running underline.
@@ -644,6 +711,36 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_ne!(row(0), row(1));
+    }
+
+    #[test]
+    fn paint_with_artwork_blits_theme_pixels_over_initial() {
+        let apps = provider();
+        let items = dock_items(&["org.gnome.Terminal.desktop".to_owned()], &apps, &[]);
+        assert_eq!(items.len(), 1);
+        let width = 1280;
+        // Solid artwork in a color the fallback never paints.
+        let art = crate::icons::Artwork {
+            size: DOCK_ICON_PX,
+            argb: vec![0x12; DOCK_ICON_PX as usize * DOCK_ICON_PX as usize * BYTES_PER_PIXEL],
+        };
+        let mut art_pixels = vec![0u8; width as usize * DOCK_H as usize * BYTES_PER_PIXEL];
+        paint_dock_stacked_with_icons(&mut art_pixels, width, DOCK_H, &items, None, &[Some(art)]);
+        // Slot center carries the artwork color...
+        let stride = width as usize * BYTES_PER_PIXEL;
+        let (x0, _, _, _) = dock_slot(width, 0, items.len());
+        let at =
+            ((DOCK_H / 2) as usize * stride) + ((x0 + DOCK_SLOT / 2) as usize * BYTES_PER_PIXEL);
+        assert_eq!(&art_pixels[at..at + 4], &[0x12, 0x12, 0x12, 0x12]);
+        // ...while the fallback paints no such pixel anywhere.
+        let mut plain = vec![0u8; width as usize * DOCK_H as usize * BYTES_PER_PIXEL];
+        paint_dock(&mut plain, width, DOCK_H, &items);
+        assert_ne!(art_pixels, plain);
+        let (chunks, _) = plain.as_chunks::<4>();
+        assert!(
+            chunks.iter().all(|px| *px != [0x12, 0x12, 0x12, 0x12]),
+            "fallback must not paint the artwork color"
+        );
     }
 
     fn stack_dir() -> PathBuf {
