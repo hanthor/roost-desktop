@@ -1649,33 +1649,46 @@ fn gnome_shift_arrows_still_tile_and_consume() {
 }
 
 #[test]
-fn scroll_up_down_keep_gnome_meaning() {
+fn scroll_up_down_stay_columns_in_scroll() {
     let mut f = layout_windows();
     assert!(f.manager.set_scroll(&mut f.comp.state, true));
     assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
     sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
     sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
     f.client_b.keys.clear();
+    f.client_b.configure_sizes.clear();
+    f.client_b.configure_states.clear();
 
-    // Up/Down keep their gnome meaning in scroll mode: Up maximizes
-    // into the work area, Down restores.
+    // Forced membership: Super+Up mid-scroll joins as a same-height
+    // column instead of covering the screen.
     press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
     press(&mut f.manager, &mut f.comp, ARROW_UP_KEYCODE);
-    assert_eq!(
-        f.manager.window_layout(f.id_b),
-        Some(WindowLayout::Maximized)
-    );
-    let maxed = f.manager.geometry(f.id_b).unwrap();
-    assert_eq!((maxed.size.w, maxed.size.h), (1280, 768));
+    assert_eq!(f.manager.window_layout(f.id_b), Some(WindowLayout::Strip));
+    let col = f.manager.geometry(f.id_b).unwrap();
+    assert_eq!((col.loc.x, col.loc.y), (632, 32));
+    assert_eq!((col.size.w, col.size.h), (616, 768));
     release(&mut f.manager, &mut f.comp, ARROW_UP_KEYCODE);
+    // Super+Down afterwards keeps the column: no floating restore
+    // mid-strip.
     press(&mut f.manager, &mut f.comp, ARROW_DOWN_KEYCODE);
-    assert_eq!(
-        f.manager.window_layout(f.id_b),
-        Some(WindowLayout::Floating)
-    );
+    assert_eq!(f.manager.window_layout(f.id_b), Some(WindowLayout::Strip));
+    assert_eq!(f.manager.geometry(f.id_b).unwrap(), col);
     release(&mut f.manager, &mut f.comp, ARROW_DOWN_KEYCODE);
     release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
 
+    // The column size is advertised with no managed xdg state.
+    pump(&mut f.comp, &mut f.queue_b, &mut f.client_b, |c| {
+        c.configure_sizes.last() == Some(&(616, 768))
+    });
+    let states = f
+        .client_b
+        .configure_states
+        .last()
+        .expect("strip configure must advertise state");
+    assert!(
+        !has_state(states, 1) && !has_state(states, 2),
+        "scroll column advertised a managed state: {states:?}"
+    );
     sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
     assert!(
         !f.client_b
@@ -1809,4 +1822,261 @@ fn reentering_scroll_resets_strip_offset() {
     assert!(f.manager.set_scroll(&mut f.comp.state, true));
     assert_eq!(f.manager.strip_offset(), 0.0);
     assert_eq!(column_xs(&f), (0, 632, 1264));
+}
+
+#[test]
+fn scroll_maximize_joins_strip_as_column() {
+    let mut f = layout_windows();
+    assert!(f.manager.set_scroll(&mut f.comp.state, true));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    f.client_b.configure_sizes.clear();
+    f.client_b.configure_states.clear();
+
+    // Maximizing mid-scroll joins as a same-height column: Strip
+    // layout, full work height, 16px-gap column width — never the
+    // 1280x768 work area.
+    assert!(f.manager.set_maximized(&mut f.comp.state, f.id_b, true));
+    assert_eq!(f.manager.window_layout(f.id_b), Some(WindowLayout::Strip));
+    let col = f.manager.geometry(f.id_b).unwrap();
+    assert_eq!((col.loc.x, col.loc.y), (632, 32));
+    assert_eq!((col.size.w, col.size.h), (616, 768));
+    // Un-maximizing mid-scroll stays a column too.
+    assert!(f.manager.set_maximized(&mut f.comp.state, f.id_b, false));
+    assert_eq!(f.manager.window_layout(f.id_b), Some(WindowLayout::Strip));
+    assert_eq!(f.manager.geometry(f.id_b).unwrap(), col);
+    assert!(!f.manager.set_maximized(&mut f.comp.state, 999, true));
+
+    // The column size is advertised with no Maximized state.
+    pump(&mut f.comp, &mut f.queue_b, &mut f.client_b, |c| {
+        c.configure_sizes.last() == Some(&(616, 768))
+    });
+    let states = f
+        .client_b
+        .configure_states
+        .last()
+        .expect("strip configure must advertise state");
+    assert!(
+        !has_state(states, 1),
+        "scroll column advertised Maximized: {states:?}"
+    );
+}
+
+#[test]
+fn scroll_fullscreen_joins_strip_as_column() {
+    let mut f = layout_windows();
+    assert!(f.manager.set_scroll(&mut f.comp.state, true));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    f.client_b.configure_sizes.clear();
+    f.client_b.configure_states.clear();
+
+    // Fullscreen mid-scroll joins as a same-height column instead of
+    // covering the 1280x800 output.
+    assert!(f.manager.set_fullscreen(&mut f.comp.state, f.id_b, true));
+    assert_eq!(f.manager.window_layout(f.id_b), Some(WindowLayout::Strip));
+    let col = f.manager.geometry(f.id_b).unwrap();
+    assert_eq!((col.loc.x, col.loc.y), (632, 32));
+    assert_eq!((col.size.w, col.size.h), (616, 768));
+    // Un-fullscreen mid-scroll stays a column too.
+    assert!(f.manager.set_fullscreen(&mut f.comp.state, f.id_b, false));
+    assert_eq!(f.manager.window_layout(f.id_b), Some(WindowLayout::Strip));
+    assert_eq!(f.manager.geometry(f.id_b).unwrap(), col);
+    assert!(!f.manager.set_fullscreen(&mut f.comp.state, 999, true));
+
+    // The column size is advertised with no Fullscreen state.
+    pump(&mut f.comp, &mut f.queue_b, &mut f.client_b, |c| {
+        c.configure_sizes.last() == Some(&(616, 768))
+    });
+    let states = f
+        .client_b
+        .configure_states
+        .last()
+        .expect("strip configure must advertise state");
+    assert!(
+        !has_state(states, 2),
+        "scroll column advertised Fullscreen: {states:?}"
+    );
+}
+
+#[test]
+fn scroll_tile_reresolves_to_column() {
+    let mut f = layout_windows();
+    assert!(f.manager.set_scroll(&mut f.comp.state, true));
+
+    // Tiling mid-scroll is already a column, so both sides re-resolve
+    // to the strip instead of splitting the work area into halves.
+    assert!(f
+        .manager
+        .set_tiled(&mut f.comp.state, f.id_b, TileSide::Left));
+    assert_eq!(f.manager.window_layout(f.id_b), Some(WindowLayout::Strip));
+    let col = f.manager.geometry(f.id_b).unwrap();
+    assert_eq!((col.loc.x, col.loc.y), (632, 32));
+    assert_eq!((col.size.w, col.size.h), (616, 768));
+    assert!(f
+        .manager
+        .set_tiled(&mut f.comp.state, f.id_b, TileSide::Right));
+    assert_eq!(f.manager.window_layout(f.id_b), Some(WindowLayout::Strip));
+    assert_eq!(f.manager.geometry(f.id_b).unwrap(), col);
+    assert!(!f.manager.set_tiled(&mut f.comp.state, 999, TileSide::Left));
+}
+
+#[test]
+fn scroll_map_lands_directly_in_strip() {
+    let mut f = layout_windows();
+    assert!(f.manager.set_scroll(&mut f.comp.state, true));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+
+    // Mapping mid-scroll lands directly in the strip: the third
+    // window extends the column sequence instead of cascading.
+    let (conn_c, mut queue_c, mut client_c) = connect(&mut f.comp);
+    map_toplevel(&mut f.comp, &conn_c, &mut queue_c, &mut client_c, "gamma");
+    f.manager.reconcile(&mut f.comp.state);
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    sync_client(&mut f.comp, &conn_c, &mut queue_c, &mut client_c);
+    let id_c = f
+        .manager
+        .model()
+        .windows()
+        .find(|w| w.title == "gamma")
+        .unwrap()
+        .id;
+    for id in [f.id_a, f.id_b, id_c] {
+        assert_eq!(f.manager.window_layout(id), Some(WindowLayout::Strip));
+        let geo = f.manager.geometry(id).unwrap();
+        assert_eq!((geo.loc.y, geo.size.w, geo.size.h), (32, 616, 768));
+    }
+    let mut xs: Vec<i32> = [f.id_a, f.id_b, id_c]
+        .into_iter()
+        .map(|id| f.manager.geometry(id).unwrap().loc.x)
+        .collect();
+    xs.sort();
+    assert_eq!(xs, vec![0, 632, 1264]);
+
+    // The strip size is advertised with no managed xdg state.
+    pump(&mut f.comp, &mut queue_c, &mut client_c, |c| {
+        c.configure_sizes.last() == Some(&(616, 768))
+    });
+    let states = client_c
+        .configure_states
+        .last()
+        .expect("strip configure must advertise state");
+    assert!(
+        !has_state(states, 1) && !has_state(states, 2),
+        "mapped strip column advertised a managed state: {states:?}"
+    );
+}
+
+#[test]
+fn scroll_client_requests_join_as_columns() {
+    let mut f = layout_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    assert!(f.manager.set_scroll(&mut f.comp.state, true));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    f.client_b.configure_sizes.clear();
+    f.client_b.configure_states.clear();
+
+    // Client maximize/unmaximize/fullscreen requests drain through the
+    // same setters, so every direction resolves to a column.
+    f.client_b.toplevel.as_ref().unwrap().set_maximized();
+    f.queue_b.flush().unwrap();
+    f.comp.pump();
+    f.manager.reconcile(&mut f.comp.state);
+    assert_eq!(f.manager.window_layout(f.id_b), Some(WindowLayout::Strip));
+    let col = f.manager.geometry(f.id_b).unwrap();
+    assert_eq!((col.loc.x, col.loc.y), (632, 32));
+    assert_eq!((col.size.w, col.size.h), (616, 768));
+
+    f.client_b.toplevel.as_ref().unwrap().unset_maximized();
+    f.queue_b.flush().unwrap();
+    f.comp.pump();
+    f.manager.reconcile(&mut f.comp.state);
+    assert_eq!(f.manager.window_layout(f.id_b), Some(WindowLayout::Strip));
+    assert_eq!(f.manager.geometry(f.id_b).unwrap(), col);
+
+    f.client_b
+        .toplevel
+        .as_ref()
+        .unwrap()
+        .set_fullscreen(None::<&wayland_client::protocol::wl_output::WlOutput>);
+    f.queue_b.flush().unwrap();
+    f.comp.pump();
+    f.manager.reconcile(&mut f.comp.state);
+    assert_eq!(f.manager.window_layout(f.id_b), Some(WindowLayout::Strip));
+    assert_eq!(f.manager.geometry(f.id_b).unwrap(), col);
+
+    // The column size is advertised with no managed xdg state.
+    pump(&mut f.comp, &mut f.queue_b, &mut f.client_b, |c| {
+        !c.configure_sizes.is_empty()
+    });
+    for states in &f.client_b.configure_states {
+        assert!(
+            !has_state(states, 1) && !has_state(states, 2),
+            "scroll column advertised a managed state: {states:?}"
+        );
+    }
+}
+
+#[test]
+fn gnome_maximized_toggle_scroll_restores_floating_exact() {
+    let mut f = layout_windows();
+    let before_a = f.manager.geometry(f.id_a).unwrap();
+    let before_b = f.manager.geometry(f.id_b).unwrap();
+
+    // Maximizing in gnome stashes the floating geometry; toggling to
+    // scroll keeps that stash alive underneath the strip column.
+    assert!(f.manager.set_maximized(&mut f.comp.state, f.id_a, true));
+    assert_eq!(
+        f.manager.window_layout(f.id_a),
+        Some(WindowLayout::Maximized)
+    );
+    assert!(f.manager.set_scroll(&mut f.comp.state, true));
+    assert_eq!(f.manager.session_mode(), SessionMode::Scroll);
+    assert_eq!(f.manager.window_layout(f.id_a), Some(WindowLayout::Strip));
+    let col = f.manager.geometry(f.id_a).unwrap();
+    assert_eq!((col.loc.x, col.loc.y), (0, 32));
+    assert_eq!((col.size.w, col.size.h), (616, 768));
+
+    // Toggling back restores the exact floating geometry stashed
+    // before the gnome maximize.
+    assert!(f.manager.set_scroll(&mut f.comp.state, false));
+    assert_eq!(f.manager.session_mode(), SessionMode::Gnome);
+    assert_eq!(
+        f.manager.window_layout(f.id_a),
+        Some(WindowLayout::Floating)
+    );
+    assert_eq!(f.manager.geometry(f.id_a).unwrap(), before_a);
+    assert_eq!(f.manager.geometry(f.id_b).unwrap(), before_b);
+}
+
+#[test]
+fn gnome_client_fullscreen_request_applies_on_reconcile() {
+    let mut f = layout_windows();
+    f.client_b
+        .toplevel
+        .as_ref()
+        .unwrap()
+        .set_fullscreen(None::<&wayland_client::protocol::wl_output::WlOutput>);
+    f.queue_b.flush().unwrap();
+    f.comp.pump();
+    f.manager.reconcile(&mut f.comp.state);
+    assert_eq!(
+        f.manager.window_layout(f.id_b),
+        Some(WindowLayout::Fullscreen)
+    );
+    let full = f.manager.geometry(f.id_b).unwrap();
+    assert_eq!((full.loc.x, full.loc.y), (0, 0));
+    assert_eq!((full.size.w, full.size.h), (1280, 800));
+    // And back off again through the protocol.
+    f.client_b.toplevel.as_ref().unwrap().unset_fullscreen();
+    f.queue_b.flush().unwrap();
+    f.comp.pump();
+    f.manager.reconcile(&mut f.comp.state);
+    assert_eq!(
+        f.manager.window_layout(f.id_b),
+        Some(WindowLayout::Floating)
+    );
 }

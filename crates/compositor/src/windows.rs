@@ -348,6 +348,13 @@ impl WindowManager {
         self.surface_index.insert(surface.wl_surface().clone(), id);
         self.stacking.push(id);
         self.place_transient(surface, id);
+        // Forced strip membership: windows mapped mid-scroll join the
+        // strip as columns. Dialogs keep their after-parent stacking
+        // slot, so they land in the adjacent column — the strip is
+        // their rule instead of floating centering.
+        if self.mode == SessionMode::Scroll {
+            self.apply_layout(state, id, WindowLayout::Strip);
+        }
         self.configure(id, true);
         self.apply_focus(state, Some(id));
         id
@@ -940,6 +947,13 @@ impl WindowManager {
     /// Maximize a window into the work area, stashing its floating
     /// geometry for restore. Idempotent; false for unknown ids.
     pub fn set_maximized(&mut self, state: &mut State, id: u64, maximized: bool) -> bool {
+        // Forced strip membership: in scroll mode both directions
+        // resolve to a column (un-maximizing mid-scroll stays a
+        // column); the stashed floating geometry survives underneath
+        // for the toggle back.
+        if self.mode == SessionMode::Scroll && self.windows.contains_key(&id) {
+            return self.apply_layout(state, id, WindowLayout::Strip);
+        }
         if maximized {
             self.apply_layout(state, id, WindowLayout::Maximized)
         } else {
@@ -950,6 +964,11 @@ impl WindowManager {
     /// Cover the output with a window, stashing its floating geometry.
     /// Idempotent; false for unknown ids.
     pub fn set_fullscreen(&mut self, state: &mut State, id: u64, fullscreen: bool) -> bool {
+        // Forced strip membership, like maximize: fullscreen changes
+        // mid-scroll stay columns instead of covering the screen.
+        if self.mode == SessionMode::Scroll && self.windows.contains_key(&id) {
+            return self.apply_layout(state, id, WindowLayout::Strip);
+        }
         if fullscreen {
             self.apply_layout(state, id, WindowLayout::Fullscreen)
         } else {
@@ -960,6 +979,11 @@ impl WindowManager {
     /// Tile a window into one work-area half, stashing its floating
     /// geometry. Idempotent; false for unknown ids.
     pub fn set_tiled(&mut self, state: &mut State, id: u64, side: TileSide) -> bool {
+        // Forced strip membership: tiling mid-scroll is already a
+        // column, so re-resolve instead of splitting the work area.
+        if self.mode == SessionMode::Scroll && self.windows.contains_key(&id) {
+            return self.apply_layout(state, id, WindowLayout::Strip);
+        }
         self.apply_layout(state, id, WindowLayout::Tiled(side))
     }
 
@@ -1448,7 +1472,13 @@ impl WindowManager {
                         self.set_maximized(state, id, true);
                     }
                     ARROW_DOWN_KEYCODE => {
-                        self.restore_window(id);
+                        // Forced strip membership: Down never restores
+                        // floating mid-scroll; re-resolve the column.
+                        if self.mode == SessionMode::Scroll {
+                            self.apply_layout(state, id, WindowLayout::Strip);
+                        } else {
+                            self.restore_window(id);
+                        }
                     }
                     ARROW_LEFT_KEYCODE => {
                         self.toggle_tiled(state, id, TileSide::Left);
