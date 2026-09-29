@@ -181,6 +181,16 @@ fn from_crate_entry(entry: &CrateEntry) -> Option<AppEntry> {
     })
 }
 
+/// Parse one desktop file into a launchable entry: the same
+/// launchability filter [`discover`] applies, so a stack `.desktop`
+/// file the shell cannot spawn is not a stack cell it offers.
+/// Returns `None` for unreadable, hidden, or `Exec`-less files.
+pub fn entry_from_file(path: &std::path::Path) -> Option<AppEntry> {
+    let locales: Vec<String> = LOCALES.iter().map(|s| s.to_string()).collect();
+    let entry = CrateEntry::from_path(path, Some(&locales)).ok()?;
+    from_crate_entry(&entry)
+}
+
 /// [`SearchProvider`] over discovered entries: case-insensitive
 /// substring over name, id, generic name, and keywords.
 pub struct AppProvider {

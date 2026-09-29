@@ -56,7 +56,10 @@ impl ProtocolVersion {
     ///
     /// `0.4` appends the compositor-to-shell `Switcher` message (002
     /// Alt-Tab drive), again last for the same reason.
-    pub const CURRENT: Self = Self { major: 0, minor: 4 };
+    ///
+    /// `0.5` appends the shell-to-compositor `CloseWindow` command
+    /// (dock quit), again last for the same reason.
+    pub const CURRENT: Self = Self { major: 0, minor: 5 };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
     pub const fn new(major: u16, minor: u16) -> Self {
@@ -155,6 +158,14 @@ pub enum CommandKind {
     },
     /// Toggle the shell overview open or closed.
     ToggleOverview,
+    /// Ask a window's client to close (polite close request; the
+    /// client unmaps itself and the compositor drops it on reconcile).
+    /// No activation token: closing is not focus, and unknown ids are
+    /// per-request denials like every other command.
+    CloseWindow {
+        /// Window to close.
+        window: WindowId,
+    },
 }
 
 /// Outcome of one shell command, matched by request id.
@@ -535,8 +546,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_4() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 4));
+    fn current_version_is_0_5() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 5));
     }
 
     #[test]
@@ -548,7 +559,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 2).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 3).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 4).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 5).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 5).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 6).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }
@@ -608,6 +620,7 @@ mod tests {
             },
             CommandKind::FocusWorkspace { workspace: 2 },
             CommandKind::ToggleOverview,
+            CommandKind::CloseWindow { window: 7 },
         ] {
             roundtrip(&Message::Command { id: 99, kind });
         }

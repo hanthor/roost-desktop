@@ -41,6 +41,7 @@ use crate::control::ControlHub;
 use crate::overlay::{overlay_key_for_keycode, Overlay, OverlayWindow};
 use crate::state::TokenStore;
 use crate::supervise::{RecoveryAction, RestartPolicy, ShellDriver, ShellStatus};
+use crate::wallpaper::Wallpaper;
 use crate::windows::{
     translate_input, ManagerInput, TriggerAction, TriggerState, WindowManager, ESCAPE_KEYCODE,
 };
@@ -193,6 +194,7 @@ pub struct Runtime {
     control: ControlHub,
     shell: ShellDriver,
     overlay: Overlay,
+    wallpaper: Wallpaper,
     triggers: TriggerState,
     exit: bool,
     stats: RunStats,
@@ -289,6 +291,7 @@ impl Runtime {
             control,
             shell,
             overlay,
+            wallpaper: Wallpaper::new(),
             triggers: TriggerState::default(),
             exit: false,
             stats: RunStats::default(),
@@ -420,9 +423,12 @@ impl Runtime {
             .flush_clients()
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
         self.manager.reconcile(&mut self.state);
-        let activated = self.control.poll(self.manager.model_mut());
-        for id in activated {
+        let outcome = self.control.poll(self.manager.model_mut());
+        for id in outcome.activated {
             self.manager.focus(&mut self.state, Some(id));
+        }
+        for id in outcome.closed {
+            self.manager.close_window(id);
         }
         // Overview focus follows the hub flag (shell commands and
         // runtime triggers converge here); the next reconcile parks
@@ -464,7 +470,7 @@ impl Runtime {
                 .backend
                 .bind()
                 .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-            let mut elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = self
+            let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = self
                 .manager
                 .visible_windows()
                 .iter()
@@ -480,6 +486,7 @@ impl Runtime {
                 })
                 .collect();
             // Layer shell above windows: panel strip, then overview.
+            let mut elements = elements;
             for (surface, (x, y), _) in crate::layer::layer_layout(&self.state) {
                 elements.extend(render_elements_from_surface_tree(
                     renderer,
@@ -490,6 +497,16 @@ impl Runtime {
                     Kind::Unspecified,
                 ));
             }
+            // Settings wallpaper behind everything. Skipped under the
+            // recovery overlay so the shell-absent red stays
+            // unmistakable. Drawn in its own pass: mixing element
+            // types in one list needs DMA import bounds this backend
+            // does not satisfy.
+            let paper = if self.overlay.visible {
+                None
+            } else {
+                self.wallpaper.element(renderer, size.w, size.h)
+            };
             // The winit EGL surface presents bottom-up (see the Y-flip
             // in the backend's own damage path), so the output
             // transform mirrors vertically; placements stay top-down.
@@ -499,6 +516,10 @@ impl Runtime {
             frame
                 .clear(background, &[damage])
                 .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+            if let Some(paper) = paper.as_ref() {
+                draw_render_elements(&mut frame, 1.0, std::slice::from_ref(paper), &[damage])
+                    .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+            }
             draw_render_elements(&mut frame, 1.0, &elements, &[damage])
                 .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
             let _ = frame

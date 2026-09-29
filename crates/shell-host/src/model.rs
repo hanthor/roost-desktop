@@ -28,6 +28,10 @@ pub struct WindowEntry {
     pub active: bool,
     /// Workspace this window belongs to (0 when unknown).
     pub workspace: u32,
+    /// Client-supplied application id, when the compositor knows it.
+    /// The dock matches running windows to desktop entries on this;
+    /// `None` falls back to title matching.
+    pub app_id: Option<String>,
 }
 
 impl WindowEntry {
@@ -38,12 +42,19 @@ impl WindowEntry {
             title: title.into(),
             active,
             workspace: 0,
+            app_id: None,
         }
     }
 
     /// Attach the workspace, for overview filtering.
     pub fn with_workspace(mut self, workspace: u32) -> Self {
         self.workspace = workspace;
+        self
+    }
+
+    /// Attach the client-supplied application id, for dock matching.
+    pub fn with_app_id(mut self, app_id: Option<String>) -> Self {
+        self.app_id = app_id;
         self
     }
 }

@@ -34,6 +34,7 @@ use wayland_client::{
         wl_compositor::WlCompositor,
         wl_keyboard::{Event as KeyEvent, KeyState, KeymapFormat, WlKeyboard},
         wl_output::WlOutput,
+        wl_pointer::{ButtonState, Event as PointerEvent, WlPointer},
         wl_registry,
         wl_seat::{Capability, Event as SeatEvent, WlSeat},
         wl_shm::Format,
@@ -52,8 +53,12 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 
 use std::sync::Arc;
 
-use crate::apps::{AppProvider, LaunchTracker};
+use crate::apps::{entry_from_file, AppEntry, AppProvider, LaunchTracker};
 use crate::control::{ControlClient, ControlError, Handled};
+use crate::dock::{
+    dock_items, dock_press, dock_slot_at, paint_dock_stacked, read_stack, stack_cell_at,
+    stack_shown, DockAction, DockItem, StackEntry, DOCK_H, STACK_GRID_H,
+};
 use crate::favorites::Favorites;
 use crate::keyboard::{KeyAction, XkbFeed};
 use crate::model::ShellModel;
@@ -62,11 +67,18 @@ use crate::overview::{
     banner_strip_height, paint_panel, BannerCanvas, OverviewCanvas, SwitcherCanvas, BANNER_STRIP_W,
     BYTES_PER_PIXEL, SWITCHER_STRIP_H,
 };
+use crate::popup::{paint_popup, panel_layout, popup_box, PopupBody, PopupState, POPUP_HEIGHT};
 use crate::search::{SearchAction, SearchHub, SearchResult, WindowProvider};
 use crate::tiles::{TileSet, TileState};
+use crate::watcher::{
+    indicator_at, indicator_cells, indicator_right_x, menu_row_at, paint_indicators, IndicatorHost,
+    WatcherBus,
+};
 
 /// Namespace advertised for the panel layer surface.
 pub const PANEL_NAMESPACE: &str = "roost-shell-panel";
+/// Layer namespace for the bottom dock surface.
+pub const DOCK_NAMESPACE: &str = "roost-shell-dock";
 /// Namespace advertised for the overview layer surface.
 pub const OVERVIEW_NAMESPACE: &str = "roost-shell-overview";
 /// Namespace advertised for the Alt-Tab switcher layer surface.
@@ -195,6 +207,37 @@ pub struct ShellHost {
     seat: Option<WlSeat>,
     /// Server keyboard for overview search input.
     keyboard: Option<WlKeyboard>,
+    /// Server pointer for panel presses (clock, tiles, popup
+    /// dismissal). Acquired on pointer capability like the keyboard.
+    pointer: Option<WlPointer>,
+    /// Last pointer position on our panel surface, surface coordinates.
+    /// Button events carry no coordinates, so motion feeds presses.
+    pointer_pos: Option<(f64, f64)>,
+    /// True while the pointer is over the dock surface (set on enter,
+    /// cleared on panel enter): routes button presses to the dock.
+    pointer_on_dock: bool,
+    /// Open calendar/menu popup, if any.
+    popup: PopupState,
+    /// Bottom dock layer surface and its arranged size (`None` before
+    /// the first configure; unit tests never attach it).
+    dock_layer: Option<ZwlrLayerSurfaceV1>,
+    dock_surface: Option<WlSurface>,
+    dock_size: Option<(i32, i32)>,
+    dock_backing: Option<ShmBacking>,
+    dock_paint_key: Option<DockPaintKey>,
+    /// Open folder-stack grid: item index into the current dock
+    /// items, plus the directory read cached at open time.
+    open_stack: Option<usize>,
+    stack_cache: Vec<StackEntry>,
+    /// Last wallpaper URI published to the compositor drop file.
+    published_wallpaper: Option<String>,
+    /// Hosted app indicators (StatusNotifier items).
+    indicators: IndicatorHost,
+    /// D-Bus edge behind the indicator host.
+    watcher: WatcherBus,
+    /// Dock switch/close actions awaiting the control client (the run
+    /// loop's driver consumes them; launch and pin run immediately).
+    pending_dock: Vec<DockAction>,
     /// xkb state behind the keyboard; `None` until the first keymap
     /// arrives, while which keys are ignored.
     xkb: Option<XkbFeed>,
@@ -286,6 +329,18 @@ struct BannerPaintKey {
     height: i32,
 }
 
+/// Repaint the dock strip when any of these change: item order,
+/// running windows, focus, pins, size, or the open stack grid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DockPaintKey {
+    items: Vec<(String, Vec<u64>, bool, bool)>,
+    width: i32,
+    height: i32,
+    /// Open stack item plus its entry names (directory reads refresh
+    /// the grid without reopening it).
+    stack: Option<(usize, Vec<String>)>,
+}
+
 /// Repaint the panel strip when any of these change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PanelPaintKey {
@@ -293,6 +348,11 @@ struct PanelPaintKey {
     states: [(TileState, Option<u8>); 3],
     width: i32,
     height: i32,
+    /// Open popup: calendar carries the day of month (midnight
+    /// repaint), menus carry the tile index.
+    popup: Option<(u8, u32)>,
+    /// Hosted indicators: service, title, and menu labels.
+    indicators: Vec<(String, String, Vec<String>)>,
 }
 
 /// Upload `pixels` (`Argb8888`, `width` x `height`) into a fresh shm
@@ -430,6 +490,21 @@ impl ShellHost {
             panel_paint_key: None,
             seat: None,
             keyboard: None,
+            pointer: None,
+            pointer_pos: None,
+            pointer_on_dock: false,
+            popup: PopupState::default(),
+            dock_layer: None,
+            dock_surface: None,
+            dock_size: None,
+            dock_backing: None,
+            dock_paint_key: None,
+            open_stack: None,
+            stack_cache: Vec::new(),
+            published_wallpaper: None,
+            indicators: IndicatorHost::new(),
+            watcher: WatcherBus::new(),
+            pending_dock: Vec::new(),
             xkb: None,
             search_text: String::new(),
             pending_submit: false,
@@ -729,19 +804,40 @@ impl ShellHost {
     }
 
     /// Paint the panel strip into a fresh shm buffer and attach it.
-    /// Repaints when the size, clock minute, or tile states change;
-    /// called on configure and from the slow status tick.
-    fn paint_panel_surface(&mut self, width: i32) {
-        let height = self.panel.height as i32;
+    /// Repaints when the size, clock minute, tile states, or popup
+    /// change; called on configure and from the slow status tick.
+    /// `height` is the arranged surface height: strip-only, or strip
+    /// plus the popup band while a popup is open.
+    fn paint_panel_surface(&mut self, width: i32, height: i32) {
         if width <= 0 || height <= 0 {
             return;
         }
+        let strip_h = self.panel.height as i32;
         let tiles = self.tiles.tiles();
+        let today = jiff::Zoned::now().date();
+        let popup = self.popup.body().map(|body| match body {
+            PopupBody::Calendar => (0u8, today.day() as u32),
+            PopupBody::Menu(index) => (1u8, index as u32),
+            PopupBody::IndicatorMenu(index) => (2u8, index as u32),
+        });
         let key = PanelPaintKey {
             clock: self.tiles.clock.clone(),
             states: tiles.map(|tile| (tile.state, tile.level)),
             width,
             height,
+            popup,
+            indicators: self
+                .indicators
+                .items()
+                .iter()
+                .map(|item| {
+                    (
+                        item.service.clone(),
+                        item.title.clone(),
+                        item.menu.iter().map(|row| row.label.clone()).collect(),
+                    )
+                })
+                .collect(),
         };
         if self.panel_size == Some((width, height))
             && self.panel_backing.is_some()
@@ -757,9 +853,35 @@ impl ShellHost {
             &mut pixels,
             width,
             height,
+            strip_h,
             &self.tiles.clock,
             &[self.tiles.network, self.tiles.power, self.tiles.sound],
         );
+        if let Some(body) = self.popup.body() {
+            if height > strip_h {
+                let layout = panel_layout(width, strip_h, &self.tiles.clock);
+                let tiles = [self.tiles.network, self.tiles.power, self.tiles.sound];
+                paint_popup(
+                    &mut pixels,
+                    width,
+                    &layout,
+                    body,
+                    today,
+                    &tiles,
+                    self.indicators.items(),
+                );
+            }
+        }
+        // Indicator cells sit left of the sound tile, painted over
+        // the strip in their own pass.
+        let cells = indicator_cells(
+            indicator_right_x(width),
+            strip_h,
+            self.indicators.items().len(),
+        );
+        if !cells.is_empty() {
+            paint_indicators(&mut pixels, width, &cells, self.indicators.items());
+        }
         let Some(surface) = self.surface.as_ref() else {
             return;
         };
@@ -785,10 +907,95 @@ impl ShellHost {
         if due {
             self.tiles.refresh();
             self.tiles_refreshed = Some(now);
+            self.publish_wallpaper();
+            self.poll_indicators();
+        }
+        if let Some((width, height)) = self.panel_size {
+            self.paint_panel_surface(width, height);
+        }
+        if let Some((width, height)) = self.dock_size {
+            self.paint_dock_surface(width, height);
+        }
+    }
+
+    /// Surface height for the current popup state: strip-only, or
+    /// strip plus the popup band while a popup is open. The exclusive
+    /// zone stays at strip height either way so windows only ever
+    /// clear the strip.
+    fn popup_surface_height(&self) -> i32 {
+        self.panel.height as i32
+            + if self.popup.is_open() {
+                POPUP_HEIGHT
+            } else {
+                0
+            }
+    }
+
+    /// Apply the popup state to the live surface: request the matching
+    /// size and repaint at it. The compositor's configure round trip
+    /// repaints again at the arranged size; without Wayland attached
+    /// (tests) this only flips state.
+    fn apply_popup_size(&mut self) {
+        let height = self.popup_surface_height();
+        if let (Some(layer), Some(surface)) = (self.layer_surface.as_ref(), self.surface.as_ref()) {
+            layer.set_size(0, height as u32);
+            surface.commit();
         }
         if let Some((width, _)) = self.panel_size {
-            self.paint_panel_surface(width);
+            self.panel_paint_key = None;
+            self.paint_panel_surface(width, height);
         }
+    }
+
+    /// Close the open popup, if any, shrinking the surface back.
+    /// No-op (beyond state) without Wayland attached.
+    pub fn close_popup(&mut self) {
+        if !self.popup.is_open() {
+            return;
+        }
+        self.popup.dismiss();
+        self.apply_popup_size();
+    }
+
+    /// Left press at panel-surface coordinates: toggle the calendar on
+    /// the clock, a menu on a tile, dismiss anywhere else. Resizes and
+    /// repaints the surface to match. Ignored before the first
+    /// configure (no arranged size to hit-test against yet).
+    pub fn press_panel(&mut self, x: i32, y: i32) {
+        let Some((width, _)) = self.panel_size else {
+            return;
+        };
+        let strip_h = self.panel.height as i32;
+        let layout = panel_layout(width, strip_h, &self.tiles.clock);
+        // Indicator cells toggle their menus before the strip
+        // layout sees the press.
+        let cells = indicator_cells(
+            indicator_right_x(width),
+            strip_h,
+            self.indicators.items().len(),
+        );
+        if let Some(hit) = indicator_at(&cells, x, y) {
+            if self.popup.body() == Some(PopupBody::IndicatorMenu(hit)) {
+                self.popup.dismiss();
+            } else {
+                self.open_indicator_menu(hit);
+            }
+            self.apply_popup_size();
+            return;
+        }
+        // Row presses inside an open indicator menu fire, then
+        // dismiss; anything else falls through to the strip.
+        if let Some(PopupBody::IndicatorMenu(index)) = self.popup.body() {
+            let open_box = popup_box(&layout, PopupBody::IndicatorMenu(index));
+            if open_box.contains(x, y) {
+                self.fire_indicator_row(index, y, &open_box);
+                self.apply_popup_size();
+                return;
+            }
+        }
+        let open_box = self.popup.body().map(|body| popup_box(&layout, body));
+        self.popup.press(&layout, open_box, x, y);
+        self.apply_popup_size();
     }
 
     /// Pinned favorites for the overview grid.
@@ -841,13 +1048,16 @@ impl ShellHost {
         let Some(feed) = self.xkb.as_mut() else {
             return;
         };
+        let action = feed.key(key, pressed);
         if !self.model.is_overview_open() {
-            // Keep press/release tracking current, but change nothing:
-            // the action belongs to a hidden box.
-            let _ = feed.key(key, pressed);
+            // The overview owns keys while open; a popup still answers
+            // Escape when nothing else does.
+            if pressed && matches!(action, KeyAction::Dismiss) {
+                self.close_popup();
+            }
             return;
         }
-        match feed.key(key, pressed) {
+        match action {
             KeyAction::Text(text) => {
                 self.search_text.push_str(&text);
                 self.search.query(&self.search_text);
@@ -857,7 +1067,10 @@ impl ShellHost {
                 self.search.query(&self.search_text);
             }
             KeyAction::Submit => self.pending_submit = true,
-            KeyAction::Dismiss => self.pending_dismiss = true,
+            KeyAction::Dismiss => {
+                self.close_popup();
+                self.pending_dismiss = true;
+            }
             KeyAction::None => {}
         }
     }
@@ -943,6 +1156,378 @@ impl ShellHost {
         surface.commit();
         self.surface = Some(surface);
         self.layer_surface = Some(layer_surface);
+    }
+
+    /// Create the dock `wl_surface` plus its bottom-anchored layer
+    /// surface. Overlay layer with no exclusive zone: the dock floats
+    /// over windows like the switcher, so maximized geometry is
+    /// untouched.
+    fn create_dock_surface(
+        &mut self,
+        compositor: &WlCompositor,
+        layer_shell: &ZwlrLayerShellV1,
+        qh: &QueueHandle<Self>,
+    ) {
+        let surface = compositor.create_surface(qh, ());
+        let layer_surface = layer_shell.get_layer_surface(
+            &surface,
+            None,
+            Layer::Overlay,
+            DOCK_NAMESPACE.to_owned(),
+            qh,
+            (),
+        );
+        layer_surface.set_size(0, DOCK_H as u32);
+        layer_surface.set_anchor(Anchor::Bottom | Anchor::Left | Anchor::Right);
+        layer_surface.set_exclusive_zone(0);
+        layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
+        surface.commit();
+        self.dock_surface = Some(surface);
+        self.dock_layer = Some(layer_surface);
+    }
+
+    /// Current dock items from favorites, desktop entries, and the
+    /// compositor window list.
+    fn dock_items(&self) -> Vec<DockItem> {
+        dock_items(self.favorites.ids(), &self.apps, self.model.windows())
+    }
+
+    /// Publish the snapshot wallpaper URI to the compositor drop
+    /// file when it changes. Best-effort like favorites saves: a
+    /// failed write leaves the last published file in place and the
+    /// compositor keeps its current image.
+    fn publish_wallpaper(&mut self) {
+        let current = self.tiles.settings.wallpaper_uri.clone();
+        if current == self.published_wallpaper {
+            return;
+        }
+        let path = self.tiles.runtime_dir().join("roost-wallpaper");
+        let done = match &current {
+            Some(uri) => std::fs::write(&path, uri).is_ok(),
+            None => std::fs::remove_file(&path).is_ok(),
+        };
+        if done {
+            self.published_wallpaper = current;
+        }
+    }
+
+    /// Poll the indicator edge: take the watcher role when free,
+    /// drop vanished clients, and refresh hosted icons. Empty host
+    /// without a bus, by design.
+    fn poll_indicators(&mut self) {
+        if !self.watcher.ensure() {
+            return;
+        }
+        let before = self.indicators.items().to_vec();
+        let registered = self.watcher.registered();
+        let live = self.watcher.prune_vanished(&registered);
+        let gone: Vec<String> = registered
+            .iter()
+            .filter(|service| !live.contains(service))
+            .cloned()
+            .collect();
+        self.watcher.forget(&gone);
+        for service in &live {
+            if let Some(item) = self.watcher.fetch_item(service) {
+                self.indicators.upsert(item);
+            }
+        }
+        self.indicators.retain_registered(&live);
+        // An open menu follows its item's rows.
+        if let Some(PopupBody::IndicatorMenu(index)) = self.popup.body() {
+            if let Some(service) = self
+                .indicators
+                .items()
+                .get(index)
+                .map(|item| item.service.clone())
+            {
+                let menu = self.watcher.fetch_menu(&service);
+                if let Some(mut item) = self.indicators.get(&service).cloned() {
+                    item.menu = menu;
+                    self.indicators.upsert(item);
+                }
+            }
+        }
+        if self.indicators.items() != before.as_slice() {
+            self.panel_paint_key = None;
+        }
+    }
+
+    /// Open an indicator's menu, fetching its rows first. An empty
+    /// menu activates the item directly instead of opening nothing.
+    fn open_indicator_menu(&mut self, index: usize) {
+        let Some(service) = self
+            .indicators
+            .items()
+            .get(index)
+            .map(|item| item.service.clone())
+        else {
+            return;
+        };
+        let menu = self.watcher.fetch_menu(&service);
+        if menu.is_empty() {
+            self.watcher.activate(&service);
+            self.popup.dismiss();
+        } else {
+            if let Some(mut item) = self.indicators.get(&service).cloned() {
+                item.menu = menu;
+                self.indicators.upsert(item);
+            }
+            self.popup.open(PopupBody::IndicatorMenu(index));
+        }
+        self.panel_paint_key = None;
+    }
+
+    /// Fire the menu row under a press inside an open indicator menu,
+    /// then dismiss either way.
+    fn fire_indicator_row(&mut self, index: usize, y: i32, open_box: &crate::popup::Rect) {
+        if let Some(item) = self.indicators.items().get(index).cloned() {
+            if let Some(row) = menu_row_at(open_box, y, item.menu.len()) {
+                if let Some(entry) = item.menu.get(row) {
+                    if entry.enabled {
+                        self.watcher.fire_menu(&item.service, entry.id);
+                    }
+                }
+            }
+        }
+        self.popup.dismiss();
+        self.panel_paint_key = None;
+    }
+
+    /// Surface height for the open stack grid: strip-only, or strip
+    /// plus the grid band while a stack is open.
+    fn dock_surface_height(&self) -> i32 {
+        DOCK_H
+            + if self.open_stack.is_some() {
+                STACK_GRID_H
+            } else {
+                0
+            }
+    }
+
+    /// Directory backing the open stack item, if it still resolves.
+    fn open_stack_dir(&self, items: &[DockItem]) -> Option<std::path::PathBuf> {
+        let index = self.open_stack?;
+        items.get(index)?.stack_dir.clone()
+    }
+
+    /// Apply the stack state to the live surface: request the
+    /// matching size and repaint at it. The compositor's configure
+    /// round trip repaints again at the arranged size; without
+    /// Wayland attached (tests) this only flips state.
+    fn apply_dock_size(&mut self) {
+        let height = self.dock_surface_height();
+        if let (Some(layer), Some(surface)) = (self.dock_layer.as_ref(), self.dock_surface.as_ref())
+        {
+            layer.set_size(0, height as u32);
+            surface.commit();
+        }
+        if let Some((width, _)) = self.dock_size {
+            self.dock_paint_key = None;
+            self.paint_dock_surface(width, height);
+        }
+    }
+
+    /// Open (or re-target) the stack grid for item `index`, or close
+    /// it with `None`. Refreshes the directory read on open.
+    fn set_stack(&mut self, open: Option<usize>) {
+        self.open_stack = open;
+        self.stack_cache = open
+            .and_then(|index| self.dock_items().get(index)?.stack_dir.clone())
+            .map(|dir| read_stack(&dir))
+            .unwrap_or_default();
+        self.apply_dock_size();
+    }
+
+    /// Paint the dock strip into a fresh shm buffer and attach it.
+    /// Repaints when items, focus, pins, size, or the stack grid
+    /// change; called on configure and from the slow status tick.
+    fn paint_dock_surface(&mut self, width: i32, height: i32) {
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        let items = self.dock_items();
+        // Refresh the grid read while open: directory contents may
+        // change under the shell without any dock event.
+        if let Some(dir) = self.open_stack_dir(&items) {
+            let fresh = read_stack(&dir);
+            if fresh != self.stack_cache {
+                self.stack_cache = fresh;
+            }
+        }
+        let stack = self.open_stack.map(|index| {
+            (
+                index,
+                self.stack_cache
+                    .iter()
+                    .map(|entry| entry.name.clone())
+                    .collect(),
+            )
+        });
+        let key = DockPaintKey {
+            items: items
+                .iter()
+                .map(|item| {
+                    (
+                        item.app_id.clone(),
+                        item.windows.clone(),
+                        item.active,
+                        item.pinned,
+                    )
+                })
+                .collect(),
+            width,
+            height,
+            stack,
+        };
+        if self.dock_size == Some((width, height))
+            && self.dock_backing.is_some()
+            && self.dock_paint_key.as_ref() == Some(&key)
+        {
+            return;
+        }
+        let Some(wayland) = self.wayland.clone() else {
+            return;
+        };
+        let mut pixels = vec![0u8; width as usize * height as usize * BYTES_PER_PIXEL];
+        let grid = if self.open_stack.is_some() {
+            Some(self.stack_cache.as_slice())
+        } else {
+            None
+        };
+        paint_dock_stacked(&mut pixels, width, height, &items, grid);
+        let Some(dock) = self.dock_surface.as_ref() else {
+            return;
+        };
+        if let Some(backing) = shm_upload(&wayland.shm, &wayland.qh, &pixels, width, height) {
+            dock.attach(Some(&backing.buffer), 0, 0);
+            dock.damage(0, 0, width, height);
+            dock.commit();
+            self.dock_backing = Some(backing);
+            self.dock_size = Some((width, height));
+            self.dock_paint_key = Some(key);
+        }
+    }
+
+    /// Press at dock-surface coordinates with a mouse button: run
+    /// launch/pin immediately, arm switch/close for the control loop.
+    /// An open stack grid takes grid-cell presses first; any other
+    /// dock press closes the grid. Ignored before the first
+    /// configure.
+    pub fn press_dock(&mut self, x: i32, y: i32, button: u32) {
+        let Some((width, _)) = self.dock_size else {
+            return;
+        };
+        let items = self.dock_items();
+        let count = items.len();
+        let origin = if self.open_stack.is_some() {
+            STACK_GRID_H
+        } else {
+            0
+        };
+        // Grid-band presses activate (left) or dismiss (other
+        // buttons) a cell, then close the grid either way.
+        if self.open_stack.is_some() && y < STACK_GRID_H {
+            if button == crate::dock::BTN_LEFT {
+                let shown = stack_shown(width, self.stack_cache.len());
+                if let Some(cell) = stack_cell_at(width, x, y, shown) {
+                    let entry = self.stack_cache[cell].clone();
+                    self.activate_stack_entry(&entry);
+                }
+            }
+            self.set_stack(None);
+            return;
+        }
+        let slots = (0..count)
+            .map(|index| dock_slot_at(width, index, count, origin))
+            .collect::<Vec<_>>();
+        let hit = slots
+            .iter()
+            .position(|(sx, sy, w, h)| x >= *sx && x < *sx + *w && y >= *sy && y < *sy + *h);
+        // The grid's own item toggles it on left press; any other
+        // strip press (or a miss) closes it before the action runs.
+        if self.open_stack.is_some() {
+            if hit == self.open_stack && button == crate::dock::BTN_LEFT {
+                self.set_stack(None);
+                return;
+            }
+            self.set_stack(None);
+        }
+        let Some(index) = hit else {
+            return;
+        };
+        self.run_dock_press(&items, index, button);
+    }
+
+    /// Launch a stack cell: desktop files through their parsed entry,
+    /// plain files through the default handler (`xdg-open`).
+    fn activate_stack_entry(&mut self, entry: &StackEntry) {
+        if entry.app {
+            if let Some(parsed) = entry_from_file(&entry.path) {
+                let _ = self.launcher.launch(&parsed);
+            }
+        } else {
+            let synthetic = AppEntry {
+                app_id: format!("xdg-open:{}", entry.name),
+                name: entry.name.clone(),
+                generic_name: None,
+                keywords: Vec::new(),
+                argv: vec![
+                    std::ffi::OsString::from("xdg-open"),
+                    entry.path.as_os_str().to_owned(),
+                ],
+                icon: None,
+            };
+            let _ = self.launcher.launch(&synthetic);
+        }
+        self.dock_paint_key = None;
+    }
+
+    /// Resolve one icon-strip press to its [`DockAction`] and run it.
+    fn run_dock_press(&mut self, items: &[DockItem], index: usize, button: u32) {
+        let focused: Vec<u64> = self
+            .model
+            .windows()
+            .iter()
+            .filter(|w| w.active)
+            .map(|w| w.id)
+            .collect();
+        let Some(action) = dock_press(items, &focused, index, button) else {
+            return;
+        };
+        match action {
+            DockAction::Launch(app_id) => {
+                if let Some(entry) = self.apps.entry(&app_id) {
+                    let _ = self.launcher.launch(entry);
+                }
+                self.dock_paint_key = None;
+            }
+            DockAction::TogglePin(app_id) => {
+                if self.favorites.contains(&app_id) {
+                    self.favorites.unpin(&app_id);
+                } else {
+                    self.favorites.pin(&app_id);
+                }
+                let _ = self.favorites.save();
+                // An unpinned stack (or a reorder under the open
+                // index) must not leave the grid pointing sideways.
+                if self.open_stack_dir(&self.dock_items()).is_none() {
+                    self.set_stack(None);
+                }
+                self.dock_paint_key = None;
+            }
+            DockAction::OpenStack(index) => {
+                self.set_stack(Some(index));
+            }
+            DockAction::Switch(_) | DockAction::Close(_) => {
+                self.pending_dock.push(action);
+            }
+        }
+    }
+
+    /// Take armed dock switch/close actions for the run loop's driver.
+    pub fn take_dock_actions(&mut self) -> Vec<DockAction> {
+        std::mem::take(&mut self.pending_dock)
     }
 
     /// Whether the event loop should keep dispatching.
@@ -1036,7 +1621,29 @@ fn drive_key_actions(host: &mut ShellHost, control: &mut ControlClient) {
         }
     }
     if host.take_dismiss() {
+        host.close_popup();
         let _ = control.toggle_overview();
+    }
+}
+
+/// Consume armed dock switch/close actions through the control client.
+/// Best-effort like overview hits: failures must not wedge the loop.
+/// Launch, pin, and stack toggles already ran locally in
+/// [`ShellHost::press_dock`](ShellHost::press_dock); only the actions
+/// needing the compositor travel here.
+fn drive_dock_actions(host: &mut ShellHost, control: &mut ControlClient) {
+    for action in host.take_dock_actions() {
+        match action {
+            DockAction::Switch(window) => {
+                if host.model.select_window(window) {
+                    let _ = control.activate_window(window);
+                }
+            }
+            DockAction::Close(window) => {
+                let _ = control.close_window(window);
+            }
+            DockAction::Launch(_) | DockAction::TogglePin(_) | DockAction::OpenStack(_) => {}
+        }
     }
 }
 
@@ -1085,9 +1692,10 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for ShellHost {
             } => {
                 if state.layer_surface.as_ref() == Some(proxy) {
                     proxy.ack_configure(serial);
-                    // First configure carries the arranged width: paint
-                    // the strip and commit the buffer with it.
-                    state.paint_panel_surface(width as i32);
+                    // Configure carries the arranged size: paint the
+                    // strip (plus the popup band when one is open) and
+                    // commit the buffer with it.
+                    state.paint_panel_surface(width as i32, height as i32);
                     if let Some(surface) = state.surface.as_ref() {
                         surface.commit();
                     }
@@ -1129,6 +1737,16 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for ShellHost {
                             banners.width = width as i32;
                             banners.height = height as i32;
                         }
+                    }
+                } else if state.dock_layer.as_ref() == Some(proxy) {
+                    proxy.ack_configure(serial);
+                    // Size arrives here; the next update pass paints.
+                    if width > 0 && height > 0 {
+                        state.dock_size = Some((width as i32, height as i32));
+                        state.paint_dock_surface(width as i32, height as i32);
+                    }
+                    if let Some(surface) = state.dock_surface.as_ref() {
+                        surface.commit();
                     }
                 } else {
                     proxy.ack_configure(serial);
@@ -1173,7 +1791,7 @@ impl Dispatch<WlSeat, ()> for ShellHost {
         _: &Connection,
         qh: &QueueHandle<Self>,
     ) {
-        // Late keyboard capability (e.g. seat bound before the
+        // Late input capability (e.g. seat bound before the
         // compositor attached input): acquire once, then hold.
         if let SeatEvent::Capabilities { capabilities } = event {
             let offers_keyboard = matches!(
@@ -1182,6 +1800,13 @@ impl Dispatch<WlSeat, ()> for ShellHost {
             );
             if offers_keyboard && state.keyboard.is_none() {
                 state.keyboard = Some(seat.get_keyboard(qh, ()));
+            }
+            let offers_pointer = matches!(
+                capabilities,
+                WEnum::Value(caps) if caps.contains(Capability::Pointer)
+            );
+            if offers_pointer && state.pointer.is_none() {
+                state.pointer = Some(seat.get_pointer(qh, ()));
             }
         }
     }
@@ -1222,6 +1847,70 @@ impl Dispatch<WlKeyboard, ()> for ShellHost {
             } => {
                 if let Some(feed) = state.xkb.as_mut() {
                     feed.update_mask(mods_depressed, mods_latched, mods_locked, group);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Left mouse button (evdev): the only press the panel acts on.
+const BTN_LEFT: u32 = 0x110;
+
+impl Dispatch<WlPointer, ()> for ShellHost {
+    fn event(
+        state: &mut Self,
+        _: &WlPointer,
+        event: PointerEvent,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            PointerEvent::Enter {
+                surface,
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                if Some(&surface) == state.surface.as_ref() {
+                    state.pointer_pos = Some((surface_x, surface_y));
+                    state.pointer_on_dock = false;
+                } else if Some(&surface) == state.dock_surface.as_ref() {
+                    state.pointer_pos = Some((surface_x, surface_y));
+                    state.pointer_on_dock = true;
+                }
+            }
+            PointerEvent::Leave { surface, .. } => {
+                if Some(&surface) == state.surface.as_ref()
+                    || Some(&surface) == state.dock_surface.as_ref()
+                {
+                    state.pointer_pos = None;
+                }
+            }
+            PointerEvent::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                // Motion carries no surface: only meaningful while the
+                // pointer is over our surface from a tracked enter.
+                if state.pointer_pos.is_some() {
+                    state.pointer_pos = Some((surface_x, surface_y));
+                }
+            }
+            PointerEvent::Button {
+                button,
+                state: pressed,
+                ..
+            } => {
+                let pressed_now = matches!(pressed, WEnum::Value(ButtonState::Pressed));
+                if let (true, Some((x, y))) = (pressed_now, state.pointer_pos) {
+                    if state.pointer_on_dock {
+                        state.press_dock(x as i32, y as i32, button);
+                    } else if button == BTN_LEFT {
+                        state.press_panel(x as i32, y as i32);
+                    }
                 }
             }
             _ => {}
@@ -1300,6 +1989,7 @@ pub fn run_panel_with_control(
     host.attach_wayland(compositor.clone(), layer_shell.clone(), shm, qh.clone());
     host.attach_seat(seat.clone(), &qh);
     host.create_panel_surface(&compositor, &layer_shell, &qh);
+    host.create_dock_surface(&compositor, &layer_shell, &qh);
     drop((globals, compositor, layer_shell));
 
     let mut control = match control_path {
@@ -1320,6 +2010,7 @@ pub fn run_panel_with_control(
             pump_wayland(&conn, &mut queue, &mut host)?;
             drive_control(control, &mut host);
             drive_key_actions(&mut host, control);
+            drive_dock_actions(&mut host, control);
             host.update_overview(control.revision());
             host.update_switcher();
             host.update_panel_status();
@@ -1393,6 +2084,339 @@ mod tests {
                 Favorites::load(dir.path().join(crate::favorites::FAVORITES_FILE)),
             );
             (host, dir)
+        }
+
+        /// Panel presses toggle popups and grow the surface, all
+        /// without Wayland attached (state only, no paint).
+        #[test]
+        fn presses_toggle_popup_and_resize_height() {
+            use crate::popup::{PopupBody, POPUP_HEIGHT};
+            let (mut host, _dir) = test_host();
+            host.panel_size = Some((1280, 32));
+            host.tiles.clock = "12:34".to_owned();
+            assert!(!host.popup.is_open());
+            assert_eq!(host.popup_surface_height(), 32);
+            // Clock press opens the calendar and grows the surface.
+            host.press_panel(640, 16);
+            assert_eq!(host.popup.body(), Some(PopupBody::Calendar));
+            assert_eq!(host.popup_surface_height(), 32 + POPUP_HEIGHT);
+            // Second press on the clock closes it again.
+            host.press_panel(640, 16);
+            assert!(!host.popup.is_open());
+            assert_eq!(host.popup_surface_height(), 32);
+            // Tile press opens that tile's menu; outside press closes.
+            host.press_panel(1260, 16);
+            assert!(host.popup.is_open());
+            host.press_panel(4, 100);
+            assert!(!host.popup.is_open());
+        }
+
+        /// `close_popup` is a no-op when nothing is open and shrinks
+        /// back when something is.
+        #[test]
+        fn close_popup_only_acts_when_open() {
+            let (mut host, _dir) = test_host();
+            host.panel_size = Some((1280, 32));
+            host.tiles.clock = "12:34".to_owned();
+            host.close_popup();
+            assert_eq!(host.popup_surface_height(), 32);
+            host.press_panel(640, 16);
+            assert!(host.popup.is_open());
+            host.close_popup();
+            assert!(!host.popup.is_open());
+            assert_eq!(host.popup_surface_height(), 32);
+        }
+
+        /// Presses before the first configure are ignored: there is
+        /// no arranged size to hit-test against yet.
+        #[test]
+        fn presses_need_an_arranged_size() {
+            let (mut host, _dir) = test_host();
+            assert_eq!(host.panel_size, None);
+            host.press_panel(640, 16);
+            assert!(!host.popup.is_open());
+        }
+
+        /// Dock presses with a launchable entry, without Wayland.
+        fn dock_test_host() -> (ShellHost, tempfile::TempDir) {
+            use crate::apps::AppEntry;
+            let dir = tempfile::tempdir().expect("tempdir");
+            let true_entry = AppEntry {
+                app_id: "org.example.True.desktop".to_owned(),
+                name: "True".to_owned(),
+                generic_name: None,
+                keywords: Vec::new(),
+                argv: vec![std::ffi::OsString::from("/bin/true")],
+                icon: None,
+            };
+            let mut host = ShellHost::new(
+                PanelConfig::default(),
+                AppProvider::new(vec![true_entry]),
+                Favorites::load(dir.path().join(crate::favorites::FAVORITES_FILE)),
+            );
+            host.favorites.pin("org.example.True.desktop");
+            host.dock_size = Some((1280, crate::dock::DOCK_H));
+            (host, dir)
+        }
+
+        /// Left press on a stopped pinned app launches it locally
+        /// (`/bin/true`, reaped by the tracker) and arms nothing.
+        #[test]
+        fn dock_left_press_launches_stopped_app() {
+            let (mut host, _dir) = dock_test_host();
+            // Single item: slot 0 centers in 1280.
+            host.press_dock(640, 28, crate::dock::BTN_LEFT);
+            assert!(host.pending_dock.is_empty());
+            let states = host.launcher.states();
+            assert_eq!(states.len(), 1, "launch must track one app");
+        }
+
+        /// Right press toggles the pin and persists favorites. Note
+        /// unpinning removes the slot, so re-pinning presses the
+        /// running (now unpinned) item instead.
+        #[test]
+        fn dock_right_press_toggles_pin() {
+            use crate::dock::BTN_RIGHT;
+            let (mut host, _dir) = dock_test_host();
+            assert!(host.favorites.contains("org.example.True.desktop"));
+            host.press_dock(640, 28, BTN_RIGHT);
+            assert!(!host.favorites.contains("org.example.True.desktop"));
+            host.model.apply_window_list(
+                vec![crate::model::WindowEntry::new(7, "True", false)
+                    .with_app_id(Some("org.example.True".to_owned()))],
+                vec![0],
+            );
+            host.press_dock(640, 28, BTN_RIGHT);
+            assert!(host.favorites.contains("org.example.True.desktop"));
+        }
+
+        /// Switch and close arm the pending queue for the control
+        /// loop instead of running inline.
+        #[test]
+        fn dock_switch_and_close_arm_pending() {
+            use crate::dock::{DockAction, BTN_LEFT, BTN_MIDDLE};
+            let (mut host, _dir) = dock_test_host();
+            host.model.apply_window_list(
+                vec![crate::model::WindowEntry::new(7, "True", true)
+                    .with_app_id(Some("org.example.True".to_owned()))],
+                vec![0],
+            );
+            host.press_dock(640, 28, BTN_LEFT);
+            assert_eq!(host.take_dock_actions(), vec![DockAction::Switch(7)]);
+            host.press_dock(640, 28, BTN_MIDDLE);
+            assert_eq!(host.take_dock_actions(), vec![DockAction::Close(7)]);
+            assert!(host.take_dock_actions().is_empty());
+        }
+
+        /// Dock presses before the first configure are ignored.
+        #[test]
+        fn dock_presses_need_an_arranged_size() {
+            use crate::dock::BTN_LEFT;
+            let (mut host, _dir) = dock_test_host();
+            host.dock_size = None;
+            host.press_dock(640, 28, BTN_LEFT);
+            assert!(host.pending_dock.is_empty());
+            assert!(host.launcher.states().is_empty());
+        }
+
+        /// Stack fixture: a pinned `stack:<dir>` favorite backed by
+        /// one launchable desktop file plus one plain file.
+        fn stack_test_host() -> (ShellHost, tempfile::TempDir) {
+            use crate::apps::AppEntry;
+            let dir = tempfile::tempdir().expect("tempdir");
+            let stack = dir.path().join("stack");
+            std::fs::create_dir_all(&stack).expect("stack dir");
+            std::fs::write(
+                stack.join("tool.desktop"),
+                "[Desktop Entry]\nName=Tool\nExec=/bin/true\nType=Application\n",
+            )
+            .expect("stack desktop file");
+            std::fs::write(stack.join("notes.txt"), "plain file cell").expect("stack plain file");
+            let mut host = ShellHost::new(
+                PanelConfig::default(),
+                AppProvider::new(vec![AppEntry {
+                    app_id: "org.example.True.desktop".to_owned(),
+                    name: "True".to_owned(),
+                    generic_name: None,
+                    keywords: Vec::new(),
+                    argv: vec![std::ffi::OsString::from("/bin/true")],
+                    icon: None,
+                }]),
+                Favorites::load(dir.path().join(crate::favorites::FAVORITES_FILE)),
+            );
+            let fav = format!("{}{}", crate::dock::STACK_PREFIX, stack.display());
+            assert!(host.favorites.pin(&fav), "stack favorite must pin");
+            host.dock_size = Some((1280, crate::dock::DOCK_H));
+            (host, dir)
+        }
+
+        /// Left press on a stack item opens the grid and grows the
+        /// surface; a second press on the item closes it again.
+        #[test]
+        fn stack_press_opens_grid_and_grows_surface() {
+            use crate::dock::{BTN_LEFT, DOCK_H, STACK_GRID_H};
+            let (mut host, _dir) = stack_test_host();
+            assert_eq!(host.dock_surface_height(), DOCK_H);
+            host.press_dock(640, 28, BTN_LEFT);
+            assert_eq!(host.open_stack, Some(0));
+            assert_eq!(host.stack_cache.len(), 2);
+            assert_eq!(host.dock_surface_height(), DOCK_H + STACK_GRID_H);
+            // Apps sort first: cell zero launches.
+            assert!(host.stack_cache[0].app);
+            // Second press on the same (shifted-down) slot toggles.
+            host.press_dock(640, STACK_GRID_H + 28, BTN_LEFT);
+            assert_eq!(host.open_stack, None);
+            assert_eq!(host.dock_surface_height(), DOCK_H);
+        }
+
+        /// Left press on a grid cell launches it (`/bin/true`,
+        /// tracked) and closes the grid.
+        #[test]
+        fn stack_cell_press_launches_and_closes() {
+            use crate::dock::{stack_cell_origin, BTN_LEFT};
+            let (mut host, _dir) = stack_test_host();
+            host.press_dock(640, 28, BTN_LEFT);
+            assert_eq!(host.open_stack, Some(0));
+            let (cx, cy) = stack_cell_origin(1280, 0);
+            host.press_dock(cx + 10, cy + 10, BTN_LEFT);
+            assert_eq!(host.open_stack, None);
+            assert_eq!(host.launcher.states().len(), 1);
+            // A file cell opens through the handler and also closes.
+            host.press_dock(640, 28, BTN_LEFT);
+            let (fx, fy) = stack_cell_origin(1280, 1);
+            host.press_dock(fx + 10, fy + 10, BTN_LEFT);
+            assert_eq!(host.open_stack, None);
+        }
+
+        /// Unpinning the open stack closes the grid with it.
+        #[test]
+        fn stack_unpin_closes_grid() {
+            use crate::dock::{BTN_LEFT, BTN_RIGHT, STACK_GRID_H};
+            let (mut host, _dir) = stack_test_host();
+            host.press_dock(640, 28, BTN_LEFT);
+            assert_eq!(host.open_stack, Some(0));
+            host.press_dock(640, STACK_GRID_H + 28, BTN_RIGHT);
+            assert_eq!(host.open_stack, None);
+            assert!(host.dock_items().is_empty());
+        }
+
+        /// Indicator fixture: arranged panel size, fixed clock, one
+        /// hosted item, and no bus behind the watcher (disconnected in
+        /// tests, so menu fetches read empty).
+        fn indicator_test_host() -> (ShellHost, tempfile::TempDir) {
+            use crate::watcher::{IndicatorIcon, IndicatorItem};
+            let (mut host, dir) = test_host();
+            host.panel_size = Some((1280, 32));
+            host.tiles.clock = "12:34".to_owned();
+            host.indicators.upsert(IndicatorItem {
+                service: "test.indicator".to_owned(),
+                title: "Test".to_owned(),
+                icon: IndicatorIcon::Named("test".to_owned()),
+                menu: Vec::new(),
+            });
+            (host, dir)
+        }
+
+        /// Cell press with an empty menu activates directly: no popup
+        /// opens (nothing to show) and the item stays hosted.
+        #[test]
+        fn indicator_press_with_empty_menu_activates_and_dismisses() {
+            let (mut host, _dir) = indicator_test_host();
+            assert_eq!(host.indicators.items().len(), 1);
+            let cells =
+                crate::watcher::indicator_cells(crate::watcher::indicator_right_x(1280), 32, 1);
+            let cell = cells[0];
+            host.press_panel(cell.x + cell.w / 2, cell.y + cell.h / 2);
+            assert!(!host.popup.is_open());
+            assert_eq!(host.indicators.items().len(), 1);
+        }
+
+        /// Row press inside an open indicator menu dismisses it, for
+        /// enabled and disabled rows alike.
+        #[test]
+        fn indicator_menu_row_press_fires_and_dismisses() {
+            use crate::popup::{panel_layout, popup_box, PopupBody};
+            use crate::watcher::MenuEntry;
+            let (mut host, _dir) = indicator_test_host();
+            if let Some(mut item) = host.indicators.get("test.indicator").cloned() {
+                item.menu = vec![
+                    MenuEntry {
+                        id: 7,
+                        label: "open".to_owned(),
+                        enabled: true,
+                    },
+                    MenuEntry {
+                        id: 8,
+                        label: "quit".to_owned(),
+                        enabled: false,
+                    },
+                ];
+                host.indicators.upsert(item);
+            }
+            host.popup.open(PopupBody::IndicatorMenu(0));
+            let layout = panel_layout(1280, 32, &host.tiles.clock);
+            let open_box = popup_box(&layout, PopupBody::IndicatorMenu(0));
+            // First-row center: inside the box, on row 0.
+            host.press_panel(open_box.x + open_box.w / 2, open_box.y + 10 + 12);
+            assert!(!host.popup.is_open(), "menu row press dismisses");
+            // Reopen and press the disabled second row: still dismisses.
+            host.popup.open(PopupBody::IndicatorMenu(0));
+            host.press_panel(open_box.x + open_box.w / 2, open_box.y + 10 + 24 + 12);
+            assert!(!host.popup.is_open(), "disabled row press dismisses");
+        }
+
+        /// `paint_panel_surface` carries indicator pixels: the shm
+        /// backing painted with an item hosted differs from the bare
+        /// strip and paints strictly more glyph pixels.
+        #[test]
+        fn paint_panel_surface_includes_indicator_pixels() {
+            use crate::overview::{BG, BYTES_PER_PIXEL};
+            use crate::watcher::{IndicatorIcon, IndicatorItem};
+            let mut comp = TestCompositor::new();
+            let (server_stream, client_stream) = UnixStream::pair().unwrap();
+            comp.add_client(server_stream);
+            let conn = Connection::from_socket(client_stream).unwrap();
+            let mut queue = conn.new_event_queue();
+            let (mut host, _dir) = test_host();
+            attach_host(&mut comp, &conn, &mut queue, &mut host);
+            let wayland = host.wayland.clone().expect("attached");
+            host.surface = Some(wayland.compositor.create_surface(&wayland.qh, ()));
+            host.tiles.clock = "12:34".to_owned();
+
+            fn backing_pixels(host: &mut ShellHost) -> Vec<u8> {
+                use std::io::{Read, Seek, SeekFrom};
+                let backing = host.panel_backing.as_mut().expect("panel painted");
+                backing._file.seek(SeekFrom::Start(0)).expect("rewind");
+                let mut out = Vec::new();
+                backing._file.read_to_end(&mut out).expect("read");
+                out
+            }
+
+            fn non_bg(pixels: &[u8]) -> usize {
+                let (chunks, _) = pixels.as_chunks::<BYTES_PER_PIXEL>();
+                chunks.iter().filter(|pixel| **pixel != BG).count()
+            }
+
+            host.paint_panel_surface(800, 32);
+            let plain = backing_pixels(&mut host);
+            assert_eq!(plain.len(), 800 * 32 * BYTES_PER_PIXEL);
+
+            host.indicators.upsert(IndicatorItem {
+                service: "test.indicator".to_owned(),
+                title: "Test".to_owned(),
+                icon: IndicatorIcon::Named("test".to_owned()),
+                menu: Vec::new(),
+            });
+            host.panel_backing = None;
+            host.panel_paint_key = None;
+            host.panel_size = None;
+            host.paint_panel_surface(800, 32);
+            let with_indicator = backing_pixels(&mut host);
+            assert_ne!(
+                plain, with_indicator,
+                "indicator pixels reach the panel surface"
+            );
+            assert!(non_bg(&with_indicator) > non_bg(&plain));
         }
 
         /// Registry observer on a throwaway queue, used only to learn

@@ -49,6 +49,7 @@ pub mod overlay;
 pub mod runtime;
 pub mod state;
 pub mod supervise;
+pub mod wallpaper;
 pub mod windows;
 
 /// Compositor dispatch state: protocol states plus their handlers.

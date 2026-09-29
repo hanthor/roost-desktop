@@ -17,13 +17,13 @@ use crate::tiles::{Tile, TileState};
 /// Canvas backing pixel format (matches `wl_shm` `Argb8888`).
 pub const BYTES_PER_PIXEL: usize = 4;
 /// Backdrop color (opaque dark).
-const BG: [u8; 4] = [0x1e, 0x1a, 0x1a, 0xff];
+pub(crate) const BG: [u8; 4] = [0x1e, 0x1a, 0x1a, 0xff];
 /// Window block fill.
 const BLOCK: [u8; 4] = [0x42, 0x3a, 0x3a, 0xff];
 /// Selected window block fill.
 const BLOCK_SELECTED: [u8; 4] = [0x54, 0x4a, 0x4a, 0xff];
 /// Selection border + favorite squares.
-const ACCENT: [u8; 4] = [0xe8, 0xe8, 0xe8, 0xff];
+pub(crate) const ACCENT: [u8; 4] = [0xe8, 0xe8, 0xe8, 0xff];
 
 const BLOCK_W: i32 = 280;
 const BLOCK_H: i32 = 180;
@@ -226,14 +226,14 @@ const GLYPHS: [[u8; 5]; 37] = [
     [0b000, 0b111, 0b001, 0b010, 0b111], // z
 ];
 /// Glyph advance (3px glyph + 1px tracking) times the strip scale.
-const FONT_SCALE: i32 = 3;
-const GLYPH_ADVANCE: i32 = 4 * FONT_SCALE;
+pub(crate) const FONT_SCALE: i32 = 3;
+pub(crate) const GLYPH_ADVANCE: i32 = 4 * FONT_SCALE;
 /// Indicator square size and spacing at the strip's right edge.
-const DOT_SIZE: i32 = 14;
-const DOT_GAP: i32 = 8;
-const DOT_MARGIN: i32 = 10;
+pub(crate) const DOT_SIZE: i32 = 14;
+pub(crate) const DOT_GAP: i32 = 8;
+pub(crate) const DOT_MARGIN: i32 = 10;
 
-fn put_pixel(pixels: &mut [u8], stride: usize, x: i32, y: i32, color: [u8; 4]) {
+pub(crate) fn put_pixel(pixels: &mut [u8], stride: usize, x: i32, y: i32, color: [u8; 4]) {
     if x < 0 || y < 0 {
         return;
     }
@@ -243,7 +243,14 @@ fn put_pixel(pixels: &mut [u8], stride: usize, x: i32, y: i32, color: [u8; 4]) {
     }
 }
 
-fn blit_glyph(pixels: &mut [u8], stride: usize, x: i32, y: i32, glyph: u8, color: [u8; 4]) {
+pub(crate) fn blit_glyph(
+    pixels: &mut [u8],
+    stride: usize,
+    x: i32,
+    y: i32,
+    glyph: u8,
+    color: [u8; 4],
+) {
     for row in 0..5 {
         for col in 0..3 {
             if GLYPHS[glyph as usize][row as usize] & (1 << (2 - col)) != 0 {
@@ -266,7 +273,7 @@ fn blit_glyph(pixels: &mut [u8], stride: usize, x: i32, y: i32, glyph: u8, color
 /// Micro-glyph index, or `None` for a gap. ASCII uppercase folds
 /// to lowercase: 3x5 cells cannot distinguish case, and matching is
 /// case-insensitive anyway.
-fn glyph_index(ch: char) -> Option<u8> {
+pub(crate) fn glyph_index(ch: char) -> Option<u8> {
     match ch {
         '0'..='9' => Some(ch as u8 - b'0'),
         ':' => Some(10),
@@ -276,15 +283,25 @@ fn glyph_index(ch: char) -> Option<u8> {
     }
 }
 
-pub fn paint_panel(pixels: &mut [u8], width: i32, height: i32, clock: &str, tiles: &[Tile]) {
+pub fn paint_panel(
+    pixels: &mut [u8],
+    width: i32,
+    height: i32,
+    strip_h: i32,
+    clock: &str,
+    tiles: &[Tile],
+) {
     let stride = width as usize * BYTES_PER_PIXEL;
     for (i, byte) in pixels.iter_mut().enumerate() {
         let channel = i % BYTES_PER_PIXEL;
         *byte = BG[channel];
     }
-    // Activities corner block, 96xheight, slightly lifted.
+    // Activities corner block, 96xstrip, slightly lifted. The strip
+    // caps at `strip_h` so a taller surface keeps a clean popup band
+    // below for the popup painter to own.
+    let strip_h = strip_h.clamp(0, height);
     let corner: [u8; 4] = [0x3a, 0x34, 0x34, 0xff];
-    for y in 0..height {
+    for y in 0..strip_h {
         for x in 0..96.min(width) {
             let at = y as usize * stride + x as usize * BYTES_PER_PIXEL;
             if let Some(slot) = pixels.get_mut(at..at + BYTES_PER_PIXEL) {
@@ -296,7 +313,7 @@ pub fn paint_panel(pixels: &mut [u8], width: i32, height: i32, clock: &str, tile
     // glyph so a malformed string degrades to gaps, never garbage).
     let text_w = clock.chars().count() as i32 * GLYPH_ADVANCE - (FONT_SCALE - 1);
     let mut cx = (width - text_w) / 2;
-    let cy = (height - 5 * FONT_SCALE) / 2;
+    let cy = (strip_h - 5 * FONT_SCALE) / 2;
     for ch in clock.chars() {
         if let Some(glyph) = glyph_index(ch) {
             blit_glyph(pixels, stride, cx, cy, glyph, ACCENT);
@@ -308,7 +325,7 @@ pub fn paint_panel(pixels: &mut [u8], width: i32, height: i32, clock: &str, tile
     // fills from the bottom by battery percent when known.
     let mut dx = width - DOT_MARGIN - DOT_SIZE;
     for tile in tiles {
-        let y0 = (height - DOT_SIZE) / 2;
+        let y0 = (strip_h - DOT_SIZE) / 2;
         let (fill, frame) = match tile.state {
             TileState::Ready => (ACCENT, ACCENT),
             TileState::Error => (WARN, WARN),
@@ -744,7 +761,7 @@ mod tests {
         ];
         let width = 1280;
         let mut pixels = vec![0u8; width as usize * 32 * BYTES_PER_PIXEL];
-        paint_panel(&mut pixels, width, 32, "12:34", &tiles);
+        paint_panel(&mut pixels, width, 32, 32, "12:34", &tiles);
         // Clock "12:34" centered: digit 1 lights, colon lights.
         let cx = (width - (5 * GLYPH_ADVANCE - (FONT_SCALE - 1))) / 2;
         let cy = (32 - 5 * FONT_SCALE) / 2;
@@ -804,7 +821,7 @@ mod tests {
         }];
         let width = 1280;
         let mut pixels = vec![0u8; width as usize * 32 * BYTES_PER_PIXEL];
-        paint_panel(&mut pixels, width, 32, "", &tiles);
+        paint_panel(&mut pixels, width, 32, 32, "", &tiles);
         // Hollow: accent frame, backdrop interior.
         assert_eq!(strip_pixel(&pixels, width, 1256, 9), ACCENT);
         assert_eq!(strip_pixel(&pixels, width, 1256 + 7, 9 + 7), BG);

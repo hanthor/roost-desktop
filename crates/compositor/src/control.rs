@@ -285,6 +285,10 @@ pub struct Session<'a> {
     /// open state flipped by `ToggleOverview` commands and runtime
     /// triggers, broadcast back as [`Message::Overview`].
     overview: std::rc::Rc<std::cell::Cell<bool>>,
+    /// Window ids the shell asked to close this round (`CloseWindow`
+    /// commands the mirror applied). Drained by [`ControlHub::poll`]
+    /// so the runtime can send the polite client close.
+    closed: Vec<u64>,
 }
 
 impl std::fmt::Debug for Session<'_> {
@@ -333,6 +337,7 @@ impl<'a> Session<'a> {
             minter,
             last_revision: 0,
             overview,
+            closed: Vec::new(),
         };
         let msg = match session.conn.read_frame() {
             Ok(msg) => msg,
@@ -498,7 +503,10 @@ impl<'a> Session<'a> {
                 Ok(Handled::HelloResync { revision })
             }
             Message::Command { id, kind } => {
-                let status = apply_command(model, &self.validator, &self.overview, &kind);
+                let (status, closed) = apply_command(model, &self.validator, &self.overview, &kind);
+                if let Some(window) = closed {
+                    self.closed.push(window);
+                }
                 let applied = matches!(status, CommandStatus::Applied);
                 self.conn
                     .write_frame(&Message::CommandResult { id, status })?;
@@ -618,43 +626,67 @@ fn state_op(change: &StateChange, mint: &dyn Fn(Option<&str>) -> String) -> Opti
 /// (`CommandResult::Denied`), not protocol errors. The validator sees the
 /// target window's `app_id` from the model, so tokens bind to the window
 /// they were minted for.
+///
+/// Returns the status plus the closed window id when a `CloseWindow`
+/// applied: the hub drains those so the runtime can send the polite
+/// client close (the mirror keeps the window until the client unmaps).
 fn apply_command(
     model: &mut StateModel,
     validator: &dyn Fn(&ActivationToken, Option<&str>) -> bool,
     overview: &std::cell::Cell<bool>,
     kind: &CommandKind,
-) -> CommandStatus {
+) -> (CommandStatus, Option<u64>) {
     match kind {
         CommandKind::ActivateWindow { window, token } => {
             let Some(entry) = model.window(*window) else {
-                return CommandStatus::Denied {
-                    reason: "unknown window".to_owned(),
-                };
+                return (
+                    CommandStatus::Denied {
+                        reason: "unknown window".to_owned(),
+                    },
+                    None,
+                );
             };
             if !validator(token, entry.app_id.as_deref()) {
-                return CommandStatus::Denied {
-                    reason: "activation token rejected".to_owned(),
-                };
+                return (
+                    CommandStatus::Denied {
+                        reason: "activation token rejected".to_owned(),
+                    },
+                    None,
+                );
             }
             let _ = model.set_focused(Some(*window));
-            CommandStatus::Applied
+            (CommandStatus::Applied, None)
         }
         CommandKind::FocusWorkspace { workspace } => {
             // Dynamic workspaces: any representable id switches
             // (registering if new); focus lands on the tick's reconcile.
             let Ok(workspace) = u32::try_from(*workspace) else {
-                return CommandStatus::Denied {
-                    reason: "workspace id out of range".to_owned(),
-                };
+                return (
+                    CommandStatus::Denied {
+                        reason: "workspace id out of range".to_owned(),
+                    },
+                    None,
+                );
             };
             model.set_active_workspace(workspace);
-            CommandStatus::Applied
+            (CommandStatus::Applied, None)
         }
         CommandKind::ToggleOverview => {
             // Flip the hub-shared intent; the hub broadcasts the new
             // state as `Message::Overview` (002 R1).
             overview.set(!overview.get());
-            CommandStatus::Applied
+            (CommandStatus::Applied, None)
+        }
+        CommandKind::CloseWindow { window } => {
+            if model.window(*window).is_none() {
+                return (
+                    CommandStatus::Denied {
+                        reason: "unknown window".to_owned(),
+                    },
+                    None,
+                );
+            }
+            (CommandStatus::Applied, Some(*window))
         }
     }
 }
@@ -662,6 +694,17 @@ fn apply_command(
 /// Our protocol version, for handshake replies.
 pub fn our_version() -> ProtocolVersion {
     CURRENT_VERSION
+}
+
+/// Outcome of one [`ControlHub::poll`] round: model ids the shell
+/// activated (runtime applies Wayland-side focus) and asked to close
+/// (runtime sends the polite client close).
+#[derive(Debug, Default)]
+pub struct PollOutcome {
+    /// Windows to focus and raise.
+    pub activated: Vec<u64>,
+    /// Windows to ask to close.
+    pub closed: Vec<u64>,
 }
 
 /// Live control-plane driver: accepts shell connections, handshakes them
@@ -750,18 +793,25 @@ impl ControlHub {
         self.switcher_queue.push(action);
     }
 
+    /// Drain one session's applied close requests (called by
+    /// [`ControlHub::poll`]).
+    fn take_closed(session: &mut Session<'_>) -> Vec<u64> {
+        std::mem::take(&mut session.closed)
+    }
+
     /// One nonblocking round: accept waiting peers, advance pending
     /// handshakes, catch live sessions up, and apply one command frame
     /// per session. Returns the model ids of windows the shell activated
-    /// this round, so the runtime can apply Wayland-side focus.
-    pub fn poll(&mut self, model: &mut StateModel) -> Vec<u64> {
+    /// this round (for Wayland-side focus) and asked to close (for the
+    /// polite client close), so the runtime can apply both.
+    pub fn poll(&mut self, model: &mut StateModel) -> PollOutcome {
         while let Ok((stream, _)) = self.listener.accept() {
             let _ = stream.set_nonblocking(true);
             self.fresh.push(stream);
         }
         self.advance_pending(model);
         self.pending = std::mem::take(&mut self.fresh);
-        let mut activated = Vec::new();
+        let mut outcome = PollOutcome::default();
         let mut i = 0;
         while i < self.sessions.len() {
             let alive = {
@@ -775,8 +825,9 @@ impl ControlHub {
                 };
                 if deltas_ok && cmd_ok {
                     if model.focused() != before {
-                        activated.extend(model.focused());
+                        outcome.activated.extend(model.focused());
                     }
+                    outcome.closed.extend(Self::take_closed(session));
                     true
                 } else {
                     false
@@ -821,7 +872,7 @@ impl ControlHub {
             }
             self.switcher_queue = unsent;
         }
-        activated
+        outcome
     }
 
     /// Try each aged peer's handshake once. Peers were accepted a full

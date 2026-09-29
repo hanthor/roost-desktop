@@ -331,6 +331,20 @@ impl ControlClient {
         Ok(id)
     }
 
+    /// Ask the compositor to close a window (dock quit). Like
+    /// `toggle_overview` this carries no activation token: closing is
+    /// not focus, and unknown ids come back `Denied`. Callers must
+    /// already hold the id from their own view state. Returns the
+    /// request id for `CommandResult` correlation.
+    pub fn close_window(&mut self, window: u64) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::CloseWindow { window },
+        })?;
+        Ok(id)
+    }
+
     /// Request activation of the currently selected window.
     ///
     /// Builds the schema `Command` carrying the compositor-minted
@@ -544,6 +558,7 @@ fn snapshot_view(windows: &[WindowInfo], workspaces: &[WorkspaceInfo]) -> Snapsh
             .map(|w| {
                 WindowEntry::new(w.id, w.title.clone(), w.focused)
                     .with_workspace(u32::try_from(w.workspace).unwrap_or(u32::MAX))
+                    .with_app_id(w.app_id.clone())
             })
             .collect(),
         workspaces: workspaces
@@ -963,6 +978,42 @@ mod tests {
             }
             other => panic!("expected CommandResult, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn close_window_sends_id_command_with_fresh_id() {
+        let (mut client, mut peer) = handshook();
+        let id = client.close_window(9).expect("close");
+        assert_eq!(id, INITIAL_REQUEST_ID);
+        match server_read(&mut peer) {
+            Message::Command {
+                id: wire_id,
+                kind: CommandKind::CloseWindow { window },
+            } => {
+                assert_eq!(wire_id, id, "wire id matches returned id");
+                assert_eq!(window, 9, "close names the dock's window");
+            }
+            other => panic!("expected CloseWindow command, got {other:?}"),
+        }
+        // Close needs no selection: it works on an empty model too.
+        assert_eq!(client.model().selected(), None);
+    }
+
+    #[test]
+    fn snapshot_carries_app_id_into_entries() {
+        let (mut client, mut peer) = handshook();
+        server_write(&mut peer, &snapshot_rev7());
+        assert!(matches!(
+            client.poll().expect("snapshot"),
+            Handled::Snapshot { .. }
+        ));
+        let entry = client
+            .model()
+            .windows()
+            .iter()
+            .find(|w| w.id == 7)
+            .expect("window 7 in snapshot");
+        assert_eq!(entry.app_id.as_deref(), Some("org.example.App"));
     }
 
     #[test]

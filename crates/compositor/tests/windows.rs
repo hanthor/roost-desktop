@@ -1082,6 +1082,25 @@ fn alt_f4_politely_closes_focused_window() {
 }
 
 #[test]
+fn dock_close_request_unmaps_and_keeps_sibling() {
+    let mut f = two_windows();
+    // The runtime tick answers a reported shell close with the polite
+    // client close; the client honors it by going away (drop here
+    // stands in for a real client exit, exactly like the Alt+F4 test).
+    assert!(f.manager.close_window(f.id_a));
+    pump(&mut f.comp, &mut f.queue_a, &mut f.client_a, |c| {
+        c.close_requested
+    });
+    assert!(f.client_a.close_requested);
+    drop((f.conn_a, f.queue_a, f.client_a));
+    f.comp.pump();
+    f.comp.pump();
+    f.manager.reconcile(&mut f.comp.state);
+    assert!(f.manager.model().window(f.id_a).is_none());
+    assert!(f.manager.model().window(f.id_b).is_some());
+}
+
+#[test]
 fn disconnect_unmaps_window_and_falls_back_focus() {
     let mut f = two_windows();
     assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));

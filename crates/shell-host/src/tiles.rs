@@ -11,6 +11,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::settings::{self, ClockFormat, ShellSettings};
+
 /// Which service a tile reports on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceKind {
@@ -75,8 +77,10 @@ pub struct TileSet {
     power_root: PathBuf,
     /// Real or fake runtime dir holding sound sockets.
     runtime_dir: PathBuf,
-    /// Current clock text (`HH:MM`).
+    /// Current clock text (`HH:MM`, or `h:MM` in twelve-hour mode).
     pub clock: String,
+    /// Snapshot of the shared desktop settings feeding the paint code.
+    pub settings: ShellSettings,
     /// Network tile.
     pub network: Tile,
     /// Power tile.
@@ -107,6 +111,7 @@ impl TileSet {
             power_root: power_root.to_owned(),
             runtime_dir: runtime_dir.to_owned(),
             clock: String::new(),
+            settings: ShellSettings::default(),
             network: Tile::new(ServiceKind::Network),
             power: Tile::new(ServiceKind::Power),
             sound: Tile::new(ServiceKind::Sound),
@@ -114,9 +119,12 @@ impl TileSet {
     }
 
     /// Refresh the clock text and re-probe every service. Pure local
-    /// reads: bounded, nonblocking, spawn-free.
+    /// reads: bounded, nonblocking, spawn-free. Settings come from the
+    /// platform backend on this same tick, degrading to defaults when
+    /// the bus or schema is absent.
     pub fn refresh(&mut self) {
-        self.clock = clock_text(&self.tz);
+        settings::refresh(&mut self.settings, &settings::GioBackend);
+        self.clock = clock_text(&self.tz, self.settings.clock_format);
         self.network = probe_network(&self.net_root);
         self.power = probe_power(&self.power_root);
         self.sound = probe_sound(&self.runtime_dir);
@@ -126,19 +134,27 @@ impl TileSet {
     pub fn tiles(&self) -> [&Tile; 3] {
         [&self.network, &self.power, &self.sound]
     }
+
+    /// Runtime dir holding sound sockets (and the wallpaper drop
+    /// file the compositor polls).
+    pub fn runtime_dir(&self) -> &Path {
+        &self.runtime_dir
+    }
 }
 
-/// Current local time as `HH:MM` (UTC fallback when the zone fails).
-fn clock_text(tz: &str) -> String {
+/// Current local time as `HH:MM` (twelve-hour `h:MM` when asked;
+/// UTC fallback when the zone fails).
+fn clock_text(tz: &str, format: ClockFormat) -> String {
     let zone = if tz.is_empty() {
         jiff::tz::TimeZone::system()
     } else {
         jiff::tz::TimeZone::get(tz).unwrap_or(jiff::tz::TimeZone::UTC)
     };
-    jiff::Zoned::now()
-        .with_time_zone(zone)
-        .strftime("%H:%M")
-        .to_string()
+    let zoned = jiff::Zoned::now().with_time_zone(zone);
+    match format {
+        ClockFormat::TwentyFour => zoned.strftime("%H:%M").to_string(),
+        ClockFormat::Twelve => zoned.strftime("%-I:%M").to_string(),
+    }
 }
 
 /// Network tile from interface operstate: `Ready` when any non-loopback
@@ -274,6 +290,24 @@ mod tests {
         assert_eq!(set.clock.as_bytes()[2], b':');
         assert!(set.clock[..2].parse::<u32>().is_ok());
         assert!(set.clock[3..].parse::<u32>().is_ok());
+    }
+
+    #[test]
+    fn twelve_hour_clock_drops_the_leading_zero() {
+        let text = clock_text("", ClockFormat::Twelve);
+        assert!(text.contains(':'));
+        let (hour, minute) = text.split_once(':').unwrap();
+        let hour: u32 = hour.parse().unwrap();
+        assert!((1..=12).contains(&hour));
+        assert_eq!(minute.len(), 2);
+        assert!(minute.parse::<u32>().is_ok());
+    }
+
+    #[test]
+    fn tile_set_starts_with_default_settings() {
+        let (_dir, net, power, run) = roots();
+        let set = TileSet::with_roots("", &net, &power, &run);
+        assert_eq!(set.settings, ShellSettings::default());
     }
 
     #[test]
