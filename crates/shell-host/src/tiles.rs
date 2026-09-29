@@ -15,7 +15,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::settings::{self, ClockFormat, ShellSettings};
+use crate::prefs::{self, RoostPrefs};
+use crate::settings::{self, ClockFormat, SettingsBackend, ShellSettings};
 
 /// NetworkManager bus identity for the radio toggle contract.
 pub const NM_NAME: &str = "org.freedesktop.NetworkManager";
@@ -341,6 +342,14 @@ pub struct TileSet {
     pub clock: String,
     /// Snapshot of the shared desktop settings feeding the paint code.
     pub settings: ShellSettings,
+    /// Roost-owned prefs snapshot feeding the paint code (bar clock
+    /// extras the shared schema never covered). Loaded from the XDG
+    /// state file at startup; the calendar surface writes it back.
+    pub prefs: RoostPrefs,
+    /// Prefs file behind this set; `None` keeps it memory-only. Set
+    /// by [`TileSet::restore_prefs`], so a restored set keeps
+    /// persisting to the file it came from.
+    prefs_path: Option<PathBuf>,
     /// D-Bus caller behind the network tile (NetworkManager radio
     /// flags). The sysfs probe stays the link truth; this only
     /// toggles radios and confirms the tile against them.
@@ -396,6 +405,8 @@ impl TileSet {
             runtime_dir: runtime_dir.to_owned(),
             clock: String::new(),
             settings: ShellSettings::default(),
+            prefs: RoostPrefs::default(),
+            prefs_path: None,
             radio: NetworkRadio::new(),
             radio_state: None,
             network_pending: None,
@@ -414,13 +425,138 @@ impl TileSet {
     /// platform backend on this same tick, degrading to defaults when
     /// the bus or schema is absent.
     pub fn refresh(&mut self) {
-        settings::refresh(&mut self.settings, &settings::GioBackend);
-        self.clock = clock_text(&self.tz, self.settings.clock_format);
+        self.refresh_with(&settings::GioBackend);
+    }
+
+    /// [`refresh`](Self::refresh) against an explicit backend: the
+    /// slow tick passes the platform backend, tests a fake. Paint
+    /// code still reads only the snapshot, never a backend.
+    pub fn refresh_with(&mut self, backend: &dyn SettingsBackend) {
+        settings::refresh(&mut self.settings, backend);
+        self.clock = clock_text(
+            &self.tz,
+            self.settings.clock_format,
+            self.prefs.clock_show_weekday,
+        );
         self.network = probe_network(&self.net_root);
         self.power = probe_power(&self.power_root);
         self.sound = probe_sound(&self.runtime_dir);
         self.apply_radio();
         self.apply_sound();
+    }
+
+    /// Write the bar clock format against the shared desktop schema,
+    /// then re-read at once so paint stays on snapshot truth. A
+    /// refused write keeps the last good snapshot, quietly.
+    pub fn set_clock_format(&mut self, format: ClockFormat) -> bool {
+        self.set_clock_format_with(format, &settings::GioBackend)
+    }
+
+    /// [`set_clock_format`](Self::set_clock_format) against an
+    /// explicit backend (tests substitute a fake).
+    pub fn set_clock_format_with(
+        &mut self,
+        format: ClockFormat,
+        backend: &dyn SettingsBackend,
+    ) -> bool {
+        if !settings::write_clock_format(backend, format) {
+            return false;
+        }
+        settings::refresh(&mut self.settings, backend);
+        self.clock = clock_text(
+            &self.tz,
+            self.settings.clock_format,
+            self.prefs.clock_show_weekday,
+        );
+        true
+    }
+
+    /// Load Roost-owned prefs from `path` into the snapshot, replacing
+    /// whatever it holds. Missing, corrupt, or version-skewed files
+    /// read as defaults. The loaded path sticks to the set, so later
+    /// surface writes persist back to it. Recomputes the clock text at
+    /// once so paint stays on snapshot truth.
+    pub fn restore_prefs(&mut self, path: &Path) {
+        self.prefs = prefs::load(path);
+        self.prefs_path = Some(path.to_owned());
+        self.clock = clock_text(
+            &self.tz,
+            self.settings.clock_format,
+            self.prefs.clock_show_weekday,
+        );
+    }
+
+    /// Load Roost-owned prefs from the system state file at host
+    /// start. Same fail-closed rule as
+    /// [`TileSet::restore_prefs`]: a bad file never blocks the panel.
+    pub fn load_prefs_system(&mut self) {
+        self.restore_prefs(&prefs::system_path());
+    }
+
+    /// Persist back to the prefs file when one is pinned. Failures
+    /// log and keep the in-memory prefs: a full disk must never lose
+    /// or break the live clock.
+    fn persist_prefs(&self) {
+        if let Some(path) = self.prefs_path.as_ref() {
+            if let Err(e) = prefs::save(&self.prefs, path) {
+                eprintln!("roost-shell-host: roost prefs save failed: {e}");
+            }
+        }
+    }
+
+    /// Set the bar-clock weekday prefix from the calendar surface:
+    /// update the snapshot at once, recompute the clock text, and
+    /// persist back to the pinned prefs file when one is set.
+    pub fn set_clock_show_weekday(&mut self, show: bool) -> bool {
+        self.prefs.clock_show_weekday = show;
+        self.clock = clock_text(
+            &self.tz,
+            self.settings.clock_format,
+            self.prefs.clock_show_weekday,
+        );
+        self.persist_prefs();
+        true
+    }
+
+    /// Flip the bar-clock weekday prefix: the calendar prefs row's
+    /// write. Same snapshot-then-persist shape as
+    /// [`TileSet::set_clock_show_weekday`].
+    pub fn toggle_clock_show_weekday(&mut self) -> bool {
+        self.set_clock_show_weekday(!self.prefs.clock_show_weekday)
+    }
+
+    /// Flip the bar clock between twelve- and twenty-four-hour: the
+    /// calendar toggle row's write. Same write-then-reread shape as
+    /// [`set_clock_format`](Self::set_clock_format).
+    pub fn toggle_clock_format(&mut self) -> bool {
+        self.toggle_clock_format_with(&settings::GioBackend)
+    }
+
+    /// [`toggle_clock_format`](Self::toggle_clock_format) against an
+    /// explicit backend (tests substitute a fake).
+    pub fn toggle_clock_format_with(&mut self, backend: &dyn SettingsBackend) -> bool {
+        let next = match self.settings.clock_format {
+            ClockFormat::Twelve => ClockFormat::TwentyFour,
+            ClockFormat::TwentyFour => ClockFormat::Twelve,
+        };
+        self.set_clock_format_with(next, backend)
+    }
+
+    /// Write the desktop wallpaper URI against the shared schema,
+    /// then re-read at once so paint stays on snapshot truth. A
+    /// refused write keeps the last good snapshot, quietly.
+    pub fn set_wallpaper_uri(&mut self, uri: &str) -> bool {
+        self.set_wallpaper_uri_with(uri, &settings::GioBackend)
+    }
+
+    /// [`set_wallpaper_uri`](Self::set_wallpaper_uri) against an
+    /// explicit backend (tests substitute a fake).
+    pub fn set_wallpaper_uri_with(&mut self, uri: &str, backend: &dyn SettingsBackend) -> bool {
+        if !settings::write_wallpaper_uri(backend, uri) {
+            return false;
+        }
+        settings::refresh(&mut self.settings, backend);
+        true
     }
 
     /// Connect the radio caller to the session bus (the slow tick
@@ -652,17 +788,32 @@ impl TileSet {
 
 /// Current local time as `HH:MM` (twelve-hour `h:MM` when asked;
 /// UTC fallback when the zone fails).
-fn clock_text(tz: &str, format: ClockFormat) -> String {
+fn clock_text(tz: &str, format: ClockFormat, show_weekday: bool) -> String {
     let zone = if tz.is_empty() {
         jiff::tz::TimeZone::system()
     } else {
         jiff::tz::TimeZone::get(tz).unwrap_or(jiff::tz::TimeZone::UTC)
     };
     let zoned = jiff::Zoned::now().with_time_zone(zone);
-    match format {
+    let time = match format {
         ClockFormat::TwentyFour => zoned.strftime("%H:%M").to_string(),
         ClockFormat::Twelve => zoned.strftime("%-I:%M").to_string(),
+    };
+    if !show_weekday {
+        return time;
     }
+    // Two-letter weekday in the calendar header's own spelling, so the
+    // prefix never depends on locale data the strip may lack.
+    let day = match zoned.date().weekday() {
+        jiff::civil::Weekday::Monday => "mo",
+        jiff::civil::Weekday::Tuesday => "tu",
+        jiff::civil::Weekday::Wednesday => "we",
+        jiff::civil::Weekday::Thursday => "th",
+        jiff::civil::Weekday::Friday => "fr",
+        jiff::civil::Weekday::Saturday => "sa",
+        jiff::civil::Weekday::Sunday => "su",
+    };
+    format!("{day} {time}")
 }
 
 /// Which radio flag a menu row toggles.
@@ -838,7 +989,7 @@ mod tests {
 
     #[test]
     fn twelve_hour_clock_drops_the_leading_zero() {
-        let text = clock_text("", ClockFormat::Twelve);
+        let text = clock_text("", ClockFormat::Twelve, false);
         assert!(text.contains(':'));
         let (hour, minute) = text.split_once(':').unwrap();
         let hour: u32 = hour.parse().unwrap();
@@ -852,6 +1003,146 @@ mod tests {
         let (_dir, net, power, run) = roots();
         let set = TileSet::with_roots("", &net, &power, &run);
         assert_eq!(set.settings, ShellSettings::default());
+    }
+
+    #[test]
+    fn clock_toggle_writes_then_rereads_the_fake_backend() {
+        use crate::settings::{MapBackend, CLOCK_FORMAT_KEY, INTERFACE_SCHEMA};
+        let (_dir, net, power, run) = roots();
+        let mut set = TileSet::with_roots("", &net, &power, &run);
+        let backend = MapBackend::with_values(&[(INTERFACE_SCHEMA, CLOCK_FORMAT_KEY, "24h")]);
+        set.refresh_with(&backend);
+        assert_eq!(set.settings.clock_format, ClockFormat::TwentyFour);
+        assert!(set.toggle_clock_format_with(&backend));
+        assert_eq!(
+            backend
+                .string(INTERFACE_SCHEMA, CLOCK_FORMAT_KEY)
+                .as_deref(),
+            Some("12h")
+        );
+        assert_eq!(set.settings.clock_format, ClockFormat::Twelve);
+        assert!(!set.clock.is_empty());
+        assert!(set.toggle_clock_format_with(&backend));
+        assert_eq!(
+            backend
+                .string(INTERFACE_SCHEMA, CLOCK_FORMAT_KEY)
+                .as_deref(),
+            Some("24h")
+        );
+        assert_eq!(set.settings.clock_format, ClockFormat::TwentyFour);
+    }
+
+    #[test]
+    fn refused_clock_write_keeps_the_last_good_snapshot() {
+        struct Refusing;
+        impl SettingsBackend for Refusing {
+            fn string(&self, _schema: &str, _key: &str) -> Option<String> {
+                None
+            }
+            fn set_string(&self, _schema: &str, _key: &str, _value: &str) -> bool {
+                false
+            }
+        }
+        let (_dir, net, power, run) = roots();
+        let mut set = TileSet::with_roots("", &net, &power, &run);
+        let before = set.settings.clone();
+        assert!(!set.set_clock_format_with(ClockFormat::Twelve, &Refusing));
+        assert_eq!(set.settings, before);
+        assert!(!set.toggle_clock_format_with(&Refusing));
+        assert_eq!(set.settings, before);
+    }
+
+    #[test]
+    fn wallpaper_set_writes_then_rereads_the_fake_backend() {
+        use crate::settings::{MapBackend, BACKGROUND_SCHEMA, PICTURE_URI_KEY};
+        let (_dir, net, power, run) = roots();
+        let mut set = TileSet::with_roots("", &net, &power, &run);
+        let backend = MapBackend::default();
+        set.refresh_with(&backend);
+        assert_eq!(set.settings.wallpaper_uri, None);
+        assert!(set.set_wallpaper_uri_with("file:///wall.png", &backend));
+        assert_eq!(
+            backend
+                .string(BACKGROUND_SCHEMA, PICTURE_URI_KEY)
+                .as_deref(),
+            Some("file:///wall.png")
+        );
+        assert_eq!(
+            set.settings.wallpaper_uri.as_deref(),
+            Some("file:///wall.png")
+        );
+        // Paint still reads only the snapshot: a fresh refresh from
+        // the same backend restores the URI, like a session restart.
+        let mut restarted = TileSet::with_roots("", &net, &power, &run);
+        restarted.refresh_with(&backend);
+        assert_eq!(
+            restarted.settings.wallpaper_uri.as_deref(),
+            Some("file:///wall.png")
+        );
+    }
+
+    #[test]
+    fn refused_wallpaper_write_keeps_the_last_good_snapshot() {
+        struct Refusing;
+        impl SettingsBackend for Refusing {
+            fn string(&self, _schema: &str, _key: &str) -> Option<String> {
+                None
+            }
+            fn set_string(&self, _schema: &str, _key: &str, _value: &str) -> bool {
+                false
+            }
+        }
+        let (_dir, net, power, run) = roots();
+        let mut set = TileSet::with_roots("", &net, &power, &run);
+        let before = set.settings.clone();
+        assert!(!set.set_wallpaper_uri_with("file:///wall.png", &Refusing));
+        assert_eq!(set.settings, before);
+        // Blank URIs are refused before the backend is touched.
+        assert!(!set.set_wallpaper_uri_with("   ", &Refusing));
+        assert_eq!(set.settings, before);
+    }
+
+    #[test]
+    fn weekday_prefix_prepends_the_calendar_spelling() {
+        let plain = clock_text("", ClockFormat::TwentyFour, false);
+        assert_eq!(plain.len(), 5);
+        let prefixed = clock_text("", ClockFormat::TwentyFour, true);
+        let (day, time) = prefixed.split_once(' ').expect("weekday prefix");
+        assert!(["mo", "tu", "we", "th", "fr", "sa", "su"].contains(&day));
+        assert_eq!(time, plain);
+    }
+
+    #[test]
+    fn weekday_toggle_updates_the_snapshot_and_persists() {
+        let (dir, net, power, run) = roots();
+        let path = dir.path().join(crate::prefs::PREFS_FILE);
+        let mut set = TileSet::with_roots("", &net, &power, &run);
+        set.restore_prefs(&path);
+        assert!(!set.prefs.clock_show_weekday);
+        assert!(set.toggle_clock_show_weekday());
+        assert!(set.prefs.clock_show_weekday);
+        assert!(set.clock.contains(' '));
+        // The pinned file carries the flip without hand editing.
+        assert!(crate::prefs::load(&path).clock_show_weekday);
+        assert!(set.toggle_clock_show_weekday());
+        assert!(!set.prefs.clock_show_weekday);
+        assert!(!crate::prefs::load(&path).clock_show_weekday);
+    }
+
+    #[test]
+    fn changed_roost_option_survives_a_restart() {
+        let (dir, net, power, run) = roots();
+        let path = dir.path().join(crate::prefs::PREFS_FILE);
+        let mut set = TileSet::with_roots("", &net, &power, &run);
+        set.restore_prefs(&path);
+        assert!(set.set_clock_show_weekday(true));
+        // Fresh set, same file: the kept value comes back, and the
+        // clock text carries it without another write.
+        let mut restarted = TileSet::with_roots("", &net, &power, &run);
+        assert!(!restarted.prefs.clock_show_weekday);
+        restarted.restore_prefs(&path);
+        assert!(restarted.prefs.clock_show_weekday);
+        assert!(restarted.clock.contains(' '));
     }
 
     #[test]

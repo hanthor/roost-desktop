@@ -10,11 +10,14 @@ use crate::overview::{
     blit_glyph, glyph_index, put_pixel, ACCENT, BG, BYTES_PER_PIXEL, DOT_GAP, DOT_MARGIN, DOT_SIZE,
     FONT_SCALE, GLYPH_ADVANCE,
 };
+use crate::settings::ClockFormat;
 use crate::tiles::{Tile, TileState};
 
 /// Popup band height below the strip; the panel surface grows by this
 /// much while a popup is open (exclusive zone stays at strip height).
-pub const POPUP_HEIGHT: i32 = 216;
+/// Sized for the calendar's day grid plus its two footer toggle rows
+/// (clock format above, Roost prefs below).
+pub const POPUP_HEIGHT: i32 = 264;
 
 /// Integer rectangle for hit-testing painted regions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -294,8 +297,10 @@ fn paint_box(pixels: &mut [u8], stride: usize, rect: &Rect) {
 /// Paint the open popup band below the strip. `today` is the date the
 /// calendar highlights; `tiles` feeds the menu rows, `network`
 /// carries the network tile's toggle rows (painted only under the
-/// network menu), and `sound` carries the sound tile's toggle rows
-/// (painted only under the sound menu). No-ops on degenerate sizes.
+/// network menu), `sound` carries the sound tile's toggle rows
+/// (painted only under the sound menu), `clock_format` paints the
+/// calendar's clock-format footer row, and `show_weekday` paints the
+/// Roost-prefs footer row below it. No-ops on degenerate sizes.
 #[allow(clippy::too_many_arguments)]
 pub fn paint_popup(
     pixels: &mut [u8],
@@ -307,6 +312,8 @@ pub fn paint_popup(
     indicators: &[crate::watcher::IndicatorItem],
     network: &[TileRow],
     sound: &[TileRow],
+    clock_format: ClockFormat,
+    show_weekday: bool,
 ) {
     let rect = popup_box(layout, body);
     if rect.w <= 0 || rect.h <= 0 {
@@ -322,7 +329,9 @@ pub fn paint_popup(
     }
     paint_box(pixels, stride, &rect);
     match body {
-        PopupBody::Calendar => paint_calendar(pixels, stride, &rect, today),
+        PopupBody::Calendar => {
+            paint_calendar(pixels, stride, &rect, today, clock_format, show_weekday);
+        }
         PopupBody::Menu(index) => {
             let tile = tiles.get(index).copied().unwrap_or(Tile {
                 kind: crate::tiles::ServiceKind::Network,
@@ -346,8 +355,71 @@ pub fn paint_popup(
     }
 }
 
-/// Month title, weekday header, and day grid with today inverted.
-fn paint_calendar(pixels: &mut [u8], stride: usize, rect: &Rect, today: jiff::civil::Date) {
+/// Bottom footer toggle row rect inside the calendar box: below the
+/// day grid with a small gap, mirroring menu row height. The press
+/// path hit-tests this same rect, so paint and presses agree.
+pub fn calendar_weekday_row(rect: &Rect) -> Rect {
+    Rect {
+        x: rect.x + 12,
+        y: rect.y + rect.h - TILE_ROW_H - 4,
+        w: (rect.w - 24).max(0),
+        h: TILE_ROW_H,
+    }
+}
+
+/// Upper footer toggle row rect: above the prefs row with the same
+/// small gap. The clock-format toggle lives here; the Roost prefs
+/// toggle takes the bottom row.
+pub fn calendar_clock_row(rect: &Rect) -> Rect {
+    let below = calendar_weekday_row(rect);
+    Rect {
+        x: below.x,
+        y: below.y - TILE_ROW_H - 4,
+        w: below.w,
+        h: TILE_ROW_H,
+    }
+}
+
+/// Calendar clock-format toggle row: names the flip, like the menu
+/// rows. Always enabled — the format always has a value, and a
+/// refused write keeps the snapshot quietly.
+pub fn clock_format_row(format: ClockFormat) -> TileRow {
+    match format {
+        ClockFormat::Twelve => TileRow {
+            label: "use 24-hour clock".to_owned(),
+            enabled: true,
+        },
+        ClockFormat::TwentyFour => TileRow {
+            label: "use 12-hour clock".to_owned(),
+            enabled: true,
+        },
+    }
+}
+
+/// Calendar Roost-prefs toggle row: names the flip, like the menu
+/// rows. Always enabled — the pref always has a value, and a failed
+/// persist keeps the snapshot quietly.
+pub fn clock_weekday_row(show_weekday: bool) -> TileRow {
+    TileRow {
+        label: if show_weekday {
+            "hide weekday in clock".to_owned()
+        } else {
+            "show weekday in clock".to_owned()
+        },
+        enabled: true,
+    }
+}
+
+/// Month title, weekday header, day grid with today inverted, and the
+/// two footer toggle rows (clock format above, Roost prefs below).
+fn paint_calendar(
+    pixels: &mut [u8],
+    stride: usize,
+    rect: &Rect,
+    today: jiff::civil::Date,
+    format: ClockFormat,
+    show_weekday: bool,
+) {
     const CELL_W: i32 = 36;
     const CELL_H: i32 = 22;
     let title = format!("{} {}", MONTHS[today.month() as usize - 1], today.year());
@@ -399,6 +471,27 @@ fn paint_calendar(pixels: &mut [u8], stride: usize, rect: &Rect, today: jiff::ci
             },
         );
     }
+    let max_chars = ((rect.w - 24) / GLYPH_ADVANCE).max(1) as usize;
+    let clock_footer = calendar_clock_row(rect);
+    let clock_row = clock_format_row(format);
+    paint_row(
+        pixels,
+        stride,
+        clock_footer.x,
+        clock_footer.y,
+        max_chars,
+        &clock_row,
+    );
+    let prefs_footer = calendar_weekday_row(rect);
+    let prefs_row = clock_weekday_row(show_weekday);
+    paint_row(
+        pixels,
+        stride,
+        prefs_footer.x,
+        prefs_footer.y,
+        max_chars,
+        &prefs_row,
+    );
 }
 
 /// Dim brick for out-of-month filler days.
@@ -579,25 +672,31 @@ fn paint_menu(pixels: &mut [u8], stride: usize, rect: &Rect, tile: Tile, rows: &
             ACCENT,
         );
     }
-    const DIM: [u8; 4] = [0x4a, 0x44, 0x44, 0xff];
     let max_chars = ((rect.w - 24) / GLYPH_ADVANCE).max(1) as usize;
     for (index, row) in rows.iter().enumerate() {
         let gy = rect.y + TILE_ROWS_TOP + index as i32 * TILE_ROW_H;
         if gy + TILE_ROW_H > rect.y + rect.h {
             break;
         }
-        let color = if row.enabled { ACCENT } else { DIM };
-        let mut gx = rect.x + 12;
-        for ch in row.label.chars().take(max_chars) {
-            if ch == ' ' {
-                gx += GLYPH_ADVANCE;
-                continue;
-            }
-            if let Some(glyph) = glyph_index(ch) {
-                blit_glyph(pixels, stride, gx, gy, glyph, color);
-            }
+        paint_row(pixels, stride, rect.x + 12, gy, max_chars, row);
+    }
+}
+
+/// One toggle row line: label glyphs at `(x, y)`, dimmed when
+/// disabled. Shared by menus and the calendar footer row.
+fn paint_row(pixels: &mut [u8], stride: usize, x: i32, y: i32, max_chars: usize, row: &TileRow) {
+    const DIM: [u8; 4] = [0x4a, 0x44, 0x44, 0xff];
+    let color = if row.enabled { ACCENT } else { DIM };
+    let mut gx = x;
+    for ch in row.label.chars().take(max_chars) {
+        if ch == ' ' {
             gx += GLYPH_ADVANCE;
+            continue;
         }
+        if let Some(glyph) = glyph_index(ch) {
+            blit_glyph(pixels, stride, gx, y, glyph, color);
+        }
+        gx += GLYPH_ADVANCE;
     }
 }
 
@@ -827,6 +926,74 @@ mod tests {
     }
 
     #[test]
+    fn clock_format_row_names_the_flip_and_stays_enabled() {
+        assert_eq!(
+            clock_format_row(ClockFormat::Twelve),
+            TileRow {
+                label: "use 24-hour clock".to_owned(),
+                enabled: true,
+            }
+        );
+        assert_eq!(
+            clock_format_row(ClockFormat::TwentyFour),
+            TileRow {
+                label: "use 12-hour clock".to_owned(),
+                enabled: true,
+            }
+        );
+    }
+
+    #[test]
+    fn calendar_footer_row_sits_inside_the_box_below_the_grid() {
+        let rect = popup_box(&layout(), PopupBody::Calendar);
+        let footer = calendar_clock_row(&rect);
+        assert!(footer.y > rect.y);
+        assert!(footer.y + footer.h <= rect.y + rect.h);
+        assert!(footer.x >= rect.x);
+        assert!(footer.x + footer.w <= rect.x + rect.w);
+        // Day grid bottom row ends above the footer (six 22px rows
+        // from the grid top leave a gap before the footer row).
+        let grid_top = rect.y + 10 + 5 * FONT_SCALE + 12 + 5 * FONT_SCALE + 8;
+        assert!(grid_top + 6 * 22 <= footer.y);
+    }
+
+    #[test]
+    fn weekday_row_names_the_flip_and_stays_enabled() {
+        assert_eq!(
+            clock_weekday_row(false),
+            TileRow {
+                label: "show weekday in clock".to_owned(),
+                enabled: true,
+            }
+        );
+        assert_eq!(
+            clock_weekday_row(true),
+            TileRow {
+                label: "hide weekday in clock".to_owned(),
+                enabled: true,
+            }
+        );
+    }
+
+    #[test]
+    fn footer_rows_stack_without_overlap_inside_the_box() {
+        let rect = popup_box(&layout(), PopupBody::Calendar);
+        let clock = calendar_clock_row(&rect);
+        let prefs = calendar_weekday_row(&rect);
+        // Same margins as the single-footer layout.
+        assert_eq!((prefs.x, prefs.w), (rect.x + 12, (rect.w - 24).max(0)));
+        assert_eq!((clock.x, clock.w), (prefs.x, prefs.w));
+        // Clock row above the prefs row with a gap, prefs row flush
+        // to the box bottom margin.
+        assert!(clock.y + clock.h + 4 == prefs.y);
+        assert!(prefs.y + prefs.h <= rect.y + rect.h);
+        assert!(clock.y > rect.y);
+        // Day grid bottom row ends above the upper footer.
+        let grid_top = rect.y + 10 + 5 * FONT_SCALE + 12 + 5 * FONT_SCALE + 8;
+        assert!(grid_top + 6 * 22 <= clock.y);
+    }
+
+    #[test]
     fn tile_row_at_hits_three_rows_in_order() {
         let rect = Rect {
             x: 972,
@@ -916,6 +1083,8 @@ mod tests {
             &[],
             &[],
             &[],
+            ClockFormat::TwentyFour,
+            false,
         );
         // Popup paints below the strip and leaves the strip itself alone.
         assert_eq!(
@@ -937,6 +1106,8 @@ mod tests {
             &[],
             &[],
             &[],
+            ClockFormat::TwentyFour,
+            false,
         );
         assert_ne!(
             menu[1280 * 32 * BYTES_PER_PIXEL..],

@@ -66,6 +66,10 @@ pub trait SettingsBackend {
     /// Read `key` from `schema`, or `None` when absent/unreadable.
     /// Must never block the caller for long and never panic.
     fn string(&self, schema: &str, key: &str) -> Option<String>;
+    /// Write `value` to `key` in `schema`: `false` when the schema,
+    /// key, or bus is unavailable. The caller keeps its snapshot on
+    /// `false` — never reset, never panic.
+    fn set_string(&self, schema: &str, key: &str, value: &str) -> bool;
 }
 
 /// Platform settings backend over `gio::Settings`.
@@ -93,21 +97,39 @@ impl SettingsBackend for GioBackend {
         }
         settings.value(key).str().map(str::to_owned)
     }
+
+    fn set_string(&self, schema: &str, key: &str, value: &str) -> bool {
+        let Some(settings) = Self::settings_for(schema) else {
+            return false;
+        };
+        // Same key guard as the read: a missing key must read as a
+        // refused write, never a critical log.
+        let known = settings
+            .settings_schema()
+            .is_some_and(|schema| schema.has_key(key));
+        if !known {
+            return false;
+        }
+        settings.set_string(key, value).is_ok()
+    }
 }
 
-/// In-memory backend for tests.
+/// In-memory backend for tests. Interior mutability keeps the
+/// [`SettingsBackend`] write behind `&self`, like the production
+/// backend's bus handle.
 #[derive(Debug, Default)]
 pub struct MapBackend {
-    values: HashMap<(String, String), String>,
+    values: std::cell::RefCell<HashMap<(String, String), String>>,
 }
 
 impl MapBackend {
     /// Backend holding the given `(schema, key, value)` triples.
     pub fn with_values(values: &[(&str, &str, &str)]) -> Self {
-        let mut backend = Self::default();
+        let backend = Self::default();
         for (schema, key, value) in values {
             backend
                 .values
+                .borrow_mut()
                 .insert((schema.to_string(), key.to_string()), value.to_string());
         }
         backend
@@ -117,8 +139,16 @@ impl MapBackend {
 impl SettingsBackend for MapBackend {
     fn string(&self, schema: &str, key: &str) -> Option<String> {
         self.values
+            .borrow()
             .get(&(schema.to_string(), key.to_string()))
             .cloned()
+    }
+
+    fn set_string(&self, schema: &str, key: &str, value: &str) -> bool {
+        self.values
+            .borrow_mut()
+            .insert((schema.to_string(), key.to_string()), value.to_string());
+        true
     }
 }
 
@@ -126,12 +156,42 @@ impl SettingsBackend for MapBackend {
 pub const INTERFACE_SCHEMA: &str = "org.gnome.desktop.interface";
 /// `12h` or `24h`.
 pub const CLOCK_FORMAT_KEY: &str = "clock-format";
-/// Background picture URI (carried, not yet applied).
+/// Background picture URI (published to the compositor drop file).
 pub const BACKGROUND_SCHEMA: &str = "org.gnome.desktop.background";
 /// Picture URI key.
 pub const PICTURE_URI_KEY: &str = "picture-uri";
 /// Icon theme name key.
 pub const ICON_THEME_KEY: &str = "icon-theme";
+
+/// Key value for a clock format (`12h`/`24h`): the inverse of
+/// [`parse_clock_format`].
+pub fn clock_format_value(format: ClockFormat) -> &'static str {
+    match format {
+        ClockFormat::Twelve => "12h",
+        ClockFormat::TwentyFour => "24h",
+    }
+}
+
+/// Write the clock format against the shared desktop schema.
+/// `false` keeps the caller's snapshot — never reset, never panic.
+pub fn write_clock_format(backend: &dyn SettingsBackend, format: ClockFormat) -> bool {
+    backend.set_string(
+        INTERFACE_SCHEMA,
+        CLOCK_FORMAT_KEY,
+        clock_format_value(format),
+    )
+}
+
+/// Write the wallpaper URI against the shared desktop schema.
+/// Blank URIs are refused (`false`) so the caller keeps its last
+/// good snapshot — never reset, never panic.
+pub fn write_wallpaper_uri(backend: &dyn SettingsBackend, uri: &str) -> bool {
+    let uri = uri.trim();
+    if uri.is_empty() {
+        return false;
+    }
+    backend.set_string(BACKGROUND_SCHEMA, PICTURE_URI_KEY, uri)
+}
 
 /// Refresh a snapshot from a backend. Unknown or absent values keep
 /// their current (default) settings — never reset, never panic.
@@ -209,6 +269,67 @@ mod tests {
     fn default_icon_theme_is_gnome_default() {
         assert_eq!(ShellSettings::default().icon_theme, DEFAULT_ICON_THEME);
         assert_eq!(DEFAULT_ICON_THEME, "Adwaita");
+    }
+
+    #[test]
+    fn clock_format_value_round_trips_through_parse() {
+        assert_eq!(clock_format_value(ClockFormat::Twelve), "12h");
+        assert_eq!(clock_format_value(ClockFormat::TwentyFour), "24h");
+        assert_eq!(
+            parse_clock_format(clock_format_value(ClockFormat::Twelve)),
+            ClockFormat::Twelve
+        );
+        assert_eq!(
+            parse_clock_format(clock_format_value(ClockFormat::TwentyFour)),
+            ClockFormat::TwentyFour
+        );
+    }
+
+    #[test]
+    fn write_clock_format_flips_the_shared_key() {
+        let backend = MapBackend::with_values(&[(INTERFACE_SCHEMA, CLOCK_FORMAT_KEY, "24h")]);
+        assert!(write_clock_format(&backend, ClockFormat::Twelve));
+        assert_eq!(
+            backend
+                .string(INTERFACE_SCHEMA, CLOCK_FORMAT_KEY)
+                .as_deref(),
+            Some("12h")
+        );
+        assert!(write_clock_format(&backend, ClockFormat::TwentyFour));
+        assert_eq!(
+            backend
+                .string(INTERFACE_SCHEMA, CLOCK_FORMAT_KEY)
+                .as_deref(),
+            Some("24h")
+        );
+    }
+
+    #[test]
+    fn write_wallpaper_uri_round_trips_and_refuses_blank() {
+        let backend = MapBackend::default();
+        assert!(write_wallpaper_uri(&backend, "file:///wall.png"));
+        assert_eq!(
+            backend
+                .string(BACKGROUND_SCHEMA, PICTURE_URI_KEY)
+                .as_deref(),
+            Some("file:///wall.png")
+        );
+        // Surrounding whitespace is trimmed before the write.
+        assert!(write_wallpaper_uri(&backend, "  file:///next.png\n"));
+        assert_eq!(
+            backend
+                .string(BACKGROUND_SCHEMA, PICTURE_URI_KEY)
+                .as_deref(),
+            Some("file:///next.png")
+        );
+        // Blank URIs never touch the backend: the stored value stays.
+        assert!(!write_wallpaper_uri(&backend, "   "));
+        assert_eq!(
+            backend
+                .string(BACKGROUND_SCHEMA, PICTURE_URI_KEY)
+                .as_deref(),
+            Some("file:///next.png")
+        );
     }
 
     #[test]

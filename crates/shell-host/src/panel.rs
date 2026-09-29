@@ -71,10 +71,11 @@ use crate::overview::{
     SWITCHER_STRIP_H,
 };
 use crate::popup::{
-    network_rows, paint_popup, panel_layout, popup_box, sound_rows, tile_row_at, PopupBody,
-    PopupState, POPUP_HEIGHT,
+    calendar_clock_row, calendar_weekday_row, network_rows, paint_popup, panel_layout, popup_box,
+    sound_rows, tile_row_at, PopupBody, PopupState, POPUP_HEIGHT,
 };
 use crate::search::{SearchAction, SearchHub, SearchResult, WindowProvider};
+use crate::settings::ClockFormat;
 use crate::tiles::{TileSet, TileState, NETWORK_TILE_INDEX, SOUND_TILE_INDEX};
 use crate::watcher::{
     indicator_at, indicator_cells, indicator_right_x, menu_row_at, paint_indicators, IndicatorHost,
@@ -408,6 +409,10 @@ struct DockPaintKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PanelPaintKey {
     clock: String,
+    /// Bar clock format: the calendar footer row names the flip, so
+    /// a format change repaints even when the minute text coincides
+    /// (noon reads `12:xx` either way).
+    clock_format: ClockFormat,
     states: [(TileState, Option<u8>); 3],
     /// Queued unread notifications behind the bar presence marker;
     /// the strip repaints within one slow tick of queue changes.
@@ -664,6 +669,13 @@ impl ShellHost {
     /// blocks the panel.
     pub fn load_notification_queue(&mut self) {
         self.restore_notification_queue(&NotificationCenter::system_path());
+    }
+
+    /// Load the Roost-owned prefs from the system state file at host
+    /// start. Same fail-closed rule as the notification queue: a bad
+    /// file never blocks the panel.
+    pub fn load_roost_prefs(&mut self) {
+        self.tiles.load_prefs_system();
     }
 
     /// Tear down the banner surface, if any (same explicit-destroy
@@ -982,6 +994,7 @@ impl ShellHost {
             .unwrap_or(0);
         let key = PanelPaintKey {
             clock: self.tiles.clock.clone(),
+            clock_format: self.tiles.settings.clock_format,
             states: tiles.map(|tile| (tile.state, tile.level)),
             unread,
             width,
@@ -1053,6 +1066,8 @@ impl ShellHost {
                     self.indicators.items(),
                     &rows,
                     &sound,
+                    self.tiles.settings.clock_format,
+                    self.tiles.prefs.clock_show_weekday,
                 );
             }
         }
@@ -1181,6 +1196,19 @@ impl ShellHost {
                 return;
             }
         }
+        // Row presses inside the open calendar fire the footer
+        // toggles (clock format above, Roost prefs below); the
+        // calendar stays open on the new face, and anything else
+        // falls through to the strip.
+        if self.popup.body() == Some(PopupBody::Calendar) {
+            let open_box = popup_box(&layout, PopupBody::Calendar);
+            if open_box.contains(x, y) {
+                self.fire_clock_row(&open_box, x, y);
+                self.fire_weekday_row(&open_box, x, y);
+                self.apply_popup_size();
+                return;
+            }
+        }
         // Row presses inside the open network menu fire the radio
         // toggle; the menu stays open on the pending face, and anything
         // else falls through to the strip.
@@ -1207,6 +1235,75 @@ impl ShellHost {
         let open_box = self.popup.body().map(|body| popup_box(&layout, body));
         self.popup.press(&layout, open_box, x, y);
         self.apply_popup_size();
+    }
+
+    /// Fire the calendar footer row under the popup point: flips the
+    /// bar clock between twelve- and twenty-four-hour. Presses
+    /// elsewhere in the calendar keep it open; a refused write keeps
+    /// the last good snapshot quietly and the calendar stays open.
+    fn fire_clock_row(&mut self, open_box: &crate::popup::Rect, x: i32, y: i32) {
+        if !calendar_clock_row(open_box).contains(x, y) {
+            return;
+        }
+        self.toggle_clock_format();
+    }
+
+    /// Fire the calendar prefs row under the popup point: flips the
+    /// bar-clock weekday prefix. Presses elsewhere in the calendar
+    /// keep it open; the calendar stays open on the new face.
+    fn fire_weekday_row(&mut self, open_box: &crate::popup::Rect, x: i32, y: i32) {
+        if !calendar_weekday_row(open_box).contains(x, y) {
+            return;
+        }
+        self.toggle_clock_weekday();
+    }
+
+    /// Flip the bar-clock weekday prefix from the calendar prefs row:
+    /// update the snapshot at once and persist to the prefs file,
+    /// repaint on the tick.
+    pub fn toggle_clock_weekday(&mut self) -> bool {
+        self.tiles.toggle_clock_show_weekday()
+    }
+
+    /// Flip the bar clock between twelve- and twenty-four-hour from
+    /// the calendar toggle row: write the shared key, re-read the
+    /// snapshot at once, repaint on the tick. A refused write keeps
+    /// the last good snapshot, quietly.
+    pub fn toggle_clock_format(&mut self) -> bool {
+        self.toggle_clock_format_with(&crate::settings::GioBackend)
+    }
+
+    /// [`toggle_clock_format`](Self::toggle_clock_format) against an
+    /// explicit backend (tests substitute a fake; the press path
+    /// passes the platform backend).
+    pub fn toggle_clock_format_with(
+        &mut self,
+        backend: &dyn crate::settings::SettingsBackend,
+    ) -> bool {
+        self.tiles.toggle_clock_format_with(backend)
+    }
+
+    /// Set the desktop wallpaper from the shell picker surface: write
+    /// the shared key, re-read the snapshot at once, and publish to
+    /// the compositor drop file on this same call (the slow tick
+    /// would republish within two seconds; the picker must not wait
+    /// for it). A refused write keeps the last good snapshot,
+    /// quietly, and publishes nothing new.
+    pub fn set_wallpaper_uri(&mut self, uri: &str) -> bool {
+        self.set_wallpaper_uri_with(uri, &crate::settings::GioBackend)
+    }
+
+    /// [`set_wallpaper_uri`](Self::set_wallpaper_uri) against an
+    /// explicit backend (tests substitute a fake; the picker path
+    /// passes the platform backend).
+    pub fn set_wallpaper_uri_with(
+        &mut self,
+        uri: &str,
+        backend: &dyn crate::settings::SettingsBackend,
+    ) -> bool {
+        let done = self.tiles.set_wallpaper_uri_with(uri, backend);
+        self.publish_wallpaper();
+        done
     }
 
     /// Fire the network menu row under the popup point: row 0 toggles
@@ -2459,6 +2556,7 @@ pub fn run_panel_with_control(
 
     let mut host = ShellHost::new(panel, AppProvider::system(), Favorites::system());
     host.load_notification_queue();
+    host.load_roost_prefs();
     host.attach_wayland(compositor.clone(), layer_shell.clone(), shm, qh.clone());
     host.attach_seat(seat.clone(), &qh);
     host.create_panel_surface(&compositor, &layer_shell, &qh);
@@ -2583,6 +2681,188 @@ mod tests {
             assert!(host.popup.is_open());
             host.press_panel(4, 100);
             assert!(!host.popup.is_open());
+        }
+
+        /// Clock format write-back round trip through a fake backend:
+        /// the shell toggle flips the shared key, and one tick
+        /// re-renders the bar. Touches no real dconf: every backend
+        /// pass goes through the fake, and paint reads only the
+        /// snapshot.
+        #[test]
+        fn clock_toggle_flips_shared_key_and_rerenders_within_one_tick() {
+            use crate::popup::{calendar_clock_row, popup_box, PopupBody};
+            use crate::settings::{
+                ClockFormat, MapBackend, SettingsBackend, CLOCK_FORMAT_KEY, INTERFACE_SCHEMA,
+            };
+            let (mut host, _dir) = test_host();
+            host.panel_size = Some((1280, 32));
+            host.tiles.clock = "12:34".to_owned();
+            let backend = MapBackend::with_values(&[(INTERFACE_SCHEMA, CLOCK_FORMAT_KEY, "24h")]);
+            host.tiles.refresh_with(&backend);
+            assert_eq!(host.tiles.settings.clock_format, ClockFormat::TwentyFour);
+            // Baseline paint records the pre-toggle key (no Wayland:
+            // the key records without uploading, keeping the repaint
+            // decision observable).
+            host.paint_panel_surface(1280, 32);
+            let before = host.panel_paint_key.clone().expect("baseline paint");
+            // A press inside the open calendar but above the footer
+            // row keeps it open and writes nothing.
+            host.press_panel(640, 16);
+            assert_eq!(host.popup.body(), Some(PopupBody::Calendar));
+            let open_box = popup_box(
+                &crate::popup::panel_layout(1280, 32, &host.tiles.clock),
+                PopupBody::Calendar,
+            );
+            let footer = calendar_clock_row(&open_box);
+            host.press_panel(open_box.x + 4, open_box.y + 4);
+            assert!(footer.y > open_box.y + 4);
+            assert_eq!(host.popup.body(), Some(PopupBody::Calendar));
+            assert_eq!(
+                backend
+                    .string(INTERFACE_SCHEMA, CLOCK_FORMAT_KEY)
+                    .as_deref(),
+                Some("24h")
+            );
+            host.close_popup();
+            // The shell toggle flips the shared key...
+            assert!(host.toggle_clock_format_with(&backend));
+            assert_eq!(
+                backend
+                    .string(INTERFACE_SCHEMA, CLOCK_FORMAT_KEY)
+                    .as_deref(),
+                Some("12h")
+            );
+            // ...and one tick re-renders the bar on snapshot truth.
+            host.tiles.refresh_with(&backend);
+            host.paint_panel_surface(1280, 32);
+            let after = host.panel_paint_key.clone().expect("repaint");
+            assert_ne!(before, after);
+            assert_eq!(after.clock_format, ClockFormat::Twelve);
+            assert_eq!(after.clock, host.tiles.clock);
+        }
+
+        /// Shell-set wallpaper applies at once through the existing
+        /// publish path: the picker write flips the shared key and
+        /// the compositor drop file carries the new URI without
+        /// waiting for the slow tick. Touches no real dconf and no
+        /// real runtime dir: every backend pass goes through the
+        /// fake, and the drop file lands in a temp dir.
+        #[test]
+        fn shell_set_wallpaper_applies_through_the_publish_path() {
+            use crate::settings::{
+                MapBackend, SettingsBackend, BACKGROUND_SCHEMA, PICTURE_URI_KEY,
+            };
+            use crate::tiles::TileSet;
+            let (mut host, _dir) = test_host();
+            let net = tempfile::tempdir().expect("tempdir");
+            let power = tempfile::tempdir().expect("tempdir");
+            let run = tempfile::tempdir().expect("tempdir");
+            host.tiles = TileSet::with_roots("", net.path(), power.path(), run.path());
+            let backend = MapBackend::default();
+            assert!(host.set_wallpaper_uri_with("file:///wall.png", &backend));
+            assert_eq!(
+                backend
+                    .string(BACKGROUND_SCHEMA, PICTURE_URI_KEY)
+                    .as_deref(),
+                Some("file:///wall.png")
+            );
+            assert_eq!(
+                host.tiles.settings.wallpaper_uri.as_deref(),
+                Some("file:///wall.png")
+            );
+            let drop = run.path().join(roost_compositor::wallpaper::WALLPAPER_FILE);
+            assert_eq!(
+                std::fs::read_to_string(&drop).expect("drop file"),
+                "file:///wall.png"
+            );
+        }
+
+        /// Wallpaper survives session restart: a fresh host re-reads
+        /// the shared key and republishes the same drop file, so the
+        /// compositor shows the same image after the shell restarts.
+        #[test]
+        fn wallpaper_survives_session_restart() {
+            use crate::settings::{MapBackend, BACKGROUND_SCHEMA, PICTURE_URI_KEY};
+            use crate::tiles::TileSet;
+            let backend = MapBackend::with_values(&[(
+                BACKGROUND_SCHEMA,
+                PICTURE_URI_KEY,
+                "file:///wall.png",
+            )]);
+            // Fresh session: default snapshot, nothing published yet,
+            // and a fresh runtime dir with no drop file.
+            let (mut host, _dir) = test_host();
+            let net = tempfile::tempdir().expect("tempdir");
+            let power = tempfile::tempdir().expect("tempdir");
+            let run = tempfile::tempdir().expect("tempdir");
+            host.tiles = TileSet::with_roots("", net.path(), power.path(), run.path());
+            assert_eq!(host.tiles.settings.wallpaper_uri, None);
+            // The slow tick's shape — re-read, then publish — restores
+            // the same drop file the previous session wrote.
+            host.tiles.refresh_with(&backend);
+            host.publish_wallpaper();
+            assert_eq!(
+                host.tiles.settings.wallpaper_uri.as_deref(),
+                Some("file:///wall.png")
+            );
+            let drop = run.path().join(roost_compositor::wallpaper::WALLPAPER_FILE);
+            assert_eq!(
+                std::fs::read_to_string(&drop).expect("drop file"),
+                "file:///wall.png"
+            );
+        }
+
+        /// Roost prefs surface round trip: a press on the calendar's
+        /// prefs row flips the weekday prefix, the calendar stays
+        /// open, and the pinned prefs file carries the flip without
+        /// hand editing.
+        #[test]
+        fn calendar_prefs_press_flips_weekday_and_persists() {
+            use crate::popup::{calendar_weekday_row, popup_box, PopupBody};
+            let (mut host, _dir) = test_host();
+            host.panel_size = Some((1280, 32));
+            host.tiles.clock = "12:34".to_owned();
+            let state = tempfile::tempdir().expect("tempdir");
+            let prefs = state.path().join(crate::prefs::PREFS_FILE);
+            host.tiles.restore_prefs(&prefs);
+            assert!(!host.tiles.prefs.clock_show_weekday);
+            host.press_panel(640, 16);
+            assert_eq!(host.popup.body(), Some(PopupBody::Calendar));
+            let open_box = popup_box(
+                &crate::popup::panel_layout(1280, 32, &host.tiles.clock),
+                PopupBody::Calendar,
+            );
+            let row = calendar_weekday_row(&open_box);
+            host.press_panel(row.x + 4, row.y + 4);
+            assert_eq!(host.popup.body(), Some(PopupBody::Calendar));
+            assert!(host.tiles.prefs.clock_show_weekday);
+            assert!(host.tiles.clock.contains(' '));
+            assert!(
+                crate::prefs::load(&prefs).clock_show_weekday,
+                "surface write reaches the prefs file"
+            );
+        }
+
+        /// Changed Roost option shows the kept value after shell
+        /// restart: a fresh host restoring from the same prefs file
+        /// paints the weekday prefix with no further writes.
+        #[test]
+        fn changed_roost_option_shows_kept_value_after_restart() {
+            let (mut host, _dir) = test_host();
+            let state = tempfile::tempdir().expect("tempdir");
+            let prefs = state.path().join(crate::prefs::PREFS_FILE);
+            host.tiles.restore_prefs(&prefs);
+            assert!(host.toggle_clock_weekday());
+            assert!(host.tiles.prefs.clock_show_weekday);
+            // Fresh session, same file: the kept value comes back.
+            let (mut restarted, _dir) = test_host();
+            assert!(!restarted.tiles.prefs.clock_show_weekday);
+            restarted.tiles.restore_prefs(&prefs);
+            assert!(restarted.tiles.prefs.clock_show_weekday);
+            assert!(restarted.tiles.clock.contains(' '));
+            // And flipping back persists too: no one-way latch.
+            assert!(restarted.toggle_clock_weekday());
+            assert!(!crate::prefs::load(&prefs).clock_show_weekday);
         }
 
         /// `close_popup` is a no-op when nothing is open and shrinks
@@ -4430,6 +4710,7 @@ mod tests {
         fn some_panel_key() -> super::super::PanelPaintKey {
             super::super::PanelPaintKey {
                 clock: "12:34".to_owned(),
+                clock_format: crate::settings::ClockFormat::TwentyFour,
                 states: [(crate::tiles::TileState::Ready, None); 3],
                 unread: 0,
                 width: 1280,

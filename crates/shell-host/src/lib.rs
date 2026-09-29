@@ -23,6 +23,7 @@ pub mod notifications;
 pub mod overview;
 pub mod panel;
 pub mod popup;
+pub mod prefs;
 pub mod search;
 pub mod settings;
 pub mod tiles;
