@@ -12,6 +12,7 @@
 
 use crate::model::ShellModel;
 use crate::notifications::Urgency;
+use crate::search::{SearchAction, SearchResult};
 use crate::tiles::{Tile, TileState};
 
 /// Canvas backing pixel format (matches `wl_shm` `Argb8888`).
@@ -176,11 +177,80 @@ impl OverviewCanvas {
         }
         self.rect(gx, gy, FONT_SCALE, 5 * FONT_SCALE, ACCENT);
     }
+
+    /// Paint the inline spawn-failure marker on result row `index`:
+    /// a brick border plus a filled tick at the row's left edge, in
+    /// the error-indicator `WARN` ink the tiles use for failed
+    /// services. Called after [`render`](Self::render) /
+    /// [`draw_query`](Self::draw_query) while host failure state
+    /// names the row; with no failure the canvas paints exactly the
+    /// old pixels. Out-of-range indexes paint nothing, never panic.
+    /// Later rows overlay the window grid — acceptable at
+    /// placeholder scale: only the failed row ever paints, and
+    /// failure visibility beats grid fidelity.
+    pub fn draw_launch_failure(&mut self, index: usize) {
+        let Some((x, y, w, h)) = overview_result_box(index) else {
+            return;
+        };
+        self.border(x, y, w, h, 3, WARN);
+        self.rect(x + 6, y + 6, 12, 12, WARN);
+    }
+}
+
+/// Map a press on overview result `index` to its runnable action.
+///
+/// Left press on an app (launch) or window (focus) result resolves
+/// to that result's [`SearchAction`]: launch carries the
+/// desktop-entry id the host resolves through the shared launch
+/// tracker, focus carries the window id the host runs through the
+/// token-gated activation path — the overview half of the
+/// [`dock_press`](crate::dock::dock_press) shape. The match stays
+/// exhaustive so a future non-runnable action variant fails closed
+/// at compile time instead of routing by default. Any other button
+/// or an out-of-range index routes nowhere, and a press must never
+/// fire from keyboard navigation. Never panics: the index is
+/// bounds-checked against `results`.
+pub fn overview_press(results: &[SearchResult], index: usize, button: u32) -> Option<SearchAction> {
+    if button != crate::dock::BTN_LEFT {
+        return None;
+    }
+    let hit = results.get(index)?;
+    match &hit.action {
+        SearchAction::Launch { .. } | SearchAction::Focus { .. } => Some(hit.action.clone()),
+    }
+}
+
+/// Search-hit row geometry for the overview (placeholder rows; full
+/// text rows wait for the toolkit).
+const RESULT_X: i32 = ORIGIN_X;
+/// Below the query box (which ends at 32 + 5 * `FONT_SCALE` + 16),
+/// above the window grid at `ORIGIN_Y`.
+const RESULT_Y: i32 = 72;
+const RESULT_W: i32 = 512;
+const RESULT_H: i32 = 24;
+const RESULT_GAP: i32 = 8;
+
+/// Screen box for the `index`-th search-hit row, or `None` past the
+/// drawn rows. Same geometry
+/// [`OverviewCanvas::draw_launch_failure`] paints, so the failure
+/// marker lands on the pressed row — the `banner_row_boxes` shape
+/// applied to overview hits. Clipped, never panics.
+pub fn overview_result_box(index: usize) -> Option<(i32, i32, i32, i32)> {
+    if index >= crate::search::MAX_TOTAL_RESULTS {
+        return None;
+    }
+    Some((
+        RESULT_X,
+        RESULT_Y + index as i32 * (RESULT_H + RESULT_GAP),
+        RESULT_W,
+        RESULT_H,
+    ))
 }
 
 /// Paint the panel strip: backdrop plus a lighter Activities corner.
-/// Error-indicator color (opaque brick).
-const WARN: [u8; 4] = [0xc0, 0x40, 0x30, 0xff];
+/// Error-indicator color (opaque brick); shared with the overview
+/// inline launch-failure marker and the panel tiles.
+pub(crate) const WARN: [u8; 4] = [0xc0, 0x40, 0x30, 0xff];
 
 /// 3x5 micro-glyphs (`0-9`, `:`, then `a-z`), rows top to bottom,
 /// low three bits left to right. Enough for the panel clock and the
@@ -1156,5 +1226,78 @@ mod tests {
         // Hollow: accent frame, backdrop interior.
         assert_eq!(strip_pixel(&pixels, width, 1256, 9), ACCENT);
         assert_eq!(strip_pixel(&pixels, width, 1256 + 7, 9 + 7), BG);
+    }
+
+    /// Press routing mirrors the dock shape: left on a runnable
+    /// (launch or focus) result resolves its action; anything else
+    /// routes nowhere.
+    #[test]
+    fn press_routes_runnable_hits_on_left_only() {
+        use crate::dock::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT};
+        let results = vec![
+            SearchResult::launch("Terminal", "org.gnome.Terminal.desktop"),
+            SearchResult::focus("alpha", None, 7),
+        ];
+        // Left on the app result carries its desktop-entry id.
+        assert_eq!(
+            overview_press(&results, 0, BTN_LEFT),
+            Some(SearchAction::Launch {
+                app_id: "org.gnome.Terminal.desktop".to_owned(),
+            })
+        );
+        // Left on the window result carries its window id.
+        assert_eq!(
+            overview_press(&results, 1, BTN_LEFT),
+            Some(SearchAction::Focus { window: 7 })
+        );
+        // Other buttons never fire, even on runnable hits.
+        assert_eq!(overview_press(&results, 0, BTN_MIDDLE), None);
+        assert_eq!(overview_press(&results, 1, BTN_RIGHT), None);
+        assert_eq!(overview_press(&results, 0, 0x113), None);
+        // Out-of-range indexes and empty lists miss, never panic.
+        assert_eq!(overview_press(&results, 2, BTN_LEFT), None);
+        assert_eq!(overview_press(&[], 0, BTN_LEFT), None);
+    }
+
+    /// Inline spawn-failure rendering marks only the failed row: a
+    /// brick border plus a filled tick on its box, everything else
+    /// exactly the old pixels.
+    #[test]
+    fn launch_failure_marks_only_the_failed_row() {
+        use crate::search::MAX_TOTAL_RESULTS;
+        let mut canvas = OverviewCanvas::new(1280, 800);
+        canvas.render(&ShellModel::new(), 0);
+        canvas.draw_query("");
+        let clean = canvas.pixels().to_vec();
+        canvas.draw_launch_failure(1);
+        assert_ne!(
+            canvas.pixels(),
+            clean,
+            "the marker paints over the clean frame"
+        );
+        // The failed row's box carries the brick border.
+        let (x, y, w, h) = overview_result_box(1).expect("row 1 box");
+        assert_eq!(pixel(&canvas, x, y), WARN);
+        assert_eq!(pixel(&canvas, x + w - 1, y + h - 1), WARN);
+        // The filled tick sits inside the failed row.
+        assert_eq!(pixel(&canvas, x + 8, y + 8), WARN);
+        // Row 0 and the far corner stay exactly as painted.
+        let (x0, y0, _, _) = overview_result_box(0).expect("row 0 box");
+        assert_eq!(pixel(&canvas, x0, y0), BG, "other rows untouched");
+        assert_eq!(pixel(&canvas, 1270, 790), BG);
+        // Row boxes cap at the merged answer bound, like the hub.
+        assert!(overview_result_box(MAX_TOTAL_RESULTS).is_none());
+        assert!(overview_result_box(usize::MAX).is_none());
+        // Past-the-end indexes paint nothing, never panic.
+        let mut edge = OverviewCanvas::new(1280, 800);
+        edge.render(&ShellModel::new(), 0);
+        let before = edge.pixels().to_vec();
+        edge.draw_launch_failure(MAX_TOTAL_RESULTS);
+        edge.draw_launch_failure(usize::MAX);
+        assert_eq!(edge.pixels(), before, "out-of-range failure paints nothing");
+        // Zero-size canvases never panic.
+        let mut tiny = OverviewCanvas::new(0, 0);
+        tiny.draw_launch_failure(0);
+        assert!(tiny.pixels().is_empty());
     }
 }

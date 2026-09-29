@@ -66,8 +66,9 @@ use crate::keyboard::{KeyAction, XkbFeed};
 use crate::model::ShellModel;
 use crate::notifications::{NotificationCenter, Urgency};
 use crate::overview::{
-    banner_hit, banner_strip_height, paint_panel, BannerCanvas, BannerHit, BannerRow,
-    OverviewCanvas, SwitcherCanvas, ACCENT, BANNER_STRIP_W, BYTES_PER_PIXEL, SWITCHER_STRIP_H,
+    banner_hit, banner_strip_height, overview_press, paint_panel, BannerCanvas, BannerHit,
+    BannerRow, OverviewCanvas, SwitcherCanvas, ACCENT, BANNER_STRIP_W, BYTES_PER_PIXEL,
+    SWITCHER_STRIP_H,
 };
 use crate::popup::{paint_popup, panel_layout, popup_box, PopupBody, PopupState, POPUP_HEIGHT};
 use crate::search::{SearchAction, SearchHub, SearchResult, WindowProvider};
@@ -257,6 +258,14 @@ pub struct ShellHost {
     xkb: Option<XkbFeed>,
     /// Live overview search text (re-queried on every edit).
     search_text: String,
+    /// Pressed overview result whose spawn failed (row index plus
+    /// the spawn error text). Set on `HitError::Launch` in
+    /// [`press_overview`](Self::press_overview) — the overview stays
+    /// open and the next repaint marks the row via
+    /// [`OverviewCanvas::draw_launch_failure`](crate::overview::OverviewCanvas::draw_launch_failure).
+    /// Cleared on successful press, fresh query text, and overview
+    /// close so a stale row never paints.
+    overview_failure: Option<OverviewFailure>,
     /// Enter arrived while open: the run loop activates the top hit.
     pending_submit: bool,
     /// Escape arrived while open: the run loop dismisses the overview.
@@ -302,6 +311,7 @@ struct PaintKey {
     width: i32,
     height: i32,
     query: String,
+    failure: Option<usize>,
 }
 
 /// Live switcher layer surface and its configured size.
@@ -502,6 +512,18 @@ impl std::error::Error for HitError {
     }
 }
 
+/// Inline launch-failure state for one overview result row: the
+/// pressed row the repaint marker paints on, plus the spawn error
+/// text (kept for diagnostics and tests; the text row itself waits
+/// for the toolkit).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverviewFailure {
+    /// Pressed result index the marker paints on.
+    pub index: usize,
+    /// Spawn error text, in [`HitError`] display form.
+    pub message: String,
+}
+
 impl ShellHost {
     /// Host over explicit workflow state (002 T2).
     ///
@@ -566,6 +588,7 @@ impl ShellHost {
             pending_dock: Vec::new(),
             xkb: None,
             search_text: String::new(),
+            overview_failure: None,
             pending_submit: false,
             pending_dismiss: false,
         }
@@ -902,6 +925,7 @@ impl ShellHost {
             width: overview.width,
             height: overview.height,
             query: self.search_text.clone(),
+            failure: self.overview_failure.as_ref().map(|f| f.index),
         };
         if self.paint_key.as_ref() == Some(&key) {
             return;
@@ -909,6 +933,9 @@ impl ShellHost {
         let mut canvas = OverviewCanvas::new(overview.width, overview.height);
         canvas.render(&self.model, self.favorites.ids().len());
         canvas.draw_query(&self.search_text);
+        if let Some(failure) = &self.overview_failure {
+            canvas.draw_launch_failure(failure.index);
+        }
         if let Some(backing) = shm_upload(
             &wayland.shm,
             &wayland.qh,
@@ -1200,10 +1227,14 @@ impl ShellHost {
             KeyAction::Text(text) => {
                 self.search_text.push_str(&text);
                 self.search.query(&self.search_text);
+                // Fresh results obsolete the failed row.
+                self.overview_failure = None;
             }
             KeyAction::Erase => {
                 self.search_text.pop();
                 self.search.query(&self.search_text);
+                // Fresh results obsolete the failed row.
+                self.overview_failure = None;
             }
             KeyAction::Submit => self.pending_submit = true,
             KeyAction::Dismiss => {
@@ -1222,6 +1253,12 @@ impl ShellHost {
     /// Nonblocking drain of the current answer, merged and bounded.
     pub fn search_collect(&mut self) -> Vec<SearchResult> {
         self.search.collect()
+    }
+
+    /// Inline launch failure awaiting repaint, if the last overview
+    /// press failed to spawn.
+    pub fn overview_failure(&self) -> Option<&OverviewFailure> {
+        self.overview_failure.as_ref()
     }
 
     /// Current launch feedback per app id (reaps exited children).
@@ -1268,6 +1305,58 @@ impl ShellHost {
             }
         }
     }
+
+    /// Press overview result `index` (the app-launch and
+    /// action-run press path, plus inline failure reporting).
+    ///
+    /// Routes through [`overview_press`] and runs the routed hit
+    /// through [`activate_hit`](Self::activate_hit): app results
+    /// resolve by desktop-entry id and spawn through the shared
+    /// [`LaunchTracker`](crate::apps::LaunchTracker), dismissing the
+    /// overview on success while starting feedback flows from
+    /// [`launch_states`](Self::launch_states) exactly as dock
+    /// launches do; window (action) results run their activation
+    /// command through the token gate and dismiss on success. A
+    /// press that routes nowhere (wrong button, stale index) is a
+    /// `None` no-op. A spawn failure reports [`HitError::Launch`]
+    /// with the overview still open and records the pressed row in
+    /// [`overview_failure`](Self::overview_failure) so the next
+    /// repaint marks it inline — fail-closed like
+    /// [`LaunchTracker`](crate::apps::LaunchTracker): nothing
+    /// tracked, nothing dismissed. This path never panics.
+    pub fn press_overview(
+        &mut self,
+        control: &mut ControlClient,
+        results: &[SearchResult],
+        index: usize,
+        button: u32,
+    ) -> Result<Option<HitOutcome>, HitError> {
+        if overview_press(results, index, button).is_none() {
+            return Ok(None);
+        }
+        let Some(hit) = results.get(index) else {
+            return Ok(None);
+        };
+        match self.activate_hit(control, hit) {
+            Ok(outcome) => {
+                // Success dismisses: no stale marker survives, and
+                // the key drops so a still-open overview (best-effort
+                // dismissal) repaints any previous marker away.
+                self.overview_failure = None;
+                self.paint_key = None;
+                Ok(Some(outcome))
+            }
+            Err(HitError::Launch(err)) => {
+                let message = format!("launch failed: {err}");
+                self.overview_failure = Some(OverviewFailure { index, message });
+                // The marker is new paint: force the next frame.
+                self.paint_key = None;
+                Err(HitError::Launch(err))
+            }
+            Err(other) => Err(other),
+        }
+    }
+
     /// Create the panel `wl_surface` plus its top-anchored layer surface.
     ///
     /// `output` is `None` so the compositor places the panel on the
@@ -1802,6 +1891,11 @@ impl ShellHost {
             let _ = self.model.select_window(selected);
         }
         self.model.set_overview_open(model.is_overview_open());
+        if !model.is_overview_open() {
+            // A closed overview shows nothing: never reopen onto a
+            // stale failure marker.
+            self.overview_failure = None;
+        }
         self.model
             .apply_switcher_state(model.is_switcher_open(), model.switcher_selection());
         // Keep switch-to-instance answers on compositor truth.
@@ -3715,6 +3809,341 @@ mod tests {
                 }
                 other => panic!("expected unknown app, got {other:?}"),
             }
+        }
+
+        /// Type-and-press on a fixture app spawns it with starting
+        /// feedback and dismisses the overview: the behavioural proof
+        /// for the press-launch path.
+        #[test]
+        fn overview_press_launches_typed_app_with_feedback() {
+            use crate::apps::discover;
+            use std::rc::Rc;
+
+            let apps_dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                apps_dir.path().join("sleeper.desktop"),
+                "[Desktop Entry]\nName=Sleeper Probe\nExec=/bin/sleep 30\nType=Application\n",
+            )
+            .unwrap();
+            let fav_dir = tempfile::tempdir().unwrap();
+            let mut host = ShellHost::new(
+                PanelConfig::default(),
+                AppProvider::new(discover(&[apps_dir.path().to_owned()])),
+                Favorites::load(fav_dir.path().join(crate::favorites::FAVORITES_FILE)),
+            );
+
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("control.sock");
+            let mut model = StateModel::new();
+            let mut hub =
+                ControlHub::bind(socket_path.clone(), Rc::new(TokenStore::new()), SEAT_NAME)
+                    .unwrap();
+            let mut client = ControlClient::connect(&socket_path).unwrap();
+            client.send_hello().unwrap();
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.await_hello() {
+                    Ok(()) => break,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("hello failed: {e}"),
+                }
+            }
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.poll() {
+                    Ok(Handled::Snapshot { .. }) => break,
+                    Ok(_) => continue,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("snapshot poll failed: {e}"),
+                }
+            }
+            host.sync_overview(&client);
+            hub.set_overview(true);
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.poll() {
+                    Ok(Handled::Overview { open: true }) => break,
+                    Ok(_) => continue,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("overview poll failed: {e}"),
+                }
+            }
+            host.sync_overview(&client);
+            assert!(host.model.is_overview_open());
+
+            // Type the fixture name; the hub answers off-thread.
+            host.search_query("sleeper probe");
+            let mut results = Vec::new();
+            for _ in 0..200 {
+                results = host.search_collect();
+                if results.iter().any(|hit| hit.title == "Sleeper Probe") {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let index = results
+                .iter()
+                .position(|hit| hit.title == "Sleeper Probe")
+                .expect("typed query answers the fixture app");
+            let app_id = match &results[index].action {
+                crate::search::SearchAction::Launch { app_id } => app_id.clone(),
+                other => panic!("fixture hit must launch, got {other:?}"),
+            };
+
+            // Press the app result: spawn plus starting feedback.
+            match host.press_overview(&mut client, &results, index, crate::dock::BTN_LEFT) {
+                Ok(Some(super::super::HitOutcome::Launched { pid })) => {
+                    assert!(pid > 0, "spawn reports a live pid");
+                }
+                other => panic!("expected launch, got {other:?}"),
+            }
+            assert!(
+                host.launch_states()
+                    .get(&app_id)
+                    .is_some_and(|states| states.contains(&crate::apps::LaunchState::Starting)),
+                "long-lived spawn shows starting feedback"
+            );
+
+            // The hub applies the dismissal flip after the spawn.
+            let mut dismissed = false;
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.poll() {
+                    Ok(Handled::Overview { open }) => {
+                        if !open {
+                            dismissed = true;
+                            break;
+                        }
+                    }
+                    Ok(_) => continue,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("dismiss poll failed: {e}"),
+                }
+            }
+            assert!(dismissed, "overview dismisses after press-launch");
+        }
+
+        /// Press on an unlaunchable entry fails closed: spawn error,
+        /// overview still open, tracker empty. Inline rendering
+        /// belongs to the failure task; this pins the no-panic,
+        /// no-dismiss floor it builds on.
+        #[test]
+        fn overview_press_spawn_failure_keeps_overview_open() {
+            use crate::apps::discover;
+            use crate::search::SearchProvider;
+
+            let apps_dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                apps_dir.path().join("broken.desktop"),
+                "[Desktop Entry]\nName=Broken Probe\nExec=/nonexistent-roost-binary-xyz\nType=Application\n",
+            )
+            .unwrap();
+            let fav_dir = tempfile::tempdir().unwrap();
+            let mut host = ShellHost::new(
+                PanelConfig::default(),
+                AppProvider::new(discover(&[apps_dir.path().to_owned()])),
+                Favorites::load(fav_dir.path().join(crate::favorites::FAVORITES_FILE)),
+            );
+            host.model.set_overview_open(true);
+            let (stream, _peer) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+            let mut client = ControlClient::new(stream).expect("client");
+
+            let provider = AppProvider::new(discover(&[apps_dir.path().to_owned()]));
+            let results = provider.query("broken");
+            assert_eq!(results.len(), 1, "fixture app answers the query");
+            match host.press_overview(&mut client, &results, 0, crate::dock::BTN_LEFT) {
+                Err(super::super::HitError::Launch(_)) => {}
+                other => panic!("expected launch failure, got {other:?}"),
+            }
+            assert!(
+                host.model.is_overview_open(),
+                "failed press keeps the overview open"
+            );
+            assert!(
+                host.launcher.states().is_empty(),
+                "failed spawn tracks nothing"
+            );
+        }
+
+        /// Bad-Exec press reports inline: the spawn error keeps the
+        /// overview open with failure state naming the pressed row,
+        /// and the repaint marker lands a brick border on that row.
+        #[test]
+        fn overview_press_spawn_failure_reports_inline() {
+            use crate::apps::discover;
+            use crate::overview::{overview_result_box, OverviewCanvas, WARN};
+            use crate::search::SearchProvider;
+
+            let apps_dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                apps_dir.path().join("broken.desktop"),
+                "[Desktop Entry]\nName=Broken Probe\nExec=/nonexistent-roost-binary-xyz\nType=Application\n",
+            )
+            .unwrap();
+            let fav_dir = tempfile::tempdir().unwrap();
+            let mut host = ShellHost::new(
+                PanelConfig::default(),
+                AppProvider::new(discover(&[apps_dir.path().to_owned()])),
+                Favorites::load(fav_dir.path().join(crate::favorites::FAVORITES_FILE)),
+            );
+            host.model.set_overview_open(true);
+            let (stream, _peer) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+            let mut client = ControlClient::new(stream).expect("client");
+
+            let provider = AppProvider::new(discover(&[apps_dir.path().to_owned()]));
+            let results = provider.query("broken");
+            assert_eq!(results.len(), 1, "fixture app answers the query");
+            match host.press_overview(&mut client, &results, 0, crate::dock::BTN_LEFT) {
+                Err(super::super::HitError::Launch(_)) => {}
+                other => panic!("expected launch failure, got {other:?}"),
+            }
+            assert!(
+                host.model.is_overview_open(),
+                "failed press keeps the overview open"
+            );
+            assert!(
+                host.launcher.states().is_empty(),
+                "failed spawn tracks nothing"
+            );
+            // Inline failure names the pressed row with the error.
+            let failure = host
+                .overview_failure()
+                .expect("failed press records inline failure");
+            assert_eq!(failure.index, 0, "marker lands on the pressed row");
+            assert!(
+                failure.message.contains("launch failed"),
+                "message names the failure: {}",
+                failure.message
+            );
+            // The repaint marker borders exactly that row's box.
+            let (x, y, w, h) = overview_result_box(failure.index).expect("failed row box");
+            let mut canvas = OverviewCanvas::new(1280, 800);
+            canvas.render(&host.model, 0);
+            canvas.draw_launch_failure(failure.index);
+            let at = |x: i32, y: i32| {
+                let at = (y as usize * 1280 + x as usize) * crate::overview::BYTES_PER_PIXEL;
+                <[u8; 4]>::try_from(&canvas.pixels()[at..at + 4]).unwrap()
+            };
+            assert_eq!(at(x, y), WARN, "inline marker borders the pressed row");
+            assert_eq!(at(x + w - 1, y + h - 1), WARN);
+            assert_eq!(at(x + 8, y + 8), WARN, "filled tick marks the row");
+        }
+
+        /// Press on a window (action) result runs its activation
+        /// command through the token gate and dismisses the
+        /// overview: the behavioural proof for the action-run path.
+        #[test]
+        fn overview_press_action_runs_command_and_dismisses() {
+            use crate::search::SearchResult;
+            use roost_shell_control::CommandStatus;
+            use std::rc::Rc;
+
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("control.sock");
+            let mut model = StateModel::new();
+            let id_a = model.insert("alpha", Some("com.example.alpha"), 0);
+            let id_b = model.insert("beta", Some("com.example.beta"), 0);
+            assert!(model.set_focused(Some(id_a)));
+            let mut hub =
+                ControlHub::bind(socket_path.clone(), Rc::new(TokenStore::new()), SEAT_NAME)
+                    .unwrap();
+
+            let mut client = ControlClient::connect(&socket_path).unwrap();
+            client.send_hello().unwrap();
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.await_hello() {
+                    Ok(()) => break,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("hello failed: {e}"),
+                }
+            }
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.poll() {
+                    Ok(Handled::Snapshot { .. }) => break,
+                    Ok(_) => continue,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("snapshot poll failed: {e}"),
+                }
+            }
+
+            let (mut host, _favdir) = test_host();
+            host.sync_overview(&client);
+            hub.set_overview(true);
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.poll() {
+                    Ok(Handled::Overview { open: true }) => break,
+                    Ok(_) => continue,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("overview poll failed: {e}"),
+                }
+            }
+            host.sync_overview(&client);
+            assert!(host.model.is_overview_open());
+
+            // Press the window result: the activation command runs.
+            let results = vec![SearchResult::focus("beta", None, id_b)];
+            let request = match host.press_overview(&mut client, &results, 0, crate::dock::BTN_LEFT)
+            {
+                Ok(Some(super::super::HitOutcome::Focused { request })) => request,
+                other => panic!("expected focus, got {other:?}"),
+            };
+            assert_eq!(host.model.selected(), Some(id_b));
+
+            // The hub applies the activation, then the dismissal flip.
+            let mut result = None;
+            let mut dismissed = false;
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.poll() {
+                    Ok(Handled::CommandResult { id, status }) => {
+                        if id == request {
+                            result = Some(status);
+                        }
+                    }
+                    Ok(Handled::Overview { open }) => {
+                        if !open {
+                            dismissed = true;
+                        }
+                    }
+                    Ok(_) => continue,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("result poll failed: {e}"),
+                }
+                if result.is_some() && dismissed {
+                    break;
+                }
+            }
+            assert_eq!(result, Some(CommandStatus::Applied));
+            assert!(dismissed, "overview dismisses after action press");
+            assert_eq!(model.focused(), Some(id_b));
+        }
+
+        /// Presses that route nowhere are no-ops: no spawn, no
+        /// dismissal, overview untouched.
+        #[test]
+        fn overview_press_miss_is_noop() {
+            use crate::search::SearchResult;
+
+            let (mut host, _dir) = test_host();
+            host.model.set_overview_open(true);
+            let (stream, _peer) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+            let mut client = ControlClient::new(stream).expect("client");
+
+            let results = vec![SearchResult::launch("True", "true")];
+            // Wrong button and stale index route nowhere.
+            assert!(host
+                .press_overview(&mut client, &results, 0, crate::dock::BTN_RIGHT)
+                .expect("miss must not fail")
+                .is_none());
+            assert!(host
+                .press_overview(&mut client, &results, 9, crate::dock::BTN_LEFT)
+                .expect("miss must not fail")
+                .is_none());
+            assert!(host.model.is_overview_open());
+            assert!(host.launcher.states().is_empty());
         }
 
         /// Env mutation is process-global while Rust runs tests in
