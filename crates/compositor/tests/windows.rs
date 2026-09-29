@@ -1393,3 +1393,296 @@ fn super_t_without_shift_does_not_toggle() {
         f.client_b.keys
     );
 }
+
+/// Three mapped windows ("alpha", "beta", "gamma") on a 1280x800
+/// output with a reconciled manager, for strip chord tests.
+struct ThreeFixture {
+    comp: TestCompositor,
+    manager: WindowManager,
+    conn_a: Connection,
+    queue_a: EventQueue<Client>,
+    client_a: Client,
+    conn_b: Connection,
+    queue_b: EventQueue<Client>,
+    client_b: Client,
+    conn_c: Connection,
+    queue_c: EventQueue<Client>,
+    client_c: Client,
+    id_a: u64,
+    id_b: u64,
+    id_c: u64,
+}
+
+fn three_windows() -> ThreeFixture {
+    let mut f = layout_windows();
+    let (conn_c, mut queue_c, mut client_c) = connect(&mut f.comp);
+    map_toplevel(&mut f.comp, &conn_c, &mut queue_c, &mut client_c, "gamma");
+    f.manager.reconcile(&mut f.comp.state);
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    sync_client(&mut f.comp, &conn_c, &mut queue_c, &mut client_c);
+    let id_c = f
+        .manager
+        .model()
+        .windows()
+        .find(|w| w.title == "gamma")
+        .unwrap()
+        .id;
+    let Fixture {
+        comp,
+        manager,
+        conn_a,
+        queue_a,
+        client_a,
+        conn_b,
+        queue_b,
+        client_b,
+        id_a,
+        id_b,
+    } = f;
+    ThreeFixture {
+        comp,
+        manager,
+        conn_a,
+        queue_a,
+        client_a,
+        conn_b,
+        queue_b,
+        client_b,
+        conn_c,
+        queue_c,
+        client_c,
+        id_a,
+        id_b,
+        id_c,
+    }
+}
+
+fn sync_three(f: &mut ThreeFixture) {
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    sync_client(&mut f.comp, &f.conn_c, &mut f.queue_c, &mut f.client_c);
+}
+
+fn clear_three(f: &mut ThreeFixture) {
+    f.client_a.keys.clear();
+    f.client_b.keys.clear();
+    f.client_c.keys.clear();
+}
+
+/// Column x positions of alpha/beta/gamma: the strip order focus
+/// motion must never disturb.
+fn column_xs(f: &ThreeFixture) -> (i32, i32, i32) {
+    (
+        f.manager.geometry(f.id_a).unwrap().loc.x,
+        f.manager.geometry(f.id_b).unwrap().loc.x,
+        f.manager.geometry(f.id_c).unwrap().loc.x,
+    )
+}
+
+/// No arrow press reached any client: chord presses are consumed and
+/// only releases (plus bare modifiers) are observed.
+fn assert_no_arrow_press(f: &ThreeFixture) {
+    for (name, client) in [
+        ("alpha", &f.client_a),
+        ("beta", &f.client_b),
+        ("gamma", &f.client_c),
+    ] {
+        assert!(
+            !client.keys.iter().any(|(key, pressed)| [
+                ARROW_UP_KEYCODE,
+                ARROW_DOWN_KEYCODE,
+                ARROW_LEFT_KEYCODE,
+                ARROW_RIGHT_KEYCODE
+            ]
+            .contains(key)
+                && *pressed),
+            "{name} observed a consumed arrow press: {:?}",
+            client.keys
+        );
+    }
+}
+
+#[test]
+fn scroll_arrow_focus_moves_and_clamps_without_reordering() {
+    let mut f = three_windows();
+    assert!(f.manager.set_scroll(&mut f.comp.state, true));
+    assert_eq!(f.manager.session_mode(), SessionMode::Scroll);
+    // Columns step 632px: alpha 0, beta 632, gamma 1264.
+    assert_eq!(column_xs(&f), (0, 632, 1264));
+    // Focusing in scroll mode never reorders the strip, so starting
+    // from the leftmost column keeps the order above.
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    sync_three(&mut f);
+    clear_three(&mut f);
+
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, ARROW_RIGHT_KEYCODE);
+    assert_eq!(f.manager.model().focused(), Some(f.id_b));
+    release(&mut f.manager, &mut f.comp, ARROW_RIGHT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, ARROW_RIGHT_KEYCODE);
+    assert_eq!(f.manager.model().focused(), Some(f.id_c));
+    release(&mut f.manager, &mut f.comp, ARROW_RIGHT_KEYCODE);
+    // Clamped at the end: a third step right stays put.
+    press(&mut f.manager, &mut f.comp, ARROW_RIGHT_KEYCODE);
+    assert_eq!(f.manager.model().focused(), Some(f.id_c));
+    release(&mut f.manager, &mut f.comp, ARROW_RIGHT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, ARROW_LEFT_KEYCODE);
+    assert_eq!(f.manager.model().focused(), Some(f.id_b));
+    release(&mut f.manager, &mut f.comp, ARROW_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, ARROW_LEFT_KEYCODE);
+    assert_eq!(f.manager.model().focused(), Some(f.id_a));
+    release(&mut f.manager, &mut f.comp, ARROW_LEFT_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+
+    // Focus motion never reorders columns.
+    assert_eq!(column_xs(&f), (0, 632, 1264));
+
+    sync_three(&mut f);
+    assert_no_arrow_press(&f);
+    // Releases still reach clients so modifiers never stick.
+    for keycode in [ARROW_RIGHT_KEYCODE, ARROW_LEFT_KEYCODE] {
+        assert!(
+            [&f.client_a, &f.client_b, &f.client_c]
+                .iter()
+                .any(|c| c.keys.contains(&(keycode, false))),
+            "arrow release {keycode} must still reach a client",
+        );
+    }
+}
+
+#[test]
+fn scroll_shift_arrow_moves_focused_slot() {
+    let mut f = three_windows();
+    assert!(f.manager.set_scroll(&mut f.comp.state, true));
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    sync_three(&mut f);
+    clear_three(&mut f);
+
+    // Super+Shift+Right swaps beta one slot right: gamma takes 632,
+    // beta takes 1264, and focus follows beta.
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, ARROW_RIGHT_KEYCODE);
+    assert_eq!(f.manager.model().focused(), Some(f.id_b));
+    assert_eq!(column_xs(&f), (0, 1264, 632));
+    release(&mut f.manager, &mut f.comp, ARROW_RIGHT_KEYCODE);
+    for id in [f.id_a, f.id_b, f.id_c] {
+        let geo = f.manager.geometry(id).unwrap();
+        assert_eq!((geo.loc.y, geo.size.w, geo.size.h), (32, 616, 768));
+        assert_eq!(f.manager.window_layout(id), Some(WindowLayout::Strip));
+    }
+
+    // Super+Shift+Left reverses the swap exactly.
+    press(&mut f.manager, &mut f.comp, ARROW_LEFT_KEYCODE);
+    assert_eq!(f.manager.model().focused(), Some(f.id_b));
+    assert_eq!(column_xs(&f), (0, 632, 1264));
+    release(&mut f.manager, &mut f.comp, ARROW_LEFT_KEYCODE);
+
+    // End-clamped moves are no-ops keeping geometry.
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    press(&mut f.manager, &mut f.comp, ARROW_LEFT_KEYCODE);
+    assert_eq!(f.manager.model().focused(), Some(f.id_a));
+    assert_eq!(column_xs(&f), (0, 632, 1264));
+    release(&mut f.manager, &mut f.comp, ARROW_LEFT_KEYCODE);
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_c)));
+    press(&mut f.manager, &mut f.comp, ARROW_RIGHT_KEYCODE);
+    assert_eq!(f.manager.model().focused(), Some(f.id_c));
+    assert_eq!(column_xs(&f), (0, 632, 1264));
+    release(&mut f.manager, &mut f.comp, ARROW_RIGHT_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+
+    sync_three(&mut f);
+    assert_no_arrow_press(&f);
+}
+
+#[test]
+fn gnome_shift_arrows_still_tile_and_consume() {
+    let mut f = layout_windows();
+    assert_eq!(f.manager.session_mode(), SessionMode::Gnome);
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    f.client_b.keys.clear();
+
+    // Shift is ignored by the gnome arrow chords (as today): a
+    // shifted Left tiles left exactly like the bare chord.
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, ARROW_LEFT_KEYCODE);
+    assert_eq!(
+        f.manager.window_layout(f.id_b),
+        Some(WindowLayout::Tiled(TileSide::Left))
+    );
+    release(&mut f.manager, &mut f.comp, ARROW_LEFT_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    // Back to floating, then the bare chord tiles left too.
+    press(&mut f.manager, &mut f.comp, ARROW_DOWN_KEYCODE);
+    assert_eq!(
+        f.manager.window_layout(f.id_b),
+        Some(WindowLayout::Floating)
+    );
+    release(&mut f.manager, &mut f.comp, ARROW_DOWN_KEYCODE);
+    press(&mut f.manager, &mut f.comp, ARROW_LEFT_KEYCODE);
+    assert_eq!(
+        f.manager.window_layout(f.id_b),
+        Some(WindowLayout::Tiled(TileSide::Left))
+    );
+    release(&mut f.manager, &mut f.comp, ARROW_LEFT_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    assert_eq!(f.manager.session_mode(), SessionMode::Gnome);
+
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert!(
+        !f.client_b.keys.iter().any(|(key, pressed)| [
+            ARROW_UP_KEYCODE,
+            ARROW_DOWN_KEYCODE,
+            ARROW_LEFT_KEYCODE,
+            ARROW_RIGHT_KEYCODE
+        ]
+        .contains(key)
+            && *pressed),
+        "arrow presses must be consumed, got: {:?}",
+        f.client_b.keys
+    );
+}
+
+#[test]
+fn scroll_up_down_keep_gnome_meaning() {
+    let mut f = layout_windows();
+    assert!(f.manager.set_scroll(&mut f.comp.state, true));
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    f.client_b.keys.clear();
+
+    // Up/Down keep their gnome meaning in scroll mode: Up maximizes
+    // into the work area, Down restores.
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, ARROW_UP_KEYCODE);
+    assert_eq!(
+        f.manager.window_layout(f.id_b),
+        Some(WindowLayout::Maximized)
+    );
+    let maxed = f.manager.geometry(f.id_b).unwrap();
+    assert_eq!((maxed.size.w, maxed.size.h), (1280, 768));
+    release(&mut f.manager, &mut f.comp, ARROW_UP_KEYCODE);
+    press(&mut f.manager, &mut f.comp, ARROW_DOWN_KEYCODE);
+    assert_eq!(
+        f.manager.window_layout(f.id_b),
+        Some(WindowLayout::Floating)
+    );
+    release(&mut f.manager, &mut f.comp, ARROW_DOWN_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert!(
+        !f.client_b
+            .keys
+            .iter()
+            .any(|(key, pressed)| [ARROW_UP_KEYCODE, ARROW_DOWN_KEYCODE].contains(key) && *pressed),
+        "arrow presses must be consumed, got: {:?}",
+        f.client_b.keys
+    );
+}

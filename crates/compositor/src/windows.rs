@@ -451,8 +451,13 @@ impl WindowManager {
         let previous = self.model.focused();
         self.model.set_focused(id);
         if let Some(id) = id {
-            self.stacking.retain(|other| *other != id);
-            self.stacking.push(id);
+            // Floating stacks raise focus to the top; the strip keeps
+            // column order independent of focus (niri shape), so focus
+            // never reorders in scroll mode.
+            if self.mode == SessionMode::Gnome {
+                self.stacking.retain(|other| *other != id);
+                self.stacking.push(id);
+            }
         }
         let serial = SERIAL_COUNTER.next_serial();
         if let Some(previous) = previous {
@@ -768,6 +773,94 @@ impl WindowManager {
         Rectangle {
             loc: (work.loc.x + index * (width + gap), work.loc.y).into(),
             size: (width, work.size.h).into(),
+        }
+    }
+
+    /// Active-workspace windows bottom-to-top: the strip order focus
+    /// motion and slot moves operate on.
+    fn strip_order(&self) -> Vec<u64> {
+        let active = self.model.active_workspace();
+        self.stacking
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.model
+                    .window(*id)
+                    .is_some_and(|entry| entry.workspace == active)
+            })
+            .collect()
+    }
+
+    /// Move strip focus one column left/right (negative/positive
+    /// delta), clamped at the ends. Focus never reorders the strip:
+    /// column order is independent of focus. False with no windows.
+    fn focus_neighbor_in_strip(&mut self, state: &mut State, delta: i32) -> bool {
+        let order = self.strip_order();
+        if order.is_empty() {
+            return false;
+        }
+        let pos = self
+            .model
+            .focused()
+            .and_then(|focused| order.iter().position(|id| *id == focused))
+            .unwrap_or(0) as i32;
+        let next = pos.saturating_add(delta).clamp(0, order.len() as i32 - 1) as usize;
+        self.apply_focus(state, Some(order[next]));
+        true
+    }
+
+    /// Move the focused window one strip slot left/right, following it
+    /// with focus. Only the two swapped columns change geometry; the
+    /// rest of the strip is untouched. False with no movable window.
+    fn move_focused_in_strip(&mut self, state: &mut State, delta: i32) -> bool {
+        let Some(focused) = self.model.focused() else {
+            return false;
+        };
+        let active = self.model.active_workspace();
+        let off_workspace = self
+            .model
+            .window(focused)
+            .map(|entry| entry.workspace != active)
+            .unwrap_or(true);
+        if off_workspace {
+            return false;
+        }
+        let positions: Vec<usize> = self
+            .stacking
+            .iter()
+            .enumerate()
+            .filter(|(_, id)| {
+                self.model
+                    .window(**id)
+                    .is_some_and(|entry| entry.workspace == active)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let Some(slot) = positions
+            .iter()
+            .position(|index| self.stacking[*index] == focused)
+        else {
+            return false;
+        };
+        let other = slot
+            .saturating_add_signed(delta as isize)
+            .clamp(0, positions.len() - 1);
+        if other == slot {
+            return true;
+        }
+        self.stacking.swap(positions[slot], positions[other]);
+        self.relayout_strip(state);
+        true
+    }
+
+    /// Re-resolve every strip column (after slot moves). Windows in
+    /// other managed layouts keep theirs.
+    fn relayout_strip(&mut self, state: &mut State) {
+        let ids: Vec<u64> = self.windows.keys().copied().collect();
+        for id in ids {
+            if self.window_layout(id) == Some(WindowLayout::Strip) {
+                self.apply_layout(state, id, WindowLayout::Strip);
+            }
         }
     }
 
@@ -1274,7 +1367,21 @@ impl WindowManager {
                 );
             }
         } else if pressed && self.super_held && Self::is_arrow(keycode) {
-            if let Some(id) = self.model.focused() {
+            if self.mode == SessionMode::Scroll
+                && (keycode == ARROW_LEFT_KEYCODE || keycode == ARROW_RIGHT_KEYCODE)
+            {
+                // Scroll-mode strip motion (niri shape): arrows move
+                // focus along the strip, Shift+arrows move the focused
+                // window one slot. Up/Down keep their gnome meaning;
+                // forced membership converts the result to columns.
+                // Consumed in all cases, like the gnome chords.
+                let delta = if keycode == ARROW_LEFT_KEYCODE { -1 } else { 1 };
+                if self.shift_held {
+                    self.move_focused_in_strip(state, delta);
+                } else {
+                    self.focus_neighbor_in_strip(state, delta);
+                }
+            } else if let Some(id) = self.model.focused() {
                 match keycode {
                     ARROW_UP_KEYCODE => {
                         self.set_maximized(state, id, true);
