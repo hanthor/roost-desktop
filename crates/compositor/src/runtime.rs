@@ -92,6 +92,21 @@ impl NestedSession {
     }
 }
 
+/// Sibling binary next to `dir` when it exists as a file.
+/// Shared by the session launcher and the shell resolver so both agree
+/// on what "installed side by side" means.
+pub fn sibling_binary(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    let candidate = dir.join(name);
+    candidate.is_file().then_some(candidate)
+}
+
+/// Directory holding this process's binary, for sibling resolution.
+pub fn current_exe_dir() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.to_owned()))
+}
+
 /// Shell binary for a session: explicit config, then `RWD_SHELL_BIN`,
 /// then the `rwd-shell-host` sibling of this binary when it exists,
 /// else a `PATH` lookup at spawn time.
@@ -104,12 +119,9 @@ pub fn resolve_shell_bin(configured: Option<&std::path::Path>) -> std::path::Pat
             return std::path::PathBuf::from(path);
         }
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let sibling = dir.join("rwd-shell-host");
-            if sibling.is_file() {
-                return sibling;
-            }
+    if let Some(dir) = current_exe_dir() {
+        if let Some(sibling) = sibling_binary(&dir, "rwd-shell-host") {
+            return sibling;
         }
     }
     std::path::PathBuf::from("rwd-shell-host")

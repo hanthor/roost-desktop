@@ -88,3 +88,33 @@ jobs:
           name: scroll-proof-shots
           path: scroll-proof-artifacts/
           retention-days: 14
+
+  docs-shots:
+    runs-on: ubuntu-latest
+    needs: [journey, app-content, scroll-proof]
+    steps:
+      - uses: actions/checkout@v7
+      # Curate the release screenshot set out of this run's own proof
+      # artifacts and upload it as one bundle: each release takes its
+      # docs/shots refresh from here (see docs/screenshots.md). No
+      # byte-freshness gate: the panel clock renders live, so a fresh
+      # run legitimately differs from the committed set by its digits.
+      - uses: actions/download-artifact@v4
+        with:
+          name: journey-shots
+          path: /tmp/rwd-docs/journey
+      - uses: actions/download-artifact@v4
+        with:
+          name: app-content-shots
+          path: /tmp/rwd-docs/app
+      - uses: actions/download-artifact@v4
+        with:
+          name: scroll-proof-shots
+          path: /tmp/rwd-docs/scroll
+      - run: shellcheck scripts/rwd-docs-shots
+      - run: scripts/rwd-docs-shots collect /tmp/rwd-docs/journey /tmp/rwd-docs/app /tmp/rwd-docs/scroll --dest /tmp/rwd-docs/shots && ls /tmp/rwd-docs/shots | wc -l | grep -q 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docs-shots
+          path: /tmp/rwd-docs/shots/
+          retention-days: 90
