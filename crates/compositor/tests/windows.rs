@@ -1686,3 +1686,127 @@ fn scroll_up_down_keep_gnome_meaning() {
         f.client_b.keys
     );
 }
+
+/// Drive one wheel tick straight into the manager (no backend): the
+/// axis unit is whatever the backend reported (v120 or pixels).
+fn axis(manager: &mut WindowManager, comp: &mut TestCompositor, horizontal: f64, vertical: f64) {
+    manager.on_input(
+        &mut comp.state,
+        ManagerInput::Axis {
+            horizontal,
+            vertical,
+            time: 6000,
+        },
+    );
+}
+
+#[test]
+fn scroll_axis_moves_strip_view_and_reports_offset() {
+    let mut f = three_windows();
+    assert!(f.manager.set_scroll(&mut f.comp.state, true));
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    assert_eq!(column_xs(&f), (0, 632, 1264));
+    assert_eq!(f.manager.strip_offset(), 0.0);
+
+    // One vertical tick shifts every column left; the getter tracks
+    // the accumulated offset.
+    axis(&mut f.manager, &mut f.comp, 0.0, 120.0);
+    assert_eq!(f.manager.strip_offset(), 120.0);
+    assert_eq!(column_xs(&f), (-120, 512, 1144));
+    // Horizontal and vertical amounts accumulate into one offset.
+    axis(&mut f.manager, &mut f.comp, 30.0, 0.0);
+    assert_eq!(f.manager.strip_offset(), 150.0);
+    assert_eq!(column_xs(&f), (-150, 482, 1114));
+    // Scrolling never moves focus.
+    assert_eq!(f.manager.model().focused(), Some(f.id_a));
+}
+
+#[test]
+fn scroll_axis_clamps_at_overflow_bounds() {
+    let mut f = three_windows();
+    assert!(f.manager.set_scroll(&mut f.comp.state, true));
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    // Three 616-wide columns with 16px gaps total 1880px on a
+    // 1280px work area: at most 600px of scroll.
+    axis(&mut f.manager, &mut f.comp, 0.0, 100_000.0);
+    assert_eq!(f.manager.strip_offset(), 600.0);
+    assert_eq!(column_xs(&f), (-600, 32, 664));
+    // Past the end further ticks are no-ops keeping geometry.
+    axis(&mut f.manager, &mut f.comp, 0.0, 120.0);
+    assert_eq!(f.manager.strip_offset(), 600.0);
+    assert_eq!(column_xs(&f), (-600, 32, 664));
+    // A huge pull back clamps at the start.
+    axis(&mut f.manager, &mut f.comp, 0.0, -100_000.0);
+    assert_eq!(f.manager.strip_offset(), 0.0);
+    assert_eq!(column_xs(&f), (0, 632, 1264));
+    assert_eq!(f.manager.model().focused(), Some(f.id_b));
+}
+
+#[test]
+fn scroll_axis_ignored_without_overflow() {
+    let mut comp = TestCompositor::new();
+    let mut manager = comp.window_manager();
+    let (conn_a, mut queue_a, mut client_a) = connect(&mut comp);
+    map_toplevel(&mut comp, &conn_a, &mut queue_a, &mut client_a, "solo");
+    comp.state.set_output_size(1280, 800);
+    manager.reconcile(&mut comp.state);
+    sync_client(&mut comp, &conn_a, &mut queue_a, &mut client_a);
+    let id = manager
+        .model()
+        .windows()
+        .find(|w| w.title == "solo")
+        .unwrap()
+        .id;
+    assert!(manager.set_scroll(&mut comp.state, true));
+    let before = manager.geometry(id).unwrap();
+    // A single 616-wide column fits the 1280px work area: nothing to
+    // scroll, so the offset stays put and geometry is untouched.
+    axis(&mut manager, &mut comp, 0.0, 120.0);
+    assert_eq!(manager.strip_offset(), 0.0);
+    assert_eq!(manager.geometry(id).unwrap(), before);
+}
+
+#[test]
+fn scroll_axis_keeps_focused_window() {
+    let mut f = three_windows();
+    assert!(f.manager.set_scroll(&mut f.comp.state, true));
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    for _ in 0..5 {
+        axis(&mut f.manager, &mut f.comp, 0.0, 120.0);
+        assert_eq!(f.manager.model().focused(), Some(f.id_b));
+    }
+    assert_eq!(f.manager.strip_offset(), 600.0);
+    for _ in 0..5 {
+        axis(&mut f.manager, &mut f.comp, 0.0, -120.0);
+        assert_eq!(f.manager.model().focused(), Some(f.id_b));
+    }
+    assert_eq!(f.manager.strip_offset(), 0.0);
+}
+
+#[test]
+fn scroll_axis_ignored_in_gnome_mode() {
+    let mut f = three_windows();
+    assert_eq!(f.manager.session_mode(), SessionMode::Gnome);
+    let before_a = f.manager.geometry(f.id_a).unwrap();
+    let before_b = f.manager.geometry(f.id_b).unwrap();
+    let before_c = f.manager.geometry(f.id_c).unwrap();
+    axis(&mut f.manager, &mut f.comp, 0.0, 120.0);
+    axis(&mut f.manager, &mut f.comp, 120.0, 0.0);
+    assert_eq!(f.manager.strip_offset(), 0.0);
+    assert_eq!(f.manager.geometry(f.id_a).unwrap(), before_a);
+    assert_eq!(f.manager.geometry(f.id_b).unwrap(), before_b);
+    assert_eq!(f.manager.geometry(f.id_c).unwrap(), before_c);
+}
+
+#[test]
+fn reentering_scroll_resets_strip_offset() {
+    let mut f = three_windows();
+    assert!(f.manager.set_scroll(&mut f.comp.state, true));
+    axis(&mut f.manager, &mut f.comp, 0.0, 120.0);
+    assert_eq!(f.manager.strip_offset(), 120.0);
+    assert_eq!(column_xs(&f), (-120, 512, 1144));
+    f.manager.set_scroll(&mut f.comp.state, false);
+    assert!(f.manager.set_scroll(&mut f.comp.state, true));
+    assert_eq!(f.manager.strip_offset(), 0.0);
+    assert_eq!(column_xs(&f), (0, 632, 1264));
+}

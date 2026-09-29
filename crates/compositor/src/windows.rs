@@ -17,8 +17,8 @@ use std::collections::HashMap;
 use smithay::{
     backend::{
         input::{
-            AbsolutePositionEvent, ButtonState, Event as BackendEvent, InputEvent, KeyState,
-            KeyboardKeyEvent, PointerButtonEvent,
+            AbsolutePositionEvent, Axis, ButtonState, Event as BackendEvent, InputEvent, KeyState,
+            KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
         },
         winit::WinitInput,
     },
@@ -134,6 +134,9 @@ pub struct WindowManager {
     /// Session window-management mode (scrollable-tiling spec).
     /// Gnome by default; Super+Shift+T flips the whole session.
     mode: SessionMode,
+    /// Horizontal strip view offset in logical pixels (scroll mode).
+    /// Zero on entering scroll; clamped to the strip overflow.
+    strip_offset: f64,
     /// Last hub overview flag seen (set by the runtime each tick).
     overview_open: bool,
     /// Window focused before the overview parked keyboard focus.
@@ -165,6 +168,7 @@ impl WindowManager {
             pointer,
             pointer_pos: (0.0, 0.0).into(),
             mode: SessionMode::Gnome,
+            strip_offset: 0.0,
             super_held: false,
             shift_held: false,
             alt_held: false,
@@ -770,10 +774,44 @@ impl WindowManager {
         let width = ((work.size.w - gap) as f64 * Self::STRIP_DEFAULT_PROPORTION) as i32 - gap;
         let width = width.max(1);
         let index = self.strip_index(id).unwrap_or(0) as i32;
+        let x = work.loc.x + index * (width + gap) - self.strip_offset as i32;
         Rectangle {
-            loc: (work.loc.x + index * (width + gap), work.loc.y).into(),
+            loc: (x, work.loc.y).into(),
             size: (width, work.size.h).into(),
         }
+    }
+
+    /// Current strip view offset (scroll mode), for tests.
+    pub fn strip_offset(&self) -> f64 {
+        self.strip_offset
+    }
+
+    /// Scroll the strip by axis amounts (positive moves the view
+    /// right, toward later columns). Only acts in scroll mode; the
+    /// offset clamps to the strip overflow and focus stays on the
+    /// same window. False when not scrolling.
+    fn scroll_strip(&mut self, state: &mut State, horizontal: f64, vertical: f64) -> bool {
+        if self.mode != SessionMode::Scroll {
+            return false;
+        }
+        let work = Self::work_area(state);
+        let gap = Self::STRIP_GAP;
+        let width = ((work.size.w - gap) as f64 * Self::STRIP_DEFAULT_PROPORTION) as i32 - gap;
+        let width = width.max(1);
+        let count = self.strip_order().len() as i32;
+        let total = if count > 0 {
+            count * (width + gap) - gap
+        } else {
+            0
+        };
+        let max = (total - work.size.w).max(0) as f64;
+        let next = (self.strip_offset + horizontal + vertical).clamp(0.0, max);
+        if next == self.strip_offset {
+            return true;
+        }
+        self.strip_offset = next;
+        self.relayout_strip(state);
+        true
     }
 
     /// Active-workspace windows bottom-to-top: the strip order focus
@@ -876,6 +914,7 @@ impl WindowManager {
             SessionMode::Gnome
         };
         if scroll {
+            self.strip_offset = 0.0;
             let ids: Vec<u64> = self.windows.keys().copied().collect();
             for id in ids {
                 self.apply_layout(state, id, WindowLayout::Strip);
@@ -1143,6 +1182,14 @@ pub enum ManagerInput {
         pressed: bool,
         time: u32,
     },
+    /// Pointer axis (wheel / scroll) motion, in backend units (v120
+    /// for wheels, pixels for continuous devices). Only scroll mode
+    /// consumes it; everywhere else it is dropped as before.
+    Axis {
+        horizontal: f64,
+        vertical: f64,
+        time: u32,
+    },
 }
 
 /// X11 keycodes are kernel evdev numbers plus 8; the winit backend
@@ -1260,6 +1307,10 @@ impl TriggerState {
                 self.super_armed = false;
                 TriggerAction::None
             }
+            ManagerInput::Axis { .. } => {
+                self.super_armed = false;
+                TriggerAction::None
+            }
         }
     }
 }
@@ -1324,6 +1375,16 @@ impl WindowManager {
                 pressed,
                 time,
             } => self.pointer_button(state, button, pressed, time),
+            ManagerInput::Axis {
+                horizontal,
+                vertical,
+                ..
+            } => {
+                // Wheel scrolls the strip in scroll mode (focus stays
+                // on the same window); everywhere else axis events
+                // drop as before.
+                self.scroll_strip(state, horizontal, vertical);
+            }
         }
     }
 
@@ -1467,6 +1528,19 @@ pub fn translate_input(event: InputEvent<WinitInput>) -> Option<ManagerInput> {
             pressed: event.state() == ButtonState::Pressed,
             time: (event.time() / 1000) as u32,
         }),
+        InputEvent::PointerAxis { event } => {
+            let axis_amount = |axis: Axis| {
+                event
+                    .amount_v120(axis)
+                    .or_else(|| event.amount(axis))
+                    .unwrap_or(0.0)
+            };
+            Some(ManagerInput::Axis {
+                horizontal: axis_amount(Axis::Horizontal),
+                vertical: axis_amount(Axis::Vertical),
+                time: (event.time() / 1000) as u32,
+            })
+        }
         _ => None,
     }
 }
