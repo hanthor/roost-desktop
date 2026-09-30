@@ -9,9 +9,13 @@ use std::process::ExitCode;
 
 use roost_compositor::runtime::{run, NestedSession};
 
-/// `roost-compositor [--socket NAME] [--width W] [--height H] [--shell-bin PATH]`.
+/// `roost-compositor [--socket NAME] [--width W] [--height H] [--shell-bin PATH] [--xwayland]`.
+/// `ROOST_XWAYLAND=1` also opts in to X11 compatibility.
 fn main() -> ExitCode {
     let mut session = NestedSession::default_for_pid();
+    if std::env::var("ROOST_XWAYLAND").is_ok_and(|value| value == "1") {
+        session.xwayland = true;
+    }
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -35,11 +39,14 @@ fn main() -> ExitCode {
                     session.shell_bin = Some(path.into());
                 }
             }
+            "--xwayland" => {
+                session.xwayland = true;
+            }
             "--help" | "-h" => {
                 println!("roost-compositor: nested Roost session (001 developer preview)");
                 println!();
                 println!(
-                    "Usage: roost-compositor [--socket NAME] [--width W] [--height H] [--shell-bin PATH]"
+                    "Usage: roost-compositor [--socket NAME] [--width W] [--height H] [--shell-bin PATH] [--xwayland]"
                 );
                 println!();
                 println!("Starts one isolated nested Wayland session on a private");
