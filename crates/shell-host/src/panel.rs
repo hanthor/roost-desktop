@@ -1144,6 +1144,18 @@ impl ShellHost {
         }
     }
 
+    /// One surface-update pass for every run loop: overview, switcher,
+    /// panel status, and banners. Both the control-paced loop and the
+    /// pure-panel fallback loop run this, so no mode can open a surface
+    /// without painting it (regression: the fallback loop only
+    /// refreshed panel status, leaving the overview blank forever).
+    fn update_shell_surfaces(&mut self, revision: Option<u64>) {
+        self.update_overview(revision);
+        self.update_switcher();
+        self.update_panel_status();
+        self.update_banners();
+    }
+
     fn update_overview(&mut self, revision: Option<u64>) {
         if !self.model.is_overview_open() {
             self.destroy_overview();
@@ -3865,21 +3877,23 @@ pub fn run_panel_with_control(
             drive_key_actions(&mut host, control);
             drive_dock_actions(&mut host, control);
             drive_lock_actions(&mut host, control);
-            host.update_overview(control.revision());
-            host.update_switcher();
-            host.update_panel_status();
-            host.update_banners();
+            host.update_shell_surfaces(control.revision());
             queue
                 .flush()
                 .map_err(|e| PanelError::Flush(e.to_string()))?;
             std::thread::sleep(Duration::from_millis(5));
         }
     } else {
+        // Panel-only sessions have no control frames; poll Wayland at
+        // the same cadence and run the same update pass, so every
+        // surface (overview included) paints here too.
         while host.is_running() {
+            pump_wayland(&conn, &mut queue, &mut host)?;
+            host.update_shell_surfaces(None);
             queue
-                .blocking_dispatch(&mut host)
-                .map_err(PanelError::Dispatch)?;
-            host.update_panel_status();
+                .flush()
+                .map_err(|e| PanelError::Flush(e.to_string()))?;
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
     Ok(())
@@ -4018,7 +4032,7 @@ mod tests {
         use crate::control::{ControlClient, Handled};
 
         use super::super::{
-            is_would_block, PanelConfig, ShellHost, BANNER_NAMESPACE, PANEL_NAMESPACE,
+            is_would_block, PanelConfig, ShellHost, ShmBacking, BANNER_NAMESPACE, PANEL_NAMESPACE,
         };
         use crate::apps::AppProvider;
         use crate::favorites::Favorites;
@@ -5772,6 +5786,262 @@ mod tests {
                 "indicator pixels reach the panel surface"
             );
             assert!(non_bg(&with_indicator) > non_bg(&plain));
+        }
+
+        /// Overview open paints window pixels: opening the overview
+        /// against the live in-process compositor commits a buffer
+        /// holding non-backdrop pixels (regression: Super opened a
+        /// blank canvas — nothing reached the committed buffer).
+        #[test]
+        fn overview_open_paints_window_pixels_to_committed_buffer() {
+            use crate::model::WindowEntry;
+            use crate::overview::{BG, BYTES_PER_PIXEL};
+            let mut comp = TestCompositor::new();
+            comp.state.set_output_size(1280, 800);
+            let (server_stream, client_stream) = UnixStream::pair().unwrap();
+            comp.add_client(server_stream);
+            let conn = Connection::from_socket(client_stream).unwrap();
+            let mut queue = conn.new_event_queue();
+            let (mut host, _dir) = test_host();
+            attach_host(&mut comp, &conn, &mut queue, &mut host);
+            host.model.apply_window_list(
+                vec![
+                    WindowEntry::new(1, "alpha", true),
+                    WindowEntry::new(2, "beta", false),
+                ],
+                vec![0],
+            );
+            host.model.set_overview_open(true);
+            // Drive the production loop shape: pump server events,
+            // then run the update pass (configure only stores the
+            // size; painting happens on the next update pass).
+            for _ in 0..PUMP_ROUNDS {
+                pump_server(&mut comp, &mut queue, &mut host);
+                host.update_overview(None);
+            }
+
+            fn backing_pixels(host: &mut ShellHost) -> Vec<u8> {
+                use std::io::{Read, Seek, SeekFrom};
+                let overview = host.overview.as_mut().expect("overview painted");
+                let backing = overview.backing.as_mut().expect("overview committed");
+                backing._file.seek(SeekFrom::Start(0)).expect("rewind");
+                let mut out = Vec::new();
+                backing._file.read_to_end(&mut out).expect("read");
+                out
+            }
+
+            let pixels = backing_pixels(&mut host);
+            let (chunks, _) = pixels.as_chunks::<BYTES_PER_PIXEL>();
+            let painted = chunks.iter().filter(|pixel| **pixel != BG).count();
+            assert!(
+                painted > 0,
+                "overview commits painted pixels, got {painted} non-backdrop of {}",
+                chunks.len()
+            );
+        }
+
+        /// Panel-only sessions paint the overview too: one iteration of
+        /// the fallback loop shape (pump, shared update pass, flush)
+        /// commits non-backdrop pixels. Regression: the fallback loop
+        /// used to refresh panel status only, so Super opened a blank
+        /// overview wherever no control socket was present.
+        #[test]
+        fn panel_only_iteration_paints_open_overview() {
+            use crate::model::WindowEntry;
+            use crate::overview::{BG, BYTES_PER_PIXEL};
+            let mut comp = TestCompositor::new();
+            comp.state.set_output_size(1280, 800);
+            let (server_stream, client_stream) = UnixStream::pair().unwrap();
+            comp.add_client(server_stream);
+            let conn = Connection::from_socket(client_stream).unwrap();
+            let mut queue = conn.new_event_queue();
+            let (mut host, _dir) = test_host();
+            attach_host(&mut comp, &conn, &mut queue, &mut host);
+            host.model
+                .apply_window_list(vec![WindowEntry::new(1, "alpha", true)], vec![0]);
+            host.model.set_overview_open(true);
+            // First pass creates the surface and commits while the
+            // configured size is still zero (nothing paints yet).
+            host.update_overview(None);
+            queue.flush().unwrap();
+            comp.pump();
+            // One fallback-loop iteration: dispatch the pending
+            // configure, run the shared update pass, flush the paint.
+            pump_server(&mut comp, &mut queue, &mut host);
+            host.update_shell_surfaces(None);
+            queue.flush().unwrap();
+
+            let overview = host.overview.as_mut().expect("overview created");
+            assert!(
+                overview.width > 0 && overview.height > 0,
+                "fallback iteration stores the configure"
+            );
+            let backing = overview.backing.as_mut().expect("overview committed");
+            use std::io::{Read, Seek, SeekFrom};
+            backing._file.seek(SeekFrom::Start(0)).expect("rewind");
+            let mut pixels = Vec::new();
+            backing._file.read_to_end(&mut pixels).expect("read");
+            let (chunks, _) = pixels.as_chunks::<BYTES_PER_PIXEL>();
+            let painted = chunks.iter().filter(|pixel| **pixel != BG).count();
+            assert!(
+                painted > 0,
+                "fallback iteration commits painted pixels, got {painted} non-backdrop of {}",
+                chunks.len()
+            );
+        }
+
+        /// Output resize repaints at the new size: after the server
+        /// re-arranges, the next update pass stores the new configure
+        /// and commits a buffer of the new dimensions (no frozen or
+        /// blank frame).
+        #[test]
+        fn overview_repaints_after_output_resize() {
+            use crate::model::WindowEntry;
+            let mut comp = TestCompositor::new();
+            comp.state.set_output_size(1280, 800);
+            let (server_stream, client_stream) = UnixStream::pair().unwrap();
+            comp.add_client(server_stream);
+            let conn = Connection::from_socket(client_stream).unwrap();
+            let mut queue = conn.new_event_queue();
+            let (mut host, _dir) = test_host();
+            attach_host(&mut comp, &conn, &mut queue, &mut host);
+            host.model
+                .apply_window_list(vec![WindowEntry::new(1, "alpha", true)], vec![0]);
+            host.model.set_overview_open(true);
+            for _ in 0..PUMP_ROUNDS {
+                pump_server(&mut comp, &mut queue, &mut host);
+                host.update_overview(None);
+            }
+            assert_eq!(
+                host.overview.as_ref().map(|o| (o.width, o.height)),
+                Some((1280, 800)),
+                "overview sized at first geometry"
+            );
+            comp.state.set_output_size(1600, 900);
+            roost_compositor::layer::arrange_after_commit(&comp.state);
+            for _ in 0..PUMP_ROUNDS {
+                pump_server(&mut comp, &mut queue, &mut host);
+                host.update_overview(None);
+                if host.overview.as_ref().is_some_and(|o| o.width == 1600) {
+                    break;
+                }
+            }
+            let overview = host.overview.as_ref().expect("overview created");
+            assert_eq!(
+                (overview.width, overview.height),
+                (1600, 900),
+                "overview tracks the resized output"
+            );
+            let len = overview.backing.as_ref().expect("repaint committed");
+            use std::io::{Read, Seek, SeekFrom};
+            let mut file = &len._file;
+            file.seek(SeekFrom::Start(0)).expect("rewind");
+            let mut pixels = Vec::new();
+            file.read_to_end(&mut pixels).expect("read");
+            assert_eq!(
+                pixels.len(),
+                1600 * 900 * crate::overview::BYTES_PER_PIXEL,
+                "repainted buffer matches the new size"
+            );
+        }
+
+        /// Empty overview still paints: with no windows open, the
+        /// committed buffer exists at the configured size (backdrop,
+        /// no crash, no missing commit).
+        #[test]
+        fn empty_overview_commits_backdrop() {
+            let mut comp = TestCompositor::new();
+            comp.state.set_output_size(1280, 800);
+            let (server_stream, client_stream) = UnixStream::pair().unwrap();
+            comp.add_client(server_stream);
+            let conn = Connection::from_socket(client_stream).unwrap();
+            let mut queue = conn.new_event_queue();
+            let (mut host, _dir) = test_host();
+            attach_host(&mut comp, &conn, &mut queue, &mut host);
+            host.model.set_overview_open(true);
+            for _ in 0..PUMP_ROUNDS {
+                pump_server(&mut comp, &mut queue, &mut host);
+                host.update_overview(None);
+            }
+            let overview = host.overview.as_ref().expect("overview created");
+            assert_eq!(
+                (overview.width, overview.height),
+                (1280, 800),
+                "empty overview still sizes"
+            );
+            let backing = overview.backing.as_ref().expect("empty overview commits");
+            use crate::overview::ACCENT;
+            use std::io::{Read, Seek, SeekFrom};
+            fn accent_count(backing: &ShmBacking) -> usize {
+                use crate::overview::BYTES_PER_PIXEL;
+                let mut file = &backing._file;
+                file.seek(SeekFrom::Start(0)).expect("rewind");
+                let mut pixels = Vec::new();
+                file.read_to_end(&mut pixels).expect("read");
+                assert_eq!(
+                    pixels.len(),
+                    1280 * 800 * crate::overview::BYTES_PER_PIXEL,
+                    "empty overview commits a full-size buffer"
+                );
+                let (chunks, _) = pixels.as_chunks::<BYTES_PER_PIXEL>();
+                chunks.iter().filter(|pixel| **pixel == ACCENT).count()
+            }
+            let before = accent_count(backing);
+            // Two pinned favorites paint two 40x40 accent squares and
+            // nothing else changes: the accent delta is exact.
+            assert!(host.favorites.pin("alpha-app"));
+            assert!(host.favorites.pin("beta-app"));
+            for _ in 0..PUMP_ROUNDS {
+                pump_server(&mut comp, &mut queue, &mut host);
+                host.update_overview(None);
+            }
+            let after = accent_count(
+                host.overview
+                    .as_ref()
+                    .expect("overview kept")
+                    .backing
+                    .as_ref()
+                    .expect("repaint committed"),
+            );
+            assert_eq!(
+                after - before,
+                2 * 40 * 40,
+                "two pinned favorites add two accent squares"
+            );
+        }
+
+        /// Typing during paint loses nothing: five key presses driven
+        /// through the real key path while update passes run arrive
+        /// complete and in order.
+        #[test]
+        fn typing_during_paint_arrives_complete() {
+            use super::super::{FocusRegion, ShellFocus};
+            // evdev keycodes for h, e, l, l, o.
+            const HELLO: [u32; 5] = [35, 18, 38, 38, 24];
+            let mut comp = TestCompositor::new();
+            comp.state.set_output_size(1280, 800);
+            let (server_stream, client_stream) = UnixStream::pair().unwrap();
+            comp.add_client(server_stream);
+            let conn = Connection::from_socket(client_stream).unwrap();
+            let mut queue = conn.new_event_queue();
+            let (mut host, _dir) = keyed_host();
+            attach_host(&mut comp, &conn, &mut queue, &mut host);
+            host.model.set_overview_open(true);
+            host.focus = Some(ShellFocus {
+                region: FocusRegion::Overview,
+                cursor: 0,
+            });
+            for key in HELLO {
+                host.on_key(key, true);
+                host.on_key(key, false);
+                pump_server(&mut comp, &mut queue, &mut host);
+                host.update_overview(None);
+            }
+            assert_eq!(
+                host.search_text(),
+                "hello",
+                "all five keystrokes land during paint"
+            );
         }
 
         /// Registry observer on a throwaway queue, used only to learn
