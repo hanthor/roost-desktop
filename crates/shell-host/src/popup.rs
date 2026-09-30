@@ -155,7 +155,10 @@ impl PopupState {
         }
     }
 
-    fn toggle(&mut self, body: PopupBody) {
+    /// Toggle `body`: open it, or dismiss when it is already the
+    /// open one. Strip presses route here; keyboard Enter on a
+    /// focused panel stop shares the call.
+    pub fn toggle(&mut self, body: PopupBody) {
         if self.open == Some(body) {
             self.open = None;
         } else {

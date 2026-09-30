@@ -77,7 +77,7 @@ use crate::overview::{
 };
 use crate::popup::{
     calendar_clock_row, calendar_weekday_row, lock_rows, network_rows, paint_popup, panel_layout,
-    popup_box, sound_rows, tile_row_at, PopupBody, PopupState, POPUP_HEIGHT,
+    popup_box, sound_rows, tile_row_at, PopupBody, PopupState, Rect, POPUP_HEIGHT,
 };
 use crate::search::{SearchAction, SearchHub, SearchResult, WindowProvider};
 use crate::settings::ClockFormat;
@@ -300,6 +300,17 @@ pub struct ShellHost {
     pending_submit: bool,
     /// Escape arrived while open: the run loop dismisses the overview.
     pending_dismiss: bool,
+    /// Navigation actions armed by [`on_key`](Self::on_key); the
+    /// focus model drains them with [`take_nav`](Self::take_nav).
+    pending_nav: Vec<KeyAction>,
+    /// Enter pressed with the overview closed: the run loop routes
+    /// it to the focused shell stop (the overview owns Enter while
+    /// open through [`take_submit`](Self::take_submit), unchanged).
+    pending_shell_submit: bool,
+    /// Keyboard focus cursor (`None` until the first focus key):
+    /// region plus stop index. Paint keys carry it, so any focus
+    /// change repaints by construction.
+    focus: Option<ShellFocus>,
 }
 
 /// Cloned Wayland globals the host keeps for creating surfaces after
@@ -319,6 +330,49 @@ struct ShmBacking {
     _file: std::fs::File,
     _pool: WlShmPool,
     buffer: WlBuffer,
+}
+
+/// Keyboard focus region: the panel strip or the dock (popups and
+/// overview results join in task 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusRegion {
+    /// Top strip: clock plus the three tiles.
+    Panel,
+    /// Bottom dock: favorite and running slots.
+    Dock,
+}
+
+/// Panel strip stops: the clock plus the three service tiles in
+/// strip order (network, power, sound).
+pub const PANEL_STOPS: usize = 4;
+
+/// Keyboard cursor: region plus the stop index within it. Panel
+/// stops run left-to-right over clock and tiles; dock stops run
+/// over the item slots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShellFocus {
+    /// Focused region.
+    pub region: FocusRegion,
+    /// Stop index within the region.
+    pub cursor: usize,
+}
+
+/// 2px accent outline around `rect`, clamped to the buffer by the
+/// bounds-safe pixel writer: the keyboard-focus ring, mirroring
+/// the overview selection border.
+fn paint_focus_ring(pixels: &mut [u8], width: i32, rect: &Rect) {
+    use crate::overview::put_pixel;
+    let stride = width as usize * BYTES_PER_PIXEL;
+    for x in rect.x - 2..rect.x + rect.w + 2 {
+        for y in [rect.y - 2, rect.y - 1, rect.y + rect.h, rect.y + rect.h + 1] {
+            put_pixel(pixels, stride, x, y, ACCENT);
+        }
+    }
+    for y in rect.y - 2..rect.y + rect.h + 2 {
+        for x in [rect.x - 2, rect.x - 1, rect.x + rect.w, rect.x + rect.w + 1] {
+            put_pixel(pixels, stride, x, y, ACCENT);
+        }
+    }
 }
 
 /// Make one top-anchored panel layer surface on explicit handles,
@@ -365,7 +419,9 @@ fn make_dock_surface(
     layer_surface.set_size(0, DOCK_H as u32);
     layer_surface.set_anchor(Anchor::Bottom | Anchor::Left | Anchor::Right);
     layer_surface.set_exclusive_zone(0);
-    layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
+    // OnDemand: the dock takes keyboard focus while its slots are
+    // keyboard-driven, never stealing it otherwise.
+    layer_surface.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
     surface.commit();
     (surface, layer_surface)
 }
@@ -541,6 +597,9 @@ struct DockPaintKey {
     /// Open stack item plus its entry names (directory reads refresh
     /// the grid without reopening it).
     stack: Option<(usize, Vec<String>)>,
+    /// Keyboard focus cursor: any focus move repaints, so a stale
+    /// ring is impossible by construction.
+    focus: Option<ShellFocus>,
 }
 
 /// Repaint the panel strip when any of these change.
@@ -562,6 +621,9 @@ struct PanelPaintKey {
     popup: Option<(u8, u32)>,
     /// Hosted indicators: service, title, and menu labels.
     indicators: Vec<(String, String, Vec<String>)>,
+    /// Keyboard focus cursor: any focus move repaints, so a stale
+    /// ring is impossible by construction.
+    focus: Option<ShellFocus>,
 }
 
 /// Upload `pixels` (`Argb8888`, `width` x `height`) into a fresh shm
@@ -743,6 +805,9 @@ impl ShellHost {
             overview_failure: None,
             pending_submit: false,
             pending_dismiss: false,
+            pending_nav: Vec::new(),
+            pending_shell_submit: false,
+            focus: None,
         }
     }
 
@@ -1141,6 +1206,7 @@ impl ShellHost {
             unread,
             width,
             height,
+            focus: self.focus,
             popup,
             indicators: self
                 .indicators
@@ -1223,6 +1289,23 @@ impl ShellHost {
         );
         if !cells.is_empty() {
             paint_indicators(&mut pixels, width, &cells, self.indicators.items());
+        }
+        // Keyboard focus ring paints last, over strip and
+        // indicators alike, so the focused stop always reads.
+        if let Some(ShellFocus {
+            region: FocusRegion::Panel,
+            cursor,
+        }) = self.focus
+        {
+            let layout = panel_layout(width, strip_h, &self.tiles.clock);
+            let stop = if cursor == 0 {
+                Some(layout.clock)
+            } else {
+                layout.tiles.get(cursor - 1).copied()
+            };
+            if let Some(rect) = stop {
+                paint_focus_ring(&mut pixels, width, &rect);
+            }
         }
         pixels
     }
@@ -1662,11 +1745,38 @@ impl ShellHost {
             return;
         };
         let action = feed.key(key, pressed);
+        // Navigation actions queue in both states: the strip is
+        // visible with the overview closed, and the focus model
+        // (task 2) consumes the queue. Search actions below keep
+        // their overview-open gating byte-identical.
+        if matches!(
+            action,
+            KeyAction::Up
+                | KeyAction::Down
+                | KeyAction::Left
+                | KeyAction::Right
+                | KeyAction::Next
+                | KeyAction::Previous
+                | KeyAction::CycleRegion
+                | KeyAction::FocusDock
+                | KeyAction::FocusPanel
+        ) {
+            if pressed {
+                self.pending_nav.push(action);
+            }
+            return;
+        }
         if !self.model.is_overview_open() {
             // The overview owns keys while open; a popup still answers
-            // Escape when nothing else does.
-            if pressed && matches!(action, KeyAction::Dismiss) {
-                self.close_popup();
+            // Escape when nothing else does, and Enter activates the
+            // focused shell stop. Submit stays disarmed here so
+            // `take_submit` keeps its overview-open-only contract.
+            if pressed {
+                match action {
+                    KeyAction::Dismiss => self.close_popup(),
+                    KeyAction::Submit => self.pending_shell_submit = true,
+                    _ => {}
+                }
             }
             return;
         }
@@ -1689,6 +1799,154 @@ impl ShellHost {
                 self.pending_dismiss = true;
             }
             KeyAction::None => {}
+            // Navigation queued above; unreachable here.
+            KeyAction::Up
+            | KeyAction::Down
+            | KeyAction::Left
+            | KeyAction::Right
+            | KeyAction::Next
+            | KeyAction::Previous
+            | KeyAction::CycleRegion
+            | KeyAction::FocusDock
+            | KeyAction::FocusPanel => {}
+        }
+    }
+
+    /// Nonblocking drain of queued navigation actions (task 1
+    /// records, the focus model in task 2 consumes).
+    pub fn take_nav(&mut self) -> Vec<KeyAction> {
+        std::mem::take(&mut self.pending_nav)
+    }
+
+    /// Consume a pending closed-overview Enter activation, if any.
+    pub fn take_shell_submit(&mut self) -> bool {
+        std::mem::take(&mut self.pending_shell_submit)
+    }
+
+    /// Keyboard focus cursor, if any.
+    pub fn shell_focus(&self) -> Option<ShellFocus> {
+        self.focus
+    }
+
+    /// Stop count for `region`: panel stops are fixed (clock plus
+    /// three tiles); dock stops track the live item row.
+    fn stop_count(&self, region: FocusRegion) -> usize {
+        match region {
+            FocusRegion::Panel => PANEL_STOPS,
+            FocusRegion::Dock => self.dock_items().len(),
+        }
+    }
+
+    /// Clamp the cursor into the live stops; an emptied region (the
+    /// last dock item gone) clears focus instead of stranding it.
+    fn clamp_focus(&mut self) {
+        if let Some(focus) = self.focus {
+            let count = self.stop_count(focus.region);
+            if count == 0 {
+                self.focus = None;
+            } else if focus.cursor >= count {
+                self.focus = Some(ShellFocus {
+                    cursor: count - 1,
+                    ..focus
+                });
+            }
+        }
+    }
+
+    /// Enter `region`, keeping the cursor when already there
+    /// (Alt+F1 re-presses don't lose the tile).
+    fn focus_region(&mut self, region: FocusRegion) {
+        let cursor = match self.focus {
+            Some(focus) if focus.region == region => focus.cursor,
+            _ => 0,
+        };
+        self.focus = Some(ShellFocus { region, cursor });
+        self.clamp_focus();
+    }
+
+    /// Move the cursor one stop along the strip, wrapping. From no
+    /// focus, forward lands on the first panel stop and backward on
+    /// the last.
+    fn step_cursor(&mut self, direction: i32) {
+        let Some(focus) = self.focus else {
+            let cursor = if direction < 0 { PANEL_STOPS - 1 } else { 0 };
+            self.focus = Some(ShellFocus {
+                region: FocusRegion::Panel,
+                cursor,
+            });
+            return;
+        };
+        let count = self.stop_count(focus.region);
+        if count == 0 {
+            self.focus = None;
+            return;
+        }
+        let cursor = (focus.cursor as i32 + direction).rem_euclid(count as i32) as usize;
+        self.focus = Some(ShellFocus { cursor, ..focus });
+    }
+
+    /// Apply one queued navigation action to the focus cursor. Up
+    /// and Down cross between strip and dock; Left/Right and
+    /// Tab/Shift+Tab walk the stops; F6 flips the region.
+    fn apply_nav(&mut self, action: KeyAction) {
+        match action {
+            KeyAction::FocusPanel => self.focus_region(FocusRegion::Panel),
+            KeyAction::FocusDock => self.focus_region(FocusRegion::Dock),
+            KeyAction::CycleRegion => {
+                let region = match self.focus {
+                    Some(focus) if focus.region == FocusRegion::Panel => FocusRegion::Dock,
+                    _ => FocusRegion::Panel,
+                };
+                // Never land on an empty region (an itemless dock):
+                // stay where the cursor is live.
+                if self.stop_count(region) > 0 {
+                    self.focus = Some(ShellFocus { region, cursor: 0 });
+                }
+                self.clamp_focus();
+            }
+            KeyAction::Up => self.focus_region(FocusRegion::Panel),
+            KeyAction::Down => self.focus_region(FocusRegion::Dock),
+            KeyAction::Next | KeyAction::Right => self.step_cursor(1),
+            KeyAction::Previous | KeyAction::Left => self.step_cursor(-1),
+            _ => {}
+        }
+    }
+
+    /// Drain the queued navigation actions into the focus cursor.
+    /// Shell-local: no round-trip, no wire. Paint keys carry the
+    /// cursor, so the ring follows on the next tick.
+    fn step_focus(&mut self) {
+        for action in self.take_nav() {
+            self.apply_nav(action);
+        }
+        self.clamp_focus();
+    }
+
+    /// Activate the focused stop through the pointer-equivalent
+    /// call: a panel stop toggles its popup like a strip press, a
+    /// dock slot takes a left press (launch, switch, or stack).
+    /// No-op without focus.
+    pub fn activate_focused(&mut self) {
+        self.clamp_focus();
+        let Some(focus) = self.focus else {
+            return;
+        };
+        match focus.region {
+            FocusRegion::Panel => {
+                let body = if focus.cursor == 0 {
+                    PopupBody::Calendar
+                } else {
+                    PopupBody::Menu(focus.cursor - 1)
+                };
+                self.popup.toggle(body);
+                self.apply_popup_size();
+            }
+            FocusRegion::Dock => {
+                let items = self.dock_items();
+                if focus.cursor < items.len() {
+                    self.run_dock_press(&items, focus.cursor, BTN_LEFT);
+                }
+            }
         }
     }
 
@@ -2320,6 +2578,38 @@ impl ShellHost {
         self.apply_dock_size();
     }
 
+    /// Paint key for one dock size: items, pins, size, the open
+    /// stack grid, and the keyboard focus cursor, so any content
+    /// or focus change repaints.
+    fn dock_render_key(&self, width: i32, height: i32, items: &[DockItem]) -> DockPaintKey {
+        let stack = self.open_stack.map(|index| {
+            (
+                index,
+                self.stack_cache
+                    .iter()
+                    .map(|entry| entry.name.clone())
+                    .collect(),
+            )
+        });
+        DockPaintKey {
+            items: items
+                .iter()
+                .map(|item| {
+                    (
+                        item.app_id.clone(),
+                        item.windows.clone(),
+                        item.active,
+                        item.pinned,
+                    )
+                })
+                .collect(),
+            width,
+            height,
+            stack,
+            focus: self.focus,
+        }
+    }
+
     /// Paint the dock strip into a fresh shm buffer and attach it.
     /// Repaints when items, focus, pins, size, or the stack grid
     /// change; called on configure and from the slow status tick.
@@ -2336,31 +2626,7 @@ impl ShellHost {
                 self.stack_cache = fresh;
             }
         }
-        let stack = self.open_stack.map(|index| {
-            (
-                index,
-                self.stack_cache
-                    .iter()
-                    .map(|entry| entry.name.clone())
-                    .collect(),
-            )
-        });
-        let key = DockPaintKey {
-            items: items
-                .iter()
-                .map(|item| {
-                    (
-                        item.app_id.clone(),
-                        item.windows.clone(),
-                        item.active,
-                        item.pinned,
-                    )
-                })
-                .collect(),
-            width,
-            height,
-            stack,
-        };
+        let key = self.dock_render_key(width, height, &items);
         if self.dock_size == Some((width, height))
             && self.dock_backing.is_some()
             && self.dock_paint_key.as_ref() == Some(&key)
@@ -2370,14 +2636,7 @@ impl ShellHost {
         let Some(wayland) = self.wayland.clone() else {
             return;
         };
-        let mut pixels = vec![0u8; width as usize * height as usize * BYTES_PER_PIXEL];
-        let icons: Vec<Option<Artwork>> = items.iter().map(|item| self.dock_icon(item)).collect();
-        let grid = if self.open_stack.is_some() {
-            Some(self.stack_cache.as_slice())
-        } else {
-            None
-        };
-        paint_dock_stacked_with_icons(&mut pixels, width, height, &items, grid, &icons);
+        let pixels = self.render_dock_pixels(width, height, &items);
         let Some(dock) = self.dock_surface.as_ref() else {
             return;
         };
@@ -2389,6 +2648,37 @@ impl ShellHost {
             self.dock_size = Some((width, height));
             self.dock_paint_key = Some(key);
         }
+    }
+
+    /// Pixel content for the dock strip: icon squares, the open
+    /// stack grid band, and the keyboard focus ring around the
+    /// focused slot. Pure paint shared by the surface tick and the
+    /// ring tests (the tick only uploads).
+    fn render_dock_pixels(&mut self, width: i32, height: i32, items: &[DockItem]) -> Vec<u8> {
+        let mut pixels = vec![0u8; width as usize * height as usize * BYTES_PER_PIXEL];
+        let icons: Vec<Option<Artwork>> = items.iter().map(|item| self.dock_icon(item)).collect();
+        let grid = if self.open_stack.is_some() {
+            Some(self.stack_cache.as_slice())
+        } else {
+            None
+        };
+        paint_dock_stacked_with_icons(&mut pixels, width, height, items, grid, &icons);
+        if let Some(ShellFocus {
+            region: FocusRegion::Dock,
+            cursor,
+        }) = self.focus
+        {
+            if cursor < items.len() {
+                let origin = if self.open_stack.is_some() {
+                    STACK_GRID_H
+                } else {
+                    0
+                };
+                let (x0, y0, w, h) = dock_slot_at(width, cursor, items.len(), origin);
+                paint_focus_ring(&mut pixels, width, &Rect { x: x0, y: y0, w, h });
+            }
+        }
+        pixels
     }
 
     /// Press at dock-surface coordinates with a mouse button: run
@@ -2597,15 +2887,23 @@ fn attach_control(path: &Path) -> Result<ControlClient, PanelError> {
 /// frame is waiting into the overview model, re-request the snapshot
 /// after a revision gap, and log (never crash on) typed errors — the
 /// connection stays usable.
-/// Consume overview key actions armed by [`ShellHost::on_key`]:
-/// Enter activates the top collected hit through the normal path,
-/// Escape dismisses via the hub. Best-effort like the hits
-/// themselves: a failed activation must not wedge the loop.
+/// Consume key actions armed by [`ShellHost::on_key`]: queued
+/// navigation moves the shell focus cursor first, Enter activates
+/// the top collected hit through the normal path, Escape dismisses
+/// via the hub, and closed-overview Enter activates the focused
+/// shell stop. Best-effort like the hits themselves: a failed
+/// activation must not wedge the loop.
 fn drive_key_actions(host: &mut ShellHost, control: &mut ControlClient) {
+    // Shell focus moves first: later activations in this tick see
+    // the cursor the keys just placed.
+    host.step_focus();
     if host.take_submit() {
         if let Some(hit) = host.search_collect().into_iter().next() {
             let _ = host.activate_hit(control, &hit);
         }
+    }
+    if host.take_shell_submit() {
+        host.activate_focused();
     }
     if host.take_dismiss() {
         host.close_popup();
@@ -3577,6 +3875,424 @@ mod tests {
             host.press_dock(640, 28, BTN_MIDDLE);
             assert_eq!(host.take_dock_actions(), vec![DockAction::Close(7)]);
             assert!(host.take_dock_actions().is_empty());
+        }
+
+        /// Evdev codes on a `us` layout for the focus keys.
+        const EV_TAB: u32 = 15;
+        const EV_F6: u32 = 64;
+        const EV_D: u32 = 32;
+        const EV_F1: u32 = 59;
+        const EV_LEFT: u32 = 105;
+        const EV_RIGHT: u32 = 106;
+        const EV_UP: u32 = 103;
+        const EV_DOWN: u32 = 108;
+        const EV_RETURN: u32 = 28;
+        const EV_SUPER: u32 = 125;
+        const EV_ALT: u32 = 56;
+        const EV_SHIFT: u32 = 42;
+
+        /// Host with a live key feed: `on_key` resolves real keysyms.
+        fn keyed_host() -> (ShellHost, tempfile::TempDir) {
+            let (mut host, dir) = test_host();
+            use crate::keyboard::XkbFeed;
+            host.xkb = XkbFeed::from_names("evdev", "pc105", "us", "", None);
+            (host, dir)
+        }
+
+        /// Feed one press through `on_key` and drain it into focus.
+        fn press(host: &mut ShellHost, key: u32) {
+            host.on_key(key, true);
+            host.on_key(key, false);
+            host.step_focus();
+        }
+
+        /// Tab walks the four panel stops left to right, then wraps.
+        #[test]
+        fn tab_walks_panel_stops_and_wraps() {
+            use super::super::{FocusRegion, PANEL_STOPS};
+            let (mut host, _dir) = keyed_host();
+            assert_eq!(host.shell_focus(), None);
+            for cursor in 0..PANEL_STOPS {
+                press(&mut host, EV_TAB);
+                assert_eq!(
+                    host.shell_focus(),
+                    Some(super::super::ShellFocus {
+                        region: FocusRegion::Panel,
+                        cursor,
+                    }),
+                    "tab {cursor}"
+                );
+            }
+            press(&mut host, EV_TAB);
+            assert_eq!(
+                host.shell_focus().map(|focus| focus.cursor),
+                Some(0),
+                "tab wraps"
+            );
+        }
+
+        /// Shift+Tab walks backward from no focus onto the last stop.
+        #[test]
+        fn shift_tab_walks_backward() {
+            use super::super::{FocusRegion, PANEL_STOPS};
+            let (mut host, _dir) = keyed_host();
+            host.on_key(EV_SHIFT, true);
+            host.on_key(EV_TAB, true);
+            host.on_key(EV_TAB, false);
+            host.on_key(EV_SHIFT, false);
+            host.step_focus();
+            assert_eq!(
+                host.shell_focus(),
+                Some(super::super::ShellFocus {
+                    region: FocusRegion::Panel,
+                    cursor: PANEL_STOPS - 1,
+                })
+            );
+            // Backward steps keep walking down the strip.
+            host.on_key(EV_SHIFT, true);
+            press(&mut host, EV_TAB);
+            host.on_key(EV_SHIFT, false);
+            host.step_focus();
+            assert_eq!(
+                host.shell_focus(),
+                Some(super::super::ShellFocus {
+                    region: FocusRegion::Panel,
+                    cursor: PANEL_STOPS - 2,
+                })
+            );
+            let _ = FocusRegion::Dock;
+        }
+
+        /// F6 flips between strip and dock; arrows walk stops and
+        /// cross regions vertically.
+        #[test]
+        fn f6_and_arrows_move_across_regions() {
+            use super::super::{FocusRegion, ShellFocus};
+            let (mut host, _dir) = dock_test_host();
+            use crate::keyboard::XkbFeed;
+            host.xkb = XkbFeed::from_names("evdev", "pc105", "us", "", None);
+            assert!(!host.dock_items().is_empty(), "dock has a stop");
+            press(&mut host, EV_F6);
+            assert_eq!(
+                host.shell_focus(),
+                Some(ShellFocus {
+                    region: FocusRegion::Panel,
+                    cursor: 0,
+                })
+            );
+            press(&mut host, EV_F6);
+            assert_eq!(
+                host.shell_focus(),
+                Some(ShellFocus {
+                    region: FocusRegion::Dock,
+                    cursor: 0,
+                })
+            );
+            press(&mut host, EV_F6);
+            assert_eq!(
+                host.shell_focus().map(|focus| focus.region),
+                Some(FocusRegion::Panel)
+            );
+            // Right walks the strip; Down crosses to the dock; Up
+            // crosses back, keeping the strip cursor.
+            press(&mut host, EV_RIGHT);
+            assert_eq!(host.shell_focus().map(|focus| focus.cursor), Some(1));
+            press(&mut host, EV_DOWN);
+            assert_eq!(
+                host.shell_focus().map(|focus| focus.region),
+                Some(FocusRegion::Dock)
+            );
+            press(&mut host, EV_UP);
+            assert_eq!(
+                host.shell_focus(),
+                Some(ShellFocus {
+                    region: FocusRegion::Panel,
+                    cursor: 0,
+                })
+            );
+            press(&mut host, EV_LEFT);
+            assert_eq!(host.shell_focus().map(|focus| focus.cursor), Some(3));
+        }
+
+        /// Super+D jumps to the dock, Alt+F1 to the panel, keeping
+        /// the cursor when already in the region.
+        #[test]
+        fn super_d_and_alt_f1_jump_regions() {
+            use super::super::{FocusRegion, ShellFocus};
+            let (mut host, _dir) = dock_test_host();
+            use crate::keyboard::XkbFeed;
+            host.xkb = XkbFeed::from_names("evdev", "pc105", "us", "", None);
+            host.on_key(EV_SUPER, true);
+            press(&mut host, EV_D);
+            host.on_key(EV_SUPER, false);
+            host.step_focus();
+            assert_eq!(
+                host.shell_focus(),
+                Some(ShellFocus {
+                    region: FocusRegion::Dock,
+                    cursor: 0,
+                })
+            );
+            host.on_key(EV_ALT, true);
+            press(&mut host, EV_F1);
+            host.on_key(EV_ALT, false);
+            host.step_focus();
+            assert_eq!(
+                host.shell_focus(),
+                Some(ShellFocus {
+                    region: FocusRegion::Panel,
+                    cursor: 0,
+                })
+            );
+            // A Right move then a redundant Alt+F1 keeps the tile.
+            press(&mut host, EV_RIGHT);
+            host.on_key(EV_ALT, true);
+            press(&mut host, EV_F1);
+            host.on_key(EV_ALT, false);
+            host.step_focus();
+            assert_eq!(host.shell_focus().map(|focus| focus.cursor), Some(1));
+            let _ = FocusRegion::Dock;
+        }
+
+        /// F6 never lands on an itemless dock: the cursor stays put.
+        #[test]
+        fn f6_skips_an_empty_dock() {
+            use super::super::{FocusRegion, ShellFocus};
+            let (mut host, _dir) = keyed_host();
+            assert!(host.dock_items().is_empty(), "no dock stops");
+            press(&mut host, EV_F6);
+            assert_eq!(
+                host.shell_focus(),
+                Some(ShellFocus {
+                    region: FocusRegion::Panel,
+                    cursor: 0,
+                })
+            );
+            press(&mut host, EV_F6);
+            assert_eq!(
+                host.shell_focus(),
+                Some(ShellFocus {
+                    region: FocusRegion::Panel,
+                    cursor: 0,
+                }),
+                "empty dock keeps the strip cursor"
+            );
+            let _ = FocusRegion::Dock;
+        }
+
+        /// An emptied dock clears a stranded cursor instead of
+        /// keeping focus on a stop that no longer exists.
+        #[test]
+        fn emptied_dock_clears_focus() {
+            use super::super::{FocusRegion, ShellFocus};
+            let (mut host, _dir) = dock_test_host();
+            use crate::keyboard::XkbFeed;
+            host.xkb = XkbFeed::from_names("evdev", "pc105", "us", "", None);
+            press(&mut host, EV_F6);
+            press(&mut host, EV_F6);
+            assert_eq!(
+                host.shell_focus().map(|focus| focus.region),
+                Some(FocusRegion::Dock)
+            );
+            host.favorites.unpin("org.example.True.desktop");
+            let _ = host.favorites.save();
+            assert!(host.dock_items().is_empty(), "unpin empties the dock");
+            host.step_focus();
+            assert_eq!(host.shell_focus(), None);
+            let _ = ShellFocus {
+                region: FocusRegion::Panel,
+                cursor: 0,
+            };
+        }
+
+        /// Enter on the focused clock toggles the calendar twice
+        /// (open, then dismiss), like two strip presses.
+        #[test]
+        fn enter_on_clock_toggles_calendar() {
+            use crate::popup::PopupBody;
+            let (mut host, _dir) = keyed_host();
+            press(&mut host, EV_TAB);
+            assert_eq!(host.shell_focus().map(|focus| focus.cursor), Some(0));
+            host.on_key(EV_RETURN, true);
+            host.on_key(EV_RETURN, false);
+            assert!(
+                host.take_shell_submit(),
+                "closed overview arms shell submit"
+            );
+            host.activate_focused();
+            assert_eq!(host.popup.body(), Some(PopupBody::Calendar));
+            host.on_key(EV_RETURN, true);
+            host.on_key(EV_RETURN, false);
+            assert!(host.take_shell_submit());
+            host.activate_focused();
+            assert_eq!(host.popup.body(), None);
+        }
+
+        /// Enter on a focused tile opens its menu, like a press.
+        #[test]
+        fn enter_on_tile_opens_menu() {
+            use crate::popup::PopupBody;
+            let (mut host, _dir) = keyed_host();
+            press(&mut host, EV_TAB);
+            press(&mut host, EV_TAB);
+            assert_eq!(host.shell_focus().map(|focus| focus.cursor), Some(1));
+            host.on_key(EV_RETURN, true);
+            host.on_key(EV_RETURN, false);
+            assert!(host.take_shell_submit());
+            host.activate_focused();
+            assert_eq!(host.popup.body(), Some(PopupBody::Menu(0)));
+        }
+
+        /// Enter on a focused dock slot fires the left-press action:
+        /// Switch arms the pending queue for the control loop.
+        #[test]
+        fn enter_on_dock_slot_switches() {
+            use super::super::FocusRegion;
+            use crate::dock::DockAction;
+            let (mut host, _dir) = dock_test_host();
+            use crate::keyboard::XkbFeed;
+            host.xkb = XkbFeed::from_names("evdev", "pc105", "us", "", None);
+            host.model.apply_window_list(
+                vec![crate::model::WindowEntry::new(7, "True", true)
+                    .with_app_id(Some("org.example.True".to_owned()))],
+                vec![0],
+            );
+            press(&mut host, EV_F6);
+            press(&mut host, EV_F6);
+            assert_eq!(
+                host.shell_focus().map(|focus| focus.region),
+                Some(FocusRegion::Dock)
+            );
+            host.on_key(EV_RETURN, true);
+            host.on_key(EV_RETURN, false);
+            assert!(host.take_shell_submit());
+            host.activate_focused();
+            assert_eq!(host.take_dock_actions(), vec![DockAction::Switch(7)]);
+        }
+
+        /// Enter on a pinned-but-missing slot is a quiet no-op: no
+        /// launch, no armed action, nothing spawned.
+        #[test]
+        fn enter_on_missing_slot_is_quiet() {
+            use super::super::FocusRegion;
+            let (mut host, _dir) = test_host();
+            use crate::keyboard::XkbFeed;
+            host.xkb = XkbFeed::from_names("evdev", "pc105", "us", "", None);
+            host.favorites.pin("org.example.Missing.desktop");
+            let _ = host.favorites.save();
+            assert_eq!(host.dock_items().len(), 1, "missing pin still a stop");
+            press(&mut host, EV_F6);
+            press(&mut host, EV_F6);
+            assert_eq!(
+                host.shell_focus().map(|focus| focus.region),
+                Some(FocusRegion::Dock)
+            );
+            host.activate_focused();
+            assert!(host.take_dock_actions().is_empty());
+            assert_eq!(host.popup.body(), None);
+        }
+
+        /// Byte sampler for the ring tests.
+        fn pixel_at(pixels: &[u8], width: i32, x: i32, y: i32) -> [u8; 4] {
+            let start = (y as usize * width as usize + x as usize) * 4;
+            pixels[start..start + 4].try_into().expect("in bounds")
+        }
+
+        /// Every panel stop paints its accent ring; without focus the
+        /// same pixels are ring-free.
+        #[test]
+        fn panel_stops_paint_focus_rings() {
+            use super::super::{FocusRegion, ShellFocus, PANEL_STOPS};
+            use crate::overview::ACCENT;
+            use crate::popup::panel_layout;
+            let (mut host, _dir) = test_host();
+            let width = 1280;
+            let strip_h = host.panel.height as i32;
+            let plain = host.render_panel_pixels(width, strip_h);
+            for cursor in 0..PANEL_STOPS {
+                host.focus = Some(ShellFocus {
+                    region: FocusRegion::Panel,
+                    cursor,
+                });
+                let painted = host.render_panel_pixels(width, strip_h);
+                let layout = panel_layout(width, strip_h, &host.tiles.clock);
+                let stop = if cursor == 0 {
+                    layout.clock
+                } else {
+                    layout.tiles[cursor - 1]
+                };
+                // Left ring edge, vertically centered on the stop.
+                let (x, y) = (stop.x - 1, stop.y + stop.h / 2);
+                assert_eq!(
+                    pixel_at(&painted, width, x, y),
+                    ACCENT,
+                    "ring on stop {cursor}"
+                );
+                assert_ne!(
+                    pixel_at(&plain, width, x, y),
+                    ACCENT,
+                    "no ring without focus on stop {cursor}"
+                );
+            }
+        }
+
+        /// The focused dock slot paints its accent ring; without
+        /// focus the same pixel is ring-free.
+        #[test]
+        fn dock_slot_paints_focus_ring() {
+            use super::super::{FocusRegion, ShellFocus};
+            use crate::dock::dock_slot_at;
+            use crate::overview::ACCENT;
+            let (mut host, _dir) = dock_test_host();
+            let width = 1280;
+            let height = crate::dock::DOCK_H;
+            let items = host.dock_items();
+            assert_eq!(items.len(), 1);
+            let plain = host.render_dock_pixels(width, height, &items);
+            host.focus = Some(ShellFocus {
+                region: FocusRegion::Dock,
+                cursor: 0,
+            });
+            let painted = host.render_dock_pixels(width, height, &items);
+            let (x0, y0, _, h) = dock_slot_at(width, 0, items.len(), 0);
+            let (x, y) = (x0 - 1, y0 + h / 2);
+            assert_eq!(pixel_at(&painted, width, x, y), ACCENT, "ring on slot");
+            assert_ne!(
+                pixel_at(&plain, width, x, y),
+                ACCENT,
+                "no ring without focus"
+            );
+        }
+
+        /// Paint keys carry the cursor: moving focus repaints both
+        /// surfaces by construction.
+        #[test]
+        fn paint_keys_carry_focus() {
+            use super::super::{FocusRegion, ShellFocus};
+            let (mut host, _dir) = dock_test_host();
+            let width = 1280;
+            let items = host.dock_items();
+            let panel_plain = host.panel_render_key(width, 32);
+            let dock_plain = host.dock_render_key(width, crate::dock::DOCK_H, &items);
+            host.focus = Some(ShellFocus {
+                region: FocusRegion::Panel,
+                cursor: 2,
+            });
+            let panel_focused = host.panel_render_key(width, 32);
+            let dock_focused = host.dock_render_key(width, crate::dock::DOCK_H, &items);
+            assert_ne!(panel_plain, panel_focused, "panel key moves with focus");
+            assert_ne!(dock_plain, dock_focused, "dock key moves with focus");
+            host.focus = None;
+            assert_eq!(
+                host.panel_render_key(width, 32),
+                panel_plain,
+                "key restores"
+            );
+            assert_eq!(
+                host.dock_render_key(width, crate::dock::DOCK_H, &items),
+                dock_plain,
+                "dock key restores"
+            );
         }
 
         /// Dock presses before the first configure are ignored.
@@ -4837,6 +5553,106 @@ mod tests {
             );
         }
 
+        /// `on_key` queues navigation into `take_nav` in both overview
+        /// states (Task 1 routing): the strip is visible with the
+        /// overview closed, and the focus model drains the queue.
+        /// Presses only; search text and submit/dismiss stay untouched.
+        #[test]
+        fn on_key_queues_nav_in_both_overview_states() {
+            use crate::keyboard::{KeyAction, XkbFeed};
+
+            // Evdev codes on a `us` layout.
+            const UP: u32 = 103;
+            const DOWN: u32 = 108;
+            const LEFT: u32 = 105;
+            const RIGHT: u32 = 106;
+            const TAB: u32 = 15;
+            const SHIFT: u32 = 42;
+            const F6: u32 = 64;
+            const D: u32 = 32;
+            const SUPER: u32 = 125;
+            const F1: u32 = 59;
+            const ALT: u32 = 56;
+
+            let press_nav = |host: &mut ShellHost| {
+                host.on_key(UP, true);
+                host.on_key(DOWN, true);
+                host.on_key(LEFT, true);
+                host.on_key(RIGHT, true);
+                host.on_key(TAB, true);
+                host.on_key(SHIFT, true);
+                host.on_key(TAB, true);
+                host.on_key(SHIFT, false);
+                host.on_key(F6, true);
+                host.on_key(SUPER, true);
+                host.on_key(D, true);
+                host.on_key(SUPER, false);
+                host.on_key(ALT, true);
+                host.on_key(F1, true);
+                host.on_key(ALT, false);
+            };
+
+            let want = vec![
+                KeyAction::Up,
+                KeyAction::Down,
+                KeyAction::Left,
+                KeyAction::Right,
+                KeyAction::Next,
+                KeyAction::Previous,
+                KeyAction::CycleRegion,
+                KeyAction::FocusDock,
+                KeyAction::FocusPanel,
+            ];
+
+            for open in [false, true] {
+                let (mut host, _favdir) = test_host();
+                host.xkb = XkbFeed::from_names("evdev", "pc105", "us", "", None);
+                host.model.set_overview_open(open);
+                press_nav(&mut host);
+                assert_eq!(host.take_nav(), want, "nav queues while open={open}");
+                assert!(host.take_nav().is_empty(), "take_nav drains");
+                assert_eq!(host.search_text(), "", "nav never types");
+                assert!(!host.take_submit(), "nav never submits");
+                assert!(!host.take_dismiss(), "nav never dismisses");
+            }
+        }
+
+        /// Releases never queue navigation, and search gating beside
+        /// the nav path is unchanged: closed-overview text keys stay
+        /// out of the buffer while nav still queues.
+        #[test]
+        fn nav_releases_queue_nothing_and_closed_search_stays_gated() {
+            use crate::keyboard::XkbFeed;
+
+            const A: u32 = 30;
+            const RETURN: u32 = 28;
+            const BACKSPACE: u32 = 14;
+            const UP: u32 = 103;
+            const TAB: u32 = 15;
+            const F6: u32 = 64;
+
+            let (mut host, _favdir) = test_host();
+            host.xkb = XkbFeed::from_names("evdev", "pc105", "us", "", None);
+
+            // Closed overview: text/erase/submit stay gated out, but
+            // navigation still queues.
+            host.on_key(A, true);
+            host.on_key(BACKSPACE, true);
+            host.on_key(RETURN, true);
+            assert_eq!(host.search_text(), "", "closed overview types nothing");
+            assert!(!host.take_submit(), "closed overview submits nothing");
+            host.on_key(UP, true);
+            host.on_key(TAB, true);
+            host.on_key(F6, true);
+            assert_eq!(host.take_nav().len(), 3, "nav queues while closed");
+            // Releases queue nothing.
+            host.on_key(UP, false);
+            host.on_key(TAB, false);
+            host.on_key(F6, false);
+            host.on_key(A, false);
+            assert!(host.take_nav().is_empty(), "releases queue nothing");
+        }
+
         /// Enter on a window hit focuses through the token gate and
         /// dismisses the overview; the compositor confirms both.
         #[test]
@@ -5484,6 +6300,7 @@ mod tests {
                 unread: 0,
                 width: 1280,
                 height: 32,
+                focus: None,
                 popup: None,
                 indicators: Vec::new(),
             }
@@ -5495,6 +6312,7 @@ mod tests {
                 width: 1280,
                 height: crate::dock::DOCK_H,
                 stack: None,
+                focus: None,
             }
         }
 
