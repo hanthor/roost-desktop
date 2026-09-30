@@ -39,8 +39,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 
 use roost_shell_control::{
     decode_frame, encode_frame, ActivationToken, CommandKind, CommandStatus, DecodeError,
-    ErrorKind, Message, ProtocolVersion, StateOp, SwitcherAction, WorkspaceInfo, CURRENT_VERSION,
-    MAX_FRAME_BYTES,
+    ErrorKind, Message, OutputInfo, ProtocolVersion, StateOp, SwitcherAction, WorkspaceInfo,
+    CURRENT_VERSION, MAX_FRAME_BYTES,
 };
 
 use crate::state::{StateChange, StateModel, TokenStore, WindowEntry};
@@ -425,6 +425,15 @@ impl<'a> Session<'a> {
         self.conn.write_frame(&Message::Overview { open })
     }
 
+    /// Send the current output inventory (multi-monitor). Best-effort
+    /// like overview: the hub rebroadcasts until every live session
+    /// holds it, and newcomers get it right after the handshake.
+    pub fn send_outputs(&mut self, outputs: &[OutputInfo]) -> Result<(), ControlError> {
+        self.conn.write_frame(&Message::Outputs {
+            outputs: outputs.to_vec(),
+        })
+    }
+
     /// Send one Alt-Tab switcher drive event (002 workspaces).
     pub fn send_switcher(&mut self, action: SwitcherAction) -> Result<(), ControlError> {
         self.conn.write_frame(&Message::Switcher { action })
@@ -551,6 +560,7 @@ impl<'a> Session<'a> {
             | Message::CommandResult { .. }
             | Message::Overview { .. }
             | Message::Switcher { .. }
+            | Message::Outputs { .. }
             | Message::Error { .. } => {
                 let _ = self.conn.write_frame(&Message::Error {
                     kind: ErrorKind::UnknownCommand,
@@ -586,6 +596,7 @@ fn message_kind(msg: &Message) -> &'static str {
         Message::Error { .. } => "Error",
         Message::Overview { .. } => "Overview",
         Message::Switcher { .. } => "Switcher",
+        Message::Outputs { .. } => "Outputs",
     }
 }
 
@@ -795,6 +806,14 @@ pub struct ControlHub {
     /// intent (level), steps are discrete events: each one is sent to
     /// every live session exactly once, retained until all sends land.
     switcher_queue: Vec<SwitcherAction>,
+    /// Output inventory last handed to [`set_outputs`](Self::set_outputs)
+    /// (multi-monitor): the runtime refreshes this every tick from the
+    /// compositor's tracking, and [`poll`](Self::poll) broadcasts it
+    /// whenever it differs from `outputs_sent`.
+    outputs: Vec<OutputInfo>,
+    /// Inventory value every live session holds; a mismatch means a
+    /// broadcast is still owed (or a newcomer joined mid-state).
+    outputs_sent: Vec<OutputInfo>,
 }
 
 impl ControlHub {
@@ -818,6 +837,8 @@ impl ControlHub {
             overview_sent: false,
             locked: std::rc::Rc::new(std::cell::Cell::new(false)),
             switcher_queue: Vec::new(),
+            outputs: Vec::new(),
+            outputs_sent: Vec::new(),
             store,
             seat: seat.to_owned(),
         })
@@ -843,6 +864,16 @@ impl ControlHub {
     /// Idempotent: setting the current value sends nothing.
     pub fn set_overview(&self, open: bool) {
         self.overview.set(open);
+    }
+
+    /// Refresh the output inventory; the next [`poll`](Self::poll)
+    /// broadcasts it to every live session as [`Message::Outputs`]
+    /// when it differs from the last broadcast. Idempotent: setting
+    /// the current value sends nothing. The runtime calls this every
+    /// tick from the compositor's tracking — the single inventory the
+    /// spec requires, never a parallel database.
+    pub fn set_outputs(&mut self, outputs: Vec<OutputInfo>) {
+        self.outputs = outputs;
     }
 
     /// Whether the session is locked (compositor-owned flag).
@@ -925,6 +956,20 @@ impl ControlHub {
                 self.overview_sent = open;
             }
         }
+        // Broadcast the output inventory (multi-monitor): best-effort
+        // per session like overview, staying dirty until every live
+        // session holds it.
+        if self.outputs != self.outputs_sent {
+            let mut all_sent = true;
+            for session in &mut self.sessions {
+                if session.send_outputs(&self.outputs).is_err() {
+                    all_sent = false;
+                }
+            }
+            if all_sent {
+                self.outputs_sent = self.outputs.clone();
+            }
+        }
         // Broadcast switcher drive events (002 workspaces): each queued
         // action goes to every live session exactly once; actions that
         // miss a session stay queued for the next poll.
@@ -969,9 +1014,15 @@ impl ControlHub {
             if let Ok(mut session) =
                 Session::handshake_with(conn, model, validator, minter, overview, locked)
             {
-                // Newcomers join mid-state: tell them the intent now
-                // (best-effort; the poll broadcast covers the rest).
+                // Newcomers join mid-state: tell them the intent and the
+                // inventory now (best-effort; the poll broadcast covers
+                // the rest). An empty inventory means unknown — never
+                // send it; the shell keeps its legacy surfaces until a
+                // real one arrives.
                 let _ = session.send_overview(open);
+                if !self.outputs.is_empty() {
+                    let _ = session.send_outputs(&self.outputs);
+                }
                 self.sessions.push(session);
             }
         }

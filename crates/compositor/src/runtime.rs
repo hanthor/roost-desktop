@@ -186,12 +186,13 @@ pub fn restore_env(prev: Option<OsString>) {
     }
 }
 
-/// Live nested session: display, protocol state, backend, and output.
+/// Live nested session: display, protocol state, backend, and outputs.
+/// Output handles live in the state's inventory (entry zero is the
+/// primary); the runtime reaches them through [`State`] accessors.
 pub struct Runtime {
     display: Display<State>,
     state: State,
     backend: winit::WinitGraphicsBackend<GlesRenderer>,
-    output: Output,
     manager: WindowManager,
     control: ControlHub,
     shell: ShellDriver,
@@ -230,21 +231,6 @@ impl Runtime {
             Display::new().map_err(|e| RuntimeError::Loop(e.to_string()))?;
         let dh = display.handle();
         let mut state = State::new(&dh);
-        state.set_output_size(session.width, session.height);
-        let manager = WindowManager::new(&mut state);
-        let tokens = std::rc::Rc::new(TokenStore::new());
-        let control_path = control_socket_path(&session.socket_name);
-        let control = ControlHub::bind(control_path.clone(), tokens, crate::SEAT_NAME)
-            .map_err(|e| RuntimeError::Socket(e.to_string()))?;
-        let shell_policy = RestartPolicy::default();
-        let shell = ShellDriver::new(
-            shell_policy,
-            resolve_shell_bin(session.shell_bin.as_deref()),
-            session.socket_name.clone(),
-            control_path,
-        );
-        let overlay = Overlay::new(shell_policy.max_attempts);
-
         let output = Output::new(
             "roost-0".to_owned(),
             PhysicalProperties {
@@ -265,7 +251,22 @@ impl Runtime {
             Some((0, 0).into()),
         );
         output.set_preferred(mode);
-        output.create_global::<State>(&dh);
+        let global = output.create_global::<State>(&dh);
+        state.add_output("roost-0", Some(output), session.width, session.height);
+        state.note_output_global("roost-0", global);
+        let manager = WindowManager::new(&mut state);
+        let tokens = std::rc::Rc::new(TokenStore::new());
+        let control_path = control_socket_path(&session.socket_name);
+        let control = ControlHub::bind(control_path.clone(), tokens, crate::SEAT_NAME)
+            .map_err(|e| RuntimeError::Socket(e.to_string()))?;
+        let shell_policy = RestartPolicy::default();
+        let shell = ShellDriver::new(
+            shell_policy,
+            resolve_shell_bin(session.shell_bin.as_deref()),
+            session.socket_name.clone(),
+            control_path,
+        );
+        let overlay = Overlay::new(shell_policy.max_attempts);
 
         let (backend, winit_loop) =
             winit::init::<GlesRenderer>().map_err(|e| RuntimeError::Backend(e.to_string()))?;
@@ -297,7 +298,6 @@ impl Runtime {
             display,
             state,
             backend,
-            output,
             manager,
             control,
             shell,
@@ -322,8 +322,9 @@ impl Runtime {
                     size,
                     refresh: 60_000,
                 };
-                self.output
-                    .change_current_state(Some(mode), None, None, None);
+                if let Some(output) = self.state.primary_output() {
+                    output.change_current_state(Some(mode), None, None, None);
+                }
             }
             WinitEvent::CloseRequested => self.exit = true,
             WinitEvent::Input(event) => {
@@ -499,6 +500,11 @@ impl Runtime {
             .flush_clients()
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
         self.manager.reconcile(&mut self.state);
+        // Publish the output inventory every tick (multi-monitor): the
+        // hub broadcasts on change only, so the steady state costs one
+        // short comparison. The inventory is the compositor's tracking
+        // handed over as-is — never a parallel database.
+        self.control.set_outputs(self.state.output_infos());
         let outcome = self.control.poll(self.manager.model_mut());
         for id in outcome.activated {
             self.manager.focus(&mut self.state, Some(id));
@@ -638,22 +644,24 @@ impl Runtime {
                 .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
         }
         // Provisional frame pacing: always send callbacks (zero throttle)
-        // with this output as scan-out. Damage-tracked pacing is deferred.
-        let output = self.output.clone();
+        // with the primary output as scan-out. Damage-tracked pacing is
+        // deferred. Per-output scan-out arrives with the paint task.
         let time = Duration::from_millis(self.stats.frames.saturating_mul(16));
-        for surface in self.state.toplevels() {
-            send_frames_surface_tree(
-                surface.wl_surface(),
-                &output,
-                time,
-                Some(Duration::ZERO),
-                |_, _| Some(output.clone()),
-            );
-        }
-        for (surface, _, _) in crate::layer::layer_layout(&self.state) {
-            send_frames_surface_tree(&surface, &output, time, Some(Duration::ZERO), |_, _| {
-                Some(output.clone())
-            });
+        if let Some(output) = self.state.primary_output() {
+            for surface in self.state.toplevels() {
+                send_frames_surface_tree(
+                    surface.wl_surface(),
+                    &output,
+                    time,
+                    Some(Duration::ZERO),
+                    |_, _| Some(output.clone()),
+                );
+            }
+            for (surface, _, _) in crate::layer::layer_layout(&self.state) {
+                send_frames_surface_tree(&surface, &output, time, Some(Duration::ZERO), |_, _| {
+                    Some(output.clone())
+                });
+            }
         }
         self.backend
             .submit(Some(&[damage]))

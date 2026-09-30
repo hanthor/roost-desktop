@@ -324,7 +324,7 @@ fn three_wrong_passwords_stay_locked_without_leak() {
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("control.sock");
-    let mut hub = ControlHub::bind(path.clone(), Rc::new(TokenStore::new()), SEAT_NAME).unwrap();
+    let hub = ControlHub::bind(path.clone(), Rc::new(TokenStore::new()), SEAT_NAME).unwrap();
     let mut lock = SessionLock::new(60_000);
     let mut overlay = Overlay::new(3);
     lock.lock();

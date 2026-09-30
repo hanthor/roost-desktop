@@ -11,6 +11,7 @@
 
 use smithay::{
     delegate_layer_shell,
+    output::Output,
     reexports::wayland_server::protocol::{wl_output::WlOutput, wl_surface::WlSurface},
     utils::{Logical, Size},
     wayland::{
@@ -60,9 +61,17 @@ pub fn arranged_size(surface: &LayerSurface, output: Size<i32, Logical>) -> Size
 /// only where the arranged size changed. The runtime calls this from
 /// its commit handler: client size/anchor requests land with the
 /// commit, so this is the earliest point the real geometry is known.
+/// Each surface arranges against the output it is bound to (unbound
+/// surfaces fall back to primary), so per-output panels each learn
+/// their own width from one shared pass.
 pub fn arrange_after_commit(state: &State) {
     for surface in state.layer_shell_state.layer_surfaces() {
-        let size = arranged_size(&surface, state.output_size);
+        let bound = state
+            .panel_surfaces
+            .iter()
+            .find(|record| record.surface == *surface.wl_surface())
+            .and_then(|record| record.output_name.clone());
+        let size = arranged_size(&surface, state.size_for_output(bound.as_deref()));
         if surface.current_state().size != Some(size) {
             surface.with_pending_state(|pending| {
                 pending.size = Some(size);
@@ -82,6 +91,11 @@ pub struct PanelSurface {
     pub layer: Layer,
     /// Whether the client has acknowledged any configure yet.
     pub configured: bool,
+    /// Inventory name of the output the surface was created on
+    /// (`None` for unbound/global surfaces, which arrange against
+    /// primary). Resolved once at creation: the client's resource
+    /// identifies the output through its protocol handle.
+    pub output_name: Option<String>,
     surface: WlSurface,
 }
 
@@ -93,7 +107,7 @@ impl WlrLayerShellHandler for State {
     fn new_layer_surface(
         &mut self,
         surface: LayerSurface,
-        _output: Option<WlOutput>,
+        output: Option<WlOutput>,
         layer: Layer,
         namespace: String,
     ) {
@@ -102,10 +116,15 @@ impl WlrLayerShellHandler for State {
         // `arrange_after_commit`, once the client's size/anchor
         // requests have arrived.
         surface.send_configure();
+        let output_name = output
+            .as_ref()
+            .and_then(Output::from_resource)
+            .map(|bound| bound.name());
         self.panel_surfaces.push(PanelSurface {
             namespace,
             layer,
             configured: false,
+            output_name,
             surface: surface.wl_surface().clone(),
         });
     }
@@ -143,9 +162,10 @@ fn layer_order(layer: Layer) -> u8 {
 /// Surfaces with no configured size yet are skipped. Sorted
 /// background-to-overlay; callers draw windows first, then these.
 pub fn layer_layout(state: &State) -> Vec<(WlSurface, (i32, i32), Layer)> {
-    let output = state.output_size;
     let mut placed = Vec::new();
     for record in &state.panel_surfaces {
+        let output = state.size_for_output(record.output_name.as_deref());
+        let (ox, oy) = state.loc_for_output(record.output_name.as_deref());
         let Some(handle) = state
             .layer_shell_state
             .layer_surfaces()
@@ -163,20 +183,22 @@ pub fn layer_layout(state: &State) -> Vec<(WlSurface, (i32, i32), Layer)> {
                 .current()
                 .anchor
         });
-        let x = if anchor.contains(Anchor::LEFT) {
-            0
-        } else if anchor.contains(Anchor::RIGHT) {
-            output.w - size.w
-        } else {
-            (output.w - size.w) / 2
-        };
-        let y = if anchor.contains(Anchor::TOP) {
-            0
-        } else if anchor.contains(Anchor::BOTTOM) {
-            output.h - size.h
-        } else {
-            (output.h - size.h) / 2
-        };
+        let x = ox
+            + if anchor.contains(Anchor::LEFT) {
+                0
+            } else if anchor.contains(Anchor::RIGHT) {
+                output.w - size.w
+            } else {
+                (output.w - size.w) / 2
+            };
+        let y = oy
+            + if anchor.contains(Anchor::TOP) {
+                0
+            } else if anchor.contains(Anchor::BOTTOM) {
+                output.h - size.h
+            } else {
+                (output.h - size.h) / 2
+            };
         placed.push((record.surface.clone(), (x, y), record.layer));
     }
     placed.sort_by_key(|(_, _, layer)| layer_order(*layer));

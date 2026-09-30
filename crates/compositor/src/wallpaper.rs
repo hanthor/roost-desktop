@@ -61,11 +61,20 @@ struct Loaded {
     pixels: Option<Vec<u8>>,
 }
 
-/// Session wallpaper: polls the drop file, decodes on change.
+/// Session wallpaper: polls the drop file, decodes on change. One
+/// cache slot per output size (multi-monitor): each output's
+/// cover-crop is decoded once and reused while its size and the URI
+/// hold. Slots are area-capped individually and count-capped
+/// together, so extra outputs cannot grow memory without bound.
 #[derive(Debug, Default)]
 pub struct Wallpaper {
-    loaded: Option<Loaded>,
+    loaded: Vec<Loaded>,
 }
+
+/// Most cached sizes at once; each slot holds at most
+/// `MAX_WALLPAPER_AREA` pixels, so the cache stays bounded while
+/// covering the common multi-output case.
+const MAX_WALLPAPER_SLOTS: usize = 4;
 
 impl Wallpaper {
     /// Empty wallpaper (solid clear until a drop file appears).
@@ -76,7 +85,8 @@ impl Wallpaper {
     /// Render element stretching the current image over a `w` x `h`
     /// output, or `None` when no usable image is loaded. The caller
     /// still clears first: the image covers the output exactly, but
-    /// the clear stays the honest fallback underneath.
+    /// the clear stays the honest fallback underneath. Call once per
+    /// output with that output's size; crops are cached per size.
     pub fn element(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -91,18 +101,24 @@ impl Wallpaper {
         let uri = std::fs::read_to_string(wallpaper_drop_path())
             .map(|text| text.trim().to_owned())
             .unwrap_or_default();
-        let stale = self
+        if !self
             .loaded
-            .as_ref()
-            .is_none_or(|loaded| loaded.uri != uri || loaded.size != Some(output));
-        if stale {
-            self.loaded = Some(Loaded {
+            .iter()
+            .any(|loaded| loaded.uri == uri && loaded.size == Some(output))
+        {
+            if self.loaded.len() >= MAX_WALLPAPER_SLOTS {
+                self.loaded.remove(0);
+            }
+            self.loaded.push(Loaded {
                 uri: uri.clone(),
                 size: if uri.is_empty() { None } else { Some(output) },
                 pixels: load_wallpaper(&uri, output),
             });
         }
-        let loaded = self.loaded.as_ref()?;
+        let loaded = self
+            .loaded
+            .iter()
+            .find(|loaded| loaded.uri == uri && loaded.size == Some(output))?;
         let pixels = loaded.pixels.as_ref()?;
         let size = loaded.size?;
         let buffer = MemoryRenderBuffer::from_slice(
@@ -319,5 +335,36 @@ mod tests {
             distinct.len() > 1,
             "decoded pixels vary with the source checker"
         );
+    }
+
+    /// One source image covers two output sizes (multi-monitor): each
+    /// crop fills its own output exactly — cover, never stretch — so a
+    /// 1280x800 panel and a 1920x1080 sibling each get full-bleed
+    /// ARGB8888 pixels at their own dimensions.
+    #[test]
+    fn load_wallpaper_covers_two_output_sizes_with_exact_dims() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let png = dir.path().join("wall.png");
+        checker_png(&png, 96, 64);
+        let uri = format!("file://{}", png.display());
+        for (w, h) in [(48, 32), (64, 64)] {
+            let output = Size::<i32, Logical>::from((w, h));
+            let pixels = load_wallpaper(&uri, output).expect("real png decodes");
+            assert_eq!(
+                pixels.len(),
+                (w * h * 4) as usize,
+                "cover fills {w}x{h} exactly"
+            );
+            // A red/blue checker at any cover size cannot be a flat
+            // fill: bars would mean stretch, one tone would mean crop
+            // failure.
+            let (chunks, _) = pixels.as_chunks::<4>();
+            let distinct: std::collections::HashSet<&[u8]> =
+                chunks.iter().map(|px| px.as_slice()).collect();
+            assert!(
+                distinct.len() > 1,
+                "decoded pixels vary with the source checker at {w}x{h}"
+            );
+        }
     }
 }

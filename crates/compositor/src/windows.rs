@@ -27,7 +27,7 @@ use smithay::{
         pointer::{ButtonEvent, MotionEvent, PointerHandle},
     },
     reexports::wayland_server::{protocol::wl_surface::WlSurface, Resource},
-    utils::{Logical, Point, Rectangle, SERIAL_COUNTER},
+    utils::{Logical, Point, Rectangle, Size, SERIAL_COUNTER},
     wayland::{
         compositor::with_states,
         shell::xdg::{ToplevelSurface, XdgToplevelSurfaceData},
@@ -723,7 +723,8 @@ impl WindowManager {
     /// Work area a maximized window fills: the output minus the shell
     /// panel strip ([`WORK_AREA_TOP`]).
     fn work_area(state: &State) -> Rectangle<i32, Logical> {
-        let (w, h) = (state.output_size.w.max(0), state.output_size.h.max(0));
+        let primary = state.primary_size();
+        let (w, h) = (primary.w.max(0), primary.h.max(0));
         Rectangle {
             loc: (0, WORK_AREA_TOP).into(),
             size: (w, (h - WORK_AREA_TOP).max(0)).into(),
@@ -746,9 +747,10 @@ impl WindowManager {
 
     /// Whole output, including the panel strip, for fullscreen windows.
     fn fullscreen_area(state: &State) -> Rectangle<i32, Logical> {
+        let primary = state.primary_size();
         Rectangle {
             loc: (0, 0).into(),
-            size: (state.output_size.w.max(0), state.output_size.h.max(0)).into(),
+            size: (primary.w.max(0), primary.h.max(0)).into(),
         }
     }
 
@@ -1124,6 +1126,128 @@ impl WindowManager {
         self.configure(id, self.model.focused() == Some(id));
         eprintln!("roost-compositor: window {id} {layout:?}");
         true
+    }
+
+    /// Shift `geo` from the removed output's slice into the
+    /// survivor's, preserving size and clamping inside the survivor
+    /// bounds (an oversized window pins at the survivor origin).
+    fn shift_into_survivor(
+        geo: Rectangle<i32, Logical>,
+        removed_loc: (i32, i32),
+        survivor_loc: (i32, i32),
+        survivor_size: Size<i32, Logical>,
+    ) -> Rectangle<i32, Logical> {
+        let x = (survivor_loc.0 + geo.loc.x - removed_loc.0).clamp(
+            survivor_loc.0,
+            (survivor_loc.0 + survivor_size.w - geo.size.w).max(survivor_loc.0),
+        );
+        let y = (survivor_loc.1 + geo.loc.y - removed_loc.1).clamp(
+            survivor_loc.1,
+            (survivor_loc.1 + survivor_size.h - geo.size.h).max(survivor_loc.1),
+        );
+        Rectangle {
+            loc: (x, y).into(),
+            size: geo.size,
+        }
+    }
+
+    /// Whether `geo`'s center sits inside the `(loc, size)` slice:
+    /// the test for "this window lives on that output".
+    fn center_in_slice(
+        geo: Rectangle<i32, Logical>,
+        loc: (i32, i32),
+        size: Size<i32, Logical>,
+    ) -> bool {
+        let (cx, cy) = (geo.loc.x + geo.size.w / 2, geo.loc.y + geo.size.h / 2);
+        cx >= loc.0 && cx < loc.0 + size.w && cy >= loc.1 && cy < loc.1 + size.h
+    }
+
+    /// Migrate windows off a removed output onto a live one, before
+    /// its inventory entry drops: call this, then
+    /// [`State::remove_output`](crate::State::remove_output), then
+    /// [`reapply_derived_layouts`](Self::reapply_derived_layouts) when
+    /// the primary changed.
+    ///
+    /// Windows carry no output affinity (they live in workspaces),
+    /// so migration is geometric: floating windows centered on the
+    /// removed slice shift into the survivor slice (preferring the
+    /// primary) with size preserved. Derived layouts (maximized,
+    /// tiled, fullscreen, strip) are positional only through the
+    /// primary areas, so they move in the re-apply step after
+    /// failover — re-applying here would size them for the dying
+    /// primary. Stashed restore rects shift with their windows.
+    /// Focus and workspace membership never change, so no window is
+    /// lost — only positions move. Returns how many windows moved.
+    /// Unknown names and a missing survivor (removing the last
+    /// output) migrate nothing.
+    pub fn migrate_output_windows(&mut self, state: &mut State, removed: &str) -> usize {
+        let Some(gone) = state
+            .outputs
+            .iter()
+            .find(|entry| entry.name == removed)
+            .cloned()
+        else {
+            return 0;
+        };
+        let Some(live) = state
+            .outputs
+            .iter()
+            .find(|entry| entry.primary && entry.name != removed)
+            .or_else(|| state.outputs.iter().find(|entry| entry.name != removed))
+            .cloned()
+        else {
+            return 0;
+        };
+        let mut moved = 0;
+        let mut ids: Vec<u64> = self.windows.keys().copied().collect();
+        ids.sort_unstable();
+        for id in ids {
+            let Some(layout) = self.windows.get(&id).map(|window| window.layout) else {
+                continue;
+            };
+            if layout != WindowLayout::Floating {
+                continue;
+            }
+            let mut shifted = false;
+            if let Some(window) = self.windows.get_mut(&id) {
+                if Self::center_in_slice(window.geometry, gone.loc, gone.size) {
+                    window.geometry =
+                        Self::shift_into_survivor(window.geometry, gone.loc, live.loc, live.size);
+                    shifted = true;
+                }
+                if let Some(restore) = window.restore {
+                    if Self::center_in_slice(restore, gone.loc, gone.size) {
+                        window.restore = Some(Self::shift_into_survivor(
+                            restore, gone.loc, live.loc, live.size,
+                        ));
+                        shifted = true;
+                    }
+                }
+            }
+            moved += usize::from(shifted);
+        }
+        moved
+    }
+
+    /// Re-resolve every derived-layout window (maximized, tiled,
+    /// fullscreen, strip) against the current primary areas: call
+    /// after [`State::remove_output`](crate::State::remove_output)
+    /// when the primary changed, so no window keeps the dead
+    /// primary's geometry. Floating windows are untouched (migration
+    /// already placed them). Returns how many windows re-applied.
+    pub fn reapply_derived_layouts(&mut self, state: &mut State) -> usize {
+        let mut ids: Vec<u64> = self.windows.keys().copied().collect();
+        ids.sort_unstable();
+        let mut applied = 0;
+        for id in ids {
+            let Some(layout) = self.windows.get(&id).map(|window| window.layout) else {
+                continue;
+            };
+            if layout != WindowLayout::Floating && self.apply_layout(state, id, layout) {
+                applied += 1;
+            }
+        }
+        applied
     }
 
     /// Move a window to another workspace (registered if new). Focus

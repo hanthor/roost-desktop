@@ -66,7 +66,10 @@ impl ProtocolVersion {
     /// positions are untouched; like `0.2`, the body is still
     /// wire-incompatible with older peers despite the minor bump, and
     /// both sides always ship from this workspace.
-    pub const CURRENT: Self = Self { major: 0, minor: 6 };
+    ///
+    /// `0.7` appends the compositor-to-shell `Outputs` message
+    /// (multi-monitor inventory), again last for the same reason.
+    pub const CURRENT: Self = Self { major: 0, minor: 7 };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
     pub const fn new(major: u16, minor: u16) -> Self {
@@ -116,6 +119,21 @@ pub struct WorkspaceInfo {
     pub name: Option<String>,
     /// Whether this workspace is currently active.
     pub active: bool,
+}
+
+/// One compositor-tracked output: name, size, and dock anchor. The
+/// inventory crosses to the shell as these records; window migration
+/// stays compositor-internal, so no other wire types change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputInfo {
+    /// Output name, e.g. `roost-0`.
+    pub name: String,
+    /// Output width in physical pixels.
+    pub width: i32,
+    /// Output height in physical pixels.
+    pub height: i32,
+    /// Whether the dock anchors here.
+    pub primary: bool,
 }
 
 /// One ordered state mutation between two snapshot revisions.
@@ -285,6 +303,16 @@ pub enum Message {
     Switcher {
         /// What the switcher should do.
         action: SwitcherAction,
+    },
+    /// Compositor-to-shell output inventory (multi-monitor). The
+    /// compositor broadcasts the full list whenever it changes and
+    /// right after each handshake snapshot; the shell reconciles its
+    /// per-output surfaces against it. Carries no revision: structural
+    /// state, like `Overview` — and it sits last so earlier variant
+    /// positions are untouched.
+    Outputs {
+        /// Every tracked output, primary first.
+        outputs: Vec<OutputInfo>,
     },
 }
 
@@ -524,7 +552,8 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
         | Message::CommandResult { .. }
         | Message::Error { .. }
         | Message::Overview { .. }
-        | Message::Switcher { .. } => {}
+        | Message::Switcher { .. }
+        | Message::Outputs { .. } => {}
     }
     Ok(())
 }
@@ -563,8 +592,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_6() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 6));
+    fn current_version_is_0_7() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 7));
     }
 
     #[test]
@@ -578,7 +607,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 4).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 5).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 6).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 7).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 7).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 8).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }

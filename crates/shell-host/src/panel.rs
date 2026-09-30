@@ -26,6 +26,7 @@ use std::os::unix::io::AsFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use roost_shell_control::OutputInfo;
 use wayland_client::{
     delegate_noop,
     globals::{registry_queue_init, BindError, GlobalListContents},
@@ -43,6 +44,10 @@ use wayland_client::{
         wl_surface::WlSurface,
     },
     Connection, Dispatch, QueueHandle, WEnum,
+};
+use wayland_protocols::xdg::xdg_output::zv1::client::{
+    zxdg_output_manager_v1::ZxdgOutputManagerV1,
+    zxdg_output_v1::{Event as XdgOutputEvent, ZxdgOutputV1},
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
@@ -237,6 +242,23 @@ pub struct ShellHost {
     dock_size: Option<(i32, i32)>,
     dock_backing: Option<ShmBacking>,
     dock_paint_key: Option<DockPaintKey>,
+    /// Output the primary panel is bound to (`None` while the legacy
+    /// unbound surface from startup is live).
+    panel_output: Option<String>,
+    /// Output the dock is bound to (`None` while legacy unbound).
+    dock_output: Option<String>,
+    /// Bound `wl_output` globals with their compositor names (`None`
+    /// until the `xdg_output` name event resolves). Filled from
+    /// registry events; the tick reconciles surfaces against it plus
+    /// the control inventory.
+    bound_outputs: Vec<BoundOutput>,
+    /// Extra panel surfaces for non-primary outputs (primary keeps
+    /// the legacy `surface`/`panel_*` fields above, so presses and
+    /// popups stay on one surface).
+    extra_panels: Vec<ExtraPanel>,
+    /// `xdg_output` manager for naming bound outputs (`None` until
+    /// the registry advertises it; unit tests never attach it).
+    xdg_manager: Option<ZxdgOutputManagerV1>,
     /// Open folder-stack grid: item index into the current dock
     /// items, plus the directory read cached at open time.
     open_stack: Option<usize>,
@@ -297,6 +319,118 @@ struct ShmBacking {
     _file: std::fs::File,
     _pool: WlShmPool,
     buffer: WlBuffer,
+}
+
+/// Make one top-anchored panel layer surface on explicit handles,
+/// bound to `output` (`None` leaves placement to the compositor).
+/// Shared by startup creation and per-output reconcile so both paths
+/// configure identically.
+fn make_panel_surface(
+    compositor: &WlCompositor,
+    layer_shell: &ZwlrLayerShellV1,
+    qh: &QueueHandle<ShellHost>,
+    namespace: &str,
+    height: u32,
+    output: Option<&WlOutput>,
+) -> (WlSurface, ZwlrLayerSurfaceV1) {
+    let surface = compositor.create_surface(qh, ());
+    let layer_surface =
+        layer_shell.get_layer_surface(&surface, output, Layer::Top, namespace.to_owned(), qh, ());
+    layer_surface.set_size(0, height);
+    layer_surface.set_anchor(Anchor::Top | Anchor::Left | Anchor::Right);
+    layer_surface.set_exclusive_zone(height as i32);
+    layer_surface.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
+    surface.commit();
+    (surface, layer_surface)
+}
+
+/// Make one bottom-anchored dock layer surface on explicit handles,
+/// bound to `output`. Overlay layer with no exclusive zone, like the
+/// switcher. Shared by startup creation and primary-anchor moves.
+fn make_dock_surface(
+    compositor: &WlCompositor,
+    layer_shell: &ZwlrLayerShellV1,
+    qh: &QueueHandle<ShellHost>,
+    output: Option<&WlOutput>,
+) -> (WlSurface, ZwlrLayerSurfaceV1) {
+    let surface = compositor.create_surface(qh, ());
+    let layer_surface = layer_shell.get_layer_surface(
+        &surface,
+        output,
+        Layer::Overlay,
+        DOCK_NAMESPACE.to_owned(),
+        qh,
+        (),
+    );
+    layer_surface.set_size(0, DOCK_H as u32);
+    layer_surface.set_anchor(Anchor::Bottom | Anchor::Left | Anchor::Right);
+    layer_surface.set_exclusive_zone(0);
+    layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
+    surface.commit();
+    (surface, layer_surface)
+}
+
+/// One bound compositor output: the protocol object plus its
+/// inventory name once `xdg_output` resolves it.
+struct BoundOutput {
+    /// Registry global name (for `GlobalRemove` matching).
+    global: u32,
+    /// Bound protocol object for surface creation.
+    output: WlOutput,
+    /// `xdg_output` tracker driving the name resolution.
+    _xdg: Option<ZxdgOutputV1>,
+    /// Inventory name from the `xdg_output` name event (`None` until
+    /// it arrives).
+    name: Option<String>,
+}
+
+/// Extra panel surface for one non-primary output: its own layer
+/// surface, configured size, backing, and paint key, painted with
+/// the same strip content as the primary. Presses and popups stay
+/// on the primary surface.
+struct ExtraPanel {
+    /// Inventory name of the output this panel is bound to.
+    name: String,
+    /// Panel `wl_surface` for this output.
+    surface: WlSurface,
+    /// Top-anchored layer surface bound to this output.
+    layer: ZwlrLayerSurfaceV1,
+    /// Size last painted (repaint on configure resize).
+    size: Option<(i32, i32)>,
+    /// Buffer backing (pool fd must outlive the buffer).
+    backing: Option<ShmBacking>,
+    /// What the buffer currently shows; repaint on change.
+    paint_key: Option<PanelPaintKey>,
+}
+
+/// Desired per-output surface set from the inventory plus the bound
+/// `wl_output` names: panel outputs (primary first) and the dock
+/// output. Pure planning — the tick applies it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OutputPlan {
+    /// Output names needing a panel surface, primary first.
+    panels: Vec<String>,
+    /// Output name needing the dock surface (`None` while the
+    /// primary's `wl_output` is unbound).
+    dock: Option<String>,
+}
+
+/// Plan the per-output surfaces: every inventoried output whose
+/// `wl_output` is bound gets a panel; the dock goes on the primary.
+/// Unknown inventory (empty list, e.g. old compositor) plans
+/// nothing — the legacy unbound surfaces stay live.
+fn plan_output_surfaces(outputs: &[OutputInfo], bound: &[String]) -> OutputPlan {
+    let panels: Vec<String> = outputs
+        .iter()
+        .filter(|info| bound.iter().any(|name| name == &info.name))
+        .map(|info| info.name.clone())
+        .collect();
+    let dock = outputs
+        .iter()
+        .find(|info| info.primary)
+        .map(|info| info.name.clone())
+        .filter(|name| bound.iter().any(|bound| bound == name));
+    OutputPlan { panels, dock }
 }
 
 /// Live overview layer surface and its configured size.
@@ -589,6 +723,11 @@ impl ShellHost {
             dock_size: None,
             dock_backing: None,
             dock_paint_key: None,
+            panel_output: None,
+            dock_output: None,
+            bound_outputs: Vec::new(),
+            extra_panels: Vec::new(),
+            xdg_manager: None,
             open_stack: None,
             stack_cache: Vec::new(),
             published_wallpaper: None,
@@ -980,11 +1119,9 @@ impl ShellHost {
     /// count, or popup change; called on configure and from the slow
     /// status tick. `height` is the arranged surface height:
     /// strip-only, or strip plus the popup band while a popup is open.
-    fn paint_panel_surface(&mut self, width: i32, height: i32) {
-        if width <= 0 || height <= 0 {
-            return;
-        }
-        let strip_h = self.panel.height as i32;
+    /// Paint key for one panel strip size: clock, tiles, unread,
+    /// indicators, and popup state, so any content change repaints.
+    fn panel_render_key(&self, width: i32, height: i32) -> PanelPaintKey {
         let tiles = self.tiles.tiles();
         let today = jiff::Zoned::now().date();
         let popup = self.popup.body().map(|body| match body {
@@ -997,7 +1134,7 @@ impl ShellHost {
             .lock()
             .map(|center| center.unread_count())
             .unwrap_or(0);
-        let key = PanelPaintKey {
+        PanelPaintKey {
             clock: self.tiles.clock.clone(),
             clock_format: self.tiles.settings.clock_format,
             states: tiles.map(|tile| (tile.state, tile.level)),
@@ -1017,21 +1154,21 @@ impl ShellHost {
                     )
                 })
                 .collect(),
-        };
-        if self.panel_size == Some((width, height))
-            && self.panel_backing.is_some()
-            && self.panel_paint_key.as_ref() == Some(&key)
-        {
-            return;
         }
-        let Some(wayland) = self.wayland.clone() else {
-            // No compositor attached (unit tests): record the key so
-            // the slow-tick repaint decision stays observable. The shm
-            // upload below still needs Wayland, and `panel_backing`
-            // stays `None`, so a later attach repaints for real.
-            self.panel_paint_key = Some(key);
-            return;
-        };
+    }
+
+    /// Pixel content for one panel strip: the status strip plus the
+    /// popup band when one is open and tall enough. Shared by the
+    /// primary surface and every extra panel, so all outputs show
+    /// the same strip.
+    fn render_panel_pixels(&self, width: i32, height: i32) -> Vec<u8> {
+        let strip_h = self.panel.height as i32;
+        let today = jiff::Zoned::now().date();
+        let unread = self
+            .center
+            .lock()
+            .map(|center| center.unread_count())
+            .unwrap_or(0);
         let mut pixels = vec![0u8; width as usize * height as usize * BYTES_PER_PIXEL];
         paint_panel(
             &mut pixels,
@@ -1087,6 +1224,29 @@ impl ShellHost {
         if !cells.is_empty() {
             paint_indicators(&mut pixels, width, &cells, self.indicators.items());
         }
+        pixels
+    }
+
+    fn paint_panel_surface(&mut self, width: i32, height: i32) {
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        let key = self.panel_render_key(width, height);
+        if self.panel_size == Some((width, height))
+            && self.panel_backing.is_some()
+            && self.panel_paint_key.as_ref() == Some(&key)
+        {
+            return;
+        }
+        let Some(wayland) = self.wayland.clone() else {
+            // No compositor attached (unit tests): record the key so
+            // the slow-tick repaint decision stays observable. The shm
+            // upload below still needs Wayland, and `panel_backing`
+            // stays `None`, so a later attach repaints for real.
+            self.panel_paint_key = Some(key);
+            return;
+        };
+        let pixels = self.render_panel_pixels(width, height);
         let Some(surface) = self.surface.as_ref() else {
             return;
         };
@@ -1097,6 +1257,41 @@ impl ShellHost {
             self.panel_backing = Some(backing);
             self.panel_size = Some((width, height));
             self.panel_paint_key = Some(key);
+        }
+    }
+
+    /// Paint one extra (non-primary) panel at its configured size,
+    /// with the same strip content as the primary. Own backing, size,
+    /// and key: each output repaints independently on its configure.
+    fn paint_extra_panel(&mut self, index: usize, width: i32, height: i32) {
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        let key = self.panel_render_key(width, height);
+        let same = self.extra_panels.get(index).is_some_and(|extra| {
+            extra.size == Some((width, height)) && extra.paint_key.as_ref() == Some(&key)
+        });
+        if same && self.extra_panels[index].backing.is_some() {
+            return;
+        }
+        let Some(wayland) = self.wayland.clone() else {
+            if let Some(extra) = self.extra_panels.get_mut(index) {
+                extra.paint_key = Some(key);
+            }
+            return;
+        };
+        let pixels = self.render_panel_pixels(width, height);
+        let Some(extra) = self.extra_panels.get(index) else {
+            return;
+        };
+        if let Some(backing) = shm_upload(&wayland.shm, &wayland.qh, &pixels, width, height) {
+            extra.surface.attach(Some(&backing.buffer), 0, 0);
+            extra.surface.damage(0, 0, width, height);
+            extra.surface.commit();
+            let extra = &mut self.extra_panels[index];
+            extra.backing = Some(backing);
+            extra.size = Some((width, height));
+            extra.paint_key = Some(key);
         }
     }
 
@@ -1124,6 +1319,17 @@ impl ShellHost {
         }
         if let Some((width, height)) = self.dock_size {
             self.paint_dock_surface(width, height);
+        }
+        // Extra panels repaint on their own sizes when content
+        // changed; the paint keys skip the steady state.
+        let extra_sizes: Vec<(usize, i32, i32)> = self
+            .extra_panels
+            .iter()
+            .enumerate()
+            .filter_map(|(index, extra)| extra.size.map(|(width, height)| (index, width, height)))
+            .collect();
+        for (index, width, height) in extra_sizes {
+            self.paint_extra_panel(index, width, height);
         }
     }
 
@@ -1612,6 +1818,26 @@ impl ShellHost {
         }
     }
 
+    /// Build one panel `wl_surface` plus its top-anchored layer
+    /// surface, bound to `output` (`None` leaves placement to the
+    /// compositor, which falls back to primary), from already-bound
+    /// handles. Returns the pair for the caller to store (primary
+    /// fields or an extra record).
+    fn build_panel_surface(
+        &self,
+        output: Option<&WlOutput>,
+    ) -> Option<(WlSurface, ZwlrLayerSurfaceV1)> {
+        let wayland = self.wayland.clone()?;
+        Some(make_panel_surface(
+            &wayland.compositor,
+            &wayland.layer_shell,
+            &wayland.qh,
+            &self.panel.namespace,
+            self.panel.height,
+            output,
+        ))
+    }
+
     /// Create the panel `wl_surface` plus its top-anchored layer surface.
     ///
     /// `output` is `None` so the compositor places the panel on the
@@ -1623,22 +1849,35 @@ impl ShellHost {
         layer_shell: &ZwlrLayerShellV1,
         qh: &QueueHandle<Self>,
     ) {
-        let surface = compositor.create_surface(qh, ());
-        let layer_surface = layer_shell.get_layer_surface(
-            &surface,
-            None,
-            Layer::Top,
-            self.panel.namespace.clone(),
+        // Startup path keeps the legacy unbound surface; the tick
+        // rebinds it once the inventory and `wl_output` names land.
+        let (surface, layer_surface) = make_panel_surface(
+            compositor,
+            layer_shell,
             qh,
-            (),
+            &self.panel.namespace,
+            self.panel.height,
+            None,
         );
-        layer_surface.set_size(0, self.panel.height);
-        layer_surface.set_anchor(Anchor::Top | Anchor::Left | Anchor::Right);
-        layer_surface.set_exclusive_zone(self.panel.height as i32);
-        layer_surface.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
-        surface.commit();
         self.surface = Some(surface);
         self.layer_surface = Some(layer_surface);
+    }
+
+    /// Build one dock `wl_surface` plus its bottom-anchored layer
+    /// surface, bound to `output`, from already-bound handles.
+    /// Overlay layer with no exclusive zone: the dock floats over
+    /// windows like the switcher, so maximized geometry is untouched.
+    fn build_dock_surface(
+        &self,
+        output: Option<&WlOutput>,
+    ) -> Option<(WlSurface, ZwlrLayerSurfaceV1)> {
+        let wayland = self.wayland.clone()?;
+        Some(make_dock_surface(
+            &wayland.compositor,
+            &wayland.layer_shell,
+            &wayland.qh,
+            output,
+        ))
     }
 
     /// Create the dock `wl_surface` plus its bottom-anchored layer
@@ -1651,22 +1890,171 @@ impl ShellHost {
         layer_shell: &ZwlrLayerShellV1,
         qh: &QueueHandle<Self>,
     ) {
-        let surface = compositor.create_surface(qh, ());
-        let layer_surface = layer_shell.get_layer_surface(
-            &surface,
-            None,
-            Layer::Overlay,
-            DOCK_NAMESPACE.to_owned(),
-            qh,
-            (),
-        );
-        layer_surface.set_size(0, DOCK_H as u32);
-        layer_surface.set_anchor(Anchor::Bottom | Anchor::Left | Anchor::Right);
-        layer_surface.set_exclusive_zone(0);
-        layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
-        surface.commit();
+        // Startup path keeps the legacy unbound surface; the tick
+        // rebinds it once the inventory and `wl_output` names land.
+        let (surface, layer_surface) = make_dock_surface(compositor, layer_shell, qh, None);
         self.dock_surface = Some(surface);
         self.dock_layer = Some(layer_surface);
+    }
+
+    /// Reconcile live surfaces with the compositor inventory: one
+    /// panel per bound output (primary keeps the legacy fields, the
+    /// rest become extras), the dock on the primary output. Unknown
+    /// inventory (empty list) keeps the legacy unbound surfaces.
+    /// Idempotent: the tick calls this after every control step, and
+    /// only missing or surplus surfaces change.
+    fn reconcile_outputs(&mut self, outputs: &[OutputInfo]) {
+        if outputs.is_empty() || self.wayland.is_none() {
+            return;
+        }
+        let bound: Vec<String> = self
+            .bound_outputs
+            .iter()
+            .filter_map(|bound| bound.name.clone())
+            .collect();
+        let plan = plan_output_surfaces(outputs, &bound);
+        let primary = outputs
+            .iter()
+            .find(|info| info.primary)
+            .map(|info| info.name.clone());
+        // Primary panel: rebind when it names a different bound
+        // output than the live surface holds.
+        if let Some(name) = primary.clone() {
+            if self.panel_output.as_ref() != Some(&name) {
+                if let Some(target) = self
+                    .bound_outputs
+                    .iter()
+                    .find(|b| b.name.as_ref() == Some(&name))
+                {
+                    let output = target.output.clone();
+                    self.surface = None;
+                    self.layer_surface = None;
+                    self.panel_size = None;
+                    self.panel_backing = None;
+                    self.panel_paint_key = None;
+                    if let Some((surface, layer)) = self.build_panel_surface(Some(&output)) {
+                        self.surface = Some(surface);
+                        self.layer_surface = Some(layer);
+                        self.panel_output = Some(name);
+                    }
+                }
+            }
+        }
+        // Extra panels: create per non-primary plan entry, drop the
+        // rest (removed outputs or lost bindings).
+        let wanted: Vec<String> = plan
+            .panels
+            .iter()
+            .filter(|name| Some(*name) != primary.as_ref())
+            .cloned()
+            .collect();
+        self.extra_panels
+            .retain(|extra| wanted.iter().any(|name| name == &extra.name));
+        for name in wanted {
+            if self.extra_panels.iter().any(|extra| extra.name == name) {
+                continue;
+            }
+            let Some(target) = self
+                .bound_outputs
+                .iter()
+                .find(|b| b.name.as_ref() == Some(&name))
+            else {
+                continue;
+            };
+            let output = target.output.clone();
+            if let Some((surface, layer)) = self.build_panel_surface(Some(&output)) {
+                self.extra_panels.push(ExtraPanel {
+                    name,
+                    surface,
+                    layer,
+                    size: None,
+                    backing: None,
+                    paint_key: None,
+                });
+            }
+        }
+        // Dock: follow the primary anchor, rebinding on change.
+        // While the primary is unbound, keep the legacy surface until
+        // its `wl_output` resolves.
+        if self.dock_output.as_ref() != plan.dock.as_ref() {
+            if let Some(name) = plan.dock.clone() {
+                if let Some(target) = self
+                    .bound_outputs
+                    .iter()
+                    .find(|b| b.name.as_ref() == Some(&name))
+                {
+                    let output = target.output.clone();
+                    self.dock_surface = None;
+                    self.dock_layer = None;
+                    self.dock_size = None;
+                    self.dock_backing = None;
+                    self.dock_paint_key = None;
+                    if let Some((surface, layer)) = self.build_dock_surface(Some(&output)) {
+                        self.dock_surface = Some(surface);
+                        self.dock_layer = Some(layer);
+                        self.dock_output = Some(name);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Bind one advertised `wl_output` for per-output surfaces, plus
+    /// its `xdg_output` tracker when the manager is already known.
+    /// Names resolve asynchronously through the tracker events.
+    fn bind_output(
+        &mut self,
+        registry: &wl_registry::WlRegistry,
+        global: u32,
+        version: u32,
+        qh: &QueueHandle<Self>,
+    ) {
+        if self
+            .bound_outputs
+            .iter()
+            .any(|bound| bound.global == global)
+        {
+            return;
+        }
+        let output: WlOutput = registry.bind(global, version.min(4), qh, ());
+        let xdg = self
+            .xdg_manager
+            .as_ref()
+            .map(|manager| manager.get_xdg_output(&output, qh, global));
+        self.bound_outputs.push(BoundOutput {
+            global,
+            output,
+            _xdg: xdg,
+            name: None,
+        });
+    }
+
+    /// Bind the `xdg_output` manager and attach trackers to
+    /// already-bound outputs still awaiting names.
+    fn bind_xdg_manager(
+        &mut self,
+        registry: &wl_registry::WlRegistry,
+        global: u32,
+        version: u32,
+        qh: &QueueHandle<Self>,
+    ) {
+        if self.xdg_manager.is_some() {
+            return;
+        }
+        let manager: ZxdgOutputManagerV1 = registry.bind(global, version.min(3), qh, ());
+        for bound in &mut self.bound_outputs {
+            if bound._xdg.is_none() {
+                bound._xdg = Some(manager.get_xdg_output(&bound.output, qh, bound.global));
+            }
+        }
+        self.xdg_manager = Some(manager);
+    }
+
+    /// Drop a removed output global; the tick's reconcile destroys
+    /// its surfaces (dropping the proxies sends the protocol
+    /// destroy).
+    fn unbind_output(&mut self, global: u32) {
+        self.bound_outputs.retain(|bound| bound.global != global);
     }
 
     /// Current dock items from favorites, desktop entries, and the
@@ -2268,19 +2656,43 @@ fn drive_control(control: &mut ControlClient, host: &mut ShellHost) {
         Ok(_) => host.sync_overview(control),
         Err(e) => eprintln!("roost-shell-host: control error: {e}"),
     }
+    // Per-output surfaces follow the inventory every tick, whether or
+    // not a control frame landed: registry naming and inventory
+    // arrivals race, and reconcile is idempotent.
+    let outputs = control.outputs().to_vec();
+    host.reconcile_outputs(&outputs);
 }
 
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for ShellHost {
     fn event(
-        _state: &mut Self,
-        _proxy: &wl_registry::WlRegistry,
-        _event: wl_registry::Event,
+        state: &mut Self,
+        proxy: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
         _data: &GlobalListContents,
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
     ) {
-        // Globals are bound once at startup; dynamic add/remove needs no
-        // reaction from the slice-1 panel.
+        match event {
+            wl_registry::Event::Global {
+                name,
+                interface,
+                version,
+            } => {
+                // Outputs join live (multi-monitor): bind each
+                // `wl_output` for per-output surfaces, plus the
+                // `xdg_output` manager that names them. Everything
+                // else stays bound once at startup.
+                if interface.as_str() == "wl_output" {
+                    state.bind_output(proxy, name, version, qh);
+                } else if interface.as_str() == "zxdg_output_manager_v1" {
+                    state.bind_xdg_manager(proxy, name, version, qh);
+                }
+            }
+            wl_registry::Event::GlobalRemove { name } => {
+                state.unbind_output(name);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -2357,6 +2769,20 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for ShellHost {
                     if let Some(surface) = state.dock_surface.as_ref() {
                         surface.commit();
                     }
+                } else if let Some(index) = state
+                    .extra_panels
+                    .iter()
+                    .position(|extra| &extra.layer == proxy)
+                {
+                    proxy.ack_configure(serial);
+                    // Extra panel configure: paint this output's strip
+                    // at its own arranged size, then commit it.
+                    if width > 0 && height > 0 {
+                        state.paint_extra_panel(index, width as i32, height as i32);
+                    }
+                    if let Some(extra) = state.extra_panels.get(index) {
+                        extra.surface.commit();
+                    }
                 } else {
                     proxy.ack_configure(serial);
                 }
@@ -2384,6 +2810,14 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for ShellHost {
                     .is_some_and(|banners| &banners.layer == proxy)
                 {
                     state.destroy_banners();
+                } else if let Some(index) = state
+                    .extra_panels
+                    .iter()
+                    .position(|extra| &extra.layer == proxy)
+                {
+                    // Losing an extra panel drops its record; the tick
+                    // rebuilds it while its output stays inventoried.
+                    state.extra_panels.remove(index);
                 }
             }
             _ => {}
@@ -2551,6 +2985,31 @@ impl Dispatch<WlPointer, ()> for ShellHost {
 delegate_noop!(ShellHost: ignore WlCompositor);
 delegate_noop!(ShellHost: ignore WlSurface);
 delegate_noop!(ShellHost: ignore WlOutput);
+delegate_noop!(ShellHost: ignore ZxdgOutputManagerV1);
+
+impl Dispatch<ZxdgOutputV1, u32> for ShellHost {
+    fn event(
+        state: &mut Self,
+        _proxy: &ZxdgOutputV1,
+        event: XdgOutputEvent,
+        global: &u32,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        // Only the name matters: it keys a bound protocol object to
+        // the control inventory. Sizes ride the layer configure, so
+        // position/size/done events are ignored.
+        if let XdgOutputEvent::Name { name } = event {
+            if let Some(bound) = state
+                .bound_outputs
+                .iter_mut()
+                .find(|bound| bound.global == *global)
+            {
+                bound.name = Some(name);
+            }
+        }
+    }
+}
 delegate_noop!(ShellHost: ignore ZwlrLayerShellV1);
 delegate_noop!(ShellHost: ignore WlShm);
 delegate_noop!(ShellHost: ignore WlShmPool);
@@ -2673,6 +3132,103 @@ mod tests {
         assert_eq!(config.namespace, PANEL_NAMESPACE);
         assert_eq!(config.height, PANEL_HEIGHT);
         assert!(config.height > 0, "exclusive zone must reserve space");
+    }
+
+    /// Pure per-output surface planner (multi-monitor): panels and the
+    /// dock anchor derive from the control inventory plus the bound
+    /// `wl_output` names, with no Wayland attached. Hand-written
+    /// expectations, never derived from the planner itself.
+    mod output_plan {
+        use roost_shell_control::OutputInfo;
+
+        use super::super::{plan_output_surfaces, OutputPlan};
+
+        fn info(name: &str, width: i32, height: i32, primary: bool) -> OutputInfo {
+            OutputInfo {
+                name: name.to_owned(),
+                width,
+                height,
+                primary,
+            }
+        }
+
+        /// Primary-first inventory as [`State::output_infos`] hands it
+        /// over: dock anchor first, sibling second.
+        fn inventory() -> Vec<OutputInfo> {
+            vec![
+                info("left", 1280, 800, true),
+                info("right", 1920, 1080, false),
+            ]
+        }
+
+        #[test]
+        fn panels_cover_each_bound_output_primary_first() {
+            let plan = plan_output_surfaces(&inventory(), &["left".to_owned(), "right".to_owned()]);
+            assert_eq!(
+                plan,
+                OutputPlan {
+                    panels: vec!["left".to_owned(), "right".to_owned()],
+                    dock: Some("left".to_owned()),
+                }
+            );
+        }
+
+        #[test]
+        fn dock_anchors_on_primary_and_follows_a_switch() {
+            let plan = plan_output_surfaces(&inventory(), &["left".to_owned(), "right".to_owned()]);
+            assert_eq!(plan.dock.as_deref(), Some("left"));
+            // Primary switch re-anchors the dock and keeps panels
+            // primary-first.
+            let switched = vec![
+                info("right", 1920, 1080, true),
+                info("left", 1280, 800, false),
+            ];
+            let plan = plan_output_surfaces(&switched, &["left".to_owned(), "right".to_owned()]);
+            assert_eq!(
+                plan,
+                OutputPlan {
+                    panels: vec!["right".to_owned(), "left".to_owned()],
+                    dock: Some("right".to_owned()),
+                }
+            );
+        }
+
+        #[test]
+        fn unbound_primary_plans_no_dock_but_keeps_bound_panels() {
+            // The primary's `wl_output` has not resolved yet: bound
+            // siblings still get panels, but the dock waits for the
+            // primary rather than parking on a sibling.
+            let plan = plan_output_surfaces(&inventory(), &["right".to_owned()]);
+            assert_eq!(
+                plan,
+                OutputPlan {
+                    panels: vec!["right".to_owned()],
+                    dock: None,
+                }
+            );
+        }
+
+        #[test]
+        fn empty_inventory_plans_nothing() {
+            // Unknown inventory (e.g. an old compositor that never sends
+            // `Outputs`): the legacy unbound surfaces stay live.
+            let plan = plan_output_surfaces(&[], &["left".to_owned()]);
+            assert_eq!(
+                plan,
+                OutputPlan {
+                    panels: Vec::new(),
+                    dock: None,
+                }
+            );
+            let plan = plan_output_surfaces(&inventory(), &[]);
+            assert_eq!(
+                plan,
+                OutputPlan {
+                    panels: Vec::new(),
+                    dock: None,
+                }
+            );
+        }
     }
 
     /// Live attach of the real [`ShellHost`] against the compositor's
