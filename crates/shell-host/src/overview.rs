@@ -195,6 +195,17 @@ impl OverviewCanvas {
         self.border(x, y, w, h, 3, WARN);
         self.rect(x + 6, y + 6, 12, 12, WARN);
     }
+
+    /// Paint the keyboard-focus ring on result row `index`: an
+    /// accent border in the selection style, mirroring
+    /// [`draw_launch_failure`](Self::draw_launch_failure).
+    /// Out-of-range indexes paint nothing, never panic.
+    pub fn draw_result_focus(&mut self, index: usize) {
+        let Some((x, y, w, h)) = overview_result_box(index) else {
+            return;
+        };
+        self.border(x, y, w, h, 2, ACCENT);
+    }
 }
 
 /// Map a press on overview result `index` to its runnable action.
@@ -1299,5 +1310,33 @@ mod tests {
         let mut tiny = OverviewCanvas::new(0, 0);
         tiny.draw_launch_failure(0);
         assert!(tiny.pixels().is_empty());
+    }
+
+    /// Result-focus rendering marks only the focused row with an
+    /// accent border; out-of-range rows paint nothing.
+    #[test]
+    fn result_focus_marks_only_the_focused_row() {
+        let mut canvas = OverviewCanvas::new(1280, 800);
+        canvas.render(&ShellModel::new(), 0);
+        canvas.draw_query("");
+        let clean = canvas.pixels().to_vec();
+        canvas.draw_result_focus(0);
+        assert_ne!(
+            canvas.pixels(),
+            clean,
+            "the ring paints over the clean frame"
+        );
+        let (x, y, w, h) = overview_result_box(0).expect("row 0 box");
+        assert_eq!(pixel(&canvas, x, y), ACCENT);
+        assert_eq!(pixel(&canvas, x + w - 1, y + h - 1), ACCENT);
+        let (x1, y1, _, _) = overview_result_box(1).expect("row 1 box");
+        assert_eq!(pixel(&canvas, x1, y1), BG, "other rows untouched");
+        // Out-of-range rows paint nothing, never panic.
+        let mut edge = OverviewCanvas::new(1280, 800);
+        edge.render(&ShellModel::new(), 0);
+        let before = edge.pixels().to_vec();
+        edge.draw_result_focus(crate::search::MAX_TOTAL_RESULTS);
+        edge.draw_result_focus(usize::MAX);
+        assert_eq!(edge.pixels(), before, "out-of-range focus paints nothing");
     }
 }

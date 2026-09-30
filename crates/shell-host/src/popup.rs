@@ -655,6 +655,21 @@ pub fn tile_row_at(rect: &Rect, y: i32, count: usize) -> Option<usize> {
     (row < count).then_some(row)
 }
 
+/// Paint box for toggle row `index`: the inverse of
+/// [`tile_row_at`], so the keyboard focus ring lands where presses
+/// do. Slightly inset from the menu box edges.
+pub fn tile_row_rect(rect: &Rect, index: usize, count: usize) -> Option<Rect> {
+    if index >= count {
+        return None;
+    }
+    Some(Rect {
+        x: rect.x + 4,
+        y: rect.y + TILE_ROWS_TOP + index as i32 * TILE_ROW_H,
+        w: (rect.w - 8).max(0),
+        h: TILE_ROW_H,
+    })
+}
+
 /// Service name, state word, optional level row, and toggle rows.
 fn paint_menu(pixels: &mut [u8], stride: usize, rect: &Rect, tile: Tile, rows: &[TileRow]) {
     use crate::tiles::ServiceKind;

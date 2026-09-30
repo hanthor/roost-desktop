@@ -277,6 +277,22 @@ pub fn menu_row_at(rect: &Rect, y: i32, count: usize) -> Option<usize> {
     (row < count).then_some(row)
 }
 
+/// Paint box for indicator-menu row `index`: the inverse of
+/// [`menu_row_at`], so the keyboard focus ring lands where presses
+/// do. Slightly inset from the menu box edges.
+pub fn menu_row_rect(rect: &Rect, index: usize, count: usize) -> Option<Rect> {
+    const ROW_H: i32 = 24;
+    if index >= count {
+        return None;
+    }
+    Some(Rect {
+        x: rect.x + 4,
+        y: rect.y + 10 + index as i32 * ROW_H,
+        w: (rect.w - 8).max(0),
+        h: ROW_H,
+    })
+}
+
 /// Split a registration string into bus name and object path.
 pub fn split_service(service: &str) -> (String, String) {
     match service.split_once('/') {

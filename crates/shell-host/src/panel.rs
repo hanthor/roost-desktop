@@ -77,11 +77,12 @@ use crate::overview::{
 };
 use crate::popup::{
     calendar_clock_row, calendar_weekday_row, lock_rows, network_rows, paint_popup, panel_layout,
-    popup_box, sound_rows, tile_row_at, PopupBody, PopupState, Rect, POPUP_HEIGHT,
+    popup_box, sound_rows, tile_row_at, tile_row_rect, PopupBody, PopupState, Rect, POPUP_HEIGHT,
 };
-use crate::search::{SearchAction, SearchHub, SearchResult, WindowProvider};
+use crate::search::{SearchAction, SearchHub, SearchResult, WindowProvider, MAX_TOTAL_RESULTS};
 use crate::settings::ClockFormat;
 use crate::tiles::{TileSet, TileState, NETWORK_TILE_INDEX, POWER_TILE_INDEX, SOUND_TILE_INDEX};
+use crate::watcher::menu_row_rect;
 use crate::watcher::{
     indicator_at, indicator_cells, indicator_right_x, menu_row_at, paint_indicators, IndicatorHost,
     IndicatorIcon, ItemInfo, WatcherBus,
@@ -311,6 +312,15 @@ pub struct ShellHost {
     /// region plus stop index. Paint keys carry it, so any focus
     /// change repaints by construction.
     focus: Option<ShellFocus>,
+    /// Parked cursors under open transient surfaces: opening a
+    /// popup or the overview pushes the live cursor here, and
+    /// Escape pops back to it. Bounded; only transient entries
+    /// (popup, overview) are pushed, never region jumps.
+    return_stack: Vec<ShellFocus>,
+    /// Latest collected search hits behind the overview result
+    /// cursor, refreshed from the hub. Cleared on every re-query
+    /// and overview close so the cursor never indexes stale rows.
+    overview_hits: Vec<SearchResult>,
 }
 
 /// Cloned Wayland globals the host keeps for creating surfaces after
@@ -332,14 +342,19 @@ struct ShmBacking {
     buffer: WlBuffer,
 }
 
-/// Keyboard focus region: the panel strip or the dock (popups and
-/// overview results join in task 3).
+/// Keyboard focus region: the panel strip, the dock, the open
+/// popup's rows, or the overview's result list. F6 cycles Panel
+/// and Dock; Popup and Overview take focus when they open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusRegion {
     /// Top strip: clock plus the three tiles.
     Panel,
     /// Bottom dock: favorite and running slots.
     Dock,
+    /// Open popup: calendar footers or menu rows.
+    Popup,
+    /// Open overview: search result rows.
+    Overview,
 }
 
 /// Panel strip stops: the clock plus the three service tiles in
@@ -510,6 +525,9 @@ struct PaintKey {
     height: i32,
     query: String,
     failure: Option<usize>,
+    /// Keyboard focus cursor: any focus move repaints, so a stale
+    /// result ring is impossible by construction.
+    focus: Option<ShellFocus>,
 }
 
 /// Live switcher layer surface and its configured size.
@@ -808,6 +826,8 @@ impl ShellHost {
             pending_nav: Vec::new(),
             pending_shell_submit: false,
             focus: None,
+            return_stack: Vec::new(),
+            overview_hits: Vec::new(),
         }
     }
 
@@ -1103,6 +1123,25 @@ impl ShellHost {
         }
     }
 
+    /// Paint key for one overview size: revision, selection,
+    /// windows, favorites, workspace, query, failure marker, and
+    /// the keyboard focus cursor, so any content or focus change
+    /// repaints.
+    fn overview_render_key(&self, revision: Option<u64>, width: i32, height: i32) -> PaintKey {
+        PaintKey {
+            revision,
+            selected: self.model.selected(),
+            windows: self.model.windows().len(),
+            favorites: self.favorites.ids().len(),
+            active_workspace: self.model.active_workspace(),
+            width,
+            height,
+            query: self.search_text.clone(),
+            failure: self.overview_failure.as_ref().map(|f| f.index),
+            focus: self.focus,
+        }
+    }
+
     fn update_overview(&mut self, revision: Option<u64>) {
         if !self.model.is_overview_open() {
             self.destroy_overview();
@@ -1136,41 +1175,48 @@ impl ShellHost {
             });
             self.paint_key = None;
         }
-        let overview = self.overview.as_mut().expect("created above");
-        if overview.width <= 0 || overview.height <= 0 {
-            return;
-        }
-        let key = PaintKey {
-            revision,
-            selected: self.model.selected(),
-            windows: self.model.windows().len(),
-            favorites: self.favorites.ids().len(),
-            active_workspace: self.model.active_workspace(),
-            width: overview.width,
-            height: overview.height,
-            query: self.search_text.clone(),
-            failure: self.overview_failure.as_ref().map(|f| f.index),
+        // Result row behind the ring, decided before the surface
+        // borrow: refreshing here keeps paint and activation on
+        // the same rows.
+        let result_ring = match self.focus {
+            Some(ShellFocus {
+                region: FocusRegion::Overview,
+                cursor,
+            }) => {
+                self.refresh_overview_hits();
+                (cursor < self.overview_hits.len()).then_some(cursor)
+            }
+            _ => None,
         };
+        let Some(size) = self
+            .overview
+            .as_ref()
+            .filter(|overview| overview.width > 0 && overview.height > 0)
+            .map(|overview| (overview.width, overview.height))
+        else {
+            return;
+        };
+        let (width, height) = size;
+        let key = self.overview_render_key(revision, width, height);
         if self.paint_key.as_ref() == Some(&key) {
             return;
         }
-        let mut canvas = OverviewCanvas::new(overview.width, overview.height);
+        let mut canvas = OverviewCanvas::new(width, height);
         canvas.render(&self.model, self.favorites.ids().len());
         canvas.draw_query(&self.search_text);
         if let Some(failure) = &self.overview_failure {
             canvas.draw_launch_failure(failure.index);
         }
-        if let Some(backing) = shm_upload(
-            &wayland.shm,
-            &wayland.qh,
-            canvas.pixels(),
-            overview.width,
-            overview.height,
-        ) {
+        // The ring paints over the grid, so the row cursor reads
+        // wherever the selection border was.
+        if let Some(cursor) = result_ring {
+            canvas.draw_result_focus(cursor);
+        }
+        if let Some(backing) = shm_upload(&wayland.shm, &wayland.qh, canvas.pixels(), width, height)
+        {
+            let overview = self.overview.as_mut().expect("sized above");
             overview.surface.attach(Some(&backing.buffer), 0, 0);
-            overview
-                .surface
-                .damage(0, 0, overview.width, overview.height);
+            overview.surface.damage(0, 0, width, height);
             overview.surface.commit();
             // The old backing drops here, after the new buffer is
             // committed — the compositor never reads a freed mapping.
@@ -1307,7 +1353,50 @@ impl ShellHost {
                 paint_focus_ring(&mut pixels, width, &rect);
             }
         }
+        // Popup row rings paint over the band, so the row cursor
+        // reads wherever the strip ring was.
+        if height > strip_h {
+            if let Some(rect) = self.focused_popup_row(width, strip_h) {
+                paint_focus_ring(&mut pixels, width, &rect);
+            }
+        }
         pixels
+    }
+
+    /// Paint box for the focused popup row, if the cursor names a
+    /// live row of the open popup: calendar footers reuse their
+    /// press rects, menu rows invert the press hit-test.
+    fn focused_popup_row(&self, width: i32, strip_h: i32) -> Option<Rect> {
+        let Some(ShellFocus {
+            region: FocusRegion::Popup,
+            cursor,
+        }) = self.focus
+        else {
+            return None;
+        };
+        let body = self.popup.body()?;
+        if cursor >= self.popup_row_count() {
+            return None;
+        }
+        let layout = panel_layout(width, strip_h, &self.tiles.clock);
+        let open_box = popup_box(&layout, body);
+        match body {
+            PopupBody::Calendar => Some(if cursor == 0 {
+                calendar_clock_row(&open_box)
+            } else {
+                calendar_weekday_row(&open_box)
+            }),
+            PopupBody::Menu(_) => tile_row_rect(&open_box, cursor, self.popup_row_count()),
+            PopupBody::IndicatorMenu(index) => {
+                let count = self
+                    .indicators
+                    .items()
+                    .get(index)
+                    .map(|item| item.menu.len())
+                    .unwrap_or(0);
+                menu_row_rect(&open_box, cursor, count)
+            }
+        }
     }
 
     fn paint_panel_surface(&mut self, width: i32, height: i32) {
@@ -1446,6 +1535,8 @@ impl ShellHost {
     }
 
     /// Close the open popup, if any, shrinking the surface back.
+    /// Settling restores the parked cursor (or clears a stranded
+    /// one), so focus never sticks on the closed surface.
     /// No-op (beyond state) without Wayland attached.
     pub fn close_popup(&mut self) {
         if !self.popup.is_open() {
@@ -1453,6 +1544,7 @@ impl ShellHost {
         }
         self.popup.dismiss();
         self.apply_popup_size();
+        self.settle_focus();
     }
 
     /// Left press at panel-surface coordinates: toggle the calendar on
@@ -1541,6 +1633,9 @@ impl ShellHost {
         let open_box = self.popup.body().map(|body| popup_box(&layout, body));
         self.popup.press(&layout, open_box, x, y);
         self.apply_popup_size();
+        // A press may have dismissed the popup under a parked
+        // keyboard cursor: settle it instead of stranding it.
+        self.settle_focus();
     }
 
     /// Fire the calendar footer row under the popup point: flips the
@@ -1551,7 +1646,7 @@ impl ShellHost {
         if !calendar_clock_row(open_box).contains(x, y) {
             return;
         }
-        self.toggle_clock_format();
+        self.fire_calendar_index(0);
     }
 
     /// Fire the calendar prefs row under the popup point: flips the
@@ -1561,7 +1656,23 @@ impl ShellHost {
         if !calendar_weekday_row(open_box).contains(x, y) {
             return;
         }
-        self.toggle_clock_weekday();
+        self.fire_calendar_index(1);
+    }
+
+    /// Fire calendar footer row `row` by index: row 0 flips the bar
+    /// clock format, row 1 flips the weekday prefix. The keyboard
+    /// twin of the footer press path, sharing both toggles; the
+    /// calendar stays open on the new face either way.
+    fn fire_calendar_index(&mut self, row: usize) {
+        match row {
+            0 => {
+                self.toggle_clock_format();
+            }
+            1 => {
+                self.toggle_clock_weekday();
+            }
+            _ => {}
+        }
     }
 
     /// Flip the bar-clock weekday prefix from the calendar prefs row:
@@ -1617,16 +1728,31 @@ impl ShellHost {
     /// or unknown radio state) never fire; a refused write reports
     /// why on stderr and the menu stays open.
     fn fire_network_row(&mut self, open_box: &crate::popup::Rect, y: i32) {
+        let rows = network_rows(
+            self.tiles.radio_state().map(|state| state.wireless),
+            self.tiles.radio_state().map(|state| state.networking),
+            self.tiles.network_pending().is_some(),
+        );
+        let Some(row) = tile_row_at(open_box, y, rows.len()) else {
+            return;
+        };
+        self.fire_network_index(row);
+    }
+
+    /// Fire network menu row `row` by index: the keyboard twin of
+    /// [`fire_network_row`](Self::fire_network_row), sharing its
+    /// enabled gating and toggle calls.
+    fn fire_network_index(&mut self, row: usize) {
         let radio = self.tiles.radio_state();
         let rows = network_rows(
             radio.map(|state| state.wireless),
             radio.map(|state| state.networking),
             self.tiles.network_pending().is_some(),
         );
-        let Some(row) = tile_row_at(open_box, y, rows.len()) else {
+        let Some(row_state) = rows.get(row) else {
             return;
         };
-        if !rows[row].enabled {
+        if !row_state.enabled {
             return;
         }
         match row {
@@ -1648,16 +1774,31 @@ impl ShellHost {
     /// volume bound) never fire; a refused write reports why on
     /// stderr and the menu stays open.
     fn fire_sound_row(&mut self, open_box: &crate::popup::Rect, y: i32) {
+        let rows = sound_rows(
+            self.tiles.sound_state().map(|state| state.muted),
+            self.tiles.sound_state().map(|state| state.volume),
+            self.tiles.sound_pending().is_some(),
+        );
+        let Some(row) = tile_row_at(open_box, y, rows.len()) else {
+            return;
+        };
+        self.fire_sound_index(row);
+    }
+
+    /// Fire sound menu row `row` by index: the keyboard twin of
+    /// [`fire_sound_row`](Self::fire_sound_row), sharing its
+    /// enabled gating and mixer calls.
+    fn fire_sound_index(&mut self, row: usize) {
         let output = self.tiles.sound_state();
         let rows = sound_rows(
             output.map(|state| state.muted),
             output.map(|state| state.volume),
             self.tiles.sound_pending().is_some(),
         );
-        let Some(row) = tile_row_at(open_box, y, rows.len()) else {
+        let Some(row_state) = rows.get(row) else {
             return;
         };
-        if !rows[row].enabled {
+        if !row_state.enabled {
             return;
         }
         match row {
@@ -1683,7 +1824,18 @@ impl ShellHost {
         let Some(row) = tile_row_at(open_box, y, rows.len()) else {
             return;
         };
-        if !rows[row].enabled {
+        self.fire_lock_index(row);
+    }
+
+    /// Fire power menu row `row` by index: the keyboard twin of
+    /// [`fire_lock_row`](Self::fire_lock_row), sharing its enabled
+    /// gating and lock arming.
+    fn fire_lock_index(&mut self, row: usize) {
+        let rows = lock_rows();
+        let Some(row_state) = rows.get(row) else {
+            return;
+        };
+        if !row_state.enabled {
             return;
         }
         self.pending_lock = true;
@@ -1773,7 +1925,14 @@ impl ShellHost {
             // `take_submit` keeps its overview-open-only contract.
             if pressed {
                 match action {
-                    KeyAction::Dismiss => self.close_popup(),
+                    KeyAction::Dismiss => {
+                        // Split Escape: an open popup closes and
+                        // hands focus back to the parked cursor; with
+                        // no popup there is nothing to unwind.
+                        if self.popup.is_open() {
+                            self.close_popup();
+                        }
+                    }
                     KeyAction::Submit => self.pending_shell_submit = true,
                     _ => {}
                 }
@@ -1784,19 +1943,32 @@ impl ShellHost {
             KeyAction::Text(text) => {
                 self.search_text.push_str(&text);
                 self.search.query(&self.search_text);
-                // Fresh results obsolete the failed row.
+                // Fresh results obsolete the failed row, the cached
+                // hits, and the result cursor.
                 self.overview_failure = None;
+                self.overview_hits.clear();
+                self.reset_overview_cursor();
             }
             KeyAction::Erase => {
                 self.search_text.pop();
                 self.search.query(&self.search_text);
-                // Fresh results obsolete the failed row.
+                // Fresh results obsolete the failed row, the cached
+                // hits, and the result cursor.
                 self.overview_failure = None;
+                self.overview_hits.clear();
+                self.reset_overview_cursor();
             }
             KeyAction::Submit => self.pending_submit = true,
             KeyAction::Dismiss => {
-                self.close_popup();
-                self.pending_dismiss = true;
+                // Split Escape: an open popup closes first and hands
+                // focus back to the parked cursor; only with no popup
+                // does Escape dismiss the overview (returning to the
+                // previously focused window), never both at once.
+                if self.popup.is_open() {
+                    self.close_popup();
+                } else {
+                    self.pending_dismiss = true;
+                }
             }
             KeyAction::None => {}
             // Navigation queued above; unreachable here.
@@ -1829,28 +2001,165 @@ impl ShellHost {
     }
 
     /// Stop count for `region`: panel stops are fixed (clock plus
-    /// three tiles); dock stops track the live item row.
+    /// three tiles); dock stops track the live item row; popup
+    /// stops track the open menu's rows; overview stops track the
+    /// collected hits.
     fn stop_count(&self, region: FocusRegion) -> usize {
         match region {
             FocusRegion::Panel => PANEL_STOPS,
             FocusRegion::Dock => self.dock_items().len(),
+            FocusRegion::Popup => self.popup_row_count(),
+            FocusRegion::Overview => self.overview_hits.len(),
         }
     }
 
-    /// Clamp the cursor into the live stops; an emptied region (the
-    /// last dock item gone) clears focus instead of stranding it.
-    fn clamp_focus(&mut self) {
+    /// True while `region` can hold the cursor: the strip always
+    /// can; the dock needs an item; popups and the overview need
+    /// to be open.
+    fn region_live(&self, region: FocusRegion) -> bool {
+        match region {
+            FocusRegion::Panel => true,
+            FocusRegion::Dock => !self.dock_items().is_empty(),
+            FocusRegion::Popup => self.popup.is_open(),
+            FocusRegion::Overview => self.model.is_overview_open(),
+        }
+    }
+
+    /// Actionable rows in the open popup: two calendar footers,
+    /// two network toggles, one lock row, three sound rows, or the
+    /// hosted indicator menu's row count. Zero with no popup.
+    fn popup_row_count(&self) -> usize {
+        match self.popup.body() {
+            None => 0,
+            Some(PopupBody::Calendar) => 2,
+            Some(PopupBody::Menu(index)) if index == NETWORK_TILE_INDEX => 2,
+            Some(PopupBody::Menu(index)) if index == POWER_TILE_INDEX => 1,
+            Some(PopupBody::Menu(index)) if index == SOUND_TILE_INDEX => 3,
+            Some(PopupBody::Menu(_)) => 0,
+            Some(PopupBody::IndicatorMenu(index)) => self
+                .indicators
+                .items()
+                .get(index)
+                .map(|item| item.menu.len())
+                .unwrap_or(0),
+        }
+    }
+
+    /// Park the live cursor for Escape: opening a popup or the
+    /// overview pushes here so dismissal restores exactly this
+    /// stop. Bounded and duplicate-free at the top.
+    fn push_focus(&mut self) {
         if let Some(focus) = self.focus {
-            let count = self.stop_count(focus.region);
-            if count == 0 {
-                self.focus = None;
-            } else if focus.cursor >= count {
+            if self.return_stack.last() != Some(&focus) {
+                self.return_stack.push(focus);
+            }
+            while self.return_stack.len() > 8 {
+                self.return_stack.remove(0);
+            }
+        }
+    }
+
+    /// Settle the cursor after any state change: a cursor on a dead
+    /// surface (closed popup or overview, emptied dock) falls back
+    /// to the return stack, and dead stack tops drain with it, so
+    /// focus never sticks where no stop exists. A live cursor is
+    /// clamped into its stops and left alone.
+    fn settle_focus(&mut self) {
+        loop {
+            let Some(focus) = self.focus else {
+                return;
+            };
+            if !self.region_live(focus.region) {
+                self.focus = self.return_stack.pop();
+                continue;
+            }
+            let max = match focus.region {
+                FocusRegion::Panel => PANEL_STOPS,
+                FocusRegion::Dock => self.dock_items().len(),
+                FocusRegion::Popup => self.popup_row_count(),
+                // Result rows stream in: the cursor clamps at move,
+                // paint, and activation time, never here.
+                FocusRegion::Overview => usize::MAX,
+            };
+            if focus.cursor >= max {
                 self.focus = Some(ShellFocus {
-                    cursor: count - 1,
+                    cursor: max.saturating_sub(1),
                     ..focus
                 });
             }
+            while let Some(&top) = self.return_stack.last() {
+                if self.region_live(top.region) {
+                    break;
+                }
+                self.return_stack.pop();
+            }
+            return;
         }
+    }
+
+    /// Drain newly arrived hub answers behind the overview cursor,
+    /// capped at the hub's own bound (oldest first, like submit
+    /// would have seen them).
+    fn refresh_overview_hits(&mut self) {
+        let hits = self.search_collect();
+        self.overview_hits.extend(hits);
+        let len = self.overview_hits.len();
+        if len > MAX_TOTAL_RESULTS {
+            self.overview_hits.drain(..len - MAX_TOTAL_RESULTS);
+        }
+    }
+
+    /// Move the overview result cursor one row along `direction`
+    /// (±1), wrapping. From any other region the cursor starts at
+    /// the first (or, backward, the last) collected hit.
+    fn step_overview(&mut self, direction: i32) {
+        self.refresh_overview_hits();
+        let count = self.overview_hits.len();
+        let cursor = match self.focus {
+            Some(focus) if focus.region == FocusRegion::Overview => {
+                if count == 0 {
+                    0
+                } else {
+                    (focus.cursor as i32 + direction).rem_euclid(count as i32) as usize
+                }
+            }
+            _ => {
+                if direction < 0 {
+                    count.saturating_sub(1)
+                } else {
+                    0
+                }
+            }
+        };
+        self.focus = Some(ShellFocus {
+            region: FocusRegion::Overview,
+            cursor,
+        });
+    }
+
+    /// Restart the result cursor on a re-query: fresh answers
+    /// obsolete the old row. Other regions keep their cursor.
+    fn reset_overview_cursor(&mut self) {
+        if let Some(focus) = self.focus {
+            if focus.region == FocusRegion::Overview {
+                self.focus = Some(ShellFocus { cursor: 0, ..focus });
+            }
+        }
+    }
+
+    /// Result the next Enter activates: the focused overview row,
+    /// or the top hit when focus sits anywhere else. Refreshes
+    /// first, so keyboard and pointer activate the same rows.
+    fn take_overview_hit(&mut self) -> Option<SearchResult> {
+        self.refresh_overview_hits();
+        let index = match self.focus {
+            Some(ShellFocus {
+                region: FocusRegion::Overview,
+                cursor,
+            }) => cursor,
+            _ => 0,
+        };
+        self.overview_hits.get(index).cloned()
     }
 
     /// Enter `region`, keeping the cursor when already there
@@ -1861,7 +2170,7 @@ impl ShellHost {
             _ => 0,
         };
         self.focus = Some(ShellFocus { region, cursor });
-        self.clamp_focus();
+        self.settle_focus();
     }
 
     /// Move the cursor one stop along the strip, wrapping. From no
@@ -1887,8 +2196,50 @@ impl ShellHost {
 
     /// Apply one queued navigation action to the focus cursor. Up
     /// and Down cross between strip and dock; Left/Right and
-    /// Tab/Shift+Tab walk the stops; F6 flips the region.
+    /// Tab/Shift+Tab walk the stops; F6 flips the region. Inside
+    /// an open popup every movement key walks its rows instead —
+    /// the focused surface owns the arrows. While the overview is
+    /// open the result list owns movement (arrows and Tab walk
+    /// rows); the region keys still jump the shell.
     fn apply_nav(&mut self, action: KeyAction) {
+        // The focused surface owns movement: inside an open
+        // popup every movement key walks its rows, consuming the
+        // press; region keys fall through to the jump table below.
+        if matches!(
+            self.focus,
+            Some(ShellFocus {
+                region: FocusRegion::Popup,
+                ..
+            })
+        ) {
+            match action {
+                KeyAction::Next | KeyAction::Right | KeyAction::Down => {
+                    self.step_cursor(1);
+                    return;
+                }
+                KeyAction::Previous | KeyAction::Left | KeyAction::Up => {
+                    self.step_cursor(-1);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        if self.model.is_overview_open() {
+            match action {
+                KeyAction::Next
+                | KeyAction::Previous
+                | KeyAction::Up
+                | KeyAction::Down
+                | KeyAction::Left
+                | KeyAction::Right => {
+                    let forward =
+                        matches!(action, KeyAction::Next | KeyAction::Down | KeyAction::Right);
+                    self.step_overview(if forward { 1 } else { -1 });
+                    return;
+                }
+                _ => {}
+            }
+        }
         match action {
             KeyAction::FocusPanel => self.focus_region(FocusRegion::Panel),
             KeyAction::FocusDock => self.focus_region(FocusRegion::Dock),
@@ -1902,7 +2253,7 @@ impl ShellHost {
                 if self.stop_count(region) > 0 {
                     self.focus = Some(ShellFocus { region, cursor: 0 });
                 }
-                self.clamp_focus();
+                self.settle_focus();
             }
             KeyAction::Up => self.focus_region(FocusRegion::Panel),
             KeyAction::Down => self.focus_region(FocusRegion::Dock),
@@ -1919,7 +2270,7 @@ impl ShellHost {
         for action in self.take_nav() {
             self.apply_nav(action);
         }
-        self.clamp_focus();
+        self.settle_focus();
     }
 
     /// Activate the focused stop through the pointer-equivalent
@@ -1927,7 +2278,7 @@ impl ShellHost {
     /// dock slot takes a left press (launch, switch, or stack).
     /// No-op without focus.
     pub fn activate_focused(&mut self) {
-        self.clamp_focus();
+        self.settle_focus();
         let Some(focus) = self.focus else {
             return;
         };
@@ -1940,6 +2291,17 @@ impl ShellHost {
                 };
                 self.popup.toggle(body);
                 self.apply_popup_size();
+                if self.popup.is_open() {
+                    // A keyboard-opened popup takes row focus,
+                    // parking the strip cursor for Escape.
+                    self.push_focus();
+                    self.focus = Some(ShellFocus {
+                        region: FocusRegion::Popup,
+                        cursor: 0,
+                    });
+                } else {
+                    self.settle_focus();
+                }
             }
             FocusRegion::Dock => {
                 let items = self.dock_items();
@@ -1947,7 +2309,40 @@ impl ShellHost {
                     self.run_dock_press(&items, focus.cursor, BTN_LEFT);
                 }
             }
+            FocusRegion::Popup => {
+                self.activate_popup_row(focus.cursor);
+            }
+            // Overview Enter owns Submit while open; a closed
+            // overview can never hold this region (settle pops
+            // it). Defensive no-op.
+            FocusRegion::Overview => {}
         }
+    }
+
+    /// Activate open-popup row `cursor` through the
+    /// pointer-equivalent fire calls: calendar footers flip, menu
+    /// rows toggle, indicator rows send and dismiss (pointer
+    /// parity) so Escape unwinds to the parked shell focus.
+    /// Out-of-range rows are quiet no-ops.
+    fn activate_popup_row(&mut self, cursor: usize) {
+        match self.popup.body() {
+            Some(PopupBody::Calendar) => self.fire_calendar_index(cursor),
+            Some(PopupBody::Menu(index)) if index == NETWORK_TILE_INDEX => {
+                self.fire_network_index(cursor);
+            }
+            Some(PopupBody::Menu(index)) if index == POWER_TILE_INDEX => {
+                self.fire_lock_index(cursor);
+            }
+            Some(PopupBody::Menu(index)) if index == SOUND_TILE_INDEX => {
+                self.fire_sound_index(cursor);
+            }
+            Some(PopupBody::IndicatorMenu(index)) => {
+                self.fire_indicator_index(index, cursor);
+                self.close_popup();
+            }
+            _ => {}
+        }
+        self.apply_popup_size();
     }
 
     /// Drop in-flight answers (e.g. overview closed mid-query).
@@ -2522,15 +2917,26 @@ impl ShellHost {
     fn fire_indicator_row(&mut self, index: usize, y: i32, open_box: &crate::popup::Rect) {
         if let Some(item) = self.indicators.items().get(index).cloned() {
             if let Some(row) = menu_row_at(open_box, y, item.menu.len()) {
-                if let Some(entry) = item.menu.get(row) {
-                    if entry.enabled {
-                        self.watcher.fire_menu(&item.service, entry.id);
-                    }
-                }
+                self.fire_indicator_index(index, row);
             }
         }
         self.popup.dismiss();
         self.panel_paint_key = None;
+    }
+
+    /// Fire indicator-menu row `row` of hosted item `index` by row
+    /// number: the keyboard twin of the menu press path, sharing its
+    /// enabled gating and bus send. The caller dismisses: pointer
+    /// presses dismiss in `press_panel`, keyboard activation
+    /// dismisses so Escape can unwind to the parked shell focus.
+    fn fire_indicator_index(&mut self, index: usize, row: usize) {
+        if let Some(item) = self.indicators.items().get(index).cloned() {
+            if let Some(entry) = item.menu.get(row) {
+                if entry.enabled {
+                    self.watcher.fire_menu(&item.service, entry.id);
+                }
+            }
+        }
     }
 
     /// Surface height for the open stack grid: strip-only, or strip
@@ -2823,11 +3229,25 @@ impl ShellHost {
         if let Some(selected) = model.selected() {
             let _ = self.model.select_window(selected);
         }
+        let was_open = self.model.is_overview_open();
         self.model.set_overview_open(model.is_overview_open());
+        if model.is_overview_open() && !was_open {
+            // Fresh open: park the shell cursor and start on the
+            // result list, so Escape unwinds back to this stop and
+            // the final Escape closes onto the focused window.
+            self.push_focus();
+            self.focus = Some(ShellFocus {
+                region: FocusRegion::Overview,
+                cursor: 0,
+            });
+            self.overview_hits.clear();
+        }
         if !model.is_overview_open() {
             // A closed overview shows nothing: never reopen onto a
-            // stale failure marker.
+            // stale failure marker, cached hit, or stranded cursor.
             self.overview_failure = None;
+            self.overview_hits.clear();
+            self.settle_focus();
         }
         self.model
             .apply_switcher_state(model.is_switcher_open(), model.switcher_selection());
@@ -2889,16 +3309,16 @@ fn attach_control(path: &Path) -> Result<ControlClient, PanelError> {
 /// connection stays usable.
 /// Consume key actions armed by [`ShellHost::on_key`]: queued
 /// navigation moves the shell focus cursor first, Enter activates
-/// the top collected hit through the normal path, Escape dismisses
-/// via the hub, and closed-overview Enter activates the focused
-/// shell stop. Best-effort like the hits themselves: a failed
-/// activation must not wedge the loop.
+/// the focused overview row (or the top hit) through the normal
+/// path, Escape dismisses via the hub, and closed-overview Enter
+/// activates the focused shell stop. Best-effort like the hits
+/// themselves: a failed activation must not wedge the loop.
 fn drive_key_actions(host: &mut ShellHost, control: &mut ControlClient) {
     // Shell focus moves first: later activations in this tick see
     // the cursor the keys just placed.
     host.step_focus();
     if host.take_submit() {
-        if let Some(hit) = host.search_collect().into_iter().next() {
+        if let Some(hit) = host.take_overview_hit() {
             let _ = host.activate_hit(control, &hit);
         }
     }
@@ -3887,6 +4307,7 @@ mod tests {
         const EV_UP: u32 = 103;
         const EV_DOWN: u32 = 108;
         const EV_RETURN: u32 = 28;
+        const EV_ESCAPE: u32 = 1;
         const EV_SUPER: u32 = 125;
         const EV_ALT: u32 = 56;
         const EV_SHIFT: u32 = 42;
@@ -4105,10 +4526,16 @@ mod tests {
             };
         }
 
-        /// Enter on the focused clock toggles the calendar twice
-        /// (open, then dismiss), like two strip presses.
+        /// Enter on the focused clock opens the calendar and takes
+        /// row focus, parking the strip cursor; rows walk with the
+        /// arrows; Escape closes and restores the parked cursor.
+        /// (Firing a footer row writes through Gio or the prefs
+        /// file, so shell tests never fire calendar rows — the
+        /// flip paths are covered by the tiles backend tests, and
+        /// row activation end to end by the power-row lock test.)
         #[test]
-        fn enter_on_clock_toggles_calendar() {
+        fn enter_on_clock_opens_calendar_with_row_focus() {
+            use super::super::{FocusRegion, ShellFocus};
             use crate::popup::PopupBody;
             let (mut host, _dir) = keyed_host();
             press(&mut host, EV_TAB);
@@ -4121,11 +4548,46 @@ mod tests {
             );
             host.activate_focused();
             assert_eq!(host.popup.body(), Some(PopupBody::Calendar));
-            host.on_key(EV_RETURN, true);
-            host.on_key(EV_RETURN, false);
-            assert!(host.take_shell_submit());
-            host.activate_focused();
+            assert_eq!(
+                host.shell_focus(),
+                Some(ShellFocus {
+                    region: FocusRegion::Popup,
+                    cursor: 0,
+                }),
+                "row focus parks the strip cursor"
+            );
+            assert_eq!(
+                host.return_stack,
+                vec![ShellFocus {
+                    region: FocusRegion::Panel,
+                    cursor: 0,
+                }],
+                "strip cursor parked"
+            );
+            // Rows walk; the calendar stays open on row focus.
+            host.on_key(EV_DOWN, true);
+            host.on_key(EV_DOWN, false);
+            host.step_focus();
+            assert_eq!(
+                host.shell_focus(),
+                Some(ShellFocus {
+                    region: FocusRegion::Popup,
+                    cursor: 1,
+                })
+            );
+            assert_eq!(host.popup.body(), Some(PopupBody::Calendar));
+            // Escape closes and restores the parked strip cursor.
+            host.on_key(EV_ESCAPE, true);
+            host.on_key(EV_ESCAPE, false);
             assert_eq!(host.popup.body(), None);
+            assert_eq!(
+                host.shell_focus(),
+                Some(ShellFocus {
+                    region: FocusRegion::Panel,
+                    cursor: 0,
+                }),
+                "escape restores the parked cursor"
+            );
         }
 
         /// Enter on a focused tile opens its menu, like a press.
@@ -4292,6 +4754,365 @@ mod tests {
                 host.dock_render_key(width, crate::dock::DOCK_H, &items),
                 dock_plain,
                 "dock key restores"
+            );
+        }
+
+        /// Three injected hits behind the cursor (titles only; the
+        /// hub stays quiet so the count is exact).
+        fn three_hits() -> Vec<crate::search::SearchResult> {
+            use crate::search::{SearchAction, SearchResult};
+            ["alpha", "beta", "gamma"]
+                .into_iter()
+                .enumerate()
+                .map(|(i, title)| SearchResult {
+                    title: title.to_owned(),
+                    app_id: None,
+                    action: SearchAction::Focus { window: i as u64 },
+                })
+                .collect()
+        }
+
+        /// Popup rows walk with Up/Down and wrap inside the open
+        /// menu's row count.
+        #[test]
+        fn popup_rows_move_and_wrap() {
+            use super::super::{FocusRegion, ShellFocus};
+            use crate::popup::PopupBody;
+            let (mut host, _dir) = keyed_host();
+            // Two Tabs reach the network tile; Enter opens its menu
+            // and takes row focus.
+            press(&mut host, EV_TAB);
+            press(&mut host, EV_TAB);
+            host.on_key(EV_RETURN, true);
+            host.on_key(EV_RETURN, false);
+            assert!(host.take_shell_submit());
+            host.activate_focused();
+            assert_eq!(host.popup.body(), Some(PopupBody::Menu(0)));
+            assert_eq!(
+                host.shell_focus(),
+                Some(ShellFocus {
+                    region: FocusRegion::Popup,
+                    cursor: 0,
+                })
+            );
+            // Two network rows: Down, Down wraps home.
+            host.on_key(EV_DOWN, true);
+            host.on_key(EV_DOWN, false);
+            host.step_focus();
+            assert_eq!(host.shell_focus().map(|focus| focus.cursor), Some(1));
+            host.on_key(EV_DOWN, true);
+            host.on_key(EV_DOWN, false);
+            host.step_focus();
+            assert_eq!(
+                host.shell_focus().map(|focus| focus.cursor),
+                Some(0),
+                "rows wrap"
+            );
+            host.on_key(EV_UP, true);
+            host.on_key(EV_UP, false);
+            host.step_focus();
+            assert_eq!(host.shell_focus().map(|focus| focus.cursor), Some(1));
+        }
+
+        /// Enter on the power row arms the lock request and keeps
+        /// the menu open, like a press.
+        #[test]
+        fn enter_on_power_row_arms_lock() {
+            use crate::popup::PopupBody;
+            let (mut host, _dir) = keyed_host();
+            press(&mut host, EV_TAB);
+            press(&mut host, EV_TAB);
+            press(&mut host, EV_TAB);
+            assert_eq!(host.shell_focus().map(|focus| focus.cursor), Some(2));
+            host.on_key(EV_RETURN, true);
+            host.on_key(EV_RETURN, false);
+            assert!(host.take_shell_submit());
+            host.activate_focused();
+            assert_eq!(host.popup.body(), Some(PopupBody::Menu(1)));
+            host.on_key(EV_RETURN, true);
+            host.on_key(EV_RETURN, false);
+            assert!(host.take_shell_submit());
+            host.activate_focused();
+            assert!(host.take_lock(), "lock row arms the driver");
+            assert_eq!(
+                host.popup.body(),
+                Some(PopupBody::Menu(1)),
+                "toggle menus stay open"
+            );
+        }
+
+        /// Escape splits in two: with a popup over the overview the
+        /// popup closes and dismissal stays disarmed; the next
+        /// Escape dismisses the overview onto the focused window.
+        #[test]
+        fn escape_splits_popup_then_overview() {
+            use super::super::{FocusRegion, ShellFocus};
+            use crate::popup::PopupBody;
+            let (mut host, _dir) = keyed_host();
+            host.model.set_overview_open(true);
+            host.popup.open(PopupBody::Calendar);
+            host.focus = Some(ShellFocus {
+                region: FocusRegion::Popup,
+                cursor: 1,
+            });
+            host.return_stack = vec![ShellFocus {
+                region: FocusRegion::Panel,
+                cursor: 2,
+            }];
+            host.on_key(EV_ESCAPE, true);
+            host.on_key(EV_ESCAPE, false);
+            assert_eq!(host.popup.body(), None, "first escape closes the popup");
+            assert!(
+                !host.take_dismiss(),
+                "overview stays open after the first escape"
+            );
+            assert_eq!(
+                host.shell_focus(),
+                Some(ShellFocus {
+                    region: FocusRegion::Panel,
+                    cursor: 2,
+                }),
+                "parked cursor restored"
+            );
+            host.on_key(EV_ESCAPE, true);
+            host.on_key(EV_ESCAPE, false);
+            assert!(host.take_dismiss(), "second escape dismisses the overview");
+        }
+
+        /// With the overview closed, Escape on an open popup only
+        /// closes the popup — no submit or dismissal arms.
+        #[test]
+        fn escape_closed_overview_closes_popup_only() {
+            use crate::popup::PopupBody;
+            let (mut host, _dir) = keyed_host();
+            host.popup.open(PopupBody::Calendar);
+            host.on_key(EV_ESCAPE, true);
+            host.on_key(EV_ESCAPE, false);
+            assert_eq!(host.popup.body(), None);
+            assert!(!host.take_dismiss());
+            assert!(!host.take_submit());
+            assert!(!host.take_shell_submit());
+        }
+
+        /// Overview arrows walk the collected hits with wrap, and
+        /// Enter takes the focused row (or the top hit from any
+        /// other region).
+        #[test]
+        fn overview_cursor_moves_over_hits() {
+            use super::super::{FocusRegion, ShellFocus};
+            let (mut host, _dir) = keyed_host();
+            host.model.set_overview_open(true);
+            host.overview_hits = three_hits();
+            host.on_key(EV_DOWN, true);
+            host.on_key(EV_DOWN, false);
+            host.step_focus();
+            assert_eq!(
+                host.shell_focus(),
+                Some(ShellFocus {
+                    region: FocusRegion::Overview,
+                    cursor: 0,
+                })
+            );
+            // Down walks 1, 2, then wraps to 0; Up walks back.
+            for cursor in [1, 2, 0] {
+                host.on_key(EV_DOWN, true);
+                host.on_key(EV_DOWN, false);
+                host.step_focus();
+                assert_eq!(
+                    host.shell_focus().map(|focus| focus.cursor),
+                    Some(cursor),
+                    "walk"
+                );
+            }
+            host.on_key(EV_UP, true);
+            host.on_key(EV_UP, false);
+            host.step_focus();
+            assert_eq!(host.shell_focus().map(|focus| focus.cursor), Some(2));
+            let _ = FocusRegion::Panel;
+            host.focus = Some(ShellFocus {
+                region: FocusRegion::Overview,
+                cursor: 1,
+            });
+            assert_eq!(
+                host.take_overview_hit().map(|hit| hit.title),
+                Some("beta".to_owned()),
+                "enter takes the focused row"
+            );
+            host.focus = Some(ShellFocus {
+                region: FocusRegion::Panel,
+                cursor: 0,
+            });
+            assert_eq!(
+                host.take_overview_hit().map(|hit| hit.title),
+                Some("alpha".to_owned()),
+                "other regions take the top hit"
+            );
+        }
+
+        /// Typing a re-query clears the cached hits and restarts the
+        /// result cursor; other regions keep their cursor.
+        #[test]
+        fn requery_restarts_result_cursor() {
+            use super::super::{FocusRegion, ShellFocus};
+            const EV_A: u32 = 30;
+            let (mut host, _dir) = keyed_host();
+            host.model.set_overview_open(true);
+            host.overview_hits = three_hits();
+            host.focus = Some(ShellFocus {
+                region: FocusRegion::Overview,
+                cursor: 2,
+            });
+            host.on_key(EV_A, true);
+            host.on_key(EV_A, false);
+            assert!(host.overview_hits.is_empty(), "re-query drops cached hits");
+            assert_eq!(
+                host.shell_focus().map(|focus| focus.cursor),
+                Some(0),
+                "cursor restarts"
+            );
+            assert_eq!(host.search_text(), "a");
+        }
+
+        /// The overview paint key carries the cursor: moving result
+        /// focus repaints by construction.
+        #[test]
+        fn overview_key_carries_focus() {
+            use super::super::{FocusRegion, ShellFocus};
+            let (mut host, _dir) = test_host();
+            let plain = host.overview_render_key(None, 1280, 800);
+            host.focus = Some(ShellFocus {
+                region: FocusRegion::Overview,
+                cursor: 1,
+            });
+            assert_ne!(
+                host.overview_render_key(None, 1280, 800),
+                plain,
+                "overview key moves with focus"
+            );
+        }
+
+        /// Trap: closing the popup restores the parked cursor, and
+        /// with an empty stack the cursor clears.
+        #[test]
+        fn trap_popup_close_restores_or_clears() {
+            use super::super::{FocusRegion, ShellFocus};
+            use crate::popup::PopupBody;
+            let (mut host, _dir) = dock_test_host();
+            host.popup.open(PopupBody::Calendar);
+            host.focus = Some(ShellFocus {
+                region: FocusRegion::Popup,
+                cursor: 1,
+            });
+            host.return_stack = vec![ShellFocus {
+                region: FocusRegion::Dock,
+                cursor: 0,
+            }];
+            host.close_popup();
+            assert_eq!(
+                host.shell_focus(),
+                Some(ShellFocus {
+                    region: FocusRegion::Dock,
+                    cursor: 0,
+                }),
+                "parked dock cursor restored"
+            );
+            // No stack, dead surface: the cursor clears instead of
+            // sticking.
+            host.popup.open(PopupBody::Calendar);
+            host.focus = Some(ShellFocus {
+                region: FocusRegion::Popup,
+                cursor: 0,
+            });
+            host.return_stack.clear();
+            host.close_popup();
+            assert_eq!(host.shell_focus(), None);
+        }
+
+        /// Trap: a dead overview cursor falls back through the stack
+        /// to the last live region, draining dead tops with it.
+        #[test]
+        fn trap_overview_close_falls_back_to_live() {
+            use super::super::{FocusRegion, ShellFocus};
+            let (mut host, _dir) = keyed_host();
+            host.focus = Some(ShellFocus {
+                region: FocusRegion::Overview,
+                cursor: 3,
+            });
+            host.return_stack = vec![ShellFocus {
+                region: FocusRegion::Panel,
+                cursor: 2,
+            }];
+            assert!(!host.model.is_overview_open());
+            host.settle_focus();
+            assert_eq!(
+                host.shell_focus(),
+                Some(ShellFocus {
+                    region: FocusRegion::Panel,
+                    cursor: 2,
+                }),
+                "dead overview cursor restores the parked stop"
+            );
+            assert!(host.return_stack.is_empty());
+            // Nothing parked: the cursor clears.
+            host.focus = Some(ShellFocus {
+                region: FocusRegion::Overview,
+                cursor: 0,
+            });
+            host.settle_focus();
+            assert_eq!(host.shell_focus(), None);
+            // Dead stack tops drain under a live cursor.
+            host.focus = Some(ShellFocus {
+                region: FocusRegion::Panel,
+                cursor: 0,
+            });
+            host.return_stack = vec![
+                ShellFocus {
+                    region: FocusRegion::Panel,
+                    cursor: 1,
+                },
+                ShellFocus {
+                    region: FocusRegion::Popup,
+                    cursor: 0,
+                },
+            ];
+            host.settle_focus();
+            assert_eq!(
+                host.return_stack,
+                vec![ShellFocus {
+                    region: FocusRegion::Panel,
+                    cursor: 1,
+                }],
+                "dead popup top drains"
+            );
+        }
+
+        /// Focused menu rows paint their accent ring; without focus
+        /// the same pixels are ring-free.
+        #[test]
+        fn popup_row_paints_focus_ring() {
+            use super::super::{FocusRegion, ShellFocus};
+            use crate::overview::ACCENT;
+            use crate::popup::{panel_layout, popup_box, tile_row_rect, PopupBody, POPUP_HEIGHT};
+            let (mut host, _dir) = test_host();
+            let width = 1280;
+            let strip_h = host.panel.height as i32;
+            let height = strip_h + POPUP_HEIGHT;
+            host.popup.open(PopupBody::Menu(0));
+            let plain = host.render_panel_pixels(width, height);
+            host.focus = Some(ShellFocus {
+                region: FocusRegion::Popup,
+                cursor: 1,
+            });
+            let painted = host.render_panel_pixels(width, height);
+            let layout = panel_layout(width, strip_h, &host.tiles.clock);
+            let open_box = popup_box(&layout, PopupBody::Menu(0));
+            let row = tile_row_rect(&open_box, 1, 2).expect("row 1 box");
+            let (x, y) = (row.x - 1, row.y + 2);
+            assert_eq!(pixel_at(&painted, width, x, y), ACCENT, "ring on row");
+            assert_ne!(
+                pixel_at(&plain, width, x, y),
+                ACCENT,
+                "no ring without focus"
             );
         }
 
@@ -5325,6 +6146,97 @@ mod tests {
             host.sync_overview(&client);
             assert!(host.model.is_overview_open());
             assert_eq!(host.model.windows().len(), 3);
+        }
+
+        /// Overview intent flips park and restore the shell cursor:
+        /// a fresh open pushes the live stop and takes result
+        /// focus, and the close settles back to the parked stop —
+        /// the same `sync_overview` path the run loop drives.
+        #[test]
+        fn overview_intent_parks_and_restores_focus() {
+            use super::super::{FocusRegion, ShellFocus};
+            use std::rc::Rc;
+
+            let dir = tempfile::tempdir().unwrap();
+            let socket_path = dir.path().join("control.sock");
+            let mut model = StateModel::new();
+            let mut hub =
+                ControlHub::bind(socket_path.clone(), Rc::new(TokenStore::new()), SEAT_NAME)
+                    .unwrap();
+
+            let mut client = ControlClient::connect(&socket_path).unwrap();
+            client.send_hello().unwrap();
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.await_hello() {
+                    Ok(()) => break,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("hello failed: {e}"),
+                }
+            }
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                match client.poll() {
+                    Ok(Handled::Snapshot { .. }) => break,
+                    Ok(_) => continue,
+                    Err(e) if is_would_block(&e) => continue,
+                    Err(e) => panic!("snapshot poll failed: {e}"),
+                }
+            }
+
+            let (mut host, _favdir) = test_host();
+            host.sync_overview(&client);
+            assert!(!host.model.is_overview_open());
+            host.focus = Some(ShellFocus {
+                region: FocusRegion::Panel,
+                cursor: 2,
+            });
+            hub.set_overview(true);
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                let _ = client.poll();
+                if client.model().is_overview_open() {
+                    break;
+                }
+            }
+            host.sync_overview(&client);
+            assert!(host.model.is_overview_open());
+            assert_eq!(
+                host.shell_focus(),
+                Some(ShellFocus {
+                    region: FocusRegion::Overview,
+                    cursor: 0,
+                }),
+                "open takes result focus"
+            );
+            assert_eq!(
+                host.return_stack,
+                vec![ShellFocus {
+                    region: FocusRegion::Panel,
+                    cursor: 2,
+                }],
+                "open parks the live stop"
+            );
+
+            hub.set_overview(false);
+            for _ in 0..PUMP_ROUNDS {
+                hub.poll(&mut model);
+                let _ = client.poll();
+                if !client.model().is_overview_open() {
+                    break;
+                }
+            }
+            host.sync_overview(&client);
+            assert!(!host.model.is_overview_open());
+            assert_eq!(
+                host.shell_focus(),
+                Some(ShellFocus {
+                    region: FocusRegion::Panel,
+                    cursor: 2,
+                }),
+                "close restores the parked stop"
+            );
+            assert!(host.return_stack.is_empty());
         }
 
         /// Alt-Tab drive round trip: hub-queued steps open the host
