@@ -15,6 +15,11 @@ roost-greeter = { path = "../greeter", version = "0.1.0" }
 greetd_ipc.workspace = true
 image.workspace = true
 
+[features]
+# Additive X11 compatibility: enables Smithay's xwayland module within the
+# pinned =0.7.0 release (ADR 0001). Default builds are native-only.
+xwayland = ["smithay/xwayland"]
+
 [dev-dependencies]
 wayland-client.workspace = true
 wayland-protocols = { workspace = true, features = ["client"] }
