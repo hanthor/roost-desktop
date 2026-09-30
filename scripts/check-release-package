@@ -1,0 +1,49 @@
+#!/bin/sh
+# check-release-package — verify a Roost .deb built by scripts/roost-release.
+#
+# Usage:
+#   scripts/check-release-package <package.deb>
+#
+# Asserts the session binaries and login-screen entry are present and
+# executable, and that the package metadata version matches the binaries'
+# reported version.
+set -eu
+
+unset CDPATH
+
+if [ "$#" -ne 1 ]; then
+    echo "Usage: scripts/check-release-package <package.deb>" >&2
+    exit 1
+fi
+
+PKG="$1"
+fail() {
+    echo "check-release-package: $1" >&2
+    exit 1
+}
+
+CONTENTS="$(dpkg-deb -c "$PKG" 2>/dev/null)"
+for path in \
+    usr/bin/roost-compositor \
+    usr/bin/roost-session \
+    usr/bin/roost-shell-host \
+    usr/bin/roost-greeter \
+    usr/share/wayland-sessions/roost.desktop; do
+    printf '%s' "$CONTENTS" | grep -q "$path" || fail "missing $path"
+done
+
+printf '%s' "$CONTENTS" | grep "usr/bin/roost-" | grep -q "^-rwx" \
+    || fail "session binaries are not executable"
+
+VERSION="$(dpkg-deb -f "$PKG" Version)"
+[ -n "$VERSION" ] || fail "empty Version field"
+
+DIR="$(mktemp -d)"
+trap 'rm -rf "$DIR"' EXIT INT TERM
+dpkg-deb -x "$PKG" "$DIR"
+for bin in roost-compositor roost-session roost-shell-host roost-greeter; do
+    REPORTED="$("$DIR/usr/bin/$bin" --version | awk '{print $NF}')"
+    [ "$REPORTED" = "$VERSION" ] || fail "$bin reports $REPORTED, package is $VERSION"
+done
+
+echo "check-release-package: $PKG OK (version $VERSION)"
