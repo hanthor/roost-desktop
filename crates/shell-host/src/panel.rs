@@ -62,18 +62,19 @@ use crate::apps::{entry_from_file, AppEntry, AppProvider, LaunchTracker};
 use crate::control::{ControlClient, ControlError, Handled};
 use crate::dock::{
     dock_items, dock_press, dock_slot_at, paint_dock_stacked_with_icons, read_stack, stack_cell_at,
-    stack_shown, DockAction, DockItem, StackEntry, DOCK_H, STACK_GRID_H,
+    stack_shown, DockAction, DockItem, StackEntry, DOCK_H, DOCK_SLOT, STACK_GRID_H,
 };
+use crate::extensions::{extension_dir, ExtensionHost};
 use crate::favorites::Favorites;
 use crate::icons::Artwork;
 use crate::intake::NotificationBus;
 use crate::keyboard::{KeyAction, XkbFeed};
 use crate::model::ShellModel;
-use crate::notifications::{NotificationCenter, Urgency};
+use crate::notifications::{NotificationAction, NotificationCenter, Urgency};
 use crate::overview::{
-    banner_hit, banner_strip_height, overview_press, paint_panel, BannerCanvas, BannerHit,
-    BannerRow, OverviewCanvas, SwitcherCanvas, ACCENT, BANNER_STRIP_W, BYTES_PER_PIXEL,
-    SWITCHER_STRIP_H,
+    banner_hit, banner_strip_height, blit_glyph, glyph_index, overview_press, paint_panel,
+    put_pixel, BannerCanvas, BannerHit, BannerRow, OverviewCanvas, SwitcherCanvas, ACCENT,
+    BANNER_STRIP_W, BYTES_PER_PIXEL, FONT_SCALE, GLYPH_ADVANCE, SWITCHER_STRIP_H,
 };
 use crate::popup::{
     calendar_clock_row, calendar_weekday_row, lock_rows, network_rows, paint_popup, panel_layout,
@@ -85,7 +86,7 @@ use crate::tiles::{TileSet, TileState, NETWORK_TILE_INDEX, POWER_TILE_INDEX, SOU
 use crate::watcher::menu_row_rect;
 use crate::watcher::{
     indicator_at, indicator_cells, indicator_right_x, menu_row_at, paint_indicators, IndicatorHost,
-    IndicatorIcon, ItemInfo, WatcherBus,
+    IndicatorIcon, ItemInfo, WatcherBus, INDICATOR_CELL,
 };
 
 /// Namespace advertised for the panel layer surface.
@@ -268,6 +269,15 @@ pub struct ShellHost {
     published_wallpaper: Option<String>,
     /// Hosted app indicators (StatusNotifier items).
     indicators: IndicatorHost,
+    /// Sandboxed extension scripts and their cached outputs.
+    extensions: ExtensionHost,
+    /// Per-script note surfacing state: last seen enabled flag plus
+    /// notice texts already shown, so each note banners exactly once.
+    ext_seen: std::collections::HashMap<String, ExtSeen>,
+    /// Press action ids queued by strip presses, drained into script
+    /// handlers on the slow tick so no script code runs on the event
+    /// path itself.
+    pending_presses: Vec<String>,
     /// D-Bus edge behind the indicator host.
     watcher: WatcherBus,
     /// D-Bus edge behind the notification center.
@@ -378,7 +388,6 @@ pub struct ShellFocus {
 /// bounds-safe pixel writer: the keyboard-focus ring, mirroring
 /// the overview selection border.
 fn paint_focus_ring(pixels: &mut [u8], width: i32, rect: &Rect) {
-    use crate::overview::put_pixel;
     let stride = width as usize * BYTES_PER_PIXEL;
     for x in rect.x - 2..rect.x + rect.w + 2 {
         for y in [rect.y - 2, rect.y - 1, rect.y + rect.h, rect.y + rect.h + 1] {
@@ -388,6 +397,60 @@ fn paint_focus_ring(pixels: &mut [u8], width: i32, rect: &Rect) {
     for y in rect.y - 2..rect.y + rect.h + 2 {
         for x in [rect.x - 2, rect.x - 1, rect.x + rect.w, rect.x + rect.w + 1] {
             put_pixel(pixels, stride, x, y, ACCENT);
+        }
+    }
+}
+
+/// Paint extension script badges on the dock row: one framed slot
+/// per badge with its text truncated to fit, starting at `start_x`.
+/// Cached texts only — no script runs on this path.
+fn paint_script_badges(
+    pixels: &mut [u8],
+    width: i32,
+    start_x: i32,
+    y_origin: i32,
+    badges: &[(String, String)],
+) {
+    const DIM: [u8; 4] = [0x4a, 0x44, 0x44, 0xff];
+    let stride = width as usize * BYTES_PER_PIXEL;
+    let max_chars = ((DOCK_SLOT - 8) / GLYPH_ADVANCE).max(1) as usize;
+    for (index, (_, text)) in badges.iter().enumerate() {
+        let x0 = start_x + index as i32 * DOCK_SLOT;
+        for dx in 0..DOCK_SLOT {
+            put_pixel(pixels, stride, x0 + dx, y_origin, DIM);
+            put_pixel(pixels, stride, x0 + dx, y_origin + DOCK_H - 1, DIM);
+        }
+        let mut gx = x0 + 4;
+        let gy = y_origin + 6;
+        for ch in text.chars().take(max_chars) {
+            if ch == ' ' {
+                gx += GLYPH_ADVANCE;
+                continue;
+            }
+            if let Some(glyph) = glyph_index(ch) {
+                blit_glyph(pixels, stride, gx, gy, glyph, ACCENT);
+            }
+            gx += GLYPH_ADVANCE;
+        }
+    }
+}
+
+/// Paint extension script cells: a frame plus the cell text's
+/// initial, mirroring the indicator look. Cached texts only — no
+/// script runs on this path.
+fn paint_script_cells(pixels: &mut [u8], width: i32, cells: &[Rect], texts: &[&str]) {
+    let stride = width as usize * BYTES_PER_PIXEL;
+    for (cell, text) in cells.iter().zip(texts.iter()) {
+        for dx in 0..cell.w {
+            put_pixel(pixels, stride, cell.x + dx, cell.y, ACCENT);
+            put_pixel(pixels, stride, cell.x + dx, cell.y + cell.h - 1, ACCENT);
+        }
+        if let Some(initial) = text.chars().next() {
+            if let Some(glyph) = glyph_index(initial) {
+                let gx = cell.x + (cell.w - 4 * FONT_SCALE) / 2;
+                let gy = cell.y + (cell.h - 5 * FONT_SCALE) / 2;
+                blit_glyph(pixels, stride, gx, gy, glyph, ACCENT);
+            }
         }
     }
 }
@@ -506,6 +569,14 @@ fn plan_output_surfaces(outputs: &[OutputInfo], bound: &[String]) -> OutputPlan 
     OutputPlan { panels, dock }
 }
 
+/// Note-surfacing state per extension script: the last seen enabled
+/// flag (fresh disables banner once) plus notice texts already shown.
+#[derive(Debug, Default)]
+struct ExtSeen {
+    enabled: bool,
+    notices: Vec<String>,
+}
+
 /// Live overview layer surface and its configured size.
 struct OverviewSurface {
     surface: WlSurface,
@@ -612,6 +683,8 @@ fn banner_key_rows(center: &NotificationCenter) -> Vec<BannerKeyRow> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DockPaintKey {
     items: Vec<(String, Vec<u64>, bool, bool)>,
+    /// Script badges: name and text per contributing script.
+    badges: Vec<(String, String)>,
     width: i32,
     height: i32,
     /// Open stack item plus its entry names (directory reads refresh
@@ -641,6 +714,8 @@ struct PanelPaintKey {
     popup: Option<(u8, u32)>,
     /// Hosted indicators: service, title, and menu labels.
     indicators: Vec<(String, String, Vec<String>)>,
+    /// Script cells: name, text, and icon per contributing script.
+    extensions: Vec<(String, String, String)>,
     /// Keyboard focus cursor: any focus move repaints, so a stale
     /// ring is impossible by construction.
     focus: Option<ShellFocus>,
@@ -814,6 +889,9 @@ impl ShellHost {
             stack_cache: Vec::new(),
             published_wallpaper: None,
             indicators: IndicatorHost::new(),
+            extensions: ExtensionHost::new(extension_dir()),
+            ext_seen: std::collections::HashMap::new(),
+            pending_presses: Vec::new(),
             watcher: WatcherBus::new(),
             notifications,
             icon_cache: std::collections::HashMap::new(),
@@ -1280,6 +1358,21 @@ impl ShellHost {
                     )
                 })
                 .collect(),
+            extensions: self
+                .extensions
+                .states()
+                .iter()
+                .filter(|state| state.enabled)
+                .filter_map(|state| {
+                    state.output.cell_text.clone().map(|text| {
+                        (
+                            state.name.clone(),
+                            text,
+                            state.output.cell_icon.clone().unwrap_or_default(),
+                        )
+                    })
+                })
+                .collect(),
         }
     }
 
@@ -1287,6 +1380,11 @@ impl ShellHost {
     /// popup band when one is open and tall enough. Shared by the
     /// primary surface and every extra panel, so all outputs show
     /// the same strip.
+    ///
+    /// Script cells paint in their own pass left of the indicator
+    /// row: a frame plus the cell text's initial, mirroring the
+    /// indicator look. Extension engines never run here — only
+    /// cached outputs paint.
     fn render_panel_pixels(&self, width: i32, height: i32) -> Vec<u8> {
         let strip_h = self.panel.height as i32;
         let today = jiff::Zoned::now().date();
@@ -1342,13 +1440,18 @@ impl ShellHost {
         }
         // Indicator cells sit left of the sound tile, painted over
         // the strip in their own pass.
-        let cells = indicator_cells(
-            indicator_right_x(width),
-            strip_h,
-            self.indicators.items().len(),
-        );
+        let indicator_count = self.indicators.items().len();
+        let cells = indicator_cells(indicator_right_x(width), strip_h, indicator_count);
         if !cells.is_empty() {
             paint_indicators(&mut pixels, width, &cells, self.indicators.items());
+        }
+        // Script cells continue the row left of the indicators.
+        let script = self.extension_cells();
+        if !script.is_empty() {
+            let right = indicator_right_x(width) - indicator_count as i32 * INDICATOR_CELL;
+            let rects = indicator_cells(right, strip_h, script.len());
+            let texts: Vec<&str> = script.iter().map(|(_, text, _)| text.as_str()).collect();
+            paint_script_cells(&mut pixels, width, &rects, &texts);
         }
         // Keyboard focus ring paints last, over strip and
         // indicators alike, so the focused stop always reads.
@@ -1488,6 +1591,87 @@ impl ShellHost {
         }
     }
 
+    /// Enabled scripts contributing a bar cell, in load order: script
+    /// name, cell text, and press action id.
+    fn extension_cells(&self) -> Vec<(String, String, Option<String>)> {
+        self.extensions
+            .states()
+            .iter()
+            .filter(|state| state.enabled)
+            .filter_map(|state| {
+                state
+                    .output
+                    .cell_text
+                    .clone()
+                    .map(|text| (state.name.clone(), text, state.output.press_id.clone()))
+            })
+            .collect()
+    }
+
+    /// Enabled scripts contributing a dock badge, in load order:
+    /// script name and badge text.
+    fn extension_badges(&self) -> Vec<(String, String)> {
+        self.extensions
+            .states()
+            .iter()
+            .filter(|state| state.enabled)
+            .filter_map(|state| {
+                state
+                    .output
+                    .badge
+                    .clone()
+                    .map(|badge| (state.name.clone(), badge))
+            })
+            .collect()
+    }
+
+    /// Drain queued strip presses into the declaring scripts'
+    /// handlers. Runs on the slow tick only, so the press event path
+    /// itself never executes script code.
+    fn drain_extension_presses(&mut self) {
+        for id in std::mem::take(&mut self.pending_presses) {
+            self.extensions.press(&id);
+        }
+    }
+
+    /// Banner fresh script notes exactly once each: explicit notices
+    /// show on first sight, disable notes on the enabled-to-disabled
+    /// transition. Seen texts are capped; pathological chatter eventually
+    /// re-banners rather than growing memory without bound.
+    fn surface_extension_notes(&mut self) {
+        let mut fresh = Vec::new();
+        for state in self.extensions.states() {
+            let seen = self.ext_seen.entry(state.name.clone()).or_default();
+            if !state.enabled && seen.enabled {
+                if let Some(note) = state.note.clone() {
+                    fresh.push((state.name.clone(), note));
+                }
+            }
+            seen.enabled = state.enabled;
+            for notice in &state.output.notices {
+                if !seen.notices.contains(notice) {
+                    fresh.push((state.name.clone(), notice.clone()));
+                    seen.notices.push(notice.clone());
+                }
+            }
+            if seen.notices.len() > 64 {
+                seen.notices.drain(..seen.notices.len() - 64);
+            }
+        }
+        for (name, body) in fresh {
+            if let Ok(mut center) = self.center.lock() {
+                center.notify(
+                    "extensions",
+                    &name,
+                    &body,
+                    Vec::<NotificationAction>::new(),
+                    Urgency::Normal,
+                    None,
+                );
+            }
+        }
+    }
+
     /// Slow-tick status refresh for the run loop: re-probe services at
     /// most every two seconds, repainting the strip when the clock
     /// minute or any tile changed. Pure no-op without attached
@@ -1506,6 +1690,13 @@ impl ShellHost {
             self.sync_icon_theme();
             self.poll_indicators();
             self.poll_notifications();
+            // Extension scripts run here, off the paint and event
+            // paths: the drive reloads changed scripts and refreshes
+            // cached outputs, queued presses drain into handlers,
+            // then fresh notes banner once each.
+            self.extensions.drive();
+            self.drain_extension_presses();
+            self.surface_extension_notes();
         }
         if let Some((width, height)) = self.panel_size {
             self.paint_panel_surface(width, height);
@@ -1593,6 +1784,22 @@ impl ShellHost {
             }
             self.apply_popup_size();
             return;
+        }
+        // Script cells queue their press actions before the strip
+        // layout sees the press; cells without an action are inert.
+        // Queued ids drain into handlers on the slow tick, keeping
+        // script code off the event path.
+        let script = self.extension_cells();
+        if !script.is_empty() {
+            let right =
+                indicator_right_x(width) - self.indicators.items().len() as i32 * INDICATOR_CELL;
+            let rects = indicator_cells(right, strip_h, script.len());
+            if let Some(hit) = indicator_at(&rects, x, y) {
+                if let Some(id) = script[hit].2.clone() {
+                    self.pending_presses.push(id);
+                }
+                return;
+            }
         }
         // Row presses inside an open indicator menu fire, then
         // dismiss; anything else falls through to the strip.
@@ -3066,6 +3273,7 @@ impl ShellHost {
                     )
                 })
                 .collect(),
+            badges: self.extension_badges(),
             width,
             height,
             stack,
@@ -3126,6 +3334,20 @@ impl ShellHost {
             None
         };
         paint_dock_stacked_with_icons(&mut pixels, width, height, items, grid, &icons);
+        // Script badges continue the slot row past the last item (or
+        // centered alone when the dock is empty): a dim frame plus the
+        // badge text, truncated to the slot. Cached texts only.
+        let badges = self.extension_badges();
+        if !badges.is_empty() {
+            let y_origin = if grid.is_some() { STACK_GRID_H } else { 0 };
+            let start_x = if items.is_empty() {
+                (width - badges.len() as i32 * DOCK_SLOT) / 2
+            } else {
+                let (last_x, _, _, _) = dock_slot_at(width, items.len() - 1, items.len(), y_origin);
+                last_x + DOCK_SLOT
+            };
+            paint_script_badges(&mut pixels, width, start_x, y_origin, &badges);
+        }
         if let Some(ShellFocus {
             region: FocusRegion::Dock,
             cursor,
@@ -6044,6 +6266,154 @@ mod tests {
             );
         }
 
+        /// Script cells reach the strip paint: a host with a cell
+        /// script renders different pixels than one without.
+        #[test]
+        fn script_cell_paints_in_strip() {
+            use crate::extensions::ExtensionHost;
+            use std::fs;
+            let plain_dir = tempfile::tempdir().expect("tempdir");
+            let (mut plain, _dir) = test_host();
+            plain.extensions = ExtensionHost::new(plain_dir.path().join("ext"));
+            plain.extensions.load_dir();
+            let script_dir = tempfile::tempdir().expect("tempdir");
+            let ext = script_dir.path().join("ext");
+            fs::create_dir_all(&ext).expect("mkdir");
+            fs::write(ext.join("hello.rhai"), "bar_cell(\"hello\", \"\");").expect("write");
+            let (mut host, _guard) = test_host();
+            host.extensions = ExtensionHost::new(ext);
+            host.extensions.load_dir();
+            let a = plain.render_panel_pixels(1280, 32);
+            let b = host.render_panel_pixels(1280, 32);
+            assert_ne!(a, b, "script cell changes strip pixels");
+        }
+
+        /// Strip presses on a script cell dispatch its press action.
+        #[test]
+        fn strip_press_dispatches_script_action() {
+            use crate::extensions::ExtensionHost;
+            use crate::watcher::{indicator_cells, indicator_right_x};
+            use std::fs;
+            let script_dir = tempfile::tempdir().expect("tempdir");
+            let ext = script_dir.path().join("ext");
+            fs::create_dir_all(&ext).expect("mkdir");
+            fs::write(
+                ext.join("hello.rhai"),
+                "bar_cell(\"hello\", \"\");\non_press(\"wave\");\nfn press(id) { notice(\"got \" + id); }",
+            )
+            .expect("write");
+            let (mut host, _guard) = test_host();
+            host.extensions = ExtensionHost::new(ext);
+            host.extensions.load_dir();
+            host.panel_size = Some((1280, 32));
+            let strip_h = host.panel.height as i32;
+            let rects = indicator_cells(indicator_right_x(1280), strip_h, 1);
+            host.press_panel(rects[0].x + 1, rects[0].y + 1);
+            assert_eq!(
+                host.pending_presses.as_slice(),
+                ["wave"],
+                "strip press queues the action without running scripts"
+            );
+            host.drain_extension_presses();
+            let output = host.extensions.output("hello").expect("hello loaded");
+            assert!(
+                output.notices.iter().any(|note| note.contains("got wave")),
+                "strip press ran the press handler: {:?}",
+                output.notices
+            );
+        }
+
+        /// Script badges paint on the dock row past the last item.
+        #[test]
+        fn script_badge_paints_on_dock() {
+            use crate::dock::DOCK_H;
+            use crate::extensions::ExtensionHost;
+            use std::fs;
+            let plain_dir = tempfile::tempdir().expect("tempdir");
+            let (mut plain, _dir) = test_host();
+            plain.extensions = ExtensionHost::new(plain_dir.path().join("ext"));
+            plain.extensions.load_dir();
+            let script_dir = tempfile::tempdir().expect("tempdir");
+            let ext = script_dir.path().join("ext");
+            fs::create_dir_all(&ext).expect("mkdir");
+            fs::write(ext.join("stat.rhai"), "dock_badge(\"42\");").expect("write");
+            let (mut host, _guard) = test_host();
+            host.extensions = ExtensionHost::new(ext);
+            host.extensions.load_dir();
+            let items: Vec<crate::dock::DockItem> = Vec::new();
+            let a = plain.render_dock_pixels(1280, DOCK_H, &items);
+            let b = host.render_dock_pixels(1280, DOCK_H, &items);
+            assert_ne!(a, b, "script badge changes dock pixels");
+        }
+
+        /// Script notices surface as notifications exactly once each.
+        #[test]
+        fn script_notice_surfaces_once() {
+            use crate::extensions::ExtensionHost;
+            use std::fs;
+            let script_dir = tempfile::tempdir().expect("tempdir");
+            let ext = script_dir.path().join("ext");
+            fs::create_dir_all(&ext).expect("mkdir");
+            fs::write(ext.join("hello.rhai"), "notice(\"hi there\");").expect("write");
+            let (mut host, _guard) = test_host();
+            host.extensions = ExtensionHost::new(ext);
+            host.extensions.load_dir();
+            host.surface_extension_notes();
+            let unread = host
+                .center
+                .lock()
+                .map(|center| center.unread_count())
+                .unwrap_or(0);
+            assert_eq!(unread, 1, "notice banners once");
+            host.surface_extension_notes();
+            let again = host
+                .center
+                .lock()
+                .map(|center| center.unread_count())
+                .unwrap_or(0);
+            assert_eq!(again, 1, "no duplicate banner on re-drive");
+        }
+
+        /// Editing a script applies on the next drive; removing it
+        /// drops its output without restart.
+        #[test]
+        fn edited_script_reloads_and_removed_drops() {
+            use crate::extensions::ExtensionHost;
+            use std::fs;
+            let script_dir = tempfile::tempdir().expect("tempdir");
+            let ext = script_dir.path().join("ext");
+            fs::create_dir_all(&ext).expect("mkdir");
+            fs::write(ext.join("stat.rhai"), "bar_cell(\"one\", \"\");").expect("write");
+            let (mut host, _guard) = test_host();
+            host.extensions = ExtensionHost::new(ext.clone());
+            host.extensions.load_dir();
+            assert_eq!(
+                host.extensions
+                    .output("stat")
+                    .expect("stat loaded")
+                    .cell_text
+                    .as_deref(),
+                Some("one")
+            );
+            fs::write(ext.join("stat.rhai"), "bar_cell(\"two\", \"\");").expect("rewrite");
+            host.extensions.drive();
+            assert_eq!(
+                host.extensions
+                    .output("stat")
+                    .expect("stat kept")
+                    .cell_text
+                    .as_deref(),
+                Some("two"),
+                "edit applies without restart"
+            );
+            fs::remove_file(ext.join("stat.rhai")).expect("remove");
+            host.extensions.drive();
+            assert!(
+                host.extensions.output("stat").is_none(),
+                "removal drops the script"
+            );
+        }
+
         /// Registry observer on a throwaway queue, used only to learn
         /// global names before binding on the panel queue.
         #[derive(Default)]
@@ -7750,12 +8120,14 @@ mod tests {
                 focus: None,
                 popup: None,
                 indicators: Vec::new(),
+                extensions: Vec::new(),
             }
         }
 
         fn some_dock_key() -> super::super::DockPaintKey {
             super::super::DockPaintKey {
                 items: vec![("org.example.True.desktop".to_owned(), vec![], false, true)],
+                badges: Vec::new(),
                 width: 1280,
                 height: crate::dock::DOCK_H,
                 stack: None,
