@@ -347,7 +347,8 @@ struct ShmBacking {
 /// and Dock; Popup and Overview take focus when they open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusRegion {
-    /// Top strip: clock plus the three tiles.
+    /// Top strip: clock, the three tiles, then hosted indicator
+    /// cells in strip order.
     Panel,
     /// Bottom dock: favorite and running slots.
     Dock,
@@ -357,8 +358,9 @@ pub enum FocusRegion {
     Overview,
 }
 
-/// Panel strip stops: the clock plus the three service tiles in
-/// strip order (network, power, sound).
+/// Panel strip stops before hosted indicators: the clock plus the
+/// three service tiles in strip order (network, power, sound).
+/// Indicator cells append after the tiles while hosted.
 pub const PANEL_STOPS: usize = 4;
 
 /// Keyboard cursor: region plus the stop index within it. Panel
@@ -1346,8 +1348,15 @@ impl ShellHost {
             let layout = panel_layout(width, strip_h, &self.tiles.clock);
             let stop = if cursor == 0 {
                 Some(layout.clock)
-            } else {
+            } else if cursor < PANEL_STOPS {
                 layout.tiles.get(cursor - 1).copied()
+            } else {
+                let cells = indicator_cells(
+                    indicator_right_x(width),
+                    strip_h,
+                    self.indicators.items().len(),
+                );
+                cells.get(cursor - PANEL_STOPS).copied()
             };
             if let Some(rect) = stop {
                 paint_focus_ring(&mut pixels, width, &rect);
@@ -2000,13 +2009,20 @@ impl ShellHost {
         self.focus
     }
 
-    /// Stop count for `region`: panel stops are fixed (clock plus
-    /// three tiles); dock stops track the live item row; popup
+    /// Panel strip stops: clock, three tiles, then one stop per
+    /// hosted indicator cell. Dynamic like the dock row: unhosted
+    /// cells settle away.
+    fn panel_stop_count(&self) -> usize {
+        PANEL_STOPS + self.indicators.items().len()
+    }
+
+    /// Stop count for `region`: panel stops track clock, tiles, and
+    /// hosted indicators; dock stops track the live item row; popup
     /// stops track the open menu's rows; overview stops track the
     /// collected hits.
     fn stop_count(&self, region: FocusRegion) -> usize {
         match region {
-            FocusRegion::Panel => PANEL_STOPS,
+            FocusRegion::Panel => self.panel_stop_count(),
             FocusRegion::Dock => self.dock_items().len(),
             FocusRegion::Popup => self.popup_row_count(),
             FocusRegion::Overview => self.overview_hits.len(),
@@ -2074,7 +2090,7 @@ impl ShellHost {
                 continue;
             }
             let max = match focus.region {
-                FocusRegion::Panel => PANEL_STOPS,
+                FocusRegion::Panel => self.panel_stop_count(),
                 FocusRegion::Dock => self.dock_items().len(),
                 FocusRegion::Popup => self.popup_row_count(),
                 // Result rows stream in: the cursor clamps at move,
@@ -2175,10 +2191,14 @@ impl ShellHost {
 
     /// Move the cursor one stop along the strip, wrapping. From no
     /// focus, forward lands on the first panel stop and backward on
-    /// the last.
+    /// the last (indicator cells included while hosted).
     fn step_cursor(&mut self, direction: i32) {
         let Some(focus) = self.focus else {
-            let cursor = if direction < 0 { PANEL_STOPS - 1 } else { 0 };
+            let cursor = if direction < 0 {
+                self.panel_stop_count().saturating_sub(1)
+            } else {
+                0
+            };
             self.focus = Some(ShellFocus {
                 region: FocusRegion::Panel,
                 cursor,
@@ -2284,13 +2304,20 @@ impl ShellHost {
         };
         match focus.region {
             FocusRegion::Panel => {
-                let body = if focus.cursor == 0 {
-                    PopupBody::Calendar
+                if focus.cursor >= PANEL_STOPS {
+                    // Hosted indicator cell: the shared strip-press
+                    // call (empty menus activate in place, menus
+                    // open), then row focus like the tile popups.
+                    self.activate_indicator_stop(focus.cursor - PANEL_STOPS);
                 } else {
-                    PopupBody::Menu(focus.cursor - 1)
-                };
-                self.popup.toggle(body);
-                self.apply_popup_size();
+                    let body = if focus.cursor == 0 {
+                        PopupBody::Calendar
+                    } else {
+                        PopupBody::Menu(focus.cursor - 1)
+                    };
+                    self.popup.toggle(body);
+                    self.apply_popup_size();
+                }
                 if self.popup.is_open() {
                     // A keyboard-opened popup takes row focus,
                     // parking the strip cursor for Escape.
@@ -2316,6 +2343,24 @@ impl ShellHost {
             // overview can never hold this region (settle pops
             // it). Defensive no-op.
             FocusRegion::Overview => {}
+        }
+    }
+
+    /// Activate hosted indicator cell `index` like a strip press
+    /// on its cell: dismiss when its menu is already open, else
+    /// open through the shared
+    /// [`open_indicator_menu`](Self::open_indicator_menu) (empty
+    /// menus activate in place, fetched menus open). Out-of-range
+    /// cells are quiet no-ops.
+    fn activate_indicator_stop(&mut self, index: usize) {
+        if self.indicators.items().get(index).is_none() {
+            return;
+        }
+        if self.popup.body() == Some(PopupBody::IndicatorMenu(index)) {
+            self.close_popup();
+        } else {
+            self.open_indicator_menu(index);
+            self.apply_popup_size();
         }
     }
 
@@ -5114,6 +5159,226 @@ mod tests {
                 ACCENT,
                 "no ring without focus"
             );
+        }
+
+        /// Indicator cells append to the strip stops: four Tabs
+        /// cross clock and tiles, the fifth lands on the hosted
+        /// cell, and Enter runs the shared strip-press call (empty
+        /// menus activate in place with no popup).
+        #[test]
+        fn indicator_stops_walk_and_activate() {
+            use super::super::{FocusRegion, ShellFocus};
+            let (mut host, _dir) = indicator_test_host();
+            use crate::keyboard::XkbFeed;
+            host.xkb = XkbFeed::from_names("evdev", "pc105", "us", "", None);
+            assert_eq!(host.panel_stop_count(), 5);
+            for cursor in 0..5 {
+                press(&mut host, EV_TAB);
+                assert_eq!(
+                    host.shell_focus().map(|focus| focus.cursor),
+                    Some(cursor),
+                    "tab {cursor}"
+                );
+            }
+            assert_eq!(
+                host.shell_focus().map(|focus| focus.region),
+                Some(FocusRegion::Panel)
+            );
+            host.on_key(EV_RETURN, true);
+            host.on_key(EV_RETURN, false);
+            assert!(host.take_shell_submit());
+            host.activate_focused();
+            assert!(!host.popup.is_open(), "empty menu activates in place");
+            assert_eq!(
+                host.shell_focus(),
+                Some(ShellFocus {
+                    region: FocusRegion::Panel,
+                    cursor: 4,
+                }),
+                "indicator stop keeps focus"
+            );
+            assert_eq!(host.indicators.items().len(), 1, "item stays hosted");
+            let _ = FocusRegion::Dock;
+        }
+
+        /// Seeded indicator menus walk and fire by keyboard: rows
+        /// move, Enter sends the enabled row and dismisses, and the
+        /// parked strip cursor comes back.
+        #[test]
+        fn indicator_menu_key_rows_fire_and_restore() {
+            use super::super::{FocusRegion, ShellFocus};
+            use crate::popup::PopupBody;
+            use crate::watcher::MenuEntry;
+            let (mut host, _dir) = indicator_test_host();
+            use crate::keyboard::XkbFeed;
+            host.xkb = XkbFeed::from_names("evdev", "pc105", "us", "", None);
+            if let Some(mut item) = host.indicators.get("test.indicator").cloned() {
+                item.menu = vec![
+                    MenuEntry {
+                        id: 7,
+                        label: "open".to_owned(),
+                        enabled: true,
+                    },
+                    MenuEntry {
+                        id: 8,
+                        label: "quit".to_owned(),
+                        enabled: false,
+                    },
+                ];
+                host.indicators.upsert(item);
+            }
+            host.popup.open(PopupBody::IndicatorMenu(0));
+            host.focus = Some(ShellFocus {
+                region: FocusRegion::Popup,
+                cursor: 0,
+            });
+            host.return_stack = vec![ShellFocus {
+                region: FocusRegion::Panel,
+                cursor: 4,
+            }];
+            assert_eq!(host.popup_row_count(), 2);
+            host.on_key(EV_DOWN, true);
+            host.on_key(EV_DOWN, false);
+            host.step_focus();
+            assert_eq!(host.shell_focus().map(|focus| focus.cursor), Some(1));
+            host.on_key(EV_UP, true);
+            host.on_key(EV_UP, false);
+            host.step_focus();
+            assert_eq!(host.shell_focus().map(|focus| focus.cursor), Some(0));
+            host.on_key(EV_RETURN, true);
+            host.on_key(EV_RETURN, false);
+            assert!(host.take_shell_submit());
+            host.activate_focused();
+            assert_eq!(host.popup.body(), None, "row fire dismisses");
+            assert_eq!(
+                host.shell_focus(),
+                Some(ShellFocus {
+                    region: FocusRegion::Panel,
+                    cursor: 4,
+                }),
+                "parked indicator stop restored"
+            );
+        }
+
+        /// Unhosting the focused cell settles the cursor onto the
+        /// last tile instead of stranding it past the strip.
+        #[test]
+        fn unhosted_indicator_settles_cursor() {
+            use super::super::{FocusRegion, ShellFocus};
+            let (mut host, _dir) = indicator_test_host();
+            host.focus = Some(ShellFocus {
+                region: FocusRegion::Panel,
+                cursor: 4,
+            });
+            assert!(host.indicators.remove("test.indicator"));
+            assert_eq!(host.panel_stop_count(), 4);
+            host.settle_focus();
+            assert_eq!(
+                host.shell_focus(),
+                Some(ShellFocus {
+                    region: FocusRegion::Panel,
+                    cursor: 3,
+                }),
+                "cursor clamps into the live stops"
+            );
+        }
+
+        /// The focused indicator cell paints its accent ring.
+        #[test]
+        fn indicator_stop_paints_focus_ring() {
+            use super::super::{FocusRegion, ShellFocus};
+            use crate::overview::ACCENT;
+            let (mut host, _dir) = indicator_test_host();
+            let width = 1280;
+            let strip_h = host.panel.height as i32;
+            host.focus = Some(ShellFocus {
+                region: FocusRegion::Panel,
+                cursor: 4,
+            });
+            let painted = host.render_panel_pixels(width, strip_h);
+            let cells = crate::watcher::indicator_cells(
+                crate::watcher::indicator_right_x(width),
+                strip_h,
+                1,
+            );
+            let cell = cells[0];
+            assert_eq!(
+                pixel_at(&painted, width, cell.x - 1, cell.y + cell.h / 2),
+                ACCENT,
+                "ring on the indicator cell"
+            );
+        }
+
+        /// Headline key-only run, no pointer: open the calendar,
+        /// launch a dock app, and activate an indicator, all
+        /// through `on_key` plus the run-loop drains.
+        #[test]
+        fn key_only_run_opens_launches_and_activates() {
+            use super::super::{FocusRegion, ShellFocus};
+            use crate::popup::PopupBody;
+
+            // Flow 1 — calendar: Tab to the clock, Enter opens,
+            // Down walks a footer row, Escape closes and restores.
+            let (mut host, _dir) = keyed_host();
+            press(&mut host, EV_TAB);
+            submit(&mut host);
+            host.activate_focused();
+            assert_eq!(host.popup.body(), Some(PopupBody::Calendar));
+            assert_eq!(
+                host.shell_focus().map(|focus| focus.region),
+                Some(FocusRegion::Popup)
+            );
+            press(&mut host, EV_DOWN);
+            assert_eq!(host.shell_focus().map(|focus| focus.cursor), Some(1));
+            host.on_key(EV_ESCAPE, true);
+            host.on_key(EV_ESCAPE, false);
+            assert_eq!(host.popup.body(), None);
+            assert_eq!(
+                host.shell_focus(),
+                Some(ShellFocus {
+                    region: FocusRegion::Panel,
+                    cursor: 0,
+                })
+            );
+
+            // Flow 2 — dock launch: Super+D to the first slot,
+            // Enter launches the pinned app through the tracker.
+            let (mut host, _dir) = dock_test_host();
+            use crate::keyboard::XkbFeed;
+            host.xkb = XkbFeed::from_names("evdev", "pc105", "us", "", None);
+            host.on_key(EV_SUPER, true);
+            press(&mut host, EV_D);
+            host.on_key(EV_SUPER, false);
+            host.step_focus();
+            assert_eq!(
+                host.shell_focus().map(|focus| focus.region),
+                Some(FocusRegion::Dock)
+            );
+            submit(&mut host);
+            host.activate_focused();
+            assert_eq!(host.launcher.len(), 1, "pinned app spawned");
+            assert!(host.take_dock_actions().is_empty());
+
+            // Flow 3 — indicator: Tabs to the hosted cell, Enter
+            // activates in place with no popup.
+            let (mut host, _dir) = indicator_test_host();
+            host.xkb = XkbFeed::from_names("evdev", "pc105", "us", "", None);
+            for _ in 0..5 {
+                press(&mut host, EV_TAB);
+            }
+            assert_eq!(host.shell_focus().map(|focus| focus.cursor), Some(4));
+            submit(&mut host);
+            host.activate_focused();
+            assert!(!host.popup.is_open());
+            assert_eq!(host.indicators.items().len(), 1);
+        }
+
+        /// Feed one closed-overview Enter through `on_key` and drain
+        /// it into the shell-submit flag, like the run loop.
+        fn submit(host: &mut ShellHost) {
+            host.on_key(EV_RETURN, true);
+            host.on_key(EV_RETURN, false);
+            assert!(host.take_shell_submit());
         }
 
         /// Dock presses before the first configure are ignored.
