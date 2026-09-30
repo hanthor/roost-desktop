@@ -17,13 +17,21 @@ use smithay::{
     wayland::{
         compositor,
         shell::wlr_layer::{
-            Anchor, Layer, LayerSurface, LayerSurfaceCachedState, LayerSurfaceConfigure,
+            Anchor, LayerSurface, LayerSurfaceCachedState, LayerSurfaceConfigure,
             WlrLayerShellHandler, WlrLayerShellState,
         },
     },
 };
 
 use crate::State;
+
+/// The layer a [`PanelSurface`] was created on.
+///
+/// Re-exported because `PanelSurface::layer` is public: without this a
+/// caller cannot name the type of a field it can read, and every consumer
+/// (including the shell-host tests) has to declare smithay just to spell
+/// `Layer::Overlay`.
+pub use smithay::wayland::shell::wlr_layer::Layer;
 
 /// Namespace the shell advertises for its overview layer surface
 /// (mirrors `roost_shell_host::OVERVIEW_NAMESPACE`; the crates cannot

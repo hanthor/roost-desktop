@@ -6007,10 +6007,7 @@ mod tests {
                 .collect();
             assert_eq!(banners.len(), 1, "one banner strip tracked");
             assert!(banners[0].configured, "banner acked the configure");
-            assert_eq!(
-                banners[0].layer,
-                smithay::wayland::shell::wlr_layer::Layer::Overlay
-            );
+            assert_eq!(banners[0].layer, roost_compositor::layer::Layer::Overlay);
 
             // Draining the queue destroys the surface server-side too.
             host.notification_center()
