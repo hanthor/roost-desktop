@@ -424,4 +424,101 @@ mod tests {
         assert_eq!(reloaded.key(EV_A, true), KeyAction::Text("a".to_owned()));
         assert_eq!(reloaded.key(EV_RETURN, true), KeyAction::Submit);
     }
+
+    #[test]
+    fn from_fd_rejects_zero_size() {
+        use std::os::fd::OwnedFd;
+        // A zero-size keymap fd is resource exhaustion or malformed:
+        // refuse without reading.
+        let fd = rustix::fs::memfd_create("test", rustix::fs::MemfdFlags::CLOEXEC)
+            .expect("memfd_create succeeds in test environment");
+        let fd = OwnedFd::from(fd);
+        assert!(XkbFeed::from_fd(&fd, 0).is_none());
+    }
+
+    #[test]
+    fn from_fd_rejects_oversized() {
+        use std::os::fd::OwnedFd;
+        // A keymap claiming >1 MiB is likely resource exhaustion:
+        // refuse without reading the full size.
+        let fd = rustix::fs::memfd_create("test", rustix::fs::MemfdFlags::CLOEXEC)
+            .expect("memfd_create succeeds in test environment");
+        let fd = OwnedFd::from(fd);
+        assert!(XkbFeed::from_fd(&fd, 1 << 20).is_none()); // exactly 1 MiB is out of bounds
+        assert!(XkbFeed::from_fd(&fd, (1 << 20) + 1).is_none());
+    }
+
+    #[test]
+    fn from_fd_accepts_valid_keymap_via_memfd() {
+        use std::os::fd::OwnedFd;
+        use xkbcommon::xkb::KEYMAP_FORMAT_TEXT_V1;
+
+        // A real keymap round-tripped through a memfd (matching the
+        // server-fd shape) must be accepted and produce a working feed.
+        let feed = us_feed();
+        let dumped = feed._keymap.get_as_string(KEYMAP_FORMAT_TEXT_V1);
+
+        let fd = rustix::fs::memfd_create("test", rustix::fs::MemfdFlags::CLOEXEC)
+            .expect("memfd_create succeeds in test environment");
+        let fd = OwnedFd::from(fd);
+        rustix::io::write(&fd, dumped.as_bytes()).expect("write to memfd succeeds");
+
+        let loaded = XkbFeed::from_fd(&fd, dumped.len() as u32).expect("valid keymap via fd");
+        // Verify the feed works: a key press must resolve, not None.
+        let mut test_feed = loaded;
+        let result = test_feed.key(EV_A, true);
+        assert_eq!(result, KeyAction::Text("a".to_owned()));
+    }
+
+    #[test]
+    fn from_fd_accepts_nul_terminated_keymap() {
+        use std::os::fd::OwnedFd;
+        use xkbcommon::xkb::KEYMAP_FORMAT_TEXT_V1;
+
+        // The server keymap fd includes a trailing NUL (the xkb wire
+        // format includes it); from_fd must strip and accept it.
+        let feed = us_feed();
+        let mut dumped = feed._keymap.get_as_string(KEYMAP_FORMAT_TEXT_V1);
+        dumped.push('\0');
+
+        let fd = rustix::fs::memfd_create("test", rustix::fs::MemfdFlags::CLOEXEC)
+            .expect("memfd_create succeeds in test environment");
+        let fd = OwnedFd::from(fd);
+        rustix::io::write(&fd, dumped.as_bytes()).expect("write to memfd succeeds");
+
+        let loaded = XkbFeed::from_fd(&fd, dumped.len() as u32).expect("nul-terminated keymap via fd");
+        let mut test_feed = loaded;
+        assert_eq!(test_feed.key(EV_A, true), KeyAction::Text("a".to_owned()));
+    }
+
+    #[test]
+    fn from_fd_rejects_non_utf8() {
+        use std::os::fd::OwnedFd;
+
+        // A keymap fd carrying invalid UTF-8 (truncated, corrupted, or
+        // adversarial) must be refused; the shell runs deaf but alive
+        // rather than panicking or guessing.
+        let fd = rustix::fs::memfd_create("test", rustix::fs::MemfdFlags::CLOEXEC)
+            .expect("memfd_create succeeds in test environment");
+        let fd = OwnedFd::from(fd);
+        let invalid_utf8: &[u8] = &[0xFF, 0xFE, 0xFD];
+        rustix::io::write(&fd, invalid_utf8).expect("write to memfd succeeds");
+
+        assert!(XkbFeed::from_fd(&fd, invalid_utf8.len() as u32).is_none());
+    }
+
+    #[test]
+    fn from_fd_rejects_utf8_garbage() {
+        use std::os::fd::OwnedFd;
+
+        // UTF-8 but not a valid keymap (garbage string) must be
+        // refused just as from_string does.
+        let fd = rustix::fs::memfd_create("test", rustix::fs::MemfdFlags::CLOEXEC)
+            .expect("memfd_create succeeds in test environment");
+        let fd = OwnedFd::from(fd);
+        let garbage = "this is not a valid keymap at all";
+        rustix::io::write(&fd, garbage.as_bytes()).expect("write to memfd succeeds");
+
+        assert!(XkbFeed::from_fd(&fd, garbage.len() as u32).is_none());
+    }
 }
