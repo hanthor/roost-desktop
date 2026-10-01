@@ -7,7 +7,7 @@
 # Runs the nested compositor and GTK shell on a private Xvfb and buses,
 # then writes DIR/<state>.png for: 01-desktop, 02-calendar,
 # 03-quick-settings, 03b-power-mode-menu, 04-overview-empty, 05-app-grid, 06-windows,
-# 07-overview-windows, 08-notification, 09-calendar-with-notification.
+# 07-overview-windows, 07b-overview-hover, 08-notification, 09-calendar-with-notification.
 # Run scripts/roost-gnome-reference first: it exports GNOME's wallpapers.
 # Compare with scripts/lib/roost-parity-compare.py.
 set -eu
@@ -163,6 +163,9 @@ done
 shot 06-windows 4
 xdotool key Super_L
 shot 07-overview-windows
+xdotool mousemove --window "$WID" 415 232
+shot 07b-overview-hover
+park
 xdotool key Escape
 sleep 1
 # GNOME's reference uses Main.notify(): the "System" source with

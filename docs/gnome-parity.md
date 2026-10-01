@@ -47,6 +47,7 @@ scripts/lib/roost-parity-compare.py target/gnome-reference target/roost-parity t
 | 05-app-grid | the app grid |
 | 06-windows | three windows on the desktop |
 | 07-overview-windows | the overview with three windows |
+| 07b-overview-hover | a window preview hovered (caption and close button) |
 | 08-notification | a notification banner |
 | 09-calendar-with-notification | the date menu listing it |
 

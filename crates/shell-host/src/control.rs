@@ -178,6 +178,11 @@ pub enum Handled {
         /// Variable count now held.
         count: usize,
     },
+    /// Where the overview's previews sit (UI state, not model truth).
+    OverviewPreviews {
+        /// Preview count now held.
+        count: usize,
+    },
 }
 
 /// Shell-side control client over a connected Unix socket.
@@ -201,6 +206,8 @@ pub struct ControlClient {
     outputs: Vec<OutputInfo>,
     /// Session environment from the compositor (#59).
     environment: Vec<(String, String)>,
+    /// Overview previews and the hovered one, from the compositor.
+    overview_previews: (Vec<roost_shell_control::PreviewInfo>, Option<u64>),
 }
 
 impl ControlClient {
@@ -229,6 +236,7 @@ impl ControlClient {
             locked: false,
             outputs: Vec::new(),
             environment: Vec::new(),
+            overview_previews: (Vec::new(), None),
         })
     }
 
@@ -261,6 +269,11 @@ impl ControlClient {
     /// (empty before the first one), already applied to app launches.
     pub fn environment(&self) -> &[(String, String)] {
         &self.environment
+    }
+
+    /// The overview's window previews and the hovered one.
+    pub fn overview_previews(&self) -> (&[roost_shell_control::PreviewInfo], Option<u64>) {
+        (&self.overview_previews.0, self.overview_previews.1)
     }
 
     /// Output inventory from the latest `Outputs` message (empty
@@ -555,6 +568,13 @@ impl ControlClient {
                     count: self.outputs.len(),
                 })
             }
+            Message::OverviewPreviews { previews, hovered } => {
+                // UI state for the shell's preview chrome, like Overview.
+                self.overview_previews = (previews, hovered);
+                Ok(Handled::OverviewPreviews {
+                    count: self.overview_previews.0.len(),
+                })
+            }
             Message::Environment { vars } => {
                 // Apps the shell launches inherit these (DISPLAY once
                 // XWayland is up). Not model truth, like Outputs.
@@ -675,6 +695,7 @@ fn message_label(msg: &Message) -> &'static str {
         Message::Switcher { .. } => "Switcher",
         Message::Outputs { .. } => "Outputs",
         Message::Environment { .. } => "Environment",
+        Message::OverviewPreviews { .. } => "OverviewPreviews",
     }
 }
 

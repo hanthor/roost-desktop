@@ -78,6 +78,32 @@ pub struct OverviewLayout {
     pub cards: Vec<WorkspaceCard>,
     /// Previews bottom to top (active card last, so it paints on top).
     pub previews: Vec<Preview>,
+    /// The active preview under the pointer, grown (see [`grow_hovered`]).
+    pub hovered: Option<u64>,
+}
+
+/// GNOME's hover growth (`WINDOW_ACTIVE_SIZE_INC`): 5px each side.
+pub const HOVER_GROWTH: i32 = 5;
+
+/// Grow the topmost active preview under `pointer` by
+/// [`HOVER_GROWTH`] a side, as GNOME does, and remember it as hovered.
+pub fn grow_hovered(layout: &mut OverviewLayout, pointer: Point<f64, Logical>) {
+    let Some(p) = layout
+        .previews
+        .iter_mut()
+        .rev()
+        .find(|p| p.active && p.rect.to_f64().contains(pointer))
+    else {
+        return;
+    };
+    let g = HOVER_GROWTH;
+    let w = p.rect.size.w.max(1);
+    p.scale *= f64::from(w + 2 * g) / f64::from(w);
+    p.rect = Rectangle::new(
+        (p.rect.loc.x - g, p.rect.loc.y - g).into(),
+        (p.rect.size.w + 2 * g, p.rect.size.h + 2 * g).into(),
+    );
+    layout.hovered = Some(p.id);
 }
 
 /// What a press at a point means in the overview.
@@ -698,6 +724,24 @@ mod tests {
         assert!(
             l.previews.iter().all(|p| !p.active),
             "thumbnails are not window pickers"
+        );
+    }
+
+    #[test]
+    fn hovered_preview_grows_five_pixels_a_side() {
+        let mut l = layout(output(), 32, &[0], 0, &[win(1, 0, 100, 100, 640, 420)]);
+        let before = l.previews[0].rect;
+        let inside = Point::from((f64::from(before.loc.x + 10), f64::from(before.loc.y + 10)));
+        grow_hovered(&mut l, inside);
+        assert_eq!(l.hovered, Some(1));
+        let after = l.previews[0].rect;
+        assert_eq!(
+            (after.loc.x, after.loc.y),
+            (before.loc.x - 5, before.loc.y - 5)
+        );
+        assert_eq!(
+            (after.size.w, after.size.h),
+            (before.size.w + 10, before.size.h + 10)
         );
     }
 

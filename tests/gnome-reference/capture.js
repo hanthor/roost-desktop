@@ -100,6 +100,19 @@ export async function run() {
     Main.overview.show();
     await Scripting.sleep(1500);
     await shot('07-overview-windows');
+    // The first preview as hovered: GNOME's own hover path.
+    const previews = [];
+    const find = a => {
+        if (a.constructor.$gtype.name.includes('WindowPreview'))
+            previews.push(a);
+        a.get_children().forEach(find);
+    };
+    find(global.stage);
+    previews.sort((a, b) => a.get_transformed_position()[0] - b.get_transformed_position()[0] ||
+        a.get_transformed_position()[1] - b.get_transformed_position()[1]);
+    previews[0]?.showOverlay(false);
+    await shot('07b-overview-hover');
+    previews[0]?.hideOverlay(false);
     Main.overview.hide();
     await Scripting.sleep(1500);
 

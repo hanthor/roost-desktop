@@ -1102,13 +1102,16 @@ impl Runtime {
         } else {
             crate::overview::layout
         };
-        layout(
+        let mut scene = layout(
             output,
             crate::windows::WORK_AREA_TOP,
             model.workspaces(),
             model.active_workspace(),
             &self.manager.overview_windows(),
-        )
+        );
+        // GNOME grows the preview under the pointer by 5px a side.
+        crate::overview::grow_hovered(&mut scene, self.manager.pointer_pos());
+        scene
     }
 
     /// A press while the overview is open that no shell surface took:
@@ -1336,7 +1339,7 @@ impl Runtime {
         let overview = self.control.overview_open().then(|| self.overview_layout());
         let cards = overview.as_ref().filter(|_| !self.overview_search);
         let decor_global = cards
-            .map(|layout| overview_decor(layout, self.manager.pointer_pos()))
+            .map(|_| Vec::<(Color32F, Vec<Rectangle<i32, Logical>>)>::new())
             .unwrap_or_default();
         let background = if overview.is_some() {
             OVERVIEW_BACKGROUND
@@ -1594,6 +1597,32 @@ impl Runtime {
     }
 
     /// Keep the D-Bus side's monitor list current (cheap when unchanged).
+    /// Preview geometry for the shell's preview chrome: GNOME's app
+    /// icon, caption and close button (window picker only, not while
+    /// search or the app grid covers it).
+    fn publish_overview_previews(&mut self) {
+        let (previews, hovered) =
+            if self.control.overview_open() && !self.overview_search && !self.overview_app_grid {
+                let scene = self.overview_layout();
+                let list: Vec<roost_shell_control::PreviewInfo> = scene
+                    .previews
+                    .iter()
+                    .filter(|p| p.active)
+                    .map(|p| roost_shell_control::PreviewInfo {
+                        window: p.id,
+                        x: p.rect.loc.x,
+                        y: p.rect.loc.y,
+                        width: p.rect.size.w,
+                        height: p.rect.size.h,
+                    })
+                    .collect();
+                (list, scene.hovered)
+            } else {
+                (Vec::new(), None)
+            };
+        self.control.set_overview_previews(previews, hovered);
+    }
+
     fn publish_cast_outputs(&self) {
         let snapshot: Vec<crate::mutter::OutputSnapshot> = self
             .state
@@ -1747,6 +1776,7 @@ impl Runtime {
         self.stats.shell_restarts = self.shell.restarts_used();
         self.publish_state();
         self.publish_cast_outputs();
+        self.publish_overview_previews();
         self.render()?;
         self.screencast_tick();
         Ok(!self.exit)
@@ -1775,7 +1805,7 @@ impl Runtime {
         // While search shows results, the workspace view steps aside.
         let cards = overview.as_ref().filter(|_| !self.overview_search);
         let decor_global = cards
-            .map(|layout| overview_decor(layout, self.manager.pointer_pos()))
+            .map(|_| Vec::<(Color32F, Vec<Rectangle<i32, Logical>>)>::new())
             .unwrap_or_default();
         let background = if overview.is_some() {
             OVERVIEW_BACKGROUND
@@ -1944,42 +1974,6 @@ impl Runtime {
 
 /// Overview backdrop (GNOME 51's `#overviewGroup`, #222226).
 const OVERVIEW_BACKGROUND: Color32F = Color32F::new(34.0 / 255.0, 34.0 / 255.0, 38.0 / 255.0, 1.0);
-/// Hover ring around the preview under the pointer.
-const OVERVIEW_HOVER: Color32F = Color32F::new(0.62, 0.66, 0.72, 1.0);
-/// Hover ring thickness.
-const HOVER_RING: i32 = 4;
-
-/// Overview solid shapes in the global space: the ring around the active
-/// preview under `pointer` (cards are drawn as images, see [`backdrop`]).
-fn overview_decor(
-    layout: &crate::overview::OverviewLayout,
-    pointer: Point<f64, Logical>,
-) -> Vec<(Color32F, Vec<Rectangle<i32, Logical>>)> {
-    let mut out = Vec::new();
-    if let Some(p) = layout
-        .previews
-        .iter()
-        .rev()
-        .find(|p| p.active && p.rect.to_f64().contains(pointer))
-    {
-        let r = p.rect;
-        let t = HOVER_RING;
-        let ring = vec![
-            Rectangle::new(
-                (r.loc.x - t, r.loc.y - t).into(),
-                (r.size.w + 2 * t, t).into(),
-            ),
-            Rectangle::new(
-                (r.loc.x - t, r.loc.y + r.size.h).into(),
-                (r.size.w + 2 * t, t).into(),
-            ),
-            Rectangle::new((r.loc.x - t, r.loc.y).into(), (t, r.size.h).into()),
-            Rectangle::new((r.loc.x + r.size.w, r.loc.y).into(), (t, r.size.h).into()),
-        ];
-        out.push((OVERVIEW_HOVER, ring));
-    }
-    out
-}
 
 /// Global decor in one output's physical pixels.
 fn decor_for_output(

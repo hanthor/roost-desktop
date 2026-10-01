@@ -451,6 +451,18 @@ impl<'a> Session<'a> {
         self.idle_timeout.take()
     }
 
+    /// Send where the overview's window previews sit.
+    pub fn send_overview_previews(
+        &mut self,
+        previews: &[roost_shell_control::PreviewInfo],
+        hovered: Option<u64>,
+    ) -> Result<(), ControlError> {
+        self.conn.write_frame(&Message::OverviewPreviews {
+            previews: previews.to_vec(),
+            hovered,
+        })
+    }
+
     /// Send the session environment (#59).
     pub fn send_environment(&mut self, vars: &[(String, String)]) -> Result<(), ControlError> {
         self.conn.write_frame(&Message::Environment {
@@ -635,6 +647,7 @@ impl<'a> Session<'a> {
             | Message::Switcher { .. }
             | Message::Outputs { .. }
             | Message::Environment { .. }
+            | Message::OverviewPreviews { .. }
             | Message::Error { .. } => {
                 let _ = self.conn.write_frame(&Message::Error {
                     kind: ErrorKind::UnknownCommand,
@@ -672,6 +685,7 @@ fn message_kind(msg: &Message) -> &'static str {
         Message::Switcher { .. } => "Switcher",
         Message::Outputs { .. } => "Outputs",
         Message::Environment { .. } => "Environment",
+        Message::OverviewPreviews { .. } => "OverviewPreviews",
     }
 }
 
@@ -977,6 +991,10 @@ pub struct ControlHub {
     /// every live session holds.
     environment: Vec<(String, String)>,
     environment_sent: Vec<(String, String)>,
+    /// Overview previews for the shell's chrome, and the last value
+    /// every session holds.
+    previews: (Vec<roost_shell_control::PreviewInfo>, Option<u64>),
+    previews_sent: (Vec<roost_shell_control::PreviewInfo>, Option<u64>),
     /// Peer admission rule (#30); the runtime narrows it to the
     /// supervised shell's pid every tick.
     gate: PeerGate,
@@ -1030,6 +1048,8 @@ impl ControlHub {
             outputs_sent: Vec::new(),
             environment: Vec::new(),
             environment_sent: Vec::new(),
+            previews: (Vec::new(), None),
+            previews_sent: (Vec::new(), None),
             store,
             seat: seat.to_owned(),
             gate: PeerGate::SameUser,
@@ -1096,6 +1116,16 @@ impl ControlHub {
     /// Set the session environment (#59); the next [`poll`](Self::poll)
     /// broadcasts it when it differs from the last broadcast, and every
     /// newcomer gets it right after the handshake.
+    /// Where the overview's previews sit and which one is hovered; sent
+    /// to the shell when it changes (empty while the overview is closed).
+    pub fn set_overview_previews(
+        &mut self,
+        previews: Vec<roost_shell_control::PreviewInfo>,
+        hovered: Option<u64>,
+    ) {
+        self.previews = (previews, hovered);
+    }
+
     pub fn set_environment(&mut self, mut vars: Vec<(String, String)>) {
         vars.sort();
         self.environment = vars;
@@ -1228,6 +1258,20 @@ impl ControlHub {
                 self.environment_sent = self.environment.clone();
             }
         }
+        if self.previews != self.previews_sent {
+            let mut all_sent = true;
+            for session in &mut self.sessions {
+                if session
+                    .send_overview_previews(&self.previews.0, self.previews.1)
+                    .is_err()
+                {
+                    all_sent = false;
+                }
+            }
+            if all_sent {
+                self.previews_sent = self.previews.clone();
+            }
+        }
         if self.outputs != self.outputs_sent {
             let mut all_sent = true;
             for session in &mut self.sessions {
@@ -1301,6 +1345,7 @@ impl ControlHub {
                 }
                 if !self.environment.is_empty() {
                     let _ = session.send_environment(&self.environment);
+                    let _ = session.send_overview_previews(&self.previews.0, self.previews.1);
                 }
                 self.sessions.push(session);
                 self.session_peers.push(peer);
