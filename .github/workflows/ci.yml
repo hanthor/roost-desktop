@@ -34,7 +34,7 @@ jobs:
       # check does not. Mesa swrast provides software GL on runners.
       # The shell's gio settings read needs glib dev files at build
       # time (check gets them transitively via GTK).
-      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck libglib2.0-dev
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck libglib2.0-dev libgtk-4-dev libadwaita-1-dev
       - run: shellcheck scripts/roost-journey scripts/roost-nested scripts/roost-release scripts/check-release-package
       - run: scripts/roost-release --allow-dirty --out package-artifacts && scripts/check-release-package package-artifacts/*.deb
       - uses: actions/upload-artifact@v4
@@ -64,7 +64,7 @@ jobs:
       # (baseline-vs-app diff plus app-color pixel count), humans review
       # the uploaded frames. Playwright installs its own venv, browser,
       # and browser system libraries on the runner.
-      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck python3-venv libglib2.0-dev
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck python3-venv libglib2.0-dev libgtk-4-dev libadwaita-1-dev
       - run: shellcheck scripts/roost-app-content scripts/roost-nested
       - run: scripts/roost-app-content --artifacts app-content-artifacts
       - uses: actions/upload-artifact@v4
@@ -87,7 +87,7 @@ jobs:
       # Playwright, Super+Shift+T toggle, Super+R preset cycling, and
       # wheel scrolling, with gap-geometry pixel asserts. Humans review
       # the uploaded frames.
-      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck python3-venv libglib2.0-dev
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck python3-venv libglib2.0-dev libgtk-4-dev libadwaita-1-dev
       - run: shellcheck scripts/roost-scroll-proof scripts/roost-nested
       - run: scripts/roost-scroll-proof --artifacts scroll-proof-artifacts
       - uses: actions/upload-artifact@v4
