@@ -19,3 +19,7 @@ jiff.workspace = true
 libc = "0.2"
 roost-shell-host = { path = "../shell-host", version = "0.1.0" }
 roost-shell-control = { path = "../shell-control-schema", version = "0.1.0" }
+
+[build-dependencies]
+# GNOME Shell's own icons, compiled in as a GResource (build.rs).
+glib-build-tools = "0.22"

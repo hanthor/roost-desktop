@@ -11,15 +11,10 @@ push button: Power Off
 push button: Mute
 slider: Volume
 slider: Brightness
-table cell: Wi-Fi
 toggle button: Wi-Fi
-table cell: Wired
 toggle button: Wired
-table cell: Bluetooth
 toggle button: Bluetooth
-table cell: Power Mode
 toggle button: Power Mode
-table cell: Dark Style
+toggle button: Power Mode Menu
 toggle button: Dark Style
-table cell: Do Not Disturb
 toggle button: Do Not Disturb

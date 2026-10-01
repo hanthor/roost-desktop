@@ -6,7 +6,7 @@
 #
 # Runs the nested compositor and GTK shell on a private Xvfb and buses,
 # then writes DIR/<state>.png for: 01-desktop, 02-calendar,
-# 03-quick-settings, 04-overview-empty, 05-app-grid, 06-windows,
+# 03-quick-settings, 03b-power-mode-menu, 04-overview-empty, 05-app-grid, 06-windows,
 # 07-overview-windows, 08-notification, 09-calendar-with-notification.
 # Run scripts/roost-gnome-reference first: it exports GNOME's wallpapers.
 # Compare with scripts/lib/roost-parity-compare.py.
@@ -52,15 +52,28 @@ XDG_CONFIG_HOME="$WORK/config"
 XDG_STATE_HOME="$WORK/state"
 XDG_DATA_HOME="$WORK/data"
 export GSETTINGS_BACKEND XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME
-mkdir -p "$WORK/backlight/roost-bl" "$WORK/bin"
-echo 1000 >"$WORK/backlight/roost-bl/max_brightness"
-echo 500 >"$WORK/backlight/roost-bl/brightness"
-ROOST_BACKLIGHT_ROOT="$WORK/backlight"
-export ROOST_BACKLIGHT_ROOT
+# GNOME 51's icons and fonts from the reference run, ahead of the host's.
+REF="$ROOT/target/gnome-reference"
+# Icons go last on XDG_DATA_DIRS: with two copies of a theme, GTK
+# 4.14 takes the icon from the later directory.
+if [ -d "$REF/share" ]; then
+    mkdir -p "$XDG_DATA_HOME" "$WORK/gnome51"
+    cp -r "$REF/share/fonts" "$XDG_DATA_HOME/"
+    fc-cache "$XDG_DATA_HOME/fonts" >/dev/null 2>&1 || true
+    cp -r "$REF/share/icons" "$WORK/gnome51/"
+    XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}:$WORK/gnome51"
+    export XDG_DATA_DIRS
+fi
+# The same services GNOME's headless reference has: power profiles and
+# logind, no network or Bluetooth daemons, no backlight (a virtual
+# monitor has none) and no audio server.
+mkdir -p "$WORK/backlight/none" "$WORK/bin"
+ROOST_BACKLIGHT_ROOT="$WORK/backlight/none"
+ROOST_STUB_SERVICES=ppd,logind
+export ROOST_BACKLIGHT_ROOT ROOST_STUB_SERVICES
 cat >"$WORK/bin/wpctl" <<'WPCTL'
 #!/bin/sh
-[ "$1" = get-volume ] && echo "Volume: 0.80"
-exit 0
+exit 1
 WPCTL
 chmod +x "$WORK/bin/wpctl"
 PATH="$WORK/bin:$PATH"
@@ -69,13 +82,14 @@ SYSBUS_INFO="$(dbus-daemon --session --fork --print-address=1 --print-pid=1)"
 DBUS_SYSTEM_BUS_ADDRESS="$(echo "$SYSBUS_INFO" | sed -n 1p)"
 PIDS="$PIDS $(echo "$SYSBUS_INFO" | sed -n 2p)"
 export DBUS_SYSTEM_BUS_ADDRESS
-"$PY" "$ROOT/scripts/lib/roost-service-stubs.py" "$WORK/backlight/roost-bl" >"$WORK/stubs.log" 2>&1 &
+"$PY" "$ROOT/scripts/lib/roost-service-stubs.py" "$WORK/backlight/none" >"$WORK/stubs.log" 2>&1 &
 PIDS="$PIDS $!"
 for _ in $(seq 1 20); do grep -q ready "$WORK/stubs.log" 2>/dev/null && break; sleep 0.5; done
 
 # GNOME 51's defaults: the reference run exports its wallpapers.
-REF="$ROOT/target/gnome-reference"
 gsettings set org.gnome.desktop.background primary-color '#023c88'
+# GNOME's defaults where the host's schemas may differ (Ubuntu: Yaru).
+gsettings set org.gnome.desktop.interface icon-theme Adwaita
 gsettings set org.gnome.desktop.background picture-options zoom
 for variant in l d; do
     key=picture-uri
@@ -117,6 +131,8 @@ xdotool key Escape
 xdotool mousemove --window "$WID" $((WIDTH - 30)) 16 click 1
 park
 shot 03-quick-settings
+press "Power Mode Menu"
+shot 03b-power-mode-menu
 xdotool key Escape
 sleep 1
 xdotool key Super_L

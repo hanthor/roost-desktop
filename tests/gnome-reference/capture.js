@@ -71,9 +71,15 @@ export async function run() {
     await shot('02-calendar');
     Main.panel.statusArea.dateMenu.menu.close(NONE);
 
-    Main.panel.statusArea.quickSettings.menu.open(NONE);
+    const quickSettings = Main.panel.statusArea.quickSettings;
+    quickSettings.menu.open(NONE);
     await shot('03-quick-settings');
-    Main.panel.statusArea.quickSettings.menu.close(NONE);
+    // The Power Mode toggle's own menu, opened in place.
+    const powerMode = quickSettings._powerProfiles.quickSettingsItems[0];
+    powerMode.menu.open(false);
+    await shot('03b-power-mode-menu');
+    powerMode.menu.close(false);
+    quickSettings.menu.close(NONE);
 
     Main.overview.show();
     await Scripting.sleep(1500);

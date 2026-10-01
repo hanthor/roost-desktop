@@ -166,7 +166,8 @@ fn render_pills(shell: &mut Shell) {
     let wanted = match shell.control.as_ref() {
         Some(control) => {
             let model = control.model();
-            logic::workspace_pills(model.workspaces(), model.active_workspace())
+            let occupied: Vec<u32> = model.windows().iter().map(|w| w.workspace).collect();
+            logic::workspace_pills(model.workspaces(), model.active_workspace(), &occupied)
         }
         None => vec![true],
     };
@@ -181,6 +182,7 @@ fn render_pills(shell: &mut Shell) {
         pill.add_css_class("ws-pill");
         if *active {
             pill.add_css_class("active");
+            pill.set_size_request(logic::active_pill_width(wanted.len()), -1);
         }
         pill.set_valign(gtk::Align::Center);
         shell.pills.append(&pill);
@@ -215,27 +217,202 @@ fn calendar_popover(notes: &gtk::Box) -> (gtk::Popover, gtk::Label, gtk::Label) 
     (popover, weekday, full_date)
 }
 
+/// One GNOME 51 quick toggle (`.quick-toggle`): icon, bold title and an
+/// optional subtitle in a 176x48 pill.
 fn qs_tile(icon: &str, title: &str, subtitle: Option<&str>) -> services::Tile {
-    let content = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 9);
     let image = gtk::Image::from_icon_name(icon);
     image.set_valign(gtk::Align::Center);
+    image.add_css_class("qs-icon");
     content.append(&image);
     let text = gtk::Box::new(gtk::Orientation::Vertical, 0);
     text.set_valign(gtk::Align::Center);
+    // Fixed-width toggles (GNOME's 12em): labels ellipsize instead of
+    // widening the panel.
     let t = gtk::Label::new(Some(title));
-    t.set_halign(gtk::Align::Start);
+    t.set_xalign(0.0);
+    t.set_max_width_chars(1);
+    t.set_hexpand(true);
+    t.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    t.add_css_class("qs-title");
     text.append(&t);
     let s = gtk::Label::new(subtitle);
-    s.set_halign(gtk::Align::Start);
-    s.add_css_class("caption");
+    s.set_xalign(0.0);
+    s.set_max_width_chars(1);
+    s.set_hexpand(true);
+    s.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    s.add_css_class("qs-subtitle");
     s.set_visible(subtitle.is_some());
     text.append(&s);
     content.append(&text);
     let toggle = gtk::ToggleButton::builder().child(&content).build();
     toggle.add_css_class("qs-toggle");
-    toggle.set_hexpand(true);
     toggle.update_property(&[gtk::accessible::Property::Label(title)]);
-    services::Tile::new(toggle, s)
+    services::Tile::new(toggle, s, image)
+}
+
+/// A GNOME quick toggle with a menu (`.quick-toggle-has-menu`): the
+/// toggle, a 1px separator, and an arrow that opens `menu` in place.
+fn qs_menu_tile(icon: &str, title: &str, subtitle: Option<&str>, menu: &QsMenu) -> services::Tile {
+    let mut tile = qs_tile(icon, title, subtitle);
+    tile.button.add_css_class("has-menu");
+    let outer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    outer.add_css_class("qs-toggle-has-menu");
+    outer.append(&tile.button);
+    tile.button.set_hexpand(true);
+    let separator = gtk::Separator::new(gtk::Orientation::Vertical);
+    separator.add_css_class("qs-separator");
+    outer.append(&separator);
+    let arrow = gtk::ToggleButton::new();
+    arrow.set_icon_name("go-next-symbolic");
+    arrow.add_css_class("qs-menu-button");
+    arrow.update_property(&[gtk::accessible::Property::Label(&format!("{title} Menu"))]);
+    outer.append(&arrow);
+    {
+        let revealer = menu.revealer.clone();
+        arrow.connect_toggled(move |a| revealer.set_visible(a.is_active()));
+    }
+    {
+        let arrow = arrow.clone();
+        menu.revealer.connect_visible_notify(move |r| {
+            if arrow.is_active() != r.is_visible() {
+                arrow.set_active(r.is_visible());
+            }
+        });
+    }
+    // The separator and arrow follow the toggle's checked state.
+    {
+        let (outer, button) = (outer.clone(), tile.button.clone());
+        let sync = move || {
+            if button.is_active() {
+                outer.add_css_class("checked");
+            } else {
+                outer.remove_css_class("checked");
+            }
+        };
+        sync();
+        tile.button.connect_toggled(move |_| sync());
+    }
+    tile.outer = outer.upcast();
+    tile
+}
+
+/// A quick toggle's menu (`.quick-toggle-menu`): a header with a round
+/// icon and title, then a section of items. Shown in place, spanning
+/// the grid under its toggle's row.
+struct QsMenu {
+    revealer: gtk::Box,
+    header_icon: gtk::Image,
+    section: gtk::Box,
+}
+
+impl QsMenu {
+    fn new(icon: &str, title: &str) -> Self {
+        let revealer = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        revealer.add_css_class("qs-menu");
+        revealer.set_visible(false);
+        let header = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        header.add_css_class("qs-menu-header");
+        let header_icon = gtk::Image::from_icon_name(icon);
+        header_icon.add_css_class("qs-menu-icon");
+        header_icon.set_pixel_size(24);
+        header.append(&header_icon);
+        let label = gtk::Label::new(Some(title));
+        label.add_css_class("qs-menu-title");
+        header.append(&label);
+        revealer.append(&header);
+        let section = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        revealer.append(&section);
+        Self {
+            revealer,
+            header_icon,
+            section,
+        }
+    }
+
+    /// One item: icon, label and a check ornament (hidden until set).
+    fn item(&self, icon: Option<&str>, label: &str) -> (gtk::Button, gtk::Image) {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        if let Some(icon) = icon {
+            row.append(&gtk::Image::from_icon_name(icon));
+        }
+        row.append(&gtk::Label::new(Some(label)));
+        let ornament = gtk::Image::from_icon_name("ornament-check-symbolic");
+        ornament.set_visible(false);
+        row.append(&ornament);
+        let button = gtk::Button::builder().child(&row).build();
+        button.add_css_class("qs-menu-item");
+        button.update_property(&[gtk::accessible::Property::Label(label)]);
+        self.section.append(&button);
+        (button, ornament)
+    }
+
+    fn separator(&self) {
+        let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
+        separator.add_css_class("qs-menu-separator");
+        self.section.append(&separator);
+    }
+}
+
+/// GNOME's quick-settings grid (`QuickSettingsLayout`): two 176px
+/// columns, 12px apart; hidden toggles leave no gap; an open toggle
+/// menu takes a full-width row under its toggle's row.
+struct QsGrid {
+    grid: gtk::Grid,
+    items: RefCell<Vec<(gtk::Widget, Option<gtk::Box>)>>,
+}
+
+impl QsGrid {
+    fn new() -> Rc<Self> {
+        let grid = gtk::Grid::builder()
+            .row_spacing(12)
+            .column_spacing(12)
+            .column_homogeneous(true)
+            .build();
+        grid.add_css_class("qs-grid");
+        Rc::new(Self {
+            grid,
+            items: RefCell::new(Vec::new()),
+        })
+    }
+
+    fn add(self: &Rc<Self>, tile: &services::Tile, menu: Option<&QsMenu>) {
+        let menu = menu.map(|m| m.revealer.clone());
+        self.items
+            .borrow_mut()
+            .push((tile.outer.clone(), menu.clone()));
+        // A strong reference: the grid lives as long as its tiles do
+        // (the quick-settings popover, for the whole session).
+        let this = self.clone();
+        let relayout = move || this.relayout();
+        let r = relayout.clone();
+        tile.outer.connect_visible_notify(move |_| r());
+        if let Some(menu) = menu {
+            menu.connect_visible_notify(move |_| relayout());
+        }
+        self.relayout();
+    }
+
+    fn relayout(&self) {
+        while let Some(child) = self.grid.first_child() {
+            self.grid.remove(&child);
+        }
+        let items = self.items.borrow();
+        let visible: Vec<_> = items.iter().filter(|(w, _)| w.is_visible()).collect();
+        let mut row = 0;
+        for pair in visible.chunks(2) {
+            for (col, (widget, _)) in pair.iter().enumerate() {
+                self.grid.attach(widget, col as i32, row, 1, 1);
+            }
+            row += 1;
+            for (_, menu) in pair {
+                if let Some(menu) = menu {
+                    self.grid.attach(menu, 0, row, 2, 1);
+                    row += 1;
+                }
+            }
+        }
+    }
 }
 
 fn qs_round(icon: &str, label: &str) -> gtk::Button {
@@ -245,10 +422,19 @@ fn qs_round(icon: &str, label: &str) -> gtk::Button {
     button
 }
 
+/// The panel's status icons that quick-settings services drive.
+struct PanelIcons {
+    network: gtk::Image,
+    dnd: gtk::Image,
+    volume: gtk::Image,
+    power_profile: gtk::Image,
+}
+
 fn quick_settings_popover(
     shell: &Rc<RefCell<Shell>>,
     notify: &Rc<notify::NotifyUi>,
     power_ui: &Rc<power::PowerUi>,
+    icons: PanelIcons,
 ) -> gtk::Popover {
     let popover = gtk::Popover::new();
     popover.add_css_class("roost-shell-popover");
@@ -257,9 +443,13 @@ fn quick_settings_popover(
     let col = gtk::Box::new(gtk::Orientation::Vertical, 12);
 
     // Top row: screenshot and settings left, lock and power right.
-    let top = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    let screenshot = qs_round("camera-photo-symbolic", "Take Screenshot");
+    let top = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let screenshot = qs_round("screenshooter-symbolic", "Take Screenshot");
+    // GNOME shows the Settings app's own icon, in its symbolic form.
     let settings_btn = qs_round("emblem-system-symbolic", "Settings");
+    settings_btn.set_child(Some(&gtk::Image::from_gicon(&gio::ThemedIcon::from_names(
+        &["org.gnome.Settings-symbolic", "emblem-system-symbolic"],
+    ))));
     let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
     let lock = qs_round("system-lock-screen-symbolic", "Lock");
@@ -348,10 +538,23 @@ fn quick_settings_popover(
         });
         power_menu.set_child(Some(&power_ui.menu(close)));
     }
+    // Hidden while closed, so the column adds no spacing for it.
+    power_menu.set_visible(false);
     {
         let revealer = power_menu.clone();
-        power.connect_clicked(move |_| revealer.set_reveal_child(!revealer.reveals_child()));
+        power.connect_clicked(move |_| {
+            let open = !revealer.reveals_child();
+            if open {
+                revealer.set_visible(true);
+            }
+            revealer.set_reveal_child(open);
+        });
     }
+    power_menu.connect_child_revealed_notify(|r| {
+        if !r.is_child_revealed() {
+            r.set_visible(false);
+        }
+    });
     {
         let revealer = power_menu.clone();
         popover.connect_closed(move |_| revealer.set_reveal_child(false));
@@ -377,37 +580,81 @@ fn quick_settings_popover(
     brightness.update_property(&[gtk::accessible::Property::Label("Brightness")]);
     brightness_row.append(&brightness);
 
-    // Toggle grid, two columns, GNOME 51 order. Tiles whose service is
-    // absent hide, and the flow closes the gap.
-    let grid = gtk::FlowBox::builder()
-        .selection_mode(gtk::SelectionMode::None)
-        .homogeneous(true)
-        .min_children_per_line(2)
-        .max_children_per_line(2)
-        .row_spacing(12)
-        .column_spacing(12)
-        .build();
+    // Toggle grid, two columns, GNOME 51 order (panel.js
+    // `_setupIndicators`). Tiles whose service is absent hide, and the
+    // grid closes the gap.
+    let grid = QsGrid::new();
     let wifi = qs_tile("network-wireless-symbolic", "Wi-Fi", None);
     let wired = qs_tile("network-wired-symbolic", "Wired", None);
     let bluetooth = qs_tile("bluetooth-active-symbolic", "Bluetooth", None);
-    let power_mode = qs_tile(
+    let power_menu_ui = QsMenu::new("power-profile-balanced-symbolic", "Power Mode");
+    let power_items: Vec<(&'static str, gtk::Button, gtk::Image)> = [
+        ("performance", "Performance"),
+        ("balanced", "Balanced"),
+        ("power-saver", "Power Saver"),
+    ]
+    .into_iter()
+    .map(|(name, label)| {
+        let (button, ornament) = power_menu_ui.item(Some(logic::power_mode_icon(name)), label);
+        (name, button, ornament)
+    })
+    .collect();
+    power_menu_ui.separator();
+    let (power_settings, _) = power_menu_ui.item(None, "Power Settings");
+    power_settings.connect_clicked(|_| {
+        let _ = std::process::Command::new("gnome-control-center")
+            .arg("power")
+            .spawn();
+    });
+    let power_mode = qs_menu_tile(
         "power-profile-balanced-symbolic",
         "Power Mode",
         Some("Balanced"),
+        &power_menu_ui,
     );
     let night = qs_tile("night-light-symbolic", "Night Light", None);
     let dark = qs_tile("dark-mode-symbolic", "Dark Style", None);
     let dnd_tile = qs_tile("notifications-disabled-symbolic", "Do Not Disturb", None);
-    for tile in [
-        &wifi,
-        &wired,
-        &bluetooth,
-        &power_mode,
-        &night,
-        &dark,
-        &dnd_tile,
-    ] {
-        grid.append(&tile.button);
+    for tile in [&wifi, &wired, &bluetooth] {
+        grid.add(tile, None);
+    }
+    grid.add(&power_mode, Some(&power_menu_ui));
+    for tile in [&night, &dark, &dnd_tile] {
+        grid.add(tile, None);
+    }
+    let (wifi_outer, wired_outer, bluetooth_outer, power_outer, night_outer, dark_outer, dnd_outer) = (
+        wifi.outer.clone(),
+        wired.outer.clone(),
+        bluetooth.outer.clone(),
+        power_mode.outer.clone(),
+        night.outer.clone(),
+        dark.outer.clone(),
+        dnd_tile.outer.clone(),
+    );
+    // While a toggle menu is open GNOME dims everything else in the
+    // panel (brightness -0.4); selecting an item closes the panel, as
+    // PopupMenu activation does.
+    {
+        let popover = popover.clone();
+        power_menu_ui.revealer.connect_visible_notify(move |menu| {
+            if menu.is_visible() {
+                popover.add_css_class("dimmed");
+            } else {
+                popover.remove_css_class("dimmed");
+            }
+        });
+    }
+    for (_, button, _) in &power_items {
+        let popover = popover.clone();
+        button.connect_clicked(move |_| popover.popdown());
+    }
+    {
+        let popover = popover.clone();
+        power_settings.connect_clicked(move |_| popover.popdown());
+    }
+    {
+        let menu = power_menu_ui.revealer.clone();
+        popover.connect_closed(move |_| menu.set_visible(false));
     }
     let dnd = dnd_tile.button.clone();
 
@@ -434,6 +681,11 @@ fn quick_settings_popover(
         wired,
         bluetooth,
         power_mode,
+        power_header: power_menu_ui.header_icon.clone(),
+        power_items,
+        panel_network: icons.network,
+        panel_volume: icons.volume,
+        panel_power_profile: icons.power_profile,
         volume: slider,
         mute,
         brightness_row: brightness_row.clone(),
@@ -456,12 +708,14 @@ fn quick_settings_popover(
         });
     }
     {
-        // Keep the tile in step when DND changes elsewhere.
-        let (dnd, notify) = (dnd.clone(), notify.clone());
+        // Keep the tile, and the panel's DND icon, in step when DND
+        // changes elsewhere.
+        let (dnd, notify, dnd_icon) = (dnd.clone(), notify.clone(), icons.dnd.clone());
         glib::timeout_add_local(Duration::from_millis(250), move || {
             if dnd.is_active() != notify.dnd() {
                 dnd.set_active(notify.dnd());
             }
+            dnd_icon.set_visible(notify.dnd());
             glib::ControlFlow::Continue
         });
     }
@@ -470,7 +724,26 @@ fn quick_settings_popover(
     col.append(&power_menu);
     col.append(&volume_row);
     col.append(&brightness_row);
-    col.append(&grid);
+    col.append(&grid.grid);
+    // Everything but an open toggle menu dims with the panel.
+    for widget in [
+        top.upcast_ref::<gtk::Widget>(),
+        volume_row.upcast_ref(),
+        brightness_row.upcast_ref(),
+    ] {
+        widget.add_css_class("qs-dimmable");
+    }
+    for tile in [
+        &wifi_outer,
+        &wired_outer,
+        &bluetooth_outer,
+        &power_outer,
+        &night_outer,
+        &dark_outer,
+        &dnd_outer,
+    ] {
+        tile.add_css_class("qs-dimmable");
+    }
     popover.set_child(Some(&col));
     popover
 }
@@ -484,6 +757,51 @@ fn build(app: &adw::Application) {
             &provider,
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
+        // GNOME Shell's bundled icons (dark-mode, screenshooter...).
+        gio::resources_register_include!("icons.gresource").ok();
+        gtk::IconTheme::for_display(&display).add_resource_path("/org/roost/Shell/icons");
+    }
+    // GNOME's icon theme key, applied the way gnome-settings-daemon's
+    // xsettings plugin applies it to GTK.
+    if let (Some(gtk_settings), Some(iface)) =
+        (gtk::Settings::default(), settings(INTERFACE_SCHEMA))
+    {
+        gtk_settings.set_gtk_icon_theme_name(Some(&iface.string("icon-theme")));
+        iface.connect_changed(Some("icon-theme"), move |i, _| {
+            gtk_settings.set_gtk_icon_theme_name(Some(&i.string("icon-theme")));
+        });
+    }
+    // Text renders with GNOME's font hinting and antialiasing keys
+    // (slight, grayscale by default), mapped the way
+    // gnome-settings-daemon's xsettings plugin maps them for GTK.
+    if let Some(gtk_settings) = gtk::Settings::default() {
+        let apply = {
+            let gtk_settings = gtk_settings.clone();
+            move |iface: Option<&gio::Settings>| {
+                let (hinting, antialias) = iface
+                    .map(|i| {
+                        (
+                            i.string("font-hinting").to_string(),
+                            i.string("font-antialiasing").to_string(),
+                        )
+                    })
+                    .unwrap_or_else(|| ("slight".into(), "grayscale".into()));
+                let (hint, style, aa, rgba) = logic::font_rendering(&hinting, &antialias);
+                gtk_settings.set_property("gtk-xft-hinting", hint);
+                gtk_settings.set_property("gtk-xft-hintstyle", style);
+                gtk_settings.set_property("gtk-xft-antialias", aa);
+                gtk_settings.set_property("gtk-xft-rgba", rgba);
+            }
+        };
+        let iface = settings(INTERFACE_SCHEMA);
+        apply(iface.as_ref());
+        if let Some(iface) = iface {
+            iface.connect_changed(None, move |i, key| {
+                if key.starts_with("font-") {
+                    apply(Some(i));
+                }
+            });
+        }
     }
     // The shell chrome is always dark, as in GNOME.
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
@@ -500,8 +818,9 @@ fn build(app: &adw::Application) {
     window.auto_exclusive_zone_enable();
     window.set_keyboard_mode(KeyboardMode::OnDemand);
 
-    let pills = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    let pills = gtk::Box::new(gtk::Orientation::Horizontal, 5);
     pills.set_valign(gtk::Align::Center);
+    pills.add_css_class("ws-pills");
     let shell = Rc::new(RefCell::new(Shell {
         control: attach_control(),
         pills: pills.clone(),
@@ -525,15 +844,24 @@ fn build(app: &adw::Application) {
     let clock_label = gtk::Label::new(None);
     let (cal_popover, weekday, full_date) = calendar_popover(notify.pane());
     let clock = panel_menu_button(&clock_label, "Date and Time", &cal_popover);
+    clock.add_css_class("clock-display");
 
-    let indicators = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    for icon in [
-        "network-wired-symbolic",
-        "audio-volume-high-symbolic",
-        "system-shutdown-symbolic",
-    ] {
-        indicators.append(&gtk::Image::from_icon_name(icon));
-    }
+    // System indicators in GNOME's order (panel.js `_indicators`): each
+    // shows only while it means something; the power icon always does.
+    let indicators = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    indicators.add_css_class("panel-status-indicators-box");
+    let status_icon = |icon: &str, visible: bool| {
+        let image = gtk::Image::from_icon_name(icon);
+        image.add_css_class("system-status-icon");
+        image.set_visible(visible);
+        indicators.append(&image);
+        image
+    };
+    let panel_network = status_icon("network-wired-symbolic", false);
+    let panel_dnd = status_icon("notifications-disabled-symbolic", false);
+    let panel_volume = status_icon("audio-volume-high-symbolic", false);
+    let panel_power_profile = status_icon("power-profile-balanced-symbolic", false);
+    status_icon("system-shutdown-symbolic", true);
     let power_ui = {
         let shell = shell.clone();
         power::PowerUi::new(
@@ -545,7 +873,17 @@ fn build(app: &adw::Application) {
             }),
         )
     };
-    let qs = quick_settings_popover(&shell, &notify, &power_ui);
+    let qs = quick_settings_popover(
+        &shell,
+        &notify,
+        &power_ui,
+        PanelIcons {
+            network: panel_network,
+            dnd: panel_dnd,
+            volume: panel_volume,
+            power_profile: panel_power_profile,
+        },
+    );
     let system = panel_menu_button(&indicators, "System", &qs);
 
     let bar = gtk::CenterBox::new();

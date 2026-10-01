@@ -42,6 +42,7 @@ scripts/lib/roost-parity-compare.py target/gnome-reference target/roost-parity t
 | 01-desktop | top bar over the default wallpaper |
 | 02-calendar | the date menu |
 | 03-quick-settings | quick settings |
+| 03b-power-mode-menu | the Power Mode toggle's menu, open in place |
 | 04-overview-empty | the overview with no windows |
 | 05-app-grid | the app grid |
 | 06-windows | three windows on the desktop |
@@ -49,6 +50,31 @@ scripts/lib/roost-parity-compare.py target/gnome-reference target/roost-parity t
 | 08-notification | a notification banner |
 | 09-calendar-with-notification | the date menu listing it |
 
+Both sides run the same services: the stubs serve power-profiles and
+logind only, since GNOME's NetworkManager and BlueZ clients need more
+than a stub. The virtual monitor has no backlight and there is no audio
+server. GNOME 51's Adwaita icons and Adwaita Sans come from the reference
+run, so the host's older theme and fonts do not leak in. Ubuntu, for
+example, defaults to Yaru and lacks `dark-mode-symbolic`.
+
 Window contents differ by design: GNOME's capture uses its perf-helper
 windows and Roost's uses libadwaita test windows. Compare the shell
 around them.
+
+## Where Roost stands
+
+Share of pixels visibly off (more than 24 levels) in each element crop:
+
+| Element | First measured | Now |
+| --- | --- | --- |
+| Desktop and wallpaper | 96.1% | 0.1% |
+| Top bar | 35.2% | 0.7% (the clock's minutes) |
+| Quick settings | 68.4% | 3.4% |
+| Power Mode menu | not built | 4.0% |
+
+GTK and St differ in a few ways that matter when matching numbers:
+
+- GTK's `min-width` excludes padding, St's does not.
+- GNOME's 12px panel padding is a 3px border plus 9px of padding.
+- With two copies of an icon theme, GTK 4.14 takes the icon from the
+  later directory.
