@@ -800,8 +800,28 @@ impl WindowManager {
     /// Pointer motion: track the position, focus the window under the
     /// cursor, and deliver the motion event to it. Focusing on motion
     /// (not only on click) keeps pointer focus off the shell round-trip.
+    /// Layer-shell surfaces (panel, banners) paint over windows, so they
+    /// win the hit test first; without this the panel never sees motion.
     pub fn pointer_motion(&mut self, state: &mut State, pos: Point<f64, Logical>, time: u32) {
         self.pointer_pos = pos;
+        if let Some((surface, (ox, oy))) =
+            crate::layer::topmost_layer_at(state, pos.x as i32, pos.y as i32)
+        {
+            if let Some(pointer) = self.pointer.clone() {
+                // Focus point is the surface origin: smithay reports
+                // surface-local coordinates as event minus focus.
+                pointer.motion(
+                    state,
+                    Some((surface, (ox as f64, oy as f64).into())),
+                    &MotionEvent {
+                        location: pos,
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time,
+                    },
+                );
+            }
+            return;
+        }
         if let Some(id) = self.window_at(pos) {
             if self.model.focused() != Some(id) {
                 self.apply_focus(state, Some(id));
@@ -815,11 +835,12 @@ impl WindowManager {
                 .surface
                 .wl_surface()
                 .map(|surface| surface.into_owned());
+            // Focus point is the surface origin: smithay reports
+            // surface-local coordinates as event minus focus.
             let origin = focused.geometry.loc;
-            let local = (pos.x - origin.x as f64, pos.y - origin.y as f64);
             pointer.motion(
                 state,
-                surface.map(|surface| (surface, local.into())),
+                surface.map(|surface| (surface, (origin.x as f64, origin.y as f64).into())),
                 &MotionEvent {
                     location: pos,
                     serial: SERIAL_COUNTER.next_serial(),
@@ -830,10 +851,24 @@ impl WindowManager {
     }
 
     /// Pointer button: deliver to the focused window and focus the
-    /// window under the cursor on press (click-to-focus).
+    /// window under the cursor on press (click-to-focus). A press on a
+    /// layer-shell surface moves keyboard focus there (unless the
+    /// overview park owns it) so panel menus and banners take keys; the
+    /// button itself follows pointer focus from the last motion.
     pub fn pointer_button(&mut self, state: &mut State, button: u32, pressed: bool, time: u32) {
         if pressed {
-            if let Some(id) = self.window_at(self.pointer_pos) {
+            let pos = self.pointer_pos;
+            if let Some((surface, _)) =
+                crate::layer::topmost_layer_at(state, pos.x as i32, pos.y as i32)
+            {
+                if !self.overview_open {
+                    let serial = SERIAL_COUNTER.next_serial();
+                    if let Some(keyboard) = self.keyboard.clone() {
+                        keyboard.set_focus(state, Some(surface.clone()), serial);
+                    }
+                    state.sync_selection_focus(Some(&surface));
+                }
+            } else if let Some(id) = self.window_at(pos) {
                 if self.model.focused() != Some(id) {
                     self.apply_focus(state, Some(id));
                 }
@@ -2024,9 +2059,48 @@ impl WindowManager {
 
 /// Translate a winit backend [`InputEvent`] into [`ManagerInput`].
 /// Returns `None` for device add/remove and other unconsumed kinds.
-pub fn translate_input(event: InputEvent<WinitInput>) -> Option<ManagerInput> {
+/// Button code synthesized for touch contacts: the shell gates tile,
+/// dock, and banner presses on left-click, and clients expect balanced
+/// press/release pairs, so a tap must arrive as a left press to act.
+const TOUCH_BUTTON: u32 = 0x110;
+
+/// One touch contact as pointer inputs: move to the contact, then press.
+/// Motion must precede the press because press handlers act at the last
+/// motion position, not at any position the button event carries.
+/// Pure so unit tests pin the pairing without backend event types.
+fn touch_press(pos: (f64, f64), time: u32) -> [ManagerInput; 2] {
+    [
+        ManagerInput::Motion {
+            pos: pos.into(),
+            time,
+        },
+        ManagerInput::Button {
+            button: TOUCH_BUTTON,
+            pressed: true,
+            time,
+        },
+    ]
+}
+
+/// End of one touch contact: release the synthesized press so no
+/// button sticks down. Cancel releases too: a cancelled contact must
+/// never leave a press behind either.
+fn touch_release(time: u32) -> ManagerInput {
+    ManagerInput::Button {
+        button: TOUCH_BUTTON,
+        pressed: false,
+        time,
+    }
+}
+
+/// Translate one backend event into manager inputs. Touch contacts
+/// emulate a left-button pointer (down moves then presses, motion
+/// moves, up/cancel releases) so touchscreens act instead of dropping
+/// silently. Multi-touch overlaps may interleave presses — there is no
+/// per-slot tracking here — but every release still balances.
+pub fn translate_input(event: InputEvent<WinitInput>) -> Vec<ManagerInput> {
     match event {
-        InputEvent::Keyboard { event } => Some(ManagerInput::Key {
+        InputEvent::Keyboard { event } => vec![ManagerInput::Key {
             // The winit backend reports X11 keycodes (kernel evdev
             // number plus 8); normalize back to evdev so trigger and
             // overlay tables written in evdev keycodes match on every
@@ -2034,19 +2108,19 @@ pub fn translate_input(event: InputEvent<WinitInput>) -> Option<ManagerInput> {
             keycode: u32::from(event.key_code()).saturating_sub(XKB_X11_OFFSET),
             pressed: event.state() == KeyState::Pressed,
             time: (event.time() / 1000) as u32,
-        }),
+        }],
         InputEvent::PointerMotionAbsolute { event } => {
             let pos = event.position();
-            Some(ManagerInput::Motion {
+            vec![ManagerInput::Motion {
                 pos: (pos.x, pos.y).into(),
                 time: (event.time() / 1000) as u32,
-            })
+            }]
         }
-        InputEvent::PointerButton { event } => Some(ManagerInput::Button {
+        InputEvent::PointerButton { event } => vec![ManagerInput::Button {
             button: event.button_code(),
             pressed: event.state() == ButtonState::Pressed,
             time: (event.time() / 1000) as u32,
-        }),
+        }],
         InputEvent::PointerAxis { event } => {
             let axis_amount = |axis: Axis| {
                 event
@@ -2054,13 +2128,26 @@ pub fn translate_input(event: InputEvent<WinitInput>) -> Option<ManagerInput> {
                     .or_else(|| event.amount(axis))
                     .unwrap_or(0.0)
             };
-            Some(ManagerInput::Axis {
+            vec![ManagerInput::Axis {
                 horizontal: axis_amount(Axis::Horizontal),
                 vertical: axis_amount(Axis::Vertical),
                 time: (event.time() / 1000) as u32,
-            })
+            }]
         }
-        _ => None,
+        InputEvent::TouchDown { event } => {
+            let pos = event.position();
+            touch_press((pos.x, pos.y), (event.time() / 1000) as u32).into()
+        }
+        InputEvent::TouchMotion { event } => {
+            let pos = event.position();
+            vec![ManagerInput::Motion {
+                pos: (pos.x, pos.y).into(),
+                time: (event.time() / 1000) as u32,
+            }]
+        }
+        InputEvent::TouchUp { event } => vec![touch_release((event.time() / 1000) as u32)],
+        InputEvent::TouchCancel { event } => vec![touch_release((event.time() / 1000) as u32)],
+        _ => Vec::new(),
     }
 }
 
@@ -2089,6 +2176,41 @@ mod tests {
             pressed,
             time: 0,
         }
+    }
+
+    #[test]
+    fn touch_press_moves_then_presses_left() {
+        let [motion, press] = touch_press((1263.0, 16.0), 7);
+        assert!(
+            matches!(motion, ManagerInput::Motion { pos, time: 7 } if pos.x == 1263.0 && pos.y == 16.0),
+            "tap must move first, presses act at the last motion position: {motion:?}"
+        );
+        assert!(
+            matches!(
+                press,
+                ManagerInput::Button {
+                    button: 0x110,
+                    pressed: true,
+                    time: 7
+                }
+            ),
+            "tap must arrive as a left press or the shell ignores it: {press:?}"
+        );
+    }
+
+    #[test]
+    fn touch_release_balances_with_left_release() {
+        assert!(
+            matches!(
+                touch_release(9),
+                ManagerInput::Button {
+                    button: 0x110,
+                    pressed: false,
+                    time: 9
+                }
+            ),
+            "lift and cancel must release the synthesized press"
+        );
     }
 
     #[test]

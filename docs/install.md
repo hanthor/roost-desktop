@@ -1,5 +1,17 @@
 # Installing Roost
 
+## From the Debian package (recommended on Debian/Ubuntu)
+
+```sh
+sudo apt install ./roost_X.Y.Z_amd64.deb
+```
+
+Dependencies resolve automatically. After installing, the Roost session is
+selectable from the login screen. Upgrading installs the newer package over
+the older one with user configuration and application data preserved;
+removing the package drops the Roost-owned program files and session entry
+while preserving user data. See `docs/release.md` for the release process.
+
 ## From source
 
 Prerequisites mirror CI (`check` job plus the display libraries the nested

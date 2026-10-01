@@ -1921,10 +1921,13 @@ impl ShellHost {
         }
         let open_box = self.popup.body().map(|body| popup_box(&layout, body));
         self.popup.press(&layout, open_box, x, y);
-        self.apply_popup_size();
         // A press may have dismissed the popup under a parked
-        // keyboard cursor: settle it instead of stranding it.
+        // keyboard cursor: settle it instead of stranding it. Settle
+        // before sizing: the configure round trip repaints at the
+        // arranged size, and painting first with the stale focus would
+        // attach a second buffer for the same frame.
         self.settle_focus();
+        self.apply_popup_size();
     }
 
     /// Fire the calendar footer row under the popup point: flips the

@@ -205,6 +205,50 @@ pub fn layer_layout(state: &State) -> Vec<(WlSurface, (i32, i32), Layer)> {
     placed
 }
 
+/// Frame draw order from a bottom-to-top stack: Smithay 0.7's
+/// `draw_render_elements` draws the first element topmost (it reverses
+/// the slice internally for painter's order), while the runtime builds
+/// windows bottom-to-top followed by background-to-overlay layers.
+/// Passing that stack straight through inverts the session: the banner
+/// draws beneath the dock and floating windows stack upside down.
+/// Reverse once so the first element is the topmost surface.
+pub fn front_to_back<T>(bottom_to_top: Vec<T>) -> Vec<T> {
+    bottom_to_top.into_iter().rev().collect()
+}
+
+/// Topmost-first hit test over placed layer rects `(x, y, w, h)`.
+/// Pure so unit tests pin the ordering without a live backend: later
+/// rects paint over earlier ones, so the last containing rect wins.
+pub fn hit_layer_rect(rects: &[(i32, i32, i32, i32)], x: i32, y: i32) -> Option<usize> {
+    rects
+        .iter()
+        .rposition(|(rx, ry, w, h)| x >= *rx && x < rx + w && y >= *ry && y < ry + h)
+}
+
+/// Topmost layer surface at output coordinates, with its placed origin.
+/// Returns `None` where no mapped layer surface covers the point, so the
+/// caller falls through to window routing.
+pub fn topmost_layer_at(state: &State, x: i32, y: i32) -> Option<(WlSurface, (i32, i32))> {
+    let placed = layer_layout(state);
+    let rects: Vec<(i32, i32, i32, i32)> = placed
+        .iter()
+        .map(|(surface, (ox, oy), _)| {
+            let (w, h) = state
+                .layer_shell_state
+                .layer_surfaces()
+                .find(|handle| handle.wl_surface() == surface)
+                .and_then(|handle| handle.current_state().size)
+                .map(|size| (size.w, size.h))
+                .unwrap_or((0, 0));
+            (*ox, *oy, w, h)
+        })
+        .collect();
+    hit_layer_rect(&rects, x, y).map(|index| {
+        let (surface, origin, _) = &placed[index];
+        (surface.clone(), *origin)
+    })
+}
+
 impl State {
     /// Layer surfaces the server currently tracks (the slice-1 panel).
     pub fn panel_surfaces(&self) -> Vec<PanelSurface> {
@@ -225,5 +269,41 @@ impl State {
             .iter()
             .find(|record| record.namespace == OVERVIEW_NAMESPACE)
             .map(|record| record.surface.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{front_to_back, hit_layer_rect};
+
+    #[test]
+    fn topmost_rect_wins_and_edges_hold() {
+        // Panel strip under a popup: the later (popup) rect wins overlap.
+        let rects = [(0, 0, 1280, 32), (976, 40, 292, 200)];
+        assert_eq!(hit_layer_rect(&rects, 1000, 100), Some(1));
+        assert_eq!(hit_layer_rect(&rects, 100, 16), Some(0));
+        assert_eq!(hit_layer_rect(&rects, 10, 500), None);
+        // Right/bottom edges are exclusive.
+        assert_eq!(hit_layer_rect(&rects, 1280, 16), None);
+        assert_eq!(hit_layer_rect(&rects, 1279, 16), Some(0));
+        // Zero-size rects never hit.
+        assert_eq!(hit_layer_rect(&[(5, 5, 0, 0)], 5, 5), None);
+    }
+
+    #[test]
+    fn draw_order_is_topmost_first() {
+        // Bottom-to-top stack as the runtime builds it: windows in
+        // stacking order, then background-to-overlay layers. The draw
+        // slice must lead with the topmost surface (the Overlay banner
+        // over the dock, the dock over the panel, the panel over the
+        // focused window) or lower layers cover the banner.
+        let stack = vec!["win-bottom", "win-focused", "panel", "dock", "banner"];
+        assert_eq!(
+            front_to_back(stack),
+            vec!["banner", "dock", "panel", "win-focused", "win-bottom",]
+        );
+        // Empty and singleton stacks are fixed points.
+        assert!(front_to_back(Vec::<u8>::new()).is_empty());
+        assert_eq!(front_to_back(vec![7]), vec![7]);
     }
 }

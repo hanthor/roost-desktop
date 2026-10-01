@@ -1,0 +1,103 @@
+#!/bin/sh
+# roost-release — build the Roost Debian package from a clean checkout.
+#
+# Usage:
+#   scripts/roost-release [--out DIR] [--allow-dirty] [--help]
+#
+# Builds the four release binaries with the version stamped from the git tag,
+# stages the documented install layout (binaries side by side plus the
+# login-screen session entry), generates the package metadata from the same
+# stamp, and produces roost_<version>_amd64.deb via dpkg-deb.
+#
+# The tree must be clean and HEAD must carry a vX.Y.Z tag unless --allow-dirty
+# is given (dev builds; the version is still stamped from the tag or falls
+# back to the crate version when no tag resolves).
+set -eu
+
+unset CDPATH
+
+OUT="dist"
+ALLOW_DIRTY="no"
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --out)
+            OUT="$2"
+            shift 2
+            ;;
+        --allow-dirty)
+            ALLOW_DIRTY="yes"
+            shift
+            ;;
+        --help | -h)
+            sed -n '2,13p' "$0"
+            exit 0
+            ;;
+        *)
+            echo "roost-release: unknown argument $1" >&2
+            exit 1
+            ;;
+    esac
+done
+
+if [ "$ALLOW_DIRTY" != "yes" ]; then
+    if [ -n "$(git status --porcelain)" ]; then
+        echo "roost-release: working tree is dirty (use --allow-dirty for dev builds)" >&2
+        exit 1
+    fi
+fi
+
+TAG="$(git describe --tags --exact-match HEAD 2>/dev/null || true)"
+if [ -z "$TAG" ]; then
+    TAG="$(git describe --tags 2>/dev/null || true)"
+fi
+VERSION="$(printf '%s' "$TAG" | sed -e 's/^v//' -e 's/-.*//')"
+if [ -z "$VERSION" ]; then
+    echo "roost-release: no tag found and no version given; crate fallback applies" >&2
+fi
+
+export ROOST_VERSION="$VERSION"
+cargo build --release -p roost-compositor -p roost-shell-host -p roost-greeter
+
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE"' EXIT INT TERM
+mkdir -p "$STAGE/DEBIAN" "$STAGE/usr/bin" "$STAGE/usr/share/wayland-sessions"
+
+for bin in roost-compositor roost-session roost-shell-host roost-greeter; do
+    install -m0755 "target/release/$bin" "$STAGE/usr/bin/$bin"
+done
+install -m0644 share/wayland-sessions/roost.desktop \
+    "$STAGE/usr/share/wayland-sessions/roost.desktop"
+
+# Agreement check: the stamped binaries must report the stamped version.
+for bin in roost-compositor roost-session roost-shell-host roost-greeter; do
+    REPORTED="$("$STAGE/usr/bin/$bin" --version | awk '{print $NF}')"
+    if [ -n "$VERSION" ] && [ "$REPORTED" != "$VERSION" ]; then
+        echo "roost-release: $bin reports $REPORTED, expected $VERSION" >&2
+        exit 1
+    fi
+done
+if [ -z "$VERSION" ]; then
+    VERSION="$("$STAGE/usr/bin/roost-session" --version | awk '{print $NF}')"
+fi
+
+cat >"$STAGE/DEBIAN/control" <<EOF
+Package: roost
+Version: $VERSION
+Section: x11
+Priority: optional
+Architecture: amd64
+Depends: libxkbcommon0, libxkbcommon-x11-0, libegl1, libgl1, libgbm1, libgtk-4-1, libadwaita-1-0, libglib2.0-0t64 | libglib2.0-0
+Maintainer: Roost Developers <roost@example.invalid>
+Description: Roost Wayland desktop session
+ A GNOME-style Wayland desktop with an optional scrollable tiling shell,
+ pixel-painted with no GTK in the shell itself.
+ .
+ Installs the compositor, shell host, session launcher, and greeter plus
+ the login-screen session entry.
+EOF
+
+mkdir -p "$OUT"
+PKG="$OUT/roost_${VERSION}_amd64.deb"
+dpkg-deb --build "$STAGE" "$PKG" >/dev/null
+echo "roost-release: wrote $PKG"

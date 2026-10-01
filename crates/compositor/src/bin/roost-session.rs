@@ -11,6 +11,20 @@ use std::process::ExitCode;
 
 use roost_compositor::runtime::{current_exe_dir, resolve_shell_bin, sibling_binary};
 
+/// Release version stamped at build time: `ROOST_VERSION` (a `vX.Y.Z` tag or
+/// plain `X.Y.Z`) wins, otherwise the crate version. Duplicated per binary on
+/// purpose — no shared dependency for a few lines.
+fn normalize_version<'a>(raw: Option<&'a str>, fallback: &'a str) -> &'a str {
+    match raw {
+        Some(v) if !v.is_empty() => v.strip_prefix('v').unwrap_or(v),
+        _ => fallback,
+    }
+}
+
+fn release_version() -> &'static str {
+    normalize_version(option_env!("ROOST_VERSION"), env!("CARGO_PKG_VERSION"))
+}
+
 /// Compositor binary for this session: sibling of the launcher when the
 /// install placed them side by side, else a `PATH` lookup at exec time.
 fn resolve_compositor_bin() -> std::path::PathBuf {
@@ -51,6 +65,10 @@ fn main() -> ExitCode {
     let extra: Vec<OsString> = std::env::args_os().skip(1).collect();
     if extra.iter().any(|arg| arg == "--help" || arg == "-h") {
         print_help();
+        return ExitCode::SUCCESS;
+    }
+    if extra.iter().any(|arg| arg == "--version" || arg == "-V") {
+        println!("roost-session {}", release_version());
         return ExitCode::SUCCESS;
     }
     let compositor = resolve_compositor_bin();
@@ -131,5 +149,26 @@ mod tests {
         assert_eq!(sibling_binary(&dir, "absent-bin"), None);
         std::fs::remove_file(&present).expect("cleanup");
         std::fs::remove_dir(&dir).expect("cleanup");
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::normalize_version;
+
+    #[test]
+    fn tag_prefix_is_stripped() {
+        assert_eq!(normalize_version(Some("v1.2.3"), "0.1.0"), "1.2.3");
+    }
+
+    #[test]
+    fn plain_version_is_kept() {
+        assert_eq!(normalize_version(Some("1.2.3"), "0.1.0"), "1.2.3");
+    }
+
+    #[test]
+    fn missing_or_empty_falls_back() {
+        assert_eq!(normalize_version(None, "0.1.0"), "0.1.0");
+        assert_eq!(normalize_version(Some(""), "0.1.0"), "0.1.0");
     }
 }
