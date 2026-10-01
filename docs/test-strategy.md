@@ -1,6 +1,7 @@
 # Verification and test strategy
 
-**Status:** Draft framework; no implementation tests have run.  
+**Status:** Active. Unit, integration, and nested proof layers run in CI; the parity, VM, hardware, accessibility, and performance layers are open work tracked on the roadmap board.  
+**Baseline:** GNOME 51 in the TunaOS Marlin GNOME image (`ghcr.io/tuna-os/marlin:gnome`), captured once per baseline bump and reused for every comparison.  
 **Applies to:** all Roost speks and release gates.  
 **Principle:** Every requirement has a traceable test or review artifact. Passing a protocol probe alone does not establish user-visible correctness, security, or hardware support.
 
@@ -61,6 +62,18 @@ Complete scripted keyboard journeys and human-reviewed AT-SPI/screen-reader jour
 ### Packaging and recovery
 
 On each supported distro: clean install, session selection, login/logout, upgrade, rollback, uninstall, failed shell package, malformed config, last-known-good restore, and user-data preservation. An intentionally broken shell package/config must return to a working recovery/login path without deleting user configuration or app data.
+
+## 3a. Parity evidence (added 2026-10-01)
+
+The nested proof jobs today assert liveness: the session lived, pixels changed, a log line appeared. That is necessary and not sufficient for "looks and acts like GNOME". Parity evidence has five parts:
+
+1. **Pinned baseline capture.** Boot `ghcr.io/tuna-os/marlin:gnome` in a VM once per baseline bump and record the reference journeys (overview, search and launch, workspaces, Alt-Tab, quick settings, notifications, lock, calendar) as frames, recordings, and AT-SPI tree dumps. Store them as versioned artifacts named by GNOME release and image digest.
+2. **Semantic assertions.** Journeys assert the GNOME behavior, not a pixel delta: after Super the overview lists N window previews and the workspace strip; after typing, the top result is the expected app; after Escape, focus returns to the previous window. Shell state is read through an introspection channel so scripts assert state, not screenshots.
+3. **Parity ledger.** [`docs/parity-ledger.md`](parity-ledger.md) holds one row per GNOME 51 behavior: baseline evidence, Roost status, test ID, deviation, owner, disposition. CI fails when a row regresses from pass. Undocumented gaps are not parity (roadmap change control).
+4. **Recorded human review.** Frame review stays human but leaves an artifact: per release, a checklist naming reviewer, Roost frames, and the baseline frames they were compared against.
+5. **Same-image comparison.** Reference (Marlin GNOME flavor) and candidate (Marlin Roost flavor) run on the same VM image family and hardware profile, so performance and behavior comparisons are like for like.
+
+Timing rule: any test that depends on scheduler latency waits on a wall-clock deadline and reports distributions over repeated samples; a fixed iteration budget is a flake, not a gate.
 
 ## 4. Test design and traceability
 

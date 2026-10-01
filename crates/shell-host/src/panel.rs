@@ -947,7 +947,7 @@ impl ShellHost {
             stack_cache: Vec::new(),
             published_wallpaper: None,
             indicators: IndicatorHost::new(),
-            extensions: ExtensionHost::new(extension_dir()),
+            extensions: ExtensionHost::new(extension_dir().unwrap_or_default()),
             ext_seen: std::collections::HashMap::new(),
             pending_presses: Vec::new(),
             watcher: WatcherBus::new(),
@@ -1035,7 +1035,9 @@ impl ShellHost {
     /// [`ShellHost::restore_notification_queue`]: a bad file never
     /// blocks the panel.
     pub fn load_notification_queue(&mut self) {
-        self.restore_notification_queue(&NotificationCenter::system_path());
+        if let Some(path) = NotificationCenter::system_path() {
+            self.restore_notification_queue(&path);
+        }
     }
 
     /// Load the Roost-owned prefs from the system state file at host
@@ -3053,7 +3055,11 @@ impl ShellHost {
         if current == self.published_wallpaper {
             return;
         }
-        let path = self.tiles.runtime_dir().join("roost-wallpaper");
+        let runtime_dir = self.tiles.runtime_dir();
+        if runtime_dir.as_os_str().is_empty() {
+            return;
+        }
+        let path = runtime_dir.join("roost-wallpaper");
         let done = match &current {
             Some(uri) => std::fs::write(&path, uri).is_ok(),
             None => std::fs::remove_file(&path).is_ok(),

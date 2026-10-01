@@ -69,27 +69,20 @@ impl AppEntry {
 
 /// Application directories in precedence order:
 ///
-/// 1. `$XDG_DATA_HOME/applications` (default `~/.local/share`),
+/// 1. `$XDG_DATA_HOME/applications` (default `~/.local/share`; omitted
+///    entirely when neither is set, see [`crate::xdg`]),
 /// 2. each `$XDG_DATA_DIRS/applications` (default
 ///    `/usr/local/share`, `/usr/share`).
 pub fn default_app_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    dirs.push(data_home().join("applications"));
+    // Fail closed (#49): no HOME means no user dir, never /tmp.
+    if let Some(home) = crate::xdg::data_home() {
+        dirs.push(home.join("applications"));
+    }
     for dir in data_dirs() {
         dirs.push(dir.join("applications"));
     }
     dirs
-}
-
-fn data_home() -> PathBuf {
-    std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(|home| PathBuf::from(home).join(".local/share"))
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
-        })
 }
 
 fn data_dirs() -> Vec<PathBuf> {
