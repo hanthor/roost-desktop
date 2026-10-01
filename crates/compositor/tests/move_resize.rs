@@ -372,7 +372,12 @@ fn header_drag_moves_the_window() {
         .pointer_button(&mut f.comp.state, BTN_LEFT, false, 4);
     assert!(!f.manager.grab_active(), "release ends the grab");
     sync(&mut f);
-    assert_eq!(f.client.releases, 0, "the grab's release is not delivered");
+    // The client's press opened smithay's implicit click grab; only the
+    // matching release closes it (#97).
+    assert_eq!(
+        f.client.releases, 1,
+        "the grab's release reaches the client"
+    );
 }
 
 #[test]
@@ -444,6 +449,8 @@ fn super_drag_moves_without_a_client_request() {
     f.manager
         .pointer_button(&mut f.comp.state, BTN_LEFT, false, 5);
     assert_eq!(geometry(&f).loc, start.loc + Point::from((-30, 70)));
+    sync(&mut f);
+    assert_eq!(f.client.releases, 0, "a swallowed press has no release");
 }
 
 #[test]
