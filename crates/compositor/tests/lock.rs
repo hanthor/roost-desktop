@@ -108,7 +108,7 @@ fn assert_locked_without_content(snapshot: &Message) {
 /// snapshot.
 #[test]
 fn idle_timeout_strips_snapshot_windows() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_tempdir();
     let path = dir.path().join("control.sock");
     let mut hub = ControlHub::bind(path.clone(), Rc::new(TokenStore::new()), SEAT_NAME).unwrap();
     let mut model = two_window_model();
@@ -146,7 +146,7 @@ fn idle_timeout_strips_snapshot_windows() {
 /// fresh handshake receives the locked, content-free snapshot.
 #[test]
 fn reconnect_while_locked_stays_locked() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_tempdir();
     let path = dir.path().join("control.sock");
     let mut hub = ControlHub::bind(path.clone(), Rc::new(TokenStore::new()), SEAT_NAME).unwrap();
     let mut model = two_window_model();
@@ -322,7 +322,7 @@ fn three_wrong_passwords_stay_locked_without_leak() {
         }
     }
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_tempdir();
     let path = dir.path().join("control.sock");
     let hub = ControlHub::bind(path.clone(), Rc::new(TokenStore::new()), SEAT_NAME).unwrap();
     let mut lock = SessionLock::new(60_000);
@@ -349,4 +349,13 @@ fn three_wrong_passwords_stay_locked_without_leak() {
         assert!(overlay.windows.is_empty(), "no content leaks");
         assert!(hub.is_locked(), "hub mirror stays locked");
     }
+}
+
+/// Temp dir with owner-only permissions: the control socket refuses to
+/// bind anywhere less private (#30).
+fn private_tempdir() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    dir
 }

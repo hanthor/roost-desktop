@@ -1,6 +1,10 @@
 name: ci
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -38,8 +42,8 @@ jobs:
       # check does not. Mesa swrast provides software GL on runners.
       # The shell's gio settings read needs glib dev files at build
       # time (check gets them transitively via GTK).
-      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck libglib2.0-dev libgtk-4-dev libadwaita-1-dev
-      - run: shellcheck scripts/roost-journey scripts/roost-nested scripts/roost-release scripts/check-release-package
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck jq dbus libglib2.0-dev libgtk-4-dev libadwaita-1-dev
+      - run: shellcheck -x scripts/roost-journey scripts/roost-nested scripts/roost-release scripts/check-release-package scripts/lib/roost-introspect.sh
       - run: scripts/roost-release --allow-dirty --out package-artifacts && scripts/check-release-package package-artifacts/*.deb
       - uses: actions/upload-artifact@v4
         with:

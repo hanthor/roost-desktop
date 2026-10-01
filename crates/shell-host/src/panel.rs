@@ -3042,6 +3042,77 @@ impl ShellHost {
 
     /// Current dock items from favorites, desktop entries, and the
     /// compositor window list.
+    /// Read-only state for semantic journeys (#65, see
+    /// [`crate::introspect`]). Ids and app ids only, never titles.
+    pub fn introspect(&self, locked: bool, revision: Option<u64>) -> serde_json::Value {
+        use serde_json::json;
+        let windows: Vec<serde_json::Value> = self
+            .model
+            .windows()
+            .iter()
+            .map(|w| {
+                json!({
+                    "id": w.id,
+                    "app_id": w.app_id,
+                    "workspace": w.workspace,
+                    "active": w.active,
+                })
+            })
+            .collect();
+        let results: Vec<serde_json::Value> = self
+            .overview_hits
+            .iter()
+            .map(|hit| {
+                let (kind, target) = match &hit.action {
+                    SearchAction::Launch { app_id } => ("launch", json!(app_id)),
+                    SearchAction::Focus { window } => ("focus", json!(window)),
+                    #[allow(unreachable_patterns)]
+                    _ => ("other", serde_json::Value::Null),
+                };
+                json!({"app_id": hit.app_id, "kind": kind, "target": target})
+            })
+            .collect();
+        let (banners, unread) = self
+            .center
+            .lock()
+            .map(|c| (c.banners().len(), c.unread_count()))
+            .unwrap_or((0, 0));
+        let dock: Vec<serde_json::Value> = self
+            .dock_items()
+            .iter()
+            .map(|item| {
+                json!({
+                    "app_id": item.app_id,
+                    "windows": item.windows,
+                    "active": item.active,
+                })
+            })
+            .collect();
+        json!({
+            "revision": revision,
+            "locked": locked,
+            "overview": {
+                "open": self.model.is_overview_open(),
+                "query": self.search_text,
+                "results": results,
+                "launch_failed": self.overview_failure.is_some(),
+            },
+            "focus": self.focus.map(|f| json!({
+                "region": format!("{:?}", f.region),
+                "cursor": f.cursor,
+            })),
+            "popup": self.popup.body().map(|b| format!("{b:?}")),
+            "workspaces": {
+                "active": self.model.active_workspace(),
+                "all": self.model.workspaces(),
+            },
+            "windows": windows,
+            "focused_window": self.model.windows().iter().find(|w| w.active).map(|w| w.id),
+            "notifications": {"banners": banners, "unread": unread},
+            "dock": dock,
+        })
+    }
+
     fn dock_items(&self) -> Vec<DockItem> {
         dock_items(self.favorites.ids(), &self.apps, self.model.windows())
     }
@@ -4159,6 +4230,7 @@ pub fn run_panel_with_control(
     };
 
     queue.roundtrip(&mut host).map_err(PanelError::Dispatch)?;
+    let mut introspect = crate::introspect::IntrospectSink::from_env();
     if let Some(control) = control.as_mut() {
         // Provisional pacing: poll both sides at 200 Hz instead of
         // blocking on Wayland events, so control frames land while the
@@ -4170,6 +4242,9 @@ pub fn run_panel_with_control(
             drive_dock_actions(&mut host, control);
             drive_lock_actions(&mut host, control);
             host.update_shell_surfaces(control.revision());
+            if introspect.is_active() {
+                introspect.publish(host.introspect(control.locked(), control.revision()));
+            }
             queue
                 .flush()
                 .map_err(|e| PanelError::Flush(e.to_string()))?;
@@ -4182,6 +4257,9 @@ pub fn run_panel_with_control(
         while host.is_running() {
             pump_wayland(&conn, &mut queue, &mut host)?;
             host.update_shell_surfaces(None);
+            if introspect.is_active() {
+                introspect.publish(host.introspect(false, None));
+            }
             queue
                 .flush()
                 .map_err(|e| PanelError::Flush(e.to_string()))?;
@@ -4193,6 +4271,15 @@ pub fn run_panel_with_control(
 
 #[cfg(test)]
 mod tests {
+    /// Temp dir with owner-only permissions: the control socket refuses to
+    /// bind anywhere less private (#30).
+    pub(super) fn private_tempdir() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        dir
+    }
+
     use super::*;
 
     #[test]
@@ -5980,7 +6067,7 @@ mod tests {
         fn armed_lock_request_drives_lock_command() {
             use crate::popup::{panel_layout, popup_box, PopupBody, TILE_ROWS_TOP};
             use crate::tiles::POWER_TILE_INDEX;
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::panel::tests::private_tempdir();
             let socket_path = dir.path().join("control.sock");
             let mut model = StateModel::new();
             let mut hub =
@@ -7039,7 +7126,7 @@ mod tests {
         fn control_feeds_overview_model() {
             use std::rc::Rc;
 
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::panel::tests::private_tempdir();
             let socket_path = dir.path().join("control.sock");
             let mut model = StateModel::new();
             model.insert("alpha", Some("com.example.alpha"), 0);
@@ -7129,7 +7216,7 @@ mod tests {
             use super::super::{FocusRegion, ShellFocus};
             use std::rc::Rc;
 
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::panel::tests::private_tempdir();
             let socket_path = dir.path().join("control.sock");
             let mut model = StateModel::new();
             let mut hub =
@@ -7219,7 +7306,7 @@ mod tests {
         fn switcher_drive_steps_and_commits() {
             use roost_shell_control::{CommandStatus, SwitcherAction};
 
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::panel::tests::private_tempdir();
             let socket_path = dir.path().join("control.sock");
             let mut model = StateModel::new();
             let id_a = model.insert("alpha", Some("com.example.alpha"), 0);
@@ -7339,7 +7426,7 @@ mod tests {
         fn host_search_finds_synced_windows() {
             use crate::search::SearchAction;
 
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::panel::tests::private_tempdir();
             let socket_path = dir.path().join("control.sock");
             let mut model = StateModel::new();
             model.insert("alpha", Some("com.example.alpha"), 0);
@@ -7544,7 +7631,7 @@ mod tests {
             use crate::search::SearchResult;
             use roost_shell_control::CommandStatus;
 
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::panel::tests::private_tempdir();
             let socket_path = dir.path().join("control.sock");
             let mut model = StateModel::new();
             let id_a = model.insert("alpha", Some("com.example.alpha"), 0);
@@ -7635,7 +7722,7 @@ mod tests {
         fn manual_lock_engages_lock_screen_at_once() {
             use roost_shell_control::CommandStatus;
 
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::panel::tests::private_tempdir();
             let socket_path = dir.path().join("control.sock");
             let mut model = StateModel::new();
             model.insert("alpha", Some("com.example.alpha"), 0);
@@ -7793,7 +7880,7 @@ mod tests {
                 Favorites::load(fav_dir.path().join(crate::favorites::FAVORITES_FILE)),
             );
 
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::panel::tests::private_tempdir();
             let socket_path = dir.path().join("control.sock");
             let mut model = StateModel::new();
             let mut hub =
@@ -7999,7 +8086,7 @@ mod tests {
             use roost_shell_control::CommandStatus;
             use std::rc::Rc;
 
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::panel::tests::private_tempdir();
             let socket_path = dir.path().join("control.sock");
             let mut model = StateModel::new();
             let id_a = model.insert("alpha", Some("com.example.alpha"), 0);

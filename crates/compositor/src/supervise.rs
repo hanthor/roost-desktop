@@ -285,6 +285,11 @@ impl Supervisor {
 
     /// Whether a child handle is currently held. The process may have
     /// exited but not yet been reaped by `poll`.
+    /// Pid of the held child, if any.
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child.as_ref().map(std::process::Child::id)
+    }
+
     pub fn has_child(&self) -> bool {
         self.child.is_some()
     }
@@ -454,6 +459,12 @@ impl ShellDriver {
     /// Whether a child handle is currently held.
     pub fn has_child(&self) -> bool {
         self.supervisor.has_child()
+    }
+
+    /// Pid of the live shell child, if any: the only process the
+    /// control socket admits once supervision runs (#30).
+    pub fn child_pid(&self) -> Option<u32> {
+        self.supervisor.child_pid()
     }
 
     /// Policy this driver enforces.
