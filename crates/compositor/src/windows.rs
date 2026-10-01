@@ -1237,10 +1237,13 @@ impl WindowManager {
     /// overview park owns it) so panel menus and banners take keys; the
     /// button itself follows pointer focus from the last motion.
     pub fn pointer_button(&mut self, state: &mut State, button: u32, pressed: bool, time: u32) {
-        // Release ends a move/resize grab and is not delivered.
+        // Release ends a move/resize grab. It is still delivered (unless
+        // its press was swallowed): the client's press opened smithay's
+        // implicit click grab, and only the matching release closes it.
+        // Dropping it pinned pointer focus to the dragged window for
+        // good, so the panel never saw another click (#97).
         if !pressed && self.grab.is_some() {
             self.end_grab(state);
-            return;
         }
         // Super+press on a window starts a move (GNOME's Super+drag).
         if pressed && self.super_held && !self.overview_open {
@@ -1254,6 +1257,8 @@ impl WindowManager {
                     // this press, so releasing Super will not open the
                     // overview.
                     self.begin_move(state, id);
+                    // The press is not delivered, so neither is its release.
+                    self.swallowed_button = Some(button);
                     return;
                 }
             }
