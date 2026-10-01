@@ -206,21 +206,10 @@ fn decode_notification(item: &serde_json::Value) -> Option<Notification> {
     })
 }
 
-/// `$XDG_STATE_HOME/roost-shell` (default `~/.local/state/roost-shell`).
-pub fn state_dir() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .map(|base| base.join(STATE_DIR_NAME))
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(|home| {
-                    PathBuf::from(home)
-                        .join(".local/state")
-                        .join(STATE_DIR_NAME)
-                })
-                .unwrap_or_else(|| PathBuf::from("/tmp").join(STATE_DIR_NAME))
-        })
+/// `$XDG_STATE_HOME/roost-shell` (default `~/.local/state/roost-shell`),
+/// or `None` when neither resolves (#49: never `/tmp`).
+pub fn state_dir() -> Option<PathBuf> {
+    crate::xdg::state_home().map(|base| base.join(STATE_DIR_NAME))
 }
 
 /// Local notification store: banner queue, history, DND gate.
@@ -246,14 +235,16 @@ impl NotificationCenter {
     }
 
     /// System queue file path under the XDG state dir.
-    pub fn system_path() -> PathBuf {
-        state_dir().join(QUEUE_FILE)
+    pub fn system_path() -> Option<PathBuf> {
+        state_dir().map(|dir| dir.join(QUEUE_FILE))
     }
 
     /// Load from the system queue file, creating its dir when absent.
     /// Missing, corrupt, or version-skewed files start empty.
     pub fn load_system() -> Self {
-        let path = Self::system_path();
+        let Some(path) = Self::system_path() else {
+            return Self::new();
+        };
         let _ = fs::create_dir_all(path.parent().expect("queue file has a parent"));
         Self::load(&path)
     }

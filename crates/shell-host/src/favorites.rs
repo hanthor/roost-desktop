@@ -20,7 +20,9 @@ pub const FAVORITES_FILE: &str = "favorites.json";
 #[derive(Debug)]
 pub struct Favorites {
     ids: Vec<String>,
-    path: PathBuf,
+    /// `None` when no private data dir resolves: pins live in memory
+    /// only and `save` is a no-op.
+    path: Option<PathBuf>,
 }
 
 impl Favorites {
@@ -42,19 +44,34 @@ impl Favorites {
                 })
             })
             .unwrap_or_default();
-        Self { ids, path }
+        Self {
+            ids,
+            path: Some(path),
+        }
     }
 
     /// Load from the host data dir, creating it when absent.
     pub fn system() -> Self {
-        let dir = data_dir();
-        let _ = fs::create_dir_all(&dir);
-        Self::load(dir.join(FAVORITES_FILE))
+        match data_dir() {
+            Some(dir) => {
+                let _ = fs::create_dir_all(&dir);
+                Self::load(dir.join(FAVORITES_FILE))
+            }
+            None => Self::in_memory(),
+        }
     }
 
-    /// Backing file path.
-    pub fn path(&self) -> &Path {
-        &self.path
+    /// Empty pins with no backing file (no private data dir).
+    pub fn in_memory() -> Self {
+        Self {
+            ids: Vec::new(),
+            path: None,
+        }
+    }
+
+    /// Backing file path, when there is one.
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
     }
 
     /// Pinned ids in grid order.
@@ -88,29 +105,25 @@ impl Favorites {
     /// torn file. Creates parent dirs; surfaces I/O errors to the
     /// caller (the in-memory pins stay regardless).
     pub fn save(&self) -> std::io::Result<()> {
-        if let Some(parent) = self.path.parent() {
+        let Some(path) = self.path.as_deref() else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         let text = serde_json::to_string_pretty(&self.ids)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        let tmp = self.path.with_extension("json.tmp");
+        let tmp = path.with_extension("json.tmp");
         fs::write(&tmp, text)?;
-        fs::rename(&tmp, &self.path)?;
+        fs::rename(&tmp, path)?;
         Ok(())
     }
 }
 
-/// `$XDG_DATA_HOME/roost-shell` (default `~/.local/share/roost-shell`).
-pub fn data_dir() -> PathBuf {
-    std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .map(|base| base.join(DATA_DIR_NAME))
-        .unwrap_or_else(|| {
-            std::env::var_os("HOME")
-                .map(|home| PathBuf::from(home).join(".local/share").join(DATA_DIR_NAME))
-                .unwrap_or_else(|| PathBuf::from("/tmp").join(DATA_DIR_NAME))
-        })
+/// `$XDG_DATA_HOME/roost-shell` (default `~/.local/share/roost-shell`),
+/// or `None` when neither resolves (#49: never `/tmp`).
+pub fn data_dir() -> Option<PathBuf> {
+    crate::xdg::data_home().map(|base| base.join(DATA_DIR_NAME))
 }
 
 #[cfg(test)]

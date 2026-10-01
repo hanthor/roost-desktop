@@ -387,9 +387,10 @@ pub struct TileSet {
 impl TileSet {
     /// Tile set probing the live system roots.
     pub fn system() -> Self {
-        let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/run/user/0"));
+        // Fail closed (#49): an unset or shared runtime dir yields an
+        // empty root, never `/run/user/0`; sound probes then find no
+        // socket and wallpaper publishing is skipped.
+        let runtime_dir = crate::xdg::runtime_dir().unwrap_or_default();
         Self::with_roots(
             "",
             Path::new("/sys/class/net"),
@@ -492,7 +493,9 @@ impl TileSet {
     /// start. Same fail-closed rule as
     /// [`TileSet::restore_prefs`]: a bad file never blocks the panel.
     pub fn load_prefs_system(&mut self) {
-        self.restore_prefs(&prefs::system_path());
+        if let Some(path) = prefs::system_path() {
+            self.restore_prefs(&path);
+        }
     }
 
     /// Persist back to the prefs file when one is pinned. Failures
