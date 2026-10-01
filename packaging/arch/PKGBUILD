@@ -20,9 +20,13 @@ depends=(
     'glib2'
     'gtk4'
     'libadwaita'
+    'libdrm'
+    'libinput'
     'libxkbcommon'
     'libxkbcommon-x11'
     'mesa'
+    'seatd'
+    'systemd-libs'
     'wayland'
 )
 makedepends=('cargo' 'git' 'pkgconf')

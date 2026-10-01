@@ -142,7 +142,7 @@ jobs:
     timeout-minutes: 40
     container: archlinux:latest
     steps:
-      - run: pacman -Syu --noconfirm --needed base-devel git rust pkgconf gtk4 libadwaita libxkbcommon libxkbcommon-x11 mesa wayland dbus glib2 namcap
+      - run: pacman -Syu --noconfirm --needed base-devel git rust pkgconf gtk4 libadwaita libxkbcommon libxkbcommon-x11 mesa wayland dbus glib2 seatd libinput systemd-libs libdrm namcap
       - uses: actions/checkout@v7
       - run: |
           useradd -m builder
