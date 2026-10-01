@@ -47,8 +47,8 @@ export XDG_STATE_HOME XDG_DATA_HOME
 OWNED_XVFB=""
 COMPOSITOR_PID=""
 cleanup() {
-    [ -n "$COMPOSITOR_PID" ] && kill "$COMPOSITOR_PID" 2>/dev/null || true
-    [ -n "$OWNED_XVFB" ] && kill "$OWNED_XVFB" 2>/dev/null || true
+    if [ -n "$COMPOSITOR_PID" ]; then kill "$COMPOSITOR_PID" 2>/dev/null || true; fi
+    if [ -n "$OWNED_XVFB" ]; then kill "$OWNED_XVFB" 2>/dev/null || true; fi
 }
 trap cleanup EXIT INT TERM
 # RGB of one pixel of a PNG, as "r g b".
