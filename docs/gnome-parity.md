@@ -53,6 +53,8 @@ scripts/lib/roost-parity-compare.py target/gnome-reference target/roost-parity t
 | 08-notification | a notification banner |
 | 09-calendar-with-notification | the date menu listing it |
 | 10-end-session | the Log Out dialog (gnome-session's EndSessionDialog) |
+| 11-lock-screen | the lock screen curtain (reference: a stubbed display manager lets GNOME lock) |
+| 11b-unlock-prompt | the unlock prompt |
 
 Both sides run the same services: the stubs serve power-profiles and
 logind only, since GNOME's NetworkManager and BlueZ clients need more

@@ -8,7 +8,7 @@
 # then writes DIR/<state>.png for: 01-desktop, 02-calendar,
 # 03-quick-settings, 03b-power-mode-menu, 04-overview-empty, 05-app-grid, 06-windows, 06b-switcher,
 # 07-overview-windows, 07b-overview-hover, 08-notification, 09-calendar-with-notification,
-# 10-end-session.
+# 10-end-session, 11-lock-screen, 11b-unlock-prompt.
 # Run scripts/roost-gnome-reference first: it exports GNOME's wallpapers.
 # Compare with scripts/lib/roost-parity-compare.py.
 set -eu
@@ -194,4 +194,13 @@ sleep 1
 press "Power Off Menu"
 press "Log Out…"
 shot 10-end-session 2
+xdotool key Escape
+sleep 1
+xdotool mousemove --window "$WID" $((WIDTH - 30)) 16 click 1
+park
+sleep 1
+press "Lock"
+shot 11-lock-screen 3
+xdotool key space
+shot 11b-unlock-prompt 2
 echo "roost-parity-capture: frames in $OUT"

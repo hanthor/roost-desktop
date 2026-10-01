@@ -10,6 +10,8 @@ import * as Scripting from 'resource:///org/gnome/shell/ui/scripting.js';
 import * as BoxPointer from 'resource:///org/gnome/shell/ui/boxpointer.js';
 
 Gio._promisify(Shell.Screenshot.prototype, 'screenshot');
+Gio._promisify(Shell.Screenshot.prototype, 'screenshot_stage_to_content');
+Gio._promisify(Shell.Screenshot, 'composite_to_stream');
 
 const OUT = GLib.getenv('GREF_OUT') ?? '/out';
 export const METRICS = {};
@@ -43,6 +45,23 @@ function dump(actor, depth, out) {
     }
     for (const child of actor.get_children())
         dump(child, depth + 1, out);
+}
+
+// The lock screen blanks ordinary screenshots (privacy); GNOME's own
+// screenshot UI composes the stage content instead.
+async function shotStage(state) {
+    await Scripting.sleep(700);
+    const [content] = await new Shell.Screenshot().screenshot_stage_to_content();
+    const texture = content.get_texture();
+    const file = Gio.File.new_for_path(`${OUT}/${state}.png`);
+    const stream = file.replace(null, false, Gio.FileCreateFlags.NONE, null);
+    await Shell.Screenshot.composite_to_stream(texture, 0, 0,
+        texture.get_width(), texture.get_height(), 1, null, 0, 0, 1, stream);
+    stream.close(null);
+    const actors = [];
+    dump(global.stage, 0, actors);
+    GLib.file_set_contents(`${OUT}/${state}.json`, JSON.stringify(actors, null, 1));
+    print(`GREF captured ${state}`);
 }
 
 async function shotNow(state) {
@@ -158,6 +177,29 @@ export async function run() {
         Gio.DBusCallFlags.NONE, -1, null, null);
     await Scripting.sleep(1500);
     await shot('10-end-session');
+    Gio.DBus.session.call(Gio.DBus.session.unique_name,
+        '/org/gnome/SessionManager/EndSessionDialog',
+        'org.gnome.SessionManager.EndSessionDialog', 'Close',
+        null, null, Gio.DBusCallFlags.NONE, -1, null, null);
+    await Scripting.sleep(1000);
+
+    // The lock screen: the curtain with the clock, then the unlock prompt.
+    if (Main.screenShield) {
+        Main.screenShield.lock(false);
+        await Scripting.sleep(3000);
+        // Without gnome-settings-daemon the shield stays faded to black
+        // (its blanking lightbox); lift it to show the lock screen.
+        Main.screenShield._shortLightbox?.lightOff(0);
+        Main.screenShield._longLightbox?.lightOff(0);
+        await Scripting.sleep(500);
+        await shotStage('11-lock-screen');
+        Main.screenShield.showDialog();
+        Main.screenShield._dialog?._showPrompt?.();
+        await Scripting.sleep(2000);
+        await shotStage('11b-unlock-prompt');
+    } else {
+        print('GREF no screen shield');
+    }
 
     await Scripting.destroyTestWindows();
     print('GREF done');

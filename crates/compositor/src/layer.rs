@@ -351,6 +351,27 @@ pub fn layer_layout(state: &State) -> Vec<(WlSurface, (i32, i32), Layer)> {
     placed
 }
 
+/// The topmost mapped surface on the top or overlay layer that asked
+/// for exclusive keyboard interactivity: under wlr-layer-shell it gets
+/// the keyboard while mapped (a modal dialog, the unlock prompt).
+pub fn exclusive_keyboard_layer(state: &State) -> Option<WlSurface> {
+    layer_layout(state)
+        .into_iter()
+        .rev()
+        .filter(|(_, _, layer)| matches!(layer, Layer::Top | Layer::Overlay))
+        .map(|(surface, _, _)| surface)
+        .find(|surface| {
+            smithay::wayland::compositor::with_states(surface, |states| {
+                states
+                    .cached_state
+                    .get::<LayerSurfaceCachedState>()
+                    .current()
+                    .keyboard_interactivity
+                    == smithay::wayland::shell::wlr_layer::KeyboardInteractivity::Exclusive
+            })
+        })
+}
+
 /// Frame draw order from a bottom-to-top stack: Smithay 0.7's
 /// `draw_render_elements` draws the first element topmost (it reverses
 /// the slice internally for painter's order), while the runtime builds

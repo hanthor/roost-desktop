@@ -31,10 +31,13 @@ echo 500 >/tmp/backlight/brightness
 echo 1000 >/tmp/backlight/max_brightness
 dbus-daemon --session --address=unix:path=/tmp/sysbus --fork --nopidfile
 export DBUS_SYSTEM_BUS_ADDRESS=unix:path=/tmp/sysbus
+# GNOME Shell locks only under a display manager on systemd: the gdm
+# stub answers its probe, and systemd's seat directory must exist.
+mkdir -p /run/systemd/seats
 # Only what GNOME's headless session can use, so Roost's capture can run
 # the same: power profiles and logind (its NetworkManager and BlueZ
 # clients need more than the stubs offer).
-ROOST_STUB_SERVICES=ppd,logind python3 /lib/roost-service-stubs.py /tmp/backlight >/tmp/stubs.log 2>&1 &
+ROOST_STUB_SERVICES=ppd,logind,gdm python3 /lib/roost-service-stubs.py /tmp/backlight >/tmp/stubs.log 2>&1 &
 sleep 1
 # shellcheck disable=SC2016 # expands in the inner shell
 exec dbus-run-session -- sh -c '
