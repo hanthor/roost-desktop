@@ -21,6 +21,15 @@
 #   G-NOTIFY-LIST    the calendar lists it instead of "No Notifications"
 #   G-NOTIFY-CLEAR   Clear empties the list
 #   G-NOTIFY-DND     with Do Not Disturb on, no banner, but listed
+#   G-QS-SERVICES    quick settings shows the tiles of the services on
+#                    the bus (stub daemons on a private system bus, #55)
+#   G-QS-WIFI        the Wi-Fi tile turns NetworkManager's radio off
+#   G-QS-BLUETOOTH   the Bluetooth tile powers the BlueZ adapter off
+#   G-QS-POWER       the Power Mode tile switches to power saver
+#   G-QS-DARK        the Dark Style tile writes GNOME's color-scheme key
+#   G-QS-BRIGHTNESS  the brightness slider sets the backlight via logind
+#   G-QS-VOLUME      the volume slider sets the PipeWire sink volume
+#   G-QS-ABSENT      with the daemons gone, their tiles hide (no hang)
 #   G-OV-SHELL-UI  the overview shows the search entry and the dash
 #   G-OV-SEARCH typing lists matching apps (#57)
 #   G-OV-LAUNCH Enter launches the top result and closes the overview
@@ -70,9 +79,13 @@ Type=Application
 EOF
 OWNED_XVFB=""
 COMPOSITOR_PID=""
+STUBS_PID=""
+SYSBUS_PID=""
 cleanup() {
     if [ -n "$COMPOSITOR_PID" ]; then kill "$COMPOSITOR_PID" 2>/dev/null || true; fi
     if [ -n "$OWNED_XVFB" ]; then kill "$OWNED_XVFB" 2>/dev/null || true; fi
+    if [ -n "$STUBS_PID" ]; then kill "$STUBS_PID" 2>/dev/null || true; fi
+    if [ -n "$SYSBUS_PID" ]; then kill "$SYSBUS_PID" 2>/dev/null || true; fi
 }
 trap cleanup EXIT INT TERM
 # RGB of one pixel of a PNG, as "r g b".
@@ -111,6 +124,39 @@ if ! xdotool getdisplaygeometry >/dev/null 2>&1; then
     OWNED_XVFB=$!
     for _ in $(seq 1 30); do xdotool getdisplaygeometry >/dev/null 2>&1 && break; sleep 1; done
 fi
+
+# Settings land in a private keyfile so the proof can read them back.
+GSETTINGS_BACKEND=keyfile
+XDG_CONFIG_HOME="$ARTIFACTS/config"
+export GSETTINGS_BACKEND XDG_CONFIG_HOME
+# Quick-settings daemons: stubs on a private "system" bus (#55), a fake
+# backlight, and a fake wpctl that records the sink volume.
+BACKLIGHT="$ARTIFACTS/backlight/roost-bl"
+mkdir -p "$BACKLIGHT" "$ARTIFACTS/bin"
+echo 1000 >"$BACKLIGHT/max_brightness"
+echo 500 >"$BACKLIGHT/brightness"
+ROOST_BACKLIGHT_ROOT="$ARTIFACTS/backlight"
+export ROOST_BACKLIGHT_ROOT
+VOLUME_FILE="$ARTIFACTS/volume"
+echo 0.80 >"$VOLUME_FILE"
+cat >"$ARTIFACTS/bin/wpctl" <<WPCTL
+#!/bin/sh
+case "\$1" in
+    get-volume) echo "Volume: \$(cat "$VOLUME_FILE")" ;;
+    set-volume) echo "\$3" >"$VOLUME_FILE" ;;
+    *) ;;
+esac
+WPCTL
+chmod +x "$ARTIFACTS/bin/wpctl"
+PATH="$ARTIFACTS/bin:$PATH"
+export PATH
+SYSBUS_INFO="$(dbus-daemon --session --fork --print-address=1 --print-pid=1)"
+DBUS_SYSTEM_BUS_ADDRESS="$(echo "$SYSBUS_INFO" | sed -n 1p)"
+SYSBUS_PID="$(echo "$SYSBUS_INFO" | sed -n 2p)"
+export DBUS_SYSTEM_BUS_ADDRESS
+"$PY" "$ROOT/scripts/lib/roost-service-stubs.py" "$BACKLIGHT" >"$ARTIFACTS/stubs.log" 2>&1 &
+STUBS_PID=$!
+for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/stubs.log" 2>/dev/null && break; sleep 0.5; done
 
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk
 "$ROOT/target/debug/roost-compositor" --backend winit --socket "roost-gtk-proof-$$" \
@@ -375,6 +421,84 @@ showing "$ARTIFACTS/a11y-dnd-list.json" "Quiet Note" ||
     fail G-NOTIFY-DND "the held-back notification is missing from the list"
 pass G-NOTIFY-DND "Do Not Disturb holds banners back but keeps the list"
 scrot "$ARTIFACTS/14-dnd-list.png" >/dev/null
+xdotool key Escape
+
+# Quick-settings services (#55): each toggle is read back from its daemon.
+sysprop() {
+    gdbus call --system --dest "$1" --object-path "$2" \
+        --method org.freedesktop.DBus.Properties.Get "$3" "$4" 2>>"$ARTIFACTS/stubs.log"
+}
+open_qs() {
+    xdotool mousemove --window "$WID" $((WIDTH - 50)) 16 click 1
+    sleep 2
+}
+qs_press() {
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-$2.json" 20 --press "$1"
+}
+open_qs
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-services.json" 20 ||
+    fail G-QS-SERVICES "accessibility dump failed"
+scrot "$ARTIFACTS/15-quick-settings-services.png" >/dev/null
+for label in "Wi-Fi" "Wired" "Bluetooth" "Power Mode" "Brightness" "Volume"; do
+    showing "$ARTIFACTS/a11y-qs-services.json" "$label" ||
+        fail G-QS-SERVICES "no '$label' control with its daemon on the bus"
+done
+pass G-QS-SERVICES "quick settings shows a tile per service on the bus"
+
+qs_press "Wi-Fi" wifi || fail G-QS-WIFI "could not press Wi-Fi"
+sysprop org.freedesktop.NetworkManager /org/freedesktop/NetworkManager \
+    org.freedesktop.NetworkManager WirelessEnabled | grep -q false ||
+    fail G-QS-WIFI "NetworkManager's WirelessEnabled is still true"
+pass G-QS-WIFI "the Wi-Fi tile turns NetworkManager's radio off"
+
+qs_press "Bluetooth" bt || fail G-QS-BLUETOOTH "could not press Bluetooth"
+sysprop org.bluez /org/bluez/hci0 org.bluez.Adapter1 Powered | grep -q false ||
+    fail G-QS-BLUETOOTH "the BlueZ adapter is still powered"
+pass G-QS-BLUETOOTH "the Bluetooth tile powers the adapter off"
+
+qs_press "Power Mode" power || fail G-QS-POWER "could not press Power Mode"
+sysprop org.freedesktop.UPower.PowerProfiles /org/freedesktop/UPower/PowerProfiles \
+    org.freedesktop.UPower.PowerProfiles ActiveProfile | grep -q power-saver ||
+    fail G-QS-POWER "power-profiles-daemon did not switch to power-saver"
+pass G-QS-POWER "the Power Mode tile switches to power saver"
+
+qs_press "Dark Style" dark || fail G-QS-DARK "could not press Dark Style"
+scheme="$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null)"
+[ "$scheme" = "'prefer-dark'" ] ||
+    fail G-QS-DARK "color-scheme is $scheme, not 'prefer-dark'"
+pass G-QS-DARK "the Dark Style tile writes GNOME's color-scheme key"
+
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-brightness.json" 20 \
+    --set Brightness 30 || fail G-QS-BRIGHTNESS "could not set Brightness"
+[ "$(cat "$BACKLIGHT/brightness")" = 300 ] ||
+    fail G-QS-BRIGHTNESS "backlight is $(cat "$BACKLIGHT/brightness"), not 300"
+pass G-QS-BRIGHTNESS "the brightness slider sets the backlight through logind"
+
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-volume.json" 20 \
+    --set Volume 40 || fail G-QS-VOLUME "could not set Volume"
+[ "$(cat "$VOLUME_FILE")" = 0.40 ] ||
+    fail G-QS-VOLUME "sink volume is $(cat "$VOLUME_FILE"), not 0.40"
+pass G-QS-VOLUME "the volume slider sets the PipeWire sink volume"
+scrot "$ARTIFACTS/16-quick-settings-toggled.png" >/dev/null
+xdotool key Escape
+sleep 1
+
+kill "$STUBS_PID" 2>/dev/null || true
+STUBS_PID=""
+sleep 2
+scrot "$ARTIFACTS/17-before-absent.png" >/dev/null
+open_qs
+scrot "$ARTIFACTS/18-quick-settings-absent.png" >/dev/null
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-absent.json" 20 ||
+    fail G-QS-ABSENT "accessibility dump failed (shell hung?)"
+for label in "Wi-Fi" "Bluetooth" "Power Mode"; do
+    if showing "$ARTIFACTS/a11y-qs-absent.json" "$label"; then
+        fail G-QS-ABSENT "'$label' still showing with its daemon gone"
+    fi
+done
+showing "$ARTIFACTS/a11y-qs-absent.json" "Dark Style" ||
+    fail G-QS-ABSENT "the settings tiles went away with the daemons"
+pass G-QS-ABSENT "tiles hide when their daemons leave the bus"
 xdotool key Escape
 
 grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"

@@ -16,6 +16,7 @@
 mod logic;
 mod notify;
 mod overview;
+mod services;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -31,6 +32,7 @@ use logic::ClockFormat;
 
 const INTERFACE_SCHEMA: &str = "org.gnome.desktop.interface";
 const NOTIFICATIONS_SCHEMA: &str = "org.gnome.desktop.notifications";
+const COLOR_SCHEMA: &str = "org.gnome.settings-daemon.plugins.color";
 
 fn release_version() -> &'static str {
     match option_env!("ROOST_VERSION") {
@@ -198,7 +200,7 @@ fn calendar_popover(notes: &gtk::Box) -> (gtk::Popover, gtk::Label, gtk::Label) 
     (popover, weekday, full_date)
 }
 
-fn qs_toggle(icon: &str, title: &str, subtitle: Option<&str>) -> gtk::ToggleButton {
+fn qs_tile(icon: &str, title: &str, subtitle: Option<&str>) -> services::Tile {
     let content = gtk::Box::new(gtk::Orientation::Horizontal, 10);
     let image = gtk::Image::from_icon_name(icon);
     image.set_valign(gtk::Align::Center);
@@ -208,17 +210,17 @@ fn qs_toggle(icon: &str, title: &str, subtitle: Option<&str>) -> gtk::ToggleButt
     let t = gtk::Label::new(Some(title));
     t.set_halign(gtk::Align::Start);
     text.append(&t);
-    if let Some(sub) = subtitle {
-        let s = gtk::Label::new(Some(sub));
-        s.set_halign(gtk::Align::Start);
-        s.add_css_class("caption");
-        text.append(&s);
-    }
+    let s = gtk::Label::new(subtitle);
+    s.set_halign(gtk::Align::Start);
+    s.add_css_class("caption");
+    s.set_visible(subtitle.is_some());
+    text.append(&s);
     content.append(&text);
     let toggle = gtk::ToggleButton::builder().child(&content).build();
     toggle.add_css_class("qs-toggle");
+    toggle.set_hexpand(true);
     toggle.update_property(&[gtk::accessible::Property::Label(title)]);
-    toggle
+    services::Tile::new(toggle, s)
 }
 
 fn qs_round(icon: &str, label: &str) -> gtk::Button {
@@ -273,40 +275,88 @@ fn quick_settings_popover(
         });
     }
 
-    // Volume slider.
-    let volume = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    volume.append(&gtk::Image::from_icon_name("audio-volume-high-symbolic"));
+    // Volume: mute button plus slider (PipeWire via wpctl).
+    let volume_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let mute = gtk::Button::from_icon_name("audio-volume-high-symbolic");
+    mute.add_css_class("flat");
+    mute.update_property(&[gtk::accessible::Property::Label("Mute")]);
+    volume_row.append(&mute);
     let slider = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 1.0);
     slider.set_value(100.0);
     slider.set_hexpand(true);
     slider.update_property(&[gtk::accessible::Property::Label("Volume")]);
-    volume.append(&slider);
+    volume_row.append(&slider);
 
-    // Toggle grid, two columns, GNOME 51 order.
-    let grid = gtk::Grid::builder()
+    // Brightness: hidden without a backlight.
+    let brightness_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    brightness_row.append(&gtk::Image::from_icon_name("display-brightness-symbolic"));
+    let brightness = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 1.0);
+    brightness.set_hexpand(true);
+    brightness.update_property(&[gtk::accessible::Property::Label("Brightness")]);
+    brightness_row.append(&brightness);
+
+    // Toggle grid, two columns, GNOME 51 order. Tiles whose service is
+    // absent hide, and the flow closes the gap.
+    let grid = gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .homogeneous(true)
+        .min_children_per_line(2)
+        .max_children_per_line(2)
         .row_spacing(12)
         .column_spacing(12)
         .build();
-    let wired = qs_toggle("network-wired-symbolic", "Wired", None);
-    wired.set_active(true);
-    let power_mode = qs_toggle(
+    let wifi = qs_tile("network-wireless-symbolic", "Wi-Fi", None);
+    let wired = qs_tile("network-wired-symbolic", "Wired", None);
+    let bluetooth = qs_tile("bluetooth-active-symbolic", "Bluetooth", None);
+    let power_mode = qs_tile(
         "power-profile-balanced-symbolic",
         "Power Mode",
         Some("Balanced"),
     );
-    let dark = qs_toggle("dark-mode-symbolic", "Dark Style", None);
-    let dnd = qs_toggle("notifications-disabled-symbolic", "Do Not Disturb", None);
-    grid.attach(&wired, 0, 0, 1, 1);
-    grid.attach(&power_mode, 1, 0, 1, 1);
-    grid.attach(&dark, 0, 1, 1, 1);
-    grid.attach(&dnd, 1, 1, 1, 1);
+    let night = qs_tile("night-light-symbolic", "Night Light", None);
+    let dark = qs_tile("dark-mode-symbolic", "Dark Style", None);
+    let dnd_tile = qs_tile("notifications-disabled-symbolic", "Do Not Disturb", None);
+    for tile in [
+        &wifi,
+        &wired,
+        &bluetooth,
+        &power_mode,
+        &night,
+        &dark,
+        &dnd_tile,
+    ] {
+        grid.append(&tile.button);
+    }
+    let dnd = dnd_tile.button.clone();
 
     if let Some(iface) = settings(INTERFACE_SCHEMA) {
-        dark.set_active(logic::is_dark(&iface.string("color-scheme")));
-        dark.connect_toggled(move |t| {
+        dark.button
+            .set_active(logic::is_dark(&iface.string("color-scheme")));
+        dark.button.connect_toggled(move |t| {
             let _ = iface.set_string("color-scheme", logic::color_scheme_for(t.is_active()));
         });
     }
+    match settings(COLOR_SCHEMA) {
+        Some(color) => {
+            night
+                .button
+                .set_active(color.boolean("night-light-enabled"));
+            night.button.connect_toggled(move |t| {
+                let _ = color.set_boolean("night-light-enabled", t.is_active());
+            });
+        }
+        None => night.present(false),
+    }
+    services::attach(&Rc::new(services::Widgets {
+        wifi,
+        wired,
+        bluetooth,
+        power_mode,
+        volume: slider,
+        mute,
+        brightness_row: brightness_row.clone(),
+        brightness,
+    }));
     // Do Not Disturb drives the shell's notification store (banners
     // held back) and mirrors GNOME's show-banners key.
     let notes_settings = settings(NOTIFICATIONS_SCHEMA);
@@ -335,7 +385,8 @@ fn quick_settings_popover(
     }
 
     col.append(&top);
-    col.append(&volume);
+    col.append(&volume_row);
+    col.append(&brightness_row);
     col.append(&grid);
     popover.set_child(Some(&col));
     popover
