@@ -7,7 +7,7 @@
 
 use std::process::ExitCode;
 
-use roost_compositor::runtime::{run, NestedSession};
+use roost_compositor::runtime::{run, BackendChoice, NestedSession};
 
 /// `roost-compositor [--socket NAME] [--width W] [--height H] [--shell-bin PATH] [--xwayland]`.
 /// `ROOST_XWAYLAND=1` also opts in to X11 compatibility.
@@ -57,6 +57,13 @@ fn main() -> ExitCode {
             "--xwayland" => {
                 session.xwayland = true;
             }
+            "--backend" => match args.next().as_deref().and_then(BackendChoice::parse) {
+                Some(choice) => session.backend = choice,
+                None => {
+                    eprintln!("roost-compositor: --backend takes auto, winit, or drm");
+                    return ExitCode::FAILURE;
+                }
+            },
             "--version" | "-V" => {
                 println!("roost-compositor {}", release_version());
                 return ExitCode::SUCCESS;
@@ -65,12 +72,15 @@ fn main() -> ExitCode {
                 println!("roost-compositor: nested Roost session (001 developer preview)");
                 println!();
                 println!(
-                    "Usage: roost-compositor [--socket NAME] [--width W] [--height H] [--shell-bin PATH] [--xwayland]"
+                    "Usage: roost-compositor [--backend auto|winit|drm] [--socket NAME] [--width W] [--height H] [--shell-bin PATH] [--xwayland]"
                 );
                 println!();
                 println!("Starts one isolated nested Wayland session on a private");
                 println!("socket (default roost-nested-<pid>) and drives it until the");
-                println!("window closes. Needs a host Wayland/X session with EGL.");
+                println!("window closes. --backend auto (default) runs nested when a");
+                println!("host Wayland/X display exists and as a DRM/KMS hardware");
+                println!("session otherwise (from a TTY via greetd; needs a seat");
+                println!("from logind or seatd). --width/--height apply to nested runs.");
                 println!("The shell binary (default: ROOST_SHELL_BIN, else the");
                 println!("roost-shell-host sibling) is spawned supervised with a");
                 println!("finite restart budget; WAYLAND_DISPLAY is set for this");

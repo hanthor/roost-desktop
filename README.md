@@ -16,10 +16,10 @@ versioned control protocol between compositor and shell.
 
 What it is not yet:
 
-- **Not a hardware session.** The only compositor backend is the nested winit
-  backend, so Roost runs inside an existing Wayland or X11 session. There is
-  no DRM/KMS, libseat, or libinput path, and the shipped session entry cannot
-  start from a TTY until there is.
+- **Hardware sessions are new.** The DRM/KMS backend (libseat, GBM/EGL,
+  libinput) starts from a TTY and is proven on a virtual KMS device in CI,
+  but is not yet qualified on real GPUs. Nested runs inside another session
+  remain the main development path.
 - **Not visually at parity.** The shell paints its own pixels with a small
   bitmap font; there is no toolkit, no app grid, no window previews, and no
   AT-SPI bridge yet.

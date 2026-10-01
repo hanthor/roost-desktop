@@ -87,7 +87,7 @@ Version: $VERSION
 Section: x11
 Priority: optional
 Architecture: amd64
-Depends: libxkbcommon0, libxkbcommon-x11-0, libegl1, libgl1, libgbm1, libgtk-4-1, libadwaita-1-0, libglib2.0-0t64 | libglib2.0-0
+Depends: libxkbcommon0, libxkbcommon-x11-0, libegl1, libgl1, libgbm1, libseat1, libinput10, libudev1, libdrm2, libgtk-4-1, libadwaita-1-0, libglib2.0-0t64 | libglib2.0-0
 Maintainer: Roost Developers <roost@example.invalid>
 Description: Roost Wayland desktop session
  A GNOME-style Wayland desktop with an optional scrollable tiling shell,

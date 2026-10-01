@@ -1,0 +1,485 @@
+//! DRM/KMS hardware session backend (#52).
+//!
+//! The nested winit backend draws into a window of a host session; this
+//! backend owns the display hardware itself, so Roost can start from a
+//! TTY through greetd:
+//!
+//! - **Session**: libseat (logind or seatd) grants device access and
+//!   reports VT pause/activate. Ctrl+Alt+F1..F12 switches VTs.
+//! - **Device**: udev's primary GPU for the seat (or
+//!   `ROOST_DRM_DEVICE`), opened through the session; GBM allocates
+//!   scanout buffers and EGL/GLES renders into them.
+//! - **Outputs**: every connected connector with its preferred mode and
+//!   a free CRTC, tiled left to right in the same order the output
+//!   inventory uses. Each output renders when its previous page flip
+//!   completed (vblank), so frames are paced by the display.
+//! - **Input**: libinput on the session's seat. Relative pointer motion
+//!   is accumulated here and clamped to the output union, so the window
+//!   manager keeps receiving absolute positions like the nested backend.
+//!
+//! The pointer is drawn in software (an arrow of solid rectangles):
+//! there is no host cursor on bare hardware. Client cursor surfaces are
+//! not composited yet.
+
+use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
+use smithay::backend::allocator::Fourcc;
+use smithay::backend::drm::{
+    DrmDevice, DrmDeviceFd, DrmDeviceNotifier, DrmEvent, GbmBufferedSurface,
+};
+use smithay::backend::egl::{EGLContext, EGLDisplay};
+use smithay::backend::input::{Event, InputEvent, KeyState, KeyboardKeyEvent, PointerMotionEvent};
+use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
+use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::session::libseat::{LibSeatSession, LibSeatSessionNotifier};
+use smithay::backend::session::{Event as SessionEvent, Session};
+use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
+use smithay::reexports::drm::control::{connector, crtc, Device as ControlDevice, ModeTypeFlags};
+use smithay::reexports::input::Libinput;
+use smithay::reexports::rustix::fs::OFlags;
+use smithay::utils::{DeviceFd, Logical, Physical, Point, Rectangle, Size};
+
+use crate::windows::ManagerInput;
+
+/// Scanout surface type: GBM buffers on the DRM device, no per-buffer data.
+pub type ScanoutSurface = GbmBufferedSurface<GbmAllocator<DrmDeviceFd>, ()>;
+
+/// One lit connector.
+pub struct DrmOutput {
+    /// Inventory name, e.g. `eDP-1`.
+    pub name: String,
+    /// CRTC driving the connector.
+    pub crtc: crtc::Handle,
+    /// GBM swapchain bound to the CRTC.
+    pub surface: ScanoutSurface,
+    /// Protocol output advertised to clients.
+    pub output: Output,
+    /// Mode size in physical pixels.
+    pub size: Size<i32, Physical>,
+    /// Top-left in the global space (left-to-right tiling).
+    pub loc: (i32, i32),
+    /// A frame is queued and its page flip has not completed yet.
+    pub pending: bool,
+}
+
+/// Hardware session state.
+pub struct DrmBackend {
+    /// libseat session (device access, VT switching).
+    pub session: LibSeatSession,
+    /// Opened KMS device.
+    pub drm: DrmDevice,
+    /// GLES renderer on the device's EGL display.
+    pub renderer: GlesRenderer,
+    /// Lit outputs, primary first.
+    pub outputs: Vec<DrmOutput>,
+    /// libinput context, suspended while the session is paused.
+    pub libinput: Libinput,
+    /// Whether the session currently owns the VT.
+    pub active: bool,
+    pointer: Point<f64, Logical>,
+    ctrl: bool,
+    alt: bool,
+}
+
+/// Event sources the runtime installs on its loop.
+pub struct DrmSources {
+    /// Session pause/activate.
+    pub session: LibSeatSessionNotifier,
+    /// VBlank and device errors.
+    pub drm: DrmDeviceNotifier,
+    /// Input events.
+    pub input: LibinputInputBackend,
+}
+
+/// Why the hardware session could not start.
+#[derive(Debug)]
+pub struct DrmInitError(pub String);
+
+impl std::fmt::Display for DrmInitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "drm backend: {}", self.0)
+    }
+}
+
+fn err(context: &str) -> impl Fn(String) -> DrmInitError + '_ {
+    move |e| DrmInitError(format!("{context}: {e}"))
+}
+
+// Evdev keycodes (backend keycodes minus the XKB offset of 8).
+const KEY_LEFTCTRL: u32 = 29;
+const KEY_RIGHTCTRL: u32 = 97;
+const KEY_LEFTALT: u32 = 56;
+const KEY_RIGHTALT: u32 = 100;
+const KEY_F1: u32 = 59;
+const KEY_F10: u32 = 68;
+const KEY_F11: u32 = 87;
+const KEY_F12: u32 = 88;
+const XKB_OFFSET: u32 = 8;
+
+/// VT number for an evdev function-key code, if it is F1..F12.
+pub fn vt_for_key(keycode: u32) -> Option<i32> {
+    match keycode {
+        KEY_F1..=KEY_F10 => Some((keycode - KEY_F1 + 1) as i32),
+        KEY_F11 => Some(11),
+        KEY_F12 => Some(12),
+        _ => None,
+    }
+}
+
+/// Clamp a pointer position into the union of output rectangles.
+pub fn clamp_to_outputs(
+    pos: Point<f64, Logical>,
+    outputs: &[Rectangle<i32, Logical>],
+) -> Point<f64, Logical> {
+    if outputs.iter().any(|r| r.to_f64().contains(pos)) {
+        return pos;
+    }
+    // Nearest point on the nearest output.
+    let mut best = pos;
+    let mut best_d = f64::INFINITY;
+    for r in outputs {
+        let r = r.to_f64();
+        let x = pos.x.clamp(r.loc.x, r.loc.x + r.size.w - 1.0);
+        let y = pos.y.clamp(r.loc.y, r.loc.y + r.size.h - 1.0);
+        let d = (x - pos.x).powi(2) + (y - pos.y).powi(2);
+        if d < best_d {
+            best_d = d;
+            best = (x, y).into();
+        }
+    }
+    best
+}
+
+impl DrmBackend {
+    /// Open the seat, the primary GPU, every connected output, and
+    /// libinput. Fails with a readable reason (no seat daemon, no GPU,
+    /// nothing connected) so the launcher can report it.
+    pub fn new() -> Result<(Self, DrmSources), DrmInitError> {
+        let (mut session, session_notifier) =
+            LibSeatSession::new().map_err(|e| err("libseat session")(e.to_string()))?;
+        let seat = session.seat();
+        let path = match std::env::var_os("ROOST_DRM_DEVICE") {
+            Some(path) => std::path::PathBuf::from(path),
+            None => smithay::backend::udev::primary_gpu(&seat)
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    smithay::backend::udev::all_gpus(&seat)
+                        .ok()
+                        .and_then(|gpus| gpus.into_iter().next())
+                })
+                .ok_or_else(|| DrmInitError(format!("no GPU on seat {seat}")))?,
+        };
+        let fd = session
+            .open(
+                &path,
+                OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK,
+            )
+            .map_err(|e| err("open drm device")(format!("{}: {e}", path.display())))?;
+        let fd = DrmDeviceFd::new(DeviceFd::from(fd));
+        let (mut drm, drm_notifier) =
+            DrmDevice::new(fd.clone(), true).map_err(|e| err("drm device")(e.to_string()))?;
+        let gbm = GbmDevice::new(fd.clone()).map_err(|e| err("gbm device")(e.to_string()))?;
+        // SAFETY: the GBM device outlives the display; both are held for
+        // the backend's lifetime through the renderer's context.
+        let egl = unsafe { EGLDisplay::new(gbm.clone()) }
+            .map_err(|e| err("egl display")(e.to_string()))?;
+        let context = EGLContext::new(&egl).map_err(|e| err("egl context")(e.to_string()))?;
+        let render_formats = context.dmabuf_render_formats().clone();
+        // SAFETY: the context is current on this thread only.
+        let renderer =
+            unsafe { GlesRenderer::new(context) }.map_err(|e| err("gles")(e.to_string()))?;
+
+        let resources = drm
+            .resource_handles()
+            .map_err(|e| err("drm resources")(e.to_string()))?;
+        let mut used: Vec<crtc::Handle> = Vec::new();
+        let mut outputs = Vec::new();
+        let mut next_x = 0;
+        for handle in resources.connectors() {
+            let Ok(info) = drm.get_connector(*handle, false) else {
+                continue;
+            };
+            if info.state() != connector::State::Connected {
+                continue;
+            }
+            let Some(mode) = info
+                .modes()
+                .iter()
+                .find(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
+                .or_else(|| info.modes().first())
+                .copied()
+            else {
+                continue;
+            };
+            let crtc = info
+                .encoders()
+                .iter()
+                .filter_map(|enc| drm.get_encoder(*enc).ok())
+                .flat_map(|enc| resources.filter_crtcs(enc.possible_crtcs()))
+                .find(|crtc| !used.contains(crtc));
+            let Some(crtc) = crtc else {
+                continue;
+            };
+            let surface = match drm.create_surface(crtc, mode, &[*handle]) {
+                Ok(surface) => surface,
+                Err(e) => {
+                    eprintln!("roost-compositor: drm: skip connector: {e}");
+                    continue;
+                }
+            };
+            let allocator = GbmAllocator::new(
+                gbm.clone(),
+                GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
+            );
+            let surface = match GbmBufferedSurface::new(
+                surface,
+                allocator,
+                &[Fourcc::Argb8888, Fourcc::Xrgb8888],
+                render_formats.iter().copied(),
+            ) {
+                Ok(surface) => surface,
+                Err(e) => {
+                    eprintln!("roost-compositor: drm: skip connector: {e}");
+                    continue;
+                }
+            };
+            used.push(crtc);
+            let name = format!("{}-{}", info.interface().as_str(), info.interface_id());
+            let (w, h) = mode.size();
+            let size: Size<i32, Physical> = (i32::from(w), i32::from(h)).into();
+            let (mm_w, mm_h) = info.size().unwrap_or((0, 0));
+            let output = Output::new(
+                name.clone(),
+                PhysicalProperties {
+                    size: (mm_w as i32, mm_h as i32).into(),
+                    subpixel: Subpixel::Unknown,
+                    make: "Roost".to_owned(),
+                    model: name.clone(),
+                },
+            );
+            let out_mode = Mode::from(mode);
+            output.change_current_state(
+                Some(out_mode),
+                None,
+                Some(smithay::output::Scale::Integer(1)),
+                Some((next_x, 0).into()),
+            );
+            output.set_preferred(out_mode);
+            eprintln!(
+                "roost-compositor: drm: output {name} {}x{} at {next_x},0",
+                size.w, size.h
+            );
+            outputs.push(DrmOutput {
+                name,
+                crtc,
+                surface,
+                output,
+                size,
+                loc: (next_x, 0),
+                pending: false,
+            });
+            next_x += size.w;
+        }
+        if outputs.is_empty() {
+            return Err(DrmInitError(format!(
+                "no connected output on {}",
+                path.display()
+            )));
+        }
+
+        let mut libinput = Libinput::new_with_udev(LibinputSessionInterface::from(session.clone()));
+        libinput
+            .udev_assign_seat(&seat)
+            .map_err(|()| DrmInitError(format!("libinput: cannot assign seat {seat}")))?;
+        let input = LibinputInputBackend::new(libinput.clone());
+        let first = outputs[0].size;
+        Ok((
+            Self {
+                session,
+                drm,
+                renderer,
+                outputs,
+                libinput,
+                active: true,
+                pointer: (f64::from(first.w) / 2.0, f64::from(first.h) / 2.0).into(),
+                ctrl: false,
+                alt: false,
+            },
+            DrmSources {
+                session: session_notifier,
+                drm: drm_notifier,
+                input,
+            },
+        ))
+    }
+
+    /// Output rectangles in the global logical space (scale 1).
+    pub fn output_rects(&self) -> Vec<Rectangle<i32, Logical>> {
+        self.outputs
+            .iter()
+            .map(|o| Rectangle::new(o.loc.into(), (o.size.w, o.size.h).into()))
+            .collect()
+    }
+
+    /// Current pointer position (global logical space).
+    pub fn pointer(&self) -> Point<f64, Logical> {
+        self.pointer
+    }
+
+    /// Session pause/activate from libseat.
+    pub fn on_session_event(&mut self, event: SessionEvent) {
+        match event {
+            SessionEvent::PauseSession => {
+                eprintln!("roost-compositor: drm: session paused");
+                self.active = false;
+                self.libinput.suspend();
+                self.drm.pause();
+            }
+            SessionEvent::ActivateSession => {
+                eprintln!("roost-compositor: drm: session activated");
+                if self.libinput.resume().is_err() {
+                    eprintln!("roost-compositor: drm: libinput resume failed");
+                }
+                if let Err(e) = self.drm.activate(false) {
+                    eprintln!("roost-compositor: drm: activate failed: {e}");
+                }
+                for out in &mut self.outputs {
+                    out.surface.reset_buffers();
+                    out.pending = false;
+                }
+                self.active = true;
+            }
+        }
+    }
+
+    /// Page flip completion: the output may render again.
+    pub fn on_drm_event(&mut self, event: DrmEvent) {
+        match event {
+            DrmEvent::VBlank(crtc) => {
+                if let Some(out) = self.outputs.iter_mut().find(|o| o.crtc == crtc) {
+                    if let Err(e) = out.surface.frame_submitted() {
+                        eprintln!("roost-compositor: drm: frame_submitted: {e}");
+                    }
+                    out.pending = false;
+                }
+            }
+            DrmEvent::Error(e) => eprintln!("roost-compositor: drm: device error: {e}"),
+        }
+    }
+
+    /// Translate one libinput event into manager inputs, handling the
+    /// pieces only the hardware backend owns: relative pointer motion
+    /// (accumulated, clamped) and Ctrl+Alt+F<n> VT switching (consumed).
+    pub fn translate(&mut self, event: InputEvent<LibinputInputBackend>) -> Vec<ManagerInput> {
+        match event {
+            InputEvent::PointerMotion { event } => {
+                let delta = event.delta();
+                let rects = self.output_rects();
+                self.pointer = clamp_to_outputs(self.pointer + delta, &rects);
+                vec![ManagerInput::Motion {
+                    pos: self.pointer,
+                    time: (event.time() / 1000) as u32,
+                }]
+            }
+            InputEvent::Keyboard { event } => {
+                let code = u32::from(event.key_code()).saturating_sub(XKB_OFFSET);
+                let pressed = event.state() == KeyState::Pressed;
+                match code {
+                    KEY_LEFTCTRL | KEY_RIGHTCTRL => self.ctrl = pressed,
+                    KEY_LEFTALT | KEY_RIGHTALT => self.alt = pressed,
+                    _ => {}
+                }
+                if pressed && self.ctrl && self.alt {
+                    if let Some(vt) = vt_for_key(code) {
+                        if let Err(e) = self.session.change_vt(vt) {
+                            eprintln!("roost-compositor: drm: change_vt({vt}): {e}");
+                        }
+                        return Vec::new();
+                    }
+                }
+                crate::windows::translate_input::<LibinputInputBackend>(
+                    InputEvent::Keyboard { event },
+                    self.primary_size(),
+                )
+            }
+            other => {
+                let inputs = crate::windows::translate_input(other, self.primary_size());
+                for input in &inputs {
+                    if let ManagerInput::Motion { pos, .. } = input {
+                        self.pointer = *pos;
+                    }
+                }
+                inputs
+            }
+        }
+    }
+
+    fn primary_size(&self) -> Size<i32, Logical> {
+        self.outputs
+            .first()
+            .map(|o| (o.size.w, o.size.h).into())
+            .unwrap_or_else(|| (1, 1).into())
+    }
+}
+
+/// Rectangles in an output's physical pixel space.
+pub type PixelRects = Vec<Rectangle<i32, Physical>>;
+
+/// Software pointer: an arrow drawn as stacked rectangles (outline
+/// first, fill second), relative to the hotspot at `pos` and offset by
+/// the output's location. Returns `(outline, fill)` damage-style rects.
+pub fn cursor_rects(pos: Point<f64, Logical>, output_loc: (i32, i32)) -> (PixelRects, PixelRects) {
+    let x = pos.x.round() as i32 - output_loc.0;
+    let y = pos.y.round() as i32 - output_loc.1;
+    let mut outline = Vec::new();
+    let mut fill = Vec::new();
+    // Left-aligned triangle, 12 rows tall, plus a short tail.
+    for row in 0..12 {
+        outline.push(Rectangle::new((x, y + row).into(), (row + 2, 1).into()));
+        if row > 0 && row < 11 {
+            fill.push(Rectangle::new((x + 1, y + row).into(), (row, 1).into()));
+        }
+    }
+    for row in 12..17 {
+        outline.push(Rectangle::new((x + 4, y + row).into(), (4, 1).into()));
+        fill.push(Rectangle::new((x + 5, y + row).into(), (2, 1).into()));
+    }
+    (outline, fill)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn function_keys_map_to_vts() {
+        assert_eq!(vt_for_key(KEY_F1), Some(1));
+        assert_eq!(vt_for_key(KEY_F10), Some(10));
+        assert_eq!(vt_for_key(KEY_F11), Some(11));
+        assert_eq!(vt_for_key(KEY_F12), Some(12));
+        assert_eq!(vt_for_key(30), None);
+    }
+
+    #[test]
+    fn pointer_clamps_into_the_output_union() {
+        let outputs = [
+            Rectangle::new((0, 0).into(), (1920, 1080).into()),
+            Rectangle::new((1920, 0).into(), (1280, 800).into()),
+        ];
+        let inside: Point<f64, Logical> = (2000.0, 100.0).into();
+        assert_eq!(clamp_to_outputs(inside, &outputs), inside);
+        // Below the shorter right-hand output: pulled up onto it.
+        let below = clamp_to_outputs((2500.0, 1000.0).into(), &outputs);
+        assert_eq!(below, (2500.0, 799.0).into());
+        // Far left: onto the left edge of the first output.
+        let left = clamp_to_outputs((-50.0, 10.0).into(), &outputs);
+        assert_eq!(left, (0.0, 10.0).into());
+    }
+
+    #[test]
+    fn cursor_is_offset_by_output_location() {
+        let (outline, fill) = cursor_rects((1930.0, 5.0).into(), (1920, 0));
+        assert_eq!(outline[0].loc, (10, 5).into());
+        assert!(!fill.is_empty());
+    }
+}

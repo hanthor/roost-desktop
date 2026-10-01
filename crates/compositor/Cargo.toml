@@ -19,9 +19,22 @@ greetd_ipc.workspace = true
 image.workspace = true
 
 [features]
+default = ["drm"]
 # Additive X11 compatibility: enables Smithay's xwayland module within the
 # pinned =0.7.0 release (ADR 0001). Default builds are native-only.
 xwayland = ["smithay/xwayland"]
+# Hardware session (#52): DRM/KMS output through GBM/EGL, libseat session,
+# udev device discovery, libinput input. Needs libseat, libinput, libudev,
+# gbm, and libdrm at build time. The nested winit backend stays available.
+drm = [
+    "smithay/backend_drm",
+    "smithay/backend_gbm",
+    "smithay/backend_egl",
+    "smithay/backend_libinput",
+    "smithay/backend_session_libseat",
+    "smithay/backend_udev",
+    "smithay/renderer_gl",
+]
 
 [dev-dependencies]
 wayland-client.workspace = true
