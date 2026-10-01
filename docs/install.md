@@ -1,5 +1,13 @@
 # Installing Roost
 
+> **Current limitation.** Roost's compositor has only a nested (winit)
+> backend. The installed session entry launches, but it needs a host Wayland
+> or X11 session with EGL to run; it cannot yet start from a TTY through a
+> display manager. A DRM/KMS session is tracked on the roadmap board. Until
+> it lands, run Roost with `scripts/roost-nested run` from inside another
+> session. On TunaOS Marlin the plan is a Roost image flavor rather than this
+> Debian package; see `docs/roadmap.md`.
+
 ## From the Debian package (recommended on Debian/Ubuntu)
 
 ```sh

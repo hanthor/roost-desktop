@@ -6,7 +6,35 @@ The compositor is a long-lived Rust process built with Smithay. The shell UI run
 
 ## Project status
 
-Design and planning only; no compositor implementation has started. The planning framework covers baseline research, the nested recovery slice, shell parity, hardware/app compatibility, secure system integration, optional extensions, and release readiness.
+**Nested developer preview.** Four crates build and ship: a Smithay compositor
+(floating windows, workspaces, Alt-Tab, tiling halves, a scrollable strip mode,
+multi-output with hotplug migration, session lock, supervised shell restart,
+optional XWayland), a shell host (panel, quick-settings tiles, tray,
+notifications daemon, dock, overview search and launch, keyboard navigation,
+Rhai extensions, GSettings read and write-back), a greetd greeter, and the
+versioned control protocol between compositor and shell.
+
+What it is not yet:
+
+- **Not a hardware session.** The only compositor backend is the nested winit
+  backend, so Roost runs inside an existing Wayland or X11 session. There is
+  no DRM/KMS, libseat, or libinput path, and the shipped session entry cannot
+  start from a TTY until there is.
+- **Not visually at parity.** The shell paints its own pixels with a small
+  bitmap font; there is no toolkit, no app grid, no window previews, and no
+  AT-SPI bridge yet.
+
+**Parity baseline:** GNOME 51 as shipped in the TunaOS Marlin GNOME image
+(`ghcr.io/tuna-os/marlin:gnome`). Every parity claim is measured against
+that image on the same virtual machine; see
+[the parity ledger](docs/parity-ledger.md).
+
+**Target platform:** Roost is being tested as a TunaOS Marlin flavor (Arch
+base, bootc image). The Debian package remains for local development hosts.
+
+**Roadmap:** tracked as GitHub issues on the Roost roadmap project board;
+[docs/roadmap.md](docs/roadmap.md) keeps the program structure, gates, and
+requirement traceability.
 
 ## Contributing and Development
 
