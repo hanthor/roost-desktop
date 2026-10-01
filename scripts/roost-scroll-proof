@@ -202,6 +202,8 @@ if ! grep -q "session mode now scroll" "$LOG"; then
     tail -30 "$LOG" >&2 || true
     exit 1
 fi
+# Clients still have to ack the column configures and redraw.
+sleep 3
 scrot "$ARTIFACTS/02-strip.png" >/dev/null
 echo "roost-scroll-proof: shot 02-strip.png"
 
