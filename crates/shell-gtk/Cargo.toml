@@ -13,6 +13,7 @@ path = "src/main.rs"
 gtk4 = { workspace = true, features = ["v4_12"] }
 libadwaita.workspace = true
 gtk4-layer-shell.workspace = true
+gtk4-session-lock.workspace = true
 glib.workspace = true
 gio.workspace = true
 jiff.workspace = true

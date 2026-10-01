@@ -38,6 +38,7 @@ const ROUNDS: usize = 200;
 /// linux-dmabuf joins once a renderer reports formats (see below), and
 /// wl_output once an output is connected.
 const EXPECTED: &[(&str, u32)] = &[
+    ("ext_session_lock_manager_v1", 1),
     ("wl_compositor", 5),
     ("wl_data_device_manager", 3),
     ("wl_seat", 9),

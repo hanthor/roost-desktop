@@ -90,9 +90,12 @@ impl ProtocolVersion {
     /// `0.13` appends the compositor-to-shell `OverviewPreviews` message
     /// (where each window preview sits, so the shell can draw GNOME's
     /// app icons, captions and close buttons on them), again last.
+    ///
+    /// `0.14` appends the shell-to-compositor `Unlock` command (the lock
+    /// screen's password, verified by the compositor), again last.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 13,
+        minor: 14,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -218,7 +221,8 @@ pub enum CommandKind {
     /// Lock the session immediately (manual lock from the shell).
     /// Idempotent and tokenless like `ToggleOverview`: the shell is a
     /// trusted local peer, and locking hides rather than reveals.
-    /// Unlock is never a command: it goes through session auth.
+    /// Unlocking is never granted on request: see `Unlock`, which
+    /// carries a password the compositor verifies through session auth.
     Lock,
     /// Lock after this much idle time; `0` never locks on idle (#63).
     /// The shell derives it from GNOME's `idle-delay`, `lock-enabled`
@@ -247,6 +251,25 @@ pub enum CommandKind {
         /// Whether the app grid is showing.
         active: bool,
     },
+    /// The lock screen's password: the compositor verifies it through
+    /// session auth (PAM, or greetd's daemon) off its event loop and
+    /// unlocks only on success. The result comes back as this command's
+    /// `CommandResult` (`Applied` unlocked, `Denied` wrong password).
+    Unlock {
+        /// The typed password; never logged (`Debug` is redacted).
+        password: Secret,
+    },
+}
+
+/// A secret on the wire (the lock screen's password). `Debug` never
+/// shows it, so a logged message cannot leak it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Secret(pub String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(<redacted>)")
+    }
 }
 
 /// Outcome of one shell command, matched by request id.
@@ -738,8 +761,18 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_13() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 13));
+    fn secrets_never_reach_debug_output() {
+        let kind = CommandKind::Unlock {
+            password: Secret("hunter2".into()),
+        };
+        let shown = format!("{kind:?}");
+        assert!(!shown.contains("hunter2"), "{shown}");
+        assert!(shown.contains("redacted"));
+    }
+
+    #[test]
+    fn current_version_is_0_14() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 14));
     }
 
     #[test]
@@ -760,7 +793,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 11).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 12).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 13).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 14).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 14).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 15).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }

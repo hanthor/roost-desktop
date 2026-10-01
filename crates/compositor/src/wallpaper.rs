@@ -94,6 +94,8 @@ pub struct Wallpaper {
     color: Option<[f32; 3]>,
     /// Overview cards.
     cards: Vec<CardCache>,
+    /// The lock screen's blurred, dimmed copy, by URI and output size.
+    locked: Vec<(String, Size<i32, Logical>, MemoryRenderBuffer)>,
 }
 
 impl std::fmt::Debug for CardCache {
@@ -234,6 +236,68 @@ impl Wallpaper {
             None,
             None,
             Some(size),
+            Kind::Unspecified,
+        )
+        .ok()
+    }
+
+    /// GNOME's lock-screen background over a `w` x `h` output: the
+    /// wallpaper blurred and dimmed (`roost_wallpaper::LOCK_*`), cached
+    /// per URI and size. `None` while the picture is still decoding or
+    /// when there is none (the caller clears to the dimmed
+    /// primary-color).
+    pub fn lock_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        w: i32,
+        h: i32,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        let output = Size::<i32, Logical>::from((w, h));
+        let uri = self.refresh(output)?;
+        if !self
+            .locked
+            .iter()
+            .any(|(u, s, _)| *u == uri && *s == output)
+        {
+            let full = self
+                .loaded
+                .iter()
+                .find(|l| l.uri == uri && l.size == Some(output))
+                .and_then(|l| l.pixels.as_deref())?;
+            let pixels = roost_wallpaper::blur_dim_argb(
+                full,
+                w as u32,
+                h as u32,
+                roost_wallpaper::LOCK_BLUR_SIGMA,
+                roost_wallpaper::LOCK_BRIGHTNESS,
+            )?;
+            if self.locked.len() >= MAX_CARDS {
+                self.locked.remove(0);
+            }
+            self.locked.push((
+                uri.clone(),
+                output,
+                MemoryRenderBuffer::from_slice(
+                    &pixels,
+                    Fourcc::Argb8888,
+                    (w, h),
+                    1,
+                    Transform::Normal,
+                    None,
+                ),
+            ));
+        }
+        let (_, size, buffer) = self
+            .locked
+            .iter()
+            .find(|(u, s, _)| *u == uri && *s == output)?;
+        MemoryRenderBufferRenderElement::from_buffer(
+            renderer,
+            Point::<f64, Physical>::from((0.0, 0.0)),
+            buffer,
+            None,
+            None,
+            Some(*size),
             Kind::Unspecified,
         )
         .ok()

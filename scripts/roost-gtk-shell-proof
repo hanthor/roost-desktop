@@ -72,6 +72,8 @@
 #   G-POWER-OFF    confirming the dialog asks logind to power off
 #   G-SUSPEND-LOCK Suspend asks logind, and its PrepareForSleep locks
 #                  the session before sleep
+#   G-UNLOCK       GNOME's lock screen: a wrong password is refused and
+#                  the right one unlocks through PAM (pam_wrapper)
 #   A11Y-GOLDEN    the panel, calendar, quick settings and overview
 #                  accessible trees match tests/a11y/ (#71)
 #   G-SHELL-STABLE the shell never exits or restarts during the journey
@@ -259,9 +261,36 @@ for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/provider.log" 2>/dev/null && 
 ROOST_SESSION_KIND=hardware
 export ROOST_SESSION_KIND
 
+# The lock screen's password goes through a real PAM stack: pam_wrapper
+# serves the compositor's roost-lock service from a private password
+# file, so G-UNLOCK proves wrong passwords fail and the right one
+# unlocks, without root.
+PAM_WRAPPER_LIB=/usr/lib/x86_64-linux-gnu/libpam_wrapper.so
+PAM_MATRIX=/usr/lib/x86_64-linux-gnu/pam_wrapper/pam_matrix.so
+UNLOCK_PASSWORD="roost-proof-$$"
+PAM_ON=""
+if [ -e "$PAM_WRAPPER_LIB" ] && [ -e "$PAM_MATRIX" ]; then
+    mkdir -p "$ARTIFACTS/pam/services"
+    echo "$(id -un):$UNLOCK_PASSWORD:roost-lock" >"$ARTIFACTS/pam/passdb"
+    printf 'auth required %s passdb=%s\naccount required %s passdb=%s\n' \
+        "$PAM_MATRIX" "$ARTIFACTS/pam/passdb" "$PAM_MATRIX" "$ARTIFACTS/pam/passdb" \
+        >"$ARTIFACTS/pam/services/roost-lock"
+    PAM_ON=1
+elif [ -n "${ROOST_REQUIRE_PAM_WRAPPER:-}" ]; then
+    echo "roost-gtk-shell-proof: pam_wrapper is required but missing" >&2
+    exit 1
+fi
+
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk
-"$ROOT/target/debug/roost-compositor" --backend winit --socket "roost-gtk-proof-$$" \
-    --shell-bin "${ROOST_PROOF_SHELL_BIN:-$ROOT/target/debug/roost-shell-gtk}" >"$LOG" 2>&1 &
+if [ -n "$PAM_ON" ]; then
+    env LD_PRELOAD="$PAM_WRAPPER_LIB" PAM_WRAPPER=1 \
+        PAM_WRAPPER_SERVICE_DIR="$ARTIFACTS/pam/services" \
+        "$ROOT/target/debug/roost-compositor" --backend winit --socket "roost-gtk-proof-$$" \
+        --shell-bin "${ROOST_PROOF_SHELL_BIN:-$ROOT/target/debug/roost-shell-gtk}" >"$LOG" 2>&1 &
+else
+    "$ROOT/target/debug/roost-compositor" --backend winit --socket "roost-gtk-proof-$$" \
+        --shell-bin "${ROOST_PROOF_SHELL_BIN:-$ROOT/target/debug/roost-shell-gtk}" >"$LOG" 2>&1 &
+fi
 COMPOSITOR_PID=$!
 
 WID=""
@@ -993,6 +1022,30 @@ grep -q Suspend "$POWER_LOG" || fail G-SUSPEND-LOCK "logind never got Suspend"
 cstate '.locked' "locked" 10 || fail G-SUSPEND-LOCK "PrepareForSleep did not lock the session"
 scrot "$ARTIFACTS/23-locked-after-suspend.png" >/dev/null
 pass G-SUSPEND-LOCK "Suspend asks logind, and PrepareForSleep locks the session"
+
+# GNOME's lock screen (ext-session-lock): a click lifts the curtain, a
+# wrong password is refused and the session stays locked, the right one
+# unlocks it and the windows come back.
+if [ -n "$PAM_ON" ]; then
+    sleep 1
+    xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT * 3 / 4)) click 1
+    sleep 1
+    scrot "$ARTIFACTS/24-unlock-prompt.png" >/dev/null
+    xdotool type --delay 30 "not-the-password"
+    xdotool key Return
+    sleep 2
+    cstate '.locked' "still locked after a wrong password" 5 ||
+        fail G-UNLOCK "a wrong password unlocked the session"
+    scrot "$ARTIFACTS/25-unlock-denied.png" >/dev/null
+    xdotool type --delay 30 "$UNLOCK_PASSWORD"
+    xdotool key Return
+    cstate '(.locked | not) and (.windows | length) > 0' "unlocked" 15 ||
+        fail G-UNLOCK "the right password did not unlock the session"
+    scrot "$ARTIFACTS/26-unlocked.png" >/dev/null
+    pass G-UNLOCK "a wrong password is refused, the right one unlocks through PAM"
+else
+    echo "roost-gtk-shell-proof: G-UNLOCK skipped (no pam_wrapper)"
+fi
 
 "$ROOT/scripts/roost-a11y-golden" check "$ARTIFACTS" ||
     fail A11Y-GOLDEN "accessible trees differ from tests/a11y/ (see above)"

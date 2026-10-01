@@ -134,6 +134,42 @@ pub fn attempt_unlock(client: &mut impl UnlockClient, user: &str, password: &str
     UnlockOutcome::Denied
 }
 
+/// Verify `password` for `user` the way [`unlock_session`] does, without
+/// touching any lock state: greetd's daemon when one runs, else PAM's
+/// `roost-lock` service (GDM sessions). Blocking (PAM may delay a
+/// failure for seconds), so the runtime calls it on a worker thread.
+pub fn verify(user: &str, password: &str) -> bool {
+    if let Some(path) = greetd_socket_path() {
+        let Ok(mut client) = GreeterClient::connect(&path) else {
+            return false;
+        };
+        return matches!(
+            attempt_unlock(&mut client, user, password),
+            UnlockOutcome::Unlocked
+        );
+    }
+    let mut client = crate::pam::PamClient::new(crate::pam::service());
+    matches!(
+        attempt_unlock(&mut client, user, password),
+        UnlockOutcome::Unlocked
+    )
+}
+
+/// The session's user name, for unlocking.
+pub fn session_user() -> Option<String> {
+    // SAFETY: getpwuid returns a pointer into static storage, read at once.
+    unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        if pw.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr((*pw).pw_name)
+            .to_str()
+            .ok()
+            .map(str::to_owned)
+    }
+}
+
 /// Apply one unlock attempt to the compositor-owned lock state: verify
 /// `password` for `user` through `client`, and on success clear the
 /// idle flag plus the hub mirror (the next poll restores the intact

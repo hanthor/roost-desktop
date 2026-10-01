@@ -62,6 +62,7 @@ pub mod protocols;
 pub mod runtime;
 pub mod screencast;
 pub mod screenshot;
+pub mod session_lock;
 pub mod state;
 pub mod supervise;
 pub mod unlock;
@@ -142,6 +143,8 @@ pub struct State {
     pub(crate) window_requests: Vec<(wl_surface::WlSurface, WindowRequest)>,
     /// dmabuf, activation, viewporter and the other #89 protocols.
     pub(crate) protocols: protocols::Protocols,
+    /// ext-session-lock-v1: the shell's lock screen surfaces.
+    pub(crate) lock_protocol: session_lock::LockProtocol,
     /// Running X11 window manager, once the compatibility server is
     /// up (xwayland feature only).
     #[cfg(feature = "xwayland")]
@@ -584,6 +587,7 @@ impl State {
             outputs: Vec::new(),
             window_requests: Vec::new(),
             protocols: protocols::Protocols::new(dh),
+            lock_protocol: session_lock::LockProtocol::new(dh),
             #[cfg(feature = "xwayland")]
             xwm: None,
             #[cfg(feature = "xwayland")]
@@ -769,6 +773,15 @@ impl State {
 
     /// Every registered output with its protocol object: name, output,
     /// logical position, primary flag.
+    /// The primary output's name.
+    pub fn primary_output_name(&self) -> Option<String> {
+        self.outputs
+            .iter()
+            .find(|e| e.primary)
+            .or_else(|| self.outputs.first())
+            .map(|e| e.name.clone())
+    }
+
     pub fn output_entries(&self) -> Vec<(String, Output, (i32, i32), bool)> {
         self.outputs
             .iter()

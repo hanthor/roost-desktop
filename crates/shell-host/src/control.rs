@@ -457,6 +457,23 @@ impl ControlClient {
         Ok(id)
     }
 
+    /// Offer the lock screen's password (ext-session-lock prompt). The
+    /// compositor verifies it off its loop (PAM or greetd) and answers
+    /// `Applied` once the session is unlocked or `Denied` when the
+    /// password was wrong; the unlocked snapshot follows an `Applied`.
+    /// The password is never logged (`Secret` redacts its `Debug`).
+    /// Returns the request id for `CommandResult` correlation.
+    pub fn unlock(&mut self, password: String) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::Unlock {
+                password: roost_shell_control::Secret(password),
+            },
+        })?;
+        Ok(id)
+    }
+
     /// Ask the compositor to close a window (dock quit). Like
     /// `toggle_overview` this carries no activation token: closing is
     /// not focus, and unknown ids come back `Denied`. Callers must

@@ -38,6 +38,7 @@ and this page together.
 | zwp_pointer_gestures_v1 | 3 | swipes reach apps; three-finger swipes are the shell's (overview, workspaces) |
 | zwp_relative_pointer_manager_v1 | 1 | raw motion from the DRM backend |
 | zwp_pointer_constraints_v1 | 1 | a locked pointer stays put; a confined one stays in its window |
+| ext_session_lock_manager_v1 | 1 | the shell's lock screen; only the supervised shell's lock is granted, and only a password the compositor verified unlocks |
 
 ### xdg-activation policy
 

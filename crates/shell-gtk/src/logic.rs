@@ -117,6 +117,61 @@ pub fn is_weekend(day: jiff::civil::Date) -> bool {
 
 /// The calendar header: the month, plus the year when it is not this
 /// year (calendar.js `_updateMonthLabel`).
+/// GNOME's lock-screen clock (`formatTime(.., {timeOnly: true})`):
+/// "22:38", or "10:38 PM" under the 12-hour format.
+pub fn lock_clock_text(time: &jiff::civil::DateTime, format: ClockFormat) -> String {
+    let parts = ClockParts {
+        weekday: false,
+        date: false,
+        seconds: false,
+    };
+    clock_text(time, format, parts)
+}
+
+/// GNOME's lock-screen date line: "Thursday October 1".
+pub fn lock_date_text(date: jiff::civil::Date) -> String {
+    date.strftime("%A %B %-d").to_string()
+}
+
+/// Top margins of the lock screen's clock and prompt for an output
+/// `height` pixels tall: GNOME's stack sits a third of the way down,
+/// which puts the clock at y 275 and the prompt at y 205 on 800 rows.
+pub fn lock_offsets(height: i32) -> (i32, i32) {
+    let third = height.max(0) / 3;
+    ((third + 9).max(0), (third - 61).max(0))
+}
+
+/// The user's display name for the unlock prompt: the GECOS real name,
+/// else the login name (GNOME's user widget, without AccountsService).
+pub fn real_name() -> String {
+    // SAFETY: getpwuid returns a pointer into static storage, read at once.
+    unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        if pw.is_null() {
+            return String::new();
+        }
+        let gecos = if (*pw).pw_gecos.is_null() {
+            String::new()
+        } else {
+            std::ffi::CStr::from_ptr((*pw).pw_gecos)
+                .to_string_lossy()
+                .into_owned()
+        };
+        let login = std::ffi::CStr::from_ptr((*pw).pw_name)
+            .to_string_lossy()
+            .into_owned();
+        display_name(&gecos, &login)
+    }
+}
+
+/// GECOS's first field when it has one, else the login name.
+pub fn display_name(gecos: &str, login: &str) -> String {
+    match gecos.split(',').next().map(str::trim) {
+        Some(name) if !name.is_empty() => name.to_owned(),
+        _ => login.to_owned(),
+    }
+}
+
 pub fn month_label(shown: jiff::civil::Date, today: jiff::civil::Date) -> String {
     if shown.year() == today.year() {
         shown.strftime("%B").to_string()
@@ -203,6 +258,18 @@ mod tests {
 
     fn at(h: i8, m: i8) -> jiff::civil::DateTime {
         jiff::civil::date(2026, 10, 1).at(h, m, 0, 0)
+    }
+
+    #[test]
+    fn lock_screen_text_matches_gnome_51() {
+        let t = jiff::civil::date(2026, 10, 1).at(22, 38, 0, 0);
+        assert_eq!(lock_clock_text(&t, ClockFormat::TwentyFourHour), "22:38");
+        assert_eq!(lock_clock_text(&t, ClockFormat::TwelveHour), "10:38 PM");
+        assert_eq!(lock_date_text(t.date()), "Thursday October 1");
+        assert_eq!(lock_offsets(800), (275, 205));
+        assert_eq!(display_name("Ada Lovelace,,,", "ada"), "Ada Lovelace");
+        assert_eq!(display_name("", "ada"), "ada");
+        assert_eq!(display_name(",,,", "ada"), "ada");
     }
 
     #[test]
