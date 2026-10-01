@@ -37,18 +37,15 @@ sudo dnf install -y \
 ```
 
 ### Spektacular CLI
-RWD uses [Spektacular](https://github.com/projectbluefin/spektacular) for specification and planning workflows. Install the CLI:
+RWD uses [Spektacular](https://github.com/hivecommons/spektacular) for specification and planning workflows. Install the CLI:
 
 ```bash
-# Clone the Spektacular repository
-git clone https://github.com/projectbluefin/spektacular.git
-cd spektacular
-cargo install --path .
+go install github.com/hivecommons/spektacular@latest
 ```
 
-Verify installation:
+Ensure `$(go env GOPATH)/bin` is on `PATH`, then verify installation:
 ```bash
-spek --version
+spektacular version check
 ```
 
 ## Project Structure
@@ -163,20 +160,20 @@ RWD uses Spektacular for planning and tracking implementation work. Each work it
 ### Common Spektacular commands
 
 ```bash
-# List all specs and their plan status
-spek list
+# List specs and their plan status
+spektacular spec file list
 
-# View a specific spec
-spek show <spec-id>
+# Create a new spec
+spektacular spec new --data '{"name":"my-feature"}'
 
-# Create a new spec (typically for maintainers)
-spek new --title "My feature" --category implementation
+# Generate an implementation plan from a spec
+spektacular plan new --data '{"name":"<spec-name>"}'
 
-# Update plan state (e.g., transitioning from draft to ready)
-spek plan <spec-id> --state ready
+# Drive the implementation workflow for an approved plan
+spektacular implement new --data '{"name":"<plan-name>"}'
 ```
 
-For more details, see the [Spektacular documentation](https://github.com/projectbluefin/spektacular).
+For more details, see the [Spektacular documentation](https://github.com/hivecommons/spektacular).
 
 ## Architecture and Design
 
@@ -233,6 +230,6 @@ If you find a bug or have a feature request:
 - **Roadmap**: `docs/roadmap.md` for the full vision and current priorities
 - **Smithay documentation**: https://docs.rs/smithay/latest/smithay/
 - **Wayland protocol specs**: https://wayland.freedesktop.org/
-- **Spektacular**: https://github.com/projectbluefin/spektacular
+- **Spektacular**: https://github.com/hivecommons/spektacular
 
 Welcome to the project, and happy hacking! 🚀
