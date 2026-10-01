@@ -47,36 +47,102 @@ pub struct NotifyUi {
     list: gtk::Box,
     empty: gtk::Box,
     clear: gtk::Button,
-    dnd: gtk::Switch,
+    /// GNOME binds Clear's visibility to the placeholder without
+    /// SYNC_CREATE, so Clear shows (insensitive) until the list first
+    /// changes; after that it hides whenever the list is empty.
+    clear_bound: std::cell::Cell<bool>,
     first_seen: RefCell<HashMap<u64, Instant>>,
     shown: RefCell<Shown>,
     last_bus_try: RefCell<Option<Instant>>,
 }
 
-fn card(n: &Notification) -> gtk::Box {
-    let card = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    card.add_css_class("notification-card");
+/// One notification as GNOME 51 draws it (messageList.js
+/// NotificationMessage): a header with the source icon, app name, time
+/// and close button, then the title and body. Returns the card and its
+/// close button.
+fn card(n: &Notification) -> (gtk::Box, gtk::Button) {
+    let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    card.add_css_class("message");
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    let app = gtk::Label::new(Some(n.app()));
-    app.add_css_class("notification-app");
-    app.set_halign(gtk::Align::Start);
-    app.set_hexpand(true);
-    header.append(&app);
+    header.add_css_class("message-header");
+    // The app's own name and icon when its desktop entry is known, else
+    // the sender's name and app_icon (notificationDaemon.js).
+    let app = (!n.desktop_entry().is_empty())
+        .then(|| desktop_app(n.desktop_entry()))
+        .flatten();
+    let (title, gicon): (String, Option<gio::Icon>) = match &app {
+        Some(app) => (app.name.clone(), app.icon.as_deref().and_then(source_icon)),
+        None => (n.app().to_owned(), source_icon(n.icon())),
+    };
+    let icon = gtk::Image::new();
+    icon.add_css_class("message-source-icon");
+    icon.set_pixel_size(16);
+    match gicon {
+        Some(gicon) => icon.set_from_gicon(&gicon),
+        None => icon.set_visible(false),
+    }
+    header.append(&icon);
+    let source = gtk::Label::new(Some(&title));
+    source.add_css_class("message-source-title");
+    header.append(&source);
+    let age = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+        .saturating_sub(n.received());
+    let time = gtk::Label::new(Some(&crate::logic::time_span(age)));
+    time.add_css_class("event-time");
+    time.set_hexpand(true);
+    time.set_xalign(0.0);
+    header.append(&time);
+    let close = gtk::Button::from_icon_name("window-close-symbolic");
+    close.add_css_class("message-close-button");
+    close.set_valign(gtk::Align::Center);
+    close.update_property(&[gtk::accessible::Property::Label("Close")]);
+    header.append(&close);
     card.append(&header);
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    content.add_css_class("message-content");
     let summary = gtk::Label::new(Some(n.summary()));
-    summary.add_css_class("notification-summary");
-    summary.set_halign(gtk::Align::Start);
+    summary.add_css_class("message-title");
+    summary.set_xalign(0.0);
     summary.set_wrap(true);
-    card.append(&summary);
+    content.append(&summary);
     if !n.body().is_empty() {
         let body = gtk::Label::new(Some(n.body()));
-        body.set_halign(gtk::Align::Start);
+        body.add_css_class("message-body");
+        body.set_xalign(0.0);
         body.set_wrap(true);
         body.set_max_width_chars(48);
-        card.append(&body);
+        content.append(&body);
     }
+    card.append(&content);
     card.update_property(&[gtk::accessible::Property::Label(n.summary())]);
-    card
+    (card, close)
+}
+
+/// The installed app a `desktop-entry` hint names, if any.
+fn desktop_app(id: &str) -> Option<roost_shell_host::apps::AppEntry> {
+    roost_shell_host::apps::default_app_dirs()
+        .into_iter()
+        .map(|dir| dir.join(format!("{id}.desktop")))
+        .find(|path| path.is_file())
+        .and_then(|path| roost_shell_host::apps::entry_from_file(&path))
+}
+
+/// A `Notify` app_icon as GNOME reads it: a file URI, an absolute path,
+/// or an icon name.
+fn source_icon(icon: &str) -> Option<gio::Icon> {
+    if icon.is_empty() {
+        None
+    } else if icon.starts_with("file://") {
+        Some(gio::FileIcon::new(&gio::File::for_uri(icon)).upcast())
+    } else if icon.starts_with('/') {
+        Some(gio::FileIcon::new(&gio::File::for_path(icon)).upcast())
+    } else {
+        Some(gio::ThemedIcon::new(icon).upcast())
+    }
 }
 
 impl NotifyUi {
@@ -91,47 +157,52 @@ impl NotifyUi {
         banner_window.set_layer(Layer::Overlay);
         banner_window.set_namespace(Some("roost-shell-banners"));
         banner_window.set_anchor(Edge::Top, true);
-        banner_window.set_margin(Edge::Top, 6);
+        // The card's own 4px margin puts it 4px under the bar (GNOME).
+        banner_window.set_margin(Edge::Top, 0);
         banner_window.set_keyboard_mode(KeyboardMode::None);
         banner_window.set_title(Some("Notifications"));
         let banner_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        banner_box.set_width_request(420);
         banner_window.set_child(Some(&banner_box));
 
-        // Calendar pane: list (or empty state) above a DND + Clear row.
-        let pane = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        pane.set_size_request(400, -1);
-        let list = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        // Calendar pane, GNOME 51's CalendarMessageList: the placeholder
+        // overlaid on the list, and a controls row holding only Clear (Do
+        // Not Disturb lives in quick settings).
+        let pane = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        pane.add_css_class("message-list");
+        let overlay = gtk::Overlay::new();
+        overlay.set_vexpand(true);
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        list.add_css_class("message-view");
         let scroller = gtk::ScrolledWindow::builder()
             .child(&list)
             .hscrollbar_policy(gtk::PolicyType::Never)
-            .min_content_height(240)
             .vexpand(true)
             .build();
-        let empty = gtk::Box::new(gtk::Orientation::Vertical, 12);
-        empty.set_vexpand(true);
+        column.append(&scroller);
+        let controls = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        controls.add_css_class("message-list-controls");
+        let clear = gtk::Button::with_label("Clear");
+        clear.add_css_class("message-list-clear-button");
+        clear.set_halign(gtk::Align::Start);
+        clear.update_property(&[gtk::accessible::Property::Description(
+            "Clear all notifications",
+        )]);
+        controls.append(&clear);
+        column.append(&controls);
+        overlay.set_child(Some(&column));
+        let empty = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        empty.add_css_class("message-list-placeholder");
+        empty.set_halign(gtk::Align::Center);
         empty.set_valign(gtk::Align::Center);
-        let bell = gtk::Image::from_icon_name("notifications-disabled-symbolic");
-        bell.set_pixel_size(72);
+        empty.set_can_target(false);
+        let bell = gtk::Image::from_icon_name("no-notifications-symbolic");
+        bell.set_pixel_size(96);
         let none = gtk::Label::new(Some("No Notifications"));
-        none.add_css_class("no-notifications");
         empty.append(&bell);
         empty.append(&none);
-        let footer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        let dnd_label = gtk::Label::new(Some("Do Not Disturb"));
-        let dnd = gtk::Switch::new();
-        dnd.set_valign(gtk::Align::Center);
-        dnd.update_property(&[gtk::accessible::Property::Label("Do Not Disturb")]);
-        let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        spacer.set_hexpand(true);
-        let clear = gtk::Button::with_label("Clear");
-        footer.append(&dnd_label);
-        footer.append(&dnd);
-        footer.append(&spacer);
-        footer.append(&clear);
-        pane.append(&scroller);
-        pane.append(&empty);
-        pane.append(&footer);
+        overlay.add_overlay(&empty);
+        pane.append(&overlay);
 
         let ui = Rc::new(Self {
             center,
@@ -142,7 +213,7 @@ impl NotifyUi {
             list,
             empty,
             clear,
-            dnd,
+            clear_bound: std::cell::Cell::new(false),
             first_seen: RefCell::new(HashMap::new()),
             shown: RefCell::new(Shown {
                 banners: vec![u64::MAX],
@@ -159,19 +230,16 @@ impl NotifyUi {
                 me.refresh();
             });
         }
-        {
-            let me = ui.clone();
-            ui.dnd
-                .connect_active_notify(move |switch| me.set_dnd(switch.is_active()));
-        }
         ui.refresh();
         ui
     }
 
-    /// Post the shell's own notification (screenshots, for one).
-    pub fn post(self: &Rc<Self>, app: &str, summary: &str, body: &str) {
+    /// Post the shell's own notification under a GNOME source name and
+    /// icon (screenshots: "Screenshot", `screenshot-recorded-symbolic`).
+    pub fn post(self: &Rc<Self>, app: &str, icon: &str, summary: &str, body: &str) {
         if let Ok(mut center) = self.center.lock() {
-            center.notify(app, summary, body, Vec::new(), Urgency::Normal, None);
+            let id = center.notify(app, summary, body, Vec::new(), Urgency::Normal, None);
+            center.set_source(id, icon, "");
         }
         self.refresh();
     }
@@ -181,15 +249,12 @@ impl NotifyUi {
         &self.pane
     }
 
-    /// Turn Do Not Disturb on or off (calendar switch, quick settings).
+    /// Turn Do Not Disturb on or off (the quick-settings toggle).
     pub fn set_dnd(&self, on: bool) {
         if let Ok(mut center) = self.center.lock() {
             if center.dnd() != on {
                 center.set_dnd(on);
             }
-        }
-        if self.dnd.is_active() != on {
-            self.dnd.set_active(on);
         }
     }
 
@@ -249,14 +314,8 @@ impl NotifyUi {
             self.banner_box.remove(&child);
         }
         for n in center.banners() {
-            let c = card(n);
+            let (c, close) = card(n);
             c.add_css_class("banner");
-            let close = gtk::Button::from_icon_name("window-close-symbolic");
-            close.add_css_class("flat");
-            close.update_property(&[gtk::accessible::Property::Label("Close")]);
-            if let Some(header) = c.first_child().and_downcast::<gtk::Box>() {
-                header.append(&close);
-            }
             let has_default = n.actions().iter().any(|a| a.id == "default");
             if n.actions().iter().any(|a| a.id != "default") {
                 let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -302,20 +361,27 @@ impl NotifyUi {
             self.list.remove(&child);
         }
         for n in center.history().iter().rev() {
-            self.list.append(&card(n));
+            let (c, close) = card(n);
+            let (me, id) = (self.clone(), n.id);
+            close.connect_clicked(move |_| {
+                let _ = me.bus.borrow().dismiss_banner(id as u32, REASON_DISMISSED);
+                if let Ok(mut center) = me.center.lock() {
+                    center.remove(id);
+                }
+                me.refresh();
+            });
+            self.list.append(&c);
         }
         let any = !now.history.is_empty();
         self.list.set_visible(any);
-        self.empty.set_visible(!any);
-        self.clear.set_sensitive(any);
-        // Release the store before touching the switch: its handler
-        // takes the same lock, and std's mutex is not re-entrant (with
-        // DND persisted on, this deadlocked the shell at startup).
-        drop(center);
-        let dnd = now.dnd;
-        *self.shown.borrow_mut() = now;
-        if self.dnd.is_active() != dnd {
-            self.dnd.set_active(dnd);
+        if self.empty.is_visible() == any {
+            // The placeholder changes: from here on Clear follows it.
+            self.clear_bound.set(true);
         }
+        self.empty.set_visible(!any);
+        self.clear.set_visible(!self.clear_bound.get() || any);
+        self.clear.set_sensitive(any);
+        drop(center);
+        *self.shown.borrow_mut() = now;
     }
 }

@@ -71,13 +71,58 @@ pub fn clock_text(time: &jiff::civil::DateTime, format: ClockFormat, parts: Cloc
     }
 }
 
-/// Calendar popover heading: weekday line and full date line
-/// (`Thursday` / `October 1 2026`).
+/// Today button labels: weekday line and full date line (`Thursday` /
+/// `October 1 2026`, dateMenu.js's `%A` and `%B %-d %Y`).
 pub fn calendar_heading(time: &jiff::civil::DateTime) -> (String, String) {
     (
         time.strftime("%A").to_string(),
         time.strftime("%B %-d %Y").to_string(),
     )
+}
+
+/// The 42 days (six weeks) GNOME's calendar grid shows for `month`,
+/// starting on the locale's first weekday (`week_start`, 0 = Sunday),
+/// with the first of the month in the first row (calendar.js
+/// `_buildMonth`).
+pub fn month_grid(year: i16, month: i8, week_start: i8) -> Vec<jiff::civil::Date> {
+    let first = jiff::civil::date(year, month, 1);
+    let weekday = first.weekday().to_sunday_zero_offset();
+    let back = (weekday - week_start).rem_euclid(7);
+    let start = first
+        .checked_sub(jiff::Span::new().days(i64::from(back)))
+        .unwrap_or(first);
+    (0..42)
+        .map(|i| {
+            start
+                .checked_add(jiff::Span::new().days(i))
+                .unwrap_or(start)
+        })
+        .collect()
+}
+
+/// One-letter weekday headings from `week_start` on, GNOME's English
+/// (`C_('grid sunday', 'S')`...).
+pub fn weekday_initials(week_start: i8) -> Vec<&'static str> {
+    const DAYS: [&str; 7] = ["S", "M", "T", "W", "T", "F", "S"];
+    (0..7)
+        .map(|i| DAYS[((i + week_start).rem_euclid(7)) as usize])
+        .collect()
+}
+
+/// GNOME's work-free days (`C_('calendar-no-work', '06')`): Sunday and
+/// Saturday.
+pub fn is_weekend(day: jiff::civil::Date) -> bool {
+    matches!(day.weekday().to_sunday_zero_offset(), 0 | 6)
+}
+
+/// The calendar header: the month, plus the year when it is not this
+/// year (calendar.js `_updateMonthLabel`).
+pub fn month_label(shown: jiff::civil::Date, today: jiff::civil::Date) -> String {
+    if shown.year() == today.year() {
+        shown.strftime("%B").to_string()
+    } else {
+        shown.strftime("%B %Y").to_string()
+    }
 }
 
 /// Workspace indicator shape: one entry per workspace, `true` for the
@@ -265,6 +310,47 @@ mod tests {
     }
 
     #[test]
+    fn month_grid_matches_gnome_51() {
+        // October 2026 from Sunday: Sep 27 .. Nov 7, as GNOME draws it.
+        let grid = month_grid(2026, 10, 0);
+        assert_eq!(grid.len(), 42);
+        assert_eq!(grid[0], jiff::civil::date(2026, 9, 27));
+        assert_eq!(grid[4], jiff::civil::date(2026, 10, 1));
+        assert_eq!(grid[41], jiff::civil::date(2026, 11, 7));
+        // From Monday the first row starts on Monday Sep 28.
+        assert_eq!(month_grid(2026, 10, 1)[0], jiff::civil::date(2026, 9, 28));
+        // A month starting on the week start leads with the first.
+        assert_eq!(month_grid(2026, 11, 0)[0], jiff::civil::date(2026, 11, 1));
+    }
+
+    #[test]
+    fn calendar_labels_follow_gnome() {
+        assert_eq!(weekday_initials(0).concat(), "SMTWTFS");
+        assert_eq!(weekday_initials(1).concat(), "MTWTFSS");
+        assert!(is_weekend(jiff::civil::date(2026, 10, 3)));
+        assert!(!is_weekend(jiff::civil::date(2026, 10, 2)));
+        let today = jiff::civil::date(2026, 10, 1);
+        assert_eq!(month_label(today, today), "October");
+        assert_eq!(
+            month_label(jiff::civil::date(2027, 1, 5), today),
+            "January 2027"
+        );
+    }
+
+    #[test]
+    fn time_spans_follow_gnome() {
+        assert_eq!(time_span(0), "Just now");
+        assert_eq!(time_span(299), "Just now");
+        assert_eq!(time_span(300), "5 minutes ago");
+        assert_eq!(time_span(3600), "1 hour ago");
+        assert_eq!(time_span(86_400), "Yesterday");
+        assert_eq!(time_span(3 * 86_400), "3 days ago");
+        assert_eq!(time_span(20 * 86_400), "2 weeks ago");
+        assert_eq!(time_span(100 * 86_400), "3 months ago");
+        assert_eq!(time_span(800 * 86_400), "2 years ago");
+    }
+
+    #[test]
     fn active_pill_widths_follow_gnome() {
         assert_eq!(active_pill_width(2), 29);
         assert_eq!(active_pill_width(5), 26);
@@ -440,6 +526,41 @@ pub fn volume_icon(percent: f64, muted: bool) -> &'static str {
         1 => "audio-volume-low-symbolic",
         2 => "audio-volume-medium-symbolic",
         _ => "audio-volume-high-symbolic",
+    }
+}
+
+/// How long ago a notification arrived, in GNOME's words
+/// (dateUtils.js `formatTimeSpan`).
+pub fn time_span(seconds: u64) -> String {
+    let minutes = seconds / 60;
+    let hours = seconds / 3600;
+    let days = seconds / 86_400;
+    let weeks = days / 7;
+    let months = days / 30;
+    let years = weeks / 52;
+    let plural = |n: u64, one: &str, many: &str| {
+        if n == 1 {
+            format!("{n} {one}")
+        } else {
+            format!("{n} {many}")
+        }
+    };
+    if minutes < 5 {
+        "Just now".to_owned()
+    } else if hours < 1 {
+        plural(minutes, "minute ago", "minutes ago")
+    } else if days < 1 {
+        plural(hours, "hour ago", "hours ago")
+    } else if days < 2 {
+        "Yesterday".to_owned()
+    } else if days < 15 {
+        plural(days, "day ago", "days ago")
+    } else if weeks < 8 {
+        plural(weeks, "week ago", "weeks ago")
+    } else if years < 1 {
+        plural(months, "month ago", "months ago")
+    } else {
+        plural(years, "year ago", "years ago")
     }
 }
 

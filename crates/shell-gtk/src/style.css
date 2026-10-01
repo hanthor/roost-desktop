@@ -252,21 +252,191 @@ popover.roost-qs.dimmed > contents {
   background-color: rgba(255, 255, 255, 0.1);
 }
 
-.roost-cal .weekday {
-  color: alpha(#ffffff, 0.6);
+/* Date menu, measured against GNOME Shell 51 (.datemenu-popover): 30px
+   corners; the notification list (29em, a 1px divider) beside the
+   calendar column (today button, month grid of 36px days on a 40px
+   pitch, events card). */
+popover.roost-cal > contents {
+  border-radius: 30px;
+}
+
+.roost-cal .calendar-area {
+  padding: 4px;
+}
+
+.roost-cal .message-list {
+  min-width: 425px;
+  margin-right: 4px;
+  padding-right: 6px;
+  border-right: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.roost-cal .message-view {
+  margin-right: 12px;
+}
+
+.roost-cal .message-list-placeholder {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 15pt;
   font-weight: bold;
 }
 
-.roost-cal .full-date {
+.roost-cal .message-list-placeholder image {
+  margin-bottom: 12px;
+}
+
+.roost-cal .message-list-controls {
+  padding: 12px 12px 9px 12px;
+}
+
+.roost-cal .message-list-clear-button {
+  min-height: 22px;
+  padding: 3px 24px;
+  border-radius: 999px;
+  font-weight: bold;
+  background-color: #47474b;
+  color: #ffffff;
+  box-shadow: none;
+}
+
+.roost-cal .message-list-clear-button:hover {
+  background-color: #515155;
+}
+
+.roost-cal .message-list-clear-button:disabled {
+  /* GNOME's insensitive colours, without libadwaita's extra fade. */
+  filter: none;
+  background-color: #404043;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.roost-cal .datemenu-calendar-column {
+  min-width: 290px;
+  margin-left: 6px;
+}
+
+.roost-cal .datemenu-today-button,
+.roost-cal .calendar,
+.roost-cal .events-button {
+  border-radius: 12px;
+  margin: 4px;
+  border: 1px solid transparent;
+  box-shadow: none;
+}
+
+.roost-cal .datemenu-today-button {
+  padding: 9px;
+  background: none;
+  color: #ffffff;
+}
+
+.roost-cal .datemenu-today-button:hover {
+  background-color: #444448;
+}
+
+.roost-cal .datemenu-today-button:disabled {
+  /* GNOME's insensitive colours, without libadwaita's extra fade. */
+  filter: none;
+  background: none;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.roost-cal .datemenu-today-button .day-label {
+  font-weight: bold;
+}
+
+.roost-cal .datemenu-today-button .date-label {
   font-size: 15pt;
   font-weight: 800;
-  color: alpha(#ffffff, 0.6);
 }
 
-.roost-cal .no-notifications {
-  font-size: 15pt;
+.roost-cal .calendar {
+  margin-top: 0;
+  padding: 0;
+}
+
+.roost-cal .calendar-month-header {
+  min-height: 38px;
+}
+
+.roost-cal .pager-button {
+  min-width: 38px;
+  min-height: 38px;
+  padding: 0;
+  border-radius: 999px;
+  background-color: #36363a;
+  color: #ffffff;
+  box-shadow: none;
+}
+
+.roost-cal .pager-button:hover {
+  background-color: #444448;
+}
+
+.roost-cal .calendar-month-label {
   font-weight: bold;
-  color: alpha(#ffffff, 0.45);
+}
+
+.roost-cal .calendar-day-heading {
+  min-width: 20px;
+  margin: 4px;
+  padding: 3px 6px;
+  font-size: 9pt;
+  font-weight: bold;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.roost-cal .calendar-day {
+  min-width: 36px;
+  min-height: 36px;
+  margin: 2px;
+  padding: 0;
+  border-radius: 999px;
+  font-size: 9pt;
+  font-weight: bold;
+  font-feature-settings: "tnum";
+  background-color: #36363a;
+  color: #ffffff;
+  box-shadow: none;
+}
+
+.roost-cal .calendar-day:hover {
+  background-color: #444448;
+}
+
+.roost-cal .calendar-day.selected {
+  background-color: #48484c;
+}
+
+.roost-cal .calendar-day.calendar-weekend {
+  color: #9b9b9d;
+}
+
+.roost-cal .calendar-day.calendar-other-month {
+  color: rgba(255, 255, 255, 0.5);
+  font-weight: normal;
+}
+
+.roost-cal .calendar-day.calendar-today {
+  background-color: @accent_bg_color;
+  color: @accent_fg_color;
+}
+
+.roost-cal .events-button {
+  padding: 12px;
+  background-color: #3f3f44;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.roost-cal .events-title {
+  font-weight: bold;
+  color: #b2b2b4;
+  padding-bottom: 6px;
+}
+
+.roost-cal .event-placeholder {
+  color: #b2b2b4;
+  font-style: italic;
 }
 
 /* Overview surfaces (#54, #57): transparent windows, GNOME 51 shapes. */
@@ -303,29 +473,69 @@ window.roost-overview-grid {
   box-shadow: inset 0 -3px 0 0 alpha(#ffffff, 0.8);
 }
 
-/* Notifications (#56): GNOME 51 banner and list cards. */
+/* Notifications, measured against GNOME Shell 51 (.message): a #54545a
+   card with 6px padding; a 34px header of source icon, app name, time
+   and a 28px close button; then title and body. Banners are 34em wide,
+   4px below the bar, with a shadow; list cards round to 18px. */
 window.roost-banners {
   background: none;
 }
 
-.notification-card {
-  background-color: alpha(#ffffff, 0.08);
+.message {
+  padding: 6px;
+  border: 1px solid transparent;
   border-radius: 16px;
-  padding: 12px;
+  background-color: #54545a;
   color: #ffffff;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
 }
 
-.notification-card.banner {
-  background-color: #2a2a2f;
-  box-shadow: 0 2px 8px alpha(#000000, 0.4);
+.message.banner {
+  min-width: 499px;
+  min-height: 52px;
+  margin: 4px;
+  box-shadow: 0 2px 4px 2px rgba(0, 0, 0, 0.2);
 }
 
-.notification-app {
+.message-view .message {
+  border-radius: 18px;
+  margin-bottom: 12px;
+}
+
+.message-header {
+  min-height: 34px;
+  padding: 0 3px 0 6px;
+  color: #b2b2b4;
+}
+
+.message-source-title {
+  font-weight: bold;
+}
+
+.message-header .event-time {
   font-size: 9pt;
-  color: alpha(#ffffff, 0.6);
 }
 
-.notification-summary {
+.message-close-button {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  border-radius: 999px;
+  background-color: rgba(255, 255, 255, 0.15);
+  color: #ffffff;
+  box-shadow: none;
+}
+
+.message-close-button:hover {
+  background-color: rgba(255, 255, 255, 0.25);
+}
+
+.message-content {
+  padding: 6px;
+}
+
+.message-title {
   font-weight: bold;
 }
 

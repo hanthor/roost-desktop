@@ -13,6 +13,7 @@
 //! The compositor runs one supervised shell; select this one with
 //! `ROOST_SHELL_BIN=roost-shell-gtk` while it grows to parity.
 
+mod calendar;
 mod folders;
 mod live_apps;
 mod logic;
@@ -190,31 +191,24 @@ fn render_pills(shell: &mut Shell) {
     shell.pill_state = wanted;
 }
 
-fn calendar_popover(notes: &gtk::Box) -> (gtk::Popover, gtk::Label, gtk::Label) {
+/// GNOME 51's date menu: the notification list beside the calendar
+/// column, back on today each time it opens (dateMenu.js).
+fn calendar_popover(notes: &gtk::Box) -> (gtk::Popover, Rc<calendar::CalendarUi>) {
     let popover = gtk::Popover::new();
     popover.add_css_class("roost-shell-popover");
     popover.add_css_class("roost-cal");
     popover.set_has_arrow(false);
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 24);
-
-    // Right: date heading plus month grid.
-    let cal = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    let weekday = gtk::Label::new(None);
-    weekday.add_css_class("weekday");
-    weekday.set_halign(gtk::Align::Start);
-    let full_date = gtk::Label::new(None);
-    full_date.add_css_class("full-date");
-    full_date.set_halign(gtk::Align::Start);
-    let calendar = gtk::Calendar::new();
-    cal.append(&weekday);
-    cal.append(&full_date);
-    cal.append(&calendar);
-
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    row.add_css_class("calendar-area");
+    let cal = calendar::CalendarUi::new(jiff::Zoned::now().date());
     row.append(notes);
-    row.append(&gtk::Separator::new(gtk::Orientation::Vertical));
-    row.append(&cal);
+    row.append(&cal.column);
     popover.set_child(Some(&row));
-    (popover, weekday, full_date)
+    {
+        let cal = cal.clone();
+        popover.connect_show(move |_| cal.reset());
+    }
+    (popover, cal)
 }
 
 /// One GNOME 51 quick toggle (`.quick-toggle`): icon, bold title and an
@@ -494,7 +488,12 @@ fn quick_settings_popover(
                                         .file_name()
                                         .map(|n| n.to_string_lossy().into_owned())
                                         .unwrap_or(path);
-                                    notify.post("Screenshot", "Screenshot captured", &name);
+                                    notify.post(
+                                        "Screenshot",
+                                        "screenshot-recorded-symbolic",
+                                        "Screenshot captured",
+                                        &name,
+                                    );
                                 }
                                 Err(e) => eprintln!("roost-shell-gtk: screenshot failed: {e}"),
                             },
@@ -842,7 +841,7 @@ fn build(app: &adw::Application) {
         });
     }
     let clock_label = gtk::Label::new(None);
-    let (cal_popover, weekday, full_date) = calendar_popover(notify.pane());
+    let (cal_popover, calendar_ui) = calendar_popover(notify.pane());
     let clock = panel_menu_button(&clock_label, "Date and Time", &cal_popover);
     clock.add_css_class("clock-display");
 
@@ -916,9 +915,7 @@ fn build(app: &adw::Application) {
         let text = logic::clock_text(&now, format, parts);
         clock_label.set_label(&text);
         clock.update_property(&[gtk::accessible::Property::Description(&text)]);
-        let (day, date) = logic::calendar_heading(&now);
-        weekday.set_label(&day);
-        full_date.set_label(&date);
+        calendar_ui.set_today(now.date());
         glib::ControlFlow::Continue
     };
     tick();

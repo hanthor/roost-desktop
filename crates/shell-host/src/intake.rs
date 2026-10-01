@@ -73,7 +73,7 @@ impl Notifications {
         &self,
         app_name: String,
         replaces_id: u32,
-        _app_icon: String,
+        app_icon: String,
         summary: String,
         body: String,
         actions: Vec<String>,
@@ -81,17 +81,23 @@ impl Notifications {
         _expire_timeout: i32,
     ) -> u32 {
         let replaces = (replaces_id != 0).then_some(replaces_id as u64);
+        let desktop_entry = hints
+            .get("desktop-entry")
+            .and_then(|v| String::try_from(v.clone()).ok())
+            .unwrap_or_default();
         self.center
             .lock()
             .map(|mut center| {
-                center.notify(
+                let id = center.notify(
                     &app_name,
                     &summary,
                     &body,
                     pair_actions(&actions),
                     urgency_hint(&hints),
                     replaces,
-                )
+                );
+                center.set_source(id, &app_icon, &desktop_entry);
+                id
             })
             .unwrap_or(0) as u32
     }

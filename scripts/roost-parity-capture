@@ -153,8 +153,10 @@ xdotool key Super_L
 shot 07-overview-windows
 xdotool key Escape
 sleep 1
+# GNOME's reference uses Main.notify(): the "System" source with
+# cog-wheel-symbolic, which this app name and icon reproduce.
 gdbus call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications \
-    --method org.freedesktop.Notifications.Notify -- "System" 0 "emblem-system-symbolic" \
+    --method org.freedesktop.Notifications.Notify -- "System" 0 "cog-wheel-symbolic" \
     "Roost reference" "A notification banner, as GNOME 51 draws it" "[]" "{}" 5000 >/dev/null
 shot 08-notification 1
 sleep 6

@@ -71,6 +71,8 @@ Share of pixels visibly off (more than 24 levels) in each element crop:
 | Top bar | 35.2% | 0.7% (the clock's minutes) |
 | Quick settings | 68.4% | 3.4% |
 | Power Mode menu | not built | 4.0% |
+| Date menu | 16.5% | 0.3% |
+| Notification banner and list card | 11.3% | matches; the rest is what lies behind |
 
 GTK and St differ in a few ways that matter when matching numbers:
 
