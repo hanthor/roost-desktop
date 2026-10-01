@@ -301,6 +301,15 @@ pub fn split_service(service: &str) -> (String, String) {
     }
 }
 
+/// An item's `Menu` property. The spec types it as an object path
+/// (`o`); some items send a plain string, so both are accepted.
+fn menu_path(item: &zbus::blocking::Proxy<'_>) -> Option<String> {
+    if let Ok(path) = item.get_property::<zbus::zvariant::OwnedObjectPath>("Menu") {
+        return Some(path.as_str().to_owned());
+    }
+    item.get_property::<String>("Menu").ok()
+}
+
 /// Pick the largest pixmap from an `IconPixmap` (`a(iiay)`) payload.
 pub fn pick_pixmap(pixmaps: Vec<(i32, i32, Vec<u8>)>) -> Option<(i32, i32, Vec<u8>)> {
     pixmaps
@@ -316,11 +325,13 @@ pub fn pick_pixmap(pixmaps: Vec<(i32, i32, Vec<u8>)>) -> Option<(i32, i32, Vec<u
 pub fn argb_to_shm(argb: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(argb.len());
     let (chunks, _) = argb.as_chunks::<4>();
+    // Wire bytes are [A, R, G, B]; little-endian ARGB8888 wants
+    // [B, G, R, A].
     for px in chunks {
+        out.push(px[3]);
         out.push(px[2]);
         out.push(px[1]);
         out.push(px[0]);
-        out.push(px[3]);
     }
     out
 }
@@ -607,9 +618,8 @@ impl WatcherBus {
             Ok(item) => item,
             Err(_) => return Vec::new(),
         };
-        let menu_path: String = match item.get_property("Menu") {
-            Ok(path) => path,
-            Err(_) => return Vec::new(),
+        let Some(menu_path) = menu_path(&item) else {
+            return Vec::new();
         };
         let menu = match zbus::blocking::Proxy::new(
             conn,
@@ -626,11 +636,19 @@ impl WatcherBus {
             "visible".to_owned(),
             "type".to_owned(),
         ];
-        let reply: Result<(u32, zbus::zvariant::OwnedValue), zbus::Error> =
-            menu.call("GetLayout", &(0i32, 1i32, props));
-        match reply {
-            Ok((_, layout)) => parse_menu_layout(&layout),
-            Err(_) => Vec::new(),
+        // The reply is `(u(ia{sv}av))`, a revision and the layout struct
+        // (not a variant): read the body dynamically and hand the
+        // struct on.
+        let Ok(reply) = menu.call_method("GetLayout", &(0i32, 1i32, props)) else {
+            return Vec::new();
+        };
+        let body = reply.body();
+        let Ok(top) = body.deserialize::<zbus::zvariant::Structure>() else {
+            return Vec::new();
+        };
+        match top.fields().get(1).and_then(|v| v.try_to_owned().ok()) {
+            Some(layout) => parse_menu_layout(&layout),
+            None => Vec::new(),
         }
     }
 
@@ -665,9 +683,8 @@ impl WatcherBus {
         ) else {
             return false;
         };
-        let menu_path: String = match item.get_property("Menu") {
-            Ok(path) => path,
-            Err(_) => return false,
+        let Some(menu_path) = menu_path(&item) else {
+            return false;
         };
         let Ok(menu) = zbus::blocking::Proxy::new(
             conn,
@@ -805,14 +822,15 @@ mod tests {
 
     #[test]
     fn argb_to_shm_reorders_one_known_pixel() {
-        // Four input bytes [b0, b1, b2, b3] map to [b2, b1, b0, b3].
+        // Opaque red on the wire (big-endian ARGB: A, R, G, B) becomes
+        // B, G, R, A in a little-endian ARGB8888 buffer.
         assert_eq!(
-            argb_to_shm(&[0xaa, 0x11, 0x22, 0x33]),
-            vec![0x22, 0x11, 0xaa, 0x33]
+            argb_to_shm(&[0xff, 0xcc, 0x00, 0x00]),
+            vec![0x00, 0x00, 0xcc, 0xff]
         );
         assert_eq!(
             argb_to_shm(&[0xaa, 0x11, 0x22, 0x33, 0xff, 0x44, 0x55, 0x66]),
-            vec![0x22, 0x11, 0xaa, 0x33, 0x55, 0x44, 0xff, 0x66]
+            vec![0x33, 0x22, 0x11, 0xaa, 0x66, 0x55, 0x44, 0xff]
         );
         // A trailing partial word has no full pixel and is dropped.
         assert_eq!(argb_to_shm(&[0xaa, 0x11, 0x22, 0x33, 0x00]).len(), 4);
@@ -1162,13 +1180,37 @@ mod tests {
             }
 
             #[zbus(property)]
-            fn menu(&self) -> String {
-                MENU_PATH.to_owned()
+            /// Typed `o`, as the StatusNotifierItem spec has it.
+            fn menu(&self) -> zbus::zvariant::OwnedObjectPath {
+                zbus::zvariant::OwnedObjectPath::try_from(MENU_PATH).expect("valid path")
             }
 
             fn activate(&self, _x: i32, _y: i32) {
                 self.activated.store(true, Ordering::SeqCst);
             }
+        }
+
+        type SpecLayout = (
+            i32,
+            std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+            Vec<zbus::zvariant::OwnedValue>,
+        );
+
+        /// The fixture's root node as the typed spec struct.
+        fn spec_layout(root: zbus::zvariant::OwnedValue) -> SpecLayout {
+            use zbus::zvariant::{Structure, Value};
+            let value: Value<'static> = root.into();
+            let root = Structure::try_from(value).expect("root struct");
+            let mut fields = root.into_fields().into_iter();
+            let id = i32::try_from(fields.next().expect("id")).expect("i32 id");
+            let props = std::collections::HashMap::<String, zbus::zvariant::OwnedValue>::try_from(
+                fields.next().expect("props"),
+            )
+            .expect("props dict");
+            let children =
+                Vec::<zbus::zvariant::OwnedValue>::try_from(fields.next().expect("children"))
+                    .expect("children array");
+            (id, props, children)
         }
 
         struct StubMenu {
@@ -1182,8 +1224,9 @@ mod tests {
                 _parent: i32,
                 _depth: i32,
                 _names: Vec<String>,
-            ) -> (u32, zbus::zvariant::OwnedValue) {
-                (1, layout_fixture::layout())
+            ) -> (u32, SpecLayout) {
+                // The spec's reply: `(u(ia{sv}av))`, a struct, not a variant.
+                (1, spec_layout(layout_fixture::layout()))
             }
 
             fn event(
