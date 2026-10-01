@@ -1,0 +1,274 @@
+#!/bin/sh
+# roost-journey — scripted nested-session screenshot journey for CI.
+#
+# Usage:
+#   scripts/roost-journey [--display :98] [--artifacts DIR] [--socket NAME]
+#
+# Starts a private Xvfb (unless DISPLAY already works), builds and runs
+# the nested compositor with its supervised shell, then drives the
+# Milestone-1 journey with real X input and captures a screenshot per
+# stage: baseline, Super-tap overview, typed search, Enter (which must
+# launch the probe app below), Escape return, Super+PageDown workspace
+# switch, Alt+Tab switcher drive.
+# Exits nonzero on any failure (dead process, panic in logs, missing
+# or byte-identical screenshots, no workspace-switch or switcher-step
+# line in the log, probe app never launched). PNGs plus logs land in
+# the artifacts dir for upload; a human reviews the frames, the script
+# proves the session lived, visibly reacted, and launched from search.
+#
+# Environment hygiene: DISPLAY is set for child processes only and only
+# when this script started the Xvfb itself.
+set -eu
+
+unset CDPATH
+ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+DISPLAY_ARG=""
+ARTIFACTS="$ROOT/journey-artifacts"
+SOCKET="roost-journey-$$"
+WIDTH=1280
+HEIGHT=800
+
+usage() {
+    sed -n '2,20p' "$0"
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --display) DISPLAY_ARG="$2"; shift 2 ;;
+        --artifacts) ARTIFACTS="$2"; shift 2 ;;
+        --socket) SOCKET="$2"; shift 2 ;;
+        --help|-h) usage; exit 0 ;;
+        *) echo "roost-journey: unknown argument $1" >&2; usage >&2; exit 1 ;;
+    esac
+done
+
+mkdir -p "$ARTIFACTS"
+# Absolute: the shell rejects relative XDG_DATA_HOME, and the probe
+# marker must resolve identically in the script and in spawned apps.
+ARTIFACTS="$(cd "$ARTIFACTS" && pwd)"
+LOG="$ARTIFACTS/nested.log"
+OWNED_XVFB=""
+COMPOSITOR_PID=""
+
+# Launch probe: a fake app only this journey can see. Its Exec
+# touches the marker, proving overview search actually launched it.
+# XDG_DATA_HOME redirects shell discovery (inherited by the
+# supervised shell child); the query below matches nothing else.
+PROBE_HOME="$ARTIFACTS/probe-home"
+MARKER="$ARTIFACTS/launch-marker"
+rm -f "$MARKER"
+mkdir -p "$PROBE_HOME/applications"
+cat >"$PROBE_HOME/applications/roostterm-probe.desktop" <<EOF
+[Desktop Entry]
+Name=Roostterm Probe
+Exec=touch "$MARKER"
+Type=Application
+EOF
+XDG_DATA_HOME="$PROBE_HOME"
+export XDG_DATA_HOME
+
+cleanup() {
+    if [ -n "$COMPOSITOR_PID" ] && kill -0 "$COMPOSITOR_PID" 2>/dev/null; then
+        kill "$COMPOSITOR_PID" 2>/dev/null || true
+        wait "$COMPOSITOR_PID" 2>/dev/null || true
+    fi
+    if [ -n "$OWNED_XVFB" ]; then
+        kill "$OWNED_XVFB" 2>/dev/null || true
+        wait "$OWNED_XVFB" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT INT TERM
+
+display_works() {
+    xdotool getdisplaygeometry >/dev/null 2>&1
+}
+
+if [ -n "$DISPLAY_ARG" ]; then
+    DISPLAY="$DISPLAY_ARG"
+    export DISPLAY
+fi
+if ! display_works; then
+    DISPLAY=":98"
+    export DISPLAY
+    echo "roost-journey: starting Xvfb on $DISPLAY"
+    Xvfb "$DISPLAY" -screen 0 "${WIDTH}x${HEIGHT}x24" >"$ARTIFACTS/xvfb.log" 2>&1 &
+    OWNED_XVFB=$!
+    for _ in $(seq 1 30); do
+        if display_works; then
+            break
+        fi
+        sleep 1
+    done
+    display_works || {
+        echo "roost-journey: Xvfb never answered on $DISPLAY" >&2
+        exit 1
+    }
+fi
+echo "roost-journey: display $DISPLAY geometry $(xdotool getdisplaygeometry)"
+
+echo "roost-journey: building"
+cargo build --quiet --manifest-path "$ROOT/Cargo.toml" \
+    -p roost-compositor -p roost-shell-host
+
+echo "roost-journey: starting compositor on socket $SOCKET"
+"$ROOT/target/debug/roost-compositor" --socket "$SOCKET" \
+    --shell-bin "$ROOT/target/debug/roost-shell-host" \
+    >"$LOG" 2>&1 &
+COMPOSITOR_PID=$!
+
+echo "roost-journey: waiting for the nested window"
+WID=""
+for _ in $(seq 1 60); do
+    if ! kill -0 "$COMPOSITOR_PID" 2>/dev/null; then
+        echo "roost-journey: compositor died during startup" >&2
+        tail -30 "$LOG" >&2 || true
+        exit 1
+    fi
+    WID="$(xdotool search --onlyvisible "" 2>/dev/null | head -1 || true)"
+    if [ -n "$WID" ]; then
+        break
+    fi
+    sleep 1
+done
+if [ -z "$WID" ]; then
+    echo "roost-journey: no nested window appeared" >&2
+    tail -30 "$LOG" >&2 || true
+    exit 1
+fi
+echo "roost-journey: window $WID"
+
+# Focus the nested window so keys land in the compositor. No
+# window manager runs here: windowactivate (which needs
+# _NET_ACTIVE_WINDOW) fails, and bare keystrokes go to a void focus.
+# Target the backend window by name and set the X input focus
+# directly; a click follows so pointer state is sane too. The name
+# search retries: cold Mesa warmup can map the window visibly before
+# the title lands, and unrelated early windows must not satisfy it.
+WID=""
+for _ in $(seq 1 60); do
+    if ! kill -0 "$COMPOSITOR_PID" 2>/dev/null; then
+        echo "roost-journey: compositor died waiting for its window" >&2
+        tail -30 "$LOG" >&2 || true
+        exit 1
+    fi
+    WID="$(xdotool search --name Smithay 2>/dev/null | head -1 || true)"
+    if [ -n "$WID" ]; then
+        break
+    fi
+    sleep 1
+done
+if [ -z "$WID" ]; then
+    echo "roost-journey: no Smithay window found" >&2
+    exit 1
+fi
+xdotool windowfocus --sync "$WID"
+xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2)) click 1
+sleep 3
+
+shot() {
+    # Root capture, not a window shot: with no window manager there is
+    # no frame to redirect, and the private Xvfb shows only our window.
+    scrot "$ARTIFACTS/$1" >/dev/null
+    echo "roost-journey: shot $1"
+}
+
+shot "01-baseline.png"
+
+# Lone Super tap: overview opens (tap, not hold — no chord).
+xdotool key Super_L
+sleep 2
+shot "02-overview.png"
+
+# Typing filters; Enter picks; Escape returns. The query matches
+# only the probe app, so Enter must spawn it (marker below).
+xdotool type "roostterm"
+sleep 2
+shot "03-search.png"
+xdotool key Return
+sleep 2
+shot "04-after-enter.png"
+
+# The probe's Exec touches the marker: search-to-launch worked end
+# to end. Slow provider threads get a few more Returns (the query
+# stays buffered while the overview is open).
+LAUNCHED=""
+for _ in $(seq 1 6); do
+    if [ -f "$MARKER" ]; then
+        LAUNCHED=1
+        break
+    fi
+    xdotool key Return
+    sleep 3
+done
+if [ -z "$LAUNCHED" ]; then
+    echo "roost-journey: probe app never launched (no marker at $MARKER)" >&2
+    tail -30 "$LOG" >&2 || true
+    exit 1
+fi
+echo "roost-journey: probe app launched"
+xdotool key Escape
+sleep 2
+shot "05-after-escape.png"
+
+# Super+PageDown chord: switch to workspace 1. Both workspaces are
+# empty, so the shot matches baseline pixel-wise; the compositor's
+# "workspace now" log line is the signal, asserted below.
+xdotool key Super_L+Page_Down
+sleep 2
+shot "06-workspace.png"
+
+# Alt+Tab chord: the compositor queues a switcher step on the Tab
+# tap and a commit on Alt release. No windows are mapped, so the
+# shell opens nothing visible; the "switcher Step" log line is the
+# signal, asserted below. Separate keydown/keyup (not a `key` chord)
+# so a frame lands mid-hold like a real switcher pause.
+xdotool keydown Alt_L
+sleep 1
+xdotool key Tab
+sleep 1
+shot "07-switcher.png"
+xdotool keyup Alt_L
+sleep 1
+
+echo "roost-journey: asserting"
+if ! kill -0 "$COMPOSITOR_PID" 2>/dev/null; then
+    echo "roost-journey: compositor died mid-journey" >&2
+    tail -30 "$LOG" >&2 || true
+    exit 1
+fi
+if grep -q "panicked" "$LOG"; then
+    echo "roost-journey: panic in nested log" >&2
+    grep "panicked" "$LOG" >&2
+    exit 1
+fi
+if ! grep -q "roost-compositor: workspace now 1" "$LOG"; then
+    echo "roost-journey: no workspace switch in nested log" >&2
+    tail -30 "$LOG" >&2 || true
+    exit 1
+fi
+if ! grep -q "roost-compositor: switcher Step" "$LOG"; then
+    echo "roost-journey: no switcher step in nested log" >&2
+    tail -30 "$LOG" >&2 || true
+    exit 1
+fi
+for shot_file in 01-baseline 02-overview 03-search 04-after-enter 05-after-escape 06-workspace 07-switcher; do
+    path="$ARTIFACTS/$shot_file.png"
+    if [ ! -s "$path" ]; then
+        echo "roost-journey: missing screenshot $path" >&2
+        exit 1
+    fi
+    # Guard only against corrupt/empty captures: an empty desktop is
+    # legitimately near-black and compresses tiny. Visible reaction is
+    # proven by the baseline-vs-overview diff below, not by size.
+    size=$(wc -c <"$path")
+    if [ "$size" -lt 1500 ]; then
+        echo "roost-journey: suspiciously small screenshot $path ($size bytes)" >&2
+        exit 1
+    fi
+done
+if cmp -s "$ARTIFACTS/01-baseline.png" "$ARTIFACTS/02-overview.png"; then
+    echo "roost-journey: overview shot identical to baseline (Super did nothing visible)" >&2
+    exit 1
+fi
+
+echo "roost-journey: OK, artifacts in $ARTIFACTS"

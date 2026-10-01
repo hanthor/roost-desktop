@@ -1,191 +1,145 @@
 ---
 created_date: "2026-09-27"
-document_status: draft
+document_status: final
+closed_date: "2026-09-28"
 ---
 
-# Research — nested compositor and shell recovery
+# Research: 20260927170317-a01f0011-001-nested-compositor-shell-recovery
 
-**Status:** Draft; Gate #1 pins verified 2026-09-27. Three follow-ups
-remain open: EGL runtime probe on dev hardware, anvil/upstream-test
-review at the pinned revision, and control-codec choice. See
-“Open follow-ups”.
+## Alternatives considered and rejected
 
-## 1. Smithay release, nested backend API, features, render paths — verified
+### Option A: Headless-only sufficiency
 
-Pinned 2026-09-27 (crates.io index/API; resolved and `cargo check`ed
-on rustc/cargo 1.94.1):
+Treat the headless `TestCompositor` plus socket/control unit tests as enough for 001.
 
-| Crate | Pinned | Released | Notes |
-|---|---|---|---|
-| smithay | 0.7.0 | 2025-06-24 | MSRV 1.80.1; unyanked |
-| calloop | 0.14.4 | 2026-02-13 | MSRV 1.71.1; smithay req `^0.14.0` |
-| wayland-protocols | 0.32.13 | 2026-06-19 | vendors protocol XML; smithay req `^0.32.8` |
-| wayland-server | 0.31.14 | 2026-07-22 | smithay req `^0.31.9` |
-| wayland-client | 0.31.15 | 2026-07-22 | shell-host side |
-| wayland-backend | 0.3.17 | 2026-08-14 | transitively resolved |
-| winit | 0.30.13 | 2026-03-02 | via `backend_winit`, req `^0.30.0` |
+**Rejected**: `crates/compositor/src/lib.rs:1-7` and `:133-177` state no event loop, backend, seat routing, or shell channel; this cannot satisfy R1/R2/A1/A2/A7 live nested app mapping and input.
 
-- `backend_winit` = `winit` + `backend_egl` + `wayland-client/cursor/egl`
-  + `renderer_gl`. Entry points `winit::init`,
-  `init_from_attributes`, `init_from_attributes_with_gl_attr` return
-  `(WinitGraphicsBackend<R>, WinitEventLoop)` with
-  `R: From<GlesRenderer> + Bind<EGLSurface>`.
-- Rendering is **GLES over EGL only**. No pixman/software path is wired
-  to the winit backend in 0.7.0, so the nested preview requires working
-  EGL (Mesa llvmpipe acceptable in VMs/CI).
-- Upstream git tag `v0.7.0` exists for anvil/upstream-test review.
-- Decision record: `docs/adr/0001-nested-backend-smithay-pin.md`.
+### Option B: Full anvil machinery now
 
-## 2. Calloop, server setup, surface lifecycle, frames, test patterns — verified
+Pull in full anvil `Space`, damage tracking, dmabuf feedback, and XWayland for slice 1.
 
-All points confirmed against the smithay-0.7.0 crate source:
+**Rejected**: explicitly deferred by the 001 spec constraints and ADR 0001; scope creep that would bury the control/recovery contract under unrelated rendering work.
 
-- `WinitEventLoop` implements calloop `EventSource` (winit `EventLoop`
-  wrapped in `calloop::generic::Generic`); alternatively drivable
-  manually via `dispatch_new_events` (`pump_app_events(ZERO)`).
-- Client acceptance via `wayland::socket::ListeningSocketSource`
-  (`new_auto` / `with_name`) in the same calloop loop; per-iteration
-  `dispatch_all_clients` / `flush_clients` on the `Display` handle.
-- Surface lifecycle traits: `CompositorHandler`, `XdgShellHandler`
-  (`new_toplevel`, configure/ack), `SeatHandler`, `ShmHandler`,
-  `BufferHandler`. Frame production via
-  `desktop::wayland::utils::send_frames_surface_tree`.
-- Test-compositor template: `examples/minimal.rs` in the 0.7.0 crate
-  (nested winit + shm + xdg-shell + seat in one file). Fuller reference:
-  anvil at tag `v0.7.0` (follow-up to read).
+### Option C: Separate recovery client now
 
-## 3. IPC envelope — proposed
+Build a second supervised recovery client instead of the compositor-owned overlay.
 
-Separate Unix socket (not the Wayland socket). Framed protocol: u32
-length prefix + postcard/bincode body; codec choice is an open
-follow-up for plan Phase 0. Proposed limits: 1 MiB max frame;
-oversized/malformed/stale-version frames get a typed error and are
-dropped. Backpressure via bounded server-side queue — a slow shell is
-disconnected, never blocks compositor input/frame paths. Reconnect
-means full snapshot plus revision resync; live-connection revision gaps
-trigger resnapshot. fd-passing deferred (no current need; viable later
-via rustix SCM_RIGHTS, rustix ^1.0.7 already in the smithay tree).
-Decision record: `docs/adr/0002-shell-control-ipc-envelope.md`.
+**Rejected**: ADR 0003 defers a second supervised process until the control contract hardens; the overlay rides the existing input/GLES path.
 
-## 4. Activation tokens — API verified, policy proposed
+### Option D: Generated schema codec
 
-API facts (`wayland::xdg_activation`, 0.7.0): token is an opaque 32-char
-alphanumeric random string; `XdgActivationTokenData` carries requesting
-`client_id`, seat-bound `serial: Option<(Serial, WlSeat)>`, `app_id`,
-requesting `surface`, and `timestamp: Instant`.
-`XdgActivationState::create_external_token` lets the compositor mint
-tokens for the control API; `token_created` can veto; tokens persist
-until `remove_token` / `retain_tokens` — one-use is compositor policy,
-not protocol behavior. Serials differ fundamentally: per-display u32
-event counters meaningful only within one client's event stream, versus
-unguessable bearer strings passable across processes.
+Replace postcard framing with protobuf/flatbuffers.
 
-Proposed policy: 30 s expiry, one-use (remove after first successful
-activation), seat binding plus `app_id` match required, log-and-deny on
-mismatch. Recorded in `docs/adr/0002-shell-control-ipc-envelope.md`.
+**Rejected**: ADR 0002 already selects a compact framed local protocol for two parties; the schema crate implements u32-LE length plus postcard with a 1 MiB cap and typed decode errors (`crates/shell-control-schema/src/lib.rs:8-24,257-290`).
 
-## 5. Supervision and nested lifecycle — proposed
+### Option E: systemd supervision for slice 1
 
-Nested preview: compositor spawns the shell as a child process, owns a
-finite restart budget with capped backoff, and kills the child on
-compositor exit. A systemd user unit is deferred to production work
-(004/006) and explicitly out of slice 1. Env hygiene: unique socket
-name (e.g. `rwd-nested-<pid>`), `WAYLAND_DISPLAY` set for the child
-only, parent host environment never mutated; nested window carries an
-identifying title; host grab/ungrab escape key documented.
-Decision record: `docs/adr/0003-nested-supervision-and-recovery.md`.
+Supervise the shell through a systemd user unit instead of compositor-spawned child management.
 
-## 6. Recovery affordance — proposed
+**Rejected**: ADR 0003 defers systemd to 004/006 production work; it couples the nested prototype to service-manager setup and complicates restart-budget tests.
 
-Slice 1 uses a compositor-owned emergency overlay on the existing input
-+ GLES path (window list, shell relaunch, focus/input kept alive) —
-no second client to supervise while the control contract is
-provisional. A separate recovery client is deferred.
-Decision record: `docs/adr/0003-nested-supervision-and-recovery.md`.
+## Chosen approach — evidence
 
-## Protocol matrix — verified
+- Start from pinned smallvil/minimal.rs nested winit shape, not full anvil: prior 001 research records `smallvil/` plus `examples/minimal.rs` as slice template and full anvil Space/damage/dmabuf/xwayland as deferred.
+- Keep Smithay 0.7.0 pin set and GLES-over-EGL nested backend: ADR 0001 `docs/adr/0001-nested-backend-smithay-pin.md:19-27`; knowledge `repo:decisions/smithay-070-for-nested-slice.md`; pins in root `Cargo.toml` and `Cargo.lock`.
+- Implement missing runtime seam: winit/calloop loop, socket accept, output/seat/input, xdg-toplevel mapping/focus/move/resize/workspace, layer-shell server for panel, StateModel wiring, token mint/one-use store, supervision loop, overlay rendering/input, nested launch script.
+- Preserve existing contracts: state model `crates/compositor/src/state.rs:1-18`; control handshake/snapshot/delta `crates/compositor/src/control.rs:283-392`; shell client snapshot/gap handling `crates/shell-host/src/control.rs:278-360`; supervision budget/backoff `crates/compositor/src/supervise.rs:77-116,210-251`; overlay logic `crates/compositor/src/overlay.rs:29-76`.
+- Keep same-UID prototype assumption development-only: 001 spec control-API section and ADR 0002 consequences; production identity remains 004 gate.
 
-From the XML vendored in wayland-protocols 0.32.13:
+## Files examined
 
-| Protocol | Interface version | Needed by |
-|---|---|---|
-| xdg-shell stable | `xdg_wm_base` v7 | nested slice |
-| viewporter | v1 | nested slice |
-| presentation-time | `wp_presentation` v2 | nested slice |
-| linux-dmabuf | v6 | nested slice |
-| xdg-activation | v1 | token policy |
-| fractional-scale | v1 | 003 follow-on |
-| tearing-control | v1 | 003 follow-on |
-| cursor-shape | v2 | 003 follow-on |
-| single-pixel-buffer | v1 | 003 follow-on |
-| xdg-dialog | v1 | 003 follow-on |
-| ext-session-lock (staging) | v1 | 004 |
-| linux-explicit-synchronization (unstable) | v2 | 003 |
-| linux-drm-syncobj (staging) | v1 | 003 |
+- `docs/roadmap.md:31-41` — 000/001 sequence and draft-plan rule.
+- `docs/roadmap.md:63-64` — gate 1 requires recorded provisional backend/versions/event-loop/control/recovery scope.
+- `docs/architecture.md:15-21` — compositor authority, shell client boundary, nonblocking critical paths.
+- `docs/architecture.md:25` — nested developer preview tier and nonclaims.
+- `docs/test-strategy.md:38-41` — 100-run shell-kill nested recovery journey and artifact rule.
+- `docs/adr/0001-nested-backend-smithay-pin.md:19-46` — Smithay pin, GLES-only consequence, provisional status.
+- `docs/adr/0002-shell-control-ipc-envelope.md:19-59` — framed IPC, backpressure, resnapshot, token policy, deferred codec/fd choices now resolved in code.
+- `docs/adr/0003-nested-supervision-and-recovery.md:19-49` — child supervision, env hygiene, overlay-first recovery.
+- `crates/compositor/src/lib.rs:1-7,100-110,133-177` — headless Display helper only; seat exists but no input routing; no loop/backend.
+- `crates/compositor/src/state.rs:22-30,105-142,322-363` — caps, model API, TokenPolicy pure validation; no token table/store wiring.
+- `crates/compositor/src/control.rs:1-30,203-210,283-392,406-470,546-582` — nonblocking IPC, fail-closed default, handshake/snapshot/deltas, command application; no runtime accept loop.
+- `crates/compositor/src/supervise.rs:77-116,162-251` — restart budget/backoff and poll supervision; no compositor-loop integration.
+- `crates/compositor/src/overlay.rs:1-16,29-76` — pure overlay state/key mapping; no rendering/input binding.
+- `crates/shell-control-schema/src/lib.rs:8-24,35-63,222-242,257-290` — framing/version/token-redaction/decode errors.
+- `crates/shell-host/src/lib.rs:1-16` — model/panel/control halves awaiting join-up.
+- `crates/shell-host/src/control.rs:1-30,154-164,242-360` — shell handshake/snapshot/gap/activation-command client.
+- `crates/shell-host/src/model.rs:41-55,128-154` — shell view model and schema adapter seam.
+- `crates/shell-host/src/panel.rs:1-25,204-247` — layer-shell client structure; live runtime explicitly deferred pending compositor layer-shell.
+- `crates/shell-host/src/main.rs:1-23` — supervised-child entry point; live runtime deferred.
+- `crates/compositor/tests/handshake.rs:1-3` — headless socketpair xdg-toplevel mapping probe.
+- `crates/compositor/tests/recovery.rs:1-26` — control/state/supervision fault-injection harness scope.
+- `crates/compositor/tests/control.rs:1-16` and `crates/compositor/tests/state_model.rs:1-12` — socket-level control and model sync tests.
+- Root `Cargo.toml` and `Cargo.lock` — workspace pins for smithay/calloop/protocols; smithay currently only `wayland_frontend`, no `backend_winit`.
+- `.github/workflows/ci.yml` — fmt, clippy `-D warnings`, workspace tests.
 
-## Initial design constraints
+## External references
 
-Unchanged: no shell round-trip on critical motion/focus/frame paths;
-shell reconnect takes a complete snapshot; revision gaps resnapshot;
-control errors are typed and observable. Treat titles as untrusted
-text. Separate local development assumptions from production service
-identity.
+- Smithay upstream tag `v0.7.0`, as recorded in ADR 0001/prior 001 research: reference for smallvil/anvil shapes; why it mattered: template scope and deferred anvil machinery.
+- `wayland-protocols` 0.32.13 vendored XML, as recorded in prior 001 research protocol matrix: why it mattered: xdg-shell v7/viewporter v1/presentation v2/dmabuf v6/activation v1 baseline.
+- Mesa EGL llvmpipe behavior, as recorded in `repo:gotchas/winit-backend-requires-egl.md`: why it mattered: nested preview needs working EGL; windowed WSI needs host session.
 
-## Sources pinned
+## Prior plans / specs consulted
 
-- smithay 0.7.0 crate source (crates.io, released 2025-06-24;
-  docs: https://smithay.github.io/smithay/smithay/index.html).
-- wayland-protocols 0.32.13 vendored XML (released 2026-06-19;
-  upstream: https://gitlab.freedesktop.org/wayland/wayland-protocols).
-- Upstream repo tag `v0.7.0`: https://github.com/Smithay/smithay
-  (anvil + tests; review pending).
-- Pin verification: `cargo generate-lockfile` + `cargo check`, rustc
-  1.94.1, 2026-09-27 (scratch crate, retained lockfile excerpt in
-  `.spektacular/work/gate1-research/`).
+- 001 spec via `spektacular spec file read 20260927170317-a01f0011-001-nested-compositor-shell-recovery`: R1-R7, control API, A1-A7, technical approach, risks.
+- 001 draft plan via `spektacular plan file read ... plan`: Phase 0-3 and exit gate; now stale because waves implemented parts and code moved.
+- 001 draft context via `... context`: intended crates and provisional constraints; code now exists but runtime integration missing.
+- 001 draft research via `... research`: pins, backend API, codec recommendation, EGL/anvil follow-ups; codec and supervision pieces since implemented.
+- 001 draft test plan via `... test-plan`: unit/property, nested integration, 100-run fault injection, critical-path stall, diagnostics/privacy.
+- Greeter implement completion: finished workflow, CI green; relevant only as adjacent completed scope and uncommitted store artifacts to avoid mixing into 001 commits.
 
-## Open follow-ups
+## Open assumptions
 
-1. ~~EGL runtime probe on dev hardware~~ — done 2026-09-27, see
-   “Follow-up results” below.
-2. ~~Read anvil + upstream tests at tag `v0.7.0`~~ — done 2026-09-27,
-   see “Follow-up results” below.
-3. Control codec: postcard 1.1.3 recommended (see “Follow-up
-   results”); exact frame schema and sign-off remain plan Phase 0.
-4. Threat-model review stays a 004 gate; same-UID limits are labeled
-   development-only in the 001 ADRs.
+- 001 draft spec plus ADRs 0001-0003 satisfy roadmap gate 1 as provisional recorded inputs. If walkthrough requires spec/ADR changes, STOP and update the owning spec/ADR before implement.
+- CI/dev environment provides working EGL acceptable to Smithay winit backend. If EGL probe fails, STOP: nested runtime cannot be verified as specified.
+- Windowed nested runs need a host Wayland/X session; if unavailable, verify headless/offscreen paths plus structure, and flag live WSI as manual follow-up rather than claiming A1/A2.
+- Existing control/state/supervision/overlay APIs are stable enough to build runtime integration on; if integration exposes contract gaps, STOP and revise plan rather than silently changing wire behavior.
 
-## Follow-up results (2026-09-27)
+## Drafting assumptions
 
-### EGL probe — present, headless nuance recorded
+### Target single repo for 001 (discovery)
+- **Decision**: Plan all 001 changes in `rust-wayland-desktop` only.
+- **Rationale**: Registry lists one repo; code, docs, ADRs, and tests all live there.
+- **Rejected**: Splitting work across repos; no other registered repo exists.
 
-Mesa EGL 25.2.8 is installed (`libegl-mesa0`, DRI modules). `eglinfo`
-reports EGL 1.5 / OpenGL_ES on the **surfaceless** platform; GBM,
-Wayland, and X11 platforms fail to initialize here (no seat or host
-display — expected). Consequence: the GLES nested backend can run on
-this machine only under a host Wayland/X session (or Xvfb-class
-stand-in for smoke tests); surfaceless EGL covers offscreen/CI paths,
-not windowed WSI. Windowed WSI stays unverified until a nested run on
-a live session.
+### Treat 001 draft as plannable provisional input (discovery)
+- **Decision**: Proceed with planning against draft 001 spec plus ADRs 0001-0003 under roadmap gate 1.
+- **Rationale**: Gate 1 requires recorded provisional inputs, not final production decisions; blocking changes must surface in walkthrough.
+- **Rejected**: Halting plan work solely because spec/ADRs are draft; that would stall the roadmap-ordered next slice.
 
-### Anvil review at tag v0.7.0 — smallvil is the slice-1 template
+### Runtime-first plan shape (discovery)
+- **Decision**: Recommend integrating existing control/state/supervision/overlay pieces into a real nested runtime before adding new protocol features.
+- **Rationale**: Code already implements contracts but lacks backend loop, mapping, input, layer-shell, token store, supervision wiring, and launch script.
+- **Rejected**: Rewriting contracts first; current tests constrain them.
 
-`anvil/src/winit.rs` (`run_winit`): `EventLoop::try_new`,
-`Display::new`, `winit::init::<GlesRenderer>()`, one `Output`, dmabuf
-global with default feedback (v3 fallback + `bind_wl_display` for
-Mesa), `AnvilState::init`, manual `dispatch_new_events` pump loop,
-damage-tracked repaint. Full anvil pulls in `desktop::Space`,
-`OutputDamageTracker`, dmabuf feedback, and xwayland — all deferrable
-for slice 1. `smallvil/` (~480 lines: `main.rs`, `winit.rs`,
-`state.rs`, `input.rs`, handlers) uses the same backend plus
-`ListeningSocketSource::new_auto` and is the recommended starting
-shape alongside `examples/minimal.rs`. No deviations that threaten the
-plan; dmabuf/space/damage are explicit later additions, not hidden
-requirements.
+### Chosen runtime-integration direction (architecture)
+- **Decision**: Integrate around existing contracts using smallvil/minimal.rs nested shape; defer full anvil machinery and production concerns.
+- **Rationale**: Contracts and fault harnesses already exist; only live nested runtime can prove mapping/input/recovery acceptance.
+- **Rejected**: Headless-only sufficiency; full-anvil-now scope expansion.
 
-### Codec recommendation — postcard 1.1.3
+### No applicable conventions (architecture)
+- **Decision**: Record that no always-applied repo conventions bear on 001.
+- **Rationale**: Knowledge load returned zero convention entries; spec/ADRs/code contracts govern instead.
+- **Rejected**: Padding the plan with generic conventions.
 
-postcard 1.1.3 (serde-native, tiny, deterministic, no config surface)
-over bincode 3.0.0 (MSRV 1.85.0, config variants are a footgun for a
-version-negotiated protocol). Wire plan: our own u32 length prefix,
-decode from the already-capped slice so the 1 MiB limit is enforced
-before deserialization. Sign-off stays with plan Phase 0.
+### Token store boundary shape (data_structures)
+- **Decision**: Add a `TokenStore` issue/consume interface around pure `TokenPolicy`.
+- **Rationale**: One-use removal and seat/app binding need stateful ownership; policy stays pure/testable.
+- **Rejected**: Stuffing storage into policy or protocol messages.
+
+### Real-client runs environment-gated (testing_approach)
+- **Decision**: Automate A1/A2 with protocol-level clients; require real GTK/terminal binaries only where present, else manual test-plan coverage.
+- **Rationale**: Protocol journeys prove mapping/input deterministically; real-client availability is environmental, not contractual.
+- **Rejected**: Claiming full A1/A2 from headless tests alone; also rejecting automation because real clients may be absent.
+
+### Seven-task split with live human verification (tasks)
+- **Decision**: Seven tasks: five agent integration tasks, one agent docs task, one human live-session task.
+- **Rationale**: Mixed agent/person verification must split per workflow rules; live visual proof cannot be agent-claimed.
+- **Rejected**: Fewer coarse tasks that would hide the runtime seams; a human task without an agent docs prerequisite.
+
+## Rehydration cues
+
+- Reread 001 spec via `spektacular spec file read 20260927170317-a01f0011-001-nested-compositor-shell-recovery`.
+- Reread the plan's `plan.md`, `context.md`, `research.md` via `spektacular plan file read <name> <doc>` once committed.
+- Reinspect `crates/compositor/src/lib.rs`, `crates/shell-host/src/panel.rs`, root `Cargo.toml`, and `.github/workflows/ci.yml`.
+- Resume plan with the CLI-reported current step; never invent `goto` targets.

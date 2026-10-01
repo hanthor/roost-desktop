@@ -4,8 +4,9 @@
 
 use std::os::unix::{io::AsFd, net::UnixStream};
 
-use rwd_compositor::TestCompositor;
-use smithay::wayland::compositor::{self, SurfaceAttributes};
+use roost_compositor::TestCompositor;
+use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
+use smithay::wayland::compositor;
 use wayland_client::{
     protocol::{
         wl_buffer::WlBuffer, wl_callback::WlCallback, wl_compositor::WlCompositor,
@@ -231,15 +232,16 @@ fn client_maps_shm_toplevel() {
     conn.display().sync(&qh, ());
     roundtrip(&mut comp, &mut queue, &mut client, |c| c.synced);
 
-    // The committed buffer reached the server-side surface state.
+    // The committed buffer reached the renderer-managed surface state:
+    // `commit` hands buffers to `on_commit_buffer_handler`, which consumes
+    // them out of `SurfaceAttributes` into `RendererSurfaceState`.
     let wl_surface = comp.state.first_toplevel_surface();
     let has_buffer = compositor::with_states(&wl_surface, |states| {
         states
-            .cached_state
-            .get::<SurfaceAttributes>()
-            .current()
-            .buffer
-            .is_some()
+            .data_map
+            .get::<RendererSurfaceStateUserData>()
+            .map(|data| data.lock().unwrap().buffer_size().is_some())
+            .unwrap_or(false)
     });
     assert!(has_buffer, "committed shm buffer missing server-side");
 }

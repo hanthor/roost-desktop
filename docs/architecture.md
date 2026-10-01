@@ -2,7 +2,7 @@
 
 **Status:** Proposed, for design review  
 **Date:** 27 September 2026  
-**Working name:** Rust Wayland Desktop (RWD)
+**Name:** Roost (Rust Wayland desktop session)
 
 ## Product decision
 

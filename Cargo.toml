@@ -1,12 +1,37 @@
 [workspace]
 resolver = "2"
-members = ["crates/compositor"]
+members = [
+    "crates/compositor",
+    "crates/shell-control-schema",
+    "crates/shell-host",
+    "crates/greeter",
+]
 
 # Pinned per ADR 0001 (docs/adr/0001-nested-backend-smithay-pin.md).
 # Exact pins keep the Gate #1 verification reproducible.
+[workspace.package]
+license = "GPL-3.0-or-later"
+
 [workspace.dependencies]
-smithay = { version = "=0.7.0", default-features = false, features = ["wayland_frontend"] }
+smithay = { version = "=0.7.0", default-features = false, features = ["wayland_frontend", "backend_winit", "desktop"] }
 calloop = "=0.14.4"
 wayland-protocols = "=0.32.13"
+wayland-protocols-wlr = "=0.3.12"
 wayland-server = "=0.31.14"
 wayland-client = "=0.31.15"
+postcard = "=1.1.3"
+greetd_ipc = { version = "=0.10.3", features = ["codec", "sync-codec"] }
+serde_json = "1"
+rustix = { version = "=0.38.44", features = ["fs", "event"] }
+freedesktop-desktop-entry = "=0.8.3"
+signal-hook = "0.3"
+rand = "0.9"
+gtk4 = "0.11"
+libadwaita = "0.9"
+gio = "0.18"
+jiff = "0.2"
+xkbcommon = "=0.8.0"
+zbus = "5"
+image = "0.25"
+resvg = { version = "0.48", default-features = false, features = ["raster-images"] }
+rhai = "1.26"

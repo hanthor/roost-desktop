@@ -1,6 +1,6 @@
 # ADR 0001: Nested backend and pinned Smithay/protocol revisions
 
-- Status: Decided (provisional for nested preview; see Consequences)
+- Status: Decided (nested preview proven 001 T1–T5; production review stays a 004 gate)
 - Date: 2026-09-27
 - Owner: project (unassigned)
 - Dependent speks: 001 implementation (blocks compositor implementation
@@ -55,3 +55,7 @@ slices). Upstream reference revision is git tag `v0.7.0`.
 - Knowledge: `learnings/smithay-070-pin-set.md`,
   `gotchas/winit-backend-requires-egl.md`,
   `decisions/smithay-070-for-nested-slice.md`.
+- 001 implementation (T1–T5): the winit/calloop loop runs nested
+  sessions under Xvfb with EGL, serving compositor, shm, xdg-shell,
+  layer-shell, seat, and output globals; 130 workspace tests green
+  with `clippy -D warnings`.
