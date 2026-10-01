@@ -490,8 +490,11 @@ mod tests {
         tracker.launch(entry).expect("spawn /bin/true");
         assert_eq!(tracker.len(), 1);
         // Wait for the immediate exit to become visible to polling.
+        // Deadline, not an iteration budget (#72): a loaded runner only
+        // makes this wait longer.
         let mut exited = false;
-        for _ in 0..100 {
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_secs(20) {
             let states = tracker.states();
             if states["term"]
                 .iter()
