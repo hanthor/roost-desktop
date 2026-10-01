@@ -76,13 +76,16 @@ cargo build --release -p roost-compositor -p roost-shell-host -p roost-greeter
 
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT INT TERM
-mkdir -p "$STAGE/DEBIAN" "$STAGE/usr/bin" "$STAGE/usr/share/wayland-sessions"
+mkdir -p "$STAGE/DEBIAN" "$STAGE/usr/bin" "$STAGE/usr/share/wayland-sessions" "$STAGE/etc/pam.d"
 
 for bin in roost-compositor roost-session roost-shell-host roost-greeter; do
     install -m0755 "target/release/$bin" "$STAGE/usr/bin/$bin"
 done
 install -m0644 share/wayland-sessions/roost.desktop \
     "$STAGE/usr/share/wayland-sessions/roost.desktop"
+# Lock-screen PAM service (#62); a conffile, so local edits survive.
+install -m0644 share/pam.d/roost-lock "$STAGE/etc/pam.d/roost-lock"
+echo /etc/pam.d/roost-lock >"$STAGE/DEBIAN/conffiles"
 
 # Agreement check: the stamped binaries must report the stamped version.
 for bin in roost-compositor roost-session roost-shell-host roost-greeter; do

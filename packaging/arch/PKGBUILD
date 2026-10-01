@@ -36,6 +36,7 @@ optdepends=(
     'xorg-xwayland: X11 application support'
 )
 options=('!lto' '!debug')
+backup=('etc/pam.d/roost-lock')
 
 if [[ -n "${ROOST_LOCAL_SRC:-}" ]]; then
     source=()
@@ -89,6 +90,8 @@ package() {
     done
     install -Dm0644 "$root/share/wayland-sessions/roost.desktop" \
         "$pkgdir/usr/share/wayland-sessions/roost.desktop"
+    # Lock-screen PAM service (#62): unlock under GDM, where no greetd runs.
+    install -Dm0644 "$root/share/pam.d/roost-lock" "$pkgdir/etc/pam.d/roost-lock"
     install -Dm0644 "$root/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
     install -Dm0644 "$root/docs/nested-session.md" \
         "$pkgdir/usr/share/doc/$pkgname/nested-session.md"

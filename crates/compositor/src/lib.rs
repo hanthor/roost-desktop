@@ -53,6 +53,7 @@ pub mod layer;
 pub mod lock;
 pub mod overlay;
 pub mod overview;
+pub mod pam;
 pub mod popup;
 pub mod protocols;
 pub mod runtime;
