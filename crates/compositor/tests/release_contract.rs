@@ -136,3 +136,24 @@ fn release_requires_a_filled_visual_review() {
         "release checklist names the review step"
     );
 }
+
+#[test]
+fn arch_package_stamps_and_checks_the_version() {
+    let pkgbuild = read_workspace("packaging/arch/PKGBUILD");
+    for token in [
+        "ROOST_VERSION",
+        "roost-compositor",
+        "roost-session",
+        "roost-shell-host",
+        "roost-greeter",
+        "roost.desktop",
+        "check()",
+        "--locked",
+    ] {
+        assert!(pkgbuild.contains(token), "PKGBUILD keeps {token}");
+    }
+    let containerfile = read_workspace("packaging/marlin/Containerfile");
+    assert!(containerfile.contains("ghcr.io/tuna-os/marlin:gnome"));
+    // Nested-only until DRM/KMS (#52): never selectable at login.
+    assert!(containerfile.contains("test ! -e /usr/share/wayland-sessions/roost.desktop"));
+}

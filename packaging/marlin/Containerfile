@@ -1,0 +1,39 @@
+# Roost preview layer on TunaOS Marlin (#69).
+#
+# Marlin is TunaOS's Arch-based bootc variant and the parity baseline's
+# home: ghcr.io/tuna-os/marlin:gnome ships GNOME 51. This image adds the
+# Roost Arch package on top of that exact base, so the reference session
+# (GNOME 51) and the candidate (Roost) share one image, one kernel, one
+# Mesa, and one VM profile.
+#
+# Until the DRM/KMS backend lands (#52) Roost is nested-only: it runs as a
+# window inside the GNOME session, never from the login screen. The
+# session entry is therefore moved out of wayland-sessions and an app
+# launcher ("Roost (nested preview)") is installed instead.
+#
+# Build (CI does this with the package from packaging/arch):
+#   podman build -f packaging/marlin/Containerfile \
+#       --build-arg ROOST_PKG=roost-X.Y.Z-1-x86_64.pkg.tar.zst .
+
+ARG BASE_IMAGE=ghcr.io/tuna-os/marlin:gnome
+FROM ${BASE_IMAGE}
+
+ARG ROOST_PKG
+COPY ${ROOST_PKG} /tmp/roost.pkg.tar.zst
+COPY packaging/marlin/roost-nested-preview.desktop /tmp/roost-nested-preview.desktop
+
+RUN pacman -U --noconfirm /tmp/roost.pkg.tar.zst \
+    && install -d /usr/share/roost \
+    && mv /usr/share/wayland-sessions/roost.desktop /usr/share/roost/roost-session.desktop \
+    && install -Dm0644 /tmp/roost-nested-preview.desktop \
+        /usr/share/applications/roost-nested-preview.desktop \
+    && rm -f /tmp/roost.pkg.tar.zst /tmp/roost-nested-preview.desktop \
+    && roost-compositor --version \
+    && test ! -e /usr/share/wayland-sessions/roost.desktop
+
+LABEL org.opencontainers.image.title="marlin-roost-preview" \
+      org.opencontainers.image.description="TunaOS Marlin GNOME 51 plus Roost as a nested preview" \
+      org.opencontainers.image.source="https://github.com/hanthor/roost-desktop" \
+      org.opencontainers.image.licenses="GPL-3.0-or-later"
+
+RUN bootc container lint || true
