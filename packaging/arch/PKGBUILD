@@ -30,7 +30,7 @@ optdepends=(
     'greetd: login manager driving roost-greeter'
     'xorg-xwayland: X11 application support'
 )
-options=('!lto')
+options=('!lto' '!debug')
 
 if [[ -n "${ROOST_LOCAL_SRC:-}" ]]; then
     source=()
