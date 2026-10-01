@@ -91,8 +91,10 @@ pub struct ExtensionHost {
 
 /// Extension directory under the shared XDG data dir (mirrors the
 /// favorites layout; tests pass their own temp dir instead).
-pub fn extension_dir() -> PathBuf {
-    crate::favorites::data_dir().join("extensions")
+/// `None` when no private data dir resolves (#49): scripts are then
+/// never loaded, rather than read from a shared directory.
+pub fn extension_dir() -> Option<PathBuf> {
+    crate::favorites::data_dir().map(|dir| dir.join("extensions"))
 }
 
 /// Build the hardened engine: dummy module resolver (no `import`
@@ -171,6 +173,11 @@ impl ExtensionHost {
 
     /// Script names currently in the directory, sorted.
     fn dir_names(&self) -> Vec<String> {
+        // No private extension dir (#49): load nothing, never a
+        // relative path resolved against the working directory.
+        if self.dir.as_os_str().is_empty() {
+            return Vec::new();
+        }
         let _ = fs::create_dir_all(&self.dir);
         let mut names = Vec::new();
         if let Ok(entries) = fs::read_dir(&self.dir) {
