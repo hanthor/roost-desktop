@@ -340,13 +340,18 @@ fn removed_output_shifts_floating_windows_into_survivor() {
         Some(WindowLayout::Floating)
     );
     // Park beta on the right slice; alpha stays on the removed slice.
+    let beta_placed = f.manager.geometry(f.id_b).unwrap();
     assert!(f.manager.move_window(f.id_b, 1280, 0));
     let beta_before = f.manager.geometry(f.id_b).unwrap();
-    assert_eq!((beta_before.loc.x, beta_before.loc.y), (1312, 32));
+    assert_eq!(
+        beta_before.loc,
+        beta_placed.loc + smithay::utils::Point::from((1280, 0))
+    );
     let focus_before = f.manager.model().focused();
     let ws_a = f.manager.model().window(f.id_a).unwrap().workspace;
     let ws_b = f.manager.model().window(f.id_b).unwrap().workspace;
 
+    let alpha_before = f.manager.geometry(f.id_a).unwrap();
     // Migrate first, then drop the entry: the documented removal order.
     let moved = f.manager.migrate_output_windows(&mut f.comp.state, "left");
     assert_eq!(moved, 1, "only alpha sat on the removed slice");
@@ -362,8 +367,12 @@ fn removed_output_shifts_floating_windows_into_survivor() {
     // Alpha shifted size-preserved into the survivor slice; beta is
     // byte-identical.
     let alpha = f.manager.geometry(f.id_a).unwrap();
-    assert_eq!((alpha.loc.x, alpha.loc.y), (1280, 0));
-    assert_eq!((alpha.size.w, alpha.size.h), (800, 600));
+    assert_eq!(
+        alpha.loc,
+        alpha_before.loc + smithay::utils::Point::from((1280, 0)),
+        "same place relative to its output"
+    );
+    assert_eq!(alpha.size, alpha_before.size);
     assert_inside_right(alpha);
     assert_eq!(f.manager.geometry(f.id_b).unwrap(), beta_before);
     assert_inside_right(f.manager.geometry(f.id_b).unwrap());
