@@ -211,13 +211,17 @@ echo "roost-app-content: shot 03-tiled.png"
 # no kill, no DONE file. A lingering process means the chord or the
 # close request regressed, and the run fails here instead of hanging
 # on wait (the EXIT trap still cleans up).
+# Chromium can drop a chord that lands while it is still settling from
+# the tile resize; the chord is resent twice. Each send is only a
+# request: the process must still exit on its own.
 xdotool key Alt_L+F4
 CLOSED=""
-for _ in $(seq 1 30); do
+for i in $(seq 1 30); do
     if ! kill -0 "$CHROMIUM_PID" 2>/dev/null; then
         CLOSED=1
         break
     fi
+    case "$i" in 5|15) xdotool key Alt_L+F4 ;; esac
     sleep 2
 done
 if [ -z "$CLOSED" ]; then
