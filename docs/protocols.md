@@ -47,6 +47,18 @@ A valid request focuses and raises the window. This is Mutter's
 focus-stealing prevention in its simplest form: a background app cannot
 mint its way to the front.
 
+## GNOME D-Bus interfaces
+
+GNOME's portal backend (xdg-desktop-portal-gnome) talks to GNOME Shell
+and Mutter over D-Bus, not Wayland. Roost serves those interfaces itself,
+as niri does, so the stock portal works.
+
+| Interface | Roost | Notes |
+|---|---|---|
+| org.gnome.Shell.Screenshot | Screenshot | saves a PNG; the name is left to a real GNOME Shell when one runs (nested preview) |
+| org.gnome.Mutter.ScreenCast, org.gnome.Mutter.DisplayConfig | missing | screen sharing (#61); niri's PipeWire implementation is the reference |
+| org.gnome.Shell.Introspect | missing | window list for the portal's window picker (#61) |
+
 ## Gaps against Mutter
 
 | Protocol | Roost | Tracked in |

@@ -168,6 +168,14 @@ impl NotifyUi {
         ui
     }
 
+    /// Post the shell's own notification (screenshots, for one).
+    pub fn post(self: &Rc<Self>, app: &str, summary: &str, body: &str) {
+        if let Ok(mut center) = self.center.lock() {
+            center.notify(app, summary, body, Vec::new(), Urgency::Normal, None);
+        }
+        self.refresh();
+    }
+
     /// The calendar popover's notification pane.
     pub fn pane(&self) -> &gtk::Box {
         &self.pane

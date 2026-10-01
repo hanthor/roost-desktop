@@ -13,6 +13,9 @@ libc = "0.2"
 libloading = "0.8"
 # GNOME's monitors.xml (per-output scale and layout, #59).
 roxmltree = "0.21"
+# org.gnome.Shell.Screenshot (#61): D-Bus service and PNG output.
+zbus = { workspace = true }
+png = "0.18"
 calloop.workspace = true
 signal-hook.workspace = true
 rand.workspace = true

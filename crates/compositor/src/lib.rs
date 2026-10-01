@@ -58,6 +58,7 @@ pub mod pam;
 pub mod popup;
 pub mod protocols;
 pub mod runtime;
+pub mod screenshot;
 pub mod state;
 pub mod supervise;
 pub mod unlock;

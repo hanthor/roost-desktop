@@ -661,6 +661,18 @@ impl Runtime {
             state.enable_dmabuf(formats);
         }
 
+        // org.gnome.Shell.Screenshot (#61): requests from the D-Bus
+        // thread are answered between frames.
+        event_loop
+            .handle()
+            .insert_source(crate::screenshot::start(), |event, _, rt: &mut Runtime| {
+                if let calloop::channel::Event::Msg(request) = event {
+                    let saved = rt.capture(&request.filename);
+                    let _ = request.reply.send(saved);
+                }
+            })
+            .map_err(|e| RuntimeError::Loop(e.to_string()))?;
+
         let loop_handle = event_loop.handle();
         let mut runtime = Runtime {
             display,
@@ -1117,6 +1129,94 @@ impl Runtime {
             }
             _ => false,
         }
+    }
+
+    /// Render the primary output's current scene offscreen and save it
+    /// as a PNG (`requested` when absolute, else GNOME's default path).
+    /// Never while locked: nothing behind the lock may leave the session.
+    pub fn capture(&mut self, requested: &std::path::Path) -> Option<std::path::PathBuf> {
+        use smithay::backend::allocator::Fourcc;
+        use smithay::backend::renderer::{ExportMem, Offscreen};
+        if self.is_locked() {
+            return None;
+        }
+        let path =
+            crate::screenshot::target_path(requested, &crate::screenshot::jiff_like::Stamp::now())?;
+        let overview = self.control.overview_open().then(|| self.overview_layout());
+        let cards = overview.as_ref().filter(|_| !self.overview_search);
+        let decor_global = cards
+            .map(|layout| overview_decor(layout, self.manager.pointer_pos()))
+            .unwrap_or_default();
+        let background = if overview.is_some() {
+            OVERVIEW_BACKGROUND
+        } else {
+            Color32F::new(0.08, 0.09, 0.11, 1.0)
+        };
+        let (renderer, size, view) = match &mut self.backend {
+            Backend::Winit(backend) => {
+                let size = backend.window_size();
+                let view = View {
+                    offset: (0, 0),
+                    scale: self.scale,
+                };
+                (backend.renderer(), size, view)
+            }
+            #[cfg(feature = "drm")]
+            Backend::Drm(drm) => {
+                let crate::drm::DrmBackend {
+                    renderer, outputs, ..
+                } = &mut **drm;
+                let out = outputs.first()?;
+                let view = View {
+                    offset: out.loc,
+                    scale: out.scale,
+                };
+                (renderer, out.size, view)
+            }
+        };
+        let buffer_size = (size.w, size.h).into();
+        let mut texture: smithay::backend::renderer::gles::GlesTexture =
+            renderer.create_buffer(Fourcc::Abgr8888, buffer_size).ok()?;
+        let elements = scene_elements(
+            renderer,
+            &self.manager,
+            &self.state,
+            view,
+            true,
+            overview.as_ref(),
+        );
+        let decor = decor_for_output(&decor_global, view);
+        let previews = preview_elements(renderer, &self.manager, view, cards);
+        let paper = overview
+            .is_none()
+            .then(|| self.wallpaper.element(renderer, size.w, size.h))
+            .flatten();
+        let damage = Rectangle::from_size(size);
+        let mut target = renderer.bind(&mut texture).ok()?;
+        {
+            let mut frame = renderer.render(&mut target, size, Transform::Normal).ok()?;
+            draw_scene(
+                &mut frame,
+                background,
+                paper.as_ref(),
+                &elements,
+                Target {
+                    damage,
+                    scale: view.scale,
+                },
+                &decor,
+                &previews,
+            )
+            .ok()?;
+            let _ = frame.finish().ok()?;
+        }
+        let mapping = renderer
+            .copy_framebuffer(&target, Rectangle::from_size(buffer_size), Fourcc::Abgr8888)
+            .ok()?;
+        let bytes = renderer.map_texture(&mapping).ok()?.to_vec();
+        crate::screenshot::save_png(&path, size.w as u32, size.h as u32, &bytes).ok()?;
+        eprintln!("roost-compositor: screenshot saved to {}", path.display());
+        Some(path)
     }
 
     fn tick(&mut self) -> Result<bool, RuntimeError> {
