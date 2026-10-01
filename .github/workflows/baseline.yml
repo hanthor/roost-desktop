@@ -33,7 +33,7 @@ jobs:
           ls -la /dev/kvm
       - name: Free disk for the 5.7 GB ISO
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
-      - run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ffmpeg
+      - run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf ffmpeg
       - run: scripts/roost-baseline --out baseline-artifacts
       - uses: actions/upload-artifact@v4
         if: always()

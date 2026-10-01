@@ -193,8 +193,16 @@ def main():
 
     kvm = os.access("/dev/kvm", os.R_OK | os.W_OK)
     qmp_path = os.path.join(scratch, "qmp.sock")
-    qemu = ["qemu-system-x86_64", "-m", "6144", "-smp", "2",
-            "-cdrom", iso, "-boot", "d",
+    # The Marlin live ISO is UEFI-only: boot it on OVMF (q35), never
+    # SeaBIOS, which stops at "No bootable device".
+    ovmf = next((p for p in ("/usr/share/ovmf/OVMF.fd", "/usr/share/OVMF/OVMF_CODE.fd",
+                             "/usr/share/qemu/OVMF.fd") if os.path.exists(p)), None)
+    if not ovmf:
+        sys.exit("roost-baseline: OVMF firmware not found (install ovmf)")
+    qemu = ["qemu-system-x86_64", "-machine", "q35", "-m", "6144", "-smp", "2",
+            "-bios", ovmf,
+            "-drive", f"file={iso},media=cdrom,readonly=on,if=none,id=cd0",
+            "-device", "virtio-scsi-pci", "-device", "scsi-cd,drive=cd0,bootindex=0",
             "-device", f"virtio-vga,xres={WIDTH},yres={HEIGHT}",
             "-device", "qemu-xhci", "-device", "usb-tablet", "-device", "usb-kbd",
             "-display", "none", "-serial", f"file:{os.path.join(out, 'serial.log')}",
