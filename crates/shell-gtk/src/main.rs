@@ -16,6 +16,7 @@
 mod logic;
 mod notify;
 mod overview;
+mod providers;
 mod services;
 
 use std::cell::RefCell;

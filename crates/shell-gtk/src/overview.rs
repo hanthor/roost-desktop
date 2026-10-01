@@ -17,6 +17,8 @@ use gtk4::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use roost_shell_host::apps::{AppEntry, AppProvider};
 
+use crate::providers;
+
 /// Namespace the compositor parks overview keyboard focus on
 /// (`roost_compositor::layer::OVERVIEW_NAMESPACE`).
 pub const OVERVIEW_NAMESPACE: &str = "roost-shell-overview";
@@ -74,6 +76,14 @@ pub struct OverviewUi {
     search: gtk::ApplicationWindow,
     entry: gtk::SearchEntry,
     results: gtk::Box,
+    /// One section per search provider with hits, in provider order.
+    provider_box: gtk::Box,
+    /// Providers on the session bus, once it connects.
+    remotes: Rc<RefCell<Vec<providers::Remote>>>,
+    /// Cancels the in-flight provider search on the next keystroke.
+    search_cancel: RefCell<Option<gio::Cancellable>>,
+    /// First provider hit, for Enter when no app matches.
+    first_remote_hit: Rc<RefCell<Option<(providers::Remote, String)>>>,
     dash: gtk::ApplicationWindow,
     dash_row: gtk::Box,
     grid: gtk::ApplicationWindow,
@@ -106,9 +116,47 @@ impl OverviewUi {
         results.add_css_class("overview-results");
         results.set_halign(gtk::Align::Center);
         results.set_visible(false);
+        let provider_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        provider_box.add_css_class("overview-providers");
+        provider_box.set_halign(gtk::Align::Center);
+        provider_box.set_visible(false);
         column.append(&entry);
         column.append(&results);
+        column.append(&provider_box);
         search.set_child(Some(&column));
+
+        // Search providers: discovered once, bound when the bus is up.
+        let remotes = Rc::new(RefCell::new(Vec::new()));
+        {
+            let remotes = remotes.clone();
+            let apps = apps.clone();
+            gio::bus_get(
+                gio::BusType::Session,
+                None::<&gio::Cancellable>,
+                move |conn| {
+                    let Ok(conn) = conn else {
+                        return;
+                    };
+                    let found = providers::discover(&providers::data_dirs());
+                    let chosen =
+                        providers::select(found, &providers::ProviderSettings::load(), |id| {
+                            providers::provider_app(&apps, id).is_some()
+                        });
+                    eprintln!(
+                        "roost-shell-gtk: search providers: {}",
+                        chosen
+                            .iter()
+                            .map(|p| p.desktop_id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    *remotes.borrow_mut() = chosen
+                        .into_iter()
+                        .map(|info| providers::Remote::new(info, &conn))
+                        .collect();
+                },
+            );
+        }
 
         // Dash: bottom center.
         let dash = layer_window(app, "roost-shell-dash", "roost-overview-dash");
@@ -134,6 +182,10 @@ impl OverviewUi {
             search,
             entry,
             results,
+            provider_box,
+            remotes,
+            search_cancel: RefCell::new(None),
+            first_remote_hit: Rc::new(RefCell::new(None)),
             dash,
             dash_row,
             grid,
@@ -165,6 +217,14 @@ impl OverviewUi {
                 };
                 if let Some(app) = first {
                     ui.borrow().launch(&app);
+                } else {
+                    // No app matched: Enter opens the first provider hit.
+                    let me = ui.borrow();
+                    let hit = me.first_remote_hit.borrow().clone();
+                    if let Some((remote, id)) = hit {
+                        remote.activate(&id, providers::terms(&entry.text()));
+                        me.actions.close_overview();
+                    }
                 }
             });
         }
@@ -197,6 +257,50 @@ impl OverviewUi {
             self.results.append(&button);
         }
         self.results.set_visible(!hits.is_empty());
+        self.search_providers(query);
+    }
+
+    /// Ask every provider, in order; each fills its own section when it
+    /// answers. A newer query cancels this one.
+    fn search_providers(&self, query: &str) {
+        if let Some(old) = self.search_cancel.borrow_mut().take() {
+            old.cancel();
+        }
+        while let Some(child) = self.provider_box.first_child() {
+            self.provider_box.remove(&child);
+        }
+        *self.first_remote_hit.borrow_mut() = None;
+        let terms = providers::terms(query);
+        if terms.is_empty() {
+            self.provider_box.set_visible(false);
+            return;
+        }
+        let cancel = gio::Cancellable::new();
+        *self.search_cancel.borrow_mut() = Some(cancel.clone());
+        for remote in self.remotes.borrow().iter() {
+            // Sections exist up front so answers keep provider order.
+            let section = gtk::Box::new(gtk::Orientation::Horizontal, 18);
+            section.add_css_class("provider-section");
+            section.set_visible(false);
+            self.provider_box.append(&section);
+            let (section2, box2) = (section.clone(), self.provider_box.clone());
+            let (remote2, terms2) = (remote.clone(), terms.clone());
+            let app = providers::provider_app(&self.apps, &remote.info.desktop_id).cloned();
+            let actions = self.actions.clone();
+            let first = self.first_remote_hit.clone();
+            remote.search(terms.clone(), &cancel, move |metas| {
+                if metas.is_empty() {
+                    return;
+                }
+                fill_section(&section2, &remote2, app.as_ref(), &metas, &terms2, actions);
+                section2.set_visible(true);
+                box2.set_visible(true);
+                let mut first = first.borrow_mut();
+                if first.is_none() {
+                    *first = Some((remote2.clone(), metas[0].id.clone()));
+                }
+            });
+        }
     }
 
     fn rebuild_dash(ui: &Rc<RefCell<Self>>) {
@@ -310,4 +414,72 @@ impl OverviewUi {
             me.grid.set_visible(false);
         }
     }
+}
+
+/// One provider's results: its app on the left (opens the app on the
+/// search), result rows on the right (each opens itself).
+fn fill_section(
+    section: &gtk::Box,
+    remote: &providers::Remote,
+    app: Option<&AppEntry>,
+    metas: &[providers::ResultMeta],
+    terms: &[String],
+    actions: Rc<dyn OverviewActions>,
+) {
+    let name = app
+        .map(|a| a.name.clone())
+        .unwrap_or_else(|| remote.info.desktop_id.clone());
+    let provider = match app {
+        Some(app) => app_button(app, 48, true),
+        None => gtk::Button::with_label(&name),
+    };
+    provider.add_css_class("provider-app");
+    provider.set_valign(gtk::Align::Start);
+    {
+        let (remote, terms, actions) = (remote.clone(), terms.to_vec(), actions.clone());
+        provider.connect_clicked(move |_| {
+            remote.launch_search(terms.clone());
+            actions.close_overview();
+        });
+    }
+    section.append(&provider);
+    let rows = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    for meta in metas {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        let icon = match &meta.icon {
+            Some(icon) => gtk::Image::from_gicon(icon),
+            None => gtk::Image::from_icon_name("text-x-generic"),
+        };
+        icon.set_pixel_size(32);
+        row.append(&icon);
+        let text = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let title = gtk::Label::new(Some(&meta.name));
+        title.set_halign(gtk::Align::Start);
+        title.add_css_class("provider-result-name");
+        text.append(&title);
+        if let Some(desc) = &meta.description {
+            let d = gtk::Label::new(Some(desc));
+            d.set_halign(gtk::Align::Start);
+            d.add_css_class("caption");
+            d.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+            d.set_max_width_chars(48);
+            text.append(&d);
+        }
+        row.append(&text);
+        let button = gtk::Button::builder().child(&row).build();
+        button.add_css_class("provider-result");
+        button.update_property(&[gtk::accessible::Property::Label(&meta.name)]);
+        let (remote, terms, actions, id) = (
+            remote.clone(),
+            terms.to_vec(),
+            actions.clone(),
+            meta.id.clone(),
+        );
+        button.connect_clicked(move |_| {
+            remote.activate(&id, terms.clone());
+            actions.close_overview();
+        });
+        rows.append(&button);
+    }
+    section.append(&rows);
 }

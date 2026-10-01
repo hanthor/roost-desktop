@@ -152,3 +152,27 @@ window.roost-banners {
 .notification-summary {
   font-weight: bold;
 }
+
+/* Search providers (#57): GNOME 51 list results under the app row. */
+/* Opaque: the compositor keeps drawing previews under search, where
+   GNOME fades them out (ledger P-OV-04). */
+.overview-providers {
+  background-color: #2a2a2f;
+  border-radius: 18px;
+  padding: 12px;
+}
+
+.provider-result {
+  background: none;
+  border-radius: 12px;
+  padding: 6px 12px;
+  min-width: 420px;
+}
+
+.provider-result:hover {
+  background-color: alpha(#ffffff, 0.1);
+}
+
+.provider-result-name {
+  font-weight: bold;
+}

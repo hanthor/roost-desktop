@@ -16,6 +16,8 @@
 #   G-OV-OPEN   Super opens the overview with a preview per window (#54)
 #   G-OV-PICK   clicking a preview focuses that window, closes overview
 #   G-APP-POPOVER an app's menu popover opens (xdg popups, #88)
+#   G-SEARCH-PROVIDER  typing lists a D-Bus search provider's result (#57)
+#   G-SEARCH-ACTIVATE  clicking it calls ActivateResult, closes overview
 #   G-NOTIFY-BANNER  a D-Bus notification shows a banner (#56)
 #   G-NOTIFY-EXPIRE  the banner goes away by itself
 #   G-NOTIFY-LIST    the calendar lists it instead of "No Notifications"
@@ -79,6 +81,18 @@ Exec=touch $PROBE_MARKER
 Icon=applications-system
 Type=Application
 EOF
+# A GNOME Shell search provider owned by the probe app (#57).
+SEARCH_MARKER="$ARTIFACTS/search-marker"
+rm -f "$SEARCH_MARKER"
+mkdir -p "$XDG_DATA_HOME/gnome-shell/search-providers"
+cat >"$XDG_DATA_HOME/gnome-shell/search-providers/roost-probe-search.ini" <<INI
+[Shell Search Provider]
+DesktopId=roost-probe.desktop
+BusName=org.roost.ProbeSearch
+ObjectPath=/org/roost/ProbeSearch
+Version=2
+INI
+PROVIDER_PID=""
 OWNED_XVFB=""
 COMPOSITOR_PID=""
 STUBS_PID=""
@@ -87,6 +101,7 @@ cleanup() {
     if [ -n "$COMPOSITOR_PID" ]; then kill "$COMPOSITOR_PID" 2>/dev/null || true; fi
     if [ -n "$OWNED_XVFB" ]; then kill "$OWNED_XVFB" 2>/dev/null || true; fi
     if [ -n "$STUBS_PID" ]; then kill "$STUBS_PID" 2>/dev/null || true; fi
+    if [ -n "$PROVIDER_PID" ]; then kill "$PROVIDER_PID" 2>/dev/null || true; fi
     if [ -n "$SYSBUS_PID" ]; then kill "$SYSBUS_PID" 2>/dev/null || true; fi
 }
 trap cleanup EXIT INT TERM
@@ -159,6 +174,9 @@ export DBUS_SYSTEM_BUS_ADDRESS
 "$PY" "$ROOT/scripts/lib/roost-service-stubs.py" "$BACKLIGHT" >"$ARTIFACTS/stubs.log" 2>&1 &
 STUBS_PID=$!
 for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/stubs.log" 2>/dev/null && break; sleep 0.5; done
+"$PY" "$ROOT/scripts/lib/roost-search-provider-stub.py" "$SEARCH_MARKER" >"$ARTIFACTS/provider.log" 2>&1 &
+PROVIDER_PID=$!
+for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/provider.log" 2>/dev/null && break; sleep 0.5; done
 
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk
 "$ROOT/target/debug/roost-compositor" --backend winit --socket "roost-gtk-proof-$$" \
@@ -333,6 +351,28 @@ until [ -f "$PROBE_MARKER" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
 [ -f "$PROBE_MARKER" ] || fail G-OV-LAUNCH "Enter did not launch the top result"
 cstate '.overview_open | not' "closed" || fail G-OV-LAUNCH "overview stayed open after launch"
 pass G-OV-LAUNCH "Enter launches the top result and closes the overview"
+
+# Search providers (#57): a D-Bus provider's result lists under the
+# apps, and clicking it hands the result back to the provider.
+xdotool key Super_L
+cstate '.overview_open' "overview" || fail G-SEARCH-PROVIDER "overview did not reopen"
+sleep 1
+xdotool type --delay 40 "report"
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-provider.json" 20 ||
+    fail G-SEARCH-PROVIDER "accessibility dump failed"
+scrot "$ARTIFACTS/10b-search-provider.png" >/dev/null
+showing "$ARTIFACTS/a11y-provider.json" "Quarterly Report.odt" ||
+    fail G-SEARCH-PROVIDER "the provider's result is not listed"
+pass G-SEARCH-PROVIDER "typing lists a D-Bus search provider's result"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-provider-press.json" 20 \
+    --press "Quarterly Report.odt" || fail G-SEARCH-ACTIVATE "could not press the result"
+end=$(($(date +%s) + 10))
+until [ -s "$SEARCH_MARKER" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+grep -q "^activate doc-1 report" "$SEARCH_MARKER" 2>/dev/null ||
+    fail G-SEARCH-ACTIVATE "ActivateResult never reached the provider"
+cstate '.overview_open | not' "closed" || fail G-SEARCH-ACTIVATE "overview stayed open"
+pass G-SEARCH-ACTIVATE "clicking a provider result activates it and closes the overview"
 
 xdotool key Super_L
 cstate '.overview_open' "overview" || fail G-OV-APPGRID "overview did not reopen"
