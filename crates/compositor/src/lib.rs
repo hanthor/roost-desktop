@@ -168,6 +168,10 @@ pub(crate) enum WindowRequest {
     Fullscreen,
     /// Client asked to leave fullscreen.
     Unfullscreen,
+    /// Client started an interactive move (header-bar drag, #58).
+    Move,
+    /// Client started an interactive resize from these xdg edges.
+    Resize(u32),
 }
 
 impl ClientData for ClientState {
@@ -230,6 +234,26 @@ impl XdgShellHandler for State {
         if before > 0 && self.popup_grab.is_empty() {
             self.popup_refocus = true;
         }
+    }
+
+    /// Queue an interactive move (CSD header-bar drag) for the manager.
+    fn move_request(&mut self, surface: ToplevelSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
+        self.window_requests
+            .push((surface.wl_surface().clone(), WindowRequest::Move));
+    }
+
+    /// Queue an interactive resize from `edges` for the manager.
+    fn resize_request(
+        &mut self,
+        surface: ToplevelSurface,
+        _seat: wl_seat::WlSeat,
+        _serial: Serial,
+        edges: smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge,
+    ) {
+        self.window_requests.push((
+            surface.wl_surface().clone(),
+            WindowRequest::Resize(edges as u32),
+        ));
     }
 
     /// Queue a client maximize request for the manager drain. The
