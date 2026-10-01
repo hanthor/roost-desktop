@@ -374,7 +374,10 @@ fn header_drag_moves_the_window() {
     sync(&mut f);
     // The client's press opened smithay's implicit click grab; only the
     // matching release closes it (#97).
-    assert_eq!(f.client.releases, 1, "the grab's release reaches the client");
+    assert_eq!(
+        f.client.releases, 1,
+        "the grab's release reaches the client"
+    );
 }
 
 #[test]
