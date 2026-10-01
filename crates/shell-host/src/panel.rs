@@ -455,6 +455,60 @@ fn paint_script_cells(pixels: &mut [u8], width: i32, cells: &[Rect], texts: &[&s
     }
 }
 
+/// What distinguishes one shell layer surface from another. Everything
+/// else about making one is identical, so it lives in
+/// [`make_layer_surface`] and nowhere else.
+struct LayerSurfaceSpec<'a> {
+    namespace: &'a str,
+    layer: Layer,
+    anchor: Anchor,
+    /// `None` sets no size, which requires anchoring opposite edges in
+    /// both dimensions and lets the compositor assign it — what the
+    /// overview does. Per the protocol, omitting a dimension without
+    /// anchoring both its edges is a protocol error.
+    size: Option<(u32, u32)>,
+    exclusive_zone: i32,
+    interactivity: KeyboardInteractivity,
+    /// `None` leaves placement to the compositor.
+    output: Option<&'a WlOutput>,
+}
+
+/// Make one layer-shell surface on explicit handles.
+///
+/// The whole construction sequence lives here: every shell surface —
+/// panel, dock, banners, switcher, overview — is made through this, so a
+/// protocol-level change has one edit site rather than five. Taking the
+/// handles explicitly rather than reading `self.wayland` keeps it
+/// callable without a live [`ShellHost`].
+///
+/// Ordering is immaterial: the protocol specifies layer, size, anchor,
+/// exclusive zone, margin and interactivity as double-buffered state
+/// applied together at `wl_surface.commit`.
+fn make_layer_surface(
+    compositor: &WlCompositor,
+    layer_shell: &ZwlrLayerShellV1,
+    qh: &QueueHandle<ShellHost>,
+    spec: LayerSurfaceSpec<'_>,
+) -> (WlSurface, ZwlrLayerSurfaceV1) {
+    let surface = compositor.create_surface(qh, ());
+    let layer_surface = layer_shell.get_layer_surface(
+        &surface,
+        spec.output,
+        spec.layer,
+        spec.namespace.to_owned(),
+        qh,
+        (),
+    );
+    if let Some((width, height)) = spec.size {
+        layer_surface.set_size(width, height);
+    }
+    layer_surface.set_anchor(spec.anchor);
+    layer_surface.set_exclusive_zone(spec.exclusive_zone);
+    layer_surface.set_keyboard_interactivity(spec.interactivity);
+    surface.commit();
+    (surface, layer_surface)
+}
+
 /// Make one top-anchored panel layer surface on explicit handles,
 /// bound to `output` (`None` leaves placement to the compositor).
 /// Shared by startup creation and per-output reconcile so both paths
@@ -467,15 +521,20 @@ fn make_panel_surface(
     height: u32,
     output: Option<&WlOutput>,
 ) -> (WlSurface, ZwlrLayerSurfaceV1) {
-    let surface = compositor.create_surface(qh, ());
-    let layer_surface =
-        layer_shell.get_layer_surface(&surface, output, Layer::Top, namespace.to_owned(), qh, ());
-    layer_surface.set_size(0, height);
-    layer_surface.set_anchor(Anchor::Top | Anchor::Left | Anchor::Right);
-    layer_surface.set_exclusive_zone(height as i32);
-    layer_surface.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
-    surface.commit();
-    (surface, layer_surface)
+    make_layer_surface(
+        compositor,
+        layer_shell,
+        qh,
+        LayerSurfaceSpec {
+            namespace,
+            layer: Layer::Top,
+            anchor: Anchor::Top | Anchor::Left | Anchor::Right,
+            size: Some((0, height)),
+            exclusive_zone: height as i32,
+            interactivity: KeyboardInteractivity::OnDemand,
+            output,
+        },
+    )
 }
 
 /// Make one bottom-anchored dock layer surface on explicit handles,
@@ -487,23 +546,22 @@ fn make_dock_surface(
     qh: &QueueHandle<ShellHost>,
     output: Option<&WlOutput>,
 ) -> (WlSurface, ZwlrLayerSurfaceV1) {
-    let surface = compositor.create_surface(qh, ());
-    let layer_surface = layer_shell.get_layer_surface(
-        &surface,
-        output,
-        Layer::Overlay,
-        DOCK_NAMESPACE.to_owned(),
+    make_layer_surface(
+        compositor,
+        layer_shell,
         qh,
-        (),
-    );
-    layer_surface.set_size(0, DOCK_H as u32);
-    layer_surface.set_anchor(Anchor::Bottom | Anchor::Left | Anchor::Right);
-    layer_surface.set_exclusive_zone(0);
-    // OnDemand: the dock takes keyboard focus while its slots are
-    // keyboard-driven, never stealing it otherwise.
-    layer_surface.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
-    surface.commit();
-    (surface, layer_surface)
+        LayerSurfaceSpec {
+            namespace: DOCK_NAMESPACE,
+            layer: Layer::Overlay,
+            anchor: Anchor::Bottom | Anchor::Left | Anchor::Right,
+            size: Some((0, DOCK_H as u32)),
+            exclusive_zone: 0,
+            // OnDemand: the dock takes keyboard focus while its slots are
+            // keyboard-driven, never stealing it otherwise.
+            interactivity: KeyboardInteractivity::OnDemand,
+            output,
+        },
+    )
 }
 
 /// One bound compositor output: the protocol object plus its
@@ -1016,22 +1074,22 @@ impl ShellHost {
             return;
         };
         if self.banners.is_none() {
-            let surface = wayland.compositor.create_surface(&wayland.qh, ());
-            let layer = wayland.layer_shell.get_layer_surface(
-                &surface,
-                None,
-                Layer::Overlay,
-                BANNER_NAMESPACE.to_owned(),
-                &wayland.qh,
-                (),
-            );
-            layer.set_anchor(Anchor::Bottom | Anchor::Right);
             let expanded: Vec<bool> = rows.iter().map(|row| row.expanded).collect();
             let want = banner_strip_height(&expanded);
-            layer.set_size(BANNER_STRIP_W as u32, want as u32);
-            layer.set_exclusive_zone(0);
-            layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-            surface.commit();
+            let (surface, layer) = make_layer_surface(
+                &wayland.compositor,
+                &wayland.layer_shell,
+                &wayland.qh,
+                LayerSurfaceSpec {
+                    namespace: BANNER_NAMESPACE,
+                    layer: Layer::Overlay,
+                    anchor: Anchor::Bottom | Anchor::Right,
+                    size: Some((BANNER_STRIP_W as u32, want as u32)),
+                    exclusive_zone: 0,
+                    interactivity: KeyboardInteractivity::None,
+                    output: None,
+                },
+            );
             self.banners = Some(BannerSurface {
                 surface,
                 layer,
@@ -1148,20 +1206,20 @@ impl ShellHost {
             return;
         };
         if self.switcher.is_none() {
-            let surface = wayland.compositor.create_surface(&wayland.qh, ());
-            let layer = wayland.layer_shell.get_layer_surface(
-                &surface,
-                None,
-                Layer::Overlay,
-                SWITCHER_NAMESPACE.to_owned(),
+            let (surface, layer) = make_layer_surface(
+                &wayland.compositor,
+                &wayland.layer_shell,
                 &wayland.qh,
-                (),
+                LayerSurfaceSpec {
+                    namespace: SWITCHER_NAMESPACE,
+                    layer: Layer::Overlay,
+                    anchor: Anchor::Bottom | Anchor::Left | Anchor::Right,
+                    size: Some((0, SWITCHER_STRIP_H as u32)),
+                    exclusive_zone: 0,
+                    interactivity: KeyboardInteractivity::None,
+                    output: None,
+                },
             );
-            layer.set_anchor(Anchor::Bottom | Anchor::Left | Anchor::Right);
-            layer.set_size(0, SWITCHER_STRIP_H as u32);
-            layer.set_exclusive_zone(0);
-            layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-            surface.commit();
             self.switcher = Some(SwitcherSurface {
                 surface,
                 layer,
@@ -1243,21 +1301,24 @@ impl ShellHost {
             return;
         };
         if self.overview.is_none() {
-            let surface = wayland.compositor.create_surface(&wayland.qh, ());
-            let layer = wayland.layer_shell.get_layer_surface(
-                &surface,
-                None,
-                Layer::Overlay,
-                OVERVIEW_NAMESPACE.to_owned(),
+            let (surface, layer) = make_layer_surface(
+                &wayland.compositor,
+                &wayland.layer_shell,
                 &wayland.qh,
-                (),
+                LayerSurfaceSpec {
+                    namespace: OVERVIEW_NAMESPACE,
+                    layer: Layer::Overlay,
+                    anchor: Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right,
+                    // No size: anchored on all four edges, so the
+                    // compositor assigns it in the configure event.
+                    size: None,
+                    exclusive_zone: 0,
+                    // The overview takes typed search: declare it so the
+                    // compositor parks keyboard focus here while open.
+                    interactivity: KeyboardInteractivity::Exclusive,
+                    output: None,
+                },
             );
-            layer.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
-            layer.set_exclusive_zone(0);
-            // The overview takes typed search: declare it so the
-            // compositor parks keyboard focus here while open.
-            layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
-            surface.commit();
             self.overview = Some(OverviewSurface {
                 surface,
                 layer,
