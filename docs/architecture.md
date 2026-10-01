@@ -55,4 +55,4 @@ Decided 2026-10-01: the parity baseline is **GNOME 51 as shipped in the TunaOS M
 
 Still open before a hardware or security implementation spek is approved: GPU matrix beyond the Marlin VM; same-UID process threat model and trusted-service credential binding; UI toolkit after the accessibility spike (the current hand-painted shell cannot reach parity or AT-SPI); 1.0 tiling requirement; settings compatibility map against GNOME 51 schemas; portal/capture grant lifecycle; and packaging/rollback strategy on bootc.
 
-Current backend reality: the compositor has only the nested winit backend. A DRM/KMS, libseat, and libinput session is the gate between tier 1 and tier 2 and is tracked on the roadmap board.
+Current backend reality: the compositor runs nested (winit) or as a DRM/KMS hardware session (libseat, udev, GBM/EGL, libinput), chosen automatically by whether a host display exists. The hardware path is proven on vkms in CI; real-GPU qualification and the VM lane are tracked on the roadmap board.

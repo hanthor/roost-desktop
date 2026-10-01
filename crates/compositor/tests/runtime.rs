@@ -177,3 +177,24 @@ fn launch_smoke_binds_private_socket_or_skips_without_backend() {
     );
     eprintln!("SKIP: no host display/EGL for nested launch ({status}): {stderr}");
 }
+
+#[test]
+fn backend_choice_parses_and_auto_resolves_by_host_display() {
+    use roost_compositor::runtime::BackendChoice;
+    assert_eq!(BackendChoice::parse("auto"), Some(BackendChoice::Auto));
+    assert_eq!(BackendChoice::parse("nested"), Some(BackendChoice::Winit));
+    assert_eq!(BackendChoice::parse("kms"), Some(BackendChoice::Drm));
+    assert_eq!(BackendChoice::parse("vulkan"), None);
+    // A host display always means nested.
+    assert_eq!(BackendChoice::Auto.resolve(true), BackendChoice::Winit);
+    // No host display (greetd on a TTY): hardware when built with it.
+    let bare = BackendChoice::Auto.resolve(false);
+    if cfg!(feature = "drm") {
+        assert_eq!(bare, BackendChoice::Drm);
+    } else {
+        assert_eq!(bare, BackendChoice::Winit);
+    }
+    // Explicit choices are never overridden.
+    assert_eq!(BackendChoice::Drm.resolve(true), BackendChoice::Drm);
+    assert_eq!(BackendChoice::Winit.resolve(false), BackendChoice::Winit);
+}

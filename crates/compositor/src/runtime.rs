@@ -26,7 +26,7 @@ use smithay::{
             },
             gles::GlesRenderer,
             utils::draw_render_elements,
-            Color32F, Frame, Renderer,
+            Bind, Color32F, Frame, Renderer,
         },
         winit::{self, WinitEvent},
     },
@@ -89,6 +89,56 @@ pub struct NestedSession {
     /// `false` (default) keeps the session native-only; the flag is
     /// the v1 trigger until per-app launch requests exist.
     pub xwayland: bool,
+    /// Display backend (#52): nested window or hardware session.
+    pub backend: BackendChoice,
+}
+
+/// Which display backend a session runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendChoice {
+    /// Hardware when no host display exists (started from a TTY by
+    /// greetd), nested otherwise.
+    Auto,
+    /// Nested window inside a host Wayland/X11 session.
+    Winit,
+    /// DRM/KMS hardware session (needs the `drm` feature).
+    Drm,
+}
+
+impl BackendChoice {
+    /// Parse a `--backend` value.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "auto" => Some(Self::Auto),
+            "winit" | "nested" => Some(Self::Winit),
+            "drm" | "kms" => Some(Self::Drm),
+            _ => None,
+        }
+    }
+
+    /// Resolve `Auto` against the environment: a host display means
+    /// nested. Pure so the rule is testable without a display.
+    pub fn resolve(self, has_host_display: bool) -> Self {
+        match self {
+            Self::Auto if has_host_display || !cfg!(feature = "drm") => Self::Winit,
+            Self::Auto => Self::Drm,
+            other => other,
+        }
+    }
+}
+
+/// Whether a host Wayland or X11 display is reachable from our env.
+pub fn has_host_display() -> bool {
+    ["WAYLAND_DISPLAY", "DISPLAY"]
+        .iter()
+        .any(|key| std::env::var_os(key).is_some_and(|v| !v.is_empty()))
+}
+
+/// The live display backend.
+enum Backend {
+    Winit(Box<winit::WinitGraphicsBackend<GlesRenderer>>),
+    #[cfg(feature = "drm")]
+    Drm(Box<crate::drm::DrmBackend>),
 }
 
 impl NestedSession {
@@ -100,6 +150,7 @@ impl NestedSession {
             height,
             shell_bin: None,
             xwayland: false,
+            backend: BackendChoice::Auto,
         }
     }
 
@@ -210,7 +261,7 @@ pub fn restore_env(prev: Option<OsString>) {
 pub struct Runtime {
     display: Display<State>,
     state: State,
-    backend: winit::WinitGraphicsBackend<GlesRenderer>,
+    backend: Backend,
     manager: WindowManager,
     control: ControlHub,
     shell: ShellDriver,
@@ -265,6 +316,48 @@ impl Runtime {
             Display::new().map_err(|e| RuntimeError::Loop(e.to_string()))?;
         let dh = display.handle();
         let mut state = State::new(&dh);
+        let event_loop = EventLoop::try_new().map_err(|e| RuntimeError::Loop(e.to_string()))?;
+        let choice = session.backend.resolve(has_host_display());
+        let backend = match choice {
+            #[cfg(feature = "drm")]
+            BackendChoice::Drm => {
+                let (drm, sources) = crate::drm::DrmBackend::new()
+                    .map_err(|e| RuntimeError::Backend(e.to_string()))?;
+                for out in &drm.outputs {
+                    let global = out.output.create_global::<State>(&dh);
+                    state.add_output(&out.name, Some(out.output.clone()), out.size.w, out.size.h);
+                    state.note_output_global(&out.name, global);
+                }
+                let handle = event_loop.handle();
+                handle
+                    .insert_source(sources.session, |event, _, rt: &mut Runtime| {
+                        if let Backend::Drm(drm) = &mut rt.backend {
+                            drm.on_session_event(event);
+                        }
+                    })
+                    .map_err(|e| RuntimeError::Loop(e.to_string()))?;
+                handle
+                    .insert_source(sources.drm, |event, _, rt: &mut Runtime| {
+                        if let Backend::Drm(drm) = &mut rt.backend {
+                            drm.on_drm_event(event);
+                        }
+                    })
+                    .map_err(|e| RuntimeError::Loop(e.to_string()))?;
+                handle
+                    .insert_source(sources.input, |event, _, rt: &mut Runtime| {
+                        let inputs = match &mut rt.backend {
+                            Backend::Drm(drm) => drm.translate(event),
+                            Backend::Winit(_) => Vec::new(),
+                        };
+                        for input in inputs {
+                            rt.on_manager_input(input);
+                        }
+                    })
+                    .map_err(|e| RuntimeError::Loop(e.to_string()))?;
+                Some(Backend::Drm(Box::new(drm)))
+            }
+            _ => None,
+        };
         let output = Output::new(
             "roost-0".to_owned(),
             PhysicalProperties {
@@ -285,9 +378,11 @@ impl Runtime {
             Some((0, 0).into()),
         );
         output.set_preferred(mode);
-        let global = output.create_global::<State>(&dh);
-        state.add_output("roost-0", Some(output), session.width, session.height);
-        state.note_output_global("roost-0", global);
+        if backend.is_none() {
+            let global = output.create_global::<State>(&dh);
+            state.add_output("roost-0", Some(output), session.width, session.height);
+            state.note_output_global("roost-0", global);
+        }
         let manager = WindowManager::new(&mut state);
         let tokens = std::rc::Rc::new(TokenStore::new());
         let control_path = control_socket_path(&session.socket_name)
@@ -303,18 +398,22 @@ impl Runtime {
         );
         let overlay = Overlay::new(shell_policy.max_attempts);
 
-        let (backend, winit_loop) =
-            winit::init::<GlesRenderer>().map_err(|e| RuntimeError::Backend(e.to_string()))?;
+        let backend = match backend {
+            Some(backend) => backend,
+            None => {
+                let (backend, winit_loop) = winit::init::<GlesRenderer>()
+                    .map_err(|e| RuntimeError::Backend(e.to_string()))?;
+                event_loop
+                    .handle()
+                    .insert_source(winit_loop, |event, _, runtime: &mut Runtime| {
+                        runtime.on_winit_event(event);
+                    })
+                    .map_err(|e| RuntimeError::Loop(e.to_string()))?;
+                Backend::Winit(Box::new(backend))
+            }
+        };
         let socket = ListeningSocketSource::with_name(&session.socket_name)
             .map_err(|e| RuntimeError::Socket(e.to_string()))?;
-
-        let event_loop = EventLoop::try_new().map_err(|e| RuntimeError::Loop(e.to_string()))?;
-        event_loop
-            .handle()
-            .insert_source(winit_loop, |event, _, runtime: &mut Runtime| {
-                runtime.on_winit_event(event);
-            })
-            .map_err(|e| RuntimeError::Loop(e.to_string()))?;
         event_loop
             .handle()
             .insert_source(socket, |stream, _, runtime: &mut Runtime| {
@@ -374,7 +473,15 @@ impl Runtime {
             }
             WinitEvent::CloseRequested => self.exit = true,
             WinitEvent::Input(event) => {
-                for input in translate_input(event) {
+                let area = match &self.backend {
+                    Backend::Winit(backend) => {
+                        let size = backend.window_size();
+                        (size.w, size.h).into()
+                    }
+                    #[cfg(feature = "drm")]
+                    Backend::Drm(_) => return,
+                };
+                for input in translate_input(event, area) {
                     self.on_manager_input(input);
                 }
             }
@@ -664,132 +771,240 @@ impl Runtime {
     /// show — no windows, no layer-shell chrome (panel, notifications),
     /// no wallpaper — over a dark lock background.
     fn render(&mut self) -> Result<(), RuntimeError> {
-        let size = self.backend.window_size();
-        let damage = Rectangle::from_size(size);
         let locked = self.is_locked();
         let show_content = content_visible(locked);
+        let overlay_visible = self.overlay.visible;
         let background = if locked {
             Color32F::new(0.03, 0.05, 0.12, 1.0)
-        } else if self.overlay.visible {
+        } else if overlay_visible {
             Color32F::new(0.20, 0.08, 0.10, 1.0)
         } else {
             Color32F::new(0.08, 0.09, 0.11, 1.0)
         };
-        {
-            let (renderer, mut framebuffer) = self
-                .backend
-                .bind()
-                .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-            let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = if show_content {
-                self.manager
-                    .visible_windows()
-                    .iter()
-                    .flat_map(|(window, geometry)| {
-                        // Unassociated X11 windows contribute no
-                        // surface yet and render nothing this frame.
-                        window
-                            .wl_surface()
-                            .map(|surface| {
-                                render_elements_from_surface_tree(
-                                    renderer,
-                                    &surface,
-                                    (geometry.loc.x, geometry.loc.y),
-                                    1.0,
-                                    1.0,
-                                    Kind::Unspecified,
-                                )
-                            })
-                            .into_iter()
-                            .flatten()
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            // Layer shell above windows: panel strip, then overview.
-            // Hidden with everything else while locked.
-            let mut elements = elements;
-            if show_content {
-                for (surface, (x, y), _) in crate::layer::layer_layout(&self.state) {
-                    elements.extend(render_elements_from_surface_tree(
+        let show_paper = show_content && !overlay_visible;
+        match &mut self.backend {
+            Backend::Winit(backend) => {
+                let size = backend.window_size();
+                let damage = Rectangle::from_size(size);
+                {
+                    let (renderer, mut framebuffer) = backend
+                        .bind()
+                        .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+                    let elements =
+                        scene_elements(renderer, &self.manager, &self.state, (0, 0), show_content);
+                    let paper = if show_paper {
+                        self.wallpaper.element(renderer, size.w, size.h)
+                    } else {
+                        None
+                    };
+                    // The winit EGL surface presents bottom-up (see the
+                    // Y-flip in the backend's own damage path), so the
+                    // output transform mirrors vertically; placements
+                    // stay top-down.
+                    let mut frame = renderer
+                        .render(&mut framebuffer, size, Transform::Flipped180)
+                        .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+                    draw_scene(&mut frame, background, paper.as_ref(), &elements, damage)?;
+                    let _ = frame
+                        .finish()
+                        .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+                }
+                send_frame_callbacks(&self.state, &self.manager, self.stats.frames);
+                backend
+                    .submit(Some(&[damage]))
+                    .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+                self.stats.frames += 1;
+            }
+            #[cfg(feature = "drm")]
+            Backend::Drm(drm) => {
+                if !drm.active {
+                    return Ok(());
+                }
+                let pointer = drm.pointer();
+                let crate::drm::DrmBackend {
+                    renderer, outputs, ..
+                } = &mut **drm;
+                let mut queued = false;
+                for out in outputs.iter_mut() {
+                    // Display-paced: one frame in flight per output.
+                    if out.pending {
+                        continue;
+                    }
+                    let (mut dmabuf, _age) = match out.surface.next_buffer() {
+                        Ok(buffer) => buffer,
+                        Err(e) => {
+                            eprintln!("roost-compositor: drm: next_buffer {}: {e}", out.name);
+                            continue;
+                        }
+                    };
+                    let size = out.size;
+                    let damage = Rectangle::from_size(size);
+                    let elements =
+                        scene_elements(renderer, &self.manager, &self.state, out.loc, show_content);
+                    let paper = if show_paper {
+                        self.wallpaper.element(renderer, size.w, size.h)
+                    } else {
+                        None
+                    };
+                    let sync = {
+                        let mut target = renderer
+                            .bind(&mut dmabuf)
+                            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+                        let mut frame = renderer
+                            .render(&mut target, size, Transform::Normal)
+                            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+                        draw_scene(&mut frame, background, paper.as_ref(), &elements, damage)?;
+                        // Software pointer on top (no host cursor on
+                        // bare hardware); hidden while locked.
+                        if !locked {
+                            let (outline, fill) = crate::drm::cursor_rects(pointer, out.loc);
+                            let clip = |rects: Vec<Rectangle<i32, smithay::utils::Physical>>| {
+                                rects
+                                    .into_iter()
+                                    .filter_map(|r| r.intersection(damage))
+                                    .collect::<Vec<_>>()
+                            };
+                            let (outline, fill) = (clip(outline), clip(fill));
+                            if !outline.is_empty() {
+                                frame
+                                    .clear(Color32F::new(0.0, 0.0, 0.0, 1.0), &outline)
+                                    .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+                            }
+                            if !fill.is_empty() {
+                                frame
+                                    .clear(Color32F::new(1.0, 1.0, 1.0, 1.0), &fill)
+                                    .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+                            }
+                        }
+                        frame
+                            .finish()
+                            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?
+                    };
+                    if let Err(e) = out.surface.queue_buffer(Some(sync), None, ()) {
+                        eprintln!("roost-compositor: drm: queue_buffer {}: {e}", out.name);
+                        continue;
+                    }
+                    out.pending = true;
+                    queued = true;
+                }
+                send_frame_callbacks(&self.state, &self.manager, self.stats.frames);
+                if queued {
+                    self.stats.frames += 1;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Window and layer-shell elements for one output whose top-left sits
+/// at `offset` in the global space. Empty while content is hidden
+/// (locked): nothing beneath the lock surface may show.
+fn scene_elements(
+    renderer: &mut GlesRenderer,
+    manager: &WindowManager,
+    state: &State,
+    offset: (i32, i32),
+    show_content: bool,
+) -> Vec<WaylandSurfaceRenderElement<GlesRenderer>> {
+    if !show_content {
+        return Vec::new();
+    }
+    let mut elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = manager
+        .visible_windows()
+        .iter()
+        .flat_map(|(window, geometry)| {
+            // Unassociated X11 windows contribute no surface yet and
+            // render nothing this frame.
+            window
+                .wl_surface()
+                .map(|surface| {
+                    render_elements_from_surface_tree(
                         renderer,
                         &surface,
-                        (x, y),
+                        (geometry.loc.x - offset.0, geometry.loc.y - offset.1),
                         1.0,
                         1.0,
                         Kind::Unspecified,
-                    ));
-                }
-            }
-            // Settings wallpaper behind everything. Skipped under the
-            // recovery overlay so the shell-absent red stays
-            // unmistakable, and while locked so no content leaks.
-            // Drawn in its own pass: mixing element
-            // types in one list needs DMA import bounds this backend
-            // does not satisfy.
-            let paper = if show_content && !self.overlay.visible {
-                self.wallpaper.element(renderer, size.w, size.h)
-            } else {
-                None
-            };
-            // The winit EGL surface presents bottom-up (see the Y-flip
-            // in the backend's own damage path), so the output
-            // transform mirrors vertically; placements stay top-down.
-            let mut frame = renderer
-                .render(&mut framebuffer, size, Transform::Flipped180)
-                .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-            frame
-                .clear(background, &[damage])
-                .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-            if let Some(paper) = paper.as_ref() {
-                draw_render_elements(&mut frame, 1.0, std::slice::from_ref(paper), &[damage])
-                    .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-            }
-            // `elements` accumulates bottom-to-top (windows, then
-            // background-to-overlay layers); Smithay 0.7 draws the
-            // first element topmost.
-            let elements = crate::layer::front_to_back(elements);
-            draw_render_elements(&mut frame, 1.0, &elements, &[damage])
-                .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-            let _ = frame
-                .finish()
-                .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-        }
-        // Provisional frame pacing: always send callbacks (zero throttle)
-        // with the primary output as scan-out. Damage-tracked pacing is
-        // deferred. Per-output scan-out arrives with the paint task.
-        let time = Duration::from_millis(self.stats.frames.saturating_mul(16));
-        if let Some(output) = self.state.primary_output() {
-            for surface in self.state.toplevels() {
-                send_frames_surface_tree(
-                    surface.wl_surface(),
-                    &output,
-                    time,
-                    Some(Duration::ZERO),
-                    |_, _| Some(output.clone()),
-                );
-            }
-            for (surface, _, _) in crate::layer::layer_layout(&self.state) {
-                send_frames_surface_tree(&surface, &output, time, Some(Duration::ZERO), |_, _| {
-                    Some(output.clone())
-                });
-            }
-            // X11 windows are not xdg toplevels, so the loop above
-            // never reaches them; Xwayland waits on these callbacks
-            // before committing content.
-            #[cfg(feature = "xwayland")]
-            for surface in self.manager.x11_surfaces() {
-                send_frames_surface_tree(&surface, &output, time, Some(Duration::ZERO), |_, _| {
-                    Some(output.clone())
-                });
-            }
-        }
-        self.backend
-            .submit(Some(&[damage]))
-            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-        self.stats.frames += 1;
-        Ok(())
+                    )
+                })
+                .into_iter()
+                .flatten()
+        })
+        .collect();
+    // Layer shell above windows: panel strip, then overview.
+    for (surface, (x, y), _) in crate::layer::layer_layout(state) {
+        elements.extend(render_elements_from_surface_tree(
+            renderer,
+            &surface,
+            (x - offset.0, y - offset.1),
+            1.0,
+            1.0,
+            Kind::Unspecified,
+        ));
     }
+    // `elements` accumulates bottom-to-top (windows, then
+    // background-to-overlay layers); Smithay 0.7 draws the first
+    // element topmost.
+    crate::layer::front_to_back(elements)
+}
+
+/// Clear, wallpaper (own pass: mixing element types in one list needs
+/// DMA import bounds this backend does not satisfy), then the scene.
+fn draw_scene(
+    frame: &mut smithay::backend::renderer::gles::GlesFrame<'_, '_>,
+    background: Color32F,
+    paper: Option<
+        &smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<GlesRenderer>,
+    >,
+    elements: &[WaylandSurfaceRenderElement<GlesRenderer>],
+    damage: Rectangle<i32, smithay::utils::Physical>,
+) -> Result<(), RuntimeError> {
+    frame
+        .clear(background, &[damage])
+        .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    if let Some(paper) = paper {
+        draw_render_elements(frame, 1.0, std::slice::from_ref(paper), &[damage])
+            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    }
+    draw_render_elements(frame, 1.0, elements, &[damage])
+        .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    Ok(())
+}
+
+/// Frame callbacks for every client surface. Provisional pacing: always
+/// send (zero throttle) with the primary output as scan-out; per-output
+/// callbacks arrive with damage tracking.
+fn send_frame_callbacks(state: &State, manager: &WindowManager, frames: u64) {
+    let time = Duration::from_millis(frames.saturating_mul(16));
+    let Some(output) = state.primary_output() else {
+        return;
+    };
+    for surface in state.toplevels() {
+        send_frames_surface_tree(
+            surface.wl_surface(),
+            &output,
+            time,
+            Some(Duration::ZERO),
+            |_, _| Some(output.clone()),
+        );
+    }
+    for (surface, _, _) in crate::layer::layer_layout(state) {
+        send_frames_surface_tree(&surface, &output, time, Some(Duration::ZERO), |_, _| {
+            Some(output.clone())
+        });
+    }
+    // X11 windows are not xdg toplevels, so the loop above never
+    // reaches them; Xwayland waits on these callbacks before
+    // committing content.
+    #[cfg(feature = "xwayland")]
+    for surface in manager.x11_surfaces() {
+        send_frames_surface_tree(&surface, &output, time, Some(Duration::ZERO), |_, _| {
+            Some(output.clone())
+        });
+    }
+    #[cfg(not(feature = "xwayland"))]
+    let _ = manager;
 }
 
 /// Run a nested session to shutdown: drive the loop and report run

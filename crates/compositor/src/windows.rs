@@ -19,12 +19,9 @@ use crate::xwayland::{map_x11_identity, X11ManagerEvent};
 #[cfg(feature = "xwayland")]
 use smithay::xwayland::X11Surface;
 use smithay::{
-    backend::{
-        input::{
-            AbsolutePositionEvent, Axis, ButtonState, Event as BackendEvent, InputEvent, KeyState,
-            KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
-        },
-        winit::WinitInput,
+    backend::input::{
+        AbsolutePositionEvent, Axis, ButtonState, Event as BackendEvent, InputBackend, InputEvent,
+        KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
     },
     desktop::{Window, WindowSurface},
     input::{
@@ -2098,7 +2095,16 @@ fn touch_release(time: u32) -> ManagerInput {
 /// moves, up/cancel releases) so touchscreens act instead of dropping
 /// silently. Multi-touch overlaps may interleave presses — there is no
 /// per-slot tracking here — but every release still balances.
-pub fn translate_input(event: InputEvent<WinitInput>) -> Vec<ManagerInput> {
+///
+/// Generic over the backend (nested winit or hardware libinput): every
+/// backend reports XKB keycodes (evdev + 8) and absolute positions are
+/// scaled into `area`, the logical size the event's device maps onto
+/// (the nested window, or the primary output on hardware). Relative
+/// pointer motion is backend-owned and yields nothing here.
+pub fn translate_input<B: InputBackend>(
+    event: InputEvent<B>,
+    area: Size<i32, Logical>,
+) -> Vec<ManagerInput> {
     match event {
         InputEvent::Keyboard { event } => vec![ManagerInput::Key {
             // The winit backend reports X11 keycodes (kernel evdev
@@ -2110,7 +2116,7 @@ pub fn translate_input(event: InputEvent<WinitInput>) -> Vec<ManagerInput> {
             time: (event.time() / 1000) as u32,
         }],
         InputEvent::PointerMotionAbsolute { event } => {
-            let pos = event.position();
+            let pos = event.position_transformed(area);
             vec![ManagerInput::Motion {
                 pos: (pos.x, pos.y).into(),
                 time: (event.time() / 1000) as u32,
@@ -2135,11 +2141,11 @@ pub fn translate_input(event: InputEvent<WinitInput>) -> Vec<ManagerInput> {
             }]
         }
         InputEvent::TouchDown { event } => {
-            let pos = event.position();
+            let pos = event.position_transformed(area);
             touch_press((pos.x, pos.y), (event.time() / 1000) as u32).into()
         }
         InputEvent::TouchMotion { event } => {
-            let pos = event.position();
+            let pos = event.position_transformed(area);
             vec![ManagerInput::Motion {
                 pos: (pos.x, pos.y).into(),
                 time: (event.time() / 1000) as u32,
