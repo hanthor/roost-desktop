@@ -1,0 +1,94 @@
+/* Roost GTK shell, matched against the GNOME 51 baseline frames
+   (docs: parity ledger P-PN-*). Libadwaita supplies the widget look;
+   these rules only shape the shell-specific surfaces. */
+
+window.roost-panel {
+  background-color: #000000;
+}
+
+.roost-panel {
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
+  font-weight: bold;
+  color: #ffffff;
+}
+
+.roost-panel > centerbox {
+  min-height: 32px;
+}
+
+.roost-panel button.panel-button,
+.roost-panel menubutton.panel-button > button {
+  background: none;
+  color: #ffffff;
+  border-radius: 99px;
+  padding: 0 12px;
+  margin: 3px 2px;
+  min-height: 26px;
+  box-shadow: none;
+  font-weight: bold;
+}
+
+.roost-panel button.panel-button:hover,
+.roost-panel menubutton.panel-button > button:hover,
+.roost-panel menubutton.panel-button > button:checked {
+  background-color: alpha(#ffffff, 0.17);
+}
+
+.roost-panel .ws-pill {
+  background-color: alpha(#ffffff, 0.55);
+  border-radius: 99px;
+  min-width: 6px;
+  min-height: 6px;
+  margin: 0 2px;
+}
+
+.roost-panel .ws-pill.active {
+  background-color: #ffffff;
+  min-width: 28px;
+}
+
+popover.roost-shell-popover > contents {
+  background-color: #2a2a2f;
+  color: #ffffff;
+  border-radius: 24px;
+  padding: 12px;
+}
+
+.roost-qs .qs-toggle {
+  border-radius: 99px;
+  min-height: 48px;
+  min-width: 170px;
+  background-color: alpha(#ffffff, 0.1);
+  color: #ffffff;
+  font-weight: bold;
+}
+
+.roost-qs .qs-toggle:checked {
+  background-color: @accent_bg_color;
+}
+
+.roost-qs .qs-round {
+  border-radius: 99px;
+  min-width: 40px;
+  min-height: 40px;
+  background-color: alpha(#ffffff, 0.1);
+  color: #ffffff;
+}
+
+.roost-cal .weekday {
+  color: alpha(#ffffff, 0.6);
+  font-weight: bold;
+}
+
+.roost-cal .full-date {
+  font-size: 15pt;
+  font-weight: 800;
+  color: alpha(#ffffff, 0.6);
+}
+
+.roost-cal .no-notifications {
+  font-size: 15pt;
+  font-weight: bold;
+  color: alpha(#ffffff, 0.45);
+}
