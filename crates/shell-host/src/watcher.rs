@@ -1303,7 +1303,8 @@ mod tests {
 
             let mut bus = WatcherBus::new();
             let mut owned = false;
-            for _ in 0..100 {
+            let start = std::time::Instant::now();
+            while start.elapsed() < Duration::from_secs(20) {
                 if bus.ensure() {
                     owned = true;
                     break;

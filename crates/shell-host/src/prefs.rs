@@ -39,14 +39,16 @@ impl Default for RoostPrefs {
 
 /// System prefs file path under the XDG state dir (same dir as the
 /// notification queue).
-pub fn system_path() -> PathBuf {
-    crate::notifications::state_dir().join(PREFS_FILE)
+pub fn system_path() -> Option<PathBuf> {
+    crate::notifications::state_dir().map(|dir| dir.join(PREFS_FILE))
 }
 
 /// Load from the system prefs file, creating its dir when absent.
 /// Missing, corrupt, or version-skewed files read as defaults.
 pub fn load_system() -> RoostPrefs {
-    let path = system_path();
+    let Some(path) = system_path() else {
+        return RoostPrefs::default();
+    };
     let _ = fs::create_dir_all(path.parent().expect("prefs file has a parent"));
     load(&path)
 }

@@ -121,7 +121,7 @@ The nested compositor runs inside your current Wayland or X11 session for safe d
 
 ```bash
 # Build and start a nested RWD session
-./scripts/rwd-nested run
+./scripts/roost-nested run
 ```
 
 This command:
@@ -138,10 +138,10 @@ RWD implements a supervised shell-host restart mechanism. Test it with:
 
 ```bash
 # In one terminal, start the nested session:
-./scripts/rwd-nested run
+./scripts/roost-nested run
 
 # In another terminal, simulate a shell crash:
-./scripts/rwd-nested kill-shell --socket rwd-nested-<pid>
+./scripts/roost-nested kill-shell --socket rwd-nested-<pid>
 ```
 
 The compositor will:
@@ -192,7 +192,7 @@ For deeper understanding of RWD's design:
 1. **Choose a spec**: Find an open spec in `.spektacular/specs/` or create one
 2. **Review the plan**: Check the associated plan in `.spektacular/plans/` for implementation guidance
 3. **Implement**: Edit crates as needed, using the test strategy guide to add tests
-4. **Test locally**: Run `cargo build`, `cargo test`, and use `./scripts/rwd-nested run` to validate
+4. **Test locally**: Run `cargo build`, `cargo test`, and use `./scripts/roost-nested run` to validate
 5. **Create a PR**: Reference the spec number and plan state in your PR body
 6. **Update spec/plan state**: Once merged, update the spec and plan in Spektacular to reflect completion
 
@@ -207,13 +207,22 @@ For deeper understanding of RWD's design:
 
 ### Writing a test
 - Unit tests: Add inline tests in the crate (follow `#[cfg(test)]` patterns)
-- Protocol probes: Add scripts in `.spektacular/work/` or under `scripts/`
-- Nested integration: Use `./scripts/rwd-journey` as a base or add a new harness
+- Protocol probes: Add scripts under `scripts/`
+- Nested integration: Use `./scripts/roost-journey` as a base or add a new harness
+
+**Timing rule (#72).** Never gate a test on a fixed iteration budget or a
+sleep length: a loaded CI runner exhausts both. Wait on a wall-clock
+deadline that is generous (seconds, not milliseconds) and only makes a
+slow run slower, or make the ordering deterministic (a latch the test
+releases, a manual clock, a counter of finished workers). Assert on
+state, never on elapsed time, except for explicit no-hang bounds. There
+is no retry policy for deterministic tests: `gh run rerun --failed` is a
+diagnostic, not a fix.
 
 ### Debugging
-- Compositor logs: Check the output of `./scripts/rwd-nested run` or tail the log file
+- Compositor logs: Check the output of `./scripts/roost-nested run` or tail the log file
 - Shell-host logs: Printed to the same log file as the compositor
-- Nested shell interaction: Use `./scripts/rwd-nested shell-pid` to identify the shell process for attaching a debugger
+- Nested shell interaction: Use `./scripts/roost-nested shell-pid` to identify the shell process for attaching a debugger
 
 ## Reporting issues
 
