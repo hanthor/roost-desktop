@@ -34,6 +34,7 @@ rationale and owner), `untested`.
 | P-SY-02 | Multi-monitor with per-output panel and hotplug | pass (nested) | cargo:hotplug_remove_and_readd_round_trips_without_restart | `tests/outputs.rs`, `tests/migration.rs` | real outputs untested |
 | P-SY-03 | Fractional scaling and mixed DPI | missing |  | — | — |
 | P-SY-04 | XWayland apps run by default | partial |  | behind the `xwayland` feature; off by default | — |
+| P-SY-06 | Clients find the protocols Mutter offers (dmabuf, activation, viewporter, fractional scale, cursor shape, idle inhibit) | partial | cargo:advertised_globals_match_the_golden_list, cargo:dmabuf_is_advertised_only_with_renderer_formats, cargo:focused_client_can_hand_focus_with_a_token, cargo:background_clients_and_serial_less_tokens_cannot_steal_focus, proof:G-GL-WINDOW | `docs/protocols.md` lists what is advertised and each gap; Mutter column read from source, not captured | baseline `wayland-info` capture open (#89) |
 | P-SY-05 | Screen capture and sharing through portals with consent | missing |  | no portal backend, no screencopy | — |
 | P-A11Y-01 | Screen reader reads panel, overview, quick settings | missing |  | no AT-SPI bridge (`docs/keymap.md`) | blocked on toolkit decision |
 | P-A11Y-02 | Every pointer action has a keyboard equivalent | partial | cargo:panel::tests::live::key_only_run_opens_launches_and_activates | keymap and key-only run (`docs/keymap.md`) | chords not rebindable |
