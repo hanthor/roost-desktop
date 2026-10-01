@@ -14,9 +14,9 @@
 
 use std::ffi::OsString;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use calloop::EventLoop;
+use calloop::{EventLoop, LoopHandle};
 use smithay::{
     backend::{
         renderer::{
@@ -34,16 +34,31 @@ use smithay::{
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::wayland_server::Display,
     utils::{Rectangle, Transform},
-    wayland::socket::ListeningSocketSource,
+    wayland::{seat::WaylandFocus, socket::ListeningSocketSource},
 };
 
 use crate::control::ControlHub;
+use crate::lock::{content_visible, SessionLock, DEFAULT_IDLE_TIMEOUT_MS};
+
+/// Idle timeout for the session lock: `ROOST_IDLE_TIMEOUT_MS` overrides
+/// the five-minute default. Testability seam for scripted lock capture
+/// (and lock journey tests); production runs leave it unset.
+fn idle_timeout_ms() -> u64 {
+    std::env::var("ROOST_IDLE_TIMEOUT_MS")
+        .ok()
+        .and_then(|raw| raw.parse().ok())
+        .filter(|ms| *ms > 0)
+        .unwrap_or(DEFAULT_IDLE_TIMEOUT_MS)
+}
 use crate::overlay::{overlay_key_for_keycode, Overlay, OverlayWindow};
 use crate::state::TokenStore;
 use crate::supervise::{RecoveryAction, RestartPolicy, ShellDriver, ShellStatus};
+use crate::wallpaper::Wallpaper;
 use crate::windows::{
     translate_input, ManagerInput, TriggerAction, TriggerState, WindowManager, ESCAPE_KEYCODE,
 };
+use crate::xwayland::XWaylandSupervisor;
+use roost_greeter::client::GreeterClient;
 
 use crate::{ClientState, State};
 
@@ -59,16 +74,21 @@ const DEFAULT_HEIGHT: i32 = 800;
 /// Nested session configuration: socket identity plus output geometry.
 #[derive(Debug, Clone)]
 pub struct NestedSession {
-    /// Private Wayland socket name, e.g. `rwd-nested-<pid>`.
+    /// Private Wayland socket name, e.g. `roost-nested-<pid>`.
     pub socket_name: String,
     /// Output width in physical pixels.
     pub width: i32,
     /// Output height in physical pixels.
     pub height: i32,
     /// Shell binary to supervise. `None` selects
-    /// [`resolve_shell_bin`]: `RWD_SHELL_BIN`, then the
-    /// `rwd-shell-host` sibling of this binary, then `PATH`.
+    /// [`resolve_shell_bin`]: `ROOST_SHELL_BIN`, then the
+    /// `roost-shell-host` sibling of this binary, then `PATH`.
     pub shell_bin: Option<std::path::PathBuf>,
+    /// Opt in to X11 compatibility: records the first X11 need at
+    /// launch so the supervisor may spawn the server on demand.
+    /// `false` (default) keeps the session native-only; the flag is
+    /// the v1 trigger until per-app launch requests exist.
+    pub xwayland: bool,
 }
 
 impl NestedSession {
@@ -79,40 +99,53 @@ impl NestedSession {
             width,
             height,
             shell_bin: None,
+            xwayland: false,
         }
     }
 
     /// Default session: unique socket name from our pid, default size.
     pub fn default_for_pid() -> Self {
         Self::new(
-            format!("rwd-nested-{}", std::process::id()),
+            format!("roost-nested-{}", std::process::id()),
             DEFAULT_WIDTH,
             DEFAULT_HEIGHT,
         )
     }
 }
 
-/// Shell binary for a session: explicit config, then `RWD_SHELL_BIN`,
-/// then the `rwd-shell-host` sibling of this binary when it exists,
+/// Sibling binary next to `dir` when it exists as a file.
+/// Shared by the session launcher and the shell resolver so both agree
+/// on what "installed side by side" means.
+pub fn sibling_binary(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    let candidate = dir.join(name);
+    candidate.is_file().then_some(candidate)
+}
+
+/// Directory holding this process's binary, for sibling resolution.
+pub fn current_exe_dir() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.to_owned()))
+}
+
+/// Shell binary for a session: explicit config, then `ROOST_SHELL_BIN`,
+/// then the `roost-shell-host` sibling of this binary when it exists,
 /// else a `PATH` lookup at spawn time.
 pub fn resolve_shell_bin(configured: Option<&std::path::Path>) -> std::path::PathBuf {
     if let Some(path) = configured {
         return path.to_owned();
     }
-    if let Ok(path) = std::env::var("RWD_SHELL_BIN") {
+    if let Ok(path) = std::env::var("ROOST_SHELL_BIN") {
         if !path.is_empty() {
             return std::path::PathBuf::from(path);
         }
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let sibling = dir.join("rwd-shell-host");
-            if sibling.is_file() {
-                return sibling;
-            }
+    if let Some(dir) = current_exe_dir() {
+        if let Some(sibling) = sibling_binary(&dir, "roost-shell-host") {
+            return sibling;
         }
     }
-    std::path::PathBuf::from("rwd-shell-host")
+    std::path::PathBuf::from("roost-shell-host")
 }
 
 /// Summary of one nested run, for diagnostics (no sensitive content).
@@ -171,28 +204,52 @@ pub fn restore_env(prev: Option<OsString>) {
     }
 }
 
-/// Live nested session: display, protocol state, backend, and output.
+/// Live nested session: display, protocol state, backend, and outputs.
+/// Output handles live in the state's inventory (entry zero is the
+/// primary); the runtime reaches them through [`State`] accessors.
 pub struct Runtime {
     display: Display<State>,
     state: State,
     backend: winit::WinitGraphicsBackend<GlesRenderer>,
-    output: Output,
     manager: WindowManager,
     control: ControlHub,
     shell: ShellDriver,
     overlay: Overlay,
+    wallpaper: Wallpaper,
     triggers: TriggerState,
+    /// Compositor-owned session lock: flag plus idle accumulator fed
+    /// from input timestamps. The hub mirror carries the flag to shell
+    /// snapshots; the shell never owns it.
+    lock: SessionLock,
+    /// On-demand XWayland server supervisor. Idle until the first X11
+    /// need is recorded via [`Runtime::request_x11`]; the window-model
+    /// join installs the real spawner, until then ticks are no-ops.
+    xwayland: XWaylandSupervisor,
+    /// Loop handle for event-source installation (XWayland spawn).
+    /// Cloned from the owned event loop at launch; `'static`
+    /// because the loop outlives the runtime in `run`.
+    loop_handle: LoopHandle<'static, Runtime>,
+    /// XWayland server client awaiting its `Ready` event, after
+    /// which the X11 window manager starts against it (xwayland
+    /// feature only).
+    #[cfg(feature = "xwayland")]
+    pending_x11_client: Option<smithay::reexports::wayland_server::Client>,
+    /// Real-time anchor of the last input event. Input stamps live on
+    /// the backend event clock while idle is measured here, so each
+    /// tick evaluates the lock in the input base as
+    /// `last_stamp + anchor.elapsed()`.
+    idle_since: Instant,
     exit: bool,
     stats: RunStats,
 }
 
 /// Control socket path for a session: alongside the Wayland socket in the
-/// runtime dir, so one session owns both (`rwd-<name>.control`).
+/// runtime dir, so one session owns both (`roost-<name>.control`).
 pub fn control_socket_path(socket_name: &str) -> std::path::PathBuf {
     let dir = std::env::var_os("XDG_RUNTIME_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    dir.join(format!("rwd-{socket_name}.control"))
+    dir.join(format!("roost-{socket_name}.control"))
 }
 
 impl Runtime {
@@ -205,27 +262,12 @@ impl Runtime {
             Display::new().map_err(|e| RuntimeError::Loop(e.to_string()))?;
         let dh = display.handle();
         let mut state = State::new(&dh);
-        state.set_output_size(session.width, session.height);
-        let manager = WindowManager::new(&mut state);
-        let tokens = std::rc::Rc::new(TokenStore::new());
-        let control_path = control_socket_path(&session.socket_name);
-        let control = ControlHub::bind(control_path.clone(), tokens, crate::SEAT_NAME)
-            .map_err(|e| RuntimeError::Socket(e.to_string()))?;
-        let shell_policy = RestartPolicy::default();
-        let shell = ShellDriver::new(
-            shell_policy,
-            resolve_shell_bin(session.shell_bin.as_deref()),
-            session.socket_name.clone(),
-            control_path,
-        );
-        let overlay = Overlay::new(shell_policy.max_attempts);
-
         let output = Output::new(
-            "rwd-0".to_owned(),
+            "roost-0".to_owned(),
             PhysicalProperties {
                 size: (0, 0).into(),
                 subpixel: Subpixel::Unknown,
-                make: "RWD".to_owned(),
+                make: "Roost".to_owned(),
                 model: "Nested".to_owned(),
             },
         );
@@ -240,7 +282,22 @@ impl Runtime {
             Some((0, 0).into()),
         );
         output.set_preferred(mode);
-        output.create_global::<State>(&dh);
+        let global = output.create_global::<State>(&dh);
+        state.add_output("roost-0", Some(output), session.width, session.height);
+        state.note_output_global("roost-0", global);
+        let manager = WindowManager::new(&mut state);
+        let tokens = std::rc::Rc::new(TokenStore::new());
+        let control_path = control_socket_path(&session.socket_name);
+        let control = ControlHub::bind(control_path.clone(), tokens, crate::SEAT_NAME)
+            .map_err(|e| RuntimeError::Socket(e.to_string()))?;
+        let shell_policy = RestartPolicy::default();
+        let shell = ShellDriver::new(
+            shell_policy,
+            resolve_shell_bin(session.shell_bin.as_deref()),
+            session.socket_name.clone(),
+            control_path,
+        );
+        let overlay = Overlay::new(shell_policy.max_attempts);
 
         let (backend, winit_loop) =
             winit::init::<GlesRenderer>().map_err(|e| RuntimeError::Backend(e.to_string()))?;
@@ -268,19 +325,32 @@ impl Runtime {
             })
             .map_err(|e| RuntimeError::Loop(e.to_string()))?;
 
-        let runtime = Runtime {
+        let loop_handle = event_loop.handle();
+        let mut runtime = Runtime {
             display,
             state,
             backend,
-            output,
             manager,
             control,
             shell,
             overlay,
+            wallpaper: Wallpaper::new(),
             triggers: TriggerState::default(),
+            lock: SessionLock::new(idle_timeout_ms()),
+            xwayland: XWaylandSupervisor::new(),
+            loop_handle,
+            #[cfg(feature = "xwayland")]
+            pending_x11_client: None,
+            idle_since: Instant::now(),
             exit: false,
             stats: RunStats::default(),
         };
+        // Session-level X11 opt-in is the recorded first X11 need:
+        // the supervisor leaves `Idle` and the next tick may spawn
+        // the server. Native sessions never request.
+        if session.xwayland {
+            runtime.request_x11();
+        }
         Ok((runtime, event_loop))
     }
 
@@ -294,12 +364,13 @@ impl Runtime {
                     size,
                     refresh: 60_000,
                 };
-                self.output
-                    .change_current_state(Some(mode), None, None, None);
+                if let Some(output) = self.state.primary_output() {
+                    output.change_current_state(Some(mode), None, None, None);
+                }
             }
             WinitEvent::CloseRequested => self.exit = true,
             WinitEvent::Input(event) => {
-                if let Some(input) = translate_input(event) {
+                for input in translate_input(event) {
                     self.on_manager_input(input);
                 }
             }
@@ -307,12 +378,75 @@ impl Runtime {
         }
     }
 
-    /// Route one backend input event: to the recovery overlay while it
-    /// is visible, else through the overview triggers to the window
-    /// manager. Trigger events still reach clients (tap toggles without
+    /// Current time in the input-timestamp base: the newest input stamp
+    /// plus real time elapsed since it arrived. The backend event clock
+    /// and the system clock share no base, so the stamp anchors the
+    /// base and only the gap is measured here.
+    fn lock_now_ms(&self) -> u64 {
+        self.lock.last_input_ms().saturating_add(
+            self.idle_since
+                .elapsed()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX),
+        )
+    }
+
+    /// Whether the session is locked (hub flag: what the snapshots say).
+    fn is_locked(&self) -> bool {
+        self.control.is_locked()
+    }
+
+    /// Engage the lock: flag (idle machine plus hub mirror for
+    /// snapshots), overview dismissed, and the exclusive lock surface
+    /// up with an empty list — no window titles while locked.
+    fn engage_lock(&mut self) {
+        self.lock.lock();
+        self.control.set_locked(true);
+        self.control.set_overview(false);
+        self.overlay.show(Vec::new());
+    }
+
+    /// Attempt unlock against the live daemon: verify `password` for
+    /// `user` through the greeter login path and clear the lock on
+    /// success (see [`crate::unlock`]). No socket configured or no
+    /// daemon reachable fails closed — the session stays locked and
+    /// silent; auth is never invented. Returns whether the session is
+    /// unlocked afterwards.
+    pub fn try_unlock(&mut self, user: &str, password: &str) -> bool {
+        let Some(path) = crate::unlock::greetd_socket_path() else {
+            return false;
+        };
+        let Ok(mut client) = GreeterClient::connect(&path) else {
+            return false;
+        };
+        let now_ms = self.lock_now_ms();
+        crate::unlock::unlock_session(
+            &mut self.lock,
+            &self.control,
+            &mut self.overlay,
+            now_ms,
+            user,
+            password,
+            &mut client,
+        )
+    }
+
+    /// Route one backend input event: consumed by the lock surface while
+    /// locked (credential entry submits through [`try_unlock`](Self::try_unlock);
+    /// windows hear nothing), else to the recovery overlay while it is visible,
+    /// else through the overview triggers to the window manager.
+    /// Trigger events still reach clients (tap toggles without
     /// breaking Super-combos); only Escape-closes is consumed, so a
     /// closing keypress never double-acts on client UI.
     fn on_manager_input(&mut self, input: ManagerInput) {
+        // Every timestamped event feeds the idle accumulator first,
+        // including events consumed below: activity is activity.
+        self.lock.note_input(input_time(&input));
+        self.idle_since = Instant::now();
+        if self.is_locked() {
+            return;
+        }
         if !self.overlay.visible {
             if let ManagerInput::Key {
                 keycode: ESCAPE_KEYCODE,
@@ -400,6 +534,40 @@ impl Runtime {
     /// one frame, and report whether to continue. The shell step never
     /// blocks the tick: absence shows the overlay, exhaustion stays
     /// calm, and every outcome is logged redacted (codes/counts only).
+    /// Record the first X11 need: the supervisor leaves `Idle` and the
+    /// next tick may spawn the compatibility server once its spawner
+    /// is installed. Session opt-in calls this at launch; until then
+    /// native sessions never request.
+    pub fn request_x11(&mut self) {
+        self.xwayland.request();
+    }
+
+    /// Loop handle for event-source installation (XWayland spawn).
+    pub fn loop_handle(&self) -> LoopHandle<'static, Runtime> {
+        self.loop_handle.clone()
+    }
+
+    /// Mutable protocol state, for the X11 handler impls.
+    pub fn state_mut(&mut self) -> &mut State {
+        &mut self.state
+    }
+
+    /// Take the XWayland server client awaiting its `Ready` event.
+    /// (xwayland feature only.)
+    #[cfg(feature = "xwayland")]
+    pub fn take_pending_x11_client(
+        &mut self,
+    ) -> Option<smithay::reexports::wayland_server::Client> {
+        self.pending_x11_client.take()
+    }
+
+    /// Handle one XWayland server event (spawned source callback).
+    /// (xwayland feature only.)
+    #[cfg(feature = "xwayland")]
+    pub fn on_xwayland_event(&mut self, event: smithay::xwayland::XWaylandEvent) {
+        crate::xwayland::on_xwayland_event(self, event);
+    }
+
     fn tick(&mut self) -> Result<bool, RuntimeError> {
         self.display
             .dispatch_clients(&mut self.state)
@@ -408,26 +576,70 @@ impl Runtime {
             .flush_clients()
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
         self.manager.reconcile(&mut self.state);
-        let activated = self.control.poll(self.manager.model_mut());
-        for id in activated {
+        // Publish the output inventory every tick (multi-monitor): the
+        // hub broadcasts on change only, so the steady state costs one
+        // short comparison. The inventory is the compositor's tracking
+        // handed over as-is — never a parallel database.
+        self.control.set_outputs(self.state.output_infos());
+        let outcome = self.control.poll(self.manager.model_mut());
+        for id in outcome.activated {
             self.manager.focus(&mut self.state, Some(id));
+        }
+        for id in outcome.closed {
+            self.manager.close_window(id);
+        }
+        // Adopt a control-command lock (manual lock set path): the hub
+        // flag flipped without the idle machine, so mirror it locally,
+        // dismiss the overview, and raise the exclusive surface.
+        if self.control.is_locked() && !self.lock.is_locked() {
+            self.lock.lock();
+            self.control.set_overview(false);
+            self.overlay.show(Vec::new());
+        }
+        // Idle timeout from input timestamps: lock the untouched session.
+        if !self.is_locked() && self.lock.check_timeout(self.lock_now_ms()) {
+            self.engage_lock();
         }
         // Overview focus follows the hub flag (shell commands and
         // runtime triggers converge here); the next reconcile parks
         // or restores keyboard focus.
         self.manager.set_overview_open(self.control.overview_open());
-        match self.shell.poll(crate::state::system_millis()) {
-            ShellStatus::Running => {
-                if self.overlay.visible {
-                    self.overlay.hide();
-                }
+        // While locked the overlay stays up with its empty list no
+        // matter what the shell does: a shell restart while locked
+        // keeps the lock screen up. Otherwise the shell step never
+        // blocks the tick as before.
+        if self.is_locked() {
+            if !self.overlay.visible {
+                self.overlay.show(Vec::new());
             }
-            ShellStatus::Waiting { .. } | ShellStatus::Fault(_) | ShellStatus::Exhausted => {
-                self.refresh_overlay()
+        } else {
+            match self.shell.poll(crate::state::system_millis()) {
+                ShellStatus::Running => {
+                    if self.overlay.visible {
+                        self.overlay.hide();
+                    }
+                }
+                ShellStatus::Waiting { .. } | ShellStatus::Fault(_) | ShellStatus::Exhausted => {
+                    self.refresh_overlay()
+                }
             }
         }
         for event in self.shell.drain_events() {
-            eprintln!("rwd-compositor: shell supervision: {event:?}");
+            eprintln!("roost-compositor: shell supervision: {event:?}");
+        }
+        // XWayland supervision rides the same tick. Without the
+        // feature there is no spawner and this stays a no-op;
+        // native sessions never leave `Idle`.
+        #[cfg(not(feature = "xwayland"))]
+        self.xwayland.tick(crate::state::system_millis(), None);
+        #[cfg(feature = "xwayland")]
+        {
+            let display = self.display.handle();
+            let loop_handle = self.loop_handle.clone();
+            let pending = &mut self.pending_x11_client;
+            let mut spawner = || crate::xwayland::spawn_xwayland(&display, &loop_handle, pending);
+            self.xwayland
+                .tick(crate::state::system_millis(), Some(&mut spawner));
         }
         self.stats.shell_restarts = self.shell.restarts_used();
         self.render()?;
@@ -438,11 +650,17 @@ impl Runtime {
     /// callbacks. While the recovery overlay is visible the background
     /// shifts to a deep red (provisional overlay visual; full overlay
     /// text rendering is deferred) so the shell-absent state is
-    /// unmistakable.
+    /// unmistakable. While locked nothing beneath the lock surface may
+    /// show — no windows, no layer-shell chrome (panel, notifications),
+    /// no wallpaper — over a dark lock background.
     fn render(&mut self) -> Result<(), RuntimeError> {
         let size = self.backend.window_size();
         let damage = Rectangle::from_size(size);
-        let background = if self.overlay.visible {
+        let locked = self.is_locked();
+        let show_content = content_visible(locked);
+        let background = if locked {
+            Color32F::new(0.03, 0.05, 0.12, 1.0)
+        } else if self.overlay.visible {
             Color32F::new(0.20, 0.08, 0.10, 1.0)
         } else {
             Color32F::new(0.08, 0.09, 0.11, 1.0)
@@ -452,32 +670,58 @@ impl Runtime {
                 .backend
                 .bind()
                 .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-            let mut elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = self
-                .manager
-                .visible_windows()
-                .iter()
-                .flat_map(|(surface, geometry)| {
-                    render_elements_from_surface_tree(
+            let elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = if show_content {
+                self.manager
+                    .visible_windows()
+                    .iter()
+                    .flat_map(|(window, geometry)| {
+                        // Unassociated X11 windows contribute no
+                        // surface yet and render nothing this frame.
+                        window
+                            .wl_surface()
+                            .map(|surface| {
+                                render_elements_from_surface_tree(
+                                    renderer,
+                                    &surface,
+                                    (geometry.loc.x, geometry.loc.y),
+                                    1.0,
+                                    1.0,
+                                    Kind::Unspecified,
+                                )
+                            })
+                            .into_iter()
+                            .flatten()
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            // Layer shell above windows: panel strip, then overview.
+            // Hidden with everything else while locked.
+            let mut elements = elements;
+            if show_content {
+                for (surface, (x, y), _) in crate::layer::layer_layout(&self.state) {
+                    elements.extend(render_elements_from_surface_tree(
                         renderer,
-                        surface.wl_surface(),
-                        (geometry.loc.x, geometry.loc.y),
+                        &surface,
+                        (x, y),
                         1.0,
                         1.0,
                         Kind::Unspecified,
-                    )
-                })
-                .collect();
-            // Layer shell above windows: panel strip, then overview.
-            for (surface, (x, y), _) in crate::layer::layer_layout(&self.state) {
-                elements.extend(render_elements_from_surface_tree(
-                    renderer,
-                    &surface,
-                    (x, y),
-                    1.0,
-                    1.0,
-                    Kind::Unspecified,
-                ));
+                    ));
+                }
             }
+            // Settings wallpaper behind everything. Skipped under the
+            // recovery overlay so the shell-absent red stays
+            // unmistakable, and while locked so no content leaks.
+            // Drawn in its own pass: mixing element
+            // types in one list needs DMA import bounds this backend
+            // does not satisfy.
+            let paper = if show_content && !self.overlay.visible {
+                self.wallpaper.element(renderer, size.w, size.h)
+            } else {
+                None
+            };
             // The winit EGL surface presents bottom-up (see the Y-flip
             // in the backend's own damage path), so the output
             // transform mirrors vertically; placements stay top-down.
@@ -487,6 +731,14 @@ impl Runtime {
             frame
                 .clear(background, &[damage])
                 .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+            if let Some(paper) = paper.as_ref() {
+                draw_render_elements(&mut frame, 1.0, std::slice::from_ref(paper), &[damage])
+                    .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+            }
+            // `elements` accumulates bottom-to-top (windows, then
+            // background-to-overlay layers); Smithay 0.7 draws the
+            // first element topmost.
+            let elements = crate::layer::front_to_back(elements);
             draw_render_elements(&mut frame, 1.0, &elements, &[damage])
                 .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
             let _ = frame
@@ -494,22 +746,33 @@ impl Runtime {
                 .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
         }
         // Provisional frame pacing: always send callbacks (zero throttle)
-        // with this output as scan-out. Damage-tracked pacing is deferred.
-        let output = self.output.clone();
+        // with the primary output as scan-out. Damage-tracked pacing is
+        // deferred. Per-output scan-out arrives with the paint task.
         let time = Duration::from_millis(self.stats.frames.saturating_mul(16));
-        for surface in self.state.toplevels() {
-            send_frames_surface_tree(
-                surface.wl_surface(),
-                &output,
-                time,
-                Some(Duration::ZERO),
-                |_, _| Some(output.clone()),
-            );
-        }
-        for (surface, _, _) in crate::layer::layer_layout(&self.state) {
-            send_frames_surface_tree(&surface, &output, time, Some(Duration::ZERO), |_, _| {
-                Some(output.clone())
-            });
+        if let Some(output) = self.state.primary_output() {
+            for surface in self.state.toplevels() {
+                send_frames_surface_tree(
+                    surface.wl_surface(),
+                    &output,
+                    time,
+                    Some(Duration::ZERO),
+                    |_, _| Some(output.clone()),
+                );
+            }
+            for (surface, _, _) in crate::layer::layer_layout(&self.state) {
+                send_frames_surface_tree(&surface, &output, time, Some(Duration::ZERO), |_, _| {
+                    Some(output.clone())
+                });
+            }
+            // X11 windows are not xdg toplevels, so the loop above
+            // never reaches them; Xwayland waits on these callbacks
+            // before committing content.
+            #[cfg(feature = "xwayland")]
+            for surface in self.manager.x11_surfaces() {
+                send_frames_surface_tree(&surface, &output, time, Some(Duration::ZERO), |_, _| {
+                    Some(output.clone())
+                });
+            }
         }
         self.backend
             .submit(Some(&[damage]))
@@ -555,5 +818,17 @@ pub fn run(session: &NestedSession) -> Result<RunStats, RuntimeError> {
                 return done.map(|_| runtime.stats);
             }
         }
+    }
+}
+
+/// Input-event timestamp in the backend event base, for the session-lock
+/// idle accumulator. Every [`ManagerInput`] variant carries one; axis
+/// scroll counts as activity like any other event.
+fn input_time(input: &ManagerInput) -> u64 {
+    match *input {
+        ManagerInput::Key { time, .. }
+        | ManagerInput::Motion { time, .. }
+        | ManagerInput::Button { time, .. }
+        | ManagerInput::Axis { time, .. } => u64::from(time),
     }
 }

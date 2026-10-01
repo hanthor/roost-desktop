@@ -1,0 +1,1153 @@
+//! Panel popups: calendar and service menus (settings-compat M2).
+//!
+//! All state and paint here is wire-free: pointer coordinates enter
+//! through [`PopupState::press`], and the panel surface grows to fit
+//! the popup band. Hit areas mirror `overview::paint_panel` exactly —
+//! the clock rect centers like the painted text, tile rects sit on the
+//! painted dots — so presses land where the pixels are.
+
+use crate::overview::{
+    blit_glyph, glyph_index, put_pixel, ACCENT, BG, BYTES_PER_PIXEL, DOT_GAP, DOT_MARGIN, DOT_SIZE,
+    FONT_SCALE, GLYPH_ADVANCE,
+};
+use crate::settings::ClockFormat;
+use crate::tiles::{Tile, TileState};
+
+/// Popup band height below the strip; the panel surface grows by this
+/// much while a popup is open (exclusive zone stays at strip height).
+/// Sized for the calendar's day grid plus its two footer toggle rows
+/// (clock format above, Roost prefs below).
+pub const POPUP_HEIGHT: i32 = 264;
+
+/// Integer rectangle for hit-testing painted regions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rect {
+    /// Left edge, surface coordinates.
+    pub x: i32,
+    /// Top edge, surface coordinates.
+    pub y: i32,
+    /// Width in pixels.
+    pub w: i32,
+    /// Height in pixels.
+    pub h: i32,
+}
+
+impl Rect {
+    /// True when the surface point falls inside (right/bottom exclusive).
+    pub fn contains(&self, x: i32, y: i32) -> bool {
+        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
+    }
+}
+
+/// Strip hit areas: clock plus the three service tiles in strip order
+/// (network, power, sound), matching the painted dots right to left.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PanelLayout {
+    /// Surface width the layout was computed for.
+    pub width: i32,
+    /// Strip height (popup band excluded).
+    pub strip_h: i32,
+    /// Clock text area (padded for touch).
+    pub clock: Rect,
+    /// Tile areas in strip order.
+    pub tiles: [Rect; 3],
+}
+
+impl PanelLayout {
+    /// Tile index under the point, if any.
+    pub fn tile_at(&self, x: i32, y: i32) -> Option<usize> {
+        self.tiles.iter().position(|rect| rect.contains(x, y))
+    }
+}
+
+/// Hit areas for a strip of `width` carrying `clock`, mirroring
+/// `overview::paint_panel`: centered clock text, dots packed from the
+/// right margin.
+pub fn panel_layout(width: i32, strip_h: i32, clock: &str) -> PanelLayout {
+    let text_w = clock.chars().count() as i32 * GLYPH_ADVANCE - (FONT_SCALE - 1);
+    let cx = (width - text_w) / 2;
+    let cy = (strip_h - 5 * FONT_SCALE) / 2;
+    let clock = Rect {
+        x: cx - 6,
+        y: cy - 4,
+        w: text_w + 12,
+        h: 5 * FONT_SCALE + 8,
+    };
+    let mut dx = width - DOT_MARGIN - DOT_SIZE;
+    let mut tiles = [Rect {
+        x: 0,
+        y: 0,
+        w: 0,
+        h: 0,
+    }; 3];
+    for tile in tiles.iter_mut() {
+        *tile = Rect {
+            x: dx - 4,
+            y: 0,
+            w: DOT_SIZE + 8,
+            h: strip_h,
+        };
+        dx -= DOT_SIZE + DOT_GAP;
+    }
+    PanelLayout {
+        width,
+        strip_h,
+        clock,
+        tiles,
+    }
+}
+
+/// Which popup is open. Calendar belongs to the clock; each menu
+/// belongs to a tile by strip index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PopupBody {
+    /// Month calendar under the clock.
+    Calendar,
+    /// Service menu under tile `usize` (strip order).
+    Menu(usize),
+    /// Indicator menu for hosted item `usize` (registration order).
+    IndicatorMenu(usize),
+}
+
+/// Open-popup state. Pressing the owning region toggles, pressing the
+/// other region switches, pressing anywhere else dismisses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PopupState {
+    open: Option<PopupBody>,
+}
+
+impl PopupState {
+    /// Currently open popup, if any.
+    pub fn body(&self) -> Option<PopupBody> {
+        self.open
+    }
+
+    /// True while any popup is open.
+    pub fn is_open(&self) -> bool {
+        self.open.is_some()
+    }
+
+    /// Close whatever is open.
+    pub fn dismiss(&mut self) {
+        self.open = None;
+    }
+
+    /// Open `body` directly. Indicator cells live outside the strip
+    /// layout `press` understands, so the panel opens their menus
+    /// without a layout hit.
+    pub fn open(&mut self, body: PopupBody) {
+        self.open = Some(body);
+    }
+
+    /// Left press at surface coordinates against the strip layout.
+    /// `popup_box` (below) describes the open popup's band area:
+    /// presses inside it change nothing, presses outside the strip
+    /// and the box dismiss.
+    pub fn press(&mut self, layout: &PanelLayout, popup: Option<Rect>, x: i32, y: i32) {
+        if layout.clock.contains(x, y) {
+            self.toggle(PopupBody::Calendar);
+        } else if let Some(index) = layout.tile_at(x, y) {
+            self.toggle(PopupBody::Menu(index));
+        } else if popup.is_some_and(|rect| rect.contains(x, y)) {
+            // Inside the open popup: keep it open.
+        } else {
+            self.dismiss();
+        }
+    }
+
+    /// Toggle `body`: open it, or dismiss when it is already the
+    /// open one. Strip presses route here; keyboard Enter on a
+    /// focused panel stop shares the call.
+    pub fn toggle(&mut self, body: PopupBody) {
+        if self.open == Some(body) {
+            self.open = None;
+        } else {
+            self.open = Some(body);
+        }
+    }
+}
+
+/// Popup band box for an open popup: calendar centers on the clock,
+/// menus right-align under the tiles. Clamped inside the surface with
+/// an 8px margin.
+pub fn popup_box(layout: &PanelLayout, body: PopupBody) -> Rect {
+    const BOX_W: i32 = 300;
+    const BOX_H: i32 = POPUP_HEIGHT - 16;
+    let y = layout.strip_h + 8;
+    let x = match body {
+        PopupBody::Calendar => {
+            let center = layout.clock.x + layout.clock.w / 2;
+            (center - BOX_W / 2).clamp(8, (layout.width - 8 - BOX_W).max(8))
+        }
+        PopupBody::Menu(_) | PopupBody::IndicatorMenu(_) => (layout.width - 8 - BOX_W).max(8),
+    };
+    Rect {
+        x,
+        y,
+        w: BOX_W.min(layout.width - 16).max(0),
+        h: BOX_H,
+    }
+}
+
+/// One calendar cell: day number, whether it falls in the shown
+/// month, and whether it is today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CalCell {
+    /// Day of month (this or the abutting month).
+    pub day: u8,
+    /// False for leading/trailing filler days.
+    pub in_month: bool,
+    /// True for today's cell.
+    pub today: bool,
+}
+
+/// Monday-first month grid (42 cells) for `year`/`month`, with `today`
+/// highlighted when it falls inside. Pure date math, no clock reads.
+pub fn month_cells(year: i32, month: u8, today: Option<u8>) -> [CalCell; 42] {
+    let first =
+        jiff::civil::Date::new(year as i16, month as i8, 1).expect("caller passes a valid month");
+    let leading = match first.weekday() {
+        jiff::civil::Weekday::Monday => 0,
+        jiff::civil::Weekday::Tuesday => 1,
+        jiff::civil::Weekday::Wednesday => 2,
+        jiff::civil::Weekday::Thursday => 3,
+        jiff::civil::Weekday::Friday => 4,
+        jiff::civil::Weekday::Saturday => 5,
+        jiff::civil::Weekday::Sunday => 6,
+    };
+    let days_in_month = first.days_in_month() as usize;
+    let prev_days = if month == 1 {
+        jiff::civil::Date::new((year - 1) as i16, 12, 1)
+            .expect("year-1 valid")
+            .days_in_month() as usize
+    } else {
+        jiff::civil::Date::new(year as i16, (month - 1) as i8, 1)
+            .expect("month-1 valid")
+            .days_in_month() as usize
+    };
+    let mut cells = [CalCell {
+        day: 0,
+        in_month: false,
+        today: false,
+    }; 42];
+    for (index, cell) in cells.iter_mut().enumerate() {
+        if index < leading {
+            cell.day = (prev_days - leading + 1 + index) as u8;
+        } else if index < leading + days_in_month {
+            let day = (index - leading + 1) as u8;
+            cell.day = day;
+            cell.in_month = true;
+            cell.today = today == Some(day);
+        } else {
+            cell.day = (index - leading - days_in_month + 1) as u8;
+        }
+    }
+    cells
+}
+
+/// Lowercase month names (the micro-glyphs fold case anyway).
+const MONTHS: [&str; 12] = [
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+];
+
+/// Blit one lowercase text line; unknown glyphs become gaps.
+pub(crate) fn blit_text(
+    pixels: &mut [u8],
+    stride: usize,
+    x: i32,
+    y: i32,
+    text: &str,
+    color: [u8; 4],
+) {
+    let mut cx = x;
+    for ch in text.chars() {
+        if ch == ' ' {
+            cx += GLYPH_ADVANCE;
+            continue;
+        }
+        if let Some(glyph) = glyph_index(ch) {
+            blit_glyph(pixels, stride, cx, y, glyph, color);
+        }
+        cx += GLYPH_ADVANCE;
+    }
+}
+
+/// Popup band and box face.
+const FACE: [u8; 4] = [0x2a, 0x26, 0x26, 0xff];
+
+/// Box frame: filled face with a one-pixel accent border.
+fn paint_box(pixels: &mut [u8], stride: usize, rect: &Rect) {
+    for y in rect.y..rect.y + rect.h {
+        for x in rect.x..rect.x + rect.w {
+            let edge =
+                x == rect.x || y == rect.y || x == rect.x + rect.w - 1 || y == rect.y + rect.h - 1;
+            put_pixel(pixels, stride, x, y, if edge { ACCENT } else { FACE });
+        }
+    }
+}
+
+/// Paint the open popup band below the strip. `today` is the date the
+/// calendar highlights; `tiles` feeds the menu rows, `network`
+/// carries the network tile's toggle rows (painted only under the
+/// network menu), `sound` carries the sound tile's toggle rows
+/// (painted only under the sound menu), `clock_format` paints the
+/// calendar's clock-format footer row, and `show_weekday` paints the
+/// Roost-prefs footer row below it. No-ops on degenerate sizes.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_popup(
+    pixels: &mut [u8],
+    width: i32,
+    layout: &PanelLayout,
+    body: PopupBody,
+    today: jiff::civil::Date,
+    tiles: &[Tile; 3],
+    indicators: &[crate::watcher::IndicatorItem],
+    network: &[TileRow],
+    sound: &[TileRow],
+    power: &[TileRow],
+    clock_format: ClockFormat,
+    show_weekday: bool,
+) {
+    let rect = popup_box(layout, body);
+    if rect.w <= 0 || rect.h <= 0 {
+        return;
+    }
+    let stride = width as usize * BYTES_PER_PIXEL;
+    // Own the whole band below the strip so the box floats on a clean
+    // face instead of stretched strip pixels.
+    for y in layout.strip_h..layout.strip_h + POPUP_HEIGHT {
+        for x in 0..width {
+            put_pixel(pixels, stride, x, y, FACE);
+        }
+    }
+    paint_box(pixels, stride, &rect);
+    match body {
+        PopupBody::Calendar => {
+            paint_calendar(pixels, stride, &rect, today, clock_format, show_weekday);
+        }
+        PopupBody::Menu(index) => {
+            let tile = tiles.get(index).copied().unwrap_or(Tile {
+                kind: crate::tiles::ServiceKind::Network,
+                state: TileState::Disconnected,
+                level: None,
+            });
+            let rows = if tile.kind == crate::tiles::ServiceKind::Network {
+                network
+            } else if tile.kind == crate::tiles::ServiceKind::Sound {
+                sound
+            } else if tile.kind == crate::tiles::ServiceKind::Power {
+                power
+            } else {
+                &[]
+            };
+            paint_menu(pixels, stride, &rect, tile, rows);
+        }
+        PopupBody::IndicatorMenu(index) => {
+            if let Some(item) = indicators.get(index) {
+                crate::watcher::paint_indicator_menu(pixels, stride, &rect, item);
+            }
+        }
+    }
+}
+
+/// Bottom footer toggle row rect inside the calendar box: below the
+/// day grid with a small gap, mirroring menu row height. The press
+/// path hit-tests this same rect, so paint and presses agree.
+pub fn calendar_weekday_row(rect: &Rect) -> Rect {
+    Rect {
+        x: rect.x + 12,
+        y: rect.y + rect.h - TILE_ROW_H - 4,
+        w: (rect.w - 24).max(0),
+        h: TILE_ROW_H,
+    }
+}
+
+/// Upper footer toggle row rect: above the prefs row with the same
+/// small gap. The clock-format toggle lives here; the Roost prefs
+/// toggle takes the bottom row.
+pub fn calendar_clock_row(rect: &Rect) -> Rect {
+    let below = calendar_weekday_row(rect);
+    Rect {
+        x: below.x,
+        y: below.y - TILE_ROW_H - 4,
+        w: below.w,
+        h: TILE_ROW_H,
+    }
+}
+
+/// Calendar clock-format toggle row: names the flip, like the menu
+/// rows. Always enabled — the format always has a value, and a
+/// refused write keeps the snapshot quietly.
+pub fn clock_format_row(format: ClockFormat) -> TileRow {
+    match format {
+        ClockFormat::Twelve => TileRow {
+            label: "use 24-hour clock".to_owned(),
+            enabled: true,
+        },
+        ClockFormat::TwentyFour => TileRow {
+            label: "use 12-hour clock".to_owned(),
+            enabled: true,
+        },
+    }
+}
+
+/// Calendar Roost-prefs toggle row: names the flip, like the menu
+/// rows. Always enabled — the pref always has a value, and a failed
+/// persist keeps the snapshot quietly.
+pub fn clock_weekday_row(show_weekday: bool) -> TileRow {
+    TileRow {
+        label: if show_weekday {
+            "hide weekday in clock".to_owned()
+        } else {
+            "show weekday in clock".to_owned()
+        },
+        enabled: true,
+    }
+}
+
+/// Month title, weekday header, day grid with today inverted, and the
+/// two footer toggle rows (clock format above, Roost prefs below).
+fn paint_calendar(
+    pixels: &mut [u8],
+    stride: usize,
+    rect: &Rect,
+    today: jiff::civil::Date,
+    format: ClockFormat,
+    show_weekday: bool,
+) {
+    const CELL_W: i32 = 36;
+    const CELL_H: i32 = 22;
+    let title = format!("{} {}", MONTHS[today.month() as usize - 1], today.year());
+    blit_text(pixels, stride, rect.x + 12, rect.y + 10, &title, ACCENT);
+    let grid_y = rect.y + 10 + 5 * FONT_SCALE + 12;
+    for (index, day) in ["mo", "tu", "we", "th", "fr", "sa", "su"]
+        .iter()
+        .enumerate()
+    {
+        blit_text(
+            pixels,
+            stride,
+            rect.x + 12 + index as i32 * CELL_W,
+            grid_y,
+            day,
+            ACCENT,
+        );
+    }
+    let cells = month_cells(
+        today.year() as i32,
+        today.month() as u8,
+        Some(today.day() as u8),
+    );
+    for (index, cell) in cells.iter().enumerate() {
+        let col = index as i32 % 7;
+        let row = index as i32 / 7;
+        let x = rect.x + 12 + col * CELL_W;
+        let y = grid_y + 5 * FONT_SCALE + 8 + row * CELL_H;
+        if cell.today {
+            for dy in 0..CELL_H - 4 {
+                for dx in 0..CELL_W - 8 {
+                    put_pixel(pixels, stride, x + dx - 2, y + dy - 2, ACCENT);
+                }
+            }
+        }
+        let digits = format!("{:>2}", cell.day);
+        blit_text(
+            pixels,
+            stride,
+            x,
+            y,
+            &digits,
+            if cell.today {
+                BG
+            } else if cell.in_month {
+                ACCENT
+            } else {
+                WARN_DIM
+            },
+        );
+    }
+    let max_chars = ((rect.w - 24) / GLYPH_ADVANCE).max(1) as usize;
+    let clock_footer = calendar_clock_row(rect);
+    let clock_row = clock_format_row(format);
+    paint_row(
+        pixels,
+        stride,
+        clock_footer.x,
+        clock_footer.y,
+        max_chars,
+        &clock_row,
+    );
+    let prefs_footer = calendar_weekday_row(rect);
+    let prefs_row = clock_weekday_row(show_weekday);
+    paint_row(
+        pixels,
+        stride,
+        prefs_footer.x,
+        prefs_footer.y,
+        max_chars,
+        &prefs_row,
+    );
+}
+
+/// Dim brick for out-of-month filler days.
+const WARN_DIM: [u8; 4] = [0x60, 0x38, 0x30, 0xff];
+
+/// One tile menu toggle row: label plus whether it fires. Disabled
+/// rows paint dimmed and never fire (like indicator menu rows).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TileRow {
+    /// Row label.
+    pub label: String,
+    /// False rows paint dimmed and never fire.
+    pub enabled: bool,
+}
+
+/// Row height for tile menu toggle rows (matches indicator menus).
+pub const TILE_ROW_H: i32 = 24;
+
+/// Top offset of the first toggle row within a tile menu box: below
+/// the name and state lines `paint_menu` always paints.
+pub const TILE_ROWS_TOP: i32 = 10 + 2 * (5 * FONT_SCALE + 10);
+
+/// Network tile menu rows: wifi toggle plus network toggle. Labels
+/// name the action; rows disable while a toggle is pending or the
+/// radio state is unknown (no bus: pure sysfs, nothing to toggle).
+pub fn network_rows(
+    wireless: Option<bool>,
+    networking: Option<bool>,
+    pending: bool,
+) -> [TileRow; 2] {
+    [
+        flag_row("wifi", wireless, pending),
+        flag_row("network", networking, pending),
+    ]
+}
+
+/// Sound tile menu rows: mute toggle plus volume down/up. Labels
+/// name the action; rows disable while a toggle is pending or the
+/// output state is unknown (no bus: pure sysfs, nothing to toggle).
+/// Volume rows also disable at their bound (down at silence, up at
+/// full).
+pub fn sound_rows(muted: Option<bool>, volume: Option<f64>, pending: bool) -> [TileRow; 3] {
+    [
+        mute_row(muted, pending),
+        volume_row(false, volume, pending),
+        volume_row(true, volume, pending),
+    ]
+}
+
+/// Power tile menu rows: a single lock row. Locking is a
+/// tokenless fire-and-forget command, so the row is always
+/// enabled — there is no pending or unknown state to disable
+/// on, unlike the toggle rows.
+pub fn lock_rows() -> [TileRow; 1] {
+    [TileRow {
+        label: "lock now".to_owned(),
+        enabled: true,
+    }]
+}
+
+/// One mute row: pending reads as waiting, a known flag names its
+/// flip, an unknown flag reads as unavailable and never fires.
+fn mute_row(muted: Option<bool>, pending: bool) -> TileRow {
+    if pending {
+        TileRow {
+            label: "mute waiting".to_owned(),
+            enabled: false,
+        }
+    } else {
+        match muted {
+            Some(true) => TileRow {
+                label: "unmute".to_owned(),
+                enabled: true,
+            },
+            Some(false) => TileRow {
+                label: "mute".to_owned(),
+                enabled: true,
+            },
+            None => TileRow {
+                label: "mute unavailable".to_owned(),
+                enabled: false,
+            },
+        }
+    }
+}
+
+/// One volume row (`up` picks the direction): pending reads as
+/// waiting, an unknown volume reads as unavailable and never fires,
+/// and the bound in that direction reads as the limit and never
+/// fires.
+fn volume_row(up: bool, volume: Option<f64>, pending: bool) -> TileRow {
+    let name = if up { "volume up" } else { "volume down" };
+    if pending {
+        return TileRow {
+            label: format!("{name} waiting"),
+            enabled: false,
+        };
+    }
+    let Some(volume) = volume else {
+        return TileRow {
+            label: format!("{name} unavailable"),
+            enabled: false,
+        };
+    };
+    if !up && volume <= 0.0 {
+        return TileRow {
+            label: "volume at minimum".to_owned(),
+            enabled: false,
+        };
+    }
+    if up && volume >= 1.0 {
+        return TileRow {
+            label: "volume at maximum".to_owned(),
+            enabled: false,
+        };
+    }
+    TileRow {
+        label: format!("turn {name}"),
+        enabled: true,
+    }
+}
+
+/// One radio flag row: pending reads as waiting, a known flag names
+/// its flip, an unknown flag reads as unavailable and never fires.
+fn flag_row(name: &str, enabled: Option<bool>, pending: bool) -> TileRow {
+    if pending {
+        TileRow {
+            label: format!("{name} waiting"),
+            enabled: false,
+        }
+    } else {
+        match enabled {
+            Some(true) => TileRow {
+                label: format!("turn {name} off"),
+                enabled: true,
+            },
+            Some(false) => TileRow {
+                label: format!("turn {name} on"),
+                enabled: true,
+            },
+            None => TileRow {
+                label: format!("{name} unavailable"),
+                enabled: false,
+            },
+        }
+    }
+}
+
+/// Toggle row under the menu-box point, if any.
+pub fn tile_row_at(rect: &Rect, y: i32, count: usize) -> Option<usize> {
+    if count == 0 || y < rect.y + TILE_ROWS_TOP {
+        return None;
+    }
+    let row = ((y - rect.y - TILE_ROWS_TOP) / TILE_ROW_H) as usize;
+    (row < count).then_some(row)
+}
+
+/// Paint box for toggle row `index`: the inverse of
+/// [`tile_row_at`], so the keyboard focus ring lands where presses
+/// do. Slightly inset from the menu box edges.
+pub fn tile_row_rect(rect: &Rect, index: usize, count: usize) -> Option<Rect> {
+    if index >= count {
+        return None;
+    }
+    Some(Rect {
+        x: rect.x + 4,
+        y: rect.y + TILE_ROWS_TOP + index as i32 * TILE_ROW_H,
+        w: (rect.w - 8).max(0),
+        h: TILE_ROW_H,
+    })
+}
+
+/// Service name, state word, optional level row, and toggle rows.
+fn paint_menu(pixels: &mut [u8], stride: usize, rect: &Rect, tile: Tile, rows: &[TileRow]) {
+    use crate::tiles::ServiceKind;
+    let name = match tile.kind {
+        ServiceKind::Clock => "clock",
+        ServiceKind::Network => "network",
+        ServiceKind::Power => "power",
+        ServiceKind::Sound => "sound",
+    };
+    let state = match tile.state {
+        TileState::Ready => "ready",
+        TileState::Disconnected => "no link",
+        TileState::Error => "error",
+        TileState::Loading => "waiting",
+    };
+    blit_text(pixels, stride, rect.x + 12, rect.y + 10, name, ACCENT);
+    blit_text(
+        pixels,
+        stride,
+        rect.x + 12,
+        rect.y + 10 + 5 * FONT_SCALE + 10,
+        state,
+        ACCENT,
+    );
+    if let Some(level) = tile.level {
+        blit_text(
+            pixels,
+            stride,
+            rect.x + 12,
+            rect.y + 10 + 2 * (5 * FONT_SCALE + 10),
+            &format!("{level} pct"),
+            ACCENT,
+        );
+    }
+    let max_chars = ((rect.w - 24) / GLYPH_ADVANCE).max(1) as usize;
+    for (index, row) in rows.iter().enumerate() {
+        let gy = rect.y + TILE_ROWS_TOP + index as i32 * TILE_ROW_H;
+        if gy + TILE_ROW_H > rect.y + rect.h {
+            break;
+        }
+        paint_row(pixels, stride, rect.x + 12, gy, max_chars, row);
+    }
+}
+
+/// One toggle row line: label glyphs at `(x, y)`, dimmed when
+/// disabled. Shared by menus and the calendar footer row.
+fn paint_row(pixels: &mut [u8], stride: usize, x: i32, y: i32, max_chars: usize, row: &TileRow) {
+    const DIM: [u8; 4] = [0x4a, 0x44, 0x44, 0xff];
+    let color = if row.enabled { ACCENT } else { DIM };
+    let mut gx = x;
+    for ch in row.label.chars().take(max_chars) {
+        if ch == ' ' {
+            gx += GLYPH_ADVANCE;
+            continue;
+        }
+        if let Some(glyph) = glyph_index(ch) {
+            blit_glyph(pixels, stride, gx, y, glyph, color);
+        }
+        gx += GLYPH_ADVANCE;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tiles::ServiceKind;
+
+    fn layout() -> PanelLayout {
+        panel_layout(1280, 32, "12:34")
+    }
+
+    #[test]
+    fn clock_rect_centers_on_painted_text() {
+        let layout = layout();
+        // "12:34" is 5 glyphs: 5*12-2 = 58px wide, centered in 1280.
+        assert_eq!(layout.clock.w, 58 + 12);
+        assert_eq!(layout.clock.x, (1280 - 58) / 2 - 6);
+        assert!(layout.clock.contains(640, 16));
+        assert!(!layout.clock.contains(0, 16));
+    }
+
+    #[test]
+    fn tile_rects_sit_on_the_right_edge_in_order() {
+        let layout = layout();
+        // First tile (network) is rightmost.
+        assert!(layout.tiles[0].x > layout.tiles[1].x);
+        assert!(layout.tiles[1].x > layout.tiles[2].x);
+        let right = 1280 - DOT_MARGIN;
+        assert!(layout.tiles[0].x + layout.tiles[0].w >= right - 8);
+        assert_eq!(layout.tile_at(right - DOT_SIZE, 16), Some(0));
+        assert_eq!(layout.tile_at(640, 16), None);
+        // scripts/roost-capture clicks here for the network menu.
+        assert_eq!(layout.tile_at(1263, 16), Some(0));
+    }
+
+    #[test]
+    fn press_toggles_switches_and_dismisses() {
+        let layout = layout();
+        let mut popup = PopupState::default();
+        assert!(!popup.is_open());
+        // Clock press opens the calendar; pressing again closes it.
+        popup.press(&layout, None, 640, 16);
+        assert_eq!(popup.body(), Some(PopupBody::Calendar));
+        popup.press(&layout, None, 640, 16);
+        assert!(!popup.is_open());
+        // Tile press opens that tile's menu; clock press switches.
+        let tile_x = layout.tiles[1].x + 2;
+        popup.press(&layout, None, tile_x, 16);
+        assert_eq!(popup.body(), Some(PopupBody::Menu(1)));
+        popup.press(&layout, None, 640, 16);
+        assert_eq!(popup.body(), Some(PopupBody::Calendar));
+        // Presses inside the open box keep it; outside dismisses.
+        let rect = popup_box(&layout, PopupBody::Calendar);
+        popup.press(&layout, Some(rect), rect.x + 4, rect.y + 4);
+        assert!(popup.is_open());
+        popup.press(&layout, Some(rect), 4, 100);
+        assert!(!popup.is_open());
+    }
+
+    #[test]
+    fn escape_and_repress_paths_dismiss() {
+        let mut popup = PopupState::default();
+        popup.press(&layout(), None, 640, 16);
+        assert!(popup.is_open());
+        popup.dismiss();
+        assert!(!popup.is_open());
+    }
+
+    #[test]
+    fn september_2026_grid_starts_tuesday_with_30_days() {
+        // September 1st 2026 is a Tuesday: one Monday filler, then 1..=30.
+        let cells = month_cells(2026, 9, None);
+        assert_eq!(cells.len(), 42);
+        assert!(!cells[0].in_month);
+        assert_eq!(cells[0].day, 31);
+        assert!(cells[1].in_month);
+        assert_eq!(cells[1].day, 1);
+        assert_eq!(cells[30].day, 30);
+        assert!(cells[30].in_month);
+        assert!(!cells[31].in_month);
+        assert_eq!(cells[31].day, 1);
+    }
+
+    #[test]
+    fn today_flag_lands_on_the_right_cell() {
+        let cells = month_cells(2026, 9, Some(15));
+        let flagged: Vec<u8> = cells
+            .iter()
+            .filter(|cell| cell.today)
+            .map(|cell| cell.day)
+            .collect();
+        assert_eq!(flagged, vec![15]);
+        let none = month_cells(2026, 9, Some(31));
+        assert!(none.iter().all(|cell| !cell.today));
+    }
+
+    #[test]
+    fn popup_box_stays_inside_narrow_surfaces() {
+        let small = panel_layout(200, 32, "12:34");
+        let rect = popup_box(&small, PopupBody::Calendar);
+        assert!(rect.x >= 0);
+        assert!(rect.x + rect.w <= 200);
+    }
+
+    #[test]
+    fn network_rows_name_the_flip_and_disable_when_unknown_or_pending() {
+        let row = |label: &str, enabled: bool| TileRow {
+            label: label.to_owned(),
+            enabled,
+        };
+        assert_eq!(
+            network_rows(Some(true), Some(true), false),
+            [row("turn wifi off", true), row("turn network off", true)]
+        );
+        assert_eq!(
+            network_rows(Some(false), Some(false), false),
+            [row("turn wifi on", true), row("turn network on", true)]
+        );
+        assert_eq!(
+            network_rows(None, None, false),
+            [
+                row("wifi unavailable", false),
+                row("network unavailable", false)
+            ]
+        );
+        assert_eq!(
+            network_rows(Some(true), Some(true), true),
+            [row("wifi waiting", false), row("network waiting", false)]
+        );
+    }
+
+    #[test]
+    fn sound_rows_name_the_flip_and_disable_when_unknown_pending_or_bound() {
+        let row = |label: &str, enabled: bool| TileRow {
+            label: label.to_owned(),
+            enabled,
+        };
+        assert_eq!(
+            sound_rows(Some(false), Some(0.5), false),
+            [
+                row("mute", true),
+                row("turn volume down", true),
+                row("turn volume up", true)
+            ]
+        );
+        assert_eq!(
+            sound_rows(Some(true), Some(0.5), false),
+            [
+                row("unmute", true),
+                row("turn volume down", true),
+                row("turn volume up", true)
+            ]
+        );
+        assert_eq!(
+            sound_rows(Some(false), Some(0.0), false),
+            [
+                row("mute", true),
+                row("volume at minimum", false),
+                row("turn volume up", true)
+            ]
+        );
+        assert_eq!(
+            sound_rows(Some(false), Some(1.0), false),
+            [
+                row("mute", true),
+                row("turn volume down", true),
+                row("volume at maximum", false)
+            ]
+        );
+        assert_eq!(
+            sound_rows(None, None, false),
+            [
+                row("mute unavailable", false),
+                row("volume down unavailable", false),
+                row("volume up unavailable", false)
+            ]
+        );
+        assert_eq!(
+            sound_rows(Some(false), Some(0.5), true),
+            [
+                row("mute waiting", false),
+                row("volume down waiting", false),
+                row("volume up waiting", false)
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_services_explain_instead_of_dead_toggles() {
+        // No radio on the bus: every network toggle is skipped and
+        // each row explains itself instead of offering a dead flip.
+        let network = network_rows(None, None, false);
+        assert!(
+            network.iter().all(|row| !row.enabled),
+            "absent radio skips every toggle"
+        );
+        for row in &network {
+            assert!(
+                row.label.contains("unavailable"),
+                "menu explains the absence: {}",
+                row.label
+            );
+        }
+        assert!(
+            !network.iter().any(|row| row.label.starts_with("turn ")),
+            "no dead toggle labels without a service"
+        );
+        // No sound server on the bus: same honest shape — skipped
+        // toggles, explaining text, never a live-looking row.
+        let sound = sound_rows(None, None, false);
+        assert!(
+            sound.iter().all(|row| !row.enabled),
+            "absent mixer skips every toggle"
+        );
+        for row in &sound {
+            assert!(
+                row.label.contains("unavailable"),
+                "menu explains the absence: {}",
+                row.label
+            );
+        }
+        assert!(
+            !sound.iter().any(|row| row.label == "mute"
+                || row.label == "unmute"
+                || row.label.starts_with("turn ")),
+            "no dead toggle labels without a service"
+        );
+    }
+
+    #[test]
+    fn clock_format_row_names_the_flip_and_stays_enabled() {
+        assert_eq!(
+            clock_format_row(ClockFormat::Twelve),
+            TileRow {
+                label: "use 24-hour clock".to_owned(),
+                enabled: true,
+            }
+        );
+        assert_eq!(
+            clock_format_row(ClockFormat::TwentyFour),
+            TileRow {
+                label: "use 12-hour clock".to_owned(),
+                enabled: true,
+            }
+        );
+    }
+
+    #[test]
+    fn calendar_footer_row_sits_inside_the_box_below_the_grid() {
+        let rect = popup_box(&layout(), PopupBody::Calendar);
+        let footer = calendar_clock_row(&rect);
+        assert!(footer.y > rect.y);
+        assert!(footer.y + footer.h <= rect.y + rect.h);
+        assert!(footer.x >= rect.x);
+        assert!(footer.x + footer.w <= rect.x + rect.w);
+        // Day grid bottom row ends above the footer (six 22px rows
+        // from the grid top leave a gap before the footer row).
+        let grid_top = rect.y + 10 + 5 * FONT_SCALE + 12 + 5 * FONT_SCALE + 8;
+        assert!(grid_top + 6 * 22 <= footer.y);
+    }
+
+    #[test]
+    fn weekday_row_names_the_flip_and_stays_enabled() {
+        assert_eq!(
+            clock_weekday_row(false),
+            TileRow {
+                label: "show weekday in clock".to_owned(),
+                enabled: true,
+            }
+        );
+        assert_eq!(
+            clock_weekday_row(true),
+            TileRow {
+                label: "hide weekday in clock".to_owned(),
+                enabled: true,
+            }
+        );
+    }
+
+    #[test]
+    fn footer_rows_stack_without_overlap_inside_the_box() {
+        let rect = popup_box(&layout(), PopupBody::Calendar);
+        let clock = calendar_clock_row(&rect);
+        let prefs = calendar_weekday_row(&rect);
+        // Same margins as the single-footer layout.
+        assert_eq!((prefs.x, prefs.w), (rect.x + 12, (rect.w - 24).max(0)));
+        assert_eq!((clock.x, clock.w), (prefs.x, prefs.w));
+        // Clock row above the prefs row with a gap, prefs row flush
+        // to the box bottom margin.
+        assert!(clock.y + clock.h + 4 == prefs.y);
+        assert!(prefs.y + prefs.h <= rect.y + rect.h);
+        assert!(clock.y > rect.y);
+        // Day grid bottom row ends above the upper footer.
+        let grid_top = rect.y + 10 + 5 * FONT_SCALE + 12 + 5 * FONT_SCALE + 8;
+        assert!(grid_top + 6 * 22 <= clock.y);
+    }
+
+    #[test]
+    fn tile_row_at_hits_three_rows_in_order() {
+        let rect = Rect {
+            x: 972,
+            y: 40,
+            w: 300,
+            h: 200,
+        };
+        assert_eq!(tile_row_at(&rect, rect.y + TILE_ROWS_TOP + 2, 3), Some(0));
+        assert_eq!(
+            tile_row_at(&rect, rect.y + TILE_ROWS_TOP + TILE_ROW_H + 2, 3),
+            Some(1)
+        );
+        assert_eq!(
+            tile_row_at(&rect, rect.y + TILE_ROWS_TOP + 2 * TILE_ROW_H + 2, 3),
+            Some(2)
+        );
+        assert_eq!(
+            tile_row_at(&rect, rect.y + TILE_ROWS_TOP + 3 * TILE_ROW_H, 3),
+            None
+        );
+    }
+
+    #[test]
+    fn tile_row_at_hits_two_rows_in_order() {
+        let rect = Rect {
+            x: 972,
+            y: 40,
+            w: 300,
+            h: 200,
+        };
+        assert_eq!(tile_row_at(&rect, rect.y + TILE_ROWS_TOP + 2, 2), Some(0));
+        assert_eq!(
+            tile_row_at(&rect, rect.y + TILE_ROWS_TOP + TILE_ROW_H + 2, 2),
+            Some(1)
+        );
+        // Above the rows and past the last row: no hit.
+        assert_eq!(tile_row_at(&rect, rect.y + TILE_ROWS_TOP - 1, 2), None);
+        assert_eq!(
+            tile_row_at(&rect, rect.y + TILE_ROWS_TOP + 2 * TILE_ROW_H, 2),
+            None
+        );
+        assert_eq!(tile_row_at(&rect, rect.y + TILE_ROWS_TOP + 2, 0), None);
+    }
+
+    fn sample_tiles() -> [Tile; 3] {
+        [
+            Tile {
+                kind: ServiceKind::Network,
+                state: crate::tiles::TileState::Ready,
+                level: None,
+            },
+            Tile {
+                kind: ServiceKind::Power,
+                state: crate::tiles::TileState::Ready,
+                level: Some(73),
+            },
+            Tile {
+                kind: ServiceKind::Sound,
+                state: crate::tiles::TileState::Disconnected,
+                level: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn popup_paint_differs_from_strip_and_covers_expected_area() {
+        let layout = layout();
+        let today = jiff::civil::Date::new(2026, 9, 15).unwrap();
+        let mut plain = vec![0u8; 1280 * (32 + POPUP_HEIGHT) as usize * BYTES_PER_PIXEL];
+        crate::overview::paint_panel(
+            &mut plain,
+            1280,
+            32 + POPUP_HEIGHT,
+            32,
+            "12:34",
+            &sample_tiles(),
+            0,
+        );
+        let mut with_popup = plain.clone();
+        paint_popup(
+            &mut with_popup,
+            1280,
+            &layout,
+            PopupBody::Calendar,
+            today,
+            &sample_tiles(),
+            &[],
+            &[],
+            &[],
+            &[],
+            ClockFormat::TwentyFour,
+            false,
+        );
+        // Popup paints below the strip and leaves the strip itself alone.
+        assert_eq!(
+            plain[..1280 * 32 * BYTES_PER_PIXEL],
+            with_popup[..1280 * 32 * BYTES_PER_PIXEL]
+        );
+        assert_ne!(
+            plain[1280 * 32 * BYTES_PER_PIXEL..],
+            with_popup[1280 * 32 * BYTES_PER_PIXEL..]
+        );
+        let mut menu = plain.clone();
+        paint_popup(
+            &mut menu,
+            1280,
+            &layout,
+            PopupBody::Menu(1),
+            today,
+            &sample_tiles(),
+            &[],
+            &[],
+            &[],
+            &[],
+            ClockFormat::TwentyFour,
+            false,
+        );
+        assert_ne!(
+            menu[1280 * 32 * BYTES_PER_PIXEL..],
+            with_popup[1280 * 32 * BYTES_PER_PIXEL..]
+        );
+    }
+}

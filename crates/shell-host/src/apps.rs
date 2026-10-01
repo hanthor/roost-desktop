@@ -181,6 +181,16 @@ fn from_crate_entry(entry: &CrateEntry) -> Option<AppEntry> {
     })
 }
 
+/// Parse one desktop file into a launchable entry: the same
+/// launchability filter [`discover`] applies, so a stack `.desktop`
+/// file the shell cannot spawn is not a stack cell it offers.
+/// Returns `None` for unreadable, hidden, or `Exec`-less files.
+pub fn entry_from_file(path: &std::path::Path) -> Option<AppEntry> {
+    let locales: Vec<String> = LOCALES.iter().map(|s| s.to_string()).collect();
+    let entry = CrateEntry::from_path(path, Some(&locales)).ok()?;
+    from_crate_entry(&entry)
+}
+
 /// [`SearchProvider`] over discovered entries: case-insensitive
 /// substring over name, id, generic name, and keywords.
 pub struct AppProvider {
@@ -456,16 +466,16 @@ mod tests {
         write_entry(
             dir.path(),
             "probe.desktop",
-            "[Desktop Entry]\nName=Rwdterm Probe\nExec=touch \"/tmp/rwd-marker\"\nType=Application\n",
+            "[Desktop Entry]\nName=Roostterm Probe\nExec=touch \"/tmp/roost-marker\"\nType=Application\n",
         );
         let apps = discover(&[dir.path().to_owned()]);
         let app = apps
             .iter()
-            .find(|a| a.name == "Rwdterm Probe")
+            .find(|a| a.name == "Roostterm Probe")
             .expect("probe");
         assert_eq!(
             app.argv,
-            vec![OsString::from("touch"), OsString::from("/tmp/rwd-marker")],
+            vec![OsString::from("touch"), OsString::from("/tmp/roost-marker")],
             "quoted Exec arg keeps its quotes: {:?}",
             app.argv
         );
@@ -502,7 +512,7 @@ mod tests {
             name: "Missing".to_owned(),
             generic_name: None,
             keywords: Vec::new(),
-            argv: vec![OsString::from("/nonexistent-rwd-binary-xyz")],
+            argv: vec![OsString::from("/nonexistent-roost-binary-xyz")],
             icon: None,
         };
         let mut tracker = LaunchTracker::new();

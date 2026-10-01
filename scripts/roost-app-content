@@ -1,8 +1,8 @@
 #!/bin/sh
-# rwd-app-content — real app client inside the nested session, for CI.
+# roost-app-content — real app client inside the nested session, for CI.
 #
 # Usage:
-#   scripts/rwd-app-content [--display :98] [--artifacts DIR] [--socket NAME]
+#   scripts/roost-app-content [--display :98] [--artifacts DIR] [--socket NAME]
 #
 # Starts a private Xvfb (unless DISPLAY already works), builds and runs
 # the nested compositor with its supervised shell, then launches headed
@@ -25,7 +25,7 @@ unset CDPATH
 ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
 DISPLAY_ARG=""
 ARTIFACTS="$ROOT/app-content-artifacts"
-SOCKET="rwd-app-content-$$"
+SOCKET="roost-app-content-$$"
 WIDTH=1280
 HEIGHT=800
 # Distinctive page background the pixel assert counts (sampled grid).
@@ -41,7 +41,7 @@ while [ $# -gt 0 ]; do
         --artifacts) ARTIFACTS="$2"; shift 2 ;;
         --socket) SOCKET="$2"; shift 2 ;;
         --help|-h) usage; exit 0 ;;
-        *) echo "rwd-app-content: unknown argument $1" >&2; usage >&2; exit 1 ;;
+        *) echo "roost-app-content: unknown argument $1" >&2; usage >&2; exit 1 ;;
     esac
 done
 
@@ -78,7 +78,7 @@ fi
 if ! display_works; then
     DISPLAY=":98"
     export DISPLAY
-    echo "rwd-app-content: starting Xvfb on $DISPLAY"
+    echo "roost-app-content: starting Xvfb on $DISPLAY"
     Xvfb "$DISPLAY" -screen 0 "${WIDTH}x${HEIGHT}x24" >"$ARTIFACTS/xvfb.log" 2>&1 &
     OWNED_XVFB=$!
     for _ in $(seq 1 30); do
@@ -86,27 +86,27 @@ if ! display_works; then
         sleep 1
     done
     if ! display_works; then
-        echo "rwd-app-content: Xvfb never answered on $DISPLAY" >&2
+        echo "roost-app-content: Xvfb never answered on $DISPLAY" >&2
         exit 1
     fi
 fi
 
-echo "rwd-app-content: display $DISPLAY geometry $(xdotool getdisplaygeometry)"
-echo "rwd-app-content: building"
+echo "roost-app-content: display $DISPLAY geometry $(xdotool getdisplaygeometry)"
+echo "roost-app-content: building"
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" \
-    -p rwd-compositor -p rwd-shell-host
+    -p roost-compositor -p roost-shell-host
 
-echo "rwd-app-content: starting compositor on socket $SOCKET"
-"$ROOT/target/debug/rwd-compositor" --socket "$SOCKET" \
-    --shell-bin "$ROOT/target/debug/rwd-shell-host" \
+echo "roost-app-content: starting compositor on socket $SOCKET"
+"$ROOT/target/debug/roost-compositor" --socket "$SOCKET" \
+    --shell-bin "$ROOT/target/debug/roost-shell-host" \
     >"$LOG" 2>&1 &
 COMPOSITOR_PID=$!
 
-echo "rwd-app-content: waiting for the nested window"
+echo "roost-app-content: waiting for the nested window"
 WID=""
 for _ in $(seq 1 60); do
     if ! kill -0 "$COMPOSITOR_PID" 2>/dev/null; then
-        echo "rwd-app-content: compositor died during startup" >&2
+        echo "roost-app-content: compositor died during startup" >&2
         tail -30 "$LOG" >&2 || true
         exit 1
     fi
@@ -117,20 +117,20 @@ for _ in $(seq 1 60); do
     sleep 1
 done
 if [ -z "$WID" ]; then
-    echo "rwd-app-content: no Smithay window found" >&2
+    echo "roost-app-content: no Smithay window found" >&2
     tail -30 "$LOG" >&2 || true
     exit 1
 fi
-echo "rwd-app-content: window $WID"
+echo "roost-app-content: window $WID"
 xdotool windowfocus --sync "$WID"
 sleep 3
 
 scrot "$ARTIFACTS/01-baseline.png" >/dev/null
-echo "rwd-app-content: shot 01-baseline.png"
+echo "roost-app-content: shot 01-baseline.png"
 
 # Playwright plus Chromium, in a throwaway venv outside the artifacts
 # dir. --with-deps pulls the browser system libraries via apt.
-PW_ENV="${RUNNER_TEMP:-/tmp}/rwd-pw-env-$$"
+PW_ENV="${RUNNER_TEMP:-/tmp}/roost-pw-env-$$"
 python3 -m venv "$PW_ENV"
 "$PW_ENV/bin/pip" install --quiet playwright pillow
 "$PW_ENV/bin/python" -m playwright install --with-deps chromium
@@ -143,7 +143,7 @@ from playwright.sync_api import sync_playwright
 
 artifacts = sys.argv[1]
 url = ("data:text/html,<html><body style='margin:0;background:%2300c853'>"
-       "<h1 style='color:white;font-size:64px'>RWD-APP-CONTENT</h1></body></html>")
+       "<h1 style='color:white;font-size:64px'>Roost-APP-CONTENT</h1></body></html>")
 
 os.environ.pop("DISPLAY", None)
 with sync_playwright() as p:
@@ -184,20 +184,20 @@ CHROMIUM_PID=$!
 for _ in $(seq 1 60); do
     [ -f "$READY" ] && break
     if ! kill -0 "$CHROMIUM_PID" 2>/dev/null; then
-        echo "rwd-app-content: chromium exited before ready" >&2
+        echo "roost-app-content: chromium exited before ready" >&2
         tail -30 "$ARTIFACTS/chromium.log" >&2 || true
         exit 1
     fi
     sleep 2
 done
 if [ ! -f "$READY" ]; then
-    echo "rwd-app-content: chromium never signalled ready" >&2
+    echo "roost-app-content: chromium never signalled ready" >&2
     tail -30 "$ARTIFACTS/chromium.log" >&2 || true
     exit 1
 fi
 sleep 2
 scrot "$ARTIFACTS/02-app.png" >/dev/null
-echo "rwd-app-content: shot 02-app.png"
+echo "roost-app-content: shot 02-app.png"
 
 # Super+Left tiles the focused Chromium into the left half; the shot
 # must differ from the floating frame and the layout line lands in
@@ -205,7 +205,7 @@ echo "rwd-app-content: shot 02-app.png"
 xdotool key Super_L+Left
 sleep 2
 scrot "$ARTIFACTS/03-tiled.png" >/dev/null
-echo "rwd-app-content: shot 03-tiled.png"
+echo "roost-app-content: shot 03-tiled.png"
 
 # Alt+F4 asks Chromium to close politely; it must exit on its own —
 # no kill, no DONE file. A lingering process means the chord or the
@@ -221,47 +221,47 @@ for _ in $(seq 1 30); do
     sleep 2
 done
 if [ -z "$CLOSED" ]; then
-    echo "rwd-app-content: chromium ignored Alt+F4 polite close" >&2
+    echo "roost-app-content: chromium ignored Alt+F4 polite close" >&2
     tail -30 "$LOG" >&2 || true
     exit 1
 fi
 wait "$CHROMIUM_PID" 2>/dev/null || true
 CHROMIUM_PID=""
-echo "rwd-app-content: chromium exited on polite close"
+echo "roost-app-content: chromium exited on polite close"
 
-echo "rwd-app-content: asserting"
+echo "roost-app-content: asserting"
 if ! kill -0 "$COMPOSITOR_PID" 2>/dev/null; then
-    echo "rwd-app-content: compositor died mid-run" >&2
+    echo "roost-app-content: compositor died mid-run" >&2
     tail -30 "$LOG" >&2 || true
     exit 1
 fi
 if grep -q "panicked" "$LOG"; then
-    echo "rwd-app-content: panic in nested log" >&2
+    echo "roost-app-content: panic in nested log" >&2
     grep "panicked" "$LOG" >&2
     exit 1
 fi
 for shot_file in 01-baseline 02-app 03-tiled; do
     path="$ARTIFACTS/$shot_file.png"
     if [ ! -s "$path" ]; then
-        echo "rwd-app-content: missing screenshot $path" >&2
+        echo "roost-app-content: missing screenshot $path" >&2
         exit 1
     fi
 done
 if cmp -s "$ARTIFACTS/01-baseline.png" "$ARTIFACTS/02-app.png"; then
-    echo "rwd-app-content: app shot identical to baseline (no app window visible)" >&2
+    echo "roost-app-content: app shot identical to baseline (no app window visible)" >&2
     exit 1
 fi
 if cmp -s "$ARTIFACTS/02-app.png" "$ARTIFACTS/03-tiled.png"; then
-    echo "rwd-app-content: tiled shot identical to floating (Super+Left did nothing visible)" >&2
+    echo "roost-app-content: tiled shot identical to floating (Super+Left did nothing visible)" >&2
     exit 1
 fi
 if ! grep -q "Tiled(Left)" "$LOG"; then
-    echo "rwd-app-content: no tile-left layout in nested log" >&2
+    echo "roost-app-content: no tile-left layout in nested log" >&2
     tail -30 "$LOG" >&2 || true
     exit 1
 fi
 if ! grep -q "close requested" "$LOG"; then
-    echo "rwd-app-content: no polite close in nested log" >&2
+    echo "roost-app-content: no polite close in nested log" >&2
     tail -30 "$LOG" >&2 || true
     exit 1
 fi
@@ -274,14 +274,14 @@ px = im.load()
 w, h = im.size
 green = sum(1 for x in range(0, w, 4) for y in range(0, h, 4)
             if (p := px[x, y])[1] > 150 and p[1] > p[0] + 60 and p[1] > p[2] + 60)
-print(f"rwd-app-content: green pixels {green} (min {green_min})")
+print(f"roost-app-content: green pixels {green} (min {green_min})")
 sys.exit(0 if green >= green_min else 1)
 PYEOF
 then
     :
 else
-    echo "rwd-app-content: app-content pixels below threshold" >&2
+    echo "roost-app-content: app-content pixels below threshold" >&2
     exit 1
 fi
 
-echo "rwd-app-content: OK, artifacts in $ARTIFACTS"
+echo "roost-app-content: OK, artifacts in $ARTIFACTS"

@@ -12,7 +12,7 @@
 
 use std::os::unix::net::UnixStream;
 
-use rwd_compositor::TestCompositor;
+use roost_compositor::TestCompositor;
 use smithay::wayland::{
     compositor::with_states,
     shell::wlr_layer::{
@@ -35,7 +35,7 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 };
 
 const PUMP_ROUNDS: usize = 200;
-const PANEL_NAMESPACE: &str = "rwd-shell-panel";
+const PANEL_NAMESPACE: &str = "roost-shell-panel";
 const PANEL_HEIGHT: u32 = 32;
 
 /// One panel-shaped protocol client.
@@ -45,6 +45,8 @@ struct Client {
     layer_shell: Option<ZwlrLayerShellV1>,
     surface: Option<WlSurface>,
     layer_surface: Option<ZwlrLayerSurfaceV1>,
+    /// Bound `wl_output` globals, in registry order.
+    outputs: Vec<WlOutput>,
     synced: bool,
     configured: bool,
     configured_size: Option<(u32, u32)>,
@@ -76,8 +78,19 @@ macro_rules! empty_dispatch {
 
 empty_dispatch!(WlCompositor);
 empty_dispatch!(WlSurface);
-empty_dispatch!(WlOutput);
 empty_dispatch!(ZwlrLayerShellV1);
+
+impl Dispatch<WlOutput, ()> for Client {
+    fn event(
+        _: &mut Self,
+        _: &WlOutput,
+        _: <WlOutput as wayland_client::Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
 
 impl Dispatch<WlRegistry, ()> for Client {
     fn event(
@@ -102,6 +115,14 @@ impl Dispatch<WlRegistry, ()> for Client {
                 "zwlr_layer_shell_v1" => {
                     state.layer_shell =
                         Some(registry.bind::<ZwlrLayerShellV1, _, _>(name, version.min(5), qh, ()));
+                }
+                "wl_output" => {
+                    state.outputs.push(registry.bind::<WlOutput, _, _>(
+                        name,
+                        version.min(4),
+                        qh,
+                        (),
+                    ));
                 }
                 _ => {}
             }
@@ -193,11 +214,18 @@ fn connect(comp: &mut TestCompositor) -> (Connection, EventQueue<Client>, Client
 /// Attach the panel-shaped layer surface: top-anchored full-width strip
 /// with an exclusive zone, mirroring `ShellHost::create_panel_surface`.
 fn attach_panel(queue: &EventQueue<Client>, client: &mut Client) {
+    attach_panel_on(queue, client, None);
+}
+
+/// Attach the panel-shaped layer surface bound to `output` (`None`
+/// leaves placement to the compositor), mirroring the shell's
+/// per-output reconcile.
+fn attach_panel_on(queue: &EventQueue<Client>, client: &mut Client, output: Option<&WlOutput>) {
     let qh = queue.handle();
     let surface = client.compositor.as_ref().unwrap().create_surface(&qh, ());
     let layer_surface = client.layer_shell.as_ref().unwrap().get_layer_surface(
         &surface,
-        None,
+        output,
         ClientLayer::Top,
         PANEL_NAMESPACE.to_owned(),
         &qh,
@@ -221,7 +249,7 @@ fn attach_fullscreen(queue: &EventQueue<Client>, client: &mut Client) {
         &surface,
         None,
         ClientLayer::Overlay,
-        "rwd-shell-overview".to_owned(),
+        "roost-shell-overview".to_owned(),
         &qh,
         (),
     );
@@ -332,4 +360,71 @@ fn destroyed_panel_leaves_no_record() {
         comp.state.panel_surfaces().is_empty()
     });
     assert!(comp.state.panel_surfaces().is_empty());
+}
+
+#[test]
+fn bound_panel_arranges_at_its_output_size_and_offset() {
+    use roost_compositor::State;
+    use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
+
+    let mut comp = TestCompositor::new();
+    // Virtual primary on the left; the bound output tiles right of it.
+    comp.state.add_output("left", None, 1280, 800);
+
+    // One real output global: the client's `wl_output` resolves to it
+    // server-side through its protocol handle.
+    let dh = comp.display.handle();
+    let right = Output::new(
+        "right".to_owned(),
+        PhysicalProperties {
+            size: (0, 0).into(),
+            subpixel: Subpixel::Unknown,
+            make: "Roost".to_owned(),
+            model: "Test".to_owned(),
+        },
+    );
+    let mode = Mode {
+        size: (1920, 1080).into(),
+        refresh: 60_000,
+    };
+    right.change_current_state(
+        Some(mode),
+        None,
+        Some(Scale::Integer(1)),
+        Some((0, 0).into()),
+    );
+    right.set_preferred(mode);
+    right.create_global::<State>(&dh);
+    comp.state.add_output("right", Some(right), 1920, 1080);
+
+    let (_conn, mut queue, mut client) = connect(&mut comp);
+    let output = client.outputs.first().cloned().expect("one wl_output");
+    attach_panel_on(&queue, &mut client, Some(&output));
+    pump(&mut comp, &mut queue, &mut client, |_, c| {
+        c.configured_size.is_some_and(|(w, h)| w > 0 && h > 0)
+    });
+    assert_eq!(
+        client.configured_size,
+        Some((1920, PANEL_HEIGHT)),
+        "bound surface arranges at its own output width"
+    );
+
+    // The server bound the surface to the named output; layout places
+    // the strip at that output's slice of the global space.
+    pump(&mut comp, &mut queue, &mut client, |comp, _| {
+        comp.state
+            .panel_surfaces()
+            .first()
+            .is_some_and(|panel| panel.configured)
+    });
+    let panels = comp.state.panel_surfaces();
+    assert_eq!(panels.len(), 1);
+    assert_eq!(panels[0].output_name.as_deref(), Some("right"));
+    let placed = roost_compositor::layer::layer_layout(&comp.state);
+    assert_eq!(placed.len(), 1);
+    assert_eq!(
+        placed[0].1,
+        (1280, 0),
+        "strip sits at the tiled second-output origin"
+    );
 }

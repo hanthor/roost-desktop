@@ -2,7 +2,7 @@
 //!
 //! 001 spec R3 + ADR 0002: the shell host talks to the compositor over a
 //! dedicated Unix socket whose frames are `u32-LE length + postcard body`
-//! (see `rwd-shell-control`). This client owns the shell side of that
+//! (see `roost-shell-control`). This client owns the shell side of that
 //! conversation: the `Hello` handshake, full-`Snapshot` application into
 //! [`ShellModel`], ordered `Changes` application with revision-gap
 //! resnapshot, and activation commands carrying compositor-minted tokens.
@@ -32,9 +32,9 @@
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 
-use rwd_shell_control::{
-    ActivationToken, CommandKind, CommandStatus, DecodeError, ErrorKind, Message, SwitcherAction,
-    WindowInfo, WorkspaceInfo, CURRENT_VERSION, MAX_FRAME_BYTES,
+use roost_shell_control::{
+    ActivationToken, CommandKind, CommandStatus, DecodeError, ErrorKind, Message, OutputInfo,
+    SwitcherAction, WindowInfo, WorkspaceInfo, CURRENT_VERSION, MAX_FRAME_BYTES,
 };
 
 use crate::model::{ShellModel, SnapshotView, WindowEntry};
@@ -165,6 +165,13 @@ pub enum Handled {
         /// Current switcher selection, if any.
         selection: Option<u64>,
     },
+    /// Compositor output inventory (multi-monitor): the full list the
+    /// shell reconciles its per-output surfaces against. Carries no
+    /// revision — structural state, not model truth.
+    Outputs {
+        /// Output count now held.
+        count: usize,
+    },
 }
 
 /// Shell-side control client over a connected Unix socket.
@@ -177,6 +184,15 @@ pub struct ControlClient {
     next_request_id: u64,
     shadow_windows: Vec<WindowInfo>,
     shadow_workspaces: Vec<WorkspaceInfo>,
+    /// Compositor-owned session-lock display value from the latest
+    /// snapshot. Read-only here: the flag lives in the compositor,
+    /// never the shell.
+    locked: bool,
+    /// Output inventory from the latest `Outputs` message (empty
+    /// before the first one): name, size, and dock anchor per output.
+    /// Read-only here; the shell reconciles its surfaces against it
+    /// and never edits it.
+    outputs: Vec<OutputInfo>,
 }
 
 impl ControlClient {
@@ -202,6 +218,8 @@ impl ControlClient {
             next_request_id: INITIAL_REQUEST_ID,
             shadow_windows: Vec::new(),
             shadow_workspaces: Vec::new(),
+            locked: false,
+            outputs: Vec::new(),
         })
     }
 
@@ -221,6 +239,20 @@ impl ControlClient {
     /// cleared except by applying a `Snapshot`.
     pub fn needs_snapshot(&self) -> bool {
         self.needs_snapshot
+    }
+
+    /// Session-lock display value from the latest snapshot (false before
+    /// the first one). Mirrors the compositor-owned flag; the shell
+    /// renders from it and never flips it.
+    pub fn locked(&self) -> bool {
+        self.locked
+    }
+
+    /// Output inventory from the latest `Outputs` message (empty
+    /// before the first one). The shell reconciles its per-output
+    /// surfaces against this and never edits it.
+    pub fn outputs(&self) -> &[OutputInfo] {
+        &self.outputs
     }
 
     /// Send our `Hello`. Pair with [`ControlClient::await_hello`], or use
@@ -331,6 +363,39 @@ impl ControlClient {
         Ok(id)
     }
 
+    /// Ask the compositor to lock the session at once (manual lock
+    /// from the shell).
+    ///
+    /// The shell trigger surface calls this: like `toggle_overview`
+    /// it carries no activation token (the shell is a trusted local
+    /// peer and locking hides rather than reveals), it is
+    /// idempotent, and the compositor answers with a `CommandResult`
+    /// plus a locked, content-free snapshot the [`locked`](Self::locked)
+    /// display value mirrors. Returns the request id for
+    /// `CommandResult` correlation.
+    pub fn lock(&mut self) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::Lock,
+        })?;
+        Ok(id)
+    }
+
+    /// Ask the compositor to close a window (dock quit). Like
+    /// `toggle_overview` this carries no activation token: closing is
+    /// not focus, and unknown ids come back `Denied`. Callers must
+    /// already hold the id from their own view state. Returns the
+    /// request id for `CommandResult` correlation.
+    pub fn close_window(&mut self, window: u64) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::CloseWindow { window },
+        })?;
+        Ok(id)
+    }
+
     /// Request activation of the currently selected window.
     ///
     /// Builds the schema `Command` carrying the compositor-minted
@@ -383,9 +448,11 @@ impl ControlClient {
                 revision,
                 windows,
                 workspaces,
+                locked,
             } => {
                 self.shadow_windows = windows;
                 self.shadow_workspaces = workspaces;
+                self.locked = locked;
                 self.model.apply_snapshot_view(snapshot_view(
                     &self.shadow_windows,
                     &self.shadow_workspaces,
@@ -416,6 +483,16 @@ impl ControlClient {
                 Ok(Handled::Changes { to_revision })
             }
             Message::CommandResult { id, status } => Ok(Handled::CommandResult { id, status }),
+            Message::Outputs { outputs } => {
+                // Structural state, not model truth — never touches
+                // revision, `needs_snapshot`, or the window list. The
+                // panel reconciles its per-output surfaces against the
+                // stored list on its own tick.
+                self.outputs = outputs;
+                Ok(Handled::Outputs {
+                    count: self.outputs.len(),
+                })
+            }
             Message::Overview { open } => {
                 // 002 R1: overview intent is UI state, not model truth —
                 // never touches revision, `needs_snapshot`, or the window
@@ -463,7 +540,7 @@ impl ControlClient {
 
     /// Encode and write one frame. `WouldBlock` propagates to the caller.
     fn write_message(&mut self, msg: &Message) -> Result<(), ControlError> {
-        let frame = rwd_shell_control::encode_frame(msg);
+        let frame = roost_shell_control::encode_frame(msg);
         self.stream.write_all(&frame)?;
         Ok(())
     }
@@ -485,7 +562,7 @@ impl ControlClient {
                     }));
                 }
                 if self.read_buf.len() >= 4 + len {
-                    let msg = rwd_shell_control::decode_frame(&self.read_buf[..4 + len])?;
+                    let msg = roost_shell_control::decode_frame(&self.read_buf[..4 + len])?;
                     self.read_buf.drain(..4 + len);
                     return Ok(msg);
                 }
@@ -525,6 +602,7 @@ fn message_label(msg: &Message) -> &'static str {
         Message::Error { .. } => "Error",
         Message::Overview { .. } => "Overview",
         Message::Switcher { .. } => "Switcher",
+        Message::Outputs { .. } => "Outputs",
     }
 }
 
@@ -544,6 +622,7 @@ fn snapshot_view(windows: &[WindowInfo], workspaces: &[WorkspaceInfo]) -> Snapsh
             .map(|w| {
                 WindowEntry::new(w.id, w.title.clone(), w.focused)
                     .with_workspace(u32::try_from(w.workspace).unwrap_or(u32::MAX))
+                    .with_app_id(w.app_id.clone())
             })
             .collect(),
         workspaces: workspaces
@@ -567,9 +646,9 @@ fn snapshot_view(windows: &[WindowInfo], workspaces: &[WorkspaceInfo]) -> Snapsh
 fn apply_ops(
     shadow_windows: &mut Vec<WindowInfo>,
     shadow_workspaces: &mut Vec<WorkspaceInfo>,
-    ops: &[rwd_shell_control::StateOp],
+    ops: &[roost_shell_control::StateOp],
 ) {
-    use rwd_shell_control::StateOp;
+    use roost_shell_control::StateOp;
     for op in ops {
         match op {
             StateOp::WindowOpened(info) => {
@@ -614,7 +693,7 @@ fn apply_ops(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rwd_shell_control::{decode_frame, encode_frame, ProtocolVersion, WindowId, WorkspaceId};
+    use roost_shell_control::{decode_frame, encode_frame, ProtocolVersion, WindowId, WorkspaceId};
 
     fn pair() -> (ControlClient, UnixStream) {
         let (ours, peer) = UnixStream::pair().expect("socketpair");
@@ -688,6 +767,7 @@ mod tests {
                 window(8, "Browser", 1, false),
             ],
             workspaces: vec![workspace(1, true), workspace(2, false)],
+            locked: false,
         }
     }
 
@@ -807,6 +887,55 @@ mod tests {
     }
 
     #[test]
+    fn outputs_frame_stores_inventory_without_touching_revision() {
+        let (mut client, mut peer) = handshook();
+        assert!(
+            client.outputs().is_empty(),
+            "no inventory before the first frame"
+        );
+        server_write(&mut peer, &snapshot_rev7());
+        assert!(matches!(
+            client.poll().expect("snapshot"),
+            Handled::Snapshot { .. }
+        ));
+        let inventory = vec![
+            roost_shell_control::OutputInfo {
+                name: "left".to_owned(),
+                width: 1280,
+                height: 800,
+                primary: true,
+            },
+            roost_shell_control::OutputInfo {
+                name: "right".to_owned(),
+                width: 1920,
+                height: 1080,
+                primary: false,
+            },
+        ];
+        server_write(
+            &mut peer,
+            &Message::Outputs {
+                outputs: inventory.clone(),
+            },
+        );
+        match client.poll().expect("poll outputs") {
+            Handled::Outputs { count } => assert_eq!(count, 2),
+            other => panic!("expected Outputs, got {other:?}"),
+        }
+        assert_eq!(client.outputs(), inventory.as_slice());
+        assert_eq!(client.revision(), Some(7), "inventory is not model truth");
+        assert!(
+            !client.needs_snapshot(),
+            "inventory never flags a resnapshot"
+        );
+        assert_eq!(
+            client.model().windows().len(),
+            2,
+            "inventory keeps the window list"
+        );
+    }
+
+    #[test]
     fn changes_apply_deltas_and_bump_revision() {
         let (mut client, mut peer) = handshook();
         server_write(&mut peer, &snapshot_rev7());
@@ -820,9 +949,9 @@ mod tests {
                 from_revision: 7,
                 to_revision: 9,
                 ops: vec![
-                    rwd_shell_control::StateOp::WindowOpened(window(9, "Editor", 2, false)),
-                    rwd_shell_control::StateOp::WindowFocused { id: 9 },
-                    rwd_shell_control::StateOp::WindowClosed { id: 7 },
+                    roost_shell_control::StateOp::WindowOpened(window(9, "Editor", 2, false)),
+                    roost_shell_control::StateOp::WindowFocused { id: 9 },
+                    roost_shell_control::StateOp::WindowClosed { id: 7 },
                 ],
             },
         );
@@ -856,7 +985,7 @@ mod tests {
             &Message::Changes {
                 from_revision: 3,
                 to_revision: 4,
-                ops: vec![rwd_shell_control::StateOp::WindowClosed { id: 8 }],
+                ops: vec![roost_shell_control::StateOp::WindowClosed { id: 8 }],
             },
         );
         match client.poll().expect("poll gap") {
@@ -882,6 +1011,7 @@ mod tests {
                 revision: 10,
                 windows: vec![window(8, "Browser", 1, true)],
                 workspaces: vec![workspace(1, true)],
+                locked: false,
             },
         );
         assert!(matches!(
@@ -966,6 +1096,78 @@ mod tests {
     }
 
     #[test]
+    fn close_window_sends_id_command_with_fresh_id() {
+        let (mut client, mut peer) = handshook();
+        let id = client.close_window(9).expect("close");
+        assert_eq!(id, INITIAL_REQUEST_ID);
+        match server_read(&mut peer) {
+            Message::Command {
+                id: wire_id,
+                kind: CommandKind::CloseWindow { window },
+            } => {
+                assert_eq!(wire_id, id, "wire id matches returned id");
+                assert_eq!(window, 9, "close names the dock's window");
+            }
+            other => panic!("expected CloseWindow command, got {other:?}"),
+        }
+        // Close needs no selection: it works on an empty model too.
+        assert_eq!(client.model().selected(), None);
+    }
+
+    #[test]
+    fn snapshot_carries_app_id_into_entries() {
+        let (mut client, mut peer) = handshook();
+        server_write(&mut peer, &snapshot_rev7());
+        assert!(matches!(
+            client.poll().expect("snapshot"),
+            Handled::Snapshot { .. }
+        ));
+        let entry = client
+            .model()
+            .windows()
+            .iter()
+            .find(|w| w.id == 7)
+            .expect("window 7 in snapshot");
+        assert_eq!(entry.app_id.as_deref(), Some("org.example.App"));
+    }
+
+    #[test]
+    fn snapshot_lock_flag_mirrors_into_display_value() {
+        let (mut client, mut peer) = handshook();
+        assert!(!client.locked(), "no snapshot yet: unlocked");
+        server_write(&mut peer, &snapshot_rev7());
+        assert!(matches!(
+            client.poll().expect("snapshot"),
+            Handled::Snapshot { .. }
+        ));
+        assert!(!client.locked());
+        // A locked snapshot flips the display value and strips content.
+        server_write(
+            &mut peer,
+            &Message::Snapshot {
+                revision: 8,
+                windows: vec![],
+                workspaces: vec![workspace(1, true)],
+                locked: true,
+            },
+        );
+        assert!(matches!(
+            client.poll().expect("locked snapshot"),
+            Handled::Snapshot { revision: 8 }
+        ));
+        assert!(client.locked());
+        assert!(client.model().windows().is_empty());
+        // Unlock restores the display value with content.
+        server_write(&mut peer, &snapshot_rev7());
+        assert!(matches!(
+            client.poll().expect("unlocked snapshot"),
+            Handled::Snapshot { .. }
+        ));
+        assert!(!client.locked());
+        assert_eq!(client.model().windows().len(), 2);
+    }
+
+    #[test]
     fn toggle_overview_sends_unit_command_with_fresh_id() {
         let (mut client, mut peer) = handshook();
         let id = client.toggle_overview().expect("toggle");
@@ -978,6 +1180,22 @@ mod tests {
             other => panic!("expected ToggleOverview command, got {other:?}"),
         }
         // Toggle needs no selection: it works on an empty model too.
+        assert_eq!(client.model().selected(), None);
+    }
+
+    #[test]
+    fn lock_sends_unit_command_with_fresh_id() {
+        let (mut client, mut peer) = handshook();
+        let id = client.lock().expect("lock");
+        assert_eq!(id, INITIAL_REQUEST_ID);
+        match server_read(&mut peer) {
+            Message::Command {
+                id: wire_id,
+                kind: CommandKind::Lock,
+            } => assert_eq!(wire_id, id, "wire id matches returned id"),
+            other => panic!("expected Lock command, got {other:?}"),
+        }
+        // Lock needs no selection: it works on an empty model too.
         assert_eq!(client.model().selected(), None);
     }
 

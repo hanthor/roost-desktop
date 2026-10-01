@@ -4,7 +4,7 @@
 
 use std::os::unix::{io::AsFd, net::UnixStream};
 
-use rwd_compositor::TestCompositor;
+use roost_compositor::TestCompositor;
 use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
 use smithay::wayland::compositor;
 use wayland_client::{

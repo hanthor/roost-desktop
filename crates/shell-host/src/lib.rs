@@ -13,11 +13,19 @@
 
 pub mod apps;
 pub mod control;
+pub mod dock;
+pub mod extensions;
 pub mod favorites;
+pub mod icons;
+pub mod intake;
 pub mod keyboard;
 pub mod model;
 pub mod notifications;
 pub mod overview;
 pub mod panel;
+pub mod popup;
+pub mod prefs;
 pub mod search;
+pub mod settings;
 pub mod tiles;
+pub mod watcher;

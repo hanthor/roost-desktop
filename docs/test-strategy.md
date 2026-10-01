@@ -1,7 +1,7 @@
 # Verification and test strategy
 
 **Status:** Draft framework; no implementation tests have run.  
-**Applies to:** all RWD speks and release gates.  
+**Applies to:** all Roost speks and release gates.  
 **Principle:** Every requirement has a traceable test or review artifact. Passing a protocol probe alone does not establish user-visible correctness, security, or hardware support.
 
 ## 1. Verification layers
@@ -64,7 +64,7 @@ On each supported distro: clean install, session selection, login/logout, upgrad
 
 ## 4. Test design and traceability
 
-- Assign stable IDs `RWD-<spek>-<requirement>-<case>` and link each spec requirement to unit, protocol, integration, manual, security, or performance cases.
+- Assign stable IDs `Roost-<spek>-<requirement>-<case>` and link each spec requirement to unit, protocol, integration, manual, security, or performance cases.
 - Every security boundary gets positive, negative, spoofing/replay, resource exhaustion, and process-failure cases.
 - Every workflow gets normal, cancellation, timeout/unavailable-service, and recovery behavior where applicable.
 - Property tests cover invariants rather than implementation details: no invisible/orphaned windows after output changes; no focus to unauthorized surfaces; monotonic state revisions; quota bounds; lock remains latched until valid unlock.

@@ -3,12 +3,12 @@
 //! End-to-end proof of the recovery contract against the real crate APIs
 //! (no fakes on the server side):
 //!
-//! - [`rwd_compositor::control`]: malformed / oversize / stale-major frames
+//! - [`roost_compositor::control`]: malformed / oversize / stale-major frames
 //!   over real sockets are rejected with typed errors and the server side
 //!   stays alive (driven through the real [`ControlServer`] accept path).
-//! - [`rwd_compositor::state`]: a forced revision gap against [`StateModel`]
+//! - [`roost_compositor::state`]: a forced revision gap against [`StateModel`]
 //!   yields a fresh full snapshot, never a delta.
-//! - [`rwd_compositor::supervise`]: a killed `sleep` child under
+//! - [`roost_compositor::supervise`]: a killed `sleep` child under
 //!   [`Supervisor`] exhausts a small restart budget on a [`ManualClock`]
 //!   (wall-clock capped at 10 s).
 //! - Disconnect-then-reconnect: a dropped client reconnects and receives a
@@ -31,15 +31,15 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use rwd_compositor::control::{
+use roost_compositor::control::{
     ControlConn, ControlError, ControlServer, Emitted, Handled, Session,
 };
-use rwd_compositor::state::StateModel;
-use rwd_compositor::supervise::{
+use roost_compositor::state::StateModel;
+use roost_compositor::supervise::{
     snapshot_hash, ChildEvent, Clock, ManualClock, RestartPolicy, RunArtifact, ShellDriver,
     SuperviseError, Supervisor,
 };
-use rwd_shell_control::{
+use roost_shell_control::{
     decode_frame, encode_frame, CommandKind, ErrorKind, Message, ProtocolVersion, CURRENT_VERSION,
     MAX_FRAME_BYTES,
 };
@@ -219,7 +219,7 @@ fn oversize_frame_rejected_with_typed_error_and_server_accepts_next_client() {
     assert!(
         matches!(
             err,
-            ControlError::Decode(rwd_shell_control::DecodeError::Oversize { .. })
+            ControlError::Decode(roost_shell_control::DecodeError::Oversize { .. })
         ),
         "expected typed Oversize decode error, got {err:?}"
     );
@@ -269,7 +269,7 @@ fn stale_major_rejected_with_typed_error_and_server_accepts_next_client() {
     assert!(
         matches!(
             err,
-            ControlError::Decode(rwd_shell_control::DecodeError::IncompatibleVersion { .. })
+            ControlError::Decode(roost_shell_control::DecodeError::IncompatibleVersion { .. })
         ),
         "expected typed IncompatibleVersion error, got {err:?}"
     );
@@ -310,7 +310,7 @@ fn revision_gap_forces_full_resnapshot_not_delta() {
     assert_eq!(session.last_revision(), model.revision());
 
     // Force the shell's revision out of the retained change-log window.
-    for i in 0..(rwd_compositor::state::MAX_CHANGE_LOG as u64 + 10) {
+    for i in 0..(roost_compositor::state::MAX_CHANGE_LOG as u64 + 10) {
         model.insert(&format!("w{i}"), None, 1);
     }
     assert!(
@@ -455,7 +455,7 @@ fn stalled_client_gets_backpressure_and_server_still_serves() {
         revision: model.revision(),
         windows: model
             .windows()
-            .map(|w| rwd_shell_control::WindowInfo {
+            .map(|w| roost_shell_control::WindowInfo {
                 id: w.id,
                 title: w.title.clone(),
                 app_id: None,
@@ -467,12 +467,13 @@ fn stalled_client_gets_backpressure_and_server_still_serves() {
         workspaces: model
             .workspaces()
             .iter()
-            .map(|id| rwd_shell_control::WorkspaceInfo {
+            .map(|id| roost_shell_control::WorkspaceInfo {
                 id: u64::from(*id),
                 name: None,
                 active: false,
             })
             .collect(),
+        locked: false,
     };
     let mut pressured = false;
     for _ in 0..500 {
@@ -503,7 +504,7 @@ fn stalled_client_gets_backpressure_and_server_still_serves() {
     let (_dir, server, path) = bind_server();
     let (client, _session, _, snapshot) = handshake_pair(&server, &path, &model);
     assert!(matches!(snapshot, Message::Snapshot { .. }));
-    let mut comp = rwd_compositor::TestCompositor::new();
+    let mut comp = roost_compositor::TestCompositor::new();
     comp.pump(); // must complete, never blocked by the stalled client.
     let _ = client;
 }
@@ -530,37 +531,37 @@ fn drive_crash_loop() -> u32 {
     let mut driver = ShellDriver::new(
         RestartPolicy::new(2, 1, 1),
         std::path::PathBuf::from("/bin/false"),
-        "rwd-harness.sock".to_owned(),
+        "roost-harness.sock".to_owned(),
         dir.path().join("control.sock"),
     );
     let clock = ManualClock::new(0);
     let mut now = clock.now_ms();
     assert_eq!(
         driver.poll(now),
-        rwd_compositor::supervise::ShellStatus::Running,
+        roost_compositor::supervise::ShellStatus::Running,
         "initial shell spawn must succeed"
     );
     for _ in 0..64 {
         match driver.poll(now) {
-            rwd_compositor::supervise::ShellStatus::Running => {
+            roost_compositor::supervise::ShellStatus::Running => {
                 std::thread::sleep(Duration::from_millis(2));
             }
-            rwd_compositor::supervise::ShellStatus::Waiting { .. } => {
+            roost_compositor::supervise::ShellStatus::Waiting { .. } => {
                 clock.set(now.saturating_add(5));
                 now = clock.now_ms();
             }
-            rwd_compositor::supervise::ShellStatus::Exhausted => {
+            roost_compositor::supervise::ShellStatus::Exhausted => {
                 let events = driver.drain_events();
                 assert!(
                     events.iter().any(|e| matches!(
                         e,
-                        rwd_compositor::supervise::SupervisorEvent::BudgetExhausted
+                        roost_compositor::supervise::SupervisorEvent::BudgetExhausted
                     )),
                     "exhaustion must be observable, got {events:?}"
                 );
                 return driver.restarts_used();
             }
-            rwd_compositor::supervise::ShellStatus::Fault(e) => {
+            roost_compositor::supervise::ShellStatus::Fault(e) => {
                 panic!("shell driver faulted: {e}")
             }
         }
@@ -641,7 +642,7 @@ fn hundred_fault_runs_keep_apps_alive_and_resync() {
             "gap" => {
                 // Force the shell's revision out of the retained
                 // change-log window, then drop it mid-gap.
-                for i in 0..(rwd_compositor::state::MAX_CHANGE_LOG as u64 + 10) {
+                for i in 0..(roost_compositor::state::MAX_CHANGE_LOG as u64 + 10) {
                     model.insert(&format!("harness-{run}-gap-{i}"), None, 1);
                 }
                 assert!(model.changes_since(revision_before).is_err());

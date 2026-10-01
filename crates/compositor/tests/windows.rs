@@ -1,6 +1,6 @@
 //! T2 window mapping, input routing, and focus-policy tests.
 //!
-//! Headless end-to-end coverage for `rwd_compositor::windows` with no
+//! Headless end-to-end coverage for `roost_compositor::windows` with no
 //! backend: real protocol clients over a socketpair map xdg_toplevels,
 //! then the test drives [`WindowManager`] directly (reconcile, focus,
 //! pointer/keyboard delivery, move/resize/workspace) and observes the
@@ -14,16 +14,19 @@
 
 use std::os::unix::net::UnixStream;
 
-use rwd_compositor::layer::OVERVIEW_NAMESPACE;
-use rwd_compositor::windows::{
+use roost_compositor::layer::OVERVIEW_NAMESPACE;
+use roost_compositor::windows::{
     ManagerInput, SessionMode, TileSide, WindowLayout, WindowManager, ALT_LEFT_KEYCODE,
     ARROW_DOWN_KEYCODE, ARROW_LEFT_KEYCODE, ARROW_RIGHT_KEYCODE, ARROW_UP_KEYCODE, ESCAPE_KEYCODE,
     F4_KEYCODE, PAGE_DOWN_KEYCODE, PAGE_UP_KEYCODE, R_KEYCODE, SHIFT_LEFT_KEYCODE,
     SUPER_LEFT_KEYCODE, TAB_KEYCODE, T_KEYCODE,
 };
-use rwd_compositor::TestCompositor;
-use rwd_shell_control::SwitcherAction;
-use smithay::utils::{Logical, Point};
+use roost_compositor::TestCompositor;
+use roost_shell_control::SwitcherAction;
+use smithay::desktop::WindowSurface;
+use smithay::reexports::wayland_server::Resource;
+use smithay::utils::{IsAlive, Logical, Point};
+use smithay::wayland::seat::WaylandFocus;
 use wayland_client::{
     protocol::{
         wl_callback::WlCallback,
@@ -1079,6 +1082,25 @@ fn alt_f4_politely_closes_focused_window() {
     assert!(f.manager.model().window(f.id_b).is_none());
     assert_eq!(f.manager.model().focused(), Some(f.id_a));
     assert!(!f.manager.close_window(999));
+}
+
+#[test]
+fn dock_close_request_unmaps_and_keeps_sibling() {
+    let mut f = two_windows();
+    // The runtime tick answers a reported shell close with the polite
+    // client close; the client honors it by going away (drop here
+    // stands in for a real client exit, exactly like the Alt+F4 test).
+    assert!(f.manager.close_window(f.id_a));
+    pump(&mut f.comp, &mut f.queue_a, &mut f.client_a, |c| {
+        c.close_requested
+    });
+    assert!(f.client_a.close_requested);
+    drop((f.conn_a, f.queue_a, f.client_a));
+    f.comp.pump();
+    f.comp.pump();
+    f.manager.reconcile(&mut f.comp.state);
+    assert!(f.manager.model().window(f.id_a).is_none());
+    assert!(f.manager.model().window(f.id_b).is_some());
 }
 
 #[test]
@@ -2344,4 +2366,64 @@ fn scroll_preset_shrink_reclamps_offset() {
     assert_eq!(gamma.loc.x + gamma.size.w, 1280);
     sync_three(&mut f);
     assert_no_r_press(&f);
+}
+
+/// Unified handles: every managed entry holds the toolkit's `Window`
+/// on its native variant, one distinct live surface per client.
+#[test]
+fn managed_entries_hold_unified_window_handles() {
+    let f = two_windows();
+    let visible = f.manager.visible_windows();
+    assert_eq!(visible.len(), 2);
+    for (window, _geometry) in &visible {
+        assert!(window.is_wayland());
+        assert!(window.alive());
+        assert!(window.wl_surface().is_some());
+        assert!(window.toplevel().is_some());
+        assert!(matches!(
+            window.underlying_surface(),
+            WindowSurface::Wayland(_)
+        ));
+    }
+    // One distinct underlying surface per entry: the handles track
+    // alpha's and beta's own surfaces, not one shared handle.
+    let ids: Vec<_> = visible
+        .iter()
+        .map(|(window, _)| window.toplevel().unwrap().wl_surface().id())
+        .collect();
+    assert_eq!(ids.len(), 2);
+    assert_ne!(ids[0], ids[1]);
+}
+
+/// One reconcile path end to end for native entries through the
+/// unified type: reconcile maps, focus targets, polite close asks,
+/// and the next reconcile after client exit drops the entry with
+/// focus falling back to the sibling.
+#[test]
+fn unified_round_trip_reconcile_focus_close_reconcile() {
+    let mut f = two_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    assert_eq!(f.manager.model().focused(), Some(f.id_a));
+
+    // Polite close through the unified handle: the client observes
+    // the request, but the live entry stays managed until it exits.
+    assert!(f.manager.close_window(f.id_a));
+    pump(&mut f.comp, &mut f.queue_a, &mut f.client_a, |c| {
+        c.close_requested
+    });
+    assert!(f.client_a.close_requested);
+    f.manager.reconcile(&mut f.comp.state);
+    assert!(f.manager.model().window(f.id_a).is_some());
+
+    // Client exit: the alive sweep drops the entry on the next
+    // reconcile and focus falls back to beta.
+    drop((f.conn_a, f.queue_a, f.client_a));
+    f.comp.pump();
+    f.comp.pump();
+    f.manager.reconcile(&mut f.comp.state);
+    assert!(f.manager.model().window(f.id_a).is_none());
+    assert!(f.manager.geometry(f.id_a).is_none());
+    assert_eq!(f.manager.model().focused(), Some(f.id_b));
+    assert_eq!(f.manager.visible_windows().len(), 1);
+    assert!(!f.manager.close_window(f.id_a));
 }

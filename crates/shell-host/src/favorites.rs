@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 /// Favorites shown in the overview grid.
 pub const MAX_FAVORITES: usize = 32;
 /// Shell data dir name under `$XDG_DATA_HOME`.
-pub const DATA_DIR_NAME: &str = "rwd-shell";
+pub const DATA_DIR_NAME: &str = "roost-shell";
 /// Favorites file name.
 pub const FAVORITES_FILE: &str = "favorites.json";
 
@@ -100,7 +100,7 @@ impl Favorites {
     }
 }
 
-/// `$XDG_DATA_HOME/rwd-shell` (default `~/.local/share/rwd-shell`).
+/// `$XDG_DATA_HOME/roost-shell` (default `~/.local/share/roost-shell`).
 pub fn data_dir() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)

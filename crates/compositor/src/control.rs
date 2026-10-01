@@ -1,7 +1,7 @@
 //! Compositor-side control channel (001 R4/R6, ADR 0002).
 //!
 //! Private local IPC between the compositor (authoritative) and the shell
-//! host. Wire types and framing live in the `rwd-shell-control` crate
+//! host. Wire types and framing live in the `roost-shell-control` crate
 //! (version handshake, length-prefixed frames, 1 MiB cap); this module owns
 //! the compositor side: accept, handshake, snapshots, change deltas, and
 //! command dispatch over a [`StateModel`].
@@ -37,10 +37,10 @@
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 
-use rwd_shell_control::{
+use roost_shell_control::{
     decode_frame, encode_frame, ActivationToken, CommandKind, CommandStatus, DecodeError,
-    ErrorKind, Message, ProtocolVersion, StateOp, SwitcherAction, WorkspaceInfo, CURRENT_VERSION,
-    MAX_FRAME_BYTES,
+    ErrorKind, Message, OutputInfo, ProtocolVersion, StateOp, SwitcherAction, WorkspaceInfo,
+    CURRENT_VERSION, MAX_FRAME_BYTES,
 };
 
 use crate::state::{StateChange, StateModel, TokenStore, WindowEntry};
@@ -285,6 +285,19 @@ pub struct Session<'a> {
     /// open state flipped by `ToggleOverview` commands and runtime
     /// triggers, broadcast back as [`Message::Overview`].
     overview: std::rc::Rc<std::cell::Cell<bool>>,
+    /// Compositor-owned session-lock flag shared with the hub: the
+    /// runtime (idle timeout) and `Lock` commands flip it, and every
+    /// snapshot/delta path reads it. The flag lives here in the
+    /// compositor, never in the restartable shell.
+    locked: std::rc::Rc<std::cell::Cell<bool>>,
+    /// Lock value the shell last received. A flip forces a fresh
+    /// snapshot (resnapshot rule for lock transitions): locking strips
+    /// window content, unlocking restores it.
+    locked_sent: bool,
+    /// Window ids the shell asked to close this round (`CloseWindow`
+    /// commands the mirror applied). Drained by [`ControlHub::poll`]
+    /// so the runtime can send the polite client close.
+    closed: Vec<u64>,
 }
 
 impl std::fmt::Debug for Session<'_> {
@@ -308,6 +321,7 @@ impl<'a> Session<'a> {
             deny_all_tokens,
             std::rc::Rc::new(|_| String::new()),
             std::rc::Rc::new(std::cell::Cell::new(false)),
+            std::rc::Rc::new(std::cell::Cell::new(false)),
         )
     }
 
@@ -319,20 +333,28 @@ impl<'a> Session<'a> {
     /// [`validator`](crate::state::TokenStore::validator)); the default
     /// minter issues empty tokens that can never validate. The shared
     /// `overview` cell joins the hub's overview intent so shell
-    /// `ToggleOverview` commands flip state the hub broadcasts.
+    /// `ToggleOverview` commands flip state the hub broadcasts; the
+    /// shared `locked` cell joins the hub's session-lock flag so every
+    /// (re)connect snapshot carries the current lock state (a shell
+    /// restart while locked stays locked).
     pub fn handshake_with(
         conn: ControlConn,
         model: &StateModel,
         validator: impl Fn(&ActivationToken, Option<&str>) -> bool + 'a,
         minter: TokenMinter,
         overview: std::rc::Rc<std::cell::Cell<bool>>,
+        locked: std::rc::Rc<std::cell::Cell<bool>>,
     ) -> Result<Self, ControlError> {
+        let locked_sent = locked.get();
         let mut session = Self {
             conn,
             validator: Box::new(validator),
             minter,
             last_revision: 0,
             overview,
+            locked,
+            locked_sent,
+            closed: Vec::new(),
         };
         let msg = match session.conn.read_frame() {
             Ok(msg) => msg,
@@ -383,12 +405,16 @@ impl<'a> Session<'a> {
 
     /// Send a full snapshot of `model` (on-request path; the handshake and
     /// gap paths call this internally). Every window carries a freshly
-    /// minted activation token from this session's minter.
+    /// minted activation token from this session's minter. Carries the
+    /// session-lock flag (stripping window content while locked) and
+    /// records it as sent for the lock-transition resnapshot rule.
     pub fn send_snapshot(&mut self, model: &StateModel) -> Result<u64, ControlError> {
         let revision = model.revision();
+        let locked = self.locked.get();
         self.conn
-            .write_frame(&snapshot_message(model, &*self.minter))?;
+            .write_frame(&snapshot_message(model, &*self.minter, locked))?;
         self.last_revision = revision;
+        self.locked_sent = locked;
         Ok(revision)
     }
 
@@ -399,6 +425,15 @@ impl<'a> Session<'a> {
         self.conn.write_frame(&Message::Overview { open })
     }
 
+    /// Send the current output inventory (multi-monitor). Best-effort
+    /// like overview: the hub rebroadcasts until every live session
+    /// holds it, and newcomers get it right after the handshake.
+    pub fn send_outputs(&mut self, outputs: &[OutputInfo]) -> Result<(), ControlError> {
+        self.conn.write_frame(&Message::Outputs {
+            outputs: outputs.to_vec(),
+        })
+    }
+
     /// Send one Alt-Tab switcher drive event (002 workspaces).
     pub fn send_switcher(&mut self, action: SwitcherAction) -> Result<(), ControlError> {
         self.conn.write_frame(&Message::Switcher { action })
@@ -407,8 +442,20 @@ impl<'a> Session<'a> {
     /// Catch the shell up from [`last_revision`](Self::last_revision):
     /// incremental `Changes` when the change log covers the gap, else a
     /// fresh snapshot (resnapshot rule). New token-bearing entries mint
-    /// through this session's minter.
+    /// through this session's minter. A lock transition since the last
+    /// send forces a fresh snapshot (locking strips window content,
+    /// unlocking restores it); while locked with no transition, deltas
+    /// are suppressed (never leak titles) and only the cursor advances.
     pub fn emit_deltas(&mut self, model: &StateModel) -> Result<Emitted, ControlError> {
+        if self.locked.get() != self.locked_sent {
+            let revision = self.send_snapshot(model)?;
+            return Ok(Emitted::Snapshot { revision });
+        }
+        if self.locked.get() {
+            let to = model.revision();
+            self.last_revision = to;
+            return Ok(Emitted::Idle { revision: to });
+        }
         match model.changes_since(self.last_revision) {
             Ok(entries) => {
                 let ops: Vec<StateOp> = entries
@@ -498,7 +545,11 @@ impl<'a> Session<'a> {
                 Ok(Handled::HelloResync { revision })
             }
             Message::Command { id, kind } => {
-                let status = apply_command(model, &self.validator, &self.overview, &kind);
+                let (status, closed) =
+                    apply_command(model, &self.validator, &self.overview, &self.locked, &kind);
+                if let Some(window) = closed {
+                    self.closed.push(window);
+                }
                 let applied = matches!(status, CommandStatus::Applied);
                 self.conn
                     .write_frame(&Message::CommandResult { id, status })?;
@@ -509,6 +560,7 @@ impl<'a> Session<'a> {
             | Message::CommandResult { .. }
             | Message::Overview { .. }
             | Message::Switcher { .. }
+            | Message::Outputs { .. }
             | Message::Error { .. } => {
                 let _ = self.conn.write_frame(&Message::Error {
                     kind: ErrorKind::UnknownCommand,
@@ -544,20 +596,31 @@ fn message_kind(msg: &Message) -> &'static str {
         Message::Error { .. } => "Error",
         Message::Overview { .. } => "Overview",
         Message::Switcher { .. } => "Switcher",
+        Message::Outputs { .. } => "Outputs",
     }
 }
 
 /// Build the full-snapshot message for `model`, minting one activation
-/// token per window through `mint`.
-fn snapshot_message(model: &StateModel, mint: &dyn Fn(Option<&str>) -> String) -> Message {
+/// token per window through `mint`. While `locked` the snapshot carries
+/// the flag with no window content (empty list): the lock screen shows
+/// no titles, and the restartable shell must not retain any.
+/// Workspaces are structural ids only and pass through unchanged.
+fn snapshot_message(
+    model: &StateModel,
+    mint: &dyn Fn(Option<&str>) -> String,
+    locked: bool,
+) -> Message {
     let snap = model.snapshot();
     Message::Snapshot {
         revision: snap.revision,
-        windows: snap
-            .windows
-            .iter()
-            .map(|w| window_to_wire(w, mint))
-            .collect(),
+        windows: if locked {
+            Vec::new()
+        } else {
+            snap.windows
+                .iter()
+                .map(|w| window_to_wire(w, mint))
+                .collect()
+        },
         workspaces: snap
             .workspaces
             .iter()
@@ -567,6 +630,7 @@ fn snapshot_message(model: &StateModel, mint: &dyn Fn(Option<&str>) -> String) -
                 active: *id == snap.active,
             })
             .collect(),
+        locked,
     }
 }
 
@@ -575,8 +639,8 @@ fn snapshot_message(model: &StateModel, mint: &dyn Fn(Option<&str>) -> String) -
 fn window_to_wire(
     w: &WindowEntry,
     mint: &dyn Fn(Option<&str>) -> String,
-) -> rwd_shell_control::WindowInfo {
-    rwd_shell_control::WindowInfo {
+) -> roost_shell_control::WindowInfo {
+    roost_shell_control::WindowInfo {
         id: w.id,
         title: w.title.clone(),
         app_id: w.app_id.clone(),
@@ -618,43 +682,75 @@ fn state_op(change: &StateChange, mint: &dyn Fn(Option<&str>) -> String) -> Opti
 /// (`CommandResult::Denied`), not protocol errors. The validator sees the
 /// target window's `app_id` from the model, so tokens bind to the window
 /// they were minted for.
+///
+/// Returns the status plus the closed window id when a `CloseWindow`
+/// applied: the hub drains those so the runtime can send the polite
+/// client close (the mirror keeps the window until the client unmaps).
 fn apply_command(
     model: &mut StateModel,
     validator: &dyn Fn(&ActivationToken, Option<&str>) -> bool,
     overview: &std::cell::Cell<bool>,
+    locked: &std::cell::Cell<bool>,
     kind: &CommandKind,
-) -> CommandStatus {
+) -> (CommandStatus, Option<u64>) {
     match kind {
         CommandKind::ActivateWindow { window, token } => {
             let Some(entry) = model.window(*window) else {
-                return CommandStatus::Denied {
-                    reason: "unknown window".to_owned(),
-                };
+                return (
+                    CommandStatus::Denied {
+                        reason: "unknown window".to_owned(),
+                    },
+                    None,
+                );
             };
             if !validator(token, entry.app_id.as_deref()) {
-                return CommandStatus::Denied {
-                    reason: "activation token rejected".to_owned(),
-                };
+                return (
+                    CommandStatus::Denied {
+                        reason: "activation token rejected".to_owned(),
+                    },
+                    None,
+                );
             }
             let _ = model.set_focused(Some(*window));
-            CommandStatus::Applied
+            (CommandStatus::Applied, None)
         }
         CommandKind::FocusWorkspace { workspace } => {
             // Dynamic workspaces: any representable id switches
             // (registering if new); focus lands on the tick's reconcile.
             let Ok(workspace) = u32::try_from(*workspace) else {
-                return CommandStatus::Denied {
-                    reason: "workspace id out of range".to_owned(),
-                };
+                return (
+                    CommandStatus::Denied {
+                        reason: "workspace id out of range".to_owned(),
+                    },
+                    None,
+                );
             };
             model.set_active_workspace(workspace);
-            CommandStatus::Applied
+            (CommandStatus::Applied, None)
         }
         CommandKind::ToggleOverview => {
             // Flip the hub-shared intent; the hub broadcasts the new
             // state as `Message::Overview` (002 R1).
             overview.set(!overview.get());
-            CommandStatus::Applied
+            (CommandStatus::Applied, None)
+        }
+        CommandKind::CloseWindow { window } => {
+            if model.window(*window).is_none() {
+                return (
+                    CommandStatus::Denied {
+                        reason: "unknown window".to_owned(),
+                    },
+                    None,
+                );
+            }
+            (CommandStatus::Applied, Some(*window))
+        }
+        CommandKind::Lock => {
+            // Manual lock from the shell (session-lock set path):
+            // engage the compositor-owned flag; idempotent, always
+            // applied. The next poll snapshots the stripped state.
+            locked.set(true);
+            (CommandStatus::Applied, None)
         }
     }
 }
@@ -662,6 +758,17 @@ fn apply_command(
 /// Our protocol version, for handshake replies.
 pub fn our_version() -> ProtocolVersion {
     CURRENT_VERSION
+}
+
+/// Outcome of one [`ControlHub::poll`] round: model ids the shell
+/// activated (runtime applies Wayland-side focus) and asked to close
+/// (runtime sends the polite client close).
+#[derive(Debug, Default)]
+pub struct PollOutcome {
+    /// Windows to focus and raise.
+    pub activated: Vec<u64>,
+    /// Windows to ask to close.
+    pub closed: Vec<u64>,
 }
 
 /// Live control-plane driver: accepts shell connections, handshakes them
@@ -691,10 +798,22 @@ pub struct ControlHub {
     /// Intent value last broadcast to all sessions; a mismatch means a
     /// flip is still owed (or a newcomer joined mid-state).
     overview_sent: bool,
+    /// Compositor-owned session-lock flag (session-lock): flipped by
+    /// the runtime (idle timeout) or `Lock` commands, shared with every
+    /// live session so snapshots carry it; the shell never owns it.
+    locked: std::rc::Rc<std::cell::Cell<bool>>,
     /// Alt-Tab drive events awaiting broadcast. Unlike the overview
     /// intent (level), steps are discrete events: each one is sent to
     /// every live session exactly once, retained until all sends land.
     switcher_queue: Vec<SwitcherAction>,
+    /// Output inventory last handed to [`set_outputs`](Self::set_outputs)
+    /// (multi-monitor): the runtime refreshes this every tick from the
+    /// compositor's tracking, and [`poll`](Self::poll) broadcasts it
+    /// whenever it differs from `outputs_sent`.
+    outputs: Vec<OutputInfo>,
+    /// Inventory value every live session holds; a mismatch means a
+    /// broadcast is still owed (or a newcomer joined mid-state).
+    outputs_sent: Vec<OutputInfo>,
 }
 
 impl ControlHub {
@@ -716,7 +835,10 @@ impl ControlHub {
             fresh: Vec::new(),
             overview: std::rc::Rc::new(std::cell::Cell::new(false)),
             overview_sent: false,
+            locked: std::rc::Rc::new(std::cell::Cell::new(false)),
             switcher_queue: Vec::new(),
+            outputs: Vec::new(),
+            outputs_sent: Vec::new(),
             store,
             seat: seat.to_owned(),
         })
@@ -744,24 +866,55 @@ impl ControlHub {
         self.overview.set(open);
     }
 
+    /// Refresh the output inventory; the next [`poll`](Self::poll)
+    /// broadcasts it to every live session as [`Message::Outputs`]
+    /// when it differs from the last broadcast. Idempotent: setting
+    /// the current value sends nothing. The runtime calls this every
+    /// tick from the compositor's tracking — the single inventory the
+    /// spec requires, never a parallel database.
+    pub fn set_outputs(&mut self, outputs: Vec<OutputInfo>) {
+        self.outputs = outputs;
+    }
+
+    /// Whether the session is locked (compositor-owned flag).
+    pub fn is_locked(&self) -> bool {
+        self.locked.get()
+    }
+
+    /// Set the session-lock flag; the next [`poll`](Self::poll) carries
+    /// it to every live session as a (possibly content-stripped)
+    /// [`Message::Snapshot`]. Idempotent. Unlock clears through session
+    /// auth (see [`crate::unlock`]), never through this path from the
+    /// shell.
+    pub fn set_locked(&self, locked: bool) {
+        self.locked.set(locked);
+    }
+
     /// Queue one Alt-Tab drive event; the next [`poll`](Self::poll)
     /// broadcasts it to every live session as [`Message::Switcher`].
     pub fn queue_switcher(&mut self, action: SwitcherAction) {
         self.switcher_queue.push(action);
     }
 
+    /// Drain one session's applied close requests (called by
+    /// [`ControlHub::poll`]).
+    fn take_closed(session: &mut Session<'_>) -> Vec<u64> {
+        std::mem::take(&mut session.closed)
+    }
+
     /// One nonblocking round: accept waiting peers, advance pending
     /// handshakes, catch live sessions up, and apply one command frame
     /// per session. Returns the model ids of windows the shell activated
-    /// this round, so the runtime can apply Wayland-side focus.
-    pub fn poll(&mut self, model: &mut StateModel) -> Vec<u64> {
+    /// this round (for Wayland-side focus) and asked to close (for the
+    /// polite client close), so the runtime can apply both.
+    pub fn poll(&mut self, model: &mut StateModel) -> PollOutcome {
         while let Ok((stream, _)) = self.listener.accept() {
             let _ = stream.set_nonblocking(true);
             self.fresh.push(stream);
         }
         self.advance_pending(model);
         self.pending = std::mem::take(&mut self.fresh);
-        let mut activated = Vec::new();
+        let mut outcome = PollOutcome::default();
         let mut i = 0;
         while i < self.sessions.len() {
             let alive = {
@@ -775,8 +928,9 @@ impl ControlHub {
                 };
                 if deltas_ok && cmd_ok {
                     if model.focused() != before {
-                        activated.extend(model.focused());
+                        outcome.activated.extend(model.focused());
                     }
+                    outcome.closed.extend(Self::take_closed(session));
                     true
                 } else {
                     false
@@ -802,6 +956,20 @@ impl ControlHub {
                 self.overview_sent = open;
             }
         }
+        // Broadcast the output inventory (multi-monitor): best-effort
+        // per session like overview, staying dirty until every live
+        // session holds it.
+        if self.outputs != self.outputs_sent {
+            let mut all_sent = true;
+            for session in &mut self.sessions {
+                if session.send_outputs(&self.outputs).is_err() {
+                    all_sent = false;
+                }
+            }
+            if all_sent {
+                self.outputs_sent = self.outputs.clone();
+            }
+        }
         // Broadcast switcher drive events (002 workspaces): each queued
         // action goes to every live session exactly once; actions that
         // miss a session stay queued for the next poll.
@@ -821,7 +989,7 @@ impl ControlHub {
             }
             self.switcher_queue = unsent;
         }
-        activated
+        outcome
     }
 
     /// Try each aged peer's handshake once. Peers were accepted a full
@@ -841,13 +1009,20 @@ impl ControlHub {
                 move |token: &ActivationToken, app_id: Option<&str>| validate(&token.0, app_id);
             let minter = std::rc::Rc::new(self.store.clone().minter(self.seat.clone()));
             let overview = self.overview.clone();
+            let locked = self.locked.clone();
             let open = overview.get();
             if let Ok(mut session) =
-                Session::handshake_with(conn, model, validator, minter, overview)
+                Session::handshake_with(conn, model, validator, minter, overview, locked)
             {
-                // Newcomers join mid-state: tell them the intent now
-                // (best-effort; the poll broadcast covers the rest).
+                // Newcomers join mid-state: tell them the intent and the
+                // inventory now (best-effort; the poll broadcast covers
+                // the rest). An empty inventory means unknown — never
+                // send it; the shell keeps its legacy surfaces until a
+                // real one arrives.
                 let _ = session.send_overview(open);
+                if !self.outputs.is_empty() {
+                    let _ = session.send_outputs(&self.outputs);
+                }
                 self.sessions.push(session);
             }
         }

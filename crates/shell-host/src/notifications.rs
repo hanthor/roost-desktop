@@ -12,13 +12,29 @@
 //! Privacy: [`Notification`] `Debug` is redacted (ids and counts
 //! only). Logs must never carry app names, titles, bodies, or action
 //! labels.
+//!
+//! Persistence: the queue survives restarts through a versioned JSON
+//! file under the XDG state dir ([`NotificationCenter::load`] /
+//! [`NotificationCenter::save`]). Writes are atomic (temp file plus
+//! rename) and fire on every mutation once the center knows its path,
+//! so the unread list on disk always matches memory. Missing, corrupt,
+//! or version-skewed files load as empty — fail-closed, never a
+//! startup error.
 
 use std::collections::{HashSet, VecDeque};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// How many banners may stack before older ones wait in history.
-const MAX_BANNERS: usize = 3;
+pub const MAX_BANNERS: usize = 3;
 /// How many notifications history retains (oldest drop first).
-const MAX_HISTORY: usize = 50;
+pub const MAX_HISTORY: usize = 50;
+/// Shell state dir name under `$XDG_STATE_HOME`.
+pub const STATE_DIR_NAME: &str = "roost-shell";
+/// Versioned notification queue file name.
+pub const QUEUE_FILE: &str = "notifications.json";
+/// Queue file schema version (a mismatch loads as empty).
+const QUEUE_VERSION: u64 = 1;
 
 /// Freedesktop-style urgency.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -30,6 +46,26 @@ pub enum Urgency {
     Normal,
     /// Breaks through Do Not Disturb onto the banner queue.
     Critical,
+}
+
+impl Urgency {
+    /// Stable queue-file spelling.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Normal => "normal",
+            Self::Critical => "critical",
+        }
+    }
+
+    /// Parse a queue-file spelling; unknown reads as normal.
+    fn from_str(text: &str) -> Self {
+        match text {
+            "low" => Self::Low,
+            "critical" => Self::Critical,
+            _ => Self::Normal,
+        }
+    }
 }
 
 /// One invokable notification action (freedesktop `actions` pairs).
@@ -63,6 +99,16 @@ pub struct Notification {
 }
 
 impl Notification {
+    /// Summary line (the banner paints this).
+    pub fn summary(&self) -> &str {
+        &self.title
+    }
+
+    /// Body text (the banner paints this; empty means no body line).
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+
     /// Action keys still available (never the consumed ones).
     pub fn pending_actions(&self) -> Vec<&str> {
         self.actions
@@ -107,6 +153,76 @@ impl std::fmt::Display for NotificationError {
 
 impl std::error::Error for NotificationError {}
 
+/// Decode one queue-file notification; `None` skips a malformed
+/// entry while the rest of the file still loads.
+fn decode_notification(item: &serde_json::Value) -> Option<Notification> {
+    let id = item.get("id")?.as_u64()?;
+    if id == 0 {
+        return None;
+    }
+    let actions = item
+        .get("actions")
+        .and_then(|v| v.as_array())
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    Some(NotificationAction {
+                        id: row.get("id")?.as_str()?.to_owned(),
+                        label: row.get("label")?.as_str()?.to_owned(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let consumed = item
+        .get("consumed")
+        .and_then(|v| v.as_array())
+        .map(|keys| {
+            keys.iter()
+                .filter_map(|key| key.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(Notification {
+        id,
+        app: item.get("app")?.as_str()?.to_owned(),
+        title: item
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned(),
+        body: item
+            .get("body")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned(),
+        actions,
+        urgency: Urgency::from_str(item.get("urgency").and_then(|v| v.as_str()).unwrap_or("")),
+        expanded: item
+            .get("expanded")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        consumed,
+    })
+}
+
+/// `$XDG_STATE_HOME/roost-shell` (default `~/.local/state/roost-shell`).
+pub fn state_dir() -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .map(|base| base.join(STATE_DIR_NAME))
+        .unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(|home| {
+                    PathBuf::from(home)
+                        .join(".local/state")
+                        .join(STATE_DIR_NAME)
+                })
+                .unwrap_or_else(|| PathBuf::from("/tmp").join(STATE_DIR_NAME))
+        })
+}
+
 /// Local notification store: banner queue, history, DND gate.
 #[derive(Debug, Default)]
 pub struct NotificationCenter {
@@ -117,12 +233,154 @@ pub struct NotificationCenter {
     history: VecDeque<Notification>,
     /// Do Not Disturb: normal/low notifications skip the banners.
     dnd: bool,
+    /// Queue file behind this center; `None` keeps it memory-only.
+    /// Set by [`NotificationCenter::load`], so a restored center
+    /// keeps persisting to the file it came from.
+    queue_path: Option<PathBuf>,
 }
 
 impl NotificationCenter {
     /// Empty center with Do Not Disturb off.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// System queue file path under the XDG state dir.
+    pub fn system_path() -> PathBuf {
+        state_dir().join(QUEUE_FILE)
+    }
+
+    /// Load from the system queue file, creating its dir when absent.
+    /// Missing, corrupt, or version-skewed files start empty.
+    pub fn load_system() -> Self {
+        let path = Self::system_path();
+        let _ = fs::create_dir_all(path.parent().expect("queue file has a parent"));
+        Self::load(&path)
+    }
+
+    /// Load from `path`; missing or unreadable files start empty. A
+    /// corrupt file (or a schema version we do not know) also starts
+    /// empty — the queue is user data, not configuration the shell
+    /// may crash over. Either way the path sticks, so later
+    /// mutations persist back to it.
+    pub fn load(path: &Path) -> Self {
+        let mut center = Self {
+            queue_path: Some(path.to_owned()),
+            ..Self::default()
+        };
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(_) => return center,
+        };
+        let doc: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(doc) => doc,
+            Err(_) => return center,
+        };
+        if doc.get("version").and_then(serde_json::Value::as_u64) != Some(QUEUE_VERSION) {
+            return center;
+        }
+        center.dnd = doc
+            .get("dnd")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        center.next_id = doc
+            .get("next_id")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        let mut history = VecDeque::new();
+        if let Some(items) = doc.get("notifications").and_then(|v| v.as_array()) {
+            for item in items {
+                let Some(entry) = decode_notification(item) else {
+                    continue;
+                };
+                history.push_back(entry);
+            }
+        }
+        while history.len() > MAX_HISTORY {
+            history.pop_front();
+        }
+        // Ids must keep moving forward even when the file was edited
+        // by hand: never reuse an id a live entry still carries.
+        let high = history.iter().map(|n| n.id).max().unwrap_or(0);
+        center.next_id = center.next_id.max(high);
+        center.history = history;
+        let live: HashSet<u64> = center.history.iter().map(|n| n.id).collect();
+        let mut banners = VecDeque::new();
+        if let Some(ids) = doc.get("banners").and_then(|v| v.as_array()) {
+            for id in ids.iter().filter_map(serde_json::Value::as_u64) {
+                if live.contains(&id) && !banners.contains(&id) {
+                    banners.push_back(id);
+                }
+            }
+        }
+        while banners.len() > MAX_BANNERS {
+            banners.pop_front();
+        }
+        center.banners = banners;
+        center
+    }
+
+    /// Persist to `path` atomically: write plus rename, so readers
+    /// never see a torn file. Creates parent dirs; surfaces I/O
+    /// errors to the caller (the in-memory queue stays regardless).
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let items: Vec<serde_json::Value> = self
+            .history
+            .iter()
+            .map(|n| {
+                serde_json::json!({
+                    "id": n.id,
+                    "app": n.app,
+                    "title": n.title,
+                    "body": n.body,
+                    "actions": n.actions.iter().map(|a| serde_json::json!({
+                        "id": a.id,
+                        "label": a.label,
+                    })).collect::<Vec<_>>(),
+                    "urgency": n.urgency.as_str(),
+                    "expanded": n.expanded,
+                    "consumed": n.consumed.iter().collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        let doc = serde_json::json!({
+            "version": QUEUE_VERSION,
+            "next_id": self.next_id,
+            "dnd": self.dnd,
+            "banners": self.banners.iter().collect::<Vec<_>>(),
+            "notifications": items,
+        });
+        let text = serde_json::to_string_pretty(&doc)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let tmp = path.with_extension("json.tmp");
+        fs::write(&tmp, text)?;
+        fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    /// Pin the queue file behind this center (a [`load`](Self::load)
+    /// already does this): later mutations persist back to `path`.
+    pub fn set_queue_path(&mut self, path: PathBuf) {
+        self.queue_path = Some(path);
+    }
+
+    /// Queue file behind this center, if any.
+    pub fn queue_path(&self) -> Option<&Path> {
+        self.queue_path.as_deref()
+    }
+
+    /// Persist back to the queue file when one is pinned. Failures
+    /// log and keep the in-memory queue: a full disk must never lose
+    /// or break the live banners.
+    fn persist(&self) {
+        if let Some(path) = self.queue_path.as_ref() {
+            if let Err(e) = self.save(path) {
+                eprintln!("roost-shell-host: notification queue save failed: {e}");
+            }
+        }
     }
 
     /// Whether Do Not Disturb is on.
@@ -135,6 +393,7 @@ impl NotificationCenter {
     /// gated notifications wait in history.
     pub fn set_dnd(&mut self, dnd: bool) {
         self.dnd = dnd;
+        self.persist();
     }
 
     /// Banner-visible notifications, oldest first.
@@ -150,6 +409,14 @@ impl NotificationCenter {
         &self.history
     }
 
+    /// How many notifications are unread: the banner-visible queue
+    /// length. Dismissing a banner or invoking its action reads it
+    /// (history keeps the entry); DND-gated arrivals never queue,
+    /// so they never count.
+    pub fn unread_count(&self) -> usize {
+        self.banners.len()
+    }
+
     /// File a notification (freedesktop `Notify` shape). Returns the
     /// store id. With `replaces_id` naming a live entry, that entry is
     /// updated in place and re-queued instead of allocating.
@@ -162,7 +429,7 @@ impl NotificationCenter {
         urgency: Urgency,
         replaces_id: Option<u64>,
     ) -> u64 {
-        if let Some(replaces) = replaces_id {
+        let id = if let Some(replaces) = replaces_id {
             if let Some(entry) = self.history.iter_mut().find(|n| n.id == replaces) {
                 entry.app = app.to_owned();
                 entry.title = title.to_owned();
@@ -172,9 +439,26 @@ impl NotificationCenter {
                 entry.expanded = false;
                 entry.consumed.clear();
                 self.queue_banner(replaces, urgency);
+                self.persist();
                 return replaces;
             }
-        }
+            self.alloc_fresh(app, title, body, actions, urgency)
+        } else {
+            self.alloc_fresh(app, title, body, actions, urgency)
+        };
+        self.persist();
+        id
+    }
+
+    /// Append a fresh entry, pruning history and queueing its banner.
+    fn alloc_fresh(
+        &mut self,
+        app: &str,
+        title: &str,
+        body: &str,
+        actions: Vec<NotificationAction>,
+        urgency: Urgency,
+    ) -> u64 {
         self.next_id += 1;
         let id = self.next_id;
         self.history.push_back(Notification {
@@ -217,6 +501,7 @@ impl NotificationCenter {
             return Err(NotificationError::UnknownNotification);
         }
         self.banners.retain(|b| *b != id);
+        self.persist();
         Ok(())
     }
 
@@ -226,6 +511,7 @@ impl NotificationCenter {
             return Err(NotificationError::UnknownNotification);
         };
         entry.expanded = expanded;
+        self.persist();
         Ok(())
     }
 
@@ -244,6 +530,7 @@ impl NotificationCenter {
             return Err(NotificationError::ActionReplayed);
         }
         self.banners.retain(|b| *b != id);
+        self.persist();
         Ok(())
     }
 
@@ -251,6 +538,7 @@ impl NotificationCenter {
     pub fn clear_history(&mut self) {
         self.history.clear();
         self.banners.clear();
+        self.persist();
     }
 }
 
@@ -313,6 +601,28 @@ mod tests {
         c.set_dnd(false);
         assert_eq!(c.banners().len(), 1);
         let _ = (a, b);
+    }
+
+    #[test]
+    fn unread_count_tracks_the_banner_queue() {
+        let mut c = center();
+        assert_eq!(c.unread_count(), 0);
+        let a = c.notify("app", "t", "b", vec![], Urgency::Normal, None);
+        assert_eq!(c.unread_count(), 1);
+        c.notify("app", "t", "b", vec![], Urgency::Low, None);
+        assert_eq!(c.unread_count(), 2);
+        // Dismissing reads the banner; history keeps the entry.
+        c.dismiss(a).unwrap();
+        assert_eq!(c.unread_count(), 1);
+        assert_eq!(c.history().len(), 2);
+        // DND-gated arrivals never queue, so they never read as unread.
+        c.set_dnd(true);
+        c.notify("app", "t", "b", vec![], Urgency::Normal, None);
+        assert_eq!(c.unread_count(), 1);
+        assert_eq!(c.history().len(), 3);
+        // Critical breaks through DND and counts again.
+        c.notify("app", "t", "b", vec![], Urgency::Critical, None);
+        assert_eq!(c.unread_count(), 2);
     }
 
     #[test]
@@ -409,6 +719,179 @@ mod tests {
         ] {
             assert!(!rendered.contains(secret), "leaked {secret}: {rendered}");
         }
+    }
+
+    #[test]
+    fn queue_roundtrip_preserves_unread_list_and_guards() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(QUEUE_FILE);
+        let mut c = center();
+        c.set_dnd(true);
+        let gated = c.notify("app", "gated", "b", vec![], Urgency::Normal, None);
+        assert!(
+            c.banners().iter().all(|n| n.id != gated),
+            "DND-gated arrival never queues"
+        );
+        let crit = c.notify(
+            "app",
+            "loud",
+            "boom",
+            vec![action("open")],
+            Urgency::Critical,
+            None,
+        );
+        c.expand(crit, true).unwrap();
+        // A second critical whose key a banner press consumes: the
+        // invocation dismisses it from the unread list, but history
+        // keeps the consumed key.
+        let acted = c.notify(
+            "app",
+            "acted",
+            "b",
+            vec![action("open"), action("later")],
+            Urgency::Critical,
+            None,
+        );
+        c.invoke_action(acted, "open").unwrap();
+        c.save(&path).expect("save");
+        // Atomic write: no temp file left behind.
+        assert!(
+            dir.path()
+                .join("notifications.json.tmp")
+                .symlink_metadata()
+                .is_err(),
+            "rename must consume the temp file"
+        );
+
+        let again = NotificationCenter::load(&path);
+        assert!(again.dnd(), "DND survives the restart");
+        assert_eq!(
+            again.banners().iter().map(|n| n.id).collect::<Vec<_>>(),
+            c.banners().iter().map(|n| n.id).collect::<Vec<_>>(),
+            "restart preserves the unread list"
+        );
+        assert_eq!(again.history().len(), c.history().len());
+        let entry = again
+            .history()
+            .iter()
+            .find(|n| n.id == crit)
+            .expect("entry");
+        assert_eq!(entry.summary(), "loud");
+        assert_eq!(entry.body(), "boom");
+        assert!(entry.expanded, "expand flag survives");
+        assert_eq!(
+            entry.pending_actions(),
+            vec!["open"],
+            "pending key survives"
+        );
+        assert_eq!(entry.urgency, Urgency::Critical);
+        let acted_entry = again
+            .history()
+            .iter()
+            .find(|n| n.id == acted)
+            .expect("entry");
+        assert_eq!(
+            acted_entry.pending_actions(),
+            vec!["later"],
+            "consumed key stays consumed"
+        );
+        // Ids keep moving forward: the next file never reuses one.
+        let mut again = again;
+        let fresh = again.notify("app", "t", "b", vec![], Urgency::Normal, None);
+        assert!(fresh > crit, "no id reuse after reload");
+    }
+
+    #[test]
+    fn queue_mutations_persist_back_to_the_loaded_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(QUEUE_FILE);
+        let mut c = center();
+        c.set_queue_path(path.clone());
+        let id = c.notify("app", "t", "b", vec![], Urgency::Normal, None);
+        assert!(path.exists(), "notify writes the queue file");
+        c.dismiss(id).unwrap();
+        let again = NotificationCenter::load(&path);
+        assert!(again.banners().is_empty(), "dismiss reaches the disk queue");
+        assert_eq!(again.history().len(), 1, "history still kept");
+    }
+
+    #[test]
+    fn queue_load_is_fail_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Missing file starts empty but remembers its path.
+        let missing = dir.path().join("nope.json");
+        let c = NotificationCenter::load(&missing);
+        assert!(c.history().is_empty());
+        assert!(c.banners().is_empty());
+        assert_eq!(c.queue_path(), Some(missing.as_path()));
+        // Corrupt content starts empty.
+        let corrupt = dir.path().join(QUEUE_FILE);
+        std::fs::write(&corrupt, "{ not json").expect("write corrupt");
+        let c = NotificationCenter::load(&corrupt);
+        assert!(c.history().is_empty());
+        assert!(c.banners().is_empty());
+        // Unknown schema versions start empty (never half-read).
+        std::fs::write(&corrupt, r#"{"version": 999, "notifications": []}"#).expect("write skewed");
+        let c = NotificationCenter::load(&corrupt);
+        assert!(c.history().is_empty());
+        // Dangling banner ids and oversized queues clamp on load.
+        let doc = serde_json::json!({
+            "version": 1,
+            "next_id": 3,
+            "dnd": false,
+            "banners": [1, 2, 3, 999],
+            "notifications": [
+                {"id": 1, "app": "a", "title": "t", "body": "b",
+                 "actions": [], "urgency": "normal", "expanded": false, "consumed": []},
+                {"id": 2, "app": "a", "title": "t", "body": "b",
+                 "actions": [], "urgency": "bogus", "expanded": false, "consumed": []},
+                {"id": 0, "app": "a", "title": "t", "body": "b",
+                 "actions": [], "urgency": "normal", "expanded": false, "consumed": []},
+                {"no-id": true},
+            ],
+        });
+        std::fs::write(&corrupt, serde_json::to_string(&doc).unwrap()).expect("write clamped");
+        let c = NotificationCenter::load(&corrupt);
+        assert_eq!(c.history().len(), 2, "zero-id and id-less rows skipped");
+        assert_eq!(
+            c.history()[1].urgency,
+            Urgency::Normal,
+            "bogus urgency reads normal"
+        );
+        assert!(
+            c.banners().iter().all(|n| n.id == 1 || n.id == 2),
+            "dangling banner id 999 dropped"
+        );
+    }
+
+    #[test]
+    fn flood_keeps_ten_thousand_notifies_bounded_and_newest() {
+        let mut c = center();
+        for _ in 0..10_000 {
+            c.notify("app", "t", "b", vec![], Urgency::Normal, None);
+        }
+        assert_eq!(c.history().len(), MAX_HISTORY, "history stays capped");
+        assert_eq!(c.banners().len(), MAX_BANNERS, "banner queue stays capped");
+        let ids: Vec<u64> = c.history().iter().map(|n| n.id).collect();
+        assert_eq!(
+            ids,
+            (9951..=10_000).collect::<Vec<_>>(),
+            "newest kept in history"
+        );
+        let queued: Vec<u64> = c.banners().iter().map(|n| n.id).collect();
+        assert_eq!(
+            queued,
+            vec![9998, 9999, 10_000],
+            "newest kept on the banners"
+        );
+        // A second flood changes nothing about the bounds: flat.
+        for _ in 0..10_000 {
+            c.notify("app", "t", "b", vec![], Urgency::Normal, None);
+        }
+        assert_eq!(c.history().len(), MAX_HISTORY);
+        assert_eq!(c.banners().len(), MAX_BANNERS);
+        let ids: Vec<u64> = c.history().iter().map(|n| n.id).collect();
+        assert_eq!(ids, (19951..=20_000).collect::<Vec<_>>());
     }
 
     #[test]
