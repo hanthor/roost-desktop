@@ -14,6 +14,7 @@
 //! `ROOST_SHELL_BIN=roost-shell-gtk` while it grows to parity.
 
 mod logic;
+mod overview;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -85,6 +86,40 @@ struct Shell {
     control: Option<ControlClient>,
     pills: gtk::Box,
     pill_state: Vec<bool>,
+}
+
+/// Overview actions routed through the control socket.
+struct ShellActions(Rc<RefCell<Shell>>);
+
+impl overview::OverviewActions for ShellActions {
+    fn close_overview(&self) {
+        if let Some(control) = self.0.borrow_mut().control.as_mut() {
+            if control.model().is_overview_open() {
+                let _ = control.toggle_overview();
+            }
+        }
+    }
+
+    fn activate_window(&self, id: u64) {
+        if let Some(control) = self.0.borrow_mut().control.as_mut() {
+            let _ = control.activate_window(id);
+        }
+    }
+
+    fn running(&self) -> Vec<(u64, Option<String>)> {
+        self.0
+            .borrow()
+            .control
+            .as_ref()
+            .map(|c| {
+                c.model()
+                    .windows()
+                    .iter()
+                    .map(|w| (w.id, w.app_id.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 fn panel_button(child: &impl IsA<gtk::Widget>, label: &str) -> gtk::Button {
@@ -379,9 +414,31 @@ fn build(app: &adw::Application) {
     tick();
     glib::timeout_add_seconds_local(1, tick);
 
+    // Overview search, dash, and app grid (#54, #57).
+    let favorites = {
+        let pinned = roost_shell_host::favorites::Favorites::system()
+            .ids()
+            .to_vec();
+        if pinned.is_empty() {
+            logic::DEFAULT_FAVORITES
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect()
+        } else {
+            pinned
+        }
+    };
+    let overview_ui = overview::OverviewUi::new(
+        app.upcast_ref(),
+        Rc::new(roost_shell_host::apps::AppProvider::system()),
+        favorites,
+        Rc::new(ShellActions(shell.clone())),
+    );
+
     // Compositor state: drain the control socket every frame.
     {
         let shell = shell.clone();
+        let overview_ui = overview_ui.clone();
         glib::timeout_add_local(Duration::from_millis(16), move || {
             let mut shell = shell.borrow_mut();
             if let Some(control) = shell.control.as_mut() {
@@ -400,6 +457,12 @@ fn build(app: &adw::Application) {
                 }
             }
             render_pills(&mut shell);
+            let open = shell
+                .control
+                .as_ref()
+                .is_some_and(|c| c.model().is_overview_open());
+            drop(shell);
+            overview::OverviewUi::set_open(&overview_ui, open);
             glib::ControlFlow::Continue
         });
     }

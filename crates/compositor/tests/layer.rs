@@ -278,13 +278,15 @@ fn arrange_gives_stretched_axes_output_size() {
     });
     assert_eq!(client.configured_size, Some((1280, PANEL_HEIGHT)));
 
-    // Overview: stretched on both axes, no requested size.
+    // Overview: stretched on both axes, no requested size, exclusive
+    // zone 0 (neutral): it avoids the panel's exclusive zone, so it gets
+    // the output minus the strip (layer-shell semantics).
     let (_conn2, mut queue2, mut client2) = connect(&mut comp);
     attach_fullscreen(&queue2, &mut client2);
     pump(&mut comp, &mut queue2, &mut client2, |_, c| {
         c.configured_size.is_some_and(|(w, h)| w > 0 && h > 0)
     });
-    assert_eq!(client2.configured_size, Some((1280, 800)));
+    assert_eq!(client2.configured_size, Some((1280, 800 - PANEL_HEIGHT)));
 }
 
 #[test]

@@ -124,3 +124,120 @@ mod tests {
         assert_eq!(color_scheme_for(false), "default");
     }
 }
+
+/// GNOME-style app search ranking (#57): names starting with the query
+/// first, then names with a word starting with it, then any other match
+/// on name, generic name, keywords, or id; ties keep discovery order.
+/// Case-insensitive; a blank query matches nothing.
+pub fn rank_apps<'a>(
+    apps: &'a [roost_shell_host::apps::AppEntry],
+    query: &str,
+    limit: usize,
+) -> Vec<&'a roost_shell_host::apps::AppEntry> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut scored: Vec<(u8, usize, &roost_shell_host::apps::AppEntry)> = apps
+        .iter()
+        .enumerate()
+        .filter_map(|(i, app)| {
+            let name = app.name.to_lowercase();
+            let score = if name.starts_with(&needle) {
+                0
+            } else if name
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|word| word.starts_with(&needle))
+            {
+                1
+            } else {
+                let mut hay = format!("{name} {}", app.app_id.to_lowercase());
+                if let Some(g) = &app.generic_name {
+                    hay.push(' ');
+                    hay.push_str(&g.to_lowercase());
+                }
+                for k in &app.keywords {
+                    hay.push(' ');
+                    hay.push_str(&k.to_lowercase());
+                }
+                if hay.contains(&needle) {
+                    2
+                } else {
+                    return None;
+                }
+            };
+            Some((score, i, app))
+        })
+        .collect();
+    scored.sort_by_key(|(score, i, _)| (*score, *i));
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, _, app)| app)
+        .collect()
+}
+
+/// GNOME's default dash favorites, used when the user pinned none;
+/// only those installed are shown.
+pub const DEFAULT_FAVORITES: &[&str] = &[
+    "org.gnome.Nautilus.desktop",
+    "firefox.desktop",
+    "org.mozilla.firefox.desktop",
+    "org.gnome.Software.desktop",
+    "org.gnome.Console.desktop",
+    "org.gnome.Terminal.desktop",
+    "org.gnome.Settings.desktop",
+];
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+    use roost_shell_host::apps::AppEntry;
+
+    fn app(id: &str, name: &str, generic: Option<&str>, keywords: &[&str]) -> AppEntry {
+        AppEntry {
+            app_id: id.to_owned(),
+            name: name.to_owned(),
+            generic_name: generic.map(str::to_owned),
+            keywords: keywords.iter().map(|k| (*k).to_owned()).collect(),
+            argv: vec!["true".into()],
+            icon: None,
+        }
+    }
+
+    #[test]
+    fn prefix_beats_word_prefix_beats_substring() {
+        let apps = vec![
+            app("a.desktop", "Text Editor", None, &[]),
+            app("b.desktop", "Edit Tool", None, &[]),
+            app("c.desktop", "Credits", None, &["editing"]),
+        ];
+        let names: Vec<&str> = rank_apps(&apps, "edit", 10)
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Edit Tool", "Text Editor", "Credits"]);
+    }
+
+    #[test]
+    fn generic_names_and_keywords_match() {
+        let apps = vec![app(
+            "org.gnome.Nautilus.desktop",
+            "Files",
+            Some("File Manager"),
+            &["folder"],
+        )];
+        assert_eq!(rank_apps(&apps, "folder", 5).len(), 1);
+        assert_eq!(rank_apps(&apps, "manager", 5).len(), 1);
+        assert_eq!(rank_apps(&apps, "nautilus", 5).len(), 1);
+    }
+
+    #[test]
+    fn blank_queries_match_nothing_and_limits_apply() {
+        let apps: Vec<AppEntry> = (0..20)
+            .map(|i| app(&format!("{i}.desktop"), &format!("App {i}"), None, &[]))
+            .collect();
+        assert!(rank_apps(&apps, "   ", 5).is_empty());
+        assert_eq!(rank_apps(&apps, "app", 6).len(), 6);
+    }
+}

@@ -16,6 +16,12 @@
 #   G-OV-OPEN   Super opens the overview with a preview per window (#54)
 #   G-OV-PICK   clicking a preview focuses that window, closes overview
 #   G-APP-POPOVER an app's menu popover opens (xdg popups, #88)
+#   G-OV-SHELL-UI  the overview shows the search entry and the dash
+#   G-OV-SEARCH typing lists matching apps (#57)
+#   G-OV-LAUNCH Enter launches the top result and closes the overview
+#   G-OV-APPGRID Show Apps opens the app grid
+#   G-SHELL-STABLE the shell never exits or restarts during the journey
+
 #   G-APP-DRAG  dragging an app's header bar moves the window (#58)
 # Frames and accessibility dumps land in the artifacts dir; assertions in
 # assertions.txt for the parity ledger.
@@ -45,6 +51,18 @@ ASSERTIONS="$ARTIFACTS/assertions.txt"
 XDG_STATE_HOME="$ARTIFACTS/state"
 XDG_DATA_HOME="$ARTIFACTS/data"
 export XDG_STATE_HOME XDG_DATA_HOME
+# Launch probe for overview search: only this journey has it, and its
+# Exec leaves a marker, proving search-to-launch end to end.
+PROBE_MARKER="$ARTIFACTS/probe-marker"
+rm -f "$PROBE_MARKER"
+mkdir -p "$XDG_DATA_HOME/applications"
+cat >"$XDG_DATA_HOME/applications/roost-probe.desktop" <<EOF
+[Desktop Entry]
+Name=Roost Probe
+Exec=touch $PROBE_MARKER
+Icon=applications-system
+Type=Application
+EOF
 OWNED_XVFB=""
 COMPOSITOR_PID=""
 cleanup() {
@@ -211,6 +229,7 @@ showing "$ARTIFACTS/a11y-beta.json" "Popover content" ||
     fail G-APP-POPOVER "app menu popover did not open (xdg popup)"
 pass G-APP-POPOVER "an app's menu popover opens (xdg popup, #88)"
 
+
 xdotool key Escape
 sleep 1
 # Header-bar drag: GTK sends xdg_toplevel.move, the compositor owns the
@@ -232,5 +251,53 @@ cstate ".windows[] | select(.app_id == \"roost-test-beta\") | (.rect[0] - $bx) >
 pass G-APP-DRAG "dragging an app's header bar moves the window (#58)"
 scrot "$ARTIFACTS/08-dragged.png" >/dev/null
 
+# Overview shell surfaces (#54, #57): search entry, dash, app grid.
+xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
+xdotool key Super_L
+cstate '.overview_open' "overview" || fail G-OV-SHELL-UI "overview did not open"
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-overview.json" 20 ||
+    fail G-OV-SHELL-UI "accessibility dump failed"
+if ! showing "$ARTIFACTS/a11y-overview.json" "Search" ||
+    ! showing "$ARTIFACTS/a11y-overview.json" "Show Apps"; then
+    fail G-OV-SHELL-UI "search entry or dash missing from the overview"
+fi
+pass G-OV-SHELL-UI "overview shows the search entry and the dash"
+scrot "$ARTIFACTS/09-overview-shell.png" >/dev/null
+
+xdotool type --delay 40 "roost probe"
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-search.json" 20 ||
+    fail G-OV-SEARCH "accessibility dump failed"
+showing "$ARTIFACTS/a11y-search.json" "Roost Probe" ||
+    fail G-OV-SEARCH "typing did not list the probe app"
+pass G-OV-SEARCH "typing in the overview lists matching apps"
+scrot "$ARTIFACTS/10-search.png" >/dev/null
+
+xdotool key Return
+end=$(($(date +%s) + 15))
+until [ -f "$PROBE_MARKER" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+[ -f "$PROBE_MARKER" ] || fail G-OV-LAUNCH "Enter did not launch the top result"
+cstate '.overview_open | not' "closed" || fail G-OV-LAUNCH "overview stayed open after launch"
+pass G-OV-LAUNCH "Enter launches the top result and closes the overview"
+
+xdotool key Super_L
+cstate '.overview_open' "overview" || fail G-OV-APPGRID "overview did not reopen"
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid.json" 20 --press "Show Apps" ||
+    fail G-OV-APPGRID "could not press Show Apps"
+showing "$ARTIFACTS/a11y-grid.json" "Roost Probe" ||
+    fail G-OV-APPGRID "app grid does not list installed apps"
+pass G-OV-APPGRID "Show Apps opens the app grid"
+scrot "$ARTIFACTS/11-app-grid.png" >/dev/null
+xdotool key Escape
+
 grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
+# The shell must survive the whole journey: a crash the supervisor
+# quietly restarts is still a failure (the overview-close teardown bug
+# hid behind exactly that).
+if grep -q 'ShellExited' "$LOG"; then
+    fail G-SHELL-STABLE "the shell exited during the journey: $(grep -c ShellExited "$LOG") time(s)"
+fi
+pass G-SHELL-STABLE "the shell never exited or restarted"
 echo "roost-gtk-shell-proof: OK, artifacts in $ARTIFACTS"

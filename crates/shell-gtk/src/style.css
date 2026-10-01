@@ -92,3 +92,37 @@ popover.roost-shell-popover > contents {
   font-weight: bold;
   color: alpha(#ffffff, 0.45);
 }
+
+/* Overview surfaces (#54, #57): transparent windows, GNOME 51 shapes. */
+window.roost-overview-search,
+window.roost-overview-dash {
+  background: none;
+}
+
+window.roost-overview-grid {
+  background-color: #242426;
+}
+
+.roost-overview-search searchentry {
+  min-height: 36px;
+  border-radius: 99px;
+  background-color: alpha(#ffffff, 0.1);
+  color: #ffffff;
+}
+
+.overview-results,
+.overview-dash {
+  background-color: alpha(#2a2a2f, 0.92);
+  border-radius: 24px;
+  padding: 8px;
+}
+
+.overview-app {
+  color: #ffffff;
+  border-radius: 16px;
+  padding: 6px;
+}
+
+.overview-app.running {
+  box-shadow: inset 0 -3px 0 0 alpha(#ffffff, 0.8);
+}
