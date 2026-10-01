@@ -415,3 +415,51 @@ mod idle_tests {
         assert_eq!(idle_lock_ms(300, false, 0), 0, "lock disabled");
     }
 }
+
+/// GNOME's input sources (`[('xkb', 'us'), ('xkb', 'de+nodeadkeys')]`)
+/// as one xkb keymap: comma-separated layouts and variants in order.
+/// Non-xkb sources (IBus engines) are skipped; none at all means `us`.
+pub fn xkb_from_sources(sources: &[(String, String)]) -> (String, String) {
+    let parts: Vec<(&str, &str)> = sources
+        .iter()
+        .filter(|(kind, _)| kind == "xkb")
+        .map(|(_, id)| id.split_once('+').unwrap_or((id.as_str(), "")))
+        .collect();
+    if parts.is_empty() {
+        return ("us".to_owned(), String::new());
+    }
+    let layouts: Vec<&str> = parts.iter().map(|(l, _)| *l).collect();
+    let variants: Vec<&str> = parts.iter().map(|(_, v)| *v).collect();
+    let variants = if variants.iter().all(|v| v.is_empty()) {
+        String::new()
+    } else {
+        variants.join(",")
+    };
+    (layouts.join(","), variants)
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+
+    fn src(kind: &str, id: &str) -> (String, String) {
+        (kind.to_owned(), id.to_owned())
+    }
+
+    #[test]
+    fn input_sources_become_one_keymap() {
+        assert_eq!(xkb_from_sources(&[]), ("us".into(), String::new()));
+        assert_eq!(
+            xkb_from_sources(&[src("xkb", "us"), src("xkb", "de")]),
+            ("us,de".into(), String::new())
+        );
+        assert_eq!(
+            xkb_from_sources(&[src("xkb", "us"), src("xkb", "de+nodeadkeys")]),
+            ("us,de".into(), ",nodeadkeys".into())
+        );
+        assert_eq!(
+            xkb_from_sources(&[src("ibus", "anthy"), src("xkb", "fr+bepo")]),
+            ("fr".into(), "bepo".into())
+        );
+    }
+}

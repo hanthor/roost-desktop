@@ -302,6 +302,8 @@ pub struct Session<'a> {
     idle_timeout: Option<u64>,
     /// Latest `SetOverviewSearch` from the shell, drained by the hub.
     overview_search: Option<bool>,
+    /// Latest `SetInputSettings` from the shell, drained by the hub.
+    input_settings: Option<roost_shell_control::InputSettings>,
 }
 
 impl std::fmt::Debug for Session<'_> {
@@ -361,6 +363,7 @@ impl<'a> Session<'a> {
             closed: Vec::new(),
             idle_timeout: None,
             overview_search: None,
+            input_settings: None,
         };
         let msg = match session.conn.read_frame() {
             Ok(msg) => msg,
@@ -561,6 +564,18 @@ impl<'a> Session<'a> {
                 })?;
                 let revision = self.send_snapshot(model)?;
                 Ok(Handled::HelloResync { revision })
+            }
+            Message::Command {
+                id,
+                kind: CommandKind::SetInputSettings(settings),
+            } => {
+                // Session-level settings for the runtime (seat, libinput).
+                self.input_settings = Some(settings);
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: CommandStatus::Applied,
+                })?;
+                Ok(Handled::CommandResult { id, applied: true })
             }
             Message::Command {
                 id,
@@ -791,9 +806,9 @@ fn apply_command(
             (CommandStatus::Applied, Some(*window))
         }
         // Intercepted by the session before it gets here.
-        CommandKind::SetIdleTimeout { .. } | CommandKind::SetOverviewSearch { .. } => {
-            (CommandStatus::Applied, None)
-        }
+        CommandKind::SetIdleTimeout { .. }
+        | CommandKind::SetOverviewSearch { .. }
+        | CommandKind::SetInputSettings(_) => (CommandStatus::Applied, None),
         CommandKind::Lock => {
             // Manual lock from the shell (session-lock set path):
             // engage the compositor-owned flag; idempotent, always
@@ -822,6 +837,8 @@ pub struct PollOutcome {
     pub idle_timeout: Option<u64>,
     /// Whether overview search is showing results, if the shell said.
     pub overview_search: Option<bool>,
+    /// GNOME input settings the shell sent, if any.
+    pub input_settings: Option<roost_shell_control::InputSettings>,
 }
 
 /// Peers accepted but not yet handshaken are capped so a same-user
@@ -1146,6 +1163,9 @@ impl ControlHub {
                     }
                     if let Some(active) = session.overview_search.take() {
                         outcome.overview_search = Some(active);
+                    }
+                    if let Some(settings) = session.input_settings.take() {
+                        outcome.input_settings = Some(settings);
                     }
                     true
                 } else {

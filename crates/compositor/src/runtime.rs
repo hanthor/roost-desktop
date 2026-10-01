@@ -458,6 +458,8 @@ pub struct Runtime {
     pending_x11_client: Option<smithay::reexports::wayland_server::Client>,
     /// Output scale (#59), see [`NestedSession::scale`].
     scale: f64,
+    /// GNOME's input settings as last applied (#60).
+    input_settings: roost_shell_control::InputSettings,
     /// PipeWire, connected on the first screen cast (#61).
     pipewire: Option<crate::screencast::PipeWire>,
     /// Running screen casts.
@@ -713,6 +715,7 @@ impl Runtime {
             overview_search: false,
             shell_swipe: None,
             scale: clamp_scale(session.scale),
+            input_settings: Default::default(),
             pipewire: None,
             casts: Vec::new(),
             cast_outputs,
@@ -993,6 +996,10 @@ impl Runtime {
     /// (`ROOST_COMPOSITOR_STATE`, journeys only; #65). App ids and ids,
     /// never titles.
     fn publish_state(&mut self) {
+        if self.state_path.is_none() {
+            return;
+        }
+        let keyboard = self.manager.keyboard_summary(&mut self.state);
         let Some(path) = self.state_path.as_ref() else {
             return;
         };
@@ -1027,6 +1034,7 @@ impl Runtime {
             "x11_display": self.x11_display.map(|d| format!(":{d}")),
             "idle_timeout_ms": self.lock.timeout_ms(),
             "overview_search": self.overview_search,
+            "keyboard": keyboard,
             "overview_open": overview_open,
             "locked": self.is_locked(),
             "active_workspace": model.active_workspace(),
@@ -1347,6 +1355,19 @@ impl Runtime {
         }
     }
 
+    /// Apply GNOME's input settings (#60): the seat's keymap and key
+    /// repeat, libinput pointer devices (hardware), the hot corner.
+    fn apply_input_settings(&mut self, settings: roost_shell_control::InputSettings) {
+        self.manager
+            .apply_keyboard_settings(&mut self.state, &settings);
+        self.triggers.set_hot_corner(settings.hot_corners);
+        #[cfg(feature = "drm")]
+        if let Backend::Drm(drm) = &mut self.backend {
+            drm.apply_input_settings(&settings);
+        }
+        self.input_settings = settings;
+    }
+
     /// Apply a display arrangement live (GNOME Settings' Displays
     /// panel): each named output's scale and logical position. Layout,
     /// rendering and the per-window client scale follow on the next frame.
@@ -1450,6 +1471,9 @@ impl Runtime {
         }
         if let Some(active) = outcome.overview_search {
             self.overview_search = active;
+        }
+        if let Some(settings) = outcome.input_settings {
+            self.apply_input_settings(settings);
         }
         if !self.control.overview_open() {
             self.overview_search = false;
