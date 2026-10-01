@@ -7,7 +7,8 @@
 # Runs the nested compositor and GTK shell on a private Xvfb and buses,
 # then writes DIR/<state>.png for: 01-desktop, 02-calendar,
 # 03-quick-settings, 03b-power-mode-menu, 04-overview-empty, 05-app-grid, 06-windows, 06b-switcher,
-# 07-overview-windows, 07b-overview-hover, 08-notification, 09-calendar-with-notification.
+# 07-overview-windows, 07b-overview-hover, 08-notification, 09-calendar-with-notification,
+# 10-end-session.
 # Run scripts/roost-gnome-reference first: it exports GNOME's wallpapers.
 # Compare with scripts/lib/roost-parity-compare.py.
 set -eu
@@ -145,6 +146,9 @@ park
 shot 03-quick-settings
 press "Power Mode Menu"
 shot 03b-power-mode-menu
+press "Power Mode Menu"
+press "Power Off Menu"
+shot 03c-power-menu
 xdotool key Escape
 sleep 1
 xdotool key Super_L
@@ -183,4 +187,11 @@ xdotool mousemove --window "$WID" $((WIDTH / 2)) 16 click 1
 park
 shot 09-calendar-with-notification
 xdotool key Escape
+sleep 1
+xdotool mousemove --window "$WID" $((WIDTH - 30)) 16 click 1
+park
+sleep 1
+press "Power Off Menu"
+press "Log Out…"
+shot 10-end-session 2
 echo "roost-parity-capture: frames in $OUT"

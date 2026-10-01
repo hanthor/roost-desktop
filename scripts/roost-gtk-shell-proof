@@ -933,7 +933,7 @@ STUBS_PID=$!
 sleep 2
 open_power_menu() {
     open_qs
-    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-$1.json" 20 --press "Power Off"
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-$1.json" 20 --press "Power Off Menu"
 }
 open_power_menu power-menu || fail G-POWER-MENU "could not press the power button"
 scrot "$ARTIFACTS/21-power-menu.png" >/dev/null

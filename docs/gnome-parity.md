@@ -43,6 +43,7 @@ scripts/lib/roost-parity-compare.py target/gnome-reference target/roost-parity t
 | 02-calendar | the date menu |
 | 03-quick-settings | quick settings |
 | 03b-power-mode-menu | the Power Mode toggle's menu, open in place |
+| 03c-power-menu | the shutdown menu, open in place |
 | 04-overview-empty | the overview with no windows |
 | 05-app-grid | the app grid |
 | 06-windows | three windows on the desktop |
@@ -51,6 +52,7 @@ scripts/lib/roost-parity-compare.py target/gnome-reference target/roost-parity t
 | 07b-overview-hover | a window preview hovered (caption and close button) |
 | 08-notification | a notification banner |
 | 09-calendar-with-notification | the date menu listing it |
+| 10-end-session | the Log Out dialog (gnome-session's EndSessionDialog) |
 
 Both sides run the same services: the stubs serve power-profiles and
 logind only, since GNOME's NetworkManager and BlueZ clients need more

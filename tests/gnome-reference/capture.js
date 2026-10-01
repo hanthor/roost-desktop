@@ -91,6 +91,11 @@ export async function run() {
     powerMode.menu.open(false);
     await shot('03b-power-mode-menu');
     powerMode.menu.close(false);
+    // The shutdown menu (status/system.js), opened in place too.
+    const system = quickSettings._system.quickSettingsItems[0];
+    system.menu.open(false);
+    await shot('03c-power-menu');
+    system.menu.close(false);
     quickSettings.menu.close(NONE);
 
     Main.overview.show();
@@ -143,6 +148,16 @@ export async function run() {
     Main.panel.statusArea.dateMenu.menu.open(NONE);
     await shot('09-calendar-with-notification');
     Main.panel.statusArea.dateMenu.menu.close(NONE);
+
+    // GNOME's end-session dialog, as gnome-session opens it (Log Out,
+    // 60 s, no inhibitors), over its own D-Bus object.
+    Gio.DBus.session.call(Gio.DBus.session.unique_name,
+        '/org/gnome/SessionManager/EndSessionDialog',
+        'org.gnome.SessionManager.EndSessionDialog', 'Open',
+        new GLib.Variant('(uuuao)', [0, 0, 60, []]), null,
+        Gio.DBusCallFlags.NONE, -1, null, null);
+    await Scripting.sleep(1500);
+    await shot('10-end-session');
 
     await Scripting.destroyTestWindows();
     print('GREF done');
