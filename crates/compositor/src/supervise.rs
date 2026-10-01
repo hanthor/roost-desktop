@@ -616,7 +616,7 @@ mod tests {
         assert_eq!(driver.poll(0), ShellStatus::Running);
         // Reap the instant exit: first Waiting carries the two
         // transition events.
-        let mut waited = false;
+        let waited: bool;
         // Wall-clock deadline, not an iteration count: on a loaded
         // machine the fresh child may wait longer than a fast spin
         // loop for its first timeslice.
@@ -782,7 +782,7 @@ mod tests {
         // /bin/false exits immediately; reap it (wall-clock deadline in
         // case the exit has not been scheduled yet; the fake clock does
         // not move, so the deadline uses the real clock).
-        let mut exited = None;
+        let exited: Option<Option<i32>>;
         let deadline = SystemClock.now_ms().saturating_add(30_000);
         loop {
             match sup.poll(&mut remake, clock.now_ms()).unwrap() {
@@ -814,7 +814,7 @@ mod tests {
         assert_eq!(sup.restarts_used(), 1);
         assert_eq!(sup.restarts_remaining(), 0);
 
-        let mut exited = None;
+        let exited: Option<Option<i32>>;
         let deadline = SystemClock.now_ms().saturating_add(30_000);
         loop {
             match sup.poll(&mut remake, clock.now_ms()).unwrap() {
