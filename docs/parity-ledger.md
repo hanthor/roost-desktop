@@ -36,7 +36,7 @@ rationale and owner), `untested`.
 | P-SY-04 | XWayland apps run by default | partial |  | behind the `xwayland` feature; off by default | — |
 | P-SY-06 | Clients find the protocols Mutter offers (dmabuf, activation, viewporter, fractional scale, cursor shape, idle inhibit) | partial | cargo:advertised_globals_match_the_golden_list, cargo:dmabuf_is_advertised_only_with_renderer_formats, cargo:focused_client_can_hand_focus_with_a_token, cargo:background_clients_and_serial_less_tokens_cannot_steal_focus, proof:G-GL-WINDOW | `docs/protocols.md` lists what is advertised and each gap; Mutter column read from source, not captured | baseline `wayland-info` capture open (#89) |
 | P-SY-05 | Screen capture and sharing through portals with consent | missing |  | no portal backend, no screencopy | — |
-| P-A11Y-01 | Screen reader reads panel, overview, quick settings | missing |  | no AT-SPI bridge (`docs/keymap.md`) | blocked on toolkit decision |
+| P-A11Y-01 | Screen reader reads panel, overview, quick settings | partial | proof:A11Y-PANEL, proof:A11Y-QS, proof:A11Y-GOLDEN | GTK shell exposes every control by name; golden trees in `tests/a11y/` fail CI on a dropped or renamed control (`scripts/roost-a11y-golden`) | GNOME 51 trees for comparison come with the baseline capture (#64) |
 | P-A11Y-02 | Every pointer action has a keyboard equivalent | partial | cargo:panel::tests::live::key_only_run_opens_launches_and_activates | keymap and key-only run (`docs/keymap.md`) | chords not rebindable |
 | P-IN-01 | IME composition in GTK apps | missing |  | no text-input / input-method protocols | — |
 | P-IN-02 | Touchpad gestures (three-finger overview, workspace swipe) | missing |  | — | — |

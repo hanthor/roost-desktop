@@ -38,6 +38,8 @@
 #   G-OV-SEARCH typing lists matching apps (#57)
 #   G-OV-LAUNCH Enter launches the top result and closes the overview
 #   G-OV-APPGRID Show Apps opens the app grid
+#   A11Y-GOLDEN    the panel, calendar, quick settings and overview
+#                  accessible trees match tests/a11y/ (#71)
 #   G-SHELL-STABLE the shell never exits or restarts during the journey
 
 #   G-APP-DRAG  dragging an app's header bar moves the window (#58)
@@ -615,6 +617,10 @@ if [ "$1" -lt 150 ] || [ "$2" -gt 80 ] || [ "$3" -gt 80 ]; then
     fail G-GL-WINDOW "GL window did not paint its red body (pixel $rgb)"
 fi
 pass G-GL-WINDOW "a GL-rendered GTK window maps and paints"
+
+"$ROOT/scripts/roost-a11y-golden" check "$ARTIFACTS" ||
+    fail A11Y-GOLDEN "accessible trees differ from tests/a11y/ (see above)"
+pass A11Y-GOLDEN "panel, calendar, quick settings and overview trees match their goldens"
 
 grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
 # The shell must survive the whole journey: a crash the supervisor
