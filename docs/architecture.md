@@ -51,4 +51,8 @@ Each spek has its own draft `plan.md`, `context.md`, and `research.md`; plans re
 
 ## Decisions still open
 
-Before a hardware or security implementation spek is approved, decide and record: baseline GNOME release/configuration; supported distributions and GPU matrix; same-UID process threat model and trusted-service credential binding; UI toolkit after accessibility spike; 1.0 tiling requirement; settings compatibility map; portal/capture grant lifecycle; and packaging/rollback strategy.
+Decided 2026-10-01: the parity baseline is **GNOME 51 as shipped in the TunaOS Marlin GNOME image**, and the first supported distribution is **TunaOS Marlin** (Arch Linux base, bootc image, x86_64). Both are recorded in [the roadmap](roadmap.md).
+
+Still open before a hardware or security implementation spek is approved: GPU matrix beyond the Marlin VM; same-UID process threat model and trusted-service credential binding; UI toolkit after the accessibility spike (the current hand-painted shell cannot reach parity or AT-SPI); 1.0 tiling requirement; settings compatibility map against GNOME 51 schemas; portal/capture grant lifecycle; and packaging/rollback strategy on bootc.
+
+Current backend reality: the compositor has only the nested winit backend. A DRM/KMS, libseat, and libinput session is the gate between tier 1 and tier 2 and is tracked on the roadmap board.
