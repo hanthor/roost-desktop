@@ -113,6 +113,13 @@ pub struct State {
     /// Set when the last grabbed popup went away, so the manager hands
     /// keyboard focus back to the focused window on its next reconcile.
     pub(crate) popup_refocus: bool,
+    /// Global origin of each mapped toplevel's surface, published by the
+    /// window manager every reconcile, so popups can be constrained to
+    /// the output under their parent before their first configure.
+    pub(crate) window_origins: std::collections::HashMap<
+        wl_surface::WlSurface,
+        smithay::utils::Point<i32, smithay::utils::Logical>,
+    >,
     /// Output inventory: one entry per connected output, fed by the
     /// standard global add/remove flow. Empty until the runtime (or a
     /// test) registers the first entry; readers fall back to zero
@@ -206,6 +213,7 @@ impl XdgShellHandler for State {
             state.geometry = positioner.get_geometry();
             state.positioner = positioner;
         });
+        self.unconstrain_popup(&surface);
         surface.send_repositioned(token);
         let _ = surface.send_configure();
     }
@@ -290,6 +298,7 @@ impl CompositorHandler for State {
         self.popups.commit(surface);
         if let Some(smithay::desktop::PopupKind::Xdg(popup)) = self.popups.find_popup(surface) {
             if !popup.is_initial_configure_sent() {
+                self.unconstrain_popup(&popup);
                 let _ = popup.send_configure();
             }
         }
@@ -347,6 +356,46 @@ impl SeatHandler for State {
 pub const SEAT_NAME: &str = "roost-seat";
 
 impl State {
+    /// Fit a popup onto the output under its parent using the client's
+    /// positioner constraint adjustments (flip, slide, resize in protocol
+    /// order). Parents are toplevels (positioned relative to their window
+    /// geometry) or layer surfaces (relative to the surface); nested
+    /// popups keep their positioner geometry.
+    pub(crate) fn unconstrain_popup(&self, popup: &PopupSurface) {
+        use smithay::utils::{Logical, Point, Rectangle};
+        let Some(parent) = popup.get_parent_surface() else {
+            return;
+        };
+        let base: Point<i32, Logical> = if let Some(origin) = self.window_origins.get(&parent) {
+            *origin + crate::popup::window_geometry_loc(&parent)
+        } else if let Some((_, (x, y), _)) = crate::layer::layer_layout(self)
+            .into_iter()
+            .find(|(s, _, _)| *s == parent)
+        {
+            (x, y).into()
+        } else {
+            return;
+        };
+        let output = self
+            .outputs
+            .iter()
+            .map(|e| Rectangle::<i32, Logical>::new(e.loc.into(), e.size))
+            .find(|r| r.contains(base))
+            .or_else(|| {
+                self.outputs
+                    .iter()
+                    .find(|e| e.primary)
+                    .map(|e| Rectangle::new(e.loc.into(), e.size))
+            });
+        let Some(output) = output else {
+            return;
+        };
+        let target = Rectangle::new(output.loc - base, output.size);
+        popup.with_pending_state(|state| {
+            state.geometry = state.positioner.get_unconstrained_geometry(target);
+        });
+    }
+
     /// Dismiss every grabbed popup (outside click): `popup_done` to each,
     /// newest first. Returns whether anything was dismissed.
     pub(crate) fn dismiss_popup_grab(&mut self) -> bool {
@@ -363,6 +412,16 @@ impl State {
     /// Take the "hand keyboard focus back" flag (see `popup_refocus`).
     pub(crate) fn take_popup_refocus(&mut self) -> bool {
         std::mem::take(&mut self.popup_refocus)
+    }
+
+    /// Client that owns the active popup grab, if any.
+    pub(crate) fn popup_grab_owner(
+        &self,
+    ) -> Option<smithay::reexports::wayland_server::backend::ClientId> {
+        self.popup_grab
+            .first()
+            .and_then(|p| p.wl_surface().client())
+            .map(|c| c.id())
     }
 
     /// Whether an explicit popup grab is active.
@@ -449,6 +508,7 @@ impl State {
             popups: smithay::desktop::PopupManager::default(),
             popup_grab: Vec::new(),
             popup_refocus: false,
+            window_origins: std::collections::HashMap::new(),
             outputs: Vec::new(),
             window_requests: Vec::new(),
             #[cfg(feature = "xwayland")]

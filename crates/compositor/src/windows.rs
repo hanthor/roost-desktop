@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 #[cfg(feature = "xwayland")]
 use crate::xwayland::{map_x11_identity, X11ManagerEvent};
+use smithay::reexports::wayland_server::Resource as _;
 #[cfg(feature = "xwayland")]
 use smithay::xwayland::X11Surface;
 use smithay::{
@@ -26,7 +27,7 @@ use smithay::{
     desktop::{Window, WindowSurface},
     input::{
         keyboard::{FilterResult, KeyboardHandle, XkbConfig},
-        pointer::{ButtonEvent, MotionEvent, PointerHandle},
+        pointer::{AxisFrame, ButtonEvent, MotionEvent, PointerHandle},
     },
     reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::IsAlive,
@@ -272,6 +273,11 @@ impl WindowManager {
         // Popups (#88): drop dead trees, and once the last grabbed popup
         // is gone hand keyboard focus back to the focused window.
         state.popups.cleanup();
+        state.window_origins = self
+            .visible_windows()
+            .into_iter()
+            .filter_map(|(w, g)| w.wl_surface().map(|s| (s.into_owned(), g.loc)))
+            .collect();
         if state.take_popup_refocus() {
             let focused = self.model.focused();
             self.apply_focus(state, focused);
@@ -816,6 +822,20 @@ impl WindowManager {
         crate::popup::popup_at(&placed, pos).cloned()
     }
 
+    /// The surface a press at `pos` would land on (layer or window).
+    fn surface_for_click(&self, state: &State, pos: Point<f64, Logical>) -> Option<WlSurface> {
+        if let Some((surface, _)) =
+            crate::layer::topmost_layer_at(state, pos.x as i32, pos.y as i32)
+        {
+            return Some(surface);
+        }
+        let id = self.window_at(pos)?;
+        self.windows
+            .get(&id)
+            .and_then(|w| w.surface.wl_surface())
+            .map(|s| s.into_owned())
+    }
+
     /// Topmost window containing `pos`, if any. Only the active
     /// workspace is hit-testable; hidden workspaces never take focus.
     pub fn window_at(&self, pos: Point<f64, Logical>) -> Option<u64> {
@@ -850,6 +870,9 @@ impl WindowManager {
                         time,
                     },
                 );
+                // wl_seat v5+: clients act on pointer events only at a
+                // frame boundary (GTK4 drops unframed clicks).
+                pointer.frame(state);
             }
             return;
         }
@@ -868,6 +891,9 @@ impl WindowManager {
                         time,
                     },
                 );
+                // wl_seat v5+: clients act on pointer events only at a
+                // frame boundary (GTK4 drops unframed clicks).
+                pointer.frame(state);
             }
             return;
         }
@@ -896,6 +922,9 @@ impl WindowManager {
                     time,
                 },
             );
+            // wl_seat v5+: clients act on pointer events only at a
+            // frame boundary (GTK4 drops unframed clicks).
+            pointer.frame(state);
         }
     }
 
@@ -906,11 +935,21 @@ impl WindowManager {
     /// button itself follows pointer focus from the last motion.
     pub fn pointer_button(&mut self, state: &mut State, button: u32, pressed: bool, time: u32) {
         let on_popup = self.popup_at(state, self.pointer_pos).is_some();
-        // A press outside a grabbed menu dismisses it and is consumed,
-        // as under Mutter: the click does not reach what is beneath.
-        if pressed && !on_popup && state.dismiss_popup_grab() {
-            self.swallowed_button = Some(button);
-            return;
+        // xdg-shell grab rule: a press on another client's surface (or on
+        // nothing) dismisses the grabbed popups and is consumed, so the
+        // click never reaches what is beneath. A press on a surface of
+        // the grab's own client is delivered normally: that client
+        // decides (a GTK panel closes one popover and opens the next).
+        if pressed && !on_popup && state.popup_grab_active() {
+            let target = self
+                .surface_for_click(state, self.pointer_pos)
+                .and_then(|s| s.client())
+                .map(|c| c.id());
+            if target.is_none() || target != state.popup_grab_owner() {
+                state.dismiss_popup_grab();
+                self.swallowed_button = Some(button);
+                return;
+            }
         }
         if !pressed && self.swallowed_button == Some(button) {
             self.swallowed_button = None;
@@ -948,7 +987,47 @@ impl WindowManager {
                     },
                 },
             );
+            // wl_seat v5+: clients act on pointer events only at a
+            // frame boundary (GTK4 drops unframed clicks).
+            pointer.frame(state);
         }
+    }
+
+    /// Scroll the client under the pointer. Wheel notches arrive in v120
+    /// units (multiples of 120): sent as discrete steps of 15 px each,
+    /// Mutter's wheel distance. Anything else is a continuous (touchpad)
+    /// distance in pixels. Always closed by a pointer frame.
+    pub fn pointer_axis(&mut self, state: &mut State, horizontal: f64, vertical: f64, time: u32) {
+        let Some(pointer) = self.pointer.clone() else {
+            return;
+        };
+        let mut frame = AxisFrame::new(time);
+        let mut wheel = false;
+        let mut any = false;
+        for (axis, amount) in [(Axis::Horizontal, horizontal), (Axis::Vertical, vertical)] {
+            if amount == 0.0 {
+                continue;
+            }
+            any = true;
+            if is_v120_wheel(amount) {
+                wheel = true;
+                frame = frame
+                    .value(axis, amount / 120.0 * WHEEL_STEP_PX)
+                    .v120(axis, amount as i32);
+            } else {
+                frame = frame.value(axis, amount);
+            }
+        }
+        if !any {
+            return;
+        }
+        frame = frame.source(if wheel {
+            smithay::backend::input::AxisSource::Wheel
+        } else {
+            smithay::backend::input::AxisSource::Finger
+        });
+        pointer.axis(state, frame);
+        pointer.frame(state);
     }
 
     /// Deliver a key event to the focused window. Returns false when no
@@ -1834,9 +1913,13 @@ pub const R_KEYCODE: u32 = 19;
 pub const WORK_AREA_TOP: i32 = 32;
 /// Hot-corner trigger region in logical pixels from the top-left.
 pub const HOT_CORNER_PX: f64 = 8.0;
-/// Activities-strip trigger: button presses in the top strip open the
-/// overview (the panel owns that strip; matches shell `PANEL_HEIGHT`).
+/// Activities-strip trigger height: the top strip the panel owns
+/// (matches shell `PANEL_HEIGHT`).
 pub const ACTIVITIES_STRIP_PX: f64 = 32.0;
+/// Activities-strip trigger width: only presses on the Activities
+/// control at the strip's left end toggle the overview, as in GNOME.
+/// Clicks on the clock, indicators, or tray belong to the shell.
+pub const ACTIVITIES_WIDTH_PX: f64 = 96.0;
 
 /// What an input event means for the overview (002 R1), decided purely
 /// from the event plus the current intent and pointer height. The
@@ -1862,13 +1945,13 @@ pub struct TriggerState {
 
 impl TriggerState {
     /// Decide the overview action for one input event. `overview_open`
-    /// is the hub intent; `pointer_y` is the last known pointer height
+    /// is the hub intent; `pointer` is the last known pointer position
     /// for strip clicks (buttons carry no position).
     pub fn feed(
         &mut self,
         input: &ManagerInput,
         overview_open: bool,
-        pointer_y: f64,
+        pointer: Point<f64, Logical>,
     ) -> TriggerAction {
         match *input {
             ManagerInput::Key {
@@ -1893,7 +1976,8 @@ impl TriggerState {
                 }
             }
             ManagerInput::Button { pressed, .. } => {
-                let strip = pressed && pointer_y < ACTIVITIES_STRIP_PX;
+                let strip =
+                    pressed && pointer.y < ACTIVITIES_STRIP_PX && pointer.x < ACTIVITIES_WIDTH_PX;
                 self.super_armed = false;
                 if strip {
                     TriggerAction::Toggle
@@ -1976,12 +2060,14 @@ impl WindowManager {
             ManagerInput::Axis {
                 horizontal,
                 vertical,
-                ..
+                time,
             } => {
                 // Wheel scrolls the strip in scroll mode (focus stays
-                // on the same window); everywhere else axis events
-                // drop as before.
-                self.scroll_strip(state, horizontal, vertical);
+                // on the same window); everywhere else it scrolls the
+                // client under the pointer, as in GNOME.
+                if !self.scroll_strip(state, horizontal, vertical) {
+                    self.pointer_axis(state, horizontal, vertical, time);
+                }
             }
         }
     }
@@ -2153,6 +2239,14 @@ fn touch_release(time: u32) -> ManagerInput {
     }
 }
 
+/// Pixels per wheel notch, as Mutter scrolls.
+pub const WHEEL_STEP_PX: f64 = 15.0;
+
+/// Whether an axis amount is a whole number of v120 wheel units.
+pub fn is_v120_wheel(amount: f64) -> bool {
+    amount.fract() == 0.0 && (amount as i64) % 120 == 0
+}
+
 /// Translate one backend event into manager inputs. Touch contacts
 /// emulate a left-button pointer (down moves then presses, motion
 /// moves, up/cancel releases) so touchscreens act instead of dropping
@@ -2286,21 +2380,21 @@ mod tests {
     fn lone_super_tap_toggles() {
         let mut triggers = TriggerState::default();
         assert_eq!(
-            triggers.feed(&key(SUPER_LEFT_KEYCODE, true), false, 100.0),
+            triggers.feed(&key(SUPER_LEFT_KEYCODE, true), false, (0.0, 100.0).into()),
             TriggerAction::None,
             "press alone arms without acting"
         );
         assert_eq!(
-            triggers.feed(&key(SUPER_LEFT_KEYCODE, false), false, 100.0),
+            triggers.feed(&key(SUPER_LEFT_KEYCODE, false), false, (0.0, 100.0).into()),
             TriggerAction::Toggle
         );
         // Right Super taps too.
         assert_eq!(
-            triggers.feed(&key(SUPER_RIGHT_KEYCODE, true), true, 100.0),
+            triggers.feed(&key(SUPER_RIGHT_KEYCODE, true), true, (0.0, 100.0).into()),
             TriggerAction::None
         );
         assert_eq!(
-            triggers.feed(&key(SUPER_RIGHT_KEYCODE, false), true, 100.0),
+            triggers.feed(&key(SUPER_RIGHT_KEYCODE, false), true, (0.0, 100.0).into()),
             TriggerAction::Toggle
         );
     }
@@ -2309,16 +2403,16 @@ mod tests {
     fn super_combo_does_not_toggle() {
         let mut triggers = TriggerState::default();
         assert_eq!(
-            triggers.feed(&key(SUPER_LEFT_KEYCODE, true), false, 100.0),
+            triggers.feed(&key(SUPER_LEFT_KEYCODE, true), false, (0.0, 100.0).into()),
             TriggerAction::None
         );
         // Any other key in between cancels the tap (Super+T etc.).
         assert_eq!(
-            triggers.feed(&key(20, true), false, 100.0),
+            triggers.feed(&key(20, true), false, (0.0, 100.0).into()),
             TriggerAction::None
         );
         assert_eq!(
-            triggers.feed(&key(SUPER_LEFT_KEYCODE, false), false, 100.0),
+            triggers.feed(&key(SUPER_LEFT_KEYCODE, false), false, (0.0, 100.0).into()),
             TriggerAction::None,
             "release after a combo is not a tap"
         );
@@ -2328,16 +2422,16 @@ mod tests {
     fn hot_corner_opens_only_when_closed() {
         let mut triggers = TriggerState::default();
         assert_eq!(
-            triggers.feed(&motion(2.0, 3.0), false, 3.0),
+            triggers.feed(&motion(2.0, 3.0), false, (0.0, 3.0).into()),
             TriggerAction::Open
         );
         assert_eq!(
-            triggers.feed(&motion(2.0, 3.0), true, 3.0),
+            triggers.feed(&motion(2.0, 3.0), true, (0.0, 3.0).into()),
             TriggerAction::None,
             "no re-open while already open"
         );
         assert_eq!(
-            triggers.feed(&motion(400.0, 300.0), false, 300.0),
+            triggers.feed(&motion(400.0, 300.0), false, (0.0, 300.0).into()),
             TriggerAction::None
         );
     }
@@ -2346,28 +2440,34 @@ mod tests {
     fn strip_click_toggles_and_disarms_super() {
         let mut triggers = TriggerState::default();
         assert_eq!(
-            triggers.feed(&key(SUPER_LEFT_KEYCODE, true), false, 100.0),
+            triggers.feed(&key(SUPER_LEFT_KEYCODE, true), false, (0.0, 100.0).into()),
             TriggerAction::None
         );
         // Click in the Activities strip: toggles, and the earlier Super
         // press must not linger as an armed tap.
         assert_eq!(
-            triggers.feed(&button(true), false, 10.0),
+            triggers.feed(&button(true), false, (0.0, 10.0).into()),
             TriggerAction::Toggle
         );
         assert_eq!(
-            triggers.feed(&key(SUPER_LEFT_KEYCODE, false), false, 100.0),
+            triggers.feed(&key(SUPER_LEFT_KEYCODE, false), false, (0.0, 100.0).into()),
             TriggerAction::None,
             "strip click consumed the armed Super"
         );
+        // Clicks in the strip right of Activities (clock, indicators)
+        // belong to the shell and never toggle.
+        assert_eq!(
+            triggers.feed(&button(true), false, (640.0, 10.0).into()),
+            TriggerAction::None
+        );
         // Clicks below the strip do nothing.
         assert_eq!(
-            triggers.feed(&button(true), false, 200.0),
+            triggers.feed(&button(true), false, (0.0, 200.0).into()),
             TriggerAction::None
         );
         // Releases never toggle.
         assert_eq!(
-            triggers.feed(&button(false), false, 10.0),
+            triggers.feed(&button(false), false, (0.0, 10.0).into()),
             TriggerAction::None
         );
     }

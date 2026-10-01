@@ -1,15 +1,14 @@
-//! xdg popups (#88): configure, placement, hit-testing, grab dismissal.
+//! Pointer event framing and scrolling, as GTK4 clients need them.
 //!
-//! A real protocol client maps a toplevel, opens an xdg_popup anchored
-//! inside it, and the test checks what a GTK menu needs: the popup is
-//! configured where the positioner asked, the pointer finds it there
-//! ahead of the window, and a press outside a grabbed popup sends
-//! popup_done and is not delivered to the window beneath. Conventions
-//! follow `windows.rs`: bounded pump, no sleeps.
+//! wl_seat v5+ clients act on pointer events only at a frame boundary:
+//! without wl_pointer.frame, GTK4 silently drops clicks (found while
+//! bringing up the GTK shell, ADR 0006). And outside scroll mode the
+//! wheel must scroll the client under the pointer, as in GNOME. A real
+//! client asserts both. Conventions follow `windows.rs`.
 
 use std::os::unix::net::UnixStream;
 
-use roost_compositor::windows::WindowManager;
+use roost_compositor::windows::{ManagerInput, WindowManager, WHEEL_STEP_PX};
 use roost_compositor::TestCompositor;
 use smithay::utils::{Logical, Point};
 use wayland_client::{
@@ -27,7 +26,7 @@ use wayland_client::{
 };
 use wayland_protocols::xdg::shell::client::{
     xdg_popup::{Event as PopupEvent, XdgPopup},
-    xdg_positioner::{Anchor, Gravity, XdgPositioner},
+    xdg_positioner::XdgPositioner,
     xdg_surface::XdgSurface,
     xdg_toplevel::XdgToplevel,
     xdg_wm_base::XdgWmBase,
@@ -53,6 +52,12 @@ struct Client {
     releases: u32,
     /// Surface ids keyboard focus entered, in order.
     keyboard_entered: Vec<u32>,
+    /// wl_pointer.frame events received.
+    frames: u32,
+    /// (axis, value) for every wl_pointer.axis, vertical = 0.
+    axes: Vec<(u32, f64)>,
+    /// v120 values for every wl_pointer.axis_value120.
+    v120: Vec<i32>,
 }
 
 impl Client {
@@ -183,6 +188,15 @@ impl Dispatch<WlPointer, ()> for Client {
             PointerEvent::Enter { surface, .. } => {
                 state.pointer_entered.push(surface.id().protocol_id())
             }
+            PointerEvent::Frame => state.frames += 1,
+            PointerEvent::Axis { axis, value, .. } => {
+                let axis = match axis {
+                    wayland_client::WEnum::Value(a) => a as u32,
+                    wayland_client::WEnum::Unknown(a) => a,
+                };
+                state.axes.push((axis, value));
+            }
+            PointerEvent::AxisValue120 { value120, .. } => state.v120.push(value120),
             PointerEvent::Button {
                 state: wayland_client::WEnum::Value(s),
                 ..
@@ -241,8 +255,8 @@ struct Fixture {
     conn: Connection,
     queue: EventQueue<Client>,
     client: Client,
-    toplevel_surface: WlSurface,
-    toplevel_xdg: XdgSurface,
+    _toplevel_surface: WlSurface,
+    _toplevel_xdg: XdgSurface,
     window_origin: Point<i32, Logical>,
 }
 
@@ -307,8 +321,8 @@ fn fixture() -> Fixture {
         conn,
         queue,
         client,
-        toplevel_surface: surface,
-        toplevel_xdg: xdg,
+        _toplevel_surface: surface,
+        _toplevel_xdg: xdg,
         window_origin: (0, 0).into(),
     };
     sync(&mut f);
@@ -318,231 +332,68 @@ fn fixture() -> Fixture {
     f
 }
 
-/// Open a 100x50 popup whose top-left sits at (10, 10) in the parent's
-/// window geometry, optionally grabbing.
-fn open_popup(f: &mut Fixture, grab: bool) -> (WlSurface, XdgPopup) {
-    let qh = f.queue.handle();
-    let base = f.client.xdg_base.clone().unwrap();
-    let positioner = base.create_positioner(&qh, ());
-    positioner.set_size(100, 50);
-    positioner.set_anchor_rect(10, 10, 1, 1);
-    positioner.set_anchor(Anchor::TopLeft);
-    positioner.set_gravity(Gravity::BottomRight);
-    let surface = f
-        .client
-        .compositor
-        .as_ref()
-        .unwrap()
-        .create_surface(&qh, ());
-    let xdg = base.get_xdg_surface(&surface, &qh, surface.clone());
-    let popup = xdg.get_popup(Some(&f.toplevel_xdg), &positioner, &qh, ());
-    if grab {
-        popup.grab(f.client.seat.as_ref().unwrap(), 1);
-    }
-    surface.commit();
-    pump(f, |c| c.popup_configure.is_some());
-    sync(f);
-    (surface, popup)
+fn inside(f: &Fixture) -> Point<f64, Logical> {
+    (f.window_origin + Point::from((20, 20))).to_f64()
 }
 
 #[test]
-fn popup_is_configured_where_the_positioner_asked() {
+fn motion_and_buttons_end_with_a_pointer_frame() {
     let mut f = fixture();
-    let _ = open_popup(&mut f, false);
-    assert_eq!(f.client.popup_configure, Some((10, 10, 100, 50)));
-}
-
-#[test]
-fn pointer_finds_the_popup_ahead_of_its_window() {
-    let mut f = fixture();
-    let (popup_surface, _popup) = open_popup(&mut f, false);
-    let inside = f.window_origin + Point::from((20, 20));
-    let placed = f
-        .manager
-        .popup_at(&f.comp.state, inside.to_f64())
-        .expect("popup under the pointer");
-    assert_eq!(placed.rect.loc, f.window_origin + Point::from((10, 10)));
-    // Pointer motion enters the popup surface, not the toplevel.
-    f.manager
-        .pointer_motion(&mut f.comp.state, inside.to_f64(), 1);
+    let at = inside(&f);
+    f.manager.pointer_motion(&mut f.comp.state, at, 1);
     sync(&mut f);
-    assert_eq!(
-        f.client.pointer_entered.last().copied(),
-        Some(popup_surface.id().protocol_id())
-    );
-    // Just outside the popup rect: no popup.
-    let outside = f.window_origin + Point::from((200, 200));
-    assert!(f
-        .manager
-        .popup_at(&f.comp.state, outside.to_f64())
-        .is_none());
-}
-
-/// A second client with its own mapped toplevel; returns where to
-/// click so the press lands on that client's window only.
-struct Other {
-    _conn: Connection,
-    queue: EventQueue<Client>,
-    client: Client,
-}
-
-fn other_client(f: &mut Fixture) -> (Other, Point<f64, Logical>) {
-    let (server, stream) = UnixStream::pair().unwrap();
-    f.comp.add_client(server);
-    let conn = Connection::from_socket(stream).unwrap();
-    let mut queue = conn.new_event_queue();
-    let qh = queue.handle();
-    let mut client = Client::default();
-    conn.display().get_registry(&qh, ());
-    let step = |f: &mut Fixture, q: &mut EventQueue<Client>, c: &mut Client| {
-        q.flush().unwrap();
-        f.comp.pump();
-        f.manager.reconcile(&mut f.comp.state);
-        f.comp.pump();
-        if let Some(guard) = q.prepare_read() {
-            guard.read().unwrap();
-        }
-        q.dispatch_pending(c).unwrap();
-    };
-    for _ in 0..PUMP_ROUNDS {
-        step(f, &mut queue, &mut client);
-        if client.ready() {
-            break;
-        }
-    }
-    let surface = client.compositor.as_ref().unwrap().create_surface(&qh, ());
-    let xdg = client
-        .xdg_base
-        .as_ref()
-        .unwrap()
-        .get_xdg_surface(&surface, &qh, surface.clone());
-    let toplevel = xdg.get_toplevel(&qh, ());
-    toplevel.set_title("other".into());
-    surface.commit();
-    for _ in 0..20 {
-        step(f, &mut queue, &mut client);
-    }
-    // Keep the original popup client in sync too.
-    sync(f);
-    assert_eq!(f.manager.visible_windows().len(), 2);
-    let (_, host) = f
-        .manager
-        .visible_windows()
-        .into_iter()
-        .find(|(_, g)| g.loc == f.window_origin)
-        .unwrap();
-    let (_, other) = f
-        .manager
-        .visible_windows()
-        .into_iter()
-        .find(|(_, g)| g.loc != f.window_origin)
-        .unwrap();
-    let probe = Point::<i32, Logical>::from((
-        other.loc.x + other.size.w - 5,
-        other.loc.y + other.size.h - 5,
-    ));
-    assert!(!host.contains(probe), "probe must miss the menu host");
-    (
-        Other {
-            _conn: conn,
-            queue,
-            client,
-        },
-        probe.to_f64(),
-    )
-}
-
-#[test]
-fn press_on_another_client_dismisses_the_grab_and_is_consumed() {
-    let mut f = fixture();
-    let (_popup_surface, _popup) = open_popup(&mut f, true);
-    assert!(f.comp.state.popup_grab_active());
-    let (mut other, probe) = other_client(&mut f);
-    f.manager.pointer_motion(&mut f.comp.state, probe, 2);
+    let after_motion = f.client.frames;
+    assert!(after_motion >= 1, "motion is framed");
     f.manager
-        .pointer_button(&mut f.comp.state, BTN_LEFT, true, 3);
+        .pointer_button(&mut f.comp.state, BTN_LEFT, true, 2);
     f.manager
-        .pointer_button(&mut f.comp.state, BTN_LEFT, false, 4);
-    pump(&mut f, |c| c.popup_done);
-    for _ in 0..10 {
-        other.queue.flush().unwrap();
-        f.comp.pump();
-        if let Some(guard) = other.queue.prepare_read() {
-            guard.read().unwrap();
-        }
-        other.queue.dispatch_pending(&mut other.client).unwrap();
-    }
-    assert!(!f.comp.state.popup_grab_active());
-    assert_eq!(other.client.presses, 0, "dismissing press consumed");
-    assert_eq!(other.client.releases, 0, "its release is swallowed too");
-}
-
-#[test]
-fn press_on_the_grab_owners_own_surface_is_delivered() {
-    let mut f = fixture();
-    let (_popup_surface, _popup) = open_popup(&mut f, true);
-    // Inside the menu host window, outside the popup rect.
-    let own = (f.window_origin + Point::from((300, 200))).to_f64();
-    assert!(f.manager.popup_at(&f.comp.state, own).is_none());
-    f.manager.pointer_motion(&mut f.comp.state, own, 2);
-    f.manager
-        .pointer_button(&mut f.comp.state, BTN_LEFT, true, 3);
-    f.manager
-        .pointer_button(&mut f.comp.state, BTN_LEFT, false, 4);
+        .pointer_button(&mut f.comp.state, BTN_LEFT, false, 3);
     sync(&mut f);
-    assert!(
-        !f.client.popup_done,
-        "the owner decides, not the compositor"
-    );
     assert_eq!(f.client.presses, 1);
     assert_eq!(f.client.releases, 1);
+    assert!(
+        f.client.frames >= after_motion + 2,
+        "press and release each framed"
+    );
 }
 
 #[test]
-fn keyboard_focus_returns_to_the_window_after_the_grab() {
+fn wheel_scrolls_the_client_under_the_pointer() {
     let mut f = fixture();
-    let (_popup_surface, popup) = open_popup(&mut f, true);
-    popup.destroy();
-    sync(&mut f);
+    let at = inside(&f);
+    f.manager.pointer_motion(&mut f.comp.state, at, 1);
+    // One notch down: v120 = 120.
+    f.manager.on_input(
+        &mut f.comp.state,
+        ManagerInput::Axis {
+            horizontal: 0.0,
+            vertical: 120.0,
+            time: 2,
+        },
+    );
     sync(&mut f);
     assert_eq!(
-        f.client.keyboard_entered.last().copied(),
-        Some(f.toplevel_surface.id().protocol_id())
+        f.client.axes,
+        vec![(0, WHEEL_STEP_PX)],
+        "vertical, one step"
     );
+    assert_eq!(f.client.v120, vec![120]);
 }
 
 #[test]
-fn popup_slides_back_onto_the_output() {
-    use wayland_protocols::xdg::shell::client::xdg_positioner::ConstraintAdjustment;
+fn touchpad_scroll_is_continuous() {
     let mut f = fixture();
-    f.comp.state.set_output_size(1280, 800);
-    sync(&mut f);
-    let qh = f.queue.handle();
-    let base = f.client.xdg_base.clone().unwrap();
-    let positioner = base.create_positioner(&qh, ());
-    // 400 wide, anchored far right of the parent: would overflow any
-    // output edge unless slid back.
-    positioner.set_size(400, 50);
-    positioner.set_anchor_rect(5000, 10, 1, 1);
-    positioner.set_anchor(Anchor::TopLeft);
-    positioner.set_gravity(Gravity::BottomRight);
-    positioner.set_constraint_adjustment(ConstraintAdjustment::SlideX);
-    let surface = f
-        .client
-        .compositor
-        .as_ref()
-        .unwrap()
-        .create_surface(&qh, ());
-    let xdg = base.get_xdg_surface(&surface, &qh, surface.clone());
-    let _popup = xdg.get_popup(Some(&f.toplevel_xdg), &positioner, &qh, ());
-    surface.commit();
-    pump(&mut f, |c| c.popup_configure.is_some());
-    let (x, _, w, _) = f.client.popup_configure.unwrap();
-    let output_w = 1280;
-    let right_edge = f.window_origin.x + x + w;
-    assert!(
-        right_edge <= output_w,
-        "popup right edge {right_edge} slid inside the {output_w}px output"
+    let at = inside(&f);
+    f.manager.pointer_motion(&mut f.comp.state, at, 1);
+    f.manager.on_input(
+        &mut f.comp.state,
+        ManagerInput::Axis {
+            horizontal: 3.5,
+            vertical: 0.0,
+            time: 2,
+        },
     );
-    assert_eq!(w, 400, "slide keeps the size");
+    sync(&mut f);
+    assert_eq!(f.client.axes, vec![(1, 3.5)], "horizontal, pixel distance");
+    assert!(f.client.v120.is_empty(), "no discrete steps for touchpads");
 }
