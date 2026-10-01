@@ -113,9 +113,9 @@ def main():
                 if kind == "cargo":
                     if name not in tests:
                         errors.append(f"{r['ID']}: cargo test '{name}' does not exist")
-                elif kind == "journey":
+                elif kind in ("journey", "proof"):
                     if name not in passed:
-                        errors.append(f"{r['ID']}: journey assertion '{name}' did not pass")
+                        errors.append(f"{r['ID']}: {kind} assertion '{name}' did not pass")
                 else:
                     errors.append(f"{r['ID']}: unknown test reference '{ref}'")
     summary(rows)

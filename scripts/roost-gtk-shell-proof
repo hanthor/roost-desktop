@@ -16,6 +16,11 @@
 #   G-OV-OPEN   Super opens the overview with a preview per window (#54)
 #   G-OV-PICK   clicking a preview focuses that window, closes overview
 #   G-APP-POPOVER an app's menu popover opens (xdg popups, #88)
+#   G-NOTIFY-BANNER  a D-Bus notification shows a banner (#56)
+#   G-NOTIFY-EXPIRE  the banner goes away by itself
+#   G-NOTIFY-LIST    the calendar lists it instead of "No Notifications"
+#   G-NOTIFY-CLEAR   Clear empties the list
+#   G-NOTIFY-DND     with Do Not Disturb on, no banner, but listed
 #   G-OV-SHELL-UI  the overview shows the search entry and the dash
 #   G-OV-SEARCH typing lists matching apps (#57)
 #   G-OV-LAUNCH Enter launches the top result and closes the overview
@@ -109,7 +114,7 @@ fi
 
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk
 "$ROOT/target/debug/roost-compositor" --backend winit --socket "roost-gtk-proof-$$" \
-    --shell-bin "$ROOT/target/debug/roost-shell-gtk" >"$LOG" 2>&1 &
+    --shell-bin "${ROOST_PROOF_SHELL_BIN:-$ROOT/target/debug/roost-shell-gtk}" >"$LOG" 2>&1 &
 COMPOSITOR_PID=$!
 
 WID=""
@@ -290,6 +295,86 @@ showing "$ARTIFACTS/a11y-grid.json" "Roost Probe" ||
     fail G-OV-APPGRID "app grid does not list installed apps"
 pass G-OV-APPGRID "Show Apps opens the app grid"
 scrot "$ARTIFACTS/11-app-grid.png" >/dev/null
+xdotool key Escape
+
+# Notifications (#56). Close whatever the grid left open first (#97).
+xdotool key Escape
+if ! cstate '.overview_open | not' "closed" 3; then
+    xdotool key Super_L
+    cstate '.overview_open | not' "closed" || fail G-NOTIFY-BANNER "overview would not close"
+fi
+sleep 1
+notify() {
+    gdbus call --session --dest org.freedesktop.Notifications \
+        --object-path /org/freedesktop/Notifications \
+        --method org.freedesktop.Notifications.Notify \
+        -- "Roost Proof" 0 "" "$1" "$2" "[]" "{}" -1 >>"$ARTIFACTS/notify.log" 2>&1
+}
+open_calendar() {
+    xdotool mousemove --window "$WID" $((WIDTH / 2)) 16 click 1
+    sleep 2
+}
+notify "Proof Banner" "Sent over D-Bus" || fail G-NOTIFY-BANNER "Notify call failed"
+sleep 1
+scrot "$ARTIFACTS/12-banner.png" >/dev/null
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-banner.json" 20 ||
+    fail G-NOTIFY-BANNER "accessibility dump failed"
+showing "$ARTIFACTS/a11y-banner.json" "Proof Banner" ||
+    fail G-NOTIFY-BANNER "no banner showing for the notification"
+pass G-NOTIFY-BANNER "a D-Bus notification shows a banner"
+
+sleep 6
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-expired.json" 20 ||
+    fail G-NOTIFY-EXPIRE "accessibility dump failed"
+if showing "$ARTIFACTS/a11y-expired.json" "Proof Banner"; then
+    fail G-NOTIFY-EXPIRE "banner still showing after its timeout"
+fi
+pass G-NOTIFY-EXPIRE "the banner expires by itself"
+
+open_calendar
+scrot "$ARTIFACTS/13-notification-list.png" >/dev/null
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-list.json" 20 ||
+    fail G-NOTIFY-LIST "accessibility dump failed"
+showing "$ARTIFACTS/a11y-list.json" "Proof Banner" ||
+    fail G-NOTIFY-LIST "the calendar does not list the notification"
+if showing "$ARTIFACTS/a11y-list.json" "No Notifications"; then
+    fail G-NOTIFY-LIST "the empty state shows next to a notification"
+fi
+pass G-NOTIFY-LIST "the calendar lists the notification"
+
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-cleared.json" 20 --press "Clear" ||
+    fail G-NOTIFY-CLEAR "could not press Clear"
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-cleared.json" 20 ||
+    fail G-NOTIFY-CLEAR "accessibility dump failed"
+showing "$ARTIFACTS/a11y-cleared.json" "No Notifications" ||
+    fail G-NOTIFY-CLEAR "Clear did not empty the list"
+pass G-NOTIFY-CLEAR "Clear empties the list"
+
+xdotool key Escape
+sleep 1
+# Do Not Disturb from the quick-settings tile (the calendar's switch
+# shares the same store).
+xdotool mousemove --window "$WID" $((WIDTH - 50)) 16 click 1
+sleep 2
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-dnd.json" 20 --press "Do Not Disturb" ||
+    fail G-NOTIFY-DND "could not press Do Not Disturb"
+xdotool key Escape
+sleep 1
+notify "Quiet Note" "Held back by Do Not Disturb" || fail G-NOTIFY-DND "Notify call failed"
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-dnd-banner.json" 20 ||
+    fail G-NOTIFY-DND "accessibility dump failed"
+if showing "$ARTIFACTS/a11y-dnd-banner.json" "Quiet Note"; then
+    fail G-NOTIFY-DND "a banner showed with Do Not Disturb on"
+fi
+open_calendar
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-dnd-list.json" 20 ||
+    fail G-NOTIFY-DND "accessibility dump failed"
+showing "$ARTIFACTS/a11y-dnd-list.json" "Quiet Note" ||
+    fail G-NOTIFY-DND "the held-back notification is missing from the list"
+pass G-NOTIFY-DND "Do Not Disturb holds banners back but keeps the list"
+scrot "$ARTIFACTS/14-dnd-list.png" >/dev/null
 xdotool key Escape
 
 grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"

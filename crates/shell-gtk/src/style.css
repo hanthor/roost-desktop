@@ -126,3 +126,29 @@ window.roost-overview-grid {
 .overview-app.running {
   box-shadow: inset 0 -3px 0 0 alpha(#ffffff, 0.8);
 }
+
+/* Notifications (#56): GNOME 51 banner and list cards. */
+window.roost-banners {
+  background: none;
+}
+
+.notification-card {
+  background-color: alpha(#ffffff, 0.08);
+  border-radius: 16px;
+  padding: 12px;
+  color: #ffffff;
+}
+
+.notification-card.banner {
+  background-color: #2a2a2f;
+  box-shadow: 0 2px 8px alpha(#000000, 0.4);
+}
+
+.notification-app {
+  font-size: 9pt;
+  color: alpha(#ffffff, 0.6);
+}
+
+.notification-summary {
+  font-weight: bold;
+}

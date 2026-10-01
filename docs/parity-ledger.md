@@ -12,24 +12,25 @@ rationale and owner), `untested`.
 
 | ID | GNOME 51 behavior | Roost status | Tests | Evidence / notes | Deviation and owner |
 |---|---|---|---|---|---|
-| P-OV-01 | Super opens the overview with live window previews for the current workspace | missing | journey:J-OV-OPEN | overview lists windows as a text/box list only (`crates/shell-host/src/overview.rs`) | — |
+| P-OV-01 | Super opens the overview with live window previews for the current workspace | partial | journey:J-OV-OPEN, proof:G-OV-OPEN, proof:G-OV-PICK, cargo:spread_previews_never_overlap_and_stay_in_the_card | compositor-drawn workspace card with scaled live previews; click picks (`crates/compositor/src/overview.rs`) | visuals unverified against baseline shots |
 | P-OV-02 | Overview shows the workspace strip with thumbnails; drag or click switches | missing |  | workspaces exist in the model and switch by key; no strip | — |
-| P-OV-03 | Overview shows the dash with favorites and running apps | partial |  | bottom dock exists outside the overview (`dock.rs`) | layout differs; owner TBD |
-| P-OV-04 | Typing in the overview searches apps and launches the top hit with Enter | partial | journey:J-OV-SEARCH, journey:J-OV-LAUNCH | `scripts/roost-journey` proves launch via marker file; no search providers | — |
-| P-OV-05 | App grid with pages and folders | missing |  | — | — |
+| P-OV-03 | Overview shows the dash with favorites and running apps | partial | proof:G-OV-SHELL-UI | GTK shell dash with favorites (`crates/shell-gtk/src/overview.rs`); running-app indicators missing | — |
+| P-OV-04 | Typing in the overview searches apps and launches the top hit with Enter | partial | journey:J-OV-SEARCH, journey:J-OV-LAUNCH, proof:G-OV-SEARCH, proof:G-OV-LAUNCH | app search and launch in both shells; no D-Bus search providers (#57) | — |
+| P-OV-05 | App grid with pages and folders | partial | proof:G-OV-APPGRID | Show Apps opens a grid of installed apps; no pages or folders | — |
 | P-OV-06 | Escape returns to the previously focused window | pass (liveness only) | cargo:overview_parks_keyboard_focus_and_restores_on_dismiss, journey:J-OV-ESC | `overview_parks_keyboard_focus_and_restores_on_dismiss` | needs baseline comparison |
-| P-PN-01 | Top panel: Activities, centered clock, system menu right | partial |  | clock and three tiles; small bitmap font; no Activities label | — |
-| P-PN-02 | Clock opens calendar plus notification list | partial |  | calendar popup rows exist; no notification list | — |
-| P-PN-03 | Quick settings grid: Wi-Fi, Bluetooth, power mode, night light, dark style, volume, brightness | partial |  | network radio, sound, power rows (`tiles.rs`); no grid, no Bluetooth/brightness/night light/dark style | — |
-| P-NT-01 | Notification banners stack top-center with actions and dismissal | partial | cargo:panel::tests::live::banners_surface_appears_and_destroys_with_queue, cargo:intake::tests::live_bus::stub_notify_shows_a_banner_and_close_notification_dismisses_it | banners exist and act (`notifications.rs`); position and style unverified against baseline | — |
-| P-NT-02 | Do Not Disturb toggle and notification history | missing | cargo:notifications::tests::dnd_gates_banners_but_not_critical_or_history | history persists; no DND, no list surface | — |
+| P-PN-01 | Top panel: Activities, centered clock, system menu right | partial | proof:G-PANEL, proof:A11Y-PANEL | GTK shell panel matches the layout (ADR 0006); legacy shell still the default | — |
+| P-PN-02 | Clock opens calendar plus notification list | partial | proof:G-CAL-OPEN, proof:G-NOTIFY-LIST, proof:G-NOTIFY-CLEAR | GTK shell calendar popover lists notifications with Clear (`crates/shell-gtk/src/notify.rs`) | no events column |
+| P-PN-03 | Quick settings grid: Wi-Fi, Bluetooth, power mode, night light, dark style, volume, brightness | partial | proof:G-QS-OPEN, proof:A11Y-QS | GTK shell grid with network, dark style, DND, volume; Bluetooth, power mode, brightness are not wired (#55) | — |
+| P-NT-01 | Notification banners stack top-center with actions and dismissal | partial | cargo:panel::tests::live::banners_surface_appears_and_destroys_with_queue, cargo:intake::tests::live_bus::stub_notify_shows_a_banner_and_close_notification_dismisses_it, proof:G-NOTIFY-BANNER, proof:G-NOTIFY-EXPIRE | GTK shell banners top-center with actions, close, and expiry | style unverified against baseline |
+| P-NT-02 | Do Not Disturb toggle and notification history | partial | cargo:notifications::tests::dnd_gates_banners_but_not_critical_or_history, proof:G-NOTIFY-DND, proof:G-NOTIFY-LIST | DND in quick settings and the calendar holds banners back; history listed | needs baseline comparison |
 | P-WM-01 | Alt-Tab switcher with app icons and window previews | partial | cargo:alt_tab_steps_commits_and_cancels_without_leaking_keys, journey:J-SW-STEP | switcher steps and commits; visuals unverified | — |
 | P-WM-02 | Super+Up maximizes, Super+Left/Right tiles halves | pass (liveness only) | cargo:super_arrows_drive_layouts_and_consume | `super_arrows_drive_layouts_and_consume`; `roost-app-content` tiles Chromium | needs baseline comparison |
 | P-WM-03 | Dynamic workspaces, Super+PgUp/PgDn switch, Shift moves window | pass (liveness only) | cargo:super_page_keys_switch_and_shift_moves_focused, journey:J-WS-NEXT | `super_page_keys_switch_and_shift_moves_focused` | — |
-| P-WM-04 | Interactive drag-to-move and resize with pointer | missing |  | manager API only; no interactive drag (`windows.rs` header) | — |
+| P-WM-04 | Interactive drag-to-move and resize with pointer | partial | cargo:header_drag_moves_the_window, cargo:bottom_right_resize_grows_and_configures, cargo:super_drag_moves_without_a_client_request, proof:G-APP-DRAG | header drag, edge resize, Super+drag, top-edge maximize (`windows.rs`) | half-tile snapping missing |
+| P-WM-06 | App menus and popovers open as xdg popups and close on outside click | partial | cargo:popup_is_configured_where_the_positioner_asked, cargo:press_on_another_client_dismisses_the_grab_and_is_consumed, proof:G-APP-POPOVER, proof:G-CAL-OPEN | xdg popups with positioner constraints and the grab rule (`crates/compositor/src/popup.rs`) | — |
 | P-WM-05 | Window close, minimize, maximize via server-side or client decorations | partial |  | close via Alt+F4 and dock; no decorations policy | — |
 | P-LK-01 | Idle blanks then locks; password unlocks; nothing leaks while locked | pass (nested) | cargo:lock_command_engages_and_unlock_restores, cargo:correct_password_dismisses_lock_intact | `tests/lock.rs`, `tests/unlock.rs` | greetd unlock path; PAM binding is a 004 gate |
-| P-SY-01 | Session starts from the display manager on hardware | missing |  | winit backend only; no DRM/KMS | gate between tier 1 and 2 |
+| P-SY-01 | Session starts from the display manager on hardware | partial | proof:D-OUTPUT, proof:D-FRAMES, proof:D-SHELL | DRM/KMS backend runs on vkms in CI (`scripts/roost-drm-smoke`); greetd session untested on hardware | gate between tier 1 and 2 |
 | P-SY-02 | Multi-monitor with per-output panel and hotplug | pass (nested) | cargo:hotplug_remove_and_readd_round_trips_without_restart | `tests/outputs.rs`, `tests/migration.rs` | real outputs untested |
 | P-SY-03 | Fractional scaling and mixed DPI | missing |  | — | — |
 | P-SY-04 | XWayland apps run by default | partial |  | behind the `xwayland` feature; off by default | — |
@@ -51,6 +52,9 @@ Comma-separated references, checked by `scripts/roost-ledger` in CI
   listed test is a passing test.
 - `journey:<ID>` names a state assertion recorded as `<ID> pass` in a
   journey's `assertions.txt` (see `scripts/lib/roost-introspect.sh`).
+- `proof:<ID>` names a stage recorded as `<ID> pass` by the GTK shell
+  proof (`scripts/roost-gtk-shell-proof`) or the DRM smoke test
+  (`scripts/roost-drm-smoke`).
 
 A row whose status starts with `pass` must cite at least one test, and
 every cited test must exist and pass. CI fails otherwise.

@@ -109,6 +109,16 @@ impl Notification {
         &self.body
     }
 
+    /// Sending application name.
+    pub fn app(&self) -> &str {
+        &self.app
+    }
+
+    /// Every action with its label, in sender order.
+    pub fn actions(&self) -> &[NotificationAction] {
+        &self.actions
+    }
+
     /// Action keys still available (never the consumed ones).
     pub fn pending_actions(&self) -> Vec<&str> {
         self.actions

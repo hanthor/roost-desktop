@@ -14,6 +14,7 @@
 //! `ROOST_SHELL_BIN=roost-shell-gtk` while it grows to parity.
 
 mod logic;
+mod notify;
 mod overview;
 
 use std::cell::RefCell;
@@ -170,30 +171,12 @@ fn render_pills(shell: &mut Shell) {
     shell.pill_state = wanted;
 }
 
-fn calendar_popover() -> (gtk::Popover, gtk::Label, gtk::Label) {
+fn calendar_popover(notes: &gtk::Box) -> (gtk::Popover, gtk::Label, gtk::Label) {
     let popover = gtk::Popover::new();
     popover.add_css_class("roost-shell-popover");
     popover.add_css_class("roost-cal");
     popover.set_has_arrow(false);
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 24);
-
-    // Left: notification list (empty state as in GNOME 51).
-    let notes = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    notes.set_size_request(400, -1);
-    let bell = gtk::Image::from_icon_name("notifications-disabled-symbolic");
-    bell.set_pixel_size(72);
-    bell.set_vexpand(true);
-    bell.set_valign(gtk::Align::End);
-    let empty = gtk::Label::new(Some("No Notifications"));
-    empty.add_css_class("no-notifications");
-    empty.set_vexpand(true);
-    empty.set_valign(gtk::Align::Start);
-    let clear = gtk::Button::with_label("Clear");
-    clear.set_halign(gtk::Align::Start);
-    clear.set_sensitive(false);
-    notes.append(&bell);
-    notes.append(&empty);
-    notes.append(&clear);
 
     // Right: date heading plus month grid.
     let cal = gtk::Box::new(gtk::Orientation::Vertical, 6);
@@ -208,7 +191,7 @@ fn calendar_popover() -> (gtk::Popover, gtk::Label, gtk::Label) {
     cal.append(&full_date);
     cal.append(&calendar);
 
-    row.append(&notes);
+    row.append(notes);
     row.append(&gtk::Separator::new(gtk::Orientation::Vertical));
     row.append(&cal);
     popover.set_child(Some(&row));
@@ -245,7 +228,10 @@ fn qs_round(icon: &str, label: &str) -> gtk::Button {
     button
 }
 
-fn quick_settings_popover(shell: &Rc<RefCell<Shell>>) -> gtk::Popover {
+fn quick_settings_popover(
+    shell: &Rc<RefCell<Shell>>,
+    notify: &Rc<notify::NotifyUi>,
+) -> gtk::Popover {
     let popover = gtk::Popover::new();
     popover.add_css_class("roost-shell-popover");
     popover.add_css_class("roost-qs");
@@ -321,10 +307,30 @@ fn quick_settings_popover(shell: &Rc<RefCell<Shell>>) -> gtk::Popover {
             let _ = iface.set_string("color-scheme", logic::color_scheme_for(t.is_active()));
         });
     }
-    if let Some(notes) = settings(NOTIFICATIONS_SCHEMA) {
-        dnd.set_active(!notes.boolean("show-banners"));
+    // Do Not Disturb drives the shell's notification store (banners
+    // held back) and mirrors GNOME's show-banners key.
+    let notes_settings = settings(NOTIFICATIONS_SCHEMA);
+    if let Some(notes) = notes_settings.as_ref() {
+        notify.set_dnd(!notes.boolean("show-banners"));
+    }
+    dnd.set_active(notify.dnd());
+    {
+        let notify = notify.clone();
         dnd.connect_toggled(move |t| {
-            let _ = notes.set_boolean("show-banners", !t.is_active());
+            notify.set_dnd(t.is_active());
+            if let Some(notes) = notes_settings.as_ref() {
+                let _ = notes.set_boolean("show-banners", !t.is_active());
+            }
+        });
+    }
+    {
+        // Keep the tile in step when DND changes elsewhere.
+        let (dnd, notify) = (dnd.clone(), notify.clone());
+        glib::timeout_add_local(Duration::from_millis(250), move || {
+            if dnd.is_active() != notify.dnd() {
+                dnd.set_active(notify.dnd());
+            }
+            glib::ControlFlow::Continue
         });
     }
 
@@ -374,8 +380,16 @@ fn build(app: &adw::Application) {
     // as well would cancel it out.
     let activities = panel_button(&pills, "Activities");
 
+    let notify = notify::NotifyUi::new(app.upcast_ref());
+    {
+        let notify = notify.clone();
+        glib::timeout_add_local(Duration::from_millis(250), move || {
+            notify.tick();
+            glib::ControlFlow::Continue
+        });
+    }
     let clock_label = gtk::Label::new(None);
-    let (cal_popover, weekday, full_date) = calendar_popover();
+    let (cal_popover, weekday, full_date) = calendar_popover(notify.pane());
     let clock = panel_menu_button(&clock_label, "Date and Time", &cal_popover);
 
     let indicators = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -386,7 +400,7 @@ fn build(app: &adw::Application) {
     ] {
         indicators.append(&gtk::Image::from_icon_name(icon));
     }
-    let qs = quick_settings_popover(&shell);
+    let qs = quick_settings_popover(&shell, &notify);
     let system = panel_menu_button(&indicators, "System", &qs);
 
     let bar = gtk::CenterBox::new();
