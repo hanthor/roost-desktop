@@ -22,6 +22,9 @@ jobs:
       # smithay links system libxkbcommon via the xkbcommon crate;
       # the greeter UI needs GTK4/libadwaita dev files.
       - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev pkg-config libgtk-4-dev libadwaita-1-dev
+      # The GTK shell (ADR 0006) links gtk4-layer-shell, which Ubuntu
+      # 24.04 does not package.
+      - run: sudo apt-get install -y meson ninja-build libwayland-dev wayland-protocols && scripts/ci-install-gtk4-layer-shell
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
@@ -132,6 +135,29 @@ jobs:
         with:
           name: drm-smoke
           path: drm-smoke-artifacts/
+          retention-days: 14
+
+  gtk-shell:
+    # GTK4/libadwaita shell (ADR 0006) in the nested session: panel,
+    # calendar and quick-settings popovers (xdg popups on a layer
+    # surface), and the AT-SPI tree a screen reader sees (#71).
+    runs-on: ubuntu-latest
+    needs: [check]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool scrot ffmpeg jq dbus at-spi2-core python3-pyatspi fonts-cantarell shellcheck libglib2.0-dev libgtk-4-dev libadwaita-1-dev meson ninja-build libwayland-dev wayland-protocols
+      - run: scripts/ci-install-gtk4-layer-shell
+      - run: shellcheck scripts/roost-gtk-shell-proof
+      - run: scripts/roost-gtk-shell-proof --artifacts gtk-shell-artifacts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gtk-shell
+          path: gtk-shell-artifacts/
           retention-days: 14
 
   arch-package:

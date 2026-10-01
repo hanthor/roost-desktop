@@ -1,0 +1,151 @@
+#!/bin/sh
+# roost-gtk-shell-proof — GTK shell (ADR 0006) inside the nested session.
+#
+# Usage:
+#   scripts/roost-gtk-shell-proof [--display :N] [--artifacts DIR]
+#
+# Runs the nested compositor with roost-shell-gtk as its supervised shell
+# on a private session bus with the AT-SPI accessibility bus, then:
+#   G-PANEL     the panel maps (frame differs from the bare session)
+#   A11Y-PANEL  the panel controls are exposed to screen readers by name
+#   G-CAL-OPEN  clicking the clock opens the calendar popover (xdg popup
+#               on the layer surface, #88)
+#   G-QS-OPEN   clicking the system indicators opens quick settings
+#   A11Y-QS     quick-settings toggles and the volume slider are exposed
+# Frames and accessibility dumps land in the artifacts dir; assertions in
+# assertions.txt for the parity ledger.
+set -eu
+if [ -z "${ROOST_PROOF_PRIVATE_BUS:-}" ] && command -v dbus-run-session >/dev/null 2>&1; then
+    ROOST_PROOF_PRIVATE_BUS=1 exec dbus-run-session -- "$0" "$@"
+fi
+unset CDPATH
+ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+DISPLAY_ARG=""
+ARTIFACTS="$ROOT/gtk-shell-artifacts"
+WIDTH=1280
+HEIGHT=800
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --display) DISPLAY_ARG="$2"; shift 2 ;;
+        --artifacts) ARTIFACTS="$2"; shift 2 ;;
+        --help|-h) sed -n '2,17p' "$0"; exit 0 ;;
+        *) echo "roost-gtk-shell-proof: unknown argument $1" >&2; exit 1 ;;
+    esac
+done
+mkdir -p "$ARTIFACTS"
+ARTIFACTS="$(cd "$ARTIFACTS" && pwd)"
+LOG="$ARTIFACTS/nested.log"
+ASSERTIONS="$ARTIFACTS/assertions.txt"
+: >"$ASSERTIONS"
+XDG_STATE_HOME="$ARTIFACTS/state"
+XDG_DATA_HOME="$ARTIFACTS/data"
+export XDG_STATE_HOME XDG_DATA_HOME
+OWNED_XVFB=""
+COMPOSITOR_PID=""
+cleanup() {
+    if [ -n "$COMPOSITOR_PID" ]; then kill "$COMPOSITOR_PID" 2>/dev/null || true; fi
+    if [ -n "$OWNED_XVFB" ]; then kill "$OWNED_XVFB" 2>/dev/null || true; fi
+}
+trap cleanup EXIT INT TERM
+# RGB of one pixel of a PNG, as "r g b".
+px() {
+    ffmpeg -loglevel error -i "$1" -vf "crop=1:1:$2:$3" -f rawvideo -pix_fmt rgb24 - |
+        od -An -tu1 | tr -s ' ' | sed 's/^ //; s/ $//'
+}
+pass() { echo "$1 pass $2" >>"$ASSERTIONS"; echo "roost-gtk-shell-proof: $1 pass: $2"; }
+fail() {
+    echo "$1 fail $2" >>"$ASSERTIONS"
+    echo "roost-gtk-shell-proof: $1 FAIL: $2" >&2
+    tail -30 "$LOG" >&2 || true
+    exit 1
+}
+
+# pyatspi ships with the distro Python, which a user-local Python
+# (Homebrew, pyenv) may shadow on PATH.
+PY=/usr/bin/python3
+[ -x "$PY" ] || PY=python3
+
+# Accessibility bus for GTK's AT-SPI backend.
+if [ -x /usr/libexec/at-spi-bus-launcher ]; then
+    /usr/libexec/at-spi-bus-launcher --launch-immediately >"$ARTIFACTS/atspi.log" 2>&1 &
+fi
+
+[ -n "$DISPLAY_ARG" ] && DISPLAY="$DISPLAY_ARG" && export DISPLAY
+if ! xdotool getdisplaygeometry >/dev/null 2>&1; then
+    DISPLAY=":96"
+    export DISPLAY
+    Xvfb "$DISPLAY" -screen 0 "${WIDTH}x${HEIGHT}x24" >"$ARTIFACTS/xvfb.log" 2>&1 &
+    OWNED_XVFB=$!
+    for _ in $(seq 1 30); do xdotool getdisplaygeometry >/dev/null 2>&1 && break; sleep 1; done
+fi
+
+cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk
+"$ROOT/target/debug/roost-compositor" --backend winit --socket "roost-gtk-proof-$$" \
+    --shell-bin "$ROOT/target/debug/roost-shell-gtk" >"$LOG" 2>&1 &
+COMPOSITOR_PID=$!
+
+WID=""
+for _ in $(seq 1 60); do
+    kill -0 "$COMPOSITOR_PID" 2>/dev/null || fail G-PANEL "compositor exited during startup"
+    WID="$(xdotool search --name Smithay 2>/dev/null | head -1 || true)"
+    [ -n "$WID" ] && break
+    sleep 1
+done
+[ -n "$WID" ] || fail G-PANEL "no nested window"
+xdotool windowfocus --sync "$WID"
+# Park the pointer mid-screen: (0,0) is the hot corner, which opens the
+# overview (and the overview then claims Escape).
+xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
+
+# The panel is up once the shell registers on the a11y bus with its
+# controls; that also proves the accessible tree.
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-panel.json" 60 ||
+    fail A11Y-PANEL "shell never registered on the accessibility bus"
+sleep 2
+scrot "$ARTIFACTS/01-panel.png" >/dev/null
+# GNOME 51's top bar is pure black; the session background is not. An
+# empty spot in the strip must be black and the desktop below must not.
+strip="$(px "$ARTIFACTS/01-panel.png" 300 5)"
+desk="$(px "$ARTIFACTS/01-panel.png" 300 200)"
+[ "$strip" = "0 0 0" ] || fail G-PANEL "panel strip is '$strip', not black"
+[ "$desk" != "0 0 0" ] || fail G-PANEL "desktop below the panel is black too"
+pass G-PANEL "GTK panel mapped as a black top strip"
+for label in "Activities" "Date and Time" "System"; do
+    jq -e --arg n "$label" 'any(.[]; .name == $n)' "$ARTIFACTS/a11y-panel.json" >/dev/null ||
+        fail A11Y-PANEL "no accessible control named '$label'"
+done
+pass A11Y-PANEL "Activities, Date and Time, System exposed"
+
+# A popover counts as open only when its contents are showing in the
+# accessible tree: a pixel diff passes on a mere hover highlight.
+showing() {
+    jq -e --arg n "$2" 'any(.[]; .name == $n and .showing)' "$1" >/dev/null
+}
+
+xdotool mousemove --window "$WID" $((WIDTH / 2)) 16 click 1
+sleep 2
+scrot "$ARTIFACTS/02-calendar.png" >/dev/null
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-calendar.json" 20 ||
+    fail G-CAL-OPEN "accessibility dump failed"
+showing "$ARTIFACTS/a11y-calendar.json" "No Notifications" ||
+    fail G-CAL-OPEN "calendar popover contents not showing"
+pass G-CAL-OPEN "clock opens the calendar and notification list"
+xdotool key Escape
+sleep 1
+
+xdotool mousemove --window "$WID" $((WIDTH - 50)) 16 click 1
+sleep 2
+scrot "$ARTIFACTS/03-quick-settings.png" >/dev/null
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs.json" 20 ||
+    fail G-QS-OPEN "accessibility dump failed"
+showing "$ARTIFACTS/a11y-qs.json" "Dark Style" ||
+    fail G-QS-OPEN "quick settings contents not showing"
+pass G-QS-OPEN "system indicators open quick settings"
+for label in "Wired" "Dark Style" "Do Not Disturb" "Volume" "Lock"; do
+    showing "$ARTIFACTS/a11y-qs.json" "$label" ||
+        fail A11Y-QS "no showing accessible control named '$label'"
+done
+pass A11Y-QS "quick-settings toggles, slider, and lock exposed"
+
+grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
+echo "roost-gtk-shell-proof: OK, artifacts in $ARTIFACTS"

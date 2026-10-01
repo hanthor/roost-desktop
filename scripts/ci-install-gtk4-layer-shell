@@ -1,0 +1,17 @@
+#!/bin/sh
+# ci-install-gtk4-layer-shell — build and install gtk4-layer-shell from
+# source on distros that do not package it (Ubuntu 24.04). ADR 0006.
+set -eu
+VERSION="${1:-v1.1.1}"
+if pkg-config --exists gtk4-layer-shell-0 2>/dev/null; then
+    echo "gtk4-layer-shell already present: $(pkg-config --modversion gtk4-layer-shell-0)"
+    exit 0
+fi
+work="$(mktemp -d)"
+git clone --quiet --depth 1 --branch "$VERSION" https://github.com/wmww/gtk4-layer-shell "$work/src"
+meson setup "$work/build" "$work/src" --prefix=/usr/local \
+    -Dexamples=false -Ddocs=false -Dtests=false -Dintrospection=false -Dvapi=false
+ninja -C "$work/build"
+sudo ninja -C "$work/build" install
+sudo ldconfig
+rm -rf "$work"
