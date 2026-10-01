@@ -43,6 +43,12 @@ This page records that decision for R9 (knowledge entry
 | org.gnome.shell enabled-extensions | Ignored | GNOME Shell extensions are JavaScript. Roost has its own extension point |
 | org.gnome.settings-daemon.plugins.color night-light-enabled | Honored (write only) | The Night Light tile writes it, but Roost applies no colour temperature yet (#89 gamma control) |
 
+## Displays
+
+| File | Status | Notes |
+|---|---|---|
+| ~/.config/monitors.xml | Honored | The arrangement for the lit connectors sets each output's scale, position and primary monitor (hardware sessions). Proof D-SCALE |
+
 ## Window management and input
 
 | Schema and key | Status | Notes |

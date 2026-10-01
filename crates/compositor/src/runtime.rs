@@ -509,7 +509,8 @@ impl Runtime {
                     .map_err(|e| RuntimeError::Backend(e.to_string()))?;
                 for out in &drm.outputs {
                     let global = out.output.create_global::<State>(&dh);
-                    state.add_output(&out.name, Some(out.output.clone()), out.size.w, out.size.h);
+                    let (lw, lh) = out.logical_size();
+                    state.add_output(&out.name, Some(out.output.clone()), lw, lh);
                     state.note_output_global(&out.name, global);
                 }
                 let handle = event_loop.handle();
@@ -574,6 +575,14 @@ impl Runtime {
         );
         output.set_preferred(mode);
         state.set_preferred_scale(scale);
+        // Hardware: fractional clients render at the primary output's
+        // scale from monitors.xml (#59).
+        #[cfg(feature = "drm")]
+        if let Some(Backend::Drm(drm)) = &backend {
+            if let Some(first) = drm.outputs.first() {
+                state.set_preferred_scale(first.scale);
+            }
+        }
         if backend.is_none() {
             let global = output.create_global::<State>(&dh);
             let (lw, lh) = logical_size(session.width, session.height, scale);
@@ -1321,11 +1330,10 @@ impl Runtime {
                     };
                     let size = out.size;
                     let damage = Rectangle::from_size(size);
-                    // Hardware outputs render at scale 1 for now; per-output
-                    // scales from GNOME's monitors.xml come next (#59).
+                    // Per-output scale from GNOME's monitors.xml (#59).
                     let view = View {
                         offset: out.loc,
-                        scale: 1.0,
+                        scale: out.scale,
                     };
                     let elements = scene_elements(
                         renderer,
@@ -1364,7 +1372,8 @@ impl Runtime {
                         // Software pointer on top (no host cursor on
                         // bare hardware); hidden while locked.
                         if !locked {
-                            let (outline, fill) = crate::drm::cursor_rects(pointer, out.loc);
+                            let (outline, fill) =
+                                crate::drm::cursor_rects(pointer, out.loc, out.scale);
                             let clip = |rects: Vec<Rectangle<i32, smithay::utils::Physical>>| {
                                 rects
                                     .into_iter()

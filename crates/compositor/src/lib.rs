@@ -51,6 +51,7 @@ pub mod control;
 pub mod drm;
 pub mod layer;
 pub mod lock;
+pub mod monitors;
 pub mod overlay;
 pub mod overview;
 pub mod pam;
