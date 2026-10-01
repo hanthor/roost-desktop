@@ -420,8 +420,140 @@ mod tests {
         assert!(!dumped.is_empty());
         let mut terminated = dumped;
         terminated.push('\0');
-        let mut reloaded = XkbFeed::from_string(terminated).expect("trailing NUL must be stripped");
+        let mut reloaded =
+            XkbFeed::from_string(terminated).expect("trailing NUL must be stripped");
         assert_eq!(reloaded.key(EV_A, true), KeyAction::Text("a".to_owned()));
         assert_eq!(reloaded.key(EV_RETURN, true), KeyAction::Submit);
+    }
+
+    #[test]
+    fn from_fd_refuses_zero_size() {
+        // Security boundary: reject size == 0 without reading.
+        // This prevents resource exhaustion and ensures sensible keymaps.
+        use std::os::fd::AsRawFd;
+        use rustix::fs::{memfd_create, MemfdFlags};
+
+        let fd = memfd_create("test", MemfdFlags::ALLOW_SEALING)
+            .expect("memfd_create succeeds in test env");
+        let result = XkbFeed::from_fd(&fd, 0);
+        assert!(result.is_none(), "from_fd must refuse size == 0");
+    }
+
+    #[test]
+    fn from_fd_refuses_oversized() {
+        // Security boundary: reject size > 1 MiB without reading.
+        // This prevents OOM and huge-buffer DOS attacks.
+        use rustix::fs::{memfd_create, MemfdFlags};
+
+        let fd = memfd_create("test", MemfdFlags::ALLOW_SEALING)
+            .expect("memfd_create succeeds in test env");
+        let result = XkbFeed::from_fd(&fd, (1 << 20) + 1);
+        assert!(result.is_none(), "from_fd must refuse size > 1 MiB");
+    }
+
+    #[test]
+    fn from_fd_accepts_valid_keymap_via_memfd() {
+        // Happy path: valid keymap through a memfd (matches real server-fd shape).
+        // This verifies the fd read loop, UTF-8 decoding, and delegation to
+        // from_string work end-to-end.
+        use xkbcommon::xkb::KEYMAP_FORMAT_TEXT_V1;
+        use rustix::fs::{memfd_create, MemfdFlags};
+        use std::io::Write;
+
+        let feed = us_feed();
+        let keymap_str = feed._keymap.get_as_string(KEYMAP_FORMAT_TEXT_V1);
+        let size = keymap_str.len() as u32;
+
+        let mut fd = memfd_create("test", MemfdFlags::ALLOW_SEALING)
+            .expect("memfd_create succeeds in test env");
+        std::io::Write::write_all(&mut fd, keymap_str.as_bytes())
+            .expect("write to memfd succeeds");
+        // Seek back to start for reading.
+        rustix::fs::seek(&fd, 0, rustix::fs::SeekWhence::Start)
+            .expect("seek succeeds");
+
+        let result = XkbFeed::from_fd(&fd, size);
+        assert!(
+            result.is_some(),
+            "from_fd must accept valid keymap from memfd"
+        );
+        let mut feed = result.unwrap();
+        assert_eq!(feed.key(EV_A, true), KeyAction::Text("a".to_owned()));
+    }
+
+    #[test]
+    fn from_fd_strips_nul_terminator_from_memfd() {
+        // Server keymap fds include a trailing NUL: from_fd must strip it
+        // (delegating to from_string, which already handles this).
+        use xkbcommon::xkb::KEYMAP_FORMAT_TEXT_V1;
+        use rustix::fs::{memfd_create, MemfdFlags};
+        use std::io::Write;
+
+        let feed = us_feed();
+        let mut keymap_str = feed._keymap.get_as_string(KEYMAP_FORMAT_TEXT_V1);
+        keymap_str.push('\0'); // Add NUL like the server does.
+        let size = keymap_str.len() as u32;
+
+        let mut fd = memfd_create("test", MemfdFlags::ALLOW_SEALING)
+            .expect("memfd_create succeeds in test env");
+        std::io::Write::write_all(&mut fd, keymap_str.as_bytes())
+            .expect("write to memfd succeeds");
+        rustix::fs::seek(&fd, 0, rustix::fs::SeekWhence::Start)
+            .expect("seek succeeds");
+
+        let result = XkbFeed::from_fd(&fd, size);
+        assert!(
+            result.is_some(),
+            "from_fd must strip trailing NUL and load keymap"
+        );
+        let mut feed = result.unwrap();
+        assert_eq!(feed.key(EV_RETURN, true), KeyAction::Submit);
+    }
+
+    #[test]
+    fn from_fd_refuses_non_utf8() {
+        // Malformed input boundary: reject non-UTF-8 bytes.
+        // This prevents invalid memory and ensures stable string handling.
+        use rustix::fs::{memfd_create, MemfdFlags};
+        use std::io::Write;
+
+        let mut fd = memfd_create("test", MemfdFlags::ALLOW_SEALING)
+            .expect("memfd_create succeeds in test env");
+        // Write invalid UTF-8 sequence.
+        let invalid = [0xFF, 0xFE, 0xFD];
+        std::io::Write::write_all(&mut fd, &invalid)
+            .expect("write to memfd succeeds");
+        rustix::fs::seek(&fd, 0, rustix::fs::SeekWhence::Start)
+            .expect("seek succeeds");
+
+        let result = XkbFeed::from_fd(&fd, invalid.len() as u32);
+        assert!(
+            result.is_none(),
+            "from_fd must refuse non-UTF-8 payload"
+        );
+    }
+
+    #[test]
+    fn from_fd_refuses_utf8_garbage() {
+        // Malformed input boundary: UTF-8 but not a valid keymap.
+        // This ensures xkb parser can safely reject the input.
+        use rustix::fs::{memfd_create, MemfdFlags};
+        use std::io::Write;
+
+        let garbage = "this is not a keymap at all, just some random text";
+        let size = garbage.len() as u32;
+
+        let mut fd = memfd_create("test", MemfdFlags::ALLOW_SEALING)
+            .expect("memfd_create succeeds in test env");
+        std::io::Write::write_all(&mut fd, garbage.as_bytes())
+            .expect("write to memfd succeeds");
+        rustix::fs::seek(&fd, 0, rustix::fs::SeekWhence::Start)
+            .expect("seek succeeds");
+
+        let result = XkbFeed::from_fd(&fd, size);
+        assert!(
+            result.is_none(),
+            "from_fd must refuse UTF-8 garbage that is not a keymap"
+        );
     }
 }
