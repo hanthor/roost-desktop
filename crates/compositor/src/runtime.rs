@@ -1094,6 +1094,7 @@ impl Runtime {
         let model = self.manager.model();
         crate::overview::layout(
             output,
+            crate::windows::WORK_AREA_TOP,
             model.workspaces(),
             model.active_workspace(),
             &self.manager.overview_windows(),
@@ -1122,7 +1123,12 @@ impl Runtime {
                 self.control.set_overview(false);
             }
             crate::overview::OverviewHit::Workspace(ws) => {
-                self.manager.switch_to_workspace(&mut self.state, ws);
+                // GNOME's trailing empty workspace is not in the model
+                // yet: it sits right after the active (last) one, and
+                // stepping onto it creates it.
+                if !self.manager.switch_to_workspace(&mut self.state, ws) {
+                    self.manager.switch_relative(&mut self.state, 1);
+                }
             }
             crate::overview::OverviewHit::Dismiss => self.control.set_overview(false),
         }
@@ -1277,7 +1283,7 @@ impl Runtime {
             draw_scene(
                 &mut frame,
                 Color32F::new(0.0, 0.0, 0.0, 0.0),
-                None,
+                &[],
                 &elements,
                 Target {
                     damage: Rectangle::from_size(size),
@@ -1365,10 +1371,14 @@ impl Runtime {
         );
         let decor = decor_for_output(&decor_global, view);
         let previews = preview_elements(renderer, &self.manager, view, cards);
-        let paper = overview
-            .is_none()
-            .then(|| self.wallpaper.element(renderer, size.w, size.h))
-            .flatten();
+        let paper = backdrop(
+            &mut self.wallpaper,
+            renderer,
+            size,
+            view,
+            overview.is_none(),
+            cards,
+        );
         let damage = Rectangle::from_size(size);
         let mut target = renderer.bind(&mut texture).ok()?;
         {
@@ -1376,7 +1386,7 @@ impl Runtime {
             draw_scene(
                 &mut frame,
                 background,
-                paper.as_ref(),
+                &paper,
                 &elements,
                 Target {
                     damage,
@@ -1781,11 +1791,8 @@ impl Runtime {
                     );
                     let decor = decor_for_output(&decor_global, view);
                     let previews = preview_elements(renderer, &self.manager, view, cards);
-                    let paper = if show_paper {
-                        self.wallpaper.element(renderer, size.w, size.h)
-                    } else {
-                        None
-                    };
+                    let paper =
+                        backdrop(&mut self.wallpaper, renderer, size, view, show_paper, cards);
                     // The winit EGL surface presents bottom-up (see the
                     // Y-flip in the backend's own damage path), so the
                     // output transform mirrors vertically; placements
@@ -1796,7 +1803,7 @@ impl Runtime {
                     draw_scene(
                         &mut frame,
                         background,
-                        paper.as_ref(),
+                        &paper,
                         &elements,
                         Target {
                             damage,
@@ -1855,11 +1862,8 @@ impl Runtime {
                     );
                     let decor = decor_for_output(&decor_global, view);
                     let previews = preview_elements(renderer, &self.manager, view, cards);
-                    let paper = if show_paper {
-                        self.wallpaper.element(renderer, size.w, size.h)
-                    } else {
-                        None
-                    };
+                    let paper =
+                        backdrop(&mut self.wallpaper, renderer, size, view, show_paper, cards);
                     let sync = {
                         let mut target = renderer
                             .bind(&mut dmabuf)
@@ -1870,7 +1874,7 @@ impl Runtime {
                         draw_scene(
                             &mut frame,
                             background,
-                            paper.as_ref(),
+                            &paper,
                             &elements,
                             Target {
                                 damage,
@@ -1924,23 +1928,20 @@ impl Runtime {
     }
 }
 
-/// Overview backdrop (GNOME 51's dark grey behind the cards).
-const OVERVIEW_BACKGROUND: Color32F = Color32F::new(0.14, 0.14, 0.15, 1.0);
-/// Workspace card fill (the desktop seen through the card).
-const OVERVIEW_CARD: Color32F = Color32F::new(0.08, 0.09, 0.11, 1.0);
+/// Overview backdrop (GNOME 51's `#overviewGroup`, #222226).
+const OVERVIEW_BACKGROUND: Color32F = Color32F::new(34.0 / 255.0, 34.0 / 255.0, 38.0 / 255.0, 1.0);
 /// Hover ring around the preview under the pointer.
 const OVERVIEW_HOVER: Color32F = Color32F::new(0.62, 0.66, 0.72, 1.0);
 /// Hover ring thickness.
 const HOVER_RING: i32 = 4;
 
-/// Overview solid shapes in the global space: card fills, then the ring
-/// around the active preview under `pointer`.
+/// Overview solid shapes in the global space: the ring around the active
+/// preview under `pointer` (cards are drawn as images, see [`backdrop`]).
 fn overview_decor(
     layout: &crate::overview::OverviewLayout,
     pointer: Point<f64, Logical>,
 ) -> Vec<(Color32F, Vec<Rectangle<i32, Logical>>)> {
-    let cards = layout.cards.iter().map(|c| c.rect).collect();
-    let mut out = vec![(OVERVIEW_CARD, cards)];
+    let mut out = Vec::new();
     if let Some(p) = layout
         .previews
         .iter()
@@ -2119,6 +2120,42 @@ fn scene_elements(
     crate::layer::front_to_back(elements)
 }
 
+/// What lies under the windows on one output, in physical pixels: the
+/// wallpaper on the desktop, or in the overview GNOME's workspace cards
+/// (the wallpaper below the bar, rounded, over a shadow).
+fn backdrop(
+    wallpaper: &mut Wallpaper,
+    renderer: &mut GlesRenderer,
+    size: smithay::utils::Size<i32, smithay::utils::Physical>,
+    view: View,
+    show_paper: bool,
+    cards: Option<&crate::overview::OverviewLayout>,
+) -> Vec<smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<GlesRenderer>>
+{
+    if show_paper {
+        return wallpaper
+            .element(renderer, size.w, size.h)
+            .into_iter()
+            .collect();
+    }
+    let Some(layout) = cards else {
+        return Vec::new();
+    };
+    let output = (size.w, size.h).into();
+    let work_top = (f64::from(crate::windows::WORK_AREA_TOP) * view.scale).round() as i32;
+    layout
+        .cards
+        .iter()
+        .filter_map(|card| {
+            let r = card.rect;
+            let loc = view.physical(f64::from(r.loc.x), f64::from(r.loc.y));
+            let end = view.physical(f64::from(r.loc.x + r.size.w), f64::from(r.loc.y + r.size.h));
+            let rect = Rectangle::new(loc, (end.x - loc.x, end.y - loc.y).into());
+            wallpaper.card_element(renderer, output, work_top, rect)
+        })
+        .collect()
+}
+
 /// Clear, wallpaper (own pass: mixing element types in one list needs
 /// DMA import bounds this backend does not satisfy), then the scene.
 /// What one frame redraws, and at which scale.
@@ -2131,9 +2168,9 @@ struct Target {
 fn draw_scene(
     frame: &mut smithay::backend::renderer::gles::GlesFrame<'_, '_>,
     background: Color32F,
-    paper: Option<
-        &smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<GlesRenderer>,
-    >,
+    paper: &[smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<
+        GlesRenderer,
+    >],
     elements: &[WaylandSurfaceRenderElement<GlesRenderer>],
     target: Target,
     decor: &[(Color32F, Vec<Rectangle<i32, smithay::utils::Physical>>)],
@@ -2143,8 +2180,8 @@ fn draw_scene(
     frame
         .clear(background, &[damage])
         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-    if let Some(paper) = paper {
-        draw_render_elements(frame, 1.0, std::slice::from_ref(paper), &[damage])
+    if !paper.is_empty() {
+        draw_render_elements(frame, 1.0, paper, &[damage])
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
     }
     // Solid shapes under the surfaces (overview cards, hover ring).

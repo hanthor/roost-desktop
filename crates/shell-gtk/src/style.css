@@ -6,6 +6,11 @@ window.roost-panel {
   background-color: #000000;
 }
 
+/* In the overview the bar is see-through (#panel:overview). */
+window.roost-panel.overview {
+  background-color: transparent;
+}
+
 .roost-panel {
   font-family: "Adwaita Sans", "Cantarell", sans-serif;
   font-size: 11pt;
@@ -43,6 +48,7 @@ window.roost-panel {
 
 .roost-panel button.panel-button:active,
 .roost-panel button.panel-button:checked,
+.roost-panel button.panel-button.checked,
 .roost-panel menubutton.panel-button > button:active,
 .roost-panel menubutton.panel-button > button:checked {
   background-color: alpha(#ffffff, 0.28);
@@ -449,15 +455,80 @@ window.roost-overview-grid {
   background-color: #242426;
 }
 
-.roost-overview-search searchentry {
-  min-height: 36px;
-  border-radius: 99px;
-  background-color: alpha(#ffffff, 0.1);
-  color: #ffffff;
+.roost-overview-search entry.search {
+  /* GNOME's .search-entry: a 24em pill, 9px padding, #404045. */
+  min-height: 19px;
+  padding: 9px;
+  border-radius: 999px;
+  background-color: #404045;
+  color: rgba(250, 250, 251, 0.7);
+  box-shadow: none;
+  outline: none;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
 }
 
-.overview-results,
+.roost-overview-search entry.search:hover {
+  background-color: #4a4a50;
+  color: #fafafb;
+}
+
+.roost-overview-search entry.search:focus-within {
+  outline: none;
+  box-shadow: none;
+}
+
+.roost-overview-search entry.search.idle {
+  /* GNOME shows no caret until you type. */
+  caret-color: transparent;
+}
+
+.roost-overview-search entry.search image {
+  min-width: 16px;
+  margin-right: 6px;
+}
+
 .overview-dash {
+  /* GNOME's #dash .dash-background: #38383b, 28px corners. */
+  background-color: #38383b;
+  border-radius: 28px;
+  padding: 12px 10px;
+}
+
+.overview-dash .dash-tile {
+  margin: 0 2px;
+  padding: 0;
+  background: none;
+  box-shadow: none;
+  border-radius: 16px;
+}
+
+.overview-dash .dash-tile .overview-icon {
+  padding: 6px;
+  border-radius: 16px;
+  background-color: #38383b;
+  color: #fafafb;
+}
+
+.overview-dash .dash-tile:hover .overview-icon {
+  background-color: #444447;
+}
+
+.overview-dash .app-grid-running-dot {
+  min-width: 5px;
+  min-height: 5px;
+  border-radius: 999px;
+  background-color: #fafafb;
+}
+
+.overview-dash .dash-separator {
+  min-width: 1px;
+  min-height: 64px;
+  margin: 0 4px;
+  background-color: rgba(250, 250, 251, 0.1);
+}
+
+.overview-results {
   background-color: alpha(#2a2a2f, 0.92);
   border-radius: 24px;
   padding: 8px;

@@ -40,6 +40,30 @@ pub trait OverviewActions {
     fn set_search(&self, active: bool);
 }
 
+/// One dash item (`#dash .overview-tile`): the 64px icon in a 76px
+/// rounded tile, with GNOME's running dot under it.
+fn dash_tile(entry: &AppEntry, running: bool) -> gtk::Button {
+    let tile = gtk::Overlay::new();
+    let icon = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    icon.add_css_class("overview-icon");
+    icon.append(&app_icon(entry, 64));
+    tile.set_child(Some(&icon));
+    if running {
+        let dot = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        dot.add_css_class("app-grid-running-dot");
+        dot.set_halign(gtk::Align::Center);
+        dot.set_valign(gtk::Align::End);
+        tile.add_overlay(&dot);
+    }
+    let button = gtk::Button::builder().child(&tile).build();
+    button.add_css_class("dash-tile");
+    if running {
+        button.add_css_class("running");
+    }
+    button.update_property(&[gtk::accessible::Property::Label(&entry.name)]);
+    button
+}
+
 fn app_icon(entry: &AppEntry, size: i32) -> gtk::Image {
     let image = match entry.icon.as_deref() {
         Some(icon) if icon.starts_with('/') => gtk::Image::from_file(icon),
@@ -116,6 +140,14 @@ impl OverviewUi {
         let column = gtk::Box::new(gtk::Orientation::Vertical, 12);
         let entry = gtk::SearchEntry::new();
         entry.set_placeholder_text(Some("Type to search"));
+        entry.add_css_class("idle");
+        entry.connect_search_changed(|e| {
+            if e.text().is_empty() {
+                e.add_css_class("idle");
+            } else {
+                e.remove_css_class("idle");
+            }
+        });
         entry.set_width_request(370);
         entry.set_halign(gtk::Align::Center);
         entry.update_property(&[gtk::accessible::Property::Label("Search")]);
@@ -171,7 +203,7 @@ impl OverviewUi {
         dash.set_margin(Edge::Bottom, 12);
         dash.set_keyboard_mode(KeyboardMode::None);
         dash.set_title(Some("Dash"));
-        let dash_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let dash_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         dash_row.add_css_class("overview-dash");
         dash.set_child(Some(&dash_row));
 
@@ -323,49 +355,105 @@ impl OverviewUi {
         while let Some(child) = me.dash_row.first_child() {
             me.dash_row.remove(&child);
         }
+        // GNOME's dash (dash.js): favorites, then running apps that are
+        // not favorites after a separator, then Show Apps.
         let running = me.actions.running();
-        let mut shown: Vec<String> = Vec::new();
         let apps = me.apps.get();
-        for id in &me.favorites {
-            if let Some(entry) = providers::provider_app(&apps, id) {
-                shown.push(entry.app_id.clone());
-                let button = app_button(entry, 48, false);
-                let window = running
-                    .iter()
-                    .find(|(_, app)| {
-                        app.as_deref() == Some(entry.app_id.trim_end_matches(".desktop"))
-                    })
-                    .map(|(id, _)| *id);
-                if window.is_some() {
-                    button.add_css_class("running");
+        let window_of = |entry: &AppEntry| {
+            running
+                .iter()
+                .find(|(_, app)| app.as_deref() == Some(entry.app_id.trim_end_matches(".desktop")))
+                .map(|(id, _)| *id)
+        };
+        let mut shown: Vec<AppEntry> = me
+            .favorites
+            .iter()
+            .filter_map(|id| providers::provider_app(&apps, id).cloned())
+            .collect();
+        let favorites = shown.len();
+        // Running windows no installed app claims become window-backed
+        // apps, as GNOME's WindowTracker makes them: one per app id (or
+        // window), with the generic icon.
+        let mut orphans: Vec<(u64, String)> = Vec::new();
+        for (window, app) in &running {
+            match app
+                .as_deref()
+                .and_then(|app| providers::provider_app(&apps, app))
+            {
+                Some(entry) => {
+                    if !shown.iter().any(|e| e.app_id == entry.app_id) {
+                        shown.push(entry.clone());
+                    }
                 }
-                let entry = entry.clone();
-                let actions = me.actions.clone();
-                button.connect_clicked(move |_| match window {
-                    Some(id) => {
-                        actions.activate_window(id);
-                        actions.close_overview();
+                None => {
+                    let key = app.clone().unwrap_or_else(|| format!("window:{window}"));
+                    if !orphans.iter().any(|(_, k)| *k == key) {
+                        orphans.push((*window, key));
                     }
-                    None => {
-                        if roost_shell_host::apps::launch(&entry).is_ok() {
-                            actions.close_overview();
-                        }
-                    }
-                });
-                me.dash_row.append(&button);
+                }
             }
         }
-        me.dash_row
-            .append(&gtk::Separator::new(gtk::Orientation::Vertical));
+        let orphans_need_separator = favorites == shown.len() && !orphans.is_empty();
+        for (i, entry) in shown.iter().enumerate() {
+            if i == favorites {
+                let separator = gtk::Separator::new(gtk::Orientation::Vertical);
+                separator.add_css_class("dash-separator");
+                separator.set_valign(gtk::Align::Center);
+                me.dash_row.append(&separator);
+            }
+            let window = window_of(entry);
+            let button = dash_tile(entry, window.is_some());
+            let entry = entry.clone();
+            let actions = me.actions.clone();
+            button.connect_clicked(move |_| match window {
+                Some(id) => {
+                    actions.activate_window(id);
+                    actions.close_overview();
+                }
+                None => {
+                    if roost_shell_host::apps::launch(&entry).is_ok() {
+                        actions.close_overview();
+                    }
+                }
+            });
+            me.dash_row.append(&button);
+        }
+        if orphans_need_separator {
+            let separator = gtk::Separator::new(gtk::Orientation::Vertical);
+            separator.add_css_class("dash-separator");
+            separator.set_valign(gtk::Align::Center);
+            me.dash_row.append(&separator);
+        }
+        for (window, name) in orphans {
+            let entry = AppEntry {
+                app_id: name.clone(),
+                name,
+                generic_name: None,
+                keywords: Vec::new(),
+                argv: Vec::new(),
+                icon: Some("application-x-executable".to_owned()),
+                categories: Vec::new(),
+            };
+            let button = dash_tile(&entry, true);
+            let actions = me.actions.clone();
+            button.connect_clicked(move |_| {
+                actions.activate_window(window);
+                actions.close_overview();
+            });
+            me.dash_row.append(&button);
+        }
         let show_apps = gtk::ToggleButton::builder()
             .child(&{
+                let icon = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                icon.add_css_class("overview-icon");
+                // GNOME draws the 16px grid glyph at the full 64px.
                 let image = gtk::Image::from_icon_name("view-app-grid-symbolic");
-                image.set_pixel_size(32);
-                image
+                image.set_pixel_size(64);
+                icon.append(&image);
+                icon
             })
             .build();
-        show_apps.add_css_class("flat");
-        show_apps.add_css_class("overview-app");
+        show_apps.add_css_class("dash-tile");
         show_apps.update_property(&[gtk::accessible::Property::Label("Show Apps")]);
         {
             let ui = ui.clone();

@@ -73,6 +73,8 @@ Share of pixels visibly off (more than 24 levels) in each element crop:
 | Power Mode menu | not built | 4.0% |
 | Date menu | 16.5% | 0.3% |
 | Notification banner and list card | 11.3% | matches; the rest is what lies behind |
+| Overview, empty (cards, search, dash) | 53.5% | 4.8% |
+| Overview dash | not comparable | 0.0% |
 
 GTK and St differ in a few ways that matter when matching numbers:
 
@@ -80,3 +82,6 @@ GTK and St differ in a few ways that matter when matching numbers:
 - GNOME's 12px panel padding is a 3px border plus 9px of padding.
 - With two copies of an icon theme, GTK 4.14 takes the icon from the
   later directory.
+- GTK 4's search entry node is `entry.search`, not `searchentry`.
+- GNOME 51's Adwaita wallpapers are Display P3 JPEG XL; mutter converts
+  them to sRGB, so Roost does too.

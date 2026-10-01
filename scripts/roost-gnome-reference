@@ -25,11 +25,15 @@ OUT="$(cd "$OUT" && pwd)"
 IMAGE=localhost/roost-gnome51-reference
 podman build -q -t "$IMAGE" "$ROOT/tests/gnome-reference" >/dev/null
 rm -rf "$OUT"/*.png "$OUT"/*.json "$OUT/share"
-podman run --rm \
-    -v "$ROOT/tests/gnome-reference:/gref:ro,Z" \
-    -v "$ROOT/scripts/lib:/lib:ro,Z" \
-    -v "$OUT:/out:Z" \
-    "$IMAGE" /gref/run.sh >"$OUT/gnome-shell.log" 2>&1 || {
+capture() {
+    podman run --rm \
+        -v "$ROOT/tests/gnome-reference:/gref:ro,Z" \
+        -v "$ROOT/scripts/lib:/lib:ro,Z" \
+        -v "$OUT:/out:Z" \
+        "$IMAGE" /gref/run.sh >"$OUT/gnome-shell.log" 2>&1
+}
+# A headless gnome-shell occasionally stalls at startup; one retry.
+capture || capture || {
     echo "roost-gnome-reference: gnome-shell failed; see $OUT/gnome-shell.log" >&2
     exit 1
 }

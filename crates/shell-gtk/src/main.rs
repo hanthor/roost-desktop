@@ -1094,6 +1094,8 @@ fn build(app: &adw::Application) {
         let shell = shell.clone();
         let overview_ui = overview_ui.clone();
         let switcher_ui = switcher_ui.clone();
+        let panel_window = window.clone();
+        let activities_button = activities.clone();
         glib::timeout_add_local(Duration::from_millis(16), move || {
             let mut shell = shell.borrow_mut();
             if let Some(control) = shell.control.as_mut() {
@@ -1120,6 +1122,15 @@ fn build(app: &adw::Application) {
                 .as_ref()
                 .is_some_and(|c| c.model().is_overview_open());
             drop(shell);
+            // The bar goes see-through and Activities shows as checked
+            // while the overview is open, as GNOME draws them.
+            if open {
+                panel_window.add_css_class("overview");
+                activities_button.add_css_class("checked");
+            } else {
+                panel_window.remove_css_class("overview");
+                activities_button.remove_css_class("checked");
+            }
             overview::OverviewUi::set_open(&overview_ui, open);
             glib::ControlFlow::Continue
         });
