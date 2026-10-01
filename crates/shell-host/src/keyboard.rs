@@ -424,4 +424,70 @@ mod tests {
         assert_eq!(reloaded.key(EV_A, true), KeyAction::Text("a".to_owned()));
         assert_eq!(reloaded.key(EV_RETURN, true), KeyAction::Submit);
     }
+
+    /// A memfd holding `bytes`, rewound to the start: the same shape
+    /// as the keymap fd a Wayland server hands the client.
+    fn memfd_with(bytes: &[u8]) -> std::os::fd::OwnedFd {
+        use rustix::fs::{memfd_create, MemfdFlags};
+        use std::io::{Seek, SeekFrom, Write};
+        let fd = memfd_create("roost-keymap-test", MemfdFlags::CLOEXEC)
+            .expect("memfd_create succeeds in test env");
+        let mut file = std::fs::File::from(fd);
+        file.write_all(bytes).expect("write to memfd");
+        file.seek(SeekFrom::Start(0)).expect("rewind memfd");
+        file.into()
+    }
+
+    fn us_keymap_text() -> String {
+        us_feed()
+            ._keymap
+            .get_as_string(xkbcommon::xkb::KEYMAP_FORMAT_TEXT_V1)
+    }
+
+    #[test]
+    fn from_fd_refuses_zero_size() {
+        // Security boundary (#33): size 0 is refused before any read.
+        let fd = memfd_with(us_keymap_text().as_bytes());
+        assert!(XkbFeed::from_fd(&fd, 0).is_none());
+    }
+
+    #[test]
+    fn from_fd_refuses_oversized() {
+        // Security boundary (#33): a declared size above 1 MiB is
+        // refused before any read, even when the payload is valid.
+        let fd = memfd_with(us_keymap_text().as_bytes());
+        assert!(XkbFeed::from_fd(&fd, (1 << 20) + 1).is_none());
+    }
+
+    #[test]
+    fn from_fd_accepts_valid_keymap_via_memfd() {
+        let text = us_keymap_text();
+        let fd = memfd_with(text.as_bytes());
+        let mut feed = XkbFeed::from_fd(&fd, text.len() as u32).expect("valid keymap loads");
+        assert_eq!(feed.key(EV_A, true), KeyAction::Text("a".to_owned()));
+    }
+
+    #[test]
+    fn from_fd_strips_nul_terminator_from_memfd() {
+        // Servers send the keymap with a trailing NUL.
+        let mut text = us_keymap_text();
+        text.push('\0');
+        let fd = memfd_with(text.as_bytes());
+        let mut feed = XkbFeed::from_fd(&fd, text.len() as u32).expect("NUL is stripped");
+        assert_eq!(feed.key(EV_RETURN, true), KeyAction::Submit);
+    }
+
+    #[test]
+    fn from_fd_refuses_non_utf8() {
+        let bytes = [0xFF, 0xFE, 0xFD];
+        let fd = memfd_with(&bytes);
+        assert!(XkbFeed::from_fd(&fd, bytes.len() as u32).is_none());
+    }
+
+    #[test]
+    fn from_fd_refuses_utf8_garbage() {
+        let garbage = "this is not a keymap at all, just some random text";
+        let fd = memfd_with(garbage.as_bytes());
+        assert!(XkbFeed::from_fd(&fd, garbage.len() as u32).is_none());
+    }
 }
