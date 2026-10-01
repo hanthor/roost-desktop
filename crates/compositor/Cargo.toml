@@ -21,9 +21,10 @@ serde_json.workspace = true
 rustix.workspace = true
 
 [features]
-default = ["drm"]
-# Additive X11 compatibility: enables Smithay's xwayland module within the
-# pinned =0.7.0 release (ADR 0001). Default builds are native-only.
+default = ["drm", "xwayland"]
+# X11 compatibility (#59): Smithay's xwayland module within the pinned
+# =0.7.0 release (ADR 0001). On by default, like GNOME 51; a session uses
+# it only when Xwayland is installed (see `runtime::xwayland_wanted`).
 xwayland = ["smithay/xwayland"]
 # Hardware session (#52): DRM/KMS output through GBM/EGL, libseat session,
 # udev device discovery, libinput input. Needs libseat, libinput, libudev,

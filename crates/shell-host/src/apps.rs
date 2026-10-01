@@ -260,6 +260,23 @@ pub enum LaunchState {
 /// by the crate cannot smuggle redirections or substitutions. The
 /// child is an orphan on purpose: shell restarts (001 supervision)
 /// must not take launched apps down.
+/// Session variables every launched app inherits on top of the shell's
+/// own environment (#59: `DISPLAY` once XWayland is up). Set from the
+/// compositor's `Environment` message.
+static LAUNCH_ENV: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// Replace the session variables launched apps inherit.
+pub fn set_launch_environment(vars: Vec<(String, String)>) {
+    if let Ok(mut env) = LAUNCH_ENV.lock() {
+        *env = vars;
+    }
+}
+
+/// The session variables launched apps inherit.
+pub fn launch_environment() -> Vec<(String, String)> {
+    LAUNCH_ENV.lock().map(|env| env.clone()).unwrap_or_default()
+}
+
 pub fn launch(entry: &AppEntry) -> io::Result<Launched> {
     let (program, args) = entry
         .argv
@@ -267,6 +284,7 @@ pub fn launch(entry: &AppEntry) -> io::Result<Launched> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty Exec argv"))?;
     let child = Command::new(program)
         .args(args)
+        .envs(launch_environment())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

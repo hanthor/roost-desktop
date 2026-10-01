@@ -172,6 +172,12 @@ pub enum Handled {
         /// Output count now held.
         count: usize,
     },
+    /// Session environment for launched apps (#59), already applied to
+    /// [`crate::apps::launch`].
+    Environment {
+        /// Variable count now held.
+        count: usize,
+    },
 }
 
 /// Shell-side control client over a connected Unix socket.
@@ -193,6 +199,8 @@ pub struct ControlClient {
     /// Read-only here; the shell reconciles its surfaces against it
     /// and never edits it.
     outputs: Vec<OutputInfo>,
+    /// Session environment from the compositor (#59).
+    environment: Vec<(String, String)>,
 }
 
 impl ControlClient {
@@ -220,6 +228,7 @@ impl ControlClient {
             shadow_workspaces: Vec::new(),
             locked: false,
             outputs: Vec::new(),
+            environment: Vec::new(),
         })
     }
 
@@ -246,6 +255,12 @@ impl ControlClient {
     /// renders from it and never flips it.
     pub fn locked(&self) -> bool {
         self.locked
+    }
+
+    /// Session environment from the latest `Environment` message
+    /// (empty before the first one), already applied to app launches.
+    pub fn environment(&self) -> &[(String, String)] {
+        &self.environment
     }
 
     /// Output inventory from the latest `Outputs` message (empty
@@ -493,6 +508,15 @@ impl ControlClient {
                     count: self.outputs.len(),
                 })
             }
+            Message::Environment { vars } => {
+                // Apps the shell launches inherit these (DISPLAY once
+                // XWayland is up). Not model truth, like Outputs.
+                crate::apps::set_launch_environment(vars.clone());
+                self.environment = vars;
+                Ok(Handled::Environment {
+                    count: self.environment.len(),
+                })
+            }
             Message::Overview { open } => {
                 // 002 R1: overview intent is UI state, not model truth —
                 // never touches revision, `needs_snapshot`, or the window
@@ -603,6 +627,7 @@ fn message_label(msg: &Message) -> &'static str {
         Message::Overview { .. } => "Overview",
         Message::Switcher { .. } => "Switcher",
         Message::Outputs { .. } => "Outputs",
+        Message::Environment { .. } => "Environment",
     }
 }
 
@@ -884,6 +909,28 @@ mod tests {
         ));
         assert!(!client.model().is_overview_open());
         assert_eq!(client.revision(), Some(7));
+    }
+
+    #[test]
+    fn environment_frame_reaches_app_launches() {
+        let (mut client, mut peer) = handshook();
+        server_write(
+            &mut peer,
+            &Message::Environment {
+                vars: vec![("DISPLAY".to_owned(), ":7".to_owned())],
+            },
+        );
+        assert!(matches!(
+            client.poll().expect("environment"),
+            Handled::Environment { count: 1 }
+        ));
+        assert_eq!(
+            client.environment(),
+            [("DISPLAY".to_owned(), ":7".to_owned())]
+        );
+        assert!(
+            crate::apps::launch_environment().contains(&("DISPLAY".to_owned(), ":7".to_owned()))
+        );
     }
 
     #[test]
