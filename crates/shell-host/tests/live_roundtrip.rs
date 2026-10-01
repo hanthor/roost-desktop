@@ -26,6 +26,8 @@ const ROUNDS: usize = 2000;
 /// Live harness: headless compositor plus window manager plus control
 /// hub on a unique socket path, with two windows mapped in the model.
 struct Harness {
+    /// Owner-only dir holding the control socket; kept alive for the run.
+    _dir: tempfile::TempDir,
     comp: TestCompositor,
     manager: WindowManager,
     hub: ControlHub,
@@ -49,13 +51,15 @@ fn harness(name: &str) -> Harness {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let socket_path = std::env::temp_dir().join(format!(
+    let dir = private_tempdir();
+    let socket_path = dir.path().join(format!(
         "roost-live-{}-{}-{nanos}.sock",
         std::process::id(),
         name
     ));
     let hub = ControlHub::bind(socket_path.clone(), Rc::new(TokenStore::new()), SEAT_NAME).unwrap();
     Harness {
+        _dir: dir,
         comp,
         manager,
         hub,
@@ -209,4 +213,13 @@ fn revision_gap_overflow_resnapshots_whole_state() {
             && model.windows().iter().any(|w| w.title == "w0"),
         "resnapshot carries old and new windows together"
     );
+}
+
+/// Temp dir with owner-only permissions: the control socket refuses to
+/// bind anywhere less private (#30).
+fn private_tempdir() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    dir
 }

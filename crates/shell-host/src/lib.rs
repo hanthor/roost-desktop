@@ -18,6 +18,7 @@ pub mod extensions;
 pub mod favorites;
 pub mod icons;
 pub mod intake;
+pub mod introspect;
 pub mod keyboard;
 pub mod model;
 pub mod notifications;
