@@ -452,7 +452,31 @@ window.roost-overview-dash {
 }
 
 window.roost-overview-grid {
-  background-color: #242426;
+  /* See-through: the workspace thumbnails show above the grid. */
+  background: none;
+}
+
+/* GNOME's app grid tiles (.overview-tile): 113px, the 89px icon box
+   inset 12px, a 64px icon over its name. */
+.roost-overview-grid .grid-tile {
+  min-width: 89px;
+  min-height: 89px;
+  padding: 12px;
+  border-radius: 16px;
+  background: none;
+  box-shadow: none;
+  color: #fafafb;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
+  font-weight: normal;
+}
+
+.roost-overview-grid .grid-tile:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.roost-overview-grid .grid-tile.app-folder {
+  background-color: #38383b;
 }
 
 .roost-overview-search entry.search {
@@ -512,6 +536,11 @@ window.roost-overview-grid {
 
 .overview-dash .dash-tile:hover .overview-icon {
   background-color: #444447;
+}
+
+.overview-dash .dash-tile:checked .overview-icon {
+  /* Show Apps while the app grid is up. */
+  background-color: #4b4b4f;
 }
 
 .overview-dash .app-grid-running-dot {

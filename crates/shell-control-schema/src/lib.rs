@@ -82,9 +82,13 @@ impl ProtocolVersion {
     ///
     /// `0.11` appends the shell-to-compositor `SetInputSettings` command
     /// (GNOME's keyboard, touchpad and mouse settings), again last.
+    ///
+    /// `0.12` appends the shell-to-compositor `SetOverviewAppGrid`
+    /// command (the app grid shrinks the workspaces to thumbnails along
+    /// the top, as in GNOME), again last.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 11,
+        minor: 12,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -231,6 +235,14 @@ pub enum CommandKind {
     /// (#60): keymap, key repeat, pointer devices, hot corner. Sent at
     /// start and on every change; the compositor applies them live.
     SetInputSettings(InputSettings),
+    /// The overview shows the app grid (or not): while it does, the
+    /// compositor draws the workspaces as thumbnails along the top, as
+    /// GNOME's app grid state does. UI state; it resets whenever the
+    /// overview closes.
+    SetOverviewAppGrid {
+        /// Whether the app grid is showing.
+        active: bool,
+    },
 }
 
 /// Outcome of one shell command, matched by request id.
@@ -699,8 +711,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_11() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 11));
+    fn current_version_is_0_12() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 12));
     }
 
     #[test]
@@ -719,7 +731,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 9).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 10).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 11).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 12).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 12).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 13).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }

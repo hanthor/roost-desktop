@@ -73,7 +73,8 @@ Share of pixels visibly off (more than 24 levels) in each element crop:
 | Power Mode menu | not built | 4.0% |
 | Date menu | 16.5% | 0.3% |
 | Notification banner and list card | 11.3% | matches; the rest is what lies behind |
-| Overview, empty (cards, search, dash) | 53.5% | 4.8% |
+| Overview, empty (cards, search, dash) | 53.5% | 0.4% |
+| App grid (thumbnails, tiles, dash) | 56.1% | 3.3%; the rest is which apps are installed |
 | Overview dash | not comparable | 0.0% |
 
 GTK and St differ in a few ways that matter when matching numbers:

@@ -134,6 +134,12 @@ impl overview::OverviewActions for ShellActions {
             .unwrap_or_default()
     }
 
+    fn set_app_grid(&self, active: bool) {
+        if let Some(control) = self.0.borrow_mut().control.as_mut() {
+            let _ = control.set_overview_app_grid(active);
+        }
+    }
+
     fn set_search(&self, active: bool) {
         if let Some(control) = self.0.borrow_mut().control.as_mut() {
             let _ = control.set_overview_search(active);

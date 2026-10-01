@@ -302,6 +302,8 @@ pub struct Session<'a> {
     idle_timeout: Option<u64>,
     /// Latest `SetOverviewSearch` from the shell, drained by the hub.
     overview_search: Option<bool>,
+    /// Latest `SetOverviewAppGrid` from the shell, drained by the hub.
+    overview_app_grid: Option<bool>,
     /// Latest `SetInputSettings` from the shell, drained by the hub.
     input_settings: Option<roost_shell_control::InputSettings>,
 }
@@ -363,6 +365,7 @@ impl<'a> Session<'a> {
             closed: Vec::new(),
             idle_timeout: None,
             overview_search: None,
+            overview_app_grid: None,
             input_settings: None,
         };
         let msg = match session.conn.read_frame() {
@@ -571,6 +574,18 @@ impl<'a> Session<'a> {
             } => {
                 // Session-level settings for the runtime (seat, libinput).
                 self.input_settings = Some(settings);
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: CommandStatus::Applied,
+                })?;
+                Ok(Handled::CommandResult { id, applied: true })
+            }
+            Message::Command {
+                id,
+                kind: CommandKind::SetOverviewAppGrid { active },
+            } => {
+                // UI state for the runtime's overview drawing.
+                self.overview_app_grid = Some(active);
                 self.conn.write_frame(&Message::CommandResult {
                     id,
                     status: CommandStatus::Applied,
@@ -808,6 +823,7 @@ fn apply_command(
         // Intercepted by the session before it gets here.
         CommandKind::SetIdleTimeout { .. }
         | CommandKind::SetOverviewSearch { .. }
+        | CommandKind::SetOverviewAppGrid { .. }
         | CommandKind::SetInputSettings(_) => (CommandStatus::Applied, None),
         CommandKind::Lock => {
             // Manual lock from the shell (session-lock set path):
@@ -837,6 +853,8 @@ pub struct PollOutcome {
     pub idle_timeout: Option<u64>,
     /// Whether overview search is showing results, if the shell said.
     pub overview_search: Option<bool>,
+    /// Whether the overview shows the app grid, if the shell said.
+    pub overview_app_grid: Option<bool>,
     /// GNOME input settings the shell sent, if any.
     pub input_settings: Option<roost_shell_control::InputSettings>,
 }
@@ -1163,6 +1181,9 @@ impl ControlHub {
                     }
                     if let Some(active) = session.overview_search.take() {
                         outcome.overview_search = Some(active);
+                    }
+                    if let Some(active) = session.overview_app_grid.take() {
+                        outcome.overview_app_grid = Some(active);
                     }
                     if let Some(settings) = session.input_settings.take() {
                         outcome.input_settings = Some(settings);

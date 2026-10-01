@@ -473,6 +473,9 @@ pub struct Runtime {
     /// Overview search is showing results: the workspace card and
     /// previews hide (GNOME). Reset whenever the overview closes.
     overview_search: bool,
+    /// The overview shows the app grid: workspaces become thumbnails
+    /// along the top (GNOME's app grid state). Reset on close.
+    overview_app_grid: bool,
     /// X11 display number once XWayland's window manager is up (#59):
     /// published as `DISPLAY` to the shell for the apps it launches.
     x11_display: Option<u32>,
@@ -721,6 +724,7 @@ impl Runtime {
             pending_x11_client: None,
             x11_display: None,
             overview_search: false,
+            overview_app_grid: false,
             shell_swipe: None,
             scale: clamp_scale(session.scale),
             input_settings: Default::default(),
@@ -1043,6 +1047,7 @@ impl Runtime {
             "x11_display": self.x11_display.map(|d| format!(":{d}")),
             "idle_timeout_ms": self.lock.timeout_ms(),
             "overview_search": self.overview_search,
+            "overview_app_grid": self.overview_app_grid,
             "keyboard": keyboard,
             "overview_open": overview_open,
             "locked": self.is_locked(),
@@ -1092,7 +1097,12 @@ impl Runtime {
         let size = self.state.primary_size();
         let output = Rectangle::new((0, 0).into(), size);
         let model = self.manager.model();
-        crate::overview::layout(
+        let layout = if self.overview_app_grid {
+            crate::overview::app_grid_layout
+        } else {
+            crate::overview::layout
+        };
+        layout(
             output,
             crate::windows::WORK_AREA_TOP,
             model.workspaces(),
@@ -1655,11 +1665,15 @@ impl Runtime {
         if let Some(active) = outcome.overview_search {
             self.overview_search = active;
         }
+        if let Some(active) = outcome.overview_app_grid {
+            self.overview_app_grid = active;
+        }
         if let Some(settings) = outcome.input_settings {
             self.apply_input_settings(settings);
         }
         if !self.control.overview_open() {
             self.overview_search = false;
+            self.overview_app_grid = false;
         }
         // GNOME's idle and lock settings, from the shell (#63).
         if let Some(ms) = outcome.idle_timeout {

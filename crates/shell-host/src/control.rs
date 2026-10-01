@@ -391,6 +391,17 @@ impl ControlClient {
         Ok(id)
     }
 
+    /// Tell the compositor whether the overview shows the app grid, so
+    /// it draws the workspaces as thumbnails. Returns the request id.
+    pub fn set_overview_app_grid(&mut self, active: bool) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::SetOverviewAppGrid { active },
+        })?;
+        Ok(id)
+    }
+
     /// Tell the compositor whether overview search shows results, so
     /// it hides the workspace view meanwhile. Returns the request id.
     pub fn set_overview_search(&mut self, active: bool) -> Result<u64, ControlError> {
