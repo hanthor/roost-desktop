@@ -56,7 +56,8 @@ as niri does, so the stock portal works.
 | Interface | Roost | Notes |
 |---|---|---|
 | org.gnome.Shell.Screenshot | Screenshot | saves a PNG; the name is left to a real GNOME Shell when one runs (nested preview) |
-| org.gnome.Mutter.ScreenCast, org.gnome.Mutter.DisplayConfig | missing | screen sharing (#61); niri's PipeWire implementation is the reference |
+| org.gnome.Mutter.ScreenCast | CreateSession, RecordMonitor, Start, Stop | monitor streams over PipeWire (BGRx, shared memory, up to 30 fps), adapted from niri; window streams pending |
+| org.gnome.Mutter.DisplayConfig | GetCurrentState | the portal's monitor picker; ApplyMonitorsConfig (GNOME Settings' Displays panel) pending |
 | org.gnome.Shell.Introspect | missing | window list for the portal's window picker (#61) |
 
 ## Gaps against Mutter

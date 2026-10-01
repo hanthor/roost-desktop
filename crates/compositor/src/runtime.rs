@@ -458,6 +458,12 @@ pub struct Runtime {
     pending_x11_client: Option<smithay::reexports::wayland_server::Client>,
     /// Output scale (#59), see [`NestedSession::scale`].
     scale: f64,
+    /// PipeWire, connected on the first screen cast (#61).
+    pipewire: Option<crate::screencast::PipeWire>,
+    /// Running screen casts.
+    casts: Vec<crate::screencast::Cast>,
+    /// Monitor list the Mutter D-Bus side serves.
+    cast_outputs: crate::mutter::Outputs,
     /// A three-finger swipe in progress: its travel so far (#60).
     shell_swipe: Option<Point<f64, Logical>>,
     /// Overview search is showing results: the workspace card and
@@ -661,6 +667,20 @@ impl Runtime {
             state.enable_dmabuf(formats);
         }
 
+        // org.gnome.Mutter.ScreenCast and DisplayConfig (#61): screen
+        // sharing through the stock GNOME portal.
+        let cast_outputs: crate::mutter::Outputs = Default::default();
+        event_loop
+            .handle()
+            .insert_source(
+                crate::mutter::start(cast_outputs.clone()),
+                |event, _, rt: &mut Runtime| {
+                    if let calloop::channel::Event::Msg(request) = event {
+                        rt.on_screencast_request(request);
+                    }
+                },
+            )
+            .map_err(|e| RuntimeError::Loop(e.to_string()))?;
         // org.gnome.Shell.Screenshot (#61): requests from the D-Bus
         // thread are answered between frames.
         event_loop
@@ -693,6 +713,9 @@ impl Runtime {
             overview_search: false,
             shell_swipe: None,
             scale: clamp_scale(session.scale),
+            pipewire: None,
+            casts: Vec::new(),
+            cast_outputs,
             idle_since: Instant::now(),
             exit: false,
             stats: RunStats::default(),
@@ -1135,13 +1158,30 @@ impl Runtime {
     /// as a PNG (`requested` when absolute, else GNOME's default path).
     /// Never while locked: nothing behind the lock may leave the session.
     pub fn capture(&mut self, requested: &std::path::Path) -> Option<std::path::PathBuf> {
-        use smithay::backend::allocator::Fourcc;
-        use smithay::backend::renderer::{ExportMem, Offscreen};
         if self.is_locked() {
             return None;
         }
         let path =
             crate::screenshot::target_path(requested, &crate::screenshot::jiff_like::Stamp::now())?;
+        let (w, h, rgba) =
+            self.render_pixels(None, smithay::backend::allocator::Fourcc::Abgr8888)?;
+        crate::screenshot::save_png(&path, w as u32, h as u32, &rgba).ok()?;
+        eprintln!("roost-compositor: screenshot saved to {}", path.display());
+        Some(path)
+    }
+
+    /// Render one output's current scene (the primary, or `connector`)
+    /// offscreen and read it back in `fourcc` byte order (Abgr8888 is
+    /// RGBA in memory, Xrgb8888 is BGRx). Never while locked.
+    fn render_pixels(
+        &mut self,
+        connector: Option<&str>,
+        fourcc: smithay::backend::allocator::Fourcc,
+    ) -> Option<(i32, i32, Vec<u8>)> {
+        use smithay::backend::renderer::{ExportMem, Offscreen};
+        if self.is_locked() {
+            return None;
+        }
         let overview = self.control.overview_open().then(|| self.overview_layout());
         let cards = overview.as_ref().filter(|_| !self.overview_search);
         let decor_global = cards
@@ -1166,7 +1206,10 @@ impl Runtime {
                 let crate::drm::DrmBackend {
                     renderer, outputs, ..
                 } = &mut **drm;
-                let out = outputs.first()?;
+                let out = match connector {
+                    Some(name) => outputs.iter().find(|o| o.name == name)?,
+                    None => outputs.first()?,
+                };
                 let view = View {
                     offset: out.loc,
                     scale: out.scale,
@@ -1176,7 +1219,7 @@ impl Runtime {
         };
         let buffer_size = (size.w, size.h).into();
         let mut texture: smithay::backend::renderer::gles::GlesTexture =
-            renderer.create_buffer(Fourcc::Abgr8888, buffer_size).ok()?;
+            renderer.create_buffer(fourcc, buffer_size).ok()?;
         let elements = scene_elements(
             renderer,
             &self.manager,
@@ -1211,12 +1254,111 @@ impl Runtime {
             let _ = frame.finish().ok()?;
         }
         let mapping = renderer
-            .copy_framebuffer(&target, Rectangle::from_size(buffer_size), Fourcc::Abgr8888)
+            .copy_framebuffer(&target, Rectangle::from_size(buffer_size), fourcc)
             .ok()?;
         let bytes = renderer.map_texture(&mapping).ok()?.to_vec();
-        crate::screenshot::save_png(&path, size.w as u32, size.h as u32, &bytes).ok()?;
-        eprintln!("roost-compositor: screenshot saved to {}", path.display());
-        Some(path)
+        Some((size.w, size.h, bytes))
+    }
+
+    /// Screen-cast work for this tick (#61): start and stop casts the
+    /// D-Bus side asked for, and feed every streaming cast a frame.
+    fn screencast_tick(&mut self) {
+        self.casts.retain(|cast| !cast.failed());
+        let wanted: Vec<(usize, String)> = self
+            .casts
+            .iter()
+            .enumerate()
+            .filter(|(_, cast)| cast.wants_frame().is_some())
+            .map(|(i, cast)| (i, cast.connector.clone()))
+            .collect();
+        for (index, connector) in wanted {
+            let target = match &self.backend {
+                Backend::Winit(_) => None,
+                #[cfg(feature = "drm")]
+                Backend::Drm(_) => Some(connector.as_str()),
+            };
+            let Some((w, h, bgrx)) =
+                self.render_pixels(target, smithay::backend::allocator::Fourcc::Xrgb8888)
+            else {
+                continue;
+            };
+            if let Some(cast) = self.casts.get_mut(index) {
+                cast.send_frame(w, h, &bgrx);
+            }
+        }
+    }
+
+    /// One D-Bus screen-cast request.
+    fn on_screencast_request(&mut self, request: crate::mutter::ToLoop) {
+        match request {
+            crate::mutter::ToLoop::StartCast {
+                session_id,
+                connector,
+                signal,
+            } => {
+                if self.pipewire.is_none() {
+                    self.pipewire = crate::screencast::PipeWire::new(&self.loop_handle);
+                    if self.pipewire.is_none() {
+                        eprintln!("roost-compositor: screen cast: PipeWire is not running");
+                        crate::mutter::session_closed(&signal);
+                        return;
+                    }
+                }
+                let Some(snapshot) = self
+                    .cast_outputs
+                    .lock()
+                    .ok()
+                    .and_then(|o| o.iter().find(|o| o.connector == connector).cloned())
+                else {
+                    return;
+                };
+                let Some(pw) = self.pipewire.as_ref() else {
+                    return;
+                };
+                match pw.start_cast(
+                    session_id,
+                    connector,
+                    snapshot.width,
+                    snapshot.height,
+                    signal,
+                ) {
+                    Some(cast) => self.casts.push(cast),
+                    None => eprintln!("roost-compositor: screen cast: stream failed to start"),
+                }
+            }
+            crate::mutter::ToLoop::StopCast { session_id } => {
+                self.casts.retain(|cast| cast.session_id != session_id);
+            }
+        }
+    }
+
+    /// Keep the D-Bus side's monitor list current (cheap when unchanged).
+    fn publish_cast_outputs(&self) {
+        let snapshot: Vec<crate::mutter::OutputSnapshot> = self
+            .state
+            .output_entries()
+            .into_iter()
+            .filter_map(|(name, output, loc, primary)| {
+                let mode = output.current_mode()?;
+                Some(crate::mutter::OutputSnapshot {
+                    connector: name,
+                    make: output.physical_properties().make,
+                    model: output.physical_properties().model,
+                    width: mode.size.w,
+                    height: mode.size.h,
+                    refresh_mhz: mode.refresh,
+                    x: loc.0,
+                    y: loc.1,
+                    scale: output.current_scale().fractional_scale(),
+                    primary,
+                })
+            })
+            .collect();
+        if let Ok(mut current) = self.cast_outputs.lock() {
+            if *current != snapshot {
+                *current = snapshot;
+            }
+        }
     }
 
     fn tick(&mut self) -> Result<bool, RuntimeError> {
@@ -1316,7 +1458,9 @@ impl Runtime {
         }
         self.stats.shell_restarts = self.shell.restarts_used();
         self.publish_state();
+        self.publish_cast_outputs();
         self.render()?;
+        self.screencast_tick();
         Ok(!self.exit)
     }
 

@@ -49,6 +49,9 @@
 #                  the right way up (#61)
 #   G-SCREENSHOT-BUTTON the quick-settings button saves one under
 #                  Pictures/Screenshots and lists "Screenshot captured"
+#   G-SCREENCAST   a client doing what xdg-desktop-portal-gnome does lists
+#                  the monitor (Mutter DisplayConfig), records it (Mutter
+#                  ScreenCast) and pulls a frame over PipeWire (#61)
 #   G-POWER-MENU   the power button opens GNOME's menu (Suspend,
 #                  Restart…, Power Off…, Log Out…) (#62)
 #   G-POWER-DIALOG Power Off… opens the 60 s end-session dialog, and
@@ -92,6 +95,18 @@ ASSERTIONS="$ARTIFACTS/assertions.txt"
 : >"$ASSERTIONS"
 XDG_PICTURES_DIR="$ARTIFACTS/pictures"
 export XDG_PICTURES_DIR
+# A private PipeWire for screen casts (#61), never the user's own.
+# Short path: Unix sockets cap at 108 bytes.
+PIPEWIRE_RUNTIME_DIR="$(mktemp -d /tmp/roost-pw.XXXXXX)"
+export PIPEWIRE_RUNTIME_DIR
+PW_PIDS=""
+if command -v pipewire >/dev/null 2>&1 && command -v wireplumber >/dev/null 2>&1; then
+    pipewire >"$ARTIFACTS/pipewire.log" 2>&1 &
+    PW_PIDS="$!"
+    sleep 1
+    wireplumber >"$ARTIFACTS/wireplumber.log" 2>&1 &
+    PW_PIDS="$PW_PIDS $!"
+fi
 XDG_STATE_HOME="$ARTIFACTS/state"
 XDG_DATA_HOME="$ARTIFACTS/data"
 export XDG_STATE_HOME XDG_DATA_HOME
@@ -147,6 +162,9 @@ cleanup() {
     if [ -n "$STUBS_PID" ]; then kill "$STUBS_PID" 2>/dev/null || true; fi
     if [ -n "$PROVIDER_PID" ]; then kill "$PROVIDER_PID" 2>/dev/null || true; fi
     if [ -n "$TRAY_PID" ]; then kill "$TRAY_PID" 2>/dev/null || true; fi
+    # shellcheck disable=SC2086
+    if [ -n "$PW_PIDS" ]; then kill $PW_PIDS 2>/dev/null || true; fi
+    rm -rf "${PIPEWIRE_RUNTIME_DIR:-/nonexistent}"
     if [ -n "$SYSBUS_PID" ]; then kill "$SYSBUS_PID" 2>/dev/null || true; fi
 }
 trap cleanup EXIT INT TERM
@@ -776,6 +794,19 @@ showing "$ARTIFACTS/a11y-shot-list.json" "Screenshot captured" ||
 xdotool key Escape
 sleep 1
 pass G-SCREENSHOT-BUTTON "the button saves to Pictures/Screenshots and notifies"
+
+# Screen sharing (#61): the portal's calls, a frame over PipeWire.
+if [ -n "$PW_PIDS" ] && command -v gst-launch-1.0 >/dev/null 2>&1; then
+    CAST="$ARTIFACTS/screencast.png"
+    "$PY" "$ROOT/scripts/lib/roost-screencast-client.py" "$CAST" >"$ARTIFACTS/screencast.log" 2>&1 ||
+        fail G-SCREENCAST "cast failed: $(tail -3 "$ARTIFACTS/screencast.log")"
+    dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$CAST")"
+    [ "$dims" = "$WIDTH,$HEIGHT" ] || fail G-SCREENCAST "cast frame is $dims, not $WIDTH,$HEIGHT"
+    [ "$(px "$CAST" 300 5)" = "0 0 0" ] || fail G-SCREENCAST "cast frame does not show the top bar"
+    pass G-SCREENCAST "monitor recorded over Mutter ScreenCast, frame pulled from PipeWire ($(cat "$ARTIFACTS/screencast.log"))"
+else
+    echo "roost-gtk-shell-proof: G-SCREENCAST skipped (no pipewire, wireplumber or gstreamer)"
+fi
 
 # Power (#62), against the logind stub (restarted: G-QS-ABSENT stopped
 # it). The proof runs the shell as a hardware session for the full menu.
