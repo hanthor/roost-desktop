@@ -4193,6 +4193,15 @@ pub fn run_panel_with_control(
 
 #[cfg(test)]
 mod tests {
+    /// Temp dir with owner-only permissions: the control socket refuses to
+    /// bind anywhere less private (#30).
+    pub(super) fn private_tempdir() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        dir
+    }
+
     use super::*;
 
     #[test]
@@ -5980,7 +5989,7 @@ mod tests {
         fn armed_lock_request_drives_lock_command() {
             use crate::popup::{panel_layout, popup_box, PopupBody, TILE_ROWS_TOP};
             use crate::tiles::POWER_TILE_INDEX;
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::panel::tests::private_tempdir();
             let socket_path = dir.path().join("control.sock");
             let mut model = StateModel::new();
             let mut hub =
@@ -7039,7 +7048,7 @@ mod tests {
         fn control_feeds_overview_model() {
             use std::rc::Rc;
 
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::panel::tests::private_tempdir();
             let socket_path = dir.path().join("control.sock");
             let mut model = StateModel::new();
             model.insert("alpha", Some("com.example.alpha"), 0);
@@ -7129,7 +7138,7 @@ mod tests {
             use super::super::{FocusRegion, ShellFocus};
             use std::rc::Rc;
 
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::panel::tests::private_tempdir();
             let socket_path = dir.path().join("control.sock");
             let mut model = StateModel::new();
             let mut hub =
@@ -7219,7 +7228,7 @@ mod tests {
         fn switcher_drive_steps_and_commits() {
             use roost_shell_control::{CommandStatus, SwitcherAction};
 
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::panel::tests::private_tempdir();
             let socket_path = dir.path().join("control.sock");
             let mut model = StateModel::new();
             let id_a = model.insert("alpha", Some("com.example.alpha"), 0);
@@ -7339,7 +7348,7 @@ mod tests {
         fn host_search_finds_synced_windows() {
             use crate::search::SearchAction;
 
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::panel::tests::private_tempdir();
             let socket_path = dir.path().join("control.sock");
             let mut model = StateModel::new();
             model.insert("alpha", Some("com.example.alpha"), 0);
@@ -7544,7 +7553,7 @@ mod tests {
             use crate::search::SearchResult;
             use roost_shell_control::CommandStatus;
 
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::panel::tests::private_tempdir();
             let socket_path = dir.path().join("control.sock");
             let mut model = StateModel::new();
             let id_a = model.insert("alpha", Some("com.example.alpha"), 0);
@@ -7635,7 +7644,7 @@ mod tests {
         fn manual_lock_engages_lock_screen_at_once() {
             use roost_shell_control::CommandStatus;
 
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::panel::tests::private_tempdir();
             let socket_path = dir.path().join("control.sock");
             let mut model = StateModel::new();
             model.insert("alpha", Some("com.example.alpha"), 0);
@@ -7793,7 +7802,7 @@ mod tests {
                 Favorites::load(fav_dir.path().join(crate::favorites::FAVORITES_FILE)),
             );
 
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::panel::tests::private_tempdir();
             let socket_path = dir.path().join("control.sock");
             let mut model = StateModel::new();
             let mut hub =
@@ -7999,7 +8008,7 @@ mod tests {
             use roost_shell_control::CommandStatus;
             use std::rc::Rc;
 
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::panel::tests::private_tempdir();
             let socket_path = dir.path().join("control.sock");
             let mut model = StateModel::new();
             let id_a = model.insert("alpha", Some("com.example.alpha"), 0);
