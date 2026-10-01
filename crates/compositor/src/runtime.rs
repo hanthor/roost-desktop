@@ -39,6 +39,17 @@ use smithay::{
 
 use crate::control::ControlHub;
 use crate::lock::{content_visible, SessionLock, DEFAULT_IDLE_TIMEOUT_MS};
+
+/// Idle timeout for the session lock: `ROOST_IDLE_TIMEOUT_MS` overrides
+/// the five-minute default. Testability seam for scripted lock capture
+/// (and lock journey tests); production runs leave it unset.
+fn idle_timeout_ms() -> u64 {
+    std::env::var("ROOST_IDLE_TIMEOUT_MS")
+        .ok()
+        .and_then(|raw| raw.parse().ok())
+        .filter(|ms| *ms > 0)
+        .unwrap_or(DEFAULT_IDLE_TIMEOUT_MS)
+}
 use crate::overlay::{overlay_key_for_keycode, Overlay, OverlayWindow};
 use crate::state::TokenStore;
 use crate::supervise::{RecoveryAction, RestartPolicy, ShellDriver, ShellStatus};
@@ -325,7 +336,7 @@ impl Runtime {
             overlay,
             wallpaper: Wallpaper::new(),
             triggers: TriggerState::default(),
-            lock: SessionLock::new(DEFAULT_IDLE_TIMEOUT_MS),
+            lock: SessionLock::new(idle_timeout_ms()),
             xwayland: XWaylandSupervisor::new(),
             loop_handle,
             #[cfg(feature = "xwayland")]
@@ -359,7 +370,7 @@ impl Runtime {
             }
             WinitEvent::CloseRequested => self.exit = true,
             WinitEvent::Input(event) => {
-                if let Some(input) = translate_input(event) {
+                for input in translate_input(event) {
                     self.on_manager_input(input);
                 }
             }
@@ -724,6 +735,10 @@ impl Runtime {
                 draw_render_elements(&mut frame, 1.0, std::slice::from_ref(paper), &[damage])
                     .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
             }
+            // `elements` accumulates bottom-to-top (windows, then
+            // background-to-overlay layers); Smithay 0.7 draws the
+            // first element topmost.
+            let elements = crate::layer::front_to_back(elements);
             draw_render_elements(&mut frame, 1.0, &elements, &[damage])
                 .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
             let _ = frame

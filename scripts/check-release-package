@@ -46,4 +46,14 @@ for bin in roost-compositor roost-session roost-shell-host roost-greeter; do
     [ "$REPORTED" = "$VERSION" ] || fail "$bin reports $REPORTED, package is $VERSION"
 done
 
+# Login entry must parse: run the validator when present, allowing only
+# the DesktopNames session-file convention (GNOME/KDE/Sway session
+# entries ship it and display managers read it; the base-spec validator
+# flags it).
+if command -v desktop-file-validate >/dev/null 2>&1; then
+    DESKTOP_ERRORS="$(desktop-file-validate "$DIR/usr/share/wayland-sessions/roost.desktop" 2>&1 || true)"
+    DESKTOP_ERRORS="$(printf '%s' "$DESKTOP_ERRORS" | grep -v 'key "DesktopNames"' || true)"
+    [ -z "$DESKTOP_ERRORS" ] || fail "roost.desktop invalid: $DESKTOP_ERRORS"
+fi
+
 echo "check-release-package: $PKG OK (version $VERSION)"
