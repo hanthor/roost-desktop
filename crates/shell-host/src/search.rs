@@ -272,12 +272,45 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::{Condvar, Mutex};
+    use std::time::Instant;
+
+    /// Generous wall-clock bound for waits. Tests never *assert* on
+    /// timing (#72): a slow runner only makes them take longer.
+    const DEADLINE: Duration = Duration::from_secs(20);
+
+    /// Release latch for the slow provider: its answers are held until
+    /// the test opens the gate, so "fast arrives while slow works" holds
+    /// by construction instead of by sleep length.
+    #[derive(Default)]
+    struct Gate {
+        open: Mutex<bool>,
+        cv: Condvar,
+    }
+
+    impl Gate {
+        fn wait(&self) {
+            let mut open = self.open.lock().unwrap();
+            while !*open {
+                open = self.cv.wait(open).unwrap();
+            }
+        }
+
+        fn release(&self) {
+            *self.open.lock().unwrap() = true;
+            self.cv.notify_all();
+        }
+    }
+
     /// Echo provider: every hit title carries the query text, so tests
-    /// can tell which generation an answer belongs to.
+    /// can tell which generation an answer belongs to. `done` counts
+    /// finished queries so tests can wait for workers deterministically.
     struct Echo {
         id: &'static str,
-        delay: Duration,
+        gate: Option<Arc<Gate>>,
         fail: bool,
+        done: Arc<AtomicUsize>,
     }
 
     impl SearchProvider for Echo {
@@ -286,105 +319,156 @@ mod tests {
         }
 
         fn query(&self, text: &str) -> Vec<SearchResult> {
-            if !self.delay.is_zero() {
-                std::thread::sleep(self.delay);
+            if let Some(gate) = &self.gate {
+                gate.wait();
             }
-            if self.fail {
-                return Vec::new();
-            }
-            vec![SearchResult::launch(
-                format!("{}:{text}", self.id),
-                "app.id",
-            )]
+            let out = if self.fail {
+                Vec::new()
+            } else {
+                vec![SearchResult::launch(
+                    format!("{}:{text}", self.id),
+                    "app.id",
+                )]
+            };
+            self.done.fetch_add(1, Ordering::SeqCst);
+            out
         }
     }
 
-    fn hub_with(fast: bool, slow_delay: Duration, fail: bool) -> SearchHub {
-        SearchHub::new(vec![
+    struct Fixture {
+        hub: SearchHub,
+        gate: Arc<Gate>,
+        done: Arc<AtomicUsize>,
+    }
+
+    /// Fast provider answers at once; the slow one waits on `gate`.
+    fn fixture(fast: bool, gated: bool, fail: bool) -> Fixture {
+        let gate = Arc::new(Gate::default());
+        if !gated {
+            gate.release();
+        }
+        let done = Arc::new(AtomicUsize::new(0));
+        let hub = SearchHub::new(vec![
             Arc::new(Echo {
                 id: "fast",
-                delay: Duration::ZERO,
+                gate: None,
                 fail: !fast,
+                done: done.clone(),
             }),
             Arc::new(Echo {
                 id: "slow",
-                delay: slow_delay,
+                gate: Some(gate.clone()),
                 fail,
+                done: done.clone(),
             }),
-        ])
+        ]);
+        Fixture { hub, gate, done }
+    }
+
+    /// Accumulate titles across draining `collect` calls until `want`
+    /// holds or the deadline passes; returns everything seen.
+    fn collect_until(hub: &mut SearchHub, want: impl Fn(&[String]) -> bool) -> Vec<String> {
+        let start = Instant::now();
+        let mut seen = Vec::new();
+        loop {
+            seen.extend(hub.collect().into_iter().map(|h| h.title));
+            if want(&seen) || start.elapsed() > DEADLINE {
+                return seen;
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    fn has(seen: &[String], title: &str) -> bool {
+        seen.iter().any(|t| t == title)
+    }
+
+    /// Wait until `n` provider queries have finished.
+    fn wait_done(done: &AtomicUsize, n: usize) {
+        let start = Instant::now();
+        while done.load(Ordering::SeqCst) < n {
+            assert!(start.elapsed() < DEADLINE, "providers never finished");
+            std::thread::yield_now();
+        }
     }
 
     #[test]
     fn blank_query_spawns_nothing_and_collects_empty() {
-        let mut hub = hub_with(true, Duration::ZERO, false);
-        let gen = hub.query("   ");
+        let mut f = fixture(true, false, false);
+        let gen = f.hub.query("   ");
         assert_eq!(gen, 1);
-        assert!(hub.collect().is_empty());
+        assert!(f.hub.collect().is_empty());
+        assert_eq!(f.done.load(Ordering::SeqCst), 0, "blank spawns nothing");
     }
 
     #[test]
     fn slow_provider_never_blocks_typing_or_first_results() {
-        let mut hub = hub_with(true, Duration::from_millis(150), false);
-        let first = hub.query("a");
-        // The fast answer is already waiting; the slow one is not.
-        let mut saw_fast = false;
-        for _ in 0..100 {
-            for hit in hub.collect() {
-                if hit.title == "fast:a" {
-                    saw_fast = true;
-                }
-                assert!(!hit.title.starts_with("slow:"), "slow answer is late");
-            }
-            if saw_fast {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
-        assert!(saw_fast, "fast provider answers while slow works");
-        assert_eq!(hub.generation(), first);
+        let mut f = fixture(true, true, false);
+        let first = f.hub.query("a");
+        // The slow provider is held at its gate: the fast answer must
+        // surface on its own.
+        let seen = collect_until(&mut f.hub, |s| has(s, "fast:a"));
+        assert!(
+            has(&seen, "fast:a"),
+            "fast provider answers while slow works"
+        );
+        assert!(!seen.iter().any(|t| t.starts_with("slow:")));
+        assert_eq!(f.hub.generation(), first);
+        f.gate.release();
     }
 
     #[test]
     fn late_slow_answer_joins_current_results() {
-        let mut hub = hub_with(true, Duration::from_millis(50), false);
-        hub.query("a");
-        std::thread::sleep(Duration::from_millis(200));
-        let titles: Vec<String> = hub.collect().iter().map(|h| h.title.clone()).collect();
-        assert!(titles.contains(&"fast:a".to_owned()));
-        assert!(titles.contains(&"slow:a".to_owned()));
+        let mut f = fixture(true, true, false);
+        f.hub.query("a");
+        let mut seen = collect_until(&mut f.hub, |s| has(s, "fast:a"));
+        f.gate.release();
+        seen.extend(collect_until(&mut f.hub, |s| has(s, "slow:a")));
+        assert!(has(&seen, "fast:a"));
+        assert!(has(&seen, "slow:a"));
     }
 
     #[test]
     fn new_query_supersedes_inflight_answers() {
-        let mut hub = hub_with(true, Duration::from_millis(100), false);
-        hub.query("a");
-        hub.query("ab");
-        std::thread::sleep(Duration::from_millis(300));
-        let titles: Vec<String> = hub.collect().iter().map(|h| h.title.clone()).collect();
+        let mut f = fixture(true, true, false);
+        f.hub.query("a");
+        f.hub.query("ab");
+        f.gate.release();
+        let seen = collect_until(&mut f.hub, |s| has(s, "fast:ab") && has(s, "slow:ab"));
+        // All four workers (two generations x two providers) finished.
+        wait_done(&f.done, 4);
+        let mut seen = seen;
+        seen.extend(f.hub.collect().into_iter().map(|h| h.title));
         assert!(
-            !titles.iter().any(|t| t.ends_with(":a")),
+            !seen.iter().any(|t| t.ends_with(":a")),
             "gen-1 answers dropped"
         );
-        assert!(titles.contains(&"fast:ab".to_owned()));
-        assert!(titles.contains(&"slow:ab".to_owned()));
+        assert!(has(&seen, "fast:ab"));
+        assert!(has(&seen, "slow:ab"));
     }
 
     #[test]
     fn cancel_drops_everything_inflight() {
-        let mut hub = hub_with(true, Duration::from_millis(100), false);
-        hub.query("a");
-        hub.cancel();
-        std::thread::sleep(Duration::from_millis(200));
-        assert!(hub.collect().is_empty());
+        let mut f = fixture(true, true, false);
+        f.hub.query("a");
+        f.hub.cancel();
+        f.gate.release();
+        wait_done(&f.done, 2);
+        // Workers finished; give their sends a moment to land, then the
+        // drain must still be empty (the generation retired them).
+        for _ in 0..50 {
+            assert!(f.hub.collect().is_empty());
+            std::thread::yield_now();
+        }
     }
 
     #[test]
     fn failing_provider_yields_empty_without_breaking_others() {
-        let mut hub = hub_with(true, Duration::ZERO, true);
-        hub.query("a");
-        std::thread::sleep(Duration::from_millis(50));
-        let titles: Vec<String> = hub.collect().iter().map(|h| h.title.clone()).collect();
-        assert_eq!(titles, vec!["fast:a".to_owned()]);
+        let mut f = fixture(true, false, true);
+        f.hub.query("a");
+        wait_done(&f.done, 2);
+        let seen = collect_until(&mut f.hub, |s| has(s, "fast:a"));
+        assert_eq!(seen, vec!["fast:a".to_owned()]);
     }
 
     #[test]
@@ -402,8 +486,15 @@ mod tests {
         }
         let mut hub = SearchHub::new(vec![Arc::new(Flood)]);
         hub.query("x");
-        std::thread::sleep(Duration::from_millis(100));
-        let out = hub.collect();
+        let start = Instant::now();
+        let out = loop {
+            let out = hub.collect();
+            if !out.is_empty() || start.elapsed() > DEADLINE {
+                break out;
+            }
+            std::thread::yield_now();
+        };
+        assert!(!out.is_empty(), "flood answered");
         assert!(out.len() <= MAX_TOTAL_RESULTS);
         assert!(
             out.len() <= MAX_PROVIDER_RESULTS,
