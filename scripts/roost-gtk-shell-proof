@@ -20,6 +20,8 @@
 #   G-SEARCH-PROVIDER  typing lists a D-Bus search provider's result (#57)
 #   G-SEARCH-VIEW      while search shows results the workspace view hides
 #   G-SEARCH-ACTIVATE  clicking it calls ActivateResult, closes overview
+#   G-APP-FOLDERS  GNOME's app-folders settings group the app grid: the
+#                  folder replaces its apps and opens to show them
 #   G-NOTIFY-BANNER  a D-Bus notification shows a banner (#56)
 #   G-NOTIFY-EXPIRE  the banner goes away by itself
 #   G-NOTIFY-LIST    the calendar lists it instead of "No Notifications"
@@ -531,6 +533,35 @@ showing "$ARTIFACTS/a11y-grid.json" "Roost Probe" ||
 pass G-OV-APPGRID "Show Apps opens the app grid"
 scrot "$ARTIFACTS/11-app-grid.png" >/dev/null
 xdotool key Escape
+
+# App folders, from GNOME's own keys.
+xdotool key Escape
+if ! cstate '.overview_open | not' "closed" 3; then
+    xdotool key Super_L
+    cstate '.overview_open | not' "closed" || fail G-APP-FOLDERS "overview would not close"
+fi
+FOLDER=org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/ProbeTools/
+gsettings set org.gnome.desktop.app-folders folder-children "['ProbeTools']"
+gsettings set "$FOLDER" name 'Probe Tools'
+gsettings set "$FOLDER" apps "['roost-probe.desktop']"
+xdotool key Super_L
+cstate '.overview_open' "overview" || fail G-APP-FOLDERS "overview did not open"
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-folders.json" 20 --press "Show Apps" ||
+    fail G-APP-FOLDERS "could not press Show Apps"
+showing "$ARTIFACTS/a11y-folders.json" "Probe Tools" ||
+    fail G-APP-FOLDERS "the grid has no Probe Tools folder"
+if showing "$ARTIFACTS/a11y-folders.json" "Roost Probe"; then
+    fail G-APP-FOLDERS "a foldered app still shows loose in the grid"
+fi
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-folder-open.json" 20 --press "Probe Tools" ||
+    fail G-APP-FOLDERS "could not open the folder"
+scrot "$ARTIFACTS/11b-app-folder.png" >/dev/null
+showing "$ARTIFACTS/a11y-folder-open.json" "Roost Probe" ||
+    fail G-APP-FOLDERS "the open folder does not show its app"
+pass G-APP-FOLDERS "GNOME's app folders group the grid and open to their apps"
+xdotool key Escape
+sleep 1
 
 # Notifications (#56). Close whatever the grid left open first (#97).
 xdotool key Escape

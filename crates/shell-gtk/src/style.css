@@ -217,3 +217,10 @@ window.roost-end-session {
 .power-menu button {
   padding: 6px 12px;
 }
+
+/* App-grid folders (GNOME 51): a rounded tile holding a 2x2 collage. */
+.folder-collage {
+  background-color: alpha(#ffffff, 0.1);
+  border-radius: 20px;
+  padding: 8px;
+}

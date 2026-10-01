@@ -257,6 +257,7 @@ mod search_tests {
             keywords: keywords.iter().map(|k| (*k).to_owned()).collect(),
             argv: vec!["true".into()],
             icon: None,
+            categories: Vec::new(),
         }
     }
 
