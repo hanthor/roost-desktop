@@ -169,7 +169,7 @@ fn assert_nothing_sent(client: &mut UnixStream) {
 /// carries every window with titles at the current revision.
 #[test]
 fn correct_password_dismisses_lock_intact() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_tempdir();
     let path = dir.path().join("control.sock");
     let mut hub = ControlHub::bind(path.clone(), Rc::new(TokenStore::new()), SEAT_NAME).unwrap();
     let mut model = two_window_model();
@@ -233,7 +233,7 @@ fn correct_password_dismisses_lock_intact() {
 /// neither titles nor the entered secret appear in any shell traffic.
 #[test]
 fn triple_wrong_password_stays_locked_without_leak() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_tempdir();
     let path = dir.path().join("control.sock");
     let mut hub = ControlHub::bind(path.clone(), Rc::new(TokenStore::new()), SEAT_NAME).unwrap();
     let mut model = two_window_model();
@@ -317,4 +317,13 @@ fn triple_wrong_password_stays_locked_without_leak() {
             );
         }
     }
+}
+
+/// Temp dir with owner-only permissions: the control socket refuses to
+/// bind anywhere less private (#30).
+fn private_tempdir() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    dir
 }
