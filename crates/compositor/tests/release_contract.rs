@@ -145,6 +145,8 @@ fn arch_package_stamps_and_checks_the_version() {
         "roost-compositor",
         "roost-session",
         "roost-shell-host",
+        "roost-shell-gtk",
+        "gtk4-layer-shell",
         "roost-greeter",
         "roost.desktop",
         "check()",
@@ -154,6 +156,8 @@ fn arch_package_stamps_and_checks_the_version() {
     }
     let containerfile = read_workspace("packaging/marlin/Containerfile");
     assert!(containerfile.contains("ghcr.io/tuna-os/marlin:gnome"));
-    // Nested-only until DRM/KMS (#52): never selectable at login.
+    // Nested-only until the lock screen authenticates through PAM (the
+    // 004 gate): never selectable at login.
     assert!(containerfile.contains("test ! -e /usr/share/wayland-sessions/roost.desktop"));
+    assert!(containerfile.contains("roost-shell-gtk --version"));
 }

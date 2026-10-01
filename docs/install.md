@@ -25,15 +25,17 @@ while preserving user data. See `docs/release.md` for the release process.
 Prerequisites mirror CI (`check` job plus the display libraries the nested
 backend dlopens): a stable Rust toolchain, `libxkbcommon-dev`,
 `libxkbcommon-x11-dev`, `libegl1`, `libgl1-mesa-dri`, `libgbm1`,
-`pkg-config`.
+`pkg-config`. The GTK shell also needs `libgtk-4-dev`, `libadwaita-1-dev`
+and gtk4-layer-shell (`scripts/ci-install-gtk4-layer-shell` builds it
+where the distribution has no package).
 
 ```sh
 cargo build --release \
-  -p roost-compositor -p roost-shell-host -p roost-greeter
+  -p roost-compositor -p roost-shell-host -p roost-shell-gtk -p roost-greeter
 ```
 
-Binaries land in `target/release/`: `roost-compositor`, `roost-shell-host`,
-`roost-greeter`, and `roost-session` (the last is a second binary target of
+Binaries land in `target/release/`: `roost-compositor`, `roost-shell-gtk`,
+`roost-shell-host`, `roost-greeter`, and `roost-session` (the last is a second binary target of
 the compositor crate).
 
 ## Installing
@@ -41,6 +43,7 @@ the compositor crate).
 ```sh
 PREFIX=/usr/local
 install -Dm0755 target/release/roost-compositor "$DESTDIR$PREFIX/bin/roost-compositor"
+install -Dm0755 target/release/roost-shell-gtk  "$DESTDIR$PREFIX/bin/roost-shell-gtk"
 install -Dm0755 target/release/roost-shell-host "$DESTDIR$PREFIX/bin/roost-shell-host"
 install -Dm0755 target/release/roost-greeter   "$DESTDIR$PREFIX/bin/roost-greeter"
 install -Dm0755 target/release/roost-session   "$DESTDIR$PREFIX/bin/roost-session"
@@ -56,9 +59,11 @@ per `legacy_rwd_entry_still_detected_as_default`):
 ln -s roost.desktop "$DESTDIR$PREFIX/share/wayland-sessions/rwd.desktop"
 ```
 
-Keep the four binaries side by side: `roost-session` finds its
-`roost-compositor` sibling (and the compositor finds `roost-shell-host`) by
-directory before falling back to `ROOST_SHELL_BIN` and `PATH`.
+Keep the binaries side by side: `roost-session` finds its
+`roost-compositor` sibling by directory. The compositor picks its shell
+from `ROOST_SHELL_BIN` when set, then `roost-shell-gtk` and then
+`roost-shell-host` beside it, then the same two on `PATH`. Set
+`ROOST_SHELL_BIN=roost-shell-host` to run the legacy shell.
 
 ## Greetd wiring
 

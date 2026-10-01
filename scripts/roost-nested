@@ -70,7 +70,7 @@ case "$CMD" in
             echo "roost-nested: no run for socket $SOCKET ($compositor_pid_file missing)" >&2
             exit 1
         fi
-        pgrep -P "$(cat "$compositor_pid_file")" roost-shell-host || {
+        pgrep -P "$(cat "$compositor_pid_file")" 'roost-shell-(host|gtk)' || {
             echo "roost-nested: shell not running (overlay covers the session)" >&2
             exit 1
         }
