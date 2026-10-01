@@ -108,3 +108,31 @@ fn install_doc_covers_package_install_and_data_preservation() {
         );
     }
 }
+
+#[test]
+fn release_requires_a_filled_visual_review() {
+    let script = read_workspace("scripts/roost-release");
+    for token in ["docs/reviews/$RELEASE_TAG.md", "TBD"] {
+        assert!(
+            script.contains(token),
+            "release script checks review: {token}"
+        );
+    }
+    let template = read_workspace("docs/reviews/TEMPLATE.md");
+    for section in [
+        "## Reviewer",
+        "## Inputs",
+        "## Journeys",
+        "## Sign-off",
+        "marlin:gnome",
+    ] {
+        assert!(
+            template.contains(section),
+            "review template keeps {section}"
+        );
+    }
+    assert!(
+        read_workspace("docs/release.md").contains("docs/reviews/vX.Y.Z.md"),
+        "release checklist names the review step"
+    );
+}

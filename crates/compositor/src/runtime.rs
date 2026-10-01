@@ -37,7 +37,7 @@ use smithay::{
     wayland::{seat::WaylandFocus, socket::ListeningSocketSource},
 };
 
-use crate::control::ControlHub;
+use crate::control::{ControlHub, PeerGate};
 use crate::lock::{content_visible, SessionLock, DEFAULT_IDLE_TIMEOUT_MS};
 
 /// Idle timeout for the session lock: `ROOST_IDLE_TIMEOUT_MS` overrides
@@ -296,11 +296,14 @@ pub struct Runtime {
 
 /// Control socket path for a session: alongside the Wayland socket in the
 /// runtime dir, so one session owns both (`roost-<name>.control`).
-pub fn control_socket_path(socket_name: &str) -> std::path::PathBuf {
-    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+/// `None` when `XDG_RUNTIME_DIR` is unset: the privileged socket never
+/// falls back to a shared temp dir (#30). [`ControlHub::bind`] further
+/// refuses a runtime dir that is not private to this user.
+pub fn control_socket_path(socket_name: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os("XDG_RUNTIME_DIR")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    dir.join(format!("roost-{socket_name}.control"))
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(format!("roost-{socket_name}.control")))
 }
 
 impl Runtime {
@@ -382,7 +385,8 @@ impl Runtime {
         }
         let manager = WindowManager::new(&mut state);
         let tokens = std::rc::Rc::new(TokenStore::new());
-        let control_path = control_socket_path(&session.socket_name);
+        let control_path = control_socket_path(&session.socket_name)
+            .ok_or_else(|| RuntimeError::Socket("XDG_RUNTIME_DIR is unset".to_owned()))?;
         let control = ControlHub::bind(control_path.clone(), tokens, crate::SEAT_NAME)
             .map_err(|e| RuntimeError::Socket(e.to_string()))?;
         let shell_policy = RestartPolicy::default();
@@ -731,6 +735,12 @@ impl Runtime {
                 }
             }
         }
+        // Only the supervised shell may hold a control session (#30):
+        // between restarts nobody may.
+        self.control.set_peer_gate(match self.shell.child_pid() {
+            Some(pid) => PeerGate::Pid(pid),
+            None => PeerGate::Closed,
+        });
         for event in self.shell.drain_events() {
             eprintln!("roost-compositor: shell supervision: {event:?}");
         }
