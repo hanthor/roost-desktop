@@ -311,7 +311,7 @@ impl OverviewUi {
         let running = me.actions.running();
         let mut shown: Vec<String> = Vec::new();
         for id in &me.favorites {
-            if let Some(entry) = me.apps.entry(id) {
+            if let Some(entry) = providers::provider_app(&me.apps, id) {
                 shown.push(entry.app_id.clone());
                 let button = app_button(entry, 48, false);
                 let window = running

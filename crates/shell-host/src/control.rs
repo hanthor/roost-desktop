@@ -378,6 +378,18 @@ impl ControlClient {
         Ok(id)
     }
 
+    /// Lock after `ms` of idle time, `0` for never: GNOME's
+    /// `idle-delay`, `lock-enabled` and `lock-delay` as the shell
+    /// derives them (#63). Returns the request id.
+    pub fn set_idle_timeout(&mut self, ms: u64) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::SetIdleTimeout { ms },
+        })?;
+        Ok(id)
+    }
+
     /// Ask the compositor to lock the session at once (manual lock
     /// from the shell).
     ///

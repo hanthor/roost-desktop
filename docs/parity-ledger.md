@@ -40,7 +40,7 @@ rationale and owner), `untested`.
 | P-A11Y-02 | Every pointer action has a keyboard equivalent | partial | cargo:panel::tests::live::key_only_run_opens_launches_and_activates | keymap and key-only run (`docs/keymap.md`) | chords not rebindable |
 | P-IN-01 | IME composition in GTK apps | missing |  | no text-input / input-method protocols | — |
 | P-IN-02 | Touchpad gestures (three-finger overview, workspace swipe) | missing |  | — | — |
-| P-ST-01 | Settings written by GNOME Settings take effect (wallpaper, clock, fonts) | partial | cargo:panel::tests::live::wallpaper_survives_session_restart | wallpaper and clock format round-trip (`settings.rs`); no font/theme/scale | settings compat map open |
+| P-ST-01 | Settings written by GNOME Settings take effect (wallpaper, clock, fonts) | partial | cargo:panel::tests::live::wallpaper_survives_session_restart, proof:G-QS-DARK, proof:G-SETTINGS-IDLE, cargo:idle_lock_follows_gnome_keys | `docs/settings-map.md` lists every GNOME 51 key as honored, via GTK, or ignored with an owner | keybindings and input devices not yet honored (#60, #63) |
 | P-TR-01 | AppIndicator tray items show icons and menus | pass (nested) | cargo:watcher::tests::live_bus::stub_item_serves_icon_and_menu_over_private_bus, proof:G-TRAY | `watcher.rs` tests now use the spec's reply types; GTK shell tray runs the watcher on a worker thread | GNOME 51 needs an extension for this; Roost ships it natively (deviation, accepted) |
 
 ## Tests column

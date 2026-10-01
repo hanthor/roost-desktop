@@ -40,6 +40,8 @@
 #   G-OV-APPGRID Show Apps opens the app grid
 #   G-X11-APP      XWayland is on by default: an X11 app launched from
 #                  overview search gets DISPLAY and maps a window (#59)
+#   G-SETTINGS-IDLE GNOME's idle-delay and lock-enabled keys set the
+#                  compositor's idle lock live (#63)
 #   A11Y-GOLDEN    the panel, calendar, quick settings and overview
 #                  accessible trees match tests/a11y/ (#71)
 #   G-SHELL-STABLE the shell never exits or restarts during the journey
@@ -77,6 +79,11 @@ ASSERTIONS="$ARTIFACTS/assertions.txt"
 XDG_STATE_HOME="$ARTIFACTS/state"
 XDG_DATA_HOME="$ARTIFACTS/data"
 export XDG_STATE_HOME XDG_DATA_HOME
+# The dash shows only the proof's own windows: pin a favourite no
+# runner has, so the host's apps (GitHub's runners now ship Firefox,
+# which GNOME's default favourites name) never reach the a11y goldens.
+mkdir -p "$XDG_DATA_HOME/roost-shell"
+echo '["org.roost.ProofNoFavorite.desktop"]' >"$XDG_DATA_HOME/roost-shell/favorites.json"
 # Launch probe for overview search: only this journey has it, and its
 # Exec leaves a marker, proving search-to-launch end to end.
 PROBE_MARKER="$ARTIFACTS/probe-marker"
@@ -666,6 +673,20 @@ if command -v Xwayland >/dev/null 2>&1 && command -v xeyes >/dev/null 2>&1; then
 else
     echo "roost-gtk-shell-proof: G-X11-APP skipped (no Xwayland or xeyes)"
 fi
+
+# GNOME settings (#63): the idle lock follows idle-delay and
+# lock-enabled as they change.
+gsettings set org.gnome.desktop.session idle-delay 600
+cstate '.idle_timeout_ms == 600000' "idle 600" ||
+    fail G-SETTINGS-IDLE "idle-delay 600 did not reach the compositor"
+gsettings set org.gnome.desktop.screensaver lock-enabled false
+cstate '.idle_timeout_ms > 1e18' "lock off" ||
+    fail G-SETTINGS-IDLE "lock-enabled false did not turn the idle lock off"
+gsettings set org.gnome.desktop.screensaver lock-enabled true
+gsettings set org.gnome.desktop.session idle-delay 300
+cstate '.idle_timeout_ms == 300000' "idle 300" ||
+    fail G-SETTINGS-IDLE "the idle lock did not follow back to 300 s"
+pass G-SETTINGS-IDLE "GNOME's idle-delay and lock-enabled set the idle lock live"
 
 "$ROOT/scripts/roost-a11y-golden" check "$ARTIFACTS" ||
     fail A11Y-GOLDEN "accessible trees differ from tests/a11y/ (see above)"

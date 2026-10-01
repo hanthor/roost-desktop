@@ -184,6 +184,56 @@ fn reconnect_while_locked_stays_locked() {
     );
 }
 
+/// GNOME's idle settings arrive as `SetIdleTimeout` (#63): applied at
+/// once, handed to the runtime once, and never touching the lock flag.
+#[test]
+fn set_idle_timeout_is_applied_and_handed_over_once() {
+    let mut model = two_window_model();
+    let (server, mut client) = UnixStream::pair().unwrap();
+    client
+        .set_read_timeout(Some(TIMEOUT))
+        .and(client.set_write_timeout(Some(TIMEOUT)))
+        .unwrap();
+    let conn = ControlConn::new(server).unwrap();
+    let locked = Rc::new(Cell::new(false));
+    client_write(&mut client, &hello());
+    let mut session = Session::handshake_with(
+        conn,
+        &model,
+        deny_all_tokens,
+        Rc::new(|_| String::new()),
+        Rc::new(Cell::new(false)),
+        locked.clone(),
+    )
+    .unwrap();
+    assert!(matches!(client_read(&mut client), Message::Hello { .. }));
+    assert_unlocked_with_titles(&client_read(&mut client));
+    assert_eq!(session.take_idle_timeout(), None);
+
+    client_write(
+        &mut client,
+        &Message::Command {
+            id: 4,
+            kind: CommandKind::SetIdleTimeout { ms: 600_000 },
+        },
+    );
+    let handled = session.handle_next(&mut model).unwrap();
+    assert!(matches!(
+        handled,
+        Handled::CommandResult {
+            id: 4,
+            applied: true
+        }
+    ));
+    let Message::CommandResult { status, .. } = client_read(&mut client) else {
+        panic!("expected CommandResult");
+    };
+    assert_eq!(status, CommandStatus::Applied);
+    assert_eq!(session.take_idle_timeout(), Some(600_000));
+    assert_eq!(session.take_idle_timeout(), None, "handed over once");
+    assert!(!locked.get(), "a timeout change never locks");
+}
+
 /// Control-command set path: `Lock` applies at once, the next poll
 /// strips the snapshot, deltas stay suppressed while locked, and
 /// clearing the flag restores full content.
