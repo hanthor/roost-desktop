@@ -126,6 +126,11 @@ fi
 XDG_STATE_HOME="$ARTIFACTS/state"
 XDG_DATA_HOME="$ARTIFACTS/data"
 export XDG_STATE_HOME XDG_DATA_HOME
+# The dash shows only the proof's own windows: pin a favourite no
+# runner has, so the host's apps (GitHub's runners now ship Firefox,
+# which GNOME's default favourites name) never reach the a11y goldens.
+mkdir -p "$XDG_DATA_HOME/roost-shell"
+echo '["org.roost.ProofNoFavorite.desktop"]' >"$XDG_DATA_HOME/roost-shell/favorites.json"
 # Launch probe for overview search: only this journey has it, and its
 # Exec leaves a marker, proving search-to-launch end to end.
 PROBE_MARKER="$ARTIFACTS/probe-marker"
