@@ -69,7 +69,11 @@ impl ProtocolVersion {
     ///
     /// `0.7` appends the compositor-to-shell `Outputs` message
     /// (multi-monitor inventory), again last for the same reason.
-    pub const CURRENT: Self = Self { major: 0, minor: 7 };
+    ///
+    /// `0.8` appends the compositor-to-shell `Environment` message
+    /// (session variables such as `DISPLAY` once XWayland is up), again
+    /// last for the same reason.
+    pub const CURRENT: Self = Self { major: 0, minor: 8 };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
     pub const fn new(major: u16, minor: u16) -> Self {
@@ -314,6 +318,15 @@ pub enum Message {
         /// Every tracked output, primary first.
         outputs: Vec<OutputInfo>,
     },
+    /// Compositor-to-shell session environment: variables apps launched
+    /// from the shell must inherit, such as `DISPLAY` once XWayland's
+    /// window manager is up (#59). The full set each time; sent after
+    /// every handshake and whenever it changes. Sits last so earlier
+    /// variant positions are untouched.
+    Environment {
+        /// `(name, value)` pairs, sorted by name.
+        vars: Vec<(String, String)>,
+    },
 }
 
 /// One Alt-Tab switcher drive event (compositor to shell).
@@ -554,6 +567,13 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
         | Message::Overview { .. }
         | Message::Switcher { .. }
         | Message::Outputs { .. } => {}
+        // Names and values share the title bound: short by nature.
+        Message::Environment { vars } => {
+            for (name, value) in vars {
+                check_title(name)?;
+                check_title(value)?;
+            }
+        }
     }
     Ok(())
 }
@@ -592,8 +612,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_7() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 7));
+    fn current_version_is_0_8() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 8));
     }
 
     #[test]
@@ -608,9 +628,29 @@ mod tests {
         assert!(ProtocolVersion::new(0, 5).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 6).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 7).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 8).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 8).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 9).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
+    }
+
+    #[test]
+    fn roundtrip_environment() {
+        roundtrip(&Message::Environment {
+            vars: vec![("DISPLAY".to_owned(), ":0".to_owned())],
+        });
+        roundtrip(&Message::Environment { vars: Vec::new() });
+    }
+
+    #[test]
+    fn oversize_environment_values_are_rejected() {
+        let frame = encode_frame(&Message::Environment {
+            vars: vec![("DISPLAY".to_owned(), "x".repeat(MAX_TITLE_LEN + 1))],
+        });
+        assert!(matches!(
+            decode_frame(&frame),
+            Err(DecodeError::TitleTooLong { .. })
+        ));
     }
 
     #[test]

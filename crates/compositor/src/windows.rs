@@ -176,6 +176,9 @@ pub fn resized(
 pub struct WindowManager {
     /// Active interactive move/resize, if any (#58).
     grab: Option<PointerGrab>,
+    /// Window focused before it had a surface to focus (an X11 window
+    /// mapped before association): the seat follows once it does.
+    focus_awaits_surface: Option<u64>,
     /// Button whose press dismissed a popup grab: its release is
     /// swallowed too, so the window beneath never sees half a click.
     swallowed_button: Option<u32>,
@@ -246,6 +249,7 @@ impl WindowManager {
             pointer,
             pointer_pos: (0.0, 0.0).into(),
             swallowed_button: None,
+            focus_awaits_surface: None,
             grab: None,
             mode: SessionMode::Gnome,
             strip_offset: 0.0,
@@ -517,6 +521,12 @@ impl WindowManager {
             self.apply_layout(state, id, WindowLayout::Strip);
         }
         self.configure(id, true);
+        // A window mapping while the overview holds focus (launched
+        // from search or the dash) is the one focused when it closes,
+        // as in GNOME; otherwise the pre-overview window would win.
+        if self.overview_held.is_some() {
+            self.pre_overview_focus = Some(id);
+        }
         self.apply_focus(state, Some(id));
     }
 
@@ -527,15 +537,28 @@ impl WindowManager {
     /// under the top bar). Without an output (headless tests) the plain
     /// cascade from the origin stands.
     fn placement(&mut self, state: &State) -> Rectangle<i32, Logical> {
+        self.placement_sized(state, None)
+    }
+
+    /// [`placement`](Self::placement) for a window that brings its own
+    /// size (X11 clients ask for one at map); `None` uses the default.
+    fn placement_sized(
+        &mut self,
+        state: &State,
+        wanted: Option<Size<i32, Logical>>,
+    ) -> Rectangle<i32, Logical> {
         let work = Self::work_area(state);
         if work.size.w <= 0 || work.size.h <= 0 {
-            return self.cascade_geometry();
+            let mut rect = self.cascade_geometry();
+            if let Some(size) = wanted {
+                rect.size = size;
+            }
+            return rect;
         }
-        let size: Size<i32, Logical> = (
-            DEFAULT_WIDTH.min(work.size.w),
-            DEFAULT_HEIGHT.min(work.size.h),
-        )
-            .into();
+        let (w, h) = wanted
+            .map(|s| (s.w, s.h))
+            .unwrap_or((DEFAULT_WIDTH, DEFAULT_HEIGHT));
+        let size: Size<i32, Logical> = (w.min(work.size.w), h.min(work.size.h)).into();
         let active = self.model.active_workspace();
         let last = self.stacking.iter().rev().find_map(|id| {
             (self.model.window(*id)?.workspace == active)
@@ -588,7 +611,10 @@ impl WindowManager {
         let id = self.insert_managed(&title, app_id.as_deref());
         self.x11_index.insert(surface.window_id(), id);
         eprintln!("roost-compositor: X11 window {id} mapped ({title})");
-        let geometry = self.cascade_geometry();
+        // GNOME placement at the size the client asked for.
+        let asked = surface.geometry().size;
+        let wanted = (asked.w > 0 && asked.h > 0).then_some(asked);
+        let geometry = self.placement_sized(state, wanted);
         self.windows.insert(
             id,
             ManagedWindow {
@@ -678,26 +704,30 @@ impl WindowManager {
         }
     }
 
-    /// Re-assert seat focus when the model focus outruns it — the X11
-    /// association case: a window mapped before its surface bound
-    /// gains keyboard focus once the surface commits. Never fights
-    /// the overview park (guarded out). (xwayland feature only.)
+    /// Give the seat to a window that was focused before it had a
+    /// surface (an X11 window mapped before association), once the
+    /// surface exists. Only that case: re-asserting the model focus on
+    /// every tick would take keyboard focus back from popup grabs and
+    /// panel menus. (xwayland feature only.)
     #[cfg(feature = "xwayland")]
     fn sync_seat_focus(&mut self, state: &mut State) {
+        let Some(id) = self.focus_awaits_surface else {
+            return;
+        };
+        if self.model.focused() != Some(id) || !self.windows.contains_key(&id) {
+            self.focus_awaits_surface = None;
+            return;
+        }
         if self.overview_open || self.overview_held.is_some() {
             return;
         }
-        let Some(keyboard) = self.keyboard.clone() else {
-            return;
-        };
-        let wanted = self.model.focused().and_then(|id| {
-            self.windows
-                .get(&id)
-                .and_then(|window| window.surface.wl_surface())
-                .map(|surface| surface.into_owned())
-        });
-        if keyboard.current_focus() != wanted {
-            self.apply_focus(state, self.model.focused());
+        let ready = self
+            .windows
+            .get(&id)
+            .and_then(|window| window.surface.wl_surface())
+            .is_some();
+        if ready {
+            self.apply_focus(state, Some(id));
         }
     }
 
@@ -867,6 +897,7 @@ impl WindowManager {
                     .surface
                     .wl_surface()
                     .map(|surface| surface.into_owned());
+                self.focus_awaits_surface = focus.is_none().then_some(id);
                 keyboard.set_focus(state, focus, serial);
             }
         } else if let Some(keyboard) = self.keyboard.clone() {

@@ -179,6 +179,48 @@ pub fn current_exe_dir() -> Option<std::path::PathBuf> {
         .and_then(|exe| exe.parent().map(|dir| dir.to_owned()))
 }
 
+/// Whether a session runs X11 apps (#59): `ROOST_XWAYLAND=1` forces it,
+/// `ROOST_XWAYLAND=0` turns it off, and otherwise it is on whenever an
+/// `Xwayland` binary is on `PATH`, as GNOME 51 runs X11 apps
+/// transparently. Builds without the `xwayland` feature never ask.
+pub fn xwayland_wanted(
+    env: Option<std::ffi::OsString>,
+    path_var: Option<std::ffi::OsString>,
+) -> bool {
+    if !cfg!(feature = "xwayland") {
+        return false;
+    }
+    match env.as_ref().and_then(|v| v.to_str()) {
+        Some("1") => return true,
+        Some("0") => return false,
+        _ => {}
+    }
+    path_var
+        .map(|p| std::env::split_paths(&p).any(|dir| sibling_binary(&dir, "Xwayland").is_some()))
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod xwayland_wanted_tests {
+    use super::*;
+
+    #[test]
+    fn on_by_default_when_xwayland_is_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Some(dir.path().as_os_str().to_owned());
+        let enabled = cfg!(feature = "xwayland");
+        assert!(!xwayland_wanted(None, path.clone()), "no Xwayland binary");
+        assert_eq!(xwayland_wanted(Some("1".into()), path.clone()), enabled);
+        std::fs::write(dir.path().join("Xwayland"), b"").unwrap();
+        assert_eq!(xwayland_wanted(None, path.clone()), enabled);
+        assert!(
+            !xwayland_wanted(Some("0".into()), path.clone()),
+            "opt-out wins"
+        );
+        assert_eq!(xwayland_wanted(Some("".into()), path), enabled);
+    }
+}
+
 /// Shell binaries in preference order: the GTK4/libadwaita shell
 /// (ADR 0006, the default), then the legacy software-drawn shell.
 pub const SHELL_BINARIES: [&str; 2] = ["roost-shell-gtk", "roost-shell-host"];
@@ -367,6 +409,9 @@ pub struct Runtime {
     /// feature only).
     #[cfg(feature = "xwayland")]
     pending_x11_client: Option<smithay::reexports::wayland_server::Client>,
+    /// X11 display number once XWayland's window manager is up (#59):
+    /// published as `DISPLAY` to the shell for the apps it launches.
+    x11_display: Option<u32>,
     /// Real-time anchor of the last input event. Input stamps live on
     /// the backend event clock while idle is measured here, so each
     /// tick evaluates the lock in the input base as
@@ -541,6 +586,7 @@ impl Runtime {
             loop_handle,
             #[cfg(feature = "xwayland")]
             pending_x11_client: None,
+            x11_display: None,
             idle_since: Instant::now(),
             exit: false,
             stats: RunStats::default(),
@@ -761,6 +807,14 @@ impl Runtime {
         self.xwayland.request();
     }
 
+    /// XWayland's window manager is up on `:display`: apps launched from
+    /// now on get `DISPLAY` (#59).
+    pub fn set_x11_display(&mut self, display: u32) {
+        self.x11_display = Some(display);
+        self.control
+            .set_environment(vec![("DISPLAY".to_owned(), format!(":{display}"))]);
+    }
+
     /// Loop handle for event-source installation (XWayland spawn).
     pub fn loop_handle(&self) -> LoopHandle<'static, Runtime> {
         self.loop_handle.clone()
@@ -822,6 +876,7 @@ impl Runtime {
         };
         let focused = model.focused();
         let doc = serde_json::json!({
+            "x11_display": self.x11_display.map(|d| format!(":{d}")),
             "overview_open": overview_open,
             "locked": self.is_locked(),
             "active_workspace": model.active_workspace(),

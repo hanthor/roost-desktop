@@ -434,6 +434,13 @@ impl<'a> Session<'a> {
         })
     }
 
+    /// Send the session environment (#59).
+    pub fn send_environment(&mut self, vars: &[(String, String)]) -> Result<(), ControlError> {
+        self.conn.write_frame(&Message::Environment {
+            vars: vars.to_vec(),
+        })
+    }
+
     /// Send one Alt-Tab switcher drive event (002 workspaces).
     pub fn send_switcher(&mut self, action: SwitcherAction) -> Result<(), ControlError> {
         self.conn.write_frame(&Message::Switcher { action })
@@ -561,6 +568,7 @@ impl<'a> Session<'a> {
             | Message::Overview { .. }
             | Message::Switcher { .. }
             | Message::Outputs { .. }
+            | Message::Environment { .. }
             | Message::Error { .. } => {
                 let _ = self.conn.write_frame(&Message::Error {
                     kind: ErrorKind::UnknownCommand,
@@ -597,6 +605,7 @@ fn message_kind(msg: &Message) -> &'static str {
         Message::Overview { .. } => "Overview",
         Message::Switcher { .. } => "Switcher",
         Message::Outputs { .. } => "Outputs",
+        Message::Environment { .. } => "Environment",
     }
 }
 
@@ -885,6 +894,10 @@ pub struct ControlHub {
     /// Inventory value every live session holds; a mismatch means a
     /// broadcast is still owed (or a newcomer joined mid-state).
     outputs_sent: Vec<OutputInfo>,
+    /// Session environment for launched apps (#59), and the last value
+    /// every live session holds.
+    environment: Vec<(String, String)>,
+    environment_sent: Vec<(String, String)>,
     /// Peer admission rule (#30); the runtime narrows it to the
     /// supervised shell's pid every tick.
     gate: PeerGate,
@@ -936,6 +949,8 @@ impl ControlHub {
             switcher_queue: Vec::new(),
             outputs: Vec::new(),
             outputs_sent: Vec::new(),
+            environment: Vec::new(),
+            environment_sent: Vec::new(),
             store,
             seat: seat.to_owned(),
             gate: PeerGate::SameUser,
@@ -997,6 +1012,14 @@ impl ControlHub {
     /// spec requires, never a parallel database.
     pub fn set_outputs(&mut self, outputs: Vec<OutputInfo>) {
         self.outputs = outputs;
+    }
+
+    /// Set the session environment (#59); the next [`poll`](Self::poll)
+    /// broadcasts it when it differs from the last broadcast, and every
+    /// newcomer gets it right after the handshake.
+    pub fn set_environment(&mut self, mut vars: Vec<(String, String)>) {
+        vars.sort();
+        self.environment = vars;
     }
 
     /// Whether the session is locked (compositor-owned flag).
@@ -1103,6 +1126,17 @@ impl ControlHub {
         // Broadcast the output inventory (multi-monitor): best-effort
         // per session like overview, staying dirty until every live
         // session holds it.
+        if self.environment != self.environment_sent {
+            let mut all_sent = true;
+            for session in &mut self.sessions {
+                if session.send_environment(&self.environment).is_err() {
+                    all_sent = false;
+                }
+            }
+            if all_sent {
+                self.environment_sent = self.environment.clone();
+            }
+        }
         if self.outputs != self.outputs_sent {
             let mut all_sent = true;
             for session in &mut self.sessions {
@@ -1173,6 +1207,9 @@ impl ControlHub {
                 let _ = session.send_overview(open);
                 if !self.outputs.is_empty() {
                     let _ = session.send_outputs(&self.outputs);
+                }
+                if !self.environment.is_empty() {
+                    let _ = session.send_environment(&self.environment);
                 }
                 self.sessions.push(session);
                 self.session_peers.push(peer);

@@ -10,7 +10,8 @@ use std::process::ExitCode;
 use roost_compositor::runtime::{run, BackendChoice, NestedSession};
 
 /// `roost-compositor [--socket NAME] [--width W] [--height H] [--shell-bin PATH] [--xwayland]`.
-/// `ROOST_XWAYLAND=1` also opts in to X11 compatibility.
+/// X11 compatibility is on when `Xwayland` is installed (`ROOST_XWAYLAND=0`
+/// turns it off, `--xwayland` or `ROOST_XWAYLAND=1` forces it).
 ///
 /// Release version stamped at build time: `ROOST_VERSION` (a `vX.Y.Z` tag or
 /// plain `X.Y.Z`) wins, otherwise the crate version. Duplicated per binary on
@@ -28,9 +29,10 @@ fn release_version() -> &'static str {
 
 fn main() -> ExitCode {
     let mut session = NestedSession::default_for_pid();
-    if std::env::var("ROOST_XWAYLAND").is_ok_and(|value| value == "1") {
-        session.xwayland = true;
-    }
+    session.xwayland = roost_compositor::runtime::xwayland_wanted(
+        std::env::var_os("ROOST_XWAYLAND"),
+        std::env::var_os("PATH"),
+    );
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {

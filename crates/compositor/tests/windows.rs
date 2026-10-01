@@ -2478,3 +2478,66 @@ fn picking_a_window_in_the_overview_survives_the_close() {
     assert_eq!(f.manager.model().focused(), Some(f.id_b));
     drop((conn_c, queue_c, client_c));
 }
+
+#[test]
+fn a_window_launched_from_the_overview_is_focused_when_it_closes() {
+    let mut f = two_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+
+    // Third client: the shell overview layer surface.
+    let (conn_c, mut queue_c, mut client_c) = connect(&mut f.comp);
+    let qh_c = queue_c.handle();
+    let surface_c = client_c
+        .compositor
+        .as_ref()
+        .unwrap()
+        .create_surface(&qh_c, ());
+    let layer_c = client_c.layer_shell.as_ref().unwrap().get_layer_surface(
+        &surface_c,
+        None,
+        Layer::Top,
+        OVERVIEW_NAMESPACE.to_owned(),
+        &qh_c,
+        (),
+    );
+    layer_c.set_size(0, 200);
+    layer_c.set_anchor(Anchor::Top | Anchor::Left | Anchor::Right);
+    layer_c.set_exclusive_zone(0);
+    surface_c.commit();
+    client_c.overview_layer = Some(layer_c);
+    client_c.synced = false;
+    conn_c.display().sync(&qh_c, ());
+    pump(&mut f.comp, &mut queue_c, &mut client_c, |c| c.synced);
+    f.manager.reconcile(&mut f.comp.state);
+    assert!(f.comp.state.overview_surface().is_some());
+    assert!(client_c.overview_layer.is_some());
+    assert!(!f.manager.overview_focus_held());
+
+    f.manager.set_overview_open(true);
+    f.manager.reconcile(&mut f.comp.state);
+    assert!(f.manager.overview_focus_held());
+
+    // An app launched from search maps while the overview still holds
+    // focus (the launch outruns the close): it, not the pre-overview
+    // window, is focused once the overview closes (GNOME shape).
+    let (conn_d, mut queue_d, mut client_d) = connect(&mut f.comp);
+    map_toplevel(
+        &mut f.comp,
+        &conn_d,
+        &mut queue_d,
+        &mut client_d,
+        "launched",
+    );
+    f.manager.reconcile(&mut f.comp.state);
+    let launched = f
+        .manager
+        .model()
+        .windows()
+        .find(|w| w.title == "launched")
+        .map(|w| w.id)
+        .expect("launched window mapped");
+    f.manager.set_overview_open(false);
+    f.manager.reconcile(&mut f.comp.state);
+    assert_eq!(f.manager.model().focused(), Some(launched));
+    drop((conn_c, queue_c, client_c, conn_d, queue_d, client_d));
+}

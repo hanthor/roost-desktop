@@ -289,6 +289,7 @@ pub fn on_xwayland_event(
             match X11Wm::start_wm(runtime.loop_handle(), x11_socket, client) {
                 Ok(xwm) => {
                     runtime.state_mut().xwm = Some(xwm);
+                    runtime.set_x11_display(display_number);
                     eprintln!(
                         "roost-compositor: xwayland: window manager started on :{display_number}"
                     );

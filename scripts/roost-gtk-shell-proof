@@ -38,6 +38,8 @@
 #   G-OV-SEARCH typing lists matching apps (#57)
 #   G-OV-LAUNCH Enter launches the top result and closes the overview
 #   G-OV-APPGRID Show Apps opens the app grid
+#   G-X11-APP      XWayland is on by default: an X11 app launched from
+#                  overview search gets DISPLAY and maps a window (#59)
 #   A11Y-GOLDEN    the panel, calendar, quick settings and overview
 #                  accessible trees match tests/a11y/ (#71)
 #   G-SHELL-STABLE the shell never exits or restarts during the journey
@@ -98,6 +100,23 @@ BusName=org.roost.ProbeSearch
 ObjectPath=/org/roost/ProbeSearch
 Version=2
 INI
+# X11 probe app for G-X11-APP: records the DISPLAY it was launched with.
+# Written before the shell starts, which reads desktop entries once.
+X11_MARKER="$ARTIFACTS/x11-marker"
+rm -f "$X11_MARKER"
+mkdir -p "$ARTIFACTS/bin"
+cat >"$ARTIFACTS/bin/roost-x-probe" <<XPROBE
+#!/bin/sh
+echo "\$DISPLAY" >"$X11_MARKER"
+exec xeyes
+XPROBE
+chmod +x "$ARTIFACTS/bin/roost-x-probe"
+cat >"$XDG_DATA_HOME/applications/roost-x-probe.desktop" <<XDESK
+[Desktop Entry]
+Name=Roost X Probe
+Exec=$ARTIFACTS/bin/roost-x-probe
+Type=Application
+XDESK
 PROVIDER_PID=""
 TRAY_PID=""
 OWNED_XVFB=""
@@ -617,6 +636,36 @@ if [ "$1" -lt 150 ] || [ "$2" -gt 80 ] || [ "$3" -gt 80 ]; then
     fail G-GL-WINDOW "GL window did not paint its red body (pixel $rgb)"
 fi
 pass G-GL-WINDOW "a GL-rendered GTK window maps and paints"
+
+# X11 by default (#59): the compositor starts XWayland when it is
+# installed, tells the shell DISPLAY, and apps launched from search get it.
+if command -v Xwayland >/dev/null 2>&1 && command -v xeyes >/dev/null 2>&1; then
+    cstate '.x11_display != null' "xwayland" 30 || fail G-X11-APP "XWayland never came up"
+    x11_display="$(jq -r '.x11_display' "$CSTATE")"
+    before="$(jq '.windows | length' "$CSTATE")"
+    xdotool key Super_L
+    cstate '.overview_open' "overview" || fail G-X11-APP "overview did not open"
+    sleep 1
+    xdotool type --delay 40 "roost x probe"
+    sleep 1
+    xdotool key Return
+    end=$(($(date +%s) + 15))
+    until [ -s "$X11_MARKER" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+    [ "$(cat "$X11_MARKER" 2>/dev/null)" = "$x11_display" ] ||
+        fail G-X11-APP "launched app saw DISPLAY='$(cat "$X11_MARKER" 2>/dev/null)', not $x11_display"
+    cstate "(.windows | length) > $before" "x11 window" 20 ||
+        fail G-X11-APP "the X11 app never mapped a window"
+    # Like a native app: focused, and placed below the top bar.
+    cstate '.focused_app_id == "XEyes"' "x11 focus" ||
+        fail G-X11-APP "the X11 window was not focused after launch"
+    cstate '.windows[] | select(.app_id == "XEyes") | .rect[1] >= 32' "x11 placement" ||
+        fail G-X11-APP "the X11 window was placed under the top bar"
+    sleep 1
+    scrot "$ARTIFACTS/20-x11-app.png" >/dev/null
+    pass G-X11-APP "an X11 app launched from search gets DISPLAY $x11_display and maps"
+else
+    echo "roost-gtk-shell-proof: G-X11-APP skipped (no Xwayland or xeyes)"
+fi
 
 "$ROOT/scripts/roost-a11y-golden" check "$ARTIFACTS" ||
     fail A11Y-GOLDEN "accessible trees differ from tests/a11y/ (see above)"

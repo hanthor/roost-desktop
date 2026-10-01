@@ -149,7 +149,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: stable
-      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool scrot ffmpeg jq dbus libglib2.0-bin at-spi2-core python3-pyatspi fonts-cantarell shellcheck libglib2.0-dev libgtk-4-dev libadwaita-1-dev meson ninja-build libwayland-dev wayland-protocols
+      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool scrot ffmpeg jq dbus libglib2.0-bin xwayland x11-apps at-spi2-core python3-pyatspi fonts-cantarell shellcheck libglib2.0-dev libgtk-4-dev libadwaita-1-dev meson ninja-build libwayland-dev wayland-protocols
       - run: scripts/ci-install-gtk4-layer-shell
       - run: shellcheck scripts/roost-gtk-shell-proof
       - run: scripts/roost-gtk-shell-proof --artifacts gtk-shell-artifacts
