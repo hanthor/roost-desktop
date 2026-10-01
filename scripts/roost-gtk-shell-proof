@@ -52,6 +52,8 @@
 #   G-SCREENCAST   a client doing what xdg-desktop-portal-gnome does lists
 #                  the monitor (Mutter DisplayConfig), records it (Mutter
 #                  ScreenCast) and pulls a frame over PipeWire (#61)
+#   G-DISPLAY-SETTINGS GNOME Settings' ApplyMonitorsConfig changes the
+#                  scale live and saves it to Roost's monitors.xml (#59)
 #   G-POWER-MENU   the power button opens GNOME's menu (Suspend,
 #                  Restart…, Power Off…, Log Out…) (#62)
 #   G-POWER-DIALOG Power Off… opens the 60 s end-session dialog, and
@@ -807,6 +809,25 @@ if [ -n "$PW_PIDS" ] && command -v gst-launch-1.0 >/dev/null 2>&1; then
 else
     echo "roost-gtk-shell-proof: G-SCREENCAST skipped (no pipewire, wireplumber or gstreamer)"
 fi
+
+# Display settings (#59): what GNOME Settings' Displays panel sends.
+apply_display() {
+    gdbus call --session --dest org.gnome.Mutter.DisplayConfig \
+        --object-path /org/gnome/Mutter/DisplayConfig \
+        --method org.gnome.Mutter.DisplayConfig.ApplyMonitorsConfig \
+        -- 0 "$1" "[(0, 0, $2, uint32 0, true, [('roost-0', '${WIDTH}x${HEIGHT}@60.000', @a{sv} {})])]" \
+        "@a{sv} {}" >>"$ARTIFACTS/display-settings.log" 2>&1
+}
+apply_display 2 1.25 || fail G-DISPLAY-SETTINGS "ApplyMonitorsConfig failed: $(tail -2 "$ARTIFACTS/display-settings.log")"
+cstate '.layers | any(.namespace == "roost-panel" and .rect[2] == 1024)' "125 percent" ||
+    fail G-DISPLAY-SETTINGS "the layout did not follow scale 1.25"
+grep -q '<scale>1.25</scale>' "$XDG_CONFIG_HOME/roost/monitors.xml" 2>/dev/null ||
+    fail G-DISPLAY-SETTINGS "the arrangement was not saved to roost/monitors.xml"
+scrot "$ARTIFACTS/24-scale-125.png" >/dev/null
+apply_display 1 1 || fail G-DISPLAY-SETTINGS "restoring scale 1 failed"
+cstate ".layers | any(.namespace == \"roost-panel\" and .rect[2] == $WIDTH)" "100 percent" ||
+    fail G-DISPLAY-SETTINGS "the layout did not return to scale 1"
+pass G-DISPLAY-SETTINGS "ApplyMonitorsConfig changes the scale live and saves it"
 
 # Power (#62), against the logind stub (restarted: G-QS-ABSENT stopped
 # it). The proof runs the shell as a hardware session for the full menu.

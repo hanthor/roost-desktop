@@ -1329,6 +1329,73 @@ impl Runtime {
             crate::mutter::ToLoop::StopCast { session_id } => {
                 self.casts.retain(|cast| cast.session_id != session_id);
             }
+            crate::mutter::ToLoop::ApplyMonitors {
+                configs,
+                persistent,
+            } => {
+                self.apply_monitors(&configs);
+                if persistent {
+                    match crate::monitors::save(&configs) {
+                        Ok(path) => eprintln!(
+                            "roost-compositor: display settings saved to {}",
+                            path.display()
+                        ),
+                        Err(e) => eprintln!("roost-compositor: display settings not saved: {e}"),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Apply a display arrangement live (GNOME Settings' Displays
+    /// panel): each named output's scale and logical position. Layout,
+    /// rendering and the per-window client scale follow on the next frame.
+    fn apply_monitors(&mut self, configs: &[crate::monitors::MonitorConfig]) {
+        let scale_of = |s: f64| {
+            if s == 1.0 {
+                Scale::Integer(1)
+            } else {
+                Scale::Fractional(s)
+            }
+        };
+        match &mut self.backend {
+            Backend::Winit(backend) => {
+                // One nested output: take the first arrangement entry.
+                let Some(config) = configs.first() else {
+                    return;
+                };
+                self.scale = clamp_scale(config.scale);
+                if let Some(output) = self.state.primary_output() {
+                    output.change_current_state(None, None, Some(scale_of(self.scale)), None);
+                }
+                let size = backend.window_size();
+                let (lw, lh) = logical_size(size.w, size.h, self.scale);
+                self.state.set_output_size(lw, lh);
+            }
+            #[cfg(feature = "drm")]
+            Backend::Drm(drm) => {
+                for config in configs {
+                    let Some(out) = drm.outputs.iter_mut().find(|o| o.name == config.connector)
+                    else {
+                        continue;
+                    };
+                    out.scale = clamp_scale(config.scale);
+                    out.loc = (config.x, config.y);
+                    out.output.change_current_state(
+                        None,
+                        None,
+                        Some(scale_of(out.scale)),
+                        Some(out.loc.into()),
+                    );
+                    let (lw, lh) = out.logical_size();
+                    self.state
+                        .add_output(&out.name, Some(out.output.clone()), lw, lh);
+                    self.state.set_output_location(&out.name, out.loc);
+                }
+            }
+        }
+        if let Some(first) = configs.first() {
+            self.state.set_preferred_scale(clamp_scale(first.scale));
         }
     }
 

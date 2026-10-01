@@ -48,6 +48,7 @@ This page records that decision for R9 (knowledge entry
 | File | Status | Notes |
 |---|---|---|
 | ~/.config/monitors.xml | Honored | The arrangement for the lit connectors sets each output's scale, position and primary monitor (hardware sessions). Proof D-SCALE |
+| GNOME Settings' Displays panel | Honored | ApplyMonitorsConfig over org.gnome.Mutter.DisplayConfig changes scale and position live; "keep changes" saves to ~/.config/roost/monitors.xml, which Roost reads before GNOME's file (GNOME's own file is never rewritten). Proof G-DISPLAY-SETTINGS |
 
 ## Window management and input
 

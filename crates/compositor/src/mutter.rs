@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use zbus::object_server::{InterfaceRef, SignalEmitter};
 use zbus::zvariant::{DeserializeDict, OwnedObjectPath, OwnedValue, SerializeDict, Type, Value};
 use zbus::{fdo, interface, ObjectServer};
@@ -50,6 +50,12 @@ pub enum ToLoop {
     },
     StopCast {
         session_id: u64,
+    },
+    /// GNOME Settings' Displays panel applied an arrangement; persist it
+    /// when asked (method 2).
+    ApplyMonitors {
+        configs: Vec<crate::monitors::MonitorConfig>,
+        persistent: bool,
     },
 }
 
@@ -91,8 +97,19 @@ fn is_laptop_panel(connector: &str) -> bool {
         .any(|p| connector.starts_with(p))
 }
 
+#[derive(Deserialize, Type)]
+struct LogicalMonitorConfiguration {
+    x: i32,
+    y: i32,
+    scale: f64,
+    transform: u32,
+    is_primary: bool,
+    monitors: Vec<(String, String, HashMap<String, OwnedValue>)>,
+}
+
 struct DisplayConfig {
     outputs: Outputs,
+    to_loop: calloop::channel::Sender<ToLoop>,
 }
 
 #[interface(name = "org.gnome.Mutter.DisplayConfig")]
@@ -167,8 +184,100 @@ impl DisplayConfig {
         Ok((0, monitors, logical, properties))
     }
 
+    /// GNOME Settings' Displays panel: 0 verifies, 1 applies, 2 applies
+    /// and keeps (niri's checks: no mirroring, known connectors only).
+    async fn apply_monitors_config(
+        &self,
+        #[zbus(signal_context)] ctxt: SignalEmitter<'_>,
+        _serial: u32,
+        method: u32,
+        logical_monitor_configs: Vec<LogicalMonitorConfiguration>,
+        _properties: HashMap<String, OwnedValue>,
+    ) -> fdo::Result<()> {
+        let configs = {
+            let outputs = self
+                .outputs
+                .lock()
+                .map_err(|_| fdo::Error::Failed("poisoned".into()))?;
+            validate(&outputs, &logical_monitor_configs)?
+        };
+        if method == 0 {
+            return Ok(());
+        }
+        self.to_loop
+            .send(ToLoop::ApplyMonitors {
+                configs,
+                persistent: method == 2,
+            })
+            .map_err(|_| fdo::Error::Failed("compositor gone".into()))?;
+        let _ = DisplayConfig::monitors_changed(&ctxt).await;
+        Ok(())
+    }
+
     #[zbus(signal)]
     async fn monitors_changed(ctxt: &SignalEmitter<'_>) -> zbus::Result<()>;
+
+    #[zbus(property)]
+    fn apply_monitors_config_allowed(&self) -> bool {
+        true
+    }
+
+    #[zbus(property)]
+    fn power_save_mode(&self) -> i32 {
+        0
+    }
+
+    #[zbus(property)]
+    fn panel_orientation_managed(&self) -> bool {
+        false
+    }
+
+    #[zbus(property)]
+    fn night_light_supported(&self) -> bool {
+        false
+    }
+}
+
+/// Check a requested arrangement against the lit outputs.
+fn validate(
+    outputs: &[OutputSnapshot],
+    requested: &[LogicalMonitorConfiguration],
+) -> fdo::Result<Vec<crate::monitors::MonitorConfig>> {
+    let mut configs = Vec::new();
+    for logical in requested {
+        if logical.monitors.len() > 1 {
+            return Err(fdo::Error::Failed("mirroring is not supported yet".into()));
+        }
+        if logical.transform != 0 {
+            return Err(fdo::Error::Failed("rotation is not supported yet".into()));
+        }
+        if !(1.0..=4.0).contains(&logical.scale) {
+            return Err(fdo::Error::Failed(format!(
+                "scale {} out of range",
+                logical.scale
+            )));
+        }
+        for (connector, _mode, _props) in &logical.monitors {
+            if !outputs.iter().any(|o| &o.connector == connector) {
+                return Err(fdo::Error::Failed(format!(
+                    "connector '{connector}' not found"
+                )));
+            }
+            configs.push(crate::monitors::MonitorConfig {
+                connector: connector.clone(),
+                scale: logical.scale,
+                x: logical.x,
+                y: logical.y,
+                primary: logical.is_primary,
+            });
+        }
+    }
+    if configs.is_empty() {
+        return Err(fdo::Error::Failed(
+            "at least one output must stay on".into(),
+        ));
+    }
+    Ok(configs)
 }
 
 // --- ScreenCast ----------------------------------------------------------
@@ -348,6 +457,10 @@ pub fn start(outputs: Outputs) -> calloop::channel::Channel<ToLoop> {
     let _ = std::thread::Builder::new()
         .name("roost-mutter-dbus".into())
         .spawn(move || {
+            let display_config = DisplayConfig {
+                outputs: outputs.clone(),
+                to_loop: to_loop.clone(),
+            };
             let screencast = ScreenCast {
                 outputs: outputs.clone(),
                 to_loop,
@@ -355,9 +468,7 @@ pub fn start(outputs: Outputs) -> calloop::channel::Channel<ToLoop> {
             };
             let conn = match zbus::blocking::connection::Builder::session()
                 .and_then(|b| b.serve_at("/org/gnome/Mutter/ScreenCast", screencast))
-                .and_then(|b| {
-                    b.serve_at("/org/gnome/Mutter/DisplayConfig", DisplayConfig { outputs })
-                })
+                .and_then(|b| b.serve_at("/org/gnome/Mutter/DisplayConfig", display_config))
                 .and_then(|b| b.build())
             {
                 Ok(conn) => conn,
@@ -391,6 +502,53 @@ pub fn start(outputs: Outputs) -> calloop::channel::Channel<ToLoop> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn snapshot(connector: &str) -> OutputSnapshot {
+        OutputSnapshot {
+            connector: connector.into(),
+            make: String::new(),
+            model: String::new(),
+            width: 1920,
+            height: 1080,
+            refresh_mhz: 60_000,
+            x: 0,
+            y: 0,
+            scale: 1.0,
+            primary: true,
+        }
+    }
+
+    fn logical(connector: &str, scale: f64) -> LogicalMonitorConfiguration {
+        LogicalMonitorConfiguration {
+            x: 0,
+            y: 0,
+            scale,
+            transform: 0,
+            is_primary: true,
+            monitors: vec![(connector.into(), "1920x1080@60.000".into(), HashMap::new())],
+        }
+    }
+
+    #[test]
+    fn display_settings_requests_are_checked() {
+        let outputs = [snapshot("eDP-1")];
+        let ok = validate(&outputs, &[logical("eDP-1", 1.5)]).unwrap();
+        assert_eq!((ok[0].connector.as_str(), ok[0].scale), ("eDP-1", 1.5));
+        assert!(
+            validate(&outputs, &[logical("DP-9", 1.0)]).is_err(),
+            "unknown connector"
+        );
+        assert!(
+            validate(&outputs, &[logical("eDP-1", 0.5)]).is_err(),
+            "scale range"
+        );
+        assert!(validate(&outputs, &[]).is_err(), "all off");
+        let mut mirrored = logical("eDP-1", 1.0);
+        mirrored
+            .monitors
+            .push(("HDMI-A-1".into(), String::new(), HashMap::new()));
+        assert!(validate(&outputs, &[mirrored]).is_err(), "mirroring");
+    }
 
     #[test]
     fn builtin_panels_follow_mutter() {
