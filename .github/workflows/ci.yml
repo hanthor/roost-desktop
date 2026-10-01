@@ -1,6 +1,10 @@
 name: ci
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -24,6 +28,14 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # Every listed test just passed: the parity-ledger job resolves
+      # the ledger's cargo:<name> references against this list.
+      - run: cargo test --workspace -q -- --list --format terse > test-list.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-list
+          path: test-list.txt
+          retention-days: 14
 
   journey:
     runs-on: ubuntu-latest
@@ -41,8 +53,8 @@ jobs:
       # check does not. Mesa swrast provides software GL on runners.
       # The shell's gio settings read needs glib dev files at build
       # time (check gets them transitively via GTK).
-      - run: sudo apt-get update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck libglib2.0-dev libgtk-4-dev libadwaita-1-dev
-      - run: shellcheck scripts/roost-journey scripts/roost-nested scripts/roost-release scripts/check-release-package
+      - run: sudo apt-get update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck jq dbus libglib2.0-dev libgtk-4-dev libadwaita-1-dev
+      - run: shellcheck -x scripts/roost-journey scripts/roost-nested scripts/roost-release scripts/check-release-package scripts/lib/roost-introspect.sh
       - run: scripts/roost-release --allow-dirty --out package-artifacts && scripts/check-release-package package-artifacts/*.deb
       - uses: actions/upload-artifact@v4
         with:
@@ -147,6 +159,24 @@ jobs:
           name: gtk-shell
           path: gtk-shell-artifacts/
           retention-days: 14
+
+  parity-ledger:
+    # GNOME 51 parity ledger gate (#66): every row marked pass must cite
+    # tests, and every cited cargo test / journey assertion must have
+    # passed in this run.
+    runs-on: ubuntu-latest
+    needs: [check, journey]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: test-list
+          path: ledger-in
+      - uses: actions/download-artifact@v4
+        with:
+          name: journey-shots
+          path: ledger-in/journey
+      - run: scripts/roost-ledger check --tests ledger-in/test-list.txt --assertions ledger-in/journey/assertions.txt
 
   docs-shots:
     runs-on: ubuntu-latest
