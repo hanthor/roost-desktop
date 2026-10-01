@@ -225,6 +225,44 @@ impl WindowManager {
         &mut self.model
     }
 
+    /// Every mapped window on every workspace, bottom to top, for the
+    /// overview (#54).
+    pub fn overview_windows(&self) -> Vec<crate::overview::OverviewWindow> {
+        self.stacking
+            .iter()
+            .filter_map(|id| {
+                let entry = self.model.window(*id)?;
+                let window = self.windows.get(id)?;
+                Some(crate::overview::OverviewWindow {
+                    id: *id,
+                    workspace: entry.workspace,
+                    geometry: window.geometry,
+                })
+            })
+            .collect()
+    }
+
+    /// The Wayland surface of window `id`, if it has one.
+    pub fn surface_of(&self, id: u64) -> Option<WlSurface> {
+        self.windows
+            .get(&id)
+            .and_then(|w| w.surface.wl_surface())
+            .map(|s| s.into_owned())
+    }
+
+    /// Switch to `workspace` by id, if it exists.
+    pub fn switch_to_workspace(&mut self, state: &mut State, workspace: u32) -> bool {
+        let list = self.model.workspaces().to_vec();
+        let (Some(from), Some(to)) = (
+            list.iter()
+                .position(|w| *w == self.model.active_workspace()),
+            list.iter().position(|w| *w == workspace),
+        ) else {
+            return false;
+        };
+        self.switch_relative(state, to as i32 - from as i32)
+    }
+
     /// Windows bottom-to-top with their geometry, for frame production.
     /// Only the active workspace renders; other workspaces keep their
     /// surfaces mapped but hidden.
@@ -803,7 +841,8 @@ impl WindowManager {
         let mut out = Vec::new();
         for (window, geometry) in self.visible_windows() {
             if let Some(surface) = window.wl_surface() {
-                out.extend(crate::popup::placed_popups(&surface, geometry.loc, true));
+                let origin = crate::popup::surface_origin(&surface, geometry.loc);
+                out.extend(crate::popup::placed_popups(&surface, origin, true));
             }
         }
         for (surface, (x, y), _) in crate::layer::layer_layout(state) {
@@ -897,6 +936,23 @@ impl WindowManager {
             }
             return;
         }
+        // In the overview, windows are previews the compositor draws:
+        // they never take pointer focus or events (GNOME shape).
+        if self.overview_open {
+            if let Some(pointer) = self.pointer.clone() {
+                pointer.motion(
+                    state,
+                    None,
+                    &MotionEvent {
+                        location: pos,
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time,
+                    },
+                );
+                pointer.frame(state);
+            }
+            return;
+        }
         if let Some(id) = self.window_at(pos) {
             if self.model.focused() != Some(id) {
                 self.apply_focus(state, Some(id));
@@ -912,7 +968,12 @@ impl WindowManager {
                 .map(|surface| surface.into_owned());
             // Focus point is the surface origin: smithay reports
             // surface-local coordinates as event minus focus.
-            let origin = focused.geometry.loc;
+            // The window rect is its xdg geometry; the surface origin
+            // sits up-left of it by the client-side shadow.
+            let origin = match surface.as_ref() {
+                Some(s) => crate::popup::surface_origin(s, focused.geometry.loc),
+                None => focused.geometry.loc,
+            };
             pointer.motion(
                 state,
                 surface.map(|surface| (surface, (origin.x as f64, origin.y as f64).into())),
@@ -967,6 +1028,8 @@ impl WindowManager {
                     }
                     state.sync_selection_focus(Some(&surface));
                 }
+            } else if self.overview_open {
+                // Overview presses are the runtime's (preview hits).
             } else if let Some(id) = self.window_at(pos) {
                 if self.model.focused() != Some(id) {
                     self.apply_focus(state, Some(id));

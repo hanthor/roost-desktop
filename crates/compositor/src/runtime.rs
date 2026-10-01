@@ -292,6 +292,9 @@ pub struct Runtime {
     idle_since: Instant,
     exit: bool,
     stats: RunStats,
+    /// `ROOST_COMPOSITOR_STATE` snapshot path (journeys only).
+    state_path: Option<std::path::PathBuf>,
+    state_last: String,
 }
 
 /// Control socket path for a session: alongside the Wayland socket in the
@@ -443,6 +446,10 @@ impl Runtime {
             idle_since: Instant::now(),
             exit: false,
             stats: RunStats::default(),
+            state_path: std::env::var_os("ROOST_COMPOSITOR_STATE")
+                .map(std::path::PathBuf::from)
+                .filter(|p| p.is_absolute()),
+            state_last: String::new(),
         };
         // Session-level X11 opt-in is the recorded first X11 need:
         // the supervisor leaves `Idle` and the next tick may spawn
@@ -566,6 +573,13 @@ impl Runtime {
                     return;
                 }
             }
+            if self.control.overview_open() {
+                if let ManagerInput::Button { pressed: true, .. } = input {
+                    if self.overview_press() {
+                        return;
+                    }
+                }
+            }
             let action = self.triggers.feed(
                 &input,
                 self.control.overview_open(),
@@ -675,6 +689,101 @@ impl Runtime {
         crate::xwayland::on_xwayland_event(self, event);
     }
 
+    /// Write the compositor-side state snapshot when it changed
+    /// (`ROOST_COMPOSITOR_STATE`, journeys only; #65). App ids and ids,
+    /// never titles.
+    fn publish_state(&mut self) {
+        let Some(path) = self.state_path.as_ref() else {
+            return;
+        };
+        let model = self.manager.model();
+        let snapshot = model.snapshot();
+        let app_of = |id: u64| {
+            snapshot
+                .windows
+                .iter()
+                .find(|w| w.id == id)
+                .and_then(|w| w.app_id.clone())
+        };
+        let overview_open = self.control.overview_open();
+        let previews: Vec<serde_json::Value> = if overview_open {
+            self.overview_layout()
+                .previews
+                .iter()
+                .filter(|p| p.active)
+                .map(|p| {
+                    serde_json::json!({
+                        "id": p.id,
+                        "app_id": app_of(p.id),
+                        "rect": [p.rect.loc.x, p.rect.loc.y, p.rect.size.w, p.rect.size.h],
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let focused = model.focused();
+        let doc = serde_json::json!({
+            "overview_open": overview_open,
+            "locked": self.is_locked(),
+            "active_workspace": model.active_workspace(),
+            "focused": focused,
+            "focused_app_id": focused.and_then(app_of),
+            "windows": self.manager.overview_windows().iter().map(|w| serde_json::json!({
+                "id": w.id,
+                "app_id": app_of(w.id),
+                "workspace": w.workspace,
+                "rect": [w.geometry.loc.x, w.geometry.loc.y, w.geometry.size.w, w.geometry.size.h],
+            })).collect::<Vec<_>>(),
+            "previews": previews,
+        })
+        .to_string();
+        if doc == self.state_last {
+            return;
+        }
+        let tmp = path.with_extension("tmp");
+        if std::fs::write(&tmp, &doc).is_ok() && std::fs::rename(&tmp, path).is_ok() {
+            self.state_last = doc;
+        }
+    }
+
+    /// Overview scene on the primary output (#54).
+    fn overview_layout(&self) -> crate::overview::OverviewLayout {
+        let size = self.state.primary_size();
+        let output = Rectangle::new((0, 0).into(), size);
+        let model = self.manager.model();
+        crate::overview::layout(
+            output,
+            model.workspaces(),
+            model.active_workspace(),
+            &self.manager.overview_windows(),
+        )
+    }
+
+    /// A press while the overview is open that no shell surface took:
+    /// focus the preview's window, switch to a neighbor card's
+    /// workspace, or close the overview (GNOME shape). Returns whether
+    /// the press was consumed.
+    fn overview_press(&mut self) -> bool {
+        let pos = self.manager.pointer_pos();
+        if crate::layer::topmost_layer_at(&self.state, pos.x as i32, pos.y as i32).is_some()
+            || self.manager.popup_at(&self.state, pos).is_some()
+        {
+            return false;
+        }
+        match crate::overview::hit(&self.overview_layout(), pos) {
+            crate::overview::OverviewHit::Window(id) => {
+                self.manager.focus(&mut self.state, Some(id));
+                self.control.set_overview(false);
+            }
+            crate::overview::OverviewHit::Workspace(ws) => {
+                self.manager.switch_to_workspace(&mut self.state, ws);
+            }
+            crate::overview::OverviewHit::Dismiss => self.control.set_overview(false),
+        }
+        true
+    }
+
     fn tick(&mut self) -> Result<bool, RuntimeError> {
         self.display
             .dispatch_clients(&mut self.state)
@@ -749,6 +858,7 @@ impl Runtime {
                 .tick(crate::state::system_millis(), Some(&mut spawner));
         }
         self.stats.shell_restarts = self.shell.restarts_used();
+        self.publish_state();
         self.render()?;
         Ok(!self.exit)
     }
@@ -771,7 +881,18 @@ impl Runtime {
         } else {
             Color32F::new(0.08, 0.09, 0.11, 1.0)
         };
-        let show_paper = show_content && !overlay_visible;
+        let overview = (show_content && !overlay_visible && self.control.overview_open())
+            .then(|| self.overview_layout());
+        let decor_global = overview
+            .as_ref()
+            .map(|layout| overview_decor(layout, self.manager.pointer_pos()))
+            .unwrap_or_default();
+        let background = if overview.is_some() {
+            OVERVIEW_BACKGROUND
+        } else {
+            background
+        };
+        let show_paper = show_content && !overlay_visible && overview.is_none();
         match &mut self.backend {
             Backend::Winit(backend) => {
                 let size = backend.window_size();
@@ -780,8 +901,17 @@ impl Runtime {
                     let (renderer, mut framebuffer) = backend
                         .bind()
                         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-                    let elements =
-                        scene_elements(renderer, &self.manager, &self.state, (0, 0), show_content);
+                    let elements = scene_elements(
+                        renderer,
+                        &self.manager,
+                        &self.state,
+                        (0, 0),
+                        show_content,
+                        overview.as_ref(),
+                    );
+                    let decor = decor_for_output(&decor_global, (0, 0));
+                    let previews =
+                        preview_elements(renderer, &self.manager, (0, 0), overview.as_ref());
                     let paper = if show_paper {
                         self.wallpaper.element(renderer, size.w, size.h)
                     } else {
@@ -794,7 +924,15 @@ impl Runtime {
                     let mut frame = renderer
                         .render(&mut framebuffer, size, Transform::Flipped180)
                         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-                    draw_scene(&mut frame, background, paper.as_ref(), &elements, damage)?;
+                    draw_scene(
+                        &mut frame,
+                        background,
+                        paper.as_ref(),
+                        &elements,
+                        damage,
+                        &decor,
+                        &previews,
+                    )?;
                     let _ = frame
                         .finish()
                         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
@@ -829,8 +967,17 @@ impl Runtime {
                     };
                     let size = out.size;
                     let damage = Rectangle::from_size(size);
-                    let elements =
-                        scene_elements(renderer, &self.manager, &self.state, out.loc, show_content);
+                    let elements = scene_elements(
+                        renderer,
+                        &self.manager,
+                        &self.state,
+                        out.loc,
+                        show_content,
+                        overview.as_ref(),
+                    );
+                    let decor = decor_for_output(&decor_global, out.loc);
+                    let previews =
+                        preview_elements(renderer, &self.manager, out.loc, overview.as_ref());
                     let paper = if show_paper {
                         self.wallpaper.element(renderer, size.w, size.h)
                     } else {
@@ -843,7 +990,15 @@ impl Runtime {
                         let mut frame = renderer
                             .render(&mut target, size, Transform::Normal)
                             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-                        draw_scene(&mut frame, background, paper.as_ref(), &elements, damage)?;
+                        draw_scene(
+                            &mut frame,
+                            background,
+                            paper.as_ref(),
+                            &elements,
+                            damage,
+                            &decor,
+                            &previews,
+                        )?;
                         // Software pointer on top (no host cursor on
                         // bare hardware); hidden while locked.
                         if !locked {
@@ -887,6 +1042,121 @@ impl Runtime {
     }
 }
 
+/// Overview backdrop (GNOME 51's dark grey behind the cards).
+const OVERVIEW_BACKGROUND: Color32F = Color32F::new(0.14, 0.14, 0.15, 1.0);
+/// Workspace card fill (the desktop seen through the card).
+const OVERVIEW_CARD: Color32F = Color32F::new(0.08, 0.09, 0.11, 1.0);
+/// Hover ring around the preview under the pointer.
+const OVERVIEW_HOVER: Color32F = Color32F::new(0.62, 0.66, 0.72, 1.0);
+/// Hover ring thickness.
+const HOVER_RING: i32 = 4;
+
+/// Overview solid shapes in the global space: card fills, then the ring
+/// around the active preview under `pointer`.
+fn overview_decor(
+    layout: &crate::overview::OverviewLayout,
+    pointer: Point<f64, Logical>,
+) -> Vec<(Color32F, Vec<Rectangle<i32, Logical>>)> {
+    let cards = layout.cards.iter().map(|c| c.rect).collect();
+    let mut out = vec![(OVERVIEW_CARD, cards)];
+    if let Some(p) = layout
+        .previews
+        .iter()
+        .rev()
+        .find(|p| p.active && p.rect.to_f64().contains(pointer))
+    {
+        let r = p.rect;
+        let t = HOVER_RING;
+        let ring = vec![
+            Rectangle::new(
+                (r.loc.x - t, r.loc.y - t).into(),
+                (r.size.w + 2 * t, t).into(),
+            ),
+            Rectangle::new(
+                (r.loc.x - t, r.loc.y + r.size.h).into(),
+                (r.size.w + 2 * t, t).into(),
+            ),
+            Rectangle::new((r.loc.x - t, r.loc.y).into(), (t, r.size.h).into()),
+            Rectangle::new((r.loc.x + r.size.w, r.loc.y).into(), (t, r.size.h).into()),
+        ];
+        out.push((OVERVIEW_HOVER, ring));
+    }
+    out
+}
+
+/// Shift global decor into one output's physical space (scale 1).
+fn decor_for_output(
+    decor: &[(Color32F, Vec<Rectangle<i32, Logical>>)],
+    offset: (i32, i32),
+) -> Vec<(Color32F, Vec<Rectangle<i32, smithay::utils::Physical>>)> {
+    decor
+        .iter()
+        .map(|(color, rects)| {
+            (
+                *color,
+                rects
+                    .iter()
+                    .map(|r| {
+                        Rectangle::new(
+                            (r.loc.x - offset.0, r.loc.y - offset.1).into(),
+                            (r.size.w, r.size.h).into(),
+                        )
+                    })
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// A window preview element: the window's surface tree, shrunk about
+/// its top-left corner.
+type PreviewElement = smithay::backend::renderer::element::utils::RescaleRenderElement<
+    WaylandSurfaceRenderElement<GlesRenderer>,
+>;
+
+/// Overview previews for one output, front to back (#54).
+fn preview_elements(
+    renderer: &mut GlesRenderer,
+    manager: &WindowManager,
+    offset: (i32, i32),
+    overview: Option<&crate::overview::OverviewLayout>,
+) -> Vec<PreviewElement> {
+    let Some(layout) = overview else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for preview in &layout.previews {
+        let Some(surface) = manager.surface_of(preview.id) else {
+            continue;
+        };
+        // Shrink about the surface origin, placed so the visible window
+        // (inside client shadows, also shrunk) fills the preview rect.
+        let geo = crate::popup::window_geometry_loc(&surface);
+        let origin: smithay::utils::Point<i32, smithay::utils::Physical> = (
+            preview.rect.loc.x - offset.0 - (f64::from(geo.x) * preview.scale).round() as i32,
+            preview.rect.loc.y - offset.1 - (f64::from(geo.y) * preview.scale).round() as i32,
+        )
+            .into();
+        for element in render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(
+            renderer,
+            &surface,
+            origin,
+            1.0,
+            1.0,
+            Kind::Unspecified,
+        ) {
+            out.push(
+                smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
+                    element,
+                    origin,
+                    preview.scale,
+                ),
+            );
+        }
+    }
+    crate::layer::front_to_back(out)
+}
+
 /// Window and layer-shell elements for one output whose top-left sits
 /// at `offset` in the global space. Empty while content is hidden
 /// (locked): nothing beneath the lock surface may show.
@@ -896,9 +1166,37 @@ fn scene_elements(
     state: &State,
     offset: (i32, i32),
     show_content: bool,
+    overview: Option<&crate::overview::OverviewLayout>,
 ) -> Vec<WaylandSurfaceRenderElement<GlesRenderer>> {
     if !show_content {
         return Vec::new();
+    }
+    if overview.is_some() {
+        // Overview (#54): windows are drawn as rescaled previews in
+        // their own pass (`preview_elements`); here only the shell's
+        // layers (and their popovers) go on top.
+        let mut elements = Vec::new();
+        for (surface, (x, y), _) in crate::layer::layer_layout(state) {
+            elements.extend(render_elements_from_surface_tree(
+                renderer,
+                &surface,
+                (x - offset.0, y - offset.1),
+                1.0,
+                1.0,
+                Kind::Unspecified,
+            ));
+            for popup in crate::popup::placed_popups(&surface, (x, y).into(), false) {
+                elements.extend(render_elements_from_surface_tree(
+                    renderer,
+                    &popup.surface,
+                    (popup.origin.x - offset.0, popup.origin.y - offset.1),
+                    1.0,
+                    1.0,
+                    Kind::Unspecified,
+                ));
+            }
+        }
+        return crate::layer::front_to_back(elements);
     }
     let mut elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
     let tree = |renderer: &mut GlesRenderer,
@@ -918,9 +1216,10 @@ fn scene_elements(
         // Unassociated X11 windows contribute no surface yet and
         // render nothing this frame.
         if let Some(surface) = window.wl_surface() {
-            tree(renderer, &mut elements, &surface, geometry.loc);
+            let origin = crate::popup::surface_origin(&surface, geometry.loc);
+            tree(renderer, &mut elements, &surface, origin);
             // Popups (#88) right above their window.
-            for popup in crate::popup::placed_popups(&surface, geometry.loc, true) {
+            for popup in crate::popup::placed_popups(&surface, origin, true) {
                 tree(renderer, &mut elements, &popup.surface, popup.origin);
             }
         }
@@ -949,12 +1248,30 @@ fn draw_scene(
     >,
     elements: &[WaylandSurfaceRenderElement<GlesRenderer>],
     damage: Rectangle<i32, smithay::utils::Physical>,
+    decor: &[(Color32F, Vec<Rectangle<i32, smithay::utils::Physical>>)],
+    previews: &[PreviewElement],
 ) -> Result<(), RuntimeError> {
     frame
         .clear(background, &[damage])
         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
     if let Some(paper) = paper {
         draw_render_elements(frame, 1.0, std::slice::from_ref(paper), &[damage])
+            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    }
+    // Solid shapes under the surfaces (overview cards, hover ring).
+    for (color, rects) in decor {
+        let rects: Vec<_> = rects
+            .iter()
+            .filter_map(|r| r.intersection(damage))
+            .collect();
+        if !rects.is_empty() {
+            frame
+                .clear(*color, &rects)
+                .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+        }
+    }
+    if !previews.is_empty() {
+        draw_render_elements(frame, 1.0, previews, &[damage])
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
     }
     draw_render_elements(frame, 1.0, elements, &[damage])

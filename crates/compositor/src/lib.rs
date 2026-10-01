@@ -52,6 +52,7 @@ pub mod drm;
 pub mod layer;
 pub mod lock;
 pub mod overlay;
+pub mod overview;
 pub mod popup;
 pub mod runtime;
 pub mod state;
@@ -366,8 +367,10 @@ impl State {
         let Some(parent) = popup.get_parent_surface() else {
             return;
         };
-        let base: Point<i32, Logical> = if let Some(origin) = self.window_origins.get(&parent) {
-            *origin + crate::popup::window_geometry_loc(&parent)
+        let base: Point<i32, Logical> = if let Some(window_loc) = self.window_origins.get(&parent) {
+            // Positioners are relative to the parent's window geometry,
+            // which is exactly the window rect the manager tracks.
+            *window_loc
         } else if let Some((_, (x, y), _)) = crate::layer::layer_layout(self)
             .into_iter()
             .find(|(s, _, _)| *s == parent)
