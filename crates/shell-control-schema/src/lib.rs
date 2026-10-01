@@ -73,7 +73,10 @@ impl ProtocolVersion {
     /// `0.8` appends the compositor-to-shell `Environment` message
     /// (session variables such as `DISPLAY` once XWayland is up), again
     /// last for the same reason.
-    pub const CURRENT: Self = Self { major: 0, minor: 8 };
+    ///
+    /// `0.9` appends the shell-to-compositor `SetIdleTimeout` command
+    /// (GNOME's idle and lock settings, #63), again last.
+    pub const CURRENT: Self = Self { major: 0, minor: 9 };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
     pub const fn new(major: u16, minor: u16) -> Self {
@@ -200,6 +203,14 @@ pub enum CommandKind {
     /// trusted local peer, and locking hides rather than reveals.
     /// Unlock is never a command: it goes through session auth.
     Lock,
+    /// Lock after this much idle time; `0` never locks on idle (#63).
+    /// The shell derives it from GNOME's `idle-delay`, `lock-enabled`
+    /// and `lock-delay` keys and resends it on every change. Tokenless:
+    /// it only changes when the session locks itself, never unlocks.
+    SetIdleTimeout {
+        /// Idle milliseconds before locking, `0` for never.
+        ms: u64,
+    },
 }
 
 /// Outcome of one shell command, matched by request id.
@@ -612,8 +623,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_8() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 8));
+    fn current_version_is_0_9() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 9));
     }
 
     #[test]
@@ -629,7 +640,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 6).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 7).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 8).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 9).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 9).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 10).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }

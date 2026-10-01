@@ -36,6 +36,9 @@ use logic::ClockFormat;
 const INTERFACE_SCHEMA: &str = "org.gnome.desktop.interface";
 const NOTIFICATIONS_SCHEMA: &str = "org.gnome.desktop.notifications";
 const COLOR_SCHEMA: &str = "org.gnome.settings-daemon.plugins.color";
+const SESSION_SCHEMA: &str = "org.gnome.desktop.session";
+const SHELL_SCHEMA: &str = "org.gnome.shell";
+const SCREENSAVER_SCHEMA: &str = "org.gnome.desktop.screensaver";
 
 fn release_version() -> &'static str {
     match option_env!("ROOST_VERSION") {
@@ -491,13 +494,25 @@ fn build(app: &adw::Application) {
         let pinned = roost_shell_host::favorites::Favorites::system()
             .ids()
             .to_vec();
-        if pinned.is_empty() {
+        // Roost's own pins first, then the user's GNOME dash
+        // (org.gnome.shell favorite-apps, #63), then GNOME's defaults.
+        let gnome: Vec<String> = settings(SHELL_SCHEMA)
+            .map(|s| {
+                s.strv("favorite-apps")
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !pinned.is_empty() {
+            pinned
+        } else if !gnome.is_empty() {
+            gnome
+        } else {
             logic::DEFAULT_FAVORITES
                 .iter()
                 .map(|s| (*s).to_owned())
                 .collect()
-        } else {
-            pinned
         }
     };
     let apps = Rc::new(roost_shell_host::apps::AppProvider::system());
@@ -508,6 +523,38 @@ fn build(app: &adw::Application) {
         Rc::new(ShellActions(shell.clone())),
     );
     let switcher_ui = switcher::SwitcherUi::new(app.upcast_ref(), apps);
+
+    // GNOME's idle and lock settings drive the compositor's idle lock
+    // (#63): sent now and on every change.
+    {
+        let session = settings(SESSION_SCHEMA);
+        let screensaver = settings(SCREENSAVER_SCHEMA);
+        let send: Rc<dyn Fn()> = {
+            let (shell, session, screensaver) =
+                (shell.clone(), session.clone(), screensaver.clone());
+            Rc::new(move || {
+                let idle = session
+                    .as_ref()
+                    .map(|s| s.uint("idle-delay"))
+                    .unwrap_or(300);
+                let (enabled, delay) = screensaver
+                    .as_ref()
+                    .map(|s| (s.boolean("lock-enabled"), s.uint("lock-delay")))
+                    .unwrap_or((true, 0));
+                let ms = logic::idle_lock_ms(idle, enabled, delay);
+                if let Some(control) = shell.borrow_mut().control.as_mut() {
+                    let _ = control.set_idle_timeout(ms);
+                }
+            })
+        };
+        send();
+        for settings in [session, screensaver].into_iter().flatten() {
+            let send = send.clone();
+            settings.connect_changed(None, move |_, _| send());
+            // Keep the settings object (and its signal) alive.
+            std::mem::forget(settings);
+        }
+    }
 
     // Compositor state: drain the control socket every frame.
     {

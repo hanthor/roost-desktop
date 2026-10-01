@@ -877,6 +877,7 @@ impl Runtime {
         let focused = model.focused();
         let doc = serde_json::json!({
             "x11_display": self.x11_display.map(|d| format!(":{d}")),
+            "idle_timeout_ms": self.lock.timeout_ms(),
             "overview_open": overview_open,
             "locked": self.is_locked(),
             "active_workspace": model.active_workspace(),
@@ -976,6 +977,10 @@ impl Runtime {
         }
         for id in outcome.closed {
             self.manager.close_window(id);
+        }
+        // GNOME's idle and lock settings, from the shell (#63).
+        if let Some(ms) = outcome.idle_timeout {
+            self.lock.set_timeout(if ms == 0 { u64::MAX } else { ms });
         }
         // Adopt a control-command lock (manual lock set path): the hub
         // flag flipped without the idle machine, so mirror it locally,

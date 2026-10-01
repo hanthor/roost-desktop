@@ -1,0 +1,56 @@
+# GNOME settings compatibility map
+
+Roost reads GNOME 51's own GSettings schemas. It ships no shim schemas
+and runs no translating daemon. The Marlin image already carries
+`gsettings-desktop-schemas`, so the keys exist, and GNOME Settings and
+`gsettings` keep working unchanged. Ledger row P-ST-01 tracks this page.
+
+This page records that decision for R9 (knowledge entry
+`learnings/dconf-settings-interop.md`).
+
+**Status words.**
+- **Honored**: Roost reads the key and reacts while it runs.
+- **Via GTK**: GTK or libadwaita reads the key for every app and for the
+  shell, so nothing in Roost has to.
+- **Ignored**: the key has no effect yet. The reason and owner are given.
+
+## org.gnome.desktop.interface
+
+| Key | Status | Notes |
+|---|---|---|
+| color-scheme | Honored | The Dark Style tile writes it. The shell and apps follow it through libadwaita. Proof G-QS-DARK |
+| accent-color | Via GTK | libadwaita applies it |
+| font-name, document-font-name, monospace-font-name | Via GTK | The shell is GTK, so its text follows too |
+| text-scaling-factor | Via GTK | |
+| gtk-theme, icon-theme, cursor-theme, cursor-size | Via GTK | Inside apps. The compositor's own cursor ignores them (#89) |
+| clock-format | Honored | Panel clock |
+| clock-show-weekday, clock-show-seconds, clock-show-date | Ignored | The GTK panel shows GNOME's default format (#63) |
+| enable-hot-corners | Ignored | The hot corner is always on (#63) |
+| enable-animations | Ignored | Roost has no animations yet |
+| show-battery-percentage | Ignored | No battery indicator yet (#55) |
+
+## Session, lock and notifications
+
+| Schema and key | Status | Notes |
+|---|---|---|
+| org.gnome.desktop.session idle-delay | Honored | Live, through the shell's `SetIdleTimeout` command. Proof G-SETTINGS-IDLE |
+| org.gnome.desktop.screensaver lock-enabled, lock-delay | Honored | The lock engages `idle-delay + lock-delay` after the last input. Roost has no separate blank stage |
+| org.gnome.desktop.screensaver picture-uri | Ignored | The lock screen has no background image |
+| org.gnome.desktop.notifications show-banners | Honored | Mirrors Do Not Disturb both ways. Proof G-NOTIFY-DND |
+| org.gnome.desktop.search-providers (all keys) | Honored | disable-external, disabled, enabled and sort-order. Proof G-SEARCH-PROVIDER |
+| org.gnome.desktop.background picture-uri, picture-uri-dark | Honored | Wallpaper |
+| org.gnome.shell favorite-apps | Honored | Used for the dash when Roost has no pins of its own |
+| org.gnome.shell enabled-extensions | Ignored | GNOME Shell extensions are JavaScript. Roost has its own extension point |
+| org.gnome.settings-daemon.plugins.color night-light-enabled | Honored (write only) | The Night Light tile writes it, but Roost applies no colour temperature yet (#89 gamma control) |
+
+## Window management and input
+
+| Schema and key | Status | Notes |
+|---|---|---|
+| org.gnome.desktop.wm.keybindings, org.gnome.shell.keybindings, org.gnome.mutter.keybindings | Ignored | Roost uses GNOME's default bindings, fixed (#63) |
+| org.gnome.desktop.wm.preferences button-layout | Via GTK | Client-side decorations read it |
+| org.gnome.desktop.wm.preferences focus-mode, num-workspaces | Ignored | Click to focus and dynamic workspaces, as GNOME's defaults |
+| org.gnome.mutter dynamic-workspaces, edge-tiling | Ignored | Always on, as GNOME's defaults |
+| org.gnome.desktop.peripherals.* | Ignored | Keyboard repeat, touchpad and mouse use libinput defaults (#60) |
+| org.gnome.desktop.input-sources sources, xkb-options | Ignored | The keymap comes from the environment (#60) |
+| org.gnome.desktop.a11y.* | Via GTK | Where GTK implements them. Compositor features like zoom are missing |

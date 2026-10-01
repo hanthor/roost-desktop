@@ -298,6 +298,8 @@ pub struct Session<'a> {
     /// commands the mirror applied). Drained by [`ControlHub::poll`]
     /// so the runtime can send the polite client close.
     closed: Vec<u64>,
+    /// Latest `SetIdleTimeout` from the shell, drained by the hub.
+    idle_timeout: Option<u64>,
 }
 
 impl std::fmt::Debug for Session<'_> {
@@ -355,6 +357,7 @@ impl<'a> Session<'a> {
             locked,
             locked_sent,
             closed: Vec::new(),
+            idle_timeout: None,
         };
         let msg = match session.conn.read_frame() {
             Ok(msg) => msg,
@@ -432,6 +435,11 @@ impl<'a> Session<'a> {
         self.conn.write_frame(&Message::Outputs {
             outputs: outputs.to_vec(),
         })
+    }
+
+    /// The latest `SetIdleTimeout` the shell sent, once (#63).
+    pub fn take_idle_timeout(&mut self) -> Option<u64> {
+        self.idle_timeout.take()
     }
 
     /// Send the session environment (#59).
@@ -550,6 +558,19 @@ impl<'a> Session<'a> {
                 })?;
                 let revision = self.send_snapshot(model)?;
                 Ok(Handled::HelloResync { revision })
+            }
+            Message::Command {
+                id,
+                kind: CommandKind::SetIdleTimeout { ms },
+            } => {
+                // Session-level setting, not model state: the runtime
+                // applies it to the idle lock (drained by the hub).
+                self.idle_timeout = Some(ms);
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: CommandStatus::Applied,
+                })?;
+                Ok(Handled::CommandResult { id, applied: true })
             }
             Message::Command { id, kind } => {
                 let (status, closed) =
@@ -754,6 +775,8 @@ fn apply_command(
             }
             (CommandStatus::Applied, Some(*window))
         }
+        // Intercepted by the session before it gets here.
+        CommandKind::SetIdleTimeout { .. } => (CommandStatus::Applied, None),
         CommandKind::Lock => {
             // Manual lock from the shell (session-lock set path):
             // engage the compositor-owned flag; idempotent, always
@@ -778,6 +801,8 @@ pub struct PollOutcome {
     pub activated: Vec<u64>,
     /// Windows to ask to close.
     pub closed: Vec<u64>,
+    /// Idle-lock timeout the shell asked for (`0` never), if any.
+    pub idle_timeout: Option<u64>,
 }
 
 /// Peers accepted but not yet handshaken are capped so a same-user
@@ -1097,6 +1122,9 @@ impl ControlHub {
                         outcome.activated.extend(model.focused());
                     }
                     outcome.closed.extend(Self::take_closed(session));
+                    if let Some(ms) = session.take_idle_timeout() {
+                        outcome.idle_timeout = Some(ms);
+                    }
                     true
                 } else {
                     false
