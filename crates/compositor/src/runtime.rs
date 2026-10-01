@@ -413,6 +413,8 @@ pub struct Runtime {
     /// feature only).
     #[cfg(feature = "xwayland")]
     pending_x11_client: Option<smithay::reexports::wayland_server::Client>,
+    /// A three-finger swipe in progress: its travel so far (#60).
+    shell_swipe: Option<Point<f64, Logical>>,
     /// Overview search is showing results: the workspace card and
     /// previews hide (GNOME). Reset whenever the overview closes.
     overview_search: bool,
@@ -488,6 +490,12 @@ impl Runtime {
                         };
                         for input in inputs {
                             rt.on_manager_input(input);
+                        }
+                        // The window manager has the final say (a locked
+                        // pointer stays put): the drawn cursor follows it.
+                        let pos = rt.manager.pointer_pos();
+                        if let Backend::Drm(drm) = &mut rt.backend {
+                            drm.set_pointer(pos);
                         }
                     })
                     .map_err(|e| RuntimeError::Loop(e.to_string()))?;
@@ -609,6 +617,7 @@ impl Runtime {
             pending_x11_client: None,
             x11_display: None,
             overview_search: false,
+            shell_swipe: None,
             idle_since: Instant::now(),
             exit: false,
             stats: RunStats::default(),
@@ -736,6 +745,11 @@ impl Runtime {
         self.lock.note_input(input_time(&input));
         self.idle_since = Instant::now();
         if self.is_locked() {
+            return;
+        }
+        // Three-finger swipes are the shell's (GNOME 51): consumed here,
+        // acted on at the end. Other swipes reach the client.
+        if self.shell_swipe_input(&input) {
             return;
         }
         if !self.overlay.visible {
@@ -995,6 +1009,48 @@ impl Runtime {
             crate::overview::OverviewHit::Dismiss => self.control.set_overview(false),
         }
         true
+    }
+
+    /// Track a three-finger swipe; returns whether `input` was one of
+    /// its phases (and so consumed).
+    fn shell_swipe_input(&mut self, input: &ManagerInput) -> bool {
+        match *input {
+            ManagerInput::SwipeBegin { fingers, .. } => {
+                if fingers == crate::windows::SHELL_SWIPE_FINGERS {
+                    self.shell_swipe = Some(Point::from((0.0, 0.0)));
+                    return true;
+                }
+                false
+            }
+            ManagerInput::SwipeUpdate { delta, .. } => match self.shell_swipe.as_mut() {
+                Some(travel) => {
+                    *travel += delta;
+                    true
+                }
+                None => false,
+            },
+            ManagerInput::SwipeEnd { cancelled, .. } => {
+                let Some(travel) = self.shell_swipe.take() else {
+                    return false;
+                };
+                if !cancelled {
+                    use crate::windows::SwipeAction;
+                    match crate::windows::swipe_action(travel.x, travel.y) {
+                        Some(SwipeAction::OpenOverview) => self.control.set_overview(true),
+                        Some(SwipeAction::CloseOverview) => self.control.set_overview(false),
+                        Some(SwipeAction::NextWorkspace) => {
+                            self.manager.switch_relative(&mut self.state, 1);
+                        }
+                        Some(SwipeAction::PreviousWorkspace) => {
+                            self.manager.switch_relative(&mut self.state, -1);
+                        }
+                        None => {}
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
     fn tick(&mut self) -> Result<bool, RuntimeError> {
@@ -1617,6 +1673,10 @@ fn input_time(input: &ManagerInput) -> u64 {
         ManagerInput::Key { time, .. }
         | ManagerInput::Motion { time, .. }
         | ManagerInput::Button { time, .. }
-        | ManagerInput::Axis { time, .. } => u64::from(time),
+        | ManagerInput::Axis { time, .. }
+        | ManagerInput::SwipeBegin { time, .. }
+        | ManagerInput::SwipeUpdate { time, .. }
+        | ManagerInput::SwipeEnd { time, .. } => u64::from(time),
+        ManagerInput::RelativeMotion { utime, .. } => utime / 1000,
     }
 }

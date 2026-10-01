@@ -1169,6 +1169,11 @@ impl WindowManager {
     /// Layer-shell surfaces (panel, banners) paint over windows, so they
     /// win the hit test first; without this the panel never sees motion.
     pub fn pointer_motion(&mut self, state: &mut State, pos: Point<f64, Logical>, time: u32) {
+        // A locked pointer stays where it is (relative motion still
+        // flows); a confined one stays inside its window.
+        let Some(pos) = self.constrain(pos) else {
+            return;
+        };
         self.pointer_pos = pos;
         // An interactive move/resize owns the pointer until release.
         if self.grab_motion(pos) {
@@ -2228,6 +2233,66 @@ pub enum ManagerInput {
         vertical: f64,
         time: u32,
     },
+    /// Raw pointer motion for relative-pointer clients (games, remote
+    /// desktop); comes alongside `Motion` from devices that have it.
+    RelativeMotion {
+        delta: Point<f64, Logical>,
+        delta_unaccel: Point<f64, Logical>,
+        /// Microseconds, the protocol's precision.
+        utime: u64,
+    },
+    /// Touchpad swipe gesture phases (#60). Three-finger swipes are
+    /// the shell's (overview, workspaces); others reach the client.
+    SwipeBegin {
+        fingers: u32,
+        time: u32,
+    },
+    SwipeUpdate {
+        delta: Point<f64, Logical>,
+        time: u32,
+    },
+    SwipeEnd {
+        cancelled: bool,
+        time: u32,
+    },
+}
+
+/// What a finished three-finger touchpad swipe does (GNOME 51).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwipeAction {
+    /// Swipe up: open the overview.
+    OpenOverview,
+    /// Swipe down: close it.
+    CloseOverview,
+    /// Fingers move left: the next workspace slides in (content follows
+    /// the fingers, as on GNOME).
+    NextWorkspace,
+    /// Fingers move right: the previous workspace.
+    PreviousWorkspace,
+}
+
+/// Fingers GNOME reserves for its own swipes.
+pub const SHELL_SWIPE_FINGERS: u32 = 3;
+/// Distance a swipe must travel to act (logical pixels).
+pub const SWIPE_THRESHOLD: f64 = 100.0;
+
+/// Classify a finished swipe by its dominant axis; short swipes do
+/// nothing.
+pub fn swipe_action(dx: f64, dy: f64) -> Option<SwipeAction> {
+    if dx.abs().max(dy.abs()) < SWIPE_THRESHOLD {
+        return None;
+    }
+    Some(if dy.abs() >= dx.abs() {
+        if dy < 0.0 {
+            SwipeAction::OpenOverview
+        } else {
+            SwipeAction::CloseOverview
+        }
+    } else if dx < 0.0 {
+        SwipeAction::NextWorkspace
+    } else {
+        SwipeAction::PreviousWorkspace
+    })
 }
 
 /// X11 keycodes are kernel evdev numbers plus 8; the winit backend
@@ -2359,6 +2424,10 @@ impl TriggerState {
                 self.super_armed = false;
                 TriggerAction::None
             }
+            ManagerInput::RelativeMotion { .. }
+            | ManagerInput::SwipeBegin { .. }
+            | ManagerInput::SwipeUpdate { .. }
+            | ManagerInput::SwipeEnd { .. } => TriggerAction::None,
         }
     }
 }
@@ -2435,7 +2504,129 @@ impl WindowManager {
                     self.pointer_axis(state, horizontal, vertical, time);
                 }
             }
+            ManagerInput::RelativeMotion {
+                delta,
+                delta_unaccel,
+                utime,
+            } => self.relative_motion(state, delta, delta_unaccel, utime),
+            ManagerInput::SwipeBegin { fingers, time } => {
+                if let Some(pointer) = self.pointer.clone() {
+                    pointer.gesture_swipe_begin(
+                        state,
+                        &smithay::input::pointer::GestureSwipeBeginEvent {
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time,
+                            fingers,
+                        },
+                    );
+                    pointer.frame(state);
+                }
+            }
+            ManagerInput::SwipeUpdate { delta, time } => {
+                if let Some(pointer) = self.pointer.clone() {
+                    pointer.gesture_swipe_update(
+                        state,
+                        &smithay::input::pointer::GestureSwipeUpdateEvent { time, delta },
+                    );
+                    pointer.frame(state);
+                }
+            }
+            ManagerInput::SwipeEnd { cancelled, time } => {
+                if let Some(pointer) = self.pointer.clone() {
+                    pointer.gesture_swipe_end(
+                        state,
+                        &smithay::input::pointer::GestureSwipeEndEvent {
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time,
+                            cancelled,
+                        },
+                    );
+                    pointer.frame(state);
+                }
+            }
         }
+    }
+
+    /// Raw motion to the client under the pointer (relative-pointer).
+    fn relative_motion(
+        &mut self,
+        state: &mut State,
+        delta: Point<f64, Logical>,
+        delta_unaccel: Point<f64, Logical>,
+        utime: u64,
+    ) {
+        let Some(pointer) = self.pointer.clone() else {
+            return;
+        };
+        let focus = pointer.current_focus().map(|surface| {
+            let origin = self.surface_origin_of(&surface);
+            (surface, origin)
+        });
+        pointer.relative_motion(
+            state,
+            focus,
+            &smithay::input::pointer::RelativeMotionEvent {
+                delta,
+                delta_unaccel,
+                utime,
+            },
+        );
+        pointer.frame(state);
+    }
+
+    /// Global origin of a surface's coordinates (window surfaces;
+    /// anything else reports the origin).
+    fn surface_origin_of(&self, surface: &WlSurface) -> Point<f64, Logical> {
+        self.windows
+            .values()
+            .find(|w| w.surface.wl_surface().as_deref() == Some(surface))
+            .map(|w| crate::popup::surface_origin(surface, w.geometry.loc).to_f64())
+            .unwrap_or_default()
+    }
+
+    /// Pointer-constraints (#89): a locked pointer stays put; a confined
+    /// one stays inside the focused window. Activates a pending
+    /// constraint on the surface under the pointer. Returns the position
+    /// motion may move to, or `None` when the pointer is locked.
+    fn constrain(&self, pos: Point<f64, Logical>) -> Option<Point<f64, Logical>> {
+        use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint};
+        let pointer = self.pointer.as_ref()?;
+        let Some(surface) = pointer.current_focus() else {
+            return Some(pos);
+        };
+        let mut locked = false;
+        let mut confined = false;
+        with_pointer_constraint(&surface, pointer, |constraint| {
+            if let Some(constraint) = constraint {
+                if !constraint.is_active() {
+                    constraint.activate();
+                }
+                match &*constraint {
+                    PointerConstraint::Locked(_) => locked = true,
+                    PointerConstraint::Confined(_) => confined = true,
+                }
+            }
+        });
+        if locked {
+            return None;
+        }
+        if confined {
+            if let Some(window) = self
+                .windows
+                .values()
+                .find(|w| w.surface.wl_surface().as_deref() == Some(&surface))
+            {
+                let g = window.geometry;
+                return Some(
+                    (
+                        pos.x.clamp(g.loc.x as f64, (g.loc.x + g.size.w - 1) as f64),
+                        pos.y.clamp(g.loc.y as f64, (g.loc.y + g.size.h - 1) as f64),
+                    )
+                        .into(),
+                );
+            }
+        }
+        Some(pos)
     }
 
     /// Queued switcher drive events, drained by the runtime into the

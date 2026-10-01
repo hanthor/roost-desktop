@@ -48,4 +48,5 @@ drm = [
 wayland-client.workspace = true
 wayland-protocols = { workspace = true, features = ["client"] }
 wayland-protocols-wlr = { workspace = true, features = ["client"] }
+wayland-protocols-misc = { version = "=0.3.12", features = ["client"] }
 tempfile = "3"

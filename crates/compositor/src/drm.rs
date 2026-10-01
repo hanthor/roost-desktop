@@ -376,8 +376,38 @@ impl DrmBackend {
                 let delta = event.delta();
                 let rects = self.output_rects();
                 self.pointer = clamp_to_outputs(self.pointer + delta, &rects);
-                vec![ManagerInput::Motion {
-                    pos: self.pointer,
+                vec![
+                    ManagerInput::Motion {
+                        pos: self.pointer,
+                        time: (event.time() / 1000) as u32,
+                    },
+                    // Raw motion for relative-pointer clients (#89).
+                    ManagerInput::RelativeMotion {
+                        delta,
+                        delta_unaccel: event.delta_unaccel(),
+                        utime: event.time(),
+                    },
+                ]
+            }
+            // Touchpad swipes (#60): three fingers are the shell's.
+            InputEvent::GestureSwipeBegin { event } => {
+                use smithay::backend::input::GestureBeginEvent;
+                vec![ManagerInput::SwipeBegin {
+                    fingers: event.fingers(),
+                    time: (event.time() / 1000) as u32,
+                }]
+            }
+            InputEvent::GestureSwipeUpdate { event } => {
+                use smithay::backend::input::GestureSwipeUpdateEvent;
+                vec![ManagerInput::SwipeUpdate {
+                    delta: event.delta(),
+                    time: (event.time() / 1000) as u32,
+                }]
+            }
+            InputEvent::GestureSwipeEnd { event } => {
+                use smithay::backend::input::GestureEndEvent;
+                vec![ManagerInput::SwipeEnd {
+                    cancelled: event.cancelled(),
                     time: (event.time() / 1000) as u32,
                 }]
             }
@@ -412,6 +442,11 @@ impl DrmBackend {
                 inputs
             }
         }
+    }
+
+    /// Move the drawn cursor to where the window manager put the pointer.
+    pub fn set_pointer(&mut self, pos: Point<f64, Logical>) {
+        self.pointer = pos;
     }
 
     fn primary_size(&self) -> Size<i32, Logical> {
