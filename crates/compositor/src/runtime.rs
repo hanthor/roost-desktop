@@ -573,7 +573,7 @@ impl Runtime {
             let action = self.triggers.feed(
                 &input,
                 self.control.overview_open(),
-                self.manager.pointer_pos().y,
+                self.manager.pointer_pos(),
             );
             match action {
                 TriggerAction::None => {}
