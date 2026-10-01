@@ -2,6 +2,10 @@
 //! All view *content* decisions live in pure [`render_snapshot`]
 //! (headless-tested); `build_ui` only constructs widgets. Keyboard:
 //! Tab order follows visual order, Enter submits, Escape cancels.
+//!
+//! `render_snapshot` and [`LoginView`] are always available. `build_ui` is
+//! behind the default `gtk-ui` feature, so a consumer that only drives the
+//! model needs no GTK toolchain.
 
 use crate::model::{GreeterModel, Screen};
 use crate::session::SessionEntry;
@@ -46,6 +50,7 @@ pub fn render_snapshot(
 
 /// Construct the GTK window from a snapshot. Runs on the UI thread;
 /// not covered by headless tests (see `render_snapshot`).
+#[cfg(feature = "gtk-ui")]
 pub fn build_ui(app: &libadwaita::Application, view: &LoginView) {
     use gtk4::prelude::*;
     use libadwaita::prelude::*;

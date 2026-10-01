@@ -4,10 +4,23 @@ version = "0.1.0"
 edition = "2021"
 license.workspace = true
 
+# The GTK4/libadwaita window is optional so that consumers needing only the
+# prompt model, session enumeration and greetd client — the compositor's
+# unlock path — do not drag a GTK toolchain into their build. `gtk-ui` is on
+# by default, so building this crate or its binary is unchanged.
+[features]
+default = ["gtk-ui"]
+gtk-ui = ["dep:gtk4", "dep:libadwaita"]
+
 [dependencies]
 greetd_ipc.workspace = true
-gtk4.workspace = true
-libadwaita.workspace = true
+gtk4 = { workspace = true, optional = true }
+libadwaita = { workspace = true, optional = true }
+
+[[bin]]
+name = "roost-greeter"
+path = "src/main.rs"
+required-features = ["gtk-ui"]
 
 [dev-dependencies]
 tempfile = "3"
