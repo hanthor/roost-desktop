@@ -577,14 +577,20 @@ mod tests {
             dir.path().join("control.sock"),
         );
         let reap_exit = |driver: &mut ShellDriver, now: u64| {
-            for _ in 0..10_000 {
+            // Wall-clock deadline, not an iteration count: on a loaded
+            // machine the fresh child may wait longer than a fast spin
+            // loop for its first timeslice (see live_true_spawn_observed_exiting).
+            let deadline = SystemClock.now_ms().saturating_add(30_000);
+            loop {
                 match driver.poll(now) {
                     ShellStatus::Waiting { .. } => return,
-                    ShellStatus::Running => std::thread::yield_now(),
+                    ShellStatus::Running => {
+                        assert!(SystemClock.now_ms() < deadline, "exit never reaped");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
                     other => panic!("unexpected driver status: {other:?}"),
                 }
             }
-            panic!("exit reap budget exhausted");
         };
         assert_eq!(driver.poll(0), ShellStatus::Running);
         reap_exit(&mut driver, 0);
@@ -610,14 +616,21 @@ mod tests {
         assert_eq!(driver.poll(0), ShellStatus::Running);
         // Reap the instant exit: first Waiting carries the two
         // transition events.
-        let mut waited = false;
-        for _ in 0..10_000 {
+        let waited: bool;
+        // Wall-clock deadline, not an iteration count: on a loaded
+        // machine the fresh child may wait longer than a fast spin
+        // loop for its first timeslice.
+        let deadline = SystemClock.now_ms().saturating_add(30_000);
+        loop {
             match driver.poll(0) {
                 ShellStatus::Waiting { .. } => {
                     waited = true;
                     break;
                 }
-                ShellStatus::Running => std::thread::yield_now(),
+                ShellStatus::Running => {
+                    assert!(SystemClock.now_ms() < deadline, "exit never reaped");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
                 other => panic!("unexpected driver status: {other:?}"),
             }
         }
@@ -645,15 +658,21 @@ mod tests {
             dir.path().join("control.sock"),
         );
         let reap_exit = |driver: &mut ShellDriver, now: u64| {
-            for _ in 0..10_000 {
+            // Wall-clock deadline, not an iteration count: on a loaded
+            // machine the fresh child may wait longer than a fast spin
+            // loop for its first timeslice.
+            let deadline = SystemClock.now_ms().saturating_add(30_000);
+            loop {
                 match driver.poll(now) {
                     ShellStatus::Waiting { .. } => return,
-                    ShellStatus::Running => std::thread::yield_now(),
+                    ShellStatus::Running => {
+                        assert!(SystemClock.now_ms() < deadline, "exit never reaped");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
                     ShellStatus::Exhausted => return,
                     other => panic!("unexpected driver status: {other:?}"),
                 }
             }
-            panic!("exit reap budget exhausted");
         };
         assert_eq!(driver.poll(0), ShellStatus::Running);
         reap_exit(&mut driver, 0);
@@ -760,16 +779,21 @@ mod tests {
             sup.poll(&mut remake, clock.now_ms()).unwrap(),
             ChildEvent::Running
         );
-        // /bin/false exits immediately; reap it (bounded retries in case
-        // the exit has not been scheduled yet; the fake clock does not move).
-        let mut exited = None;
-        for _ in 0..10_000 {
+        // /bin/false exits immediately; reap it (wall-clock deadline in
+        // case the exit has not been scheduled yet; the fake clock does
+        // not move, so the deadline uses the real clock).
+        let exited: Option<Option<i32>>;
+        let deadline = SystemClock.now_ms().saturating_add(30_000);
+        loop {
             match sup.poll(&mut remake, clock.now_ms()).unwrap() {
                 ChildEvent::Exited(code) => {
                     exited = Some(code);
                     break;
                 }
-                ChildEvent::Running => std::thread::yield_now(),
+                ChildEvent::Running => {
+                    assert!(SystemClock.now_ms() < deadline, "exit never reaped");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
             }
         }
         assert_eq!(exited, Some(Some(1)));
@@ -790,14 +814,18 @@ mod tests {
         assert_eq!(sup.restarts_used(), 1);
         assert_eq!(sup.restarts_remaining(), 0);
 
-        let mut exited = None;
-        for _ in 0..10_000 {
+        let exited: Option<Option<i32>>;
+        let deadline = SystemClock.now_ms().saturating_add(30_000);
+        loop {
             match sup.poll(&mut remake, clock.now_ms()).unwrap() {
                 ChildEvent::Exited(code) => {
                     exited = Some(code);
                     break;
                 }
-                ChildEvent::Running => std::thread::yield_now(),
+                ChildEvent::Running => {
+                    assert!(SystemClock.now_ms() < deadline, "exit never reaped");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
             }
         }
         assert_eq!(exited, Some(Some(1)));
@@ -841,7 +869,10 @@ mod tests {
         let mut now = clock.now_ms();
         assert_eq!(sup.poll(&mut remake, now).unwrap(), ChildEvent::Running);
         // Drive: reap exits, jump the fake clock past backoff, respawn.
-        for _ in 0..8 {
+        // Wall-clock deadline rather than a fixed iteration count: under
+        // load a fresh /bin/false may need several sleeps to exit.
+        let deadline = SystemClock.now_ms().saturating_add(30_000);
+        loop {
             match sup.poll(&mut remake, now).unwrap() {
                 ChildEvent::Running => {}
                 ChildEvent::Exited(_) => {
@@ -862,6 +893,7 @@ mod tests {
             if sup.exhaust().is_err() && !sup.has_child() {
                 break;
             }
+            assert!(SystemClock.now_ms() < deadline, "budget never exhausted");
         }
         assert!(matches!(
             sup.exhaust(),
