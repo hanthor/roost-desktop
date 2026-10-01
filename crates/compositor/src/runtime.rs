@@ -179,24 +179,106 @@ pub fn current_exe_dir() -> Option<std::path::PathBuf> {
         .and_then(|exe| exe.parent().map(|dir| dir.to_owned()))
 }
 
+/// Shell binaries in preference order: the GTK4/libadwaita shell
+/// (ADR 0006, the default), then the legacy software-drawn shell.
+pub const SHELL_BINARIES: [&str; 2] = ["roost-shell-gtk", "roost-shell-host"];
+
 /// Shell binary for a session: explicit config, then `ROOST_SHELL_BIN`,
-/// then the `roost-shell-host` sibling of this binary when it exists,
-/// else a `PATH` lookup at spawn time.
+/// then the first of [`SHELL_BINARIES`] beside this binary, then on
+/// `PATH`, else the legacy name for a spawn-time lookup.
 pub fn resolve_shell_bin(configured: Option<&std::path::Path>) -> std::path::PathBuf {
+    resolve_shell_bin_in(
+        configured,
+        std::env::var_os("ROOST_SHELL_BIN"),
+        current_exe_dir(),
+        std::env::var_os("PATH"),
+    )
+}
+
+/// [`resolve_shell_bin`] with its inputs explicit, for tests.
+pub fn resolve_shell_bin_in(
+    configured: Option<&std::path::Path>,
+    env_bin: Option<std::ffi::OsString>,
+    exe_dir: Option<std::path::PathBuf>,
+    path_var: Option<std::ffi::OsString>,
+) -> std::path::PathBuf {
     if let Some(path) = configured {
         return path.to_owned();
     }
-    if let Ok(path) = std::env::var("ROOST_SHELL_BIN") {
-        if !path.is_empty() {
-            return std::path::PathBuf::from(path);
+    if let Some(path) = env_bin.filter(|p| !p.is_empty()) {
+        return std::path::PathBuf::from(path);
+    }
+    for name in SHELL_BINARIES {
+        if let Some(found) = exe_dir.as_deref().and_then(|dir| sibling_binary(dir, name)) {
+            return found;
         }
     }
-    if let Some(dir) = current_exe_dir() {
-        if let Some(sibling) = sibling_binary(&dir, "roost-shell-host") {
-            return sibling;
+    let dirs: Vec<std::path::PathBuf> = path_var
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    for name in SHELL_BINARIES {
+        if let Some(found) = dirs.iter().find_map(|dir| sibling_binary(dir, name)) {
+            return found;
         }
     }
-    std::path::PathBuf::from("roost-shell-host")
+    std::path::PathBuf::from(SHELL_BINARIES[1])
+}
+
+#[cfg(test)]
+mod shell_bin_tests {
+    use super::*;
+
+    fn touch(dir: &std::path::Path, name: &str) {
+        std::fs::write(dir.join(name), b"").unwrap();
+    }
+
+    #[test]
+    fn gtk_shell_is_preferred_and_legacy_is_the_fallback() {
+        let exe = tempfile::tempdir().unwrap();
+        let path = tempfile::tempdir().unwrap();
+        let exe_dir = Some(exe.path().to_owned());
+        let path_var = Some(path.path().as_os_str().to_owned());
+        let resolve = || resolve_shell_bin_in(None, None, exe_dir.clone(), path_var.clone());
+
+        // Nothing installed: the legacy name, looked up at spawn.
+        assert_eq!(resolve(), std::path::PathBuf::from("roost-shell-host"));
+        // Only the legacy shell on PATH.
+        touch(path.path(), "roost-shell-host");
+        assert_eq!(resolve(), path.path().join("roost-shell-host"));
+        // The GTK shell on PATH wins over the legacy one there.
+        touch(path.path(), "roost-shell-gtk");
+        assert_eq!(resolve(), path.path().join("roost-shell-gtk"));
+        // Siblings of the compositor win over PATH, GTK first.
+        touch(exe.path(), "roost-shell-host");
+        assert_eq!(resolve(), exe.path().join("roost-shell-host"));
+        touch(exe.path(), "roost-shell-gtk");
+        assert_eq!(resolve(), exe.path().join("roost-shell-gtk"));
+    }
+
+    #[test]
+    fn explicit_choices_win() {
+        let exe = tempfile::tempdir().unwrap();
+        touch(exe.path(), "roost-shell-gtk");
+        let exe_dir = Some(exe.path().to_owned());
+        assert_eq!(
+            resolve_shell_bin_in(None, Some("roost-shell-host".into()), exe_dir.clone(), None),
+            std::path::PathBuf::from("roost-shell-host")
+        );
+        assert_eq!(
+            resolve_shell_bin_in(
+                Some(std::path::Path::new("/x/shell")),
+                None,
+                exe_dir.clone(),
+                None
+            ),
+            std::path::PathBuf::from("/x/shell")
+        );
+        // An empty ROOST_SHELL_BIN means unset.
+        assert_eq!(
+            resolve_shell_bin_in(None, Some("".into()), exe_dir, None),
+            exe.path().join("roost-shell-gtk")
+        );
+    }
 }
 
 /// Summary of one nested run, for diagnostics (no sensitive content).
