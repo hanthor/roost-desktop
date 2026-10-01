@@ -663,29 +663,36 @@ window.roost-banners {
   font-weight: bold;
 }
 
-/* Alt-Tab switcher: GNOME 51's centered icon strip. */
+/* Alt-Tab, GNOME 51's AppSwitcher (.switcher-list): #2e2e33, 28px
+   corners, 12px padding; 12px between tiles; the selected tile at 20%
+   white, 16px corners. */
 window.roost-switcher {
   background: none;
 }
 
-.switcher {
-  background-color: #2a2a2f;
-  border-radius: 24px;
-  padding: 18px;
+.roost-switcher .switcher-list {
+  padding: 12px 12px 0 12px;
+  border-radius: 28px;
+  background-color: #2e2e33;
+  box-shadow: 0 8px 8px 0 rgba(0, 0, 0, 0.2);
   color: #ffffff;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
+  margin: 16px;
 }
 
-.switcher-item {
+.roost-switcher .item-box {
+  padding: 6px;
   border-radius: 16px;
-  padding: 12px;
 }
 
-.switcher-item.selected {
-  background-color: alpha(#ffffff, 0.16);
+.roost-switcher .item-box.selected {
+  background-color: rgba(255, 255, 255, 0.2);
 }
 
-.switcher-title {
-  font-weight: bold;
+.roost-switcher .switcher-arrow {
+  margin: 4px 0 0 0;
+  min-height: 8px;
 }
 
 /* End-session dialog (GNOME 51): dimmed screen, centered card. */

@@ -45,6 +45,17 @@ function dump(actor, depth, out) {
         dump(child, depth + 1, out);
 }
 
+async function shotNow(state) {
+    const file = Gio.File.new_for_path(`${OUT}/${state}.png`);
+    const stream = file.replace(null, false, Gio.FileCreateFlags.NONE, null);
+    await new Shell.Screenshot().screenshot(false, stream);
+    stream.close(null);
+    const actors = [];
+    dump(global.stage, 0, actors);
+    GLib.file_set_contents(`${OUT}/${state}.json`, JSON.stringify(actors, null, 1));
+    print(`GREF captured ${state}`);
+}
+
 async function shot(state) {
     await Scripting.sleep(700);
     await Scripting.waitLeisure();
@@ -97,6 +108,15 @@ export async function run() {
         await Scripting.createTestWindow({width: 640, height: 420});
     await Scripting.waitTestWindows();
     await shot('06-windows');
+    // Alt+Tab, as GNOME draws it (shown without a held modifier, it
+    // stays up for NO_MODS_TIMEOUT).
+    const AltTab = await import('resource:///org/gnome/shell/ui/altTab.js');
+    const switcher = new AltTab.AppSwitcherPopup();
+    switcher.show(false, 'switch-applications', 0);
+    await Scripting.sleep(400);
+    await shotNow('06b-switcher');
+    switcher.destroy();
+    await Scripting.sleep(500);
     Main.overview.show();
     await Scripting.sleep(1500);
     await shot('07-overview-windows');

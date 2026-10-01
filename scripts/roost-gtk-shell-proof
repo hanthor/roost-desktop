@@ -77,7 +77,8 @@
 #   G-APP-DRAG  dragging an app's header bar moves the window (#58)
 #   G-TRAY      an AppIndicator item shows in the panel and its menu
 #               row reaches the item (P-TR-01)
-#   G-SWITCHER  Alt+Tab shows the switcher with every window, and
+#   G-SWITCHER  Alt+Tab shows the switcher with every app (GNOME's
+#               switch-applications; the three test windows are three apps), and
 #               releasing Alt focuses the highlighted one
 # Frames and accessibility dumps land in the artifacts dir; assertions in
 # assertions.txt for the parity ledger.
@@ -441,7 +442,7 @@ scrot "$ARTIFACTS/08b-switcher.png" >/dev/null
 items="$(jq '[.[] | select(.role == "list item" and .showing)] | length' "$ARTIFACTS/a11y-switcher.json")"
 picked="$(jq -r '[.[] | select(.role == "list item" and .showing and .selected)][0].name // ""' "$ARTIFACTS/a11y-switcher.json")"
 xdotool keyup Alt_L
-[ "$items" = 3 ] || fail G-SWITCHER "switcher shows $items windows, not 3"
+[ "$items" = 3 ] || fail G-SWITCHER "switcher shows $items apps, not 3"
 case "$picked" in
     *": "*) ;;
     *) fail G-SWITCHER "no highlighted window in the switcher" ;;
@@ -451,7 +452,7 @@ title="${picked#*: }"
 want="roost-test-$(echo "$title" | tr '[:upper:]' '[:lower:]')"
 cstate ".focused_app_id == \"$want\"" "switched" ||
     fail G-SWITCHER "releasing Alt did not focus '$title'"
-pass G-SWITCHER "Alt+Tab shows every window and focuses the highlighted one"
+pass G-SWITCHER "Alt+Tab shows every app and focuses the highlighted one"
 scrot "$ARTIFACTS/08-dragged.png" >/dev/null
 
 # Overview shell surfaces (#54, #57): search entry, dash, app grid.

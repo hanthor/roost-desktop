@@ -46,6 +46,7 @@ scripts/lib/roost-parity-compare.py target/gnome-reference target/roost-parity t
 | 04-overview-empty | the overview with no windows |
 | 05-app-grid | the app grid |
 | 06-windows | three windows on the desktop |
+| 06b-switcher | Alt+Tab |
 | 07-overview-windows | the overview with three windows |
 | 07b-overview-hover | a window preview hovered (caption and close button) |
 | 08-notification | a notification banner |
