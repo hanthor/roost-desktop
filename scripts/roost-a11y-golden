@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Golden accessibility trees for the GTK shell (#71).
+
+Usage:
+  scripts/roost-a11y-golden check ARTIFACTS   compare dumps with tests/a11y/
+  scripts/roost-a11y-golden update ARTIFACTS  rewrite tests/a11y/ from dumps
+
+Each golden is the shell's showing, named accessible nodes at one proof
+stage, one "role: name" line each, in tree order. Plain labels are left
+out: they repeat their control's name or carry live values (the clock,
+calendar days). What remains is what a screen-reader user can reach and
+press, so dropping or renaming a control fails the check.
+"""
+import json
+import os
+import sys
+
+STAGES = {
+    "panel": "a11y-panel.json",
+    "calendar": "a11y-calendar.json",
+    "quick-settings": "a11y-qs.json",
+    "overview": "a11y-overview.json",
+}
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+GOLDEN = os.path.join(ROOT, "tests", "a11y")
+
+
+def normalize(path):
+    with open(path, encoding="utf-8") as fh:
+        nodes = json.load(fh)
+    return [f"{n['role']}: {n['name']}" for n in nodes
+            if n.get("showing") and n.get("name") and n.get("role") != "label"]
+
+
+def main():
+    if len(sys.argv) != 3 or sys.argv[1] not in ("check", "update"):
+        print(__doc__, file=sys.stderr)
+        return 2
+    mode, artifacts = sys.argv[1], sys.argv[2]
+    failed = False
+    for stage, dump in STAGES.items():
+        got = normalize(os.path.join(artifacts, dump))
+        golden = os.path.join(GOLDEN, f"{stage}.txt")
+        if mode == "update":
+            with open(golden, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(got) + "\n")
+            print(f"roost-a11y-golden: wrote {golden}")
+            continue
+        with open(golden, encoding="utf-8") as fh:
+            want = fh.read().splitlines()
+        if got != want:
+            failed = True
+            print(f"roost-a11y-golden: {stage} differs from tests/a11y/{stage}.txt", file=sys.stderr)
+            for line in want:
+                if line not in got:
+                    print(f"  missing: {line}", file=sys.stderr)
+            for line in got:
+                if line not in want:
+                    print(f"  new:     {line}", file=sys.stderr)
+            if sorted(got) == sorted(want):
+                print("  (same nodes, different order)", file=sys.stderr)
+    if failed:
+        print("roost-a11y-golden: run 'scripts/roost-a11y-golden update DIR' if the change is intended",
+              file=sys.stderr)
+        return 1
+    if mode == "check":
+        print(f"roost-a11y-golden: {len(STAGES)} trees match")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
