@@ -511,6 +511,7 @@ impl Runtime {
                     let global = out.output.create_global::<State>(&dh);
                     let (lw, lh) = out.logical_size();
                     state.add_output(&out.name, Some(out.output.clone()), lw, lh);
+                    state.set_output_location(&out.name, out.loc);
                     state.note_output_global(&out.name, global);
                 }
                 let handle = event_loop.handle();
@@ -1300,6 +1301,7 @@ impl Runtime {
                         .finish()
                         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
                 }
+                send_surface_scales(&self.state, &self.manager);
                 send_frame_callbacks(&self.state, &self.manager, self.stats.frames);
                 backend
                     .submit(Some(&[damage]))
@@ -1403,6 +1405,7 @@ impl Runtime {
                     out.pending = true;
                     queued = true;
                 }
+                send_surface_scales(&self.state, &self.manager);
                 send_frame_callbacks(&self.state, &self.manager, self.stats.frames);
                 if queued {
                     self.stats.frames += 1;
@@ -1662,6 +1665,43 @@ fn draw_scene(
 /// Frame callbacks for every client surface. Provisional pacing: always
 /// send (zero throttle) with the primary output as scan-out; per-output
 /// callbacks arrive with damage tracking.
+/// Tell every window and layer surface the scale of the output it is on
+/// (preferred buffer scale and fractional scale), so on mixed-DPI setups
+/// each renders sharp for its own monitor. Smithay only sends changes.
+/// niri's `send_scale_transform` shape (#59).
+fn send_surface_scales(state: &State, manager: &WindowManager) {
+    use smithay::wayland::compositor::{
+        send_surface_state, with_surface_tree_downward, TraversalAction,
+    };
+    use smithay::wayland::fractional_scale::with_fractional_scale;
+    let send = |surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+                scale: smithay::output::Scale| {
+        with_surface_tree_downward(
+            surface,
+            (),
+            |_, _, _| TraversalAction::DoChildren(()),
+            |surface, data, _| {
+                send_surface_state(surface, data, scale.integer_scale(), Transform::Normal);
+                with_fractional_scale(data, |fractional| {
+                    fractional.set_preferred_scale(scale.fractional_scale());
+                });
+            },
+            |_, _, _| true,
+        );
+    };
+    for (window, geometry) in manager.visible_windows() {
+        if let Some(surface) = window.wl_surface() {
+            send(&surface, state.scale_for(geometry));
+        }
+    }
+    for (surface, (x, y), _) in crate::layer::layer_layout(state) {
+        send(
+            &surface,
+            state.scale_for(Rectangle::new((x, y).into(), (1, 1).into())),
+        );
+    }
+}
+
 fn send_frame_callbacks(state: &State, manager: &WindowManager, frames: u64) {
     let time = Duration::from_millis(frames.saturating_mul(16));
     let Some(output) = state.primary_output() else {
