@@ -241,3 +241,98 @@ mod search_tests {
         assert_eq!(rank_apps(&apps, "app", 6).len(), 6);
     }
 }
+
+/// power-profiles-daemon's neutral profile.
+pub const BALANCED: &str = "balanced";
+
+/// GNOME 51's Power Mode tile is checked whenever the profile is not
+/// balanced.
+pub fn power_mode_checked(profile: &str) -> bool {
+    profile != BALANCED
+}
+
+/// Profile a Power Mode tile click switches to: back to balanced when
+/// checked, else to power saver (GNOME's quick toggle shape).
+pub fn power_mode_after_click(profile: &str) -> &'static str {
+    if power_mode_checked(profile) {
+        BALANCED
+    } else {
+        "power-saver"
+    }
+}
+
+/// Tile subtitle for a power profile, in GNOME's words.
+pub fn power_mode_label(profile: &str) -> &'static str {
+    match profile {
+        "power-saver" => "Power Saver",
+        "performance" => "Performance",
+        _ => "Balanced",
+    }
+}
+
+/// Parse `wpctl get-volume` output (`Volume: 0.40 [MUTED]`) into a
+/// 0..=100 percentage and the mute flag. `None` on anything else.
+pub fn parse_wpctl_volume(out: &str) -> Option<(f64, bool)> {
+    let rest = out.trim().strip_prefix("Volume:")?.trim();
+    let value: f64 = rest.split_whitespace().next()?.parse().ok()?;
+    Some(((value * 100.0).clamp(0.0, 150.0), rest.contains("[MUTED]")))
+}
+
+/// `wpctl set-volume` argument for a 0..=100 slider value.
+pub fn wpctl_volume_arg(percent: f64) -> String {
+    format!("{:.2}", percent.clamp(0.0, 100.0) / 100.0)
+}
+
+/// Slider percentage for a backlight reading.
+pub fn brightness_percent(value: u32, max: u32) -> f64 {
+    if max == 0 {
+        return 0.0;
+    }
+    (value as f64 * 100.0 / max as f64).clamp(0.0, 100.0)
+}
+
+/// Backlight value for a slider percentage. Never zero: a black
+/// screen is not a brightness level (GNOME keeps a floor too).
+pub fn brightness_value(percent: f64, max: u32) -> u32 {
+    let raw = (percent.clamp(0.0, 100.0) * max as f64 / 100.0).round() as u32;
+    raw.clamp(1.min(max), max)
+}
+
+#[cfg(test)]
+mod service_tests {
+    use super::*;
+
+    #[test]
+    fn power_mode_follows_gnome_51() {
+        assert!(!power_mode_checked("balanced"));
+        assert!(power_mode_checked("power-saver"));
+        assert!(power_mode_checked("performance"));
+        assert_eq!(power_mode_after_click("balanced"), "power-saver");
+        assert_eq!(power_mode_after_click("power-saver"), "balanced");
+        assert_eq!(power_mode_after_click("performance"), "balanced");
+        assert_eq!(power_mode_label("power-saver"), "Power Saver");
+        assert_eq!(power_mode_label("unknown"), "Balanced");
+    }
+
+    #[test]
+    fn wpctl_volume_parses_level_and_mute() {
+        assert_eq!(parse_wpctl_volume("Volume: 0.40\n"), Some((40.0, false)));
+        assert_eq!(
+            parse_wpctl_volume("Volume: 1.00 [MUTED]"),
+            Some((100.0, true))
+        );
+        assert_eq!(parse_wpctl_volume("Error: no default sink"), None);
+        assert_eq!(wpctl_volume_arg(40.0), "0.40");
+        assert_eq!(wpctl_volume_arg(250.0), "1.00");
+    }
+
+    #[test]
+    fn brightness_round_trips_and_never_goes_black() {
+        assert_eq!(brightness_percent(512, 1024), 50.0);
+        assert_eq!(brightness_percent(5, 0), 0.0);
+        assert_eq!(brightness_value(50.0, 1024), 512);
+        assert_eq!(brightness_value(0.0, 1024), 1);
+        assert_eq!(brightness_value(100.0, 1024), 1024);
+        assert_eq!(brightness_value(30.0, 0), 0);
+    }
+}

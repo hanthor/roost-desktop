@@ -207,6 +207,9 @@ impl XdgShellHandler for State {
     fn grab(&mut self, surface: PopupSurface, _seat: wl_seat::WlSeat, serial: Serial) {
         let target = surface.wl_surface().clone();
         self.popup_grab.push(surface);
+        // A new grab supersedes a pending hand-back from a popup that
+        // closed earlier in the same tick (menu to menu on the panel).
+        self.popup_refocus = false;
         if let Some(keyboard) = self.seat.get_keyboard() {
             keyboard.set_focus(self, Some(target), serial);
         }
