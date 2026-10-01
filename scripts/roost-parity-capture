@@ -1,0 +1,149 @@
+#!/bin/sh
+# Capture Roost in the states scripts/roost-gnome-reference captures GNOME
+# 51 in, at the same size and with the same service stubs.
+#
+# Usage: roost-parity-capture [--out DIR]
+#
+# Runs the nested compositor and GTK shell on a private Xvfb and buses,
+# then writes DIR/<state>.png for: 01-desktop, 02-calendar,
+# 03-quick-settings, 04-overview-empty, 05-app-grid, 06-windows,
+# 07-overview-windows, 08-notification, 09-calendar-with-notification.
+# Run scripts/roost-gnome-reference first: it exports GNOME's wallpapers.
+# Compare with scripts/lib/roost-parity-compare.py.
+set -eu
+if [ -z "${ROOST_PARITY_PRIVATE_BUS:-}" ]; then
+    ROOST_PARITY_PRIVATE_BUS=1 exec dbus-run-session -- "$0" "$@"
+fi
+ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+OUT="$ROOT/target/roost-parity"
+WIDTH=1280
+HEIGHT=800
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --out) OUT="$2"; shift 2 ;;
+        --help|-h) sed -n '2,11p' "$0"; exit 0 ;;
+        *) echo "roost-parity-capture: unknown argument $1" >&2; exit 1 ;;
+    esac
+done
+mkdir -p "$OUT"
+OUT="$(cd "$OUT" && pwd)"
+WORK="$(mktemp -d)"
+PY=/usr/bin/python3
+[ -x "$PY" ] || PY=python3
+PIDS=""
+cleanup() {
+    # shellcheck disable=SC2086
+    [ -n "$PIDS" ] && kill $PIDS 2>/dev/null || true
+    rm -rf "$WORK"
+}
+trap cleanup EXIT INT TERM
+
+DISPLAY=":97"
+export DISPLAY
+Xvfb "$DISPLAY" -screen 0 "${WIDTH}x${HEIGHT}x24" >"$WORK/xvfb.log" 2>&1 &
+PIDS="$PIDS $!"
+for _ in $(seq 1 30); do xdotool getdisplaygeometry >/dev/null 2>&1 && break; sleep 0.5; done
+if [ -x /usr/libexec/at-spi-bus-launcher ]; then
+    /usr/libexec/at-spi-bus-launcher --launch-immediately >"$WORK/atspi.log" 2>&1 &
+    PIDS="$PIDS $!"
+fi
+GSETTINGS_BACKEND=keyfile
+XDG_CONFIG_HOME="$WORK/config"
+XDG_STATE_HOME="$WORK/state"
+XDG_DATA_HOME="$WORK/data"
+export GSETTINGS_BACKEND XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME
+mkdir -p "$WORK/backlight/roost-bl" "$WORK/bin"
+echo 1000 >"$WORK/backlight/roost-bl/max_brightness"
+echo 500 >"$WORK/backlight/roost-bl/brightness"
+ROOST_BACKLIGHT_ROOT="$WORK/backlight"
+export ROOST_BACKLIGHT_ROOT
+cat >"$WORK/bin/wpctl" <<'WPCTL'
+#!/bin/sh
+[ "$1" = get-volume ] && echo "Volume: 0.80"
+exit 0
+WPCTL
+chmod +x "$WORK/bin/wpctl"
+PATH="$WORK/bin:$PATH"
+export PATH
+SYSBUS_INFO="$(dbus-daemon --session --fork --print-address=1 --print-pid=1)"
+DBUS_SYSTEM_BUS_ADDRESS="$(echo "$SYSBUS_INFO" | sed -n 1p)"
+PIDS="$PIDS $(echo "$SYSBUS_INFO" | sed -n 2p)"
+export DBUS_SYSTEM_BUS_ADDRESS
+"$PY" "$ROOT/scripts/lib/roost-service-stubs.py" "$WORK/backlight/roost-bl" >"$WORK/stubs.log" 2>&1 &
+PIDS="$PIDS $!"
+for _ in $(seq 1 20); do grep -q ready "$WORK/stubs.log" 2>/dev/null && break; sleep 0.5; done
+
+# GNOME 51's defaults: the reference run exports its wallpapers.
+REF="$ROOT/target/gnome-reference"
+gsettings set org.gnome.desktop.background primary-color '#023c88'
+gsettings set org.gnome.desktop.background picture-options zoom
+for variant in l d; do
+    key=picture-uri
+    [ "$variant" = d ] && key=picture-uri-dark
+    if [ -f "$REF/adwaita-$variant.jxl" ]; then
+        gsettings set org.gnome.desktop.background "$key" "file://$REF/adwaita-$variant.jxl"
+    else
+        gsettings set org.gnome.desktop.background "$key" ''
+    fi
+done
+
+cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk
+LOG="$OUT/nested.log"
+"$ROOT/target/debug/roost-compositor" --backend winit --socket "roost-parity-$$" \
+    --shell-bin "$ROOT/target/debug/roost-shell-gtk" >"$LOG" 2>&1 &
+PIDS="$PIDS $!"
+WID=""
+for _ in $(seq 1 60); do
+    WID="$(xdotool search --name Smithay 2>/dev/null | head -1 || true)"
+    [ -n "$WID" ] && break
+    sleep 1
+done
+[ -n "$WID" ] || { echo "roost-parity-capture: no nested window" >&2; exit 1; }
+xdotool windowfocus --sync "$WID"
+xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$WORK/a11y.json" 60 >/dev/null ||
+    { echo "roost-parity-capture: shell never came up" >&2; exit 1; }
+SOCKET_NAME="$(sed -n 's/.*nested session on \([^ ]*\) .*/\1/p' "$LOG" | head -1)"
+
+shot() { sleep "${2:-1.5}"; scrot -o "$OUT/$1.png" >/dev/null; echo "roost-parity-capture: $1"; }
+press() { "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$WORK/press.json" 20 --press "$1" >/dev/null; }
+park() { xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2)); }
+
+shot 01-desktop 6
+xdotool mousemove --window "$WID" $((WIDTH / 2)) 16 click 1
+park
+shot 02-calendar
+xdotool key Escape
+xdotool mousemove --window "$WID" $((WIDTH - 30)) 16 click 1
+park
+shot 03-quick-settings
+xdotool key Escape
+sleep 1
+xdotool key Super_L
+shot 04-overview-empty
+press "Show Apps"
+shot 05-app-grid
+xdotool key Escape
+sleep 0.5
+xdotool key Escape
+sleep 1
+for name in Alpha Beta Gamma; do
+    WAYLAND_DISPLAY="$SOCKET_NAME" "$PY" "$ROOT/scripts/lib/roost-test-window.py" "$name" \
+        >"$WORK/window-$name.log" 2>&1 &
+    PIDS="$PIDS $!"
+done
+shot 06-windows 4
+xdotool key Super_L
+shot 07-overview-windows
+xdotool key Escape
+sleep 1
+gdbus call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications \
+    --method org.freedesktop.Notifications.Notify -- "System" 0 "emblem-system-symbolic" \
+    "Roost reference" "A notification banner, as GNOME 51 draws it" "[]" "{}" 5000 >/dev/null
+shot 08-notification 1
+sleep 6
+xdotool mousemove --window "$WID" $((WIDTH / 2)) 16 click 1
+park
+shot 09-calendar-with-notification
+xdotool key Escape
+echo "roost-parity-capture: frames in $OUT"

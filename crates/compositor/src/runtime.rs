@@ -1296,6 +1296,15 @@ impl Runtime {
         Some((w, h, bytes))
     }
 
+    /// The desktop clear: GNOME's `primary-color` once the shell has
+    /// published it, else a dark neutral.
+    fn desktop_color(&self) -> Color32F {
+        match self.wallpaper.color() {
+            Some([r, g, b]) => Color32F::new(r, g, b, 1.0),
+            None => Color32F::new(0.08, 0.09, 0.11, 1.0),
+        }
+    }
+
     /// Render one output's current scene (the primary, or `connector`)
     /// offscreen and read it back in `fourcc` byte order (Abgr8888 is
     /// RGBA in memory, Xrgb8888 is BGRx). Never while locked.
@@ -1316,7 +1325,7 @@ impl Runtime {
         let background = if overview.is_some() {
             OVERVIEW_BACKGROUND
         } else {
-            Color32F::new(0.08, 0.09, 0.11, 1.0)
+            self.desktop_color()
         };
         let (renderer, size, view) = match &mut self.backend {
             Backend::Winit(backend) => {
@@ -1735,7 +1744,7 @@ impl Runtime {
         } else if overlay_visible {
             Color32F::new(0.20, 0.08, 0.10, 1.0)
         } else {
-            Color32F::new(0.08, 0.09, 0.11, 1.0)
+            self.desktop_color()
         };
         let overview = (show_content && !overlay_visible && self.control.overview_open())
             .then(|| self.overview_layout());

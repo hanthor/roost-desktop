@@ -621,6 +621,47 @@ fn build(app: &adw::Application) {
     );
     let switcher_ui = switcher::SwitcherUi::new(app.upcast_ref(), apps);
 
+    // GNOME's background settings: the picture (the dark variant under
+    // the dark style, as GNOME picks it) and primary-color, published to
+    // the compositor's wallpaper drop file now and on every change.
+    {
+        let background = settings("org.gnome.desktop.background");
+        let interface = settings(INTERFACE_SCHEMA);
+        let publish: Rc<dyn Fn()> = {
+            let (background, interface) = (background.clone(), interface.clone());
+            Rc::new(move || {
+                let Some(bg) = background.as_ref() else {
+                    return;
+                };
+                let dark = interface
+                    .as_ref()
+                    .is_some_and(|i| i.string("color-scheme") == "prefer-dark");
+                let text = logic::wallpaper_drop(
+                    &bg.string("picture-uri"),
+                    &bg.string("picture-uri-dark"),
+                    dark,
+                    &bg.string("picture-options"),
+                    &bg.string("primary-color"),
+                );
+                let dir = std::env::var_os("XDG_RUNTIME_DIR")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(std::env::temp_dir);
+                let path = dir.join("roost-wallpaper");
+                let tmp = dir.join(".roost-wallpaper.tmp");
+                if std::fs::write(&tmp, text).is_ok() {
+                    let _ = std::fs::rename(&tmp, &path);
+                }
+            })
+        };
+        publish();
+        for s in [background, interface].into_iter().flatten() {
+            let publish = publish.clone();
+            // `publish` holds both settings objects, so they live as long
+            // as this handler does.
+            s.connect_changed(None, move |_, _| publish());
+        }
+    }
+
     // GNOME's input settings (#60): keymap, repeat, touchpad, mouse and
     // hot corner, sent now and on every change.
     {
