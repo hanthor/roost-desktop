@@ -189,13 +189,21 @@ scrot "$ARTIFACTS/01-float.png" >/dev/null
 echo "roost-scroll-proof: shot 01-float.png"
 
 # Whole-session toggle into the strip.
+# Deterministic wait (docs/development.md timing rule): a busy runner
+# with Chromium starting can take well over a fixed sleep to apply it.
+xdotool windowfocus --sync "$WID"
 xdotool key Super_L+Shift+t
-sleep 3
+for _ in $(seq 1 40); do
+    grep -q "session mode now scroll" "$LOG" && break
+    sleep 0.5
+done
 if ! grep -q "session mode now scroll" "$LOG"; then
     echo "roost-scroll-proof: no scroll mode line in nested log" >&2
     tail -30 "$LOG" >&2 || true
     exit 1
 fi
+# Clients still have to ack the column configures and redraw.
+sleep 3
 scrot "$ARTIFACTS/02-strip.png" >/dev/null
 echo "roost-scroll-proof: shot 02-strip.png"
 

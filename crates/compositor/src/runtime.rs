@@ -33,7 +33,7 @@ use smithay::{
     desktop::utils::send_frames_surface_tree,
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::wayland_server::Display,
-    utils::{Rectangle, Transform},
+    utils::{Logical, Point, Rectangle, Transform},
     wayland::{seat::WaylandFocus, socket::ListeningSocketSource},
 };
 
@@ -910,38 +910,38 @@ fn scene_elements(
     if !show_content {
         return Vec::new();
     }
-    let mut elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = manager
-        .visible_windows()
-        .iter()
-        .flat_map(|(window, geometry)| {
-            // Unassociated X11 windows contribute no surface yet and
-            // render nothing this frame.
-            window
-                .wl_surface()
-                .map(|surface| {
-                    render_elements_from_surface_tree(
-                        renderer,
-                        &surface,
-                        (geometry.loc.x - offset.0, geometry.loc.y - offset.1),
-                        1.0,
-                        1.0,
-                        Kind::Unspecified,
-                    )
-                })
-                .into_iter()
-                .flatten()
-        })
-        .collect();
-    // Layer shell above windows: panel strip, then overview.
-    for (surface, (x, y), _) in crate::layer::layer_layout(state) {
+    let mut elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
+    let tree = |renderer: &mut GlesRenderer,
+                elements: &mut Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
+                surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+                at: Point<i32, Logical>| {
         elements.extend(render_elements_from_surface_tree(
             renderer,
-            &surface,
-            (x - offset.0, y - offset.1),
+            surface,
+            (at.x - offset.0, at.y - offset.1),
             1.0,
             1.0,
             Kind::Unspecified,
         ));
+    };
+    for (window, geometry) in manager.visible_windows() {
+        // Unassociated X11 windows contribute no surface yet and
+        // render nothing this frame.
+        if let Some(surface) = window.wl_surface() {
+            tree(renderer, &mut elements, &surface, geometry.loc);
+            // Popups (#88) right above their window.
+            for popup in crate::popup::placed_popups(&surface, geometry.loc, true) {
+                tree(renderer, &mut elements, &popup.surface, popup.origin);
+            }
+        }
+    }
+    // Layer shell above windows: panel strip, then overview, each with
+    // its popups (toolkit popovers hang off layer surfaces).
+    for (surface, (x, y), _) in crate::layer::layer_layout(state) {
+        tree(renderer, &mut elements, &surface, (x, y).into());
+        for popup in crate::popup::placed_popups(&surface, (x, y).into(), false) {
+            tree(renderer, &mut elements, &popup.surface, popup.origin);
+        }
     }
     // `elements` accumulates bottom-to-top (windows, then
     // background-to-overlay layers); Smithay 0.7 draws the first
@@ -993,6 +993,28 @@ fn send_frame_callbacks(state: &State, manager: &WindowManager, frames: u64) {
         send_frames_surface_tree(&surface, &output, time, Some(Duration::ZERO), |_, _| {
             Some(output.clone())
         });
+    }
+    // Popups commit on frame callbacks like any surface (#88).
+    let parents = state
+        .toplevels()
+        .iter()
+        .map(|t| t.wl_surface().clone())
+        .chain(
+            crate::layer::layer_layout(state)
+                .into_iter()
+                .map(|(s, _, _)| s),
+        )
+        .collect::<Vec<_>>();
+    for parent in parents {
+        for (popup, _) in smithay::desktop::PopupManager::popups_for_surface(&parent) {
+            send_frames_surface_tree(
+                popup.wl_surface(),
+                &output,
+                time,
+                Some(Duration::ZERO),
+                |_, _| Some(output.clone()),
+            );
+        }
     }
     // X11 windows are not xdg toplevels, so the loop above never
     // reaches them; Xwayland waits on these callbacks before

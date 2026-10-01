@@ -119,6 +119,9 @@ pub enum SessionMode {
 /// it needs from `state`, so input delivery, focus, and configure
 /// round-trips share one call path for live events and tests.
 pub struct WindowManager {
+    /// Button whose press dismissed a popup grab: its release is
+    /// swallowed too, so the window beneath never sees half a click.
+    swallowed_button: Option<u32>,
     model: StateModel,
     windows: HashMap<u64, ManagedWindow>,
     surface_index: HashMap<WlSurface, u64>,
@@ -185,6 +188,7 @@ impl WindowManager {
             keyboard,
             pointer,
             pointer_pos: (0.0, 0.0).into(),
+            swallowed_button: None,
             mode: SessionMode::Gnome,
             strip_offset: 0.0,
             super_held: false,
@@ -265,6 +269,13 @@ impl WindowManager {
     /// Called once per loop tick after client dispatch, and directly
     /// by tests.
     pub fn reconcile(&mut self, state: &mut State) {
+        // Popups (#88): drop dead trees, and once the last grabbed popup
+        // is gone hand keyboard focus back to the focused window.
+        state.popups.cleanup();
+        if state.take_popup_refocus() {
+            let focused = self.model.focused();
+            self.apply_focus(state, focused);
+        }
         let live: Vec<ToplevelSurface> = state.toplevels();
         let mut seen = Vec::with_capacity(live.len());
         for surface in &live {
@@ -779,6 +790,32 @@ impl WindowManager {
         surface.send_configure();
     }
 
+    /// Every visible popup placed in the global space, bottom to top:
+    /// window popups in stacking order, then layer-surface popups (the
+    /// layers they hang off paint above windows).
+    pub fn placed_popups(&self, state: &State) -> Vec<crate::popup::PlacedPopup> {
+        let mut out = Vec::new();
+        for (window, geometry) in self.visible_windows() {
+            if let Some(surface) = window.wl_surface() {
+                out.extend(crate::popup::placed_popups(&surface, geometry.loc, true));
+            }
+        }
+        for (surface, (x, y), _) in crate::layer::layer_layout(state) {
+            out.extend(crate::popup::placed_popups(&surface, (x, y).into(), false));
+        }
+        out
+    }
+
+    /// Topmost popup containing `pos`, if any (#88).
+    pub fn popup_at(
+        &self,
+        state: &State,
+        pos: Point<f64, Logical>,
+    ) -> Option<crate::popup::PlacedPopup> {
+        let placed = self.placed_popups(state);
+        crate::popup::popup_at(&placed, pos).cloned()
+    }
+
     /// Topmost window containing `pos`, if any. Only the active
     /// workspace is hit-testable; hidden workspaces never take focus.
     pub fn window_at(&self, pos: Point<f64, Logical>) -> Option<u64> {
@@ -801,6 +838,21 @@ impl WindowManager {
     /// win the hit test first; without this the panel never sees motion.
     pub fn pointer_motion(&mut self, state: &mut State, pos: Point<f64, Logical>, time: u32) {
         self.pointer_pos = pos;
+        // Popups paint over everything they hang off: they win first.
+        if let Some(popup) = self.popup_at(state, pos) {
+            if let Some(pointer) = self.pointer.clone() {
+                pointer.motion(
+                    state,
+                    Some((popup.surface, popup.origin.to_f64())),
+                    &MotionEvent {
+                        location: pos,
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time,
+                    },
+                );
+            }
+            return;
+        }
         if let Some((surface, (ox, oy))) =
             crate::layer::topmost_layer_at(state, pos.x as i32, pos.y as i32)
         {
@@ -853,7 +905,18 @@ impl WindowManager {
     /// overview park owns it) so panel menus and banners take keys; the
     /// button itself follows pointer focus from the last motion.
     pub fn pointer_button(&mut self, state: &mut State, button: u32, pressed: bool, time: u32) {
-        if pressed {
+        let on_popup = self.popup_at(state, self.pointer_pos).is_some();
+        // A press outside a grabbed menu dismisses it and is consumed,
+        // as under Mutter: the click does not reach what is beneath.
+        if pressed && !on_popup && state.dismiss_popup_grab() {
+            self.swallowed_button = Some(button);
+            return;
+        }
+        if !pressed && self.swallowed_button == Some(button) {
+            self.swallowed_button = None;
+            return;
+        }
+        if pressed && !on_popup {
             let pos = self.pointer_pos;
             if let Some((surface, _)) =
                 crate::layer::topmost_layer_at(state, pos.x as i32, pos.y as i32)

@@ -52,6 +52,7 @@ pub mod drm;
 pub mod layer;
 pub mod lock;
 pub mod overlay;
+pub mod popup;
 pub mod runtime;
 pub mod state;
 pub mod supervise;
@@ -104,6 +105,14 @@ pub struct State {
     /// Middle-click primary selection beside the clipboard.
     primary_selection_state: PrimarySelectionState,
     pub(crate) panel_surfaces: Vec<layer::PanelSurface>,
+    /// Popup trees per parent surface (#88).
+    pub(crate) popups: smithay::desktop::PopupManager,
+    /// Popups holding an explicit grab, oldest first: an outside click
+    /// dismisses all of them; keyboard focus sits on the newest.
+    pub(crate) popup_grab: Vec<PopupSurface>,
+    /// Set when the last grabbed popup went away, so the manager hands
+    /// keyboard focus back to the focused window on its next reconcile.
+    pub(crate) popup_refocus: bool,
     /// Output inventory: one entry per connected output, fed by the
     /// standard global add/remove flow. Empty until the runtime (or a
     /// test) registers the first entry; readers fall back to zero
@@ -165,16 +174,49 @@ impl XdgShellHandler for State {
 
     fn new_toplevel(&mut self, _surface: ToplevelSurface) {}
 
-    fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {}
+    /// Track the popup and place it where its positioner asks; the
+    /// initial configure goes out on its first commit.
+    fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+        surface.with_pending_state(|state| {
+            state.geometry = positioner.get_geometry();
+            state.positioner = positioner;
+        });
+        let _ = self
+            .popups
+            .track_popup(smithay::desktop::PopupKind::Xdg(surface));
+    }
 
-    fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
+    /// Explicit grab (menus): keyboard focus moves to the popup and an
+    /// outside click dismisses the whole grabbed chain.
+    fn grab(&mut self, surface: PopupSurface, _seat: wl_seat::WlSeat, serial: Serial) {
+        let target = surface.wl_surface().clone();
+        self.popup_grab.push(surface);
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            keyboard.set_focus(self, Some(target), serial);
+        }
+    }
 
     fn reposition_request(
         &mut self,
-        _surface: PopupSurface,
-        _positioner: PositionerState,
-        _token: u32,
+        surface: PopupSurface,
+        positioner: PositionerState,
+        token: u32,
     ) {
+        surface.with_pending_state(|state| {
+            state.geometry = positioner.get_geometry();
+            state.positioner = positioner;
+        });
+        surface.send_repositioned(token);
+        let _ = surface.send_configure();
+    }
+
+    fn popup_destroyed(&mut self, surface: PopupSurface) {
+        let before = self.popup_grab.len();
+        self.popup_grab
+            .retain(|p| p.wl_surface() != surface.wl_surface());
+        if before > 0 && self.popup_grab.is_empty() {
+            self.popup_refocus = true;
+        }
     }
 
     /// Queue a client maximize request for the manager drain. The
@@ -245,6 +287,12 @@ impl CompositorHandler for State {
 
     fn commit(&mut self, surface: &wl_surface::WlSurface) {
         on_commit_buffer_handler::<State>(surface);
+        self.popups.commit(surface);
+        if let Some(smithay::desktop::PopupKind::Xdg(popup)) = self.popups.find_popup(surface) {
+            if !popup.is_initial_configure_sent() {
+                let _ = popup.send_configure();
+            }
+        }
         crate::layer::arrange_after_commit(self);
     }
 }
@@ -299,6 +347,29 @@ impl SeatHandler for State {
 pub const SEAT_NAME: &str = "roost-seat";
 
 impl State {
+    /// Dismiss every grabbed popup (outside click): `popup_done` to each,
+    /// newest first. Returns whether anything was dismissed.
+    pub(crate) fn dismiss_popup_grab(&mut self) -> bool {
+        if self.popup_grab.is_empty() {
+            return false;
+        }
+        for popup in self.popup_grab.drain(..).rev() {
+            popup.send_popup_done();
+        }
+        self.popup_refocus = true;
+        true
+    }
+
+    /// Take the "hand keyboard focus back" flag (see `popup_refocus`).
+    pub(crate) fn take_popup_refocus(&mut self) -> bool {
+        std::mem::take(&mut self.popup_refocus)
+    }
+
+    /// Whether an explicit popup grab is active.
+    pub fn popup_grab_active(&self) -> bool {
+        !self.popup_grab.is_empty()
+    }
+
     /// Seat for capability attachment and input routing.
     pub(crate) fn seat_mut(&mut self) -> &mut Seat<State> {
         &mut self.seat
@@ -375,6 +446,9 @@ impl State {
             data_device_state: DataDeviceState::new::<State>(dh),
             primary_selection_state: PrimarySelectionState::new::<State>(dh),
             panel_surfaces: Vec::new(),
+            popups: smithay::desktop::PopupManager::default(),
+            popup_grab: Vec::new(),
+            popup_refocus: false,
             outputs: Vec::new(),
             window_requests: Vec::new(),
             #[cfg(feature = "xwayland")]
