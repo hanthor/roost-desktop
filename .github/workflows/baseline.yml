@@ -1,0 +1,53 @@
+name: gnome51-baseline
+
+# Captures the GNOME 51 reference journeys from the TunaOS Marlin GNOME
+# live ISO (#64): one still + clip per stage plus a manifest pinning the
+# ISO sha256. Parity rows and visual reviews compare against this bundle.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * 1"
+  pull_request:
+    paths:
+      - scripts/roost-baseline
+      - .github/workflows/baseline.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gnome51-baseline-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  capture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -la /dev/kvm
+      - name: Free disk for the 5.7 GB ISO
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ffmpeg
+      - run: scripts/roost-baseline --out baseline-artifacts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gnome51-baseline
+          path: baseline-artifacts/
+          retention-days: 90
+      # Scheduled/dispatched runs on main refresh the pinned bundle as
+      # release assets, so ledger rows and reviews link a stable URL.
+      - if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view baseline-gnome51 >/dev/null 2>&1 || \
+            gh release create baseline-gnome51 --prerelease --title "GNOME 51 baseline bundle" \
+              --notes "Reference journeys captured from the TunaOS Marlin GNOME live ISO. See manifest.json for the exact ISO sha256."
+          gh release upload baseline-gnome51 --clobber baseline-artifacts/*.png baseline-artifacts/*.mp4 baseline-artifacts/manifest.json
