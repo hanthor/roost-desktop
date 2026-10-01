@@ -6,7 +6,8 @@
 //! stream. Roost serves both, so browsers and video calls share screens
 //! through the stock GNOME portal. Adapted from niri's
 //! `src/dbus/mutter_screen_cast.rs` and `mutter_display_config.rs`
-//! (GPL-3.0-or-later, like Roost): monitor streams only for now.
+//! (GPL-3.0-or-later, like Roost): monitor and window streams. Window
+//! ids are the ones `org.gnome.Shell.Introspect` lists (`introspect.rs`).
 //!
 //! The D-Bus side runs on its own thread; casts start and stop on the
 //! compositor's event loop (see `screencast.rs`). When a real GNOME
@@ -41,11 +42,40 @@ pub struct OutputSnapshot {
 /// The runtime keeps this current; D-Bus calls read it.
 pub type Outputs = Arc<Mutex<Vec<OutputSnapshot>>>;
 
+/// What one stream shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CastTarget {
+    /// A whole monitor, by connector name.
+    Monitor(String),
+    /// One window, by its Introspect id.
+    Window(u64),
+}
+
+/// A window as the D-Bus side describes it (Introspect, RecordWindow).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowSnapshot {
+    pub id: u64,
+    pub title: String,
+    /// Wayland app id or X11 class, as the client set it.
+    pub app_id: Option<String>,
+    /// Logical size of the window's visible geometry.
+    pub width: i32,
+    pub height: i32,
+    pub focused: bool,
+    /// On an inactive workspace.
+    pub hidden: bool,
+    /// X11 (through Xwayland) rather than native Wayland.
+    pub x11: bool,
+}
+
+/// The runtime keeps this current; Introspect and RecordWindow read it.
+pub type Windows = Arc<Mutex<Vec<WindowSnapshot>>>;
+
 /// Requests from D-Bus to the event loop.
 pub enum ToLoop {
     StartCast {
         session_id: u64,
-        connector: String,
+        target: CastTarget,
         signal: SignalEmitter<'static>,
     },
     StopCast {
@@ -285,6 +315,7 @@ fn validate(
 #[derive(Clone)]
 struct ScreenCast {
     outputs: Outputs,
+    windows: Windows,
     to_loop: calloop::channel::Sender<ToLoop>,
     next_id: Arc<AtomicU64>,
 }
@@ -296,6 +327,7 @@ type SessionStreams = Arc<Mutex<Vec<(Stream, InterfaceRef<Stream>)>>>;
 struct Session {
     id: u64,
     outputs: Outputs,
+    windows: Windows,
     to_loop: calloop::channel::Sender<ToLoop>,
     next_id: Arc<AtomicU64>,
     streams: SessionStreams,
@@ -303,8 +335,29 @@ struct Session {
 }
 
 #[derive(Clone)]
-struct Stream {
-    output: OutputSnapshot,
+enum Stream {
+    Monitor(OutputSnapshot),
+    Window(WindowSnapshot),
+}
+
+impl Stream {
+    fn target(&self) -> CastTarget {
+        match self {
+            Stream::Monitor(output) => CastTarget::Monitor(output.connector.clone()),
+            Stream::Window(window) => CastTarget::Window(window.id),
+        }
+    }
+}
+
+#[derive(Debug, DeserializeDict, Type)]
+#[zvariant(signature = "dict")]
+struct RecordWindowProperties {
+    #[zvariant(rename = "window-id")]
+    window_id: Option<u64>,
+    #[zvariant(rename = "cursor-mode")]
+    _cursor_mode: Option<u32>,
+    #[zvariant(rename = "is-recording")]
+    _is_recording: Option<bool>,
 }
 
 #[derive(Debug, DeserializeDict, Type)]
@@ -339,6 +392,7 @@ impl ScreenCast {
         let session = Session {
             id,
             outputs: self.outputs.clone(),
+            windows: self.windows.clone(),
             to_loop: self.to_loop.clone(),
             next_id: self.next_id.clone(),
             streams: Arc::new(Mutex::new(Vec::new())),
@@ -361,7 +415,7 @@ impl Session {
         for (stream, iface) in streams {
             let _ = self.to_loop.send(ToLoop::StartCast {
                 session_id: self.id,
-                connector: stream.output.connector.clone(),
+                target: stream.target(),
                 signal: iface.signal_emitter().to_owned(),
             });
         }
@@ -404,11 +458,42 @@ impl Session {
             .ok()
             .and_then(|o| o.iter().find(|o| o.connector == connector).cloned())
             .ok_or_else(|| fdo::Error::Failed("no such monitor".into()))?;
+        self.add_stream(server, Stream::Monitor(output)).await
+    }
+
+    /// GNOME's window share: the portal's picker lists windows from
+    /// `org.gnome.Shell.Introspect.GetWindows` and passes the chosen id.
+    async fn record_window(
+        &mut self,
+        #[zbus(object_server)] server: &ObjectServer,
+        properties: RecordWindowProperties,
+    ) -> fdo::Result<OwnedObjectPath> {
+        let id = properties
+            .window_id
+            .ok_or_else(|| fdo::Error::InvalidArgs("window-id is required".into()))?;
+        let window = self
+            .windows
+            .lock()
+            .ok()
+            .and_then(|w| w.iter().find(|w| w.id == id).cloned())
+            .ok_or_else(|| fdo::Error::Failed("no such window".into()))?;
+        self.add_stream(server, Stream::Window(window)).await
+    }
+
+    #[zbus(signal)]
+    async fn closed(ctxt: &SignalEmitter<'_>) -> zbus::Result<()>;
+}
+
+impl Session {
+    async fn add_stream(
+        &self,
+        server: &ObjectServer,
+        stream: Stream,
+    ) -> fdo::Result<OwnedObjectPath> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let path = format!("/org/gnome/Mutter/ScreenCast/Stream/u{id}");
         let path =
             OwnedObjectPath::try_from(path).map_err(|e| fdo::Error::Failed(e.to_string()))?;
-        let stream = Stream { output };
         server.at(&path, stream.clone()).await?;
         let iface = server.interface::<_, Stream>(&path).await?;
         if let Ok(mut streams) = self.streams.lock() {
@@ -416,9 +501,6 @@ impl Session {
         }
         Ok(path)
     }
-
-    #[zbus(signal)]
-    async fn closed(ctxt: &SignalEmitter<'_>) -> zbus::Result<()>;
 }
 
 #[interface(name = "org.gnome.Mutter.ScreenCast.Stream")]
@@ -429,13 +511,19 @@ impl Stream {
 
     #[zbus(property)]
     fn parameters(&self) -> StreamParameters {
-        let o = &self.output;
-        StreamParameters {
-            position: (o.x, o.y),
-            size: (
-                (f64::from(o.width) / o.scale).round() as i32,
-                (f64::from(o.height) / o.scale).round() as i32,
-            ),
+        match self {
+            Stream::Monitor(o) => StreamParameters {
+                position: (o.x, o.y),
+                size: (
+                    (f64::from(o.width) / o.scale).round() as i32,
+                    (f64::from(o.height) / o.scale).round() as i32,
+                ),
+            },
+            // A window has no place on a monitor layout.
+            Stream::Window(w) => StreamParameters {
+                position: (0, 0),
+                size: (w.width.max(1), w.height.max(1)),
+            },
         }
     }
 }
@@ -445,14 +533,18 @@ pub fn stream_added(signal: &SignalEmitter<'static>, node_id: u32) {
     let _ = zbus::block_on(Stream::pipe_wire_stream_added(signal, node_id));
 }
 
-/// Tell a session's client it ended (from the event loop).
-pub fn session_closed(signal: &SignalEmitter<'static>) {
-    let _ = zbus::block_on(Session::closed(signal));
+/// Tell a session's client it ended (from the event loop). `stream` is
+/// any of its streams' emitters; the signal goes out on the session.
+pub fn session_closed(stream: &SignalEmitter<'static>, session_id: u64) {
+    let path = format!("/org/gnome/Mutter/ScreenCast/Session/u{session_id}");
+    if let Ok(session) = SignalEmitter::new(stream.connection(), path) {
+        let _ = zbus::block_on(Session::closed(&session));
+    }
 }
 
 /// Serve DisplayConfig and ScreenCast on the session bus from a thread.
 /// Returns the channel the event loop reads cast requests from.
-pub fn start(outputs: Outputs) -> calloop::channel::Channel<ToLoop> {
+pub fn start(outputs: Outputs, windows: Windows) -> calloop::channel::Channel<ToLoop> {
     let (to_loop, from_dbus) = calloop::channel::channel();
     let _ = std::thread::Builder::new()
         .name("roost-mutter-dbus".into())
@@ -463,6 +555,7 @@ pub fn start(outputs: Outputs) -> calloop::channel::Channel<ToLoop> {
             };
             let screencast = ScreenCast {
                 outputs: outputs.clone(),
+                windows,
                 to_loop,
                 next_id: Arc::new(AtomicU64::new(1)),
             };

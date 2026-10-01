@@ -49,6 +49,7 @@ use smithay::{
 pub mod control;
 #[cfg(feature = "drm")]
 pub mod drm;
+pub mod introspect;
 pub mod layer;
 pub mod lock;
 pub mod monitors;

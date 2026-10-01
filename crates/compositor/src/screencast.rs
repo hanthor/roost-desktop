@@ -1,7 +1,7 @@
 //! PipeWire screen-cast streams (#61), adapted from niri's
 //! `src/screencasting/pw_utils.rs` (GPL-3.0-or-later, like Roost).
 //!
-//! First cut: monitor streams in BGRx over shared memory (PipeWire
+//! Monitor and window streams in BGRx over shared memory (PipeWire
 //! allocates and maps the memfd buffers), full frames at most every
 //! [`FRAME_INTERVAL`]. dmabuf zero-copy, damage tracking and cursor
 //! metadata, which niri also does, come later.
@@ -30,6 +30,8 @@ use pipewire::stream::{StreamFlags, StreamListener, StreamRc, StreamState};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{Interest, LoopHandle, Mode, PostAction};
 use zbus::object_server::SignalEmitter;
+
+use crate::mutter::CastTarget;
 
 /// Longest gap a client waits between frames, and the shortest we send.
 pub const FRAME_INTERVAL: Duration = Duration::from_millis(33);
@@ -74,11 +76,12 @@ impl PipeWire {
     pub fn start_cast(
         &self,
         session_id: u64,
-        connector: String,
+        target: CastTarget,
         width: i32,
         height: i32,
         signal: SignalEmitter<'static>,
     ) -> Option<Cast> {
+        let session_signal = signal.clone();
         let stream =
             StreamRc::new(self.core.clone(), "roost-screen-cast", PropertiesBox::new()).ok()?;
         let inner = Rc::new(RefCell::new(Inner::default()));
@@ -187,7 +190,9 @@ impl PipeWire {
             .ok()?;
         Some(Cast {
             session_id,
-            connector,
+            target,
+            offered: (width, height),
+            signal: session_signal,
             stream,
             _listener: listener,
             inner,
@@ -209,8 +214,12 @@ struct Inner {
 /// One running stream.
 pub struct Cast {
     pub session_id: u64,
-    /// Output this stream shows.
-    pub connector: String,
+    /// Monitor or window this stream shows.
+    pub target: CastTarget,
+    /// Size last offered to the consumer (window casts follow resizes).
+    offered: (i32, i32),
+    /// The stream's D-Bus emitter, for ending the session.
+    signal: SignalEmitter<'static>,
     stream: StreamRc,
     _listener: StreamListener<()>,
     inner: Rc<RefCell<Inner>>,
@@ -233,6 +242,25 @@ impl Cast {
             return None;
         }
         inner.size
+    }
+
+    /// Offer the consumer a new frame size (a cast window resized), the
+    /// way niri does: a fresh format; frames keep the old size until the
+    /// consumer accepts and new buffers arrive.
+    pub fn resize(&mut self, width: i32, height: i32) {
+        if self.offered == (width, height) || width <= 0 || height <= 0 {
+            return;
+        }
+        let mut buffer = Vec::new();
+        let format = make_pod(&mut buffer, video_format(width as u32, height as u32));
+        if self.stream.update_params(&mut [format]).is_ok() {
+            self.offered = (width, height);
+        }
+    }
+
+    /// Tell the consumer its session ended (the cast window closed).
+    pub fn close(&self) {
+        crate::mutter::session_closed(&self.signal, self.session_id);
     }
 
     /// Whether PipeWire reported the stream broken.

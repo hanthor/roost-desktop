@@ -21,6 +21,8 @@ const DEADLINE: Duration = Duration::from_secs(10);
 /// One request from D-Bus: where to save (empty: GNOME's default).
 pub struct Request {
     pub filename: PathBuf,
+    /// The focused window alone (`ScreenshotWindow`), not the screen.
+    pub window: bool,
     pub reply: mpsc::Sender<Option<PathBuf>>,
 }
 
@@ -38,10 +40,29 @@ impl Service {
         _flash: bool,
         filename: String,
     ) -> zbus::fdo::Result<(bool, String)> {
+        self.request(filename, false)
+    }
+
+    /// `(include_frame, include_cursor, flash, filename)`: the focused
+    /// window. Roost windows draw their own frames, so it is always in.
+    fn screenshot_window(
+        &self,
+        _include_frame: bool,
+        _include_cursor: bool,
+        _flash: bool,
+        filename: String,
+    ) -> zbus::fdo::Result<(bool, String)> {
+        self.request(filename, true)
+    }
+}
+
+impl Service {
+    fn request(&self, filename: String, window: bool) -> zbus::fdo::Result<(bool, String)> {
         let (reply, answer) = mpsc::channel();
         self.to_loop
             .send(Request {
                 filename: PathBuf::from(filename),
+                window,
                 reply,
             })
             .map_err(|_| zbus::fdo::Error::Failed("compositor gone".into()))?;

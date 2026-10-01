@@ -315,6 +315,21 @@ impl WindowManager {
             .map(|s| s.into_owned())
     }
 
+    /// Whether window `id` is an X11 window (through Xwayland).
+    pub fn is_x11(&self, id: u64) -> bool {
+        #[cfg(feature = "xwayland")]
+        {
+            self.windows
+                .get(&id)
+                .is_some_and(|w| matches!(w.surface.underlying_surface(), WindowSurface::X11(_)))
+        }
+        #[cfg(not(feature = "xwayland"))]
+        {
+            let _ = id;
+            false
+        }
+    }
+
     /// Switch to `workspace` by id, if it exists.
     pub fn switch_to_workspace(&mut self, state: &mut State, workspace: u32) -> bool {
         let list = self.model.workspaces().to_vec();
