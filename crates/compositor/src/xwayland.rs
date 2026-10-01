@@ -323,14 +323,19 @@ mod handlers {
     }
 
     /// Shared map-request handling: grant, then queue. Placement and
-    /// scene work stay in the manager's reconcile drain.
+    /// scene work stay in the manager's reconcile drain. Outcomes are
+    /// logged (id plus granted/refused) so a silent window has a trail.
     fn on_map_request(state: &mut State, window: X11Surface) {
+        let id = window.window_id();
         if window.is_override_redirect() {
+            eprintln!("roost-compositor: xwayland: map refused (override-redirect) id={id}");
             return;
         }
         if window.set_mapped(true).is_err() {
+            eprintln!("roost-compositor: xwayland: map refused (grant failed) id={id}");
             return;
         }
+        eprintln!("roost-compositor: xwayland: map granted id={id}");
         push(state, X11ManagerEvent::MapRequest(Box::new(window)));
     }
 
