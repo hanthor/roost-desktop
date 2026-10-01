@@ -1,6 +1,6 @@
 # ADR 0003: Nested supervision and recovery affordance
 
-- Status: Proposed (for plan Phase 0 review; blocks 001 Phase 3)
+- Status: Decided (implemented 001 T5; production supervision/identity stays a 004 gate)
 - Date: 2026-09-27
 - Owner: project (unassigned)
 - Dependent speks: 001 (failure recovery); 004 owns production
@@ -22,7 +22,7 @@ actions stay safe without the normal shell.
   on compositor exit. A systemd user unit is deferred to production
   work (004/006) and explicitly out of slice 1.
 - Env hygiene for nested-session safety: unique socket name
-  (e.g. `rwd-nested-<pid>`), `WAYLAND_DISPLAY` set for the child only,
+  (e.g. `roost-nested-<pid>`), `WAYLAND_DISPLAY` set for the child only,
   parent host environment never mutated; nested window carries an
   identifying title; host grab/ungrab escape key documented.
 - Recovery affordance for slice 1: compositor-owned emergency overlay
@@ -52,3 +52,10 @@ actions stay safe without the normal shell.
 
 - 001 research (plan store): sections 5–6, written 2026-09-27.
 - Architecture: recovery-and-lock section of `docs/architecture.md`.
+- 001 implementation (T5): `ShellDriver` (per-tick poll, session-only
+  env, finite budget with capped backoff, kill on exit) plus the
+  compositor-owned overlay (model-served list, relaunch, input shield)
+  wired into the nested loop; proven by the 100-run fault harness
+  (kill/disconnect/stall/crash-loop/malformed/gap) with redacted
+  per-run artifacts, and reproducible via `scripts/roost-nested`
+  (`docs/nested-session.md`).

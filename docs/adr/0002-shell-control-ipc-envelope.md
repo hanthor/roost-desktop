@@ -1,6 +1,6 @@
 # ADR 0002: Shell control IPC envelope and activation-token policy
 
-- Status: Proposed (for plan Phase 0 review; blocks 001 Phase 2)
+- Status: Decided (implemented 001 T2–T5; production credential binding stays a 004 gate)
 - Date: 2026-09-27
 - Owner: project (unassigned)
 - Dependent speks: 001 (control API + shell host); downstream 002/003
@@ -19,8 +19,8 @@ compositor-issued activation tokens behave versus Wayland serials.
 ## Decision
 
 - Transport: dedicated Unix socket (not the Wayland socket). Framed
-  protocol: u32 length prefix + postcard/bincode body (codec choice
-  deferred to plan Phase 0).
+  protocol: u32 length prefix + postcard body (codec chosen in
+  implementation; schema version 0.2 carries per-window tokens).
 - Limits: 1 MiB max frame; oversized/malformed/stale-version frames get
   a typed error and are dropped.
 - Backpressure: bounded server-side queue; a slow shell is
@@ -29,11 +29,13 @@ compositor-issued activation tokens behave versus Wayland serials.
   revision gaps trigger resnapshot.
 - fd-passing deferred (no current need; viable later via rustix
   SCM_RIGHTS, already in the smithay tree).
-- Activation tokens: compositor mints via
-  `XdgActivationState::create_external_token` with purpose/app_id
-  attached. Policy: 30 s expiry, one-use (remove after first successful
-  activation), seat binding plus `app_id` match required, log-and-deny
-  on mismatch.
+- Activation tokens: compositor mints 32-char random Bearer [REDACTED] via
+  `TokenStore` with purpose/seat/app_id attached. Policy: 30 s expiry,
+  one-use (remove after first successful activation), seat binding
+  plus `app_id` match required, log-and-deny on mismatch. Binding to
+  `XdgActivationState::create_external_token` is deferred to the 004
+  production-credential decision; the wire already carries opaque
+  token strings, so the mint can change without a schema bump.
 
 ## Alternatives considered
 
@@ -65,3 +67,8 @@ compositor-issued activation tokens behave versus Wayland serials.
   `XdgActivationHandler`); xdg-activation-v1 XML v1 in
   wayland-protocols 0.32.13.
 - 001 research (plan store): sections 3–4, written 2026-09-27.
+- 001 implementation (T2–T5): postcard framing with 1 MiB cap, typed
+  errors, nonblocking hub sessions, snapshot-on-connect plus gap
+  resnapshot, and the one-use `TokenStore` around the pure policy —
+  proven by the control suites and the 100-run fault harness with
+  replay/cross-window/seat-mismatch denials.

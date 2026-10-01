@@ -17,3 +17,4 @@ These decisions are open. Record the decision date, owner, options/evidence, con
 | Settings compatibility map and notification/service ownership | 002/004 | Open; blocks truthful integration behavior |
 | Tiling requirement for 1.0 | Release scope review | Proposed later; promote only by evidence-backed scope change |
 | Package/session upgrade rollback per distro | 006 release | Open; blocks daily-driver release |
+| Monorepo vs split-off repos | All | Decided: monorepo, preserve seams ([004](0004-no-split-preserve-seams.md)) |

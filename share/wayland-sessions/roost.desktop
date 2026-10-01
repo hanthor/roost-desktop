@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Roost
+Comment=Roost (GNOME-style shell with optional scrollable tiling)
+Exec=roost-session
+TryExec=roost-session
+Type=Application
+DesktopNames=roost
