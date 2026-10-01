@@ -45,6 +45,21 @@ if [ "$ALLOW_DIRTY" != "yes" ]; then
         echo "roost-release: working tree is dirty (use --allow-dirty for dev builds)" >&2
         exit 1
     fi
+    # Recorded human visual review (#67): a release tag needs a filled
+    # docs/reviews/<tag>.md comparing Roost frames against the GNOME 51
+    # baseline bundle.
+    RELEASE_TAG="$(git describe --tags --exact-match HEAD 2>/dev/null || true)"
+    if [ -n "$RELEASE_TAG" ]; then
+        REVIEW="docs/reviews/$RELEASE_TAG.md"
+        if [ ! -f "$REVIEW" ]; then
+            echo "roost-release: missing visual review $REVIEW (copy docs/reviews/TEMPLATE.md)" >&2
+            exit 1
+        fi
+        if grep -q 'TBD' "$REVIEW"; then
+            echo "roost-release: $REVIEW still has TBD placeholders" >&2
+            exit 1
+        fi
+    fi
 fi
 
 TAG="$(git describe --tags --exact-match HEAD 2>/dev/null || true)"

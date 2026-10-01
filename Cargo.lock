@@ -3100,6 +3100,7 @@ dependencies = [
  "rand 0.10.3",
  "roost-greeter",
  "roost-shell-control",
+ "rustix 0.38.44",
  "signal-hook",
  "smithay",
  "tempfile",

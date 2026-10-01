@@ -86,7 +86,7 @@ fn hello_accept_replies_version_and_snapshot() {
 
 #[test]
 fn control_server_accepts_over_a_bound_socket() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_tempdir();
     let path = dir.path().join("control.sock");
     let listener = UnixListener::bind(&path).unwrap();
     let server = ControlServer::new(listener).unwrap();
@@ -526,7 +526,7 @@ fn hub_handshake(hub: &mut ControlHub, model: &mut StateModel, client: &mut Unix
 
 #[test]
 fn hub_broadcasts_changed_outputs_then_stays_quiet() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_tempdir();
     let path = dir.path().join("control.sock");
     let mut hub =
         ControlHub::bind(path.clone(), std::rc::Rc::new(TokenStore::new()), SEAT_NAME).unwrap();
@@ -562,7 +562,7 @@ fn hub_broadcasts_changed_outputs_then_stays_quiet() {
 
 #[test]
 fn hub_newcomer_handshake_receives_non_empty_inventory() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_tempdir();
     let path = dir.path().join("control.sock");
     let mut hub =
         ControlHub::bind(path.clone(), std::rc::Rc::new(TokenStore::new()), SEAT_NAME).unwrap();
@@ -580,4 +580,13 @@ fn hub_newcomer_handshake_receives_non_empty_inventory() {
         panic!("newcomer must receive the inventory right after the handshake");
     };
     assert_eq!(outputs, inventory);
+}
+
+/// Temp dir with owner-only permissions: the control socket refuses to
+/// bind anywhere less private (#30).
+fn private_tempdir() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    dir
 }

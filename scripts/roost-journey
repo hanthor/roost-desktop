@@ -20,6 +20,14 @@
 # when this script started the Xvfb itself.
 set -eu
 
+# Hermetic session bus: the shell owns org.freedesktop.Notifications
+# and the StatusNotifier watcher, so on a developer machine it would
+# otherwise pick up the host's notifications and tray items. Re-exec
+# once under a private bus when one can be started.
+if [ -z "${ROOST_JOURNEY_PRIVATE_BUS:-}" ] && command -v dbus-run-session >/dev/null 2>&1; then
+    ROOST_JOURNEY_PRIVATE_BUS=1 exec dbus-run-session -- "$0" "$@"
+fi
+
 unset CDPATH
 ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
 DISPLAY_ARG=""
@@ -47,6 +55,8 @@ mkdir -p "$ARTIFACTS"
 # marker must resolve identically in the script and in spawned apps.
 ARTIFACTS="$(cd "$ARTIFACTS" && pwd)"
 LOG="$ARTIFACTS/nested.log"
+# shellcheck source=scripts/lib/roost-introspect.sh
+. "$ROOT/scripts/lib/roost-introspect.sh"
 OWNED_XVFB=""
 COMPOSITOR_PID=""
 
@@ -66,6 +76,12 @@ Type=Application
 EOF
 XDG_DATA_HOME="$PROBE_HOME"
 export XDG_DATA_HOME
+# Hermetic shell state: persisted notifications, favorites, and prefs
+# from the host account must not leak into the journey's baseline.
+XDG_STATE_HOME="$ARTIFACTS/probe-state"
+rm -rf "$XDG_STATE_HOME"
+mkdir -p "$XDG_STATE_HOME"
+export XDG_STATE_HOME
 
 cleanup() {
     if [ -n "$COMPOSITOR_PID" ] && kill -0 "$COMPOSITOR_PID" 2>/dev/null; then
@@ -166,26 +182,39 @@ xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2)) click 1
 sleep 3
 
 shot() {
+    # State assertions gate each stage; the frame is a review artifact
+    # taken after a short settle so it shows the painted state (the
+    # shell flips state a frame or two before the compositor presents).
+    sleep 1
     # Root capture, not a window shot: with no window manager there is
     # no frame to redirect, and the private Xvfb shows only our window.
     scrot "$ARTIFACTS/$1" >/dev/null
     echo "roost-journey: shot $1"
 }
 
+assert_state J-BASE '.overview.open == false and .locked == false and .notifications.banners == 0' \
+    "session idle: overview closed, unlocked, no stray banners" 30
+keep_state 01-baseline
 shot "01-baseline.png"
 
 # Lone Super tap: overview opens (tap, not hold — no chord).
 xdotool key Super_L
-sleep 2
+assert_state J-OV-OPEN '.overview.open == true' "Super opens the overview"
+keep_state 02-overview
 shot "02-overview.png"
 
 # Typing filters; Enter picks; Escape returns. The query matches
 # only the probe app, so Enter must spawn it (marker below).
 xdotool type "roostterm"
-sleep 2
+assert_state J-OV-SEARCH \
+    '.overview.query == "roostterm" and (.overview.results | length) >= 1 and (.overview.results[0].target | tostring | test("roostterm-probe"))' \
+    "typed query lists the probe app as the top hit"
+keep_state 03-search
 shot "03-search.png"
 xdotool key Return
-sleep 2
+assert_state J-OV-LAUNCH-DISMISS '.overview.open == false' \
+    "launching from search dismisses the overview"
+keep_state 04-after-enter
 shot "04-after-enter.png"
 
 # The probe's Exec touches the marker: search-to-launch worked end
@@ -206,15 +235,18 @@ if [ -z "$LAUNCHED" ]; then
     exit 1
 fi
 echo "roost-journey: probe app launched"
+echo "J-OV-LAUNCH pass probe app launched from search" >>"$ASSERTIONS"
 xdotool key Escape
-sleep 2
+assert_state J-OV-ESC '.overview.open == false' "Escape leaves the overview closed"
+keep_state 05-after-escape
 shot "05-after-escape.png"
 
 # Super+PageDown chord: switch to workspace 1. Both workspaces are
 # empty, so the shot matches baseline pixel-wise; the compositor's
 # "workspace now" log line is the signal, asserted below.
 xdotool key Super_L+Page_Down
-sleep 2
+assert_state J-WS-NEXT '.workspaces.active == 1' "Super+PageDown activates workspace 1"
+keep_state 06-workspace
 shot "06-workspace.png"
 
 # Alt+Tab chord: the compositor queues a switcher step on the Tab
@@ -266,6 +298,14 @@ for shot_file in 01-baseline 02-overview 03-search 04-after-enter 05-after-escap
         exit 1
     fi
 done
+if grep -q ' fail ' "$ASSERTIONS"; then
+    echo "roost-journey: failed state assertions:" >&2
+    grep ' fail ' "$ASSERTIONS" >&2
+    exit 1
+fi
+echo "J-SW-STEP pass Alt+Tab steps the switcher" >>"$ASSERTIONS"
+# Paint check on top of the state check: an overview that opens in
+# state but never paints is still a bug.
 if cmp -s "$ARTIFACTS/01-baseline.png" "$ARTIFACTS/02-overview.png"; then
     echo "roost-journey: overview shot identical to baseline (Super did nothing visible)" >&2
     exit 1

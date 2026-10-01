@@ -311,7 +311,7 @@ fn fixture() -> Fixture {
         .unwrap()
         .id;
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_tempdir();
     let path = dir.path().join("control.sock");
     let mut hub = ControlHub::bind(path.clone(), Rc::new(TokenStore::new()), SEAT_NAME).unwrap();
 
@@ -580,4 +580,13 @@ fn replayed_and_cross_window_tokens_are_denied() {
     }
     assert_eq!(read_result(&mut f.control, 13), CommandStatus::Applied);
     assert_eq!(f.manager.model().focused(), Some(f.id_b));
+}
+
+/// Temp dir with owner-only permissions: the control socket refuses to
+/// bind anywhere less private (#30).
+fn private_tempdir() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    dir
 }
