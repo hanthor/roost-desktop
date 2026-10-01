@@ -16,6 +16,7 @@ Design and planning only; no compositor implementation has started. The planning
 - [Research intake rules](docs/research/README.md)
 - [First spek: nested compositor and shell recovery](.spektacular/specs/20260927170317-a01f0011-001-nested-compositor-shell-recovery.md)
 - [Architecture decisions](docs/adr/README.md)
+- [Contributing](CONTRIBUTING.md)
 
 Spektacular is initialized for Codex. Specs and plans are managed through its CLI; each program unit has a spek plus draft plan, context, and research artifacts. Draft plans must be reviewed against current implementation and open decision gates before their implementation workflow starts.
 
