@@ -18,6 +18,8 @@ mod notify;
 mod overview;
 mod providers;
 mod services;
+mod switcher;
+mod tray;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -458,7 +460,11 @@ fn build(app: &adw::Application) {
     let bar = gtk::CenterBox::new();
     bar.set_start_widget(Some(&activities));
     bar.set_center_widget(Some(&clock));
-    bar.set_end_widget(Some(&system));
+    // AppIndicator items sit left of the system indicators.
+    let end = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    end.append(&tray::tray());
+    end.append(&system);
+    bar.set_end_widget(Some(&end));
     window.set_child(Some(&bar));
 
     // Clock: GNOME's panel text, refreshed every second.
@@ -494,17 +500,20 @@ fn build(app: &adw::Application) {
             pinned
         }
     };
+    let apps = Rc::new(roost_shell_host::apps::AppProvider::system());
     let overview_ui = overview::OverviewUi::new(
         app.upcast_ref(),
-        Rc::new(roost_shell_host::apps::AppProvider::system()),
+        apps.clone(),
         favorites,
         Rc::new(ShellActions(shell.clone())),
     );
+    let switcher_ui = switcher::SwitcherUi::new(app.upcast_ref(), apps);
 
     // Compositor state: drain the control socket every frame.
     {
         let shell = shell.clone();
         let overview_ui = overview_ui.clone();
+        let switcher_ui = switcher_ui.clone();
         glib::timeout_add_local(Duration::from_millis(16), move || {
             let mut shell = shell.borrow_mut();
             if let Some(control) = shell.control.as_mut() {
@@ -523,6 +532,9 @@ fn build(app: &adw::Application) {
                 }
             }
             render_pills(&mut shell);
+            if let Some(control) = shell.control.as_ref() {
+                switcher_ui.sync(control.model());
+            }
             let open = shell
                 .control
                 .as_ref()

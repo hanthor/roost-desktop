@@ -41,6 +41,10 @@
 #   G-SHELL-STABLE the shell never exits or restarts during the journey
 
 #   G-APP-DRAG  dragging an app's header bar moves the window (#58)
+#   G-TRAY      an AppIndicator item shows in the panel and its menu
+#               row reaches the item (P-TR-01)
+#   G-SWITCHER  Alt+Tab shows the switcher with every window, and
+#               releasing Alt focuses the highlighted one
 # Frames and accessibility dumps land in the artifacts dir; assertions in
 # assertions.txt for the parity ledger.
 set -eu
@@ -93,6 +97,7 @@ ObjectPath=/org/roost/ProbeSearch
 Version=2
 INI
 PROVIDER_PID=""
+TRAY_PID=""
 OWNED_XVFB=""
 COMPOSITOR_PID=""
 STUBS_PID=""
@@ -102,6 +107,7 @@ cleanup() {
     if [ -n "$OWNED_XVFB" ]; then kill "$OWNED_XVFB" 2>/dev/null || true; fi
     if [ -n "$STUBS_PID" ]; then kill "$STUBS_PID" 2>/dev/null || true; fi
     if [ -n "$PROVIDER_PID" ]; then kill "$PROVIDER_PID" 2>/dev/null || true; fi
+    if [ -n "$TRAY_PID" ]; then kill "$TRAY_PID" 2>/dev/null || true; fi
     if [ -n "$SYSBUS_PID" ]; then kill "$SYSBUS_PID" 2>/dev/null || true; fi
 }
 trap cleanup EXIT INT TERM
@@ -249,6 +255,32 @@ pass A11Y-QS "quick-settings toggles, slider, and lock exposed"
 xdotool key Escape
 sleep 1
 
+# Tray (P-TR-01): an item registers, shows, and its menu fires.
+TRAY_MARKER="$ARTIFACTS/tray-marker"
+rm -f "$TRAY_MARKER"
+"$PY" "$ROOT/scripts/lib/roost-tray-item-stub.py" "$TRAY_MARKER" >"$ARTIFACTS/tray.log" 2>&1 &
+TRAY_PID=$!
+for _ in $(seq 1 30); do grep -q registered "$ARTIFACTS/tray.log" 2>/dev/null && break; sleep 0.5; done
+for _ in $(seq 1 20); do
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-tray.json" 20 >/dev/null 2>&1
+    showing "$ARTIFACTS/a11y-tray.json" "Roost Tray Probe" && break
+    sleep 0.5
+done
+showing "$ARTIFACTS/a11y-tray.json" "Roost Tray Probe" ||
+    fail G-TRAY "the registered item never showed in the panel"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-tray-menu.json" 20 \
+    --press "Roost Tray Probe" || fail G-TRAY "could not open the item"
+scrot "$ARTIFACTS/03b-tray-menu.png" >/dev/null
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-tray-fire.json" 20 \
+    --press "Open Probe" || fail G-TRAY "the item's menu row never showed"
+end=$(($(date +%s) + 10))
+until [ -s "$TRAY_MARKER" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+grep -q "^clicked 1" "$TRAY_MARKER" 2>/dev/null || fail G-TRAY "the menu row never reached the item"
+kill "$TRAY_PID" 2>/dev/null || true
+pass G-TRAY "an AppIndicator item shows and its menu row reaches it"
+xdotool key Escape
+sleep 1
+
 # App stages: three libadwaita windows (scripts/lib/roost-test-window.py).
 cstate() {
     end=$(($(date +%s) + ${3:-20}))
@@ -320,6 +352,28 @@ xdotool mouseup 1
 cstate ".windows[] | select(.app_id == \"roost-test-beta\") | (.rect[0] - $bx) >= 75 and (.rect[0] - $bx) <= 150 and (.rect[1] - $by) >= 30 and (.rect[1] - $by) <= 60" "drag" ||
     fail G-APP-DRAG "dragging Beta's header bar did not move it by the drag distance"
 pass G-APP-DRAG "dragging an app's header bar moves the window (#58)"
+
+# Alt-Tab (P-WM-01): hold Alt, step once, read the switcher, release.
+xdotool keydown Alt_L
+xdotool key Tab
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-switcher.json" 20 ||
+    { xdotool keyup Alt_L; fail G-SWITCHER "accessibility dump failed"; }
+scrot "$ARTIFACTS/08b-switcher.png" >/dev/null
+items="$(jq '[.[] | select(.role == "list item" and .showing)] | length' "$ARTIFACTS/a11y-switcher.json")"
+picked="$(jq -r '[.[] | select(.role == "list item" and .showing and .selected)][0].name // ""' "$ARTIFACTS/a11y-switcher.json")"
+xdotool keyup Alt_L
+[ "$items" = 3 ] || fail G-SWITCHER "switcher shows $items windows, not 3"
+case "$picked" in
+    *": "*) ;;
+    *) fail G-SWITCHER "no highlighted window in the switcher" ;;
+esac
+title="${picked#*: }"
+# Test windows carry app id roost-test-<lowercased title>.
+want="roost-test-$(echo "$title" | tr '[:upper:]' '[:lower:]')"
+cstate ".focused_app_id == \"$want\"" "switched" ||
+    fail G-SWITCHER "releasing Alt did not focus '$title'"
+pass G-SWITCHER "Alt+Tab shows every window and focuses the highlighted one"
 scrot "$ARTIFACTS/08-dragged.png" >/dev/null
 
 # Overview shell surfaces (#54, #57): search entry, dash, app grid.
