@@ -300,10 +300,14 @@ impl NotifyUi {
         self.list.set_visible(any);
         self.empty.set_visible(!any);
         self.clear.set_sensitive(any);
-        if self.dnd.is_active() != now.dnd {
-            self.dnd.set_active(now.dnd);
-        }
+        // Release the store before touching the switch: its handler
+        // takes the same lock, and std's mutex is not re-entrant (with
+        // DND persisted on, this deadlocked the shell at startup).
         drop(center);
+        let dnd = now.dnd;
         *self.shown.borrow_mut() = now;
+        if self.dnd.is_active() != dnd {
+            self.dnd.set_active(dnd);
+        }
     }
 }
