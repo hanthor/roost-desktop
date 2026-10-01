@@ -14,12 +14,12 @@ use std::io;
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rwd_compositor::control::ControlHub;
-use rwd_compositor::state::{TokenStore, MAX_CHANGE_LOG};
-use rwd_compositor::windows::WindowManager;
-use rwd_compositor::{TestCompositor, SEAT_NAME};
-use rwd_shell_control::CommandStatus;
-use rwd_shell_host::control::{ControlClient, ControlError, Handled};
+use roost_compositor::control::ControlHub;
+use roost_compositor::state::{TokenStore, MAX_CHANGE_LOG};
+use roost_compositor::windows::WindowManager;
+use roost_compositor::{TestCompositor, SEAT_NAME};
+use roost_shell_control::CommandStatus;
+use roost_shell_host::control::{ControlClient, ControlError, Handled};
 
 const ROUNDS: usize = 2000;
 
@@ -50,7 +50,7 @@ fn harness(name: &str) -> Harness {
         .unwrap()
         .as_nanos();
     let socket_path = std::env::temp_dir().join(format!(
-        "rwd-live-{}-{}-{nanos}.sock",
+        "roost-live-{}-{}-{nanos}.sock",
         std::process::id(),
         name
     ));

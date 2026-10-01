@@ -137,6 +137,17 @@ fn from_crate_entry(entry: &CrateEntry) -> Option<AppEntry> {
         .parse_exec()
         .ok()?
         .into_iter()
+        .map(|arg| {
+            // The Exec parser splits on whitespace but leaves the
+            // spec's double-quote grouping in place, so a quoted
+            // argument arrives with its quotes attached. Strip one
+            // surrounding pair per argument; without this a probe like
+            // Exec=touch "<marker>" touches a quote-named file.
+            arg.strip_prefix('"')
+                .and_then(|inner| inner.strip_suffix('"'))
+                .unwrap_or(&arg)
+                .to_owned()
+        })
         .map(OsString::from)
         .collect();
     if argv.is_empty() {
@@ -168,6 +179,16 @@ fn from_crate_entry(entry: &CrateEntry) -> Option<AppEntry> {
         argv,
         icon: entry.icon().map(str::to_owned),
     })
+}
+
+/// Parse one desktop file into a launchable entry: the same
+/// launchability filter [`discover`] applies, so a stack `.desktop`
+/// file the shell cannot spawn is not a stack cell it offers.
+/// Returns `None` for unreadable, hidden, or `Exec`-less files.
+pub fn entry_from_file(path: &std::path::Path) -> Option<AppEntry> {
+    let locales: Vec<String> = LOCALES.iter().map(|s| s.to_string()).collect();
+    let entry = CrateEntry::from_path(path, Some(&locales)).ok()?;
+    from_crate_entry(&entry)
 }
 
 /// [`SearchProvider`] over discovered entries: case-insensitive
@@ -437,6 +458,30 @@ mod tests {
     }
 
     #[test]
+    fn quoted_exec_arg_survives_discovery_unquoted() {
+        // Probe shape from the CI journey: Exec=touch "<abs marker>".
+        // The desktop-entry spec quotes Exec arguments; argv must not
+        // carry the quote characters into the spawn.
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_entry(
+            dir.path(),
+            "probe.desktop",
+            "[Desktop Entry]\nName=Roostterm Probe\nExec=touch \"/tmp/roost-marker\"\nType=Application\n",
+        );
+        let apps = discover(&[dir.path().to_owned()]);
+        let app = apps
+            .iter()
+            .find(|a| a.name == "Roostterm Probe")
+            .expect("probe");
+        assert_eq!(
+            app.argv,
+            vec![OsString::from("touch"), OsString::from("/tmp/roost-marker")],
+            "quoted Exec arg keeps its quotes: {:?}",
+            app.argv
+        );
+    }
+
+    #[test]
     fn launch_true_exits_zero_and_tracker_reports_it() {
         let dir = sample_dir();
         let provider = AppProvider::new(discover(&[dir.path().to_owned()]));
@@ -467,7 +512,7 @@ mod tests {
             name: "Missing".to_owned(),
             generic_name: None,
             keywords: Vec::new(),
-            argv: vec![OsString::from("/nonexistent-rwd-binary-xyz")],
+            argv: vec![OsString::from("/nonexistent-roost-binary-xyz")],
             icon: None,
         };
         let mut tracker = LaunchTracker::new();

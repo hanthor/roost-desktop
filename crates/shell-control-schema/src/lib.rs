@@ -56,7 +56,20 @@ impl ProtocolVersion {
     ///
     /// `0.4` appends the compositor-to-shell `Switcher` message (002
     /// Alt-Tab drive), again last for the same reason.
-    pub const CURRENT: Self = Self { major: 0, minor: 4 };
+    ///
+    /// `0.5` appends the shell-to-compositor `CloseWindow` command
+    /// (dock quit), again last for the same reason.
+    ///
+    /// `0.6` appends `locked` to the compositor-to-shell `Snapshot` and
+    /// the shell-to-compositor `Lock` command (session-lock). The struct
+    /// field sits last and the enum variant sits last, so earlier
+    /// positions are untouched; like `0.2`, the body is still
+    /// wire-incompatible with older peers despite the minor bump, and
+    /// both sides always ship from this workspace.
+    ///
+    /// `0.7` appends the compositor-to-shell `Outputs` message
+    /// (multi-monitor inventory), again last for the same reason.
+    pub const CURRENT: Self = Self { major: 0, minor: 7 };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
     pub const fn new(major: u16, minor: u16) -> Self {
@@ -108,6 +121,21 @@ pub struct WorkspaceInfo {
     pub active: bool,
 }
 
+/// One compositor-tracked output: name, size, and dock anchor. The
+/// inventory crosses to the shell as these records; window migration
+/// stays compositor-internal, so no other wire types change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputInfo {
+    /// Output name, e.g. `roost-0`.
+    pub name: String,
+    /// Output width in physical pixels.
+    pub width: i32,
+    /// Output height in physical pixels.
+    pub height: i32,
+    /// Whether the dock anchors here.
+    pub primary: bool,
+}
+
 /// One ordered state mutation between two snapshot revisions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StateOp {
@@ -155,6 +183,19 @@ pub enum CommandKind {
     },
     /// Toggle the shell overview open or closed.
     ToggleOverview,
+    /// Ask a window's client to close (polite close request; the
+    /// client unmaps itself and the compositor drops it on reconcile).
+    /// No activation token: closing is not focus, and unknown ids are
+    /// per-request denials like every other command.
+    CloseWindow {
+        /// Window to close.
+        window: WindowId,
+    },
+    /// Lock the session immediately (manual lock from the shell).
+    /// Idempotent and tokenless like `ToggleOverview`: the shell is a
+    /// trusted local peer, and locking hides rather than reveals.
+    /// Unlock is never a command: it goes through session auth.
+    Lock,
 }
 
 /// Outcome of one shell command, matched by request id.
@@ -205,6 +246,11 @@ pub enum Message {
         windows: Vec<WindowInfo>,
         /// All workspaces.
         workspaces: Vec<WorkspaceInfo>,
+        /// Whether the session is locked. While set, `windows` carries
+        /// no content (empty): the lock screen shows no titles, and a
+        /// restartable shell must not retain any. The flag is the only
+        /// lock state on the wire — never credentials.
+        locked: bool,
     },
     /// Ordered incremental updates from `from_revision` to `to_revision`.
     /// A gap against the shell's revision forces a resnapshot.
@@ -257,6 +303,16 @@ pub enum Message {
     Switcher {
         /// What the switcher should do.
         action: SwitcherAction,
+    },
+    /// Compositor-to-shell output inventory (multi-monitor). The
+    /// compositor broadcasts the full list whenever it changes and
+    /// right after each handshake snapshot; the shell reconciles its
+    /// per-output surfaces against it. Carries no revision: structural
+    /// state, like `Overview` — and it sits last so earlier variant
+    /// positions are untouched.
+    Outputs {
+        /// Every tracked output, primary first.
+        outputs: Vec<OutputInfo>,
     },
 }
 
@@ -496,7 +552,8 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
         | Message::CommandResult { .. }
         | Message::Error { .. }
         | Message::Overview { .. }
-        | Message::Switcher { .. } => {}
+        | Message::Switcher { .. }
+        | Message::Outputs { .. } => {}
     }
     Ok(())
 }
@@ -535,8 +592,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_4() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 4));
+    fn current_version_is_0_7() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 7));
     }
 
     #[test]
@@ -548,7 +605,10 @@ mod tests {
         assert!(ProtocolVersion::new(0, 2).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 3).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 4).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 5).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 5).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 6).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 7).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 8).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }
@@ -578,6 +638,14 @@ mod tests {
             revision: 42,
             windows: vec![sample_window(7), sample_window(8)],
             workspaces: vec![sample_workspace(1), sample_workspace(2)],
+            locked: false,
+        });
+        // Locked snapshots carry the flag with no window content.
+        roundtrip(&Message::Snapshot {
+            revision: 43,
+            windows: vec![],
+            workspaces: vec![sample_workspace(1)],
+            locked: true,
         });
     }
 
@@ -608,6 +676,8 @@ mod tests {
             },
             CommandKind::FocusWorkspace { workspace: 2 },
             CommandKind::ToggleOverview,
+            CommandKind::CloseWindow { window: 7 },
+            CommandKind::Lock,
         ] {
             roundtrip(&Message::Command { id: 99, kind });
         }
@@ -711,6 +781,7 @@ mod tests {
             revision: 1,
             windows: vec![window],
             workspaces: vec![],
+            locked: false,
         };
         let frame = encode_frame(&msg);
         match decode_frame(&frame) {
@@ -730,6 +801,7 @@ mod tests {
             revision: 1,
             windows: vec![window],
             workspaces: vec![],
+            locked: false,
         };
         roundtrip(&msg);
     }

@@ -4,13 +4,14 @@ use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::time::Duration;
 
-use rwd_compositor::control::{
-    ControlConn, ControlError, ControlServer, Emitted, Handled, Session,
+use roost_compositor::control::{
+    ControlConn, ControlError, ControlHub, ControlServer, Emitted, Handled, Session,
 };
-use rwd_compositor::state::{system_millis, StateModel, TokenStore, MAX_CHANGE_LOG};
-use rwd_shell_control::{
+use roost_compositor::state::{system_millis, StateModel, TokenStore, MAX_CHANGE_LOG};
+use roost_compositor::SEAT_NAME;
+use roost_shell_control::{
     decode_frame, encode_frame, ActivationToken, CommandKind, CommandStatus, DecodeError,
-    ErrorKind, Message, ProtocolVersion, StateOp, CURRENT_VERSION,
+    ErrorKind, Message, OutputInfo, ProtocolVersion, StateOp, CURRENT_VERSION,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -68,12 +69,14 @@ fn hello_accept_replies_version_and_snapshot() {
         revision,
         windows,
         workspaces,
+        locked,
     } = client_read(&mut client)
     else {
         panic!("expected Snapshot after Hello");
     };
     assert_eq!(revision, 0);
     assert!(windows.is_empty());
+    assert!(!locked);
     // Workspace 0 is always registered and active on an empty model.
     assert_eq!(workspaces.len(), 1);
     assert_eq!(workspaces[0].id, 0);
@@ -222,7 +225,7 @@ fn unknown_message_kind_gets_typed_error() {
 
 #[test]
 fn oversize_frame_gets_typed_error_and_drop() {
-    use rwd_shell_control::MAX_FRAME_BYTES;
+    use roost_shell_control::MAX_FRAME_BYTES;
     let mut model = StateModel::new();
     let (conn, mut client) = pair();
     let mut session = handshake(conn, &mut client, &model);
@@ -334,6 +337,7 @@ fn activation_token_live_store_allows_once_then_denies_replay() {
         &model,
         validator,
         minter,
+        std::rc::Rc::new(std::cell::Cell::new(false)),
         std::rc::Rc::new(std::cell::Cell::new(false)),
     )
     .unwrap();
@@ -480,4 +484,100 @@ fn focus_workspace_announces_active_and_resnapshots() {
     );
     assert!(!zero.active);
     assert!(one.active);
+}
+
+/// Blocking raw client against a bound hub (lock.rs style).
+fn hub_client(path: &std::path::Path) -> UnixStream {
+    let client = UnixStream::connect(path).unwrap();
+    client
+        .set_read_timeout(Some(TIMEOUT))
+        .and(client.set_write_timeout(Some(TIMEOUT)))
+        .unwrap();
+    client
+}
+
+fn two_output_inventory() -> Vec<OutputInfo> {
+    vec![
+        OutputInfo {
+            name: "left".to_owned(),
+            width: 1280,
+            height: 800,
+            primary: true,
+        },
+        OutputInfo {
+            name: "right".to_owned(),
+            width: 1920,
+            height: 1080,
+            primary: false,
+        },
+    ]
+}
+
+/// Handshake one raw client through the hub, leaving it holding its
+/// snapshot plus the handshake overview intent (see lock.rs).
+fn hub_handshake(hub: &mut ControlHub, model: &mut StateModel, client: &mut UnixStream) {
+    hub.poll(model);
+    client_write(client, &hello_current());
+    hub.poll(model);
+    assert!(matches!(client_read(client), Message::Hello { .. }));
+    assert!(matches!(client_read(client), Message::Snapshot { .. }));
+    assert!(matches!(client_read(client), Message::Overview { .. }));
+}
+
+#[test]
+fn hub_broadcasts_changed_outputs_then_stays_quiet() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("control.sock");
+    let mut hub =
+        ControlHub::bind(path.clone(), std::rc::Rc::new(TokenStore::new()), SEAT_NAME).unwrap();
+    let mut model = StateModel::new();
+
+    let mut client = hub_client(&path);
+    hub_handshake(&mut hub, &mut model, &mut client);
+
+    // The runtime refreshes the inventory every tick; the hub emits
+    // exactly one frame for the change.
+    let inventory = two_output_inventory();
+    hub.set_outputs(inventory.clone());
+    hub.poll(&mut model);
+    let Message::Outputs { outputs } = client_read(&mut client) else {
+        panic!("expected Outputs broadcast after set_outputs");
+    };
+    assert_eq!(outputs, inventory);
+
+    // Steady state sends nothing: the unchanged inventory costs one
+    // short comparison, no frame.
+    client.set_nonblocking(true).unwrap();
+    let mut prefix = [0u8; 4];
+    match client.read_exact(&mut prefix) {
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+        other => panic!("expected no further frame, got {other:?}"),
+    }
+    hub.poll(&mut model);
+    match client.read_exact(&mut prefix) {
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+        other => panic!("steady poll must stay quiet, got {other:?}"),
+    }
+}
+
+#[test]
+fn hub_newcomer_handshake_receives_non_empty_inventory() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("control.sock");
+    let mut hub =
+        ControlHub::bind(path.clone(), std::rc::Rc::new(TokenStore::new()), SEAT_NAME).unwrap();
+    let mut model = StateModel::new();
+
+    // The inventory lands before the shell connects: the handshake
+    // must still carry it, so a restarting shell never paints from a
+    // stale empty list. An empty inventory is never sent.
+    let inventory = two_output_inventory();
+    hub.set_outputs(inventory.clone());
+
+    let mut client = hub_client(&path);
+    hub_handshake(&mut hub, &mut model, &mut client);
+    let Message::Outputs { outputs } = client_read(&mut client) else {
+        panic!("newcomer must receive the inventory right after the handshake");
+    };
+    assert_eq!(outputs, inventory);
 }

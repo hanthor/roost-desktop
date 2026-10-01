@@ -1,5 +1,5 @@
 [package]
-name = "rwd-shell-host"
+name = "roost-shell-host"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 # Wave 2 stream 3 owns this crate. Workspace pins live in the root Cargo.toml.
 
 [dev-dependencies]
-rwd-compositor = { path = "../compositor" }
+roost-compositor = { path = "../compositor" }
 tempfile = "3"
 
 [dependencies]
@@ -15,7 +15,14 @@ wayland-client.workspace = true
 wayland-protocols = { workspace = true, features = ["client"] }
 wayland-protocols-wlr = { workspace = true, features = ["client"] }
 smithay = { workspace = true }
-rwd-shell-control = { path = "../shell-control-schema", version = "0.1.0" }
+roost-shell-control = { path = "../shell-control-schema", version = "0.1.0" }
 freedesktop-desktop-entry.workspace = true
+gio.workspace = true
 serde_json.workspace = true
 rustix.workspace = true
+jiff.workspace = true
+xkbcommon.workspace = true
+zbus.workspace = true
+image.workspace = true
+resvg.workspace = true
+rhai.workspace = true

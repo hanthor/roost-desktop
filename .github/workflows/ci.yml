@@ -32,9 +32,17 @@ jobs:
       # libxkbcommon-x11 and EGL are dlopened at winit-backend startup
       # (not at build time), so the nested run needs them even though
       # check does not. Mesa swrast provides software GL on runners.
-      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck
-      - run: shellcheck scripts/rwd-journey scripts/rwd-nested
-      - run: scripts/rwd-journey --artifacts journey-artifacts
+      # The shell's gio settings read needs glib dev files at build
+      # time (check gets them transitively via GTK).
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck libglib2.0-dev libgtk-4-dev libadwaita-1-dev
+      - run: shellcheck scripts/roost-journey scripts/roost-nested scripts/roost-release scripts/check-release-package
+      - run: scripts/roost-release --allow-dirty --out package-artifacts && scripts/check-release-package package-artifacts/*.deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: roost-deb
+          path: package-artifacts/
+          retention-days: 14
+      - run: scripts/roost-journey --artifacts journey-artifacts
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -56,12 +64,65 @@ jobs:
       # (baseline-vs-app diff plus app-color pixel count), humans review
       # the uploaded frames. Playwright installs its own venv, browser,
       # and browser system libraries on the runner.
-      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck python3-venv
-      - run: shellcheck scripts/rwd-app-content scripts/rwd-nested
-      - run: scripts/rwd-app-content --artifacts app-content-artifacts
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck python3-venv libglib2.0-dev libgtk-4-dev libadwaita-1-dev
+      - run: shellcheck scripts/roost-app-content scripts/roost-nested
+      - run: scripts/roost-app-content --artifacts app-content-artifacts
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: app-content-shots
           path: app-content-artifacts/
           retention-days: 14
+
+  scroll-proof:
+    runs-on: ubuntu-latest
+    needs: [check]
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+      # Scroll-mode strip proof: three headed-Chromium windows via
+      # Playwright, Super+Shift+T toggle, Super+R preset cycling, and
+      # wheel scrolling, with gap-geometry pixel asserts. Humans review
+      # the uploaded frames.
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck python3-venv libglib2.0-dev libgtk-4-dev libadwaita-1-dev
+      - run: shellcheck scripts/roost-scroll-proof scripts/roost-nested
+      - run: scripts/roost-scroll-proof --artifacts scroll-proof-artifacts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scroll-proof-shots
+          path: scroll-proof-artifacts/
+          retention-days: 14
+
+  docs-shots:
+    runs-on: ubuntu-latest
+    needs: [journey, app-content, scroll-proof]
+    steps:
+      - uses: actions/checkout@v7
+      # Curate the release screenshot set out of this run's own proof
+      # artifacts and upload it as one bundle: each release takes its
+      # docs/shots refresh from here (see docs/screenshots.md). No
+      # byte-freshness gate: the panel clock renders live, so a fresh
+      # run legitimately differs from the committed set by its digits.
+      - uses: actions/download-artifact@v4
+        with:
+          name: journey-shots
+          path: /tmp/roost-docs/journey
+      - uses: actions/download-artifact@v4
+        with:
+          name: app-content-shots
+          path: /tmp/roost-docs/app
+      - uses: actions/download-artifact@v4
+        with:
+          name: scroll-proof-shots
+          path: /tmp/roost-docs/scroll
+      - run: shellcheck scripts/roost-docs-shots
+      - run: scripts/roost-docs-shots collect /tmp/roost-docs/journey /tmp/roost-docs/app /tmp/roost-docs/scroll --dest /tmp/roost-docs/shots && ls /tmp/roost-docs/shots | wc -l | grep -q 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docs-shots
+          path: /tmp/roost-docs/shots/
+          retention-days: 90

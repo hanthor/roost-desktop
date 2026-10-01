@@ -10,15 +10,18 @@
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
+#[cfg(feature = "xwayland")]
+use smithay::delegate_xwayland_shell;
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_output, delegate_primary_selection,
+    delegate_seat, delegate_shm, delegate_xdg_shell,
     input::{Seat, SeatHandler, SeatState},
+    output::Output,
     reexports::wayland_server::{
-        backend::{ClientData, ClientId, DisconnectReason},
+        backend::{ClientData, ClientId, DisconnectReason, GlobalId},
         protocol::{wl_buffer, wl_output, wl_seat, wl_surface},
-        Client, Display, DisplayHandle,
+        Client, Display, DisplayHandle, Resource,
     },
     utils::Serial,
     wayland::{
@@ -27,7 +30,11 @@ use smithay::{
         output::{OutputHandler, OutputManagerState},
         selection::{
             data_device::{
-                ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+                set_data_device_focus, ClientDndGrabHandler, DataDeviceHandler, DataDeviceState,
+                ServerDndGrabHandler,
+            },
+            primary_selection::{
+                set_primary_focus, PrimarySelectionHandler, PrimarySelectionState,
             },
             SelectionHandler,
         },
@@ -41,11 +48,37 @@ use smithay::{
 
 pub mod control;
 pub mod layer;
+pub mod lock;
 pub mod overlay;
 pub mod runtime;
 pub mod state;
 pub mod supervise;
+pub mod unlock;
+pub mod wallpaper;
 pub mod windows;
+pub mod xwayland;
+
+/// One compositor-tracked output: protocol handle plus geometry.
+/// The first entry is the primary output; single-output sessions hold
+/// exactly one entry, which is today's path generalized, not a fork.
+#[derive(Debug, Clone)]
+pub(crate) struct OutputEntry {
+    /// Protocol handle; `None` for virtual entries in tests (no
+    /// display exists there to advertise a global on).
+    pub output: Option<Output>,
+    /// Registry global id from `create_global`; `None` for virtual
+    /// entries. Removal un-advertises it so clients see the hotplug.
+    pub global: Option<GlobalId>,
+    /// Output name, e.g. `roost-0`.
+    pub name: String,
+    /// Output geometry layer surfaces and windows arrange against.
+    pub size: smithay::utils::Size<i32, smithay::utils::Logical>,
+    /// Top-left corner in the global compositor space: entries tile
+    /// left to right, so a second output starts where the first ends.
+    pub loc: (i32, i32),
+    /// Whether the dock anchors here.
+    pub primary: bool,
+}
 
 /// Compositor dispatch state: protocol states plus their handlers.
 pub struct State {
@@ -58,17 +91,37 @@ pub struct State {
     // Kept alive for the seat global; input routing (R4) attaches here later.
     #[allow(dead_code)]
     seat: Seat<State>,
+    /// Display handle for client lookups that need no round-trip
+    /// (clipboard focus follows keyboard focus by resolving the
+    /// focused surface to its client).
+    dh: DisplayHandle,
     pub(crate) layer_shell_state: WlrLayerShellState,
     /// Clipboard/drag-and-drop manager (toolkit clients such as GTK
     /// and Chromium refuse a display without this global).
     data_device_state: DataDeviceState,
+    /// Middle-click primary selection beside the clipboard.
+    primary_selection_state: PrimarySelectionState,
     pub(crate) panel_surfaces: Vec<layer::PanelSurface>,
-    /// Output geometry layer surfaces arrange against (set by the
-    /// runtime; defaults to zero, which configures zero sizes).
-    pub(crate) output_size: smithay::utils::Size<i32, smithay::utils::Logical>,
+    /// Output inventory: one entry per connected output, fed by the
+    /// standard global add/remove flow. Empty until the runtime (or a
+    /// test) registers the first entry; readers fall back to zero
+    /// sizes, which configure zero sizes.
+    pub(crate) outputs: Vec<OutputEntry>,
     /// Client window-state requests awaiting the manager's next
     /// `reconcile` drain (002 window actions).
     pub(crate) window_requests: Vec<(wl_surface::WlSurface, WindowRequest)>,
+    /// Running X11 window manager, once the compatibility server is
+    /// up (xwayland feature only).
+    #[cfg(feature = "xwayland")]
+    pub(crate) xwm: Option<smithay::xwayland::X11Wm>,
+    /// X11 manager events queued by the WM handlers for the next
+    /// `reconcile` drain (xwayland feature only).
+    #[cfg(feature = "xwayland")]
+    pub(crate) x11_events: Vec<crate::xwayland::X11ManagerEvent>,
+    /// XWayland shell global backing X11 surface association
+    /// (xwayland feature only; kept alive for the global).
+    #[cfg(feature = "xwayland")]
+    pub(crate) xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState,
 }
 
 /// Per-client data: the compositor state slice each client sees.
@@ -159,6 +212,13 @@ impl State {
     pub(crate) fn take_window_requests(&mut self) -> Vec<(wl_surface::WlSurface, WindowRequest)> {
         std::mem::take(&mut self.window_requests)
     }
+
+    /// Drain queued X11 manager events (the manager calls this from
+    /// `reconcile`; xwayland feature only).
+    #[cfg(feature = "xwayland")]
+    pub(crate) fn take_x11_events(&mut self) -> Vec<crate::xwayland::X11ManagerEvent> {
+        std::mem::take(&mut self.x11_events)
+    }
 }
 
 impl CompositorHandler for State {
@@ -167,7 +227,18 @@ impl CompositorHandler for State {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        &client.get_data::<ClientState>().unwrap().compositor_state
+        // Normal clients carry our `ClientState`. With the xwayland
+        // feature the XWayland server client instead carries
+        // Smithay's `XWaylandClientData`, which holds the same
+        // compositor state under its own field.
+        if let Some(data) = client.get_data::<ClientState>() {
+            return &data.compositor_state;
+        }
+        #[cfg(feature = "xwayland")]
+        if let Some(data) = client.get_data::<smithay::xwayland::XWaylandClientData>() {
+            return &data.compositor_state;
+        }
+        panic!("client without compositor state");
     }
 
     fn commit(&mut self, surface: &wl_surface::WlSurface) {
@@ -185,8 +256,11 @@ impl ShmHandler for State {
 impl OutputHandler for State {}
 
 /// Clipboard/drag-and-drop: advertised so toolkit clients accept the
-/// display. Selections are tracked, not served: no client content
-/// crosses this boundary yet.
+/// display. Client copy/paste and primary selection round-trip
+/// through the smithay selection state; both focuses mirror keyboard
+/// focus (see [`State::sync_selection_focus`]). Server-initiated
+/// selection content and drag-and-drop pointer grabs are not served
+/// yet.
 impl SelectionHandler for State {
     type SelectionUserData = ();
 }
@@ -197,6 +271,12 @@ impl ServerDndGrabHandler for State {}
 impl DataDeviceHandler for State {
     fn data_device_state(&self) -> &DataDeviceState {
         &self.data_device_state
+    }
+}
+
+impl PrimarySelectionHandler for State {
+    fn primary_selection_state(&self) -> &PrimarySelectionState {
+        &self.primary_selection_state
     }
 }
 
@@ -214,12 +294,22 @@ impl SeatHandler for State {
 
 /// Wayland seat name shared by the protocol state, the token store's
 /// seat binding, and the control hub.
-pub const SEAT_NAME: &str = "rwd-seat";
+pub const SEAT_NAME: &str = "roost-seat";
 
 impl State {
     /// Seat for capability attachment and input routing.
     pub(crate) fn seat_mut(&mut self) -> &mut Seat<State> {
         &mut self.seat
+    }
+
+    /// Mirror keyboard focus into selection focus: the newly focused
+    /// client's data device and primary device receive the current
+    /// offers, if any. `None` clears both. Surfaces from gone clients
+    /// resolve to no client, which also clears.
+    pub(crate) fn sync_selection_focus(&mut self, surface: Option<&wl_surface::WlSurface>) {
+        let client = surface.and_then(|s| self.dh.get_client(s.id()).ok());
+        set_data_device_focus(&self.dh, &self.seat, client.clone());
+        set_primary_focus(&self.dh, &self.seat, client);
     }
 
     /// Number of currently mapped toplevel surfaces.
@@ -243,7 +333,10 @@ impl State {
 }
 
 delegate_xdg_shell!(State);
+#[cfg(feature = "xwayland")]
+delegate_xwayland_shell!(State);
 delegate_data_device!(State);
+delegate_primary_selection!(State);
 delegate_compositor!(State);
 delegate_shm!(State);
 delegate_seat!(State);
@@ -275,18 +368,189 @@ impl State {
             _output_manager_state: OutputManagerState::new_with_xdg_output::<State>(dh),
             seat_state,
             seat,
+            dh: dh.clone(),
             layer_shell_state: WlrLayerShellState::new::<State>(dh),
             data_device_state: DataDeviceState::new::<State>(dh),
+            primary_selection_state: PrimarySelectionState::new::<State>(dh),
             panel_surfaces: Vec::new(),
-            output_size: Default::default(),
+            outputs: Vec::new(),
             window_requests: Vec::new(),
+            #[cfg(feature = "xwayland")]
+            xwm: None,
+            #[cfg(feature = "xwayland")]
+            x11_events: Vec::new(),
+            #[cfg(feature = "xwayland")]
+            xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState::new::<State>(
+                dh,
+            ),
         }
     }
 
-    /// Set the output geometry for layer-surface arrange (the nested
-    /// runtime calls this with its session size at launch).
+    /// Set the primary output geometry for layer-surface arrange
+    /// (tests call this with their fixture size at setup). With no
+    /// entries yet this registers a virtual primary entry, so the
+    /// single-output path stays the one-entry case.
     pub fn set_output_size(&mut self, width: i32, height: i32) {
-        self.output_size = smithay::utils::Size::from((width, height));
+        let size = smithay::utils::Size::from((width, height));
+        match self.outputs.iter_mut().find(|entry| entry.primary) {
+            Some(entry) => entry.size = size,
+            None => self.outputs.push(OutputEntry {
+                output: None,
+                global: None,
+                name: "roost-0".to_owned(),
+                size,
+                loc: (0, 0),
+                primary: true,
+            }),
+        }
+    }
+
+    /// Register an output in the inventory (upsert by name): the
+    /// runtime calls this once per output at launch and on hotplug
+    /// add. The first entry registered becomes primary; later entries
+    /// tile to the right of the existing row, so every output owns a
+    /// distinct slice of the global space with no overlap.
+    pub fn add_output(&mut self, name: &str, output: Option<Output>, width: i32, height: i32) {
+        let size = smithay::utils::Size::from((width, height));
+        if let Some(entry) = self.outputs.iter_mut().find(|entry| entry.name == name) {
+            entry.output = output;
+            entry.size = size;
+            return;
+        }
+        let primary = self.outputs.is_empty();
+        let x = self
+            .outputs
+            .iter()
+            .map(|entry| entry.loc.0 + entry.size.w.max(0))
+            .max()
+            .unwrap_or(0);
+        self.outputs.push(OutputEntry {
+            output,
+            global: None,
+            name: name.to_owned(),
+            size,
+            loc: (x, 0),
+            primary,
+        });
+    }
+
+    /// Record the registry global id for a registered output (from
+    /// `create_global`): removal un-advertises it. Unknown names are
+    /// ignored — virtual entries never advertise.
+    pub fn note_output_global(&mut self, name: &str, id: GlobalId) {
+        if let Some(entry) = self.outputs.iter_mut().find(|entry| entry.name == name) {
+            entry.global = Some(id);
+        }
+    }
+
+    /// Drop an output from the inventory; a surviving first entry
+    /// takes over primary. Callers migrate windows first (see
+    /// [`WindowManager::migrate_output_windows`](crate::windows::WindowManager::migrate_output_windows)),
+    /// so no window is stranded, then re-apply derived layouts when
+    /// the primary changed (see
+    /// [`WindowManager::reapply_derived_layouts`](crate::windows::WindowManager::reapply_derived_layouts)).
+    /// Real entries un-advertise their global, so clients see the
+    /// hotplug removal live; virtual entries just drop. Returns
+    /// whether an entry was removed.
+    pub fn remove_output(&mut self, name: &str) -> bool {
+        let Some(index) = self.outputs.iter().position(|entry| entry.name == name) else {
+            return false;
+        };
+        let was_primary = self.outputs[index].primary;
+        let global = self.outputs[index].global.take();
+        if let Some(id) = global {
+            self.dh.disable_global::<State>(id.clone());
+            self.dh.remove_global::<State>(id);
+        }
+        self.outputs.remove(index);
+        if was_primary {
+            if let Some(first) = self.outputs.first_mut() {
+                first.primary = true;
+            }
+        }
+        true
+    }
+
+    /// Move the dock anchor: mark `name` primary, clearing the flag
+    /// elsewhere. Returns whether the entry exists.
+    pub fn set_primary(&mut self, name: &str) -> bool {
+        if !self.outputs.iter().any(|entry| entry.name == name) {
+            return false;
+        }
+        for entry in &mut self.outputs {
+            entry.primary = entry.name == name;
+        }
+        true
+    }
+
+    /// Geometry readers arrange against: the primary entry's size,
+    /// or zero when the inventory is empty.
+    pub fn primary_size(&self) -> smithay::utils::Size<i32, smithay::utils::Logical> {
+        self.outputs
+            .iter()
+            .find(|entry| entry.primary)
+            .map(|entry| entry.size)
+            .unwrap_or_default()
+    }
+
+    /// Geometry for one named output (layer surfaces bound to it), or
+    /// the primary entry's when the name is unknown or unbound: an
+    /// unbound surface behaves like today's global one.
+    pub fn size_for_output(
+        &self,
+        name: Option<&str>,
+    ) -> smithay::utils::Size<i32, smithay::utils::Logical> {
+        name.and_then(|name| {
+            self.outputs
+                .iter()
+                .find(|entry| entry.name == name)
+                .map(|entry| entry.size)
+        })
+        .unwrap_or_else(|| self.primary_size())
+    }
+
+    /// Top-left corner of one named output in the global space, or the
+    /// primary entry's when unknown: placement falls back to the
+    /// primary slice, matching [`size_for_output`](Self::size_for_output).
+    pub fn loc_for_output(&self, name: Option<&str>) -> (i32, i32) {
+        name.and_then(|name| {
+            self.outputs
+                .iter()
+                .find(|entry| entry.name == name)
+                .map(|entry| entry.loc)
+        })
+        .unwrap_or_else(|| {
+            self.outputs
+                .iter()
+                .find(|entry| entry.primary)
+                .map(|entry| entry.loc)
+                .unwrap_or((0, 0))
+        })
+    }
+
+    /// Wire records for the shell, primary first: the inventory as the
+    /// shell already knows how to paint it — size, primary, handles
+    /// implied by the bound surfaces.
+    pub fn output_infos(&self) -> Vec<roost_shell_control::OutputInfo> {
+        let mut entries: Vec<&OutputEntry> = self.outputs.iter().collect();
+        entries.sort_by_key(|entry| (!entry.primary, entry.loc.0));
+        entries
+            .into_iter()
+            .map(|entry| roost_shell_control::OutputInfo {
+                name: entry.name.clone(),
+                width: entry.size.w,
+                height: entry.size.h,
+                primary: entry.primary,
+            })
+            .collect()
+    }
+
+    /// Protocol handle of the primary output, for frame callbacks.
+    pub fn primary_output(&self) -> Option<Output> {
+        self.outputs
+            .iter()
+            .find(|entry| entry.primary)
+            .and_then(|entry| entry.output.clone())
     }
 }
 

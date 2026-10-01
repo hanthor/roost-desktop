@@ -1,5 +1,5 @@
 //! Session enumeration: parse installed `.desktop` session files into
-//! picker entries, with RWD preselected when present. Tolerant by
+//! picker entries, with Roost preselected when present. Tolerant by
 //! design — malformed entries are skipped with a count, never failing
 //! the whole read. Live system paths stay behind [`SESSION_DIRS`]
 //! so tests inject fixture directories.
@@ -18,7 +18,7 @@ pub struct SessionEntry {
     pub command: Vec<String>,
     /// Source file (for diagnostics, not identity).
     pub source: PathBuf,
-    /// True when this is the RWD session.
+    /// True when this is the Roost session.
     pub is_default: bool,
 }
 
@@ -56,9 +56,14 @@ fn parse_entry(path: &Path, text: &str) -> Option<SessionEntry> {
     if command.is_empty() {
         return None;
     }
-    let is_default = name.to_lowercase().contains("rwd")
-        || name.to_lowercase().contains("rust wayland")
-        || command.first().is_some_and(|c| c.starts_with("rwd-"));
+    let lowered = name.to_lowercase();
+    let is_default = lowered.contains("roost")
+        || lowered.contains("rust wayland")
+        // Legacy working-title entry; keep matching old installs.
+        || lowered.contains("rwd")
+        || command.first().is_some_and(|c| {
+            c.starts_with("roost-") || c.starts_with("rwd-")
+        });
     Some(SessionEntry {
         name,
         command,
@@ -67,7 +72,7 @@ fn parse_entry(path: &Path, text: &str) -> Option<SessionEntry> {
     })
 }
 
-/// Enumerate `dirs`, returning entries sorted by name with the RWD
+/// Enumerate `dirs`, returning entries sorted by name with the Roost
 /// default first when present.
 pub fn enumerate_dirs(dirs: &[&Path]) -> Enumeration {
     let mut out = Enumeration::default();
@@ -118,20 +123,31 @@ mod tests {
         dir
     }
 
-    const RWD: &str = "[Desktop Entry]\nName=RWD\nExec=rwd-session\n";
+    const ROOST: &str = "[Desktop Entry]\nName=Roost\nExec=roost-session\n";
+    const LEGACY: &str = "[Desktop Entry]\nName=RWD\nExec=rwd-session\n";
     const SWAY: &str = "[Desktop Entry]\nName=Sway\nExec=sway\n";
     const BAD: &str = "[Desktop Entry]\nName=Broken\n";
     const NOT_DESKTOP: &str = "[Desktop Entry]\nName=X\nExec=x\n";
 
     #[test]
-    fn lists_sessions_with_rwd_default_first() {
-        let dir = fixture_dir(&[("sway.desktop", SWAY), ("rwd.desktop", RWD)]);
+    fn lists_sessions_with_roost_default_first() {
+        let dir = fixture_dir(&[("sway.desktop", SWAY), ("roost.desktop", ROOST)]);
+        let out = enumerate_dirs(&[dir.path()]);
+        assert_eq!(out.entries.len(), 2);
+        assert_eq!(out.entries[0].name, "Roost");
+        assert!(out.entries[0].is_default);
+        assert_eq!(out.entries[0].command, vec!["roost-session"]);
+        assert_eq!(out.skipped, 0);
+    }
+
+    #[test]
+    fn legacy_rwd_entry_still_detected_as_default() {
+        let dir = fixture_dir(&[("sway.desktop", SWAY), ("rwd.desktop", LEGACY)]);
         let out = enumerate_dirs(&[dir.path()]);
         assert_eq!(out.entries.len(), 2);
         assert_eq!(out.entries[0].name, "RWD");
         assert!(out.entries[0].is_default);
         assert_eq!(out.entries[0].command, vec!["rwd-session"]);
-        assert_eq!(out.skipped, 0);
     }
 
     #[test]

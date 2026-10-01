@@ -15,11 +15,11 @@ use std::os::unix::net::UnixStream;
 use std::rc::Rc;
 use std::time::Duration;
 
-use rwd_compositor::control::ControlHub;
-use rwd_compositor::state::TokenStore;
-use rwd_compositor::windows::WindowManager;
-use rwd_compositor::{TestCompositor, SEAT_NAME};
-use rwd_shell_control::{
+use roost_compositor::control::ControlHub;
+use roost_compositor::state::TokenStore;
+use roost_compositor::windows::WindowManager;
+use roost_compositor::{TestCompositor, SEAT_NAME};
+use roost_shell_control::{
     decode_frame, encode_frame, ActivationToken, CommandKind, CommandStatus, Message,
     CURRENT_VERSION,
 };
@@ -345,10 +345,12 @@ fn fixture() -> Fixture {
         revision,
         windows,
         workspaces,
+        locked,
     } = client_read(&mut control)
     else {
         panic!("expected Snapshot after Hello");
     };
+    assert!(!locked);
     assert_eq!(revision, manager.model().revision());
     assert_eq!(windows.len(), 2);
     let token_a = windows
@@ -418,7 +420,7 @@ fn activate_window_with_live_token_focuses_and_applies() {
     );
     let mut activated = Vec::new();
     for _ in 0..HUB_ROUNDS {
-        activated.extend(f.hub.poll(f.manager.model_mut()));
+        activated.extend(f.hub.poll(f.manager.model_mut()).activated);
         f.comp.pump();
         if activated.contains(&f.id_a) {
             break;
@@ -430,6 +432,51 @@ fn activate_window_with_live_token_focuses_and_applies() {
     );
     assert_eq!(read_result(&mut f.control, 11), CommandStatus::Applied);
     assert_eq!(f.manager.model().focused(), Some(f.id_a));
+}
+
+#[test]
+fn close_window_applies_and_reports_for_runtime() {
+    let mut f = fixture();
+    client_write(
+        &mut f.control,
+        &Message::Command {
+            id: 21,
+            kind: CommandKind::CloseWindow { window: f.id_a },
+        },
+    );
+    let mut closed = Vec::new();
+    for _ in 0..HUB_ROUNDS {
+        closed.extend(f.hub.poll(f.manager.model_mut()).closed);
+        f.comp.pump();
+        if closed.contains(&f.id_a) {
+            break;
+        }
+    }
+    assert_eq!(closed, vec![f.id_a], "hub must report A's close");
+    assert_eq!(read_result(&mut f.control, 21), CommandStatus::Applied);
+}
+
+#[test]
+fn close_window_unknown_id_denies() {
+    let mut f = fixture();
+    client_write(
+        &mut f.control,
+        &Message::Command {
+            id: 22,
+            kind: CommandKind::CloseWindow { window: 999_999 },
+        },
+    );
+    let mut closed = Vec::new();
+    for _ in 0..HUB_ROUNDS {
+        closed.extend(f.hub.poll(f.manager.model_mut()).closed);
+        f.comp.pump();
+    }
+    assert!(closed.is_empty(), "unknown close must report nothing");
+    let status = read_result(&mut f.control, 22);
+    assert!(
+        matches!(status, CommandStatus::Denied { .. }),
+        "unknown close must deny, got {status:?}"
+    );
 }
 
 #[test]
@@ -449,7 +496,7 @@ fn replayed_and_cross_window_tokens_are_denied() {
     );
     let mut activated = Vec::new();
     for _ in 0..HUB_ROUNDS {
-        activated.extend(f.hub.poll(f.manager.model_mut()));
+        activated.extend(f.hub.poll(f.manager.model_mut()).activated);
         f.comp.pump();
     }
     assert!(
@@ -476,7 +523,7 @@ fn replayed_and_cross_window_tokens_are_denied() {
     );
     let mut activated = Vec::new();
     for _ in 0..HUB_ROUNDS {
-        activated.extend(f.hub.poll(f.manager.model_mut()));
+        activated.extend(f.hub.poll(f.manager.model_mut()).activated);
         f.comp.pump();
         if activated.contains(&f.id_a) {
             break;
@@ -525,7 +572,7 @@ fn replayed_and_cross_window_tokens_are_denied() {
     );
     let mut activated = Vec::new();
     for _ in 0..HUB_ROUNDS {
-        activated.extend(f.hub.poll(f.manager.model_mut()));
+        activated.extend(f.hub.poll(f.manager.model_mut()).activated);
         f.comp.pump();
         if activated.contains(&f.id_b) {
             break;

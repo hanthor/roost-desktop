@@ -1,4 +1,4 @@
-# Rust Wayland Desktop
+# Roost
 
 A new, independent Wayland desktop session with a GNOME-inspired everyday workflow. This project is not a GNOME Shell rewrite and does not promise compatibility with GNOME Shell extensions or private Mutter APIs.
 
