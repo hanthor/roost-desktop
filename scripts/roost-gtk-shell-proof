@@ -229,6 +229,28 @@ showing "$ARTIFACTS/a11y-beta.json" "Popover content" ||
     fail G-APP-POPOVER "app menu popover did not open (xdg popup)"
 pass G-APP-POPOVER "an app's menu popover opens (xdg popup, #88)"
 
+
+xdotool key Escape
+sleep 1
+# Header-bar drag: GTK sends xdg_toplevel.move, the compositor owns the
+# pointer until release (#58).
+read -r bx by <<EOF2
+$(jq -r '.windows[] | select(.app_id == "roost-test-beta") | .rect | "\(.[0]) \(.[1])"' "$CSTATE")
+EOF2
+xdotool mousemove --window "$WID" $((bx + 120)) $((by + 20))
+xdotool mousedown 1
+for step in 1 2 3 4 5 6; do
+    xdotool mousemove --window "$WID" $((bx + 120 + step * 25)) $((by + 20 + step * 10))
+    sleep 0.1
+done
+xdotool mouseup 1
+# GTK starts the move after its drag threshold, so the window follows
+# the pointer from there: it moves by most, not all, of the drag.
+cstate ".windows[] | select(.app_id == \"roost-test-beta\") | (.rect[0] - $bx) >= 75 and (.rect[0] - $bx) <= 150 and (.rect[1] - $by) >= 30 and (.rect[1] - $by) <= 60" "drag" ||
+    fail G-APP-DRAG "dragging Beta's header bar did not move it by the drag distance"
+pass G-APP-DRAG "dragging an app's header bar moves the window (#58)"
+scrot "$ARTIFACTS/08-dragged.png" >/dev/null
+
 # Overview shell surfaces (#54, #57): search entry, dash, app grid.
 xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
 xdotool key Super_L
@@ -269,27 +291,6 @@ showing "$ARTIFACTS/a11y-grid.json" "Roost Probe" ||
 pass G-OV-APPGRID "Show Apps opens the app grid"
 scrot "$ARTIFACTS/11-app-grid.png" >/dev/null
 xdotool key Escape
-
-xdotool key Escape
-sleep 1
-# Header-bar drag: GTK sends xdg_toplevel.move, the compositor owns the
-# pointer until release (#58).
-read -r bx by <<EOF2
-$(jq -r '.windows[] | select(.app_id == "roost-test-beta") | .rect | "\(.[0]) \(.[1])"' "$CSTATE")
-EOF2
-xdotool mousemove --window "$WID" $((bx + 120)) $((by + 20))
-xdotool mousedown 1
-for step in 1 2 3 4 5 6; do
-    xdotool mousemove --window "$WID" $((bx + 120 + step * 25)) $((by + 20 + step * 10))
-    sleep 0.1
-done
-xdotool mouseup 1
-# GTK starts the move after its drag threshold, so the window follows
-# the pointer from there: it moves by most, not all, of the drag.
-cstate ".windows[] | select(.app_id == \"roost-test-beta\") | (.rect[0] - $bx) >= 75 and (.rect[0] - $bx) <= 150 and (.rect[1] - $by) >= 30 and (.rect[1] - $by) <= 60" "drag" ||
-    fail G-APP-DRAG "dragging Beta's header bar did not move it by the drag distance"
-pass G-APP-DRAG "dragging an app's header bar moves the window (#58)"
-scrot "$ARTIFACTS/08-dragged.png" >/dev/null
 
 grep -q panicked "$LOG" && fail G-NOPANIC "panic in nested log"
 # The shell must survive the whole journey: a crash the supervisor

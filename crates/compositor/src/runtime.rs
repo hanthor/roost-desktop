@@ -740,6 +740,26 @@ impl Runtime {
                 "rect": [w.geometry.loc.x, w.geometry.loc.y, w.geometry.size.w, w.geometry.size.h],
             })).collect::<Vec<_>>(),
             "previews": previews,
+            "layers": crate::layer::layer_layout(&self.state)
+                .iter()
+                .filter_map(|(surface, (x, y), _)| {
+                    let record = self
+                        .state
+                        .panel_surfaces
+                        .iter()
+                        .find(|r| r.surface == *surface)?;
+                    let size = self
+                        .state
+                        .layer_shell_state
+                        .layer_surfaces()
+                        .find(|s| s.wl_surface() == surface)
+                        .and_then(|s| s.current_state().size)?;
+                    Some(serde_json::json!({
+                        "namespace": record.namespace,
+                        "rect": [x, y, size.w, size.h],
+                    }))
+                })
+                .collect::<Vec<_>>(),
         })
         .to_string();
         if doc == self.state_last {

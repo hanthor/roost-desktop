@@ -189,8 +189,11 @@ pub fn arranged_size(surface: &LayerSurface, output: Size<i32, Logical>) -> Size
 
 /// Every mapped layer surface of one output key, in creation order, with
 /// its request.
-fn output_requests(state: &State) -> Vec<(Option<String>, Vec<(WlSurface, LayerRequest, Layer)>)> {
-    let mut groups: Vec<(Option<String>, Vec<(WlSurface, LayerRequest, Layer)>)> = Vec::new();
+/// Layer surfaces of one output: `(output key, [(surface, request, layer)])`.
+type OutputGroup = (Option<String>, Vec<(WlSurface, LayerRequest, Layer)>);
+
+fn output_requests(state: &State) -> Vec<OutputGroup> {
+    let mut groups: Vec<OutputGroup> = Vec::new();
     for record in &state.panel_surfaces {
         let live = state
             .layer_shell_state
@@ -253,7 +256,7 @@ pub struct PanelSurface {
     /// primary). Resolved once at creation: the client's resource
     /// identifies the output through its protocol handle.
     pub output_name: Option<String>,
-    surface: WlSurface,
+    pub(crate) surface: WlSurface,
 }
 
 impl WlrLayerShellHandler for State {
@@ -302,7 +305,7 @@ impl WlrLayerShellHandler for State {
         let gone = surface.wl_surface().clone();
         self.panel_surfaces.retain(|record| record.surface != gone);
         self.dead_layer_surfaces
-            .retain(|s| smithay::reexports::wayland_server::Resource::is_alive(s));
+            .retain(smithay::reexports::wayland_server::Resource::is_alive);
         self.dead_layer_surfaces.insert(gone);
     }
 }
