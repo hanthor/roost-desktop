@@ -14,6 +14,7 @@
 pub mod apps;
 pub mod control;
 pub mod dock;
+pub mod extensions;
 pub mod favorites;
 pub mod icons;
 pub mod intake;
