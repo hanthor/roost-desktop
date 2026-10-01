@@ -1,0 +1,90 @@
+# Maintainer: Roost contributors <https://github.com/hanthor/roost-desktop>
+#
+# Arch Linux package for Roost, the target format for TunaOS Marlin (#69).
+#
+# Release builds fetch the tagged source. CI and local builds set
+# ROOST_LOCAL_SRC to a checkout instead:
+#   ROOST_LOCAL_SRC="$PWD" makepkg -f --dir packaging/arch   (or cd there)
+# The version is stamped from the tag exactly like scripts/roost-release,
+# so every binary's --version matches pkgver.
+
+pkgname=roost
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='GNOME-style Wayland desktop session in Rust (nested developer preview)'
+arch=('x86_64')
+url='https://github.com/hanthor/roost-desktop'
+license=('GPL-3.0-or-later')
+depends=(
+    'dbus'
+    'glib2'
+    'gtk4'
+    'libadwaita'
+    'libxkbcommon'
+    'libxkbcommon-x11'
+    'mesa'
+    'wayland'
+)
+makedepends=('cargo' 'git' 'pkgconf')
+optdepends=(
+    'greetd: login manager driving roost-greeter'
+    'xorg-xwayland: X11 application support'
+)
+options=('!lto' '!debug')
+
+if [[ -n "${ROOST_LOCAL_SRC:-}" ]]; then
+    source=()
+    sha256sums=()
+else
+    source=("roost::git+${url}.git#tag=v${pkgver}")
+    sha256sums=('SKIP')
+fi
+
+_srcroot() {
+    if [[ -n "${ROOST_LOCAL_SRC:-}" ]]; then
+        printf '%s' "$ROOST_LOCAL_SRC"
+    else
+        printf '%s' "$srcdir/roost"
+    fi
+}
+
+prepare() {
+    cd "$(_srcroot)"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$(_srcroot)"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$srcdir/target}"
+    export ROOST_VERSION="v${pkgver}"
+    cargo build --frozen --release \
+        -p roost-compositor -p roost-shell-host -p roost-greeter
+}
+
+check() {
+    local bin
+    for bin in roost-compositor roost-session roost-shell-host roost-greeter; do
+        local reported
+        reported="$("${CARGO_TARGET_DIR:-$srcdir/target}/release/$bin" --version | awk '{print $NF}')"
+        if [[ "$reported" != "$pkgver" ]]; then
+            echo "$bin reports $reported, expected $pkgver" >&2
+            return 1
+        fi
+    done
+}
+
+package() {
+    local root target bin
+    root="$(_srcroot)"
+    target="${CARGO_TARGET_DIR:-$srcdir/target}/release"
+    for bin in roost-compositor roost-session roost-shell-host roost-greeter; do
+        install -Dm0755 "$target/$bin" "$pkgdir/usr/bin/$bin"
+    done
+    install -Dm0644 "$root/share/wayland-sessions/roost.desktop" \
+        "$pkgdir/usr/share/wayland-sessions/roost.desktop"
+    install -Dm0644 "$root/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm0644 "$root/docs/nested-session.md" \
+        "$pkgdir/usr/share/doc/$pkgname/nested-session.md"
+}
