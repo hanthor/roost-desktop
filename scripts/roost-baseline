@@ -217,10 +217,9 @@ def main():
         qmp = Qmp(qmp_path)
         boot_s = wait_for_desktop(qmp, scratch, out)
         log(f"desktop settled after {boot_s:.0f}s")
-        # Close anything the live session auto-starts (welcome or
-        # installer) so the baseline frame is the bare desktop.
-        for _ in range(2):
-            qmp.keys("esc")
+        # Close what the live session auto-starts (the Marlin welcome
+        # window ignores Escape) so the baseline frame is the bare desktop.
+        qmp.keys("alt", "f4")
         time.sleep(3)
         nothing = lambda: None  # noqa: E731
         stages.append(record(qmp, out, scratch, "B-BASE", nothing, 2))
@@ -243,7 +242,10 @@ def main():
         stages.append(record(qmp, out, scratch, "B-CAL-OPEN",
                              lambda: qmp.click(WIDTH // 2, 12)))
         stages.append(record(qmp, out, scratch, "B-CAL-CLOSE", lambda: qmp.keys("esc")))
-        stages.append(record(qmp, out, scratch, "B-LOCK", lambda: qmp.keys("meta_l", "l"), 6))
+        # Capture the lock promptly (a long wait blanks the display),
+        # then wake it so the unlock screen is recorded too.
+        stages.append(record(qmp, out, scratch, "B-LOCK", lambda: qmp.keys("meta_l", "l"), 2))
+        stages.append(record(qmp, out, scratch, "B-LOCK-WAKE", lambda: qmp.keys("shift"), 3))
         qmp.cmd("quit")
     finally:
         try:
