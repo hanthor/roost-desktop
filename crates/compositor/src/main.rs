@@ -9,9 +9,28 @@ use std::process::ExitCode;
 
 use roost_compositor::runtime::{run, NestedSession};
 
-/// `roost-compositor [--socket NAME] [--width W] [--height H] [--shell-bin PATH]`.
+/// `roost-compositor [--socket NAME] [--width W] [--height H] [--shell-bin PATH] [--xwayland]`.
+/// `ROOST_XWAYLAND=1` also opts in to X11 compatibility.
+///
+/// Release version stamped at build time: `ROOST_VERSION` (a `vX.Y.Z` tag or
+/// plain `X.Y.Z`) wins, otherwise the crate version. Duplicated per binary on
+/// purpose — no shared dependency for a few lines.
+fn normalize_version<'a>(raw: Option<&'a str>, fallback: &'a str) -> &'a str {
+    match raw {
+        Some(v) if !v.is_empty() => v.strip_prefix('v').unwrap_or(v),
+        _ => fallback,
+    }
+}
+
+fn release_version() -> &'static str {
+    normalize_version(option_env!("ROOST_VERSION"), env!("CARGO_PKG_VERSION"))
+}
+
 fn main() -> ExitCode {
     let mut session = NestedSession::default_for_pid();
+    if std::env::var("ROOST_XWAYLAND").is_ok_and(|value| value == "1") {
+        session.xwayland = true;
+    }
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -35,11 +54,18 @@ fn main() -> ExitCode {
                     session.shell_bin = Some(path.into());
                 }
             }
+            "--xwayland" => {
+                session.xwayland = true;
+            }
+            "--version" | "-V" => {
+                println!("roost-compositor {}", release_version());
+                return ExitCode::SUCCESS;
+            }
             "--help" | "-h" => {
                 println!("roost-compositor: nested Roost session (001 developer preview)");
                 println!();
                 println!(
-                    "Usage: roost-compositor [--socket NAME] [--width W] [--height H] [--shell-bin PATH]"
+                    "Usage: roost-compositor [--socket NAME] [--width W] [--height H] [--shell-bin PATH] [--xwayland]"
                 );
                 println!();
                 println!("Starts one isolated nested Wayland session on a private");
@@ -73,5 +99,26 @@ fn main() -> ExitCode {
             eprintln!("roost-compositor: {err}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::normalize_version;
+
+    #[test]
+    fn tag_prefix_is_stripped() {
+        assert_eq!(normalize_version(Some("v1.2.3"), "0.1.0"), "1.2.3");
+    }
+
+    #[test]
+    fn plain_version_is_kept() {
+        assert_eq!(normalize_version(Some("1.2.3"), "0.1.0"), "1.2.3");
+    }
+
+    #[test]
+    fn missing_or_empty_falls_back() {
+        assert_eq!(normalize_version(None, "0.1.0"), "0.1.0");
+        assert_eq!(normalize_version(Some(""), "0.1.0"), "0.1.0");
     }
 }

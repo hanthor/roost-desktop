@@ -25,3 +25,4 @@ xkbcommon.workspace = true
 zbus.workspace = true
 image.workspace = true
 resvg.workspace = true
+rhai.workspace = true

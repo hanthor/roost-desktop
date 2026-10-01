@@ -10,6 +10,8 @@
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
+#[cfg(feature = "xwayland")]
+use smithay::delegate_xwayland_shell;
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_data_device, delegate_output, delegate_primary_selection,
@@ -54,6 +56,7 @@ pub mod supervise;
 pub mod unlock;
 pub mod wallpaper;
 pub mod windows;
+pub mod xwayland;
 
 /// One compositor-tracked output: protocol handle plus geometry.
 /// The first entry is the primary output; single-output sessions hold
@@ -107,6 +110,18 @@ pub struct State {
     /// Client window-state requests awaiting the manager's next
     /// `reconcile` drain (002 window actions).
     pub(crate) window_requests: Vec<(wl_surface::WlSurface, WindowRequest)>,
+    /// Running X11 window manager, once the compatibility server is
+    /// up (xwayland feature only).
+    #[cfg(feature = "xwayland")]
+    pub(crate) xwm: Option<smithay::xwayland::X11Wm>,
+    /// X11 manager events queued by the WM handlers for the next
+    /// `reconcile` drain (xwayland feature only).
+    #[cfg(feature = "xwayland")]
+    pub(crate) x11_events: Vec<crate::xwayland::X11ManagerEvent>,
+    /// XWayland shell global backing X11 surface association
+    /// (xwayland feature only; kept alive for the global).
+    #[cfg(feature = "xwayland")]
+    pub(crate) xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState,
 }
 
 /// Per-client data: the compositor state slice each client sees.
@@ -197,6 +212,13 @@ impl State {
     pub(crate) fn take_window_requests(&mut self) -> Vec<(wl_surface::WlSurface, WindowRequest)> {
         std::mem::take(&mut self.window_requests)
     }
+
+    /// Drain queued X11 manager events (the manager calls this from
+    /// `reconcile`; xwayland feature only).
+    #[cfg(feature = "xwayland")]
+    pub(crate) fn take_x11_events(&mut self) -> Vec<crate::xwayland::X11ManagerEvent> {
+        std::mem::take(&mut self.x11_events)
+    }
 }
 
 impl CompositorHandler for State {
@@ -205,7 +227,18 @@ impl CompositorHandler for State {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        &client.get_data::<ClientState>().unwrap().compositor_state
+        // Normal clients carry our `ClientState`. With the xwayland
+        // feature the XWayland server client instead carries
+        // Smithay's `XWaylandClientData`, which holds the same
+        // compositor state under its own field.
+        if let Some(data) = client.get_data::<ClientState>() {
+            return &data.compositor_state;
+        }
+        #[cfg(feature = "xwayland")]
+        if let Some(data) = client.get_data::<smithay::xwayland::XWaylandClientData>() {
+            return &data.compositor_state;
+        }
+        panic!("client without compositor state");
     }
 
     fn commit(&mut self, surface: &wl_surface::WlSurface) {
@@ -300,6 +333,8 @@ impl State {
 }
 
 delegate_xdg_shell!(State);
+#[cfg(feature = "xwayland")]
+delegate_xwayland_shell!(State);
 delegate_data_device!(State);
 delegate_primary_selection!(State);
 delegate_compositor!(State);
@@ -340,6 +375,14 @@ impl State {
             panel_surfaces: Vec::new(),
             outputs: Vec::new(),
             window_requests: Vec::new(),
+            #[cfg(feature = "xwayland")]
+            xwm: None,
+            #[cfg(feature = "xwayland")]
+            x11_events: Vec::new(),
+            #[cfg(feature = "xwayland")]
+            xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState::new::<State>(
+                dh,
+            ),
         }
     }
 

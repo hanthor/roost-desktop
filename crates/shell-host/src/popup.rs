@@ -761,6 +761,8 @@ mod tests {
         assert!(layout.tiles[0].x + layout.tiles[0].w >= right - 8);
         assert_eq!(layout.tile_at(right - DOT_SIZE, 16), Some(0));
         assert_eq!(layout.tile_at(640, 16), None);
+        // scripts/roost-capture clicks here for the network menu.
+        assert_eq!(layout.tile_at(1263, 16), Some(0));
     }
 
     #[test]

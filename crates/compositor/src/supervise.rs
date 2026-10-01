@@ -358,6 +358,10 @@ pub struct ShellDriver {
     /// supervisor repeats `Exited` while a restart backoff is pending,
     /// so without this every tick would log a duplicate death.
     reported_down: bool,
+    /// Whether budget exhaustion was already reported. The supervisor
+    /// returns the error on every poll once exhausted, so without this
+    /// every tick would log a duplicate exhaustion.
+    reported_exhausted: bool,
 }
 
 impl ShellDriver {
@@ -375,6 +379,7 @@ impl ShellDriver {
             control_socket,
             events: Vec::new(),
             reported_down: false,
+            reported_exhausted: false,
         }
     }
 
@@ -396,6 +401,7 @@ impl ShellDriver {
         match supervisor.poll(&mut remake, now_ms) {
             Ok(ChildEvent::Running) => {
                 self.reported_down = false;
+                self.reported_exhausted = false;
                 ShellStatus::Running
             }
             Ok(ChildEvent::Exited(code)) => {
@@ -412,7 +418,12 @@ impl ShellDriver {
                 ShellStatus::Waiting { delay_ms }
             }
             Err(SuperviseError::BudgetExhausted) => {
-                self.events.push(SupervisorEvent::BudgetExhausted);
+                // Report the transition once; the error repeats on
+                // every poll until an operator relaunch resets it.
+                if !self.reported_exhausted {
+                    self.events.push(SupervisorEvent::BudgetExhausted);
+                    self.reported_exhausted = true;
+                }
                 ShellStatus::Exhausted
             }
             Err(e) => ShellStatus::Fault(e.to_string()),
@@ -432,6 +443,7 @@ impl ShellDriver {
     pub fn reset_budget(&mut self) {
         self.supervisor.reset_budget();
         self.reported_down = false;
+        self.reported_exhausted = false;
     }
 
     /// Restarts performed so far (initial spawn excluded).
@@ -621,6 +633,44 @@ mod tests {
             events[1],
             SupervisorEvent::RestartScheduled { .. }
         ));
+    }
+
+    #[test]
+    fn driver_reports_exhaustion_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut driver = ShellDriver::new(
+            RestartPolicy::new(1, 1, 1),
+            std::path::PathBuf::from("/bin/false"),
+            "roost-test.sock".to_owned(),
+            dir.path().join("control.sock"),
+        );
+        let reap_exit = |driver: &mut ShellDriver, now: u64| {
+            for _ in 0..10_000 {
+                match driver.poll(now) {
+                    ShellStatus::Waiting { .. } => return,
+                    ShellStatus::Running => std::thread::yield_now(),
+                    ShellStatus::Exhausted => return,
+                    other => panic!("unexpected driver status: {other:?}"),
+                }
+            }
+            panic!("exit reap budget exhausted");
+        };
+        assert_eq!(driver.poll(0), ShellStatus::Running);
+        reap_exit(&mut driver, 0);
+        // Past the backoff: the one budgeted restart respawns.
+        assert_eq!(driver.poll(100), ShellStatus::Running);
+        reap_exit(&mut driver, 100);
+        assert_eq!(driver.poll(200), ShellStatus::Exhausted);
+        // Repeated exhausted polls stay silent after the first report.
+        for _ in 0..5 {
+            assert_eq!(driver.poll(200), ShellStatus::Exhausted);
+        }
+        let exhausted = driver
+            .drain_events()
+            .into_iter()
+            .filter(|e| matches!(e, SupervisorEvent::BudgetExhausted))
+            .count();
+        assert_eq!(exhausted, 1);
     }
 
     #[test]

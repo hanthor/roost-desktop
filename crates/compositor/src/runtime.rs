@@ -16,7 +16,7 @@ use std::ffi::OsString;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use calloop::EventLoop;
+use calloop::{EventLoop, LoopHandle};
 use smithay::{
     backend::{
         renderer::{
@@ -34,11 +34,22 @@ use smithay::{
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::wayland_server::Display,
     utils::{Rectangle, Transform},
-    wayland::socket::ListeningSocketSource,
+    wayland::{seat::WaylandFocus, socket::ListeningSocketSource},
 };
 
 use crate::control::ControlHub;
 use crate::lock::{content_visible, SessionLock, DEFAULT_IDLE_TIMEOUT_MS};
+
+/// Idle timeout for the session lock: `ROOST_IDLE_TIMEOUT_MS` overrides
+/// the five-minute default. Testability seam for scripted lock capture
+/// (and lock journey tests); production runs leave it unset.
+fn idle_timeout_ms() -> u64 {
+    std::env::var("ROOST_IDLE_TIMEOUT_MS")
+        .ok()
+        .and_then(|raw| raw.parse().ok())
+        .filter(|ms| *ms > 0)
+        .unwrap_or(DEFAULT_IDLE_TIMEOUT_MS)
+}
 use crate::overlay::{overlay_key_for_keycode, Overlay, OverlayWindow};
 use crate::state::TokenStore;
 use crate::supervise::{RecoveryAction, RestartPolicy, ShellDriver, ShellStatus};
@@ -46,6 +57,7 @@ use crate::wallpaper::Wallpaper;
 use crate::windows::{
     translate_input, ManagerInput, TriggerAction, TriggerState, WindowManager, ESCAPE_KEYCODE,
 };
+use crate::xwayland::XWaylandSupervisor;
 use roost_greeter::client::GreeterClient;
 
 use crate::{ClientState, State};
@@ -72,6 +84,11 @@ pub struct NestedSession {
     /// [`resolve_shell_bin`]: `ROOST_SHELL_BIN`, then the
     /// `roost-shell-host` sibling of this binary, then `PATH`.
     pub shell_bin: Option<std::path::PathBuf>,
+    /// Opt in to X11 compatibility: records the first X11 need at
+    /// launch so the supervisor may spawn the server on demand.
+    /// `false` (default) keeps the session native-only; the flag is
+    /// the v1 trigger until per-app launch requests exist.
+    pub xwayland: bool,
 }
 
 impl NestedSession {
@@ -82,6 +99,7 @@ impl NestedSession {
             width,
             height,
             shell_bin: None,
+            xwayland: false,
         }
     }
 
@@ -203,6 +221,19 @@ pub struct Runtime {
     /// from input timestamps. The hub mirror carries the flag to shell
     /// snapshots; the shell never owns it.
     lock: SessionLock,
+    /// On-demand XWayland server supervisor. Idle until the first X11
+    /// need is recorded via [`Runtime::request_x11`]; the window-model
+    /// join installs the real spawner, until then ticks are no-ops.
+    xwayland: XWaylandSupervisor,
+    /// Loop handle for event-source installation (XWayland spawn).
+    /// Cloned from the owned event loop at launch; `'static`
+    /// because the loop outlives the runtime in `run`.
+    loop_handle: LoopHandle<'static, Runtime>,
+    /// XWayland server client awaiting its `Ready` event, after
+    /// which the X11 window manager starts against it (xwayland
+    /// feature only).
+    #[cfg(feature = "xwayland")]
+    pending_x11_client: Option<smithay::reexports::wayland_server::Client>,
     /// Real-time anchor of the last input event. Input stamps live on
     /// the backend event clock while idle is measured here, so each
     /// tick evaluates the lock in the input base as
@@ -294,7 +325,8 @@ impl Runtime {
             })
             .map_err(|e| RuntimeError::Loop(e.to_string()))?;
 
-        let runtime = Runtime {
+        let loop_handle = event_loop.handle();
+        let mut runtime = Runtime {
             display,
             state,
             backend,
@@ -304,11 +336,21 @@ impl Runtime {
             overlay,
             wallpaper: Wallpaper::new(),
             triggers: TriggerState::default(),
-            lock: SessionLock::new(DEFAULT_IDLE_TIMEOUT_MS),
+            lock: SessionLock::new(idle_timeout_ms()),
+            xwayland: XWaylandSupervisor::new(),
+            loop_handle,
+            #[cfg(feature = "xwayland")]
+            pending_x11_client: None,
             idle_since: Instant::now(),
             exit: false,
             stats: RunStats::default(),
         };
+        // Session-level X11 opt-in is the recorded first X11 need:
+        // the supervisor leaves `Idle` and the next tick may spawn
+        // the server. Native sessions never request.
+        if session.xwayland {
+            runtime.request_x11();
+        }
         Ok((runtime, event_loop))
     }
 
@@ -328,7 +370,7 @@ impl Runtime {
             }
             WinitEvent::CloseRequested => self.exit = true,
             WinitEvent::Input(event) => {
-                if let Some(input) = translate_input(event) {
+                for input in translate_input(event) {
                     self.on_manager_input(input);
                 }
             }
@@ -492,6 +534,40 @@ impl Runtime {
     /// one frame, and report whether to continue. The shell step never
     /// blocks the tick: absence shows the overlay, exhaustion stays
     /// calm, and every outcome is logged redacted (codes/counts only).
+    /// Record the first X11 need: the supervisor leaves `Idle` and the
+    /// next tick may spawn the compatibility server once its spawner
+    /// is installed. Session opt-in calls this at launch; until then
+    /// native sessions never request.
+    pub fn request_x11(&mut self) {
+        self.xwayland.request();
+    }
+
+    /// Loop handle for event-source installation (XWayland spawn).
+    pub fn loop_handle(&self) -> LoopHandle<'static, Runtime> {
+        self.loop_handle.clone()
+    }
+
+    /// Mutable protocol state, for the X11 handler impls.
+    pub fn state_mut(&mut self) -> &mut State {
+        &mut self.state
+    }
+
+    /// Take the XWayland server client awaiting its `Ready` event.
+    /// (xwayland feature only.)
+    #[cfg(feature = "xwayland")]
+    pub fn take_pending_x11_client(
+        &mut self,
+    ) -> Option<smithay::reexports::wayland_server::Client> {
+        self.pending_x11_client.take()
+    }
+
+    /// Handle one XWayland server event (spawned source callback).
+    /// (xwayland feature only.)
+    #[cfg(feature = "xwayland")]
+    pub fn on_xwayland_event(&mut self, event: smithay::xwayland::XWaylandEvent) {
+        crate::xwayland::on_xwayland_event(self, event);
+    }
+
     fn tick(&mut self) -> Result<bool, RuntimeError> {
         self.display
             .dispatch_clients(&mut self.state)
@@ -551,6 +627,20 @@ impl Runtime {
         for event in self.shell.drain_events() {
             eprintln!("roost-compositor: shell supervision: {event:?}");
         }
+        // XWayland supervision rides the same tick. Without the
+        // feature there is no spawner and this stays a no-op;
+        // native sessions never leave `Idle`.
+        #[cfg(not(feature = "xwayland"))]
+        self.xwayland.tick(crate::state::system_millis(), None);
+        #[cfg(feature = "xwayland")]
+        {
+            let display = self.display.handle();
+            let loop_handle = self.loop_handle.clone();
+            let pending = &mut self.pending_x11_client;
+            let mut spawner = || crate::xwayland::spawn_xwayland(&display, &loop_handle, pending);
+            self.xwayland
+                .tick(crate::state::system_millis(), Some(&mut spawner));
+        }
         self.stats.shell_restarts = self.shell.restarts_used();
         self.render()?;
         Ok(!self.exit)
@@ -584,15 +674,23 @@ impl Runtime {
                 self.manager
                     .visible_windows()
                     .iter()
-                    .flat_map(|(surface, geometry)| {
-                        render_elements_from_surface_tree(
-                            renderer,
-                            surface.wl_surface(),
-                            (geometry.loc.x, geometry.loc.y),
-                            1.0,
-                            1.0,
-                            Kind::Unspecified,
-                        )
+                    .flat_map(|(window, geometry)| {
+                        // Unassociated X11 windows contribute no
+                        // surface yet and render nothing this frame.
+                        window
+                            .wl_surface()
+                            .map(|surface| {
+                                render_elements_from_surface_tree(
+                                    renderer,
+                                    &surface,
+                                    (geometry.loc.x, geometry.loc.y),
+                                    1.0,
+                                    1.0,
+                                    Kind::Unspecified,
+                                )
+                            })
+                            .into_iter()
+                            .flatten()
                     })
                     .collect()
             } else {
@@ -637,6 +735,10 @@ impl Runtime {
                 draw_render_elements(&mut frame, 1.0, std::slice::from_ref(paper), &[damage])
                     .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
             }
+            // `elements` accumulates bottom-to-top (windows, then
+            // background-to-overlay layers); Smithay 0.7 draws the
+            // first element topmost.
+            let elements = crate::layer::front_to_back(elements);
             draw_render_elements(&mut frame, 1.0, &elements, &[damage])
                 .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
             let _ = frame
@@ -658,6 +760,15 @@ impl Runtime {
                 );
             }
             for (surface, _, _) in crate::layer::layer_layout(&self.state) {
+                send_frames_surface_tree(&surface, &output, time, Some(Duration::ZERO), |_, _| {
+                    Some(output.clone())
+                });
+            }
+            // X11 windows are not xdg toplevels, so the loop above
+            // never reaches them; Xwayland waits on these callbacks
+            // before committing content.
+            #[cfg(feature = "xwayland")]
+            for surface in self.manager.x11_surfaces() {
                 send_frames_surface_tree(&surface, &output, time, Some(Duration::ZERO), |_, _| {
                     Some(output.clone())
                 });
