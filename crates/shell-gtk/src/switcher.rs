@@ -5,10 +5,10 @@
 
 use std::rc::Rc;
 
+use crate::live_apps::LiveApps;
 use gtk4 as gtk;
 use gtk4::prelude::*;
 use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
-use roost_shell_host::apps::AppProvider;
 use roost_shell_host::model::ShellModel;
 
 /// Layer namespace (matches the legacy shell's switcher surface).
@@ -25,12 +25,12 @@ pub struct SwitcherUi {
     window: gtk::ApplicationWindow,
     row: gtk::Box,
     title: gtk::Label,
-    apps: Rc<AppProvider>,
+    apps: Rc<LiveApps>,
     shown: std::cell::RefCell<Shown>,
 }
 
 impl SwitcherUi {
-    pub fn new(app: &gtk::Application, apps: Rc<AppProvider>) -> Rc<Self> {
+    pub fn new(app: &gtk::Application, apps: Rc<LiveApps>) -> Rc<Self> {
         let window = gtk::ApplicationWindow::new(app);
         window.add_css_class("roost-switcher");
         window.init_layer_shell();
@@ -89,11 +89,11 @@ impl SwitcherUi {
         while let Some(child) = self.row.first_child() {
             self.row.remove(&child);
         }
+        let apps = self.apps.get();
         for (id, title, app_id) in &now.items {
             let entry = app_id.as_deref().and_then(|a| {
-                self.apps
-                    .entry(a.trim_end_matches(".desktop"))
-                    .or_else(|| self.apps.entry(a))
+                apps.entry(a.trim_end_matches(".desktop"))
+                    .or_else(|| apps.entry(a))
             });
             let icon = match entry.and_then(|e| e.icon.clone()) {
                 Some(icon) if icon.starts_with('/') => gtk::Image::from_file(icon),

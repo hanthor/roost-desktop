@@ -154,10 +154,10 @@ window.roost-banners {
 }
 
 /* Search providers (#57): GNOME 51 list results under the app row. */
-/* Opaque: the compositor keeps drawing previews under search, where
-   GNOME fades them out (ledger P-OV-04). */
+/* The compositor hides the workspace view while search shows results,
+   so results sit on the overview background, as in GNOME. */
 .overview-providers {
-  background-color: #2a2a2f;
+  background-color: alpha(#ffffff, 0.06);
   border-radius: 18px;
   padding: 12px;
 }

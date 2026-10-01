@@ -24,7 +24,7 @@ This page records that decision for R9 (knowledge entry
 | text-scaling-factor | Via GTK | |
 | gtk-theme, icon-theme, cursor-theme, cursor-size | Via GTK | Inside apps. The compositor's own cursor ignores them (#89) |
 | clock-format | Honored | Panel clock |
-| clock-show-weekday, clock-show-seconds, clock-show-date | Ignored | The GTK panel shows GNOME's default format (#63) |
+| clock-show-weekday, clock-show-date, clock-show-seconds | Honored | Panel clock, built as gnome-desktop's wall clock builds it |
 | enable-hot-corners | Ignored | The hot corner is always on (#63) |
 | enable-animations | Ignored | Roost has no animations yet |
 | show-battery-percentage | Ignored | No battery indicator yet (#55) |

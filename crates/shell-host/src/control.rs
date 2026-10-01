@@ -378,6 +378,17 @@ impl ControlClient {
         Ok(id)
     }
 
+    /// Tell the compositor whether overview search shows results, so
+    /// it hides the workspace view meanwhile. Returns the request id.
+    pub fn set_overview_search(&mut self, active: bool) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::SetOverviewSearch { active },
+        })?;
+        Ok(id)
+    }
+
     /// Lock after `ms` of idle time, `0` for never: GNOME's
     /// `idle-delay`, `lock-enabled` and `lock-delay` as the shell
     /// derives them (#63). Returns the request id.

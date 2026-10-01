@@ -16,7 +16,9 @@
 #   G-OV-OPEN   Super opens the overview with a preview per window (#54)
 #   G-OV-PICK   clicking a preview focuses that window, closes overview
 #   G-APP-POPOVER an app's menu popover opens (xdg popups, #88)
+#   G-APP-INSTALLED an app installed mid-session shows in search
 #   G-SEARCH-PROVIDER  typing lists a D-Bus search provider's result (#57)
+#   G-SEARCH-VIEW      while search shows results the workspace view hides
 #   G-SEARCH-ACTIVATE  clicking it calls ActivateResult, closes overview
 #   G-NOTIFY-BANNER  a D-Bus notification shows a banner (#56)
 #   G-NOTIFY-EXPIRE  the banner goes away by itself
@@ -40,6 +42,7 @@
 #   G-OV-APPGRID Show Apps opens the app grid
 #   G-X11-APP      XWayland is on by default: an X11 app launched from
 #                  overview search gets DISPLAY and maps a window (#59)
+#   G-SETTINGS-CLOCK GNOME's clock-show-seconds key changes the panel clock
 #   G-SETTINGS-IDLE GNOME's idle-delay and lock-enabled keys set the
 #                  compositor's idle lock live (#63)
 #   G-POWER-MENU   the power button opens GNOME's menu (Suspend,
@@ -440,6 +443,28 @@ until [ -f "$PROBE_MARKER" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
 cstate '.overview_open | not' "closed" || fail G-OV-LAUNCH "overview stayed open after launch"
 pass G-OV-LAUNCH "Enter launches the top result and closes the overview"
 
+# An app installed while the shell runs is searchable at once (GNOME
+# watches the application directories too).
+cat >"$XDG_DATA_HOME/applications/roost-late-arrival.desktop" <<LATE
+[Desktop Entry]
+Name=Roost Late Arrival
+Exec=true
+Type=Application
+LATE
+sleep 1
+xdotool key Super_L
+cstate '.overview_open' "overview" || fail G-APP-INSTALLED "overview did not open"
+sleep 1
+xdotool type --delay 40 "late arrival"
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-late-app.json" 20 ||
+    fail G-APP-INSTALLED "accessibility dump failed"
+showing "$ARTIFACTS/a11y-late-app.json" "Roost Late Arrival" ||
+    fail G-APP-INSTALLED "an app installed mid-session did not show in search"
+pass G-APP-INSTALLED "an app installed mid-session shows in search"
+xdotool key Escape
+cstate '.overview_open | not' "closed" || { xdotool key Escape; cstate '.overview_open | not' "closed" || fail G-APP-INSTALLED "overview stayed open"; }
+
 # Search providers (#57): a D-Bus provider's result lists under the
 # apps, and clicking it hands the result back to the provider.
 xdotool key Super_L
@@ -453,6 +478,9 @@ scrot "$ARTIFACTS/10b-search-provider.png" >/dev/null
 showing "$ARTIFACTS/a11y-provider.json" "Quarterly Report.odt" ||
     fail G-SEARCH-PROVIDER "the provider's result is not listed"
 pass G-SEARCH-PROVIDER "typing lists a D-Bus search provider's result"
+cstate '.overview_search' "search view" ||
+    fail G-SEARCH-VIEW "the compositor kept the workspace view during search"
+pass G-SEARCH-VIEW "search results replace the workspace view"
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-provider-press.json" 20 \
     --press "Quarterly Report.odt" || fail G-SEARCH-ACTIVATE "could not press the result"
 end=$(($(date +%s) + 10))
@@ -460,6 +488,8 @@ until [ -s "$SEARCH_MARKER" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; don
 grep -q "^activate doc-1 report" "$SEARCH_MARKER" 2>/dev/null ||
     fail G-SEARCH-ACTIVATE "ActivateResult never reached the provider"
 cstate '.overview_open | not' "closed" || fail G-SEARCH-ACTIVATE "overview stayed open"
+cstate '.overview_search | not' "search reset" ||
+    fail G-SEARCH-ACTIVATE "search state outlived the overview"
 pass G-SEARCH-ACTIVATE "clicking a provider result activates it and closes the overview"
 
 xdotool key Super_L
@@ -679,6 +709,17 @@ if command -v Xwayland >/dev/null 2>&1 && command -v xeyes >/dev/null 2>&1; then
 else
     echo "roost-gtk-shell-proof: G-X11-APP skipped (no Xwayland or xeyes)"
 fi
+
+# GNOME's clock keys reach the panel clock within its 1 s tick.
+gsettings set org.gnome.desktop.interface clock-show-seconds true
+sleep 2
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-clock.json" 20 ||
+    fail G-SETTINGS-CLOCK "accessibility dump failed"
+jq -e 'any(.[]; .role == "label" and (.name | test("[0-9]+:[0-9]{2}:[0-9]{2}")))' \
+    "$ARTIFACTS/a11y-clock.json" >/dev/null ||
+    fail G-SETTINGS-CLOCK "clock-show-seconds did not add seconds to the panel clock"
+gsettings set org.gnome.desktop.interface clock-show-seconds false
+pass G-SETTINGS-CLOCK "GNOME's clock-show-seconds changes the panel clock"
 
 # GNOME settings (#63): the idle lock follows idle-delay and
 # lock-enabled as they change.

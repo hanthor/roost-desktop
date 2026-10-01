@@ -76,7 +76,13 @@ impl ProtocolVersion {
     ///
     /// `0.9` appends the shell-to-compositor `SetIdleTimeout` command
     /// (GNOME's idle and lock settings, #63), again last.
-    pub const CURRENT: Self = Self { major: 0, minor: 9 };
+    ///
+    /// `0.10` appends the shell-to-compositor `SetOverviewSearch`
+    /// command (search hides the workspace view, as in GNOME), again last.
+    pub const CURRENT: Self = Self {
+        major: 0,
+        minor: 10,
+    };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
     pub const fn new(major: u16, minor: u16) -> Self {
@@ -210,6 +216,13 @@ pub enum CommandKind {
     SetIdleTimeout {
         /// Idle milliseconds before locking, `0` for never.
         ms: u64,
+    },
+    /// The overview's search is showing results (or not): while it is,
+    /// the compositor hides the workspace card and window previews, as
+    /// GNOME does. UI state; it resets whenever the overview closes.
+    SetOverviewSearch {
+        /// Whether search results are showing.
+        active: bool,
     },
 }
 
@@ -623,8 +636,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_9() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 9));
+    fn current_version_is_0_10() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 10));
     }
 
     #[test]
@@ -641,7 +654,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 7).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 8).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 9).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 10).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 10).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 11).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }
