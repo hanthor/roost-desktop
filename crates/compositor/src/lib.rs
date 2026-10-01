@@ -52,6 +52,7 @@ pub mod drm;
 pub mod layer;
 pub mod lock;
 pub mod overlay;
+pub mod overview;
 pub mod popup;
 pub mod runtime;
 pub mod state;
@@ -163,6 +164,10 @@ pub(crate) enum WindowRequest {
     Fullscreen,
     /// Client asked to leave fullscreen.
     Unfullscreen,
+    /// Client started an interactive move (header-bar drag, #58).
+    Move,
+    /// Client started an interactive resize from these xdg edges.
+    Resize(u32),
 }
 
 impl ClientData for ClientState {
@@ -225,6 +230,26 @@ impl XdgShellHandler for State {
         if before > 0 && self.popup_grab.is_empty() {
             self.popup_refocus = true;
         }
+    }
+
+    /// Queue an interactive move (CSD header-bar drag) for the manager.
+    fn move_request(&mut self, surface: ToplevelSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
+        self.window_requests
+            .push((surface.wl_surface().clone(), WindowRequest::Move));
+    }
+
+    /// Queue an interactive resize from `edges` for the manager.
+    fn resize_request(
+        &mut self,
+        surface: ToplevelSurface,
+        _seat: wl_seat::WlSeat,
+        _serial: Serial,
+        edges: smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge,
+    ) {
+        self.window_requests.push((
+            surface.wl_surface().clone(),
+            WindowRequest::Resize(edges as u32),
+        ));
     }
 
     /// Queue a client maximize request for the manager drain. The
@@ -366,8 +391,10 @@ impl State {
         let Some(parent) = popup.get_parent_surface() else {
             return;
         };
-        let base: Point<i32, Logical> = if let Some(origin) = self.window_origins.get(&parent) {
-            *origin + crate::popup::window_geometry_loc(&parent)
+        let base: Point<i32, Logical> = if let Some(window_loc) = self.window_origins.get(&parent) {
+            // Positioners are relative to the parent's window geometry,
+            // which is exactly the window rect the manager tracks.
+            *window_loc
         } else if let Some((_, (x, y), _)) = crate::layer::layer_layout(self)
             .into_iter()
             .find(|(s, _, _)| *s == parent)

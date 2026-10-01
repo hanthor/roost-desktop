@@ -119,7 +119,63 @@ pub enum SessionMode {
 /// protocol object stays the caller: every method takes the seat handles
 /// it needs from `state`, so input delivery, focus, and configure
 /// round-trips share one call path for live events and tests.
+/// Interactive pointer grab on one window (#58).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PointerGrab {
+    /// Move: the window follows the pointer from where the drag began.
+    Move {
+        id: u64,
+        pointer_start: Point<f64, Logical>,
+        loc_start: Point<i32, Logical>,
+    },
+    /// Resize from `edges` (xdg ResizeEdge bits).
+    Resize {
+        id: u64,
+        edges: u32,
+        pointer_start: Point<f64, Logical>,
+        geometry_start: Rectangle<i32, Logical>,
+    },
+}
+
+/// xdg_toplevel ResizeEdge bits.
+const EDGE_TOP: u32 = 1;
+const EDGE_BOTTOM: u32 = 2;
+const EDGE_LEFT: u32 = 4;
+const EDGE_RIGHT: u32 = 8;
+/// Smallest size an interactive resize may reach.
+pub const MIN_WINDOW_SIZE: (i32, i32) = (120, 80);
+/// Distance from the top/side edge that snaps a dropped window.
+pub const SNAP_EDGE_PX: f64 = 2.0;
+
+/// New rectangle for a resize from `edges` by `(dx, dy)`, never smaller
+/// than [`MIN_WINDOW_SIZE`]; the opposite edges stay put.
+pub fn resized(
+    start: Rectangle<i32, Logical>,
+    edges: u32,
+    dx: i32,
+    dy: i32,
+) -> Rectangle<i32, Logical> {
+    let (mut x, mut y, mut w, mut h) = (start.loc.x, start.loc.y, start.size.w, start.size.h);
+    if edges & EDGE_RIGHT != 0 {
+        w = (start.size.w + dx).max(MIN_WINDOW_SIZE.0);
+    }
+    if edges & EDGE_BOTTOM != 0 {
+        h = (start.size.h + dy).max(MIN_WINDOW_SIZE.1);
+    }
+    if edges & EDGE_LEFT != 0 {
+        w = (start.size.w - dx).max(MIN_WINDOW_SIZE.0);
+        x = start.loc.x + start.size.w - w;
+    }
+    if edges & EDGE_TOP != 0 {
+        h = (start.size.h - dy).max(MIN_WINDOW_SIZE.1);
+        y = start.loc.y + start.size.h - h;
+    }
+    Rectangle::new((x, y).into(), (w, h).into())
+}
+
 pub struct WindowManager {
+    /// Active interactive move/resize, if any (#58).
+    grab: Option<PointerGrab>,
     /// Button whose press dismissed a popup grab: its release is
     /// swallowed too, so the window beneath never sees half a click.
     swallowed_button: Option<u32>,
@@ -190,6 +246,7 @@ impl WindowManager {
             pointer,
             pointer_pos: (0.0, 0.0).into(),
             swallowed_button: None,
+            grab: None,
             mode: SessionMode::Gnome,
             strip_offset: 0.0,
             super_held: false,
@@ -223,6 +280,44 @@ impl WindowManager {
     /// Mutable model for control-command application.
     pub fn model_mut(&mut self) -> &mut StateModel {
         &mut self.model
+    }
+
+    /// Every mapped window on every workspace, bottom to top, for the
+    /// overview (#54).
+    pub fn overview_windows(&self) -> Vec<crate::overview::OverviewWindow> {
+        self.stacking
+            .iter()
+            .filter_map(|id| {
+                let entry = self.model.window(*id)?;
+                let window = self.windows.get(id)?;
+                Some(crate::overview::OverviewWindow {
+                    id: *id,
+                    workspace: entry.workspace,
+                    geometry: window.geometry,
+                })
+            })
+            .collect()
+    }
+
+    /// The Wayland surface of window `id`, if it has one.
+    pub fn surface_of(&self, id: u64) -> Option<WlSurface> {
+        self.windows
+            .get(&id)
+            .and_then(|w| w.surface.wl_surface())
+            .map(|s| s.into_owned())
+    }
+
+    /// Switch to `workspace` by id, if it exists.
+    pub fn switch_to_workspace(&mut self, state: &mut State, workspace: u32) -> bool {
+        let list = self.model.workspaces().to_vec();
+        let (Some(from), Some(to)) = (
+            list.iter()
+                .position(|w| *w == self.model.active_workspace()),
+            list.iter().position(|w| *w == workspace),
+        ) else {
+            return false;
+        };
+        self.switch_relative(state, to as i32 - from as i32)
     }
 
     /// Windows bottom-to-top with their geometry, for frame production.
@@ -393,7 +488,7 @@ impl WindowManager {
         let window = Window::new_wayland_window(surface.clone());
         let id = self.insert_managed(&title, app_id.as_deref());
         self.surface_index.insert(surface.wl_surface().clone(), id);
-        let geometry = self.cascade_geometry();
+        let geometry = self.placement(state);
         self.windows.insert(
             id,
             ManagedWindow {
@@ -422,6 +517,47 @@ impl WindowManager {
         }
         self.configure(id, true);
         self.apply_focus(state, Some(id));
+    }
+
+    /// Where a new floating window goes. With a real output this follows
+    /// GNOME's automatic placement: the first window on an empty
+    /// workspace is centered in the work area, later ones cascade from
+    /// the most recent by one step, kept inside the work area (never
+    /// under the top bar). Without an output (headless tests) the plain
+    /// cascade from the origin stands.
+    fn placement(&mut self, state: &State) -> Rectangle<i32, Logical> {
+        let work = Self::work_area(state);
+        if work.size.w <= 0 || work.size.h <= 0 {
+            return self.cascade_geometry();
+        }
+        let size: Size<i32, Logical> = (
+            DEFAULT_WIDTH.min(work.size.w),
+            DEFAULT_HEIGHT.min(work.size.h),
+        )
+            .into();
+        let active = self.model.active_workspace();
+        let last = self.stacking.iter().rev().find_map(|id| {
+            (self.model.window(*id)?.workspace == active)
+                .then(|| self.windows.get(id).map(|w| w.geometry.loc))
+                .flatten()
+        });
+        let centered: Point<i32, Logical> = (
+            work.loc.x + (work.size.w - size.w) / 2,
+            work.loc.y + (work.size.h - size.h) / 2,
+        )
+            .into();
+        let mut loc = match last {
+            None => centered,
+            Some(prev) => prev + Point::from((CASCADE_STEP, CASCADE_STEP)),
+        };
+        // Wrap back to the top-left of the work area when the cascade
+        // would push the window off it.
+        if loc.x + size.w > work.loc.x + work.size.w || loc.y + size.h > work.loc.y + work.size.h {
+            loc = work.loc;
+        }
+        loc.x = loc.x.max(work.loc.x);
+        loc.y = loc.y.max(work.loc.y);
+        Rectangle::new(loc, size)
     }
 
     /// Next cascaded floating geometry.
@@ -650,6 +786,8 @@ impl WindowManager {
                 WindowRequest::Unfullscreen => {
                     self.set_fullscreen(state, id, false);
                 }
+                WindowRequest::Move => self.begin_move(state, id),
+                WindowRequest::Resize(edges) => self.begin_resize(id, edges),
             }
         }
     }
@@ -796,6 +934,130 @@ impl WindowManager {
         surface.send_configure();
     }
 
+    /// Start moving `id` with the pointer (header-bar drag or Super+drag).
+    /// A maximized or tiled window drags off into floating first, keeping
+    /// the pointer at the same fraction across its width (GNOME shape).
+    fn begin_move(&mut self, state: &mut State, id: u64) {
+        if self.mode == SessionMode::Scroll {
+            return;
+        }
+        let pointer = self.pointer_pos;
+        let Some(window) = self.windows.get(&id) else {
+            return;
+        };
+        let managed = window.layout != WindowLayout::Floating;
+        let before = window.geometry;
+        if managed {
+            self.restore_layout(id);
+            if let Some(window) = self.windows.get_mut(&id) {
+                let frac = if before.size.w > 0 {
+                    (pointer.x - f64::from(before.loc.x)) / f64::from(before.size.w)
+                } else {
+                    0.5
+                };
+                let w = window.geometry.size.w;
+                window.geometry.loc = (
+                    (pointer.x - frac * f64::from(w)).round() as i32,
+                    (pointer.y - 16.0).round() as i32,
+                )
+                    .into();
+            }
+            let focused = self.model.focused() == Some(id);
+            self.configure(id, focused);
+        }
+        if let Some(window) = self.windows.get(&id) {
+            self.grab = Some(PointerGrab::Move {
+                id,
+                pointer_start: pointer,
+                loc_start: window.geometry.loc,
+            });
+        }
+        let _ = state;
+    }
+
+    /// Start resizing `id` from `edges` with the pointer.
+    fn begin_resize(&mut self, id: u64, edges: u32) {
+        if self.mode == SessionMode::Scroll {
+            return;
+        }
+        if !self.restore_layout(id) {
+            return;
+        }
+        if let Some(window) = self.windows.get(&id) {
+            self.grab = Some(PointerGrab::Resize {
+                id,
+                edges,
+                pointer_start: self.pointer_pos,
+                geometry_start: window.geometry,
+            });
+        }
+    }
+
+    /// Whether an interactive move/resize is in progress.
+    pub fn grab_active(&self) -> bool {
+        self.grab.is_some()
+    }
+
+    /// Follow the pointer during a grab. Returns whether a grab ate it.
+    fn grab_motion(&mut self, pos: Point<f64, Logical>) -> bool {
+        let Some(grab) = self.grab else {
+            return false;
+        };
+        match grab {
+            PointerGrab::Move {
+                id,
+                pointer_start,
+                loc_start,
+            } => {
+                if let Some(window) = self.windows.get_mut(&id) {
+                    window.geometry.loc = (
+                        loc_start.x + (pos.x - pointer_start.x).round() as i32,
+                        loc_start.y + (pos.y - pointer_start.y).round() as i32,
+                    )
+                        .into();
+                }
+            }
+            PointerGrab::Resize {
+                id,
+                edges,
+                pointer_start,
+                geometry_start,
+            } => {
+                let dx = (pos.x - pointer_start.x).round() as i32;
+                let dy = (pos.y - pointer_start.y).round() as i32;
+                let next = resized(geometry_start, edges, dx, dy);
+                let changed = self.windows.get(&id).is_some_and(|w| w.geometry != next);
+                if changed {
+                    if let Some(window) = self.windows.get_mut(&id) {
+                        window.geometry = next;
+                    }
+                    let focused = self.model.focused() == Some(id);
+                    self.configure(id, focused);
+                }
+            }
+        }
+        true
+    }
+
+    /// End the grab on button release. A move dropped at the top edge
+    /// maximizes; at a side edge it tiles that half (GNOME snapping).
+    fn end_grab(&mut self, state: &mut State) {
+        let Some(grab) = self.grab.take() else {
+            return;
+        };
+        if let PointerGrab::Move { id, .. } = grab {
+            let pos = self.pointer_pos;
+            let size = state.primary_size();
+            if pos.y <= f64::from(WORK_AREA_TOP) + SNAP_EDGE_PX {
+                self.set_maximized(state, id, true);
+            } else if pos.x <= SNAP_EDGE_PX {
+                self.set_tiled(state, id, TileSide::Left);
+            } else if pos.x >= f64::from(size.w) - 1.0 - SNAP_EDGE_PX {
+                self.set_tiled(state, id, TileSide::Right);
+            }
+        }
+    }
+
     /// Every visible popup placed in the global space, bottom to top:
     /// window popups in stacking order, then layer-surface popups (the
     /// layers they hang off paint above windows).
@@ -803,7 +1065,8 @@ impl WindowManager {
         let mut out = Vec::new();
         for (window, geometry) in self.visible_windows() {
             if let Some(surface) = window.wl_surface() {
-                out.extend(crate::popup::placed_popups(&surface, geometry.loc, true));
+                let origin = crate::popup::surface_origin(&surface, geometry.loc);
+                out.extend(crate::popup::placed_popups(&surface, origin, true));
             }
         }
         for (surface, (x, y), _) in crate::layer::layer_layout(state) {
@@ -858,6 +1121,10 @@ impl WindowManager {
     /// win the hit test first; without this the panel never sees motion.
     pub fn pointer_motion(&mut self, state: &mut State, pos: Point<f64, Logical>, time: u32) {
         self.pointer_pos = pos;
+        // An interactive move/resize owns the pointer until release.
+        if self.grab_motion(pos) {
+            return;
+        }
         // Popups paint over everything they hang off: they win first.
         if let Some(popup) = self.popup_at(state, pos) {
             if let Some(pointer) = self.pointer.clone() {
@@ -897,6 +1164,23 @@ impl WindowManager {
             }
             return;
         }
+        // In the overview, windows are previews the compositor draws:
+        // they never take pointer focus or events (GNOME shape).
+        if self.overview_open {
+            if let Some(pointer) = self.pointer.clone() {
+                pointer.motion(
+                    state,
+                    None,
+                    &MotionEvent {
+                        location: pos,
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time,
+                    },
+                );
+                pointer.frame(state);
+            }
+            return;
+        }
         if let Some(id) = self.window_at(pos) {
             if self.model.focused() != Some(id) {
                 self.apply_focus(state, Some(id));
@@ -912,7 +1196,12 @@ impl WindowManager {
                 .map(|surface| surface.into_owned());
             // Focus point is the surface origin: smithay reports
             // surface-local coordinates as event minus focus.
-            let origin = focused.geometry.loc;
+            // The window rect is its xdg geometry; the surface origin
+            // sits up-left of it by the client-side shadow.
+            let origin = match surface.as_ref() {
+                Some(s) => crate::popup::surface_origin(s, focused.geometry.loc),
+                None => focused.geometry.loc,
+            };
             pointer.motion(
                 state,
                 surface.map(|surface| (surface, (origin.x as f64, origin.y as f64).into())),
@@ -934,6 +1223,27 @@ impl WindowManager {
     /// overview park owns it) so panel menus and banners take keys; the
     /// button itself follows pointer focus from the last motion.
     pub fn pointer_button(&mut self, state: &mut State, button: u32, pressed: bool, time: u32) {
+        // Release ends a move/resize grab and is not delivered.
+        if !pressed && self.grab.is_some() {
+            self.end_grab(state);
+            return;
+        }
+        // Super+press on a window starts a move (GNOME's Super+drag).
+        if pressed && self.super_held && !self.overview_open {
+            let pos = self.pointer_pos;
+            if crate::layer::topmost_layer_at(state, pos.x as i32, pos.y as i32).is_none()
+                && self.popup_at(state, pos).is_none()
+            {
+                if let Some(id) = self.window_at(pos) {
+                    self.apply_focus(state, Some(id));
+                    // The trigger machine already disarmed the Super tap on
+                    // this press, so releasing Super will not open the
+                    // overview.
+                    self.begin_move(state, id);
+                    return;
+                }
+            }
+        }
         let on_popup = self.popup_at(state, self.pointer_pos).is_some();
         // xdg-shell grab rule: a press on another client's surface (or on
         // nothing) dismisses the grabbed popups and is consumed, so the
@@ -967,6 +1277,8 @@ impl WindowManager {
                     }
                     state.sync_selection_focus(Some(&surface));
                 }
+            } else if self.overview_open {
+                // Overview presses are the runtime's (preview hits).
             } else if let Some(id) = self.window_at(pos) {
                 if self.model.focused() != Some(id) {
                     self.apply_focus(state, Some(id));
@@ -2493,5 +2805,38 @@ mod tests {
         let mut manager = compositor.window_manager();
         manager.reconcile(&mut compositor.state);
         assert!(manager.x11_surfaces().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod resize_tests {
+    use super::*;
+
+    fn rect(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Logical> {
+        Rectangle::new((x, y).into(), (w, h).into())
+    }
+
+    #[test]
+    fn each_edge_moves_only_its_side() {
+        let r = rect(100, 100, 400, 300);
+        assert_eq!(resized(r, EDGE_RIGHT, 50, 0), rect(100, 100, 450, 300));
+        assert_eq!(resized(r, EDGE_BOTTOM, 0, 20), rect(100, 100, 400, 320));
+        assert_eq!(resized(r, EDGE_LEFT, 50, 0), rect(150, 100, 350, 300));
+        assert_eq!(resized(r, EDGE_TOP, 0, -20), rect(100, 80, 400, 320));
+        assert_eq!(
+            resized(r, EDGE_TOP | EDGE_LEFT, 10, 10),
+            rect(110, 110, 390, 290)
+        );
+    }
+
+    #[test]
+    fn resize_never_goes_below_the_minimum() {
+        let r = rect(0, 0, 400, 300);
+        let tiny = resized(r, EDGE_LEFT | EDGE_TOP, 1000, 1000);
+        assert_eq!((tiny.size.w, tiny.size.h), MIN_WINDOW_SIZE);
+        assert_eq!(
+            tiny.loc,
+            (400 - MIN_WINDOW_SIZE.0, 300 - MIN_WINDOW_SIZE.1).into()
+        );
     }
 }

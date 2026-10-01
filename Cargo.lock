@@ -3101,6 +3101,7 @@ dependencies = [
  "roost-greeter",
  "roost-shell-control",
  "rustix 0.38.44",
+ "serde_json",
  "signal-hook",
  "smithay",
  "tempfile",

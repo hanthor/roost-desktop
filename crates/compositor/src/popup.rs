@@ -57,6 +57,13 @@ fn configured_size(popup: &PopupKind) -> smithay::utils::Size<i32, Logical> {
     }
 }
 
+/// Where a window's surface origin (buffer 0,0) lands so that its xdg
+/// window geometry (the visible window, inside client-side shadows)
+/// sits at `window_loc`.
+pub fn surface_origin(surface: &WlSurface, window_loc: Point<i32, Logical>) -> Point<i32, Logical> {
+    window_loc - window_geometry_loc(surface)
+}
+
 /// Every live popup of `parent`, parents before children (bottom to
 /// top), placed for a parent whose surface origin is `parent_origin`.
 /// `geometry_relative` is true for xdg toplevels (positioners are
