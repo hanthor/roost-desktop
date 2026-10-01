@@ -106,6 +106,10 @@ pub struct State {
     /// Middle-click primary selection beside the clipboard.
     primary_selection_state: PrimarySelectionState,
     pub(crate) panel_surfaces: Vec<layer::PanelSurface>,
+    /// `wl_surface`s whose layer-shell role was destroyed. Smithay 0.7
+    /// keeps validating them on commit against reset (unanchored, zero
+    /// size) state and kills the client; see [`State::new_surface`].
+    pub(crate) dead_layer_surfaces: std::collections::HashSet<wl_surface::WlSurface>,
     /// Popup trees per parent surface (#88).
     pub(crate) popups: smithay::desktop::PopupManager,
     /// Popups holding an explicit grab, oldest first: an outside click
@@ -292,6 +296,32 @@ impl CompositorHandler for State {
             return &data.compositor_state;
         }
         panic!("client without compositor state");
+    }
+
+    /// Work around a Smithay 0.7 layer-shell bug. When a client destroys
+    /// a `zwlr_layer_surface_v1`, Smithay resets the surface's layer
+    /// state to defaults (no anchors, zero size) but leaves its commit
+    /// validator registered; the next commit on that `wl_surface` (GTK
+    /// commits a null buffer right after destroying the role) then posts
+    /// "width 0 requested without setting left and right anchors" and
+    /// disconnects the client. This hook is registered when the surface
+    /// is created, so it runs before Smithay's: for a surface whose layer
+    /// role is gone it marks the meaningless pending state as anchored on
+    /// every edge, which the validator accepts.
+    fn new_surface(&mut self, surface: &wl_surface::WlSurface) {
+        smithay::wayland::compositor::add_pre_commit_hook::<State, _>(
+            surface,
+            |state, _dh, surface| {
+                if state.dead_layer_surfaces.contains(surface) {
+                    smithay::wayland::compositor::with_states(surface, |states| {
+                        let mut cached = states
+                            .cached_state
+                            .get::<smithay::wayland::shell::wlr_layer::LayerSurfaceCachedState>();
+                        cached.pending().anchor = smithay::wayland::shell::wlr_layer::Anchor::all();
+                    });
+                }
+            },
+        );
     }
 
     fn commit(&mut self, surface: &wl_surface::WlSurface) {
@@ -508,6 +538,7 @@ impl State {
             data_device_state: DataDeviceState::new::<State>(dh),
             primary_selection_state: PrimarySelectionState::new::<State>(dh),
             panel_surfaces: Vec::new(),
+            dead_layer_surfaces: std::collections::HashSet::new(),
             popups: smithay::desktop::PopupManager::default(),
             popup_grab: Vec::new(),
             popup_refocus: false,

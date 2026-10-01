@@ -374,8 +374,8 @@ impl WindowManager {
     }
 
     /// Park keyboard (and selection) focus on the shell overview while
-    /// open; restore the previous window on dismiss. Explicit `focus`
-    /// calls lose to the park until the overview closes. A vanished
+    /// open; restore the previous window on dismiss. An explicit `focus`
+    /// while parked chooses the window restored on close. A vanished
     /// overview surface restores early so keys never route into a dead
     /// surface.
     fn reconcile_overview_focus(&mut self, state: &mut State) {
@@ -716,6 +716,20 @@ impl WindowManager {
             if !self.windows.contains_key(&id) {
                 return false;
             }
+        }
+        // While the overview holds keyboard focus, an explicit choice
+        // (a preview pick, a dash or search activation) becomes the
+        // window restored when it closes, instead of losing to the
+        // window that was focused before it opened.
+        if self.overview_held.is_some() {
+            self.pre_overview_focus = id;
+            if let Some(id) = id {
+                if self.mode == SessionMode::Gnome {
+                    self.stacking.retain(|other| *other != id);
+                    self.stacking.push(id);
+                }
+            }
+            return true;
         }
         self.apply_focus(state, id);
         true

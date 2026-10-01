@@ -2427,3 +2427,54 @@ fn unified_round_trip_reconcile_focus_close_reconcile() {
     assert_eq!(f.manager.visible_windows().len(), 1);
     assert!(!f.manager.close_window(f.id_a));
 }
+
+#[test]
+fn picking_a_window_in_the_overview_survives_the_close() {
+    let mut f = two_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+
+    // Third client: the shell overview layer surface.
+    let (conn_c, mut queue_c, mut client_c) = connect(&mut f.comp);
+    let qh_c = queue_c.handle();
+    let surface_c = client_c
+        .compositor
+        .as_ref()
+        .unwrap()
+        .create_surface(&qh_c, ());
+    let layer_c = client_c.layer_shell.as_ref().unwrap().get_layer_surface(
+        &surface_c,
+        None,
+        Layer::Top,
+        OVERVIEW_NAMESPACE.to_owned(),
+        &qh_c,
+        (),
+    );
+    layer_c.set_size(0, 200);
+    layer_c.set_anchor(Anchor::Top | Anchor::Left | Anchor::Right);
+    layer_c.set_exclusive_zone(0);
+    surface_c.commit();
+    client_c.overview_layer = Some(layer_c);
+    client_c.synced = false;
+    conn_c.display().sync(&qh_c, ());
+    pump(&mut f.comp, &mut queue_c, &mut client_c, |c| c.synced);
+    f.manager.reconcile(&mut f.comp.state);
+    assert!(f.comp.state.overview_surface().is_some());
+    assert!(client_c.overview_layer.is_some());
+    assert!(!f.manager.overview_focus_held());
+
+    // Opening the overview parks focus: the model unfocuses and keys
+    // reach the overview surface owner, not the windows.
+    f.manager.set_overview_open(true);
+    f.manager.reconcile(&mut f.comp.state);
+    assert!(f.manager.overview_focus_held());
+    assert_eq!(f.manager.model().focused(), None);
+    // A preview pick (or dash/search activation) while parked: the
+    // chosen window, not the pre-overview one, is focused on close.
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    assert_eq!(f.manager.model().focused(), None, "still parked while open");
+    f.manager.set_overview_open(false);
+    f.manager.reconcile(&mut f.comp.state);
+    assert!(!f.manager.overview_focus_held());
+    assert_eq!(f.manager.model().focused(), Some(f.id_b));
+    drop((conn_c, queue_c, client_c));
+}

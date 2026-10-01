@@ -13,11 +13,11 @@ use smithay::{
     delegate_layer_shell,
     output::Output,
     reexports::wayland_server::protocol::{wl_output::WlOutput, wl_surface::WlSurface},
-    utils::{Logical, Size},
+    utils::{Logical, Rectangle, Size},
     wayland::{
         compositor,
         shell::wlr_layer::{
-            Anchor, LayerSurface, LayerSurfaceCachedState, LayerSurfaceConfigure,
+            Anchor, ExclusiveZone, LayerSurface, LayerSurfaceCachedState, LayerSurfaceConfigure,
             WlrLayerShellHandler, WlrLayerShellState,
         },
     },
@@ -38,53 +38,202 @@ pub use smithay::wayland::shell::wlr_layer::Layer;
 /// share the const without a dependency cycle).
 pub const OVERVIEW_NAMESPACE: &str = "roost-shell-overview";
 
-/// Arrange one layer surface against the output: axes anchored on
-/// both edges take the output size, other axes take the client's
-/// requested size.
-///
-/// Pure sizing — callers decide when to send. Sizing must run on
-/// commit, not in `new_layer_surface`: the client's size/anchor
-/// requests only arrive after the surface exists, so arranging at
-/// creation always sees the default (empty) client state.
+/// One layer surface's placement request, as committed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayerRequest {
+    /// Anchored edges.
+    pub anchor: Anchor,
+    /// Requested size (0 on an axis means "stretch between anchors").
+    pub size: Size<i32, Logical>,
+    /// Margins: top, right, bottom, left.
+    pub margin: (i32, i32, i32, i32),
+    /// Exclusive-zone request.
+    pub zone: ExclusiveZone,
+}
+
+impl LayerRequest {
+    /// Read the committed request of a layer surface.
+    pub fn of(surface: &WlSurface) -> Self {
+        compositor::with_states(surface, |states| {
+            let mut cached = states.cached_state.get::<LayerSurfaceCachedState>();
+            let c = cached.current();
+            Self {
+                anchor: c.anchor,
+                size: c.size,
+                margin: (c.margin.top, c.margin.right, c.margin.bottom, c.margin.left),
+                zone: c.exclusive_zone,
+            }
+        })
+    }
+}
+
+/// The single edge an exclusive zone applies to: anchored to exactly one
+/// edge, or to one edge and both perpendicular ones (layer-shell rule).
+fn exclusive_edge(anchor: Anchor) -> Option<Anchor> {
+    let horiz = anchor.contains(Anchor::LEFT) && anchor.contains(Anchor::RIGHT);
+    let vert = anchor.contains(Anchor::TOP) && anchor.contains(Anchor::BOTTOM);
+    let only = |edge: Anchor| anchor == edge;
+    if only(Anchor::TOP) || anchor == Anchor::TOP | Anchor::LEFT | Anchor::RIGHT {
+        Some(Anchor::TOP)
+    } else if only(Anchor::BOTTOM) || anchor == Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT {
+        Some(Anchor::BOTTOM)
+    } else if only(Anchor::LEFT) || anchor == Anchor::LEFT | Anchor::TOP | Anchor::BOTTOM {
+        Some(Anchor::LEFT)
+    } else if only(Anchor::RIGHT) || anchor == Anchor::RIGHT | Anchor::TOP | Anchor::BOTTOM {
+        Some(Anchor::RIGHT)
+    } else {
+        let _ = (horiz, vert);
+        None
+    }
+}
+
+/// Place one request inside `bounds`: stretch between opposite anchors
+/// (minus margins) where the size is 0 or both are anchored, else use
+/// the requested size; align to the anchored edge (plus its margin) or
+/// center on that axis.
+fn place(bounds: Rectangle<i32, Logical>, req: &LayerRequest) -> Rectangle<i32, Logical> {
+    let (mt, mr, mb, ml) = req.margin;
+    let (l, r, t, b) = (
+        req.anchor.contains(Anchor::LEFT),
+        req.anchor.contains(Anchor::RIGHT),
+        req.anchor.contains(Anchor::TOP),
+        req.anchor.contains(Anchor::BOTTOM),
+    );
+    let w = if l && r && req.size.w == 0 {
+        bounds.size.w - ml - mr
+    } else {
+        req.size.w
+    }
+    .max(0);
+    let h = if t && b && req.size.h == 0 {
+        bounds.size.h - mt - mb
+    } else {
+        req.size.h
+    }
+    .max(0);
+    let x = if l {
+        bounds.loc.x + ml
+    } else if r {
+        bounds.loc.x + bounds.size.w - w - mr
+    } else {
+        bounds.loc.x + (bounds.size.w - w) / 2
+    };
+    let y = if t {
+        bounds.loc.y + mt
+    } else if b {
+        bounds.loc.y + bounds.size.h - h - mb
+    } else {
+        bounds.loc.y + (bounds.size.h - h) / 2
+    };
+    Rectangle::new((x, y).into(), (w, h).into())
+}
+
+/// Arrange the layer surfaces of one output (wlr layer-shell semantics):
+/// surfaces with a positive exclusive zone are placed first, in order,
+/// each reserving its zone plus margin along its edge; neutral surfaces
+/// are then placed inside the remaining area; `DontCare` surfaces use the
+/// whole output. Returns one rectangle per request, in input order.
+pub fn arrange(
+    output: Rectangle<i32, Logical>,
+    reqs: &[LayerRequest],
+) -> Vec<Rectangle<i32, Logical>> {
+    let mut usable = output;
+    let mut out = vec![Rectangle::default(); reqs.len()];
+    for (i, req) in reqs.iter().enumerate() {
+        let ExclusiveZone::Exclusive(zone) = req.zone else {
+            continue;
+        };
+        let Some(edge) = exclusive_edge(req.anchor) else {
+            continue;
+        };
+        out[i] = place(usable, req);
+        let (mt, mr, mb, ml) = req.margin;
+        let zone = zone as i32;
+        if edge == Anchor::TOP {
+            let cut = zone + mt;
+            usable.loc.y += cut;
+            usable.size.h -= cut;
+        } else if edge == Anchor::BOTTOM {
+            usable.size.h -= zone + mb;
+        } else if edge == Anchor::LEFT {
+            let cut = zone + ml;
+            usable.loc.x += cut;
+            usable.size.w -= cut;
+        } else {
+            usable.size.w -= zone + mr;
+        }
+    }
+    for (i, req) in reqs.iter().enumerate() {
+        let exclusive =
+            matches!(req.zone, ExclusiveZone::Exclusive(_)) && exclusive_edge(req.anchor).is_some();
+        if exclusive {
+            continue;
+        }
+        let bounds = if matches!(req.zone, ExclusiveZone::DontCare) {
+            output
+        } else {
+            usable
+        };
+        out[i] = place(bounds, req);
+    }
+    out
+}
+
+/// Arranged size of one surface against an output of `output` size
+/// with no other layer surfaces (kept for callers that size a lone
+/// surface; the runtime arranges per output with [`arrange`]).
 pub fn arranged_size(surface: &LayerSurface, output: Size<i32, Logical>) -> Size<i32, Logical> {
-    let (requested, anchor) = compositor::with_states(surface.wl_surface(), |states| {
-        let mut cached = states.cached_state.get::<LayerSurfaceCachedState>();
-        let current = cached.current();
-        (current.size, current.anchor)
-    });
-    let width = if anchor.contains(Anchor::LEFT) && anchor.contains(Anchor::RIGHT) {
-        output.w
-    } else {
-        requested.w
-    };
-    let height = if anchor.contains(Anchor::TOP) && anchor.contains(Anchor::BOTTOM) {
-        output.h
-    } else {
-        requested.h
-    };
-    Size::from((width.max(0), height.max(0)))
+    let req = LayerRequest::of(surface.wl_surface());
+    arrange(Rectangle::from_size(output), &[req])[0].size
+}
+
+/// Every mapped layer surface of one output key, in creation order, with
+/// its request.
+fn output_requests(state: &State) -> Vec<(Option<String>, Vec<(WlSurface, LayerRequest, Layer)>)> {
+    let mut groups: Vec<(Option<String>, Vec<(WlSurface, LayerRequest, Layer)>)> = Vec::new();
+    for record in &state.panel_surfaces {
+        let live = state
+            .layer_shell_state
+            .layer_surfaces()
+            .any(|surface| surface.wl_surface() == &record.surface);
+        if !live {
+            continue;
+        }
+        let entry = (
+            record.surface.clone(),
+            LayerRequest::of(&record.surface),
+            record.layer,
+        );
+        match groups.iter_mut().find(|(k, _)| *k == record.output_name) {
+            Some((_, list)) => list.push(entry),
+            None => groups.push((record.output_name.clone(), vec![entry])),
+        }
+    }
+    groups
 }
 
 /// Re-arrange every layer surface after a commit and send a configure
-/// only where the arranged size changed. The runtime calls this from
-/// its commit handler: client size/anchor requests land with the
-/// commit, so this is the earliest point the real geometry is known.
-/// Each surface arranges against the output it is bound to (unbound
-/// surfaces fall back to primary), so per-output panels each learn
-/// their own width from one shared pass.
+/// only where the arranged size changed. Surfaces arrange per output,
+/// with exclusive zones and margins applied (see [`arrange`]).
 pub fn arrange_after_commit(state: &State) {
-    for surface in state.layer_shell_state.layer_surfaces() {
-        let bound = state
-            .panel_surfaces
-            .iter()
-            .find(|record| record.surface == *surface.wl_surface())
-            .and_then(|record| record.output_name.clone());
-        let size = arranged_size(&surface, state.size_for_output(bound.as_deref()));
-        if surface.current_state().size != Some(size) {
-            surface.with_pending_state(|pending| {
-                pending.size = Some(size);
-            });
-            surface.send_pending_configure();
+    for (key, list) in output_requests(state) {
+        let size = state.size_for_output(key.as_deref());
+        let reqs: Vec<LayerRequest> = list.iter().map(|(_, r, _)| *r).collect();
+        let rects = arrange(Rectangle::from_size(size), &reqs);
+        for ((wl, _, _), rect) in list.iter().zip(rects) {
+            let Some(surface) = state
+                .layer_shell_state
+                .layer_surfaces()
+                .find(|s| s.wl_surface() == wl)
+            else {
+                continue;
+            };
+            if surface.current_state().size != Some(rect.size) {
+                surface.with_pending_state(|pending| {
+                    pending.size = Some(rect.size);
+                });
+                surface.send_pending_configure();
+            }
         }
     }
 }
@@ -119,6 +268,8 @@ impl WlrLayerShellHandler for State {
         layer: Layer,
         namespace: String,
     ) {
+        // A reused wl_surface gets a live layer role again.
+        self.dead_layer_surfaces.remove(surface.wl_surface());
         // Bare initial configure (the protocol requires one before
         // the first commit); real geometry follows on commit via
         // `arrange_after_commit`, once the client's size/anchor
@@ -150,6 +301,9 @@ impl WlrLayerShellHandler for State {
     fn layer_destroyed(&mut self, surface: LayerSurface) {
         let gone = surface.wl_surface().clone();
         self.panel_surfaces.retain(|record| record.surface != gone);
+        self.dead_layer_surfaces
+            .retain(|s| smithay::reexports::wayland_server::Resource::is_alive(s));
+        self.dead_layer_surfaces.insert(gone);
     }
 }
 
@@ -171,43 +325,24 @@ fn layer_order(layer: Layer) -> u8 {
 /// background-to-overlay; callers draw windows first, then these.
 pub fn layer_layout(state: &State) -> Vec<(WlSurface, (i32, i32), Layer)> {
     let mut placed = Vec::new();
-    for record in &state.panel_surfaces {
-        let output = state.size_for_output(record.output_name.as_deref());
-        let (ox, oy) = state.loc_for_output(record.output_name.as_deref());
-        let Some(handle) = state
-            .layer_shell_state
-            .layer_surfaces()
-            .find(|surface| surface.wl_surface() == &record.surface)
-        else {
-            continue;
-        };
-        let Some(size) = handle.current_state().size else {
-            continue;
-        };
-        let anchor = compositor::with_states(handle.wl_surface(), |states| {
-            states
-                .cached_state
-                .get::<LayerSurfaceCachedState>()
-                .current()
-                .anchor
-        });
-        let x = ox
-            + if anchor.contains(Anchor::LEFT) {
-                0
-            } else if anchor.contains(Anchor::RIGHT) {
-                output.w - size.w
-            } else {
-                (output.w - size.w) / 2
-            };
-        let y = oy
-            + if anchor.contains(Anchor::TOP) {
-                0
-            } else if anchor.contains(Anchor::BOTTOM) {
-                output.h - size.h
-            } else {
-                (output.h - size.h) / 2
-            };
-        placed.push((record.surface.clone(), (x, y), record.layer));
+    for (key, list) in output_requests(state) {
+        let size = state.size_for_output(key.as_deref());
+        let (ox, oy) = state.loc_for_output(key.as_deref());
+        let reqs: Vec<LayerRequest> = list.iter().map(|(_, r, _)| *r).collect();
+        let rects = arrange(Rectangle::from_size(size), &reqs);
+        for ((wl, _, layer), rect) in list.iter().zip(rects) {
+            // Skip surfaces never configured with a size yet.
+            let configured = state
+                .layer_shell_state
+                .layer_surfaces()
+                .find(|s| s.wl_surface() == wl)
+                .and_then(|s| s.current_state().size)
+                .is_some();
+            if !configured {
+                continue;
+            }
+            placed.push((wl.clone(), (ox + rect.loc.x, oy + rect.loc.y), *layer));
+        }
     }
     placed.sort_by_key(|(_, _, layer)| layer_order(*layer));
     placed
@@ -313,5 +448,90 @@ mod tests {
         // Empty and singleton stacks are fixed points.
         assert!(front_to_back(Vec::<u8>::new()).is_empty());
         assert_eq!(front_to_back(vec![7]), vec![7]);
+    }
+}
+
+#[cfg(test)]
+mod arrange_tests {
+    use super::*;
+
+    fn req(anchor: Anchor, w: i32, h: i32, zone: ExclusiveZone) -> LayerRequest {
+        LayerRequest {
+            anchor,
+            size: (w, h).into(),
+            margin: (0, 0, 0, 0),
+            zone,
+        }
+    }
+
+    fn output() -> Rectangle<i32, Logical> {
+        Rectangle::from_size((1280, 800).into())
+    }
+
+    #[test]
+    fn exclusive_panel_pushes_neutral_surfaces_below_it() {
+        let panel = req(
+            Anchor::TOP | Anchor::LEFT | Anchor::RIGHT,
+            0,
+            32,
+            ExclusiveZone::Exclusive(32),
+        );
+        let mut search = req(Anchor::TOP, 370, 48, ExclusiveZone::Neutral);
+        search.margin = (12, 0, 0, 0);
+        let rects = arrange(output(), &[panel, search]);
+        assert_eq!(rects[0], Rectangle::new((0, 0).into(), (1280, 32).into()));
+        // Centered horizontally, 12 px below the panel.
+        assert_eq!(rects[1], Rectangle::new((455, 44).into(), (370, 48).into()));
+    }
+
+    #[test]
+    fn dont_care_surfaces_ignore_exclusive_zones() {
+        let panel = req(
+            Anchor::TOP | Anchor::LEFT | Anchor::RIGHT,
+            0,
+            32,
+            ExclusiveZone::Exclusive(32),
+        );
+        let lock = req(Anchor::all(), 0, 0, ExclusiveZone::DontCare);
+        let rects = arrange(output(), &[panel, lock]);
+        assert_eq!(rects[1], output());
+    }
+
+    #[test]
+    fn stretched_surfaces_respect_margins_and_both_zones() {
+        let top = req(
+            Anchor::TOP | Anchor::LEFT | Anchor::RIGHT,
+            0,
+            32,
+            ExclusiveZone::Exclusive(32),
+        );
+        let bottom = req(
+            Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT,
+            0,
+            60,
+            ExclusiveZone::Exclusive(60),
+        );
+        let mut grid = req(Anchor::all(), 0, 0, ExclusiveZone::Neutral);
+        grid.margin = (64, 0, 112, 0);
+        let rects = arrange(output(), &[top, bottom, grid]);
+        assert_eq!(rects[1], Rectangle::new((0, 740).into(), (1280, 60).into()));
+        assert_eq!(
+            rects[2],
+            Rectangle::new((0, 32 + 64).into(), (1280, 800 - 32 - 60 - 64 - 112).into())
+        );
+    }
+
+    #[test]
+    fn exclusive_zone_on_a_corner_anchor_is_neutral() {
+        let corner = req(
+            Anchor::TOP | Anchor::RIGHT,
+            300,
+            40,
+            ExclusiveZone::Exclusive(40),
+        );
+        let other = req(Anchor::TOP, 100, 20, ExclusiveZone::Neutral);
+        let rects = arrange(output(), &[corner, other]);
+        assert_eq!(rects[0].loc, (980, 0).into());
+        assert_eq!(rects[1].loc.y, 0, "a corner surface reserves nothing");
     }
 }
