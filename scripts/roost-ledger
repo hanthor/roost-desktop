@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+"""roost-ledger — check docs/parity-ledger.md against real test results (#66).
+
+Usage:
+  scripts/roost-ledger check --tests LIST [--assertions FILE ...] [--ledger PATH]
+  scripts/roost-ledger summary [--ledger PATH]
+
+LIST is `cargo test --workspace -- --list --format terse` output. Each
+--assertions file is a journey's assertions.txt ("<ID> pass|fail <desc>").
+
+Fails (exit 1) when:
+  - a row whose status starts with "pass" cites no test;
+  - a cited cargo test does not exist in LIST;
+  - a cited journey assertion is not recorded as passing;
+  - the table is malformed or a row ID repeats.
+Writes a status summary to stdout and to $GITHUB_STEP_SUMMARY when set.
+"""
+import argparse
+import os
+import sys
+from collections import Counter
+
+HEADER = ["ID", "GNOME 51 behavior", "Roost status", "Tests",
+          "Evidence / notes", "Deviation and owner"]
+
+
+def parse_ledger(path):
+    rows, header, errors = [], None, []
+    with open(path, encoding="utf-8") as fh:
+        for n, line in enumerate(fh, 1):
+            if not line.startswith("|"):
+                continue
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if cells and cells[0] == "ID":
+                header = cells
+                continue
+            if set("".join(cells)) <= set("-: "):
+                continue
+            if header is None:
+                continue
+            if len(cells) != len(header):
+                errors.append(f"line {n}: {len(cells)} cells, header has {len(header)}")
+                continue
+            rows.append(dict(zip(header, cells), _line=n))
+    if header != HEADER:
+        errors.append(f"ledger header must be {HEADER}, got {header}")
+    ids = Counter(r["ID"] for r in rows)
+    errors += [f"duplicate row id {i}" for i, c in ids.items() if c > 1]
+    return rows, errors
+
+
+def refs(cell):
+    return [r.strip() for r in cell.split(",") if r.strip()]
+
+
+def load_tests(path):
+    names = set()
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line.endswith(": test"):
+                full = line[: -len(": test")]
+                names.add(full)
+                names.add(full.rsplit("::", 1)[-1])
+    return names
+
+
+def load_assertions(paths):
+    passed, failed = set(), set()
+    for path in paths:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.split(maxsplit=2)
+                if len(parts) >= 2:
+                    (passed if parts[1] == "pass" else failed).add(parts[0])
+    return passed - failed
+
+
+def summary(rows):
+    counts = Counter(r["Roost status"].split(" ")[0] for r in rows)
+    lines = ["## Parity ledger (GNOME 51 baseline)", "",
+             "| Status | Rows |", "|---|---|"]
+    lines += [f"| {k} | {v} |" for k, v in sorted(counts.items())]
+    untested = [r["ID"] for r in rows if not refs(r["Tests"])]
+    lines += ["", f"Rows citing no test: {len(untested)} ({', '.join(untested)})"]
+    text = "\n".join(lines) + "\n"
+    print(text)
+    out = os.environ.get("GITHUB_STEP_SUMMARY")
+    if out:
+        with open(out, "a", encoding="utf-8") as fh:
+            fh.write(text)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("cmd", choices=["check", "summary"])
+    ap.add_argument("--ledger", default="docs/parity-ledger.md")
+    ap.add_argument("--tests")
+    ap.add_argument("--assertions", action="append", default=[])
+    a = ap.parse_args()
+    rows, errors = parse_ledger(a.ledger)
+    if a.cmd == "check":
+        if not a.tests:
+            ap.error("check needs --tests")
+        tests = load_tests(a.tests)
+        passed = load_assertions(a.assertions)
+        for r in rows:
+            cited = refs(r["Tests"])
+            if r["Roost status"].startswith("pass") and not cited:
+                errors.append(f"{r['ID']}: status is pass but cites no test")
+            for ref in cited:
+                kind, _, name = ref.partition(":")
+                if kind == "cargo":
+                    if name not in tests:
+                        errors.append(f"{r['ID']}: cargo test '{name}' does not exist")
+                elif kind == "journey":
+                    if name not in passed:
+                        errors.append(f"{r['ID']}: journey assertion '{name}' did not pass")
+                else:
+                    errors.append(f"{r['ID']}: unknown test reference '{ref}'")
+    summary(rows)
+    for e in errors:
+        print(f"roost-ledger: {e}", file=sys.stderr)
+    sys.exit(1 if errors else 0)
+
+
+if __name__ == "__main__":
+    main()
