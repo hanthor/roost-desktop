@@ -16,4 +16,5 @@ gtk4-layer-shell.workspace = true
 glib.workspace = true
 gio.workspace = true
 jiff.workspace = true
+libc = "0.2"
 roost-shell-host = { path = "../shell-host", version = "0.1.0" }

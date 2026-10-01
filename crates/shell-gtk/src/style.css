@@ -201,3 +201,19 @@ window.roost-switcher {
 .switcher-title {
   font-weight: bold;
 }
+
+/* End-session dialog (GNOME 51): dimmed screen, centered card. */
+window.roost-end-session {
+  background-color: alpha(#000000, 0.5);
+}
+
+.end-session-card {
+  background-color: #2a2a2f;
+  border-radius: 24px;
+  padding: 24px;
+  color: #ffffff;
+}
+
+.power-menu button {
+  padding: 6px 12px;
+}
