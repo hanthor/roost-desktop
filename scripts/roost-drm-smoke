@@ -38,10 +38,10 @@ SEATD_PID=""
 COMP_PID=""
 
 cleanup() {
-    [ -n "$COMP_PID" ] && kill "$COMP_PID" 2>/dev/null || true
-    [ -n "$SEATD_PID" ] && sudo kill "$SEATD_PID" 2>/dev/null || true
+    if [ -n "$COMP_PID" ]; then kill "$COMP_PID" 2>/dev/null || true; fi
+    if [ -n "$SEATD_PID" ]; then sudo kill "$SEATD_PID" 2>/dev/null || true; fi
     # Put a stopped system seatd back exactly as we found it.
-    [ -n "$SYSTEM_SEATD" ] && sudo systemctl start seatd 2>/dev/null || true
+    if [ -n "$SYSTEM_SEATD" ]; then sudo systemctl start seatd 2>/dev/null || true; fi
 }
 trap cleanup EXIT INT TERM
 
@@ -115,8 +115,9 @@ kill -TERM "$COMP_PID"
 wait "$COMP_PID" || true
 COMP_PID=""
 frames="$(sed -n 's/.*shutdown after \([0-9]*\) frames.*/\1/p' "$LOG" | tail -1)"
-[ -n "$frames" ] && [ "$frames" -ge 30 ] ||
+if [ -z "$frames" ] || [ "$frames" -lt 30 ]; then
     fail D-FRAMES "expected at least 30 completed frames, got '${frames:-none}'"
+fi
 pass D-FRAMES "$frames frames page-flipped"
 if grep -q panicked "$LOG"; then fail D-NOPANIC "panic in compositor log"; fi
 pass D-NOPANIC "no panic"
