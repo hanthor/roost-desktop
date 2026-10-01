@@ -33,16 +33,18 @@ use crate::State;
 /// `Layer::Overlay`.
 pub use smithay::wayland::shell::wlr_layer::Layer;
 
-/// Namespace the shell advertises for its overview layer surface
-/// (mirrors `roost_shell_host::OVERVIEW_NAMESPACE`; the crates cannot
-/// share the const without a dependency cycle).
-pub const OVERVIEW_NAMESPACE: &str = "roost-shell-overview";
+/// Layer-shell namespace and contract constants.
+///
+/// Shared with the shell-host: both the compositor and shell read these
+/// from the same source to prevent drift.
+pub use roost_shell_control::{
+    ACTIVITIES_STRIP_PX as _, BANNER_NAMESPACE, OVERVIEW_NAMESPACE, PANEL_HEIGHT,
+    PANEL_NAMESPACE,
+};
 
 /// One layer surface's placement request, as committed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayerRequest {
-    /// Anchored edges.
-    pub anchor: Anchor,
     /// Requested size (0 on an axis means "stretch between anchors").
     pub size: Size<i32, Logical>,
     /// Margins: top, right, bottom, left.
