@@ -431,6 +431,18 @@ impl Runtime {
             })
             .map_err(|e| RuntimeError::Loop(e.to_string()))?;
 
+        // linux-dmabuf lists exactly what this renderer imports (#89).
+        let mut backend = backend;
+        let mut state = state;
+        {
+            use smithay::backend::renderer::ImportDma;
+            let formats: Vec<_> = match &mut backend {
+                Backend::Winit(winit) => winit.renderer().dmabuf_formats().into_iter().collect(),
+                Backend::Drm(drm) => drm.renderer.dmabuf_formats().into_iter().collect(),
+            };
+            state.enable_dmabuf(formats);
+        }
+
         let loop_handle = event_loop.handle();
         let mut runtime = Runtime {
             display,
@@ -837,6 +849,12 @@ impl Runtime {
             self.overlay.show(Vec::new());
         }
         // Idle timeout from input timestamps: lock the untouched session.
+        // A live idle inhibitor (video, presentation) counts as activity.
+        if self.state.idle_inhibited() {
+            let now = self.lock_now_ms();
+            self.lock.note_input(now);
+            self.idle_since = Instant::now();
+        }
         if !self.is_locked() && self.lock.check_timeout(self.lock_now_ms()) {
             self.engage_lock();
         }

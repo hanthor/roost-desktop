@@ -54,6 +54,7 @@ pub mod lock;
 pub mod overlay;
 pub mod overview;
 pub mod popup;
+pub mod protocols;
 pub mod runtime;
 pub mod state;
 pub mod supervise;
@@ -133,6 +134,8 @@ pub struct State {
     /// Client window-state requests awaiting the manager's next
     /// `reconcile` drain (002 window actions).
     pub(crate) window_requests: Vec<(wl_surface::WlSurface, WindowRequest)>,
+    /// dmabuf, activation, viewporter and the other #89 protocols.
+    pub(crate) protocols: protocols::Protocols,
     /// Running X11 window manager, once the compatibility server is
     /// up (xwayland feature only).
     #[cfg(feature = "xwayland")]
@@ -172,6 +175,8 @@ pub(crate) enum WindowRequest {
     Move,
     /// Client started an interactive resize from these xdg edges.
     Resize(u32),
+    /// A valid xdg-activation request: focus and raise (#89).
+    Activate,
 }
 
 impl ClientData for ClientState {
@@ -572,6 +577,7 @@ impl State {
             window_origins: std::collections::HashMap::new(),
             outputs: Vec::new(),
             window_requests: Vec::new(),
+            protocols: protocols::Protocols::new(dh),
             #[cfg(feature = "xwayland")]
             xwm: None,
             #[cfg(feature = "xwayland")]

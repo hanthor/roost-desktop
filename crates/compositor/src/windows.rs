@@ -789,6 +789,9 @@ impl WindowManager {
                 }
                 WindowRequest::Move => self.begin_move(state, id),
                 WindowRequest::Resize(edges) => self.begin_resize(id, edges),
+                WindowRequest::Activate => {
+                    self.focus(state, Some(id));
+                }
             }
         }
     }
