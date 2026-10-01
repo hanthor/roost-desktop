@@ -512,6 +512,24 @@ fn keyboard_focus_returns_to_the_window_after_the_grab() {
 }
 
 #[test]
+fn a_new_grab_keeps_focus_when_the_old_popup_closed_in_the_same_tick() {
+    // A panel closing one menu and opening the next sends both in one
+    // flush: the old grab's "hand focus back" must not land on the new
+    // popup's keyboard focus, or Escape never reaches the new menu.
+    let mut f = fixture();
+    let (_first_surface, first) = open_popup(&mut f, true);
+    first.destroy();
+    f.client.popup_configure = None;
+    let (second_surface, _second) = open_popup(&mut f, true);
+    sync(&mut f);
+    assert_eq!(
+        f.client.keyboard_entered.last().copied(),
+        Some(second_surface.id().protocol_id()),
+        "keyboard focus stays on the newly grabbed popup"
+    );
+}
+
+#[test]
 fn popup_slides_back_onto_the_output() {
     use wayland_protocols::xdg::shell::client::xdg_positioner::ConstraintAdjustment;
     let mut f = fixture();
