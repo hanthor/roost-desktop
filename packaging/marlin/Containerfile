@@ -6,13 +6,12 @@
 # (GNOME 51) and the candidate (Roost) share one image, one kernel, one
 # Mesa, and one VM profile.
 #
-# Roost stays nested-only here: it runs as a window inside the GNOME
-# session, never from the login screen, until the lock screen checks
-# passwords through PAM (the 004 release gate). The DRM/KMS backend has
-# landed (#52), but a login session must not be lockable without real
-# authentication. The session entry is therefore moved out of
-# wayland-sessions and an app launcher ("Roost (nested preview)") is
-# installed instead. The GTK4/libadwaita shell is the default shell.
+# The login screen offers "Roost (preview)" beside GNOME: the DRM/KMS
+# backend runs the hardware session (#52), the lock screen unlocks
+# through PAM under GDM (/etc/pam.d/roost-lock, #62), and the power menu
+# logs out back to GDM. The "Roost (nested preview)" launcher stays for
+# trying Roost in a window inside GNOME. The GTK4/libadwaita shell is
+# the default shell.
 #
 # Build (CI does this with the package from packaging/arch):
 #   podman build -f packaging/marlin/Containerfile \
@@ -30,17 +29,17 @@ COPY packaging/marlin/roost-nested-preview.desktop /tmp/roost-nested-preview.des
 # baseline's GNOME 51 and Mesa stay exactly as shipped).
 RUN pacman -Sy --noconfirm \
     && pacman -U --noconfirm /tmp/roost.pkg.tar.zst \
-    && install -d /usr/share/roost \
-    && mv /usr/share/wayland-sessions/roost.desktop /usr/share/roost/roost-session.desktop \
+    && sed -i 's/^Name=Roost$/Name=Roost (preview)/' /usr/share/wayland-sessions/roost.desktop \
     && install -Dm0644 /tmp/roost-nested-preview.desktop \
         /usr/share/applications/roost-nested-preview.desktop \
     && rm -f /tmp/roost.pkg.tar.zst /tmp/roost-nested-preview.desktop \
     && roost-compositor --version \
     && roost-shell-gtk --version \
-    && test ! -e /usr/share/wayland-sessions/roost.desktop
+    && grep -qx 'Name=Roost (preview)' /usr/share/wayland-sessions/roost.desktop \
+    && test -f /etc/pam.d/roost-lock
 
 LABEL org.opencontainers.image.title="marlin-roost-preview" \
-      org.opencontainers.image.description="TunaOS Marlin GNOME 51 plus Roost as a nested preview" \
+      org.opencontainers.image.description="TunaOS Marlin GNOME 51 plus Roost as a login-screen and nested preview" \
       org.opencontainers.image.source="https://github.com/hanthor/roost-desktop" \
       org.opencontainers.image.licenses="GPL-3.0-or-later"
 
