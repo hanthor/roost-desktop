@@ -134,6 +134,67 @@ jobs:
           path: drm-smoke-artifacts/
           retention-days: 14
 
+  arch-package:
+    # TunaOS Marlin is Arch-based: build, check, and install the Arch
+    # package in a clean archlinux container (#69).
+    runs-on: ubuntu-latest
+    needs: [check]
+    timeout-minutes: 40
+    container: archlinux:latest
+    steps:
+      - run: pacman -Syu --noconfirm --needed base-devel git rust pkgconf gtk4 libadwaita libxkbcommon libxkbcommon-x11 mesa wayland dbus glib2 seatd libinput systemd-libs libdrm namcap
+      - uses: actions/checkout@v7
+      - run: |
+          useradd -m builder
+          chown -R builder "$GITHUB_WORKSPACE"
+          su builder -c "cd '$GITHUB_WORKSPACE/packaging/arch' && ROOST_LOCAL_SRC='$GITHUB_WORKSPACE' makepkg -f --noconfirm"
+      - run: |
+          pkg=$(ls packaging/arch/roost-[0-9]*.pkg.tar.zst)
+          namcap "$pkg" || true
+          pacman -U --noconfirm "$pkg"
+          for bin in roost-compositor roost-session roost-shell-host roost-greeter; do "$bin" --version; done
+          test -f /usr/share/wayland-sessions/roost.desktop
+          mkdir -p arch-artifacts && cp "$pkg" arch-artifacts/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: roost-arch
+          path: arch-artifacts/
+          retention-days: 14
+
+  marlin-image:
+    # Roost layered on ghcr.io/tuna-os/marlin:gnome (GNOME 51 baseline
+    # image) as a nested preview. Built on every PR, pushed from main.
+    runs-on: ubuntu-latest
+    needs: [arch-package]
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: roost-arch
+          path: arch-artifacts
+      - name: Free disk for the Marlin base image
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - run: |
+          pkg=$(ls arch-artifacts/roost-[0-9]*.pkg.tar.zst)
+          cp "$pkg" ./roost.pkg.tar.zst
+          podman build -f packaging/marlin/Containerfile \
+            --build-arg ROOST_PKG=roost.pkg.tar.zst \
+            -t marlin-roost-preview:ci .
+          podman run --rm marlin-roost-preview:ci roost-compositor --version
+          podman run --rm marlin-roost-preview:ci test -f /usr/share/applications/roost-nested-preview.desktop
+      - if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+          img=ghcr.io/hanthor/roost-desktop/marlin-roost-preview
+          podman tag marlin-roost-preview:ci "$img:latest"
+          podman tag marlin-roost-preview:ci "$img:${{ github.sha }}"
+          podman push "$img:latest"
+          podman push "$img:${{ github.sha }}"
+
   parity-ledger:
     # GNOME 51 parity ledger gate (#66): every row marked pass must cite
     # tests, and every cited cargo test / journey assertion must have
