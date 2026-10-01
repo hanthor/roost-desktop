@@ -8,6 +8,14 @@ The compositor is a long-lived Rust process built with Smithay. The shell UI run
 
 Design and planning only; no compositor implementation has started. The planning framework covers baseline research, the nested recovery slice, shell parity, hardware/app compatibility, secure system integration, optional extensions, and release readiness.
 
+## Contributing and Development
+
+**Want to contribute?** Start with the [development guide](docs/development.md). It covers:
+- Setting up your build environment
+- Understanding the project structure
+- Running a nested RWD session locally
+- Spektacular workflows for planning and tracking
+
 ## Planning
 
 - [Program architecture](docs/architecture.md)
