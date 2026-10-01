@@ -157,6 +157,8 @@ jobs:
       - run: scripts/ci-install-gtk4-layer-shell
       - run: shellcheck scripts/roost-gtk-shell-proof
       - run: scripts/roost-gtk-shell-proof --artifacts gtk-shell-artifacts
+      # Fractional scaling (#59): the same session at GNOME's 150 percent.
+      - run: scripts/roost-scale-proof --artifacts gtk-shell-artifacts/scale
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -253,6 +255,7 @@ jobs:
           scripts/roost-ledger check --tests ledger-in/test-list.txt
           --assertions ledger-in/journey/assertions.txt
           --assertions ledger-in/gtk-shell/assertions.txt
+          --assertions ledger-in/gtk-shell/scale/assertions.txt
           --assertions ledger-in/drm-smoke/assertions.txt
 
   docs-shots:

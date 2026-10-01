@@ -82,6 +82,8 @@ pub(crate) struct Protocols {
     _pointer_constraints: PointerConstraintsState,
     /// Surfaces holding an idle inhibitor.
     pub(crate) inhibitors: Vec<WlSurface>,
+    /// Scale fractional-scale clients are asked to render at (#59).
+    pub(crate) preferred_scale: f64,
 }
 
 impl Protocols {
@@ -102,6 +104,7 @@ impl Protocols {
             _relative_pointer: RelativePointerManagerState::new::<State>(dh),
             _pointer_constraints: PointerConstraintsState::new::<State>(dh),
             inhibitors: Vec::new(),
+            preferred_scale: 1.0,
         }
     }
 }
@@ -127,6 +130,11 @@ impl State {
             .dmabuf_state
             .create_global::<State>(&dh, formats);
         self.protocols.dmabuf_global = Some(global);
+    }
+
+    /// Scale for fractional-scale clients (the output scale, #59).
+    pub fn set_preferred_scale(&mut self, scale: f64) {
+        self.protocols.preferred_scale = scale;
     }
 
     /// Whether a live, mapped surface holds an idle inhibitor.
@@ -195,9 +203,10 @@ delegate_viewporter!(State);
 
 impl FractionalScaleHandler for State {
     fn new_fractional_scale(&mut self, surface: WlSurface) {
-        // Integer scale 1 until output scaling lands (#59).
+        // Clients render at the output scale (#59).
+        let scale = self.protocols.preferred_scale;
         with_states(&surface, |states| {
-            with_fractional_scale(states, |fractional| fractional.set_preferred_scale(1.0));
+            with_fractional_scale(states, |fractional| fractional.set_preferred_scale(scale));
         });
     }
 }

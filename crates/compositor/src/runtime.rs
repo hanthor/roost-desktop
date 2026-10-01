@@ -80,6 +80,10 @@ pub struct NestedSession {
     pub width: i32,
     /// Output height in physical pixels.
     pub height: i32,
+    /// Output scale (#59): 1, or fractional like GNOME's 125, 150, 175
+    /// and 200 percent. Layout works in logical pixels (physical size
+    /// divided by this); clients render at it.
+    pub scale: f64,
     /// Shell binary to supervise. `None` selects
     /// [`resolve_shell_bin`]: `ROOST_SHELL_BIN`, then the
     /// `roost-shell-host` sibling of this binary, then `PATH`.
@@ -148,6 +152,7 @@ impl NestedSession {
             socket_name,
             width,
             height,
+            scale: 1.0,
             shell_bin: None,
             xwayland: false,
             backend: BackendChoice::Auto,
@@ -218,6 +223,44 @@ mod xwayland_wanted_tests {
             "opt-out wins"
         );
         assert_eq!(xwayland_wanted(Some("".into()), path), enabled);
+    }
+}
+
+/// Scales GNOME offers, as a range: anything from 1 to 4.
+pub fn clamp_scale(scale: f64) -> f64 {
+    if scale.is_finite() {
+        scale.clamp(1.0, 4.0)
+    } else {
+        1.0
+    }
+}
+
+/// Logical size of a physical area at `scale` (rounded, never zero).
+pub fn logical_size(width: i32, height: i32, scale: f64) -> (i32, i32) {
+    (
+        ((f64::from(width) / scale).round() as i32).max(1),
+        ((f64::from(height) / scale).round() as i32).max(1),
+    )
+}
+
+/// Where one output's pixels sit in the global logical space, and how
+/// many physical pixels a logical pixel covers there.
+#[derive(Debug, Clone, Copy)]
+pub struct View {
+    /// The output's top-left in the global logical space.
+    pub offset: (i32, i32),
+    /// Physical pixels per logical pixel.
+    pub scale: f64,
+}
+
+impl View {
+    /// A global logical point in this output's physical pixels.
+    pub fn physical(&self, x: f64, y: f64) -> Point<i32, smithay::utils::Physical> {
+        (
+            ((x - f64::from(self.offset.0)) * self.scale).round() as i32,
+            ((y - f64::from(self.offset.1)) * self.scale).round() as i32,
+        )
+            .into()
     }
 }
 
@@ -413,6 +456,8 @@ pub struct Runtime {
     /// feature only).
     #[cfg(feature = "xwayland")]
     pending_x11_client: Option<smithay::reexports::wayland_server::Client>,
+    /// Output scale (#59), see [`NestedSession::scale`].
+    scale: f64,
     /// A three-finger swipe in progress: its travel so far (#60).
     shell_swipe: Option<Point<f64, Logical>>,
     /// Overview search is showing results: the workspace card and
@@ -516,16 +561,23 @@ impl Runtime {
             size: (session.width, session.height).into(),
             refresh: 60_000,
         };
+        let scale = clamp_scale(session.scale);
         output.change_current_state(
             Some(mode),
             None,
-            Some(Scale::Integer(1)),
+            Some(if scale == 1.0 {
+                Scale::Integer(1)
+            } else {
+                Scale::Fractional(scale)
+            }),
             Some((0, 0).into()),
         );
         output.set_preferred(mode);
+        state.set_preferred_scale(scale);
         if backend.is_none() {
             let global = output.create_global::<State>(&dh);
-            state.add_output("roost-0", Some(output), session.width, session.height);
+            let (lw, lh) = logical_size(session.width, session.height, scale);
+            state.add_output("roost-0", Some(output), lw, lh);
             state.note_output_global("roost-0", global);
         }
         let manager = WindowManager::new(&mut state);
@@ -618,6 +670,7 @@ impl Runtime {
             x11_display: None,
             overview_search: false,
             shell_swipe: None,
+            scale: clamp_scale(session.scale),
             idle_since: Instant::now(),
             exit: false,
             stats: RunStats::default(),
@@ -648,13 +701,16 @@ impl Runtime {
                 if let Some(output) = self.state.primary_output() {
                     output.change_current_state(Some(mode), None, None, None);
                 }
+                let (lw, lh) = logical_size(size.w, size.h, self.scale);
+                self.state.set_output_size(lw, lh);
             }
             WinitEvent::CloseRequested => self.exit = true,
             WinitEvent::Input(event) => {
+                // Pointer positions land in logical pixels.
                 let area = match &self.backend {
                     Backend::Winit(backend) => {
                         let size = backend.window_size();
-                        (size.w, size.h).into()
+                        logical_size(size.w, size.h, self.scale).into()
                     }
                     #[cfg(feature = "drm")]
                     Backend::Drm(_) => return,
@@ -1193,16 +1249,20 @@ impl Runtime {
                     let (renderer, mut framebuffer) = backend
                         .bind()
                         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+                    let view = View {
+                        offset: (0, 0),
+                        scale: self.scale,
+                    };
                     let elements = scene_elements(
                         renderer,
                         &self.manager,
                         &self.state,
-                        (0, 0),
+                        view,
                         show_content,
                         overview.as_ref(),
                     );
-                    let decor = decor_for_output(&decor_global, (0, 0));
-                    let previews = preview_elements(renderer, &self.manager, (0, 0), cards);
+                    let decor = decor_for_output(&decor_global, view);
+                    let previews = preview_elements(renderer, &self.manager, view, cards);
                     let paper = if show_paper {
                         self.wallpaper.element(renderer, size.w, size.h)
                     } else {
@@ -1220,7 +1280,10 @@ impl Runtime {
                         background,
                         paper.as_ref(),
                         &elements,
-                        damage,
+                        Target {
+                            damage,
+                            scale: view.scale,
+                        },
                         &decor,
                         &previews,
                     )?;
@@ -1258,16 +1321,22 @@ impl Runtime {
                     };
                     let size = out.size;
                     let damage = Rectangle::from_size(size);
+                    // Hardware outputs render at scale 1 for now; per-output
+                    // scales from GNOME's monitors.xml come next (#59).
+                    let view = View {
+                        offset: out.loc,
+                        scale: 1.0,
+                    };
                     let elements = scene_elements(
                         renderer,
                         &self.manager,
                         &self.state,
-                        out.loc,
+                        view,
                         show_content,
                         overview.as_ref(),
                     );
-                    let decor = decor_for_output(&decor_global, out.loc);
-                    let previews = preview_elements(renderer, &self.manager, out.loc, cards);
+                    let decor = decor_for_output(&decor_global, view);
+                    let previews = preview_elements(renderer, &self.manager, view, cards);
                     let paper = if show_paper {
                         self.wallpaper.element(renderer, size.w, size.h)
                     } else {
@@ -1285,7 +1354,10 @@ impl Runtime {
                             background,
                             paper.as_ref(),
                             &elements,
-                            damage,
+                            Target {
+                                damage,
+                                scale: view.scale,
+                            },
                             &decor,
                             &previews,
                         )?;
@@ -1374,10 +1446,10 @@ fn overview_decor(
     out
 }
 
-/// Shift global decor into one output's physical space (scale 1).
+/// Global decor in one output's physical pixels.
 fn decor_for_output(
     decor: &[(Color32F, Vec<Rectangle<i32, Logical>>)],
-    offset: (i32, i32),
+    view: View,
 ) -> Vec<(Color32F, Vec<Rectangle<i32, smithay::utils::Physical>>)> {
     decor
         .iter()
@@ -1387,10 +1459,10 @@ fn decor_for_output(
                 rects
                     .iter()
                     .map(|r| {
-                        Rectangle::new(
-                            (r.loc.x - offset.0, r.loc.y - offset.1).into(),
-                            (r.size.w, r.size.h).into(),
-                        )
+                        let top_left = view.physical(f64::from(r.loc.x), f64::from(r.loc.y));
+                        let bottom_right = view
+                            .physical(f64::from(r.loc.x + r.size.w), f64::from(r.loc.y + r.size.h));
+                        Rectangle::from_extremities(top_left, bottom_right)
                     })
                     .collect(),
             )
@@ -1408,7 +1480,7 @@ type PreviewElement = smithay::backend::renderer::element::utils::RescaleRenderE
 fn preview_elements(
     renderer: &mut GlesRenderer,
     manager: &WindowManager,
-    offset: (i32, i32),
+    view: View,
     overview: Option<&crate::overview::OverviewLayout>,
 ) -> Vec<PreviewElement> {
     let Some(layout) = overview else {
@@ -1422,16 +1494,15 @@ fn preview_elements(
         // Shrink about the surface origin, placed so the visible window
         // (inside client shadows, also shrunk) fills the preview rect.
         let geo = crate::popup::window_geometry_loc(&surface);
-        let origin: smithay::utils::Point<i32, smithay::utils::Physical> = (
-            preview.rect.loc.x - offset.0 - (f64::from(geo.x) * preview.scale).round() as i32,
-            preview.rect.loc.y - offset.1 - (f64::from(geo.y) * preview.scale).round() as i32,
-        )
-            .into();
+        let origin = view.physical(
+            f64::from(preview.rect.loc.x) - f64::from(geo.x) * preview.scale,
+            f64::from(preview.rect.loc.y) - f64::from(geo.y) * preview.scale,
+        );
         for element in render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(
             renderer,
             &surface,
             origin,
-            1.0,
+            view.scale,
             1.0,
             Kind::Unspecified,
         ) {
@@ -1454,7 +1525,7 @@ fn scene_elements(
     renderer: &mut GlesRenderer,
     manager: &WindowManager,
     state: &State,
-    offset: (i32, i32),
+    view: View,
     show_content: bool,
     overview: Option<&crate::overview::OverviewLayout>,
 ) -> Vec<WaylandSurfaceRenderElement<GlesRenderer>> {
@@ -1470,8 +1541,8 @@ fn scene_elements(
             elements.extend(render_elements_from_surface_tree(
                 renderer,
                 &surface,
-                (x - offset.0, y - offset.1),
-                1.0,
+                view.physical(f64::from(x), f64::from(y)),
+                view.scale,
                 1.0,
                 Kind::Unspecified,
             ));
@@ -1479,8 +1550,8 @@ fn scene_elements(
                 elements.extend(render_elements_from_surface_tree(
                     renderer,
                     &popup.surface,
-                    (popup.origin.x - offset.0, popup.origin.y - offset.1),
-                    1.0,
+                    view.physical(f64::from(popup.origin.x), f64::from(popup.origin.y)),
+                    view.scale,
                     1.0,
                     Kind::Unspecified,
                 ));
@@ -1496,8 +1567,8 @@ fn scene_elements(
         elements.extend(render_elements_from_surface_tree(
             renderer,
             surface,
-            (at.x - offset.0, at.y - offset.1),
-            1.0,
+            view.physical(f64::from(at.x), f64::from(at.y)),
+            view.scale,
             1.0,
             Kind::Unspecified,
         ));
@@ -1530,6 +1601,13 @@ fn scene_elements(
 
 /// Clear, wallpaper (own pass: mixing element types in one list needs
 /// DMA import bounds this backend does not satisfy), then the scene.
+/// What one frame redraws, and at which scale.
+#[derive(Debug, Clone, Copy)]
+struct Target {
+    damage: Rectangle<i32, smithay::utils::Physical>,
+    scale: f64,
+}
+
 fn draw_scene(
     frame: &mut smithay::backend::renderer::gles::GlesFrame<'_, '_>,
     background: Color32F,
@@ -1537,10 +1615,11 @@ fn draw_scene(
         &smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<GlesRenderer>,
     >,
     elements: &[WaylandSurfaceRenderElement<GlesRenderer>],
-    damage: Rectangle<i32, smithay::utils::Physical>,
+    target: Target,
     decor: &[(Color32F, Vec<Rectangle<i32, smithay::utils::Physical>>)],
     previews: &[PreviewElement],
 ) -> Result<(), RuntimeError> {
+    let Target { damage, scale } = target;
     frame
         .clear(background, &[damage])
         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
@@ -1560,11 +1639,13 @@ fn draw_scene(
                 .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
         }
     }
+    // Surfaces carry logical sizes: draw them at the output scale. The
+    // wallpaper above is already sized in physical pixels.
     if !previews.is_empty() {
-        draw_render_elements(frame, 1.0, previews, &[damage])
+        draw_render_elements(frame, scale, previews, &[damage])
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
     }
-    draw_render_elements(frame, 1.0, elements, &[damage])
+    draw_render_elements(frame, scale, elements, &[damage])
         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
     Ok(())
 }
