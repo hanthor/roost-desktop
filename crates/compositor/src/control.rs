@@ -771,6 +771,77 @@ pub struct PollOutcome {
     pub closed: Vec<u64>,
 }
 
+/// Peers accepted but not yet handshaken are capped so a same-user
+/// connection flood cannot grow memory or starve the real shell (#30).
+pub const MAX_PENDING_PEERS: usize = 8;
+
+/// Kernel-reported credentials of a connected control peer
+/// (`SO_PEERCRED`): what the peer *is*, not what it claims.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PeerCred {
+    /// Peer process id at connect time.
+    pub pid: u32,
+    /// Peer effective user id.
+    pub uid: u32,
+}
+
+/// Who may hold a control session (#30).
+///
+/// The control socket is a privileged channel: a session can focus and
+/// close windows, drive the overview, and engage the lock. Filesystem
+/// permissions keep other users out; this gate also keeps other
+/// same-user processes out once the compositor supervises its shell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeerGate {
+    /// Any peer running as our user (tests, unsupervised development).
+    SameUser,
+    /// Only the supervised shell process with this pid, as our user.
+    Pid(u32),
+    /// Nobody: no shell is running (between restarts, or none spawned).
+    Closed,
+}
+
+impl PeerGate {
+    /// Whether a peer with `peer` credentials may hold a session.
+    /// Unknown credentials are refused: fail closed.
+    pub fn admits(self, peer: Option<PeerCred>, our_uid: u32) -> bool {
+        let Some(peer) = peer else {
+            return false;
+        };
+        if peer.uid != our_uid {
+            return false;
+        }
+        match self {
+            Self::SameUser => true,
+            Self::Pid(pid) => peer.pid == pid,
+            Self::Closed => false,
+        }
+    }
+}
+
+/// Read the kernel credentials of a connected Unix stream peer.
+pub fn peer_cred(stream: &UnixStream) -> Option<PeerCred> {
+    let cred = rustix::net::sockopt::get_socket_peercred(stream).ok()?;
+    Some(PeerCred {
+        pid: u32::try_from(cred.pid.as_raw_nonzero().get()).ok()?,
+        uid: cred.uid.as_raw(),
+    })
+}
+
+/// Our effective uid, for [`PeerGate::admits`].
+pub fn our_uid() -> u32 {
+    rustix::process::geteuid().as_raw()
+}
+
+/// Whether `dir` is a directory owned by us with no group or other
+/// permission bits: the only place a privileged socket may live.
+pub fn is_private_dir(dir: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(dir)
+        .map(|meta| meta.is_dir() && meta.uid() == our_uid() && meta.mode() & 0o077 == 0)
+        .unwrap_or(false)
+}
+
 /// Live control-plane driver: accepts shell connections, handshakes them
 /// into [`Session`]s against one [`TokenStore`], emits deltas, and applies
 /// commands — one nonblocking round per [`poll`](Self::poll), so slow or
@@ -814,18 +885,44 @@ pub struct ControlHub {
     /// Inventory value every live session holds; a mismatch means a
     /// broadcast is still owed (or a newcomer joined mid-state).
     outputs_sent: Vec<OutputInfo>,
+    /// Peer admission rule (#30); the runtime narrows it to the
+    /// supervised shell's pid every tick.
+    gate: PeerGate,
+    /// Peer pid per live session, index-aligned with `sessions`, so a
+    /// gate change evicts sessions the new gate no longer admits.
+    session_peers: Vec<Option<PeerCred>>,
+    /// Peer credentials of `pending` / `fresh`, index-aligned.
+    pending_peers: Vec<Option<PeerCred>>,
+    fresh_peers: Vec<Option<PeerCred>>,
+    /// Connections refused by the gate or the pending cap, for
+    /// diagnostics (a count only; never peer details).
+    refused: u64,
 }
 
 impl ControlHub {
     /// Bind `socket_path` (removing a stale file first) and start
-    /// nonblocking. Fails fast when the path cannot be bound.
+    /// nonblocking. Fails fast when the path cannot be bound, or when
+    /// its directory is not private to us (#30: never a shared dir such
+    /// as `/tmp`). The socket file itself is made owner-only.
     pub fn bind(
         socket_path: std::path::PathBuf,
         store: std::rc::Rc<TokenStore>,
         seat: &str,
     ) -> std::io::Result<Self> {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = socket_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .ok_or_else(|| std::io::Error::other("control socket path has no directory"))?;
+        if !is_private_dir(parent) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "control socket directory is not private to this user",
+            ));
+        }
         let _ = std::fs::remove_file(&socket_path);
         let listener = UnixListener::bind(&socket_path)?;
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
         listener.set_nonblocking(true)?;
         Ok(Self {
             listener,
@@ -841,7 +938,33 @@ impl ControlHub {
             outputs_sent: Vec::new(),
             store,
             seat: seat.to_owned(),
+            gate: PeerGate::SameUser,
+            session_peers: Vec::new(),
+            pending_peers: Vec::new(),
+            fresh_peers: Vec::new(),
+            refused: 0,
         })
+    }
+
+    /// Narrow (or widen) who may hold a session. Live sessions the new
+    /// gate refuses are dropped on the next [`poll`](Self::poll).
+    pub fn set_peer_gate(&mut self, gate: PeerGate) {
+        self.gate = gate;
+    }
+
+    /// Current admission rule.
+    pub fn peer_gate(&self) -> PeerGate {
+        self.gate
+    }
+
+    /// Connections refused so far (gate or pending cap).
+    pub fn refused_count(&self) -> u64 {
+        self.refused
+    }
+
+    /// Accepted peers still waiting for their handshake round.
+    pub fn pending_count(&self) -> usize {
+        self.pending.len() + self.fresh.len()
     }
 
     /// Bound control socket path (hand this to the shell child).
@@ -908,12 +1031,32 @@ impl ControlHub {
     /// this round (for Wayland-side focus) and asked to close (for the
     /// polite client close), so the runtime can apply both.
     pub fn poll(&mut self, model: &mut StateModel) -> PollOutcome {
+        let uid = our_uid();
         while let Ok((stream, _)) = self.listener.accept() {
+            let cred = peer_cred(&stream);
+            if !self.gate.admits(cred, uid) || self.pending_count() >= MAX_PENDING_PEERS {
+                // Dropping the stream closes it: the peer sees EOF
+                // before any state crosses the socket.
+                self.refused += 1;
+                continue;
+            }
             let _ = stream.set_nonblocking(true);
             self.fresh.push(stream);
+            self.fresh_peers.push(cred);
+        }
+        // A narrowed gate evicts sessions it no longer admits.
+        let mut i = 0;
+        while i < self.sessions.len() {
+            if self.gate.admits(self.session_peers[i], uid) {
+                i += 1;
+            } else {
+                self.sessions.swap_remove(i);
+                self.session_peers.swap_remove(i);
+            }
         }
         self.advance_pending(model);
         self.pending = std::mem::take(&mut self.fresh);
+        self.pending_peers = std::mem::take(&mut self.fresh_peers);
         let mut outcome = PollOutcome::default();
         let mut i = 0;
         while i < self.sessions.len() {
@@ -940,6 +1083,7 @@ impl ControlHub {
                 i += 1;
             } else {
                 self.sessions.swap_remove(i);
+                self.session_peers.swap_remove(i);
             }
         }
         // Broadcast overview flips (002 R1): best-effort per session,
@@ -999,7 +1143,14 @@ impl ControlHub {
     /// handshake cannot be resumed) keeps silent peers from pinning slots.
     fn advance_pending(&mut self, model: &StateModel) {
         let pending = std::mem::take(&mut self.pending);
-        for stream in pending {
+        let peers = std::mem::take(&mut self.pending_peers);
+        let uid = our_uid();
+        for (stream, peer) in pending.into_iter().zip(peers) {
+            // The gate may have narrowed since accept (shell restart).
+            if !self.gate.admits(peer, uid) {
+                self.refused += 1;
+                continue;
+            }
             let conn = match ControlConn::new(stream) {
                 Ok(conn) => conn,
                 Err(_) => continue,
@@ -1024,6 +1175,7 @@ impl ControlHub {
                     let _ = session.send_outputs(&self.outputs);
                 }
                 self.sessions.push(session);
+                self.session_peers.push(peer);
             }
         }
     }
