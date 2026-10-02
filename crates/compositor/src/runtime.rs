@@ -1877,6 +1877,9 @@ impl Runtime {
         for (window, action) in outcome.window_actions {
             self.manager.window_action(&mut self.state, window, action);
         }
+        for backward in outcome.input_source_switches {
+            self.manager.switch_input_source(&mut self.state, backward);
+        }
         // Header-bar right clicks: GNOME's window menu, drawn by the shell.
         for (window, x, y) in self.manager.take_menu_requests() {
             self.control

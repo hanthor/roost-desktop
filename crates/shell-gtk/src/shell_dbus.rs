@@ -94,8 +94,18 @@ pub fn parse_accelerator(accelerator: &str) -> Option<(u32, u32)> {
         return None;
     }
     // Letters grab as their lower case, as GTK and Mutter parse them.
-    let key = gtk4::gdk::Key::from_name(rest)?.to_lower();
-    Some((key.into_glib(), bits))
+    // Names GDK lacks (XF86Keyboard) come from xkbcommon, as Mutter's.
+    let key = match gtk4::gdk::Key::from_name(rest) {
+        Some(key) => key.to_lower().into_glib(),
+        None => {
+            let sym = xkbcommon::xkb::keysym_from_name(rest, xkbcommon::xkb::KEYSYM_NO_FLAGS);
+            if sym.raw() == 0 {
+                return None;
+            }
+            sym.raw()
+        }
+    };
+    Some((key, bits))
 }
 
 /// One caller's grab.

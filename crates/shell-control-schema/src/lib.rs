@@ -105,9 +105,13 @@ impl ProtocolVersion {
     ///
     /// `0.17` appends the compositor-to-shell `WorkspacePopup` message
     /// (GNOME's workspace switcher popup), again last.
+    ///
+    /// `0.18` appends `Maximize`, `ToggleTiledLeft` and `ToggleTiledRight`
+    /// to `WindowAction` and the shell-to-compositor `SwitchInputSource`
+    /// command (GNOME's rebindable window-manager keys), again last.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 17,
+        minor: 18,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -287,6 +291,13 @@ pub enum CommandKind {
         /// What to do.
         action: WindowAction,
     },
+    /// Switch to the next (or previous) keyboard input source (GNOME's
+    /// `switch-input-source` keys). Tokenless: it only changes the
+    /// keymap.
+    SwitchInputSource {
+        /// The previous source instead of the next.
+        backward: bool,
+    },
 }
 
 /// GNOME's window-menu actions (windowMenu.js) the compositor carries out.
@@ -317,6 +328,12 @@ pub enum WindowAction {
         /// The workspace.
         workspace: u32,
     },
+    /// Maximize (GNOME's `maximize` key, Super+Up).
+    Maximize,
+    /// Tile the left half, or untile (Mutter's `toggle-tiled-left`).
+    ToggleTiledLeft,
+    /// Tile the right half, or untile (`toggle-tiled-right`).
+    ToggleTiledRight,
 }
 
 /// Grabbed accelerators held at once.
@@ -913,8 +930,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_17() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 17));
+    fn current_version_is_0_18() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 18));
     }
 
     #[test]
@@ -939,7 +956,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 15).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 16).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 17).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 18).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 18).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 19).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }

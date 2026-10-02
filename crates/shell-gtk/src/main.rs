@@ -1300,9 +1300,33 @@ fn build(app: &adw::Application) {
                     Action::ShowScreenshotUi => screenshot_ui.open(),
                     Action::Screenshot => take_screenshot(false, notify.clone()),
                     Action::ScreenshotWindow => take_screenshot(true, notify.clone()),
+                    Action::NextInputSource | Action::PreviousInputSource => {
+                        if let Some(control) = shell.borrow_mut().control.as_mut() {
+                            let _ =
+                                control.switch_input_source(action == Action::PreviousInputSource);
+                        }
+                    }
+                    Action::Close => {
+                        let mut shell = shell.borrow_mut();
+                        if let Some(control) = shell.control.as_mut() {
+                            let focused = control
+                                .model()
+                                .windows()
+                                .iter()
+                                .find(|w| w.active)
+                                .map(|w| w.id);
+                            if let Some(id) = focused {
+                                let _ = control.close_window(id);
+                            }
+                        }
+                    }
                     Action::WindowMenu
                     | Action::ToggleMaximized
                     | Action::Unmaximize
+                    | Action::Maximize
+                    | Action::Minimize
+                    | Action::TileLeft
+                    | Action::TileRight
                     | Action::BeginMove
                     | Action::BeginResize => {
                         use roost_shell_control::WindowAction as W;
@@ -1310,6 +1334,10 @@ fn build(app: &adw::Application) {
                             Action::WindowMenu => W::ShowMenu,
                             Action::ToggleMaximized => W::ToggleMaximize,
                             Action::Unmaximize => W::Unmaximize,
+                            Action::Maximize => W::Maximize,
+                            Action::Minimize => W::Minimize,
+                            Action::TileLeft => W::ToggleTiledLeft,
+                            Action::TileRight => W::ToggleTiledRight,
                             Action::BeginMove => W::Move,
                             _ => W::Resize,
                         };
@@ -1385,15 +1413,32 @@ fn build(app: &adw::Application) {
         };
         let settings = keybindings::settings();
         let wm_settings = keybindings::wm_settings();
+        let mutter_settings = keybindings::mutter_settings();
         let apply: Rc<dyn Fn()> = {
-            let (settings, wm_settings, gnome_shell) =
-                (settings.clone(), wm_settings.clone(), gnome_shell.clone());
+            let (settings, wm_settings, mutter_settings, gnome_shell) = (
+                settings.clone(),
+                wm_settings.clone(),
+                mutter_settings.clone(),
+                gnome_shell.clone(),
+            );
             Rc::new(move || {
-                let list = keybindings::bindings(settings.as_ref(), wm_settings.as_ref());
+                let list = keybindings::bindings(
+                    settings.as_ref(),
+                    wm_settings.as_ref(),
+                    mutter_settings.as_ref(),
+                );
                 let accels: Vec<(String, u32)> = list
                     .iter()
                     .map(|b| (b.accelerator.clone(), b.modes))
                     .collect();
+                eprintln!(
+                    "roost-shell-gtk: keybindings: {} grabs, maximize on {:?}",
+                    accels.len(),
+                    list.iter()
+                        .filter(|b| b.action == keybindings::Action::Maximize)
+                        .map(|b| b.accelerator.as_str())
+                        .collect::<Vec<_>>()
+                );
                 let actions: Vec<keybindings::Action> = list.iter().map(|b| b.action).collect();
                 let run = run.clone();
                 gnome_shell.set_internal(
@@ -1407,7 +1452,10 @@ fn build(app: &adw::Application) {
             })
         };
         apply();
-        for settings in [settings, wm_settings].into_iter().flatten() {
+        for settings in [settings, wm_settings, mutter_settings]
+            .into_iter()
+            .flatten()
+        {
             let apply = apply.clone();
             settings.connect_changed(None, move |_, _| apply());
             std::mem::forget(settings);
