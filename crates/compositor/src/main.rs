@@ -33,6 +33,13 @@ fn main() -> ExitCode {
         std::env::var_os("ROOST_XWAYLAND"),
         std::env::var_os("PATH"),
     );
+    // Output scale (#59): ROOST_SCALE=1.5, or --scale.
+    if let Some(scale) = std::env::var("ROOST_SCALE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        session.scale = scale;
+    }
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -44,6 +51,11 @@ fn main() -> ExitCode {
             "--width" => {
                 if let Some(value) = args.next().and_then(|v| v.parse().ok()) {
                     session.width = value;
+                }
+            }
+            "--scale" => {
+                if let Some(value) = args.next().and_then(|v| v.parse().ok()) {
+                    session.scale = value;
                 }
             }
             "--height" => {
