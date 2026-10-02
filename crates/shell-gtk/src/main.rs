@@ -23,6 +23,7 @@ mod logic;
 mod notify;
 mod osd;
 mod overview;
+mod polkit;
 mod power;
 mod preview_chrome;
 mod providers;
@@ -1092,6 +1093,9 @@ fn build(app: &adw::Application) {
             }),
         )
     };
+
+    // GNOME Shell is the session's polkit agent.
+    polkit::start(app.upcast_ref());
 
     // GNOME's workspace switcher popup.
     let workspace_popup = ws_popup::WorkspacePopup::new(app.upcast_ref());

@@ -76,6 +76,8 @@
 #                  date menu, Super+A the app grid (and back)
 #   G-KEY-BRIGHTNESS the brightness key steps the backlight through logind
 #   G-SCREENSHOT-UI  Print opens the screenshot UI; Screen + Capture saves
+#   G-POLKIT       the shell is the polkit agent: GNOME's dialog, a wrong
+#                  password refused, the right one authorizing
 #   G-WINDOW-MENU  GNOME's window menu: Always on Top, Hide, and the
 #                  overview brings the hidden window back
 #   G-WM-KEYS      Alt+Space, Alt+F10, Super+End/Home (wm keybindings)
@@ -277,6 +279,11 @@ for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/provider.log" 2>/dev/null && 
 # The full power menu needs a hardware session; logind is the stub.
 ROOST_SESSION_KIND=hardware
 export ROOST_SESSION_KIND
+# The polkit agent checks passwords through a helper stand-in, and the
+# Authority stub records where the agent registered.
+ROOST_POLKIT_HELPER="$ROOT/scripts/lib/roost-polkit-helper-stub.py"
+ROOST_STUB_POLKIT_LOG="$ARTIFACTS/polkit-agent"
+export ROOST_POLKIT_HELPER ROOST_STUB_POLKIT_LOG
 
 # The lock screen's password goes through a real PAM stack: pam_wrapper
 # serves the compositor's roost-lock service from a private password
@@ -1156,6 +1163,38 @@ after="$(cat "$BACKLIGHT/brightness")"
     fail G-KEY-BRIGHTNESS "the brightness key left the backlight at $after (was $before)"
 scrot "$ARTIFACTS/24c-brightness-osd.png" >/dev/null
 pass G-KEY-BRIGHTNESS "the brightness key steps the backlight by a twentieth through logind"
+
+# GNOME Shell as the polkit agent: polkit (the Authority stub, back on
+# the bus) asks the agent to authenticate; a wrong password says so and
+# asks again, the right one authorizes.
+end=$(($(date +%s) + 15))
+until [ -s "$ROOST_STUB_POLKIT_LOG" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+[ -s "$ROOST_STUB_POLKIT_LOG" ] || fail G-POLKIT "the shell never registered a polkit agent"
+read -r agent_name agent_path <"$ROOST_STUB_POLKIT_LOG"
+gdbus call --system --dest "$agent_name" --object-path "$agent_path" \
+    --method org.freedesktop.PolicyKit1.AuthenticationAgent.BeginAuthentication \
+    org.roost.proof "Authentication is required to run the Roost proof." "" "{}" cookie-1 \
+    "[('unix-user', {'uid': <uint32 $(id -u)>})]" >"$ARTIFACTS/polkit-reply" 2>&1 &
+end=$(($(date +%s) + 15))
+until "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-polkit.json" 5 >/dev/null 2>&1 &&
+    showing "$ARTIFACTS/a11y-polkit.json" "Authenticate" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.5; done
+showing "$ARTIFACTS/a11y-polkit.json" "Authenticate" || fail G-POLKIT "no Authentication Required dialog"
+sleep 1
+scrot "$ARTIFACTS/24g-polkit.png" >/dev/null
+xdotool type --delay 30 "not-it"
+xdotool key Return
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-polkit-failed.json" 20 ||
+    fail G-POLKIT "accessibility dump failed"
+showing "$ARTIFACTS/a11y-polkit-failed.json" "Sorry, that didn’t work. Please try again." ||
+    fail G-POLKIT "a wrong password did not say so"
+xdotool type --delay 30 "roost-proof"
+xdotool key Return
+end=$(($(date +%s) + 10))
+until grep -q "^()" "$ARTIFACTS/polkit-reply" 2>/dev/null || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+grep -q "^()" "$ARTIFACTS/polkit-reply" ||
+    fail G-POLKIT "the right password did not authorize: $(cat "$ARTIFACTS/polkit-reply")"
+pass G-POLKIT "polkit's request shows GNOME's dialog; a wrong password is refused, the right one authorizes"
 sleep 2
 open_power_menu() {
     open_qs

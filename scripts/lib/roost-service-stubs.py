@@ -16,7 +16,11 @@ starts), just enough of each daemon behind GNOME 51's quick settings:
   Suspend, Reboot and PowerOff. Power calls are appended to POWER_LOG,
   and Suspend emits PrepareForSleep(true) first, as logind does.
 
-ROOST_STUB_SERVICES (comma-separated: nm, bluez, ppd, logind, gdm;
+- polkit: the Authority's RegisterAuthenticationAgent, recording the
+  agent's bus name and object path in $ROOST_STUB_POLKIT_LOG (one line,
+  "NAME PATH") so a proof can call the agent's BeginAuthentication.
+
+ROOST_STUB_SERVICES (comma-separated: nm, bluez, ppd, logind, polkit, gdm;
 default all but gdm; gdm answers GNOME Shell's "can lock" probe, the
 display manager's Version, so a reference GNOME session can lock) limits which daemons are served, so a capture can match another
 session's services exactly.
@@ -61,6 +65,12 @@ XML = """
       <arg type="u" direction="in"/>
     </method>
     <method name="Terminate"/>
+  </interface>
+  <interface name="org.freedesktop.PolicyKit1.Authority">
+    <method name="RegisterAuthenticationAgent">
+      <arg type="(sa{sv})" direction="in"/><arg type="s" direction="in"/>
+      <arg type="s" direction="in"/>
+    </method>
   </interface>
   <interface name="org.gnome.DisplayManager.Manager">
     <property name="Version" type="s" access="read"/>
@@ -124,6 +134,13 @@ def method_call(c, sender, path, iface, method, params, invocation):
             with open(POWER_LOG, "a") as fh:
                 fh.write(method + "\n")
         invocation.return_value(None)
+    elif method == "RegisterAuthenticationAgent":
+        _, _, agent_path = params.unpack()
+        log = os.environ.get("ROOST_STUB_POLKIT_LOG")
+        if log:
+            with open(log, "w") as fh:
+                fh.write(f"{sender} {agent_path}\n")
+        invocation.return_value(None)
     elif method == "SetBrightness":
         _, _, value = params.unpack()
         with open(os.path.join(BACKLIGHT, "brightness"), "w") as fh:
@@ -164,6 +181,9 @@ SERVICES = {
     ]),
     "gdm": (["org.gnome.DisplayManager"], [
         ("/org/gnome/DisplayManager/Manager", "org.gnome.DisplayManager.Manager"),
+    ]),
+    "polkit": (["org.freedesktop.PolicyKit1"], [
+        ("/org/freedesktop/PolicyKit1/Authority", "org.freedesktop.PolicyKit1.Authority"),
     ]),
     "logind": (["org.freedesktop.login1"], [
         (SESSION, "org.freedesktop.login1.Session"),
