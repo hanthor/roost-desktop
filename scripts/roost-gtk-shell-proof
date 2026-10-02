@@ -23,7 +23,7 @@
 #   G-APP-FOLDERS  GNOME's app-folders settings group the app grid: the
 #                  folder replaces its apps and opens to show them
 #   G-NOTIFY-BANNER  a D-Bus notification shows a banner (#56)
-#   G-NOTIFY-EXPIRE  the banner goes away by itself
+#   G-NOTIFY-EXPIRE  the banner waits for an away user, then goes 2 s after input
 #   G-NOTIFY-LIST    the calendar lists it instead of "No Notifications"
 #   G-NOTIFY-CLEAR   Clear empties the list
 #   G-NOTIFY-DND     with Do Not Disturb on, no banner, but listed
@@ -627,6 +627,8 @@ open_calendar() {
     xdotool mousemove --window "$WID" $((WIDTH / 2)) 16 click 1
     sleep 2
 }
+# Two quiet seconds first: the banner arrives while the user is away.
+sleep 2
 notify "Proof Banner" "Sent over D-Bus" || fail G-NOTIFY-BANNER "Notify call failed"
 sleep 1
 scrot "$ARTIFACTS/12-banner.png" >/dev/null
@@ -636,13 +638,22 @@ showing "$ARTIFACTS/a11y-banner.json" "Proof Banner" ||
     fail G-NOTIFY-BANNER "no banner showing for the notification"
 pass G-NOTIFY-BANNER "a D-Bus notification shows a banner"
 
+# GNOME's message tray: a banner that arrives while the user is away
+# waits for them (org.gnome.Mutter.IdleMonitor), then goes 2 s after
+# their next input.
 sleep 6
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-away.json" 20 ||
+    fail G-NOTIFY-EXPIRE "accessibility dump failed"
+showing "$ARTIFACTS/a11y-away.json" "Proof Banner" ||
+    fail G-NOTIFY-EXPIRE "the banner left while the user was away"
+xdotool mousemove --window "$WID" $((WIDTH / 3)) $((HEIGHT / 2))
+sleep 3.5
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-expired.json" 20 ||
     fail G-NOTIFY-EXPIRE "accessibility dump failed"
 if showing "$ARTIFACTS/a11y-expired.json" "Proof Banner"; then
-    fail G-NOTIFY-EXPIRE "banner still showing after its timeout"
+    fail G-NOTIFY-EXPIRE "banner still showing 2 s after the user came back"
 fi
-pass G-NOTIFY-EXPIRE "the banner expires by itself"
+pass G-NOTIFY-EXPIRE "the banner waits for an away user and goes 2 s after their input"
 
 open_calendar
 scrot "$ARTIFACTS/13-notification-list.png" >/dev/null

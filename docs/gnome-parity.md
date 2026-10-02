@@ -54,6 +54,7 @@ scripts/lib/roost-parity-compare.py target/gnome-reference target/roost-parity t
 | 09-calendar-with-notification | the date menu listing it |
 | 10-end-session | the Log Out dialog (gnome-session's EndSessionDialog) |
 | 11-lock-screen | the lock screen curtain (reference: a stubbed display manager lets GNOME lock) |
+| 12-osd-volume, 12b-osd-label, 12c-osd-overdrive | the OSD gnome-settings-daemon shows through ShowOSD |
 | 11b-unlock-prompt | the unlock prompt, set to what a real session shows: the user's name and GDM's Password question (the stubbed display manager has no PAM conversation or AccountsService) |
 
 Both sides run the same services: the stubs serve power-profiles and
@@ -100,7 +101,12 @@ Whole screens, with the same windows on both sides:
 | Overview, a preview hovered | 29.0% | 1.7% |
 | Notification banner | 48.9% | 0.4% |
 | Date menu listing it | 19.6% | 0.5% |
-| Log Out dialog | 35.6% | 0.7% |
+| Log Out dialog | 35.6% | 0.4% |
+| OSD: volume, a layout label, volume past 100% | not built | 0.4% each |
+
+Both sides send the banner's notification over D-Bus. GNOME's message
+tray keeps a banner up while the user is away, so its scripted run tells
+the tray the user is back where Roost's capture moves the pointer.
 
 Getting there took two compositor changes. Windows now pick their own
 size and are placed on their first commit, as Mutter does: a new window
