@@ -905,6 +905,10 @@ impl Runtime {
             if let Some(surface) = surface {
                 self.manager.lock_input(&mut self.state, &surface, input);
             }
+            // Media keys still work on the lock screen, as in GNOME.
+            for (action, time, mode) in self.manager.take_accelerators_fired() {
+                self.control.queue_accelerator(action, time, mode);
+            }
             return;
         }
         // Three-finger swipes are the shell's (GNOME 51): consumed here,
@@ -947,6 +951,9 @@ impl Runtime {
             // shell, which owns MRU order and rendering.
             for action in self.manager.take_switcher_queue() {
                 self.control.queue_switcher(action);
+            }
+            for (action, time, mode) in self.manager.take_accelerators_fired() {
+                self.control.queue_accelerator(action, time, mode);
             }
             return;
         }
@@ -1744,6 +1751,9 @@ impl Runtime {
         }
         if let Some(settings) = outcome.input_settings {
             self.apply_input_settings(settings);
+        }
+        if let Some(list) = outcome.accelerators {
+            self.manager.set_accelerators(list);
         }
         if !self.control.overview_open() {
             self.overview_search = false;

@@ -70,6 +70,8 @@
 #   G-POWER-DIALOG Power Off… opens the 60 s end-session dialog, and
 #                  Cancel closes it with nothing done
 #   G-POWER-OFF    confirming the dialog asks logind to power off
+#   G-ACCEL        org.gnome.Shell: an allowlisted caller grabs a media key,
+#                  the key fires AcceleratorActivated, and ShowOSD shows
 #   G-SUSPEND-LOCK Suspend asks logind, and its PrepareForSleep locks
 #                  the session before sleep
 #   G-UNLOCK       GNOME's lock screen: a wrong password is refused and
@@ -177,7 +179,9 @@ OWNED_XVFB=""
 COMPOSITOR_PID=""
 STUBS_PID=""
 SYSBUS_PID=""
+ACCEL_PID=""
 cleanup() {
+    if [ -n "$ACCEL_PID" ]; then kill "$ACCEL_PID" 2>/dev/null || true; fi
     if [ -n "$COMPOSITOR_PID" ]; then kill "$COMPOSITOR_PID" 2>/dev/null || true; fi
     if [ -n "$OWNED_XVFB" ]; then kill "$OWNED_XVFB" 2>/dev/null || true; fi
     if [ -n "$STUBS_PID" ]; then kill "$STUBS_PID" 2>/dev/null || true; fi
@@ -879,6 +883,30 @@ gsettings set org.gnome.desktop.session idle-delay 300
 cstate '.idle_timeout_ms == 300000' "idle 300" ||
     fail G-SETTINGS-IDLE "the idle lock did not follow back to 300 s"
 pass G-SETTINGS-IDLE "GNOME's idle-delay and lock-enabled set the idle lock live"
+
+# org.gnome.Shell for gnome-settings-daemon: a caller outside GNOME's
+# allowlist is refused; the media-keys daemon's grab takes the key away
+# from apps, fires AcceleratorActivated, and its ShowOSD shows the OSD.
+if gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell \
+    --method org.gnome.Shell.GrabAccelerator "<Super>F9" 1 0 >/dev/null 2>&1; then
+    fail G-ACCEL "a caller outside the allowlist grabbed an accelerator"
+fi
+ACCEL_MARKER="$ARTIFACTS/accel-marker"
+rm -f "$ACCEL_MARKER"
+"$PY" "$ROOT/scripts/lib/roost-accel-probe.py" "$ACCEL_MARKER" >"$ARTIFACTS/accel.log" 2>&1 &
+ACCEL_PID=$!
+end=$(($(date +%s) + 10))
+until grep -q grabbed "$ACCEL_MARKER" 2>/dev/null || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+grep -q "grabbed [1-9]" "$ACCEL_MARKER" 2>/dev/null ||
+    fail G-ACCEL "the media-keys stand-in could not grab XF86AudioRaiseVolume"
+xdotool key XF86AudioRaiseVolume
+end=$(($(date +%s) + 5))
+until grep -q activated "$ACCEL_MARKER" 2>/dev/null || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+grep -q "activated" "$ACCEL_MARKER" ||
+    fail G-ACCEL "pressing the grabbed key fired no AcceleratorActivated"
+sleep 0.5
+scrot "$ARTIFACTS/24b-osd.png" >/dev/null
+pass G-ACCEL "gnome-settings-daemon's grab fires on its key and its ShowOSD shows the OSD"
 
 # Screenshots (#61): GNOME Shell's interface, as the portal calls it.
 SHOT="$ARTIFACTS/screenshot.png"

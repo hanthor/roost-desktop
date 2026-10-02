@@ -300,6 +300,8 @@ pub struct Session<'a> {
     closed: Vec<u64>,
     /// Latest `SetIdleTimeout` from the shell, drained by the hub.
     idle_timeout: Option<u64>,
+    /// The latest SetAccelerators the shell sent, until drained.
+    accelerators: Option<Vec<roost_shell_control::Accelerator>>,
     /// Latest `SetOverviewSearch` from the shell, drained by the hub.
     overview_search: Option<bool>,
     /// Latest `SetOverviewAppGrid` from the shell, drained by the hub.
@@ -369,6 +371,7 @@ impl<'a> Session<'a> {
             locked_sent,
             closed: Vec::new(),
             idle_timeout: None,
+            accelerators: None,
             overview_search: None,
             overview_app_grid: None,
             unlock_request: None,
@@ -456,6 +459,22 @@ impl<'a> Session<'a> {
     /// The latest `SetIdleTimeout` the shell sent, once (#63).
     pub fn take_idle_timeout(&mut self) -> Option<u64> {
         self.idle_timeout.take()
+    }
+
+    /// The latest `SetAccelerators` the shell sent, once.
+    pub fn take_accelerators(&mut self) -> Option<Vec<roost_shell_control::Accelerator>> {
+        self.accelerators.take()
+    }
+
+    /// Report a grabbed accelerator's press.
+    pub fn send_accelerator(
+        &mut self,
+        action: u32,
+        time: u32,
+        mode: u32,
+    ) -> Result<(), ControlError> {
+        self.conn
+            .write_frame(&Message::AcceleratorActivated { action, time, mode })
     }
 
     /// Send where the overview's window previews sit.
@@ -635,6 +654,19 @@ impl<'a> Session<'a> {
             }
             Message::Command {
                 id,
+                kind: CommandKind::SetAccelerators { accelerators },
+            } => {
+                // Session-level grabs, applied by the window manager's
+                // key filter (drained by the hub).
+                self.accelerators = Some(accelerators);
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: CommandStatus::Applied,
+                })?;
+                Ok(Handled::CommandResult { id, applied: true })
+            }
+            Message::Command {
+                id,
                 kind: CommandKind::SetIdleTimeout { ms },
             } => {
                 // Session-level setting, not model state: the runtime
@@ -665,6 +697,7 @@ impl<'a> Session<'a> {
             | Message::Outputs { .. }
             | Message::Environment { .. }
             | Message::OverviewPreviews { .. }
+            | Message::AcceleratorActivated { .. }
             | Message::Error { .. } => {
                 let _ = self.conn.write_frame(&Message::Error {
                     kind: ErrorKind::UnknownCommand,
@@ -703,6 +736,7 @@ fn message_kind(msg: &Message) -> &'static str {
         Message::Outputs { .. } => "Outputs",
         Message::Environment { .. } => "Environment",
         Message::OverviewPreviews { .. } => "OverviewPreviews",
+        Message::AcceleratorActivated { .. } => "AcceleratorActivated",
     }
 }
 
@@ -856,6 +890,7 @@ fn apply_command(
         | CommandKind::SetOverviewSearch { .. }
         | CommandKind::SetOverviewAppGrid { .. }
         | CommandKind::Unlock { .. }
+        | CommandKind::SetAccelerators { .. }
         | CommandKind::SetInputSettings(_) => (CommandStatus::Applied, None),
         CommandKind::Lock => {
             // Manual lock from the shell (session-lock set path):
@@ -891,6 +926,8 @@ pub struct PollOutcome {
     pub unlock: Option<(u64, roost_shell_control::Secret)>,
     /// GNOME input settings the shell sent, if any.
     pub input_settings: Option<roost_shell_control::InputSettings>,
+    /// Accelerator grabs the shell sent, if they changed.
+    pub accelerators: Option<Vec<roost_shell_control::Accelerator>>,
 }
 
 /// Peers accepted but not yet handshaken are capped so a same-user
@@ -999,6 +1036,8 @@ pub struct ControlHub {
     /// intent (level), steps are discrete events: each one is sent to
     /// every live session exactly once, retained until all sends land.
     switcher_queue: Vec<SwitcherAction>,
+    /// Accelerator presses waiting for the next poll.
+    accelerator_queue: Vec<(u32, u32, u32)>,
     /// Output inventory last handed to [`set_outputs`](Self::set_outputs)
     /// (multi-monitor): the runtime refreshes this every tick from the
     /// compositor's tracking, and [`poll`](Self::poll) broadcasts it
@@ -1064,6 +1103,7 @@ impl ControlHub {
             overview_sent: false,
             locked: std::rc::Rc::new(std::cell::Cell::new(false)),
             switcher_queue: Vec::new(),
+            accelerator_queue: Vec::new(),
             outputs: Vec::new(),
             outputs_sent: Vec::new(),
             environment: Vec::new(),
@@ -1188,6 +1228,11 @@ impl ControlHub {
 
     /// Queue one Alt-Tab drive event; the next [`poll`](Self::poll)
     /// broadcasts it to every live session as [`Message::Switcher`].
+    /// Report a grabbed accelerator's press to the shell on the next poll.
+    pub fn queue_accelerator(&mut self, action: u32, time: u32, mode: u32) {
+        self.accelerator_queue.push((action, time, mode));
+    }
+
     pub fn queue_switcher(&mut self, action: SwitcherAction) {
         self.switcher_queue.push(action);
     }
@@ -1249,6 +1294,9 @@ impl ControlHub {
                     outcome.closed.extend(Self::take_closed(session));
                     if let Some(ms) = session.take_idle_timeout() {
                         outcome.idle_timeout = Some(ms);
+                    }
+                    if let Some(list) = session.take_accelerators() {
+                        outcome.accelerators = Some(list);
                     }
                     if let Some(active) = session.overview_search.take() {
                         outcome.overview_search = Some(active);
@@ -1345,6 +1393,13 @@ impl ControlHub {
                 }
             }
             self.switcher_queue = unsent;
+        }
+        // Accelerator presses go to every live session once (the shell
+        // signals the grabbing D-Bus caller).
+        for (action, time, mode) in std::mem::take(&mut self.accelerator_queue) {
+            for session in &mut self.sessions {
+                let _ = session.send_accelerator(action, time, mode);
+            }
         }
         outcome
     }

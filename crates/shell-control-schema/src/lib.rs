@@ -93,9 +93,14 @@ impl ProtocolVersion {
     ///
     /// `0.14` appends the shell-to-compositor `Unlock` command (the lock
     /// screen's password, verified by the compositor), again last.
+    ///
+    /// `0.15` appends the shell-to-compositor `SetAccelerators` command
+    /// and the compositor-to-shell `AcceleratorActivated` message
+    /// (org.gnome.Shell's GrabAccelerators for gnome-settings-daemon's
+    /// media keys), again last.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 14,
+        minor: 15,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -259,6 +264,43 @@ pub enum CommandKind {
         /// The typed password; never logged (`Debug` is redacted).
         password: Secret,
     },
+    /// Every key combination grabbed through org.gnome.Shell's
+    /// GrabAccelerators, the full set each time it changes. The
+    /// compositor keeps matching presses from clients and reports them
+    /// with `AcceleratorActivated`.
+    SetAccelerators {
+        /// The grabs, at most [`MAX_ACCELERATORS`].
+        accelerators: Vec<Accelerator>,
+    },
+}
+
+/// Grabbed accelerators held at once.
+pub const MAX_ACCELERATORS: usize = 512;
+
+/// Modifier bits in [`Accelerator::mods`] (X11's masks).
+pub const MOD_SHIFT: u32 = 1;
+pub const MOD_CTRL: u32 = 4;
+pub const MOD_ALT: u32 = 8;
+pub const MOD_LOGO: u32 = 64;
+
+/// GNOME Shell's action modes (Shell.ActionMode) in [`Accelerator::modes`]:
+/// where a grab applies.
+pub const MODE_NORMAL: u32 = 1;
+pub const MODE_OVERVIEW: u32 = 2;
+pub const MODE_LOCK_SCREEN: u32 = 4;
+pub const MODE_UNLOCK_SCREEN: u32 = 8;
+
+/// One grabbed key combination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Accelerator {
+    /// The shell's action id, echoed in `AcceleratorActivated`.
+    pub action: u32,
+    /// The xkb keysym (lower case for letters).
+    pub keysym: u32,
+    /// Exact modifiers: a combination of the `MOD_*` bits.
+    pub mods: u32,
+    /// Action modes it applies in: a combination of the `MODE_*` bits.
+    pub modes: u32,
 }
 
 /// A secret on the wire (the lock screen's password). `Debug` never
@@ -407,6 +449,16 @@ pub enum Message {
         previews: Vec<PreviewInfo>,
         /// The preview under the pointer, if any.
         hovered: Option<u64>,
+    },
+    /// Compositor-to-shell: a grabbed accelerator was pressed (the
+    /// press and its release never reached a client). Sits last.
+    AcceleratorActivated {
+        /// The grab's action id.
+        action: u32,
+        /// The key event's time, in milliseconds.
+        time: u32,
+        /// The action mode it fired in (one `MODE_*` bit).
+        mode: u32,
     },
 }
 
@@ -708,7 +760,16 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
             check_title(&settings.xkb_variant)?;
             check_title(&settings.xkb_options)?;
         }
+        Message::Command {
+            kind: CommandKind::SetAccelerators { accelerators },
+            ..
+        } if accelerators.len() > MAX_ACCELERATORS => {
+            return Err(DecodeError::Malformed(
+                postcard::Error::DeserializeBadEncoding,
+            ));
+        }
         Message::Hello { .. }
+        | Message::AcceleratorActivated { .. }
         | Message::Command { .. }
         | Message::CommandResult { .. }
         | Message::Error { .. }
@@ -771,8 +832,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_14() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 14));
+    fn current_version_is_0_15() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 15));
     }
 
     #[test]
@@ -794,7 +855,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 12).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 13).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 14).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 15).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 15).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 16).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }

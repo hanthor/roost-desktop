@@ -61,7 +61,7 @@ as niri does, so the stock portal works.
 | org.gnome.Mutter.DisplayConfig | GetCurrentState, ApplyMonitorsConfig | the portal's monitor picker and GNOME Settings' Displays panel (scale and position; no mirroring or rotation yet) |
 | org.gnome.Shell.Introspect | yes | window list for the portal's window picker; desktop-portal callers only, like GNOME Shell (#61) |
 | org.gnome.Mutter.IdleMonitor | GetIdletime, AddIdleWatch, AddUserActiveWatch, RemoveWatch, WatchFired | the session's idle time and watches, served by the compositor; gnome-settings-daemon dims and blanks on it, and banners wait for an away user |
-| org.gnome.Shell | ShowOSD, FocusSearch, ShowApplications; Mode, OverviewActive, ShellVersion | served by the GTK shell: gnome-settings-daemon's volume and brightness OSD, search and app-grid keys; GNOME's caller allowlist (Settings, media keys, the GNOME portal backend) |
+| org.gnome.Shell | ShowOSD, FocusSearch, ShowApplications, GrabAccelerator(s), UngrabAccelerator(s), AcceleratorActivated; Mode, OverviewActive, ShellVersion | served by the GTK shell: gnome-settings-daemon's media keys grab their keys here (the compositor keeps them from apps, in the action modes they ask for, the lock screen included) and show the volume and brightness OSD; GNOME's caller allowlist (Settings, media keys, the GNOME portal backend); a caller's grabs go when it leaves the bus |
 
 ## Gaps against Mutter
 
