@@ -792,6 +792,25 @@ fn super_page_keys_switch_and_shift_moves_focused() {
 }
 
 #[test]
+fn super_tab_switches_applications_like_alt_tab() {
+    // GNOME binds switch-applications to Super+Tab as well as Alt+Tab;
+    // Super's release commits, and no overview toggles.
+    let mut f = two_windows();
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, TAB_KEYCODE);
+    release(&mut f.manager, &mut f.comp, TAB_KEYCODE);
+    assert_eq!(
+        f.manager.take_switcher_queue(),
+        vec![SwitcherAction::Step { forward: true }]
+    );
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    assert_eq!(
+        f.manager.take_switcher_queue(),
+        vec![SwitcherAction::Commit]
+    );
+}
+
+#[test]
 fn alt_tab_steps_commits_and_cancels_without_leaking_keys() {
     let mut f = two_windows();
     assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
