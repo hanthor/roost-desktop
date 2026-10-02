@@ -128,9 +128,18 @@ export async function run() {
     Main.overview.hide();
     await Scripting.sleep(1500);
 
-    for (let i = 0; i < 3; i++)
-        await Scripting.createTestWindow({width: 640, height: 420});
-    await Scripting.waitTestWindows();
+    // The same libadwaita windows Roost's capture opens, so window
+    // placement, stacking and decorations compare pixel for pixel.
+    const testWindows = [];
+    for (const [title, color] of [['Alpha', '#3584e4'], ['Beta', '#2ec27e'], ['Gamma', '#e66100']]) {
+        testWindows.push(Gio.Subprocess.new(
+            ['/usr/bin/python3', '/lib/roost-test-window.py', title, color],
+            Gio.SubprocessFlags.NONE));
+        // One at a time, as Roost's capture maps them in order.
+        for (let t = 0; t < 100 && global.get_window_actors().length < testWindows.length; t++)
+            await Scripting.sleep(100);
+    }
+    await Scripting.sleep(3000);
     await shot('06-windows');
     // Alt+Tab, as GNOME draws it (shown without a held modifier, it
     // stays up for NO_MODS_TIMEOUT).
@@ -139,7 +148,12 @@ export async function run() {
     switcher.show(false, 'switch-applications', 0);
     await Scripting.sleep(400);
     await shotNow('06b-switcher');
-    switcher.destroy();
+    // Releasing Alt: switch to the selected app (deterministic, unlike
+    // the no-modifier timeout racing the popup's teardown).
+    if (switcher.get_parent())
+        switcher._finish(global.display.get_current_time_roundtrip());
+    else
+        switcher.destroy();
     await Scripting.sleep(500);
     Main.overview.show();
     await Scripting.sleep(1500);
@@ -194,13 +208,21 @@ export async function run() {
         await Scripting.sleep(500);
         await shotStage('11-lock-screen');
         Main.screenShield.showDialog();
-        Main.screenShield._dialog?._showPrompt?.();
+        // The stubbed display manager fails every verification, which
+        // would send the dialog back to the curtain; keep the prompt.
+        const dialog = Main.screenShield._dialog;
+        if (dialog)
+            dialog._fail = () => {};
+        dialog?._showPrompt?.();
         await Scripting.sleep(1000);
         // Without GDM's PAM conversation or AccountsService the prompt
         // shows an error and no name. Put it in the state a real
         // session shows: the user's name and the password question,
         // as GDM's 'Password:' prompt sets it.
         await Scripting.sleep(1000);
+        if (dialog && dialog._activePage !== dialog._promptBox)
+            dialog._showPrompt();
+        await Scripting.sleep(500);
         const prompt = Main.screenShield._dialog?._authPrompt;
         if (prompt) {
             prompt.setMessage(null);
@@ -224,6 +246,7 @@ export async function run() {
         print('GREF no screen shield');
     }
 
-    await Scripting.destroyTestWindows();
+    for (const proc of testWindows)
+        proc.force_exit();
     print('GREF done');
 }

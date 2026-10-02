@@ -63,9 +63,13 @@ server. GNOME 51's Adwaita icons and Adwaita Sans come from the reference
 run, so the host's older theme and fonts do not leak in. Ubuntu, for
 example, defaults to Yaru and lacks `dark-mode-symbolic`.
 
-Window contents differ by design: GNOME's capture uses its perf-helper
-windows and Roost's uses libadwaita test windows. Compare the shell
-around them.
+Both sides open the same three libadwaita test windows
+(`scripts/lib/roost-test-window.py`), one at a time, so window size,
+placement, stacking and decorations compare directly. Roost's capture
+sets GNOME 51's interface fonts, since the host's schema may still name
+Cantarell. Both sides switch apps the way releasing Alt does, and the
+Roost pointer rests in an empty corner, since GNOME's scripted run has
+no pointer motion and so shows no hover.
 
 ## Where Roost stands
 
@@ -85,6 +89,23 @@ Share of pixels visibly off (more than 24 levels) in each element crop:
 | Lock screen background (blurred, dimmed wallpaper) | not built | 1.4% beyond 8 levels |
 | Lock screen curtain (clock, date, hint) | not built | positions within 1px; the digits are the capture time |
 | Unlock prompt | not built | 0.1% of the screen, 0.5% of the prompt |
+
+Whole screens, with the same windows on both sides:
+
+| State | Before | Now |
+| --- | --- | --- |
+| Three windows mapped | 50.1% | 0.4% |
+| Alt+Tab switcher | 48.9% | 0.5% |
+| Overview with windows | 28.8% | 1.3% |
+| Overview, a preview hovered | 29.0% | 1.7% |
+| Notification banner | 48.9% | 0.4% |
+| Date menu listing it | 19.6% | 0.5% |
+| Log Out dialog | 35.6% | 0.7% |
+
+Getting there took two compositor changes. Windows now pick their own
+size and are placed on their first commit, as Mutter does: a new window
+is centred, and later ones cascade by Mutter's 50px. The switcher is
+centred on the whole monitor, top bar included.
 
 GTK and St differ in a few ways that matter when matching numbers:
 

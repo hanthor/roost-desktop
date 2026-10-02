@@ -391,7 +391,7 @@ fn sync_client(
 
 /// Two mapped windows ("alpha" from client A, "beta" from client B) with
 /// a reconciled manager. Geometry: alpha at (0,0), beta cascaded to
-/// (32,32), both 800x600.
+/// (50,50), both 800x600.
 struct Fixture {
     comp: TestCompositor,
     manager: WindowManager,
@@ -446,7 +446,7 @@ fn two_windows() -> Fixture {
     }
 }
 
-/// A point inside alpha (0,0-800,600) but outside beta (32,32-832,632).
+/// A point inside alpha (0,0-800,600) but outside beta (50,50-850,650).
 fn alpha_only() -> Point<f64, Logical> {
     (10.0, 10.0).into()
 }
@@ -467,7 +467,7 @@ fn two_toplevels_map_with_cascaded_geometry() {
     assert_eq!((geo_b.size.w, geo_b.size.h), (800, 600));
     let mut locs = vec![(geo_a.loc.x, geo_a.loc.y), (geo_b.loc.x, geo_b.loc.y)];
     locs.sort();
-    assert_eq!(locs, vec![(0, 0), (32, 32)]);
+    assert_eq!(locs, vec![(0, 0), (50, 50)]);
 
     // Mapping focuses: exactly one window holds keyboard focus.
     let focused = f.manager.model().focused().unwrap();
@@ -576,7 +576,7 @@ fn move_and_resize_update_geometry_and_advertise_size() {
     let mut f = two_windows();
     assert!(f.manager.move_window(f.id_b, 50, 60));
     let moved = f.manager.geometry(f.id_b).unwrap();
-    assert_eq!((moved.loc.x, moved.loc.y), (82, 92));
+    assert_eq!((moved.loc.x, moved.loc.y), (100, 110));
     assert!(!f.manager.move_window(999, 1, 1));
 
     assert!(f.manager.resize_window(f.id_b, 400, 300));
@@ -945,7 +945,7 @@ fn client_maximize_request_applies_on_reconcile() {
 #[test]
 fn transient_dialog_centers_above_parent() {
     let mut f = layout_windows();
-    // Beta sits cascaded at (32,32); the dialog centers on it, which a
+    // Beta sits cascaded at (50,50); the dialog centers on it, which a
     // plain cascade to (64,64) would never produce. The dialog shares
     // beta's connection: Wayland object ids are connection-scoped, so
     // a cross-client parent is a protocol error, not a placement.
@@ -987,7 +987,7 @@ fn transient_dialog_centers_above_parent() {
     let visible = f.manager.visible_windows();
     assert_eq!(visible.len(), 3);
     let geo = f.manager.geometry(id_c).unwrap();
-    assert_eq!((geo.loc.x, geo.loc.y), (32, 32));
+    assert_eq!((geo.loc.x, geo.loc.y), (50, 50));
 }
 
 #[test]

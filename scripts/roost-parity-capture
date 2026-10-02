@@ -102,6 +102,11 @@ for _ in $(seq 1 20); do grep -q ready "$WORK/stubs.log" 2>/dev/null && break; s
 gsettings set org.gnome.desktop.background primary-color '#023c88'
 # GNOME's defaults where the host's schemas may differ (Ubuntu: Yaru).
 gsettings set org.gnome.desktop.interface icon-theme Adwaita
+# GNOME 51's interface fonts (the host's schema may still say Cantarell),
+# so apps render text as they do under GNOME.
+gsettings set org.gnome.desktop.interface font-name 'Adwaita Sans 11'
+gsettings set org.gnome.desktop.interface document-font-name 'Adwaita Sans 11'
+gsettings set org.gnome.desktop.interface monospace-font-name 'Adwaita Mono 11'
 gsettings set org.gnome.shell favorite-apps "['org.mozilla.firefox.desktop', 'org.gnome.Calendar.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Software.desktop', 'org.gnome.TextEditor.desktop', 'org.gnome.Calculator.desktop']"
 gsettings set org.gnome.desktop.background picture-options zoom
 for variant in l d; do
@@ -134,9 +139,13 @@ SOCKET_NAME="$(sed -n 's/.*nested session on \([^ ]*\) .*/\1/p' "$LOG" | head -1
 
 shot() { sleep "${2:-1.5}"; scrot -o "$OUT/$1.png" >/dev/null; echo "roost-parity-capture: $1"; }
 press() { "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$WORK/press.json" 20 --press "$1" >/dev/null; }
-park() { xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2)); }
+# Park the pointer where nothing reacts to it: GNOME's scripted
+# reference has no pointer motion, so nothing there shows hover.
+park() { xdotool mousemove --window "$WID" $((WIDTH - 4)) $((HEIGHT - 4)); }
 
-shot 01-desktop 6
+# A fresh wallpaper decodes once (then comes from the cache): wait for it.
+for _ in $(seq 1 60); do grep -q "wallpaper decoded" "$LOG" 2>/dev/null && break; sleep 0.5; done
+shot 01-desktop 3
 xdotool mousemove --window "$WID" $((WIDTH / 2)) 16 click 1
 park
 shot 02-calendar
@@ -159,15 +168,19 @@ xdotool key Escape
 sleep 0.5
 xdotool key Escape
 sleep 1
-for name in Alpha Beta Gamma; do
-    WAYLAND_DISPLAY="$SOCKET_NAME" "$PY" "$ROOT/scripts/lib/roost-test-window.py" "$name" \
+park
+for spec in Alpha:#3584e4 Beta:#2ec27e Gamma:#e66100; do
+    name="${spec%%:*}"
+    WAYLAND_DISPLAY="$SOCKET_NAME" "$PY" "$ROOT/scripts/lib/roost-test-window.py" "$name" "${spec#*:}" \
         >"$WORK/window-$name.log" 2>&1 &
     PIDS="$PIDS $!"
+    # One at a time, as GNOME's reference maps them.
+    sleep 1.5
 done
 shot 06-windows 4
 xdotool keydown Alt_L key Tab
 shot 06b-switcher 1
-xdotool key Escape keyup Alt_L
+xdotool keyup Alt_L
 sleep 1
 xdotool key Super_L
 shot 07-overview-windows

@@ -50,7 +50,7 @@ use roost_shell_control::SwitcherAction;
 const DEFAULT_WIDTH: i32 = 800;
 const DEFAULT_HEIGHT: i32 = 600;
 /// Cascade offset for each newly mapped window.
-const CASCADE_STEP: i32 = 32;
+const CASCADE_STEP: i32 = 50;
 
 /// One managed window: live surface plus compositor-side geometry.
 /// The surface is the toolkit's unified window handle, so native and
@@ -71,6 +71,10 @@ struct ManagedWindow {
     /// Strip width-preset slot (`STRIP_PRESETS` index) chosen with
     /// Super+R; `None` means the default. Survives mode toggles.
     preset: Option<usize>,
+    /// Not placed yet: the client picks its own size from an empty
+    /// configure and is placed at that size on its first commit, as
+    /// Mutter does.
+    unplaced: bool,
 }
 
 /// Compositor-side presentation layout (002 window actions).
@@ -433,6 +437,7 @@ impl WindowManager {
         }
         #[cfg(feature = "xwayland")]
         self.drain_x11_events(state);
+        self.place_committed(state);
         // Focus tracks the active workspace: a model-level switch (e.g.
         // shell FocusWorkspace) that strands focus on a hidden window
         // refocuses the new topmost here, converging seat focus and
@@ -546,6 +551,9 @@ impl WindowManager {
         let id = self.insert_managed(&title, app_id.as_deref());
         self.surface_index.insert(surface.wl_surface().clone(), id);
         let geometry = self.placement(state);
+        // With a real output the client chooses its size first (Mutter's
+        // empty initial configure); headless tests keep the cascade.
+        let unplaced = Self::work_area(state).size.w > 0;
         self.windows.insert(
             id,
             ManagedWindow {
@@ -554,6 +562,7 @@ impl WindowManager {
                 layout: WindowLayout::Floating,
                 restore: None,
                 preset: None,
+                unplaced,
             },
         );
         self.place_transient(surface, id);
@@ -613,9 +622,10 @@ impl WindowManager {
         let size: Size<i32, Logical> = (w.min(work.size.w), h.min(work.size.h)).into();
         let active = self.model.active_workspace();
         let last = self.stacking.iter().rev().find_map(|id| {
-            (self.model.window(*id)?.workspace == active)
-                .then(|| self.windows.get(id).map(|w| w.geometry.loc))
-                .flatten()
+            (self.model.window(*id)?.workspace == active
+                && self.windows.get(id).is_some_and(|w| !w.unplaced))
+            .then(|| self.windows.get(id).map(|w| w.geometry.loc))
+            .flatten()
         });
         let centered: Point<i32, Logical> = (
             work.loc.x + (work.size.w - size.w) / 2,
@@ -634,6 +644,59 @@ impl WindowManager {
         loc.x = loc.x.max(work.loc.x);
         loc.y = loc.y.max(work.loc.y);
         Rectangle::new(loc, size)
+    }
+
+    /// An explicit move, resize or layout change places a window: from
+    /// then on its geometry is the compositor's, not the client's pick.
+    fn settle(&mut self, id: u64) {
+        if let Some(window) = self.windows.get_mut(&id) {
+            window.unplaced = false;
+        }
+    }
+
+    /// Place windows whose first commit has arrived at the size the
+    /// client chose: GNOME's automatic placement (centred, or cascaded
+    /// from the last window), dialogs centred over their parent. A
+    /// window that left floating before committing keeps its layout.
+    fn place_committed(&mut self, state: &State) {
+        let ready: Vec<(u64, Size<i32, Logical>)> = self
+            .windows
+            .iter()
+            .filter(|(_, w)| w.unplaced)
+            .filter_map(|(id, w)| {
+                let size = committed_size(w.surface.wl_surface()?.as_ref())?;
+                (size.w > 0 && size.h > 0).then_some((*id, size))
+            })
+            .collect();
+        for (id, size) in ready {
+            let floating = self
+                .windows
+                .get(&id)
+                .is_some_and(|w| w.layout == WindowLayout::Floating);
+            if floating {
+                let geometry = self.placement_sized(state, Some(size));
+                if let Some(window) = self.windows.get_mut(&id) {
+                    window.geometry = geometry;
+                    window.unplaced = false;
+                }
+                let parent = self
+                    .windows
+                    .get(&id)
+                    .and_then(|w| match w.surface.underlying_surface() {
+                        WindowSurface::Wayland(toplevel) => read_parent(toplevel),
+                        #[cfg(feature = "xwayland")]
+                        _ => None,
+                    })
+                    .and_then(|wl| self.surface_index.get(&wl).copied());
+                if let Some(parent) = parent {
+                    self.place_above(parent, id);
+                }
+                let focused = self.model.focused() == Some(id);
+                self.configure(id, focused);
+            } else if let Some(window) = self.windows.get_mut(&id) {
+                window.unplaced = false;
+            }
+        }
     }
 
     /// Next cascaded floating geometry.
@@ -675,6 +738,7 @@ impl WindowManager {
                 layout: WindowLayout::Floating,
                 restore: None,
                 preset: None,
+                unplaced: false,
             },
         );
         if let Some(parent) = surface
@@ -978,7 +1042,11 @@ impl WindowManager {
         let layout = window.layout;
         match window.surface.underlying_surface() {
             WindowSurface::Wayland(toplevel) => {
-                Self::configure_wayland(toplevel, &layout, &window.geometry, activated);
+                // An unplaced floating window gets no size: the client
+                // picks its own.
+                let size = (!(window.unplaced && layout == WindowLayout::Floating))
+                    .then_some(window.geometry.size);
+                Self::configure_wayland(toplevel, &layout, size, activated);
             }
             #[cfg(feature = "xwayland")]
             WindowSurface::X11(surface) => {
@@ -996,11 +1064,11 @@ impl WindowManager {
     fn configure_wayland(
         surface: &ToplevelSurface,
         layout: &WindowLayout,
-        geometry: &Rectangle<i32, Logical>,
+        size: Option<Size<i32, Logical>>,
         activated: bool,
     ) {
         surface.with_pending_state(|pending| {
-            pending.size = Some(geometry.size);
+            pending.size = size;
             if activated {
                 pending.states.set(xdg_toplevel::State::Activated);
             } else {
@@ -1039,6 +1107,7 @@ impl WindowManager {
     /// A maximized or tiled window drags off into floating first, keeping
     /// the pointer at the same fraction across its width (GNOME shape).
     fn begin_move(&mut self, state: &mut State, id: u64) {
+        self.settle(id);
         if self.mode == SessionMode::Scroll {
             return;
         }
@@ -1078,6 +1147,7 @@ impl WindowManager {
 
     /// Start resizing `id` from `edges` with the pointer.
     fn begin_resize(&mut self, id: u64, edges: u32) {
+        self.settle(id);
         if self.mode == SessionMode::Scroll {
             return;
         }
@@ -1559,6 +1629,7 @@ impl WindowManager {
     /// move from a managed layout restores the stashed geometry first
     /// (GNOME drag-off shape), then applies the delta.
     pub fn move_window(&mut self, id: u64, dx: i32, dy: i32) -> bool {
+        self.settle(id);
         if !self.restore_layout(id) {
             return false;
         }
@@ -1574,6 +1645,7 @@ impl WindowManager {
     /// manual resize from a managed layout restores the stashed
     /// geometry first, then applies the new size.
     pub fn resize_window(&mut self, id: u64, width: i32, height: i32) -> bool {
+        self.settle(id);
         if width <= 0 || height <= 0 {
             return false;
         }
@@ -2026,6 +2098,7 @@ impl WindowManager {
     /// (moving between managed layouts keeps the original restore),
     /// set the computed geometry, and advertise the new state.
     fn apply_layout(&mut self, state: &mut State, id: u64, layout: WindowLayout) -> bool {
+        self.settle(id);
         let area = match layout {
             WindowLayout::Floating => return self.restore_window(id),
             WindowLayout::Maximized => Self::work_area(state),
@@ -3302,4 +3375,23 @@ mod resize_tests {
             (400 - MIN_WINDOW_SIZE.0, 300 - MIN_WINDOW_SIZE.1).into()
         );
     }
+}
+
+/// The size a client committed for its window: its xdg window geometry,
+/// else its buffer's size. `None` before the first buffer.
+fn committed_size(
+    surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+) -> Option<Size<i32, Logical>> {
+    let buffer = smithay::backend::renderer::utils::with_renderer_surface_state(surface, |s| {
+        s.surface_size()
+    })
+    .flatten()?;
+    let geometry = smithay::wayland::compositor::with_states(surface, |states| {
+        states
+            .cached_state
+            .get::<smithay::wayland::shell::xdg::SurfaceCachedState>()
+            .current()
+            .geometry
+    });
+    Some(geometry.map(|g| g.size).unwrap_or(buffer))
 }
