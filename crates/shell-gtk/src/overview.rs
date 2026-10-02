@@ -504,22 +504,47 @@ impl OverviewUi {
 
     fn rebuild_grid(ui: &Rc<RefCell<Self>>) {
         let me = ui.borrow();
-        // GNOME's icon grid: eight 113px tiles a row, 12px apart,
-        // 24px below the top of the scroll view.
-        let flow = gtk::FlowBox::new();
-        flow.set_selection_mode(gtk::SelectionMode::None);
-        flow.set_homogeneous(true);
-        flow.set_max_children_per_line(8);
-        flow.set_min_children_per_line(8);
-        flow.set_column_spacing(12);
-        flow.set_row_spacing(12);
-        flow.set_halign(gtk::Align::Center);
-        flow.set_valign(gtk::Align::Start);
-        flow.set_margin_top(24);
-        // All eight columns even when fewer apps fill them: GNOME's grid
-        // starts at the same column however many apps there are.
-        flow.set_size_request(8 * 113 + 7 * 12, -1);
-        flow.add_css_class("icon-grid");
+        // GNOME's paged icon grid: its mode (columns x rows) from the
+        // area's shape, 113px tiles 12px apart, 24px below the top.
+        let (mon_w, mon_h) = gtk::gdk::Display::default()
+            .and_then(|d| d.monitors().item(0))
+            .and_downcast::<gtk::gdk::Monitor>()
+            .map(|m| (m.geometry().width(), m.geometry().height()))
+            .unwrap_or((1280, 800));
+        // The grid sits between the search entry and the dash.
+        let (columns, rows) = crate::logic::grid_mode(mon_w, mon_h - 250);
+        let per_page = columns * rows;
+        let new_page = || {
+            let flow = gtk::FlowBox::new();
+            flow.set_selection_mode(gtk::SelectionMode::None);
+            flow.set_homogeneous(true);
+            flow.set_max_children_per_line(columns as u32);
+            flow.set_min_children_per_line(columns as u32);
+            flow.set_column_spacing(12);
+            flow.set_row_spacing(12);
+            flow.set_halign(gtk::Align::Center);
+            flow.set_valign(gtk::Align::Start);
+            flow.set_margin_top(24);
+            flow.set_hexpand(true);
+            flow.set_vexpand(true);
+            // All columns even when fewer apps fill them: GNOME's grid
+            // starts at the same column however many apps there are.
+            flow.set_size_request(columns as i32 * 113 + (columns as i32 - 1) * 12, -1);
+            flow.add_css_class("icon-grid");
+            flow
+        };
+        let mut pages: Vec<gtk::FlowBox> = vec![new_page()];
+        let mut on_page = 0usize;
+        let mut add = |widget: &gtk::Widget| {
+            if on_page == per_page {
+                pages.push(new_page());
+                on_page = 0;
+            }
+            if let Some(page) = pages.last() {
+                page.insert(widget, -1);
+            }
+            on_page += 1;
+        };
         // GNOME's app-folders: folders and loose apps share one
         // alphabetical grid; a folder opens its apps in a popover.
         let apps = me.apps.get();
@@ -555,7 +580,7 @@ impl OverviewUi {
         for (_, item) in items {
             match item {
                 Item::App(entry) => {
-                    flow.insert(&launch_button(entry, 64, me.actions.clone()), -1);
+                    add(launch_button(entry, 64, me.actions.clone()).upcast_ref());
                 }
                 Item::Folder(folder, members) => {
                     // GNOME's createFolderIcon: a 64px square of four
@@ -616,15 +641,11 @@ impl OverviewUi {
                             dialog.open(&id, &name, tiles);
                         });
                     }
-                    flow.insert(&button, -1);
+                    add(button.upcast_ref());
                 }
             }
         }
-        let scroller = gtk::ScrolledWindow::builder()
-            .child(&flow)
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .build();
-        me.grid.set_child(Some(&scroller));
+        me.grid.set_child(Some(&paged_grid(pages)));
     }
 
     /// Who to tell when the folder dialog shades the overview.
@@ -780,4 +801,108 @@ fn fill_section(
         rows.append(&button);
     }
     section.append(&rows);
+}
+
+/// GNOME's paged app grid (appDisplay.js): the pages side by side,
+/// flipped by the wheel, a swipe, PageUp/PageDown, the side arrows or
+/// the indicators; arrows and indicators only with more than one page.
+fn paged_grid(pages: Vec<gtk::FlowBox>) -> gtk::Widget {
+    use libadwaita as adw;
+    let carousel = adw::Carousel::new();
+    carousel.set_allow_scroll_wheel(true);
+    carousel.set_hexpand(true);
+    carousel.set_vexpand(true);
+    let n = pages.len();
+    for page in &pages {
+        carousel.append(page);
+    }
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let overlay = gtk::Overlay::new();
+    overlay.set_child(Some(&carousel));
+    column.append(&overlay);
+    if n <= 1 {
+        return column.upcast();
+    }
+    // The page indicators (pageIndicators.js): 10px dots, the inactive
+    // ones at 2/3 size and half opacity.
+    let indicators = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    indicators.add_css_class("page-indicators");
+    indicators.set_halign(gtk::Align::Center);
+    let dots: Vec<gtk::Button> = (0..n)
+        .map(|i| {
+            let dot = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            dot.add_css_class("page-indicator-icon");
+            let button = gtk::Button::builder().child(&dot).build();
+            button.add_css_class("page-indicator");
+            button.update_property(&[gtk::accessible::Property::Label(&format!("Page {}", i + 1))]);
+            let carousel = carousel.clone();
+            button.connect_clicked(move |_| {
+                carousel.scroll_to(&carousel.nth_page(i as u32), true);
+            });
+            indicators.append(&button);
+            button
+        })
+        .collect();
+    column.append(&indicators);
+    // The side arrows (page-navigation-arrow).
+    let arrow = |icon: &str, label: &str, align: gtk::Align, step: i32| {
+        let button = gtk::Button::from_icon_name(icon);
+        button.add_css_class("page-navigation-arrow");
+        button.set_halign(align);
+        button.set_valign(gtk::Align::Center);
+        button.update_property(&[gtk::accessible::Property::Label(label)]);
+        let carousel = carousel.clone();
+        button.connect_clicked(move |_| step_page(&carousel, step));
+        overlay.add_overlay(&button);
+        button
+    };
+    let previous = arrow(
+        "go-previous-symbolic",
+        "Previous Page",
+        gtk::Align::Start,
+        -1,
+    );
+    let next = arrow("go-next-symbolic", "Next Page", gtk::Align::End, 1);
+    let sync = {
+        let (dots, previous, next) = (dots.clone(), previous.clone(), next.clone());
+        move |page: u32| {
+            for (i, dot) in dots.iter().enumerate() {
+                if i as u32 == page {
+                    dot.add_css_class("active");
+                } else {
+                    dot.remove_css_class("active");
+                }
+            }
+            previous.set_visible(page > 0);
+            next.set_visible((page as usize) + 1 < n);
+        }
+    };
+    sync(0);
+    carousel.connect_page_changed(move |_, page| sync(page));
+    // PageUp / PageDown, as GNOME's grid binds them.
+    let keys = gtk::EventControllerKey::new();
+    {
+        let carousel = carousel.clone();
+        keys.connect_key_pressed(move |_, key, _, _| match key {
+            gtk::gdk::Key::Page_Down => {
+                step_page(&carousel, 1);
+                gtk::glib::Propagation::Stop
+            }
+            gtk::gdk::Key::Page_Up => {
+                step_page(&carousel, -1);
+                gtk::glib::Propagation::Stop
+            }
+            _ => gtk::glib::Propagation::Proceed,
+        });
+    }
+    column.add_controller(keys);
+    column.upcast()
+}
+
+/// One page forward or back, clamped.
+fn step_page(carousel: &libadwaita::Carousel, step: i32) {
+    let current = carousel.position().round() as i32;
+    let target = (current + step).clamp(0, carousel.n_pages() as i32 - 1);
+    let page = carousel.nth_page(target as u32);
+    carousel.scroll_to(&page, true);
 }

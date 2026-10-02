@@ -1319,3 +1319,48 @@ window.roost-folder-dialog button.folder-tile:hover {
 .roost-qs .qs-slider-menu-button:checked {
   background-color: #48484b;
 }
+
+/* GNOME's app grid pages (pageIndicators.js, .page-navigation-arrow):
+   10px white dots 12px apart, the inactive ones at 2/3 size and half
+   opacity; 60px round arrows on #222226 at the sides. */
+.page-indicators {
+  margin-bottom: 12px;
+}
+
+.page-indicator {
+  padding: 6px 12px 0;
+  min-width: 0;
+  min-height: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.page-indicator .page-indicator-icon {
+  min-width: 10px;
+  min-height: 10px;
+  border-radius: 999px;
+  background-color: #fafafb;
+  opacity: 0.5;
+  transform: scale(0.6667);
+  transition: all 400ms;
+}
+
+.page-indicator.active .page-indicator-icon {
+  opacity: 1;
+  transform: none;
+}
+
+.page-navigation-arrow {
+  margin: 6px;
+  padding: 18px;
+  min-width: 24px;
+  min-height: 24px;
+  border-radius: 999px;
+  color: #fafafb;
+  background-color: #222226;
+  box-shadow: none;
+}
+
+.page-navigation-arrow:hover {
+  background-color: #2f2f34;
+}
