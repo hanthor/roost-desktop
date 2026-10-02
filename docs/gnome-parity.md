@@ -55,6 +55,7 @@ scripts/lib/roost-parity-compare.py target/gnome-reference target/roost-parity t
 | 10-end-session | the Log Out dialog (gnome-session's EndSessionDialog) |
 | 11-lock-screen | the lock screen curtain (reference: a stubbed display manager lets GNOME lock) |
 | 12-osd-volume, 12b-osd-label, 12c-osd-overdrive | the OSD gnome-settings-daemon shows through ShowOSD |
+| 13-window-menu | the window menu on the focused window's header bar |
 | 11b-unlock-prompt | the unlock prompt, set to what a real session shows: the user's name and GDM's Password question (the stubbed display manager has no PAM conversation or AccountsService) |
 
 Both sides run the same services: the stubs serve power-profiles and
@@ -104,6 +105,7 @@ Whole screens, with the same windows on both sides:
 | Date menu listing it | 19.6% | 0.5% |
 | Log Out dialog | 35.6% | 0.4% |
 | OSD: volume, a layout label, volume past 100% | not built | 0.4% each |
+| Window menu (header-bar right click) | not built | 0.3% |
 
 Roost's capture shows GNOME's installed apps, not the host's: each host
 entry is hidden by a `Hidden` copy in the user's application directory

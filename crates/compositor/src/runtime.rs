@@ -1113,6 +1113,21 @@ impl Runtime {
             "active_workspace": model.active_workspace(),
             "focused": focused,
             "focused_app_id": focused.and_then(app_of),
+            "focused_rect": focused
+                .and_then(|id| self.manager.geometry(id))
+                .map(|g| [g.loc.x, g.loc.y, g.size.w, g.size.h]),
+            "minimized": snapshot
+                .windows
+                .iter()
+                .map(|w| w.id)
+                .filter(|id| self.manager.is_minimized(*id))
+                .collect::<Vec<_>>(),
+            "above": snapshot
+                .windows
+                .iter()
+                .map(|w| w.id)
+                .filter(|id| self.manager.is_above(*id))
+                .collect::<Vec<_>>(),
             "windows": self.manager.overview_windows().iter().map(|w| serde_json::json!({
                 "id": w.id,
                 "app_id": app_of(w.id),
@@ -1763,6 +1778,22 @@ impl Runtime {
         }
         if let Some(list) = outcome.accelerators {
             self.manager.set_accelerators(list);
+        }
+        for (window, action) in outcome.window_actions {
+            self.manager.window_action(&mut self.state, window, action);
+        }
+        // Header-bar right clicks: GNOME's window menu, drawn by the shell.
+        for (window, x, y) in self.manager.take_menu_requests() {
+            self.control
+                .queue_window_menu(roost_shell_control::Message::WindowMenu {
+                    window,
+                    x,
+                    y,
+                    maximized: self.manager.is_maximized(window),
+                    above: self.manager.is_above(window),
+                    workspace_left: self.manager.workspace_left_of(window),
+                    workspace_right: true,
+                });
         }
         if !self.control.overview_open() {
             self.overview_search = false;

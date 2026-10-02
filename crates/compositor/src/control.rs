@@ -302,6 +302,8 @@ pub struct Session<'a> {
     idle_timeout: Option<u64>,
     /// The latest SetAccelerators the shell sent, until drained.
     accelerators: Option<Vec<roost_shell_control::Accelerator>>,
+    /// Window-menu actions the shell asked for, until drained.
+    window_actions: Vec<(u64, roost_shell_control::WindowAction)>,
     /// Latest `SetOverviewSearch` from the shell, drained by the hub.
     overview_search: Option<bool>,
     /// Latest `SetOverviewAppGrid` from the shell, drained by the hub.
@@ -372,6 +374,7 @@ impl<'a> Session<'a> {
             closed: Vec::new(),
             idle_timeout: None,
             accelerators: None,
+            window_actions: Vec::new(),
             overview_search: None,
             overview_app_grid: None,
             unlock_request: None,
@@ -459,6 +462,16 @@ impl<'a> Session<'a> {
     /// The latest `SetIdleTimeout` the shell sent, once (#63).
     pub fn take_idle_timeout(&mut self) -> Option<u64> {
         self.idle_timeout.take()
+    }
+
+    /// Window-menu actions the shell sent since the last call.
+    pub fn take_window_actions(&mut self) -> Vec<(u64, roost_shell_control::WindowAction)> {
+        std::mem::take(&mut self.window_actions)
+    }
+
+    /// Ask the shell to draw GNOME's window menu.
+    pub fn send_window_menu(&mut self, menu: &Message) -> Result<(), ControlError> {
+        self.conn.write_frame(menu)
     }
 
     /// The latest `SetAccelerators` the shell sent, once.
@@ -654,6 +667,26 @@ impl<'a> Session<'a> {
             }
             Message::Command {
                 id,
+                kind: CommandKind::WindowAction { window, action },
+            } => {
+                // The window manager carries it out (drained by the hub);
+                // unknown windows are denied here, like CloseWindow.
+                let known = model.windows().any(|w| w.id == window);
+                let status = if known {
+                    self.window_actions.push((window, action));
+                    CommandStatus::Applied
+                } else {
+                    CommandStatus::Denied {
+                        reason: format!("unknown window {window}"),
+                    }
+                };
+                let applied = matches!(status, CommandStatus::Applied);
+                self.conn
+                    .write_frame(&Message::CommandResult { id, status })?;
+                Ok(Handled::CommandResult { id, applied })
+            }
+            Message::Command {
+                id,
                 kind: CommandKind::SetAccelerators { accelerators },
             } => {
                 // Session-level grabs, applied by the window manager's
@@ -698,6 +731,7 @@ impl<'a> Session<'a> {
             | Message::Environment { .. }
             | Message::OverviewPreviews { .. }
             | Message::AcceleratorActivated { .. }
+            | Message::WindowMenu { .. }
             | Message::Error { .. } => {
                 let _ = self.conn.write_frame(&Message::Error {
                     kind: ErrorKind::UnknownCommand,
@@ -737,6 +771,7 @@ fn message_kind(msg: &Message) -> &'static str {
         Message::Environment { .. } => "Environment",
         Message::OverviewPreviews { .. } => "OverviewPreviews",
         Message::AcceleratorActivated { .. } => "AcceleratorActivated",
+        Message::WindowMenu { .. } => "WindowMenu",
     }
 }
 
@@ -891,6 +926,7 @@ fn apply_command(
         | CommandKind::SetOverviewAppGrid { .. }
         | CommandKind::Unlock { .. }
         | CommandKind::SetAccelerators { .. }
+        | CommandKind::WindowAction { .. }
         | CommandKind::SetInputSettings(_) => (CommandStatus::Applied, None),
         CommandKind::Lock => {
             // Manual lock from the shell (session-lock set path):
@@ -928,6 +964,8 @@ pub struct PollOutcome {
     pub input_settings: Option<roost_shell_control::InputSettings>,
     /// Accelerator grabs the shell sent, if they changed.
     pub accelerators: Option<Vec<roost_shell_control::Accelerator>>,
+    /// Window-menu actions to carry out.
+    pub window_actions: Vec<(u64, roost_shell_control::WindowAction)>,
 }
 
 /// Peers accepted but not yet handshaken are capped so a same-user
@@ -1038,6 +1076,8 @@ pub struct ControlHub {
     switcher_queue: Vec<SwitcherAction>,
     /// Accelerator presses waiting for the next poll.
     accelerator_queue: Vec<(u32, u32, u32)>,
+    /// Window-menu requests waiting for the next poll.
+    menu_queue: Vec<Message>,
     /// Output inventory last handed to [`set_outputs`](Self::set_outputs)
     /// (multi-monitor): the runtime refreshes this every tick from the
     /// compositor's tracking, and [`poll`](Self::poll) broadcasts it
@@ -1104,6 +1144,7 @@ impl ControlHub {
             locked: std::rc::Rc::new(std::cell::Cell::new(false)),
             switcher_queue: Vec::new(),
             accelerator_queue: Vec::new(),
+            menu_queue: Vec::new(),
             outputs: Vec::new(),
             outputs_sent: Vec::new(),
             environment: Vec::new(),
@@ -1228,6 +1269,11 @@ impl ControlHub {
 
     /// Queue one Alt-Tab drive event; the next [`poll`](Self::poll)
     /// broadcasts it to every live session as [`Message::Switcher`].
+    /// Ask the shell for GNOME's window menu on the next poll.
+    pub fn queue_window_menu(&mut self, menu: Message) {
+        self.menu_queue.push(menu);
+    }
+
     /// Report a grabbed accelerator's press to the shell on the next poll.
     pub fn queue_accelerator(&mut self, action: u32, time: u32, mode: u32) {
         self.accelerator_queue.push((action, time, mode));
@@ -1298,6 +1344,7 @@ impl ControlHub {
                     if let Some(list) = session.take_accelerators() {
                         outcome.accelerators = Some(list);
                     }
+                    outcome.window_actions.extend(session.take_window_actions());
                     if let Some(active) = session.overview_search.take() {
                         outcome.overview_search = Some(active);
                     }
@@ -1399,6 +1446,11 @@ impl ControlHub {
         for (action, time, mode) in std::mem::take(&mut self.accelerator_queue) {
             for session in &mut self.sessions {
                 let _ = session.send_accelerator(action, time, mode);
+            }
+        }
+        for menu in std::mem::take(&mut self.menu_queue) {
+            for session in &mut self.sessions {
+                let _ = session.send_window_menu(&menu);
             }
         }
         outcome

@@ -187,6 +187,11 @@ pub(crate) enum WindowRequest {
     Resize(u32),
     /// A valid xdg-activation request: focus and raise (#89).
     Activate,
+    /// Client asked to be minimized (GNOME's Hide).
+    Minimize,
+    /// Client asked for the window menu at this point of its window
+    /// geometry (a right click on a header bar).
+    Menu(i32, i32),
 }
 
 impl ClientData for ClientState {
@@ -302,6 +307,27 @@ impl XdgShellHandler for State {
     fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
         self.window_requests
             .push((surface.wl_surface().clone(), WindowRequest::Unfullscreen));
+    }
+
+    /// Queue a client minimize request for the manager drain.
+    fn minimize_request(&mut self, surface: ToplevelSurface) {
+        self.window_requests
+            .push((surface.wl_surface().clone(), WindowRequest::Minimize));
+    }
+
+    /// Queue a window-menu request (header-bar right click) for the
+    /// manager drain; the shell draws GNOME's window menu there.
+    fn show_window_menu(
+        &mut self,
+        surface: ToplevelSurface,
+        _seat: wl_seat::WlSeat,
+        _serial: Serial,
+        location: smithay::utils::Point<i32, smithay::utils::Logical>,
+    ) {
+        self.window_requests.push((
+            surface.wl_surface().clone(),
+            WindowRequest::Menu(location.x, location.y),
+        ));
     }
 }
 
