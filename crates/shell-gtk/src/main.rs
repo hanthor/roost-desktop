@@ -14,6 +14,7 @@
 //! `ROOST_SHELL_BIN=roost-shell-gtk` while it grows to parity.
 
 mod calendar;
+mod events;
 mod folder_dialog;
 mod folders;
 mod keybindings;
@@ -921,6 +922,8 @@ fn build(app: &adw::Application) {
     }
     let clock_label = gtk::Label::new(None);
     let (cal_popover, calendar_ui) = calendar_popover(notify.pane());
+    // GNOME's calendar events through its calendar server.
+    calendar_ui.set_event_source(events::EventSource::new());
     let clock = panel_menu_button(&clock_label, "Date and Time", &cal_popover);
     clock.add_css_class("clock-display");
 
@@ -1017,6 +1020,7 @@ fn build(app: &adw::Application) {
         let text = logic::clock_text(&now, format, parts);
         clock_label.set_label(&text);
         clock.update_property(&[gtk::accessible::Property::Description(&text)]);
+        calendar_ui.set_clock_format(format);
         calendar_ui.set_today(now.date());
         glib::ControlFlow::Continue
     };

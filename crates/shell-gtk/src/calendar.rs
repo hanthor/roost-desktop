@@ -45,6 +45,10 @@ pub struct CalendarUi {
     month_label: gtk::Label,
     grid: gtk::Grid,
     events_title: gtk::Label,
+    events_card: gtk::Box,
+    events_list: gtk::Box,
+    source: std::cell::RefCell<Option<Rc<crate::events::EventSource>>>,
+    clock_format: Cell<logic::ClockFormat>,
     week_start: i8,
     today: Cell<Date>,
     shown: Cell<Date>,
@@ -94,17 +98,21 @@ impl CalendarUi {
         calendar.append(&grid);
         column.append(&calendar);
 
-        // Events card: "Today" and a placeholder without a calendar server.
+        // Events card (dateMenu.js EventsSection): the selected day's
+        // title over its events, or "No Events"; shown while the
+        // calendar server has calendars.
         let events = gtk::Box::new(gtk::Orientation::Vertical, 0);
         events.add_css_class("events-button");
+        let events_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        events_box.add_css_class("events-box");
         let events_title = gtk::Label::new(Some("Today"));
         events_title.add_css_class("events-title");
         events_title.set_xalign(0.0);
-        let placeholder = gtk::Label::new(Some("No Events"));
-        placeholder.add_css_class("event-placeholder");
-        placeholder.set_xalign(0.0);
-        events.append(&events_title);
-        events.append(&placeholder);
+        let events_list = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        events_list.add_css_class("events-list");
+        events_box.append(&events_title);
+        events_box.append(&events_list);
+        events.append(&events_box);
         column.append(&events);
 
         let ui = Rc::new(Self {
@@ -115,6 +123,10 @@ impl CalendarUi {
             month_label,
             grid,
             events_title,
+            events_card: events,
+            events_list,
+            source: Default::default(),
+            clock_format: Cell::new(logic::ClockFormat::TwentyFourHour),
             week_start: week_start(),
             today: Cell::new(today),
             shown: Cell::new(today.first_of_month()),
@@ -135,6 +147,25 @@ impl CalendarUi {
         }
         ui.render();
         ui
+    }
+
+    /// Take events from GNOME's calendar server.
+    pub fn set_event_source(self: &Rc<Self>, source: Rc<crate::events::EventSource>) {
+        let ui = Rc::downgrade(self);
+        source.connect_changed(move || {
+            if let Some(ui) = ui.upgrade() {
+                ui.render();
+            }
+        });
+        *self.source.borrow_mut() = Some(source);
+        self.render();
+    }
+
+    /// Event times follow GNOME's clock-format.
+    pub fn set_clock_format(self: &Rc<Self>, format: logic::ClockFormat) {
+        if self.clock_format.replace(format) != format {
+            self.render();
+        }
     }
 
     /// Follow the clock: a new day moves "today" (and the selection, if
@@ -177,11 +208,20 @@ impl CalendarUi {
         self.date_label.set_text(&date);
         self.today_button.set_sensitive(selected != today);
         self.month_label.set_text(&logic::month_label(shown, today));
-        self.events_title.set_text(&if selected == today {
-            "Today".to_owned()
-        } else {
-            selected.strftime("%A, %B %-d").to_string()
-        });
+        self.events_title
+            .set_text(&logic::events_title(selected, today));
+        let tz = jiff::tz::TimeZone::system();
+        let source = self.source.borrow().clone();
+        let grid_days = logic::month_grid(shown.year(), shown.month(), self.week_start);
+        if let (Some(source), Some(first), Some(last)) =
+            (&source, grid_days.first(), grid_days.last())
+        {
+            source.request_range(
+                logic::day_bounds(*first, &tz).0,
+                logic::day_bounds(*last, &tz).1,
+            );
+        }
+        self.render_events(source.as_deref(), selected, today, &tz);
 
         while let Some(child) = self.grid.first_child() {
             self.grid.remove(&child);
@@ -213,6 +253,12 @@ impl CalendarUi {
             } else if day == selected {
                 button.add_css_class("selected");
             }
+            if let Some(source) = &source {
+                let (begin, end) = logic::day_bounds(day, &tz);
+                if !source.events_between(begin, end).is_empty() {
+                    button.add_css_class("calendar-day-with-events");
+                }
+            }
             button.update_property(&[gtk::accessible::Property::Label(
                 &day.strftime("%A, %B %-d %Y").to_string(),
             )]);
@@ -220,6 +266,52 @@ impl CalendarUi {
             button.connect_clicked(move |_| ui.select(day));
             self.grid
                 .attach(&button, (i % 7) as i32, (i / 7) as i32 + 1, 1, 1);
+        }
+    }
+
+    /// The events card: hidden without calendars (GNOME), else the
+    /// selected day's events or "No Events".
+    fn render_events(
+        &self,
+        source: Option<&crate::events::EventSource>,
+        selected: Date,
+        today: Date,
+        tz: &jiff::tz::TimeZone,
+    ) {
+        self.events_card
+            .set_visible(source.is_some_and(|s| s.has_calendars()));
+        while let Some(child) = self.events_list.first_child() {
+            self.events_list.remove(&child);
+        }
+        let (begin, end) = logic::day_bounds(selected, tz);
+        let events = source
+            .map(|s| s.events_between(begin, end))
+            .unwrap_or_default();
+        for event in &events {
+            let row = gtk::Box::new(gtk::Orientation::Vertical, 6);
+            row.add_css_class("event-box");
+            let summary = gtk::Label::new(Some(&event.summary));
+            summary.add_css_class("event-summary");
+            summary.set_xalign(0.0);
+            summary.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            let time = gtk::Label::new(Some(&logic::event_time_text(
+                event,
+                selected,
+                tz,
+                self.clock_format.get(),
+                today.year(),
+            )));
+            time.add_css_class("event-time");
+            time.set_xalign(0.0);
+            row.append(&summary);
+            row.append(&time);
+            self.events_list.append(&row);
+        }
+        if events.is_empty() {
+            let placeholder = gtk::Label::new(Some("No Events"));
+            placeholder.add_css_class("event-placeholder");
+            placeholder.set_xalign(0.0);
+            self.events_list.append(&placeholder);
         }
     }
 }

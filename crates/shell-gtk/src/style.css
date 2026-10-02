@@ -450,6 +450,35 @@ popover.roost-cal > contents {
   font-style: italic;
 }
 
+/* GNOME 51's event rows (.events-list .event-box): bold summary over a
+   smaller grey time, 6px apart. */
+.roost-cal .event-box {
+  border-radius: 8px;
+}
+
+.roost-cal .event-summary {
+  font-weight: 700;
+  color: #ffffff;
+}
+
+.roost-cal .event-time {
+  font-weight: 400;
+  font-size: 0.818em;
+  color: #b2b2b4;
+  font-feature-settings: "tnum";
+}
+
+/* Days with events: GNOME's calendar-today.svg, a 2px white dot (86%)
+   centered 28px down a 32px box, scaled to the 36px day button. */
+.roost-cal .calendar-day.calendar-day-with-events {
+  background-image: radial-gradient(circle 2.25px at 50% 87.5%,
+      rgba(255, 255, 255, 0.858) 95%, transparent 100%);
+}
+
+.roost-cal .calendar-day.calendar-today.calendar-day-with-events {
+  background-color: @accent_bg_color;
+}
+
 /* Overview surfaces (#54, #57): transparent windows, GNOME 51 shapes. */
 window.roost-overview-search,
 window.roost-overview-dash {
