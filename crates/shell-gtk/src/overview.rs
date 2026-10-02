@@ -41,6 +41,8 @@ pub trait OverviewActions {
     /// The app grid is showing (or not): the compositor draws the
     /// workspaces as thumbnails along the top meanwhile.
     fn set_app_grid(&self, active: bool);
+    /// Open the overview (org.gnome.Shell FocusSearch, ShowApplications).
+    fn open_overview(&self);
 }
 
 /// One dash item (`#dash .overview-tile`): the 64px icon in a 76px
@@ -140,6 +142,8 @@ pub struct OverviewUi {
     favorites: Vec<String>,
     actions: Rc<dyn OverviewActions>,
     open: bool,
+    /// Open on the app grid once the overview opens (ShowApplications).
+    want_apps: std::cell::Cell<bool>,
 }
 
 impl OverviewUi {
@@ -253,6 +257,7 @@ impl OverviewUi {
             favorites,
             actions,
             open: false,
+            want_apps: std::cell::Cell::new(false),
         }));
         Self::wire(&ui);
         ui
@@ -593,6 +598,42 @@ impl OverviewUi {
         me.grid.set_child(Some(&scroller));
     }
 
+    /// GNOME's `Main.overview.showApps()`: the overview on its app grid.
+    pub fn show_apps(ui: &Rc<RefCell<Self>>) {
+        let me = ui.borrow();
+        if me.open {
+            if let Some(toggle) = me
+                .dash_row
+                .last_child()
+                .and_then(|w| w.downcast::<gtk::ToggleButton>().ok())
+            {
+                drop(me);
+                toggle.set_active(true);
+            }
+        } else {
+            me.want_apps.set(true);
+            me.actions.open_overview();
+        }
+    }
+
+    /// GNOME's `Main.overview.focusSearch()`: the overview with the
+    /// search entry focused.
+    pub fn focus_search(ui: &Rc<RefCell<Self>>) {
+        let me = ui.borrow();
+        if me.open {
+            if let Some(toggle) = me
+                .dash_row
+                .last_child()
+                .and_then(|w| w.downcast::<gtk::ToggleButton>().ok())
+            {
+                toggle.set_active(false);
+            }
+            me.entry.grab_focus();
+        } else {
+            me.actions.open_overview();
+        }
+    }
+
     /// Follow the compositor's overview state.
     pub fn set_open(ui: &Rc<RefCell<Self>>, open: bool) {
         if ui.borrow().open == open {
@@ -610,6 +651,10 @@ impl OverviewUi {
             me.search.present();
             me.dash.present();
             me.entry.grab_focus();
+            if me.want_apps.replace(false) {
+                drop(me);
+                Self::show_apps(ui);
+            }
         } else {
             let me = ui.borrow();
             me.search.set_keyboard_mode(KeyboardMode::None);

@@ -488,6 +488,8 @@ pub struct Runtime {
     unlock_results: calloop::channel::Sender<(u64, bool)>,
     /// A password check is running.
     unlock_inflight: bool,
+    /// org.gnome.Mutter.IdleMonitor.
+    idle_monitor: crate::idle_monitor::IdleMonitor,
     exit: bool,
     stats: RunStats,
     /// `ROOST_COMPOSITOR_STATE` snapshot path (journeys only).
@@ -750,6 +752,7 @@ impl Runtime {
             idle_since: Instant::now(),
             unlock_results,
             unlock_inflight: false,
+            idle_monitor: crate::idle_monitor::start(),
             exit: false,
             stats: RunStats::default(),
             state_path: std::env::var_os("ROOST_COMPOSITOR_STATE")
@@ -891,6 +894,7 @@ impl Runtime {
         // including events consumed below: activity is activity.
         self.lock.note_input(input_time(&input));
         self.idle_since = Instant::now();
+        self.idle_monitor.activity();
         if self.is_locked() {
             // Only the lock screen hears input; with none up (shell
             // gone), nothing does.
@@ -1796,6 +1800,7 @@ impl Runtime {
                 });
             }
         }
+        self.idle_monitor.tick();
         // Idle timeout from input timestamps: lock the untouched session.
         // A live idle inhibitor (video, presentation) counts as activity.
         if self.state.idle_inhibited() {

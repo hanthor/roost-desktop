@@ -19,11 +19,13 @@ mod live_apps;
 mod lock;
 mod logic;
 mod notify;
+mod osd;
 mod overview;
 mod power;
 mod preview_chrome;
 mod providers;
 mod services;
+mod shell_dbus;
 mod switcher;
 mod tray;
 
@@ -146,6 +148,43 @@ impl overview::OverviewActions for ShellActions {
         if let Some(control) = self.0.borrow_mut().control.as_mut() {
             let _ = control.set_overview_search(active);
         }
+    }
+
+    fn open_overview(&self) {
+        if let Some(control) = self.0.borrow_mut().control.as_mut() {
+            if !control.model().is_overview_open() {
+                let _ = control.toggle_overview();
+            }
+        }
+    }
+}
+
+/// org.gnome.Shell's methods, routed to the OSD and the overview.
+struct GnomeShellDbus {
+    osd: Rc<osd::OsdUi>,
+    overview: Rc<RefCell<overview::OverviewUi>>,
+    shell: Rc<RefCell<Shell>>,
+}
+
+impl shell_dbus::ShellActions for GnomeShellDbus {
+    fn show_osd(&self, request: &osd::OsdRequest) {
+        self.osd.show(request);
+    }
+
+    fn focus_search(&self) {
+        overview::OverviewUi::focus_search(&self.overview);
+    }
+
+    fn show_applications(&self) {
+        overview::OverviewUi::show_apps(&self.overview);
+    }
+
+    fn overview_active(&self) -> bool {
+        self.shell
+            .borrow()
+            .control
+            .as_ref()
+            .is_some_and(|c| c.model().is_overview_open())
     }
 }
 
@@ -993,6 +1032,13 @@ fn build(app: &adw::Application) {
         Rc::new(ShellActions(shell.clone())),
     );
     let switcher_ui = switcher::SwitcherUi::new(app.upcast_ref(), apps.clone());
+    // org.gnome.Shell for the rest of GNOME: the OSD gnome-settings-daemon
+    // shows for volume and brightness keys, search and the app grid.
+    shell_dbus::start(Rc::new(GnomeShellDbus {
+        osd: osd::OsdUi::new(app.upcast_ref()),
+        overview: overview_ui.clone(),
+        shell: shell.clone(),
+    }));
 
     // GNOME's background settings: the picture (the dark variant under
     // the dark style, as GNOME picks it) and primary-color, published to

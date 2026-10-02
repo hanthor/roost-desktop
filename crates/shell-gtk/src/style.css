@@ -920,3 +920,28 @@ window.roost-lock .login-dialog-message {
   min-height: 40px;
   margin-top: 27px;
 }
+
+/* GNOME 51's OSD (.osd-window): a #2e2e33 pill, 12px by 18px of
+   padding, a 32px icon, bold label, and a 160px level bar. */
+window.roost-osd {
+  background: none;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
+}
+window.roost-osd .osd-window {
+  color: #ffffff;
+  background-color: #2e2e33;
+  border: 1px solid rgba(255, 255, 255, 0.02);
+  border-radius: 999px;
+  padding: 12px 18px;
+  font-weight: bold;
+}
+window.roost-osd .osd-label {
+  margin-right: 6px;
+}
+window.roost-osd .level {
+  margin-right: 6px;
+}
+window.roost-osd .level.after-label {
+  margin-bottom: 4px;
+}

@@ -174,8 +174,19 @@ export async function run() {
     Main.overview.hide();
     await Scripting.sleep(1500);
 
-    Main.notify('Roost reference', 'A notification banner, as GNOME 51 draws it');
+    // The same D-Bus notification Roost's capture sends.
+    Gio.DBus.session.call('org.freedesktop.Notifications',
+        '/org/freedesktop/Notifications', 'org.freedesktop.Notifications', 'Notify',
+        new GLib.Variant('(susssasa{sv}i)', ['System', 0, 'cog-wheel-symbolic',
+            'Roost reference', 'A notification banner, as GNOME 51 draws it',
+            [], {}, 5000]),
+        null, Gio.DBusCallFlags.NONE, -1, null, null);
+    await Scripting.sleep(1000);
     await shot('08-notification');
+    // A scripted session has no input, so the tray would keep the banner
+    // for an away user forever. The next step is a click for a real
+    // user: tell the tray they are back, as its idle watch would.
+    Main.messageTray._onIdleMonitorBecameActive?.();
     await Scripting.sleep(6000);
 
     Main.panel.statusArea.dateMenu.menu.open(NONE);
@@ -196,6 +207,21 @@ export async function run() {
         'org.gnome.SessionManager.EndSessionDialog', 'Close',
         null, null, Gio.DBusCallFlags.NONE, -1, null, null);
     await Scripting.sleep(1000);
+
+    // The OSD, as gnome-settings-daemon's ShowOSD calls draw it: a volume
+    // level, a labelled one (a keyboard layout), and volume past 100%.
+    const osd = (icon, label, level, maxLevel) => Main.osdWindowManager.showAll(
+        Gio.Icon.new_for_string(icon), label, level, maxLevel);
+    osd('audio-volume-medium-symbolic', null, 0.5, 1);
+    await Scripting.sleep(500);
+    await shot('12-osd-volume');
+    osd('input-keyboard-symbolic', 'English (US)', null, null);
+    await Scripting.sleep(500);
+    await shot('12b-osd-label');
+    osd('audio-volume-overamplified-symbolic', null, 1.25, 1.5);
+    await Scripting.sleep(500);
+    await shot('12c-osd-overdrive');
+    await Scripting.sleep(2000);
 
     // The lock screen: the curtain with the clock, then the unlock prompt.
     if (Main.screenShield) {

@@ -8,7 +8,8 @@
 # then writes DIR/<state>.png for: 01-desktop, 02-calendar,
 # 03-quick-settings, 03b-power-mode-menu, 04-overview-empty, 05-app-grid, 06-windows, 06b-switcher,
 # 07-overview-windows, 07b-overview-hover, 08-notification, 09-calendar-with-notification,
-# 10-end-session, 11-lock-screen, 11b-unlock-prompt.
+# 10-end-session, 12-osd-volume, 12b-osd-label, 12c-osd-overdrive,
+# 11-lock-screen, 11b-unlock-prompt.
 # Run scripts/roost-gnome-reference first: it exports GNOME's wallpapers.
 # Compare with scripts/lib/roost-parity-compare.py.
 set -eu
@@ -83,6 +84,8 @@ mkdir -p "$WORK/backlight/none" "$WORK/bin"
 ROOST_BACKLIGHT_ROOT="$WORK/backlight/none"
 ROOST_STUB_SERVICES=ppd,logind
 export ROOST_BACKLIGHT_ROOT ROOST_STUB_SERVICES
+ROOST_SHELL_DBUS_UNRESTRICTED=1
+export ROOST_SHELL_DBUS_UNRESTRICTED
 cat >"$WORK/bin/wpctl" <<'WPCTL'
 #!/bin/sh
 exit 1
@@ -195,6 +198,9 @@ gdbus call --session --dest org.freedesktop.Notifications --object-path /org/fre
     --method org.freedesktop.Notifications.Notify -- "System" 0 "cog-wheel-symbolic" \
     "Roost reference" "A notification banner, as GNOME 51 draws it" "[]" "{}" 5000 >/dev/null
 shot 08-notification 1
+# The user moves: the banner, shown while they were away, goes 2 s later.
+xdotool mousemove --window "$WID" $((WIDTH - 8)) $((HEIGHT - 8))
+park
 sleep 6
 xdotool mousemove --window "$WID" $((WIDTH / 2)) 16 click 1
 park
@@ -209,6 +215,17 @@ press "Log Out…"
 shot 10-end-session 2
 xdotool key Escape
 sleep 1
+# The OSD through org.gnome.Shell.ShowOSD, as gnome-settings-daemon
+# calls it (the harness is allowed in, as GNOME's unsafe mode would).
+osd() { gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell \
+    --method org.gnome.Shell.ShowOSD "$1" >/dev/null; }
+osd "{'icon': <'audio-volume-medium-symbolic'>, 'level': <0.5>, 'max_level': <1.0>}"
+shot 12-osd-volume 0.5
+osd "{'icon': <'input-keyboard-symbolic'>, 'label': <'English (US)'>}"
+shot 12b-osd-label 0.5
+osd "{'icon': <'audio-volume-overamplified-symbolic'>, 'level': <1.25>, 'max_level': <1.5>}"
+shot 12c-osd-overdrive 0.5
+sleep 2
 xdotool mousemove --window "$WID" $((WIDTH - 30)) 16 click 1
 park
 sleep 1

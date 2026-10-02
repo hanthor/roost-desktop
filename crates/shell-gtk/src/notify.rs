@@ -22,7 +22,68 @@ use roost_shell_host::intake::NotificationBus;
 use roost_shell_host::notifications::{Notification, NotificationCenter, Urgency};
 
 /// How long a normal or low banner stays up (GNOME: about 4 s).
-pub const BANNER_TIMEOUT: Duration = Duration::from_secs(5);
+pub const BANNER_TIMEOUT: Duration = Duration::from_secs(4);
+/// GNOME's IDLE_TIME: idle longer than this when a banner shows means
+/// the user is away, and the banner waits for them.
+pub const AWAY_AFTER: Duration = Duration::from_secs(1);
+/// How long a banner stays once an away user comes back.
+pub const BACK_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// One banner's expiry, as GNOME's message tray times it: four seconds
+/// when it appears to an active user; when the user is away it stays
+/// until their next input and goes two seconds after it. `idle` is the
+/// IdleMonitor's idle time, `None` when there is no idle monitor (then
+/// the user counts as active).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BannerTimer {
+    shown: Instant,
+    deadline: Option<Instant>,
+}
+
+impl BannerTimer {
+    pub fn new(now: Instant, idle: Option<Duration>) -> Self {
+        let active = idle.is_none_or(|i| i <= AWAY_AFTER);
+        Self {
+            shown: now,
+            deadline: active.then_some(now + BANNER_TIMEOUT),
+        }
+    }
+
+    /// Whether the banner is due to go at `now`.
+    pub fn expired(&mut self, now: Instant, idle: Option<Duration>) -> bool {
+        if self.deadline.is_none() {
+            match idle {
+                // Input since the banner showed: the user is back.
+                Some(i) if i < now.saturating_duration_since(self.shown) => {
+                    self.deadline = Some(now.checked_sub(i).unwrap_or(now) + BACK_TIMEOUT);
+                }
+                Some(_) => {}
+                None => self.deadline = Some(now + BACK_TIMEOUT),
+            }
+        }
+        self.deadline.is_some_and(|d| now >= d)
+    }
+}
+
+/// The session's idle time from org.gnome.Mutter.IdleMonitor, or `None`
+/// without one.
+fn idle_time() -> Option<Duration> {
+    let conn = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE).ok()?;
+    let reply = conn
+        .call_sync(
+            Some("org.gnome.Mutter.IdleMonitor"),
+            "/org/gnome/Mutter/IdleMonitor/Core",
+            "org.gnome.Mutter.IdleMonitor",
+            "GetIdletime",
+            None,
+            Some(glib::VariantTy::new("(t)").ok()?),
+            gio::DBusCallFlags::NO_AUTO_START,
+            200,
+            gio::Cancellable::NONE,
+        )
+        .ok()?;
+    reply.get::<(u64,)>().map(|(ms,)| Duration::from_millis(ms))
+}
 /// Close reason "dismissed by the user" (freedesktop spec).
 const REASON_DISMISSED: u32 = 2;
 /// Close reason "expired".
@@ -51,7 +112,7 @@ pub struct NotifyUi {
     /// SYNC_CREATE, so Clear shows (insensitive) until the list first
     /// changes; after that it hides whenever the list is empty.
     clear_bound: std::cell::Cell<bool>,
-    first_seen: RefCell<HashMap<u64, Instant>>,
+    first_seen: RefCell<HashMap<u64, BannerTimer>>,
     shown: RefCell<Shown>,
     last_bus_try: RefCell<Option<Instant>>,
 }
@@ -283,11 +344,19 @@ impl NotifyUi {
             let live: Vec<(u64, Urgency)> =
                 center.banners().iter().map(|n| (n.id, n.urgency)).collect();
             seen.retain(|id, _| live.iter().any(|(l, _)| l == id));
-            live.iter()
+            let timed: Vec<u64> = live
+                .iter()
                 .filter(|(_, u)| *u != Urgency::Critical)
-                .filter_map(|(id, _)| {
-                    let t = *seen.entry(*id).or_insert(now);
-                    (now.duration_since(t) >= BANNER_TIMEOUT).then_some(*id)
+                .map(|(id, _)| *id)
+                .collect();
+            // Ask for idle time only while a banner is timing.
+            let idle = if timed.is_empty() { None } else { idle_time() };
+            timed
+                .into_iter()
+                .filter(|id| {
+                    seen.entry(*id)
+                        .or_insert_with(|| BannerTimer::new(now, idle))
+                        .expired(now, idle)
                 })
                 .collect()
         };
@@ -383,5 +452,29 @@ impl NotifyUi {
         self.clear.set_sensitive(any);
         drop(center);
         *self.shown.borrow_mut() = now;
+    }
+}
+
+#[cfg(test)]
+mod timer_tests {
+    use super::*;
+
+    #[test]
+    fn banners_time_out_like_gnome() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        // Shown to an active user: four seconds.
+        let mut t = BannerTimer::new(t0, Some(Duration::from_millis(200)));
+        assert!(!t.expired(t0 + Duration::from_millis(3900), Some(s(3))));
+        assert!(t.expired(t0 + s(4), Some(s(4))));
+        // Shown to an away user: stays while they stay away...
+        let mut t = BannerTimer::new(t0, Some(s(30)));
+        assert!(!t.expired(t0 + s(60), Some(s(90))));
+        // ...and goes two seconds after they come back.
+        assert!(!t.expired(t0 + s(61), Some(Duration::from_millis(500))));
+        assert!(t.expired(t0 + Duration::from_millis(62_500), Some(s(2))));
+        // No idle monitor: the user counts as active.
+        let mut t = BannerTimer::new(t0, None);
+        assert!(t.expired(t0 + s(4), None));
     }
 }
