@@ -1453,6 +1453,76 @@ impl WindowManager {
         pointer.frame(state);
     }
 
+    /// Route one input event to the session-lock surface and nothing
+    /// else (ext-session-lock-v1): keys go to it with keyboard focus
+    /// held there, the pointer acts on it at the output origin, and no
+    /// compositor shortcut fires. Gestures and relative motion are
+    /// dropped: nothing behind the lock may hear them.
+    pub fn lock_input(
+        &mut self,
+        state: &mut State,
+        surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+        input: ManagerInput,
+    ) {
+        if let Some(keyboard) = self.keyboard.clone() {
+            if keyboard.current_focus().as_ref() != Some(surface) {
+                keyboard.set_focus(state, Some(surface.clone()), SERIAL_COUNTER.next_serial());
+            }
+        }
+        match input {
+            ManagerInput::Key {
+                keycode,
+                pressed,
+                time,
+            } => {
+                self.keyboard_key(state, keycode, pressed, time);
+            }
+            ManagerInput::Motion { pos, time } => {
+                self.pointer_pos = pos;
+                if let Some(pointer) = self.pointer.clone() {
+                    pointer.motion(
+                        state,
+                        Some((surface.clone(), (0.0, 0.0).into())),
+                        &MotionEvent {
+                            location: pos,
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time,
+                        },
+                    );
+                    pointer.frame(state);
+                }
+            }
+            ManagerInput::Button {
+                button,
+                pressed,
+                time,
+            } => {
+                if let Some(pointer) = self.pointer.clone() {
+                    pointer.button(
+                        state,
+                        &ButtonEvent {
+                            serial: SERIAL_COUNTER.next_serial(),
+                            time,
+                            button,
+                            state: if pressed {
+                                ButtonState::Pressed
+                            } else {
+                                ButtonState::Released
+                            },
+                        },
+                    );
+                    pointer.frame(state);
+                }
+            }
+            ManagerInput::Axis {
+                horizontal,
+                vertical,
+                time,
+            } => self.pointer_axis(state, horizontal, vertical, time),
+            _ => {}
+        }
+    }
+
     /// Deliver a key event to the focused window. Returns false when no
     /// keyboard capability exists.
     pub fn keyboard_key(

@@ -201,6 +201,6 @@ park
 sleep 1
 press "Lock"
 shot 11-lock-screen 3
-xdotool key space
+xdotool mousemove 640 650 click 1
 shot 11b-unlock-prompt 2
 echo "roost-parity-capture: frames in $OUT"

@@ -304,6 +304,11 @@ pub struct Session<'a> {
     overview_search: Option<bool>,
     /// Latest `SetOverviewAppGrid` from the shell, drained by the hub.
     overview_app_grid: Option<bool>,
+    /// A lock-screen password awaiting verification, with its request
+    /// id: the reply waits for the result (see `ControlHub::finish_unlock`).
+    unlock_request: Option<(u64, roost_shell_control::Secret)>,
+    /// The request id whose `CommandResult` is still owed.
+    unlock_pending: Option<u64>,
     /// Latest `SetInputSettings` from the shell, drained by the hub.
     input_settings: Option<roost_shell_control::InputSettings>,
 }
@@ -366,6 +371,8 @@ impl<'a> Session<'a> {
             idle_timeout: None,
             overview_search: None,
             overview_app_grid: None,
+            unlock_request: None,
+            unlock_pending: None,
             input_settings: None,
         };
         let msg = match session.conn.read_frame() {
@@ -590,6 +597,16 @@ impl<'a> Session<'a> {
                     id,
                     status: CommandStatus::Applied,
                 })?;
+                Ok(Handled::CommandResult { id, applied: true })
+            }
+            Message::Command {
+                id,
+                kind: CommandKind::Unlock { password },
+            } => {
+                // Verified off the event loop by the runtime; the result
+                // goes back as this id's CommandResult.
+                self.unlock_request = Some((id, password));
+                self.unlock_pending = Some(id);
                 Ok(Handled::CommandResult { id, applied: true })
             }
             Message::Command {
@@ -838,6 +855,7 @@ fn apply_command(
         CommandKind::SetIdleTimeout { .. }
         | CommandKind::SetOverviewSearch { .. }
         | CommandKind::SetOverviewAppGrid { .. }
+        | CommandKind::Unlock { .. }
         | CommandKind::SetInputSettings(_) => (CommandStatus::Applied, None),
         CommandKind::Lock => {
             // Manual lock from the shell (session-lock set path):
@@ -869,6 +887,8 @@ pub struct PollOutcome {
     pub overview_search: Option<bool>,
     /// Whether the overview shows the app grid, if the shell said.
     pub overview_app_grid: Option<bool>,
+    /// A lock-screen password to verify, with its request id.
+    pub unlock: Option<(u64, roost_shell_control::Secret)>,
     /// GNOME input settings the shell sent, if any.
     pub input_settings: Option<roost_shell_control::InputSettings>,
 }
@@ -1126,6 +1146,27 @@ impl ControlHub {
         self.previews = (previews, hovered);
     }
 
+    /// Answer a lock-screen password: `Applied` when it unlocked the
+    /// session, `Denied` when it did not.
+    pub fn finish_unlock(&mut self, request: u64, unlocked: bool) {
+        let status = if unlocked {
+            CommandStatus::Applied
+        } else {
+            CommandStatus::Denied {
+                reason: "authentication failed".to_owned(),
+            }
+        };
+        for session in &mut self.sessions {
+            if session.unlock_pending == Some(request) {
+                session.unlock_pending = None;
+                let _ = session.conn.write_frame(&Message::CommandResult {
+                    id: request,
+                    status: status.clone(),
+                });
+            }
+        }
+    }
+
     pub fn set_environment(&mut self, mut vars: Vec<(String, String)>) {
         vars.sort();
         self.environment = vars;
@@ -1214,6 +1255,9 @@ impl ControlHub {
                     }
                     if let Some(active) = session.overview_app_grid.take() {
                         outcome.overview_app_grid = Some(active);
+                    }
+                    if let Some(request) = session.unlock_request.take() {
+                        outcome.unlock = Some(request);
                     }
                     if let Some(settings) = session.input_settings.take() {
                         outcome.input_settings = Some(settings);

@@ -195,7 +195,30 @@ export async function run() {
         await shotStage('11-lock-screen');
         Main.screenShield.showDialog();
         Main.screenShield._dialog?._showPrompt?.();
-        await Scripting.sleep(2000);
+        await Scripting.sleep(1000);
+        // Without GDM's PAM conversation or AccountsService the prompt
+        // shows an error and no name. Put it in the state a real
+        // session shows: the user's name and the password question,
+        // as GDM's 'Password:' prompt sets it.
+        await Scripting.sleep(1000);
+        const prompt = Main.screenShield._dialog?._authPrompt;
+        if (prompt) {
+            prompt.setMessage(null);
+            prompt.setQuestion('Password');
+            // AccountsService's real name, as UserWidgetLabel shows it.
+            const name = GLib.getenv('GREF_USER_NAME') || 'User';
+            const label = prompt._userWell.get_child()?._label;
+            for (const l of [label?._realNameLabel, label?._userNameLabel])
+                if (l)
+                    l.text = name;
+            if (label && !label._realNameLabel)
+                label.text = name;
+            if (label) {
+                label.opacity = 255;
+                label.queue_relayout();
+            }
+        }
+        await Scripting.sleep(500);
         await shotStage('11b-unlock-prompt');
     } else {
         print('GREF no screen shield');

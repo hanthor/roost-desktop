@@ -54,7 +54,7 @@ scripts/lib/roost-parity-compare.py target/gnome-reference target/roost-parity t
 | 09-calendar-with-notification | the date menu listing it |
 | 10-end-session | the Log Out dialog (gnome-session's EndSessionDialog) |
 | 11-lock-screen | the lock screen curtain (reference: a stubbed display manager lets GNOME lock) |
-| 11b-unlock-prompt | the unlock prompt |
+| 11b-unlock-prompt | the unlock prompt, set to what a real session shows: the user's name and GDM's Password question (the stubbed display manager has no PAM conversation or AccountsService) |
 
 Both sides run the same services: the stubs serve power-profiles and
 logind only, since GNOME's NetworkManager and BlueZ clients need more
@@ -82,6 +82,9 @@ Share of pixels visibly off (more than 24 levels) in each element crop:
 | Overview, empty (cards, search, dash) | 53.5% | 0.4% |
 | App grid (thumbnails, tiles, dash) | 56.1% | 3.3%; the rest is which apps are installed |
 | Overview dash | not comparable | 0.0% |
+| Lock screen background (blurred, dimmed wallpaper) | not built | 1.4% beyond 8 levels |
+| Lock screen curtain (clock, date, hint) | not built | positions within 1px; the digits are the capture time |
+| Unlock prompt | not built | 0.1% of the screen, 0.5% of the prompt |
 
 GTK and St differ in a few ways that matter when matching numbers:
 
@@ -92,3 +95,5 @@ GTK and St differ in a few ways that matter when matching numbers:
 - GTK 4's search entry node is `entry.search`, not `searchentry`.
 - GNOME 51's Adwaita wallpapers are Display P3 JPEG XL; mutter converts
   them to sRGB, so Roost does too.
+- GNOME's lock screen blurs the wallpaper with a Gaussian of about
+  sigma 20 and dims it to 65%; fitted against GNOME's capture.

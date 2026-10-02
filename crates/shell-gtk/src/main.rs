@@ -16,6 +16,7 @@
 mod calendar;
 mod folders;
 mod live_apps;
+mod lock;
 mod logic;
 mod notify;
 mod overview;
@@ -887,6 +888,28 @@ fn build(app: &adw::Application) {
             }),
         )
     };
+    // GNOME's lock screen on ext-session-lock (the compositor decides
+    // when, draws the blurred background, and checks the password).
+    let lock_ui = {
+        let shell = shell.clone();
+        let interface = settings(INTERFACE_SCHEMA);
+        lock::LockUi::new(
+            app.upcast_ref(),
+            Rc::new(move |password| {
+                shell
+                    .borrow_mut()
+                    .control
+                    .as_mut()
+                    .and_then(|c| c.unlock(password).ok())
+            }),
+            Box::new(move || {
+                interface
+                    .as_ref()
+                    .map(|s| ClockFormat::from_setting(&s.string("clock-format")))
+                    .unwrap_or(ClockFormat::TwentyFourHour)
+            }),
+        )
+    };
     let qs = quick_settings_popover(
         &shell,
         &notify,
@@ -1126,12 +1149,17 @@ fn build(app: &adw::Application) {
         let activities_button = activities.clone();
         glib::timeout_add_local(Duration::from_millis(16), move || {
             let mut shell = shell.borrow_mut();
+            let mut results = Vec::new();
             if let Some(control) = shell.control.as_mut() {
                 loop {
                     match control.poll() {
                         Ok(Handled::Gap { .. }) => {
                             let _ = control.request_snapshot();
                         }
+                        Ok(Handled::CommandResult { id, status }) => results.push((
+                            id,
+                            matches!(status, roost_shell_control::CommandStatus::Applied),
+                        )),
                         Ok(_) => {}
                         Err(e) if is_would_block(&e) => break,
                         Err(e) => {
@@ -1141,6 +1169,7 @@ fn build(app: &adw::Application) {
                     }
                 }
             }
+            let locked = shell.control.as_ref().is_some_and(|c| c.locked());
             render_pills(&mut shell);
             if let Some(control) = shell.control.as_ref() {
                 switcher_ui.sync(control.model());
@@ -1150,6 +1179,10 @@ fn build(app: &adw::Application) {
                 .as_ref()
                 .is_some_and(|c| c.model().is_overview_open());
             drop(shell);
+            lock_ui.sync(locked);
+            for (id, applied) in results {
+                lock_ui.command_result(id, applied);
+            }
             // The bar goes see-through and Activities shows as checked
             // while the overview is open, as GNOME draws them.
             if open {

@@ -25,8 +25,13 @@ OUT="$(cd "$OUT" && pwd)"
 IMAGE=localhost/roost-gnome51-reference
 podman build -q -t "$IMAGE" "$ROOT/tests/gnome-reference" >/dev/null
 rm -rf "$OUT"/*.png "$OUT"/*.json "$OUT/share"
+# The unlock prompt shows the user's name; use the one Roost's lock
+# screen will show for whoever runs the comparison (GECOS, else login).
+USER_NAME="$(getent passwd "$(id -un)" | cut -d: -f5 | cut -d, -f1)"
+[ -n "$USER_NAME" ] || USER_NAME="$(id -un)"
 capture() {
     podman run --rm \
+        -e GREF_USER_NAME="$USER_NAME" \
         -v "$ROOT/tests/gnome-reference:/gref:ro,Z" \
         -v "$ROOT/scripts/lib:/lib:ro,Z" \
         -v "$OUT:/out:Z" \

@@ -484,6 +484,10 @@ pub struct Runtime {
     /// tick evaluates the lock in the input base as
     /// `last_stamp + anchor.elapsed()`.
     idle_since: Instant,
+    /// Lock-screen password checks report back here.
+    unlock_results: calloop::channel::Sender<(u64, bool)>,
+    /// A password check is running.
+    unlock_inflight: bool,
     exit: bool,
     stats: RunStats,
     /// `ROOST_COMPOSITOR_STATE` snapshot path (journeys only).
@@ -706,6 +710,17 @@ impl Runtime {
             })
             .map_err(|e| RuntimeError::Loop(e.to_string()))?;
 
+        // Lock-screen password checks finish here, between frames.
+        let (unlock_results, unlock_source) = calloop::channel::channel::<(u64, bool)>();
+        event_loop
+            .handle()
+            .insert_source(unlock_source, |event, _, rt: &mut Runtime| {
+                if let calloop::channel::Event::Msg((request, ok)) = event {
+                    rt.finish_unlock(request, ok);
+                }
+            })
+            .map_err(|e| RuntimeError::Loop(e.to_string()))?;
+
         let loop_handle = event_loop.handle();
         let mut runtime = Runtime {
             display,
@@ -733,6 +748,8 @@ impl Runtime {
             cast_outputs,
             introspect,
             idle_since: Instant::now(),
+            unlock_results,
+            unlock_inflight: false,
             exit: false,
             stats: RunStats::default(),
             state_path: std::env::var_os("ROOST_COMPOSITOR_STATE")
@@ -849,6 +866,19 @@ impl Runtime {
         )
     }
 
+    /// A lock-screen password check finished: a verified password
+    /// clears the lock (the shell then destroys its lock surfaces), and
+    /// the shell hears the result either way.
+    fn finish_unlock(&mut self, request: u64, ok: bool) {
+        self.unlock_inflight = false;
+        if ok && self.is_locked() {
+            self.lock.unlock(self.lock_now_ms());
+            self.control.set_locked(false);
+            self.overlay.hide();
+        }
+        self.control.finish_unlock(request, ok);
+    }
+
     /// Route one backend input event: consumed by the lock surface while
     /// locked (credential entry submits through [`try_unlock`](Self::try_unlock);
     /// windows hear nothing), else to the recovery overlay while it is visible,
@@ -862,6 +892,15 @@ impl Runtime {
         self.lock.note_input(input_time(&input));
         self.idle_since = Instant::now();
         if self.is_locked() {
+            // Only the lock screen hears input; with none up (shell
+            // gone), nothing does.
+            let surface = self
+                .state
+                .primary_output_name()
+                .and_then(|name| self.state.lock_surface_for(&name));
+            if let Some(surface) = surface {
+                self.manager.lock_input(&mut self.state, &surface, input);
+            }
             return;
         }
         // Three-finger swipes are the shell's (GNOME 51): consumed here,
@@ -1381,6 +1420,7 @@ impl Runtime {
             view,
             true,
             overview.as_ref(),
+            None,
         );
         let decor = decor_for_output(&decor_global, view);
         let previews = preview_elements(renderer, &self.manager, view, cards);
@@ -1391,6 +1431,7 @@ impl Runtime {
             view,
             overview.is_none(),
             cards,
+            false,
         );
         let damage = Rectangle::from_size(size);
         let mut target = renderer.bind(&mut texture).ok()?;
@@ -1716,6 +1757,45 @@ impl Runtime {
             self.control.set_overview(false);
             self.overlay.show(Vec::new());
         }
+        // ext-session-lock-v1: only the supervised shell may lock, and
+        // locking through the protocol engages the compositor's own
+        // flag. Anyone else's locker is dropped, which tells it the
+        // lock failed.
+        if let Some((locker, pid)) = self.state.take_lock_request() {
+            let ours = matches!(
+                (pid, self.shell.child_pid()),
+                (Some(pid), Some(child)) if u32::try_from(pid).ok() == Some(child)
+            );
+            if ours {
+                if !self.is_locked() {
+                    self.engage_lock();
+                }
+                locker.lock();
+            } else {
+                eprintln!("roost-compositor: session lock refused for pid {pid:?}");
+            }
+        }
+        // A lock client's unlock_and_destroy never unlocks by itself:
+        // only a verified password clears the flag.
+        if self.state.take_client_unlock() && self.is_locked() {
+            eprintln!("roost-compositor: lock client left while locked; staying locked");
+        }
+        // A lock-screen password: verified off the loop (PAM may stall
+        // for seconds on a failure), one attempt at a time.
+        if let Some((request, password)) = outcome.unlock {
+            if self.unlock_inflight || !self.is_locked() {
+                let unlocked = !self.is_locked();
+                self.control.finish_unlock(request, unlocked);
+            } else {
+                self.unlock_inflight = true;
+                let reply = self.unlock_results.clone();
+                std::thread::spawn(move || {
+                    let ok = crate::unlock::session_user()
+                        .is_some_and(|user| crate::unlock::verify(&user, &password.0));
+                    let _ = reply.send((request, ok));
+                });
+            }
+        }
         // Idle timeout from input timestamps: lock the untouched session.
         // A live idle inhibitor (video, presentation) counts as activity.
         if self.state.idle_inhibited() {
@@ -1794,7 +1874,11 @@ impl Runtime {
         let show_content = content_visible(locked);
         let overlay_visible = self.overlay.visible;
         let background = if locked {
-            Color32F::new(0.03, 0.05, 0.12, 1.0)
+            // GNOME's lock screen dims the desktop to 65%; without a
+            // picture that is the dimmed primary-color.
+            let c = self.desktop_color();
+            let k = roost_wallpaper::LOCK_BRIGHTNESS;
+            Color32F::new(c.r() * k, c.g() * k, c.b() * k, 1.0)
         } else if overlay_visible {
             Color32F::new(0.20, 0.08, 0.10, 1.0)
         } else {
@@ -1825,6 +1909,10 @@ impl Runtime {
                         offset: (0, 0),
                         scale: self.scale,
                     };
+                    let lock_surface = locked
+                        .then(|| self.state.primary_output_name())
+                        .flatten()
+                        .and_then(|name| self.state.lock_surface_for(&name));
                     let elements = scene_elements(
                         renderer,
                         &self.manager,
@@ -1832,11 +1920,19 @@ impl Runtime {
                         view,
                         show_content,
                         overview.as_ref(),
+                        lock_surface.as_ref(),
                     );
                     let decor = decor_for_output(&decor_global, view);
                     let previews = preview_elements(renderer, &self.manager, view, cards);
-                    let paper =
-                        backdrop(&mut self.wallpaper, renderer, size, view, show_paper, cards);
+                    let paper = backdrop(
+                        &mut self.wallpaper,
+                        renderer,
+                        size,
+                        view,
+                        show_paper,
+                        cards,
+                        locked,
+                    );
                     // The winit EGL surface presents bottom-up (see the
                     // Y-flip in the backend's own damage path), so the
                     // output transform mirrors vertically; placements
@@ -1896,6 +1992,9 @@ impl Runtime {
                         offset: out.loc,
                         scale: out.scale,
                     };
+                    let lock_surface = locked
+                        .then(|| self.state.lock_surface_for(&out.name))
+                        .flatten();
                     let elements = scene_elements(
                         renderer,
                         &self.manager,
@@ -1903,11 +2002,19 @@ impl Runtime {
                         view,
                         show_content,
                         overview.as_ref(),
+                        lock_surface.as_ref(),
                     );
                     let decor = decor_for_output(&decor_global, view);
                     let previews = preview_elements(renderer, &self.manager, view, cards);
-                    let paper =
-                        backdrop(&mut self.wallpaper, renderer, size, view, show_paper, cards);
+                    let paper = backdrop(
+                        &mut self.wallpaper,
+                        renderer,
+                        size,
+                        view,
+                        show_paper,
+                        cards,
+                        locked,
+                    );
                     let sync = {
                         let mut target = renderer
                             .bind(&mut dmabuf)
@@ -2057,9 +2164,23 @@ fn scene_elements(
     view: View,
     show_content: bool,
     overview: Option<&crate::overview::OverviewLayout>,
+    lock: Option<&smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>,
 ) -> Vec<WaylandSurfaceRenderElement<GlesRenderer>> {
     if !show_content {
-        return Vec::new();
+        // Locked: only the shell's lock surface for this output, at its
+        // origin (ext-session-lock); nothing else may show.
+        return lock
+            .map(|surface| {
+                render_elements_from_surface_tree(
+                    renderer,
+                    surface,
+                    (0, 0),
+                    view.scale,
+                    1.0,
+                    Kind::Unspecified,
+                )
+            })
+            .unwrap_or_default();
     }
     if overview.is_some() {
         // Overview (#54): windows are drawn as rescaled previews in
@@ -2138,8 +2259,15 @@ fn backdrop(
     view: View,
     show_paper: bool,
     cards: Option<&crate::overview::OverviewLayout>,
+    locked: bool,
 ) -> Vec<smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<GlesRenderer>>
 {
+    if locked {
+        return wallpaper
+            .lock_element(renderer, size.w, size.h)
+            .into_iter()
+            .collect();
+    }
     if show_paper {
         return wallpaper
             .element(renderer, size.w, size.h)
@@ -2270,6 +2398,12 @@ fn send_frame_callbacks(state: &State, manager: &WindowManager, frames: u64) {
         );
     }
     for (surface, _, _) in crate::layer::layer_layout(state) {
+        send_frames_surface_tree(&surface, &output, time, Some(Duration::ZERO), |_, _| {
+            Some(output.clone())
+        });
+    }
+    // The lock screen (ext-session-lock) paints on frame callbacks too.
+    for surface in state.lock_surfaces() {
         send_frames_surface_tree(&surface, &output, time, Some(Duration::ZERO), |_, _| {
             Some(output.clone())
         });

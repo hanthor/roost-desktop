@@ -82,6 +82,87 @@ pub fn cover_crop(image: &image::RgbaImage, w: u32, h: u32) -> Option<image::Rgb
     Some(scaled.view(x, y, w, h).to_image())
 }
 
+/// GNOME 51's lock-screen background (`unlockDialog.js`): the desktop
+/// blurred and dimmed. Fitted against GNOME's own capture: a Gaussian
+/// of sigma 20 logical pixels and brightness 0.65.
+pub const LOCK_BLUR_SIGMA: f32 = 20.0;
+pub const LOCK_BRIGHTNESS: f32 = 0.65;
+
+/// Blur ARGB8888 pixels (`w` x `h`, opaque) with a Gaussian of `sigma`
+/// (three box passes each way, which match it closely) and scale every
+/// colour by `brightness`. Returns new ARGB8888 pixels, or `None` when
+/// the buffer does not hold `w` x `h` pixels.
+pub fn blur_dim_argb(argb: &[u8], w: u32, h: u32, sigma: f32, brightness: f32) -> Option<Vec<u8>> {
+    let (w, h) = (w as usize, h as usize);
+    if w == 0 || h == 0 || argb.len() < w * h * 4 {
+        return None;
+    }
+    // Box widths for three passes approximating `sigma` (Kovesi).
+    let n = 3.0f32;
+    let ideal = (12.0 * sigma * sigma / n + 1.0).sqrt();
+    let mut lo = ideal.floor() as i32;
+    if lo % 2 == 0 {
+        lo -= 1;
+    }
+    let lo = lo.max(1);
+    let hi = lo + 2;
+    let m = ((12.0 * sigma * sigma - n * (lo * lo) as f32 - 4.0 * n * lo as f32 - 3.0 * n)
+        / (-4.0 * lo as f32 - 4.0))
+        .round() as i32;
+    let radii: Vec<usize> = (0..3)
+        .map(|i| ((if i < m { lo } else { hi }) as usize - 1) / 2)
+        .collect();
+    let mut planes: Vec<Vec<f32>> = (0..3)
+        .map(|c| (0..w * h).map(|i| f32::from(argb[i * 4 + c])).collect())
+        .collect();
+    let mut tmp = vec![0f32; w * h];
+    for plane in &mut planes {
+        for &r in &radii {
+            box_pass(plane, &mut tmp, w, h, r, true);
+            box_pass(&tmp, plane, w, h, r, false);
+        }
+    }
+    let mut out = vec![255u8; w * h * 4];
+    for i in 0..w * h {
+        for c in 0..3 {
+            out[i * 4 + c] = (planes[c][i] * brightness).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    Some(out)
+}
+
+/// One box-blur pass of radius `r`, along rows (`horizontal`) or columns,
+/// with edge pixels extended.
+fn box_pass(src: &[f32], dst: &mut [f32], w: usize, h: usize, r: usize, horizontal: bool) {
+    let (lines, len) = if horizontal { (h, w) } else { (w, h) };
+    let at = |line: usize, k: usize| {
+        if horizontal {
+            line * w + k
+        } else {
+            k * w + line
+        }
+    };
+    let norm = 1.0 / (2 * r + 1) as f32;
+    for line in 0..lines {
+        let first = src[at(line, 0)];
+        let last = src[at(line, len - 1)];
+        let get = |k: isize| -> f32 {
+            if k < 0 {
+                first
+            } else if k as usize >= len {
+                last
+            } else {
+                src[at(line, k as usize)]
+            }
+        };
+        let mut sum: f32 = (-(r as isize)..=r as isize).map(get).sum();
+        for k in 0..len {
+            dst[at(line, k)] = sum * norm;
+            sum += get(k as isize + r as isize + 1) - get(k as isize - r as isize);
+        }
+    }
+}
+
 /// A drop shadow in CSS terms (`0 dy blur spread rgba(0, 0, 0, alpha)`).
 #[derive(Debug, Clone, Copy)]
 pub struct Shadow {
@@ -301,6 +382,30 @@ mod tests {
         .unwrap();
         let i = ((c.margin * c.width + c.margin) * 4) as usize;
         assert_eq!(&c.pixels[i..i + 4], &[255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn lock_background_blurs_and_dims() {
+        // Left half white, right half black.
+        let (w, h) = (64u32, 8u32);
+        let mut argb = Vec::new();
+        for _ in 0..h {
+            for x in 0..w {
+                let v = if x < w / 2 { 255 } else { 0 };
+                argb.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let out = blur_dim_argb(&argb, w, h, 4.0, 0.5).unwrap();
+        let px = |x: u32| out[((3 * w + x) * 4) as usize];
+        // Far from the edge: dimmed but unblurred.
+        assert_eq!(px(0), 128);
+        assert_eq!(px(w - 1), 0);
+        // At the edge: a soft ramp, monotone.
+        assert!(px(w / 2 - 1) > px(w / 2));
+        assert!(px(w / 2 - 1) < 128 && px(w / 2) > 0);
+        assert!((px(w / 2 - 1) as i32 + px(w / 2) as i32 - 128).abs() <= 2);
+        assert_eq!(out[3], 255);
+        assert!(blur_dim_argb(&argb, w, h + 1, 4.0, 0.5).is_none());
     }
 
     #[test]

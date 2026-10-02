@@ -793,3 +793,130 @@ window.roost-overview-chrome {
 .roost-overview-chrome .window-close:hover {
   background-color: rgba(80, 80, 89, 0.98);
 }
+
+/* Lock screen (GNOME 51 unlockDialog, states 11 and 11b): transparent
+   over the compositor's blurred, dimmed wallpaper. */
+window.roost-lock {
+  background: none;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
+  color: #fafafb;
+}
+
+/* #panel.unlock-screen: only the system menu's power icon. */
+window.roost-lock .unlock-screen-panel {
+  min-height: 32px;
+}
+window.roost-lock .unlock-screen-panel .system-status-icon {
+  -gtk-icon-size: 16px;
+  color: #ffffff;
+  margin: 0 16px 0 0;
+}
+
+/* .unlock-dialog-clock: spacing 2em between time and date. */
+window.roost-lock .unlock-dialog-clock-time {
+  font-size: 96px;
+  font-weight: 800;
+  font-feature-settings: "tnum";
+}
+window.roost-lock .unlock-dialog-clock-date {
+  font-size: 26.66px;
+  font-weight: 400;
+  margin-top: 29px;
+}
+/* The hint: 2em of box spacing plus its own 2em margin. */
+window.roost-lock .unlock-dialog-clock-hint {
+  font-weight: bold;
+  margin-top: 58px;
+  padding: 6px 18px;
+  border-radius: 16px;
+}
+
+/* .login-dialog-prompt-layout: 30em wide. */
+window.roost-lock .login-dialog-prompt-layout {
+  min-width: 440px;
+}
+/* .user-icon in the vertical user widget: 160px, a 13% disc. */
+window.roost-lock .user-icon {
+  -gtk-icon-size: 100px;
+  padding: 30px;
+  border-radius: 999px;
+  background-color: rgba(250, 250, 251, 0.13);
+  color: #fafafb;
+}
+window.roost-lock .user-widget-label {
+  font-size: 26.66px;
+  font-weight: 400;
+  margin-top: 24px;
+  margin-bottom: 20px;
+}
+/* .login-dialog-button-box: 4em tall: the (hidden) Back button, the
+   entry area (0.5em by 20px margins), and a spacer as wide as Back. */
+window.roost-lock .login-dialog-button-box {
+  min-height: 59px;
+}
+window.roost-lock button.cancel-button {
+  min-width: 16px;
+  min-height: 16px;
+  padding: 12px;
+  border-radius: 999px;
+  background-color: rgba(250, 250, 251, 0.1);
+  color: rgba(250, 250, 251, 0.5);
+  box-shadow: none;
+  filter: none;
+}
+window.roost-lock .button-box-spacer {
+  min-width: 40px;
+}
+window.roost-lock .login-dialog-prompt-entry-area {
+  margin: 7px 20px;
+}
+/* The entry: 12px corners, white at 11% (GNOME's focused mix) under a
+   2px ring at 20%; right padding puts the peek icon where St puts it,
+   clear of the Submit arrow. */
+window.roost-lock entry.login-dialog-prompt-entry {
+  min-height: 45px;
+  padding: 0 46px 0 17px;
+  border-radius: 12px;
+  background-color: rgba(250, 250, 251, 0.1);
+  color: rgba(250, 250, 251, 0.7);
+  box-shadow: none;
+  outline: none;
+}
+window.roost-lock entry.login-dialog-prompt-entry:focus-within {
+  background-color: rgba(255, 255, 255, 0.11);
+  color: #fafafb;
+  box-shadow: inset 0 0 0 2px rgba(250, 250, 251, 0.2);
+  outline: none;
+}
+window.roost-lock entry.login-dialog-prompt-entry text placeholder {
+  color: rgba(250, 250, 251, 0.7);
+  opacity: 1;
+}
+window.roost-lock entry.login-dialog-prompt-entry image {
+  color: #fafafb;
+  opacity: 1;
+}
+/* .next-button: a bare go-next arrow, no well. */
+window.roost-lock button.next-button {
+  background: none;
+  box-shadow: none;
+  min-width: 16px;
+  min-height: 16px;
+  padding: 0;
+  margin-right: 14px;
+  color: #fafafb;
+  filter: none;
+}
+window.roost-lock .caps-lock-warning-label {
+  color: #cd9309;
+  margin-top: 9px;
+  padding-bottom: 8px;
+}
+/* The message hangs 27px under the entry row (GNOME's 9px well spacing
+   around its caps-lock placeholder), text at the top of 2.75em. */
+window.roost-lock .login-dialog-message {
+  color: #dedee4;
+  min-height: 40px;
+  margin-top: 27px;
+}
