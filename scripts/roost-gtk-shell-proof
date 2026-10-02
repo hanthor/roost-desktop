@@ -75,6 +75,8 @@
 #   G-KEYBINDINGS  GNOME Shell's keys: Super+S quick settings, Super+V the
 #                  date menu, Super+A the app grid (and back)
 #   G-KEY-BRIGHTNESS the brightness key steps the backlight through logind
+#   G-WINDOW-MENU  GNOME's window menu: Always on Top, Hide, and the
+#                  overview brings the hidden window back
 #   G-SUSPEND-LOCK Suspend asks logind, and its PrepareForSleep locks
 #                  the session before sleep
 #   G-UNLOCK       GNOME's lock screen: a wrong password is refused and
@@ -941,6 +943,47 @@ cstate '.overview_open | not' "closed" || fail G-KEYBINDINGS "Super+A again did 
 # The shell hides its overview surfaces on its next frame: let it.
 sleep 1
 pass G-KEYBINDINGS "Super+S, Super+V and Super+A open GNOME's menus and the app grid"
+
+# GNOME's window menu on a header bar's right click: Always on Top, then
+# Hide; the hidden window still shows in the overview, and picking it
+# there brings it back.
+pick_alpha() {
+    xdotool key Super_L
+    cstate '.overview_open and (.previews | length) > 0' "overview" || return 1
+    sleep 1
+    alpha="$(jq -r '.previews[] | select(.app_id == "roost-test-alpha") | .rect | "\(.[0] + .[2] / 2) \(.[1] + .[3] / 2)"' "$CSTATE")"
+    [ -n "$alpha" ] || return 1
+    # shellcheck disable=SC2086
+    xdotool mousemove --window "$WID" $alpha click 1
+    cstate '(.overview_open | not) and .focused_app_id == "roost-test-alpha"' "alpha"
+}
+window_menu() {
+    header="$(jq -r '.focused_rect | "\(.[0] + 60) \(.[1] + 20)"' "$CSTATE")"
+    # shellcheck disable=SC2086
+    xdotool mousemove --window "$WID" $header click 3
+    sleep 1.5
+}
+pick_alpha || fail G-WINDOW-MENU "could not focus Alpha from the overview"
+alpha_id="$(jq -r .focused "$CSTATE")"
+window_menu
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-window-menu.json" 20 ||
+    fail G-WINDOW-MENU "accessibility dump failed"
+showing "$ARTIFACTS/a11y-window-menu.json" "Hide" ||
+    fail G-WINDOW-MENU "the right click opened no window menu"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-window-menu-press.json" 20 \
+    --press "Always on Top" || fail G-WINDOW-MENU "the window menu has no Always on Top"
+cstate "any(.above[]; . == $alpha_id)" "above" ||
+    fail G-WINDOW-MENU "Always on Top did not keep the window above"
+window_menu
+scrot "$ARTIFACTS/24d-window-menu.png" >/dev/null
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-window-menu-2.json" 20 \
+    --press "Hide" || fail G-WINDOW-MENU "could not press Hide"
+cstate "any(.minimized[]; . == $alpha_id) and .focused != $alpha_id" "hidden" ||
+    fail G-WINDOW-MENU "Hide did not take the window away"
+pick_alpha || fail G-WINDOW-MENU "the hidden window could not be picked from the overview"
+cstate "any(.minimized[]; . == $alpha_id) | not" "restored" ||
+    fail G-WINDOW-MENU "picking the hidden window did not bring it back"
+pass G-WINDOW-MENU "the header-bar menu keeps a window on top, hides it, and the overview brings it back"
 
 # Screenshots (#61): GNOME Shell's interface, as the portal calls it.
 SHOT="$ARTIFACTS/screenshot.png"

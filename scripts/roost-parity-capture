@@ -8,7 +8,7 @@
 # then writes DIR/<state>.png for: 00-startup-overview, 01-desktop, 02-calendar,
 # 03-quick-settings, 03b-power-mode-menu, 04-overview-empty, 05-app-grid, 06-windows, 06b-switcher,
 # 07-overview-windows, 07b-overview-hover, 08-notification, 09-calendar-with-notification,
-# 10-end-session, 12-osd-volume, 12b-osd-label, 12c-osd-overdrive,
+# 10-end-session, 12-osd-volume, 12b-osd-label, 12c-osd-overdrive, 13-window-menu,
 # 11-lock-screen, 11b-unlock-prompt.
 # Run scripts/roost-gnome-reference first: it exports GNOME's wallpapers.
 # Compare with scripts/lib/roost-parity-compare.py.
@@ -247,6 +247,12 @@ shot 12b-osd-label 0.5
 osd "{'icon': <'audio-volume-overamplified-symbolic'>, 'level': <1.25>, 'max_level': <1.5>}"
 shot 12c-osd-overdrive 0.5
 sleep 2
+# The window menu: a right click on the focused window's header bar.
+xdotool mousemove --window "$WID" 500 280 click 3
+shot 13-window-menu 1
+xdotool key Escape
+park
+sleep 1
 xdotool mousemove --window "$WID" $((WIDTH - 30)) 16 click 1
 park
 sleep 1

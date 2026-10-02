@@ -98,9 +98,13 @@ impl ProtocolVersion {
     /// and the compositor-to-shell `AcceleratorActivated` message
     /// (org.gnome.Shell's GrabAccelerators for gnome-settings-daemon's
     /// media keys), again last.
+    ///
+    /// `0.16` appends the compositor-to-shell `WindowMenu` message and
+    /// the shell-to-compositor `WindowAction` command (GNOME's window
+    /// menu), again last.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 15,
+        minor: 16,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -272,6 +276,33 @@ pub enum CommandKind {
         /// The grabs, at most [`MAX_ACCELERATORS`].
         accelerators: Vec<Accelerator>,
     },
+    /// One of GNOME's window-menu actions on a window. Unknown windows
+    /// are denied, like every per-window command.
+    WindowAction {
+        /// The window.
+        window: WindowId,
+        /// What to do.
+        action: WindowAction,
+    },
+}
+
+/// GNOME's window-menu actions (windowMenu.js) the compositor carries out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WindowAction {
+    /// Hide (minimize).
+    Minimize,
+    /// Maximize, or Restore when maximized.
+    ToggleMaximize,
+    /// Move with the pointer until a click.
+    Move,
+    /// Resize from the bottom-right corner with the pointer until a click.
+    Resize,
+    /// Move to the workspace on the left.
+    MoveToWorkspaceLeft,
+    /// Move to the workspace on the right.
+    MoveToWorkspaceRight,
+    /// Always on Top, on or off.
+    ToggleAbove,
 }
 
 /// Grabbed accelerators held at once.
@@ -459,6 +490,23 @@ pub enum Message {
         time: u32,
         /// The action mode it fired in (one `MODE_*` bit).
         mode: u32,
+    },
+    /// Compositor-to-shell: a client asked for its window menu (a header
+    /// bar right click); the shell draws GNOME's menu at `x`, `y`
+    /// (logical pixels of the output). Sits last.
+    WindowMenu {
+        /// The window.
+        window: WindowId,
+        /// Where, in logical output pixels.
+        x: i32,
+        y: i32,
+        /// Whether it is maximized (Restore rather than Maximize).
+        maximized: bool,
+        /// Whether it is kept above other windows (Always on Top).
+        above: bool,
+        /// Whether there is a workspace to its left, and to its right.
+        workspace_left: bool,
+        workspace_right: bool,
     },
 }
 
@@ -770,6 +818,7 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
         }
         Message::Hello { .. }
         | Message::AcceleratorActivated { .. }
+        | Message::WindowMenu { .. }
         | Message::Command { .. }
         | Message::CommandResult { .. }
         | Message::Error { .. }
@@ -832,8 +881,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_15() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 15));
+    fn current_version_is_0_16() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 16));
     }
 
     #[test]
@@ -856,7 +905,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 13).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 14).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 15).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 16).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 16).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 17).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }

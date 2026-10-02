@@ -3,6 +3,7 @@
 // Writes OUT/<state>.png and OUT/<state>.json (visible styled actors).
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -222,6 +223,18 @@ export async function run() {
     await Scripting.sleep(500);
     await shot('12c-osd-overdrive');
     await Scripting.sleep(2000);
+
+    // The window menu, as a right click on the focused window's header
+    // bar at (500, 280) opens it (Roost's capture right-clicks there).
+    const focused = global.display.focus_window;
+    if (focused) {
+        Main.wm._windowMenuManager.showWindowMenuForWindow(focused,
+            Meta.WindowMenuType.WM, {x: 500, y: 280, width: 0, height: 0});
+        await Scripting.sleep(600);
+        await shot('13-window-menu');
+        Main.wm._windowMenuManager._manager.activeMenu?.close();
+        await Scripting.sleep(500);
+    }
 
     // The lock screen: the curtain with the clock, then the unlock prompt.
     if (Main.screenShield) {

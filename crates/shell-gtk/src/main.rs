@@ -29,6 +29,7 @@ mod services;
 mod shell_dbus;
 mod switcher;
 mod tray;
+mod window_menu;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -1305,6 +1306,33 @@ fn build(app: &adw::Application) {
         }
     }
 
+    // GNOME's window menu (header-bar right click).
+    let window_menu = {
+        let (shell, notify) = (shell.clone(), notify.clone());
+        window_menu::WindowMenu::new(
+            app.upcast_ref(),
+            Rc::new(move |window, item| {
+                let mut shell = shell.borrow_mut();
+                let Some(control) = shell.control.as_mut() else {
+                    return;
+                };
+                match item {
+                    window_menu::Item::Screenshot => {
+                        // The menu's window is the focused one.
+                        let _ = control.activate_window(window);
+                        take_screenshot(true, notify.clone());
+                    }
+                    window_menu::Item::Action(action) => {
+                        let _ = control.window_action(window, action);
+                    }
+                    window_menu::Item::Close => {
+                        let _ = control.close_window(window);
+                    }
+                }
+            }),
+        )
+    };
+
     // Compositor state: drain the control socket every frame.
     {
         let shell = shell.clone();
@@ -1329,12 +1357,14 @@ fn build(app: &adw::Application) {
             let mut shell = shell.borrow_mut();
             let mut results = Vec::new();
             let mut accelerators = Vec::new();
+            let mut menus = Vec::new();
             if let Some(control) = shell.control.as_mut() {
                 loop {
                     match control.poll() {
                         Ok(Handled::Gap { .. }) => {
                             let _ = control.request_snapshot();
                         }
+                        Ok(Handled::WindowMenu(request)) => menus.push(request),
                         Ok(Handled::Accelerator { action, time, mode }) => {
                             accelerators.push((action, time, mode));
                         }
@@ -1364,6 +1394,9 @@ fn build(app: &adw::Application) {
             lock_ui.sync(locked);
             for (action, time, mode) in accelerators {
                 gnome_shell.accelerator_activated(action, time, mode);
+            }
+            for request in menus {
+                window_menu.open(&request);
             }
             for (id, applied) in results {
                 lock_ui.command_result(id, applied);

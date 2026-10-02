@@ -963,3 +963,51 @@ window.roost-osd .level.after-label {
 .roost-overview-grid flowboxchild {
   padding: 0;
 }
+
+/* GNOME 51's window menu (.popup-menu in the window-menu boxpointer):
+   #36363a, a 1px #424247 edge, 20px corners and 6px of padding; 37px
+   items with 12px corners, focused or hovered at #535359. */
+window.roost-window-menu {
+  background: none;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
+}
+window.roost-window-menu .popup-menu-content {
+  min-width: 220px;
+  padding: 6px;
+  color: #ffffff;
+  background-color: #36363a;
+  border: 1px solid #424247;
+  border-radius: 20px;
+  box-shadow: 0 2px 4px 0 rgba(0, 0, 0, 0.2);
+}
+window.roost-window-menu button.popup-menu-item {
+  min-height: 19px;
+  padding: 9px 12px 9px 6px;
+  border-radius: 12px;
+  background: none;
+  box-shadow: none;
+  color: #ffffff;
+  font-weight: normal;
+  outline: none;
+}
+window.roost-window-menu button.popup-menu-item:hover,
+window.roost-window-menu button.popup-menu-item:focus {
+  background-color: #535359;
+}
+window.roost-window-menu button.popup-menu-item:active {
+  background-color: #58585e;
+}
+window.roost-window-menu button.popup-menu-item:disabled {
+  color: rgba(255, 255, 255, 0.5);
+  filter: none;
+  opacity: 1;
+}
+window.roost-window-menu .popup-separator-menu-item {
+  min-height: 19px;
+  padding: 0 12px;
+}
+window.roost-window-menu .popup-separator-menu-item-separator {
+  min-height: 1px;
+  background-color: rgba(255, 255, 255, 0.1);
+}

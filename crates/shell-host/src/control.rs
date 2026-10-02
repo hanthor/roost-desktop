@@ -125,6 +125,8 @@ pub enum Handled {
         /// Revision now held.
         to_revision: u64,
     },
+    /// A client asked for GNOME's window menu.
+    WindowMenu(WindowMenuRequest),
     /// A grabbed accelerator was pressed (org.gnome.Shell).
     Accelerator {
         /// The grab's action id.
@@ -480,6 +482,20 @@ impl ControlClient {
         Ok(id)
     }
 
+    /// Carry out one of GNOME's window-menu actions. Returns the request id.
+    pub fn window_action(
+        &mut self,
+        window: u64,
+        action: roost_shell_control::WindowAction,
+    ) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::WindowAction { window, action },
+        })?;
+        Ok(id)
+    }
+
     /// Offer the lock screen's password (ext-session-lock prompt). The
     /// compositor verifies it off its loop (PAM or greetd) and answers
     /// `Applied` once the session is unlocked or `Denied` when the
@@ -624,6 +640,23 @@ impl ControlClient {
                     count: self.environment.len(),
                 })
             }
+            Message::WindowMenu {
+                window,
+                x,
+                y,
+                maximized,
+                above,
+                workspace_left,
+                workspace_right,
+            } => Ok(Handled::WindowMenu(WindowMenuRequest {
+                window,
+                x,
+                y,
+                maximized,
+                above,
+                workspace_left,
+                workspace_right,
+            })),
             Message::AcceleratorActivated { action, time, mode } => {
                 // A grabbed key combination: the shell signals its D-Bus
                 // owner. UI state; never touches the model.
@@ -727,6 +760,19 @@ impl ControlClient {
     }
 }
 
+/// A window-menu request: where to draw GNOME's menu and the window's
+/// state for its items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowMenuRequest {
+    pub window: u64,
+    pub x: i32,
+    pub y: i32,
+    pub maximized: bool,
+    pub above: bool,
+    pub workspace_left: bool,
+    pub workspace_right: bool,
+}
+
 /// Short label for unexpected-message diagnostics.
 fn message_label(msg: &Message) -> &'static str {
     match msg {
@@ -742,6 +788,7 @@ fn message_label(msg: &Message) -> &'static str {
         Message::Environment { .. } => "Environment",
         Message::OverviewPreviews { .. } => "OverviewPreviews",
         Message::AcceleratorActivated { .. } => "AcceleratorActivated",
+        Message::WindowMenu { .. } => "WindowMenu",
     }
 }
 

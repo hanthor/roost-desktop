@@ -75,6 +75,11 @@ struct ManagedWindow {
     /// configure and is placed at that size on its first commit, as
     /// Mutter does.
     unplaced: bool,
+    /// Hidden (GNOME's minimize): off the screen and out of focus, still
+    /// in the overview and Alt+Tab; activating it brings it back.
+    minimized: bool,
+    /// Always on Top: stacked above every window without it.
+    above: bool,
 }
 
 /// Compositor-side presentation layout (002 window actions).
@@ -210,6 +215,9 @@ pub struct WindowManager {
     accel_fired: Vec<(u32, u32, u32)>,
     /// Input is going to the session-lock surface.
     lock_input_active: bool,
+    /// Window-menu requests `(window, x, y)` in global logical pixels,
+    /// drained by the runtime for the shell.
+    menu_requests: Vec<(u64, i32, i32)>,
     /// Super held (either side) for workspace keybindings.
     super_held: bool,
     /// Key repeat as last set: rate (keys/s, 0 off) and delay (ms).
@@ -270,6 +278,7 @@ impl WindowManager {
             accel_held: Vec::new(),
             accel_fired: Vec::new(),
             lock_input_active: false,
+            menu_requests: Vec::new(),
             swallowed_button: None,
             focus_awaits_surface: None,
             grab: None,
@@ -380,6 +389,7 @@ impl WindowManager {
             .filter_map(|id| {
                 self.windows
                     .get(&id)
+                    .filter(|w| !w.minimized)
                     .map(|w| (w.surface.clone(), w.geometry))
             })
             .collect()
@@ -584,6 +594,8 @@ impl WindowManager {
                 restore: None,
                 preset: None,
                 unplaced,
+                minimized: false,
+                above: false,
             },
         );
         self.place_transient(surface, id);
@@ -760,6 +772,8 @@ impl WindowManager {
                 restore: None,
                 preset: None,
                 unplaced: false,
+                minimized: false,
+                above: false,
             },
         );
         if let Some(parent) = surface
@@ -959,6 +973,18 @@ impl WindowManager {
                 WindowRequest::Activate => {
                     self.focus(state, Some(id));
                 }
+                WindowRequest::Minimize => {
+                    self.minimize(state, id);
+                }
+                WindowRequest::Menu(x, y) => {
+                    // Relative to the surface (Mutter adds it to the
+                    // buffer origin), not the window geometry: GTK's
+                    // shadow margin is part of it.
+                    if let Some(window) = self.windows.get(&id) {
+                        let loc = crate::popup::surface_origin(&wl, window.geometry.loc);
+                        self.menu_requests.push((id, loc.x + x, loc.y + y));
+                    }
+                }
             }
         }
     }
@@ -1010,12 +1036,17 @@ impl WindowManager {
         let previous = self.model.focused();
         self.model.set_focused(id);
         if let Some(id) = id {
+            // Activating a hidden window brings it back (GNOME).
+            if let Some(window) = self.windows.get_mut(&id) {
+                window.minimized = false;
+            }
             // Floating stacks raise focus to the top; the strip keeps
             // column order independent of focus (niri shape), so focus
             // never reorders in scroll mode.
             if self.mode == SessionMode::Gnome {
                 self.stacking.retain(|other| *other != id);
                 self.stacking.push(id);
+                self.keep_above_on_top();
             }
         }
         let serial = SERIAL_COUNTER.next_serial();
@@ -1692,6 +1723,112 @@ impl WindowManager {
             self.accel_fired.push((action, time, mode));
         }
         true
+    }
+
+    /// GNOME's Hide: take the window off the screen and hand focus to
+    /// the next window down. Returns whether it was hidden.
+    pub fn minimize(&mut self, state: &mut State, id: u64) -> bool {
+        let Some(window) = self.windows.get_mut(&id) else {
+            return false;
+        };
+        if window.minimized {
+            return true;
+        }
+        window.minimized = true;
+        if self.model.focused() == Some(id) {
+            let workspace = self.model.active_workspace();
+            self.focus_topmost(state, workspace);
+        }
+        true
+    }
+
+    /// Always on Top windows stay above every other window: a stable
+    /// partition of the stacking order.
+    fn keep_above_on_top(&mut self) {
+        let windows = &self.windows;
+        let (above, rest): (Vec<u64>, Vec<u64>) = self
+            .stacking
+            .iter()
+            .partition(|id| windows.get(id).is_some_and(|w| w.above));
+        self.stacking = rest.into_iter().chain(above).collect();
+    }
+
+    /// Whether `id` is Always on Top.
+    pub fn is_above(&self, id: u64) -> bool {
+        self.windows.get(&id).is_some_and(|w| w.above)
+    }
+
+    /// Whether `id` is hidden (minimized).
+    pub fn is_minimized(&self, id: u64) -> bool {
+        self.windows.get(&id).is_some_and(|w| w.minimized)
+    }
+
+    /// Whether `id` is maximized.
+    pub fn is_maximized(&self, id: u64) -> bool {
+        self.windows
+            .get(&id)
+            .is_some_and(|w| w.layout == WindowLayout::Maximized)
+    }
+
+    /// Carry out one of GNOME's window-menu actions on `id`.
+    pub fn window_action(
+        &mut self,
+        state: &mut State,
+        id: u64,
+        action: roost_shell_control::WindowAction,
+    ) -> bool {
+        use roost_shell_control::WindowAction;
+        if !self.windows.contains_key(&id) {
+            return false;
+        }
+        match action {
+            WindowAction::Minimize => self.minimize(state, id),
+            WindowAction::ToggleMaximize => {
+                let maximized = self.is_maximized(id);
+                self.set_maximized(state, id, !maximized)
+            }
+            WindowAction::Move => {
+                self.focus(state, Some(id));
+                self.begin_move(state, id);
+                true
+            }
+            WindowAction::Resize => {
+                self.focus(state, Some(id));
+                // xdg_toplevel resize edge bottom_right.
+                self.begin_resize(id, 10);
+                true
+            }
+            WindowAction::ToggleAbove => {
+                if let Some(window) = self.windows.get_mut(&id) {
+                    window.above = !window.above;
+                }
+                self.keep_above_on_top();
+                true
+            }
+            WindowAction::MoveToWorkspaceLeft | WindowAction::MoveToWorkspaceRight => {
+                let Some(current) = self.model.window(id).map(|e| e.workspace) else {
+                    return false;
+                };
+                let target = if action == WindowAction::MoveToWorkspaceLeft {
+                    current.saturating_sub(1)
+                } else {
+                    current.saturating_add(1)
+                };
+                // Mutter moves the window and leaves the view where it is.
+                target >= 1 && self.move_to_workspace(state, id, target)
+            }
+        }
+    }
+
+    /// Whether the window has a workspace to its left (and always one
+    /// to its right: GNOME's workspaces are dynamic).
+    pub fn workspace_left_of(&self, id: u64) -> bool {
+        self.model.window(id).is_some_and(|e| e.workspace > 1)
+    }
+
+    /// Window-menu requests since the last call: `(window, x, y)`.
+    pub fn take_menu_requests(&mut self) -> Vec<(u64, i32, i32)> {
+        std::mem::take(&mut self.menu_requests)
     }
 
     /// Replace the accelerator grabs (org.gnome.Shell GrabAccelerators).
@@ -2433,6 +2570,7 @@ impl WindowManager {
             self.model
                 .window(*id)
                 .is_some_and(|entry| entry.workspace == workspace)
+                && self.windows.get(id).is_some_and(|w| !w.minimized)
         });
         self.apply_focus(state, topmost);
     }
@@ -2614,6 +2752,8 @@ pub const T_KEYCODE: u32 = 20;
 /// consumed in scroll mode; in gnome mode the press reaches clients
 /// exactly as before (no R binding exists today).
 pub const R_KEYCODE: u32 = 19;
+/// evdev KEY_H: Super+H hides the focused window (GNOME's minimize).
+pub const H_KEYCODE: u32 = 35;
 /// Top inset of the maximized/tiled work area: the shell panel strip
 /// (matches shell-host `PANEL_HEIGHT` and the Activities-strip
 /// trigger height above).
@@ -2996,7 +3136,12 @@ impl WindowManager {
     /// that half, repeat toggles back). Those presses are consumed,
     /// everything else — modifiers included — still reaches clients.
     fn on_workspace_key(&mut self, state: &mut State, keycode: u32, pressed: bool, time: u32) {
-        if pressed && self.super_held && self.shift_held && keycode == T_KEYCODE {
+        if pressed && self.super_held && !self.shift_held && keycode == H_KEYCODE {
+            // GNOME's minimize binding: Super+H hides the focused window.
+            if let Some(id) = self.model.focused() {
+                self.minimize(state, id);
+            }
+        } else if pressed && self.super_held && self.shift_held && keycode == T_KEYCODE {
             // Whole-session mode toggle (scrollable-tiling spec):
             // Super+Shift+T flips floating/strip and re-lays out every
             // window in place. Consumed like the other Super chords;
