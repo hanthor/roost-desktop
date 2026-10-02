@@ -1195,3 +1195,54 @@ window.roost-folder-dialog button.folder-tile {
 window.roost-folder-dialog button.folder-tile:hover {
   background-color: #444447;
 }
+
+/* GNOME 51's polkit dialog (.prompt-dialog in the modal style shared
+   with the end-session dialog): a 96px avatar disc, the user's name
+   (Administrator in amber for root), a 20em password entry, and the
+   amber error label. */
+.roost-polkit .polkit-user-icon {
+  -gtk-icon-size: 60px;
+  padding: 18px;
+  border-radius: 999px;
+  background-color: rgba(255, 255, 255, 0.13);
+  color: #ffffff;
+}
+.roost-polkit .polkit-dialog-user-layout {
+  margin-bottom: 6px;
+}
+.roost-polkit .polkit-dialog-user-root-label {
+  color: #cd9309;
+}
+.roost-polkit entry.prompt-dialog-password-entry {
+  min-width: 275px;
+  min-height: 19px;
+  padding: 12px 9px;
+  border-radius: 8px;
+  background-color: #404045;
+  color: rgba(250, 250, 251, 0.7);
+  box-shadow: none;
+  outline: none;
+}
+.roost-polkit entry.prompt-dialog-password-entry:focus-within {
+  color: #fafafb;
+  box-shadow: inset 0 0 0 2px rgba(121, 160, 208, 0.8);
+}
+.roost-polkit .prompt-dialog-error-label,
+.roost-polkit .prompt-dialog-info-label {
+  padding: 9px;
+  border-radius: 8px;
+  margin: 4px 0;
+}
+.roost-polkit .prompt-dialog-error-label {
+  color: #cd9309;
+  background-color: rgba(205, 147, 9, 0.1);
+}
+.roost-polkit .prompt-dialog-info-label {
+  color: #ffffff;
+  background-color: rgba(255, 255, 255, 0.1);
+}
+.roost-polkit .modal-dialog-button:disabled {
+  color: rgba(255, 255, 255, 0.5);
+  filter: none;
+  opacity: 1;
+}
