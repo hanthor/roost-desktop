@@ -191,12 +191,24 @@ echo "roost-scroll-proof: shot 01-float.png"
 # Whole-session toggle into the strip.
 # Deterministic wait (docs/development.md timing rule): a busy runner
 # with Chromium starting can take well over a fixed sleep to apply it.
-xdotool windowfocus --sync "$WID"
-xdotool key Super_L+Shift+t
-for _ in $(seq 1 40); do
-    grep -q "session mode now scroll" "$LOG" && break
-    sleep 0.5
-done
+# A key can be lost while the nested window is still settling its X
+# focus: with no mode line after 10 s, press once more (a second press
+# only after silence, so a slow first one is not undone).
+toggle_mode() {
+    want="$1"
+    xdotool windowfocus --sync "$WID"
+    xdotool key Super_L+Shift+t
+    for i in $(seq 1 40); do
+        [ "$(grep -c "session mode now $want" "$LOG")" -ge "$2" ] && return 0
+        if [ "$i" = 20 ]; then
+            xdotool windowfocus --sync "$WID"
+            xdotool key Super_L+Shift+t
+        fi
+        sleep 0.5
+    done
+    return 1
+}
+toggle_mode scroll 1 || true
 if ! grep -q "session mode now scroll" "$LOG"; then
     echo "roost-scroll-proof: no scroll mode line in nested log" >&2
     tail -30 "$LOG" >&2 || true
@@ -229,8 +241,16 @@ scrot "$ARTIFACTS/04-wheel.png" >/dev/null
 echo "roost-scroll-proof: shot 04-wheel.png"
 
 # Toggle back to floating.
-xdotool key Super_L+Shift+t
-sleep 3
+toggle_mode gnome 1 || true
+# Let the floating layout repaint before the shot: wait (bounded) for
+# the screen to leave the strip picture, then settle.
+for _ in $(seq 1 20); do
+    scrot -o "$ARTIFACTS/.back-probe.png" >/dev/null
+    cmp -s "$ARTIFACTS/.back-probe.png" "$ARTIFACTS/04-wheel.png" || break
+    sleep 0.5
+done
+rm -f "$ARTIFACTS/.back-probe.png"
+sleep 1
 if ! grep -q "session mode now gnome" "$LOG"; then
     echo "roost-scroll-proof: no gnome mode line in nested log" >&2
     tail -30 "$LOG" >&2 || true
