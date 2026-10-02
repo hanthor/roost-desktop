@@ -125,6 +125,13 @@ pub enum Handled {
         /// Revision now held.
         to_revision: u64,
     },
+    /// A workspace key switched workspaces: show GNOME's popup.
+    WorkspacePopup {
+        /// The active workspace's position.
+        index: u32,
+        /// How many workspaces there are.
+        count: u32,
+    },
     /// A client asked for GNOME's window menu.
     WindowMenu(WindowMenuRequest),
     /// A grabbed accelerator was pressed (org.gnome.Shell).
@@ -672,6 +679,9 @@ impl ControlClient {
                 workspace_left,
                 workspace_right,
             })),
+            Message::WorkspacePopup { index, count } => {
+                Ok(Handled::WorkspacePopup { index, count })
+            }
             Message::AcceleratorActivated { action, time, mode } => {
                 // A grabbed key combination: the shell signals its D-Bus
                 // owner. UI state; never touches the model.
@@ -805,6 +815,7 @@ fn message_label(msg: &Message) -> &'static str {
         Message::OverviewPreviews { .. } => "OverviewPreviews",
         Message::AcceleratorActivated { .. } => "AcceleratorActivated",
         Message::WindowMenu { .. } => "WindowMenu",
+        Message::WorkspacePopup { .. } => "WorkspacePopup",
     }
 }
 

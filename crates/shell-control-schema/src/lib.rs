@@ -102,9 +102,12 @@ impl ProtocolVersion {
     /// `0.16` appends the compositor-to-shell `WindowMenu` message and
     /// the shell-to-compositor `WindowAction` command (GNOME's window
     /// menu), again last.
+    ///
+    /// `0.17` appends the compositor-to-shell `WorkspacePopup` message
+    /// (GNOME's workspace switcher popup), again last.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 16,
+        minor: 17,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -522,6 +525,20 @@ pub enum Message {
         workspace_left: bool,
         workspace_right: bool,
     },
+    /// Compositor-to-shell: a workspace key switched workspaces outside
+    /// the overview; the shell shows GNOME's switcher popup. Sits last.
+    WorkspacePopup {
+        /// The active workspace's position.
+        index: u32,
+        /// How many workspaces there are (GNOME's dynamic count).
+        count: u32,
+    },
+}
+
+/// GNOME's dynamic workspace count: one empty workspace always follows
+/// the last occupied one, and the active one counts too.
+pub fn dynamic_workspace_count(max_occupied: Option<u32>, active: u32) -> u32 {
+    max_occupied.map_or(1, |m| m + 2).max(active + 1)
 }
 
 /// One window preview in the overview, in output logical pixels.
@@ -833,6 +850,7 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
         Message::Hello { .. }
         | Message::AcceleratorActivated { .. }
         | Message::WindowMenu { .. }
+        | Message::WorkspacePopup { .. }
         | Message::Command { .. }
         | Message::CommandResult { .. }
         | Message::Error { .. }
@@ -895,8 +913,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_16() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 16));
+    fn current_version_is_0_17() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 17));
     }
 
     #[test]
@@ -920,9 +938,18 @@ mod tests {
         assert!(ProtocolVersion::new(0, 14).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 15).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 16).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 17).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 17).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 18).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
+    }
+
+    #[test]
+    fn dynamic_workspaces_end_with_one_empty() {
+        assert_eq!(dynamic_workspace_count(None, 0), 1);
+        assert_eq!(dynamic_workspace_count(Some(0), 0), 2);
+        assert_eq!(dynamic_workspace_count(Some(0), 1), 2);
+        assert_eq!(dynamic_workspace_count(Some(2), 0), 4);
     }
 
     #[test]

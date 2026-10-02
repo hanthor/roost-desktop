@@ -1111,3 +1111,15 @@ window.roost-screenshot-ui button.screenshot-ui-close-button {
 window.roost-screenshot-ui button.screenshot-ui-close-button image {
   -gtk-icon-size: 24px;
 }
+
+/* GNOME 51's workspace switcher popup (.workspace-switcher): an OSD pill,
+   12px by 18px of padding, the dots drawn in 32px slots. */
+window.roost-workspace-popup {
+  background: none;
+}
+window.roost-workspace-popup .workspace-switcher {
+  background-color: #2e2e33;
+  border: 1px solid rgba(255, 255, 255, 0.02);
+  border-radius: 999px;
+  padding: 12px 18px;
+}

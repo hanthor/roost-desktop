@@ -224,6 +224,8 @@ pub struct WindowManager {
     last_active_workspace: Option<u32>,
     /// The switcher was opened with Super+Tab (Super's release commits).
     switcher_by_super: bool,
+    /// Workspace-switcher popups `(index, count)` for the shell.
+    workspace_popups: Vec<(u32, u32)>,
     /// Super held (either side) for workspace keybindings.
     super_held: bool,
     /// Key repeat as last set: rate (keys/s, 0 off) and delay (ms).
@@ -287,6 +289,7 @@ impl WindowManager {
             menu_requests: Vec::new(),
             last_active_workspace: None,
             switcher_by_super: false,
+            workspace_popups: Vec::new(),
             swallowed_button: None,
             focus_awaits_surface: None,
             grab: None,
@@ -1873,6 +1876,21 @@ impl WindowManager {
         self.model.window(id).is_some_and(|e| e.workspace > 0)
     }
 
+    /// GNOME's popup for the active workspace: `(index, count)`.
+    pub fn workspace_popup(&self) -> (u32, u32) {
+        let active = self.model.active_workspace();
+        let occupied = self.model.windows().map(|w| w.workspace).max();
+        (
+            active,
+            roost_shell_control::dynamic_workspace_count(occupied, active),
+        )
+    }
+
+    /// Workspace-switcher popups since the last call.
+    pub fn take_workspace_popups(&mut self) -> Vec<(u32, u32)> {
+        std::mem::take(&mut self.workspace_popups)
+    }
+
     /// Window-menu requests since the last call: `(window, x, y)`.
     pub fn take_menu_requests(&mut self) -> Vec<(u64, i32, i32)> {
         std::mem::take(&mut self.menu_requests)
@@ -3236,6 +3254,10 @@ impl WindowManager {
                     "roost-compositor: workspace now {}",
                     self.model.active_workspace()
                 );
+                // GNOME's switcher popup, outside the overview.
+                if !self.overview_open {
+                    self.workspace_popups.push(self.workspace_popup());
+                }
             }
         } else if pressed && self.super_held && Self::is_arrow(keycode) {
             if self.mode == SessionMode::Scroll

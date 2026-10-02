@@ -31,6 +31,7 @@ mod shell_dbus;
 mod switcher;
 mod tray;
 mod window_menu;
+mod ws_popup;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -1077,6 +1078,9 @@ fn build(app: &adw::Application) {
         )
     };
 
+    // GNOME's workspace switcher popup.
+    let workspace_popup = ws_popup::WorkspacePopup::new(app.upcast_ref());
+
     // GNOME Shell's own keybindings (org.gnome.shell.keybindings).
     {
         let run: Rc<dyn Fn(keybindings::Action)> = {
@@ -1088,6 +1092,7 @@ fn build(app: &adw::Application) {
             );
             let (apps, notify, osd_ui) = (apps.clone(), notify.clone(), osd_ui.clone());
             let screenshot_ui = screenshot_ui.clone();
+            let workspace_popup_keys = workspace_popup.clone();
             Rc::new(move |action| {
                 use keybindings::Action;
                 let toggle = |button: &gtk::MenuButton| {
@@ -1197,6 +1202,26 @@ fn build(app: &adw::Application) {
                             );
                         }
                         let _ = control.focus_workspace(workspace);
+                        // GNOME's switcher popup, outside the overview.
+                        if !control.model().is_overview_open() {
+                            let moved = matches!(action, Action::MoveToWorkspace(_));
+                            let occupied = control
+                                .model()
+                                .windows()
+                                .iter()
+                                .map(|w| {
+                                    if moved && w.active {
+                                        workspace
+                                    } else {
+                                        w.workspace
+                                    }
+                                })
+                                .max();
+                            workspace_popup_keys.display(
+                                workspace,
+                                roost_shell_control::dynamic_workspace_count(occupied, workspace),
+                            );
+                        }
                     }
                     Action::BrightnessUp | Action::BrightnessDown => {
                         let up = action == Action::BrightnessUp;
@@ -1427,6 +1452,7 @@ fn build(app: &adw::Application) {
             let mut results = Vec::new();
             let mut accelerators = Vec::new();
             let mut menus = Vec::new();
+            let mut popups = Vec::new();
             if let Some(control) = shell.control.as_mut() {
                 loop {
                     match control.poll() {
@@ -1434,6 +1460,9 @@ fn build(app: &adw::Application) {
                             let _ = control.request_snapshot();
                         }
                         Ok(Handled::WindowMenu(request)) => menus.push(request),
+                        Ok(Handled::WorkspacePopup { index, count }) => {
+                            popups.push((index, count));
+                        }
                         Ok(Handled::Accelerator { action, time, mode }) => {
                             accelerators.push((action, time, mode));
                         }
@@ -1466,6 +1495,9 @@ fn build(app: &adw::Application) {
             }
             for request in menus {
                 window_menu.open(&request);
+            }
+            for (index, count) in popups {
+                workspace_popup.display(index, count);
             }
             for (id, applied) in results {
                 lock_ui.command_result(id, applied);

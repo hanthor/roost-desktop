@@ -79,6 +79,7 @@
 #   G-WINDOW-MENU  GNOME's window menu: Always on Top, Hide, and the
 #                  overview brings the hidden window back
 #   G-WM-KEYS      Alt+Space, Alt+F10, Super+End/Home (wm keybindings)
+#   G-WS-POPUP     a workspace key shows the workspace switcher popup
 #   G-SUSPEND-LOCK Suspend asks logind, and its PrepareForSleep locks
 #                  the session before sleep
 #   G-UNLOCK       GNOME's lock screen: a wrong password is refused and
@@ -1007,6 +1008,19 @@ cstate ".active_workspace != $first_ws" "last workspace" || fail G-WM-KEYS "Supe
 xdotool key super+Home
 cstate ".active_workspace == $first_ws" "first workspace" || fail G-WM-KEYS "Super+Home did not come back"
 pass G-WM-KEYS "Alt+Space, Alt+F10 and Super+End/Home do what GNOME's window-manager keys do"
+
+# GNOME's workspace switcher popup: a dark pill above the bottom edge
+# right after a workspace key.
+xdotool key super+Page_Down
+sleep 0.3
+scrot "$ARTIFACTS/24f-workspace-popup.png" >/dev/null
+# shellcheck disable=SC2046
+set -- $(px "$ARTIFACTS/24f-workspace-popup.png" $((WIDTH / 2 - 20)) $((HEIGHT - 59 - 28)))
+xdotool key super+Page_Up
+[ "${1:-0}" -lt 70 ] && [ "${2:-0}" -lt 70 ] && [ "${3:-0}" -lt 75 ] ||
+    fail G-WS-POPUP "no switcher pill above the bottom edge (pixel ${1:-?} ${2:-?} ${3:-?})"
+pass G-WS-POPUP "a workspace key shows GNOME's workspace switcher popup"
+sleep 1
 
 # Screenshots (#61): GNOME Shell's interface, as the portal calls it.
 SHOT="$ARTIFACTS/screenshot.png"

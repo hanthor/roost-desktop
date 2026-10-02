@@ -236,6 +236,18 @@ export async function run() {
         await Scripting.sleep(500);
     }
 
+    // The workspace switcher popup, as Super+Page_Down shows it: to the
+    // empty second workspace and back.
+    const WSP = await import('resource:///org/gnome/shell/ui/workspaceSwitcherPopup.js');
+    const wm = global.workspace_manager;
+    Main.wm.actionMoveWorkspace(wm.get_workspace_by_index(1));
+    const popup = new WSP.WorkspaceSwitcherPopup();
+    popup.display(1);
+    await Scripting.sleep(350);
+    await shotNow('15-workspace-popup');
+    Main.wm.actionMoveWorkspace(wm.get_workspace_by_index(0));
+    await Scripting.sleep(1200);
+
     // The screenshot UI (Print): the frozen screen, dimmed outside the
     // selection, with its panel.
     await Main.screenshotUI.open();
