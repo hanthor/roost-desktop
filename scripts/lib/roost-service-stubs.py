@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 """System-service stubs for quick-settings proofs (#55).
 
-Usage: roost-service-stubs.py BACKLIGHT_DIR
+Usage: roost-service-stubs.py BACKLIGHT_DIR [POWER_LOG]
 
 Serves, on the bus at $DBUS_SYSTEM_BUS_ADDRESS (a private bus the proof
 starts), just enough of each daemon behind GNOME 51's quick settings:
@@ -11,7 +11,9 @@ starts), just enough of each daemon behind GNOME 51's quick settings:
 - BlueZ: ObjectManager plus /org/bluez/hci0 Adapter1.Powered (rw).
 - power-profiles-daemon: ActiveProfile (rw), UPower name.
 - logind: session/auto SetBrightness, which writes BACKLIGHT_DIR's
-  brightness file the way the kernel would.
+  brightness file the way the kernel would, and Terminate; the Manager's
+  Suspend, Reboot and PowerOff. Power calls are appended to POWER_LOG,
+  and Suspend emits PrepareForSleep(true) first, as logind does.
 
 Writes emit PropertiesChanged, so the shell sees its own changes the
 way it sees the real daemons'. The proof reads state back with gdbus.
@@ -22,6 +24,7 @@ import sys
 from gi.repository import Gio, GLib
 
 BACKLIGHT = sys.argv[1]
+POWER_LOG = sys.argv[2] if len(sys.argv) > 2 else None
 
 XML = """
 <node>
@@ -49,6 +52,13 @@ XML = """
       <arg type="s" direction="in"/><arg type="s" direction="in"/>
       <arg type="u" direction="in"/>
     </method>
+    <method name="Terminate"/>
+  </interface>
+  <interface name="org.freedesktop.login1.Manager">
+    <method name="Suspend"><arg type="b" direction="in"/></method>
+    <method name="Reboot"><arg type="b" direction="in"/></method>
+    <method name="PowerOff"><arg type="b" direction="in"/></method>
+    <signal name="PrepareForSleep"><arg type="b"/></signal>
   </interface>
 </node>
 """
@@ -86,6 +96,14 @@ def method_call(c, sender, path, iface, method, params, invocation):
         props = state[(HCI, "org.bluez.Adapter1")]
         invocation.return_value(GLib.Variant(
             "(a{oa{sa{sv}}})", ({HCI: {"org.bluez.Adapter1": props}},)))
+    elif method in ("Suspend", "Reboot", "PowerOff", "Terminate"):
+        if method == "Suspend":
+            c.emit_signal(None, "/org/freedesktop/login1", "org.freedesktop.login1.Manager",
+                          "PrepareForSleep", GLib.Variant("(b)", (True,)))
+        if POWER_LOG:
+            with open(POWER_LOG, "a") as fh:
+                fh.write(method + "\n")
+        invocation.return_value(None)
     elif method == "SetBrightness":
         _, _, value = params.unpack()
         with open(os.path.join(BACKLIGHT, "brightness"), "w") as fh:
@@ -119,6 +137,7 @@ for path, iface in [
     (HCI, "org.bluez.Adapter1"),
     (PPD, "org.freedesktop.UPower.PowerProfiles"),
     (SESSION, "org.freedesktop.login1.Session"),
+    ("/org/freedesktop/login1", "org.freedesktop.login1.Manager"),
 ]:
     serve(path, iface)
 

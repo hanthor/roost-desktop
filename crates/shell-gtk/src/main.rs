@@ -16,6 +16,7 @@
 mod logic;
 mod notify;
 mod overview;
+mod power;
 mod providers;
 mod services;
 mod switcher;
@@ -239,6 +240,7 @@ fn qs_round(icon: &str, label: &str) -> gtk::Button {
 fn quick_settings_popover(
     shell: &Rc<RefCell<Shell>>,
     notify: &Rc<notify::NotifyUi>,
+    power_ui: &Rc<power::PowerUi>,
 ) -> gtk::Popover {
     let popover = gtk::Popover::new();
     popover.add_css_class("roost-shell-popover");
@@ -279,6 +281,27 @@ fn quick_settings_popover(
                 }
             }
         });
+    }
+
+    // Power: GNOME's in-panel menu under the top row.
+    let power_menu = gtk::Revealer::builder()
+        .transition_type(gtk::RevealerTransitionType::SlideDown)
+        .build();
+    {
+        let (popover, revealer) = (popover.clone(), power_menu.clone());
+        let close: Rc<dyn Fn()> = Rc::new(move || {
+            revealer.set_reveal_child(false);
+            popover.popdown();
+        });
+        power_menu.set_child(Some(&power_ui.menu(close)));
+    }
+    {
+        let revealer = power_menu.clone();
+        power.connect_clicked(move |_| revealer.set_reveal_child(!revealer.reveals_child()));
+    }
+    {
+        let revealer = power_menu.clone();
+        popover.connect_closed(move |_| revealer.set_reveal_child(false));
     }
 
     // Volume: mute button plus slider (PipeWire via wpctl).
@@ -391,6 +414,7 @@ fn quick_settings_popover(
     }
 
     col.append(&top);
+    col.append(&power_menu);
     col.append(&volume_row);
     col.append(&brightness_row);
     col.append(&grid);
@@ -457,7 +481,18 @@ fn build(app: &adw::Application) {
     ] {
         indicators.append(&gtk::Image::from_icon_name(icon));
     }
-    let qs = quick_settings_popover(&shell, &notify);
+    let power_ui = {
+        let shell = shell.clone();
+        power::PowerUi::new(
+            app.upcast_ref(),
+            Rc::new(move || {
+                if let Some(control) = shell.borrow_mut().control.as_mut() {
+                    let _ = control.lock();
+                }
+            }),
+        )
+    };
+    let qs = quick_settings_popover(&shell, &notify, &power_ui);
     let system = panel_menu_button(&indicators, "System", &qs);
 
     let bar = gtk::CenterBox::new();

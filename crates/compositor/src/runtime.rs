@@ -221,6 +221,10 @@ mod xwayland_wanted_tests {
     }
 }
 
+/// Tells the shell whether it runs nested (`nested`) or as the hardware
+/// session (`hardware`).
+pub const SESSION_KIND_ENV: &str = "ROOST_SESSION_KIND";
+
 /// Shell binaries in preference order: the GTK4/libadwaita shell
 /// (ADR 0006, the default), then the legacy software-drawn shell.
 pub const SHELL_BINARIES: [&str; 2] = ["roost-shell-gtk", "roost-shell-host"];
@@ -520,7 +524,7 @@ impl Runtime {
         let control = ControlHub::bind(control_path.clone(), tokens, crate::SEAT_NAME)
             .map_err(|e| RuntimeError::Socket(e.to_string()))?;
         let shell_policy = RestartPolicy::default();
-        let shell = ShellDriver::new(
+        let mut shell = ShellDriver::new(
             shell_policy,
             resolve_shell_bin(session.shell_bin.as_deref()),
             session.socket_name.clone(),
@@ -557,6 +561,20 @@ impl Runtime {
                 }
             })
             .map_err(|e| RuntimeError::Loop(e.to_string()))?;
+
+        // The shell offers power actions only on a hardware session: in
+        // the nested preview, logind's session is the host's, so Log Out
+        // must end only this compositor and Power Off must not exist.
+        // An explicit ROOST_SESSION_KIND wins (proofs, debugging).
+        if std::env::var_os(SESSION_KIND_ENV).is_none() {
+            shell.set_env(
+                SESSION_KIND_ENV,
+                match backend {
+                    Backend::Winit(_) => "nested",
+                    Backend::Drm(_) => "hardware",
+                },
+            );
+        }
 
         // linux-dmabuf lists exactly what this renderer imports (#89).
         let mut backend = backend;

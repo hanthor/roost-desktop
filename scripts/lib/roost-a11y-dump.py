@@ -40,7 +40,9 @@ def walk(acc, depth, out):
 
 def press(acc, target):
     try:
-        if acc.name == target and acc.getState().contains(pyatspi.STATE_SHOWING):
+        # Labels can expose a do-nothing action: press the control.
+        if (acc.name == target and acc.getRoleName() != "label"
+                and acc.getState().contains(pyatspi.STATE_SHOWING)):
             action = acc.queryAction()
             if action.nActions > 0:
                 action.doAction(0)

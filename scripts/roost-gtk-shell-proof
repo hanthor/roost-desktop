@@ -42,6 +42,13 @@
 #                  overview search gets DISPLAY and maps a window (#59)
 #   G-SETTINGS-IDLE GNOME's idle-delay and lock-enabled keys set the
 #                  compositor's idle lock live (#63)
+#   G-POWER-MENU   the power button opens GNOME's menu (Suspend,
+#                  Restart…, Power Off…, Log Out…) (#62)
+#   G-POWER-DIALOG Power Off… opens the 60 s end-session dialog, and
+#                  Cancel closes it with nothing done
+#   G-POWER-OFF    confirming the dialog asks logind to power off
+#   G-SUSPEND-LOCK Suspend asks logind, and its PrepareForSleep locks
+#                  the session before sleep
 #   A11Y-GOLDEN    the panel, calendar, quick settings and overview
 #                  accessible trees match tests/a11y/ (#71)
 #   G-SHELL-STABLE the shell never exits or restarts during the journey
@@ -211,6 +218,10 @@ for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/stubs.log" 2>/dev/null && bre
 "$PY" "$ROOT/scripts/lib/roost-search-provider-stub.py" "$SEARCH_MARKER" >"$ARTIFACTS/provider.log" 2>&1 &
 PROVIDER_PID=$!
 for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/provider.log" 2>/dev/null && break; sleep 0.5; done
+
+# The full power menu needs a hardware session; logind is the stub.
+ROOST_SESSION_KIND=hardware
+export ROOST_SESSION_KIND
 
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk
 "$ROOT/target/debug/roost-compositor" --backend winit --socket "roost-gtk-proof-$$" \
@@ -687,6 +698,59 @@ gsettings set org.gnome.desktop.session idle-delay 300
 cstate '.idle_timeout_ms == 300000' "idle 300" ||
     fail G-SETTINGS-IDLE "the idle lock did not follow back to 300 s"
 pass G-SETTINGS-IDLE "GNOME's idle-delay and lock-enabled set the idle lock live"
+
+# Power (#62), against the logind stub (restarted: G-QS-ABSENT stopped
+# it). The proof runs the shell as a hardware session for the full menu.
+POWER_LOG="$ARTIFACTS/power-log"
+: >"$POWER_LOG"
+"$PY" "$ROOT/scripts/lib/roost-service-stubs.py" "$BACKLIGHT" "$POWER_LOG" >>"$ARTIFACTS/stubs.log" 2>&1 &
+STUBS_PID=$!
+sleep 2
+open_power_menu() {
+    open_qs
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-$1.json" 20 --press "Power Off"
+}
+open_power_menu power-menu || fail G-POWER-MENU "could not press the power button"
+scrot "$ARTIFACTS/21-power-menu.png" >/dev/null
+for label in "Suspend" "Restart…" "Power Off…" "Log Out…"; do
+    showing "$ARTIFACTS/a11y-power-menu.json" "$label" ||
+        fail G-POWER-MENU "no '$label' row in the power menu"
+done
+pass G-POWER-MENU "the power button opens Suspend, Restart…, Power Off…, Log Out…"
+
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-power-dialog.json" 20 \
+    --press "Power Off…" || fail G-POWER-DIALOG "could not press Power Off…"
+scrot "$ARTIFACTS/22-end-session.png" >/dev/null
+jq -e 'any(.[]; .showing and (.name | test("will power off automatically in [0-9]+ seconds")))' \
+    "$ARTIFACTS/a11y-power-dialog.json" >/dev/null ||
+    fail G-POWER-DIALOG "no end-session countdown showing"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-power-cancel.json" 20 \
+    --press "Cancel" || fail G-POWER-DIALOG "could not press Cancel"
+if jq -e 'any(.[]; .showing and (.name | test("automatically in")))' "$ARTIFACTS/a11y-power-cancel.json" >/dev/null; then
+    fail G-POWER-DIALOG "the dialog stayed open after Cancel"
+fi
+[ ! -s "$POWER_LOG" ] || fail G-POWER-DIALOG "Cancel still called logind: $(cat "$POWER_LOG")"
+pass G-POWER-DIALOG "Power Off… opens the countdown dialog and Cancel does nothing"
+
+open_power_menu power-menu-2 || fail G-POWER-OFF "could not reopen the power menu"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-power-dialog-2.json" 20 \
+    --press "Power Off…" || fail G-POWER-OFF "could not press Power Off…"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-power-confirm.json" 20 \
+    --press "Power Off" || fail G-POWER-OFF "could not confirm"
+end=$(($(date +%s) + 10))
+until grep -q PowerOff "$POWER_LOG" 2>/dev/null || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+grep -q PowerOff "$POWER_LOG" || fail G-POWER-OFF "logind never got PowerOff"
+pass G-POWER-OFF "confirming the dialog asks logind to power off"
+
+open_power_menu power-menu-3 || fail G-SUSPEND-LOCK "could not reopen the power menu"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-suspend.json" 20 \
+    --press "Suspend" || fail G-SUSPEND-LOCK "could not press Suspend"
+end=$(($(date +%s) + 10))
+until grep -q Suspend "$POWER_LOG" 2>/dev/null || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+grep -q Suspend "$POWER_LOG" || fail G-SUSPEND-LOCK "logind never got Suspend"
+cstate '.locked' "locked" 10 || fail G-SUSPEND-LOCK "PrepareForSleep did not lock the session"
+scrot "$ARTIFACTS/23-locked-after-suspend.png" >/dev/null
+pass G-SUSPEND-LOCK "Suspend asks logind, and PrepareForSleep locks the session"
 
 "$ROOT/scripts/roost-a11y-golden" check "$ARTIFACTS" ||
     fail A11Y-GOLDEN "accessible trees differ from tests/a11y/ (see above)"
