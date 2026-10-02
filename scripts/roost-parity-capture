@@ -64,10 +64,23 @@ if [ -d "$REF/share" ]; then
     fc-cache "$XDG_DATA_HOME/fonts" >/dev/null 2>&1 || true
     cp -r "$REF/share/icons" "$WORK/gnome51/"
     mkdir -p "$XDG_DATA_HOME/applications"
+    # GNOME's installed apps, not the host's: each host entry is hidden
+    # by a Hidden copy in the user directory (the desktop-entry spec's
+    # override), then GNOME's entries and folder names go in.
+    for dir in $(printf '%s' "${XDG_DATA_DIRS:-/usr/local/share:/usr/share}" | tr ':' ' '); do
+        for entry in "$dir"/applications/*.desktop; do
+            [ -f "$entry" ] || continue
+            printf '[Desktop Entry]\nType=Application\nName=Hidden\nHidden=true\n' \
+                >"$XDG_DATA_HOME/applications/$(basename "$entry")"
+        done
+    done
     cp "$REF"/share/applications/*.desktop "$XDG_DATA_HOME/applications/" 2>/dev/null || true
-    # GNOME Shell's own keys (dash favorites) where the host lacks them.
-    if [ -d "$REF/share/glib-2.0/schemas" ] &&
-        ! gsettings list-schemas | grep -qx org.gnome.shell; then
+    if [ -d "$REF/share/desktop-directories" ]; then
+        cp -r "$REF/share/desktop-directories" "$XDG_DATA_HOME/"
+    fi
+    # GNOME 51's schemas ahead of the host's: GNOME Shell's keys (dash
+    # favorites) and its app folders.
+    if [ -d "$REF/share/glib-2.0/schemas" ]; then
         mkdir -p "$WORK/schemas"
         cp /usr/share/glib-2.0/schemas/*.xml /usr/share/glib-2.0/schemas/*.override \
             "$REF"/share/glib-2.0/schemas/*.xml "$WORK/schemas/" 2>/dev/null || true
@@ -77,6 +90,10 @@ if [ -d "$REF/share" ]; then
     XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}:$WORK/gnome51"
     export XDG_DATA_DIRS
 fi
+# GNOME's reference runs as a GNOME session; so does this one, so
+# OnlyShowIn and NotShowIn decide the same way.
+XDG_CURRENT_DESKTOP=GNOME
+export XDG_CURRENT_DESKTOP
 # The same services GNOME's headless reference has: power profiles and
 # logind, no network or Bluetooth daemons, no backlight (a virtual
 # monitor has none) and no audio server.

@@ -510,12 +510,16 @@ impl OverviewUi {
         flow.set_halign(gtk::Align::Center);
         flow.set_valign(gtk::Align::Start);
         flow.set_margin_top(24);
+        // All eight columns even when fewer apps fill them: GNOME's grid
+        // starts at the same column however many apps there are.
+        flow.set_size_request(8 * 113 + 7 * 12, -1);
         flow.add_css_class("icon-grid");
         // GNOME's app-folders: folders and loose apps share one
         // alphabetical grid; a folder opens its apps in a popover.
         let apps = me.apps.get();
+        crate::folders::ensure_defaults(apps.apps());
         let folders = crate::folders::load();
-        let (filled, loose) = crate::folders::arrange(&folders, apps.apps());
+        let (filled, loose) = crate::folders::arrange(&folders, apps.apps(), &me.favorites);
         enum Item<'a> {
             Folder(crate::folders::Folder, Vec<&'a AppEntry>),
             App(&'a AppEntry),
@@ -548,15 +552,25 @@ impl OverviewUi {
                     flow.insert(&launch_button(entry, 64, me.actions.clone()), -1);
                 }
                 Item::Folder(folder, members) => {
-                    // 2x2 collage of the first apps, the name beneath.
+                    // GNOME's createFolderIcon: a 64px square of four
+                    // 32px cells, the first apps' icons at 40% (25px).
                     let collage = gtk::Grid::builder()
-                        .row_spacing(4)
-                        .column_spacing(4)
+                        .row_homogeneous(true)
+                        .column_homogeneous(true)
                         .halign(gtk::Align::Center)
                         .build();
                     collage.add_css_class("folder-collage");
-                    for (i, entry) in members.iter().take(4).enumerate() {
-                        collage.attach(&app_icon(entry, 40), (i % 2) as i32, (i / 2) as i32, 1, 1);
+                    for i in 0..4 {
+                        let cell = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                        cell.set_size_request(32, 32);
+                        if let Some(entry) = members.get(i) {
+                            let icon = app_icon(entry, 25);
+                            icon.set_halign(gtk::Align::Center);
+                            icon.set_valign(gtk::Align::Center);
+                            icon.set_vexpand(true);
+                            cell.append(&icon);
+                        }
+                        collage.attach(&cell, (i % 2) as i32, (i / 2) as i32, 1, 1);
                     }
                     let column = gtk::Box::new(gtk::Orientation::Vertical, 6);
                     column.append(&collage);

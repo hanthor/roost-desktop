@@ -105,18 +105,52 @@ fn data_dirs() -> Vec<PathBuf> {
 
 /// Discover launchable entries under `dirs`.
 ///
-/// Skips hidden/`NoDisplay` entries and entries whose `Exec` line is
-/// missing or fails field-code parsing — an app the shell cannot
-/// safely spawn is not an app the overview offers. Duplicate entry
-/// ids resolve first-dir-wins, matching desktop-file precedence.
+/// Duplicate entry ids resolve first-dir-wins, matching desktop-file
+/// precedence, before anything is filtered: a `Hidden` or `NoDisplay`
+/// copy in the user's directory hides the system one, as the spec says.
+/// Then skips hidden/`NoDisplay` entries, entries `OnlyShowIn`/
+/// `NotShowIn` keep off this desktop (`XDG_CURRENT_DESKTOP`, as GLib
+/// decides), and entries whose `Exec` line is missing or fails
+/// field-code parsing — an app the shell cannot safely spawn is not an
+/// app the overview offers.
 pub fn discover(dirs: &[PathBuf]) -> Vec<AppEntry> {
     let locales: Vec<String> = LOCALES.iter().map(|s| s.to_string()).collect();
+    let desktops = current_desktops();
     let mut seen = std::collections::HashSet::new();
     Iter::new(dirs.iter().cloned())
         .entries(Some(&locales))
+        .filter(|entry| seen.insert(entry.id().to_owned()))
+        .filter(|entry| shown_in(entry.only_show_in(), entry.not_show_in(), &desktops))
         .filter_map(|entry| from_crate_entry(&entry))
-        .filter(|app| seen.insert(app.app_id.clone()))
         .collect()
+}
+
+/// `XDG_CURRENT_DESKTOP`'s names, in order.
+fn current_desktops() -> Vec<String> {
+    std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .split(':')
+        .filter(|d| !d.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// GLib's `g_desktop_app_info_get_show_in`: the first current desktop an
+/// entry names decides (`OnlyShowIn` shows, `NotShowIn` hides); naming
+/// none, an entry shows unless it has an `OnlyShowIn`.
+pub fn shown_in(only: Option<Vec<&str>>, not: Option<Vec<&str>>, desktops: &[String]) -> bool {
+    for desktop in desktops {
+        if only
+            .as_ref()
+            .is_some_and(|o| o.iter().any(|d| d == desktop))
+        {
+            return true;
+        }
+        if not.as_ref().is_some_and(|n| n.iter().any(|d| d == desktop)) {
+            return false;
+        }
+    }
+    only.is_none()
 }
 
 /// Discover from the host's [`default_app_dirs`].
@@ -461,6 +495,36 @@ mod tests {
         let apps = discover(&[first.path().to_owned(), second.path().to_owned()]);
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].name, "First");
+    }
+
+    #[test]
+    fn a_users_hidden_copy_hides_the_system_entry() {
+        let user = tempfile::tempdir().expect("tempdir");
+        let system = tempfile::tempdir().expect("tempdir");
+        write_entry(
+            user.path(),
+            "gone.desktop",
+            "[Desktop Entry]\nName=Gone\nExec=/bin/true\nType=Application\nHidden=true\n",
+        );
+        write_entry(
+            system.path(),
+            "gone.desktop",
+            "[Desktop Entry]\nName=Gone\nExec=/bin/true\nType=Application\n",
+        );
+        let apps = discover(&[user.path().to_owned(), system.path().to_owned()]);
+        assert!(apps.is_empty(), "the user's Hidden copy wins");
+    }
+
+    #[test]
+    fn show_in_follows_glib() {
+        let gnome = vec!["Roost".to_owned(), "GNOME".to_owned()];
+        assert!(shown_in(None, None, &gnome));
+        assert!(shown_in(Some(vec!["GNOME"]), None, &gnome));
+        assert!(!shown_in(Some(vec!["KDE"]), None, &gnome));
+        assert!(!shown_in(None, Some(vec!["GNOME"]), &gnome));
+        // The first desktop that the entry names decides.
+        assert!(shown_in(Some(vec!["Roost"]), Some(vec!["GNOME"]), &gnome));
+        assert!(!shown_in(Some(vec!["GNOME"]), None, &[]));
     }
 
     #[test]
