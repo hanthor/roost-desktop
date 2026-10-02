@@ -144,6 +144,8 @@ pub struct OverviewUi {
     open: bool,
     /// Open on the app grid once the overview opens (ShowApplications).
     want_apps: std::cell::Cell<bool>,
+    /// GNOME's app folder dialog.
+    folder_dialog: Rc<crate::folder_dialog::FolderDialog>,
 }
 
 impl OverviewUi {
@@ -258,6 +260,10 @@ impl OverviewUi {
             actions,
             open: false,
             want_apps: std::cell::Cell::new(false),
+            folder_dialog: crate::folder_dialog::FolderDialog::new(
+                app,
+                Rc::new(crate::folders::rename),
+            ),
         }));
         Self::wire(&ui);
         ui
@@ -575,7 +581,7 @@ impl OverviewUi {
                     let column = gtk::Box::new(gtk::Orientation::Vertical, 6);
                     column.append(&collage);
                     column.append(&gtk::Label::new(Some(&folder.name)));
-                    let button = gtk::MenuButton::builder()
+                    let button = gtk::Button::builder()
                         .child(&column)
                         .valign(gtk::Align::Start)
                         .build();
@@ -584,23 +590,32 @@ impl OverviewUi {
                     button.add_css_class("app-folder");
                     button.add_css_class("grid-tile");
                     button.update_property(&[gtk::accessible::Property::Label(&folder.name)]);
-                    let popover = gtk::Popover::new();
-                    popover.add_css_class("roost-shell-popover");
-                    let inner = gtk::Box::new(gtk::Orientation::Vertical, 12);
-                    let title = gtk::Label::new(Some(&folder.name));
-                    title.add_css_class("title-3");
-                    inner.append(&title);
-                    let grid = gtk::FlowBox::new();
-                    grid.set_selection_mode(gtk::SelectionMode::None);
-                    grid.set_max_children_per_line(4);
-                    grid.set_column_spacing(18);
-                    grid.set_row_spacing(18);
-                    for entry in &members {
-                        grid.insert(&launch_button(entry, 72, me.actions.clone()), -1);
+                    // GNOME's folder dialog with the apps as large tiles.
+                    {
+                        let dialog = me.folder_dialog.clone();
+                        let actions = me.actions.clone();
+                        let members: Vec<AppEntry> = members.iter().map(|e| (*e).clone()).collect();
+                        let (id, name) = (folder.id.clone(), folder.name.clone());
+                        button.connect_clicked(move |_| {
+                            let tiles = members
+                                .iter()
+                                .map(|entry| {
+                                    let tile = app_button(entry, 96, true);
+                                    tile.add_css_class("folder-tile");
+                                    let (entry, actions, dialog) =
+                                        (entry.clone(), actions.clone(), dialog.clone());
+                                    tile.connect_clicked(move |_| {
+                                        if roost_shell_host::apps::launch(&entry).is_ok() {
+                                            dialog.close();
+                                            actions.close_overview();
+                                        }
+                                    });
+                                    tile.upcast::<gtk::Widget>()
+                                })
+                                .collect();
+                            dialog.open(&id, &name, tiles);
+                        });
                     }
-                    inner.append(&grid);
-                    popover.set_child(Some(&inner));
-                    button.set_popover(Some(&popover));
                     flow.insert(&button, -1);
                 }
             }
@@ -610,6 +625,11 @@ impl OverviewUi {
             .hscrollbar_policy(gtk::PolicyType::Never)
             .build();
         me.grid.set_child(Some(&scroller));
+    }
+
+    /// Who to tell when the folder dialog shades the overview.
+    pub fn set_folder_shade(ui: &Rc<RefCell<Self>>, f: crate::folder_dialog::OnShade) {
+        ui.borrow().folder_dialog.set_on_shade(f);
     }
 
     /// GNOME's `Main.overview.showApps()`: the overview on its app grid.
@@ -685,6 +705,7 @@ impl OverviewUi {
             }
         } else {
             let me = ui.borrow();
+            me.folder_dialog.close();
             me.search.set_keyboard_mode(KeyboardMode::None);
             me.search.set_visible(false);
             me.dash.set_visible(false);

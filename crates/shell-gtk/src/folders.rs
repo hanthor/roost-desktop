@@ -192,6 +192,21 @@ pub fn ensure_defaults(installed: &[AppEntry]) {
     gio::Settings::sync();
 }
 
+/// GNOME's rename: the folder's own name, untranslated from now on.
+pub fn rename(id: &str, name: &str) {
+    let Some(source) = gio::SettingsSchemaSource::default() else {
+        return;
+    };
+    if source.lookup(FOLDER_SCHEMA, true).is_none() {
+        return;
+    }
+    let path = format!("/org/gnome/desktop/app-folders/folders/{id}/");
+    let s = gio::Settings::with_path(FOLDER_SCHEMA, &path);
+    let _ = s.set_string("name", name);
+    let _ = s.set_boolean("translate", false);
+    gio::Settings::sync();
+}
+
 /// The user's folders from GSettings (none when the schema is missing).
 pub fn load() -> Vec<Folder> {
     let Some(source) = gio::SettingsSchemaSource::default() else {

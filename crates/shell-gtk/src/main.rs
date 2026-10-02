@@ -14,6 +14,7 @@
 //! `ROOST_SHELL_BIN=roost-shell-gtk` while it grows to parity.
 
 mod calendar;
+mod folder_dialog;
 mod folders;
 mod keybindings;
 mod live_apps;
@@ -1056,6 +1057,20 @@ fn build(app: &adw::Application) {
         Rc::new(ShellActions(shell.clone())),
     );
     let switcher_ui = switcher::SwitcherUi::new(app.upcast_ref(), apps.clone());
+    // The folder dialog's shade reaches under the top bar, as GNOME's.
+    {
+        let panel = window.clone();
+        overview::OverviewUi::set_folder_shade(
+            &overview_ui,
+            Rc::new(move |on| {
+                if on {
+                    panel.add_css_class("shaded");
+                } else {
+                    panel.remove_css_class("shaded");
+                }
+            }),
+        );
+    }
     // org.gnome.Shell for the rest of GNOME: the OSD gnome-settings-daemon
     // shows for volume and brightness keys, search and the app grid.
     let osd_ui = osd::OsdUi::new(app.upcast_ref());

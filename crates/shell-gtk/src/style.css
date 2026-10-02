@@ -11,6 +11,11 @@ window.roost-panel.overview {
   background-color: transparent;
 }
 
+/* Under a folder dialog's shade: the overview behind the bar at 20%. */
+window.roost-panel.overview.shaded {
+  background-color: #070708;
+}
+
 .roost-panel {
   font-family: "Adwaita Sans", "Cantarell", sans-serif;
   font-size: 11pt;
@@ -1122,4 +1127,71 @@ window.roost-workspace-popup .workspace-switcher {
   border: 1px solid rgba(255, 255, 255, 0.02);
   border-radius: 999px;
   padding: 12px 18px;
+}
+
+/* GNOME 51's app folder dialog: the overview dimmed to 20% under a
+   720px #38383b dialog with 64px corners and a 1px light edge, the name
+   in 26.7px extra bold, the rename button a 40px circle, and the apps
+   as 145px tiles with 96px icons. */
+window.roost-folder-dialog {
+  background: none;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
+}
+window.roost-folder-dialog .folder-dialog-shade {
+  background-color: rgba(0, 0, 0, 0.8);
+}
+window.roost-folder-dialog .app-folder-dialog {
+  border-radius: 64px;
+  background-color: #38383b;
+  color: #fafafb;
+  padding: 0 1px;
+  box-shadow: inset 0 0 0 1px rgba(250, 250, 251, 0.1);
+}
+window.roost-folder-dialog .folder-name-container {
+  padding: 24px 36px 0 36px;
+  min-height: 51px;
+}
+window.roost-folder-dialog .folder-name-label {
+  font-size: 26.66px;
+  font-weight: 800;
+}
+window.roost-folder-dialog entry.folder-name-entry {
+  min-width: 314px;
+  min-height: 33px;
+  padding: 9px;
+  border-radius: 8px;
+  font-size: 26.66px;
+  font-weight: 800;
+  background-color: #404045;
+  color: #fafafb;
+  box-shadow: inset 0 0 0 2px rgba(121, 160, 208, 0.8);
+  outline: none;
+}
+window.roost-folder-dialog button.icon-button {
+  min-width: 16px;
+  min-height: 16px;
+  padding: 12px;
+  border-radius: 999px;
+  background-color: #49494c;
+  color: #fafafb;
+  box-shadow: none;
+  outline: none;
+}
+window.roost-folder-dialog button.icon-button:focus-visible,
+window.roost-folder-dialog button.icon-button:focus {
+  box-shadow: inset 0 0 0 2px rgba(121, 160, 208, 0.8);
+}
+window.roost-folder-dialog button.folder-tile {
+  min-width: 121px;
+  min-height: 121px;
+  padding: 12px;
+  border-radius: 24px;
+  background: none;
+  box-shadow: none;
+  color: #fafafb;
+  font-weight: normal;
+}
+window.roost-folder-dialog button.folder-tile:hover {
+  background-color: #444447;
 }
