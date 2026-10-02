@@ -1017,8 +1017,9 @@ scrot "$ARTIFACTS/24f-workspace-popup.png" >/dev/null
 # shellcheck disable=SC2046
 set -- $(px "$ARTIFACTS/24f-workspace-popup.png" $((WIDTH / 2 - 20)) $((HEIGHT - 59 - 28)))
 xdotool key super+Page_Up
-[ "${1:-0}" -lt 70 ] && [ "${2:-0}" -lt 70 ] && [ "${3:-0}" -lt 75 ] ||
+if [ "${1:-0}" -ge 70 ] || [ "${2:-0}" -ge 70 ] || [ "${3:-0}" -ge 75 ]; then
     fail G-WS-POPUP "no switcher pill above the bottom edge (pixel ${1:-?} ${2:-?} ${3:-?})"
+fi
 pass G-WS-POPUP "a workspace key shows GNOME's workspace switcher popup"
 sleep 1
 
@@ -1047,8 +1048,9 @@ reply="$(gdbus call --session --dest org.gnome.Shell.Screenshot \
 [ "$reply" = "(true, '$WSHOT')" ] || fail G-SCREENSHOT-WINDOW "unexpected reply: $reply"
 dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$WSHOT")"
 want="$(jq -r '.focused as $f | .windows[] | select(.id == $f) | .rect | "\(.[2]),\(.[3])"' "$CSTATE" | head -1)"
-[ -n "$want" ] && [ "$dims" = "$want" ] ||
+if [ -z "$want" ] || [ "$dims" != "$want" ]; then
     fail G-SCREENSHOT-WINDOW "window screenshot is $dims, focused window is ${want:-none}"
+fi
 pass G-SCREENSHOT-WINDOW "ScreenshotWindow saves the focused window ($dims)"
 
 open_qs
