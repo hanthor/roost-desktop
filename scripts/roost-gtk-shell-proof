@@ -933,8 +933,9 @@ reply="$(gdbus call --session --dest org.gnome.Shell.Screenshot \
 [ "$reply" = "(true, '$WSHOT')" ] || fail G-SCREENSHOT-WINDOW "unexpected reply: $reply"
 dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$WSHOT")"
 want="$(jq -r '.focused as $f | .windows[] | select(.id == $f) | .rect | "\(.[2]),\(.[3])"' "$CSTATE" | head -1)"
-[ -n "$want" ] && [ "$dims" = "$want" ] ||
+if [ -z "$want" ] || [ "$dims" != "$want" ]; then
     fail G-SCREENSHOT-WINDOW "window screenshot is $dims, focused window is ${want:-none}"
+fi
 pass G-SCREENSHOT-WINDOW "ScreenshotWindow saves the focused window ($dims)"
 
 open_qs
