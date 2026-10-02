@@ -646,6 +646,7 @@ impl ControlClient {
                 y,
                 maximized,
                 above,
+                sticky,
                 workspace_left,
                 workspace_right,
             } => Ok(Handled::WindowMenu(WindowMenuRequest {
@@ -654,6 +655,7 @@ impl ControlClient {
                 y,
                 maximized,
                 above,
+                sticky,
                 workspace_left,
                 workspace_right,
             })),
@@ -769,6 +771,7 @@ pub struct WindowMenuRequest {
     pub y: i32,
     pub maximized: bool,
     pub above: bool,
+    pub sticky: bool,
     pub workspace_left: bool,
     pub workspace_right: bool,
 }

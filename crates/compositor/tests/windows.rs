@@ -609,6 +609,60 @@ fn move_to_workspace_updates_model() {
 }
 
 #[test]
+fn window_menu_actions_follow_gnome() {
+    use roost_shell_control::WindowAction;
+    let mut f = two_windows();
+    // Always on Visible Workspace: shown on the next workspace too.
+    assert!(f
+        .manager
+        .window_action(&mut f.comp.state, f.id_a, WindowAction::ToggleSticky));
+    assert!(f.manager.is_sticky(f.id_a));
+    assert!(f.manager.switch_relative(&mut f.comp.state, 1));
+    assert_eq!(
+        f.manager.visible_windows().len(),
+        1,
+        "only the sticky window shows"
+    );
+    assert!(f.manager.switch_relative(&mut f.comp.state, -1));
+    // Hide takes it off the screen; activating it brings it back.
+    assert!(f
+        .manager
+        .window_action(&mut f.comp.state, f.id_b, WindowAction::Minimize));
+    assert!(f.manager.is_minimized(f.id_b));
+    assert_eq!(f.manager.visible_windows().len(), 1);
+    assert_ne!(f.manager.model().focused(), Some(f.id_b));
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    assert!(!f.manager.is_minimized(f.id_b));
+    // Move to Workspace: right, then left; none to the left of the first.
+    assert!(f.manager.window_action(
+        &mut f.comp.state,
+        f.id_b,
+        WindowAction::MoveToWorkspaceRight
+    ));
+    assert_eq!(f.manager.model().window(f.id_b).unwrap().workspace, 1);
+    assert!(f.manager.workspace_left_of(f.id_b));
+    assert!(f
+        .manager
+        .window_action(&mut f.comp.state, f.id_b, WindowAction::MoveToWorkspaceLeft));
+    assert_eq!(f.manager.model().window(f.id_b).unwrap().workspace, 0);
+    assert!(!f.manager.workspace_left_of(f.id_b));
+    assert!(!f
+        .manager
+        .window_action(&mut f.comp.state, f.id_b, WindowAction::MoveToWorkspaceLeft));
+    // Always on Top stays above a newly focused window.
+    assert!(f
+        .manager
+        .window_action(&mut f.comp.state, f.id_b, WindowAction::ToggleAbove));
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    let top = f.manager.visible_windows().last().map(|(w, _)| w.clone());
+    let b_surface = f.manager.surface_of(f.id_b);
+    assert_eq!(
+        top.and_then(|w| w.wl_surface().map(|s| s.into_owned())),
+        b_surface
+    );
+}
+
+#[test]
 fn switch_relative_creates_next_and_clamps_at_first() {
     let mut f = two_windows();
     // +1 past the only workspace creates id 1; it is empty, so focus

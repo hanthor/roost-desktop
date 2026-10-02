@@ -106,7 +106,7 @@ Whole screens, with the same windows on both sides:
 | Date menu listing it | 19.6% | 0.5% |
 | Log Out dialog | 35.6% | 0.4% |
 | OSD: volume, a layout label, volume past 100% | not built | 0.4% each |
-| Window menu (header-bar right click) | not built | 0.3% |
+| Window menu (header-bar right click) | not built | 0.2% |
 | Screenshot UI (Print) | not built | 0.3% of the screen, 2.9% of the panel |
 
 Roost's capture shows GNOME's installed apps, not the host's: each host

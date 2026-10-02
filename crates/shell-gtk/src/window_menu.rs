@@ -1,7 +1,8 @@
 //! GNOME 51's window menu (windowMenu.js), opened by a header bar's
 //! right click (xdg_toplevel.show_window_menu): Take Screenshot, Hide,
 //! Maximize or Restore, Move, Resize, Always on Top, Always on Visible
-//! Workspace, Move to Workspace Left/Right, Close. Drawn as GNOME's popup
+//! Workspace, Move to Workspace Left/Right (not for a window on every
+//! workspace), Close. Drawn as GNOME's popup
 //! menu 7px under the click, first item focused.
 
 use std::cell::RefCell;
@@ -58,15 +59,15 @@ pub fn rows(req: &WindowMenuRequest) -> Vec<Row> {
             !req.maximized,
             req.above,
         ),
-        // Sticky windows are not supported yet: shown, but unavailable.
-        Row {
-            label: "Always on Visible Workspace",
-            item: None,
-            sensitive: false,
-            checked: false,
-        },
+        row(
+            "Always on Visible Workspace",
+            Item::Action(WindowAction::ToggleSticky),
+            true,
+            req.sticky,
+        ),
     ];
-    if req.workspace_left {
+    // A window on every workspace has nowhere to move to.
+    if req.workspace_left && !req.sticky {
         rows.push(row(
             "Move to Workspace Left",
             Item::Action(WindowAction::MoveToWorkspaceLeft),
@@ -74,7 +75,7 @@ pub fn rows(req: &WindowMenuRequest) -> Vec<Row> {
             false,
         ));
     }
-    if req.workspace_right {
+    if req.workspace_right && !req.sticky {
         rows.push(row(
             "Move to Workspace Right",
             Item::Action(WindowAction::MoveToWorkspaceRight),
@@ -250,6 +251,7 @@ mod tests {
             y: 280,
             maximized,
             above: false,
+            sticky: false,
             workspace_left: left,
             workspace_right: true,
         }

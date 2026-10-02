@@ -80,6 +80,8 @@ struct ManagedWindow {
     minimized: bool,
     /// Always on Top: stacked above every window without it.
     above: bool,
+    /// Always on Visible Workspace: shown on every workspace.
+    sticky: bool,
 }
 
 /// Compositor-side presentation layout (002 window actions).
@@ -330,7 +332,12 @@ impl WindowManager {
                 let window = self.windows.get(id)?;
                 Some(crate::overview::OverviewWindow {
                     id: *id,
-                    workspace: entry.workspace,
+                    // A sticky window sits on whichever workspace shows.
+                    workspace: if window.sticky {
+                        self.model.active_workspace()
+                    } else {
+                        entry.workspace
+                    },
                     geometry: window.geometry,
                 })
             })
@@ -385,6 +392,7 @@ impl WindowManager {
                 self.model
                     .window(*id)
                     .is_some_and(|entry| entry.workspace == active)
+                    || self.windows.get(id).is_some_and(|w| w.sticky)
             })
             .filter_map(|id| {
                 self.windows
@@ -596,6 +604,7 @@ impl WindowManager {
                 unplaced,
                 minimized: false,
                 above: false,
+                sticky: false,
             },
         );
         self.place_transient(surface, id);
@@ -774,6 +783,7 @@ impl WindowManager {
                 unplaced: false,
                 minimized: false,
                 above: false,
+                sticky: false,
             },
         );
         if let Some(parent) = surface
@@ -1753,6 +1763,11 @@ impl WindowManager {
         self.stacking = rest.into_iter().chain(above).collect();
     }
 
+    /// Whether `id` is on every workspace.
+    pub fn is_sticky(&self, id: u64) -> bool {
+        self.windows.get(&id).is_some_and(|w| w.sticky)
+    }
+
     /// Whether `id` is Always on Top.
     pub fn is_above(&self, id: u64) -> bool {
         self.windows.get(&id).is_some_and(|w| w.above)
@@ -1798,6 +1813,12 @@ impl WindowManager {
                 self.begin_resize(id, 10);
                 true
             }
+            WindowAction::ToggleSticky => {
+                if let Some(window) = self.windows.get_mut(&id) {
+                    window.sticky = !window.sticky;
+                }
+                true
+            }
             WindowAction::ToggleAbove => {
                 if let Some(window) = self.windows.get_mut(&id) {
                     window.above = !window.above;
@@ -1810,12 +1831,15 @@ impl WindowManager {
                     return false;
                 };
                 let target = if action == WindowAction::MoveToWorkspaceLeft {
-                    current.saturating_sub(1)
+                    match current.checked_sub(1) {
+                        Some(t) => t,
+                        None => return false,
+                    }
                 } else {
                     current.saturating_add(1)
                 };
                 // Mutter moves the window and leaves the view where it is.
-                target >= 1 && self.move_to_workspace(state, id, target)
+                self.move_to_workspace(state, id, target)
             }
         }
     }
@@ -1823,7 +1847,7 @@ impl WindowManager {
     /// Whether the window has a workspace to its left (and always one
     /// to its right: GNOME's workspaces are dynamic).
     pub fn workspace_left_of(&self, id: u64) -> bool {
-        self.model.window(id).is_some_and(|e| e.workspace > 1)
+        self.model.window(id).is_some_and(|e| e.workspace > 0)
     }
 
     /// Window-menu requests since the last call: `(window, x, y)`.
@@ -2567,9 +2591,11 @@ impl WindowManager {
     /// Focus the topmost window on `workspace`, or unfocus when empty.
     fn focus_topmost(&mut self, state: &mut State, workspace: u32) {
         let topmost = self.stacking.iter().rev().copied().find(|id| {
-            self.model
+            (self
+                .model
                 .window(*id)
                 .is_some_and(|entry| entry.workspace == workspace)
+                || self.windows.get(id).is_some_and(|w| w.sticky))
                 && self.windows.get(id).is_some_and(|w| !w.minimized)
         });
         self.apply_focus(state, topmost);
