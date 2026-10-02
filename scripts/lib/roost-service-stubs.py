@@ -7,7 +7,11 @@ Serves, on the bus at $DBUS_SYSTEM_BUS_ADDRESS (a private bus the proof
 starts), just enough of each daemon behind GNOME 51's quick settings:
 
 - NetworkManager: WirelessEnabled (rw), GetDevices with one ethernet
-  (activated) and one wifi device.
+  (activated) and one wifi device. The wifi device sees four access
+  points (a saved WPA2 "Roost Home", an open "Roost Cafe", an 802.1X
+  "Roost Office" and a hidden one); RequestScan, ActivateConnection and
+  AddAndActivateConnection are appended to $ROOST_STUB_NM_LOG, and an
+  activation makes its access point the active one.
 - BlueZ: ObjectManager plus /org/bluez/hci0 Adapter1.Powered (rw).
 - power-profiles-daemon: ActiveProfile (rw), Profiles (power-saver,
   balanced, performance) and PerformanceDegraded, UPower name.
@@ -40,11 +44,39 @@ XML = """
 <node>
   <interface name="org.freedesktop.NetworkManager">
     <method name="GetDevices"><arg type="ao" direction="out"/></method>
+    <method name="ActivateConnection">
+      <arg type="o" direction="in"/><arg type="o" direction="in"/>
+      <arg type="o" direction="in"/><arg type="o" direction="out"/>
+    </method>
+    <method name="AddAndActivateConnection">
+      <arg type="a{sa{sv}}" direction="in"/><arg type="o" direction="in"/>
+      <arg type="o" direction="in"/><arg type="o" direction="out"/>
+      <arg type="o" direction="out"/>
+    </method>
     <property name="WirelessEnabled" type="b" access="readwrite"/>
   </interface>
   <interface name="org.freedesktop.NetworkManager.Device">
     <property name="DeviceType" type="u" access="read"/>
     <property name="State" type="u" access="read"/>
+    <property name="AvailableConnections" type="ao" access="read"/>
+  </interface>
+  <interface name="org.freedesktop.NetworkManager.Device.Wireless">
+    <method name="RequestScan"><arg type="a{sv}" direction="in"/></method>
+    <property name="AccessPoints" type="ao" access="read"/>
+    <property name="ActiveAccessPoint" type="o" access="read"/>
+    <signal name="AccessPointAdded"><arg type="o"/></signal>
+    <signal name="AccessPointRemoved"><arg type="o"/></signal>
+  </interface>
+  <interface name="org.freedesktop.NetworkManager.AccessPoint">
+    <property name="Ssid" type="ay" access="read"/>
+    <property name="Strength" type="y" access="read"/>
+    <property name="Flags" type="u" access="read"/>
+    <property name="WpaFlags" type="u" access="read"/>
+    <property name="RsnFlags" type="u" access="read"/>
+    <property name="Mode" type="u" access="read"/>
+  </interface>
+  <interface name="org.freedesktop.NetworkManager.Settings.Connection">
+    <method name="GetSettings"><arg type="a{sa{sv}}" direction="out"/></method>
   </interface>
   <interface name="org.freedesktop.DBus.ObjectManager">
     <method name="GetManagedObjects">
@@ -88,6 +120,16 @@ NODE = Gio.DBusNodeInfo.new_for_xml(XML)
 NM = "/org/freedesktop/NetworkManager"
 DEV_ETH = NM + "/Devices/1"
 DEV_WIFI = NM + "/Devices/2"
+APS = [
+    # path suffix, ssid, strength, flags, rsn flags
+    (1, "Roost Home", 70, 1, 0x188),
+    (2, "Roost Cafe", 85, 0, 0),
+    (3, "Roost Office", 60, 1, 0x288),
+    (4, "", 90, 0, 0),
+]
+AP_PATH = NM + "/AccessPoint/{}"
+HOME_CONN = NM + "/Settings/1"
+WIRELESS = "org.freedesktop.NetworkManager.Device.Wireless"
 HCI = "/org/bluez/hci0"
 PPD = "/org/freedesktop/UPower/PowerProfiles"
 SESSION = "/org/freedesktop/login1/session/auto"
@@ -98,7 +140,20 @@ state = {
     (DEV_ETH, "org.freedesktop.NetworkManager.Device"): {
         "DeviceType": GLib.Variant("u", 1), "State": GLib.Variant("u", 100)},
     (DEV_WIFI, "org.freedesktop.NetworkManager.Device"): {
-        "DeviceType": GLib.Variant("u", 2), "State": GLib.Variant("u", 30)},
+        "DeviceType": GLib.Variant("u", 2), "State": GLib.Variant("u", 30),
+        "AvailableConnections": GLib.Variant("ao", [HOME_CONN])},
+    (DEV_WIFI, WIRELESS): {
+        "AccessPoints": GLib.Variant("ao", [AP_PATH.format(n) for n, *_ in APS]),
+        "ActiveAccessPoint": GLib.Variant("o", "/"),
+    },
+    **{(AP_PATH.format(n), "org.freedesktop.NetworkManager.AccessPoint"): {
+        "Ssid": GLib.Variant("ay", ssid.encode()),
+        "Strength": GLib.Variant("y", strength),
+        "Flags": GLib.Variant("u", flags),
+        "WpaFlags": GLib.Variant("u", 0),
+        "RsnFlags": GLib.Variant("u", rsn),
+        "Mode": GLib.Variant("u", 2),
+    } for n, ssid, strength, flags, rsn in APS},
     (HCI, "org.bluez.Adapter1"): {"Powered": GLib.Variant("b", True)},
     ("/org/gnome/DisplayManager/Manager", "org.gnome.DisplayManager.Manager"): {
         "Version": GLib.Variant("s", "51.0"),
@@ -122,6 +177,31 @@ conn = Gio.DBusConnection.new_for_address_sync(
 def method_call(c, sender, path, iface, method, params, invocation):
     if method == "GetDevices":
         invocation.return_value(GLib.Variant("(ao)", ([DEV_ETH, DEV_WIFI],)))
+    elif method in ("RequestScan", "ActivateConnection", "AddAndActivateConnection"):
+        log = os.environ.get("ROOST_STUB_NM_LOG")
+        args = params.unpack()
+        if log:
+            with open(log, "a") as fh:
+                fh.write(f"{method} {' '.join(str(a) for a in args if isinstance(a, str))}\n")
+        if method == "RequestScan":
+            invocation.return_value(None)
+            return
+        # The access point the activation is for becomes the active one.
+        ap = args[2] if method == "AddAndActivateConnection" else AP_PATH.format(1)
+        if method == "ActivateConnection" and args[0] != HOME_CONN:
+            ap = "/"
+        set_property(c, None, DEV_WIFI, WIRELESS, "ActiveAccessPoint", GLib.Variant("o", ap))
+        active = NM + "/ActiveConnection/1"
+        if method == "ActivateConnection":
+            invocation.return_value(GLib.Variant("(o)", (active,)))
+        else:
+            invocation.return_value(GLib.Variant("(oo)", (NM + "/Settings/2", active)))
+    elif method == "GetSettings":
+        invocation.return_value(GLib.Variant("(a{sa{sv}})", ({
+            "connection": {"id": GLib.Variant("s", "Roost Home"),
+                           "type": GLib.Variant("s", "802-11-wireless")},
+            "802-11-wireless": {"ssid": GLib.Variant("ay", b"Roost Home")},
+        },)))
     elif method == "GetManagedObjects":
         props = state[(HCI, "org.bluez.Adapter1")]
         invocation.return_value(GLib.Variant(
@@ -171,6 +251,9 @@ SERVICES = {
         (NM, "org.freedesktop.NetworkManager"),
         (DEV_ETH, "org.freedesktop.NetworkManager.Device"),
         (DEV_WIFI, "org.freedesktop.NetworkManager.Device"),
+        (DEV_WIFI, WIRELESS),
+        (HOME_CONN, "org.freedesktop.NetworkManager.Settings.Connection"),
+        *[(AP_PATH.format(n), "org.freedesktop.NetworkManager.AccessPoint") for n, *_ in APS],
     ]),
     "bluez": (["org.bluez"], [
         ("/", "org.freedesktop.DBus.ObjectManager"),

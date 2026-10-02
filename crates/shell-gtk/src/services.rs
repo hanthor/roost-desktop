@@ -201,7 +201,7 @@ impl Remote {
 
 /// Call `f(true)` when `name` gains an owner and `f(false)` when it
 /// loses one, starting with the current state.
-fn watch_name(conn: &gio::DBusConnection, name: &str, f: impl Fn(bool) + 'static) {
+pub fn watch_name(conn: &gio::DBusConnection, name: &str, f: impl Fn(bool) + 'static) {
     let f = Rc::new(f);
     let sub = {
         let f = f.clone();
@@ -253,6 +253,8 @@ fn dict_string(d: &glib::VariantDict, key: &str) -> Option<String> {
 /// The tiles and sliders this module drives.
 pub struct Widgets {
     pub wifi: Tile,
+    /// The Wi-Fi tile's network menu.
+    pub wifi_menu: Rc<crate::wifi::WifiMenu>,
     pub wired: Tile,
     pub bluetooth: Tile,
     pub power_mode: Tile,
@@ -308,7 +310,8 @@ fn network(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
                     return;
                 };
                 let on = dict_bool(&props, "WirelessEnabled").unwrap_or(false);
-                w1.wifi.show_state(on, Some(if on { "On" } else { "Off" }));
+                // GNOME's subtitle is the connected network's name.
+                w1.wifi_menu.set_enabled(on);
             });
             // Which tiles exist depends on the devices present.
             let (w, conn) = (w.clone(), conn.clone());
@@ -318,6 +321,7 @@ fn network(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
                     .map(|p| p.into_iter().map(|p| p.as_str().to_owned()).collect())
                     .unwrap_or_default();
                 let seen = Rc::new(RefCell::new((false, false, false)));
+                let wifi_device: Rc<RefCell<Option<String>>> = Rc::default();
                 let left = Rc::new(Cell::new(paths.len()));
                 if paths.is_empty() {
                     w.wifi.present(false);
@@ -326,6 +330,8 @@ fn network(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
                 for path in paths {
                     let dev = Remote::new(&conn, NM_NAME, &path, NM_DEVICE_IFACE);
                     let (w, seen, left) = (w.clone(), seen.clone(), left.clone());
+                    let (wifi_device, conn, path) =
+                        (wifi_device.clone(), conn.clone(), path.clone());
                     dev.get_all(move |props| {
                         if let Some(props) = props {
                             let kind = props
@@ -337,7 +343,10 @@ fn network(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
                                 .unwrap_or(0);
                             let mut s = seen.borrow_mut();
                             match kind {
-                                Some(NM_DEVICE_WIFI) => s.0 = true,
+                                Some(NM_DEVICE_WIFI) => {
+                                    s.0 = true;
+                                    wifi_device.borrow_mut().get_or_insert(path);
+                                }
                                 Some(NM_DEVICE_ETHERNET) => {
                                     s.1 = true;
                                     s.2 |= state == NM_DEVICE_ACTIVATED;
@@ -349,6 +358,7 @@ fn network(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
                         if left.get() == 0 {
                             let (wifi, wired, connected) = *seen.borrow();
                             w.wifi.present(wifi);
+                            w.wifi_menu.attach(&conn, wifi_device.borrow().clone());
                             w.wired.present(wired);
                             // GNOME's primary network indicator: shown
                             // while the main connection is up.

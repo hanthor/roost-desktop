@@ -94,31 +94,36 @@ impl EventSource {
         );
         // The subscription lives as long as the shell.
         std::mem::forget(sub);
-        let (appeared, vanished) = (Rc::downgrade(self), Rc::downgrade(self));
-        // Auto-start, as GNOME's proxy activates the server.
-        let watch = gio::bus_watch_name_on_connection(
-            conn,
-            NAME,
-            gio::BusNameWatcherFlags::AUTO_START,
-            move |_, _, _| {
-                if let Some(source) = appeared.upgrade() {
-                    source.owned.set(true);
-                    source.refresh_has_calendars();
-                    source.events.borrow_mut().clear();
-                    source.load(true);
-                }
-            },
-            move |_, _| {
-                if let Some(source) = vanished.upgrade() {
-                    source.owned.set(false);
-                    source.has_calendars.set(false);
-                    source.events.borrow_mut().clear();
-                    source.emit();
-                }
-            },
+        // Start the server, as GNOME's proxy activates it, and follow
+        // its owner (a NameOwnerChanged watch: gio's name watcher hands
+        // its callbacks a NULL connection when the bus goes away).
+        conn.call(
+            Some("org.freedesktop.DBus"),
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "StartServiceByName",
+            Some(&(NAME, 0u32).to_variant()),
+            None,
+            gio::DBusCallFlags::NONE,
+            -1,
+            None::<&gio::Cancellable>,
+            |_| {},
         );
-        // The watch lasts the session.
-        let _ = watch;
+        let weak = Rc::downgrade(self);
+        crate::services::watch_name(conn, NAME, move |owned| {
+            let Some(source) = weak.upgrade() else {
+                return;
+            };
+            source.owned.set(owned);
+            source.events.borrow_mut().clear();
+            if owned {
+                source.refresh_has_calendars();
+                source.load(true);
+            } else {
+                source.has_calendars.set(false);
+                source.emit();
+            }
+        });
     }
 
     fn on_signal(self: &Rc<Self>, iface: &str, name: &str, params: &glib::Variant) {

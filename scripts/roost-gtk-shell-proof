@@ -31,6 +31,8 @@
 #   G-NOTIFY-DND     with Do Not Disturb on, no banner, but listed
 #   G-QS-SERVICES    quick settings shows the tiles of the services on
 #                    the bus (stub daemons on a private system bus, #55)
+#   G-QS-WIFI-MENU   the Wi-Fi menu scans, lists NetworkManager's networks
+#                    as GNOME does, and activates a saved one
 #   G-QS-WIFI        the Wi-Fi tile turns NetworkManager's radio off
 #   G-QS-BLUETOOTH   the Bluetooth tile powers the BlueZ adapter off
 #   G-QS-POWER       the Power Mode tile switches to power saver
@@ -279,6 +281,9 @@ SYSBUS_INFO="$(dbus-daemon --session --fork --print-address=1 --print-pid=1)"
 DBUS_SYSTEM_BUS_ADDRESS="$(echo "$SYSBUS_INFO" | sed -n 1p)"
 SYSBUS_PID="$(echo "$SYSBUS_INFO" | sed -n 2p)"
 export DBUS_SYSTEM_BUS_ADDRESS
+# NetworkManager's stub records scans and activations here.
+ROOST_STUB_NM_LOG="$ARTIFACTS/nm-calls"
+export ROOST_STUB_NM_LOG
 "$PY" "$ROOT/scripts/lib/roost-service-stubs.py" "$BACKLIGHT" >"$ARTIFACTS/stubs.log" 2>&1 &
 STUBS_PID=$!
 for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/stubs.log" 2>/dev/null && break; sleep 0.5; done
@@ -795,6 +800,32 @@ for label in "Wi-Fi" "Wired" "Bluetooth" "Power Mode" "Brightness" "Volume"; do
         fail G-QS-SERVICES "no '$label' control with its daemon on the bus"
 done
 pass G-QS-SERVICES "quick settings shows a tile per service on the bus"
+
+# GNOME's Wi-Fi menu: opening it scans; the saved network comes first,
+# then by signal; the hidden one is left out; a saved network activates
+# its connection and becomes the tile's subtitle.
+qs_press "Wi-Fi Menu" wifi-menu || fail G-QS-WIFI-MENU "could not open the Wi-Fi menu"
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-wifi-menu.json" 20 ||
+    fail G-QS-WIFI-MENU "accessibility dump failed"
+scrot "$ARTIFACTS/15b-wifi-menu.png" >/dev/null
+grep -q '^RequestScan' "$ROOST_STUB_NM_LOG" 2>/dev/null ||
+    fail G-QS-WIFI-MENU "opening the menu did not ask NetworkManager to scan"
+order="$(jq -r '[.[] | select(.showing) | .name | select(test("Signal strength"))] | join("|")' \
+    "$ARTIFACTS/a11y-qs-wifi-menu.json")"
+want="Roost Home, Secure, Signal strength 70%|Roost Cafe, Not secure, Signal strength 85%|Roost Office, Secure, Signal strength 60%"
+[ "$order" = "$want" ] || fail G-QS-WIFI-MENU "networks are '$order', not '$want'"
+qs_press "Roost Home, Secure, Signal strength 70%" wifi-home ||
+    fail G-QS-WIFI-MENU "could not press Roost Home"
+grep -q "^ActivateConnection /org/freedesktop/NetworkManager/Settings/1" "$ROOST_STUB_NM_LOG" ||
+    fail G-QS-WIFI-MENU "Roost Home did not activate its saved connection"
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-wifi-on.json" 20 ||
+    fail G-QS-WIFI-MENU "accessibility dump failed"
+[ "$(jq '[.[] | select(.showing and .name == "Roost Home")] | length' "$ARTIFACTS/a11y-qs-wifi-on.json")" -ge 2 ] ||
+    fail G-QS-WIFI-MENU "the tile does not name the connected network"
+qs_press "Wi-Fi Menu" wifi-menu-close || fail G-QS-WIFI-MENU "could not close the Wi-Fi menu"
+pass G-QS-WIFI-MENU "the Wi-Fi menu scans, lists networks as GNOME does, and activates a saved one"
 
 qs_press "Wi-Fi" wifi || fail G-QS-WIFI "could not press Wi-Fi"
 sysprop org.freedesktop.NetworkManager /org/freedesktop/NetworkManager \

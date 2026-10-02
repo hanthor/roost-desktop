@@ -1147,3 +1147,219 @@ mod event_tests {
         assert!(events.is_empty());
     }
 }
+
+/// One Wi-Fi access point as NetworkManager reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessPoint {
+    pub path: String,
+    pub ssid: Vec<u8>,
+    pub strength: u8,
+    pub flags: u32,
+    pub wpa_flags: u32,
+    pub rsn_flags: u32,
+    pub mode: u32,
+}
+
+/// GNOME's grouping of access points (network.js `WirelessNetwork`):
+/// one network per SSID, mode and security, at its best access point.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WifiNetwork {
+    pub name: String,
+    pub ssid: Vec<u8>,
+    /// The strongest access point's path and strength.
+    pub ap: String,
+    pub strength: u8,
+    pub security: WifiSecurity,
+    pub active: bool,
+    /// A saved connection for it, when NetworkManager has one.
+    pub connection: Option<String>,
+}
+
+/// What a network asks of a client, as far as GNOME's menu cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WifiSecurity {
+    /// No privacy, or OWE (opportunistic encryption, no secret).
+    Open,
+    /// WEP or WPA/WPA2/WPA3 personal: a password.
+    Personal,
+    /// 802.1X: GNOME sends these to Settings.
+    Enterprise,
+}
+
+impl WifiSecurity {
+    /// From NM's AP flags (NM80211ApFlags, NM80211ApSecurityFlags).
+    pub fn of(flags: u32, wpa: u32, rsn: u32) -> Self {
+        const PRIVACY: u32 = 0x1;
+        const KEY_MGMT_802_1X: u32 = 0x200;
+        const KEY_MGMT_OWE: u32 = 0x800;
+        const KEY_MGMT_OWE_TM: u32 = 0x1000;
+        if (wpa | rsn) & KEY_MGMT_802_1X != 0 {
+            Self::Enterprise
+        } else if rsn & (KEY_MGMT_OWE | KEY_MGMT_OWE_TM) != 0
+            && (wpa | rsn) & !(KEY_MGMT_OWE | KEY_MGMT_OWE_TM | 0xff) == 0
+        {
+            Self::Open
+        } else if wpa != 0 || rsn != 0 || flags & PRIVACY != 0 {
+            Self::Personal
+        } else {
+            Self::Open
+        }
+    }
+
+    /// GNOME's lock icon: neither open nor OWE.
+    pub fn secure(self) -> bool {
+        self != Self::Open
+    }
+}
+
+/// GNOME's signal icon names (network.js `signalToIcon`).
+pub fn signal_icon(strength: u8) -> &'static str {
+    match strength {
+        0..=19 => "network-wireless-signal-none-symbolic",
+        20..=39 => "network-wireless-signal-weak-symbolic",
+        40..=49 => "network-wireless-signal-ok-symbolic",
+        50..=79 => "network-wireless-signal-good-symbolic",
+        _ => "network-wireless-signal-excellent-symbolic",
+    }
+}
+
+/// GNOME shows at most this many networks (`MAX_VISIBLE_NETWORKS`).
+pub const MAX_VISIBLE_NETWORKS: usize = 8;
+
+/// The Wi-Fi menu's networks in GNOME's order: saved first, then
+/// stronger, then secure, then by name; hidden SSIDs skipped.
+/// `known` maps SSIDs to saved connection paths.
+pub fn wifi_networks(
+    aps: &[AccessPoint],
+    active_ap: Option<&str>,
+    known: &[(Vec<u8>, String)],
+) -> Vec<WifiNetwork> {
+    let mut nets: Vec<(WifiNetwork, u32, Vec<String>)> = Vec::new();
+    for ap in aps.iter().filter(|ap| !ap.ssid.is_empty()) {
+        let security = WifiSecurity::of(ap.flags, ap.wpa_flags, ap.rsn_flags);
+        match nets
+            .iter_mut()
+            .find(|(n, mode, _)| n.ssid == ap.ssid && *mode == ap.mode && n.security == security)
+        {
+            Some((net, _, paths)) => {
+                paths.push(ap.path.clone());
+                if ap.strength > net.strength {
+                    net.strength = ap.strength;
+                    net.ap = ap.path.clone();
+                }
+            }
+            None => {
+                let name = String::from_utf8(ap.ssid.clone())
+                    .unwrap_or_else(|_| String::from_utf8_lossy(&ap.ssid).into_owned());
+                nets.push((
+                    WifiNetwork {
+                        name: if name.is_empty() {
+                            "<unknown>".into()
+                        } else {
+                            name
+                        },
+                        ssid: ap.ssid.clone(),
+                        ap: ap.path.clone(),
+                        strength: ap.strength,
+                        security,
+                        active: false,
+                        connection: None,
+                    },
+                    ap.mode,
+                    vec![ap.path.clone()],
+                ));
+            }
+        }
+    }
+    let mut out: Vec<WifiNetwork> = nets
+        .into_iter()
+        .map(|(mut net, _, paths)| {
+            net.active = active_ap.is_some_and(|a| paths.iter().any(|p| p == a));
+            net.connection = known
+                .iter()
+                .find(|(ssid, _)| *ssid == net.ssid)
+                .map(|(_, path)| path.clone());
+            net
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.connection
+            .is_some()
+            .cmp(&a.connection.is_some())
+            .then(b.strength.cmp(&a.strength))
+            .then(b.security.secure().cmp(&a.security.secure()))
+            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    out.truncate(MAX_VISIBLE_NETWORKS);
+    out
+}
+
+#[cfg(test)]
+mod wifi_tests {
+    use super::*;
+
+    fn ap(path: &str, ssid: &str, strength: u8, rsn: u32) -> AccessPoint {
+        AccessPoint {
+            path: path.into(),
+            ssid: ssid.as_bytes().to_vec(),
+            strength,
+            flags: if rsn != 0 { 1 } else { 0 },
+            wpa_flags: 0,
+            rsn_flags: rsn,
+            mode: 2,
+        }
+    }
+
+    #[test]
+    fn signal_icons_follow_gnome() {
+        assert_eq!(signal_icon(10), "network-wireless-signal-none-symbolic");
+        assert_eq!(signal_icon(20), "network-wireless-signal-weak-symbolic");
+        assert_eq!(signal_icon(45), "network-wireless-signal-ok-symbolic");
+        assert_eq!(signal_icon(79), "network-wireless-signal-good-symbolic");
+        assert_eq!(
+            signal_icon(80),
+            "network-wireless-signal-excellent-symbolic"
+        );
+    }
+
+    #[test]
+    fn security_follows_nm_flags() {
+        assert_eq!(WifiSecurity::of(0, 0, 0), WifiSecurity::Open);
+        assert_eq!(WifiSecurity::of(1, 0, 0), WifiSecurity::Personal); // WEP
+        assert_eq!(WifiSecurity::of(1, 0, 0x188), WifiSecurity::Personal); // WPA2-PSK
+        assert_eq!(WifiSecurity::of(1, 0, 0x288), WifiSecurity::Enterprise);
+        assert_eq!(WifiSecurity::of(0, 0, 0x888), WifiSecurity::Open); // OWE
+    }
+
+    #[test]
+    fn networks_group_and_sort_like_gnome() {
+        let aps = vec![
+            ap("/ap/1", "Cafe", 40, 0),
+            ap("/ap/2", "Home", 30, 0x188),
+            ap("/ap/3", "Home", 70, 0x188),
+            ap("/ap/4", "Neighbour", 90, 0x188),
+            ap("/ap/5", "", 99, 0),
+            ap("/ap/6", "Library", 40, 0x188),
+        ];
+        let known = vec![(b"Home".to_vec(), "/conn/7".to_string())];
+        let nets = wifi_networks(&aps, Some("/ap/2"), &known);
+        let names: Vec<_> = nets.iter().map(|n| n.name.as_str()).collect();
+        // Saved first, then strength, then secure before open at equal
+        // strength; the hidden SSID is skipped.
+        assert_eq!(names, ["Home", "Neighbour", "Library", "Cafe"]);
+        let home = &nets[0];
+        assert!(home.active, "any of its access points counts");
+        assert_eq!(home.ap, "/ap/3", "the strongest access point");
+        assert_eq!(home.strength, 70);
+        assert_eq!(home.connection.as_deref(), Some("/conn/7"));
+        assert!(!nets[3].security.secure());
+    }
+
+    #[test]
+    fn at_most_eight_networks_show() {
+        let aps: Vec<_> = (0..12)
+            .map(|i| ap(&format!("/ap/{i}"), &format!("Net {i:02}"), 50, 0))
+            .collect();
+        assert_eq!(wifi_networks(&aps, None, &[]).len(), MAX_VISIBLE_NETWORKS);
+    }
+}
