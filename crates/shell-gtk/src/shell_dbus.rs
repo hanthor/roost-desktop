@@ -112,6 +112,8 @@ struct Grab {
 struct Grabs {
     next: u32,
     by_action: BTreeMap<u32, Grab>,
+    /// Keys the shell binds itself (its own keybindings): not grabbable.
+    reserved: Vec<(u32, u32)>,
 }
 
 impl Grabs {
@@ -121,10 +123,11 @@ impl Grabs {
         let Some((keysym, mods)) = parse_accelerator(accelerator) else {
             return 0;
         };
-        if self
-            .by_action
-            .values()
-            .any(|g| g.keysym == keysym && g.mods == mods)
+        if self.reserved.contains(&(keysym, mods))
+            || self
+                .by_action
+                .values()
+                .any(|g| g.keysym == keysym && g.mods == mods)
             || self.by_action.len() >= roost_shell_control::MAX_ACCELERATORS
         {
             return 0;
@@ -178,18 +181,67 @@ impl Grabs {
     }
 }
 
+/// Runs one of the shell's own keybindings by index.
+type InternalRun = Rc<dyn Fn(usize)>;
+
+/// Action ids of the shell's own keybindings start here, clear of the
+/// ids D-Bus callers get.
+pub const INTERNAL_BASE: u32 = 0x4000_0000;
+
 /// The running service: the shell reports accelerator presses here.
 pub struct Service {
     conn: RefCell<Option<gio::DBusConnection>>,
     grabs: RefCell<Grabs>,
+    /// The shell's own keybindings, ids from [`INTERNAL_BASE`].
+    internal: RefCell<Vec<roost_shell_control::Accelerator>>,
+    /// Runs an internal binding by its index.
+    on_internal: RefCell<Option<InternalRun>>,
+    actions: Rc<dyn ShellActions>,
     /// NameOwnerChanged, to drop a departed caller's grabs.
     watch: RefCell<Option<gio::SignalSubscription>>,
 }
 
 impl Service {
-    /// A grabbed accelerator fired: signal the caller that grabbed it,
-    /// as GNOME does (unicast AcceleratorActivated).
+    /// Hand the compositor every grab: callers' and the shell's own.
+    fn push(&self) {
+        let mut list = self.grabs.borrow().list();
+        list.extend(self.internal.borrow().iter().copied());
+        self.actions.set_accelerators(list);
+    }
+
+    /// Bind the shell's own keys: `accelerators[i]` with its modes runs
+    /// `run(i)`. Keys that do not parse are skipped.
+    pub fn set_internal(&self, accelerators: &[(String, u32)], run: InternalRun) {
+        let mut list = Vec::new();
+        let mut reserved = Vec::new();
+        for (i, (accel, modes)) in accelerators.iter().enumerate() {
+            if let Some((keysym, mods)) = parse_accelerator(accel) {
+                reserved.push((keysym, mods));
+                list.push(roost_shell_control::Accelerator {
+                    action: INTERNAL_BASE + i as u32,
+                    keysym,
+                    mods,
+                    modes: *modes,
+                });
+            }
+        }
+        self.grabs.borrow_mut().reserved = reserved;
+        *self.internal.borrow_mut() = list;
+        *self.on_internal.borrow_mut() = Some(run);
+        self.push();
+    }
+
+    /// A grabbed accelerator fired: one of the shell's own runs here;
+    /// a caller's is signalled to that caller, as GNOME does (unicast
+    /// AcceleratorActivated).
     pub fn accelerator_activated(&self, action: u32, time: u32, mode: u32) {
+        if action >= INTERNAL_BASE {
+            let run = self.on_internal.borrow().clone();
+            if let Some(run) = run {
+                run((action - INTERNAL_BASE) as usize);
+            }
+            return;
+        }
         let Some(sender) = self
             .grabs
             .borrow()
@@ -260,6 +312,9 @@ pub fn start(actions: Rc<dyn ShellActions>) -> Rc<Service> {
     let service = Rc::new(Service {
         conn: RefCell::new(None),
         grabs: RefCell::new(Grabs::default()),
+        internal: RefCell::new(Vec::new()),
+        on_internal: RefCell::new(None),
+        actions: actions.clone(),
         watch: RefCell::new(None),
     });
     let node = match gio::DBusNodeInfo::for_xml(XML) {
@@ -320,7 +375,7 @@ pub fn start(actions: Rc<dyn ShellActions>) -> Rc<Service> {
                                 return;
                             };
                             let action = grabs_svc.grabs.borrow_mut().grab(&sender, &accel, modes);
-                            calls.set_accelerators(grabs_svc.grabs.borrow().list());
+                            grabs_svc.push();
                             Some((action,).to_variant())
                         }
                         "GrabAccelerators" => {
@@ -337,13 +392,13 @@ pub fn start(actions: Rc<dyn ShellActions>) -> Rc<Service> {
                                     .map(|(accel, modes, _)| grabs.grab(&sender, accel, *modes))
                                     .collect()
                             };
-                            calls.set_accelerators(grabs_svc.grabs.borrow().list());
+                            grabs_svc.push();
                             Some((actions,).to_variant())
                         }
                         "UngrabAccelerator" => {
                             let action = params.get::<(u32,)>().map(|(a,)| a).unwrap_or(0);
                             let ok = grabs_svc.grabs.borrow_mut().ungrab(&sender, action);
-                            calls.set_accelerators(grabs_svc.grabs.borrow().list());
+                            grabs_svc.push();
                             Some((ok,).to_variant())
                         }
                         "UngrabAccelerators" => {
@@ -362,7 +417,7 @@ pub fn start(actions: Rc<dyn ShellActions>) -> Rc<Service> {
                                     ok
                                 }
                             };
-                            calls.set_accelerators(grabs_svc.grabs.borrow().list());
+                            grabs_svc.push();
                             Some((ok,).to_variant())
                         }
                         _ => {
@@ -387,7 +442,6 @@ pub fn start(actions: Rc<dyn ShellActions>) -> Rc<Service> {
             }
             // A caller that leaves the bus loses its grabs, as in GNOME.
             let leave_svc = svc.clone();
-            let leave_actions = actions.clone();
             let weak = Rc::downgrade(&leave_svc);
             let subscription = conn.subscribe_to_signal(
                 Some("org.freedesktop.DBus"),
@@ -402,7 +456,7 @@ pub fn start(actions: Rc<dyn ShellActions>) -> Rc<Service> {
                         signal.parameters.get::<(String, String, String)>()
                     {
                         if new_owner.is_empty() && svc.grabs.borrow_mut().forget(&name) {
-                            leave_actions.set_accelerators(svc.grabs.borrow().list());
+                            svc.push();
                         }
                     }
                 },

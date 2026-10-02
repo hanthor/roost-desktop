@@ -630,6 +630,20 @@ impl OverviewUi {
         }
     }
 
+    /// GNOME's toggle-application-view: the app grid, or out of the
+    /// overview when the grid already shows.
+    pub fn toggle_apps(ui: &Rc<RefCell<Self>>) {
+        let showing = {
+            let me = ui.borrow();
+            me.open && me.grid.is_visible()
+        };
+        if showing {
+            ui.borrow().actions.close_overview();
+        } else {
+            Self::show_apps(ui);
+        }
+    }
+
     /// GNOME's `Main.overview.focusSearch()`: the overview with the
     /// search entry focused.
     pub fn focus_search(ui: &Rc<RefCell<Self>>) {

@@ -72,6 +72,9 @@
 #   G-POWER-OFF    confirming the dialog asks logind to power off
 #   G-ACCEL        org.gnome.Shell: an allowlisted caller grabs a media key,
 #                  the key fires AcceleratorActivated, and ShowOSD shows
+#   G-KEYBINDINGS  GNOME Shell's keys: Super+S quick settings, Super+V the
+#                  date menu, Super+A the app grid (and back)
+#   G-KEY-BRIGHTNESS the brightness key steps the backlight through logind
 #   G-SUSPEND-LOCK Suspend asks logind, and its PrepareForSleep locks
 #                  the session before sleep
 #   G-UNLOCK       GNOME's lock screen: a wrong password is refused and
@@ -908,6 +911,37 @@ sleep 0.5
 scrot "$ARTIFACTS/24b-osd.png" >/dev/null
 pass G-ACCEL "gnome-settings-daemon's grab fires on its key and its ShowOSD shows the OSD"
 
+# GNOME Shell's own keybindings (org.gnome.shell.keybindings defaults).
+sleep 2
+xdotool key super+s
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-key-qs.json" 20 ||
+    fail G-KEYBINDINGS "accessibility dump failed"
+showing "$ARTIFACTS/a11y-key-qs.json" "Dark Style" ||
+    fail G-KEYBINDINGS "Super+S did not open quick settings"
+xdotool key Escape
+sleep 1
+xdotool key super+v
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-key-tray.json" 20 ||
+    fail G-KEYBINDINGS "accessibility dump failed"
+showing "$ARTIFACTS/a11y-key-tray.json" "Previous month" ||
+    fail G-KEYBINDINGS "Super+V did not open the date menu"
+xdotool key Escape
+sleep 1
+xdotool key super+a
+cstate '.overview_open' "app grid" || fail G-KEYBINDINGS "Super+A did not open the overview"
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-key-grid.json" 20 ||
+    fail G-KEYBINDINGS "accessibility dump failed"
+showing "$ARTIFACTS/a11y-key-grid.json" "Probe Tools" ||
+    fail G-KEYBINDINGS "Super+A did not show the app grid"
+xdotool key super+a
+cstate '.overview_open | not' "closed" || fail G-KEYBINDINGS "Super+A again did not leave the app grid"
+# The shell hides its overview surfaces on its next frame: let it.
+sleep 1
+pass G-KEYBINDINGS "Super+S, Super+V and Super+A open GNOME's menus and the app grid"
+
 # Screenshots (#61): GNOME Shell's interface, as the portal calls it.
 SHOT="$ARTIFACTS/screenshot.png"
 reply="$(gdbus call --session --dest org.gnome.Shell.Screenshot \
@@ -1006,6 +1040,19 @@ POWER_LOG="$ARTIFACTS/power-log"
 : >"$POWER_LOG"
 "$PY" "$ROOT/scripts/lib/roost-service-stubs.py" "$BACKLIGHT" "$POWER_LOG" >>"$ARTIFACTS/stubs.log" 2>&1 &
 STUBS_PID=$!
+
+# GNOME Shell's brightness keys step the backlight through logind (back
+# on the bus now) and show the brightness OSD.
+sleep 2
+before="$(cat "$BACKLIGHT/brightness")"
+xdotool key XF86MonBrightnessUp
+end=$(($(date +%s) + 5))
+until [ "$(cat "$BACKLIGHT/brightness")" != "$before" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+after="$(cat "$BACKLIGHT/brightness")"
+[ "$after" -gt "$before" ] ||
+    fail G-KEY-BRIGHTNESS "the brightness key left the backlight at $after (was $before)"
+scrot "$ARTIFACTS/24c-brightness-osd.png" >/dev/null
+pass G-KEY-BRIGHTNESS "the brightness key steps the backlight by a twentieth through logind"
 sleep 2
 open_power_menu() {
     open_qs

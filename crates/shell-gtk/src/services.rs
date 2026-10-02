@@ -565,6 +565,31 @@ fn backlight() -> Option<(String, PathBuf)> {
     ))
 }
 
+/// GNOME's brightness keys (brightnessManager.js): step the backlight
+/// by a twentieth through logind and return the new level (0..1) for
+/// the OSD, or `None` without a backlight.
+pub fn step_brightness(up: bool) -> Option<f64> {
+    let (name, dir) = backlight()?;
+    let max = read_u32(&dir.join("max_brightness"))?;
+    let now = read_u32(&dir.join("brightness"))?;
+    let percent = logic::brightness_step(logic::brightness_percent(now, max), up);
+    let value = logic::brightness_value(percent, max);
+    let conn = gio::bus_get_sync(gio::BusType::System, gio::Cancellable::NONE).ok()?;
+    conn.call(
+        Some(LOGIND_NAME),
+        LOGIND_SESSION_PATH,
+        LOGIND_SESSION_IFACE,
+        "SetBrightness",
+        Some(&("backlight", name.as_str(), value).to_variant()),
+        None,
+        gio::DBusCallFlags::NONE,
+        2000,
+        gio::Cancellable::NONE,
+        |_| {},
+    );
+    Some(percent / 100.0)
+}
+
 fn read_u32(path: &std::path::Path) -> Option<u32> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
