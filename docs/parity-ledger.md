@@ -12,7 +12,7 @@ rationale and owner), `untested`.
 
 | ID | GNOME 51 behavior | Roost status | Tests | Evidence / notes | Deviation and owner |
 |---|---|---|---|---|---|
-| P-OV-01 | Super opens the overview with live window previews for the current workspace | partial | journey:J-OV-OPEN, proof:G-OV-OPEN, proof:G-OV-PICK, cargo:spread_previews_never_overlap_and_stay_in_the_card | compositor-drawn workspace card with scaled live previews; click picks (`crates/compositor/src/overview.rs`) | visuals unverified against baseline shots |
+| P-OV-01 | Super opens the overview with live window previews for the current workspace | partial | journey:J-OV-OPEN, proof:G-OV-OPEN, proof:G-OV-PICK, cargo:spread_previews_never_overlap_and_stay_in_the_picker | compositor-drawn workspace card with scaled live previews; click picks (`crates/compositor/src/overview.rs`) | visuals unverified against baseline shots |
 | P-OV-02 | Overview shows the workspace strip with thumbnails; drag or click switches | missing |  | workspaces exist in the model and switch by key; no strip | — |
 | P-OV-03 | Overview shows the dash with favorites and running apps | partial | proof:G-OV-SHELL-UI | GTK shell dash with favorites (`crates/shell-gtk/src/overview.rs`); running-app indicators missing | — |
 | P-OV-04 | Typing in the overview searches apps and launches the top hit with Enter | partial | journey:J-OV-SEARCH, journey:J-OV-LAUNCH, proof:G-OV-SEARCH, proof:G-OV-LAUNCH, proof:G-SEARCH-PROVIDER, proof:G-SEARCH-ACTIVATE, proof:G-SEARCH-VIEW, proof:G-APP-INSTALLED, cargo:selection_follows_gnome_settings | app search plus GNOME Shell D-Bus search providers with their settings keys (`crates/shell-gtk/src/providers.rs`) | — |
