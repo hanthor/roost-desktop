@@ -22,6 +22,7 @@ mod keybindings;
 mod live_apps;
 mod lock;
 mod logic;
+mod network_agent;
 mod notify;
 mod osd;
 mod overview;
@@ -740,6 +741,26 @@ fn quick_settings_popover(
         let menu = power_menu_ui.revealer.clone();
         popover.connect_closed(move |_| menu.set_visible(false));
     }
+    // The Wi-Fi and Bluetooth menus dim the panel and reset on close the
+    // same way; their rows close the panel themselves.
+    for menu in [&wifi_menu_ui.revealer, &bt_menu_ui.revealer] {
+        {
+            let popover = popover.clone();
+            menu.connect_visible_notify(move |menu| {
+                if menu.is_visible() {
+                    popover.add_css_class("dimmed");
+                } else {
+                    popover.remove_css_class("dimmed");
+                }
+            });
+        }
+        let menu = menu.clone();
+        popover.connect_closed(move |_| menu.set_visible(false));
+    }
+    for settings in [&all_networks, &bt_settings] {
+        let popover = popover.clone();
+        settings.connect_clicked(move |_| popover.popdown());
+    }
     let dnd = dnd_tile.button.clone();
 
     if let Some(iface) = settings(INTERFACE_SCHEMA) {
@@ -1160,6 +1181,8 @@ fn build(app: &adw::Application) {
 
     // GNOME Shell is the session's polkit agent.
     polkit::start(app.upcast_ref());
+    // GNOME's NetworkManager secret agent (Wi-Fi passwords).
+    network_agent::start(app.upcast_ref());
 
     // GNOME's workspace switcher popup.
     let workspace_popup = ws_popup::WorkspacePopup::new(app.upcast_ref());

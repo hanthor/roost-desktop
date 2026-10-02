@@ -1,8 +1,8 @@
 //! GNOME's Wi-Fi menu (network.js `NMWirelessToggle`): the networks
 //! NetworkManager sees, grouped and sorted as GNOME does, scanned when
 //! the menu opens and every 15 s while it stays open. A saved network
-//! activates its connection; an open one gets a new connection; one
-//! that needs a password or 802.1X goes to Settings' Wi-Fi panel. The
+//! activates its connection; any other gets a new connection (the
+//! shell's secret agent asks for a password); 802.1X goes to Settings. The
 //! toggle shows the connected network's name and signal.
 
 use std::cell::{Cell, RefCell};
@@ -328,7 +328,14 @@ impl WifiMenu {
             ))]);
             let weak = Rc::downgrade(self);
             let net2 = net.clone();
-            button.connect_clicked(move |_| {
+            button.connect_clicked(move |b| {
+                // Picking an item closes the panel (PopupMenu activation).
+                if let Some(popover) = b
+                    .ancestor(gtk::Popover::static_type())
+                    .and_downcast::<gtk::Popover>()
+                {
+                    popover.popdown();
+                }
                 if let Some(menu) = weak.upgrade() {
                     menu.activate(&net2);
                 }
@@ -386,7 +393,8 @@ impl WifiMenu {
                     |_| {},
                 );
             }
-            (None, WifiSecurity::Open) => {
+            // GNOME's agent (network_agent.rs) asks for the password.
+            (None, WifiSecurity::Open | WifiSecurity::Personal) => {
                 let empty: std::collections::HashMap<
                     String,
                     std::collections::HashMap<String, glib::Variant>,
@@ -407,11 +415,6 @@ impl WifiMenu {
             (None, WifiSecurity::Enterprise) => {
                 let _ = std::process::Command::new("gnome-control-center")
                     .args(["wifi", "connect-8021x-wifi", &device, &net.ap])
-                    .spawn();
-            }
-            (None, WifiSecurity::Personal) => {
-                let _ = std::process::Command::new("gnome-control-center")
-                    .arg("wifi")
                     .spawn();
             }
         }

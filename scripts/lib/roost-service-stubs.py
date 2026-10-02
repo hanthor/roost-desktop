@@ -11,7 +11,9 @@ starts), just enough of each daemon behind GNOME 51's quick settings:
   points (a saved WPA2 "Roost Home", an open "Roost Cafe", an 802.1X
   "Roost Office" and a hidden one); RequestScan, ActivateConnection and
   AddAndActivateConnection are appended to $ROOST_STUB_NM_LOG, and an
-  activation makes its access point the active one.
+  activation makes its access point the active one. A secret agent
+  registered with the AgentManager is asked for an unsaved secured
+  network's password (logged as "Secrets psk=..." or "Secrets error").
 - BlueZ: ObjectManager plus /org/bluez/hci0 Adapter1.Powered (rw), and
   three devices (paired Headphones, paired and connected Keyboard, an
   unpaired Stranger) whose Device1.Connect and Disconnect flip Connected
@@ -57,6 +59,9 @@ XML = """
       <arg type="o" direction="out"/>
     </method>
     <property name="WirelessEnabled" type="b" access="readwrite"/>
+  </interface>
+  <interface name="org.freedesktop.NetworkManager.AgentManager">
+    <method name="Register"><arg type="s" direction="in"/></method>
   </interface>
   <interface name="org.freedesktop.NetworkManager.Device">
     <property name="DeviceType" type="u" access="read"/>
@@ -138,6 +143,7 @@ APS = [
     (2, "Roost Cafe", 85, 0, 0),
     (3, "Roost Office", 60, 1, 0x288),
     (4, "", 90, 0, 0),
+    (5, "Roost Guest", 50, 1, 0x188),
 ]
 AP_PATH = NM + "/AccessPoint/{}"
 HOME_CONN = NM + "/Settings/1"
@@ -156,7 +162,8 @@ SESSION = "/org/freedesktop/login1/session/auto"
 state = {
     (NM, "org.freedesktop.NetworkManager"): {"WirelessEnabled": GLib.Variant("b", True)},
     (DEV_ETH, "org.freedesktop.NetworkManager.Device"): {
-        "DeviceType": GLib.Variant("u", 1), "State": GLib.Variant("u", 100)},
+        "DeviceType": GLib.Variant("u", 1), "State": GLib.Variant("u", 100),
+        "AvailableConnections": GLib.Variant("ao", [])},
     (DEV_WIFI, "org.freedesktop.NetworkManager.Device"): {
         "DeviceType": GLib.Variant("u", 2), "State": GLib.Variant("u", 30),
         "AvailableConnections": GLib.Variant("ao", [HOME_CONN])},
@@ -197,9 +204,51 @@ conn = Gio.DBusConnection.new_for_address_sync(
     None, None)
 
 
+agents = []
+
+
+def secured_ap(path):
+    props = state.get((path, "org.freedesktop.NetworkManager.AccessPoint"))
+    return bool(props) and props["Flags"].unpack() & 1
+
+
 def method_call(c, sender, path, iface, method, params, invocation):
     if method == "GetDevices":
         invocation.return_value(GLib.Variant("(ao)", ([DEV_ETH, DEV_WIFI],)))
+    elif method == "Register":
+        agents.append(sender)
+        invocation.return_value(None)
+    elif method == "AddAndActivateConnection" and secured_ap(params.unpack()[2]):
+        # NetworkManager asks the agent for the password first.
+        ap_path = params.unpack()[2]
+        ssid = state[(ap_path, "org.freedesktop.NetworkManager.AccessPoint")]["Ssid"].unpack()
+        log = os.environ.get("ROOST_STUB_NM_LOG")
+        connection = {
+            "connection": {"id": GLib.Variant("s", bytes(ssid).decode()),
+                           "type": GLib.Variant("s", "802-11-wireless")},
+            "802-11-wireless": {"ssid": GLib.Variant("ay", bytes(ssid))},
+            "802-11-wireless-security": {"key-mgmt": GLib.Variant("s", "wpa-psk")},
+        }
+
+        def answered(conn, res):
+            try:
+                reply = conn.call_finish(res).unpack()[0]
+                line = "Secrets psk=" + reply["802-11-wireless-security"]["psk"]
+            except GLib.Error as e:
+                line = "Secrets error " + Gio.DBusError.get_remote_error(e)
+            if log:
+                with open(log, "a") as fh:
+                    fh.write(line + "\n")
+        if log:
+            with open(log, "a") as fh:
+                fh.write(f"AddAndActivateConnection {ap_path}\n")
+        for agent in agents[-1:]:
+            c.call(agent, "/org/freedesktop/NetworkManager/SecretAgent",
+                   "org.freedesktop.NetworkManager.SecretAgent", "GetSecrets",
+                   GLib.Variant("(a{sa{sv}}osasu)", (connection, NM + "/Settings/2",
+                                "802-11-wireless-security", [], 1)),
+                   None, Gio.DBusCallFlags.NONE, -1, None, answered)
+        invocation.return_value(GLib.Variant("(oo)", (NM + "/Settings/2", NM + "/ActiveConnection/2")))
     elif method in ("RequestScan", "ActivateConnection", "AddAndActivateConnection"):
         log = os.environ.get("ROOST_STUB_NM_LOG")
         args = params.unpack()
@@ -285,6 +334,7 @@ SERVICES = {
         (DEV_ETH, "org.freedesktop.NetworkManager.Device"),
         (DEV_WIFI, "org.freedesktop.NetworkManager.Device"),
         (DEV_WIFI, WIRELESS),
+        (NM + "/AgentManager", "org.freedesktop.NetworkManager.AgentManager"),
         (HOME_CONN, "org.freedesktop.NetworkManager.Settings.Connection"),
         *[(AP_PATH.format(n), "org.freedesktop.NetworkManager.AccessPoint") for n, *_ in APS],
     ]),

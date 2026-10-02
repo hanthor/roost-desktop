@@ -186,7 +186,14 @@ impl BtMenu {
             })]);
             let weak = Rc::downgrade(self);
             let dev2 = dev.clone();
-            button.connect_clicked(move |_| {
+            button.connect_clicked(move |b| {
+                // Picking an item closes the panel (PopupMenu activation).
+                if let Some(popover) = b
+                    .ancestor(gtk::Popover::static_type())
+                    .and_downcast::<gtk::Popover>()
+                {
+                    popover.popdown();
+                }
                 if let Some(menu) = weak.upgrade() {
                     menu.toggle(&dev2);
                 }
