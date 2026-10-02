@@ -4,6 +4,7 @@
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
+import Mtk from 'gi://Mtk';
 import Shell from 'gi://Shell';
 import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -282,6 +283,29 @@ export async function run() {
             await shot('16-overview-workspaces');
             Main.overview.hide();
             await Scripting.sleep(1000);
+        }
+    }
+
+    // Edge tiling: the tile preview over the left half while Gamma is
+    // dragged to the left edge. Headless input is not reliable here,
+    // so Gamma moves by the drag's offset (header 600,328 to 1,400)
+    // and GNOME's own handler opens the preview.
+    {
+        const win = global.display.focus_window;
+        if (win) {
+            const r = win.get_frame_rect();
+            win.move_frame(true, r.x - 599, r.y + 72);
+            await Scripting.sleep(500);
+            const wa = Main.layoutManager.getWorkAreaForMonitor(0);
+            const tile = new Mtk.Rectangle({
+                x: wa.x, y: wa.y, width: Math.floor(wa.width / 2), height: wa.height,
+            });
+            Main.wm._showTilePreview(global.window_manager, win, tile, 0);
+            await Scripting.sleep(1000);
+            await shot('17-tile-preview');
+            Main.wm._hideTilePreview();
+            win.move_frame(true, r.x, r.y);
+            await Scripting.sleep(800);
         }
     }
 

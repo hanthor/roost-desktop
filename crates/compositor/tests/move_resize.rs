@@ -480,3 +480,39 @@ fn new_windows_never_open_under_the_top_bar() {
     // First window on an empty workspace: centered horizontally.
     assert_eq!(g.loc.x + g.size.w / 2, 640);
 }
+
+#[test]
+fn dragging_to_an_edge_shows_gnomes_tile_preview() {
+    let mut f = fixture();
+    let window = id(&f);
+    let at = press_inside(&mut f);
+    f.toplevel._move(f.client.seat.as_ref().unwrap(), 1);
+    sync(&mut f);
+    assert_eq!(f.manager.tile_preview(&f.comp.state), None, "no edge yet");
+    // The left edge: the left half of the work area, below the bar.
+    f.manager
+        .pointer_motion(&mut f.comp.state, Point::from((1.0, at.y + 100.0)), 3);
+    let (dragged, rect) = f.manager.tile_preview(&f.comp.state).expect("left preview");
+    assert_eq!(dragged, window);
+    let top = roost_compositor::windows::WORK_AREA_TOP;
+    assert_eq!(
+        (rect.loc.x, rect.loc.y, rect.size.w, rect.size.h),
+        (0, top, 640, 800 - top)
+    );
+    // The top edge: the whole work area.
+    f.manager
+        .pointer_motion(&mut f.comp.state, Point::from((640.0, 1.0)), 4);
+    let (_, rect) = f.manager.tile_preview(&f.comp.state).expect("top preview");
+    assert_eq!((rect.size.w, rect.size.h), (1280, 800 - top));
+    // Back to the middle: the preview goes, and release tiles nothing.
+    f.manager
+        .pointer_motion(&mut f.comp.state, Point::from((640.0, 400.0)), 5);
+    assert_eq!(f.manager.tile_preview(&f.comp.state), None);
+    f.manager
+        .pointer_button(&mut f.comp.state, BTN_LEFT, false, 6);
+    assert_eq!(
+        f.manager.tile_preview(&f.comp.state),
+        None,
+        "the grab ended"
+    );
+}

@@ -1153,6 +1153,14 @@ impl Runtime {
             })).collect::<Vec<_>>(),
             "previews": previews,
             "thumbnails": thumbnails,
+            // GNOME's tile preview while a dragged window is over a
+            // snap edge: the window and the area it would fill.
+            "tile_preview": self.manager.tile_preview(&self.state).map(|(id, r)| {
+                serde_json::json!({
+                    "window": id,
+                    "rect": [r.loc.x, r.loc.y, r.size.w, r.size.h],
+                })
+            }),
             "layers": crate::layer::layer_layout(&self.state)
                 .iter()
                 .filter_map(|(surface, (x, y), _)| {
@@ -1381,7 +1389,7 @@ impl Runtime {
         for popup in crate::popup::placed_popups(&surface, origin, true) {
             tree(renderer, &popup.surface, popup.origin);
         }
-        let elements = crate::layer::front_to_back(elements);
+        let elements = Scene::flat(crate::layer::front_to_back(elements));
         let buffer_size = (w, h).into();
         let mut texture: smithay::backend::renderer::gles::GlesTexture =
             renderer.create_buffer(fourcc, buffer_size).ok()?;
@@ -1434,6 +1442,10 @@ impl Runtime {
         }
         let overview = self.control.overview_open().then(|| self.overview_layout());
         let cards = overview.as_ref().filter(|_| !self.overview_search);
+        let tile = overview
+            .is_none()
+            .then(|| self.manager.tile_preview(&self.state))
+            .flatten();
         let decor_global = cards.map(overview_decor).unwrap_or_default();
         let background = if overview.is_some() {
             OVERVIEW_BACKGROUND
@@ -1468,7 +1480,7 @@ impl Runtime {
         let buffer_size = (size.w, size.h).into();
         let mut texture: smithay::backend::renderer::gles::GlesTexture =
             renderer.create_buffer(fourcc, buffer_size).ok()?;
-        let elements = scene_elements(
+        let mut elements = scene_elements(
             renderer,
             &self.manager,
             &self.state,
@@ -1476,7 +1488,13 @@ impl Runtime {
             true,
             overview.as_ref(),
             None,
+            tile.as_ref()
+                .and_then(|(id, _)| self.manager.surface_of(*id))
+                .as_ref(),
         );
+        if let Some((_, rect)) = tile {
+            elements.tile = tile_elements(rect, view);
+        }
         let decor = decor_for_output(&decor_global, view);
         let previews = preview_elements(renderer, &self.manager, view, cards);
         let paper = backdrop(
@@ -1964,6 +1982,10 @@ impl Runtime {
             .then(|| self.overview_layout());
         // While search shows results, the workspace view steps aside.
         let cards = overview.as_ref().filter(|_| !self.overview_search);
+        // GNOME's tile preview while a dragged window is over a snap edge.
+        let tile = (show_content && overview.is_none())
+            .then(|| self.manager.tile_preview(&self.state))
+            .flatten();
         let decor_global = cards.map(overview_decor).unwrap_or_default();
         let background = if overview.is_some() {
             OVERVIEW_BACKGROUND
@@ -1987,7 +2009,7 @@ impl Runtime {
                         .then(|| self.state.primary_output_name())
                         .flatten()
                         .and_then(|name| self.state.lock_surface_for(&name));
-                    let elements = scene_elements(
+                    let mut elements = scene_elements(
                         renderer,
                         &self.manager,
                         &self.state,
@@ -1995,7 +2017,13 @@ impl Runtime {
                         show_content,
                         overview.as_ref(),
                         lock_surface.as_ref(),
+                        tile.as_ref()
+                            .and_then(|(id, _)| self.manager.surface_of(*id))
+                            .as_ref(),
                     );
+                    if let Some((_, rect)) = tile {
+                        elements.tile = tile_elements(rect, view);
+                    }
                     let decor = decor_for_output(&decor_global, view);
                     let previews = preview_elements(renderer, &self.manager, view, cards);
                     let paper = backdrop(
@@ -2069,7 +2097,7 @@ impl Runtime {
                     let lock_surface = locked
                         .then(|| self.state.lock_surface_for(&out.name))
                         .flatten();
-                    let elements = scene_elements(
+                    let mut elements = scene_elements(
                         renderer,
                         &self.manager,
                         &self.state,
@@ -2077,7 +2105,13 @@ impl Runtime {
                         show_content,
                         overview.as_ref(),
                         lock_surface.as_ref(),
+                        tile.as_ref()
+                            .and_then(|(id, _)| self.manager.surface_of(*id))
+                            .as_ref(),
                     );
+                    if let Some((_, rect)) = tile {
+                        elements.tile = tile_elements(rect, view);
+                    }
                     let decor = decor_for_output(&decor_global, view);
                     let previews = preview_elements(renderer, &self.manager, view, cards);
                     let paper = backdrop(
@@ -2239,9 +2273,81 @@ fn preview_elements(
     crate::layer::front_to_back(out)
 }
 
+/// One output's surfaces, front to back, with GNOME's tile preview
+/// slotted in: `elements[..above]` draw over the preview (the dragged
+/// window, its popups and the shell's layers), the rest beneath it.
+struct Scene {
+    elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
+    above: usize,
+    tile: Vec<smithay::backend::renderer::element::solid::SolidColorRenderElement>,
+}
+
+impl Scene {
+    /// Surfaces with nothing between them.
+    fn flat(elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>) -> Self {
+        let above = elements.len();
+        Self {
+            elements,
+            above,
+            tile: Vec::new(),
+        }
+    }
+}
+
+/// GNOME's tile preview (`.tile-preview`: the accent at half opacity
+/// with a 1px accent border) over `rect`, in one output's pixels.
+fn tile_elements(
+    rect: Rectangle<i32, Logical>,
+    view: View,
+) -> Vec<smithay::backend::renderer::element::solid::SolidColorRenderElement> {
+    use smithay::backend::renderer::element::solid::SolidColorRenderElement;
+    use smithay::backend::renderer::element::Id;
+    const ACCENT: [f32; 3] = [53.0 / 255.0, 132.0 / 255.0, 228.0 / 255.0];
+    let top_left = view.physical(f64::from(rect.loc.x), f64::from(rect.loc.y));
+    let bottom_right = view.physical(
+        f64::from(rect.loc.x + rect.size.w),
+        f64::from(rect.loc.y + rect.size.h),
+    );
+    let r = Rectangle::from_extremities(top_left, bottom_right);
+    let b = (view.scale.round() as i32).max(1);
+    let (w, h) = (r.size.w, r.size.h);
+    if w <= 2 * b || h <= 2 * b {
+        return Vec::new();
+    }
+    let [cr, cg, cb] = ACCENT;
+    let border = Color32F::new(cr, cg, cb, 1.0);
+    // Premultiplied: half opacity halves every channel.
+    let fill = Color32F::new(cr * 0.5, cg * 0.5, cb * 0.5, 0.5);
+    let at = |x: i32, y: i32, w: i32, h: i32| -> Rectangle<i32, smithay::utils::Physical> {
+        Rectangle::new((r.loc.x + x, r.loc.y + y).into(), (w, h).into())
+    };
+    // Stable ids keep damage tracking quiet while the preview holds.
+    thread_local! {
+        static IDS: [Id; 5] = std::array::from_fn(|_| Id::new());
+    }
+    IDS.with(|ids| {
+        [
+            (at(0, 0, w, b), border),
+            (at(0, h - b, w, b), border),
+            (at(0, b, b, h - 2 * b), border),
+            (at(w - b, b, b, h - 2 * b), border),
+            (at(b, b, w - 2 * b, h - 2 * b), fill),
+        ]
+        .into_iter()
+        .zip(ids.iter())
+        .map(|((geo, color), id)| {
+            SolidColorRenderElement::new(id.clone(), geo, 0usize, color, Kind::Unspecified)
+        })
+        .collect()
+    })
+}
+
 /// Window and layer-shell elements for one output whose top-left sits
 /// at `offset` in the global space. Empty while content is hidden
-/// (locked): nothing beneath the lock surface may show.
+/// (locked): nothing beneath the lock surface may show. `split` is the
+/// window being dragged over a snap edge: it and everything above it
+/// draw over the tile preview.
+#[allow(clippy::too_many_arguments)]
 fn scene_elements(
     renderer: &mut GlesRenderer,
     manager: &WindowManager,
@@ -2250,12 +2356,13 @@ fn scene_elements(
     show_content: bool,
     overview: Option<&crate::overview::OverviewLayout>,
     lock: Option<&smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>,
-) -> Vec<WaylandSurfaceRenderElement<GlesRenderer>> {
+    split: Option<&smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>,
+) -> Scene {
     if !show_content {
         // Locked: only the shell's lock surface for this output, at its
         // origin (ext-session-lock); nothing else may show.
-        return lock
-            .map(|surface| {
+        return Scene::flat(
+            lock.map(|surface| {
                 render_elements_from_surface_tree(
                     renderer,
                     surface,
@@ -2265,7 +2372,8 @@ fn scene_elements(
                     Kind::Unspecified,
                 )
             })
-            .unwrap_or_default();
+            .unwrap_or_default(),
+        );
     }
     if overview.is_some() {
         // Overview (#54): windows are drawn as rescaled previews in
@@ -2292,9 +2400,11 @@ fn scene_elements(
                 ));
             }
         }
-        return crate::layer::front_to_back(elements);
+        return Scene::flat(crate::layer::front_to_back(elements));
     }
     let mut elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
+    // Bottom-to-top index where the dragged window starts.
+    let mut split_from = None;
     let tree = |renderer: &mut GlesRenderer,
                 elements: &mut Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
                 surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
@@ -2312,6 +2422,9 @@ fn scene_elements(
         // Unassociated X11 windows contribute no surface yet and
         // render nothing this frame.
         if let Some(surface) = window.wl_surface() {
+            if split_from.is_none() && split.is_some_and(|s| *s == *surface) {
+                split_from = Some(elements.len());
+            }
             let origin = crate::popup::surface_origin(&surface, geometry.loc);
             tree(renderer, &mut elements, &surface, origin);
             // Popups (#88) right above their window.
@@ -2331,7 +2444,12 @@ fn scene_elements(
     // `elements` accumulates bottom-to-top (windows, then
     // background-to-overlay layers); Smithay 0.7 draws the first
     // element topmost.
-    crate::layer::front_to_back(elements)
+    let above = elements.len() - split_from.unwrap_or(0);
+    Scene {
+        elements: crate::layer::front_to_back(elements),
+        above,
+        tile: Vec::new(),
+    }
 }
 
 /// What lies under the windows on one output, in physical pixels: the
@@ -2392,7 +2510,7 @@ fn draw_scene(
     paper: &[smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<
         GlesRenderer,
     >],
-    elements: &[WaylandSurfaceRenderElement<GlesRenderer>],
+    scene: &Scene,
     target: Target,
     decor: &[(Color32F, Vec<Rectangle<i32, smithay::utils::Physical>>)],
     previews: &[PreviewElement],
@@ -2423,7 +2541,20 @@ fn draw_scene(
         draw_render_elements(frame, scale, previews, &[damage])
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
     }
-    draw_render_elements(frame, scale, elements, &[damage])
+    // Beneath the tile preview, the preview (blended), then the
+    // dragged window and the layers over it.
+    let (over, under) = scene
+        .elements
+        .split_at(scene.above.min(scene.elements.len()));
+    if !under.is_empty() {
+        draw_render_elements(frame, scale, under, &[damage])
+            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    }
+    if !scene.tile.is_empty() {
+        draw_render_elements::<GlesRenderer, _, _>(frame, 1.0, &scene.tile, &[damage])
+            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    }
+    draw_render_elements(frame, scale, over, &[damage])
         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
     Ok(())
 }

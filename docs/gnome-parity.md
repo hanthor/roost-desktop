@@ -60,6 +60,7 @@ scripts/lib/roost-parity-compare.py target/gnome-reference target/roost-parity t
 | 14-screenshot-ui | the screenshot UI on Print |
 | 15-workspace-popup | the workspace switcher popup on Super+Page_Down |
 | 16-overview-workspaces | the overview with three workspaces (a window moved one right): the thumbnails strip, the shrunken card, the focused window still drawn activated |
+| 17-tile-preview | Gamma dragged to the left edge: the tile preview over the left half, above Alpha and below Gamma (GNOME's reference moves Gamma by the drag's offset and opens the preview through its own handler, since headless input is unreliable) |
 | 11b-unlock-prompt | the unlock prompt, set to what a real session shows: the user's name and GDM's Password question (the stubbed display manager has no PAM conversation or AccountsService) |
 
 Both sides run the same services: the stubs serve power-profiles and
