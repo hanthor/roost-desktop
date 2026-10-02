@@ -277,6 +277,10 @@ pub struct WindowManager {
     /// The window left activated while the overview holds the keyboard
     /// (GNOME keeps the focused window's activated look there).
     overview_activated: Option<u64>,
+    /// The window this manager last told it was activated. The shell's
+    /// ActivateWindow sets the model's focus before the manager applies
+    /// it, so the model cannot say which window to deactivate.
+    activated: Option<u64>,
     /// Overview surface keyboard focus is parked on, if parked.
     overview_held: Option<WlSurface>,
     /// An exclusive-keyboard layer surface holding the keyboard (a
@@ -331,6 +335,7 @@ impl WindowManager {
             overview_open: false,
             pre_overview_focus: None,
             overview_activated: None,
+            activated: None,
             overview_held: None,
             exclusive_held: None,
         }
@@ -1099,6 +1104,7 @@ impl WindowManager {
                 self.configure(id, true);
             }
             self.overview_activated = id;
+            self.activated = id;
         }
     }
 
@@ -1120,13 +1126,14 @@ impl WindowManager {
             }
         }
         let serial = SERIAL_COUNTER.next_serial();
-        if let Some(previous) = previous {
-            if Some(previous) != id {
-                self.configure(previous, false);
+        for old in [previous, self.activated.take()].into_iter().flatten() {
+            if Some(old) != id {
+                self.configure(old, false);
             }
         }
         if let Some(id) = id {
             self.configure(id, true);
+            self.activated = Some(id);
             if let (Some(keyboard), Some(window)) = (self.keyboard.clone(), self.windows.get(&id)) {
                 // Unassociated X11 windows contribute no surface yet;
                 // the model focus stands and the seat follows on
