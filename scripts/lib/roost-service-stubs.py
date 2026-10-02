@@ -16,8 +16,9 @@ starts), just enough of each daemon behind GNOME 51's quick settings:
   Suspend, Reboot and PowerOff. Power calls are appended to POWER_LOG,
   and Suspend emits PrepareForSleep(true) first, as logind does.
 
-ROOST_STUB_SERVICES (comma-separated: nm, bluez, ppd, logind; default
-all) limits which daemons are served, so a capture can match another
+ROOST_STUB_SERVICES (comma-separated: nm, bluez, ppd, logind, gdm;
+default all but gdm; gdm answers GNOME Shell's "can lock" probe, the
+display manager's Version, so a reference GNOME session can lock) limits which daemons are served, so a capture can match another
 session's services exactly.
 
 Writes emit PropertiesChanged, so the shell sees its own changes the
@@ -61,6 +62,9 @@ XML = """
     </method>
     <method name="Terminate"/>
   </interface>
+  <interface name="org.gnome.DisplayManager.Manager">
+    <property name="Version" type="s" access="read"/>
+  </interface>
   <interface name="org.freedesktop.login1.Manager">
     <method name="Suspend"><arg type="b" direction="in"/></method>
     <method name="Reboot"><arg type="b" direction="in"/></method>
@@ -86,6 +90,9 @@ state = {
     (DEV_WIFI, "org.freedesktop.NetworkManager.Device"): {
         "DeviceType": GLib.Variant("u", 2), "State": GLib.Variant("u", 30)},
     (HCI, "org.bluez.Adapter1"): {"Powered": GLib.Variant("b", True)},
+    ("/org/gnome/DisplayManager/Manager", "org.gnome.DisplayManager.Manager"): {
+        "Version": GLib.Variant("s", "51.0"),
+    },
     (PPD, "org.freedesktop.UPower.PowerProfiles"): {
         "ActiveProfile": GLib.Variant("s", "balanced"),
         "Profiles": GLib.Variant("aa{sv}", [
@@ -155,12 +162,16 @@ SERVICES = {
     "ppd": (["org.freedesktop.UPower.PowerProfiles"], [
         (PPD, "org.freedesktop.UPower.PowerProfiles"),
     ]),
+    "gdm": (["org.gnome.DisplayManager"], [
+        ("/org/gnome/DisplayManager/Manager", "org.gnome.DisplayManager.Manager"),
+    ]),
     "logind": (["org.freedesktop.login1"], [
         (SESSION, "org.freedesktop.login1.Session"),
         ("/org/freedesktop/login1", "org.freedesktop.login1.Manager"),
     ]),
 }
-wanted = os.environ.get("ROOST_STUB_SERVICES", ",".join(SERVICES)).split(",")
+wanted = os.environ.get(
+    "ROOST_STUB_SERVICES", ",".join(k for k in SERVICES if k != "gdm")).split(",")
 names = []
 for key in wanted:
     if key not in SERVICES:

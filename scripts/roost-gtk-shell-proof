@@ -65,6 +65,8 @@
 #                  scale live and saves it to Roost's monitors.xml (#59)
 #   G-POWER-MENU   the power button opens GNOME's menu (Suspend,
 #                  Restart…, Power Off…, Log Out…) (#62)
+#   G-POWER-ESCAPE Escape dismisses the end-session dialog (it holds the
+#                  keyboard, layer-shell exclusivity)
 #   G-POWER-DIALOG Power Off… opens the 60 s end-session dialog, and
 #                  Cancel closes it with nothing done
 #   G-POWER-OFF    confirming the dialog asks logind to power off
@@ -962,6 +964,21 @@ if jq -e 'any(.[]; .showing and (.name | test("automatically in")))' "$ARTIFACTS
 fi
 [ ! -s "$POWER_LOG" ] || fail G-POWER-DIALOG "Cancel still called logind: $(cat "$POWER_LOG")"
 pass G-POWER-DIALOG "Power Off… opens the countdown dialog and Cancel does nothing"
+
+# Escape cancels too, as in GNOME: the dialog holds the keyboard
+# (layer-shell keyboard exclusivity).
+open_power_menu power-menu-esc || fail G-POWER-ESCAPE "could not reopen the power menu"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-power-esc.json" 20 \
+    --press "Log Out…" || fail G-POWER-ESCAPE "could not press Log Out…"
+sleep 1
+xdotool key Escape
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-power-esc-after.json" 20 ||
+    fail G-POWER-ESCAPE "accessibility dump failed"
+if jq -e 'any(.[]; .showing and (.name | test("automatically in")))' "$ARTIFACTS/a11y-power-esc-after.json" >/dev/null; then
+    fail G-POWER-ESCAPE "Escape left the end-session dialog up"
+fi
+pass G-POWER-ESCAPE "Escape dismisses the end-session dialog"
 
 open_power_menu power-menu-2 || fail G-POWER-OFF "could not reopen the power menu"
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-power-dialog-2.json" 20 \

@@ -224,6 +224,9 @@ pub struct WindowManager {
     pre_overview_focus: Option<u64>,
     /// Overview surface keyboard focus is parked on, if parked.
     overview_held: Option<WlSurface>,
+    /// An exclusive-keyboard layer surface holding the keyboard (a
+    /// modal dialog), released back to the focused window on unmap.
+    exclusive_held: Option<WlSurface>,
 }
 
 impl WindowManager {
@@ -265,6 +268,7 @@ impl WindowManager {
             overview_open: false,
             pre_overview_focus: None,
             overview_held: None,
+            exclusive_held: None,
         }
     }
 
@@ -451,6 +455,7 @@ impl WindowManager {
         // Overview focus parks last so newly mapped windows never
         // hold focus past this tick while the overview is open.
         self.reconcile_overview_focus(state);
+        self.reconcile_exclusive_layer(state);
         let _ = seen;
     }
 
@@ -491,6 +496,34 @@ impl WindowManager {
 
     /// Restore the pre-overview window (or the topmost live one) after
     /// dismiss or surface loss.
+    /// wlr-layer-shell keyboard exclusivity: while a top or overlay
+    /// surface asking for it is mapped, it holds the keyboard (GNOME's
+    /// modal dialogs grab it the same way); on unmap the focused window
+    /// gets it back. The overview park takes precedence while open.
+    fn reconcile_exclusive_layer(&mut self, state: &mut State) {
+        if self.overview_held.is_some() {
+            return;
+        }
+        let wanted = crate::layer::exclusive_keyboard_layer(state);
+        if wanted == self.exclusive_held {
+            return;
+        }
+        let serial = SERIAL_COUNTER.next_serial();
+        match wanted.clone() {
+            Some(surface) => {
+                if let Some(keyboard) = self.keyboard.clone() {
+                    keyboard.set_focus(state, Some(surface.clone()), serial);
+                }
+                state.sync_selection_focus(Some(&surface));
+            }
+            None => {
+                let focused = self.model.focused();
+                self.apply_focus(state, focused);
+            }
+        }
+        self.exclusive_held = wanted;
+    }
+
     fn restore_pre_overview_focus(&mut self, state: &mut State) {
         self.overview_held = None;
         let restore = self
