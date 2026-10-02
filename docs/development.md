@@ -37,13 +37,10 @@ sudo dnf install -y \
 ```
 
 ### Spektacular CLI
-RWD uses [Spektacular](https://github.com/projectbluefin/spektacular) for specification and planning workflows. Install the CLI:
+RWD uses [Spektacular](https://github.com/hivecommons/spektacular) for specification and planning workflows. Install the CLI:
 
 ```bash
-# Clone the Spektacular repository
-git clone https://github.com/projectbluefin/spektacular.git
-cd spektacular
-cargo install --path .
+go install github.com/hivecommons/spektacular@latest
 ```
 
 Verify installation:
@@ -176,7 +173,7 @@ spek new --title "My feature" --category implementation
 spek plan <spec-id> --state ready
 ```
 
-For more details, see the [Spektacular documentation](https://github.com/projectbluefin/spektacular).
+For more details, see the [Spektacular documentation](https://github.com/hivecommons/spektacular).
 
 ## Architecture and Design
 
@@ -242,6 +239,6 @@ If you find a bug or have a feature request:
 - **Roadmap**: `docs/roadmap.md` for the full vision and current priorities
 - **Smithay documentation**: https://docs.rs/smithay/latest/smithay/
 - **Wayland protocol specs**: https://wayland.freedesktop.org/
-- **Spektacular**: https://github.com/projectbluefin/spektacular
+- **Spektacular**: https://github.com/hivecommons/spektacular
 
 Welcome to the project, and happy hacking! 🚀
