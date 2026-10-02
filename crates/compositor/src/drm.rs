@@ -55,10 +55,20 @@ pub struct DrmOutput {
     pub output: Output,
     /// Mode size in physical pixels.
     pub size: Size<i32, Physical>,
-    /// Top-left in the global space (left-to-right tiling).
+    /// Top-left in the global logical space: GNOME's arrangement from
+    /// monitors.xml, else left-to-right.
     pub loc: (i32, i32),
+    /// Output scale from monitors.xml (`ROOST_SCALE` without one), #59.
+    pub scale: f64,
     /// A frame is queued and its page flip has not completed yet.
     pub pending: bool,
+}
+
+impl DrmOutput {
+    /// Size in logical pixels (mode size over scale).
+    pub fn logical_size(&self) -> (i32, i32) {
+        crate::runtime::logical_size(self.size.w, self.size.h, self.scale)
+    }
 }
 
 /// Hardware session state.
@@ -258,27 +268,63 @@ impl DrmBackend {
                 },
             );
             let out_mode = Mode::from(mode);
-            output.change_current_state(
-                Some(out_mode),
-                None,
-                Some(smithay::output::Scale::Integer(1)),
-                Some((next_x, 0).into()),
-            );
+            output.change_current_state(Some(out_mode), None, None, None);
             output.set_preferred(out_mode);
-            eprintln!(
-                "roost-compositor: drm: output {name} {}x{} at {next_x},0",
-                size.w, size.h
-            );
             outputs.push(DrmOutput {
                 name,
                 crtc,
                 surface,
                 output,
                 size,
-                loc: (next_x, 0),
+                loc: (0, 0),
+                scale: 1.0,
                 pending: false,
             });
-            next_x += size.w;
+        }
+        // GNOME's arrangement for exactly these connectors (#59): scale
+        // and logical position per output; without one, ROOST_SCALE (or
+        // 1) and left-to-right logical placement.
+        let names: Vec<String> = outputs.iter().map(|o| o.name.clone()).collect();
+        let arrangement = crate::monitors::load(&names);
+        let fallback_scale = std::env::var("ROOST_SCALE")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(crate::runtime::clamp_scale)
+            .unwrap_or(1.0);
+        for out in outputs.iter_mut() {
+            match arrangement.get(&out.name) {
+                Some(config) => {
+                    out.scale = crate::runtime::clamp_scale(config.scale);
+                    out.loc = (config.x, config.y);
+                }
+                None => {
+                    out.scale = fallback_scale;
+                    out.loc = (next_x, 0);
+                }
+            }
+            next_x = next_x.max(out.loc.0 + out.logical_size().0);
+            out.output.change_current_state(
+                None,
+                None,
+                Some(if out.scale == 1.0 {
+                    smithay::output::Scale::Integer(1)
+                } else {
+                    smithay::output::Scale::Fractional(out.scale)
+                }),
+                Some(out.loc.into()),
+            );
+            eprintln!(
+                "roost-compositor: drm: output {} {}x{} at {},{} scale {}",
+                out.name, out.size.w, out.size.h, out.loc.0, out.loc.1, out.scale
+            );
+        }
+        // GNOME's primary monitor first: it carries the top bar.
+        if let Some(primary) = outputs
+            .iter()
+            .position(|o| arrangement.get(&o.name).is_some_and(|c| c.primary))
+        {
+            let primary = outputs.remove(primary);
+            outputs.insert(0, primary);
         }
         if outputs.is_empty() {
             return Err(DrmInitError(format!(
@@ -292,7 +338,8 @@ impl DrmBackend {
             .udev_assign_seat(&seat)
             .map_err(|()| DrmInitError(format!("libinput: cannot assign seat {seat}")))?;
         let input = LibinputInputBackend::new(libinput.clone());
-        let first = outputs[0].size;
+        let (first_w, first_h) = outputs[0].logical_size();
+        let first_loc = outputs[0].loc;
         Ok((
             Self {
                 session,
@@ -301,7 +348,11 @@ impl DrmBackend {
                 outputs,
                 libinput,
                 active: true,
-                pointer: (f64::from(first.w) / 2.0, f64::from(first.h) / 2.0).into(),
+                pointer: (
+                    f64::from(first_loc.0) + f64::from(first_w) / 2.0,
+                    f64::from(first_loc.1) + f64::from(first_h) / 2.0,
+                )
+                    .into(),
                 ctrl: false,
                 alt: false,
             },
@@ -313,11 +364,11 @@ impl DrmBackend {
         ))
     }
 
-    /// Output rectangles in the global logical space (scale 1).
+    /// Output rectangles in the global logical space.
     pub fn output_rects(&self) -> Vec<Rectangle<i32, Logical>> {
         self.outputs
             .iter()
-            .map(|o| Rectangle::new(o.loc.into(), (o.size.w, o.size.h).into()))
+            .map(|o| Rectangle::new(o.loc.into(), o.logical_size().into()))
             .collect()
     }
 
@@ -463,21 +514,30 @@ pub type PixelRects = Vec<Rectangle<i32, Physical>>;
 /// Software pointer: an arrow drawn as stacked rectangles (outline
 /// first, fill second), relative to the hotspot at `pos` and offset by
 /// the output's location. Returns `(outline, fill)` damage-style rects.
-pub fn cursor_rects(pos: Point<f64, Logical>, output_loc: (i32, i32)) -> (PixelRects, PixelRects) {
-    let x = pos.x.round() as i32 - output_loc.0;
-    let y = pos.y.round() as i32 - output_loc.1;
+pub fn cursor_rects(
+    pos: Point<f64, Logical>,
+    output_loc: (i32, i32),
+    scale: f64,
+) -> (PixelRects, PixelRects) {
+    let x = ((pos.x - f64::from(output_loc.0)) * scale).round() as i32;
+    let y = ((pos.y - f64::from(output_loc.1)) * scale).round() as i32;
+    // The arrow grows by whole pixels with the scale, staying crisp.
+    let k = (scale.round() as i32).max(1);
+    let rect = |dx: i32, dy: i32, w: i32| -> Rectangle<i32, Physical> {
+        Rectangle::new((x + dx * k, y + dy * k).into(), (w * k, k).into())
+    };
     let mut outline = Vec::new();
     let mut fill = Vec::new();
     // Left-aligned triangle, 12 rows tall, plus a short tail.
     for row in 0..12 {
-        outline.push(Rectangle::new((x, y + row).into(), (row + 2, 1).into()));
+        outline.push(rect(0, row, row + 2));
         if row > 0 && row < 11 {
-            fill.push(Rectangle::new((x + 1, y + row).into(), (row, 1).into()));
+            fill.push(rect(1, row, row));
         }
     }
     for row in 12..17 {
-        outline.push(Rectangle::new((x + 4, y + row).into(), (4, 1).into()));
-        fill.push(Rectangle::new((x + 5, y + row).into(), (2, 1).into()));
+        outline.push(rect(4, row, 4));
+        fill.push(rect(5, row, 2));
     }
     (outline, fill)
 }
@@ -485,6 +545,16 @@ pub fn cursor_rects(pos: Point<f64, Logical>, output_loc: (i32, i32)) -> (PixelR
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cursor_scales_with_the_output() {
+        // At scale 2 the arrow sits at the scaled position, twice as big.
+        let (outline, _) = cursor_rects((110.0, 20.0).into(), (100, 0), 2.0);
+        assert_eq!(outline[0].loc, (20, 40).into());
+        assert_eq!(outline[0].size, (4, 2).into());
+        let (outline, _) = cursor_rects((110.0, 20.0).into(), (100, 0), 1.0);
+        assert_eq!(outline[0].size, (2, 1).into());
+    }
 
     #[test]
     fn function_keys_map_to_vts() {
@@ -513,7 +583,7 @@ mod tests {
 
     #[test]
     fn cursor_is_offset_by_output_location() {
-        let (outline, fill) = cursor_rects((1930.0, 5.0).into(), (1920, 0));
+        let (outline, fill) = cursor_rects((1930.0, 5.0).into(), (1920, 0), 1.0);
         assert_eq!(outline[0].loc, (10, 5).into());
         assert!(!fill.is_empty());
     }

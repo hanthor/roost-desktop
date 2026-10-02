@@ -51,6 +51,7 @@ pub mod control;
 pub mod drm;
 pub mod layer;
 pub mod lock;
+pub mod monitors;
 pub mod overlay;
 pub mod overview;
 pub mod pam;
@@ -638,6 +639,14 @@ impl State {
         });
     }
 
+    /// Place a registered output at a logical position (GNOME's
+    /// arrangement from monitors.xml, #59). Unknown names are ignored.
+    pub fn set_output_location(&mut self, name: &str, loc: (i32, i32)) {
+        if let Some(entry) = self.outputs.iter_mut().find(|entry| entry.name == name) {
+            entry.loc = loc;
+        }
+    }
+
     /// Record the registry global id for a registered output (from
     /// `create_global`): removal un-advertises it. Unknown names are
     /// ignored — virtual entries never advertise.
@@ -735,6 +744,26 @@ impl State {
     /// Wire records for the shell, primary first: the inventory as the
     /// shell already knows how to paint it — size, primary, handles
     /// implied by the bound surfaces.
+    /// Scale of the output a logical rect overlaps most (the primary on
+    /// a tie or no overlap), as niri picks it for a window (#59).
+    pub fn scale_for(
+        &self,
+        rect: smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+    ) -> smithay::output::Scale {
+        let overlap = |entry: &OutputEntry| {
+            let area = smithay::utils::Rectangle::new(entry.loc.into(), entry.size);
+            area.intersection(rect).map_or(0, |i| i.size.w * i.size.h)
+        };
+        self.outputs
+            .iter()
+            .filter(|entry| entry.output.is_some())
+            .max_by_key(|entry| (overlap(entry), entry.primary))
+            .and_then(|entry| entry.output.as_ref())
+            .map(|output| output.current_scale())
+            .unwrap_or(smithay::output::Scale::Integer(1))
+    }
+
+    /// Shell-facing output inventory.
     pub fn output_infos(&self) -> Vec<roost_shell_control::OutputInfo> {
         let mut entries: Vec<&OutputEntry> = self.outputs.iter().collect();
         entries.sort_by_key(|entry| (!entry.primary, entry.loc.0));
