@@ -156,7 +156,8 @@ SESSION = "/org/freedesktop/login1/session/auto"
 state = {
     (NM, "org.freedesktop.NetworkManager"): {"WirelessEnabled": GLib.Variant("b", True)},
     (DEV_ETH, "org.freedesktop.NetworkManager.Device"): {
-        "DeviceType": GLib.Variant("u", 1), "State": GLib.Variant("u", 100)},
+        "DeviceType": GLib.Variant("u", 1), "State": GLib.Variant("u", 100),
+        "AvailableConnections": GLib.Variant("ao", [])},
     (DEV_WIFI, "org.freedesktop.NetworkManager.Device"): {
         "DeviceType": GLib.Variant("u", 2), "State": GLib.Variant("u", 30),
         "AvailableConnections": GLib.Variant("ao", [HOME_CONN])},
@@ -256,8 +257,12 @@ def method_call(c, sender, path, iface, method, params, invocation):
         invocation.return_value(None)
     elif method == "SetBrightness":
         _, _, value = params.unpack()
-        with open(os.path.join(BACKLIGHT, "brightness"), "w") as fh:
+        # Atomically, as the kernel's attribute never reads half-written:
+        # a reader racing a truncate-then-write would see it empty.
+        path = os.path.join(BACKLIGHT, "brightness")
+        with open(path + ".tmp", "w") as fh:
             fh.write(f"{value}\n")
+        os.replace(path + ".tmp", path)
         invocation.return_value(None)
     else:
         invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", method)
