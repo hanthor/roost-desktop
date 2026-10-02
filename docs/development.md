@@ -48,7 +48,7 @@ cargo install --path .
 
 Verify installation:
 ```bash
-spek --version
+spektacular version check
 ```
 
 ## Project Structure
@@ -87,10 +87,10 @@ rust-wayland-desktop/
 │   └── work/                # Tracking data for each plan state
 │
 ├── scripts/
-│   ├── rwd-nested           # One-command nested session launcher and journey harness
-│   ├── rwd-journey          # App mapping and interaction test harness
-│   ├── rwd-app-content      # Content generation for testing
-│   └── rwd-scroll-proof     # Scroll mode correctness proof
+│   ├── roost-nested         # One-command nested session launcher and journey harness
+│   ├── roost-journey        # App mapping and interaction test harness
+│   ├── roost-app-content    # Content generation for testing
+│   └── roost-scroll-proof   # Scroll mode correctness proof
 │
 └── Cargo.toml              # Workspace configuration and pinned dependencies
 ```
@@ -126,8 +126,8 @@ The nested compositor runs inside your current Wayland or X11 session for safe d
 
 This command:
 - Builds both `rwd-compositor` and `rwd-shell-host` in release mode
-- Starts the compositor on a private socket (named `rwd-nested-<pid>` by default)
-- Logs output to `~/.local/state/rwd-nested/rwd-nested-<pid>/nested.log`
+- Starts the compositor on a private socket (named `roost-nested-<pid>` by default)
+- Logs output to `~/.local/state/roost-nested/roost-nested-<pid>/nested.log`
 - Displays the socket name and log path for reference
 
 The session runs until you press Ctrl+C or terminate the process.
@@ -141,7 +141,7 @@ RWD implements a supervised shell-host restart mechanism. Test it with:
 ./scripts/roost-nested run
 
 # In another terminal, simulate a shell crash:
-./scripts/roost-nested kill-shell --socket rwd-nested-<pid>
+./scripts/roost-nested kill-shell --socket roost-nested-<pid>
 ```
 
 The compositor will:
@@ -164,16 +164,16 @@ RWD uses Spektacular for planning and tracking implementation work. Each work it
 
 ```bash
 # List all specs and their plan status
-spek list
+spektacular spec file list
 
 # View a specific spec
-spek show <spec-id>
+spektacular spec show <spec-id>
 
 # Create a new spec (typically for maintainers)
-spek new --title "My feature" --category implementation
+spektacular spec new --title "My feature" --category implementation
 
 # Update plan state (e.g., transitioning from draft to ready)
-spek plan <spec-id> --state ready
+spektacular plan <spec-id> --state ready
 ```
 
 For more details, see the [Spektacular documentation](https://github.com/projectbluefin/spektacular).
