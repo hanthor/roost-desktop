@@ -696,6 +696,15 @@ pub fn brightness_percent(value: u32, max: u32) -> f64 {
     (value as f64 * 100.0 / max as f64).clamp(0.0, 100.0)
 }
 
+/// One brightness-key step from `percent`: GNOME's scale has twenty
+/// steps, and a press lands on the next one up or down.
+pub fn brightness_step(percent: f64, up: bool) -> f64 {
+    let step = 100.0 / 20.0;
+    let index = (percent / step).round();
+    let next = if up { index + 1.0 } else { index - 1.0 };
+    (next * step).clamp(0.0, 100.0)
+}
+
 /// Backlight value for a slider percentage. Never zero: a black
 /// screen is not a brightness level (GNOME keeps a floor too).
 pub fn brightness_value(percent: f64, max: u32) -> u32 {
@@ -706,6 +715,14 @@ pub fn brightness_value(percent: f64, max: u32) -> u32 {
 #[cfg(test)]
 mod service_tests {
     use super::*;
+
+    #[test]
+    fn brightness_keys_step_by_a_twentieth() {
+        assert_eq!(brightness_step(50.0, true), 55.0);
+        assert_eq!(brightness_step(52.0, false), 45.0);
+        assert_eq!(brightness_step(100.0, true), 100.0);
+        assert_eq!(brightness_step(0.0, false), 0.0);
+    }
 
     #[test]
     fn power_mode_follows_gnome_51() {

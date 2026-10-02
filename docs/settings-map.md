@@ -55,7 +55,9 @@ This page records that decision for R9 (knowledge entry
 
 | Schema and key | Status | Notes |
 |---|---|---|
-| org.gnome.desktop.wm.keybindings, org.gnome.shell.keybindings, org.gnome.mutter.keybindings | Ignored | Roost uses GNOME's default bindings, fixed (#63) |
+| org.gnome.shell.keybindings toggle-overview, toggle-application-view, toggle-message-tray, toggle-quick-settings, switch-to-application-1..9, open-new-window-application-1..9, screenshot, screenshot-window, screen-brightness-up, screen-brightness-down | Honored | read live, GNOME 51's defaults when the schema is missing; grabbed through the compositor like any accelerator (`crates/shell-gtk/src/keybindings.rs`) |
+| org.gnome.shell.keybindings show-screenshot-ui, show-screen-recording-ui, focus-active-notification, shift-overview-up/down, the per-monitor brightness keys | Ignored | no screenshot or recording UI, notification focus, or per-monitor brightness yet (#63) |
+| org.gnome.desktop.wm.keybindings, org.gnome.mutter.keybindings | Ignored | Roost uses GNOME's default window-manager bindings, fixed (#63) |
 | org.gnome.desktop.wm.preferences button-layout | Via GTK | Client-side decorations read it |
 | org.gnome.desktop.wm.preferences focus-mode, num-workspaces | Ignored | Click to focus and dynamic workspaces, as GNOME's defaults |
 | org.gnome.mutter dynamic-workspaces, edge-tiling | Ignored | Always on, as GNOME's defaults |

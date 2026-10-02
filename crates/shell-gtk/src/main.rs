@@ -15,6 +15,7 @@
 
 mod calendar;
 mod folders;
+mod keybindings;
 mod live_apps;
 mod lock;
 mod logic;
@@ -512,48 +513,7 @@ fn quick_settings_popover(
         let (popover, notify) = (popover.clone(), notify.clone());
         screenshot.connect_clicked(move |_| {
             popover.popdown();
-            let notify = notify.clone();
-            glib::timeout_add_local_once(Duration::from_millis(400), move || {
-                gio::bus_get(
-                    gio::BusType::Session,
-                    None::<&gio::Cancellable>,
-                    move |conn| {
-                        let Ok(conn) = conn else {
-                            return;
-                        };
-                        conn.call(
-                            Some("org.gnome.Shell.Screenshot"),
-                            "/org/gnome/Shell/Screenshot",
-                            "org.gnome.Shell.Screenshot",
-                            "Screenshot",
-                            Some(&(false, true, "").to_variant()),
-                            glib::VariantTy::new("(bs)").ok(),
-                            gio::DBusCallFlags::NONE,
-                            10_000,
-                            None::<&gio::Cancellable>,
-                            move |reply| match reply {
-                                Ok(reply) => {
-                                    let path = reply
-                                        .try_child_value(1)
-                                        .and_then(|v| v.get::<String>())
-                                        .unwrap_or_default();
-                                    let name = std::path::Path::new(&path)
-                                        .file_name()
-                                        .map(|n| n.to_string_lossy().into_owned())
-                                        .unwrap_or(path);
-                                    notify.post(
-                                        "Screenshot",
-                                        "screenshot-recorded-symbolic",
-                                        "Screenshot captured",
-                                        &name,
-                                    );
-                                }
-                                Err(e) => eprintln!("roost-shell-gtk: screenshot failed: {e}"),
-                            },
-                        );
-                    },
-                );
-            });
+            take_screenshot(false, notify.clone());
         });
     }
     settings_btn.connect_clicked(|_| {
@@ -808,6 +768,59 @@ fn quick_settings_popover(
     popover
 }
 
+/// Save a screenshot of the screen (or the focused window) through
+/// org.gnome.Shell.Screenshot and say so in a notification, as GNOME's
+/// screenshot button and keys do. Waits a moment so a closing menu is
+/// not in the shot.
+fn take_screenshot(window: bool, notify: Rc<notify::NotifyUi>) {
+    glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        gio::bus_get(
+            gio::BusType::Session,
+            None::<&gio::Cancellable>,
+            move |conn| {
+                let Ok(conn) = conn else {
+                    return;
+                };
+                let (method, args) = if window {
+                    ("ScreenshotWindow", (true, false, true, "").to_variant())
+                } else {
+                    ("Screenshot", (false, true, "").to_variant())
+                };
+                conn.call(
+                    Some("org.gnome.Shell.Screenshot"),
+                    "/org/gnome/Shell/Screenshot",
+                    "org.gnome.Shell.Screenshot",
+                    method,
+                    Some(&args),
+                    glib::VariantTy::new("(bs)").ok(),
+                    gio::DBusCallFlags::NONE,
+                    10_000,
+                    None::<&gio::Cancellable>,
+                    move |reply| match reply {
+                        Ok(reply) => {
+                            let path = reply
+                                .try_child_value(1)
+                                .and_then(|v| v.get::<String>())
+                                .unwrap_or_default();
+                            let name = std::path::Path::new(&path)
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or(path);
+                            notify.post(
+                                "Screenshot",
+                                "screenshot-recorded-symbolic",
+                                "Screenshot captured",
+                                &name,
+                            );
+                        }
+                        Err(e) => eprintln!("roost-shell-gtk: screenshot failed: {e}"),
+                    },
+                );
+            },
+        );
+    });
+}
+
 fn build(app: &adw::Application) {
     let provider = gtk::CssProvider::new();
     provider.load_from_string(include_str!("style.css"));
@@ -980,6 +993,7 @@ fn build(app: &adw::Application) {
 
     // Clock: GNOME's panel text, refreshed every second.
     let interface = settings(INTERFACE_SCHEMA);
+    let clock_button = clock.clone();
     let tick = move || {
         let now = jiff::Zoned::now().datetime();
         let format = interface
@@ -1031,6 +1045,7 @@ fn build(app: &adw::Application) {
         }
     };
     let apps = live_apps::LiveApps::new();
+    let dash_apps = favorites.clone();
     let overview_ui = overview::OverviewUi::new(
         app.upcast_ref(),
         apps.clone(),
@@ -1040,11 +1055,122 @@ fn build(app: &adw::Application) {
     let switcher_ui = switcher::SwitcherUi::new(app.upcast_ref(), apps.clone());
     // org.gnome.Shell for the rest of GNOME: the OSD gnome-settings-daemon
     // shows for volume and brightness keys, search and the app grid.
+    let osd_ui = osd::OsdUi::new(app.upcast_ref());
     let gnome_shell = shell_dbus::start(Rc::new(GnomeShellDbus {
-        osd: osd::OsdUi::new(app.upcast_ref()),
+        osd: osd_ui.clone(),
         overview: overview_ui.clone(),
         shell: shell.clone(),
     }));
+
+    // GNOME Shell's own keybindings (org.gnome.shell.keybindings).
+    {
+        let run: Rc<dyn Fn(keybindings::Action)> = {
+            let (shell, overview_ui, clock, system) = (
+                shell.clone(),
+                overview_ui.clone(),
+                clock_button.clone(),
+                system.clone(),
+            );
+            let (apps, notify, osd_ui) = (apps.clone(), notify.clone(), osd_ui.clone());
+            Rc::new(move |action| {
+                use keybindings::Action;
+                let toggle = |button: &gtk::MenuButton| {
+                    if button.is_active() {
+                        button.popdown();
+                    } else {
+                        button.popup();
+                    }
+                };
+                let dash_entry = |n: u8| {
+                    let id = dash_apps.get(usize::from(n) - 1)?;
+                    let id = id.trim_end_matches(".desktop");
+                    apps.get().entry(id).cloned()
+                };
+                match action {
+                    Action::ToggleOverview => {
+                        if let Some(control) = shell.borrow_mut().control.as_mut() {
+                            let _ = control.toggle_overview();
+                        }
+                    }
+                    Action::ToggleApplicationView => {
+                        overview::OverviewUi::toggle_apps(&overview_ui);
+                    }
+                    Action::ToggleMessageTray => toggle(&clock),
+                    Action::ToggleQuickSettings => toggle(&system),
+                    Action::SwitchToApplication(n) => {
+                        let Some(entry) = dash_entry(n) else { return };
+                        // Its newest window when it runs, else a launch;
+                        // the overview steps aside either way.
+                        let window = shell.borrow().control.as_ref().and_then(|c| {
+                            c.model()
+                                .windows()
+                                .iter()
+                                .rev()
+                                .find(|w| w.app_id.as_deref() == Some(entry.app_id.as_str()))
+                                .map(|w| w.id)
+                        });
+                        let mut shell = shell.borrow_mut();
+                        if let Some(control) = shell.control.as_mut() {
+                            match window {
+                                Some(id) => {
+                                    let _ = control.activate_window(id);
+                                }
+                                None => {
+                                    let _ = roost_shell_host::apps::launch(&entry);
+                                }
+                            }
+                            if control.model().is_overview_open() {
+                                let _ = control.toggle_overview();
+                            }
+                        }
+                    }
+                    Action::OpenNewWindow(n) => {
+                        if let Some(entry) = dash_entry(n) {
+                            let _ = roost_shell_host::apps::launch(&entry);
+                        }
+                    }
+                    Action::Screenshot => take_screenshot(false, notify.clone()),
+                    Action::ScreenshotWindow => take_screenshot(true, notify.clone()),
+                    Action::BrightnessUp | Action::BrightnessDown => {
+                        let up = action == Action::BrightnessUp;
+                        if let Some(level) = services::step_brightness(up) {
+                            osd_ui.show(&osd::OsdRequest {
+                                icon: Some("display-brightness-symbolic".into()),
+                                level: Some(level),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                }
+            })
+        };
+        let settings = keybindings::settings();
+        let apply: Rc<dyn Fn()> = {
+            let (settings, gnome_shell) = (settings.clone(), gnome_shell.clone());
+            Rc::new(move || {
+                let list = keybindings::bindings(settings.as_ref());
+                let accels: Vec<(String, u32)> = list
+                    .iter()
+                    .map(|b| (b.accelerator.clone(), b.modes))
+                    .collect();
+                let actions: Vec<keybindings::Action> = list.iter().map(|b| b.action).collect();
+                let run = run.clone();
+                gnome_shell.set_internal(
+                    &accels,
+                    Rc::new(move |i| {
+                        if let Some(action) = actions.get(i) {
+                            run(*action);
+                        }
+                    }),
+                );
+            })
+        };
+        apply();
+        if let Some(settings) = settings {
+            settings.connect_changed(None, move |_, _| apply());
+            std::mem::forget(settings);
+        }
+    }
 
     // GNOME's background settings: the picture (the dark variant under
     // the dark style, as GNOME picks it) and primary-color, published to
