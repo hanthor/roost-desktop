@@ -305,8 +305,12 @@ def method_call(c, sender, path, iface, method, params, invocation):
         invocation.return_value(None)
     elif method == "SetBrightness":
         _, _, value = params.unpack()
-        with open(os.path.join(BACKLIGHT, "brightness"), "w") as fh:
+        # Atomically, as the kernel's attribute never reads half-written:
+        # a reader racing a truncate-then-write would see it empty.
+        path = os.path.join(BACKLIGHT, "brightness")
+        with open(path + ".tmp", "w") as fh:
             fh.write(f"{value}\n")
+        os.replace(path + ".tmp", path)
         invocation.return_value(None)
     else:
         invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", method)
