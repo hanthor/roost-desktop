@@ -622,6 +622,35 @@ fn quick_settings_popover(
     slider.set_hexpand(true);
     slider.update_property(&[gtk::accessible::Property::Label("Volume")]);
     volume_row.append(&slider);
+    // GNOME's sound output menu (volume.js): an arrow beside the slider,
+    // offered with more than one output.
+    let sound_menu_ui = QsMenu::new("audio-headphones-symbolic", "Sound Output");
+    let sound_list = sound_menu_ui.list();
+    sound_menu_ui.separator();
+    let (sound_settings, _) = sound_menu_ui.item(None, "Sound Settings");
+    sound_settings.connect_clicked(|_| {
+        let _ = std::process::Command::new("gnome-control-center")
+            .arg("sound")
+            .spawn();
+    });
+    let sound_arrow = gtk::ToggleButton::new();
+    sound_arrow.set_icon_name("go-next-symbolic");
+    sound_arrow.add_css_class("qs-slider-menu-button");
+    sound_arrow.update_property(&[gtk::accessible::Property::Label("Open sound output menu")]);
+    sound_arrow.set_visible(false);
+    {
+        let revealer = sound_menu_ui.revealer.clone();
+        sound_arrow.connect_toggled(move |a| revealer.set_visible(a.is_active()));
+    }
+    {
+        let arrow = sound_arrow.clone();
+        sound_menu_ui.revealer.connect_visible_notify(move |r| {
+            if arrow.is_active() != r.is_visible() {
+                arrow.set_active(r.is_visible());
+            }
+        });
+    }
+    volume_row.append(&sound_arrow);
 
     // Brightness: hidden without a backlight.
     let brightness_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -743,7 +772,11 @@ fn quick_settings_popover(
     }
     // The Wi-Fi and Bluetooth menus dim the panel and reset on close the
     // same way; their rows close the panel themselves.
-    for menu in [&wifi_menu_ui.revealer, &bt_menu_ui.revealer] {
+    for menu in [
+        &wifi_menu_ui.revealer,
+        &bt_menu_ui.revealer,
+        &sound_menu_ui.revealer,
+    ] {
         {
             let popover = popover.clone();
             menu.connect_visible_notify(move |menu| {
@@ -757,7 +790,7 @@ fn quick_settings_popover(
         let menu = menu.clone();
         popover.connect_closed(move |_| menu.set_visible(false));
     }
-    for settings in [&all_networks, &bt_settings] {
+    for settings in [&all_networks, &bt_settings, &sound_settings] {
         let popover = popover.clone();
         settings.connect_clicked(move |_| popover.popdown());
     }
@@ -796,6 +829,8 @@ fn quick_settings_popover(
         volume: slider,
         mute,
         brightness_row: brightness_row.clone(),
+        sound_list,
+        sound_arrow,
         brightness,
     }));
     // Do Not Disturb drives the shell's notification store (banners
@@ -830,6 +865,7 @@ fn quick_settings_popover(
     col.append(&top);
     col.append(&power_menu);
     col.append(&volume_row);
+    col.append(&sound_menu_ui.revealer);
     col.append(&brightness_row);
     col.append(&grid.grid);
     // Everything but an open toggle menu dims with the panel.

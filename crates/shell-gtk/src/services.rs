@@ -272,6 +272,9 @@ pub struct Widgets {
     pub volume: gtk::Scale,
     pub mute: gtk::Button,
     pub brightness_row: gtk::Box,
+    /// The sound output menu's rows and the slider's arrow opening it.
+    pub sound_list: gtk::Box,
+    pub sound_arrow: gtk::ToggleButton,
     pub brightness: gtk::Scale,
 }
 
@@ -713,6 +716,57 @@ fn volume(w: &Rc<Widgets>) {
     {
         let read = read.clone();
         w.volume.connect_map(move |_| read());
+    }
+    // GNOME's output menu: one row per output, the default checked;
+    // picking one makes it the default and closes the panel.
+    let outputs: Rc<dyn Fn()> = {
+        let (w, read) = (w.clone(), read.clone());
+        Rc::new(move || {
+            let (w, read) = (w.clone(), read.clone());
+            wpctl(&["status"], move |out| {
+                let sinks = out
+                    .as_deref()
+                    .map(logic::parse_wpctl_sinks)
+                    .unwrap_or_default();
+                while let Some(child) = w.sound_list.first_child() {
+                    w.sound_list.remove(&child);
+                }
+                for sink in &sinks {
+                    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                    row.append(&gtk::Image::from_icon_name(logic::sink_icon(&sink.name)));
+                    let label = gtk::Label::new(Some(&sink.name));
+                    label.set_xalign(0.0);
+                    label.set_hexpand(true);
+                    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                    row.append(&label);
+                    let check = gtk::Image::from_icon_name("ornament-check-symbolic");
+                    check.set_visible(sink.default);
+                    row.append(&check);
+                    let button = gtk::Button::builder().child(&row).build();
+                    button.add_css_class("qs-menu-item");
+                    button.update_property(&[gtk::accessible::Property::Label(&sink.name)]);
+                    let (id, read) = (sink.id.to_string(), read.clone());
+                    button.connect_clicked(move |b| {
+                        if let Some(popover) = b
+                            .ancestor(gtk::Popover::static_type())
+                            .and_downcast::<gtk::Popover>()
+                        {
+                            popover.popdown();
+                        }
+                        let read = read.clone();
+                        wpctl(&["set-default", &id], move |_| read());
+                    });
+                    w.sound_list.append(&button);
+                }
+                // volume.js: `menuEnabled = this._deviceItems.size > 1`.
+                w.sound_arrow.set_visible(sinks.len() > 1);
+            });
+        })
+    };
+    outputs();
+    {
+        let outputs = outputs.clone();
+        w.volume.connect_map(move |_| outputs());
     }
     {
         let syncing = syncing.clone();
