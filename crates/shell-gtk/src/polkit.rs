@@ -557,19 +557,16 @@ pub fn start(app: &gtk::Application) {
             eprintln!("roost-shell-gtk: polkit agent object: {e}");
             return;
         }
-        register(&conn);
-        // polkit restarted (or started late): register again, as GNOME's
-        // agent does.
-        let watch = gio::bus_watch_name_on_connection(
-            &conn,
-            AUTHORITY,
-            gio::BusNameWatcherFlags::NONE,
-            |conn, _, _| register(&conn),
-            |_, _| {},
-        );
-        // The watch lasts the session: a WatcherId releases nothing
-        // when it drops.
-        let _ = watch;
+        // Register now, and again whenever polkit (re)starts, as GNOME's
+        // agent does. A NameOwnerChanged watch: gio's name watcher hands
+        // its callbacks a NULL connection when the bus goes away, which
+        // its Rust binding unwraps.
+        let conn2 = conn.clone();
+        crate::services::watch_name(&conn, AUTHORITY, move |owned| {
+            if owned {
+                register(&conn2);
+            }
+        });
     });
 }
 

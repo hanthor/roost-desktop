@@ -12,6 +12,7 @@ push button: Mute
 slider: Volume
 slider: Brightness
 toggle button: Wi-Fi
+toggle button: Wi-Fi Menu
 toggle button: Wired
 toggle button: Bluetooth
 toggle button: Power Mode

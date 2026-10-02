@@ -33,6 +33,7 @@ mod services;
 mod shell_dbus;
 mod switcher;
 mod tray;
+mod wifi;
 mod window_menu;
 mod ws_popup;
 
@@ -409,6 +410,13 @@ impl QsMenu {
         (button, ornament)
     }
 
+    /// A box for items rebuilt at run time (the Wi-Fi networks).
+    fn list(&self) -> gtk::Box {
+        let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        self.section.append(&list);
+        list
+    }
+
     fn separator(&self) {
         let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
         separator.add_css_class("qs-menu-separator");
@@ -625,7 +633,24 @@ fn quick_settings_popover(
     // `_setupIndicators`). Tiles whose service is absent hide, and the
     // grid closes the gap.
     let grid = QsGrid::new();
-    let wifi = qs_tile("network-wireless-symbolic", "Wi-Fi", None);
+    // GNOME's Wi-Fi menu: the networks, then All Networks (Settings).
+    let wifi_menu_ui = QsMenu::new("network-wireless-symbolic", "Wi\u{2013}Fi");
+    let wifi_menu = wifi::WifiMenu::new(wifi_menu_ui.list());
+    wifi_menu_ui.separator();
+    let (all_networks, _) = wifi_menu_ui.item(None, "All Networks");
+    all_networks.connect_clicked(|_| {
+        let _ = std::process::Command::new("gnome-control-center")
+            .arg("wifi")
+            .spawn();
+    });
+    {
+        let wifi_menu = wifi_menu.clone();
+        wifi_menu_ui
+            .revealer
+            .connect_visible_notify(move |r| wifi_menu.set_open(r.is_visible()));
+    }
+    let wifi = qs_menu_tile("network-wireless-symbolic", "Wi-Fi", None, &wifi_menu_ui);
+    wifi_menu.set_tile(wifi.clone());
     let wired = qs_tile("network-wired-symbolic", "Wired", None);
     let bluetooth = qs_tile("bluetooth-active-symbolic", "Bluetooth", None);
     let power_menu_ui = QsMenu::new("power-profile-balanced-symbolic", "Power Mode");
@@ -656,7 +681,8 @@ fn quick_settings_popover(
     let night = qs_tile("night-light-symbolic", "Night Light", None);
     let dark = qs_tile("dark-mode-symbolic", "Dark Style", None);
     let dnd_tile = qs_tile("notifications-disabled-symbolic", "Do Not Disturb", None);
-    for tile in [&wifi, &wired, &bluetooth] {
+    grid.add(&wifi, Some(&wifi_menu_ui));
+    for tile in [&wired, &bluetooth] {
         grid.add(tile, None);
     }
     grid.add(&power_mode, Some(&power_menu_ui));
@@ -719,6 +745,7 @@ fn quick_settings_popover(
     }
     services::attach(&Rc::new(services::Widgets {
         wifi,
+        wifi_menu,
         wired,
         bluetooth,
         power_mode,
