@@ -199,6 +199,8 @@ pub struct WindowManager {
     pointer_pos: Point<f64, Logical>,
     /// Super held (either side) for workspace keybindings.
     super_held: bool,
+    /// Key repeat as last set: rate (keys/s, 0 off) and delay (ms).
+    repeat: (i32, i32),
     /// Shift held (either side) for move-window keybindings.
     shift_held: bool,
     /// Alt held (either side) for the Alt-Tab switcher.
@@ -254,6 +256,8 @@ impl WindowManager {
             mode: SessionMode::Gnome,
             strip_offset: 0.0,
             super_held: false,
+            // add_keyboard below: 200 ms delay, 200 keys/s.
+            repeat: (200, 200),
             shift_held: false,
             alt_held: false,
             switcher_open: false,
@@ -2302,6 +2306,8 @@ pub const XKB_X11_OFFSET: u32 = 8;
 
 /// Overview trigger keycodes (evdev, 002 R1).
 pub const SUPER_LEFT_KEYCODE: u32 = 125;
+/// Space (evdev): Super+Space switches input source.
+pub const SPACE_KEYCODE: u32 = 57;
 pub const SUPER_RIGHT_KEYCODE: u32 = 126;
 pub const ESCAPE_KEYCODE: u32 = 1;
 /// Workspace keybindings (evdev): Super+PageUp/PageDown switches the
@@ -2372,9 +2378,16 @@ pub enum TriggerAction {
 #[derive(Debug, Default)]
 pub struct TriggerState {
     super_armed: bool,
+    /// GNOME's `enable-hot-corners` off (default on, as in GNOME).
+    hot_corner_off: bool,
 }
 
 impl TriggerState {
+    /// Follow GNOME's `enable-hot-corners`.
+    pub fn set_hot_corner(&mut self, enabled: bool) {
+        self.hot_corner_off = !enabled;
+    }
+
     /// Decide the overview action for one input event. `overview_open`
     /// is the hub intent; `pointer` is the last known pointer position
     /// for strip clicks (buttons carry no position).
@@ -2400,7 +2413,11 @@ impl TriggerState {
             }
             ManagerInput::Motion { pos, .. } => {
                 self.super_armed = false;
-                if !overview_open && pos.x < HOT_CORNER_PX && pos.y < HOT_CORNER_PX {
+                if !self.hot_corner_off
+                    && !overview_open
+                    && pos.x < HOT_CORNER_PX
+                    && pos.y < HOT_CORNER_PX
+                {
                     TriggerAction::Open
                 } else {
                     TriggerAction::None
@@ -2433,6 +2450,67 @@ impl TriggerState {
 }
 
 impl WindowManager {
+    /// GNOME's keyboard settings on the seat (#60): the input sources as
+    /// one xkb keymap (layouts in order, cycled with Super+Space) and the
+    /// repeat delay and rate. A keymap xkb cannot compile is refused and
+    /// the current one stays.
+    pub fn apply_keyboard_settings(
+        &mut self,
+        state: &mut State,
+        settings: &roost_shell_control::InputSettings,
+    ) {
+        let Some(keyboard) = self.keyboard.clone() else {
+            return;
+        };
+        let config = XkbConfig {
+            layout: &settings.xkb_layout,
+            variant: &settings.xkb_variant,
+            options: (!settings.xkb_options.is_empty()).then(|| settings.xkb_options.clone()),
+            ..XkbConfig::default()
+        };
+        if let Err(e) = keyboard.set_xkb_config(state, config) {
+            eprintln!(
+                "roost-compositor: keymap {}({}) refused: {e:?}",
+                settings.xkb_layout, settings.xkb_variant
+            );
+        }
+        let rate = if settings.repeat && settings.repeat_interval_ms > 0 {
+            (1000 / settings.repeat_interval_ms).max(1) as i32
+        } else {
+            0
+        };
+        keyboard.change_repeat_info(rate, settings.repeat_delay_ms as i32);
+        self.repeat = (rate, settings.repeat_delay_ms as i32);
+    }
+
+    /// The next input source (GNOME's Super+Space).
+    fn next_input_source(&mut self, state: &mut State) {
+        if let Some(keyboard) = self.keyboard.clone() {
+            keyboard.with_xkb_state(state, |mut context| context.cycle_next_layout());
+        }
+    }
+
+    /// Active layout and repeat, for the state file.
+    pub fn keyboard_summary(&self, state: &mut State) -> serde_json::Value {
+        let Some(keyboard) = self.keyboard.clone() else {
+            return serde_json::Value::Null;
+        };
+        let (layout, layouts) = keyboard.with_xkb_state(state, |context| {
+            let xkb = context.xkb().lock().expect("xkb lock");
+            let names: Vec<String> = xkb
+                .layouts()
+                .map(|l| xkb.layout_name(l).to_owned())
+                .collect();
+            (xkb.layout_name(xkb.active_layout()).to_owned(), names)
+        });
+        serde_json::json!({
+            "layout": layout,
+            "layouts": layouts,
+            "repeat_rate": self.repeat.0,
+            "repeat_delay": self.repeat.1,
+        })
+    }
+
     /// Dispatch one backend input event into focus and delivery.
     /// Super+PageUp/PageDown switches workspace (with Shift: moves the
     /// focused window and follows it); those presses are consumed, all
@@ -2452,7 +2530,13 @@ impl WindowManager {
             } => {
                 self.track_workspace_modifiers(keycode, pressed);
                 self.track_switcher_modifiers(keycode, pressed);
-                if keycode == TAB_KEYCODE && self.alt_held {
+                if keycode == SPACE_KEYCODE && self.super_held {
+                    // GNOME's next input source; press and release stay
+                    // with the compositor.
+                    if pressed {
+                        self.next_input_source(state);
+                    }
+                } else if keycode == TAB_KEYCODE && self.alt_held {
                     // The whole chord stays invisible to apps: taps queue
                     // steps, releases are swallowed (an app that never saw
                     // the press must not see the release either).
@@ -2972,6 +3056,22 @@ mod tests {
             triggers.feed(&key(SUPER_LEFT_KEYCODE, false), false, (0.0, 100.0).into()),
             TriggerAction::None,
             "release after a combo is not a tap"
+        );
+    }
+
+    #[test]
+    fn hot_corner_follows_gnomes_setting() {
+        let mut triggers = TriggerState::default();
+        triggers.set_hot_corner(false);
+        assert_eq!(
+            triggers.feed(&motion(2.0, 3.0), false, (0.0, 3.0).into()),
+            TriggerAction::None,
+            "enable-hot-corners off"
+        );
+        triggers.set_hot_corner(true);
+        assert_eq!(
+            triggers.feed(&motion(2.0, 3.0), false, (0.0, 3.0).into()),
+            TriggerAction::Open
         );
     }
 

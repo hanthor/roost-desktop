@@ -25,7 +25,7 @@ This page records that decision for R9 (knowledge entry
 | gtk-theme, icon-theme, cursor-theme, cursor-size | Via GTK | Inside apps. The compositor's own cursor ignores them (#89) |
 | clock-format | Honored | Panel clock |
 | clock-show-weekday, clock-show-date, clock-show-seconds | Honored | Panel clock, built as gnome-desktop's wall clock builds it |
-| enable-hot-corners | Ignored | The hot corner is always on (#63) |
+| enable-hot-corners | Honored | Live. Proof G-SETTINGS-INPUT |
 | enable-animations | Ignored | Roost has no animations yet |
 | show-battery-percentage | Ignored | No battery indicator yet (#55) |
 
@@ -58,6 +58,8 @@ This page records that decision for R9 (knowledge entry
 | org.gnome.desktop.wm.preferences button-layout | Via GTK | Client-side decorations read it |
 | org.gnome.desktop.wm.preferences focus-mode, num-workspaces | Ignored | Click to focus and dynamic workspaces, as GNOME's defaults |
 | org.gnome.mutter dynamic-workspaces, edge-tiling | Ignored | Always on, as GNOME's defaults |
-| org.gnome.desktop.peripherals.* | Ignored | Keyboard repeat, touchpad and mouse use libinput defaults (#60) |
-| org.gnome.desktop.input-sources sources, xkb-options | Ignored | The keymap comes from the environment (#60) |
+| org.gnome.desktop.peripherals.keyboard repeat, delay, repeat-interval | Honored | Seat key repeat, live. Proof G-SETTINGS-INPUT |
+| org.gnome.desktop.peripherals.touchpad tap-to-click, natural-scroll, speed, disable-while-typing | Honored | libinput on hardware sessions, live and on hotplug |
+| org.gnome.desktop.peripherals.mouse natural-scroll, speed | Honored | libinput on hardware sessions |
+| org.gnome.desktop.input-sources sources, xkb-options | Honored | xkb sources become one keymap in order; Super+Space switches; IBus sources are skipped (#60). Proof G-SETTINGS-INPUT |
 | org.gnome.desktop.a11y.* | Via GTK | Where GTK implements them. Compositor features like zoom are missing |

@@ -79,9 +79,12 @@ impl ProtocolVersion {
     ///
     /// `0.10` appends the shell-to-compositor `SetOverviewSearch`
     /// command (search hides the workspace view, as in GNOME), again last.
+    ///
+    /// `0.11` appends the shell-to-compositor `SetInputSettings` command
+    /// (GNOME's keyboard, touchpad and mouse settings), again last.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 10,
+        minor: 11,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -224,6 +227,10 @@ pub enum CommandKind {
         /// Whether search results are showing.
         active: bool,
     },
+    /// GNOME's input settings, as the shell reads them from GSettings
+    /// (#60): keymap, key repeat, pointer devices, hot corner. Sent at
+    /// start and on every change; the compositor applies them live.
+    SetInputSettings(InputSettings),
 }
 
 /// Outcome of one shell command, matched by request id.
@@ -351,6 +358,54 @@ pub enum Message {
         /// `(name, value)` pairs, sorted by name.
         vars: Vec<(String, String)>,
     },
+}
+
+/// GNOME's input settings (`org.gnome.desktop.input-sources` and
+/// `org.gnome.desktop.peripherals.*`), flattened for the compositor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputSettings {
+    /// xkb layouts, comma separated, in input-source order (`us,de`).
+    pub xkb_layout: String,
+    /// xkb variants, one per layout (`,nodeadkeys`).
+    pub xkb_variant: String,
+    /// xkb options, comma separated (`compose:ralt`).
+    pub xkb_options: String,
+    /// Key repeat on, its delay and interval in milliseconds.
+    pub repeat: bool,
+    pub repeat_delay_ms: u32,
+    pub repeat_interval_ms: u32,
+    /// Touchpad.
+    pub tap_to_click: bool,
+    pub touchpad_natural_scroll: bool,
+    /// Pointer speed in thousandths, -1000..=1000 (GNOME's -1..1).
+    pub touchpad_speed_milli: i32,
+    pub disable_while_typing: bool,
+    /// Mouse.
+    pub mouse_natural_scroll: bool,
+    pub mouse_speed_milli: i32,
+    /// `org.gnome.desktop.interface enable-hot-corners`.
+    pub hot_corners: bool,
+}
+
+impl Default for InputSettings {
+    /// GNOME 51's defaults.
+    fn default() -> Self {
+        Self {
+            xkb_layout: "us".into(),
+            xkb_variant: String::new(),
+            xkb_options: String::new(),
+            repeat: true,
+            repeat_delay_ms: 500,
+            repeat_interval_ms: 30,
+            tap_to_click: false,
+            touchpad_natural_scroll: true,
+            touchpad_speed_milli: 0,
+            disable_while_typing: true,
+            mouse_natural_scroll: false,
+            mouse_speed_milli: 0,
+            hot_corners: true,
+        }
+    }
 }
 
 /// One Alt-Tab switcher drive event (compositor to shell).
@@ -584,6 +639,14 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
                 }
             }
         }
+        Message::Command {
+            kind: CommandKind::SetInputSettings(settings),
+            ..
+        } => {
+            check_title(&settings.xkb_layout)?;
+            check_title(&settings.xkb_variant)?;
+            check_title(&settings.xkb_options)?;
+        }
         Message::Hello { .. }
         | Message::Command { .. }
         | Message::CommandResult { .. }
@@ -636,8 +699,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_10() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 10));
+    fn current_version_is_0_11() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 11));
     }
 
     #[test]
@@ -655,7 +718,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 8).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 9).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 10).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 11).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 11).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 12).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }

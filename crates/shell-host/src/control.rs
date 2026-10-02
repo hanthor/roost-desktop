@@ -378,6 +378,19 @@ impl ControlClient {
         Ok(id)
     }
 
+    /// Send GNOME's input settings (#60). Returns the request id.
+    pub fn set_input_settings(
+        &mut self,
+        settings: roost_shell_control::InputSettings,
+    ) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::SetInputSettings(settings),
+        })?;
+        Ok(id)
+    }
+
     /// Tell the compositor whether overview search shows results, so
     /// it hides the workspace view meanwhile. Returns the request id.
     pub fn set_overview_search(&mut self, active: bool) -> Result<u64, ControlError> {

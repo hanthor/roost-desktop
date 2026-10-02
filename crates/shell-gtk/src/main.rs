@@ -620,6 +620,66 @@ fn build(app: &adw::Application) {
     );
     let switcher_ui = switcher::SwitcherUi::new(app.upcast_ref(), apps);
 
+    // GNOME's input settings (#60): keymap, repeat, touchpad, mouse and
+    // hot corner, sent now and on every change.
+    {
+        let schemas = [
+            "org.gnome.desktop.input-sources",
+            "org.gnome.desktop.peripherals.keyboard",
+            "org.gnome.desktop.peripherals.touchpad",
+            "org.gnome.desktop.peripherals.mouse",
+            INTERFACE_SCHEMA,
+        ];
+        let all: Rc<Vec<Option<gio::Settings>>> =
+            Rc::new(schemas.iter().map(|s| settings(s)).collect());
+        let send: Rc<dyn Fn()> = {
+            let (shell, all) = (shell.clone(), all.clone());
+            Rc::new(move || {
+                let mut out = roost_shell_control::InputSettings::default();
+                if let Some(sources) = all[0].as_ref() {
+                    let list: Vec<(String, String)> =
+                        sources.value("sources").get().unwrap_or_default();
+                    let (layout, variant) = logic::xkb_from_sources(&list);
+                    out.xkb_layout = layout;
+                    out.xkb_variant = variant;
+                    out.xkb_options = sources
+                        .strv("xkb-options")
+                        .iter()
+                        .map(|o| o.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                }
+                if let Some(kbd) = all[1].as_ref() {
+                    out.repeat = kbd.boolean("repeat");
+                    out.repeat_delay_ms = kbd.uint("delay");
+                    out.repeat_interval_ms = kbd.uint("repeat-interval");
+                }
+                if let Some(pad) = all[2].as_ref() {
+                    out.tap_to_click = pad.boolean("tap-to-click");
+                    out.touchpad_natural_scroll = pad.boolean("natural-scroll");
+                    out.touchpad_speed_milli = (pad.double("speed") * 1000.0).round() as i32;
+                    out.disable_while_typing = pad.boolean("disable-while-typing");
+                }
+                if let Some(mouse) = all[3].as_ref() {
+                    out.mouse_natural_scroll = mouse.boolean("natural-scroll");
+                    out.mouse_speed_milli = (mouse.double("speed") * 1000.0).round() as i32;
+                }
+                if let Some(iface) = all[4].as_ref() {
+                    out.hot_corners = iface.boolean("enable-hot-corners");
+                }
+                if let Some(control) = shell.borrow_mut().control.as_mut() {
+                    let _ = control.set_input_settings(out);
+                }
+            })
+        };
+        send();
+        for settings in all.iter().flatten() {
+            let send = send.clone();
+            settings.connect_changed(None, move |_, _| send());
+        }
+        std::mem::forget(all);
+    }
+
     // GNOME's idle and lock settings drive the compositor's idle lock
     // (#63): sent now and on every change.
     {

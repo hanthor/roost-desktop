@@ -88,6 +88,9 @@ pub struct DrmBackend {
     pointer: Point<f64, Logical>,
     ctrl: bool,
     alt: bool,
+    /// libinput devices, for GNOME's touchpad and mouse settings (#60).
+    devices: Vec<smithay::reexports::input::Device>,
+    input_settings: roost_shell_control::InputSettings,
 }
 
 /// Event sources the runtime installs on its loop.
@@ -355,6 +358,8 @@ impl DrmBackend {
                     .into(),
                 ctrl: false,
                 alt: false,
+                devices: Vec::new(),
+                input_settings: Default::default(),
             },
             DrmSources {
                 session: session_notifier,
@@ -440,6 +445,15 @@ impl DrmBackend {
                     },
                 ]
             }
+            InputEvent::DeviceAdded { mut device } => {
+                apply_libinput(&self.input_settings, &mut device);
+                self.devices.push(device);
+                Vec::new()
+            }
+            InputEvent::DeviceRemoved { device } => {
+                self.devices.retain(|d| *d != device);
+                Vec::new()
+            }
             // Touchpad swipes (#60): three fingers are the shell's.
             InputEvent::GestureSwipeBegin { event } => {
                 use smithay::backend::input::GestureBeginEvent;
@@ -495,6 +509,15 @@ impl DrmBackend {
         }
     }
 
+    /// GNOME's touchpad and mouse settings on every device, now and as
+    /// devices arrive (#60).
+    pub fn apply_input_settings(&mut self, settings: &roost_shell_control::InputSettings) {
+        self.input_settings = settings.clone();
+        for device in &mut self.devices {
+            apply_libinput(settings, device);
+        }
+    }
+
     /// Move the drawn cursor to where the window manager put the pointer.
     pub fn set_pointer(&mut self, pos: Point<f64, Logical>) {
         self.pointer = pos;
@@ -505,6 +528,26 @@ impl DrmBackend {
             .first()
             .map(|o| (o.size.w, o.size.h).into())
             .unwrap_or_else(|| (1, 1).into())
+    }
+}
+
+/// One device's libinput configuration from GNOME's settings, as Mutter
+/// applies them (niri's `apply_libinput_settings` shape): touchpads get
+/// tap-to-click, natural scroll, disable-while-typing and their speed;
+/// other pointers their natural scroll and speed.
+fn apply_libinput(
+    settings: &roost_shell_control::InputSettings,
+    device: &mut smithay::reexports::input::Device,
+) {
+    let speed = |milli: i32| f64::from(milli.clamp(-1000, 1000)) / 1000.0;
+    if device.config_tap_finger_count() > 0 {
+        let _ = device.config_tap_set_enabled(settings.tap_to_click);
+        let _ = device.config_scroll_set_natural_scroll_enabled(settings.touchpad_natural_scroll);
+        let _ = device.config_dwt_set_enabled(settings.disable_while_typing);
+        let _ = device.config_accel_set_speed(speed(settings.touchpad_speed_milli));
+    } else if device.has_capability(smithay::reexports::input::DeviceCapability::Pointer) {
+        let _ = device.config_scroll_set_natural_scroll_enabled(settings.mouse_natural_scroll);
+        let _ = device.config_accel_set_speed(speed(settings.mouse_speed_milli));
     }
 }
 

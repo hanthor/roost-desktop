@@ -3291,6 +3291,7 @@ dependencies = [
  "jiff",
  "libadwaita",
  "libc",
+ "roost-shell-control",
  "roost-shell-host",
 ]
 
