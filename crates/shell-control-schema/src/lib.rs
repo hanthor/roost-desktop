@@ -109,9 +109,13 @@ impl ProtocolVersion {
     /// `0.18` appends `Maximize`, `ToggleTiledLeft` and `ToggleTiledRight`
     /// to `WindowAction` and the shell-to-compositor `SwitchInputSource`
     /// command (GNOME's rebindable window-manager keys), again last.
+    ///
+    /// `0.19` appends `StepWindow` and `Key` to `SwitcherAction` and the
+    /// shell-to-compositor `SetSwitcherThumbnails` command (GNOME's
+    /// window thumbnails in the Alt+Tab switcher), again last.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 18,
+        minor: 19,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -298,6 +302,28 @@ pub enum CommandKind {
         /// The previous source instead of the next.
         backward: bool,
     },
+    /// Where the open switcher shows window thumbnails (GNOME's
+    /// ThumbnailSwitcher): the compositor draws each window, fitted,
+    /// into its frame above everything. Empty when none show. At most
+    /// [`MAX_SWITCHER_THUMBNAILS`].
+    SetSwitcherThumbnails {
+        /// The frames, in order.
+        thumbnails: Vec<SwitcherThumbnail>,
+    },
+}
+
+/// Switcher thumbnails held at once.
+pub const MAX_SWITCHER_THUMBNAILS: usize = 64;
+
+/// One switcher thumbnail frame, in global logical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwitcherThumbnail {
+    /// The window drawn in it.
+    pub window: WindowId,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
 }
 
 /// GNOME's window-menu actions (windowMenu.js) the compositor carries out.
@@ -630,6 +656,19 @@ pub enum SwitcherAction {
     Commit,
     /// Close the switcher without activating.
     Cancel,
+    /// GNOME's `switch-group` (Alt+Above_Tab): step through the selected
+    /// app's windows, showing their thumbnails. Opens the switcher when
+    /// closed.
+    StepWindow {
+        /// True for Above_Tab, false with Shift.
+        forward: bool,
+    },
+    /// Another key pressed while the switcher is open (its keysym): the
+    /// switcher holds the keyboard, as GNOME's does (arrows, Q, W, F4).
+    Key {
+        /// The xkb keysym.
+        keysym: u32,
+    },
 }
 
 /// Compositor-minted activation Bearer [REDACTED] authorizing one privileged window action.
@@ -857,6 +896,14 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
             check_title(&settings.xkb_options)?;
         }
         Message::Command {
+            kind: CommandKind::SetSwitcherThumbnails { thumbnails },
+            ..
+        } if thumbnails.len() > MAX_SWITCHER_THUMBNAILS => {
+            return Err(DecodeError::Malformed(
+                postcard::Error::DeserializeBadEncoding,
+            ));
+        }
+        Message::Command {
             kind: CommandKind::SetAccelerators { accelerators },
             ..
         } if accelerators.len() > MAX_ACCELERATORS => {
@@ -930,8 +977,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_18() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 18));
+    fn current_version_is_0_19() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 19));
     }
 
     #[test]
@@ -957,7 +1004,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 16).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 17).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 18).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 19).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 19).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 20).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }

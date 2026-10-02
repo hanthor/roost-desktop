@@ -317,6 +317,8 @@ pub struct Session<'a> {
     input_settings: Option<roost_shell_control::InputSettings>,
     /// Input-source switches the shell asked for (`true` backward).
     input_source_switches: Vec<bool>,
+    /// The switcher's thumbnail frames, when the shell sent new ones.
+    switcher_thumbnails: Option<Vec<roost_shell_control::SwitcherThumbnail>>,
 }
 
 impl std::fmt::Debug for Session<'_> {
@@ -383,6 +385,7 @@ impl<'a> Session<'a> {
             unlock_pending: None,
             input_settings: None,
             input_source_switches: Vec::new(),
+            switcher_thumbnails: None,
         };
         let msg = match session.conn.read_frame() {
             Ok(msg) => msg,
@@ -628,6 +631,17 @@ impl<'a> Session<'a> {
             } => {
                 // Session-level settings for the runtime (seat, libinput).
                 self.input_settings = Some(settings);
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: CommandStatus::Applied,
+                })?;
+                Ok(Handled::CommandResult { id, applied: true })
+            }
+            Message::Command {
+                id,
+                kind: CommandKind::SetSwitcherThumbnails { thumbnails },
+            } => {
+                self.switcher_thumbnails = Some(thumbnails);
                 self.conn.write_frame(&Message::CommandResult {
                     id,
                     status: CommandStatus::Applied,
@@ -944,6 +958,7 @@ fn apply_command(
         | CommandKind::SetAccelerators { .. }
         | CommandKind::WindowAction { .. }
         | CommandKind::SwitchInputSource { .. }
+        | CommandKind::SetSwitcherThumbnails { .. }
         | CommandKind::SetInputSettings(_) => (CommandStatus::Applied, None),
         CommandKind::Lock => {
             // Manual lock from the shell (session-lock set path):
@@ -985,6 +1000,8 @@ pub struct PollOutcome {
     pub window_actions: Vec<(u64, roost_shell_control::WindowAction)>,
     /// Input-source switches to make (`true` backward), in order.
     pub input_source_switches: Vec<bool>,
+    /// New switcher thumbnail frames, if the shell sent any.
+    pub switcher_thumbnails: Option<Vec<roost_shell_control::SwitcherThumbnail>>,
 }
 
 /// Peers accepted but not yet handshaken are capped so a same-user
@@ -1368,6 +1385,9 @@ impl ControlHub {
                     outcome
                         .input_source_switches
                         .extend(std::mem::take(&mut session.input_source_switches));
+                    if let Some(thumbnails) = session.switcher_thumbnails.take() {
+                        outcome.switcher_thumbnails = Some(thumbnails);
+                    }
                     if let Some(active) = session.overview_search.take() {
                         outcome.overview_search = Some(active);
                     }

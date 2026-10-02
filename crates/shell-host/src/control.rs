@@ -516,6 +516,19 @@ impl ControlClient {
         Ok(id)
     }
 
+    /// Where the switcher's window thumbnails sit (empty: none).
+    pub fn set_switcher_thumbnails(
+        &mut self,
+        thumbnails: Vec<roost_shell_control::SwitcherThumbnail>,
+    ) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::SetSwitcherThumbnails { thumbnails },
+        })?;
+        Ok(id)
+    }
+
     /// Switch to the next (or previous) keyboard input source. Returns
     /// the request id.
     pub fn switch_input_source(&mut self, backward: bool) -> Result<u64, ControlError> {
@@ -712,6 +725,23 @@ impl ControlClient {
                 // overview's Enter path.
                 let selection = match action {
                     SwitcherAction::Step { forward } => self.model.switcher_step(forward),
+                    SwitcherAction::StepWindow { forward } => {
+                        self.model.switcher_step_window(forward)
+                    }
+                    SwitcherAction::Key { keysym } => {
+                        match self.model.switcher_key(keysym) {
+                            crate::model::SwitcherEffect::None => {}
+                            crate::model::SwitcherEffect::CloseWindow(id) => {
+                                self.close_window(id)?;
+                            }
+                            crate::model::SwitcherEffect::QuitApp(ids) => {
+                                for id in ids {
+                                    self.close_window(id)?;
+                                }
+                            }
+                        }
+                        self.model.switcher_selection()
+                    }
                     SwitcherAction::Cancel => {
                         self.model.switcher_cancel();
                         None

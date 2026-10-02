@@ -264,6 +264,8 @@ pub struct WindowManager {
     /// Switcher drive events queued for the hub broadcast, drained by
     /// the runtime after each input event.
     switcher_queue: Vec<SwitcherAction>,
+    /// Keys the open switcher took: their releases stay invisible too.
+    switcher_swallowed: Vec<u32>,
     /// Session window-management mode (scrollable-tiling spec).
     /// Gnome by default; Super+Shift+T flips the whole session.
     mode: SessionMode,
@@ -332,6 +334,7 @@ impl WindowManager {
             alt_held: false,
             switcher_open: false,
             switcher_queue: Vec::new(),
+            switcher_swallowed: Vec::new(),
             overview_open: false,
             pre_overview_focus: None,
             overview_activated: None,
@@ -2892,6 +2895,28 @@ pub const F4_KEYCODE: u32 = 62;
 /// session between floating and strip modes. The press is consumed;
 /// the release still reaches clients.
 pub const T_KEYCODE: u32 = 20;
+/// GNOME's `switch-group` key (Above_Tab: the key above Tab, evdev
+/// KEY_GRAVE) and the keys the open switcher acts on.
+pub const GRAVE_KEYCODE: u32 = 41;
+pub const Q_KEYCODE: u32 = 16;
+pub const W_KEYCODE: u32 = 17;
+pub const CTRL_LEFT_KEYCODE: u32 = 29;
+pub const CTRL_RIGHT_KEYCODE: u32 = 97;
+
+/// The keysym the open switcher hears for an evdev key it acts on
+/// (GNOME's AppSwitcherPopup: arrows, Q, W, F4).
+fn switcher_keysym(keycode: u32) -> Option<u32> {
+    Some(match keycode {
+        ARROW_LEFT_KEYCODE => 0xff51,
+        ARROW_UP_KEYCODE => 0xff52,
+        ARROW_RIGHT_KEYCODE => 0xff53,
+        ARROW_DOWN_KEYCODE => 0xff54,
+        F4_KEYCODE => 0xffc1,
+        Q_KEYCODE => 0x71,
+        W_KEYCODE => 0x77,
+        _ => return None,
+    })
+}
 /// Strip preset-cycle key (evdev): Super+R steps the focused column
 /// forward through the width presets, Super+Shift+R backward. Only
 /// consumed in scroll mode; in gnome mode the press reaches clients
@@ -3105,7 +3130,47 @@ impl WindowManager {
             } => {
                 self.track_workspace_modifiers(keycode, pressed);
                 self.track_switcher_modifiers(keycode, pressed);
-                if keycode == SPACE_KEYCODE && self.super_held && !self.shell_owns_wm_keys() {
+                let modifier = self.is_alt(keycode)
+                    || matches!(
+                        keycode,
+                        SUPER_LEFT_KEYCODE
+                            | SUPER_RIGHT_KEYCODE
+                            | SHIFT_LEFT_KEYCODE
+                            | SHIFT_RIGHT_KEYCODE
+                            | CTRL_LEFT_KEYCODE
+                            | CTRL_RIGHT_KEYCODE
+                    );
+                if !pressed && self.switcher_swallowed.contains(&keycode) {
+                    // The switcher took the press: the release too.
+                    self.switcher_swallowed.retain(|k| *k != keycode);
+                } else if pressed
+                    && keycode == GRAVE_KEYCODE
+                    && (self.switcher_open || self.alt_held || self.super_held)
+                {
+                    // GNOME's switch-group (Alt+Above_Tab): the selected
+                    // app's windows, opening the switcher when closed.
+                    if !self.switcher_open {
+                        self.switcher_by_super = !self.alt_held;
+                    }
+                    self.switcher_open = true;
+                    self.switcher_swallowed.push(keycode);
+                    self.push_switcher(SwitcherAction::StepWindow {
+                        forward: !self.shift_held,
+                    });
+                } else if pressed
+                    && self.switcher_open
+                    && !modifier
+                    && keycode != TAB_KEYCODE
+                    && keycode != ESCAPE_KEYCODE
+                {
+                    // GNOME's switcher holds the keyboard: arrows, Q, W
+                    // and F4 act on it, every other key goes nowhere.
+                    self.switcher_swallowed.push(keycode);
+                    if let Some(keysym) = switcher_keysym(keycode) {
+                        self.push_switcher(SwitcherAction::Key { keysym });
+                    }
+                } else if keycode == SPACE_KEYCODE && self.super_held && !self.shell_owns_wm_keys()
+                {
                     // GNOME's next input source; press and release stay
                     // with the compositor.
                     if pressed {

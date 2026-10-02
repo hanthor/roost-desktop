@@ -738,6 +738,20 @@ window.roost-switcher {
   background-color: rgba(255, 255, 255, 0.2);
 }
 
+/* GNOME's ThumbnailSwitcher: the same list, 2px around each frame,
+   6px to the title; frames 256px wide with 8px corners. */
+.roost-switcher .thumbnail-switcher {
+  padding: 12px;
+}
+
+.roost-switcher .thumbnail-box {
+  padding: 2px;
+}
+
+.roost-switcher .thumbnail {
+  border-radius: 8px;
+}
+
 .roost-switcher .switcher-arrow {
   margin: 4px 0 0 0;
   min-height: 8px;
