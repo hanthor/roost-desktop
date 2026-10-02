@@ -38,8 +38,7 @@ pub use smithay::wayland::shell::wlr_layer::Layer;
 /// Shared with the shell-host: both the compositor and shell read these
 /// from the same source to prevent drift.
 pub use roost_shell_control::{
-    ACTIVITIES_STRIP_PX as _, BANNER_NAMESPACE, OVERVIEW_NAMESPACE, PANEL_HEIGHT,
-    PANEL_NAMESPACE,
+    ACTIVITIES_STRIP_PX as _, BANNER_NAMESPACE, OVERVIEW_NAMESPACE, PANEL_HEIGHT, PANEL_NAMESPACE,
 };
 
 /// One layer surface's placement request, as committed.

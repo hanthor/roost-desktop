@@ -44,7 +44,7 @@ use crate::{
     state::{StateModel, WindowUpdate},
     State, WindowRequest,
 };
-use roost_shell_control::{PANEL_HEIGHT, SwitcherAction};
+use roost_shell_control::{SwitcherAction, PANEL_HEIGHT};
 
 /// Default floating size for a newly mapped window.
 const DEFAULT_WIDTH: i32 = 800;
