@@ -1457,3 +1457,124 @@ mod bt_tests {
         assert_eq!(bt_icon(None), "bluetooth-active-symbolic");
     }
 }
+
+/// One PipeWire sink from `wpctl status`: id, description, default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sink {
+    pub id: u32,
+    pub name: String,
+    pub default: bool,
+}
+
+/// The Audio section's sinks from `wpctl status` (WirePlumber's tree:
+/// "│  *   48. Built-in Audio Analog Stereo   [vol: 0.40]").
+pub fn parse_wpctl_sinks(status: &str) -> Vec<Sink> {
+    let mut out = Vec::new();
+    let mut in_audio = false;
+    let mut in_sinks = false;
+    for line in status.lines() {
+        let trimmed = line.trim_end();
+        if !trimmed.starts_with([' ', '│', '├', '└']) && !trimmed.is_empty() {
+            in_audio = trimmed.trim() == "Audio";
+            in_sinks = false;
+            continue;
+        }
+        if !in_audio {
+            continue;
+        }
+        let body = trimmed.trim_start_matches([' ', '│', '├', '└', '─']);
+        if trimmed.contains("─ ") && body.ends_with(':') {
+            in_sinks = body == "Sinks:";
+            continue;
+        }
+        if !in_sinks {
+            continue;
+        }
+        let body = body.trim();
+        let (default, body) = match body.strip_prefix('*') {
+            Some(rest) => (true, rest.trim_start()),
+            None => (false, body),
+        };
+        let Some((id, rest)) = body.split_once(". ") else {
+            continue;
+        };
+        let Ok(id) = id.trim().parse::<u32>() else {
+            continue;
+        };
+        let name = rest.split(" [").next().unwrap_or(rest).trim().to_owned();
+        if !name.is_empty() {
+            out.push(Sink { id, name, default });
+        }
+    }
+    out
+}
+
+/// A sink's menu icon, as GNOME picks one per form factor.
+pub fn sink_icon(name: &str) -> &'static str {
+    let lower = name.to_lowercase();
+    if lower.contains("headphone") || lower.contains("headset") {
+        "audio-headphones-symbolic"
+    } else if lower.contains("hdmi") || lower.contains("displayport") {
+        "video-display-symbolic"
+    } else {
+        "audio-speakers-symbolic"
+    }
+}
+
+#[cfg(test)]
+mod sink_tests {
+    use super::*;
+
+    const STATUS: &str = "PipeWire 'pipewire-0' [1.0.5, user@host, cookie:1]
+ └─ Clients:
+        33. WirePlumber                         [1.0.5, user@host, pid:1]
+
+Audio
+ ├─ Devices:
+ │      42. Built-in Audio                      [alsa]
+ │  
+ ├─ Sinks:
+ │  *   48. Built-in Audio Analog Stereo        [vol: 0.40]
+ │      52. HDMI / DisplayPort 1 Output         [vol: 1.00 MUTED]
+ │      60. WH-1000XM4 Headphones               [vol: 0.55]
+ │  
+ ├─ Sink endpoints:
+ │  
+ ├─ Sources:
+ │  *   49. Built-in Audio Analog Stereo        [vol: 1.00]
+ │  
+ └─ Streams:
+
+Video
+ ├─ Sinks:
+ │      70. Not audio                           [vol: 1.00]
+";
+
+    #[test]
+    fn sinks_parse_from_wpctl_status() {
+        let sinks = parse_wpctl_sinks(STATUS);
+        assert_eq!(
+            sinks,
+            vec![
+                Sink {
+                    id: 48,
+                    name: "Built-in Audio Analog Stereo".into(),
+                    default: true
+                },
+                Sink {
+                    id: 52,
+                    name: "HDMI / DisplayPort 1 Output".into(),
+                    default: false
+                },
+                Sink {
+                    id: 60,
+                    name: "WH-1000XM4 Headphones".into(),
+                    default: false
+                },
+            ]
+        );
+        assert_eq!(sink_icon(&sinks[1].name), "video-display-symbolic");
+        assert_eq!(sink_icon(&sinks[2].name), "audio-headphones-symbolic");
+        assert!(parse_wpctl_sinks("").is_empty());
+    }
+}

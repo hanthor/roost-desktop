@@ -35,6 +35,8 @@
 #                    as GNOME does, and activates a saved one
 #   G-NM-AGENT       the shell is NetworkManager's secret agent: an unsaved
 #                    secured network asks for its password in GNOME's dialog
+#   G-QS-SOUND-MENU  the volume slider's menu lists the outputs and makes
+#                    the picked one the default
 #   G-QS-WIFI        the Wi-Fi tile turns NetworkManager's radio off
 #   G-QS-BT-MENU     the Bluetooth menu lists paired devices as GNOME does
 #                    and connects one
@@ -270,11 +272,20 @@ ROOST_BACKLIGHT_ROOT="$ARTIFACTS/backlight"
 export ROOST_BACKLIGHT_ROOT
 VOLUME_FILE="$ARTIFACTS/volume"
 echo 0.80 >"$VOLUME_FILE"
+SINK_FILE="$ARTIFACTS/default-sink"
+echo 48 >"$SINK_FILE"
 cat >"$ARTIFACTS/bin/wpctl" <<WPCTL
 #!/bin/sh
+mark() { [ "\$(cat "$SINK_FILE")" = "\$1" ] && echo "*" || echo " "; }
 case "\$1" in
     get-volume) echo "Volume: \$(cat "$VOLUME_FILE")" ;;
     set-volume) echo "\$3" >"$VOLUME_FILE" ;;
+    set-default) echo "\$2" >"$SINK_FILE" ;;
+    status)
+        printf 'Audio\n ├─ Sinks:\n'
+        printf ' │  %s   48. Built-in Audio Analog Stereo    [vol: 0.80]\n' "\$(mark 48)"
+        printf ' │  %s   52. Roost HDMI Output               [vol: 1.00]\n' "\$(mark 52)"
+        printf ' │\n ├─ Sources:\n' ;;
     *) ;;
 esac
 WPCTL
@@ -885,6 +896,23 @@ open_qs
 showing "$ARTIFACTS/a11y-qs-bt-two.json" "2 Connected" ||
     fail G-QS-BT-MENU "the tile does not count two connected devices"
 pass G-QS-BT-MENU "the Bluetooth menu lists paired devices as GNOME does and connects one"
+
+# GNOME's sound output menu: both outputs, the default checked; picking
+# one makes it the default.
+qs_press "Open sound output menu" sound-menu || fail G-QS-SOUND-MENU "could not open the sound output menu"
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-sound.json" 20 ||
+    fail G-QS-SOUND-MENU "accessibility dump failed"
+for name in "Built-in Audio Analog Stereo" "Roost HDMI Output"; do
+    showing "$ARTIFACTS/a11y-qs-sound.json" "$name" ||
+        fail G-QS-SOUND-MENU "no '$name' output listed"
+done
+qs_press "Roost HDMI Output" sound-hdmi || fail G-QS-SOUND-MENU "could not press Roost HDMI Output"
+for _ in $(seq 1 10); do [ "$(cat "$SINK_FILE")" = 52 ] && break; sleep 0.3; done
+[ "$(cat "$SINK_FILE")" = 52 ] || fail G-QS-SOUND-MENU "the default sink is $(cat "$SINK_FILE"), not 52"
+pass G-QS-SOUND-MENU "the volume slider's menu lists the outputs and makes the picked one the default"
+sleep 1
+open_qs
 
 qs_press "Bluetooth" bt || fail G-QS-BLUETOOTH "could not press Bluetooth"
 sysprop org.bluez /org/bluez/hci0 org.bluez.Adapter1 Powered | grep -q false ||

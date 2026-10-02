@@ -10,6 +10,7 @@ push button: Lock
 push button: Power Off Menu
 push button: Mute
 slider: Volume
+toggle button: Open sound output menu
 slider: Brightness
 toggle button: Wi-Fi
 toggle button: Wi-Fi Menu
