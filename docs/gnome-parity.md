@@ -45,6 +45,7 @@ scripts/lib/roost-parity-compare.py target/gnome-reference target/roost-parity t
 | 03b-power-mode-menu | the Power Mode toggle's menu, open in place |
 | 03c-power-menu | the shutdown menu, open in place |
 | 04-overview-empty | the overview with no windows |
+| 05b-app-folder | the System folder's dialog |
 | 05-app-grid | the app grid |
 | 06-windows | three windows on the desktop |
 | 06b-switcher | Alt+Tab |
@@ -90,6 +91,7 @@ Share of pixels visibly off (more than 24 levels) in each element crop:
 | Notification banner and list card | 11.3% | matches; the rest is what lies behind |
 | Overview, empty (cards, search, dash) | 53.5% | 0.4% |
 | App grid (thumbnails, tiles, folders, dash) | 56.1% | 0.2% |
+| App folder dialog | popover | 0.0% |
 | Overview dash | not comparable | 0.0% |
 | Lock screen background (blurred, dimmed wallpaper) | not built | 1.4% beyond 8 levels |
 | Lock screen curtain (clock, date, hint) | not built | positions within 1px; the digits are the capture time |

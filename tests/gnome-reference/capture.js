@@ -125,6 +125,20 @@ export async function run() {
     Main.overview.dash.showAppsButton.checked = true;
     await Scripting.sleep(1500);
     await shot('05-app-grid');
+    // The System folder opened from the grid: GNOME's folder dialog.
+    {
+        const appDisplay = Main.overview._overview.controls._appDisplay;
+        const folder = appDisplay._items.get('System');
+        if (folder) {
+            folder.open();
+            await Scripting.sleep(1200);
+            await shot('05b-app-folder');
+            folder._dialog?.popdown();
+            await Scripting.sleep(800);
+        } else {
+            print('GREF no System folder');
+        }
+    }
     Main.overview.dash.showAppsButton.checked = false;
     Main.overview.hide();
     await Scripting.sleep(1500);
