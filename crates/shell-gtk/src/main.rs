@@ -1651,6 +1651,7 @@ fn build(app: &adw::Application) {
         let chrome_apps = apps.clone();
         let shell_rc = shell.clone();
         let activities_button = activities.clone();
+        let last_frames: RefCell<Vec<roost_shell_control::SwitcherThumbnail>> = RefCell::default();
         glib::timeout_add_local(Duration::from_millis(16), move || {
             let mut shell = shell.borrow_mut();
             let mut results = Vec::new();
@@ -1687,6 +1688,16 @@ fn build(app: &adw::Application) {
             render_pills(&mut shell);
             if let Some(control) = shell.control.as_ref() {
                 switcher_ui.sync(control.model());
+            }
+            // The switcher's window thumbnails: the compositor draws the
+            // windows into the frames, sent whenever they move.
+            let frames = switcher_ui.thumbnail_frames();
+            if *last_frames.borrow() != frames {
+                if let Some(control) = shell.control.as_mut() {
+                    if control.set_switcher_thumbnails(frames.clone()).is_ok() {
+                        *last_frames.borrow_mut() = frames;
+                    }
+                }
             }
             let open = shell
                 .control

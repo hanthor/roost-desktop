@@ -111,6 +111,8 @@
 #               preview over the left half; dragging back drops it
 #   G-TRAY      an AppIndicator item shows in the panel and its menu
 #               row reaches the item (P-TR-01)
+#   G-SWITCHER-GROUP Alt+Above_Tab shows an app's windows as thumbnails
+#               and steps through them; W closes the focused one
 #   G-SWITCHER  Alt+Tab shows the switcher with every app (GNOME's
 #               switch-applications; the three test windows are three apps), and
 #               releasing Alt focuses the highlighted one
@@ -585,6 +587,36 @@ want="roost-test-$(echo "$title" | tr '[:upper:]' '[:lower:]')"
 cstate ".focused_app_id == \"$want\"" "switched" ||
     fail G-SWITCHER "releasing Alt did not focus '$title'"
 pass G-SWITCHER "Alt+Tab shows every app and focuses the highlighted one"
+
+# GNOME's switch-group: with a second Alpha window, Alt+Above_Tab shows
+# Alpha's windows as thumbnails (drawn by the compositor) and moves to
+# the other one; W closes the focused thumbnail's window.
+WAYLAND_DISPLAY="$SOCKET_NAME" "$PY" "$ROOT/scripts/lib/roost-test-window.py" \
+    Alpha "#1c71d8" >"$ARTIFACTS/window-Alpha2.log" 2>&1 &
+cstate '[.windows[] | select(.app_id == "roost-test-alpha")] | length == 2' "second alpha" ||
+    fail G-SWITCHER-GROUP "a second Alpha window never mapped"
+cstate '.focused_app_id == "roost-test-alpha"' "alpha focused" ||
+    fail G-SWITCHER-GROUP "the new Alpha window did not take the focus"
+sleep 1
+second="$(jq -r .focused "$CSTATE")"
+xdotool keydown Alt_L key grave
+cstate '.switcher_thumbnails == 2' "thumbnails" 5 ||
+    { xdotool keyup Alt_L; fail G-SWITCHER-GROUP "Alt+Above_Tab drew no window thumbnails"; }
+sleep 0.5
+scrot "$ARTIFACTS/08c-switcher-thumbnails.png" >/dev/null
+xdotool keyup Alt_L
+cstate ".focused != $second and .focused_app_id == \"roost-test-alpha\" and .switcher_thumbnails == 0" \
+    "other alpha" || fail G-SWITCHER-GROUP "Alt+Above_Tab did not move to Alpha's other window"
+sleep 0.5
+xdotool keydown Alt_L key grave
+sleep 1
+xdotool key w
+sleep 0.5
+xdotool keyup Alt_L
+cstate '[.windows[] | select(.app_id == "roost-test-alpha")] | length == 1' "closed" ||
+    fail G-SWITCHER-GROUP "W did not close the focused thumbnail's window"
+pass G-SWITCHER-GROUP "Alt+Above_Tab shows an app's windows as thumbnails, steps to one, and W closes it"
+sleep 1
 scrot "$ARTIFACTS/08-dragged.png" >/dev/null
 
 # Overview shell surfaces (#54, #57): search entry, dash, app grid.

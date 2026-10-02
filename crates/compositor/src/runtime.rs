@@ -484,6 +484,8 @@ pub struct Runtime {
     /// A press on an overview preview: the window and where it was
     /// grabbed, and whether it has become a drag (GNOME DnD).
     overview_drag: Option<(u64, Point<f64, Logical>, bool)>,
+    /// The Alt+Tab switcher's window thumbnails (frames from the shell).
+    switcher_thumbnails: Vec<roost_shell_control::SwitcherThumbnail>,
     /// X11 display number once XWayland's window manager is up (#59):
     /// published as `DISPLAY` to the shell for the apps it launches.
     x11_display: Option<u32>,
@@ -751,6 +753,7 @@ impl Runtime {
             overview_search: false,
             overview_app_grid: false,
             overview_drag: None,
+            switcher_thumbnails: Vec::new(),
             shell_swipe: None,
             scale: clamp_scale(session.scale),
             input_settings: Default::default(),
@@ -984,6 +987,14 @@ impl Runtime {
             // the hub broadcast; the next hub poll delivers it to the
             // shell, which owns MRU order and rendering.
             for action in self.manager.take_switcher_queue() {
+                // A closing switcher takes its thumbnails with it.
+                if matches!(
+                    action,
+                    roost_shell_control::SwitcherAction::Commit
+                        | roost_shell_control::SwitcherAction::Cancel
+                ) {
+                    self.switcher_thumbnails.clear();
+                }
                 self.control.queue_switcher(action);
             }
             for (action, time, mode) in self.manager.take_accelerators_fired() {
@@ -1178,6 +1189,8 @@ impl Runtime {
             })).collect::<Vec<_>>(),
             "previews": previews,
             "thumbnails": thumbnails,
+            // The Alt+Tab switcher's window thumbnails being drawn.
+            "switcher_thumbnails": self.switcher_thumbnails.len(),
             // GNOME's tile preview while a dragged window is over a
             // snap edge: the window and the area it would fill.
             "tile_preview": self.manager.tile_preview(&self.state).map(|(id, r)| {
@@ -1552,6 +1565,12 @@ impl Runtime {
         if let Some((_, rect)) = tile {
             elements.tile = tile_elements(rect, view, accent);
         }
+        elements.top = previews_to_elements(
+            renderer,
+            &self.manager,
+            view,
+            &switcher_previews(&self.manager, &self.switcher_thumbnails),
+        );
         let decor = decor_for_output(&decor_global, view);
         let previews = preview_elements(renderer, &self.manager, view, cards);
         let paper = backdrop(
@@ -1877,6 +1896,9 @@ impl Runtime {
         for (window, action) in outcome.window_actions {
             self.manager.window_action(&mut self.state, window, action);
         }
+        if let Some(thumbnails) = outcome.switcher_thumbnails {
+            self.switcher_thumbnails = thumbnails;
+        }
         for backward in outcome.input_source_switches {
             self.manager.switch_input_source(&mut self.state, backward);
         }
@@ -2087,6 +2109,12 @@ impl Runtime {
                     if let Some((_, rect)) = tile {
                         elements.tile = tile_elements(rect, view, accent);
                     }
+                    elements.top = previews_to_elements(
+                        renderer,
+                        &self.manager,
+                        view,
+                        &switcher_previews(&self.manager, &self.switcher_thumbnails),
+                    );
                     let decor = decor_for_output(&decor_global, view);
                     let previews = preview_elements(renderer, &self.manager, view, cards);
                     let paper = backdrop(
@@ -2175,6 +2203,12 @@ impl Runtime {
                     if let Some((_, rect)) = tile {
                         elements.tile = tile_elements(rect, view, accent);
                     }
+                    elements.top = previews_to_elements(
+                        renderer,
+                        &self.manager,
+                        view,
+                        &switcher_previews(&self.manager, &self.switcher_thumbnails),
+                    );
                     let decor = decor_for_output(&decor_global, view);
                     let previews = preview_elements(renderer, &self.manager, view, cards);
                     let paper = backdrop(
@@ -2305,8 +2339,18 @@ fn preview_elements(
     let Some(layout) = overview else {
         return Vec::new();
     };
+    previews_to_elements(renderer, manager, view, &layout.previews)
+}
+
+/// Window surfaces drawn scaled into preview rects, front to back.
+fn previews_to_elements(
+    renderer: &mut GlesRenderer,
+    manager: &WindowManager,
+    view: View,
+    previews: &[crate::overview::Preview],
+) -> Vec<PreviewElement> {
     let mut out = Vec::new();
-    for preview in &layout.previews {
+    for preview in previews {
         let Some(surface) = manager.surface_of(preview.id) else {
             continue;
         };
@@ -2337,6 +2381,35 @@ fn preview_elements(
     crate::layer::front_to_back(out)
 }
 
+/// GNOME's switcher thumbnails (altTab.js `_createWindowClone`): each
+/// window scaled down (never up) to fit its frame, centred in it.
+fn switcher_previews(
+    manager: &WindowManager,
+    thumbnails: &[roost_shell_control::SwitcherThumbnail],
+) -> Vec<crate::overview::Preview> {
+    thumbnails
+        .iter()
+        .filter_map(|t| {
+            let geo = manager.geometry(t.window)?;
+            let (w, h) = (f64::from(geo.size.w.max(1)), f64::from(geo.size.h.max(1)));
+            let scale = (f64::from(t.width) / w)
+                .min(f64::from(t.height) / h)
+                .min(1.0);
+            let (sw, sh) = ((w * scale).round() as i32, (h * scale).round() as i32);
+            Some(crate::overview::Preview {
+                id: t.window,
+                rect: Rectangle::new(
+                    (t.x + (t.width - sw) / 2, t.y + (t.height - sh) / 2).into(),
+                    (sw, sh).into(),
+                ),
+                scale,
+                active: false,
+                alpha: 1.0,
+            })
+        })
+        .collect()
+}
+
 /// One output's surfaces, front to back, with GNOME's tile preview
 /// slotted in: `elements[..above]` draw over the preview (the dragged
 /// window, its popups and the shell's layers), the rest beneath it.
@@ -2344,6 +2417,8 @@ struct Scene {
     elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
     above: usize,
     tile: Vec<smithay::backend::renderer::element::solid::SolidColorRenderElement>,
+    /// Window thumbnails over everything (the Alt+Tab switcher's).
+    top: Vec<PreviewElement>,
 }
 
 impl Scene {
@@ -2354,6 +2429,7 @@ impl Scene {
             elements,
             above,
             tile: Vec::new(),
+            top: Vec::new(),
         }
     }
 }
@@ -2513,6 +2589,7 @@ fn scene_elements(
         elements: crate::layer::front_to_back(elements),
         above,
         tile: Vec::new(),
+        top: Vec::new(),
     }
 }
 
@@ -2620,6 +2697,10 @@ fn draw_scene(
     }
     draw_render_elements(frame, scale, over, &[damage])
         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    if !scene.top.is_empty() {
+        draw_render_elements(frame, scale, &scene.top, &[damage])
+            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    }
     Ok(())
 }
 
