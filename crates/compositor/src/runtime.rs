@@ -481,6 +481,9 @@ pub struct Runtime {
     /// The overview shows the app grid: workspaces become thumbnails
     /// along the top (GNOME's app grid state). Reset on close.
     overview_app_grid: bool,
+    /// A press on an overview preview: the window and where it was
+    /// grabbed, and whether it has become a drag (GNOME DnD).
+    overview_drag: Option<(u64, Point<f64, Logical>, bool)>,
     /// X11 display number once XWayland's window manager is up (#59):
     /// published as `DISPLAY` to the shell for the apps it launches.
     x11_display: Option<u32>,
@@ -747,6 +750,7 @@ impl Runtime {
             x11_display: None,
             overview_search: false,
             overview_app_grid: false,
+            overview_drag: None,
             shell_swipe: None,
             scale: clamp_scale(session.scale),
             input_settings: Default::default(),
@@ -942,6 +946,27 @@ impl Runtime {
                     if self.overview_press() {
                         return;
                     }
+                }
+            } else {
+                self.overview_drag = None;
+            }
+            if self.overview_drag.is_some() {
+                match input {
+                    ManagerInput::Button { pressed: false, .. } => {
+                        // The press never reached a client: neither
+                        // does its release.
+                        self.overview_release();
+                        return;
+                    }
+                    ManagerInput::Motion { pos, .. } => {
+                        if let Some((_, start, dragging)) = &mut self.overview_drag {
+                            let (dx, dy) = (pos.x - start.x, pos.y - start.y);
+                            if dx.hypot(dy) > crate::overview::DRAG_THRESHOLD {
+                                *dragging = true;
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             let action = self.triggers.feed(
@@ -1209,8 +1234,13 @@ impl Runtime {
             model.active_workspace(),
             &self.manager.overview_windows(),
         );
-        // GNOME grows the preview under the pointer by 5px a side.
-        crate::overview::grow_hovered(&mut scene, self.manager.pointer_pos());
+        match self.overview_drag {
+            Some((id, start, true)) => {
+                crate::overview::drag_preview(&mut scene, id, start, self.manager.pointer_pos());
+            }
+            // GNOME grows the preview under the pointer by 5px a side.
+            _ => crate::overview::grow_hovered(&mut scene, self.manager.pointer_pos()),
+        }
         scene
     }
 
@@ -1232,8 +1262,9 @@ impl Runtime {
         }
         match crate::overview::hit(&self.overview_layout(), pos) {
             crate::overview::OverviewHit::Window(id) => {
-                self.manager.focus(&mut self.state, Some(id));
-                self.control.set_overview(false);
+                // A click (focus) or a drag (move to a workspace): the
+                // release decides.
+                self.overview_drag = Some((id, pos, false));
             }
             crate::overview::OverviewHit::Workspace(ws) => {
                 // GNOME's trailing empty workspace is not in the model
@@ -1250,6 +1281,29 @@ impl Runtime {
             crate::overview::OverviewHit::Dismiss => self.control.set_overview(false),
         }
         true
+    }
+
+    /// The button came up after a press on a preview: a click focuses
+    /// the window and closes the overview; a drag dropped on a
+    /// thumbnail or a neighboring card moves the window to that
+    /// workspace (GNOME), anywhere else puts it back.
+    fn overview_release(&mut self) {
+        let Some((id, _, dragging)) = self.overview_drag.take() else {
+            return;
+        };
+        if !dragging {
+            self.manager.focus(&mut self.state, Some(id));
+            self.control.set_overview(false);
+            return;
+        }
+        let pos = self.manager.pointer_pos();
+        let Some(target) = crate::overview::drop_target(&self.overview_layout(), pos) else {
+            return;
+        };
+        let here = self.manager.model().window(id).map(|w| w.workspace);
+        if here != Some(target) {
+            self.manager.move_to_workspace(&mut self.state, id, target);
+        }
     }
 
     /// Track a three-finger swipe; returns whether `input` was one of
@@ -2258,7 +2312,7 @@ fn preview_elements(
             &surface,
             origin,
             view.scale,
-            1.0,
+            preview.alpha,
             Kind::Unspecified,
         ) {
             out.push(

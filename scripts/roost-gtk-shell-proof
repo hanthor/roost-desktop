@@ -84,6 +84,8 @@
 #   G-WS-POPUP     a workspace key shows the workspace switcher popup
 #   G-WS-THUMBS    three workspaces put GNOME's thumbnails strip in the
 #                  overview, and a thumbnail click switches workspace
+#   G-OV-DND       dragging a window's preview onto the next workspace's
+#                  card moves the window there, the overview staying open
 #   G-SUSPEND-LOCK Suspend asks logind, and its PrepareForSleep locks
 #                  the session before sleep
 #   G-UNLOCK       GNOME's lock screen: a wrong password is refused and
@@ -1099,6 +1101,39 @@ window_menu
 xdotool key super+Page_Up
 cstate ".active_workspace == $home_ws and .focused == $moved" "home" ||
     fail G-WS-THUMBS "could not return the window home"
+sleep 1
+
+# GNOME's window drag in the overview: a preview dropped on the right
+# neighbor's card moves that window one workspace right.
+xdotool key Super_L
+cstate ".overview_open and any(.previews[]; .id == $moved)" "overview" ||
+    fail G-OV-DND "the overview shows no preview of the window"
+sleep 1
+read -r px0 py0 <<EOF2
+$(jq -r ".previews[] | select(.id == $moved) | .rect | \"\(.[0] + .[2] / 2 | floor) \(.[1] + .[3] / 2 | floor)\"" "$CSTATE")
+EOF2
+xdotool mousemove --window "$WID" "$px0" "$py0"
+xdotool mousedown 1
+for step in $(seq 1 12); do
+    xdotool mousemove --window "$WID" $((px0 + (WIDTH - 50 - px0) * step / 12)) $((py0 + (HEIGHT / 2 - py0) * step / 12))
+    sleep 0.05
+done
+sleep 0.5
+scrot "$ARTIFACTS/24h-overview-drag.png" >/dev/null
+xdotool mouseup 1
+cstate ".overview_open and any(.windows[]; .id == $moved and .workspace == $home_ws + 1)" "dropped" ||
+    fail G-OV-DND "dropping the preview on the next card did not move the window there"
+pass G-OV-DND "dragging a preview onto the next workspace's card moves the window there"
+xdotool key Escape
+sleep 1
+xdotool key super+Page_Down
+cstate ".focused == $moved" "on the next workspace" || fail G-OV-DND "could not reach the moved window"
+window_menu
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-dnd-left.json" 20 \
+    --press "Move to Workspace Left" || fail G-OV-DND "the window menu has no Move to Workspace Left"
+xdotool key super+Page_Up
+cstate ".active_workspace == $home_ws and .focused == $moved" "home" ||
+    fail G-OV-DND "could not return the window home"
 sleep 1
 
 # Screenshots (#61): GNOME Shell's interface, as the portal calls it.

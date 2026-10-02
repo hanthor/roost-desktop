@@ -69,6 +69,8 @@ pub struct Preview {
     pub scale: f64,
     /// Whether it sits on the active card (clickable to focus).
     pub active: bool,
+    /// Opacity (a dragged preview fades).
+    pub alpha: f32,
 }
 
 /// The whole overview scene for one output.
@@ -141,6 +143,67 @@ pub fn grow_hovered(layout: &mut OverviewLayout, pointer: Point<f64, Logical>) {
         (p.rect.size.w + 2 * g, p.rect.size.h + 2 * g).into(),
     );
     layout.hovered = Some(p.id);
+}
+
+/// GNOME's window drag in the overview (windowPreview.js): the
+/// dragged preview shrinks to fit [`WINDOW_DND_SIZE`] and fades to
+/// [`DRAGGING_WINDOW_OPACITY`].
+pub const WINDOW_DND_SIZE: f64 = 256.0;
+/// Opacity of a dragged preview (100 of 255).
+pub const DRAGGING_WINDOW_OPACITY: f32 = 100.0 / 255.0;
+/// Pointer travel before a press on a preview becomes a drag
+/// (`drag-threshold`).
+pub const DRAG_THRESHOLD: f64 = 8.0;
+
+/// Turn window `id`'s active preview into the dragged one: shrunk to
+/// fit [`WINDOW_DND_SIZE`] about the point grabbed at `start`, that
+/// point following the pointer to `pos`, faded, and drawn on top.
+pub fn drag_preview(
+    layout: &mut OverviewLayout,
+    id: u64,
+    start: Point<f64, Logical>,
+    pos: Point<f64, Logical>,
+) {
+    let Some(index) = layout.previews.iter().position(|p| p.active && p.id == id) else {
+        return;
+    };
+    let mut p = layout.previews.remove(index);
+    let (w, h) = (f64::from(p.rect.size.w), f64::from(p.rect.size.h));
+    let k = (WINDOW_DND_SIZE / w.max(h).max(1.0)).min(1.0);
+    let (fx, fy) = (
+        (start.x - f64::from(p.rect.loc.x)) / w.max(1.0),
+        (start.y - f64::from(p.rect.loc.y)) / h.max(1.0),
+    );
+    let (nw, nh) = ((w * k).round(), (h * k).round());
+    p.rect = Rectangle::new(
+        (
+            (pos.x - fx * nw).round() as i32,
+            (pos.y - fy * nh).round() as i32,
+        )
+            .into(),
+        (nw as i32, nh as i32).into(),
+    );
+    p.scale *= k;
+    p.alpha = DRAGGING_WINDOW_OPACITY;
+    // Not a click target while it rides the pointer.
+    p.active = false;
+    layout.previews.push(p);
+}
+
+/// The workspace a window dropped at `pos` goes to: a thumbnail, or a
+/// neighboring card.
+pub fn drop_target(layout: &OverviewLayout, pos: Point<f64, Logical>) -> Option<u32> {
+    layout
+        .thumbnails
+        .iter()
+        .find(|t| t.rect.to_f64().contains(pos))
+        .or_else(|| {
+            layout
+                .cards
+                .iter()
+                .find(|c| !c.active && c.rect.to_f64().contains(pos))
+        })
+        .map(|c| c.workspace)
 }
 
 /// What a press at a point means in the overview.
@@ -467,6 +530,7 @@ pub fn layout(
                 rect: Rectangle::new((x, y).into(), size.into()),
                 scale,
                 active: false,
+                alpha: 1.0,
             });
         }
     }
@@ -509,6 +573,7 @@ pub fn layout(
             rect,
             scale,
             active: true,
+            alpha: 1.0,
         });
     }
     out
@@ -561,6 +626,7 @@ fn thumbnails(
                 ),
                 scale,
                 active: false,
+                alpha: 1.0,
             });
         }
     }
@@ -698,6 +764,7 @@ pub fn app_grid_layout(
                 ),
                 scale,
                 active: false,
+                alpha: 1.0,
             });
         }
     }
@@ -882,6 +949,51 @@ mod tests {
         assert!((1152..=1154).contains(&right.loc.x), "{right:?}");
         // A press on a thumbnail switches to its workspace.
         assert_eq!(hit(&l, (690.0, 110.0).into()), OverviewHit::Workspace(2));
+    }
+
+    #[test]
+    fn a_dragged_preview_shrinks_fades_and_follows_the_pointer() {
+        let mut l = layout(output(), 32, &[0], 0, &[win(1, 0, 320, 182, 640, 420)]);
+        let before = l.previews.iter().find(|p| p.active).copied().unwrap();
+        // Grab the preview's center, then move far away.
+        let start = Point::from((
+            f64::from(before.rect.loc.x + before.rect.size.w / 2),
+            f64::from(before.rect.loc.y + before.rect.size.h / 2),
+        ));
+        let pos = Point::from((300.0, 500.0));
+        drag_preview(&mut l, 1, start, pos);
+        let p = *l.previews.last().unwrap();
+        assert_eq!(p.id, 1);
+        assert!(p.rect.size.w.max(p.rect.size.h) <= WINDOW_DND_SIZE as i32);
+        assert!((p.alpha - DRAGGING_WINDOW_OPACITY).abs() < f32::EPSILON);
+        assert!(!p.active, "a dragged preview is no click target");
+        // The grabbed point (the center) stays under the pointer.
+        let center = (
+            p.rect.loc.x + p.rect.size.w / 2,
+            p.rect.loc.y + p.rect.size.h / 2,
+        );
+        assert!((center.0 - 300).abs() <= 1 && (center.1 - 500).abs() <= 1);
+        // The surface scale shrank with the rect.
+        let k = f64::from(p.rect.size.w) / f64::from(before.rect.size.w);
+        assert!((p.scale - before.scale * k).abs() < 0.01);
+    }
+
+    #[test]
+    fn drops_land_on_thumbnails_and_neighbor_cards() {
+        let l = layout(
+            output(),
+            32,
+            &[0, 1],
+            0,
+            &[win(1, 0, 320, 182, 640, 420), win(2, 1, 320, 182, 640, 420)],
+        );
+        // The third thumbnail is GNOME's trailing empty workspace.
+        assert_eq!(drop_target(&l, (690.0, 110.0).into()), Some(2));
+        assert_eq!(drop_target(&l, (640.0, 115.0).into()), Some(1));
+        // The right neighbor's peek.
+        assert_eq!(drop_target(&l, (1200.0, 400.0).into()), Some(1));
+        // The active card is no drop target.
+        assert_eq!(drop_target(&l, (640.0, 400.0).into()), None);
     }
 
     #[test]
