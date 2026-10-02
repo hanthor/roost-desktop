@@ -1500,7 +1500,10 @@ impl Runtime {
             .is_none()
             .then(|| self.manager.tile_preview(&self.state))
             .flatten();
-        let decor_global = cards.map(overview_decor).unwrap_or_default();
+        let accent = self.wallpaper.accent();
+        let decor_global = cards
+            .map(|layout| overview_decor(layout, accent))
+            .unwrap_or_default();
         let background = if overview.is_some() {
             OVERVIEW_BACKGROUND
         } else {
@@ -1547,7 +1550,7 @@ impl Runtime {
                 .as_ref(),
         );
         if let Some((_, rect)) = tile {
-            elements.tile = tile_elements(rect, view);
+            elements.tile = tile_elements(rect, view, accent);
         }
         let decor = decor_for_output(&decor_global, view);
         let previews = preview_elements(renderer, &self.manager, view, cards);
@@ -2040,7 +2043,10 @@ impl Runtime {
         let tile = (show_content && overview.is_none())
             .then(|| self.manager.tile_preview(&self.state))
             .flatten();
-        let decor_global = cards.map(overview_decor).unwrap_or_default();
+        let accent = self.wallpaper.accent();
+        let decor_global = cards
+            .map(|layout| overview_decor(layout, accent))
+            .unwrap_or_default();
         let background = if overview.is_some() {
             OVERVIEW_BACKGROUND
         } else {
@@ -2076,7 +2082,7 @@ impl Runtime {
                             .as_ref(),
                     );
                     if let Some((_, rect)) = tile {
-                        elements.tile = tile_elements(rect, view);
+                        elements.tile = tile_elements(rect, view, accent);
                     }
                     let decor = decor_for_output(&decor_global, view);
                     let previews = preview_elements(renderer, &self.manager, view, cards);
@@ -2164,7 +2170,7 @@ impl Runtime {
                             .as_ref(),
                     );
                     if let Some((_, rect)) = tile {
-                        elements.tile = tile_elements(rect, view);
+                        elements.tile = tile_elements(rect, view, accent);
                     }
                     let decor = decor_for_output(&decor_global, view);
                     let previews = preview_elements(renderer, &self.manager, view, cards);
@@ -2248,8 +2254,9 @@ const OVERVIEW_BACKGROUND: Color32F = Color32F::new(34.0 / 255.0, 34.0 / 255.0, 
 /// global logical space.
 fn overview_decor(
     layout: &crate::overview::OverviewLayout,
+    accent: [f32; 3],
 ) -> Vec<(Color32F, Vec<Rectangle<i32, Logical>>)> {
-    crate::overview::thumbnail_decor(layout)
+    crate::overview::thumbnail_decor(layout, accent)
         .into_iter()
         .map(|([r, g, b, a], rects)| (Color32F::new(r, g, b, a), rects))
         .collect()
@@ -2353,10 +2360,10 @@ impl Scene {
 fn tile_elements(
     rect: Rectangle<i32, Logical>,
     view: View,
+    accent: [f32; 3],
 ) -> Vec<smithay::backend::renderer::element::solid::SolidColorRenderElement> {
     use smithay::backend::renderer::element::solid::SolidColorRenderElement;
     use smithay::backend::renderer::element::Id;
-    const ACCENT: [f32; 3] = [53.0 / 255.0, 132.0 / 255.0, 228.0 / 255.0];
     let top_left = view.physical(f64::from(rect.loc.x), f64::from(rect.loc.y));
     let bottom_right = view.physical(
         f64::from(rect.loc.x + rect.size.w),
@@ -2368,7 +2375,7 @@ fn tile_elements(
     if w <= 2 * b || h <= 2 * b {
         return Vec::new();
     }
-    let [cr, cg, cb] = ACCENT;
+    let [cr, cg, cb] = accent;
     let border = Color32F::new(cr, cg, cb, 1.0);
     // Premultiplied: half opacity halves every channel.
     let fill = Color32F::new(cr * 0.5, cg * 0.5, cb * 0.5, 0.5);

@@ -28,6 +28,10 @@ cp /usr/share/applications/*.desktop /out/share/applications/
 mkdir -p /out/share/desktop-directories
 cp /usr/share/desktop-directories/*.directory /out/share/desktop-directories/
 cp /usr/share/glib-2.0/schemas/org.gnome.desktop.app-folders.gschema.xml /out/share/glib-2.0/schemas/
+# GNOME 51's interface keys (accent-color and friends) and the enums they
+# use, so the Roost capture reads the settings GNOME has.
+cp /usr/share/glib-2.0/schemas/org.gnome.desktop.interface.gschema.xml \
+    /usr/share/glib-2.0/schemas/org.gnome.desktop.enums.xml /out/share/glib-2.0/schemas/
 # GNOME 51's default wallpapers, for the Roost capture to show too.
 cp /usr/share/backgrounds/gnome/adwaita-l.jxl /usr/share/backgrounds/gnome/adwaita-d.jxl /out/
 mkdir -p /tmp/backlight

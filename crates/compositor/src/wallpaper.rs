@@ -92,6 +92,8 @@ pub struct Wallpaper {
     pending: Vec<Pending>,
     /// `primary-color` from the drop file's second line.
     color: Option<[f32; 3]>,
+    /// The accent color line, when published.
+    accent: Option<[f32; 3]>,
     /// Overview cards.
     cards: Vec<CardCache>,
     /// The lock screen's blurred, dimmed copy, by URI and output size.
@@ -204,6 +206,13 @@ impl Wallpaper {
         });
     }
 
+    /// GNOME's accent color as last published (the shell resolves
+    /// `accent-color` to RGB), else GNOME's default blue.
+    pub fn accent(&self) -> [f32; 3] {
+        self.accent
+            .unwrap_or([53.0 / 255.0, 132.0 / 255.0, 228.0 / 255.0])
+    }
+
     /// GNOME's `primary-color` as last published, for the clear under
     /// the picture (and instead of it when there is none).
     pub fn color(&self) -> Option<[f32; 3]> {
@@ -314,6 +323,7 @@ impl Wallpaper {
         let mut lines = text.lines();
         let uri = lines.next().unwrap_or_default().trim().to_owned();
         self.color = lines.next().and_then(parse_color);
+        self.accent = lines.next().and_then(parse_color);
         if uri.is_empty() {
             return None;
         }

@@ -84,7 +84,10 @@ if [ -d "$REF/share" ]; then
     if [ -d "$REF/share/glib-2.0/schemas" ]; then
         mkdir -p "$WORK/schemas"
         cp /usr/share/glib-2.0/schemas/*.xml /usr/share/glib-2.0/schemas/*.override \
-            "$REF"/share/glib-2.0/schemas/*.xml "$WORK/schemas/" 2>/dev/null || true
+            "$WORK/schemas/" 2>/dev/null || true
+        # A second cp: one cp will not overwrite a file it just created,
+        # so GNOME's copies would silently lose to the host's.
+        cp "$REF"/share/glib-2.0/schemas/*.xml "$WORK/schemas/" 2>/dev/null || true
         glib-compile-schemas "$WORK/schemas" && GSETTINGS_SCHEMA_DIR="$WORK/schemas"
         export GSETTINGS_SCHEMA_DIR
     fi

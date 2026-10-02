@@ -841,6 +841,7 @@ pub fn wallpaper_drop(
     prefer_dark: bool,
     options: &str,
     primary: &str,
+    accent: &str,
 ) -> String {
     let picture = if options == "none" {
         ""
@@ -849,7 +850,23 @@ pub fn wallpaper_drop(
     } else {
         uri
     };
-    format!("{picture}\n{primary}\n")
+    format!("{picture}\n{primary}\n{}\n", accent_hex(accent))
+}
+
+/// GNOME's accent colors (`org.gnome.desktop.interface accent-color`,
+/// libadwaita's `AdwAccentColor` backgrounds), blue for anything else.
+pub fn accent_hex(name: &str) -> &'static str {
+    match name {
+        "teal" => "#2190a4",
+        "green" => "#3a944a",
+        "yellow" => "#c88800",
+        "orange" => "#ed5b00",
+        "red" => "#e62d42",
+        "pink" => "#d56199",
+        "purple" => "#9141ac",
+        "slate" => "#6f8396",
+        _ => "#3584e4",
+    }
 }
 
 #[cfg(test)]
@@ -861,20 +878,20 @@ mod wallpaper_tests {
         let l = "file:///usr/share/backgrounds/gnome/adwaita-l.jxl";
         let d = "file:///usr/share/backgrounds/gnome/adwaita-d.jxl";
         assert_eq!(
-            wallpaper_drop(l, d, false, "zoom", "#023c88"),
-            format!("{l}\n#023c88\n")
+            wallpaper_drop(l, d, false, "zoom", "#023c88", "blue"),
+            format!("{l}\n#023c88\n#3584e4\n")
         );
         assert_eq!(
-            wallpaper_drop(l, d, true, "zoom", "#023c88"),
-            format!("{d}\n#023c88\n")
+            wallpaper_drop(l, d, true, "zoom", "#023c88", "purple"),
+            format!("{d}\n#023c88\n#9141ac\n")
         );
         assert_eq!(
-            wallpaper_drop(l, "", true, "zoom", "#023c88"),
-            format!("{l}\n#023c88\n")
+            wallpaper_drop(l, "", true, "zoom", "#023c88", ""),
+            format!("{l}\n#023c88\n#3584e4\n")
         );
         assert_eq!(
-            wallpaper_drop(l, d, false, "none", "#023c88"),
-            "\n#023c88\n"
+            wallpaper_drop(l, d, false, "none", "#023c88", "slate"),
+            "\n#023c88\n#6f8396\n"
         );
     }
 }

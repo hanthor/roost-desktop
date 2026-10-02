@@ -1307,6 +1307,15 @@ fn build(app: &adw::Application) {
                     dark,
                     &bg.string("picture-options"),
                     &bg.string("primary-color"),
+                    // GNOME 47's accent; older schemas have none (blue).
+                    &interface
+                        .as_ref()
+                        .filter(|i| {
+                            i.settings_schema()
+                                .is_some_and(|schema| schema.has_key("accent-color"))
+                        })
+                        .map(|i| i.string("accent-color").to_string())
+                        .unwrap_or_default(),
                 );
                 let dir = std::env::var_os("XDG_RUNTIME_DIR")
                     .map(std::path::PathBuf::from)
