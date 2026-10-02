@@ -38,6 +38,9 @@ impl SwitcherUi {
         window.set_layer(Layer::Overlay);
         window.set_namespace(Some(NAMESPACE));
         window.set_keyboard_mode(KeyboardMode::None);
+        // Centred on the whole monitor, top bar included, as GNOME
+        // centres its switcher popup.
+        window.set_exclusive_zone(-1);
         window.set_title(Some("Switch Windows"));
         // GNOME's AppSwitcher: one rounded list of app tiles.
         let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
