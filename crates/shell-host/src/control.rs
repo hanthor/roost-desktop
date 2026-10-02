@@ -482,6 +482,19 @@ impl ControlClient {
         Ok(id)
     }
 
+    /// Make `workspace` active (GNOME's workspace keys). Returns the
+    /// request id.
+    pub fn focus_workspace(&mut self, workspace: u32) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::FocusWorkspace {
+                workspace: u64::from(workspace),
+            },
+        })?;
+        Ok(id)
+    }
+
     /// Carry out one of GNOME's window-menu actions. Returns the request id.
     pub fn window_action(
         &mut self,

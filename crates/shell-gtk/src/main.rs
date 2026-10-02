@@ -1148,6 +1148,56 @@ fn build(app: &adw::Application) {
                     Action::ShowScreenshotUi => screenshot_ui.open(),
                     Action::Screenshot => take_screenshot(false, notify.clone()),
                     Action::ScreenshotWindow => take_screenshot(true, notify.clone()),
+                    Action::WindowMenu
+                    | Action::ToggleMaximized
+                    | Action::Unmaximize
+                    | Action::BeginMove
+                    | Action::BeginResize => {
+                        use roost_shell_control::WindowAction as W;
+                        let what = match action {
+                            Action::WindowMenu => W::ShowMenu,
+                            Action::ToggleMaximized => W::ToggleMaximize,
+                            Action::Unmaximize => W::Unmaximize,
+                            Action::BeginMove => W::Move,
+                            _ => W::Resize,
+                        };
+                        let mut shell = shell.borrow_mut();
+                        if let Some(control) = shell.control.as_mut() {
+                            let focused = control
+                                .model()
+                                .windows()
+                                .iter()
+                                .find(|w| w.active)
+                                .map(|w| w.id);
+                            if let Some(id) = focused {
+                                let _ = control.window_action(id, what);
+                            }
+                        }
+                    }
+                    Action::Workspace(target) | Action::MoveToWorkspace(target) => {
+                        let mut shell = shell.borrow_mut();
+                        let Some(control) = shell.control.as_mut() else {
+                            return;
+                        };
+                        let model = control.model();
+                        let occupied: Vec<u32> =
+                            model.windows().iter().map(|w| w.workspace).collect();
+                        let Some(workspace) =
+                            target.resolve(model.active_workspace(), model.workspaces(), &occupied)
+                        else {
+                            return;
+                        };
+                        let focused = model.windows().iter().find(|w| w.active).map(|w| w.id);
+                        if matches!(action, Action::MoveToWorkspace(_)) {
+                            // Mutter moves the window and follows it.
+                            let Some(id) = focused else { return };
+                            let _ = control.window_action(
+                                id,
+                                roost_shell_control::WindowAction::MoveToWorkspace { workspace },
+                            );
+                        }
+                        let _ = control.focus_workspace(workspace);
+                    }
                     Action::BrightnessUp | Action::BrightnessDown => {
                         let up = action == Action::BrightnessUp;
                         if let Some(level) = services::step_brightness(up) {
@@ -1162,10 +1212,12 @@ fn build(app: &adw::Application) {
             })
         };
         let settings = keybindings::settings();
+        let wm_settings = keybindings::wm_settings();
         let apply: Rc<dyn Fn()> = {
-            let (settings, gnome_shell) = (settings.clone(), gnome_shell.clone());
+            let (settings, wm_settings, gnome_shell) =
+                (settings.clone(), wm_settings.clone(), gnome_shell.clone());
             Rc::new(move || {
-                let list = keybindings::bindings(settings.as_ref());
+                let list = keybindings::bindings(settings.as_ref(), wm_settings.as_ref());
                 let accels: Vec<(String, u32)> = list
                     .iter()
                     .map(|b| (b.accelerator.clone(), b.modes))
@@ -1183,7 +1235,8 @@ fn build(app: &adw::Application) {
             })
         };
         apply();
-        if let Some(settings) = settings {
+        for settings in [settings, wm_settings].into_iter().flatten() {
+            let apply = apply.clone();
             settings.connect_changed(None, move |_, _| apply());
             std::mem::forget(settings);
         }

@@ -220,6 +220,8 @@ pub struct WindowManager {
     /// Window-menu requests `(window, x, y)` in global logical pixels,
     /// drained by the runtime for the shell.
     menu_requests: Vec<(u64, i32, i32)>,
+    /// The active workspace at the last reconcile.
+    last_active_workspace: Option<u32>,
     /// Super held (either side) for workspace keybindings.
     super_held: bool,
     /// Key repeat as last set: rate (keys/s, 0 off) and delay (ms).
@@ -281,6 +283,7 @@ impl WindowManager {
             accel_fired: Vec::new(),
             lock_input_active: false,
             menu_requests: Vec::new(),
+            last_active_workspace: None,
             swallowed_button: None,
             focus_awaits_surface: None,
             grab: None,
@@ -487,7 +490,11 @@ impl WindowManager {
             .focused()
             .and_then(|id| self.model.window(id))
             .is_some_and(|entry| entry.workspace != active);
-        if stranded {
+        // Arriving on a workspace with nothing focused focuses its top
+        // window, as GNOME does, whichever path switched (keys, shell).
+        let arrived = self.last_active_workspace != Some(active) && self.model.focused().is_none();
+        self.last_active_workspace = Some(active);
+        if stranded || arrived {
             self.focus_topmost(state, active);
         }
         // Client window-state requests drain last so a request that
@@ -1812,6 +1819,19 @@ impl WindowManager {
                 // xdg_toplevel resize edge bottom_right.
                 self.begin_resize(id, 10);
                 true
+            }
+            WindowAction::ShowMenu => {
+                // Mutter opens the keyboard window menu at the frame's
+                // corner.
+                let Some(loc) = self.windows.get(&id).map(|w| w.geometry.loc) else {
+                    return false;
+                };
+                self.menu_requests.push((id, loc.x, loc.y));
+                true
+            }
+            WindowAction::Unmaximize => self.set_maximized(state, id, false),
+            WindowAction::MoveToWorkspace { workspace } => {
+                self.move_to_workspace(state, id, workspace)
             }
             WindowAction::ToggleSticky => {
                 if let Some(window) = self.windows.get_mut(&id) {

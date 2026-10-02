@@ -78,6 +78,7 @@
 #   G-SCREENSHOT-UI  Print opens the screenshot UI; Screen + Capture saves
 #   G-WINDOW-MENU  GNOME's window menu: Always on Top, Hide, and the
 #                  overview brings the hidden window back
+#   G-WM-KEYS      Alt+Space, Alt+F10, Super+End/Home (wm keybindings)
 #   G-SUSPEND-LOCK Suspend asks logind, and its PrepareForSleep locks
 #                  the session before sleep
 #   G-UNLOCK       GNOME's lock screen: a wrong password is refused and
@@ -985,6 +986,27 @@ pick_alpha || fail G-WINDOW-MENU "the hidden window could not be picked from the
 cstate "any(.minimized[]; . == $alpha_id) | not" "restored" ||
     fail G-WINDOW-MENU "picking the hidden window did not bring it back"
 pass G-WINDOW-MENU "the header-bar menu keeps a window on top, hides it, and the overview brings it back"
+
+# GNOME's window-manager keys (org.gnome.desktop.wm.keybindings).
+sleep 1
+xdotool key alt+space
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-wm-menu.json" 20 ||
+    fail G-WM-KEYS "accessibility dump failed"
+showing "$ARTIFACTS/a11y-wm-menu.json" "Hide" || fail G-WM-KEYS "Alt+Space opened no window menu"
+xdotool key Escape
+sleep 1
+before_w="$(jq -r '.focused_rect[2]' "$CSTATE")"
+xdotool key alt+F10
+cstate ".focused_rect[2] == $WIDTH" "maximized" || fail G-WM-KEYS "Alt+F10 did not maximize"
+xdotool key alt+F10
+cstate ".focused_rect[2] == $before_w" "restored" || fail G-WM-KEYS "Alt+F10 again did not restore"
+first_ws="$(jq -r '.active_workspace' "$CSTATE")"
+xdotool key super+End
+cstate ".active_workspace != $first_ws" "last workspace" || fail G-WM-KEYS "Super+End stayed put"
+xdotool key super+Home
+cstate ".active_workspace == $first_ws" "first workspace" || fail G-WM-KEYS "Super+Home did not come back"
+pass G-WM-KEYS "Alt+Space, Alt+F10 and Super+End/Home do what GNOME's window-manager keys do"
 
 # Screenshots (#61): GNOME Shell's interface, as the portal calls it.
 SHOT="$ARTIFACTS/screenshot.png"

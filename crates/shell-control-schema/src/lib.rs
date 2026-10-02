@@ -305,6 +305,15 @@ pub enum WindowAction {
     ToggleAbove,
     /// Always on Visible Workspace (on every workspace), on or off.
     ToggleSticky,
+    /// Open the window menu at the window's corner (Alt+Space).
+    ShowMenu,
+    /// Leave maximized (Alt+F5).
+    Unmaximize,
+    /// Move to this workspace (GNOME's move-to-workspace keys).
+    MoveToWorkspace {
+        /// The workspace.
+        workspace: u32,
+    },
 }
 
 /// Grabbed accelerators held at once.

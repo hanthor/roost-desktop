@@ -57,7 +57,8 @@ This page records that decision for R9 (knowledge entry
 |---|---|---|
 | org.gnome.shell.keybindings show-screenshot-ui, toggle-overview, toggle-application-view, toggle-message-tray, toggle-quick-settings, switch-to-application-1..9, open-new-window-application-1..9, screenshot, screenshot-window, screen-brightness-up, screen-brightness-down | Honored | read live, GNOME 51's defaults when the schema is missing; grabbed through the compositor like any accelerator (`crates/shell-gtk/src/keybindings.rs`) |
 | org.gnome.shell.keybindings show-screen-recording-ui, focus-active-notification, shift-overview-up/down, the per-monitor brightness keys | Ignored | no screen recording, notification focus, or per-monitor brightness yet (#63) |
-| org.gnome.desktop.wm.keybindings, org.gnome.mutter.keybindings | Ignored | Roost uses GNOME's default window-manager bindings, fixed (#63) |
+| org.gnome.desktop.wm.keybindings activate-window-menu, toggle-maximized, unmaximize, begin-move, begin-resize, switch-to-workspace-1/last/left/right, move-to-workspace-1/last/left/right | Honored | read live (GNOME 51's defaults without the schema), grabbed like any accelerator; the defaults Roost's compositor binds itself (Super+PageUp/PageDown and their Shift moves) stay its own |
+| org.gnome.desktop.wm.keybindings maximize, minimize, close, switch-applications, switch-input-source, toggle-tiled; org.gnome.mutter.keybindings | Ignored | GNOME's defaults, fixed in the compositor (Super+Up/Down/Left/Right, Super+H, Alt+F4, Alt+Tab, Super+Space) (#63) |
 | org.gnome.desktop.wm.preferences button-layout | Via GTK | Client-side decorations read it |
 | org.gnome.desktop.wm.preferences focus-mode, num-workspaces | Ignored | Click to focus and dynamic workspaces, as GNOME's defaults |
 | org.gnome.mutter dynamic-workspaces, edge-tiling | Ignored | Always on, as GNOME's defaults |
