@@ -388,19 +388,82 @@ impl OverviewUi {
         flow.set_column_spacing(24);
         flow.set_row_spacing(24);
         flow.set_halign(gtk::Align::Center);
+        // GNOME's app-folders: folders and loose apps share one
+        // alphabetical grid; a folder opens its apps in a popover.
         let apps = me.apps.get();
-        let mut sorted: Vec<&AppEntry> = apps.apps().iter().collect();
-        sorted.sort_by_key(|a| a.name.to_lowercase());
-        for entry in sorted {
-            let button = app_button(entry, 96, true);
+        let folders = crate::folders::load();
+        let (filled, loose) = crate::folders::arrange(&folders, apps.apps());
+        enum Item<'a> {
+            Folder(crate::folders::Folder, Vec<&'a AppEntry>),
+            App(&'a AppEntry),
+        }
+        let mut items: Vec<(String, Item)> = filled
+            .into_iter()
+            .map(|(f, members)| (f.name.to_lowercase(), Item::Folder(f, members)))
+            .chain(
+                loose
+                    .into_iter()
+                    .map(|a| (a.name.to_lowercase(), Item::App(a))),
+            )
+            .collect();
+        items.sort_by(|a, b| a.0.cmp(&b.0));
+        let launch_button = |entry: &AppEntry, size: i32, actions: Rc<dyn OverviewActions>| {
+            let button = app_button(entry, size, true);
             let entry = entry.clone();
-            let actions = me.actions.clone();
             button.connect_clicked(move |_| {
                 if roost_shell_host::apps::launch(&entry).is_ok() {
                     actions.close_overview();
                 }
             });
-            flow.insert(&button, -1);
+            button
+        };
+        for (_, item) in items {
+            match item {
+                Item::App(entry) => {
+                    flow.insert(&launch_button(entry, 96, me.actions.clone()), -1);
+                }
+                Item::Folder(folder, members) => {
+                    // 2x2 collage of the first apps, the name beneath.
+                    let collage = gtk::Grid::builder()
+                        .row_spacing(4)
+                        .column_spacing(4)
+                        .halign(gtk::Align::Center)
+                        .build();
+                    collage.add_css_class("folder-collage");
+                    for (i, entry) in members.iter().take(4).enumerate() {
+                        collage.attach(&app_icon(entry, 40), (i % 2) as i32, (i / 2) as i32, 1, 1);
+                    }
+                    let column = gtk::Box::new(gtk::Orientation::Vertical, 6);
+                    column.append(&collage);
+                    column.append(&gtk::Label::new(Some(&folder.name)));
+                    let button = gtk::MenuButton::builder()
+                        .child(&column)
+                        .valign(gtk::Align::Start)
+                        .build();
+                    button.add_css_class("flat");
+                    button.add_css_class("overview-app");
+                    button.add_css_class("app-folder");
+                    button.update_property(&[gtk::accessible::Property::Label(&folder.name)]);
+                    let popover = gtk::Popover::new();
+                    popover.add_css_class("roost-shell-popover");
+                    let inner = gtk::Box::new(gtk::Orientation::Vertical, 12);
+                    let title = gtk::Label::new(Some(&folder.name));
+                    title.add_css_class("title-3");
+                    inner.append(&title);
+                    let grid = gtk::FlowBox::new();
+                    grid.set_selection_mode(gtk::SelectionMode::None);
+                    grid.set_max_children_per_line(4);
+                    grid.set_column_spacing(18);
+                    grid.set_row_spacing(18);
+                    for entry in &members {
+                        grid.insert(&launch_button(entry, 72, me.actions.clone()), -1);
+                    }
+                    inner.append(&grid);
+                    popover.set_child(Some(&inner));
+                    button.set_popover(Some(&popover));
+                    flow.insert(&button, -1);
+                }
+            }
         }
         let scroller = gtk::ScrolledWindow::builder()
             .child(&flow)

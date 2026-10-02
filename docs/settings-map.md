@@ -40,6 +40,7 @@ This page records that decision for R9 (knowledge entry
 | org.gnome.desktop.search-providers (all keys) | Honored | disable-external, disabled, enabled and sort-order. Proof G-SEARCH-PROVIDER |
 | org.gnome.desktop.background picture-uri, picture-uri-dark | Honored | Wallpaper |
 | org.gnome.shell favorite-apps | Honored | Used for the dash when Roost has no pins of its own |
+| org.gnome.desktop.app-folders (folder-children and each folder's name, apps, categories, excluded-apps, translate) | Honored | App-grid folders, read on each grid open. Proof G-APP-FOLDERS |
 | org.gnome.shell enabled-extensions | Ignored | GNOME Shell extensions are JavaScript. Roost has its own extension point |
 | org.gnome.settings-daemon.plugins.color night-light-enabled | Honored (write only) | The Night Light tile writes it, but Roost applies no colour temperature yet (#89 gamma control) |
 

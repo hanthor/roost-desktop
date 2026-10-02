@@ -46,6 +46,9 @@ pub struct AppEntry {
     pub argv: Vec<OsString>,
     /// Icon name or path, if any (rendering resolves it later).
     pub icon: Option<String>,
+    /// Desktop-entry categories (`Utility`, `X-GNOME-Utilities`), which
+    /// GNOME's app folders group by.
+    pub categories: Vec<String>,
 }
 
 impl AppEntry {
@@ -152,9 +155,19 @@ fn from_crate_entry(entry: &CrateEntry) -> Option<AppEntry> {
         .map(|name| name.into_owned())
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| app_id.trim_end_matches(".desktop").to_owned());
+    let categories = entry
+        .categories()
+        .map(|c| {
+            c.into_iter()
+                .filter(|c| !c.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
     Some(AppEntry {
         app_id,
         name,
+        categories,
         generic_name: entry
             .generic_name::<&str>(&[])
             .map(|name| name.into_owned())
@@ -528,6 +541,7 @@ mod tests {
             keywords: Vec::new(),
             argv: vec![OsString::from("/nonexistent-roost-binary-xyz")],
             icon: None,
+            categories: Vec::new(),
         };
         let mut tracker = LaunchTracker::new();
         assert!(tracker.launch(&entry).is_err());

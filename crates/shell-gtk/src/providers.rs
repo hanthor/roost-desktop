@@ -390,6 +390,7 @@ mod tests {
             keywords: Vec::new(),
             argv: Vec::new(),
             icon: None,
+            categories: Vec::new(),
         };
         let apps = roost_shell_host::apps::AppProvider::new(vec![entry]);
         // GNOME's favorite-apps and DesktopId keys carry ".desktop".
