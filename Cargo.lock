@@ -3097,6 +3097,8 @@ dependencies = [
  "calloop 0.14.4",
  "greetd_ipc",
  "image",
+ "libc",
+ "libloading",
  "rand 0.10.3",
  "roost-greeter",
  "roost-shell-control",

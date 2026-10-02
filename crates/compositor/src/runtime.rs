@@ -672,13 +672,24 @@ impl Runtime {
     /// silent; auth is never invented. Returns whether the session is
     /// unlocked afterwards.
     pub fn try_unlock(&mut self, user: &str, password: &str) -> bool {
-        let Some(path) = crate::unlock::greetd_socket_path() else {
-            return false;
-        };
-        let Ok(mut client) = GreeterClient::connect(&path) else {
-            return false;
-        };
         let now_ms = self.lock_now_ms();
+        // Under greetd, its daemon checks the password; under any other
+        // login manager (GDM on Marlin), PAM does (#62). Both fail closed.
+        if let Some(path) = crate::unlock::greetd_socket_path() {
+            let Ok(mut client) = GreeterClient::connect(&path) else {
+                return false;
+            };
+            return crate::unlock::unlock_session(
+                &mut self.lock,
+                &self.control,
+                &mut self.overlay,
+                now_ms,
+                user,
+                password,
+                &mut client,
+            );
+        }
+        let mut client = crate::pam::PamClient::new(crate::pam::service());
         crate::unlock::unlock_session(
             &mut self.lock,
             &self.control,

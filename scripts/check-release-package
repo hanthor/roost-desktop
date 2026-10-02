@@ -28,7 +28,8 @@ for path in \
     usr/bin/roost-session \
     usr/bin/roost-shell-host \
     usr/bin/roost-greeter \
-    usr/share/wayland-sessions/roost.desktop; do
+    usr/share/wayland-sessions/roost.desktop \
+    etc/pam.d/roost-lock; do
     printf '%s' "$CONTENTS" | grep -q "$path" || fail "missing $path"
 done
 
