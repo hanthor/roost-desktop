@@ -46,6 +46,8 @@ fn session_argv(
     argv.push(compositor.as_os_str().to_owned());
     argv.push(OsString::from("--shell-bin"));
     argv.push(shell.as_os_str().to_owned());
+    // A login opens on the overview, as GNOME's does.
+    argv.push(OsString::from("--startup-overview"));
     argv.extend(extra.iter().cloned());
     argv
 }
@@ -157,6 +159,7 @@ mod tests {
                 "/usr/bin/roost-compositor",
                 "--shell-bin",
                 "/usr/bin/roost-shell-host",
+                "--startup-overview",
                 "--socket",
                 "s0",
             ]
@@ -170,7 +173,11 @@ mod tests {
             std::path::Path::new("roost-shell-host"),
             &[],
         );
-        assert_eq!(argv.len(), 3);
+        assert_eq!(
+            argv.len(),
+            4,
+            "compositor, --shell-bin, shell, --startup-overview"
+        );
     }
 
     #[test]

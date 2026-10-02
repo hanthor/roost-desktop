@@ -78,6 +78,7 @@ Share of pixels visibly off (more than 24 levels) in each element crop:
 
 | Element | First measured | Now |
 | --- | --- | --- |
+| Login: the overview at start | not built | 0.3% |
 | Desktop and wallpaper | 96.1% | 0.1% |
 | Top bar | 35.2% | 0.7% (the clock's minutes) |
 | Quick settings | 68.4% | 3.4% |
