@@ -6,7 +6,7 @@
 #
 # Runs the nested compositor and GTK shell on a private Xvfb and buses,
 # then writes DIR/<state>.png for: 01-desktop, 02-calendar,
-# 03-quick-settings, 03b-power-mode-menu, 04-overview-empty, 05-app-grid, 06-windows,
+# 03-quick-settings, 03b-power-mode-menu, 04-overview-empty, 05-app-grid, 06-windows, 06b-switcher,
 # 07-overview-windows, 07b-overview-hover, 08-notification, 09-calendar-with-notification.
 # Run scripts/roost-gnome-reference first: it exports GNOME's wallpapers.
 # Compare with scripts/lib/roost-parity-compare.py.
@@ -161,6 +161,10 @@ for name in Alpha Beta Gamma; do
     PIDS="$PIDS $!"
 done
 shot 06-windows 4
+xdotool keydown Alt_L key Tab
+shot 06b-switcher 1
+xdotool key Escape keyup Alt_L
+sleep 1
 xdotool key Super_L
 shot 07-overview-windows
 xdotool mousemove --window "$WID" 415 232

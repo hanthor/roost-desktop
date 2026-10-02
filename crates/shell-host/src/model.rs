@@ -203,10 +203,49 @@ impl ShellModel {
         self.switcher_open
     }
 
+    /// The switcher's items: GNOME's Alt+Tab (`switch-applications`)
+    /// shows one item per app, in most-recently-used order, each standing
+    /// for that app's most recent window. Windows with no app id are
+    /// their own app.
+    pub fn switcher_items(&self) -> Vec<u64> {
+        let mut seen: Vec<String> = Vec::new();
+        self.mru
+            .iter()
+            .copied()
+            .filter(|id| {
+                let key = self.app_key(*id);
+                if seen.contains(&key) {
+                    false
+                } else {
+                    seen.push(key);
+                    true
+                }
+            })
+            .collect()
+    }
+
+    /// How many windows the app of window `id` has open (GNOME draws an
+    /// arrow under switcher items with more than one).
+    pub fn app_window_count(&self, id: u64) -> usize {
+        let key = self.app_key(id);
+        self.windows
+            .iter()
+            .filter(|w| self.app_key(w.id) == key)
+            .count()
+    }
+
+    fn app_key(&self, id: u64) -> String {
+        self.windows
+            .iter()
+            .find(|w| w.id == id)
+            .and_then(|w| w.app_id.clone())
+            .unwrap_or_else(|| format!("window:{id}"))
+    }
+
     /// Current switcher selection, if the switcher is open and nonempty.
     pub fn switcher_selection(&self) -> Option<u64> {
         self.switcher_open
-            .then(|| self.mru.get(self.switcher_index).copied())
+            .then(|| self.switcher_items().get(self.switcher_index).copied())
             .flatten()
     }
 
@@ -235,11 +274,12 @@ impl ShellModel {
             self.touch_mru(selected);
         }
         if self.switcher_open {
-            if self.mru.is_empty() {
+            let items = self.switcher_items().len();
+            if items == 0 {
                 self.switcher_open = false;
                 self.switcher_index = 0;
             } else {
-                self.switcher_index = self.switcher_index.min(self.mru.len() - 1);
+                self.switcher_index = self.switcher_index.min(items - 1);
             }
         }
     }
@@ -249,21 +289,22 @@ impl ShellModel {
     /// steps wrap around. Returns the new selection, or `None` with no
     /// windows (the switcher stays closed).
     pub fn switcher_step(&mut self, forward: bool) -> Option<u64> {
-        if self.mru.is_empty() {
+        let items = self.switcher_items();
+        if items.is_empty() {
             return None;
         }
         if !self.switcher_open {
             self.switcher_open = true;
-            self.switcher_index = if self.mru.len() >= 2 { 1 } else { 0 };
+            self.switcher_index = if items.len() >= 2 { 1 } else { 0 };
         } else if forward {
-            self.switcher_index = (self.switcher_index + 1) % self.mru.len();
+            self.switcher_index = (self.switcher_index + 1) % items.len();
         } else {
             self.switcher_index = self
                 .switcher_index
                 .checked_sub(1)
-                .unwrap_or(self.mru.len() - 1);
+                .unwrap_or(items.len() - 1);
         }
-        self.mru.get(self.switcher_index).copied()
+        items.get(self.switcher_index).copied()
     }
 
     /// Commit the switcher: close it and return the selection for the
@@ -287,7 +328,7 @@ impl ShellModel {
     pub fn apply_switcher_state(&mut self, open: bool, selection: Option<u64>) {
         match (open, selection) {
             (true, Some(id)) => {
-                if let Some(index) = self.mru.iter().position(|known| *known == id) {
+                if let Some(index) = self.switcher_items().iter().position(|known| *known == id) {
                     self.switcher_open = true;
                     self.switcher_index = index;
                 } else {
@@ -327,6 +368,30 @@ mod tests {
             WindowEntry::new(1, "Terminal", true),
             WindowEntry::new(2, "Browser", false),
         ]
+    }
+
+    #[test]
+    fn switcher_groups_windows_by_app_like_gnome() {
+        let mut model = ShellModel::new();
+        let windows = vec![
+            WindowEntry::new(1, "Doc 1", true).with_app_id(Some("editor".into())),
+            WindowEntry::new(2, "Web", false).with_app_id(Some("browser".into())),
+            WindowEntry::new(3, "Doc 2", false).with_app_id(Some("editor".into())),
+        ];
+        model.apply_window_list(windows, vec![0]);
+        // One item per app, each the app's most recent window.
+        let items = model.switcher_items();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], 1, "the focused editor window leads");
+        assert_eq!(model.app_window_count(1), 2);
+        assert_eq!(model.app_window_count(2), 1);
+        // Alt+Tab goes straight to the other app.
+        assert_eq!(model.switcher_step(true), Some(2));
+        assert_eq!(
+            model.switcher_step(true),
+            Some(1),
+            "wraps over apps, not windows"
+        );
     }
 
     #[test]

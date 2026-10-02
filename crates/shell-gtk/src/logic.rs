@@ -351,6 +351,16 @@ mod tests {
     }
 
     #[test]
+    fn switcher_icons_shrink_like_gnome() {
+        assert_eq!(switcher_icon_size(1, 1280), 96);
+        assert_eq!(switcher_icon_size(3, 1280), 96);
+        // 9 x 127 + 8 x 12 = 1239 > 1256? no: fits; 10 do not at 96.
+        assert_eq!(switcher_icon_size(9, 1280), 96);
+        assert_eq!(switcher_icon_size(10, 1280), 64);
+        assert_eq!(switcher_icon_size(40, 1280), 22);
+    }
+
+    #[test]
     fn active_pill_widths_follow_gnome() {
         assert_eq!(active_pill_width(2), 29);
         assert_eq!(active_pill_width(5), 26);
@@ -514,6 +524,22 @@ pub fn power_mode_after_click(profile: &str) -> &'static str {
     } else {
         "power-saver"
     }
+}
+
+/// Alt+Tab icon size (altTab.js `_setIconSize`): the largest of 96, 64,
+/// 48, 32 and 22 at which `items` tiles (icon plus 31px of label and
+/// padding, 12px apart) fit `width` less the list's 24px padding.
+pub fn switcher_icon_size(items: usize, width: i32) -> i32 {
+    const SIZES: [i32; 5] = [96, 64, 48, 32, 22];
+    if items <= 1 {
+        return SIZES[0];
+    }
+    let n = items as i32;
+    let avail = width - 24;
+    SIZES
+        .into_iter()
+        .find(|size| (size + 31) * n + 12 * (n - 1) <= avail)
+        .unwrap_or(SIZES[4])
 }
 
 /// GNOME's output volume icon (volume.js `getIcon`): muted at zero or
