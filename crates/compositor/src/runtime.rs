@@ -466,6 +466,8 @@ pub struct Runtime {
     casts: Vec<crate::screencast::Cast>,
     /// Monitor list the Mutter D-Bus side serves.
     cast_outputs: crate::mutter::Outputs,
+    /// Window list org.gnome.Shell.Introspect serves (window sharing).
+    introspect: crate::introspect::Handle,
     /// A three-finger swipe in progress: its travel so far (#60).
     shell_swipe: Option<Point<f64, Logical>>,
     /// Overview search is showing results: the workspace card and
@@ -672,10 +674,12 @@ impl Runtime {
         // org.gnome.Mutter.ScreenCast and DisplayConfig (#61): screen
         // sharing through the stock GNOME portal.
         let cast_outputs: crate::mutter::Outputs = Default::default();
+        // org.gnome.Shell.Introspect: the portal's window picker.
+        let introspect = crate::introspect::start(cast_outputs.clone());
         event_loop
             .handle()
             .insert_source(
-                crate::mutter::start(cast_outputs.clone()),
+                crate::mutter::start(cast_outputs.clone(), introspect.windows.clone()),
                 |event, _, rt: &mut Runtime| {
                     if let calloop::channel::Event::Msg(request) = event {
                         rt.on_screencast_request(request);
@@ -689,7 +693,11 @@ impl Runtime {
             .handle()
             .insert_source(crate::screenshot::start(), |event, _, rt: &mut Runtime| {
                 if let calloop::channel::Event::Msg(request) = event {
-                    let saved = rt.capture(&request.filename);
+                    let saved = if request.window {
+                        rt.capture_window(&request.filename)
+                    } else {
+                        rt.capture(&request.filename)
+                    };
                     let _ = request.reply.send(saved);
                 }
             })
@@ -719,6 +727,7 @@ impl Runtime {
             pipewire: None,
             casts: Vec::new(),
             cast_outputs,
+            introspect,
             idle_since: Instant::now(),
             exit: false,
             stats: RunStats::default(),
@@ -1178,6 +1187,115 @@ impl Runtime {
         Some(path)
     }
 
+    /// Save the focused window alone as a PNG (GNOME's
+    /// `ScreenshotWindow`): its visible geometry, popups included,
+    /// client shadows left out. Never while locked.
+    pub fn capture_window(&mut self, requested: &std::path::Path) -> Option<std::path::PathBuf> {
+        if self.is_locked() {
+            return None;
+        }
+        let id = self.manager.model().focused()?;
+        let path =
+            crate::screenshot::target_path(requested, &crate::screenshot::jiff_like::Stamp::now())?;
+        let (w, h, rgba) =
+            self.render_window_pixels(id, None, smithay::backend::allocator::Fourcc::Abgr8888)?;
+        crate::screenshot::save_png(&path, w as u32, h as u32, &rgba).ok()?;
+        eprintln!(
+            "roost-compositor: window screenshot saved to {}",
+            path.display()
+        );
+        Some(path)
+    }
+
+    /// Physical size of window `id` at its output's scale, and the scale.
+    fn window_pixel_size(&self, id: u64) -> Option<((i32, i32), f64)> {
+        let geometry = self.manager.geometry(id)?;
+        let scale = match &self.backend {
+            Backend::Winit(_) => self.scale,
+            #[cfg(feature = "drm")]
+            Backend::Drm(_) => self.state.scale_for(geometry).fractional_scale(),
+        };
+        let px = |v: i32| ((f64::from(v) * scale).round() as i32).max(1);
+        Some(((px(geometry.size.w), px(geometry.size.h)), scale))
+    }
+
+    /// Render one window offscreen with its visible geometry at (0, 0),
+    /// into `size` physical pixels (default: the window's own), and read
+    /// it back in `fourcc` byte order. Never while locked.
+    fn render_window_pixels(
+        &mut self,
+        id: u64,
+        size: Option<(i32, i32)>,
+        fourcc: smithay::backend::allocator::Fourcc,
+    ) -> Option<(i32, i32, Vec<u8>)> {
+        use smithay::backend::renderer::{ExportMem, Offscreen};
+        if self.is_locked() {
+            return None;
+        }
+        let surface = self.manager.surface_of(id)?;
+        let (natural, scale) = self.window_pixel_size(id)?;
+        let (w, h) = size.unwrap_or(natural);
+        let view = View {
+            offset: (0, 0),
+            scale,
+        };
+        let renderer = match &mut self.backend {
+            Backend::Winit(backend) => backend.renderer(),
+            #[cfg(feature = "drm")]
+            Backend::Drm(drm) => &mut drm.renderer,
+        };
+        // Surface-local origin such that the window geometry (inside any
+        // client-side shadow) starts at the buffer's corner.
+        let geo = crate::popup::window_geometry_loc(&surface);
+        let origin: Point<i32, Logical> = (-geo.x, -geo.y).into();
+        let mut elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
+        let mut tree =
+            |renderer: &mut GlesRenderer,
+             surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+             at: Point<i32, Logical>| {
+                elements.extend(render_elements_from_surface_tree(
+                    renderer,
+                    surface,
+                    view.physical(f64::from(at.x), f64::from(at.y)),
+                    view.scale,
+                    1.0,
+                    Kind::Unspecified,
+                ));
+            };
+        tree(renderer, &surface, origin);
+        for popup in crate::popup::placed_popups(&surface, origin, true) {
+            tree(renderer, &popup.surface, popup.origin);
+        }
+        let elements = crate::layer::front_to_back(elements);
+        let buffer_size = (w, h).into();
+        let mut texture: smithay::backend::renderer::gles::GlesTexture =
+            renderer.create_buffer(fourcc, buffer_size).ok()?;
+        let size: smithay::utils::Size<i32, smithay::utils::Physical> = (w, h).into();
+        let mut target = renderer.bind(&mut texture).ok()?;
+        {
+            let mut frame = renderer.render(&mut target, size, Transform::Normal).ok()?;
+            draw_scene(
+                &mut frame,
+                Color32F::new(0.0, 0.0, 0.0, 0.0),
+                None,
+                &elements,
+                Target {
+                    damage: Rectangle::from_size(size),
+                    scale,
+                },
+                &[],
+                &[],
+            )
+            .ok()?;
+            let _ = frame.finish().ok()?;
+        }
+        let mapping = renderer
+            .copy_framebuffer(&target, Rectangle::from_size(buffer_size), fourcc)
+            .ok()?;
+        let bytes = renderer.map_texture(&mapping).ok()?.to_vec();
+        Some((w, h, bytes))
+    }
+
     /// Render one output's current scene (the primary, or `connector`)
     /// offscreen and read it back in `fourcc` byte order (Abgr8888 is
     /// RGBA in memory, Xrgb8888 is BGRx). Never while locked.
@@ -1271,23 +1389,48 @@ impl Runtime {
     /// Screen-cast work for this tick (#61): start and stop casts the
     /// D-Bus side asked for, and feed every streaming cast a frame.
     fn screencast_tick(&mut self) {
-        self.casts.retain(|cast| !cast.failed());
-        let wanted: Vec<(usize, String)> = self
+        use crate::mutter::CastTarget;
+        // A cast window that closed ends its session, as in Mutter.
+        let manager = &self.manager;
+        self.casts.retain(|cast| {
+            let gone =
+                matches!(cast.target, CastTarget::Window(id) if manager.geometry(id).is_none());
+            if gone {
+                cast.close();
+            }
+            !cast.failed() && !gone
+        });
+        // Window casts follow their window's size.
+        for index in 0..self.casts.len() {
+            if let CastTarget::Window(id) = self.casts[index].target {
+                if let Some(((w, h), _)) = self.window_pixel_size(id) {
+                    self.casts[index].resize(w, h);
+                }
+            }
+        }
+        let wanted: Vec<(usize, CastTarget, (i32, i32))> = self
             .casts
             .iter()
             .enumerate()
-            .filter(|(_, cast)| cast.wants_frame().is_some())
-            .map(|(i, cast)| (i, cast.connector.clone()))
+            .filter_map(|(i, cast)| {
+                cast.wants_frame()
+                    .map(|size| (i, cast.target.clone(), size))
+            })
             .collect();
-        for (index, connector) in wanted {
-            let target = match &self.backend {
-                Backend::Winit(_) => None,
-                #[cfg(feature = "drm")]
-                Backend::Drm(_) => Some(connector.as_str()),
+        let xrgb = smithay::backend::allocator::Fourcc::Xrgb8888;
+        for (index, target, size) in wanted {
+            let frame = match &target {
+                CastTarget::Window(id) => self.render_window_pixels(*id, Some(size), xrgb),
+                CastTarget::Monitor(connector) => {
+                    let output = match &self.backend {
+                        Backend::Winit(_) => None,
+                        #[cfg(feature = "drm")]
+                        Backend::Drm(_) => Some(connector.as_str()),
+                    };
+                    self.render_pixels(output, xrgb)
+                }
             };
-            let Some((w, h, bgrx)) =
-                self.render_pixels(target, smithay::backend::allocator::Fourcc::Xrgb8888)
-            else {
+            let Some((w, h, bgrx)) = frame else {
                 continue;
             };
             if let Some(cast) = self.casts.get_mut(index) {
@@ -1301,35 +1444,36 @@ impl Runtime {
         match request {
             crate::mutter::ToLoop::StartCast {
                 session_id,
-                connector,
+                target,
                 signal,
             } => {
                 if self.pipewire.is_none() {
                     self.pipewire = crate::screencast::PipeWire::new(&self.loop_handle);
                     if self.pipewire.is_none() {
                         eprintln!("roost-compositor: screen cast: PipeWire is not running");
-                        crate::mutter::session_closed(&signal);
+                        crate::mutter::session_closed(&signal, session_id);
                         return;
                     }
                 }
-                let Some(snapshot) = self
-                    .cast_outputs
-                    .lock()
-                    .ok()
-                    .and_then(|o| o.iter().find(|o| o.connector == connector).cloned())
-                else {
+                let size = match &target {
+                    crate::mutter::CastTarget::Monitor(connector) => self
+                        .cast_outputs
+                        .lock()
+                        .ok()
+                        .and_then(|o| o.iter().find(|o| &o.connector == connector).cloned())
+                        .map(|o| (o.width, o.height)),
+                    crate::mutter::CastTarget::Window(id) => {
+                        self.window_pixel_size(*id).map(|(size, _)| size)
+                    }
+                };
+                let Some((width, height)) = size else {
+                    crate::mutter::session_closed(&signal, session_id);
                     return;
                 };
                 let Some(pw) = self.pipewire.as_ref() else {
                     return;
                 };
-                match pw.start_cast(
-                    session_id,
-                    connector,
-                    snapshot.width,
-                    snapshot.height,
-                    signal,
-                ) {
+                match pw.start_cast(session_id, target, width, height, signal) {
                     Some(cast) => self.casts.push(cast),
                     None => eprintln!("roost-compositor: screen cast: stream failed to start"),
                 }
@@ -1447,6 +1591,26 @@ impl Runtime {
                 *current = snapshot;
             }
         }
+        // Windows for Introspect (signals only on change).
+        let model = self.manager.model();
+        let active = model.active_workspace();
+        let windows = model
+            .windows()
+            .filter_map(|entry| {
+                let geometry = self.manager.geometry(entry.id)?;
+                Some(crate::mutter::WindowSnapshot {
+                    id: entry.id,
+                    title: entry.title.clone(),
+                    app_id: entry.app_id.clone(),
+                    width: geometry.size.w,
+                    height: geometry.size.h,
+                    focused: entry.focused,
+                    hidden: entry.workspace != active,
+                    x11: self.manager.is_x11(entry.id),
+                })
+            })
+            .collect();
+        self.introspect.publish(windows);
     }
 
     fn tick(&mut self) -> Result<bool, RuntimeError> {

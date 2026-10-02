@@ -57,6 +57,10 @@
 #   G-SCREENCAST   a client doing what xdg-desktop-portal-gnome does lists
 #                  the monitor (Mutter DisplayConfig), records it (Mutter
 #                  ScreenCast) and pulls a frame over PipeWire (#61)
+#   G-WINDOW-CAST  window sharing: Introspect refuses non-portal callers,
+#                  lists windows to the portal, and RecordWindow streams
+#                  one window at its own size (#61)
+#   G-SCREENSHOT-WINDOW ScreenshotWindow saves the focused window alone
 #   G-DISPLAY-SETTINGS GNOME Settings' ApplyMonitorsConfig changes the
 #                  scale live and saves it to Roost's monitors.xml (#59)
 #   G-POWER-MENU   the power button opens GNOME's menu (Suspend,
@@ -844,6 +848,19 @@ dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -
 [ "$(px "$SHOT" 5 $((HEIGHT - 5)))" != "0 0 0" ] || fail G-SCREENSHOT "bottom of the screenshot is black (flipped?)"
 pass G-SCREENSHOT "org.gnome.Shell.Screenshot saves the screen the right way up"
 
+WSHOT="$ARTIFACTS/screenshot-window.png"
+reply="$(gdbus call --session --dest org.gnome.Shell.Screenshot \
+    --object-path /org/gnome/Shell/Screenshot \
+    --method org.gnome.Shell.Screenshot.ScreenshotWindow true false false "$WSHOT" 2>&1)" ||
+    fail G-SCREENSHOT-WINDOW "ScreenshotWindow call failed: $reply"
+[ "$reply" = "(true, '$WSHOT')" ] || fail G-SCREENSHOT-WINDOW "unexpected reply: $reply"
+dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$WSHOT")"
+want="$(jq -r '.focused as $f | .windows[] | select(.id == $f) | .rect | "\(.[2]),\(.[3])"' "$CSTATE" | head -1)"
+if [ -z "$want" ] || [ "$dims" != "$want" ]; then
+    fail G-SCREENSHOT-WINDOW "window screenshot is $dims, focused window is ${want:-none}"
+fi
+pass G-SCREENSHOT-WINDOW "ScreenshotWindow saves the focused window ($dims)"
+
 open_qs
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-shot.json" 20 \
     --press "Take Screenshot" || fail G-SCREENSHOT-BUTTON "could not press Take Screenshot"
@@ -872,6 +889,17 @@ if [ -n "$PW_PIDS" ] && command -v gst-launch-1.0 >/dev/null 2>&1; then
     [ "$dims" = "$WIDTH,$HEIGHT" ] || fail G-SCREENCAST "cast frame is $dims, not $WIDTH,$HEIGHT"
     [ "$(px "$CAST" 300 5)" = "0 0 0" ] || fail G-SCREENCAST "cast frame does not show the top bar"
     pass G-SCREENCAST "monitor recorded over Mutter ScreenCast, frame pulled from PipeWire ($(cat "$ARTIFACTS/screencast.log"))"
+    WCAST="$ARTIFACTS/window-cast.png"
+    "$PY" "$ROOT/scripts/lib/roost-screencast-client.py" "$WCAST" --window \
+        >"$ARTIFACTS/window-cast.log" 2>&1 ||
+        fail G-WINDOW-CAST "window cast failed: $(tail -3 "$ARTIFACTS/window-cast.log")"
+    # "node N window ID WxH TITLE": the frame is the window's own size.
+    size="$(awk '{print $5}' "$ARTIFACTS/window-cast.log")"
+    dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$WCAST")"
+    [ "$dims" = "$(echo "$size" | tr x ,)" ] ||
+        fail G-WINDOW-CAST "window frame is $dims, not the window's $size"
+    [ "$dims" != "$WIDTH,$HEIGHT" ] || fail G-WINDOW-CAST "window frame is the whole screen"
+    pass G-WINDOW-CAST "a window shared over Introspect and RecordWindow ($(cat "$ARTIFACTS/window-cast.log"))"
 else
     echo "roost-gtk-shell-proof: G-SCREENCAST skipped (no pipewire, wireplumber or gstreamer)"
 fi
