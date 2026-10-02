@@ -91,6 +91,8 @@
 #   G-WINDOW-MENU  GNOME's window menu: Always on Top, Hide, and the
 #                  overview brings the hidden window back
 #   G-WM-KEYS      Alt+Space, Alt+F10, Super+End/Home (wm keybindings)
+#   G-WM-REBIND    GNOME's maximize key rebinds through its settings:
+#                  the old chord stops, the new one maximizes
 #   G-WS-POPUP     a workspace key shows the workspace switcher popup
 #   G-WS-THUMBS    three workspaces put GNOME's thumbnails strip in the
 #                  overview, and a thumbnail click switches workspace
@@ -1181,6 +1183,25 @@ cstate ".active_workspace != $first_ws" "last workspace" || fail G-WM-KEYS "Supe
 xdotool key super+Home
 cstate ".active_workspace == $first_ws" "first workspace" || fail G-WM-KEYS "Super+Home did not come back"
 pass G-WM-KEYS "Alt+Space, Alt+F10 and Super+End/Home do what GNOME's window-manager keys do"
+
+# The window-manager keys follow org.gnome.desktop.wm.keybindings, the
+# compositor's defaults standing aside: rebinding maximize moves it.
+cstate ".focused_rect[2] != $WIDTH" "not maximized" ||
+    fail G-WM-REBIND "the focused window is maximized before the test"
+gsettings set org.gnome.desktop.wm.keybindings maximize "['<Super>F9']"
+for _ in $(seq 1 20); do grep -qF 'maximize on ["<Super>F9"]' "$LOG" && break; sleep 0.3; done
+sleep 0.5
+xdotool key super+Up
+sleep 1.5
+cstate ".focused_rect[2] != $WIDTH" "unbound" 3 ||
+    fail G-WM-REBIND "Super+Up still maximized after maximize moved to Super+F9"
+xdotool key super+F9
+cstate ".focused_rect[2] == $WIDTH" "rebound" || fail G-WM-REBIND "Super+F9 did not maximize"
+xdotool key super+Down
+cstate ".focused_rect[2] != $WIDTH" "restored" || fail G-WM-REBIND "Super+Down did not restore"
+gsettings reset org.gnome.desktop.wm.keybindings maximize
+sleep 1
+pass G-WM-REBIND "GNOME's maximize key rebinds: the old chord stops and the new one maximizes"
 
 # GNOME's workspace switcher popup: a dark pill above the bottom edge
 # right after a workspace key.

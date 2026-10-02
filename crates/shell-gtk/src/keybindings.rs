@@ -13,6 +13,8 @@ use roost_shell_control::{MODE_LOCK_SCREEN, MODE_NORMAL, MODE_OVERVIEW, MODE_UNL
 pub const SCHEMA: &str = "org.gnome.shell.keybindings";
 /// GNOME's window-manager keys (gsettings-desktop-schemas).
 pub const WM_SCHEMA: &str = "org.gnome.desktop.wm.keybindings";
+/// Mutter's own keys (half tiling).
+pub const MUTTER_SCHEMA: &str = "org.gnome.mutter.keybindings";
 
 /// What a binding does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +38,16 @@ pub enum Action {
     Unmaximize,
     BeginMove,
     BeginResize,
+    /// GNOME's maximize, minimize and close keys on the focused window.
+    Maximize,
+    Minimize,
+    Close,
+    /// Mutter's half tiling (toggles back).
+    TileLeft,
+    TileRight,
+    /// The next or previous keyboard input source.
+    NextInputSource,
+    PreviousInputSource,
     /// Switch to a workspace: first, last, or one step left/right.
     Workspace(Target),
     /// Move the focused window there and follow it.
@@ -79,6 +91,7 @@ impl Target {
 enum Schema {
     Shell,
     Wm,
+    Mutter,
 }
 
 /// One key, its action, GNOME 51's default accelerators, and its modes.
@@ -175,9 +188,9 @@ fn specs() -> Vec<Spec> {
             modes: ALL,
         },
     ];
-    // GNOME's window-manager keys Roost does not bind itself (Super+
-    // PageUp/PageDown, Super+arrows, Super+H, Alt+F4, Alt+Tab and
-    // Super+Space are the compositor's own).
+    // GNOME's window-manager keys (Super+PageUp/PageDown and Alt+Tab
+    // stay the compositor's own; it drops its defaults for the rest
+    // once these are grabbed, so they rebind).
     let wm = |key: &str, action, defaults: Vec<&'static str>| Spec {
         schema: Schema::Wm,
         key: key.into(),
@@ -196,7 +209,42 @@ fn specs() -> Vec<Spec> {
             Action::ToggleMaximized,
             vec!["<Alt>F10"],
         ),
-        wm("unmaximize", Action::Unmaximize, vec!["<Alt>F5"]),
+        wm(
+            "unmaximize",
+            Action::Unmaximize,
+            vec!["<Super>Down", "<Alt>F5"],
+        ),
+        wm("maximize", Action::Maximize, vec!["<Super>Up"]),
+        wm("minimize", Action::Minimize, vec!["<Super>h"]),
+        wm("close", Action::Close, vec!["<Alt>F4"]),
+        Spec {
+            schema: Schema::Wm,
+            key: "switch-input-source".into(),
+            action: Action::NextInputSource,
+            defaults: vec!["<Super>space", "XF86Keyboard"],
+            modes: ALL,
+        },
+        Spec {
+            schema: Schema::Wm,
+            key: "switch-input-source-backward".into(),
+            action: Action::PreviousInputSource,
+            defaults: vec!["<Shift><Super>space", "<Shift>XF86Keyboard"],
+            modes: ALL,
+        },
+        Spec {
+            schema: Schema::Mutter,
+            key: "toggle-tiled-left".into(),
+            action: Action::TileLeft,
+            defaults: vec!["<Super>Left"],
+            modes: NORMAL_OVERVIEW,
+        },
+        Spec {
+            schema: Schema::Mutter,
+            key: "toggle-tiled-right".into(),
+            action: Action::TileRight,
+            defaults: vec!["<Super>Right"],
+            modes: NORMAL_OVERVIEW,
+        },
         wm("begin-move", Action::BeginMove, vec!["<Alt>F7"]),
         wm("begin-resize", Action::BeginResize, vec!["<Alt>F8"]),
         wm(
@@ -271,13 +319,18 @@ pub struct Binding {
 /// (`shell` or `wm`) when installed, else GNOME 51's defaults. Of the
 /// window-manager keys, only the accelerators Roost does not bind itself
 /// are taken.
-pub fn bindings(shell: Option<&gio::Settings>, wm: Option<&gio::Settings>) -> Vec<Binding> {
+pub fn bindings(
+    shell: Option<&gio::Settings>,
+    wm: Option<&gio::Settings>,
+    mutter: Option<&gio::Settings>,
+) -> Vec<Binding> {
     specs()
         .into_iter()
         .flat_map(|spec| {
             let settings = match spec.schema {
                 Schema::Shell => shell,
                 Schema::Wm => wm,
+                Schema::Mutter => mutter,
             };
             let has = settings
                 .and_then(|s| s.settings_schema())
@@ -288,7 +341,7 @@ pub fn bindings(shell: Option<&gio::Settings>, wm: Option<&gio::Settings>) -> Ve
             };
             let accels: Vec<String> = accels
                 .into_iter()
-                .filter(|a| spec.schema == Schema::Shell || !compositor_owned(a))
+                .filter(|a| spec.schema != Schema::Wm || !compositor_owned(a))
                 .collect();
             accels
                 .into_iter()
@@ -322,6 +375,11 @@ pub fn wm_settings() -> Option<gio::Settings> {
     schema(WM_SCHEMA)
 }
 
+/// Mutter's keybinding schema, when installed.
+pub fn mutter_settings() -> Option<gio::Settings> {
+    schema(MUTTER_SCHEMA)
+}
+
 fn schema(id: &str) -> Option<gio::Settings> {
     let source = gio::SettingsSchemaSource::default()?;
     source.lookup(id, true)?;
@@ -348,7 +406,7 @@ mod tests {
 
     #[test]
     fn gnome_51_defaults_without_the_schema() {
-        let all = bindings(None, None);
+        let all = bindings(None, None, None);
         let find = |action| {
             all.iter()
                 .filter(|b| b.action == action)
@@ -364,6 +422,21 @@ mod tests {
         assert_eq!(find(Action::BrightnessUp), ["XF86MonBrightnessUp"]);
         assert_eq!(find(Action::ShowScreenshotUi), ["Print"]);
         assert_eq!(find(Action::WindowMenu), ["<Alt>space"]);
+        // GNOME 51's defaults for the keys the compositor used to own.
+        assert_eq!(find(Action::Maximize), ["<Super>Up"]);
+        assert_eq!(find(Action::Unmaximize), ["<Super>Down", "<Alt>F5"]);
+        assert_eq!(find(Action::Minimize), ["<Super>h"]);
+        assert_eq!(find(Action::Close), ["<Alt>F4"]);
+        assert_eq!(find(Action::TileLeft), ["<Super>Left"]);
+        assert_eq!(find(Action::TileRight), ["<Super>Right"]);
+        assert_eq!(
+            find(Action::NextInputSource),
+            ["<Super>space", "XF86Keyboard"]
+        );
+        assert_eq!(
+            find(Action::PreviousInputSource),
+            ["<Shift><Super>space", "<Shift>XF86Keyboard"]
+        );
         assert_eq!(find(Action::Workspace(Target::Last)), ["<Super>End"]);
         assert_eq!(
             find(Action::MoveToWorkspace(Target::Right)),

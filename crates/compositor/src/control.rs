@@ -315,6 +315,8 @@ pub struct Session<'a> {
     unlock_pending: Option<u64>,
     /// Latest `SetInputSettings` from the shell, drained by the hub.
     input_settings: Option<roost_shell_control::InputSettings>,
+    /// Input-source switches the shell asked for (`true` backward).
+    input_source_switches: Vec<bool>,
 }
 
 impl std::fmt::Debug for Session<'_> {
@@ -380,6 +382,7 @@ impl<'a> Session<'a> {
             unlock_request: None,
             unlock_pending: None,
             input_settings: None,
+            input_source_switches: Vec::new(),
         };
         let msg = match session.conn.read_frame() {
             Ok(msg) => msg,
@@ -625,6 +628,17 @@ impl<'a> Session<'a> {
             } => {
                 // Session-level settings for the runtime (seat, libinput).
                 self.input_settings = Some(settings);
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: CommandStatus::Applied,
+                })?;
+                Ok(Handled::CommandResult { id, applied: true })
+            }
+            Message::Command {
+                id,
+                kind: CommandKind::SwitchInputSource { backward },
+            } => {
+                self.input_source_switches.push(backward);
                 self.conn.write_frame(&Message::CommandResult {
                     id,
                     status: CommandStatus::Applied,
@@ -929,6 +943,7 @@ fn apply_command(
         | CommandKind::Unlock { .. }
         | CommandKind::SetAccelerators { .. }
         | CommandKind::WindowAction { .. }
+        | CommandKind::SwitchInputSource { .. }
         | CommandKind::SetInputSettings(_) => (CommandStatus::Applied, None),
         CommandKind::Lock => {
             // Manual lock from the shell (session-lock set path):
@@ -968,6 +983,8 @@ pub struct PollOutcome {
     pub accelerators: Option<Vec<roost_shell_control::Accelerator>>,
     /// Window-menu actions to carry out.
     pub window_actions: Vec<(u64, roost_shell_control::WindowAction)>,
+    /// Input-source switches to make (`true` backward), in order.
+    pub input_source_switches: Vec<bool>,
 }
 
 /// Peers accepted but not yet handshaken are capped so a same-user
@@ -1348,6 +1365,9 @@ impl ControlHub {
                         outcome.accelerators = Some(list);
                     }
                     outcome.window_actions.extend(session.take_window_actions());
+                    outcome
+                        .input_source_switches
+                        .extend(std::mem::take(&mut session.input_source_switches));
                     if let Some(active) = session.overview_search.take() {
                         outcome.overview_search = Some(active);
                     }

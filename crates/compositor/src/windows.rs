@@ -1904,6 +1904,9 @@ impl WindowManager {
                 true
             }
             WindowAction::Unmaximize => self.set_maximized(state, id, false),
+            WindowAction::Maximize => self.set_maximized(state, id, true),
+            WindowAction::ToggleTiledLeft => self.toggle_tiled(state, id, TileSide::Left),
+            WindowAction::ToggleTiledRight => self.toggle_tiled(state, id, TileSide::Right),
             WindowAction::MoveToWorkspace { workspace } => {
                 self.move_to_workspace(state, id, workspace)
             }
@@ -3037,9 +3040,29 @@ impl WindowManager {
 
     /// The next input source (GNOME's Super+Space).
     fn next_input_source(&mut self, state: &mut State) {
+        self.switch_input_source(state, false);
+    }
+
+    /// The next (or previous) input source, as the shell's rebindable
+    /// `switch-input-source` keys ask.
+    pub fn switch_input_source(&mut self, state: &mut State, backward: bool) {
         if let Some(keyboard) = self.keyboard.clone() {
-            keyboard.with_xkb_state(state, |mut context| context.cycle_next_layout());
+            keyboard.with_xkb_state(state, |mut context| {
+                if backward {
+                    context.cycle_prev_layout();
+                } else {
+                    context.cycle_next_layout();
+                }
+            });
         }
+    }
+
+    /// Whether a shell has taken GNOME's window-manager keys
+    /// (org.gnome.desktop.wm.keybindings) by grabbing accelerators: the
+    /// compositor's built-in defaults for them then stand aside, so
+    /// rebound keys win and unbound ones reach clients.
+    fn shell_owns_wm_keys(&self) -> bool {
+        !self.accelerators.is_empty()
     }
 
     /// Active layout and repeat, for the state file.
@@ -3082,7 +3105,7 @@ impl WindowManager {
             } => {
                 self.track_workspace_modifiers(keycode, pressed);
                 self.track_switcher_modifiers(keycode, pressed);
-                if keycode == SPACE_KEYCODE && self.super_held {
+                if keycode == SPACE_KEYCODE && self.super_held && !self.shell_owns_wm_keys() {
                     // GNOME's next input source; press and release stay
                     // with the compositor.
                     if pressed {
@@ -3104,7 +3127,7 @@ impl WindowManager {
                             forward: !self.shift_held,
                         });
                     }
-                } else if keycode == F4_KEYCODE && self.alt_held {
+                } else if keycode == F4_KEYCODE && self.alt_held && !self.shell_owns_wm_keys() {
                     // Alt+F4 closes the focused window politely. An open
                     // switcher cancels with it: committing onto a window
                     // the user just closed would surprise. Press and
@@ -3289,7 +3312,8 @@ impl WindowManager {
     /// that half, repeat toggles back). Those presses are consumed,
     /// everything else — modifiers included — still reaches clients.
     fn on_workspace_key(&mut self, state: &mut State, keycode: u32, pressed: bool, time: u32) {
-        if pressed && self.super_held && !self.shift_held && keycode == H_KEYCODE {
+        let builtin = !self.shell_owns_wm_keys();
+        if builtin && pressed && self.super_held && !self.shift_held && keycode == H_KEYCODE {
             // GNOME's minimize binding: Super+H hides the focused window.
             if let Some(id) = self.model.focused() {
                 self.minimize(state, id);
@@ -3334,7 +3358,11 @@ impl WindowManager {
                     self.workspace_popups.push(self.workspace_popup());
                 }
             }
-        } else if pressed && self.super_held && Self::is_arrow(keycode) {
+        } else if pressed
+            && self.super_held
+            && Self::is_arrow(keycode)
+            && (builtin || self.mode == SessionMode::Scroll)
+        {
             if self.mode == SessionMode::Scroll
                 && (keycode == ARROW_LEFT_KEYCODE || keycode == ARROW_RIGHT_KEYCODE)
             {

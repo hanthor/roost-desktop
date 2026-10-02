@@ -516,6 +516,17 @@ impl ControlClient {
         Ok(id)
     }
 
+    /// Switch to the next (or previous) keyboard input source. Returns
+    /// the request id.
+    pub fn switch_input_source(&mut self, backward: bool) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::SwitchInputSource { backward },
+        })?;
+        Ok(id)
+    }
+
     /// Offer the lock screen's password (ext-session-lock prompt). The
     /// compositor verifies it off its loop (PAM or greetd) and answers
     /// `Applied` once the session is unlocked or `Denied` when the
