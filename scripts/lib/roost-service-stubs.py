@@ -12,7 +12,10 @@ starts), just enough of each daemon behind GNOME 51's quick settings:
   "Roost Office" and a hidden one); RequestScan, ActivateConnection and
   AddAndActivateConnection are appended to $ROOST_STUB_NM_LOG, and an
   activation makes its access point the active one.
-- BlueZ: ObjectManager plus /org/bluez/hci0 Adapter1.Powered (rw).
+- BlueZ: ObjectManager plus /org/bluez/hci0 Adapter1.Powered (rw), and
+  three devices (paired Headphones, paired and connected Keyboard, an
+  unpaired Stranger) whose Device1.Connect and Disconnect flip Connected
+  and are appended to $ROOST_STUB_BT_LOG.
 - power-profiles-daemon: ActiveProfile (rw), Profiles (power-saver,
   balanced, performance) and PerformanceDegraded, UPower name.
 - logind: session/auto SetBrightness, which writes BACKLIGHT_DIR's
@@ -86,6 +89,15 @@ XML = """
   <interface name="org.bluez.Adapter1">
     <property name="Powered" type="b" access="readwrite"/>
   </interface>
+  <interface name="org.bluez.Device1">
+    <method name="Connect"/>
+    <method name="Disconnect"/>
+    <property name="Alias" type="s" access="read"/>
+    <property name="Icon" type="s" access="read"/>
+    <property name="Paired" type="b" access="read"/>
+    <property name="Trusted" type="b" access="read"/>
+    <property name="Connected" type="b" access="read"/>
+  </interface>
   <interface name="org.freedesktop.UPower.PowerProfiles">
     <property name="ActiveProfile" type="s" access="readwrite"/>
     <property name="Profiles" type="aa{sv}" access="read"/>
@@ -131,6 +143,12 @@ AP_PATH = NM + "/AccessPoint/{}"
 HOME_CONN = NM + "/Settings/1"
 WIRELESS = "org.freedesktop.NetworkManager.Device.Wireless"
 HCI = "/org/bluez/hci0"
+BT_DEVICES = [
+    # path suffix, alias, icon, paired, connected
+    ("dev_AA_AA_AA_AA_AA_01", "Headphones", "audio-headphones", True, False),
+    ("dev_AA_AA_AA_AA_AA_02", "Keyboard", "input-keyboard", True, True),
+    ("dev_AA_AA_AA_AA_AA_03", "Stranger", "phone", False, False),
+]
 PPD = "/org/freedesktop/UPower/PowerProfiles"
 SESSION = "/org/freedesktop/login1/session/auto"
 
@@ -155,6 +173,11 @@ state = {
         "Mode": GLib.Variant("u", 2),
     } for n, ssid, strength, flags, rsn in APS},
     (HCI, "org.bluez.Adapter1"): {"Powered": GLib.Variant("b", True)},
+    **{(f"{HCI}/{d}", "org.bluez.Device1"): {
+        "Alias": GLib.Variant("s", alias), "Icon": GLib.Variant("s", icon),
+        "Paired": GLib.Variant("b", paired), "Trusted": GLib.Variant("b", False),
+        "Connected": GLib.Variant("b", connected),
+    } for d, alias, icon, paired, connected in BT_DEVICES},
     ("/org/gnome/DisplayManager/Manager", "org.gnome.DisplayManager.Manager"): {
         "Version": GLib.Variant("s", "51.0"),
     },
@@ -203,9 +226,19 @@ def method_call(c, sender, path, iface, method, params, invocation):
             "802-11-wireless": {"ssid": GLib.Variant("ay", b"Roost Home")},
         },)))
     elif method == "GetManagedObjects":
-        props = state[(HCI, "org.bluez.Adapter1")]
-        invocation.return_value(GLib.Variant(
-            "(a{oa{sa{sv}}})", ({HCI: {"org.bluez.Adapter1": props}},)))
+        objects = {HCI: {"org.bluez.Adapter1": state[(HCI, "org.bluez.Adapter1")]}}
+        for d, *_ in BT_DEVICES:
+            path = f"{HCI}/{d}"
+            objects[path] = {"org.bluez.Device1": state[(path, "org.bluez.Device1")]}
+        invocation.return_value(GLib.Variant("(a{oa{sa{sv}}})", (objects,)))
+    elif method in ("Connect", "Disconnect"):
+        log = os.environ.get("ROOST_STUB_BT_LOG")
+        if log:
+            with open(log, "a") as fh:
+                fh.write(f"{method} {path}\n")
+        set_property(c, None, path, "org.bluez.Device1", "Connected",
+                     GLib.Variant("b", method == "Connect"))
+        invocation.return_value(None)
     elif method in ("Suspend", "Reboot", "PowerOff", "Terminate"):
         if method == "Suspend":
             c.emit_signal(None, "/org/freedesktop/login1", "org.freedesktop.login1.Manager",
@@ -258,6 +291,7 @@ SERVICES = {
     "bluez": (["org.bluez"], [
         ("/", "org.freedesktop.DBus.ObjectManager"),
         (HCI, "org.bluez.Adapter1"),
+        *[(f"{HCI}/{d}", "org.bluez.Device1") for d, *_ in BT_DEVICES],
     ]),
     "ppd": (["org.freedesktop.UPower.PowerProfiles"], [
         (PPD, "org.freedesktop.UPower.PowerProfiles"),

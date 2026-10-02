@@ -255,6 +255,8 @@ pub struct Widgets {
     pub wifi: Tile,
     /// The Wi-Fi tile's network menu.
     pub wifi_menu: Rc<crate::wifi::WifiMenu>,
+    /// The Bluetooth tile's device menu.
+    pub bt_menu: Rc<crate::bt_menu::BtMenu>,
     pub wired: Tile,
     pub bluetooth: Tile,
     pub power_mode: Tile,
@@ -450,18 +452,16 @@ fn bluetooth(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
                                     let w3 = w2.clone();
                                     r2.get_all(move |p| {
                                         if let Some(on) = p.and_then(|p| dict_bool(&p, "Powered")) {
-                                            w3.bluetooth.show_state(
-                                                on,
-                                                Some(if on { "On" } else { "Off" }),
-                                            );
+                                            w3.bt_menu.set_powered(on);
                                         }
                                     });
                                 });
                                 *adapter.borrow_mut() = Some(remote);
                             }
                             w.bluetooth.present(true);
-                            w.bluetooth
-                                .show_state(powered, Some(if powered { "On" } else { "Off" }));
+                            // GNOME's subtitle names connected devices.
+                            w.bt_menu.attach(&conn);
+                            w.bt_menu.set_powered(powered);
                         }
                         None => w.bluetooth.present(false),
                     }

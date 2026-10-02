@@ -296,6 +296,9 @@ impl WifiMenu {
             if net.security.secure() {
                 let lock = gtk::Image::from_icon_name("network-wireless-encrypted-symbolic");
                 lock.add_css_class("wireless-secure-icon");
+                // `.nm-network-item .wireless-secure-icon { icon-size:
+                // 0.5455em }`: 8px at the 11pt menu font.
+                lock.set_pixel_size(8);
                 lock.set_valign(gtk::Align::End);
                 icons.append(&lock);
             }

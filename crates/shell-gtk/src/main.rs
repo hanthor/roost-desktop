@@ -13,6 +13,7 @@
 //! The compositor runs one supervised shell; select this one with
 //! `ROOST_SHELL_BIN=roost-shell-gtk` while it grows to parity.
 
+mod bt_menu;
 mod calendar;
 mod events;
 mod folder_dialog;
@@ -652,7 +653,24 @@ fn quick_settings_popover(
     let wifi = qs_menu_tile("network-wireless-symbolic", "Wi-Fi", None, &wifi_menu_ui);
     wifi_menu.set_tile(wifi.clone());
     let wired = qs_tile("network-wired-symbolic", "Wired", None);
-    let bluetooth = qs_tile("bluetooth-active-symbolic", "Bluetooth", None);
+    // GNOME's Bluetooth menu: devices, a placeholder, Bluetooth Settings.
+    let bt_menu_ui = QsMenu::new("bluetooth-active-symbolic", "Bluetooth");
+    let bt_list = bt_menu_ui.list();
+    let bt_placeholder = gtk::Label::new(None);
+    bt_placeholder.add_css_class("bt-menu-placeholder");
+    bt_placeholder.set_wrap(true);
+    bt_placeholder.set_justify(gtk::Justification::Center);
+    bt_menu_ui.section.append(&bt_placeholder);
+    let bt_menu = bt_menu::BtMenu::new(bt_list, bt_placeholder);
+    bt_menu_ui.separator();
+    let (bt_settings, _) = bt_menu_ui.item(None, "Bluetooth Settings");
+    bt_settings.connect_clicked(|_| {
+        let _ = std::process::Command::new("gnome-control-center")
+            .arg("bluetooth")
+            .spawn();
+    });
+    let bluetooth = qs_menu_tile("bluetooth-active-symbolic", "Bluetooth", None, &bt_menu_ui);
+    bt_menu.set_tile(bluetooth.clone());
     let power_menu_ui = QsMenu::new("power-profile-balanced-symbolic", "Power Mode");
     let power_items: Vec<(&'static str, gtk::Button, gtk::Image)> = [
         ("performance", "Performance"),
@@ -682,9 +700,8 @@ fn quick_settings_popover(
     let dark = qs_tile("dark-mode-symbolic", "Dark Style", None);
     let dnd_tile = qs_tile("notifications-disabled-symbolic", "Do Not Disturb", None);
     grid.add(&wifi, Some(&wifi_menu_ui));
-    for tile in [&wired, &bluetooth] {
-        grid.add(tile, None);
-    }
+    grid.add(&wired, None);
+    grid.add(&bluetooth, Some(&bt_menu_ui));
     grid.add(&power_mode, Some(&power_menu_ui));
     for tile in [&night, &dark, &dnd_tile] {
         grid.add(tile, None);
@@ -746,6 +763,7 @@ fn quick_settings_popover(
     services::attach(&Rc::new(services::Widgets {
         wifi,
         wifi_menu,
+        bt_menu,
         wired,
         bluetooth,
         power_mode,

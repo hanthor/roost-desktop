@@ -1363,3 +1363,97 @@ mod wifi_tests {
         assert_eq!(wifi_networks(&aps, None, &[]).len(), MAX_VISIBLE_NETWORKS);
     }
 }
+
+/// One BlueZ device (org.bluez.Device1) as GNOME's menu sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BtDevice {
+    pub path: String,
+    pub alias: String,
+    pub icon: Option<String>,
+    pub paired: bool,
+    pub trusted: bool,
+    pub connected: bool,
+}
+
+/// GNOME's device list (bluetooth.js): paired or trusted devices,
+/// connected first, then by name; none while the adapter is off.
+pub fn bt_devices(devices: &[BtDevice], powered: bool) -> Vec<BtDevice> {
+    if !powered {
+        return Vec::new();
+    }
+    let mut out: Vec<BtDevice> = devices
+        .iter()
+        .filter(|d| d.paired || d.trusted)
+        .cloned()
+        .collect();
+    out.sort_by(|a, b| {
+        b.connected
+            .cmp(&a.connected)
+            .then(a.alias.to_lowercase().cmp(&b.alias.to_lowercase()))
+    });
+    out
+}
+
+/// The Bluetooth toggle's subtitle: the one connected device's name,
+/// "N Connected", or none.
+pub fn bt_subtitle(devices: &[BtDevice]) -> Option<String> {
+    let connected: Vec<&BtDevice> = devices.iter().filter(|d| d.connected).collect();
+    match connected.as_slice() {
+        [] => None,
+        [one] => Some(one.alias.clone()),
+        many => Some(format!("{} Connected", many.len())),
+    }
+}
+
+/// A device's symbolic icon from BlueZ's Icon name.
+pub fn bt_icon(icon: Option<&str>) -> String {
+    match icon {
+        Some(name) if name.ends_with("-symbolic") => name.to_owned(),
+        Some(name) if !name.is_empty() => format!("{name}-symbolic"),
+        _ => "bluetooth-active-symbolic".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod bt_tests {
+    use super::*;
+
+    fn dev(alias: &str, paired: bool, connected: bool) -> BtDevice {
+        BtDevice {
+            path: format!("/org/bluez/hci0/{alias}"),
+            alias: alias.into(),
+            icon: Some("audio-headset".into()),
+            paired,
+            trusted: false,
+            connected,
+        }
+    }
+
+    #[test]
+    fn devices_filter_and_sort_like_gnome() {
+        let all = vec![
+            dev("Speaker", true, false),
+            dev("headphones", true, true),
+            dev("Stranger", false, false),
+            dev("Keyboard", true, false),
+        ];
+        let names: Vec<_> = bt_devices(&all, true)
+            .into_iter()
+            .map(|d| d.alias)
+            .collect();
+        assert_eq!(names, ["headphones", "Keyboard", "Speaker"]);
+        assert!(bt_devices(&all, false).is_empty(), "nothing while off");
+    }
+
+    #[test]
+    fn subtitle_and_icon_follow_gnome() {
+        assert_eq!(bt_subtitle(&[dev("A", true, false)]), None);
+        assert_eq!(bt_subtitle(&[dev("A", true, true)]).as_deref(), Some("A"));
+        assert_eq!(
+            bt_subtitle(&[dev("A", true, true), dev("B", true, true)]).as_deref(),
+            Some("2 Connected")
+        );
+        assert_eq!(bt_icon(Some("audio-headset")), "audio-headset-symbolic");
+        assert_eq!(bt_icon(None), "bluetooth-active-symbolic");
+    }
+}

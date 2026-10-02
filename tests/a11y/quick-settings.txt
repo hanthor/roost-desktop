@@ -15,6 +15,7 @@ toggle button: Wi-Fi
 toggle button: Wi-Fi Menu
 toggle button: Wired
 toggle button: Bluetooth
+toggle button: Bluetooth Menu
 toggle button: Power Mode
 toggle button: Power Mode Menu
 toggle button: Dark Style
