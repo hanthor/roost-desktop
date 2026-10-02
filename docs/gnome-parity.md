@@ -85,7 +85,7 @@ Share of pixels visibly off (more than 24 levels) in each element crop:
 | Date menu | 16.5% | 0.3% |
 | Notification banner and list card | 11.3% | matches; the rest is what lies behind |
 | Overview, empty (cards, search, dash) | 53.5% | 0.4% |
-| App grid (thumbnails, tiles, dash) | 56.1% | 3.3%; the rest is which apps are installed |
+| App grid (thumbnails, tiles, folders, dash) | 56.1% | 0.2% |
 | Overview dash | not comparable | 0.0% |
 | Lock screen background (blurred, dimmed wallpaper) | not built | 1.4% beyond 8 levels |
 | Lock screen curtain (clock, date, hint) | not built | positions within 1px; the digits are the capture time |
@@ -103,6 +103,12 @@ Whole screens, with the same windows on both sides:
 | Date menu listing it | 19.6% | 0.5% |
 | Log Out dialog | 35.6% | 0.4% |
 | OSD: volume, a layout label, volume past 100% | not built | 0.4% each |
+
+Roost's capture shows GNOME's installed apps, not the host's: each host
+entry is hidden by a `Hidden` copy in the user's application directory
+(the desktop-entry spec's override), GNOME's entries and folder names
+are copied in, GNOME 51's schemas come first, and the session is named
+GNOME so `OnlyShowIn` decides the same way.
 
 Both sides send the banner's notification over D-Bus. GNOME's message
 tray keeps a banner up while the user is away, so its scripted run tells

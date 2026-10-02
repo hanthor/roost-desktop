@@ -462,7 +462,7 @@ window.roost-overview-grid {
   min-width: 89px;
   min-height: 89px;
   padding: 12px;
-  border-radius: 16px;
+  border-radius: 24px;
   background: none;
   box-shadow: none;
   color: #fafafb;
@@ -475,8 +475,22 @@ window.roost-overview-grid {
   background-color: rgba(255, 255, 255, 0.1);
 }
 
+/* A folder (.app-folder): the tile tinted st-mix(#fafafb, #222226, 9%);
+   the inner button carries the tile's shape, its label stays regular. */
 .roost-overview-grid .grid-tile.app-folder {
-  background-color: #38383b;
+  background-color: #353539;
+}
+.roost-overview-grid menubutton.grid-tile {
+  padding: 0;
+}
+.roost-overview-grid menubutton.grid-tile > button {
+  min-width: 89px;
+  min-height: 89px;
+  padding: 12px;
+  border-radius: 24px;
+  background: none;
+  box-shadow: none;
+  font-weight: normal;
 }
 
 .roost-overview-search entry.search {
@@ -749,11 +763,10 @@ window.roost-end-session {
   background-color: rgba(121, 160, 208, 0.12);
 }
 
-/* App-grid folders (GNOME 51): a rounded tile holding a 2x2 collage. */
+/* App-grid folders (GNOME 51): the 2x2 collage sits bare on the tile. */
 .folder-collage {
-  background-color: alpha(#ffffff, 0.1);
-  border-radius: 20px;
-  padding: 8px;
+  min-width: 64px;
+  min-height: 64px;
 }
 
 /* Window preview chrome in the overview (windowPreview.js): the app
@@ -944,4 +957,9 @@ window.roost-osd .level {
 }
 window.roost-osd .level.after-label {
   margin-bottom: 4px;
+}
+
+/* GNOME's grid cells are exactly the 113px tiles: no flowbox padding. */
+.roost-overview-grid flowboxchild {
+  padding: 0;
 }

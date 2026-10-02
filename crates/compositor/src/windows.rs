@@ -421,6 +421,14 @@ impl WindowManager {
         if state.take_popup_refocus() && !state.popup_grab_active() {
             let focused = self.model.focused();
             self.apply_focus(state, focused);
+            // The grab held pointer focus wherever the pointer went:
+            // re-deliver it where the pointer is now, so the surface it
+            // left hears the leave (a panel button drops its hover).
+            if self.pointer.is_some() {
+                let pos = self.pointer_pos;
+                let time = (crate::state::system_millis() & u64::from(u32::MAX)) as u32;
+                self.pointer_motion(state, pos, time);
+            }
         }
         let live: Vec<ToplevelSurface> = state.toplevels();
         let mut seen = Vec::with_capacity(live.len());
@@ -1370,40 +1378,36 @@ impl WindowManager {
             }
             return;
         }
-        if let Some(id) = self.window_at(pos) {
-            if self.model.focused() != Some(id) {
-                self.apply_focus(state, Some(id));
-            }
-        }
-        if let (Some(pointer), Some(focused)) = (
-            self.pointer.clone(),
-            self.model.focused().and_then(|id| self.windows.get(&id)),
-        ) {
-            let surface = focused
-                .surface
-                .wl_surface()
-                .map(|surface| surface.into_owned());
-            // Focus point is the surface origin: smithay reports
-            // surface-local coordinates as event minus focus.
-            // The window rect is its xdg geometry; the surface origin
-            // sits up-left of it by the client-side shadow.
-            let origin = match surface.as_ref() {
-                Some(s) => crate::popup::surface_origin(s, focused.geometry.loc),
-                None => focused.geometry.loc,
-            };
-            pointer.motion(
-                state,
-                surface.map(|surface| (surface, (origin.x as f64, origin.y as f64).into())),
-                &MotionEvent {
-                    location: pos,
-                    serial: SERIAL_COUNTER.next_serial(),
-                    time,
-                },
-            );
-            // wl_seat v5+: clients act on pointer events only at a
-            // frame boundary (GTK4 drops unframed clicks).
-            pointer.frame(state);
-        }
+        // Pointer focus is the window under the pointer, or nothing over
+        // the bare desktop. Keyboard focus and stacking change only on a
+        // click (GNOME's default click-to-focus), never on motion.
+        let Some(pointer) = self.pointer.clone() else {
+            return;
+        };
+        let target = self
+            .window_at(pos)
+            .and_then(|id| self.windows.get(&id))
+            .and_then(|window| {
+                let surface = window.surface.wl_surface()?.into_owned();
+                // Focus point is the surface origin: smithay reports
+                // surface-local coordinates as event minus focus. The
+                // window rect is its xdg geometry; the surface origin
+                // sits up-left of it by the client-side shadow.
+                let origin = crate::popup::surface_origin(&surface, window.geometry.loc);
+                Some((surface, (origin.x as f64, origin.y as f64).into()))
+            });
+        pointer.motion(
+            state,
+            target,
+            &MotionEvent {
+                location: pos,
+                serial: SERIAL_COUNTER.next_serial(),
+                time,
+            },
+        );
+        // wl_seat v5+: clients act on pointer events only at a frame
+        // boundary (GTK4 drops unframed clicks).
+        pointer.frame(state);
     }
 
     /// Pointer button: deliver to the focused window and focus the

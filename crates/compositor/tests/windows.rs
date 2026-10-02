@@ -476,14 +476,21 @@ fn two_toplevels_map_with_cascaded_geometry() {
 }
 
 #[test]
-fn pointer_motion_moves_focus_to_window_under_cursor() {
+fn focus_follows_clicks_not_motion() {
+    // GNOME's default click-to-focus: hovering never focuses or raises.
     let mut f = two_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
     f.manager
         .pointer_motion(&mut f.comp.state, beta_only(), 1000);
+    assert_eq!(f.manager.model().focused(), Some(f.id_a));
+    f.manager
+        .pointer_button(&mut f.comp.state, BTN_LEFT, true, 1001);
+    f.manager
+        .pointer_button(&mut f.comp.state, BTN_LEFT, false, 1002);
     assert_eq!(f.manager.model().focused(), Some(f.id_b));
     f.manager
-        .pointer_motion(&mut f.comp.state, alpha_only(), 1001);
-    assert_eq!(f.manager.model().focused(), Some(f.id_a));
+        .pointer_motion(&mut f.comp.state, alpha_only(), 1003);
+    assert_eq!(f.manager.model().focused(), Some(f.id_b));
 }
 
 #[test]

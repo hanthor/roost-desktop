@@ -22,8 +22,12 @@ mkdir -p /out/share/glib-2.0/schemas
 cp /usr/share/glib-2.0/schemas/org.gnome.shell.gschema.xml /out/share/glib-2.0/schemas/
 # The dash's favorites that GNOME 51's default list finds installed.
 mkdir -p /out/share/applications
-cp /usr/share/applications/org.gnome.Nautilus.desktop /usr/share/applications/org.gnome.TextEditor.desktop \
-    /usr/share/applications/org.gnome.Calculator.desktop /out/share/applications/
+# Every installed app and GNOME's app-folder definitions, so Roost's
+# capture shows the same app grid.
+cp /usr/share/applications/*.desktop /out/share/applications/
+mkdir -p /out/share/desktop-directories
+cp /usr/share/desktop-directories/*.directory /out/share/desktop-directories/
+cp /usr/share/glib-2.0/schemas/org.gnome.desktop.app-folders.gschema.xml /out/share/glib-2.0/schemas/
 # GNOME 51's default wallpapers, for the Roost capture to show too.
 cp /usr/share/backgrounds/gnome/adwaita-l.jxl /usr/share/backgrounds/gnome/adwaita-d.jxl /out/
 mkdir -p /tmp/backlight
