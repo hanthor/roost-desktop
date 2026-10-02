@@ -10,7 +10,7 @@ smithay.workspace = true
 # loaded at run time, so builds need no PAM headers and a system without
 # it fails closed.
 libc = "0.2"
-libloading = "0.8"
+libloading = "0.9"
 # GNOME's monitors.xml (per-output scale and layout, #59).
 roxmltree = "0.21"
 # org.gnome.Shell.Screenshot (#61): D-Bus service and PNG output.
