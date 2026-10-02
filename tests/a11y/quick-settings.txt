@@ -7,7 +7,7 @@ toggle button: System
 push button: Take Screenshot
 push button: Settings
 push button: Lock
-push button: Power Off
+push button: Power Off Menu
 push button: Mute
 slider: Volume
 slider: Brightness

@@ -695,20 +695,58 @@ window.roost-switcher {
   min-height: 8px;
 }
 
-/* End-session dialog (GNOME 51): dimmed screen, centered card. */
+/* End-session dialog, GNOME 51's ModalDialog: the screen dimmed with
+   GNOME's vignette,
+   a #36363a card with 18px corners and 24px padding, a 20px heavy
+   title, and 170x43 buttons at 10% white, the focused one ringed. */
 window.roost-end-session {
-  background-color: alpha(#000000, 0.5);
+  /* Measured off GNOME: brightness 0.5 at the center falling linearly
+     to about 0.15 in the corners (lightbox.js vignette). */
+  background-color: transparent;
+  background-image: radial-gradient(ellipse farthest-corner at center, rgba(0, 0, 0, 0.5) 0%, rgba(0, 0, 0, 0.854) 100%);
 }
 
-.end-session-card {
-  background-color: #2a2a2f;
-  border-radius: 24px;
+.roost-end-session .modal-dialog {
+  background-color: #36363a;
+  border-radius: 18px;
   padding: 24px;
   color: #ffffff;
+  box-shadow: 0 12px 8px 12px rgba(0, 0, 0, 0.03);
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
 }
 
-.power-menu button {
-  padding: 6px 12px;
+.roost-end-session .modal-dialog-content-box {
+  padding-top: 12px;
+}
+
+.roost-end-session .message-dialog-title {
+  font-size: 15pt;
+  font-weight: 800;
+}
+
+.roost-end-session .modal-dialog-button-box {
+  padding-top: 6px;
+}
+
+.roost-end-session .modal-dialog-button {
+  min-height: 25px;
+  padding: 9px 12px;
+  border-radius: 9px;
+  background-color: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
+  font-weight: bold;
+  box-shadow: none;
+}
+
+.roost-end-session .modal-dialog-button:hover {
+  background-color: rgba(255, 255, 255, 0.13);
+}
+
+.roost-end-session .modal-dialog-button:focus {
+  outline: none;
+  box-shadow: inset 0 0 0 2px rgb(121, 160, 208);
+  background-color: rgba(121, 160, 208, 0.12);
 }
 
 /* App-grid folders (GNOME 51): a rounded tile holding a 2x2 collage. */

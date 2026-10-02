@@ -454,7 +454,7 @@ fn quick_settings_popover(
     let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     spacer.set_hexpand(true);
     let lock = qs_round("system-lock-screen-symbolic", "Lock");
-    let power = qs_round("system-shutdown-symbolic", "Power Off");
+    let power = qs_round("system-shutdown-symbolic", "Power Off Menu");
     top.append(&screenshot);
     top.append(&settings_btn);
     top.append(&spacer);
@@ -532,38 +532,46 @@ fn quick_settings_popover(
         });
     }
 
-    // Power: GNOME's in-panel menu under the top row.
-    let power_menu = gtk::Revealer::builder()
-        .transition_type(gtk::RevealerTransitionType::SlideDown)
-        .build();
-    {
-        let (popover, revealer) = (popover.clone(), power_menu.clone());
-        let close: Rc<dyn Fn()> = Rc::new(move || {
-            revealer.set_reveal_child(false);
-            popover.popdown();
-        });
-        power_menu.set_child(Some(&power_ui.menu(close)));
-    }
-    // Hidden while closed, so the column adds no spacing for it.
-    power_menu.set_visible(false);
-    {
-        let revealer = power_menu.clone();
-        power.connect_clicked(move |_| {
-            let open = !revealer.reveals_child();
-            if open {
-                revealer.set_visible(true);
-            }
-            revealer.set_reveal_child(open);
-        });
-    }
-    power_menu.connect_child_revealed_notify(|r| {
-        if !r.is_child_revealed() {
-            r.set_visible(false);
+    // Power: GNOME's shutdown menu (status/system.js ShutdownItem), a
+    // quick toggle menu opening in place under the top row.
+    let power_menu_box = QsMenu::new("system-shutdown-symbolic", "Power Off");
+    for action in power_ui.actions() {
+        let label = match action {
+            power::Action::Suspend => "Suspend",
+            power::Action::Restart => "Restart…",
+            power::Action::PowerOff => "Power Off…",
+            power::Action::LogOut => "Log Out…",
+        };
+        // GNOME's menu always separates the session actions, even when
+        // no power action sits above them.
+        if *action == power::Action::LogOut {
+            power_menu_box.separator();
         }
-    });
+        let (item, _) = power_menu_box.item(None, label);
+        let (power_ui, popover, action) = (power_ui.clone(), popover.clone(), *action);
+        item.connect_clicked(move |_| {
+            popover.popdown();
+            power_ui.activate(action);
+        });
+    }
+    let power_menu = power_menu_box.revealer.clone();
     {
-        let revealer = power_menu.clone();
-        popover.connect_closed(move |_| revealer.set_reveal_child(false));
+        let menu = power_menu.clone();
+        power.connect_clicked(move |_| menu.set_visible(!menu.is_visible()));
+    }
+    {
+        let popover = popover.clone();
+        power_menu.connect_visible_notify(move |menu| {
+            if menu.is_visible() {
+                popover.add_css_class("dimmed");
+            } else {
+                popover.remove_css_class("dimmed");
+            }
+        });
+    }
+    {
+        let menu = power_menu.clone();
+        popover.connect_closed(move |_| menu.set_visible(false));
     }
 
     // Volume: mute button plus slider (PipeWire via wpctl).
