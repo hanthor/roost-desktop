@@ -9,7 +9,7 @@
 # 03-quick-settings, 03b-power-mode-menu, 04-overview-empty, 05-app-grid, 05b-app-folder, 06-windows, 06b-switcher,
 # 07-overview-windows, 07b-overview-hover, 08-notification, 09-calendar-with-notification,
 # 10-end-session, 12-osd-volume, 12b-osd-label, 12c-osd-overdrive, 13-window-menu,
-# 14-screenshot-ui, 15-workspace-popup, 16-overview-workspaces,
+# 14-screenshot-ui, 15-workspace-popup, 16-overview-workspaces, 17-tile-preview,
 # 11-lock-screen, 11b-unlock-prompt.
 # Run scripts/roost-gnome-reference first: it exports GNOME's wallpapers.
 # Compare with scripts/lib/roost-parity-compare.py.
@@ -282,6 +282,29 @@ xdotool key Super_L
 shot 16-overview-workspaces 1.5
 xdotool key Escape
 sleep 1
+# Edge tiling: Gamma's header dragged to the left edge shows the tile
+# preview; dragged back before release, nothing tiles.
+glide() {
+    for i in $(seq 1 "$5"); do
+        xdotool mousemove --window "$WID" $(($1 + ($3 - $1) * i / $5)) $(($2 + ($4 - $2) * i / $5))
+        sleep 0.016
+    done
+}
+# GTK starts the move past its drag threshold: press 11px away, cross
+# it onto the start point and let the move begin there, so the window
+# travels exactly the glide (GNOME's reference moves it by that).
+xdotool mousemove --window "$WID" 611 328
+sleep 0.2
+xdotool mousedown 1
+sleep 0.1
+xdotool mousemove --window "$WID" 600 328
+sleep 0.5
+glide 600 328 1 400 40
+shot 17-tile-preview 1
+glide 1 400 600 328 40
+xdotool mouseup 1
+park
+sleep 0.8
 xdotool mousemove --window "$WID" $((WIDTH - 30)) 16 click 1
 park
 sleep 1

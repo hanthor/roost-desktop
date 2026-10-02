@@ -103,6 +103,29 @@ pub enum WindowLayout {
     Strip,
 }
 
+/// What a moved window dropped at a point snaps to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Snap {
+    /// The top edge: maximize.
+    Maximize,
+    /// A side edge: tile that half.
+    Tile(TileSide),
+}
+
+/// Where a window dropped with the pointer at `pos` snaps on an output
+/// `width` wide (GNOME edge tiling), if anywhere.
+pub fn snap_target(pos: Point<f64, Logical>, width: i32) -> Option<Snap> {
+    if pos.y <= f64::from(WORK_AREA_TOP) + SNAP_EDGE_PX {
+        Some(Snap::Maximize)
+    } else if pos.x <= SNAP_EDGE_PX {
+        Some(Snap::Tile(TileSide::Left))
+    } else if pos.x >= f64::from(width) - 1.0 - SNAP_EDGE_PX {
+        Some(Snap::Tile(TileSide::Right))
+    } else {
+        None
+    }
+}
+
 /// Which work-area half a tiled window fills.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TileSide {
@@ -1316,16 +1339,30 @@ impl WindowManager {
             return;
         };
         if let PointerGrab::Move { id, .. } = grab {
-            let pos = self.pointer_pos;
-            let size = state.primary_size();
-            if pos.y <= f64::from(WORK_AREA_TOP) + SNAP_EDGE_PX {
-                self.set_maximized(state, id, true);
-            } else if pos.x <= SNAP_EDGE_PX {
-                self.set_tiled(state, id, TileSide::Left);
-            } else if pos.x >= f64::from(size.w) - 1.0 - SNAP_EDGE_PX {
-                self.set_tiled(state, id, TileSide::Right);
+            match snap_target(self.pointer_pos, state.primary_size().w) {
+                Some(Snap::Maximize) => {
+                    self.set_maximized(state, id, true);
+                }
+                Some(Snap::Tile(side)) => {
+                    self.set_tiled(state, id, side);
+                }
+                None => {}
             }
         }
+    }
+
+    /// GNOME's tile preview while a moved window is over a snap edge:
+    /// the dragged window and the area it would fill on release (the
+    /// work area, or one half of it).
+    pub fn tile_preview(&self, state: &State) -> Option<(u64, Rectangle<i32, Logical>)> {
+        let Some(PointerGrab::Move { id, .. }) = self.grab else {
+            return None;
+        };
+        let rect = match snap_target(self.pointer_pos, state.primary_size().w)? {
+            Snap::Maximize => Self::work_area(state),
+            Snap::Tile(side) => Self::tile_area(state, side),
+        };
+        Some((id, rect))
     }
 
     /// Every visible popup placed in the global space, bottom to top:
