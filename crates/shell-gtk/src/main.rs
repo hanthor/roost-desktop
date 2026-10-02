@@ -220,6 +220,14 @@ fn panel_menu_button(
         .build();
     button.add_css_class("panel-button");
     button.update_property(&[gtk::accessible::Property::Label(label)]);
+    // GNOME focuses a panel menu's first item only when the keyboard
+    // opened it: a click shows no focus ring (keyboard opens set it
+    // back, see the keybinding toggle).
+    popover.connect_show(|popover| {
+        if let Some(window) = popover.root().and_downcast::<gtk::Window>() {
+            window.set_focus_visible(false);
+        }
+    });
     button
 }
 
@@ -413,7 +421,9 @@ impl QsMenu {
 /// menu takes a full-width row under its toggle's row.
 struct QsGrid {
     grid: gtk::Grid,
-    items: RefCell<Vec<(gtk::Widget, Option<gtk::Box>)>>,
+    /// Each toggle (whose visibility decides placement), the wrapper
+    /// the grid holds, and its menu.
+    items: RefCell<Vec<(gtk::Widget, gtk::Box, Option<gtk::Box>)>>,
 }
 
 impl QsGrid {
@@ -432,9 +442,14 @@ impl QsGrid {
 
     fn add(self: &Rc<Self>, tile: &services::Tile, menu: Option<&QsMenu>) {
         let menu = menu.map(|m| m.revealer.clone());
+        // GtkGrid lines toggles up by baseline, and a toggle with a
+        // subtitle has a different one: the row grows 2px past GNOME's
+        // 48. A vertical box reports no baseline.
+        let wrapper = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        wrapper.append(&tile.outer);
         self.items
             .borrow_mut()
-            .push((tile.outer.clone(), menu.clone()));
+            .push((tile.outer.clone(), wrapper, menu.clone()));
         // A strong reference: the grid lives as long as its tiles do
         // (the quick-settings popover, for the whole session).
         let this = self.clone();
@@ -452,14 +467,14 @@ impl QsGrid {
             self.grid.remove(&child);
         }
         let items = self.items.borrow();
-        let visible: Vec<_> = items.iter().filter(|(w, _)| w.is_visible()).collect();
+        let visible: Vec<_> = items.iter().filter(|(w, _, _)| w.is_visible()).collect();
         let mut row = 0;
         for pair in visible.chunks(2) {
-            for (col, (widget, _)) in pair.iter().enumerate() {
-                self.grid.attach(widget, col as i32, row, 1, 1);
+            for (col, (_, wrapper, _)) in pair.iter().enumerate() {
+                self.grid.attach(wrapper, col as i32, row, 1, 1);
             }
             row += 1;
-            for (_, menu) in pair {
+            for (_, _, menu) in pair {
                 if let Some(menu) = menu {
                     self.grid.attach(menu, 0, row, 2, 1);
                     row += 1;
@@ -1123,6 +1138,11 @@ fn build(app: &adw::Application) {
                         button.popdown();
                     } else {
                         button.popup();
+                        // Opened from the keyboard: GNOME shows the
+                        // first item's focus.
+                        if let Some(window) = button.root().and_downcast::<gtk::Window>() {
+                            window.set_focus_visible(true);
+                        }
                     }
                 };
                 let dash_entry = |n: u8| {
