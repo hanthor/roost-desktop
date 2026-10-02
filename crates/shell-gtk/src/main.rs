@@ -25,6 +25,7 @@ mod overview;
 mod power;
 mod preview_chrome;
 mod providers;
+mod screenshot_ui;
 mod services;
 mod shell_dbus;
 mod switcher;
@@ -1063,6 +1064,19 @@ fn build(app: &adw::Application) {
         shell: shell.clone(),
     }));
 
+    // GNOME's screenshot UI (Print).
+    let screenshot_ui = {
+        let notify_shot = notify.clone();
+        let notify_post = notify.clone();
+        screenshot_ui::ScreenshotUi::new(
+            app.upcast_ref(),
+            Rc::new(move || take_screenshot(true, notify_shot.clone())),
+            Rc::new(move |summary: &str, body: &str| {
+                notify_post.post("Screenshot", "screenshot-recorded-symbolic", summary, body);
+            }),
+        )
+    };
+
     // GNOME Shell's own keybindings (org.gnome.shell.keybindings).
     {
         let run: Rc<dyn Fn(keybindings::Action)> = {
@@ -1073,6 +1087,7 @@ fn build(app: &adw::Application) {
                 system.clone(),
             );
             let (apps, notify, osd_ui) = (apps.clone(), notify.clone(), osd_ui.clone());
+            let screenshot_ui = screenshot_ui.clone();
             Rc::new(move |action| {
                 use keybindings::Action;
                 let toggle = |button: &gtk::MenuButton| {
@@ -1130,6 +1145,7 @@ fn build(app: &adw::Application) {
                             let _ = roost_shell_host::apps::launch(&entry);
                         }
                     }
+                    Action::ShowScreenshotUi => screenshot_ui.open(),
                     Action::Screenshot => take_screenshot(false, notify.clone()),
                     Action::ScreenshotWindow => take_screenshot(true, notify.clone()),
                     Action::BrightnessUp | Action::BrightnessDown => {

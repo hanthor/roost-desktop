@@ -1011,3 +1011,103 @@ window.roost-window-menu .popup-separator-menu-item-separator {
   min-height: 1px;
   background-color: rgba(255, 255, 255, 0.1);
 }
+
+/* GNOME 51's screenshot UI: the panel (#2e2e33, 32px corners, 18px of
+   padding, 12px at the bottom), mode buttons (89x76, 14px corners,
+   #414148 when chosen), the photo/video switch, the 48px capture ring,
+   the pointer toggle and the close button. */
+window.roost-screenshot-ui {
+  background: none;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
+}
+window.roost-screenshot-ui .screenshot-ui-panel {
+  color: #ffffff;
+  background-color: #2e2e33;
+  border: 1px solid rgba(255, 255, 255, 0.02);
+  border-radius: 32px;
+  padding: 18px 18px 12px 18px;
+}
+window.roost-screenshot-ui button.screenshot-ui-type-button {
+  min-width: 53px;
+  padding: 12px 0;
+  border-radius: 14px;
+  background: none;
+  box-shadow: none;
+  color: #ffffff;
+}
+window.roost-screenshot-ui .screenshot-ui-type-label {
+  font-size: 12px;
+  font-weight: normal;
+}
+window.roost-screenshot-ui button.screenshot-ui-type-button:hover {
+  background-color: #38383d;
+}
+window.roost-screenshot-ui button.screenshot-ui-type-button:checked {
+  background-color: #414148;
+}
+window.roost-screenshot-ui .screenshot-ui-shot-cast-container {
+  background-color: rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  padding: 3px;
+}
+window.roost-screenshot-ui button.screenshot-ui-shot-cast-button {
+  min-width: 16px;
+  min-height: 16px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: none;
+  box-shadow: none;
+  color: #ffffff;
+}
+window.roost-screenshot-ui button.screenshot-ui-shot-cast-button:checked {
+  background-color: #ffffff;
+  color: #2e2e33;
+}
+window.roost-screenshot-ui button.screenshot-ui-shot-cast-button:disabled {
+  color: rgba(255, 255, 255, 0.5);
+  filter: none;
+  opacity: 1;
+}
+window.roost-screenshot-ui button.screenshot-ui-capture-button {
+  min-width: 32px;
+  min-height: 32px;
+  padding: 4px;
+  border: 4px solid #ffffff;
+  border-radius: 999px;
+  background: none;
+  box-shadow: none;
+}
+window.roost-screenshot-ui .screenshot-ui-capture-button-circle {
+  min-width: 32px;
+  min-height: 32px;
+  border-radius: 999px;
+  background-color: #ffffff;
+}
+window.roost-screenshot-ui button.screenshot-ui-capture-button:hover .screenshot-ui-capture-button-circle {
+  background-color: #cccccc;
+}
+window.roost-screenshot-ui button.screenshot-ui-show-pointer-button {
+  min-width: 16px;
+  min-height: 16px;
+  padding: 12px;
+  border-radius: 999px;
+  background: none;
+  box-shadow: none;
+  color: #ffffff;
+}
+window.roost-screenshot-ui button.screenshot-ui-show-pointer-button:checked {
+  background-color: #414148;
+}
+window.roost-screenshot-ui button.screenshot-ui-close-button {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 12px;
+  border-radius: 999px;
+  background-color: rgba(63, 63, 70, 0.98);
+  color: #fafafb;
+  box-shadow: 0 2px 4px 0 rgba(0, 0, 0, 0.2);
+}
+window.roost-screenshot-ui button.screenshot-ui-close-button image {
+  -gtk-icon-size: 24px;
+}

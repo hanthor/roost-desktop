@@ -236,6 +236,14 @@ export async function run() {
         await Scripting.sleep(500);
     }
 
+    // The screenshot UI (Print): the frozen screen, dimmed outside the
+    // selection, with its panel.
+    await Main.screenshotUI.open();
+    await Scripting.sleep(1200);
+    await shotStage('14-screenshot-ui');
+    Main.screenshotUI.close(true);
+    await Scripting.sleep(800);
+
     // The lock screen: the curtain with the clock, then the unlock prompt.
     if (Main.screenShield) {
         Main.screenShield.lock(false);

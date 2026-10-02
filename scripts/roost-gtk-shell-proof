@@ -75,6 +75,7 @@
 #   G-KEYBINDINGS  GNOME Shell's keys: Super+S quick settings, Super+V the
 #                  date menu, Super+A the app grid (and back)
 #   G-KEY-BRIGHTNESS the brightness key steps the backlight through logind
+#   G-SCREENSHOT-UI  Print opens the screenshot UI; Screen + Capture saves
 #   G-WINDOW-MENU  GNOME's window menu: Always on Top, Hide, and the
 #                  overview brings the hidden window back
 #   G-SUSPEND-LOCK Suspend asks logind, and its PrepareForSleep locks
@@ -1032,6 +1033,28 @@ showing "$ARTIFACTS/a11y-shot-list.json" "Screenshot captured" ||
 xdotool key Escape
 sleep 1
 pass G-SCREENSHOT-BUTTON "the button saves to Pictures/Screenshots and notifies"
+
+# GNOME's screenshot UI on Print: Screen, then Capture saves the whole
+# screen where GNOME does.
+before="$(find "$XDG_PICTURES_DIR/Screenshots" -name 'Screenshot From *.png' 2>/dev/null | wc -l)"
+xdotool key Print
+end=$(($(date +%s) + 20))
+until "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-shot-ui.json" 5 >/dev/null 2>&1 &&
+    showing "$ARTIFACTS/a11y-shot-ui.json" "Capture" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.5; done
+showing "$ARTIFACTS/a11y-shot-ui.json" "Capture" || fail G-SCREENSHOT-UI "Print did not open the screenshot UI"
+scrot "$ARTIFACTS/24e-screenshot-ui.png" >/dev/null
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-shot-ui-screen.json" 20 \
+    --press "Screen" || fail G-SCREENSHOT-UI "could not choose Screen"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-shot-ui-capture.json" 20 \
+    --press "Capture" || fail G-SCREENSHOT-UI "could not press Capture"
+end=$(($(date +%s) + 15))
+until [ "$(find "$XDG_PICTURES_DIR/Screenshots" -name 'Screenshot From *.png' 2>/dev/null | wc -l)" -gt "$before" ] ||
+    [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+newest="$(find "$XDG_PICTURES_DIR/Screenshots" -name 'Screenshot From *.png' -newer "$ARTIFACTS/24e-screenshot-ui.png" 2>/dev/null | head -1)"
+[ -n "$newest" ] || fail G-SCREENSHOT-UI "Capture saved nothing"
+dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$newest")"
+[ "$dims" = "$WIDTH,$HEIGHT" ] || fail G-SCREENSHOT-UI "the Screen capture is $dims, not $WIDTH,$HEIGHT"
+pass G-SCREENSHOT-UI "Print opens GNOME's screenshot UI; Screen and Capture save the whole screen"
 
 # Screen sharing (#61): the portal's calls, a frame over PipeWire.
 if [ -n "$PW_PIDS" ] && command -v gst-launch-1.0 >/dev/null 2>&1; then
