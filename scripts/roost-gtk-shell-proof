@@ -370,9 +370,15 @@ cstate() {
     return 1
 }
 SOCKET_NAME="$(sed -n 's/.*nested session on \([^ ]*\) .*/\1/p' "$LOG" | head -1)"
+# One at a time, so window ids (and with them GNOME's running-app order
+# in the dash) follow Alpha, Beta, Gamma.
+n=0
 for spec in Alpha:#3584e4 Beta:#2ec27e Gamma:#e66100; do
     WAYLAND_DISPLAY="$SOCKET_NAME" "$PY" "$ROOT/scripts/lib/roost-test-window.py" \
         "${spec%%:*}" "${spec#*:}" >"$ARTIFACTS/window-${spec%%:*}.log" 2>&1 &
+    n=$((n + 1))
+    cstate "(.windows | length) == $n" "window $n" ||
+        fail G-WINDOWS "${spec%%:*} never mapped"
 done
 cstate '(.windows | length) == 3' "three app windows" ||
     fail G-WINDOWS "three libadwaita windows never mapped"
