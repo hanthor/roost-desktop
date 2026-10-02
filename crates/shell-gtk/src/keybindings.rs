@@ -23,6 +23,7 @@ pub enum Action {
     SwitchToApplication(u8),
     /// Open a new window of the nth dash app.
     OpenNewWindow(u8),
+    ShowScreenshotUi,
     Screenshot,
     ScreenshotWindow,
     BrightnessUp,
@@ -80,6 +81,12 @@ fn specs() -> Vec<Spec> {
             key: "toggle-quick-settings".into(),
             action: Action::ToggleQuickSettings,
             defaults: vec!["<Super>s"],
+            modes: NORMAL_OVERVIEW,
+        },
+        Spec {
+            key: "show-screenshot-ui".into(),
+            action: Action::ShowScreenshotUi,
+            defaults: vec!["Print"],
             modes: NORMAL_OVERVIEW,
         },
         Spec {
@@ -188,6 +195,7 @@ mod tests {
         assert_eq!(find(Action::SwitchToApplication(3)), ["<Super>3"]);
         assert_eq!(find(Action::OpenNewWindow(9)), ["<Super><Control>9"]);
         assert_eq!(find(Action::BrightnessUp), ["XF86MonBrightnessUp"]);
+        assert_eq!(find(Action::ShowScreenshotUi), ["Print"]);
         let brightness = all
             .iter()
             .find(|b| b.action == Action::BrightnessUp)
