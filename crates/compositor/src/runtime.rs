@@ -95,6 +95,10 @@ pub struct NestedSession {
     pub xwayland: bool,
     /// Display backend (#52): nested window or hardware session.
     pub backend: BackendChoice,
+    /// Open the overview when the session starts, as GNOME Shell does at
+    /// login. `roost-session` (real logins) sets it; developer and proof
+    /// runs start on the desktop.
+    pub startup_overview: bool,
 }
 
 /// Which display backend a session runs on.
@@ -156,6 +160,7 @@ impl NestedSession {
             shell_bin: None,
             xwayland: false,
             backend: BackendChoice::Auto,
+            startup_overview: false,
         }
     }
 
@@ -765,6 +770,10 @@ impl Runtime {
         // the server. Native sessions never request.
         if session.xwayland {
             runtime.request_x11();
+        }
+        // GNOME Shell greets a login with the overview.
+        if session.startup_overview {
+            runtime.control.set_overview(true);
         }
         Ok((runtime, event_loop))
     }
