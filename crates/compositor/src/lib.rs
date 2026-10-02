@@ -52,12 +52,14 @@ pub mod drm;
 pub mod layer;
 pub mod lock;
 pub mod monitors;
+pub mod mutter;
 pub mod overlay;
 pub mod overview;
 pub mod pam;
 pub mod popup;
 pub mod protocols;
 pub mod runtime;
+pub mod screencast;
 pub mod screenshot;
 pub mod state;
 pub mod supervise;
@@ -762,6 +764,15 @@ impl State {
             .and_then(|entry| entry.output.as_ref())
             .map(|output| output.current_scale())
             .unwrap_or(smithay::output::Scale::Integer(1))
+    }
+
+    /// Every registered output with its protocol object: name, output,
+    /// logical position, primary flag.
+    pub fn output_entries(&self) -> Vec<(String, Output, (i32, i32), bool)> {
+        self.outputs
+            .iter()
+            .filter_map(|e| Some((e.name.clone(), e.output.clone()?, e.loc, e.primary)))
+            .collect()
     }
 
     /// Shell-facing output inventory.

@@ -26,12 +26,14 @@ depends=(
     'libxkbcommon'
     'libxkbcommon-x11'
     'mesa'
+    'pipewire'
     'seatd'
     'systemd-libs'
     'wayland'
 )
-makedepends=('cargo' 'git' 'pkgconf')
+makedepends=('cargo' 'clang' 'git' 'pkgconf')
 optdepends=(
+    'xdg-desktop-portal-gnome: screenshots and screen sharing for apps'
     'greetd: login manager driving roost-greeter'
     'xorg-xwayland: X11 application support'
 )
