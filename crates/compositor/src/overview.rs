@@ -659,11 +659,12 @@ pub type DecorFill = ([f32; 4], Vec<Rectangle<i32, Logical>>);
 
 /// The strip as solid fills, bottom to top: each thumbnail's background
 /// (rounded), then the active indicator's ring. RGBA, 0..1.
-pub fn thumbnail_decor(layout: &OverviewLayout) -> Vec<DecorFill> {
-    // `.workspace-thumbnail` background on the dark overview (#46464e)
-    // and the default accent (#3584e4).
+pub fn thumbnail_decor(layout: &OverviewLayout, accent: [f32; 3]) -> Vec<DecorFill> {
+    // `.workspace-thumbnail` background on the dark overview (#46464e);
+    // the indicator in GNOME's accent.
     const FILL: [f32; 4] = [70.0 / 255.0, 70.0 / 255.0, 78.0 / 255.0, 1.0];
-    const ACCENT: [f32; 4] = [53.0 / 255.0, 132.0 / 255.0, 228.0 / 255.0, 1.0];
+    let [ar, ag, ab] = accent;
+    let accent = [ar, ag, ab, 1.0];
     if layout.thumbnails.is_empty() {
         return Vec::new();
     }
@@ -694,7 +695,7 @@ pub fn thumbnail_decor(layout: &OverviewLayout) -> Vec<DecorFill> {
         }
         ring.retain(|r| r.size.w > 0);
     }
-    vec![(FILL, fills), (ACCENT, ring)]
+    vec![(FILL, fills), (accent, ring)]
 }
 
 /// Thumbnail scale of the work area in the app grid state.
@@ -802,6 +803,8 @@ pub fn hit(layout: &OverviewLayout, pos: Point<f64, Logical>) -> OverviewHit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const BLUE: [f32; 3] = [53.0 / 255.0, 132.0 / 255.0, 228.0 / 255.0];
 
     fn output() -> Rectangle<i32, Logical> {
         Rectangle::new((0, 0).into(), (1280, 800).into())
@@ -1000,14 +1003,14 @@ mod tests {
     fn two_workspaces_have_no_strip() {
         let l = layout(output(), 32, &[0], 0, &[win(1, 0, 0, 32, 640, 400)]);
         assert!(l.thumbnails.is_empty());
-        assert!(thumbnail_decor(&l).is_empty());
+        assert!(thumbnail_decor(&l, BLUE).is_empty());
         assert_eq!(l.cards[0].rect.loc.y, 108);
     }
 
     #[test]
     fn thumbnail_decor_rounds_and_rings() {
         let l = layout(output(), 32, &[0, 1], 0, &[win(2, 1, 0, 32, 640, 400)]);
-        let decor = thumbnail_decor(&l);
+        let decor = thumbnail_decor(&l, BLUE);
         assert_eq!(decor.len(), 2);
         let (_, fills) = &decor[0];
         // Rounded: the top row of the first thumbnail is inset.
