@@ -2,7 +2,9 @@
 //!
 //! The shell publishes the Settings wallpaper URI out-of-band: it
 //! writes the URI to [`wallpaper_drop_path`] in the runtime dir, and
-//! the compositor re-reads that one-line file on every frame. No
+//! the compositor re-reads that file on every frame. An optional second
+//! line carries GNOME's `primary-color` (`#rrggbb`), the colour shown
+//! when there is no picture or it cannot be read, as in GNOME. No
 //! wallpaper state crosses the control protocol by design. Any
 //! failure — missing file, unparsable URI, undecodable image,
 //! oversized output — degrades to the solid clear, never an error.
@@ -69,6 +71,34 @@ struct Loaded {
 #[derive(Debug, Default)]
 pub struct Wallpaper {
     loaded: Vec<Loaded>,
+    /// Decodes running on worker threads, by URI and output size: a
+    /// 4K JPEG XL takes long enough to stall frames, so the clear
+    /// colour shows until the picture is ready (GNOME loads
+    /// backgrounds asynchronously too).
+    pending: Vec<Pending>,
+    /// `primary-color` from the drop file's second line.
+    color: Option<[f32; 3]>,
+}
+
+/// Parse `#rrggbb` (GNOME's `primary-color` format) into 0..1 floats.
+pub fn parse_color(text: &str) -> Option<[f32; 3]> {
+    let hex = text.trim().strip_prefix('#')?;
+    if hex.len() != 6 || !hex.is_ascii() {
+        return None;
+    }
+    let channel = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+    Some([
+        f32::from(channel(0)?) / 255.0,
+        f32::from(channel(2)?) / 255.0,
+        f32::from(channel(4)?) / 255.0,
+    ])
+}
+
+#[derive(Debug)]
+struct Pending {
+    uri: String,
+    size: Size<i32, Logical>,
+    result: std::sync::mpsc::Receiver<Option<Vec<u8>>>,
 }
 
 /// Most cached sizes at once; each slot holds at most
@@ -80,6 +110,69 @@ impl Wallpaper {
     /// Empty wallpaper (solid clear until a drop file appears).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Start (or collect) the background decode of `uri` at `output`.
+    fn poll_decode(&mut self, uri: &str, output: Size<i32, Logical>) {
+        let index = self
+            .pending
+            .iter()
+            .position(|p| p.uri == uri && p.size == output);
+        let Some(index) = index else {
+            // Forget decodes for pictures no longer wanted.
+            self.pending.retain(|p| p.uri == uri);
+            if self.pending.len() >= MAX_WALLPAPER_SLOTS {
+                return;
+            }
+            let (send, result) = std::sync::mpsc::channel();
+            let job = uri.to_owned();
+            let spawned = std::thread::Builder::new()
+                .name("roost-wallpaper".into())
+                .spawn(move || {
+                    let started = std::time::Instant::now();
+                    let pixels = load_wallpaper(&job, output);
+                    eprintln!(
+                        "roost-compositor: wallpaper {} for {}x{} in {} ms",
+                        if pixels.is_some() {
+                            "decoded"
+                        } else {
+                            "unreadable"
+                        },
+                        output.w,
+                        output.h,
+                        started.elapsed().as_millis()
+                    );
+                    let _ = send.send(pixels);
+                });
+            if spawned.is_ok() {
+                self.pending.push(Pending {
+                    uri: uri.to_owned(),
+                    size: output,
+                    result,
+                });
+            }
+            return;
+        };
+        let pixels = match self.pending[index].result.try_recv() {
+            Ok(pixels) => pixels,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
+        };
+        self.pending.remove(index);
+        if self.loaded.len() >= MAX_WALLPAPER_SLOTS {
+            self.loaded.remove(0);
+        }
+        self.loaded.push(Loaded {
+            uri: uri.to_owned(),
+            size: Some(output),
+            pixels,
+        });
+    }
+
+    /// GNOME's `primary-color` as last published, for the clear under
+    /// the picture (and instead of it when there is none).
+    pub fn color(&self) -> Option<[f32; 3]> {
+        self.color
     }
 
     /// Render element stretching the current image over a `w` x `h`
@@ -98,22 +191,19 @@ impl Wallpaper {
         if area == 0 || area > MAX_WALLPAPER_AREA {
             return None;
         }
-        let uri = std::fs::read_to_string(wallpaper_drop_path())
-            .map(|text| text.trim().to_owned())
-            .unwrap_or_default();
+        let text = std::fs::read_to_string(wallpaper_drop_path()).unwrap_or_default();
+        let mut lines = text.lines();
+        let uri = lines.next().unwrap_or_default().trim().to_owned();
+        self.color = lines.next().and_then(parse_color);
+        if uri.is_empty() {
+            return None;
+        }
         if !self
             .loaded
             .iter()
             .any(|loaded| loaded.uri == uri && loaded.size == Some(output))
         {
-            if self.loaded.len() >= MAX_WALLPAPER_SLOTS {
-                self.loaded.remove(0);
-            }
-            self.loaded.push(Loaded {
-                uri: uri.clone(),
-                size: if uri.is_empty() { None } else { Some(output) },
-                pixels: load_wallpaper(&uri, output),
-            });
+            self.poll_decode(&uri, output);
         }
         let loaded = self
             .loaded
@@ -151,44 +241,53 @@ fn load_wallpaper(uri: &str, output: Size<i32, Logical>) -> Option<Vec<u8>> {
     let path = wallpaper_uri_to_path(uri)?;
     let bytes = std::fs::read(&path).ok()?;
     // Bound the decode: refuse absurd files before pixels exist.
-    if bytes.len() > 64 * 1024 * 1024 {
+    if bytes.len() > 64 * 1024 * 1024 || output.w <= 0 || output.h <= 0 {
         return None;
     }
-    let image = image::load_from_memory(&bytes).ok()?.to_rgba8();
     let (w, h) = (output.w as u32, output.h as u32);
-    if w == 0 || h == 0 {
-        return None;
+    let cache = cache_path(&path, w, h);
+    let want = w as usize * h as usize * 4;
+    if let Some(cached) = cache.as_ref().and_then(|c| std::fs::read(c).ok()) {
+        if cached.len() == want {
+            return Some(cached);
+        }
     }
-    // Cover-crop: scale to fill, then center-crop the overflow, so
-    // the wallpaper covers the output with no bars and no distortion.
-    let cover = cover_crop(&image, w, h)?;
-    let rgba = cover.into_raw();
-    let mut argb = Vec::with_capacity(rgba.len());
-    let (chunks, _) = rgba.as_chunks::<4>();
-    for px in chunks {
-        argb.push(px[3]);
-        argb.push(px[2]);
-        argb.push(px[1]);
-        argb.push(px[0]);
+    let pixels = roost_wallpaper::decode_cover_argb(&bytes, w, h)?;
+    if let Some(cache) = cache {
+        let tmp = cache.with_extension("tmp");
+        if cache
+            .parent()
+            .is_some_and(|d| std::fs::create_dir_all(d).is_ok())
+            && std::fs::write(&tmp, &pixels).is_ok()
+        {
+            let _ = std::fs::rename(&tmp, &cache);
+        }
     }
-    Some(argb)
+    Some(pixels)
 }
 
-/// Scale `image` to fill `(w, h)` and center-crop the overflow, so
-/// the wallpaper covers the output with no bars and no distortion.
-fn cover_crop(image: &image::RgbaImage, w: u32, h: u32) -> Option<image::RgbaImage> {
-    use image::GenericImageView;
-    let (iw, ih) = image.dimensions();
-    if iw == 0 || ih == 0 || w == 0 || h == 0 {
+/// Where the scaled pixels of `path` at `w` x `h` are cached: GNOME's
+/// 4K JPEG XL defaults take seconds to decode, so only the first
+/// session after a wallpaper or output change pays for it. Keyed by
+/// path, size, modification time and output size.
+fn cache_path(path: &std::path::Path, w: u32, h: u32) -> Option<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    if cfg!(test) {
         return None;
     }
-    let scale = (w as f64 / iw as f64).max(h as f64 / ih as f64);
-    let sw = ((iw as f64 * scale).ceil() as u32).max(w);
-    let sh = ((ih as f64 * scale).ceil() as u32).max(h);
-    let scaled = image::imageops::resize(image, sw, sh, image::imageops::FilterType::Triangle);
-    let x = (sw - w) / 2;
-    let y = (sh - h) / 2;
-    Some(scaled.view(x, y, w, h).to_image())
+    let meta = std::fs::metadata(path).ok()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    meta.len().hash(&mut hasher);
+    meta.modified().ok()?.hash(&mut hasher);
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
+    Some(
+        base.join("roost")
+            .join("wallpaper")
+            .join(format!("{:016x}-{w}x{h}.argb", hasher.finish())),
+    )
 }
 
 #[cfg(test)]
@@ -257,17 +356,15 @@ mod tests {
     }
 
     #[test]
-    fn cover_crop_fills_exact_output_for_wide_and_tall_inputs() {
-        let wide = image::RgbaImage::new(160, 90);
-        let tall = image::RgbaImage::new(90, 160);
-        for source in [&wide, &tall] {
-            let out = cover_crop(source, 64, 64).expect("cover always fills");
-            assert_eq!(out.dimensions(), (64, 64));
-            let out = cover_crop(source, 96, 48).expect("cover always fills");
-            assert_eq!(out.dimensions(), (96, 48));
-        }
-        assert!(cover_crop(&wide, 0, 64).is_none());
-        assert!(cover_crop(&wide, 64, 0).is_none());
+    fn primary_colors_parse_like_gnome() {
+        assert_eq!(
+            parse_color("#023c88"),
+            Some([2.0 / 255.0, 60.0 / 255.0, 136.0 / 255.0])
+        );
+        assert_eq!(parse_color(" #FFFFFF\n"), Some([1.0, 1.0, 1.0]));
+        assert_eq!(parse_color("023c88"), None);
+        assert_eq!(parse_color("#023c8"), None);
+        assert_eq!(parse_color("#zz3c88"), None);
     }
 
     #[test]

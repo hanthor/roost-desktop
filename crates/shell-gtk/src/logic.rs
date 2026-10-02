@@ -464,3 +464,51 @@ mod input_tests {
         );
     }
 }
+
+/// The compositor's wallpaper drop file, from GNOME's background keys:
+/// the picture URI on the first line (the dark variant when the dark
+/// style is on and one is set; none when `picture-options` is "none"),
+/// GNOME's `primary-color` on the second.
+pub fn wallpaper_drop(
+    uri: &str,
+    uri_dark: &str,
+    prefer_dark: bool,
+    options: &str,
+    primary: &str,
+) -> String {
+    let picture = if options == "none" {
+        ""
+    } else if prefer_dark && !uri_dark.is_empty() {
+        uri_dark
+    } else {
+        uri
+    };
+    format!("{picture}\n{primary}\n")
+}
+
+#[cfg(test)]
+mod wallpaper_tests {
+    use super::wallpaper_drop;
+
+    #[test]
+    fn wallpaper_follows_gnome_background_keys() {
+        let l = "file:///usr/share/backgrounds/gnome/adwaita-l.jxl";
+        let d = "file:///usr/share/backgrounds/gnome/adwaita-d.jxl";
+        assert_eq!(
+            wallpaper_drop(l, d, false, "zoom", "#023c88"),
+            format!("{l}\n#023c88\n")
+        );
+        assert_eq!(
+            wallpaper_drop(l, d, true, "zoom", "#023c88"),
+            format!("{d}\n#023c88\n")
+        );
+        assert_eq!(
+            wallpaper_drop(l, "", true, "zoom", "#023c88"),
+            format!("{l}\n#023c88\n")
+        );
+        assert_eq!(
+            wallpaper_drop(l, d, false, "none", "#023c88"),
+            "\n#023c88\n"
+        );
+    }
+}
