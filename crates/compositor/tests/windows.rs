@@ -2621,3 +2621,37 @@ fn a_window_launched_from_the_overview_is_focused_when_it_closes() {
     assert_eq!(f.manager.model().focused(), Some(launched));
     drop((conn_c, queue_c, client_c, conn_d, queue_d, client_d));
 }
+
+#[test]
+fn shell_activation_deactivates_the_previous_window() {
+    // The shell's ActivateWindow sets the model's focus first, then the
+    // runtime applies it: the window that had focus must still hear it
+    // lost activation (one activated window, as under Mutter).
+    let mut f = two_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert!(f
+        .client_b
+        .configure_states
+        .last()
+        .is_some_and(|s| has_state(s, 4)));
+    let _ = f.manager.model_mut().set_focused(Some(f.id_a));
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert!(
+        f.client_a
+            .configure_states
+            .last()
+            .is_some_and(|s| has_state(s, 4)),
+        "the activated window hears it"
+    );
+    assert!(
+        f.client_b
+            .configure_states
+            .last()
+            .is_some_and(|s| !has_state(s, 4)),
+        "the previous window is deactivated"
+    );
+}
