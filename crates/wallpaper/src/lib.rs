@@ -28,10 +28,33 @@ pub fn decode_cover_argb(bytes: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
 /// adwaita-l.jxl and adwaita-d.jxl).
 pub fn decode(bytes: &[u8]) -> Option<image::DynamicImage> {
     if is_jxl(bytes) {
-        let decoder = jxl_oxide::integration::JxlDecoder::new(std::io::Cursor::new(bytes)).ok()?;
-        return image::DynamicImage::from_decoder(decoder).ok();
+        return decode_jxl(bytes);
     }
     image::load_from_memory(bytes).ok()
+}
+
+/// Decode JPEG XL converted to sRGB, as GNOME (mutter's colour
+/// management) shows it: GNOME 51's Adwaita wallpapers are Display P3,
+/// and read as sRGB unconverted their blues come out dull.
+fn decode_jxl(bytes: &[u8]) -> Option<image::DynamicImage> {
+    let mut jxl = jxl_oxide::JxlImage::builder()
+        .read(std::io::Cursor::new(bytes))
+        .ok()?;
+    jxl.request_color_encoding(jxl_oxide::EnumColourEncoding::srgb(
+        jxl_oxide::RenderingIntent::Relative,
+    ));
+    let render = jxl.render_frame(0).ok()?;
+    let mut stream = render.stream();
+    let (w, h, c) = (stream.width(), stream.height(), stream.channels());
+    let mut buf = vec![0u8; (w as usize) * (h as usize) * (c as usize)];
+    stream.write_to_buffer(&mut buf);
+    match c {
+        1 => image::GrayImage::from_raw(w, h, buf).map(image::DynamicImage::ImageLuma8),
+        2 => image::GrayAlphaImage::from_raw(w, h, buf).map(image::DynamicImage::ImageLumaA8),
+        3 => image::RgbImage::from_raw(w, h, buf).map(image::DynamicImage::ImageRgb8),
+        4 => image::RgbaImage::from_raw(w, h, buf).map(image::DynamicImage::ImageRgba8),
+        _ => None,
+    }
 }
 
 /// JPEG XL signatures: the bare codestream, or the ISO BMFF container.
@@ -57,6 +80,128 @@ pub fn cover_crop(image: &image::RgbaImage, w: u32, h: u32) -> Option<image::Rgb
     let x = (sw - w) / 2;
     let y = (sh - h) / 2;
     Some(scaled.view(x, y, w, h).to_image())
+}
+
+/// A drop shadow in CSS terms (`0 dy blur spread rgba(0, 0, 0, alpha)`).
+#[derive(Debug, Clone, Copy)]
+pub struct Shadow {
+    pub dy: f32,
+    pub blur: f32,
+    pub spread: f32,
+    pub alpha: f32,
+}
+
+/// A rendered overview card: premultiplied ARGB8888 (B, G, R, A in
+/// memory), with `margin` pixels of shadow around the card itself.
+#[derive(Debug, Clone)]
+pub struct Card {
+    pub pixels: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub margin: u32,
+}
+
+/// GNOME's overview workspace card (`.workspace-background`): the part
+/// of the desktop at `crop` (x, y, w, h in `full`'s pixels) scaled to
+/// `w` x `h`, its corners rounded to `radius`, over a soft shadow.
+/// `full` is the output's wallpaper as ARGB8888 (`full_w` x `full_h`);
+/// `None` fills the card with `color` (RGB), GNOME's primary-color.
+#[allow(clippy::too_many_arguments)]
+pub fn card(
+    full: Option<(&[u8], u32, u32)>,
+    crop: (u32, u32, u32, u32),
+    color: [u8; 3],
+    w: u32,
+    h: u32,
+    radius: f32,
+    shadow: Shadow,
+) -> Option<Card> {
+    if w == 0 || h == 0 {
+        return None;
+    }
+    // The card's own pixels, straight RGBA.
+    let content: image::RgbaImage = match full {
+        Some((argb, fw, fh)) if argb.len() >= (fw * fh * 4) as usize => {
+            let (cx, cy, cw, ch) = crop;
+            if cw == 0 || ch == 0 || cx + cw > fw || cy + ch > fh {
+                return None;
+            }
+            let mut rgba = image::RgbaImage::new(cw, ch);
+            for y in 0..ch {
+                for x in 0..cw {
+                    let i = (((cy + y) * fw + cx + x) * 4) as usize;
+                    rgba.put_pixel(x, y, image::Rgba([argb[i + 2], argb[i + 1], argb[i], 255]));
+                }
+            }
+            image::imageops::resize(&rgba, w, h, image::imageops::FilterType::Triangle)
+        }
+        _ => image::RgbaImage::from_pixel(w, h, image::Rgba([color[0], color[1], color[2], 255])),
+    };
+    let margin = (shadow.blur + shadow.spread + shadow.dy.abs()).ceil() as u32 + 1;
+    let (cw, ch) = (w + 2 * margin, h + 2 * margin);
+    // Shadow: the card's rounded shape grown by `spread`, moved by `dy`,
+    // blurred (CSS blur radius is twice the Gaussian sigma).
+    let mut mask = image::GrayImage::new(cw, ch);
+    let grow = shadow.spread;
+    for y in 0..ch {
+        for x in 0..cw {
+            let px = x as f32 + 0.5 - margin as f32;
+            let py = y as f32 + 0.5 - margin as f32 - shadow.dy;
+            let cov = coverage(
+                px + grow,
+                py + grow,
+                w as f32 + 2.0 * grow,
+                h as f32 + 2.0 * grow,
+                radius + grow,
+            );
+            mask.put_pixel(x, y, image::Luma([(cov * 255.0).round() as u8]));
+        }
+    }
+    if shadow.blur > 0.0 {
+        mask = image::imageops::blur(&mask, shadow.blur / 2.0);
+    }
+    let mut out = vec![0u8; (cw * ch * 4) as usize];
+    for y in 0..ch {
+        for x in 0..cw {
+            let sa = f32::from(mask.get_pixel(x, y)[0]) / 255.0 * shadow.alpha;
+            let (cx, cy) = (x as i64 - margin as i64, y as i64 - margin as i64);
+            let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0f32, 0.0f32, sa);
+            if cx >= 0 && cy >= 0 && (cx as u32) < w && (cy as u32) < h {
+                let cov = coverage(cx as f32 + 0.5, cy as f32 + 0.5, w as f32, h as f32, radius);
+                if cov > 0.0 {
+                    let p = content.get_pixel(cx as u32, cy as u32);
+                    // Card over shadow, premultiplied.
+                    r = f32::from(p[0]) / 255.0 * cov;
+                    g = f32::from(p[1]) / 255.0 * cov;
+                    b = f32::from(p[2]) / 255.0 * cov;
+                    a = cov + sa * (1.0 - cov);
+                }
+            }
+            let i = ((y * cw + x) * 4) as usize;
+            out[i] = (b * 255.0).round() as u8;
+            out[i + 1] = (g * 255.0).round() as u8;
+            out[i + 2] = (r * 255.0).round() as u8;
+            out[i + 3] = (a * 255.0).round() as u8;
+        }
+    }
+    Some(Card {
+        pixels: out,
+        width: cw,
+        height: ch,
+        margin,
+    })
+}
+
+/// How much of the pixel centered at (`x`, `y`) lies inside a `w` x `h`
+/// rectangle at the origin with corners rounded to `r`: 0..1, with a
+/// one-pixel antialiased edge.
+fn coverage(x: f32, y: f32, w: f32, h: f32, r: f32) -> f32 {
+    let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
+    // Distance outside the rounded rectangle (negative inside).
+    let qx = (x - w / 2.0).abs() - (w / 2.0 - r);
+    let qy = (y - h / 2.0).abs() - (h / 2.0 - r);
+    let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() + qx.max(qy).min(0.0) - r;
+    (0.5 - outside).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
@@ -94,6 +239,68 @@ mod tests {
         assert!(is_jxl(&[0xff, 0x0a, 0, 0]));
         assert!(is_jxl(b"\0\0\0\x0cJXL \r\n\x87\n...."));
         assert!(!is_jxl(b"\x89PNG\r\n"));
+    }
+
+    #[test]
+    fn cards_round_their_corners_over_a_shadow() {
+        let shadow = Shadow {
+            dy: 4.0,
+            blur: 16.0,
+            spread: 4.0,
+            alpha: 0.2,
+        };
+        let c = card(None, (0, 0, 0, 0), [10, 20, 30], 100, 60, 20.0, shadow).unwrap();
+        assert_eq!((c.width, c.height), (100 + 2 * c.margin, 60 + 2 * c.margin));
+        let px = |x: u32, y: u32| {
+            let i = ((y * c.width + x) * 4) as usize;
+            [
+                c.pixels[i],
+                c.pixels[i + 1],
+                c.pixels[i + 2],
+                c.pixels[i + 3],
+            ]
+        };
+        let m = c.margin;
+        // Center: the fill colour, opaque (BGRA in memory).
+        assert_eq!(px(m + 50, m + 30), [30, 20, 10, 255]);
+        // Card corner pixel: outside the 20px rounding, only shadow.
+        let corner = px(m, m);
+        assert!(corner[3] < 255 && corner[2] == 0, "{corner:?}");
+        // Mid edge, just outside the card: shadow, darker below (dy).
+        let above = px(m + 50, m - 2)[3];
+        let below = px(m + 50, m + 60 + 1)[3];
+        assert!(
+            below > above && below > 0,
+            "shadow {above} above, {below} below"
+        );
+    }
+
+    #[test]
+    fn cards_crop_the_desktop_they_show() {
+        // A 4x4 wallpaper whose bottom half is white: cropping rows 2..4
+        // gives an all-white card.
+        let mut argb = vec![0u8; 4 * 4 * 4];
+        for i in 8..16 {
+            argb[i * 4..i * 4 + 4].copy_from_slice(&[255, 255, 255, 255]);
+        }
+        let shadow = Shadow {
+            dy: 0.0,
+            blur: 0.0,
+            spread: 0.0,
+            alpha: 0.0,
+        };
+        let c = card(
+            Some((&argb, 4, 4)),
+            (0, 2, 4, 2),
+            [0, 0, 0],
+            4,
+            2,
+            0.0,
+            shadow,
+        )
+        .unwrap();
+        let i = ((c.margin * c.width + c.margin) * 4) as usize;
+        assert_eq!(&c.pixels[i..i + 4], &[255, 255, 255, 255]);
     }
 
     #[test]

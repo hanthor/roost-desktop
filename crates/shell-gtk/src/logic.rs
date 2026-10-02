@@ -431,16 +431,16 @@ pub fn rank_apps<'a>(
         .collect()
 }
 
-/// GNOME's default dash favorites, used when the user pinned none;
+/// GNOME 51's default dash favorites (gnome-shell's `favorite-apps`
+/// default as GNOME 51 ships it), used when the schema is missing;
 /// only those installed are shown.
 pub const DEFAULT_FAVORITES: &[&str] = &[
-    "org.gnome.Nautilus.desktop",
-    "firefox.desktop",
     "org.mozilla.firefox.desktop",
+    "org.gnome.Calendar.desktop",
+    "org.gnome.Nautilus.desktop",
     "org.gnome.Software.desktop",
-    "org.gnome.Console.desktop",
-    "org.gnome.Terminal.desktop",
-    "org.gnome.Settings.desktop",
+    "org.gnome.TextEditor.desktop",
+    "org.gnome.Calculator.desktop",
 ];
 
 #[cfg(test)]

@@ -61,6 +61,17 @@ if [ -d "$REF/share" ]; then
     cp -r "$REF/share/fonts" "$XDG_DATA_HOME/"
     fc-cache "$XDG_DATA_HOME/fonts" >/dev/null 2>&1 || true
     cp -r "$REF/share/icons" "$WORK/gnome51/"
+    mkdir -p "$XDG_DATA_HOME/applications"
+    cp "$REF"/share/applications/*.desktop "$XDG_DATA_HOME/applications/" 2>/dev/null || true
+    # GNOME Shell's own keys (dash favorites) where the host lacks them.
+    if [ -d "$REF/share/glib-2.0/schemas" ] &&
+        ! gsettings list-schemas | grep -qx org.gnome.shell; then
+        mkdir -p "$WORK/schemas"
+        cp /usr/share/glib-2.0/schemas/*.xml /usr/share/glib-2.0/schemas/*.override \
+            "$REF"/share/glib-2.0/schemas/*.xml "$WORK/schemas/" 2>/dev/null || true
+        glib-compile-schemas "$WORK/schemas" && GSETTINGS_SCHEMA_DIR="$WORK/schemas"
+        export GSETTINGS_SCHEMA_DIR
+    fi
     XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}:$WORK/gnome51"
     export XDG_DATA_DIRS
 fi
@@ -90,6 +101,7 @@ for _ in $(seq 1 20); do grep -q ready "$WORK/stubs.log" 2>/dev/null && break; s
 gsettings set org.gnome.desktop.background primary-color '#023c88'
 # GNOME's defaults where the host's schemas may differ (Ubuntu: Yaru).
 gsettings set org.gnome.desktop.interface icon-theme Adwaita
+gsettings set org.gnome.shell favorite-apps "['org.mozilla.firefox.desktop', 'org.gnome.Calendar.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Software.desktop', 'org.gnome.TextEditor.desktop', 'org.gnome.Calculator.desktop']"
 gsettings set org.gnome.desktop.background picture-options zoom
 for variant in l d; do
     key=picture-uri

@@ -17,6 +17,13 @@ touch /root/.local/share/gnome-shell/lock-warning-shown
 mkdir -p /out/share/icons /out/share/fonts
 cp -r /usr/share/icons/Adwaita /usr/share/icons/hicolor /out/share/icons/
 cp -r /usr/share/fonts/adwaita-sans-fonts /usr/share/fonts/adwaita-mono-fonts /out/share/fonts/
+# GNOME Shell's settings schema, for hosts without gnome-shell.
+mkdir -p /out/share/glib-2.0/schemas
+cp /usr/share/glib-2.0/schemas/org.gnome.shell.gschema.xml /out/share/glib-2.0/schemas/
+# The dash's favorites that GNOME 51's default list finds installed.
+mkdir -p /out/share/applications
+cp /usr/share/applications/org.gnome.Nautilus.desktop /usr/share/applications/org.gnome.TextEditor.desktop \
+    /usr/share/applications/org.gnome.Calculator.desktop /out/share/applications/
 # GNOME 51's default wallpapers, for the Roost capture to show too.
 cp /usr/share/backgrounds/gnome/adwaita-l.jxl /usr/share/backgrounds/gnome/adwaita-d.jxl /out/
 mkdir -p /tmp/backlight

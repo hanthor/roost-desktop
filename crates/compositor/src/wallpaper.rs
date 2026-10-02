@@ -17,7 +17,7 @@ use smithay::backend::renderer::element::memory::{
 };
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::GlesRenderer;
-use smithay::utils::{Buffer, Logical, Physical, Point, Rectangle, Size, Transform};
+use smithay::utils::{Logical, Physical, Point, Rectangle, Size, Transform};
 
 /// Drop-file name in the runtime dir carrying the wallpaper URI.
 pub const WALLPAPER_FILE: &str = "roost-wallpaper";
@@ -61,7 +61,21 @@ struct Loaded {
     size: Option<Size<i32, Logical>>,
     /// ARGB8888 pixels at `size`, ready to upload.
     pixels: Option<Vec<u8>>,
+    /// The uploadable buffer, kept so its texture is uploaded once, not
+    /// every frame.
+    buffer: Option<MemoryRenderBuffer>,
 }
+
+/// One rendered overview card (GNOME's workspace background), cached by
+/// what it shows and its size.
+struct CardCache {
+    key: (String, Size<i32, Logical>, i32, i32, Option<[u8; 3]>),
+    buffer: MemoryRenderBuffer,
+    margin: i32,
+}
+
+/// Most overview cards cached at once (active and neighbor sizes).
+const MAX_CARDS: usize = 4;
 
 /// Session wallpaper: polls the drop file, decodes on change. One
 /// cache slot per output size (multi-monitor): each output's
@@ -78,6 +92,14 @@ pub struct Wallpaper {
     pending: Vec<Pending>,
     /// `primary-color` from the drop file's second line.
     color: Option<[f32; 3]>,
+    /// Overview cards.
+    cards: Vec<CardCache>,
+}
+
+impl std::fmt::Debug for CardCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CardCache").field("key", &self.key).finish()
+    }
 }
 
 /// Parse `#rrggbb` (GNOME's `primary-color` format) into 0..1 floats.
@@ -162,10 +184,21 @@ impl Wallpaper {
         if self.loaded.len() >= MAX_WALLPAPER_SLOTS {
             self.loaded.remove(0);
         }
+        let buffer = pixels.as_ref().map(|pixels| {
+            MemoryRenderBuffer::from_slice(
+                pixels,
+                Fourcc::Argb8888,
+                (output.w, output.h),
+                1,
+                Transform::Normal,
+                None,
+            )
+        });
         self.loaded.push(Loaded {
             uri: uri.to_owned(),
             size: Some(output),
             pixels,
+            buffer,
         });
     }
 
@@ -187,6 +220,28 @@ impl Wallpaper {
         h: i32,
     ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
         let output = Size::<i32, Logical>::from((w, h));
+        let uri = self.refresh(output)?;
+        let loaded = self
+            .loaded
+            .iter()
+            .find(|loaded| loaded.uri == uri && loaded.size == Some(output))?;
+        let buffer = loaded.buffer.as_ref()?;
+        let size = loaded.size?;
+        MemoryRenderBufferRenderElement::from_buffer(
+            renderer,
+            Point::<f64, Physical>::from((0.0, 0.0)),
+            buffer,
+            None,
+            None,
+            Some(size),
+            Kind::Unspecified,
+        )
+        .ok()
+    }
+
+    /// Re-read the drop file and start or collect the decode for
+    /// `output`; the current URI when there is a picture to show.
+    fn refresh(&mut self, output: Size<i32, Logical>) -> Option<String> {
         let area = output.w.max(0) as u64 * output.h.max(0) as u64;
         if area == 0 || area > MAX_WALLPAPER_AREA {
             return None;
@@ -205,29 +260,88 @@ impl Wallpaper {
         {
             self.poll_decode(&uri, output);
         }
-        let loaded = self
-            .loaded
-            .iter()
-            .find(|loaded| loaded.uri == uri && loaded.size == Some(output))?;
-        let pixels = loaded.pixels.as_ref()?;
-        let size = loaded.size?;
-        let buffer = MemoryRenderBuffer::from_slice(
-            pixels,
-            Fourcc::Argb8888,
-            (size.w, size.h),
-            1,
-            Transform::Normal,
-            Some(vec![Rectangle::from_size(Size::<i32, Buffer>::from((
-                size.w, size.h,
-            )))]),
-        );
+        Some(uri)
+    }
+
+    /// GNOME's overview workspace card (`.workspace-background`): the
+    /// desktop below the top bar (`work_top` pixels down an `output`-sized
+    /// screen) scaled into `card`, corners rounded to 30px and a
+    /// `0 4px 16px 4px` shadow at 20%, both scaled with the card as GNOME
+    /// scales them. Without a picture it shows `primary-color`.
+    pub fn card_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        output: Size<i32, Logical>,
+        work_top: i32,
+        card: Rectangle<i32, Physical>,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        if card.size.w <= 0 || card.size.h <= 0 {
+            return None;
+        }
+        let uri = self.refresh(output).unwrap_or_default();
+        let color = self.color.map(|[r, g, b]| {
+            [
+                (r * 255.0).round() as u8,
+                (g * 255.0).round() as u8,
+                (b * 255.0).round() as u8,
+            ]
+        });
+        let key = (uri.clone(), output, card.size.w, card.size.h, color);
+        if !self.cards.iter().any(|c| c.key == key) {
+            let full = self
+                .loaded
+                .iter()
+                .find(|l| l.uri == uri && l.size == Some(output))
+                .and_then(|l| l.pixels.as_deref());
+            // Still decoding: draw nothing new yet rather than cache a
+            // colour card the picture will replace.
+            if !uri.is_empty() && full.is_none() {
+                return None;
+            }
+            let scale = f64::from(card.size.w) / f64::from(output.w.max(1));
+            let s = scale as f32;
+            let top = work_top.clamp(0, output.h - 1) as u32;
+            let rendered = roost_wallpaper::card(
+                full.map(|p| (p, output.w as u32, output.h as u32)),
+                (0, top, output.w as u32, output.h as u32 - top),
+                color.unwrap_or([0x14, 0x17, 0x1c]),
+                card.size.w as u32,
+                card.size.h as u32,
+                30.0 * s,
+                roost_wallpaper::Shadow {
+                    dy: 4.0 * s,
+                    blur: 16.0 * s,
+                    spread: 4.0 * s,
+                    alpha: 0.2,
+                },
+            )?;
+            if self.cards.len() >= MAX_CARDS {
+                self.cards.remove(0);
+            }
+            self.cards.push(CardCache {
+                key: key.clone(),
+                buffer: MemoryRenderBuffer::from_slice(
+                    &rendered.pixels,
+                    Fourcc::Argb8888,
+                    (rendered.width as i32, rendered.height as i32),
+                    1,
+                    Transform::Normal,
+                    None,
+                ),
+                margin: rendered.margin as i32,
+            });
+        }
+        let cached = self.cards.iter().find(|c| c.key == key)?;
         MemoryRenderBufferRenderElement::from_buffer(
             renderer,
-            Point::<f64, Physical>::from((0.0, 0.0)),
-            &buffer,
+            Point::<f64, Physical>::from((
+                f64::from(card.loc.x - cached.margin),
+                f64::from(card.loc.y - cached.margin),
+            )),
+            &cached.buffer,
             None,
             None,
-            Some(size),
+            None,
             Kind::Unspecified,
         )
         .ok()
@@ -277,6 +391,9 @@ fn cache_path(path: &std::path::Path, w: u32, h: u32) -> Option<PathBuf> {
     }
     let meta = std::fs::metadata(path).ok()?;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    // Bumped whenever decoding changes what pixels come out (2: JPEG XL
+    // converted to sRGB), so no session keeps showing stale ones.
+    2u32.hash(&mut hasher);
     path.hash(&mut hasher);
     meta.len().hash(&mut hasher);
     meta.modified().ok()?.hash(&mut hasher);

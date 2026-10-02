@@ -19,12 +19,13 @@ function dump(actor, depth, out) {
         return;
     const style = actor instanceof St.Widget ? actor.get_style_class_name() : null;
     const name = actor.get_name?.() ?? null;
-    if (style || name) {
+    const type = actor.constructor.$gtype.name;
+    if (style || name || /WindowPreview/.test(type)) {
         const [x, y] = actor.get_transformed_position();
         const [w, h] = actor.get_transformed_size();
         if (w > 0 && h > 0) {
             const entry = {
-                class: style, name, type: actor.constructor.$gtype.name,
+                class: style, name, type,
                 rect: [Math.round(x), Math.round(y), Math.round(w), Math.round(h)],
             };
             if (actor instanceof St.Label || actor instanceof St.Button)
@@ -84,9 +85,11 @@ export async function run() {
     Main.overview.show();
     await Scripting.sleep(1500);
     await shot('04-overview-empty');
-    Main.overview.showApps();
+    // What a click on the dash's Show Apps button does.
+    Main.overview.dash.showAppsButton.checked = true;
     await Scripting.sleep(1500);
     await shot('05-app-grid');
+    Main.overview.dash.showAppsButton.checked = false;
     Main.overview.hide();
     await Scripting.sleep(1500);
 
