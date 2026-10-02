@@ -45,6 +45,10 @@
 #   G-SETTINGS-CLOCK GNOME's clock-show-seconds key changes the panel clock
 #   G-SETTINGS-IDLE GNOME's idle-delay and lock-enabled keys set the
 #                  compositor's idle lock live (#63)
+#   G-SCREENSHOT   org.gnome.Shell.Screenshot saves the screen as a PNG
+#                  the right way up (#61)
+#   G-SCREENSHOT-BUTTON the quick-settings button saves one under
+#                  Pictures/Screenshots and lists "Screenshot captured"
 #   G-POWER-MENU   the power button opens GNOME's menu (Suspend,
 #                  Restart…, Power Off…, Log Out…) (#62)
 #   G-POWER-DIALOG Power Off… opens the 60 s end-session dialog, and
@@ -86,6 +90,8 @@ ARTIFACTS="$(cd "$ARTIFACTS" && pwd)"
 LOG="$ARTIFACTS/nested.log"
 ASSERTIONS="$ARTIFACTS/assertions.txt"
 : >"$ASSERTIONS"
+XDG_PICTURES_DIR="$ARTIFACTS/pictures"
+export XDG_PICTURES_DIR
 XDG_STATE_HOME="$ARTIFACTS/state"
 XDG_DATA_HOME="$ARTIFACTS/data"
 export XDG_STATE_HOME XDG_DATA_HOME
@@ -739,6 +745,42 @@ gsettings set org.gnome.desktop.session idle-delay 300
 cstate '.idle_timeout_ms == 300000' "idle 300" ||
     fail G-SETTINGS-IDLE "the idle lock did not follow back to 300 s"
 pass G-SETTINGS-IDLE "GNOME's idle-delay and lock-enabled set the idle lock live"
+
+# Screenshots (#61): GNOME Shell's interface, as the portal calls it.
+SHOT="$ARTIFACTS/screenshot.png"
+reply="$(gdbus call --session --dest org.gnome.Shell.Screenshot \
+    --object-path /org/gnome/Shell/Screenshot \
+    --method org.gnome.Shell.Screenshot.Screenshot false false "$SHOT" 2>&1)" ||
+    fail G-SCREENSHOT "Screenshot call failed: $reply"
+case "$reply" in
+    "(true, '$SHOT')") ;;
+    *) fail G-SCREENSHOT "unexpected reply: $reply" ;;
+esac
+dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$SHOT")"
+[ "$dims" = "$WIDTH,$HEIGHT" ] || fail G-SCREENSHOT "screenshot is $dims, not $WIDTH,$HEIGHT"
+# The top bar is black and the desktop below is not: right way up.
+[ "$(px "$SHOT" 300 5)" = "0 0 0" ] || fail G-SCREENSHOT "top of the screenshot is not the black bar (flipped?)"
+[ "$(px "$SHOT" 5 $((HEIGHT - 5)))" != "0 0 0" ] || fail G-SCREENSHOT "bottom of the screenshot is black (flipped?)"
+pass G-SCREENSHOT "org.gnome.Shell.Screenshot saves the screen the right way up"
+
+open_qs
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-shot.json" 20 \
+    --press "Take Screenshot" || fail G-SCREENSHOT-BUTTON "could not press Take Screenshot"
+end=$(($(date +%s) + 15))
+until [ -n "$(find "$XDG_PICTURES_DIR/Screenshots" -name 'Screenshot From *.png' 2>/dev/null)" ] ||
+    [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+[ -n "$(find "$XDG_PICTURES_DIR/Screenshots" -name 'Screenshot From *.png' 2>/dev/null)" ] ||
+    fail G-SCREENSHOT-BUTTON "no Pictures/Screenshots/Screenshot From *.png"
+sleep 1
+xdotool mousemove --window "$WID" $((WIDTH / 2)) 16 click 1
+sleep 2
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-shot-list.json" 20 ||
+    fail G-SCREENSHOT-BUTTON "accessibility dump failed"
+showing "$ARTIFACTS/a11y-shot-list.json" "Screenshot captured" ||
+    fail G-SCREENSHOT-BUTTON "no 'Screenshot captured' notification"
+xdotool key Escape
+sleep 1
+pass G-SCREENSHOT-BUTTON "the button saves to Pictures/Screenshots and notifies"
 
 # Power (#62), against the logind stub (restarted: G-QS-ABSENT stopped
 # it). The proof runs the shell as a hardware session for the full menu.

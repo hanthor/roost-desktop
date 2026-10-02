@@ -3099,6 +3099,7 @@ dependencies = [
  "image",
  "libc",
  "libloading",
+ "png",
  "rand 0.10.3",
  "roost-greeter",
  "roost-shell-control",
@@ -3112,6 +3113,7 @@ dependencies = [
  "wayland-protocols",
  "wayland-protocols-misc",
  "wayland-protocols-wlr",
+ "zbus",
 ]
 
 [[package]]

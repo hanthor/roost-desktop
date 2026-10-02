@@ -268,6 +268,51 @@ fn quick_settings_popover(
     top.append(&spacer);
     top.append(&lock);
     top.append(&power);
+    {
+        // GNOME's Screenshot button, through org.gnome.Shell.Screenshot
+        // (#61): close the menu first so it is not in the shot.
+        let (popover, notify) = (popover.clone(), notify.clone());
+        screenshot.connect_clicked(move |_| {
+            popover.popdown();
+            let notify = notify.clone();
+            glib::timeout_add_local_once(Duration::from_millis(400), move || {
+                gio::bus_get(
+                    gio::BusType::Session,
+                    None::<&gio::Cancellable>,
+                    move |conn| {
+                        let Ok(conn) = conn else {
+                            return;
+                        };
+                        conn.call(
+                            Some("org.gnome.Shell.Screenshot"),
+                            "/org/gnome/Shell/Screenshot",
+                            "org.gnome.Shell.Screenshot",
+                            "Screenshot",
+                            Some(&(false, true, "").to_variant()),
+                            glib::VariantTy::new("(bs)").ok(),
+                            gio::DBusCallFlags::NONE,
+                            10_000,
+                            None::<&gio::Cancellable>,
+                            move |reply| match reply {
+                                Ok(reply) => {
+                                    let path = reply
+                                        .try_child_value(1)
+                                        .and_then(|v| v.get::<String>())
+                                        .unwrap_or_default();
+                                    let name = std::path::Path::new(&path)
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().into_owned())
+                                        .unwrap_or(path);
+                                    notify.post("Screenshot", "Screenshot captured", &name);
+                                }
+                                Err(e) => eprintln!("roost-shell-gtk: screenshot failed: {e}"),
+                            },
+                        );
+                    },
+                );
+            });
+        });
+    }
     settings_btn.connect_clicked(|_| {
         let _ = gio::AppInfo::launch_default_for_uri("settings://", None::<&gio::AppLaunchContext>)
             .or_else(|_| {
