@@ -3140,6 +3140,7 @@ dependencies = [
  "gtk4-layer-shell",
  "jiff",
  "libadwaita",
+ "libc",
  "roost-shell-host",
 ]
 
