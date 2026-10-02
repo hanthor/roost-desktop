@@ -964,6 +964,10 @@ impl Runtime {
             for (action, time, mode) in self.manager.take_accelerators_fired() {
                 self.control.queue_accelerator(action, time, mode);
             }
+            for (index, count) in self.manager.take_workspace_popups() {
+                self.control
+                    .queue_message(roost_shell_control::Message::WorkspacePopup { index, count });
+            }
             return;
         }
         let ManagerInput::Key {
@@ -1785,7 +1789,7 @@ impl Runtime {
         // Header-bar right clicks: GNOME's window menu, drawn by the shell.
         for (window, x, y) in self.manager.take_menu_requests() {
             self.control
-                .queue_window_menu(roost_shell_control::Message::WindowMenu {
+                .queue_message(roost_shell_control::Message::WindowMenu {
                     window,
                     x,
                     y,

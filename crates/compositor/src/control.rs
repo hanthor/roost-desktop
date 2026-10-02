@@ -732,6 +732,7 @@ impl<'a> Session<'a> {
             | Message::OverviewPreviews { .. }
             | Message::AcceleratorActivated { .. }
             | Message::WindowMenu { .. }
+            | Message::WorkspacePopup { .. }
             | Message::Error { .. } => {
                 let _ = self.conn.write_frame(&Message::Error {
                     kind: ErrorKind::UnknownCommand,
@@ -772,6 +773,7 @@ fn message_kind(msg: &Message) -> &'static str {
         Message::OverviewPreviews { .. } => "OverviewPreviews",
         Message::AcceleratorActivated { .. } => "AcceleratorActivated",
         Message::WindowMenu { .. } => "WindowMenu",
+        Message::WorkspacePopup { .. } => "WorkspacePopup",
     }
 }
 
@@ -1267,11 +1269,10 @@ impl ControlHub {
         self.locked.set(locked);
     }
 
-    /// Queue one Alt-Tab drive event; the next [`poll`](Self::poll)
-    /// broadcasts it to every live session as [`Message::Switcher`].
-    /// Ask the shell for GNOME's window menu on the next poll.
-    pub fn queue_window_menu(&mut self, menu: Message) {
-        self.menu_queue.push(menu);
+    /// Send a compositor-to-shell message (window menu, workspace popup)
+    /// on the next poll.
+    pub fn queue_message(&mut self, message: Message) {
+        self.menu_queue.push(message);
     }
 
     /// Report a grabbed accelerator's press to the shell on the next poll.
@@ -1279,6 +1280,8 @@ impl ControlHub {
         self.accelerator_queue.push((action, time, mode));
     }
 
+    /// Queue one Alt-Tab drive event; the next [`poll`](Self::poll)
+    /// broadcasts it to every live session as [`Message::Switcher`].
     pub fn queue_switcher(&mut self, action: SwitcherAction) {
         self.switcher_queue.push(action);
     }

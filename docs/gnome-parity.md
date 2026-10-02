@@ -57,6 +57,7 @@ scripts/lib/roost-parity-compare.py target/gnome-reference target/roost-parity t
 | 12-osd-volume, 12b-osd-label, 12c-osd-overdrive | the OSD gnome-settings-daemon shows through ShowOSD |
 | 13-window-menu | the window menu on the focused window's header bar |
 | 14-screenshot-ui | the screenshot UI on Print |
+| 15-workspace-popup | the workspace switcher popup on Super+Page_Down |
 | 11b-unlock-prompt | the unlock prompt, set to what a real session shows: the user's name and GDM's Password question (the stubbed display manager has no PAM conversation or AccountsService) |
 
 Both sides run the same services: the stubs serve power-profiles and
@@ -108,6 +109,7 @@ Whole screens, with the same windows on both sides:
 | OSD: volume, a layout label, volume past 100% | not built | 0.4% each |
 | Window menu (header-bar right click) | not built | 0.2% |
 | Screenshot UI (Print) | not built | 0.3% of the screen, 2.9% of the panel |
+| Workspace switcher popup | not built | 0.1% |
 
 Roost's capture shows GNOME's installed apps, not the host's: each host
 entry is hidden by a `Hidden` copy in the user's application directory
