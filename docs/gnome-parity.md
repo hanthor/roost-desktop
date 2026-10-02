@@ -87,8 +87,8 @@ Share of pixels visibly off (more than 24 levels) in each element crop:
 | Login: the overview at start | not built | 0.3% |
 | Desktop and wallpaper | 96.1% | 0.1% |
 | Top bar | 35.2% | 0.7% (the clock's minutes) |
-| Quick settings | 68.4% | 3.4% |
-| Power Mode menu | not built | 4.0% |
+| Quick settings | 68.4% | 1.2% (text rendering) |
+| Power Mode menu | not built | 0.5% |
 | Date menu | 16.5% | 0.3% |
 | Notification banner and list card | 11.3% | matches; the rest is what lies behind |
 | Overview, empty (cards, search, dash) | 53.5% | 0.4% |
