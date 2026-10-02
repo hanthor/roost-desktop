@@ -201,6 +201,15 @@ pub struct WindowManager {
     keyboard: Option<KeyboardHandle<State>>,
     pointer: Option<PointerHandle<State>>,
     pointer_pos: Point<f64, Logical>,
+    /// org.gnome.Shell accelerator grabs (GrabAccelerators).
+    accelerators: Vec<roost_shell_control::Accelerator>,
+    /// Keycodes whose press fired an accelerator: their release is
+    /// swallowed too.
+    accel_held: Vec<u32>,
+    /// Fired accelerators `(action, time, mode)`, drained by the runtime.
+    accel_fired: Vec<(u32, u32, u32)>,
+    /// Input is going to the session-lock surface.
+    lock_input_active: bool,
     /// Super held (either side) for workspace keybindings.
     super_held: bool,
     /// Key repeat as last set: rate (keys/s, 0 off) and delay (ms).
@@ -257,6 +266,10 @@ impl WindowManager {
             keyboard,
             pointer,
             pointer_pos: (0.0, 0.0).into(),
+            accelerators: Vec::new(),
+            accel_held: Vec::new(),
+            accel_fired: Vec::new(),
+            lock_input_active: false,
             swallowed_button: None,
             focus_awaits_surface: None,
             grab: None,
@@ -1545,7 +1558,9 @@ impl WindowManager {
                 pressed,
                 time,
             } => {
+                self.lock_input_active = true;
                 self.keyboard_key(state, keycode, pressed, time);
+                self.lock_input_active = false;
             }
             ManagerInput::Motion { pos, time } => {
                 self.pointer_pos = pos;
@@ -1605,12 +1620,40 @@ impl WindowManager {
         let Some(keyboard) = self.keyboard.clone() else {
             return false;
         };
+        // A grabbed accelerator's release follows its press: swallowed.
+        if !pressed {
+            if let Some(i) = self.accel_held.iter().position(|k| *k == keycode) {
+                self.accel_held.remove(i);
+                return true;
+            }
+        }
+        let mode = if self.lock_input_active {
+            roost_shell_control::MODE_LOCK_SCREEN
+        } else if self.overview_open {
+            roost_shell_control::MODE_OVERVIEW
+        } else {
+            roost_shell_control::MODE_NORMAL
+        };
+        let mode_mask = if self.lock_input_active {
+            roost_shell_control::MODE_LOCK_SCREEN | roost_shell_control::MODE_UNLOCK_SCREEN
+        } else {
+            mode
+        };
+        let grabs: Vec<roost_shell_control::Accelerator> = if pressed {
+            self.accelerators
+                .iter()
+                .filter(|a| a.modes & mode_mask != 0)
+                .copied()
+                .collect()
+        } else {
+            Vec::new()
+        };
         // Smithay's keyboard input takes XKB codespace (evdev + 8):
         // it feeds the code straight to xkbcommon and sends
         // `raw - 8` on the wire, so passing our evdev tables through
         // unchanged would mistranslate every key and panic on codes
         // below 8 (Escape, digits) once a client holds keyboard focus.
-        keyboard.input::<(), _>(
+        let intercepted = keyboard.input::<u32, _>(
             state,
             keycode.saturating_add(XKB_X11_OFFSET).into(),
             if pressed {
@@ -1620,9 +1663,41 @@ impl WindowManager {
             },
             SERIAL_COUNTER.next_serial(),
             time,
-            |_, _, _| FilterResult::Forward,
+            |_, modifiers, handle| {
+                if grabs.is_empty() {
+                    return FilterResult::Forward;
+                }
+                let mods = accelerator_mods(modifiers);
+                let syms: Vec<u32> = handle
+                    .raw_syms()
+                    .iter()
+                    .map(|k| k.raw())
+                    .chain(std::iter::once(handle.modified_sym().raw()))
+                    .collect();
+                match grabs
+                    .iter()
+                    .find(|a| a.mods == mods && syms.contains(&a.keysym))
+                {
+                    Some(a) => FilterResult::Intercept(a.action),
+                    None => FilterResult::Forward,
+                }
+            },
         );
+        if let Some(action) = intercepted {
+            self.accel_held.push(keycode);
+            self.accel_fired.push((action, time, mode));
+        }
         true
+    }
+
+    /// Replace the accelerator grabs (org.gnome.Shell GrabAccelerators).
+    pub fn set_accelerators(&mut self, accelerators: Vec<roost_shell_control::Accelerator>) {
+        self.accelerators = accelerators;
+    }
+
+    /// Accelerators fired since the last call: `(action, time, mode)`.
+    pub fn take_accelerators_fired(&mut self) -> Vec<(u32, u32, u32)> {
+        std::mem::take(&mut self.accel_fired)
     }
 
     /// Move a window by a delta, keeping it on its workspace. A manual
@@ -3394,4 +3469,22 @@ fn committed_size(
             .geometry
     });
     Some(geometry.map(|g| g.size).unwrap_or(buffer))
+}
+
+/// The control schema's modifier bits for xkb's current modifiers.
+fn accelerator_mods(m: &smithay::input::keyboard::ModifiersState) -> u32 {
+    let mut bits = 0;
+    if m.shift {
+        bits |= roost_shell_control::MOD_SHIFT;
+    }
+    if m.ctrl {
+        bits |= roost_shell_control::MOD_CTRL;
+    }
+    if m.alt {
+        bits |= roost_shell_control::MOD_ALT;
+    }
+    if m.logo {
+        bits |= roost_shell_control::MOD_LOGO;
+    }
+    bits
 }

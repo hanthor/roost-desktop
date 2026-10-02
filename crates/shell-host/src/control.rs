@@ -125,6 +125,15 @@ pub enum Handled {
         /// Revision now held.
         to_revision: u64,
     },
+    /// A grabbed accelerator was pressed (org.gnome.Shell).
+    Accelerator {
+        /// The grab's action id.
+        action: u32,
+        /// The key event's time in milliseconds.
+        time: u32,
+        /// The action mode it fired in.
+        mode: u32,
+    },
     /// Compositor answered one command; match `id` against the value
     /// [`ControlClient::send_activation`] returned.
     CommandResult {
@@ -457,6 +466,20 @@ impl ControlClient {
         Ok(id)
     }
 
+    /// Replace the compositor's accelerator grabs (org.gnome.Shell's
+    /// GrabAccelerators), the full set each time. Returns the request id.
+    pub fn set_accelerators(
+        &mut self,
+        accelerators: Vec<roost_shell_control::Accelerator>,
+    ) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::SetAccelerators { accelerators },
+        })?;
+        Ok(id)
+    }
+
     /// Offer the lock screen's password (ext-session-lock prompt). The
     /// compositor verifies it off its loop (PAM or greetd) and answers
     /// `Applied` once the session is unlocked or `Denied` when the
@@ -601,6 +624,11 @@ impl ControlClient {
                     count: self.environment.len(),
                 })
             }
+            Message::AcceleratorActivated { action, time, mode } => {
+                // A grabbed key combination: the shell signals its D-Bus
+                // owner. UI state; never touches the model.
+                Ok(Handled::Accelerator { action, time, mode })
+            }
             Message::Overview { open } => {
                 // 002 R1: overview intent is UI state, not model truth —
                 // never touches revision, `needs_snapshot`, or the window
@@ -713,6 +741,7 @@ fn message_label(msg: &Message) -> &'static str {
         Message::Outputs { .. } => "Outputs",
         Message::Environment { .. } => "Environment",
         Message::OverviewPreviews { .. } => "OverviewPreviews",
+        Message::AcceleratorActivated { .. } => "AcceleratorActivated",
     }
 }
 

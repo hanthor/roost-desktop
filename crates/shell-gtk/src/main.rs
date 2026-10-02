@@ -186,6 +186,12 @@ impl shell_dbus::ShellActions for GnomeShellDbus {
             .as_ref()
             .is_some_and(|c| c.model().is_overview_open())
     }
+
+    fn set_accelerators(&self, accelerators: Vec<roost_shell_control::Accelerator>) {
+        if let Some(control) = self.shell.borrow_mut().control.as_mut() {
+            let _ = control.set_accelerators(accelerators);
+        }
+    }
 }
 
 fn panel_button(child: &impl IsA<gtk::Widget>, label: &str) -> gtk::Button {
@@ -1034,7 +1040,7 @@ fn build(app: &adw::Application) {
     let switcher_ui = switcher::SwitcherUi::new(app.upcast_ref(), apps.clone());
     // org.gnome.Shell for the rest of GNOME: the OSD gnome-settings-daemon
     // shows for volume and brightness keys, search and the app grid.
-    shell_dbus::start(Rc::new(GnomeShellDbus {
+    let gnome_shell = shell_dbus::start(Rc::new(GnomeShellDbus {
         osd: osd::OsdUi::new(app.upcast_ref()),
         overview: overview_ui.clone(),
         shell: shell.clone(),
@@ -1196,11 +1202,15 @@ fn build(app: &adw::Application) {
         glib::timeout_add_local(Duration::from_millis(16), move || {
             let mut shell = shell.borrow_mut();
             let mut results = Vec::new();
+            let mut accelerators = Vec::new();
             if let Some(control) = shell.control.as_mut() {
                 loop {
                     match control.poll() {
                         Ok(Handled::Gap { .. }) => {
                             let _ = control.request_snapshot();
+                        }
+                        Ok(Handled::Accelerator { action, time, mode }) => {
+                            accelerators.push((action, time, mode));
                         }
                         Ok(Handled::CommandResult { id, status }) => results.push((
                             id,
@@ -1226,6 +1236,9 @@ fn build(app: &adw::Application) {
                 .is_some_and(|c| c.model().is_overview_open());
             drop(shell);
             lock_ui.sync(locked);
+            for (action, time, mode) in accelerators {
+                gnome_shell.accelerator_activated(action, time, mode);
+            }
             for (id, applied) in results {
                 lock_ui.command_result(id, applied);
             }
