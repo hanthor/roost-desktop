@@ -80,6 +80,43 @@ pub struct OverviewLayout {
     pub previews: Vec<Preview>,
     /// The active preview under the pointer, grown (see [`grow_hovered`]).
     pub hovered: Option<u64>,
+    /// GNOME's workspace thumbnails strip, left to right (empty below
+    /// [`THUMBNAILS_MIN_WORKSPACES`]).
+    pub thumbnails: Vec<WorkspaceCard>,
+}
+
+/// GNOME shows the thumbnails strip once dynamic workspaces number more
+/// than two (`NUM_WORKSPACES_THRESHOLD`, workspaceThumbnail.js).
+pub const THUMBNAILS_MIN_WORKSPACES: usize = 3;
+/// Thumbnail size as a fraction of the work area (`MAX_THUMBNAIL_SCALE`).
+pub const THUMBNAIL_STRIP_SCALE: f64 = 0.034;
+/// The strip's top edge as a fraction of the output height (below the
+/// search entry: y 96 on 1280x800).
+pub const THUMBNAILS_TOP: f64 = 0.12;
+/// Padding inside the strip and spacing between thumbnails
+/// (`.workspace-thumbnails { padding: 6px; spacing: 6px }`).
+pub const THUMBNAILS_PAD: i32 = 6;
+/// The active thumbnail's indicator border (`.workspace-thumbnail-indicator
+/// { border: 3px; border-radius: 8px }`).
+pub const THUMBNAIL_INDICATOR_BORDER: i32 = 3;
+/// Corner radius of a thumbnail (`.workspace-thumbnail { border-radius: 4px }`).
+pub const THUMBNAIL_RADIUS: i32 = 4;
+/// Corner radius of the active indicator.
+pub const THUMBNAIL_INDICATOR_RADIUS: i32 = 8;
+
+/// How far the strip pushes the workspace card down (and shrinks it):
+/// the strip's height plus the controls spacing.
+fn thumbnails_offset(work_h: i32) -> i32 {
+    thumbnail_size_for(1, work_h).1 + 2 * THUMBNAILS_PAD + THUMBNAILS_PAD
+}
+
+/// A thumbnail's size for an output `w` wide over a `work_h` work area
+/// (`w` only matters for the width).
+fn thumbnail_size_for(w: i32, work_h: i32) -> (i32, i32) {
+    (
+        (f64::from(w) * THUMBNAIL_STRIP_SCALE).floor() as i32,
+        (f64::from(work_h) * THUMBNAIL_STRIP_SCALE).floor() as i32,
+    )
 }
 
 /// GNOME's hover growth (`WINDOW_ACTIVE_SIZE_INC`): 5px each side.
@@ -124,12 +161,17 @@ fn card_rect(
     output: Rectangle<i32, Logical>,
     work_top: i32,
     offset: i32,
+    shift: i32,
 ) -> Rectangle<i32, Logical> {
     let work_h = (output.size.h - work_top).max(1);
-    let w = (f64::from(output.size.w) * CARD_SCALE).round() as i32;
-    let h = (f64::from(work_h) * CARD_SCALE).round() as i32;
+    let full_w = (f64::from(output.size.w) * CARD_SCALE).round();
+    let full_h = (f64::from(work_h) * CARD_SCALE).round();
+    // The thumbnails strip takes `shift` off the top; the card keeps its
+    // aspect (GNOME 51: 922x553 becomes 849x509 at y 152).
+    let h = (full_h as i32 - shift).max(1);
+    let w = (full_w * f64::from(h) / full_h.max(1.0)).round() as i32;
     let x = output.loc.x + (output.size.w - w) / 2;
-    let y = output.loc.y + (f64::from(output.size.h) * CARD_TOP).round() as i32;
+    let y = output.loc.y + (f64::from(output.size.h) * CARD_TOP).round() as i32 + shift;
     if offset == 0 {
         return Rectangle::new((x, y).into(), (w, h).into());
     }
@@ -394,11 +436,17 @@ pub fn layout(
         (index.checked_sub(1), -1),
         (Some(index + 1).filter(|i| *i < workspaces.len()), 1),
     ];
-    let active_card = card_rect(output, work_top, 0);
+    let work_h = (output.size.h - work_top).max(1);
+    let strip = workspaces.len() >= THUMBNAILS_MIN_WORKSPACES;
+    let shift = if strip { thumbnails_offset(work_h) } else { 0 };
+    if strip {
+        thumbnails(&mut out, output, work_top, &workspaces, active, windows);
+    }
+    let active_card = card_rect(output, work_top, 0, shift);
     for (slot, offset) in neighbors {
         let Some(slot) = slot else { continue };
         let workspace = workspaces[slot];
-        let rect = card_rect(output, work_top, offset);
+        let rect = card_rect(output, work_top, offset, shift);
         let scale = f64::from(rect.size.w) / f64::from(output.size.w.max(1));
         out.cards.push(WorkspaceCard {
             workspace,
@@ -464,6 +512,123 @@ pub fn layout(
         });
     }
     out
+}
+
+/// GNOME's thumbnails strip (workspaceThumbnail.js `ThumbnailsBox`):
+/// one 0.034-scale thumbnail per shown workspace, 6px apart, centered
+/// below the search entry, windows in place on each (43x26 at y 102 on
+/// 1280x800). Miniature windows go in as inactive previews.
+fn thumbnails(
+    out: &mut OverviewLayout,
+    output: Rectangle<i32, Logical>,
+    work_top: i32,
+    workspaces: &[u32],
+    active: u32,
+    windows: &[OverviewWindow],
+) {
+    let work_h = (output.size.h - work_top).max(1);
+    let (w, h) = thumbnail_size_for(output.size.w, work_h);
+    let n = workspaces.len() as i32;
+    let total = n * w + (n - 1) * THUMBNAILS_PAD;
+    let start = output.loc.x + (output.size.w - total + 1) / 2;
+    let top =
+        output.loc.y + (f64::from(output.size.h) * THUMBNAILS_TOP).round() as i32 + THUMBNAILS_PAD;
+    let scale = f64::from(w) / f64::from(output.size.w.max(1));
+    for (i, &workspace) in workspaces.iter().enumerate() {
+        let rect = Rectangle::new(
+            (start + i as i32 * (w + THUMBNAILS_PAD), top).into(),
+            (w, h).into(),
+        );
+        out.thumbnails.push(WorkspaceCard {
+            workspace,
+            rect,
+            active: workspace == active,
+        });
+        for win in windows.iter().filter(|w| w.workspace == workspace) {
+            let x =
+                rect.loc.x + (f64::from(win.geometry.loc.x - output.loc.x) * scale).round() as i32;
+            let y = rect.loc.y
+                + (f64::from(win.geometry.loc.y - output.loc.y - work_top) * scale).round() as i32;
+            out.previews.push(Preview {
+                id: win.id,
+                rect: Rectangle::new(
+                    (x, y).into(),
+                    (
+                        ((f64::from(win.geometry.size.w) * scale).round() as i32).max(1),
+                        ((f64::from(win.geometry.size.h) * scale).round() as i32).max(1),
+                    )
+                        .into(),
+                ),
+                scale,
+                active: false,
+            });
+        }
+    }
+}
+
+/// Rows of a rounded rectangle as `(y, x0, x1)` spans (x1 exclusive):
+/// solid fills built from rectangles, as the renderer draws decor.
+pub fn rounded_rows(rect: Rectangle<i32, Logical>, radius: i32) -> Vec<(i32, i32, i32)> {
+    let r = radius.min(rect.size.w / 2).min(rect.size.h / 2).max(0);
+    (0..rect.size.h)
+        .map(|row| {
+            let from_edge = row.min(rect.size.h - 1 - row);
+            let inset = if from_edge < r {
+                let d = f64::from(r) - f64::from(from_edge) - 0.5;
+                (f64::from(r) - (f64::from(r * r) - d * d).max(0.0).sqrt()).round() as i32
+            } else {
+                0
+            };
+            (
+                rect.loc.y + row,
+                rect.loc.x + inset,
+                rect.loc.x + rect.size.w - inset,
+            )
+        })
+        .collect()
+}
+
+/// One solid color (RGBA, 0..1) over a set of rectangles.
+pub type DecorFill = ([f32; 4], Vec<Rectangle<i32, Logical>>);
+
+/// The strip as solid fills, bottom to top: each thumbnail's background
+/// (rounded), then the active indicator's ring. RGBA, 0..1.
+pub fn thumbnail_decor(layout: &OverviewLayout) -> Vec<DecorFill> {
+    // `.workspace-thumbnail` background on the dark overview (#46464e)
+    // and the default accent (#3584e4).
+    const FILL: [f32; 4] = [70.0 / 255.0, 70.0 / 255.0, 78.0 / 255.0, 1.0];
+    const ACCENT: [f32; 4] = [53.0 / 255.0, 132.0 / 255.0, 228.0 / 255.0, 1.0];
+    if layout.thumbnails.is_empty() {
+        return Vec::new();
+    }
+    let span = |(y, x0, x1): (i32, i32, i32)| Rectangle::new((x0, y).into(), (x1 - x0, 1).into());
+    let fills = layout
+        .thumbnails
+        .iter()
+        .flat_map(|t| rounded_rows(t.rect, THUMBNAIL_RADIUS))
+        .filter(|(_, x0, x1)| x1 > x0)
+        .map(span)
+        .collect();
+    let mut ring = Vec::new();
+    if let Some(t) = layout.thumbnails.iter().find(|t| t.active) {
+        let b = THUMBNAIL_INDICATOR_BORDER;
+        let outer = Rectangle::new(
+            (t.rect.loc.x - b, t.rect.loc.y - b).into(),
+            (t.rect.size.w + 2 * b, t.rect.size.h + 2 * b).into(),
+        );
+        let inner = rounded_rows(t.rect, (THUMBNAIL_INDICATOR_RADIUS - b).max(0));
+        for (y, x0, x1) in rounded_rows(outer, THUMBNAIL_INDICATOR_RADIUS) {
+            match inner.iter().find(|(iy, _, _)| *iy == y) {
+                Some(&(_, i0, i1)) => {
+                    ring.push(span((y, x0, i0)));
+                    ring.push(span((y, i1, x1)));
+                }
+                None => ring.push(span((y, x0, x1))),
+            }
+        }
+        ring.retain(|r| r.size.w > 0);
+    }
+    vec![(FILL, fills), (ACCENT, ring)]
 }
 
 /// Thumbnail scale of the work area in the app grid state.
@@ -549,6 +714,13 @@ pub fn hit(layout: &OverviewLayout, pos: Point<f64, Logical>) -> OverviewHit {
         .find(|p| p.active && p.rect.to_f64().contains(pos))
     {
         return OverviewHit::Window(p.id);
+    }
+    if let Some(t) = layout
+        .thumbnails
+        .iter()
+        .find(|t| t.rect.to_f64().contains(pos))
+    {
+        return OverviewHit::Workspace(t.workspace);
     }
     if let Some(card) = layout
         .cards
@@ -677,7 +849,70 @@ mod tests {
         // Only the edges of the neighbors are on screen.
         assert!(left.loc.x + left.size.w > 0);
         assert!(right.loc.x < 1280);
-        assert_eq!(l.previews.iter().filter(|p| !p.active).count(), 2);
+        // Two on the neighbor cards, two more in the thumbnails strip.
+        assert_eq!(l.previews.iter().filter(|p| !p.active).count(), 4);
+    }
+
+    #[test]
+    fn thumbnails_strip_matches_gnome_51() {
+        // GNOME Shell 51 at 1280x800, three workspaces, a window moved
+        // to the second: 43x26 thumbnails at x 570/619/668, y 102; the
+        // card shrinks to 849x509 at y 152 and the right peek starts
+        // at x 1153.
+        let l = layout(
+            output(),
+            32,
+            &[0, 1],
+            0,
+            &[win(1, 0, 320, 182, 640, 420), win(2, 1, 320, 182, 640, 420)],
+        );
+        let thumbs: Vec<_> = l.thumbnails.iter().map(|t| (t.workspace, t.rect)).collect();
+        assert_eq!(
+            thumbs,
+            vec![
+                (0, Rectangle::new((570, 102).into(), (43, 26).into())),
+                (1, Rectangle::new((619, 102).into(), (43, 26).into())),
+                (2, Rectangle::new((668, 102).into(), (43, 26).into())),
+            ]
+        );
+        assert!(l.thumbnails[0].active);
+        let card = l.cards[0].rect;
+        assert_eq!((card.loc.y, card.size.w, card.size.h), (152, 849, 509));
+        let right = l.cards.iter().find(|c| c.workspace == 1).unwrap().rect;
+        assert!((1152..=1154).contains(&right.loc.x), "{right:?}");
+        // A press on a thumbnail switches to its workspace.
+        assert_eq!(hit(&l, (690.0, 110.0).into()), OverviewHit::Workspace(2));
+    }
+
+    #[test]
+    fn two_workspaces_have_no_strip() {
+        let l = layout(output(), 32, &[0], 0, &[win(1, 0, 0, 32, 640, 400)]);
+        assert!(l.thumbnails.is_empty());
+        assert!(thumbnail_decor(&l).is_empty());
+        assert_eq!(l.cards[0].rect.loc.y, 108);
+    }
+
+    #[test]
+    fn thumbnail_decor_rounds_and_rings() {
+        let l = layout(output(), 32, &[0, 1], 0, &[win(2, 1, 0, 32, 640, 400)]);
+        let decor = thumbnail_decor(&l);
+        assert_eq!(decor.len(), 2);
+        let (_, fills) = &decor[0];
+        // Rounded: the top row of the first thumbnail is inset.
+        let top = fills
+            .iter()
+            .find(|r| r.loc.y == 102 && r.loc.x < 600)
+            .unwrap();
+        assert!(top.loc.x > 570 && top.size.w < 43);
+        // The ring spans the indicator (thumbnail grown 3px a side) and
+        // leaves the thumbnail itself uncovered.
+        let (_, ring) = &decor[1];
+        let min_x = ring.iter().map(|r| r.loc.x).min().unwrap();
+        let max_x = ring.iter().map(|r| r.loc.x + r.size.w).max().unwrap();
+        assert_eq!((min_x, max_x), (567, 616));
+        assert!(!ring
+            .iter()
+            .any(|r| r.loc.y == 115 && r.loc.x < 600 && r.loc.x + r.size.w > 580));
     }
 
     #[test]

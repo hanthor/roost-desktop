@@ -270,6 +270,21 @@ export async function run() {
     Main.screenshotUI.close(true);
     await Scripting.sleep(800);
 
+    // Three workspaces (the focused window moved to the second, the view
+    // staying on the first): the overview's workspace thumbnails.
+    {
+        const win = global.display.focus_window;
+        if (win) {
+            win.change_workspace_by_index(1, false);
+            await Scripting.sleep(500);
+            Main.overview.show();
+            await Scripting.sleep(1500);
+            await shot('16-overview-workspaces');
+            Main.overview.hide();
+            await Scripting.sleep(1000);
+        }
+    }
+
     // The lock screen: the curtain with the clock, then the unlock prompt.
     if (Main.screenShield) {
         Main.screenShield.lock(false);
