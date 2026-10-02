@@ -303,6 +303,8 @@ pub enum WindowAction {
     MoveToWorkspaceRight,
     /// Always on Top, on or off.
     ToggleAbove,
+    /// Always on Visible Workspace (on every workspace), on or off.
+    ToggleSticky,
 }
 
 /// Grabbed accelerators held at once.
@@ -504,6 +506,9 @@ pub enum Message {
         maximized: bool,
         /// Whether it is kept above other windows (Always on Top).
         above: bool,
+        /// Whether it shows on every workspace (Always on Visible
+        /// Workspace).
+        sticky: bool,
         /// Whether there is a workspace to its left, and to its right.
         workspace_left: bool,
         workspace_right: bool,

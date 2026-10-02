@@ -1791,6 +1791,7 @@ impl Runtime {
                     y,
                     maximized: self.manager.is_maximized(window),
                     above: self.manager.is_above(window),
+                    sticky: self.manager.is_sticky(window),
                     workspace_left: self.manager.workspace_left_of(window),
                     workspace_right: true,
                 });
