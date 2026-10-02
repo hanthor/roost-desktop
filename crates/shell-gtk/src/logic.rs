@@ -895,3 +895,255 @@ mod wallpaper_tests {
         );
     }
 }
+
+/// One event from org.gnome.Shell.CalendarServer: its id (source uid,
+/// a newline, then the component's), summary, and Unix start and end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CalEvent {
+    pub id: String,
+    pub summary: String,
+    pub start: i64,
+    pub end: i64,
+}
+
+/// Whether an event overlaps an interval (calendar.js
+/// `_eventOverlapsInterval`; zero-length events count).
+pub fn event_overlaps(e0: i64, e1: i64, i0: i64, i1: i64) -> bool {
+    if e0 >= i0 && e1 < i1 {
+        return true;
+    }
+    !(e1 <= i0 || i1 <= e0)
+}
+
+/// A day's bounds as Unix seconds in `tz`: its midnight and the next.
+pub fn day_bounds(day: jiff::civil::Date, tz: &jiff::tz::TimeZone) -> (i64, i64) {
+    let at = |d: jiff::civil::Date| {
+        d.at(0, 0, 0, 0)
+            .to_zoned(tz.clone())
+            .map(|z| z.timestamp().as_second())
+            .unwrap_or(0)
+    };
+    let next = day.tomorrow().unwrap_or(day);
+    (at(day), at(next))
+}
+
+/// Merge EventsAddedOrUpdated: an occurrence of a recurring event
+/// (an id not ending in a newline) first drops every earlier
+/// occurrence of its parent, once per batch, as GNOME does.
+pub fn events_added(
+    events: &mut std::collections::BTreeMap<String, CalEvent>,
+    added: Vec<CalEvent>,
+) {
+    let mut handled: Vec<String> = Vec::new();
+    for event in added {
+        if !event.id.ends_with('\n') {
+            let parent = match event.id.rfind('\n') {
+                Some(i) => event.id[..=i].to_owned(),
+                None => String::new(),
+            };
+            if !handled.contains(&parent) {
+                events_remove_matching(events, &parent);
+                handled.push(parent);
+            }
+        }
+        events.insert(event.id.clone(), event);
+    }
+}
+
+/// Drop every event whose id starts with `prefix`; whether any went.
+pub fn events_remove_matching(
+    events: &mut std::collections::BTreeMap<String, CalEvent>,
+    prefix: &str,
+) -> bool {
+    let before = events.len();
+    events.retain(|id, _| !id.starts_with(prefix));
+    events.len() != before
+}
+
+/// The events overlapping `[begin, end)`, in GNOME's order: by start,
+/// or by end for events running in from before the interval.
+pub fn events_between<'a>(
+    events: impl IntoIterator<Item = &'a CalEvent>,
+    begin: i64,
+    end: i64,
+) -> Vec<CalEvent> {
+    let mut out: Vec<CalEvent> = events
+        .into_iter()
+        .filter(|e| event_overlaps(e.start, e.end, begin, end))
+        .cloned()
+        .collect();
+    let key = |e: &CalEvent| {
+        if e.start < begin && e.end <= end {
+            e.end
+        } else {
+            e.start
+        }
+    };
+    out.sort_by_key(key);
+    out
+}
+
+/// The events card's title for the selected day (dateMenu.js
+/// `_updateTitle`).
+pub fn events_title(selected: jiff::civil::Date, today: jiff::civil::Date) -> String {
+    if selected == today {
+        "Today".to_owned()
+    } else if today.yesterday().ok() == Some(selected) {
+        "Yesterday".to_owned()
+    } else if today.tomorrow().ok() == Some(selected) {
+        "Tomorrow".to_owned()
+    } else if selected.year() == today.year() {
+        selected.strftime("%B %-d").to_string()
+    } else {
+        selected.strftime("%B %-d %Y").to_string()
+    }
+}
+
+/// An event's time line under its summary on `day` (dateMenu.js
+/// `_formatEventTime`): "All Day", a time span, or dates and times for
+/// events running past the day.
+pub fn event_time_text(
+    event: &CalEvent,
+    day: jiff::civil::Date,
+    tz: &jiff::tz::TimeZone,
+    format: ClockFormat,
+    this_year: i16,
+) -> String {
+    const EN: char = '\u{2013}';
+    let (day_start, day_end) = day_bounds(day, tz);
+    let local = |t: i64| {
+        jiff::Timestamp::from_second(t)
+            .unwrap_or(jiff::Timestamp::UNIX_EPOCH)
+            .to_zoned(tz.clone())
+            .datetime()
+    };
+    let time_only = |t: i64| {
+        let fmt = match format {
+            ClockFormat::TwentyFourHour => "%H:%M",
+            ClockFormat::TwelveHour => "%l:%M %p",
+        };
+        local(t).strftime(fmt).to_string()
+    };
+    if event.start == day_start && event.end == day_end {
+        return "All Day".to_owned();
+    }
+    let (start_time, end_time) = (time_only(event.start), time_only(event.end));
+    if event.start < day_start || event.end > day_end {
+        let midnight =
+            |d: jiff::civil::DateTime| d.hour() == 0 && d.minute() == 0 && d.second() == 0;
+        let start = local(event.start);
+        let mut end = local(event.end);
+        let (starts_midnight, ends_midnight) = (midnight(start), midnight(end));
+        if ends_midnight {
+            end = end.checked_sub(jiff::Span::new().days(1)).unwrap_or(end);
+        }
+        let fmt = if start.year() == this_year && end.year() == this_year {
+            "%m/%d"
+        } else {
+            "%x"
+        };
+        let (sd, ed) = (
+            start.strftime(fmt).to_string(),
+            end.strftime(fmt).to_string(),
+        );
+        if starts_midnight && ends_midnight {
+            format!("{sd} {EN} {ed}")
+        } else {
+            format!("{sd} {start_time} {EN} {ed} {end_time}")
+        }
+    } else {
+        format!("{start_time} {EN} {end_time}")
+    }
+}
+
+#[cfg(test)]
+mod event_tests {
+    use super::*;
+    use jiff::civil::date;
+    use std::collections::BTreeMap;
+
+    fn tz() -> jiff::tz::TimeZone {
+        jiff::tz::TimeZone::UTC
+    }
+
+    fn ev(id: &str, start: i64, end: i64) -> CalEvent {
+        CalEvent {
+            id: id.into(),
+            summary: id.trim().into(),
+            start,
+            end,
+        }
+    }
+
+    #[test]
+    fn titles_follow_gnome_51() {
+        let today = date(2026, 10, 2);
+        assert_eq!(events_title(today, today), "Today");
+        assert_eq!(events_title(date(2026, 10, 1), today), "Yesterday");
+        assert_eq!(events_title(date(2026, 10, 3), today), "Tomorrow");
+        assert_eq!(events_title(date(2026, 10, 9), today), "October 9");
+        assert_eq!(events_title(date(2027, 1, 9), today), "January 9 2027");
+    }
+
+    #[test]
+    fn event_times_follow_gnome_51() {
+        let day = date(2026, 10, 2);
+        let (d0, d1) = day_bounds(day, &tz());
+        let h = 3600;
+        let all_day = ev("a\n", d0, d1);
+        assert_eq!(
+            event_time_text(&all_day, day, &tz(), ClockFormat::TwentyFourHour, 2026),
+            "All Day"
+        );
+        let meeting = ev("b\n", d0 + 10 * h, d0 + 10 * h + 1800);
+        assert_eq!(
+            event_time_text(&meeting, day, &tz(), ClockFormat::TwentyFourHour, 2026),
+            "10:00 \u{2013} 10:30"
+        );
+        assert_eq!(
+            event_time_text(&meeting, day, &tz(), ClockFormat::TwelveHour, 2026),
+            "10:00 AM \u{2013} 10:30 AM"
+        );
+        // Three whole days through this one: dates only, the end day
+        // inclusive.
+        let trip = ev("c\n", d0 - 24 * h, d1 + 24 * h);
+        assert_eq!(
+            event_time_text(&trip, day, &tz(), ClockFormat::TwentyFourHour, 2026),
+            "10/01 \u{2013} 10/03"
+        );
+        // Overnight: dates and times.
+        let night = ev("d\n", d0 - 2 * h, d0 + 6 * h);
+        assert_eq!(
+            event_time_text(&night, day, &tz(), ClockFormat::TwentyFourHour, 2026),
+            "10/01 22:00 \u{2013} 10/02 06:00"
+        );
+    }
+
+    #[test]
+    fn overlap_sort_and_recurrence_follow_gnome() {
+        let (d0, d1) = day_bounds(date(2026, 10, 2), &tz());
+        let mut events = BTreeMap::new();
+        events_added(
+            &mut events,
+            vec![
+                ev("src\nlate\n", d0 + 7200, d0 + 9000),
+                ev("src\nearly\n", d0 + 3600, d0 + 5400),
+                ev("src\nyesterday\n", d0 - 7200, d0 - 3600),
+                ev("src\nzero\n", d0 + 600, d0 + 600),
+            ],
+        );
+        let today: Vec<_> = events_between(events.values(), d0, d1)
+            .into_iter()
+            .map(|e| e.summary)
+            .collect();
+        assert_eq!(today, ["src\nzero", "src\nearly", "src\nlate"]);
+        // A recurring occurrence replaces its parent's earlier ones.
+        events_added(&mut events, vec![ev("src\nrec\n1", d0, d0 + 60)]);
+        events_added(&mut events, vec![ev("src\nrec\n2", d0 + 120, d0 + 180)]);
+        assert!(!events.contains_key("src\nrec\n1"));
+        assert!(events.contains_key("src\nrec\n2"));
+        // A source going away takes its events.
+        assert!(events_remove_matching(&mut events, "src\n"));
+        assert!(events.is_empty());
+    }
+}

@@ -8,6 +8,8 @@
 # on a private session bus with the AT-SPI accessibility bus, then:
 #   G-PANEL     the panel maps (frame differs from the bare session)
 #   A11Y-PANEL  the panel controls are exposed to screen readers by name
+#   G-CAL-EVENTS the calendar server's events for today list in the date
+#               menu's events card, timed as GNOME formats them
 #   G-CAL-OPEN  clicking the clock opens the calendar popover (xdg popup
 #               on the layer surface, #88)
 #   G-QS-OPEN   clicking the system indicators opens quick settings
@@ -196,7 +198,9 @@ COMPOSITOR_PID=""
 STUBS_PID=""
 SYSBUS_PID=""
 ACCEL_PID=""
+CAL_PID=""
 cleanup() {
+    if [ -n "$CAL_PID" ]; then kill "$CAL_PID" 2>/dev/null || true; fi
     if [ -n "$ACCEL_PID" ]; then kill "$ACCEL_PID" 2>/dev/null || true; fi
     if [ -n "$COMPOSITOR_PID" ]; then kill "$COMPOSITOR_PID" 2>/dev/null || true; fi
     if [ -n "$OWNED_XVFB" ]; then kill "$OWNED_XVFB" 2>/dev/null || true; fi
@@ -281,6 +285,16 @@ for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/stubs.log" 2>/dev/null && bre
 "$PY" "$ROOT/scripts/lib/roost-search-provider-stub.py" "$SEARCH_MARKER" >"$ARTIFACTS/provider.log" 2>&1 &
 PROVIDER_PID=$!
 for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/provider.log" 2>/dev/null && break; sleep 0.5; done
+# gnome-shell's calendar server, with today's events seeded.
+cat >"$ARTIFACTS/events.json" <<'EVENTS'
+[{"summary": "Design review", "day": 0, "start": "10:00", "end": "10:30"},
+ {"summary": "Release day", "day": 0},
+ {"summary": "Retro", "day": 1, "start": "15:00", "end": "16:00"}]
+EVENTS
+"$PY" "$ROOT/scripts/lib/roost-calendar-server-stub.py" "$ARTIFACTS/events.json" \
+    >"$ARTIFACTS/calendar-server.log" 2>&1 &
+CAL_PID=$!
+for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/calendar-server.log" 2>/dev/null && break; sleep 0.5; done
 
 # The full power menu needs a hardware session; logind is the stub.
 ROOST_SESSION_KIND=hardware
@@ -369,6 +383,14 @@ scrot "$ARTIFACTS/02-calendar.png" >/dev/null
 showing "$ARTIFACTS/a11y-calendar.json" "No Notifications" ||
     fail G-CAL-OPEN "calendar popover contents not showing"
 pass G-CAL-OPEN "clock opens the calendar and notification list"
+for name in "Design review" "Release day" "All Day" "10:00 – 10:30"; do
+    showing "$ARTIFACTS/a11y-calendar.json" "$name" ||
+        fail G-CAL-EVENTS "the events card does not show \"$name\""
+done
+if showing "$ARTIFACTS/a11y-calendar.json" "Retro"; then
+    fail G-CAL-EVENTS "tomorrow's event shows under today"
+fi
+pass G-CAL-EVENTS "today's calendar-server events list in the events card, timed as GNOME does"
 xdotool key Escape
 sleep 1
 

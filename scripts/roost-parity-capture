@@ -121,6 +121,11 @@ export DBUS_SYSTEM_BUS_ADDRESS
 "$PY" "$ROOT/scripts/lib/roost-service-stubs.py" "$WORK/backlight/none" >"$WORK/stubs.log" 2>&1 &
 PIDS="$PIDS $!"
 for _ in $(seq 1 20); do grep -q ready "$WORK/stubs.log" 2>/dev/null && break; sleep 0.5; done
+# GNOME's reference has its calendar server with the default local
+# calendar and no events: so does this session.
+"$PY" "$ROOT/scripts/lib/roost-calendar-server-stub.py" >"$WORK/calendar.log" 2>&1 &
+PIDS="$PIDS $!"
+for _ in $(seq 1 20); do grep -q ready "$WORK/calendar.log" 2>/dev/null && break; sleep 0.5; done
 
 # GNOME 51's defaults: the reference run exports its wallpapers.
 gsettings set org.gnome.desktop.background primary-color '#023c88'
