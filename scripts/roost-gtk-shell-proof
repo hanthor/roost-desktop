@@ -1056,8 +1056,9 @@ scrot "$ARTIFACTS/24f-workspace-popup.png" >/dev/null
 # shellcheck disable=SC2046
 set -- $(px "$ARTIFACTS/24f-workspace-popup.png" $((WIDTH / 2 - 20)) $((HEIGHT - 59 - 28)))
 xdotool key super+Page_Up
-[ "${1:-0}" -lt 70 ] && [ "${2:-0}" -lt 70 ] && [ "${3:-0}" -lt 75 ] ||
+if [ "${1:-0}" -ge 70 ] || [ "${2:-0}" -ge 70 ] || [ "${3:-0}" -ge 75 ]; then
     fail G-WS-POPUP "no switcher pill above the bottom edge (pixel ${1:-?} ${2:-?} ${3:-?})"
+fi
 pass G-WS-POPUP "a workspace key shows GNOME's workspace switcher popup"
 sleep 1
 
@@ -1078,10 +1079,11 @@ cstate '.overview_open and (.thumbnails | length) == 3' "strip" ||
 sleep 1.5
 scrot "$ARTIFACTS/24g-workspace-thumbnails.png" >/dev/null
 ring="$(jq -r '.thumbnails[] | select(.active) | .rect | "\(.[0] - 2) \(.[1] + .[3] / 2)"' "$CSTATE")"
-# shellcheck disable=SC2086
+# shellcheck disable=SC2046,SC2086
 set -- $(px "$ARTIFACTS/24g-workspace-thumbnails.png" $ring)
-[ "${3:-0}" -gt 180 ] && [ "${1:-255}" -lt 100 ] ||
+if [ "${3:-0}" -le 180 ] || [ "${1:-255}" -ge 100 ]; then
     fail G-WS-THUMBS "no accent indicator around the active thumbnail (pixel ${1:-?} ${2:-?} ${3:-?})"
+fi
 target="$(jq -r ".thumbnails[] | select(.workspace == $home_ws + 1) | .rect | \"\(.[0] + .[2] / 2) \(.[1] + .[3] / 2)\"" "$CSTATE")"
 # shellcheck disable=SC2086
 xdotool mousemove --window "$WID" $target click 1
@@ -1159,8 +1161,9 @@ reply="$(gdbus call --session --dest org.gnome.Shell.Screenshot \
 [ "$reply" = "(true, '$WSHOT')" ] || fail G-SCREENSHOT-WINDOW "unexpected reply: $reply"
 dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$WSHOT")"
 want="$(jq -r '.focused as $f | .windows[] | select(.id == $f) | .rect | "\(.[2]),\(.[3])"' "$CSTATE" | head -1)"
-[ -n "$want" ] && [ "$dims" = "$want" ] ||
+if [ -z "$want" ] || [ "$dims" != "$want" ]; then
     fail G-SCREENSHOT-WINDOW "window screenshot is $dims, focused window is ${want:-none}"
+fi
 pass G-SCREENSHOT-WINDOW "ScreenshotWindow saves the focused window ($dims)"
 
 open_qs
