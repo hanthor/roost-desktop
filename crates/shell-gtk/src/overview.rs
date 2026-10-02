@@ -357,7 +357,9 @@ impl OverviewUi {
         }
         // GNOME's dash (dash.js): favorites, then running apps that are
         // not favorites after a separator, then Show Apps.
-        let running = me.actions.running();
+        // Running apps in the order their windows appeared.
+        let mut running = me.actions.running();
+        running.sort_by_key(|(id, _)| *id);
         let apps = me.apps.get();
         let window_of = |entry: &AppEntry| {
             running
