@@ -41,9 +41,11 @@ impl Default for ClockParts {
     }
 }
 
-/// GNOME 51 panel clock text, built the way gnome-desktop's wall clock
-/// builds it: optional weekday and date, then the time, separated by
-/// two spaces (`Thu Oct 1  1:06 PM`).
+/// GNOME 51 panel clock text, exactly as gnome-desktop's wall clock
+/// builds it: optional weekday and date, an EN SPACE (U+2002), then the
+/// time. In 12-hour mode a FIGURE SPACE (U+2007) pads single-digit
+/// hours (`%l`), so the width holds steady. A weekday alone takes a
+/// plain space. All checked against GnomeWallClock in GNOME 51 (`Oct 1\u{2002}\u{2007}1:06 PM`).
 pub fn clock_text(time: &jiff::civil::DateTime, format: ClockFormat, parts: ClockParts) -> String {
     let date = match (parts.weekday, parts.date) {
         (true, true) => time.strftime("%a %b %-d").to_string(),
@@ -52,15 +54,20 @@ pub fn clock_text(time: &jiff::civil::DateTime, format: ClockFormat, parts: Cloc
         (false, false) => String::new(),
     };
     let clock = match (format, parts.seconds) {
-        (ClockFormat::TwelveHour, false) => time.strftime("%-I:%M %p").to_string(),
-        (ClockFormat::TwelveHour, true) => time.strftime("%-I:%M:%S %p").to_string(),
+        (ClockFormat::TwelveHour, false) => time.strftime("%l:%M %p").to_string(),
+        (ClockFormat::TwelveHour, true) => time.strftime("%l:%M:%S %p").to_string(),
         (ClockFormat::TwentyFourHour, false) => time.strftime("%H:%M").to_string(),
         (ClockFormat::TwentyFourHour, true) => time.strftime("%H:%M:%S").to_string(),
     };
-    if date.is_empty() {
-        clock
-    } else {
-        format!("{date}  {clock}")
+    // `%l` pads with an ASCII space; GNOME swaps it for a figure space.
+    let clock = match clock.strip_prefix(' ') {
+        Some(rest) => format!("\u{2007}{rest}"),
+        None => clock,
+    };
+    match (parts.weekday, parts.date) {
+        (_, true) => format!("{date}\u{2002}{clock}"),
+        (true, false) => format!("{date} {clock}"),
+        (false, false) => clock,
     }
 }
 
@@ -76,11 +83,58 @@ pub fn calendar_heading(time: &jiff::civil::DateTime) -> (String, String) {
 /// Workspace indicator shape: one entry per workspace, `true` for the
 /// active one (drawn as the wide pill, the rest as dots). GNOME always
 /// shows at least one workspace.
-pub fn workspace_pills(workspaces: &[u32], active: u32) -> Vec<bool> {
-    if workspaces.is_empty() {
-        return vec![true];
+///
+/// GNOME's dynamic workspaces (`windowManager.js` `_checkWorkspaces`)
+/// always keep one empty workspace at the end and never fewer than two
+/// (`MIN_NUM_WORKSPACES`), and the indicator shows them: when the last
+/// workspace holds a window (`occupied`) a trailing dot follows, and a
+/// lone workspace gets one too.
+pub fn workspace_pills(workspaces: &[u32], active: u32, occupied: &[u32]) -> Vec<bool> {
+    let mut pills: Vec<bool> = workspaces.iter().map(|ws| *ws == active).collect();
+    if pills.is_empty() {
+        pills.push(true);
     }
-    workspaces.iter().map(|ws| *ws == active).collect()
+    if workspaces
+        .last()
+        .is_some_and(|last| occupied.contains(last))
+    {
+        pills.push(false);
+    }
+    while pills.len() < 2 {
+        pills.push(false);
+    }
+    pills
+}
+
+/// Width of the active workspace pill, GNOME 51's `WorkspaceDot`: the
+/// 8px dot times 3.625 with up to two indicators, 3.25 up to five, 2.75
+/// beyond (`panel.js` `_updateExpansion`), rounded.
+pub fn active_pill_width(indicators: usize) -> i32 {
+    let multiplier = match indicators {
+        0..=2 => 3.625,
+        3..=5 => 3.25,
+        _ => 2.75,
+    };
+    (8.0_f64 * multiplier).round() as i32
+}
+
+/// GTK's font settings (`gtk-xft-hinting`, `-hintstyle`, `-antialias`,
+/// `-rgba`) for GNOME's `font-hinting` and `font-antialiasing` keys, the
+/// mapping gnome-settings-daemon's xsettings plugin uses.
+pub fn font_rendering(hinting: &str, antialiasing: &str) -> (i32, &'static str, i32, &'static str) {
+    let style = match hinting {
+        "none" => "hintnone",
+        "medium" => "hintmedium",
+        "full" => "hintfull",
+        _ => "hintslight",
+    };
+    let hint = i32::from(hinting != "none");
+    let (aa, rgba) = match antialiasing {
+        "none" => (0, "none"),
+        "rgba" => (1, "rgb"),
+        _ => (1, "none"),
+    };
+    (hint, style, aa, rgba)
 }
 
 /// `org.gnome.desktop.interface color-scheme` value for the Dark Style
@@ -111,15 +165,29 @@ mod tests {
         let full = ClockParts::default();
         assert_eq!(
             clock_text(&at(13, 6), ClockFormat::TwelveHour, full),
-            "Thu Oct 1  1:06 PM"
+            "Thu Oct 1\u{2002}\u{2007}1:06 PM"
         );
         assert_eq!(
             clock_text(&at(13, 6), ClockFormat::TwentyFourHour, full),
-            "Thu Oct 1  13:06"
+            "Thu Oct 1\u{2002}13:06"
         );
         assert_eq!(
             clock_text(&at(0, 5), ClockFormat::TwelveHour, full),
-            "Thu Oct 1  12:05 AM"
+            "Thu Oct 1\u{2002}12:05 AM"
+        );
+        // GNOME 51's defaults (no weekday), from gnome-desktop's own
+        // GnomeWallClock in the reference session.
+        let gnome = ClockParts {
+            weekday: false,
+            ..ClockParts::default()
+        };
+        assert_eq!(
+            clock_text(&at(20, 4), ClockFormat::TwentyFourHour, gnome),
+            "Oct 1\u{2002}20:04"
+        );
+        assert_eq!(
+            clock_text(&at(20, 4), ClockFormat::TwelveHour, gnome),
+            "Oct 1\u{2002}\u{2007}8:04 PM"
         );
     }
 
@@ -134,14 +202,14 @@ mod tests {
         let h24 = ClockFormat::TwentyFourHour;
         assert_eq!(
             clock_text(&t, h24, parts(false, true, false)),
-            "Oct 1  13:06"
+            "Oct 1\u{2002}13:06"
         );
-        assert_eq!(clock_text(&t, h24, parts(true, false, false)), "Thu  13:06");
+        assert_eq!(clock_text(&t, h24, parts(true, false, false)), "Thu 13:06");
         assert_eq!(clock_text(&t, h24, parts(false, false, false)), "13:06");
         assert_eq!(clock_text(&t, h24, parts(false, false, true)), "13:06:00");
         assert_eq!(
             clock_text(&t, ClockFormat::TwelveHour, parts(false, false, true)),
-            "1:06:00 PM"
+            "\u{2007}1:06:00 PM"
         );
     }
 
@@ -168,8 +236,53 @@ mod tests {
 
     #[test]
     fn pills_mark_the_active_workspace_and_never_vanish() {
-        assert_eq!(workspace_pills(&[0, 1, 2], 1), vec![false, true, false]);
-        assert_eq!(workspace_pills(&[], 0), vec![true]);
+        assert_eq!(
+            workspace_pills(&[0, 1, 2], 1, &[1]),
+            vec![false, true, false]
+        );
+        assert_eq!(workspace_pills(&[], 0, &[]), vec![true, false]);
+    }
+
+    #[test]
+    fn font_rendering_follows_gnome_keys() {
+        assert_eq!(
+            font_rendering("slight", "grayscale"),
+            (1, "hintslight", 1, "none")
+        );
+        assert_eq!(font_rendering("none", "rgba"), (0, "hintnone", 1, "rgb"));
+        assert_eq!(font_rendering("full", "none"), (1, "hintfull", 0, "none"));
+    }
+
+    #[test]
+    fn volume_icons_follow_gnome_thirds() {
+        assert_eq!(volume_icon(0.0, false), "audio-volume-muted-symbolic");
+        assert_eq!(volume_icon(80.0, true), "audio-volume-muted-symbolic");
+        assert_eq!(volume_icon(20.0, false), "audio-volume-low-symbolic");
+        assert_eq!(volume_icon(33.0, false), "audio-volume-low-symbolic");
+        assert_eq!(volume_icon(50.0, false), "audio-volume-medium-symbolic");
+        assert_eq!(volume_icon(100.0, false), "audio-volume-high-symbolic");
+        assert_eq!(volume_icon(150.0, false), "audio-volume-high-symbolic");
+    }
+
+    #[test]
+    fn active_pill_widths_follow_gnome() {
+        assert_eq!(active_pill_width(2), 29);
+        assert_eq!(active_pill_width(5), 26);
+        assert_eq!(active_pill_width(6), 22);
+    }
+
+    #[test]
+    fn pills_show_gnomes_trailing_empty_workspace() {
+        // No windows: GNOME still keeps two workspaces.
+        assert_eq!(workspace_pills(&[0], 0, &[]), vec![true, false]);
+        // A window on it: GNOME adds the empty one after it.
+        assert_eq!(workspace_pills(&[0], 0, &[0]), vec![true, false]);
+        // Already on the empty last one: nothing more.
+        assert_eq!(workspace_pills(&[0, 1], 1, &[0]), vec![false, true]);
+        assert_eq!(
+            workspace_pills(&[0, 1], 0, &[0, 1]),
+            vec![true, false, false]
+        );
     }
 
     #[test]
@@ -314,6 +427,28 @@ pub fn power_mode_after_click(profile: &str) -> &'static str {
         BALANCED
     } else {
         "power-saver"
+    }
+}
+
+/// GNOME's output volume icon (volume.js `getIcon`): muted at zero or
+/// when muted, else low, medium or high by thirds of the range.
+pub fn volume_icon(percent: f64, muted: bool) -> &'static str {
+    if muted || percent <= 0.0 {
+        return "audio-volume-muted-symbolic";
+    }
+    match (3.0 * percent / 100.0).ceil().clamp(1.0, 3.0) as u8 {
+        1 => "audio-volume-low-symbolic",
+        2 => "audio-volume-medium-symbolic",
+        _ => "audio-volume-high-symbolic",
+    }
+}
+
+/// Icon for a power profile, as GNOME's Power Mode toggle shows it.
+pub fn power_mode_icon(profile: &str) -> &'static str {
+    match profile {
+        "power-saver" => "power-profile-power-saver-symbolic",
+        "performance" => "power-profile-performance-symbolic",
+        _ => "power-profile-balanced-symbolic",
     }
 }
 

@@ -24,7 +24,7 @@ mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 IMAGE=localhost/roost-gnome51-reference
 podman build -q -t "$IMAGE" "$ROOT/tests/gnome-reference" >/dev/null
-rm -f "$OUT"/*.png "$OUT"/*.json
+rm -rf "$OUT"/*.png "$OUT"/*.json "$OUT/share"
 podman run --rm \
     -v "$ROOT/tests/gnome-reference:/gref:ro,Z" \
     -v "$ROOT/scripts/lib:/lib:ro,Z" \
@@ -37,4 +37,4 @@ grep -q 'GREF done' "$OUT/gnome-shell.log" || {
     echo "roost-gnome-reference: capture incomplete; see $OUT/gnome-shell.log" >&2
     exit 1
 }
-echo "roost-gnome-reference: $(find "$OUT" -name '*.png' | wc -l) GNOME 51 frames in $OUT"
+echo "roost-gnome-reference: $(find "$OUT" -maxdepth 1 -name '*.png' | wc -l) GNOME 51 frames in $OUT"

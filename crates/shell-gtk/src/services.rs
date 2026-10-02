@@ -64,16 +64,23 @@ const LOGIND_SESSION_IFACE: &str = "org.freedesktop.login1.Session";
 pub struct Tile {
     pub button: gtk::ToggleButton,
     pub subtitle: gtk::Label,
+    /// The toggle's icon (GNOME swaps it with state, e.g. power profile).
+    pub icon: gtk::Image,
+    /// What the grid places and hides: the button, or the button with
+    /// its menu arrow.
+    pub outer: gtk::Widget,
     /// Set while the shell itself updates the button from daemon
     /// state, so the toggled handler does not echo it back.
     syncing: Rc<Cell<bool>>,
 }
 
 impl Tile {
-    pub fn new(button: gtk::ToggleButton, subtitle: gtk::Label) -> Self {
+    pub fn new(button: gtk::ToggleButton, subtitle: gtk::Label, icon: gtk::Image) -> Self {
         Self {
+            outer: button.clone().upcast(),
             button,
             subtitle,
+            icon,
             syncing: Rc::new(Cell::new(false)),
         }
     }
@@ -92,13 +99,9 @@ impl Tile {
         }
     }
 
-    /// Hide or show the whole tile (its grid cell collapses).
+    /// Hide or show the whole tile; the grid closes the gap.
     pub fn present(&self, present: bool) {
-        self.button.set_visible(present);
-        // In a FlowBox the cell is the parent: hide it too, or a gap stays.
-        if let Some(cell) = self.button.parent() {
-            cell.set_visible(present);
-        }
+        self.outer.set_visible(present);
     }
 
     /// Run `f` on user toggles only.
@@ -253,6 +256,15 @@ pub struct Widgets {
     pub wired: Tile,
     pub bluetooth: Tile,
     pub power_mode: Tile,
+    /// The Power Mode menu: its header icon and one item per profile
+    /// (profile name, button, check ornament).
+    pub power_header: gtk::Image,
+    pub power_items: Vec<(&'static str, gtk::Button, gtk::Image)>,
+    /// Panel status icons GNOME shows only while they mean something
+    /// (panel.js `_indicators`): network, volume, power profile.
+    pub panel_network: gtk::Image,
+    pub panel_volume: gtk::Image,
+    pub panel_power_profile: gtk::Image,
     pub volume: gtk::Scale,
     pub mute: gtk::Button,
     pub brightness_row: gtk::Box,
@@ -338,6 +350,9 @@ fn network(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
                             let (wifi, wired, connected) = *seen.borrow();
                             w.wifi.present(wifi);
                             w.wired.present(wired);
+                            // GNOME's primary network indicator: shown
+                            // while the main connection is up.
+                            w.panel_network.set_visible(connected);
                             w.wired.show_state(
                                 connected,
                                 Some(if connected {
@@ -364,6 +379,7 @@ fn network(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
             } else {
                 w.wifi.present(false);
                 w.wired.present(false);
+                w.panel_network.set_visible(false);
             }
         });
     }
@@ -479,6 +495,21 @@ fn power_profiles(conn: &gio::DBusConnection, w: &Rc<Widgets>, which: usize) {
                     logic::power_mode_checked(&active),
                     Some(logic::power_mode_label(&active)),
                 );
+                let icon = logic::power_mode_icon(&active);
+                w.power_mode.icon.set_icon_name(Some(icon));
+                // The panel shows the profile only when not balanced.
+                w.panel_power_profile.set_icon_name(Some(icon));
+                w.panel_power_profile
+                    .set_visible(logic::power_mode_checked(&active));
+                w.power_header.set_icon_name(Some(icon));
+                if logic::power_mode_checked(&active) {
+                    w.power_header.add_css_class("active");
+                } else {
+                    w.power_header.remove_css_class("active");
+                }
+                for (name, _, ornament) in &w.power_items {
+                    ornament.set_visible(*name == active);
+                }
                 *profile.borrow_mut() = active;
             });
         })
@@ -505,6 +536,10 @@ fn power_profiles(conn: &gio::DBusConnection, w: &Rc<Widgets>, which: usize) {
                 }
             }
         });
+    }
+    for (name, button, _) in &w.power_items {
+        let (ppd, name) = (ppd.clone(), *name);
+        button.connect_clicked(move |_| ppd.set("ActiveProfile", name.to_variant()));
     }
     {
         let ppd = ppd.clone();
@@ -607,6 +642,14 @@ fn volume(w: &Rc<Widgets>) {
             wpctl(&["get-volume", SINK], move |out| {
                 match out.as_deref().and_then(logic::parse_wpctl_volume) {
                     Some((percent, muted)) => {
+                        // GNOME shows the output slider only with a
+                        // default sink (volume.js `_shouldBeVisible`).
+                        if let Some(row) = w.volume.parent() {
+                            row.set_visible(true);
+                        }
+                        w.panel_volume
+                            .set_icon_name(Some(logic::volume_icon(percent, muted)));
+                        w.panel_volume.set_visible(true);
                         w.volume.set_sensitive(true);
                         w.mute.set_sensitive(true);
                         syncing.set(true);
@@ -619,7 +662,11 @@ fn volume(w: &Rc<Widgets>) {
                         });
                     }
                     None => {
-                        // No PipeWire control: a disabled slider, never a hang.
+                        // No PipeWire sink: no slider, as in GNOME.
+                        if let Some(row) = w.volume.parent() {
+                            row.set_visible(false);
+                        }
+                        w.panel_volume.set_visible(false);
                         w.volume.set_sensitive(false);
                         w.mute.set_sensitive(false);
                     }

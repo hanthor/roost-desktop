@@ -9,11 +9,16 @@ starts), just enough of each daemon behind GNOME 51's quick settings:
 - NetworkManager: WirelessEnabled (rw), GetDevices with one ethernet
   (activated) and one wifi device.
 - BlueZ: ObjectManager plus /org/bluez/hci0 Adapter1.Powered (rw).
-- power-profiles-daemon: ActiveProfile (rw), UPower name.
+- power-profiles-daemon: ActiveProfile (rw), Profiles (power-saver,
+  balanced, performance) and PerformanceDegraded, UPower name.
 - logind: session/auto SetBrightness, which writes BACKLIGHT_DIR's
   brightness file the way the kernel would, and Terminate; the Manager's
   Suspend, Reboot and PowerOff. Power calls are appended to POWER_LOG,
   and Suspend emits PrepareForSleep(true) first, as logind does.
+
+ROOST_STUB_SERVICES (comma-separated: nm, bluez, ppd, logind; default
+all) limits which daemons are served, so a capture can match another
+session's services exactly.
 
 Writes emit PropertiesChanged, so the shell sees its own changes the
 way it sees the real daemons'. The proof reads state back with gdbus.
@@ -46,6 +51,8 @@ XML = """
   </interface>
   <interface name="org.freedesktop.UPower.PowerProfiles">
     <property name="ActiveProfile" type="s" access="readwrite"/>
+    <property name="Profiles" type="aa{sv}" access="read"/>
+    <property name="PerformanceDegraded" type="s" access="read"/>
   </interface>
   <interface name="org.freedesktop.login1.Session">
     <method name="SetBrightness">
@@ -79,7 +86,13 @@ state = {
     (DEV_WIFI, "org.freedesktop.NetworkManager.Device"): {
         "DeviceType": GLib.Variant("u", 2), "State": GLib.Variant("u", 30)},
     (HCI, "org.bluez.Adapter1"): {"Powered": GLib.Variant("b", True)},
-    (PPD, "org.freedesktop.UPower.PowerProfiles"): {"ActiveProfile": GLib.Variant("s", "balanced")},
+    (PPD, "org.freedesktop.UPower.PowerProfiles"): {
+        "ActiveProfile": GLib.Variant("s", "balanced"),
+        "Profiles": GLib.Variant("aa{sv}", [
+            {"Profile": GLib.Variant("s", p), "Driver": GLib.Variant("s", "placeholder")}
+            for p in ("power-saver", "balanced", "performance")]),
+        "PerformanceDegraded": GLib.Variant("s", ""),
+    },
 }
 
 conn = Gio.DBusConnection.new_for_address_sync(
@@ -129,20 +142,35 @@ def serve(path, iface):
     conn.register_object(path, info, method_call, get_property, set_property)
 
 
-for path, iface in [
-    (NM, "org.freedesktop.NetworkManager"),
-    (DEV_ETH, "org.freedesktop.NetworkManager.Device"),
-    (DEV_WIFI, "org.freedesktop.NetworkManager.Device"),
-    ("/", "org.freedesktop.DBus.ObjectManager"),
-    (HCI, "org.bluez.Adapter1"),
-    (PPD, "org.freedesktop.UPower.PowerProfiles"),
-    (SESSION, "org.freedesktop.login1.Session"),
-    ("/org/freedesktop/login1", "org.freedesktop.login1.Manager"),
-]:
-    serve(path, iface)
+SERVICES = {
+    "nm": (["org.freedesktop.NetworkManager"], [
+        (NM, "org.freedesktop.NetworkManager"),
+        (DEV_ETH, "org.freedesktop.NetworkManager.Device"),
+        (DEV_WIFI, "org.freedesktop.NetworkManager.Device"),
+    ]),
+    "bluez": (["org.bluez"], [
+        ("/", "org.freedesktop.DBus.ObjectManager"),
+        (HCI, "org.bluez.Adapter1"),
+    ]),
+    "ppd": (["org.freedesktop.UPower.PowerProfiles"], [
+        (PPD, "org.freedesktop.UPower.PowerProfiles"),
+    ]),
+    "logind": (["org.freedesktop.login1"], [
+        (SESSION, "org.freedesktop.login1.Session"),
+        ("/org/freedesktop/login1", "org.freedesktop.login1.Manager"),
+    ]),
+}
+wanted = os.environ.get("ROOST_STUB_SERVICES", ",".join(SERVICES)).split(",")
+names = []
+for key in wanted:
+    if key not in SERVICES:
+        continue
+    bus_names, objects = SERVICES[key]
+    names += bus_names
+    for path, iface in objects:
+        serve(path, iface)
 
-for name in ["org.freedesktop.NetworkManager", "org.bluez",
-             "org.freedesktop.UPower.PowerProfiles", "org.freedesktop.login1"]:
+for name in names:
     conn.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
                    "RequestName", GLib.Variant("(su)", (name, 4)), None,
                    Gio.DBusCallFlags.NONE, -1, None)
