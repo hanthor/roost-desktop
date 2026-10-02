@@ -82,6 +82,8 @@
 #                  overview brings the hidden window back
 #   G-WM-KEYS      Alt+Space, Alt+F10, Super+End/Home (wm keybindings)
 #   G-WS-POPUP     a workspace key shows the workspace switcher popup
+#   G-WS-THUMBS    three workspaces put GNOME's thumbnails strip in the
+#                  overview, and a thumbnail click switches workspace
 #   G-SUSPEND-LOCK Suspend asks logind, and its PrepareForSleep locks
 #                  the session before sleep
 #   G-UNLOCK       GNOME's lock screen: a wrong password is refused and
@@ -1028,6 +1030,47 @@ if [ "${1:-0}" -ge 70 ] || [ "${2:-0}" -ge 70 ] || [ "${3:-0}" -ge 75 ]; then
     fail G-WS-POPUP "no switcher pill above the bottom edge (pixel ${1:-?} ${2:-?} ${3:-?})"
 fi
 pass G-WS-POPUP "a workspace key shows GNOME's workspace switcher popup"
+sleep 1
+
+# GNOME's workspace thumbnails: a window moved one workspace right makes
+# three (the trailing empty one included), so the overview shows the
+# strip; a thumbnail click switches there with the overview still open.
+home_ws="$(jq -r '.active_workspace' "$CSTATE")"
+moved="$(jq -r .focused "$CSTATE")"
+window_menu
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-ws-right.json" 20 \
+    --press "Move to Workspace Right" || fail G-WS-THUMBS "the window menu has no Move to Workspace Right"
+cstate ".active_workspace == $home_ws and any(.windows[]; .id == $moved and .workspace == $home_ws + 1)" \
+    "moved" || fail G-WS-THUMBS "the window did not move one workspace right"
+sleep 1
+xdotool key Super_L
+cstate '.overview_open and (.thumbnails | length) == 3' "strip" ||
+    fail G-WS-THUMBS "the overview shows no three-thumbnail strip"
+sleep 1.5
+scrot "$ARTIFACTS/24g-workspace-thumbnails.png" >/dev/null
+ring="$(jq -r '.thumbnails[] | select(.active) | .rect | "\(.[0] - 2) \(.[1] + .[3] / 2)"' "$CSTATE")"
+# shellcheck disable=SC2046,SC2086
+set -- $(px "$ARTIFACTS/24g-workspace-thumbnails.png" $ring)
+if [ "${3:-0}" -le 180 ] || [ "${1:-255}" -ge 100 ]; then
+    fail G-WS-THUMBS "no accent indicator around the active thumbnail (pixel ${1:-?} ${2:-?} ${3:-?})"
+fi
+target="$(jq -r ".thumbnails[] | select(.workspace == $home_ws + 1) | .rect | \"\(.[0] + .[2] / 2) \(.[1] + .[3] / 2)\"" "$CSTATE")"
+# shellcheck disable=SC2086
+xdotool mousemove --window "$WID" $target click 1
+cstate ".overview_open and .active_workspace == $home_ws + 1" "switched" ||
+    fail G-WS-THUMBS "a thumbnail click did not switch workspace"
+xdotool key Escape
+cstate "(.overview_open | not) and .focused == $moved" "closed" ||
+    fail G-WS-THUMBS "closing the overview did not focus the moved window"
+pass G-WS-THUMBS "three workspaces show GNOME's thumbnails strip and a thumbnail click switches"
+# Put the window back where the journey expects it.
+sleep 1
+window_menu
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-ws-left.json" 20 \
+    --press "Move to Workspace Left" || fail G-WS-THUMBS "the window menu has no Move to Workspace Left"
+xdotool key super+Page_Up
+cstate ".active_workspace == $home_ws and .focused == $moved" "home" ||
+    fail G-WS-THUMBS "could not return the window home"
 sleep 1
 
 # Screenshots (#61): GNOME Shell's interface, as the portal calls it.

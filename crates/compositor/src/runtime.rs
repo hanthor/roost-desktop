@@ -1089,8 +1089,21 @@ impl Runtime {
                 .and_then(|w| w.app_id.clone())
         };
         let overview_open = self.control.overview_open();
-        let previews: Vec<serde_json::Value> = if overview_open {
-            self.overview_layout()
+        let scene = overview_open.then(|| self.overview_layout());
+        // GNOME's workspace thumbnails strip (three or more workspaces).
+        let thumbnails: Vec<serde_json::Value> = scene
+            .iter()
+            .flat_map(|l| l.thumbnails.iter())
+            .map(|t| {
+                serde_json::json!({
+                    "workspace": t.workspace,
+                    "active": t.active,
+                    "rect": [t.rect.loc.x, t.rect.loc.y, t.rect.size.w, t.rect.size.h],
+                })
+            })
+            .collect();
+        let previews: Vec<serde_json::Value> = if let Some(scene) = &scene {
+            scene
                 .previews
                 .iter()
                 .filter(|p| p.active)
@@ -1139,6 +1152,7 @@ impl Runtime {
                 "rect": [w.geometry.loc.x, w.geometry.loc.y, w.geometry.size.w, w.geometry.size.h],
             })).collect::<Vec<_>>(),
             "previews": previews,
+            "thumbnails": thumbnails,
             "layers": crate::layer::layer_layout(&self.state)
                 .iter()
                 .filter_map(|(surface, (x, y), _)| {
@@ -1218,6 +1232,10 @@ impl Runtime {
                 // yet: it sits right after the active (last) one, and
                 // stepping onto it creates it.
                 if !self.manager.switch_to_workspace(&mut self.state, ws) {
+                    // From a thumbnail the active one need not be last.
+                    if let Some(&last) = self.manager.model().workspaces().last() {
+                        self.manager.switch_to_workspace(&mut self.state, last);
+                    }
                     self.manager.switch_relative(&mut self.state, 1);
                 }
             }
@@ -1416,9 +1434,7 @@ impl Runtime {
         }
         let overview = self.control.overview_open().then(|| self.overview_layout());
         let cards = overview.as_ref().filter(|_| !self.overview_search);
-        let decor_global = cards
-            .map(|_| Vec::<(Color32F, Vec<Rectangle<i32, Logical>>)>::new())
-            .unwrap_or_default();
+        let decor_global = cards.map(overview_decor).unwrap_or_default();
         let background = if overview.is_some() {
             OVERVIEW_BACKGROUND
         } else {
@@ -1948,9 +1964,7 @@ impl Runtime {
             .then(|| self.overview_layout());
         // While search shows results, the workspace view steps aside.
         let cards = overview.as_ref().filter(|_| !self.overview_search);
-        let decor_global = cards
-            .map(|_| Vec::<(Color32F, Vec<Rectangle<i32, Logical>>)>::new())
-            .unwrap_or_default();
+        let decor_global = cards.map(overview_decor).unwrap_or_default();
         let background = if overview.is_some() {
             OVERVIEW_BACKGROUND
         } else {
@@ -2141,6 +2155,17 @@ impl Runtime {
 
 /// Overview backdrop (GNOME 51's `#overviewGroup`, #222226).
 const OVERVIEW_BACKGROUND: Color32F = Color32F::new(34.0 / 255.0, 34.0 / 255.0, 38.0 / 255.0, 1.0);
+
+/// The overview's solid fills (the workspace thumbnails strip) in
+/// global logical space.
+fn overview_decor(
+    layout: &crate::overview::OverviewLayout,
+) -> Vec<(Color32F, Vec<Rectangle<i32, Logical>>)> {
+    crate::overview::thumbnail_decor(layout)
+        .into_iter()
+        .map(|([r, g, b, a], rects)| (Color32F::new(r, g, b, a), rects))
+        .collect()
+}
 
 /// Global decor in one output's physical pixels.
 fn decor_for_output(

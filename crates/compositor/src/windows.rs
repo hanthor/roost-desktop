@@ -251,6 +251,9 @@ pub struct WindowManager {
     overview_open: bool,
     /// Window focused before the overview parked keyboard focus.
     pre_overview_focus: Option<u64>,
+    /// The window left activated while the overview holds the keyboard
+    /// (GNOME keeps the focused window's activated look there).
+    overview_activated: Option<u64>,
     /// Overview surface keyboard focus is parked on, if parked.
     overview_held: Option<WlSurface>,
     /// An exclusive-keyboard layer surface holding the keyboard (a
@@ -304,6 +307,7 @@ impl WindowManager {
             switcher_queue: Vec::new(),
             overview_open: false,
             pre_overview_focus: None,
+            overview_activated: None,
             overview_held: None,
             exclusive_held: None,
         }
@@ -528,9 +532,9 @@ impl WindowManager {
                 (Some(target), held) if held.as_ref() != Some(&target) => {
                     if held.is_none() {
                         self.pre_overview_focus = self.model.focused();
-                    }
-                    if let Some(previous) = self.model.focused() {
-                        self.configure(previous, false);
+                        // Mutter keeps the focus window while the stage
+                        // holds the keys: it stays activated.
+                        self.overview_activated = self.model.focused();
                     }
                     self.model.set_focused(None);
                     let serial = SERIAL_COUNTER.next_serial();
@@ -588,6 +592,11 @@ impl WindowManager {
             .filter(|id| self.windows.contains_key(id))
             .or_else(|| self.stacking.last().copied());
         self.pre_overview_focus = None;
+        if let Some(old) = self.overview_activated.take() {
+            if Some(old) != restore {
+                self.configure(old, false);
+            }
+        }
         self.apply_focus(state, restore);
         eprintln!("roost-compositor: overview focus restored");
     }
@@ -641,7 +650,7 @@ impl WindowManager {
         // from search or the dash) is the one focused when it closes,
         // as in GNOME; otherwise the pre-overview window would win.
         if self.overview_held.is_some() {
-            self.pre_overview_focus = Some(id);
+            self.focus_parked(Some(id));
         }
         self.apply_focus(state, Some(id));
     }
@@ -1042,17 +1051,32 @@ impl WindowManager {
         // window restored when it closes, instead of losing to the
         // window that was focused before it opened.
         if self.overview_held.is_some() {
-            self.pre_overview_focus = id;
-            if let Some(id) = id {
-                if self.mode == SessionMode::Gnome {
-                    self.stacking.retain(|other| *other != id);
-                    self.stacking.push(id);
-                }
-            }
+            self.focus_parked(id);
             return true;
         }
         self.apply_focus(state, id);
         true
+    }
+
+    /// Focus while the overview holds the keyboard: the window is the
+    /// one restored on close, rises, and takes the activated look.
+    fn focus_parked(&mut self, id: Option<u64>) {
+        self.pre_overview_focus = id;
+        if let Some(id) = id {
+            if self.mode == SessionMode::Gnome {
+                self.stacking.retain(|other| *other != id);
+                self.stacking.push(id);
+            }
+        }
+        if self.overview_activated != id {
+            if let Some(old) = self.overview_activated {
+                self.configure(old, false);
+            }
+            if let Some(id) = id {
+                self.configure(id, true);
+            }
+            self.overview_activated = id;
+        }
     }
 
     fn apply_focus(&mut self, state: &mut State, id: Option<u64>) {
@@ -2639,6 +2663,13 @@ impl WindowManager {
                 || self.windows.get(id).is_some_and(|w| w.sticky))
                 && self.windows.get(id).is_some_and(|w| !w.minimized)
         });
+        // In the overview a workspace switch moves the activated look
+        // and the window restored on close; the keys stay with the
+        // overview.
+        if self.overview_held.is_some() {
+            self.focus_parked(topmost);
+            return;
+        }
         self.apply_focus(state, topmost);
     }
 

@@ -59,6 +59,7 @@ scripts/lib/roost-parity-compare.py target/gnome-reference target/roost-parity t
 | 13-window-menu | the window menu on the focused window's header bar |
 | 14-screenshot-ui | the screenshot UI on Print |
 | 15-workspace-popup | the workspace switcher popup on Super+Page_Down |
+| 16-overview-workspaces | the overview with three workspaces (a window moved one right): the thumbnails strip, the shrunken card, the focused window still drawn activated |
 | 11b-unlock-prompt | the unlock prompt, set to what a real session shows: the user's name and GDM's Password question (the stubbed display manager has no PAM conversation or AccountsService) |
 
 Both sides run the same services: the stubs serve power-profiles and

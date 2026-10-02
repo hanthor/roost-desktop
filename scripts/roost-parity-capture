@@ -9,7 +9,7 @@
 # 03-quick-settings, 03b-power-mode-menu, 04-overview-empty, 05-app-grid, 05b-app-folder, 06-windows, 06b-switcher,
 # 07-overview-windows, 07b-overview-hover, 08-notification, 09-calendar-with-notification,
 # 10-end-session, 12-osd-volume, 12b-osd-label, 12c-osd-overdrive, 13-window-menu,
-# 14-screenshot-ui, 15-workspace-popup,
+# 14-screenshot-ui, 15-workspace-popup, 16-overview-workspaces,
 # 11-lock-screen, 11b-unlock-prompt.
 # Run scripts/roost-gnome-reference first: it exports GNOME's wallpapers.
 # Compare with scripts/lib/roost-parity-compare.py.
@@ -269,6 +269,17 @@ sleep 1.2
 # The screenshot UI (Print).
 xdotool key Print
 shot 14-screenshot-ui 6
+xdotool key Escape
+sleep 1
+# Three workspaces (the focused window moved one to the right through
+# its window menu, the view staying put): the overview's thumbnails.
+xdotool mousemove --window "$WID" 500 280 click 3
+sleep 1
+press "Move to Workspace Right"
+park
+sleep 0.5
+xdotool key Super_L
+shot 16-overview-workspaces 1.5
 xdotool key Escape
 sleep 1
 xdotool mousemove --window "$WID" $((WIDTH - 30)) 16 click 1
