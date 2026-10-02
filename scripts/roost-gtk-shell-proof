@@ -19,6 +19,8 @@
 #   G-OV-PICK   clicking a preview focuses that window, closes overview
 #   G-APP-POPOVER an app's menu popover opens (xdg popups, #88)
 #   G-APP-INSTALLED an app installed mid-session shows in search
+#   G-APP-GRID-PAGES enough apps page the grid: indicators and arrows show,
+#                   and Next Page turns to the second page
 #   G-SEARCH-PROVIDER  typing lists a D-Bus search provider's result (#57)
 #   G-SEARCH-VIEW      while search shows results the workspace view hides
 #   G-SEARCH-ACTIVATE  clicking it calls ActivateResult, closes overview
@@ -670,6 +672,39 @@ showing "$ARTIFACTS/a11y-late-app.json" "Roost Late Arrival" ||
 pass G-APP-INSTALLED "an app installed mid-session shows in search"
 xdotool key Escape
 cstate '.overview_open | not' "closed" || { xdotool key Escape; cstate '.overview_open | not' "closed" || fail G-APP-INSTALLED "overview stayed open"; }
+
+# GNOME's paged app grid: thirty more apps make a second page, with the
+# page indicators and the side arrows; Next Page turns to it.
+for i in $(seq -w 1 30); do
+    printf '[Desktop Entry]\nName=Roost Page App %s\nExec=true\nType=Application\n' "$i" \
+        >"$XDG_DATA_HOME/applications/roost-page-$i.desktop"
+done
+sleep 1.5
+xdotool key super+a
+cstate '.overview_open and .overview_app_grid' "app grid" || fail G-APP-GRID-PAGES "Super+A did not show the app grid"
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-pages.json" 20 ||
+    fail G-APP-GRID-PAGES "accessibility dump failed"
+scrot "$ARTIFACTS/11c-app-grid-pages.png" >/dev/null
+for name in "Next Page" "Page 1" "Page 2"; do
+    showing "$ARTIFACTS/a11y-grid-pages.json" "$name" || fail G-APP-GRID-PAGES "no '$name' with two pages"
+done
+if showing "$ARTIFACTS/a11y-grid-pages.json" "Previous Page"; then
+    fail G-APP-GRID-PAGES "Previous Page shows on the first page"
+fi
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-next.json" 20 \
+    --press "Next Page" || fail G-APP-GRID-PAGES "could not press Next Page"
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-page2.json" 20 ||
+    fail G-APP-GRID-PAGES "accessibility dump failed"
+showing "$ARTIFACTS/a11y-grid-page2.json" "Previous Page" ||
+    fail G-APP-GRID-PAGES "Next Page did not turn to the second page"
+scrot "$ARTIFACTS/11d-app-grid-page2.png" >/dev/null
+pass G-APP-GRID-PAGES "thirty more apps page the grid; indicators and arrows show and Next Page turns it"
+xdotool key Escape
+cstate '.overview_open | not' "closed" || { xdotool key Escape; cstate '.overview_open | not' "closed" || fail G-APP-GRID-PAGES "overview stayed open"; }
+rm -f "$XDG_DATA_HOME"/applications/roost-page-*.desktop
+sleep 1.5
 
 # Search providers (#57): a D-Bus provider's result lists under the
 # apps, and clicking it hands the result back to the provider.

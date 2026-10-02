@@ -1578,3 +1578,37 @@ Video
         assert!(parse_wpctl_sinks("").is_empty());
     }
 }
+
+/// GNOME's icon grid modes (iconGrid.js `defaultGridModes`) as
+/// (columns, rows): the one whose shape is closest to the grid's area.
+pub fn grid_mode(width: i32, height: i32) -> (usize, usize) {
+    const MODES: [(usize, usize); 4] = [(3, 8), (4, 6), (6, 4), (8, 3)];
+    let ratio = f64::from(width.max(1)) / f64::from(height.max(1));
+    let mut best = MODES[3];
+    let mut closest = f64::INFINITY;
+    for (columns, rows) in MODES {
+        let mode = columns as f64 / rows as f64;
+        if (ratio - mode).abs() < (ratio - closest).abs() {
+            closest = mode;
+            best = (columns, rows);
+        }
+    }
+    best
+}
+
+#[cfg(test)]
+mod grid_mode_tests {
+    use super::*;
+
+    #[test]
+    fn grid_modes_follow_the_area_like_gnome() {
+        // 1280x800: the grid between search and dash is wide.
+        assert_eq!(grid_mode(1280, 550), (8, 3));
+        assert_eq!(grid_mode(1920, 830), (8, 3));
+        // 4:3 screens get six columns of four.
+        assert_eq!(grid_mode(1024, 600), (6, 4));
+        // Portrait.
+        assert_eq!(grid_mode(800, 1100), (4, 6));
+        assert_eq!(grid_mode(600, 1600), (3, 8));
+    }
+}
