@@ -158,8 +158,10 @@ fn arch_package_stamps_and_checks_the_version() {
     }
     let containerfile = read_workspace("packaging/marlin/Containerfile");
     assert!(containerfile.contains("ghcr.io/tuna-os/marlin:gnome"));
-    // Nested-only until the lock screen authenticates through PAM (the
-    // 004 gate): never selectable at login.
-    assert!(containerfile.contains("test ! -e /usr/share/wayland-sessions/roost.desktop"));
+    // Selectable at login now that the lock screen unlocks through PAM
+    // under GDM (#62): the session and its PAM service must both ship.
+    assert!(containerfile.contains("Name=Roost (preview)"));
+    assert!(containerfile.contains("test -f /etc/pam.d/roost-lock"));
+    assert!(!containerfile.contains("mv /usr/share/wayland-sessions/roost.desktop"));
     assert!(containerfile.contains("roost-shell-gtk --version"));
 }

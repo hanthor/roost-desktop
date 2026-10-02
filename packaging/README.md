@@ -17,12 +17,13 @@ and Roost's first platform. Its GNOME image ships GNOME 51, Roost's
 parity baseline. The preview image layers the Roost package on
 `marlin:gnome`, so baseline and candidate share one image family.
 
-The preview image hides the login-screen session entry and installs a
-"Roost (nested preview)" launcher that opens Roost in a window inside
-GNOME. The DRM/KMS backend has landed (#52), but the login session stays
-hidden until the lock screen checks passwords through PAM (the 004
-release gate). Upstreaming a `marlin:roost` flavor to `tuna-os/tunaOS`
-follows once that gate passes.
+The preview image offers "Roost (preview)" on the GDM login screen
+beside GNOME: the DRM/KMS backend runs the hardware session (#52), the
+lock screen unlocks through PAM (`/etc/pam.d/roost-lock`, #62), and the
+power menu logs out back to GDM. A "Roost (nested preview)" launcher
+also opens Roost in a window inside GNOME. Upstreaming a `marlin:roost`
+flavor to `tuna-os/tunaOS` (#69) follows once hardware runs in the VM
+lane (#68) are green.
 
 The Arch package ships both shells. The compositor runs the
 GTK4/libadwaita shell (`roost-shell-gtk`, ADR 0006) when it is installed
