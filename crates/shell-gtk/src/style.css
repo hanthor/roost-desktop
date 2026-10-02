@@ -1275,3 +1275,14 @@ window.roost-folder-dialog button.folder-tile:hover {
   filter: none;
   opacity: 1;
 }
+
+/* GNOME's Bluetooth menu rows and placeholder (bluetooth.js). */
+.roost-qs .device-subtitle {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.roost-qs .bt-menu-placeholder {
+  font-weight: 700;
+  font-size: 1.182em;
+  padding: 2em 4em;
+}

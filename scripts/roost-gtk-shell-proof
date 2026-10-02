@@ -34,6 +34,8 @@
 #   G-QS-WIFI-MENU   the Wi-Fi menu scans, lists NetworkManager's networks
 #                    as GNOME does, and activates a saved one
 #   G-QS-WIFI        the Wi-Fi tile turns NetworkManager's radio off
+#   G-QS-BT-MENU     the Bluetooth menu lists paired devices as GNOME does
+#                    and connects one
 #   G-QS-BLUETOOTH   the Bluetooth tile powers the BlueZ adapter off
 #   G-QS-POWER       the Power Mode tile switches to power saver
 #   G-QS-DARK        the Dark Style tile writes GNOME's color-scheme key
@@ -281,9 +283,10 @@ SYSBUS_INFO="$(dbus-daemon --session --fork --print-address=1 --print-pid=1)"
 DBUS_SYSTEM_BUS_ADDRESS="$(echo "$SYSBUS_INFO" | sed -n 1p)"
 SYSBUS_PID="$(echo "$SYSBUS_INFO" | sed -n 2p)"
 export DBUS_SYSTEM_BUS_ADDRESS
-# NetworkManager's stub records scans and activations here.
+# NetworkManager's and BlueZ's stubs record what the shell asks of them.
 ROOST_STUB_NM_LOG="$ARTIFACTS/nm-calls"
-export ROOST_STUB_NM_LOG
+ROOST_STUB_BT_LOG="$ARTIFACTS/bt-calls"
+export ROOST_STUB_NM_LOG ROOST_STUB_BT_LOG
 "$PY" "$ROOT/scripts/lib/roost-service-stubs.py" "$BACKLIGHT" >"$ARTIFACTS/stubs.log" 2>&1 &
 STUBS_PID=$!
 for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/stubs.log" 2>/dev/null && break; sleep 0.5; done
@@ -832,6 +835,30 @@ sysprop org.freedesktop.NetworkManager /org/freedesktop/NetworkManager \
     org.freedesktop.NetworkManager WirelessEnabled | grep -q false ||
     fail G-QS-WIFI "NetworkManager's WirelessEnabled is still true"
 pass G-QS-WIFI "the Wi-Fi tile turns NetworkManager's radio off"
+
+# GNOME's Bluetooth menu: paired devices only, connected first; the
+# tile names the connected one; a row connects its device.
+qs_press "Bluetooth Menu" bt-menu || fail G-QS-BT-MENU "could not open the Bluetooth menu"
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-bt-menu.json" 20 ||
+    fail G-QS-BT-MENU "accessibility dump failed"
+scrot "$ARTIFACTS/15c-bluetooth-menu.png" >/dev/null
+order="$(jq -r '[.[] | select(.showing) | .name | select(test("^(Connect to|Disconnect) "))] | join("|")' \
+    "$ARTIFACTS/a11y-qs-bt-menu.json")"
+want="Disconnect Keyboard|Connect to Headphones"
+[ "$order" = "$want" ] || fail G-QS-BT-MENU "devices are '$order', not '$want'"
+[ "$(jq '[.[] | select(.showing and .name == "Keyboard")] | length' "$ARTIFACTS/a11y-qs-bt-menu.json")" -ge 2 ] ||
+    fail G-QS-BT-MENU "the tile does not name the connected device"
+qs_press "Connect to Headphones" bt-connect || fail G-QS-BT-MENU "could not press Headphones"
+grep -q "^Connect /org/bluez/hci0/dev_AA_AA_AA_AA_AA_01" "$ROOST_STUB_BT_LOG" ||
+    fail G-QS-BT-MENU "Headphones did not connect through BlueZ"
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-bt-two.json" 20 ||
+    fail G-QS-BT-MENU "accessibility dump failed"
+showing "$ARTIFACTS/a11y-qs-bt-two.json" "2 Connected" ||
+    fail G-QS-BT-MENU "the tile does not count two connected devices"
+qs_press "Bluetooth Menu" bt-menu-close || fail G-QS-BT-MENU "could not close the Bluetooth menu"
+pass G-QS-BT-MENU "the Bluetooth menu lists paired devices as GNOME does and connects one"
 
 qs_press "Bluetooth" bt || fail G-QS-BLUETOOTH "could not press Bluetooth"
 sysprop org.bluez /org/bluez/hci0 org.bluez.Adapter1 Powered | grep -q false ||
