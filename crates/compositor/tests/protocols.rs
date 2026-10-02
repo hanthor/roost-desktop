@@ -51,7 +51,12 @@ const EXPECTED: &[(&str, u32)] = &[
     ("xdg_wm_base", 6),
     ("zwlr_layer_shell_v1", 4),
     ("zwp_idle_inhibit_manager_v1", 1),
+    ("zwp_input_method_manager_v2", 1),
+    ("zwp_pointer_constraints_v1", 1),
+    ("zwp_pointer_gestures_v1", 3),
     ("zwp_primary_selection_device_manager_v1", 1),
+    ("zwp_relative_pointer_manager_v1", 1),
+    ("zwp_text_input_manager_v3", 1),
     ("zxdg_output_manager_v1", 3),
 ];
 

@@ -14,6 +14,13 @@
 //! - idle-inhibit: a live inhibitor holds off the idle lock (video
 //!   players, presentations).
 //!
+//! - text-input v3 and input-method v2 (#60): IMEs such as fcitx5 type
+//!   into GTK apps; smithay relays focus and text, candidate popups are
+//!   tracked like any other popup.
+//! - pointer-gestures, relative-pointer and pointer-constraints (#60,
+//!   #89): touchpad gestures reach apps, games get raw motion and a
+//!   locked pointer.
+//!
 //! Deliberately absent, matching Mutter: xdg-decoration (GNOME is
 //! client-side decorations only).
 
@@ -22,8 +29,12 @@ use std::time::Duration;
 use smithay::{
     backend::allocator::{dmabuf::Dmabuf, Format},
     delegate_cursor_shape, delegate_dmabuf, delegate_fractional_scale, delegate_idle_inhibit,
-    delegate_single_pixel_buffer, delegate_viewporter, delegate_xdg_activation,
+    delegate_input_method_manager, delegate_pointer_constraints, delegate_pointer_gestures,
+    delegate_relative_pointer, delegate_single_pixel_buffer, delegate_text_input_manager,
+    delegate_viewporter, delegate_xdg_activation,
+    input::pointer::PointerHandle,
     reexports::wayland_server::{protocol::wl_surface::WlSurface, DisplayHandle, Resource},
+    utils::{Logical, Point, Rectangle},
     wayland::{
         compositor::with_states,
         cursor_shape::CursorShapeManagerState,
@@ -32,8 +43,15 @@ use smithay::{
             with_fractional_scale, FractionalScaleHandler, FractionalScaleManagerState,
         },
         idle_inhibit::{IdleInhibitHandler, IdleInhibitManagerState},
+        input_method::{InputMethodHandler, InputMethodManagerState, PopupSurface as ImPopup},
+        pointer_constraints::{
+            with_pointer_constraint, PointerConstraintsHandler, PointerConstraintsState,
+        },
+        pointer_gestures::PointerGesturesState,
+        relative_pointer::RelativePointerManagerState,
         single_pixel_buffer::SinglePixelBufferState,
         tablet_manager::TabletSeatHandler,
+        text_input::TextInputManagerState,
         viewporter::ViewporterState,
         xdg_activation::{
             XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
@@ -57,6 +75,11 @@ pub(crate) struct Protocols {
     _single_pixel_buffer: SinglePixelBufferState,
     _cursor_shape: CursorShapeManagerState,
     _idle_inhibit: IdleInhibitManagerState,
+    _text_input: TextInputManagerState,
+    _input_method: InputMethodManagerState,
+    _gestures: PointerGesturesState,
+    _relative_pointer: RelativePointerManagerState,
+    _pointer_constraints: PointerConstraintsState,
     /// Surfaces holding an idle inhibitor.
     pub(crate) inhibitors: Vec<WlSurface>,
 }
@@ -72,6 +95,12 @@ impl Protocols {
             _single_pixel_buffer: SinglePixelBufferState::new::<State>(dh),
             _cursor_shape: CursorShapeManagerState::new::<State>(dh),
             _idle_inhibit: IdleInhibitManagerState::new::<State>(dh),
+            _text_input: TextInputManagerState::new::<State>(dh),
+            // Any client may become the input method, as on GNOME.
+            _input_method: InputMethodManagerState::new::<State, _>(dh, |_client| true),
+            _gestures: PointerGesturesState::new::<State>(dh),
+            _relative_pointer: RelativePointerManagerState::new::<State>(dh),
+            _pointer_constraints: PointerConstraintsState::new::<State>(dh),
             inhibitors: Vec::new(),
         }
     }
@@ -191,3 +220,60 @@ impl IdleInhibitHandler for State {
     }
 }
 delegate_idle_inhibit!(State);
+
+delegate_text_input_manager!(State);
+
+impl InputMethodHandler for State {
+    fn new_popup(&mut self, surface: ImPopup) {
+        let _ = self
+            .popups
+            .track_popup(smithay::desktop::PopupKind::from(surface));
+    }
+
+    fn dismiss_popup(&mut self, surface: ImPopup) {
+        if let Some(parent) = surface.get_parent().map(|p| p.surface.clone()) {
+            let _ = smithay::desktop::PopupManager::dismiss_popup(
+                &parent,
+                &smithay::desktop::PopupKind::from(surface),
+            );
+        }
+    }
+
+    fn popup_repositioned(&mut self, _surface: ImPopup) {}
+
+    /// Where the text field's window sits, so the candidate popup
+    /// lands next to the caret.
+    fn parent_geometry(&self, parent: &WlSurface) -> Rectangle<i32, Logical> {
+        self.window_origins
+            .get(parent)
+            .map(|loc| Rectangle::new(*loc, (0, 0).into()))
+            .unwrap_or_default()
+    }
+}
+delegate_input_method_manager!(State);
+
+delegate_pointer_gestures!(State);
+delegate_relative_pointer!(State);
+
+impl PointerConstraintsHandler for State {
+    /// Lock or confine at once when the surface already has the
+    /// pointer; otherwise the window manager activates it on enter.
+    fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
+        if pointer.current_focus().as_ref() == Some(surface) {
+            with_pointer_constraint(surface, pointer, |constraint| {
+                if let Some(constraint) = constraint {
+                    constraint.activate();
+                }
+            });
+        }
+    }
+
+    fn cursor_position_hint(
+        &mut self,
+        _surface: &WlSurface,
+        _pointer: &PointerHandle<Self>,
+        _location: Point<f64, Logical>,
+    ) {
+    }
+}
+delegate_pointer_constraints!(State);

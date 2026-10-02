@@ -33,6 +33,11 @@ and this page together.
 | wp_single_pixel_buffer_manager_v1 | 1 | |
 | wp_cursor_shape_manager_v1 | 2 | shapes accepted; the compositor cursor is still the default arrow |
 | zwp_idle_inhibit_manager_v1 | 1 | a live inhibitor holds off the idle lock |
+| zwp_text_input_manager_v3 | 1 | text fields reach the input method (#60) |
+| zwp_input_method_manager_v2 | 1 | IMEs such as fcitx5; candidate popups are tracked like any popup |
+| zwp_pointer_gestures_v1 | 3 | swipes reach apps; three-finger swipes are the shell's (overview, workspaces) |
+| zwp_relative_pointer_manager_v1 | 1 | raw motion from the DRM backend |
+| zwp_pointer_constraints_v1 | 1 | a locked pointer stays put; a confined one stays in its window |
 
 ### xdg-activation policy
 
@@ -47,9 +52,6 @@ mint its way to the front.
 | Protocol | Roost | Tracked in |
 |---|---|---|
 | wp_presentation | missing | #89 |
-| zwp_pointer_constraints_v1, zwp_relative_pointer_manager_v1 | missing | #89 (games, remote desktop) |
-| zwp_pointer_gestures_v1 | missing | #60 |
-| zwp_text_input_manager_v3 and input methods | missing | #60 |
 | zwp_tablet_manager_v2 | missing | #89 |
 | zwp_keyboard_shortcuts_inhibit_manager_v1 | missing | #89 |
 | zxdg_exporter_v2, zxdg_importer_v2 (xdg-foreign) | missing | #61 (portal dialogs) |
