@@ -38,6 +38,9 @@ pub trait OverviewActions {
     /// Search results are showing (or not): the compositor hides the
     /// workspace view meanwhile.
     fn set_search(&self, active: bool);
+    /// The app grid is showing (or not): the compositor draws the
+    /// workspaces as thumbnails along the top meanwhile.
+    fn set_app_grid(&self, active: bool);
 }
 
 /// One dash item (`#dash .overview-tile`): the 64px icon in a 76px
@@ -89,6 +92,21 @@ fn app_button(entry: &AppEntry, icon_size: i32, with_label: bool) -> gtk::Button
     button.update_property(&[gtk::accessible::Property::Label(&entry.name)]);
     button.set_tooltip_text(Some(&entry.name));
     button
+}
+
+/// Keep a grid tile at GNOME's 113px: its label ellipsizes inside the
+/// 89px icon box instead of widening the tile.
+fn fit_tile_label(button: &gtk::Button) {
+    let mut child = button.first_child();
+    while let Some(widget) = child {
+        if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+            label.set_max_width_chars(1);
+            label.set_hexpand(true);
+            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        }
+        child = widget.first_child().or_else(|| widget.next_sibling());
+    }
+    button.set_size_request(113, 113);
 }
 
 fn layer_window(app: &gtk::Application, namespace: &str, css: &str) -> gtk::ApplicationWindow {
@@ -212,8 +230,10 @@ impl OverviewUi {
         for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
             grid.set_anchor(edge, true);
         }
-        grid.set_margin(Edge::Top, 64);
-        grid.set_margin(Edge::Bottom, 112);
+        // GNOME's apps scroll view: 232..673 on 1280x800, below the
+        // workspace thumbnails and above the dash.
+        grid.set_margin(Edge::Top, 200);
+        grid.set_margin(Edge::Bottom, 127);
         grid.set_keyboard_mode(KeyboardMode::None);
         grid.set_title(Some("App Grid"));
 
@@ -460,7 +480,9 @@ impl OverviewUi {
         {
             let ui = ui.clone();
             show_apps.connect_toggled(move |t| {
-                ui.borrow().grid.set_visible(t.is_active());
+                let me = ui.borrow();
+                me.grid.set_visible(t.is_active());
+                me.actions.set_app_grid(t.is_active());
             });
         }
         me.dash_row.append(&show_apps);
@@ -471,13 +493,19 @@ impl OverviewUi {
 
     fn rebuild_grid(ui: &Rc<RefCell<Self>>) {
         let me = ui.borrow();
+        // GNOME's icon grid: eight 113px tiles a row, 12px apart,
+        // 24px below the top of the scroll view.
         let flow = gtk::FlowBox::new();
         flow.set_selection_mode(gtk::SelectionMode::None);
+        flow.set_homogeneous(true);
         flow.set_max_children_per_line(8);
-        flow.set_min_children_per_line(4);
-        flow.set_column_spacing(24);
-        flow.set_row_spacing(24);
+        flow.set_min_children_per_line(8);
+        flow.set_column_spacing(12);
+        flow.set_row_spacing(12);
         flow.set_halign(gtk::Align::Center);
+        flow.set_valign(gtk::Align::Start);
+        flow.set_margin_top(24);
+        flow.add_css_class("icon-grid");
         // GNOME's app-folders: folders and loose apps share one
         // alphabetical grid; a folder opens its apps in a popover.
         let apps = me.apps.get();
@@ -499,6 +527,8 @@ impl OverviewUi {
         items.sort_by(|a, b| a.0.cmp(&b.0));
         let launch_button = |entry: &AppEntry, size: i32, actions: Rc<dyn OverviewActions>| {
             let button = app_button(entry, size, true);
+            button.add_css_class("grid-tile");
+            fit_tile_label(&button);
             let entry = entry.clone();
             button.connect_clicked(move |_| {
                 if roost_shell_host::apps::launch(&entry).is_ok() {
@@ -510,7 +540,7 @@ impl OverviewUi {
         for (_, item) in items {
             match item {
                 Item::App(entry) => {
-                    flow.insert(&launch_button(entry, 96, me.actions.clone()), -1);
+                    flow.insert(&launch_button(entry, 64, me.actions.clone()), -1);
                 }
                 Item::Folder(folder, members) => {
                     // 2x2 collage of the first apps, the name beneath.
@@ -533,6 +563,7 @@ impl OverviewUi {
                     button.add_css_class("flat");
                     button.add_css_class("overview-app");
                     button.add_css_class("app-folder");
+                    button.add_css_class("grid-tile");
                     button.update_property(&[gtk::accessible::Property::Label(&folder.name)]);
                     let popover = gtk::Popover::new();
                     popover.add_css_class("roost-shell-popover");

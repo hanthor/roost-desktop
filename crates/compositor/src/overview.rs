@@ -78,6 +78,32 @@ pub struct OverviewLayout {
     pub cards: Vec<WorkspaceCard>,
     /// Previews bottom to top (active card last, so it paints on top).
     pub previews: Vec<Preview>,
+    /// The active preview under the pointer, grown (see [`grow_hovered`]).
+    pub hovered: Option<u64>,
+}
+
+/// GNOME's hover growth (`WINDOW_ACTIVE_SIZE_INC`): 5px each side.
+pub const HOVER_GROWTH: i32 = 5;
+
+/// Grow the topmost active preview under `pointer` by
+/// [`HOVER_GROWTH`] a side, as GNOME does, and remember it as hovered.
+pub fn grow_hovered(layout: &mut OverviewLayout, pointer: Point<f64, Logical>) {
+    let Some(p) = layout
+        .previews
+        .iter_mut()
+        .rev()
+        .find(|p| p.active && p.rect.to_f64().contains(pointer))
+    else {
+        return;
+    };
+    let g = HOVER_GROWTH;
+    let w = p.rect.size.w.max(1);
+    p.scale *= f64::from(w + 2 * g) / f64::from(w);
+    p.rect = Rectangle::new(
+        (p.rect.loc.x - g, p.rect.loc.y - g).into(),
+        (p.rect.size.w + 2 * g, p.rect.size.h + 2 * g).into(),
+    );
+    layout.hovered = Some(p.id);
 }
 
 /// What a press at a point means in the overview.
@@ -127,14 +153,15 @@ fn card_rect(
 }
 
 /// Workspaces as the overview shows them: the model's, plus GNOME's
-/// trailing empty one after an occupied last workspace.
+/// trailing empty one after an occupied last workspace, and never fewer
+/// than two (`MIN_NUM_WORKSPACES`).
 pub fn shown_workspaces(workspaces: &[u32], windows: &[OverviewWindow]) -> Vec<u32> {
     let mut shown = workspaces.to_vec();
     if shown.is_empty() {
         shown.push(0);
     }
     if let Some(&last) = shown.last() {
-        if windows.iter().any(|w| w.workspace == last) {
+        if shown.len() < 2 || windows.iter().any(|w| w.workspace == last) {
             shown.push(last + 1);
         }
     }
@@ -439,6 +466,79 @@ pub fn layout(
     out
 }
 
+/// Thumbnail scale of the work area in the app grid state.
+pub const THUMBNAIL_SCALE: f64 = 0.15;
+/// Thumbnail row top as a fraction of the output height.
+pub const THUMBNAIL_TOP: f64 = 0.1275;
+
+/// GNOME's app grid state (`ControlsState.APP_GRID`, workspacesView.js
+/// fit-all mode): every workspace as a small card along the top, 0.15 of
+/// the work area (192x115 at y 102 on 1280x800), slots 24px apart, the
+/// row centered, inactive ones at 0.94, windows in place on each.
+pub fn app_grid_layout(
+    output: Rectangle<i32, Logical>,
+    work_top: i32,
+    workspaces: &[u32],
+    active: u32,
+    windows: &[OverviewWindow],
+) -> OverviewLayout {
+    let mut out = OverviewLayout::default();
+    let shown = shown_workspaces(workspaces, windows);
+    let work_h = (output.size.h - work_top).max(1);
+    let w = (f64::from(output.size.w) * THUMBNAIL_SCALE).round();
+    let h = (f64::from(work_h) * THUMBNAIL_SCALE).round();
+    let spacing = f64::from(WORKSPACE_SPACING);
+    let n = shown.len() as f64;
+    let total = n * w + (n - 1.0) * spacing;
+    let start = f64::from(output.loc.x) + f64::from(output.size.w) / 2.0 - total / 2.0;
+    let top = f64::from(output.loc.y) + (f64::from(output.size.h) * THUMBNAIL_TOP).round();
+    for (i, &workspace) in shown.iter().enumerate() {
+        let is_active = workspace == active;
+        let (cx, cy) = (start + i as f64 * (w + spacing) + w / 2.0, top + h / 2.0);
+        let k = if is_active { 1.0 } else { INACTIVE_SCALE };
+        let (sw, sh) = ((w * k).round(), (h * k).round());
+        let rect = Rectangle::new(
+            (
+                (cx - sw / 2.0).floor() as i32,
+                (cy - sh / 2.0).floor() as i32,
+            )
+                .into(),
+            (sw as i32, sh as i32).into(),
+        );
+        let card = WorkspaceCard {
+            workspace,
+            rect,
+            active: is_active,
+        };
+        if is_active {
+            out.cards.insert(0, card);
+        } else {
+            out.cards.push(card);
+        }
+        let scale = sw / f64::from(output.size.w.max(1));
+        for win in windows.iter().filter(|w| w.workspace == workspace) {
+            let x =
+                rect.loc.x + (f64::from(win.geometry.loc.x - output.loc.x) * scale).round() as i32;
+            let y = rect.loc.y
+                + (f64::from(win.geometry.loc.y - output.loc.y - work_top) * scale).round() as i32;
+            out.previews.push(Preview {
+                id: win.id,
+                rect: Rectangle::new(
+                    (x, y).into(),
+                    (
+                        (f64::from(win.geometry.size.w) * scale).round() as i32,
+                        (f64::from(win.geometry.size.h) * scale).round() as i32,
+                    )
+                        .into(),
+                ),
+                scale,
+                active: false,
+            });
+        }
+    }
+    out
+}
+
 /// What a press at `pos` hits: the topmost active preview, else a
 /// neighboring card, else dismissal.
 pub fn hit(layout: &OverviewLayout, pos: Point<f64, Logical>) -> OverviewHit {
@@ -479,7 +579,7 @@ mod tests {
     #[test]
     fn active_card_matches_gnome_51() {
         let l = layout(output(), 32, &[0], 0, &[]);
-        assert_eq!(l.cards.len(), 1, "no windows: no trailing workspace yet");
+        assert_eq!(l.cards.len(), 2, "GNOME keeps two workspaces, even empty");
         // GNOME Shell 51 at 1280x800: workspace-background 922x553 at 179,108.
         assert_eq!(
             l.cards[0].rect,
@@ -604,6 +704,45 @@ mod tests {
                 "{got:?}"
             );
         }
+    }
+
+    #[test]
+    fn app_grid_thumbnails_match_gnome_51() {
+        // GNOME Shell 51's app grid at 1280x800 with one occupied
+        // workspace: 192x115 at 436,102 and the empty one 180x108 at
+        // 658,105.
+        let l = app_grid_layout(output(), 32, &[0], 0, &[win(1, 0, 100, 100, 640, 420)]);
+        assert_eq!(l.cards.len(), 2);
+        assert_eq!(
+            l.cards[0].rect,
+            Rectangle::new((436, 102).into(), (192, 115).into())
+        );
+        assert_eq!(
+            l.cards[1].rect,
+            Rectangle::new((658, 105).into(), (180, 108).into())
+        );
+        assert!(
+            l.previews.iter().all(|p| !p.active),
+            "thumbnails are not window pickers"
+        );
+    }
+
+    #[test]
+    fn hovered_preview_grows_five_pixels_a_side() {
+        let mut l = layout(output(), 32, &[0], 0, &[win(1, 0, 100, 100, 640, 420)]);
+        let before = l.previews[0].rect;
+        let inside = Point::from((f64::from(before.loc.x + 10), f64::from(before.loc.y + 10)));
+        grow_hovered(&mut l, inside);
+        assert_eq!(l.hovered, Some(1));
+        let after = l.previews[0].rect;
+        assert_eq!(
+            (after.loc.x, after.loc.y),
+            (before.loc.x - 5, before.loc.y - 5)
+        );
+        assert_eq!(
+            (after.size.w, after.size.h),
+            (before.size.w + 10, before.size.h + 10)
+        );
     }
 
     #[test]

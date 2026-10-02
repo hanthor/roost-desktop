@@ -374,6 +374,21 @@ pub fn hit_layer_rect(rects: &[(i32, i32, i32, i32)], x: i32, y: i32) -> Option<
 /// Topmost layer surface at output coordinates, with its placed origin.
 /// Returns `None` where no mapped layer surface covers the point, so the
 /// caller falls through to window routing.
+/// Whether `surface` accepts input at `local` (surface coordinates):
+/// inside its committed input region, or anywhere when it set none.
+pub fn accepts_input(surface: &WlSurface, local: (i32, i32)) -> bool {
+    smithay::wayland::compositor::with_states(surface, |states| {
+        let mut attrs = states
+            .cached_state
+            .get::<smithay::wayland::compositor::SurfaceAttributes>();
+        attrs
+            .current()
+            .input_region
+            .as_ref()
+            .is_none_or(|region| region.contains(local))
+    })
+}
+
 pub fn topmost_layer_at(state: &State, x: i32, y: i32) -> Option<(WlSurface, (i32, i32))> {
     let placed = layer_layout(state);
     let rects: Vec<(i32, i32, i32, i32)> = placed
@@ -386,7 +401,14 @@ pub fn topmost_layer_at(state: &State, x: i32, y: i32) -> Option<(WlSurface, (i3
                 .and_then(|handle| handle.current_state().size)
                 .map(|size| (size.w, size.h))
                 .unwrap_or((0, 0));
-            (*ox, *oy, w, h)
+            // A surface takes no input outside its wl_surface input
+            // region (no region: all of it), so a click-through overlay
+            // such as the overview's preview chrome passes presses on.
+            if accepts_input(surface, (x - ox, y - oy)) {
+                (*ox, *oy, w, h)
+            } else {
+                (*ox, *oy, 0, 0)
+            }
         })
         .collect();
     hit_layer_rect(&rects, x, y).map(|index| {

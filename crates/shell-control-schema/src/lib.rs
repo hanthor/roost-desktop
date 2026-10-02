@@ -82,9 +82,17 @@ impl ProtocolVersion {
     ///
     /// `0.11` appends the shell-to-compositor `SetInputSettings` command
     /// (GNOME's keyboard, touchpad and mouse settings), again last.
+    ///
+    /// `0.12` appends the shell-to-compositor `SetOverviewAppGrid`
+    /// command (the app grid shrinks the workspaces to thumbnails along
+    /// the top, as in GNOME), again last.
+    ///
+    /// `0.13` appends the compositor-to-shell `OverviewPreviews` message
+    /// (where each window preview sits, so the shell can draw GNOME's
+    /// app icons, captions and close buttons on them), again last.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 11,
+        minor: 13,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -231,6 +239,14 @@ pub enum CommandKind {
     /// (#60): keymap, key repeat, pointer devices, hot corner. Sent at
     /// start and on every change; the compositor applies them live.
     SetInputSettings(InputSettings),
+    /// The overview shows the app grid (or not): while it does, the
+    /// compositor draws the workspaces as thumbnails along the top, as
+    /// GNOME's app grid state does. UI state; it resets whenever the
+    /// overview closes.
+    SetOverviewAppGrid {
+        /// Whether the app grid is showing.
+        active: bool,
+    },
 }
 
 /// Outcome of one shell command, matched by request id.
@@ -358,6 +374,28 @@ pub enum Message {
         /// `(name, value)` pairs, sorted by name.
         vars: Vec<(String, String)>,
     },
+    /// Compositor-to-shell overview previews: where each window preview
+    /// on the active workspace sits and which one the pointer is over,
+    /// so the shell draws GNOME's preview chrome (app icon always;
+    /// caption and close button on hover). Empty when the overview is
+    /// closed. Sent whenever it changes. Sits last.
+    OverviewPreviews {
+        /// Previews in drawing order, bottom first.
+        previews: Vec<PreviewInfo>,
+        /// The preview under the pointer, if any.
+        hovered: Option<u64>,
+    },
+}
+
+/// One window preview in the overview, in output logical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewInfo {
+    /// The window's model id.
+    pub window: u64,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
 }
 
 /// GNOME's input settings (`org.gnome.desktop.input-sources` and
@@ -653,7 +691,8 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
         | Message::Error { .. }
         | Message::Overview { .. }
         | Message::Switcher { .. }
-        | Message::Outputs { .. } => {}
+        | Message::Outputs { .. }
+        | Message::OverviewPreviews { .. } => {}
         // Names and values share the title bound: short by nature.
         Message::Environment { vars } => {
             for (name, value) in vars {
@@ -699,8 +738,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_11() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 11));
+    fn current_version_is_0_13() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 13));
     }
 
     #[test]
@@ -719,7 +758,9 @@ mod tests {
         assert!(ProtocolVersion::new(0, 9).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 10).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 11).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 12).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 12).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 13).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 14).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }

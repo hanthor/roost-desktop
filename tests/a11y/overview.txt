@@ -11,3 +11,5 @@ push button: roost-test-alpha
 push button: roost-test-beta
 push button: roost-test-gamma
 toggle button: Show Apps
+frame: Window Previews
+push button: Close

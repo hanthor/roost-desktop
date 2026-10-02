@@ -20,6 +20,7 @@ mod logic;
 mod notify;
 mod overview;
 mod power;
+mod preview_chrome;
 mod providers;
 mod services;
 mod switcher;
@@ -132,6 +133,12 @@ impl overview::OverviewActions for ShellActions {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    fn set_app_grid(&self, active: bool) {
+        if let Some(control) = self.0.borrow_mut().control.as_mut() {
+            let _ = control.set_overview_app_grid(active);
+        }
     }
 
     fn set_search(&self, active: bool) {
@@ -954,7 +961,7 @@ fn build(app: &adw::Application) {
         favorites,
         Rc::new(ShellActions(shell.clone())),
     );
-    let switcher_ui = switcher::SwitcherUi::new(app.upcast_ref(), apps);
+    let switcher_ui = switcher::SwitcherUi::new(app.upcast_ref(), apps.clone());
 
     // GNOME's background settings: the picture (the dark variant under
     // the dark style, as GNOME picks it) and primary-color, published to
@@ -1095,6 +1102,19 @@ fn build(app: &adw::Application) {
         let overview_ui = overview_ui.clone();
         let switcher_ui = switcher_ui.clone();
         let panel_window = window.clone();
+        let chrome = {
+            let shell = shell.clone();
+            preview_chrome::PreviewChrome::new(
+                app.upcast_ref(),
+                Rc::new(move |id| {
+                    if let Some(control) = shell.borrow_mut().control.as_mut() {
+                        let _ = control.close_window(id);
+                    }
+                }),
+            )
+        };
+        let chrome_apps = apps.clone();
+        let shell_rc = shell.clone();
         let activities_button = activities.clone();
         glib::timeout_add_local(Duration::from_millis(16), move || {
             let mut shell = shell.borrow_mut();
@@ -1132,6 +1152,36 @@ fn build(app: &adw::Application) {
                 activities_button.remove_css_class("checked");
             }
             overview::OverviewUi::set_open(&overview_ui, open);
+            // GNOME's preview chrome over the compositor's previews.
+            let shell = shell_rc.borrow();
+            if let Some(control) = shell.control.as_ref() {
+                let (previews, hovered) = control.overview_previews();
+                let model = control.model();
+                let apps = chrome_apps.get();
+                let lookup = |id: u64| {
+                    let window = model.windows().iter().find(|w| w.id == id)?;
+                    let icon = window
+                        .app_id
+                        .as_deref()
+                        .and_then(|app| providers::provider_app(&apps, app))
+                        .and_then(|entry| entry.icon.clone())
+                        .map(|icon| -> gio::Icon {
+                            if icon.starts_with('/') {
+                                gio::FileIcon::new(&gio::File::for_path(&icon)).upcast()
+                            } else {
+                                gio::ThemedIcon::new(&icon).upcast()
+                            }
+                        })
+                        .unwrap_or_else(|| {
+                            gio::ThemedIcon::new("application-x-executable").upcast()
+                        });
+                    Some(preview_chrome::PreviewWindow {
+                        title: window.title.clone(),
+                        icon,
+                    })
+                };
+                chrome.update(previews, hovered, &lookup);
+            }
             glib::ControlFlow::Continue
         });
     }
