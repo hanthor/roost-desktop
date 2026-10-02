@@ -13,6 +13,7 @@
 //! The compositor runs one supervised shell; select this one with
 //! `ROOST_SHELL_BIN=roost-shell-gtk` while it grows to parity.
 
+mod live_apps;
 mod logic;
 mod notify;
 mod overview;
@@ -129,6 +130,12 @@ impl overview::OverviewActions for ShellActions {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    fn set_search(&self, active: bool) {
+        if let Some(control) = self.0.borrow_mut().control.as_mut() {
+            let _ = control.set_overview_search(active);
+        }
     }
 }
 
@@ -513,7 +520,16 @@ fn build(app: &adw::Application) {
             .as_ref()
             .map(|s| ClockFormat::from_setting(&s.string("clock-format")))
             .unwrap_or(ClockFormat::TwentyFourHour);
-        let text = logic::clock_text(&now, format);
+        // GNOME's clock keys; without the schema, weekday and date.
+        let parts = interface
+            .as_ref()
+            .map(|s| logic::ClockParts {
+                weekday: s.boolean("clock-show-weekday"),
+                date: s.boolean("clock-show-date"),
+                seconds: s.boolean("clock-show-seconds"),
+            })
+            .unwrap_or_default();
+        let text = logic::clock_text(&now, format, parts);
         clock_label.set_label(&text);
         clock.update_property(&[gtk::accessible::Property::Description(&text)]);
         let (day, date) = logic::calendar_heading(&now);
@@ -550,7 +566,7 @@ fn build(app: &adw::Application) {
                 .collect()
         }
     };
-    let apps = Rc::new(roost_shell_host::apps::AppProvider::system());
+    let apps = live_apps::LiveApps::new();
     let overview_ui = overview::OverviewUi::new(
         app.upcast_ref(),
         apps.clone(),

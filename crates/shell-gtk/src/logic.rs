@@ -21,15 +21,47 @@ impl ClockFormat {
     }
 }
 
-/// GNOME 51 panel clock text: weekday, month, day, then the time,
-/// separated by two spaces (`Thu Oct 1  1:06 PM`).
-pub fn clock_text(time: &jiff::civil::DateTime, format: ClockFormat) -> String {
-    let date = time.strftime("%a %b %-d").to_string();
-    let clock = match format {
-        ClockFormat::TwelveHour => time.strftime("%-I:%M %p").to_string(),
-        ClockFormat::TwentyFourHour => time.strftime("%H:%M").to_string(),
+/// Which parts the panel clock shows: GNOME's `clock-show-weekday`,
+/// `clock-show-date` and `clock-show-seconds`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClockParts {
+    pub weekday: bool,
+    pub date: bool,
+    pub seconds: bool,
+}
+
+impl Default for ClockParts {
+    /// What the panel shows without settings: weekday and date.
+    fn default() -> Self {
+        Self {
+            weekday: true,
+            date: true,
+            seconds: false,
+        }
+    }
+}
+
+/// GNOME 51 panel clock text, built the way gnome-desktop's wall clock
+/// builds it: optional weekday and date, then the time, separated by
+/// two spaces (`Thu Oct 1  1:06 PM`).
+pub fn clock_text(time: &jiff::civil::DateTime, format: ClockFormat, parts: ClockParts) -> String {
+    let date = match (parts.weekday, parts.date) {
+        (true, true) => time.strftime("%a %b %-d").to_string(),
+        (false, true) => time.strftime("%b %-d").to_string(),
+        (true, false) => time.strftime("%a").to_string(),
+        (false, false) => String::new(),
     };
-    format!("{date}  {clock}")
+    let clock = match (format, parts.seconds) {
+        (ClockFormat::TwelveHour, false) => time.strftime("%-I:%M %p").to_string(),
+        (ClockFormat::TwelveHour, true) => time.strftime("%-I:%M:%S %p").to_string(),
+        (ClockFormat::TwentyFourHour, false) => time.strftime("%H:%M").to_string(),
+        (ClockFormat::TwentyFourHour, true) => time.strftime("%H:%M:%S").to_string(),
+    };
+    if date.is_empty() {
+        clock
+    } else {
+        format!("{date}  {clock}")
+    }
 }
 
 /// Calendar popover heading: weekday line and full date line
@@ -76,17 +108,40 @@ mod tests {
 
     #[test]
     fn clock_matches_gnome_51_panel_text() {
+        let full = ClockParts::default();
         assert_eq!(
-            clock_text(&at(13, 6), ClockFormat::TwelveHour),
+            clock_text(&at(13, 6), ClockFormat::TwelveHour, full),
             "Thu Oct 1  1:06 PM"
         );
         assert_eq!(
-            clock_text(&at(13, 6), ClockFormat::TwentyFourHour),
+            clock_text(&at(13, 6), ClockFormat::TwentyFourHour, full),
             "Thu Oct 1  13:06"
         );
         assert_eq!(
-            clock_text(&at(0, 5), ClockFormat::TwelveHour),
+            clock_text(&at(0, 5), ClockFormat::TwelveHour, full),
             "Thu Oct 1  12:05 AM"
+        );
+    }
+
+    #[test]
+    fn clock_parts_follow_the_gnome_keys() {
+        let parts = |weekday, date, seconds| ClockParts {
+            weekday,
+            date,
+            seconds,
+        };
+        let t = at(13, 6);
+        let h24 = ClockFormat::TwentyFourHour;
+        assert_eq!(
+            clock_text(&t, h24, parts(false, true, false)),
+            "Oct 1  13:06"
+        );
+        assert_eq!(clock_text(&t, h24, parts(true, false, false)), "Thu  13:06");
+        assert_eq!(clock_text(&t, h24, parts(false, false, false)), "13:06");
+        assert_eq!(clock_text(&t, h24, parts(false, false, true)), "13:06:00");
+        assert_eq!(
+            clock_text(&t, ClockFormat::TwelveHour, parts(false, false, true)),
+            "1:06:00 PM"
         );
     }
 

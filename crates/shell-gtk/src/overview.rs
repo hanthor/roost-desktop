@@ -15,7 +15,9 @@ use std::rc::Rc;
 use gtk4 as gtk;
 use gtk4::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
-use roost_shell_host::apps::{AppEntry, AppProvider};
+use roost_shell_host::apps::AppEntry;
+
+use crate::live_apps::LiveApps;
 
 use crate::providers;
 
@@ -33,6 +35,9 @@ pub trait OverviewActions {
     fn activate_window(&self, id: u64);
     /// Running windows as `(id, app_id)`.
     fn running(&self) -> Vec<(u64, Option<String>)>;
+    /// Search results are showing (or not): the compositor hides the
+    /// workspace view meanwhile.
+    fn set_search(&self, active: bool);
 }
 
 fn app_icon(entry: &AppEntry, size: i32) -> gtk::Image {
@@ -82,12 +87,14 @@ pub struct OverviewUi {
     remotes: Rc<RefCell<Vec<providers::Remote>>>,
     /// Cancels the in-flight provider search on the next keystroke.
     search_cancel: RefCell<Option<gio::Cancellable>>,
+    /// Whether the compositor was last told search is active.
+    search_active: std::cell::Cell<bool>,
     /// First provider hit, for Enter when no app matches.
     first_remote_hit: Rc<RefCell<Option<(providers::Remote, String)>>>,
     dash: gtk::ApplicationWindow,
     dash_row: gtk::Box,
     grid: gtk::ApplicationWindow,
-    apps: Rc<AppProvider>,
+    apps: Rc<LiveApps>,
     favorites: Vec<String>,
     actions: Rc<dyn OverviewActions>,
     open: bool,
@@ -97,7 +104,7 @@ impl OverviewUi {
     /// Build the (hidden) surfaces.
     pub fn new(
         app: &gtk::Application,
-        apps: Rc<AppProvider>,
+        apps: Rc<LiveApps>,
         favorites: Vec<String>,
         actions: Rc<dyn OverviewActions>,
     ) -> Rc<RefCell<Self>> {
@@ -140,7 +147,7 @@ impl OverviewUi {
                     let found = providers::discover(&providers::data_dirs());
                     let chosen =
                         providers::select(found, &providers::ProviderSettings::load(), |id| {
-                            providers::provider_app(&apps, id).is_some()
+                            providers::provider_app(&apps.get(), id).is_some()
                         });
                     eprintln!(
                         "roost-shell-gtk: search providers: {}",
@@ -185,6 +192,7 @@ impl OverviewUi {
             provider_box,
             remotes,
             search_cancel: RefCell::new(None),
+            search_active: std::cell::Cell::new(false),
             first_remote_hit: Rc::new(RefCell::new(None)),
             dash,
             dash_row,
@@ -211,9 +219,11 @@ impl OverviewUi {
             me.entry.connect_activate(move |entry| {
                 let first = {
                     let me = ui.borrow();
-                    crate::logic::rank_apps(me.apps.apps(), &entry.text(), 1)
+                    let apps = me.apps.get();
+                    let first = crate::logic::rank_apps(apps.apps(), &entry.text(), 1)
                         .first()
-                        .map(|e| (*e).clone())
+                        .map(|e| (*e).clone());
+                    first
                 };
                 if let Some(app) = first {
                     ui.borrow().launch(&app);
@@ -239,10 +249,15 @@ impl OverviewUi {
     }
 
     fn show_results(&self, query: &str) {
+        let active = !query.trim().is_empty();
+        if self.search_active.replace(active) != active {
+            self.actions.set_search(active);
+        }
         while let Some(child) = self.results.first_child() {
             self.results.remove(&child);
         }
-        let hits = crate::logic::rank_apps(self.apps.apps(), query, MAX_RESULTS);
+        let apps = self.apps.get();
+        let hits = crate::logic::rank_apps(apps.apps(), query, MAX_RESULTS);
         for hit in &hits {
             let button = app_button(hit, 64, true);
             let entry = (*hit).clone();
@@ -285,7 +300,7 @@ impl OverviewUi {
             self.provider_box.append(&section);
             let (section2, box2) = (section.clone(), self.provider_box.clone());
             let (remote2, terms2) = (remote.clone(), terms.clone());
-            let app = providers::provider_app(&self.apps, &remote.info.desktop_id).cloned();
+            let app = providers::provider_app(&self.apps.get(), &remote.info.desktop_id).cloned();
             let actions = self.actions.clone();
             let first = self.first_remote_hit.clone();
             remote.search(terms.clone(), &cancel, move |metas| {
@@ -310,8 +325,9 @@ impl OverviewUi {
         }
         let running = me.actions.running();
         let mut shown: Vec<String> = Vec::new();
+        let apps = me.apps.get();
         for id in &me.favorites {
-            if let Some(entry) = providers::provider_app(&me.apps, id) {
+            if let Some(entry) = providers::provider_app(&apps, id) {
                 shown.push(entry.app_id.clone());
                 let button = app_button(entry, 48, false);
                 let window = running
@@ -358,6 +374,7 @@ impl OverviewUi {
             });
         }
         me.dash_row.append(&show_apps);
+        drop(apps);
         drop(me);
         Self::rebuild_grid(ui);
     }
@@ -371,7 +388,8 @@ impl OverviewUi {
         flow.set_column_spacing(24);
         flow.set_row_spacing(24);
         flow.set_halign(gtk::Align::Center);
-        let mut sorted: Vec<&AppEntry> = me.apps.apps().iter().collect();
+        let apps = me.apps.get();
+        let mut sorted: Vec<&AppEntry> = apps.apps().iter().collect();
         sorted.sort_by_key(|a| a.name.to_lowercase());
         for entry in sorted {
             let button = app_button(entry, 96, true);
@@ -400,6 +418,8 @@ impl OverviewUi {
         if open {
             Self::rebuild_dash(ui);
             let me = ui.borrow();
+            // The compositor resets search on close; start clean.
+            me.search_active.set(false);
             me.entry.set_text("");
             me.results.set_visible(false);
             me.search.set_keyboard_mode(KeyboardMode::Exclusive);

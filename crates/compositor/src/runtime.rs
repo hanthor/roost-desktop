@@ -413,6 +413,9 @@ pub struct Runtime {
     /// feature only).
     #[cfg(feature = "xwayland")]
     pending_x11_client: Option<smithay::reexports::wayland_server::Client>,
+    /// Overview search is showing results: the workspace card and
+    /// previews hide (GNOME). Reset whenever the overview closes.
+    overview_search: bool,
     /// X11 display number once XWayland's window manager is up (#59):
     /// published as `DISPLAY` to the shell for the apps it launches.
     x11_display: Option<u32>,
@@ -605,6 +608,7 @@ impl Runtime {
             #[cfg(feature = "xwayland")]
             pending_x11_client: None,
             x11_display: None,
+            overview_search: false,
             idle_since: Instant::now(),
             exit: false,
             stats: RunStats::default(),
@@ -907,6 +911,7 @@ impl Runtime {
         let doc = serde_json::json!({
             "x11_display": self.x11_display.map(|d| format!(":{d}")),
             "idle_timeout_ms": self.lock.timeout_ms(),
+            "overview_search": self.overview_search,
             "overview_open": overview_open,
             "locked": self.is_locked(),
             "active_workspace": model.active_workspace(),
@@ -974,6 +979,11 @@ impl Runtime {
         {
             return false;
         }
+        // Search hides the cards: a press beside the results dismisses.
+        if self.overview_search {
+            self.control.set_overview(false);
+            return true;
+        }
         match crate::overview::hit(&self.overview_layout(), pos) {
             crate::overview::OverviewHit::Window(id) => {
                 self.manager.focus(&mut self.state, Some(id));
@@ -1006,6 +1016,12 @@ impl Runtime {
         }
         for id in outcome.closed {
             self.manager.close_window(id);
+        }
+        if let Some(active) = outcome.overview_search {
+            self.overview_search = active;
+        }
+        if !self.control.overview_open() {
+            self.overview_search = false;
         }
         // GNOME's idle and lock settings, from the shell (#63).
         if let Some(ms) = outcome.idle_timeout {
@@ -1102,8 +1118,9 @@ impl Runtime {
         };
         let overview = (show_content && !overlay_visible && self.control.overview_open())
             .then(|| self.overview_layout());
-        let decor_global = overview
-            .as_ref()
+        // While search shows results, the workspace view steps aside.
+        let cards = overview.as_ref().filter(|_| !self.overview_search);
+        let decor_global = cards
             .map(|layout| overview_decor(layout, self.manager.pointer_pos()))
             .unwrap_or_default();
         let background = if overview.is_some() {
@@ -1129,8 +1146,7 @@ impl Runtime {
                         overview.as_ref(),
                     );
                     let decor = decor_for_output(&decor_global, (0, 0));
-                    let previews =
-                        preview_elements(renderer, &self.manager, (0, 0), overview.as_ref());
+                    let previews = preview_elements(renderer, &self.manager, (0, 0), cards);
                     let paper = if show_paper {
                         self.wallpaper.element(renderer, size.w, size.h)
                     } else {
@@ -1195,8 +1211,7 @@ impl Runtime {
                         overview.as_ref(),
                     );
                     let decor = decor_for_output(&decor_global, out.loc);
-                    let previews =
-                        preview_elements(renderer, &self.manager, out.loc, overview.as_ref());
+                    let previews = preview_elements(renderer, &self.manager, out.loc, cards);
                     let paper = if show_paper {
                         self.wallpaper.element(renderer, size.w, size.h)
                     } else {

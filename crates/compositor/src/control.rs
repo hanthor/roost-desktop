@@ -300,6 +300,8 @@ pub struct Session<'a> {
     closed: Vec<u64>,
     /// Latest `SetIdleTimeout` from the shell, drained by the hub.
     idle_timeout: Option<u64>,
+    /// Latest `SetOverviewSearch` from the shell, drained by the hub.
+    overview_search: Option<bool>,
 }
 
 impl std::fmt::Debug for Session<'_> {
@@ -358,6 +360,7 @@ impl<'a> Session<'a> {
             locked_sent,
             closed: Vec::new(),
             idle_timeout: None,
+            overview_search: None,
         };
         let msg = match session.conn.read_frame() {
             Ok(msg) => msg,
@@ -558,6 +561,18 @@ impl<'a> Session<'a> {
                 })?;
                 let revision = self.send_snapshot(model)?;
                 Ok(Handled::HelloResync { revision })
+            }
+            Message::Command {
+                id,
+                kind: CommandKind::SetOverviewSearch { active },
+            } => {
+                // UI state for the runtime's overview drawing.
+                self.overview_search = Some(active);
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: CommandStatus::Applied,
+                })?;
+                Ok(Handled::CommandResult { id, applied: true })
             }
             Message::Command {
                 id,
@@ -776,7 +791,9 @@ fn apply_command(
             (CommandStatus::Applied, Some(*window))
         }
         // Intercepted by the session before it gets here.
-        CommandKind::SetIdleTimeout { .. } => (CommandStatus::Applied, None),
+        CommandKind::SetIdleTimeout { .. } | CommandKind::SetOverviewSearch { .. } => {
+            (CommandStatus::Applied, None)
+        }
         CommandKind::Lock => {
             // Manual lock from the shell (session-lock set path):
             // engage the compositor-owned flag; idempotent, always
@@ -803,6 +820,8 @@ pub struct PollOutcome {
     pub closed: Vec<u64>,
     /// Idle-lock timeout the shell asked for (`0` never), if any.
     pub idle_timeout: Option<u64>,
+    /// Whether overview search is showing results, if the shell said.
+    pub overview_search: Option<bool>,
 }
 
 /// Peers accepted but not yet handshaken are capped so a same-user
@@ -1124,6 +1143,9 @@ impl ControlHub {
                     outcome.closed.extend(Self::take_closed(session));
                     if let Some(ms) = session.take_idle_timeout() {
                         outcome.idle_timeout = Some(ms);
+                    }
+                    if let Some(active) = session.overview_search.take() {
+                        outcome.overview_search = Some(active);
                     }
                     true
                 } else {
