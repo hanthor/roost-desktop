@@ -33,6 +33,8 @@
 #                    the bus (stub daemons on a private system bus, #55)
 #   G-QS-WIFI-MENU   the Wi-Fi menu scans, lists NetworkManager's networks
 #                    as GNOME does, and activates a saved one
+#   G-NM-AGENT       the shell is NetworkManager's secret agent: an unsaved
+#                    secured network asks for its password in GNOME's dialog
 #   G-QS-WIFI        the Wi-Fi tile turns NetworkManager's radio off
 #   G-QS-BT-MENU     the Bluetooth menu lists paired devices as GNOME does
 #                    and connects one
@@ -816,19 +818,43 @@ grep -q '^RequestScan' "$ROOST_STUB_NM_LOG" 2>/dev/null ||
     fail G-QS-WIFI-MENU "opening the menu did not ask NetworkManager to scan"
 order="$(jq -r '[.[] | select(.showing) | .name | select(test("Signal strength"))] | join("|")' \
     "$ARTIFACTS/a11y-qs-wifi-menu.json")"
-want="Roost Home, Secure, Signal strength 70%|Roost Cafe, Not secure, Signal strength 85%|Roost Office, Secure, Signal strength 60%"
+want="Roost Home, Secure, Signal strength 70%|Roost Cafe, Not secure, Signal strength 85%|Roost Office, Secure, Signal strength 60%|Roost Guest, Secure, Signal strength 50%"
 [ "$order" = "$want" ] || fail G-QS-WIFI-MENU "networks are '$order', not '$want'"
 qs_press "Roost Home, Secure, Signal strength 70%" wifi-home ||
     fail G-QS-WIFI-MENU "could not press Roost Home"
 grep -q "^ActivateConnection /org/freedesktop/NetworkManager/Settings/1" "$ROOST_STUB_NM_LOG" ||
     fail G-QS-WIFI-MENU "Roost Home did not activate its saved connection"
+# Picking a network closes the panel, as GNOME's menus do.
 sleep 1.5
+open_qs
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-wifi-on.json" 20 ||
     fail G-QS-WIFI-MENU "accessibility dump failed"
-[ "$(jq '[.[] | select(.showing and .name == "Roost Home")] | length' "$ARTIFACTS/a11y-qs-wifi-on.json")" -ge 2 ] ||
+showing "$ARTIFACTS/a11y-qs-wifi-on.json" "Roost Home" ||
     fail G-QS-WIFI-MENU "the tile does not name the connected network"
-qs_press "Wi-Fi Menu" wifi-menu-close || fail G-QS-WIFI-MENU "could not close the Wi-Fi menu"
 pass G-QS-WIFI-MENU "the Wi-Fi menu scans, lists networks as GNOME does, and activates a saved one"
+
+# GNOME's network agent: an unsaved WPA2 network makes NetworkManager
+# ask the shell's agent, which shows GNOME's dialog; the typed password
+# goes back to NetworkManager.
+grep -q "network agent registered" "$LOG" || fail G-NM-AGENT "the shell never registered a secret agent"
+qs_press "Wi-Fi Menu" wifi-menu-again || fail G-NM-AGENT "could not reopen the Wi-Fi menu"
+sleep 1
+qs_press "Roost Guest, Secure, Signal strength 50%" wifi-guest ||
+    fail G-NM-AGENT "could not press Roost Guest"
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-nm-agent.json" 20 ||
+    fail G-NM-AGENT "accessibility dump failed"
+showing "$ARTIFACTS/a11y-nm-agent.json" "Authentication required" ||
+    fail G-NM-AGENT "no Authentication required dialog"
+scrot "$ARTIFACTS/15d-network-agent.png" >/dev/null
+xdotool type --delay 30 "guest-pass-$$"
+xdotool key Return
+for _ in $(seq 1 20); do grep -q "^Secrets" "$ROOST_STUB_NM_LOG" && break; sleep 0.5; done
+grep -q "^Secrets psk=guest-pass-$$" "$ROOST_STUB_NM_LOG" ||
+    fail G-NM-AGENT "NetworkManager got $(grep "^Secrets" "$ROOST_STUB_NM_LOG" || echo nothing), not the typed password"
+pass G-NM-AGENT "an unsaved secured network asks for its password in GNOME's dialog"
+sleep 1
+open_qs
 
 qs_press "Wi-Fi" wifi || fail G-QS-WIFI "could not press Wi-Fi"
 sysprop org.freedesktop.NetworkManager /org/freedesktop/NetworkManager \
@@ -853,11 +879,11 @@ qs_press "Connect to Headphones" bt-connect || fail G-QS-BT-MENU "could not pres
 grep -q "^Connect /org/bluez/hci0/dev_AA_AA_AA_AA_AA_01" "$ROOST_STUB_BT_LOG" ||
     fail G-QS-BT-MENU "Headphones did not connect through BlueZ"
 sleep 1
+open_qs
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-bt-two.json" 20 ||
     fail G-QS-BT-MENU "accessibility dump failed"
 showing "$ARTIFACTS/a11y-qs-bt-two.json" "2 Connected" ||
     fail G-QS-BT-MENU "the tile does not count two connected devices"
-qs_press "Bluetooth Menu" bt-menu-close || fail G-QS-BT-MENU "could not close the Bluetooth menu"
 pass G-QS-BT-MENU "the Bluetooth menu lists paired devices as GNOME does and connects one"
 
 qs_press "Bluetooth" bt || fail G-QS-BLUETOOTH "could not press Bluetooth"
