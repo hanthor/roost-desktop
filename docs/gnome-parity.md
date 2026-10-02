@@ -114,6 +114,8 @@ Whole screens, with the same windows on both sides:
 | Window menu (header-bar right click) | not built | 0.2% |
 | Screenshot UI (Print) | not built | 0.3% of the screen, 2.9% of the panel |
 | Workspace switcher popup | not built | 0.1% |
+| Overview with three workspaces (thumbnails strip) | not built | 1.4% |
+| Tile preview at the left edge | not built | 0.5% |
 
 Roost's capture shows GNOME's installed apps, not the host's: each host
 entry is hidden by a `Hidden` copy in the user's application directory
