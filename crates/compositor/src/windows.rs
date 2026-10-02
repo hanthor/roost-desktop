@@ -222,6 +222,8 @@ pub struct WindowManager {
     menu_requests: Vec<(u64, i32, i32)>,
     /// The active workspace at the last reconcile.
     last_active_workspace: Option<u32>,
+    /// The switcher was opened with Super+Tab (Super's release commits).
+    switcher_by_super: bool,
     /// Super held (either side) for workspace keybindings.
     super_held: bool,
     /// Key repeat as last set: rate (keys/s, 0 off) and delay (ms).
@@ -284,6 +286,7 @@ impl WindowManager {
             lock_input_active: false,
             menu_requests: Vec::new(),
             last_active_workspace: None,
+            switcher_by_super: false,
             swallowed_button: None,
             focus_awaits_surface: None,
             grab: None,
@@ -2992,11 +2995,17 @@ impl WindowManager {
                     if pressed {
                         self.next_input_source(state);
                     }
-                } else if keycode == TAB_KEYCODE && self.alt_held {
-                    // The whole chord stays invisible to apps: taps queue
-                    // steps, releases are swallowed (an app that never saw
-                    // the press must not see the release either).
+                } else if keycode == TAB_KEYCODE && (self.alt_held || self.super_held) {
+                    // Alt+Tab and Super+Tab (GNOME's switch-applications
+                    // defaults). The whole chord stays invisible to apps:
+                    // taps queue steps, releases are swallowed (an app
+                    // that never saw the press must not see the release
+                    // either).
                     if pressed {
+                        if !self.switcher_open {
+                            // Released, this modifier commits.
+                            self.switcher_by_super = !self.alt_held;
+                        }
                         self.switcher_open = true;
                         self.push_switcher(SwitcherAction::Step {
                             forward: !self.shift_held,
@@ -3019,7 +3028,12 @@ impl WindowManager {
                     self.switcher_open = false;
                     self.push_switcher(SwitcherAction::Cancel);
                 } else {
-                    if !pressed && self.switcher_open && self.is_alt(keycode) {
+                    let opener = if self.switcher_by_super {
+                        keycode == SUPER_LEFT_KEYCODE || keycode == SUPER_RIGHT_KEYCODE
+                    } else {
+                        self.is_alt(keycode)
+                    };
+                    if !pressed && self.switcher_open && opener {
                         self.switcher_open = false;
                         self.push_switcher(SwitcherAction::Commit);
                     }
