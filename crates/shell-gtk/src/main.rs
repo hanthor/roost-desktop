@@ -1223,6 +1223,29 @@ fn build(app: &adw::Application) {
         Rc::new(ShellActions(shell.clone())),
     );
     let switcher_ui = switcher::SwitcherUi::new(app.upcast_ref(), apps.clone());
+    // GNOME's WindowTracker: a window belongs to the desktop entry its
+    // app id names (as the switcher finds its icon), shown in the grid
+    // or not; a window no desktop file claims is an app of its own.
+    if let Some(control) = shell.borrow_mut().control.as_mut() {
+        let apps = apps.clone();
+        let on_disk: RefCell<std::collections::HashMap<String, bool>> = RefCell::default();
+        control.set_app_resolver(move |app_id| {
+            let id = app_id.trim_end_matches(".desktop");
+            if let Some(entry) = {
+                let apps = apps.get();
+                apps.entry(id)
+                    .or_else(|| apps.entry(app_id))
+                    .map(|e| e.app_id.clone())
+            } {
+                return Some(entry);
+            }
+            let found = *on_disk
+                .borrow_mut()
+                .entry(id.to_owned())
+                .or_insert_with(|| roost_shell_host::apps::desktop_file_exists(id));
+            found.then(|| id.to_owned())
+        });
+    }
     // The folder dialog's shade reaches under the top bar, as GNOME's.
     {
         let panel = window.clone();

@@ -263,6 +263,12 @@ impl ControlClient {
         &self.model
     }
 
+    /// Which desktop entry a window's app id belongs to (see
+    /// [`ShellModel::set_app_resolver`]).
+    pub fn set_app_resolver(&mut self, resolve: impl Fn(&str) -> Option<String> + 'static) {
+        self.model.set_app_resolver(resolve);
+    }
+
     /// Revision of the last applied snapshot or delta (`None` before the
     /// first snapshot).
     pub fn revision(&self) -> Option<u64> {
