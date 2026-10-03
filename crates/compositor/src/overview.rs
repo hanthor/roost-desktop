@@ -206,6 +206,69 @@ pub fn drop_target(layout: &OverviewLayout, pos: Point<f64, Logical>) -> Option<
         .map(|c| c.workspace)
 }
 
+/// GNOME's overview transition time (`ANIMATION_TIME`, 250 ms).
+pub const TRANSITION_MS: f64 = 250.0;
+
+/// GNOME's `EASE_OUT_QUAD` for the overview transition.
+pub fn ease_out_quad(t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t) * (1.0 - t)
+}
+
+fn lerp_rect(
+    a: Rectangle<i32, Logical>,
+    b: Rectangle<i32, Logical>,
+    p: f64,
+) -> Rectangle<i32, Logical> {
+    let l = |x: i32, y: i32| (f64::from(x) + (f64::from(y) - f64::from(x)) * p).round() as i32;
+    Rectangle::new(
+        (l(a.loc.x, b.loc.x), l(a.loc.y, b.loc.y)).into(),
+        (l(a.size.w, b.size.w), l(a.size.h, b.size.h)).into(),
+    )
+}
+
+/// The overview part-way open (GNOME's transition): at eased progress
+/// `p` (0 the desktop, 1 the overview) the active workspace card grows
+/// out of the whole output and each window on it glides from where it
+/// sits on the desktop into its preview. Neighbouring cards, the
+/// thumbnails and the hover growth join once it is fully open.
+pub fn transition(
+    layout: &OverviewLayout,
+    p: f64,
+    output: Rectangle<i32, Logical>,
+    windows: &[OverviewWindow],
+) -> OverviewLayout {
+    if p >= 1.0 {
+        return layout.clone();
+    }
+    let p = p.max(0.0);
+    let mut out = OverviewLayout {
+        cards: layout
+            .cards
+            .iter()
+            .filter(|c| c.active)
+            .map(|c| WorkspaceCard {
+                rect: lerp_rect(output, c.rect, p),
+                ..*c
+            })
+            .collect(),
+        ..Default::default()
+    };
+    for preview in layout.previews.iter().filter(|p| p.active) {
+        let Some(window) = windows.iter().find(|w| w.id == preview.id) else {
+            continue;
+        };
+        let rect = lerp_rect(window.geometry, preview.rect, p);
+        let scale = f64::from(rect.size.w) / f64::from(window.geometry.size.w.max(1));
+        out.previews.push(Preview {
+            rect,
+            scale,
+            ..*preview
+        });
+    }
+    out
+}
+
 /// What a press at a point means in the overview.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverviewHit {
@@ -997,6 +1060,28 @@ mod tests {
         assert_eq!(drop_target(&l, (1200.0, 400.0).into()), Some(1));
         // The active card is no drop target.
         assert_eq!(drop_target(&l, (640.0, 400.0).into()), None);
+    }
+
+    #[test]
+    fn the_transition_grows_the_card_and_glides_windows_like_gnome() {
+        let windows = [win(1, 0, 320, 182, 640, 420)];
+        let open = layout(output(), 32, &[0], 0, &windows);
+        let target = open.previews.iter().find(|p| p.active).copied().unwrap();
+        // Closed: the card is the whole output, the window where it sits.
+        let closed = transition(&open, 0.0, output(), &windows);
+        assert_eq!(closed.cards.len(), 1);
+        assert_eq!(closed.cards[0].rect, output());
+        assert_eq!(closed.previews[0].rect, windows[0].geometry);
+        assert!((closed.previews[0].scale - 1.0).abs() < 1e-9);
+        // Half way: half way between.
+        let half = transition(&open, 0.5, output(), &windows);
+        let mid_x = (windows[0].geometry.loc.x + target.rect.loc.x) / 2;
+        assert!((half.previews[0].rect.loc.x - mid_x).abs() <= 1);
+        assert!(half.previews[0].scale < 1.0 && half.previews[0].scale > target.scale);
+        // Open: exactly the overview.
+        assert_eq!(transition(&open, 1.0, output(), &windows), open);
+        assert!((ease_out_quad(0.5) - 0.75).abs() < 1e-9);
+        assert_eq!(ease_out_quad(2.0), 1.0);
     }
 
     #[test]

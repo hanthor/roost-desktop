@@ -475,6 +475,13 @@ pub struct Runtime {
     introspect: crate::introspect::Handle,
     /// A three-finger swipe in progress: its travel so far (#60).
     shell_swipe: Option<Point<f64, Logical>>,
+    /// The overview transition: 0 the desktop, 1 the overview (linear
+    /// time; drawn eased), moving toward the open state each frame.
+    overview_progress: f64,
+    overview_progress_at: Instant,
+    /// A three-finger vertical swipe driving the transition: the
+    /// progress it started from.
+    overview_swipe_from: Option<f64>,
     /// Overview search is showing results: the workspace card and
     /// previews hide (GNOME). Reset whenever the overview closes.
     overview_search: bool,
@@ -755,6 +762,9 @@ impl Runtime {
             overview_drag: None,
             switcher_thumbnails: Vec::new(),
             shell_swipe: None,
+            overview_progress: 0.0,
+            overview_progress_at: Instant::now(),
+            overview_swipe_from: None,
             scale: clamp_scale(session.scale),
             input_settings: Default::default(),
             pipewire: None,
@@ -1125,7 +1135,10 @@ impl Runtime {
                 .and_then(|w| w.app_id.clone())
         };
         let overview_open = self.control.overview_open();
-        let scene = overview_open.then(|| self.overview_layout());
+        // Previews only once the transition settles: harnesses click
+        // where they say.
+        let scene =
+            (overview_open && self.overview_progress >= 1.0).then(|| self.overview_layout());
         // GNOME's workspace thumbnails strip (three or more workspaces).
         let thumbnails: Vec<serde_json::Value> = scene
             .iter()
@@ -1247,6 +1260,15 @@ impl Runtime {
             model.active_workspace(),
             &self.manager.overview_windows(),
         );
+        if self.overview_progress < 1.0 {
+            // Part-way through GNOME's transition.
+            return crate::overview::transition(
+                &scene,
+                crate::overview::ease_out_quad(self.overview_progress),
+                output,
+                &self.manager.overview_windows(),
+            );
+        }
         match self.overview_drag {
             Some((id, start, true)) => {
                 crate::overview::drag_preview(&mut scene, id, start, self.manager.pointer_pos());
@@ -1255,6 +1277,29 @@ impl Runtime {
             _ => crate::overview::grow_hovered(&mut scene, self.manager.pointer_pos()),
         }
         scene
+    }
+
+    /// Move the overview transition toward the open state (250 ms each
+    /// way, as GNOME's), unless a swipe holds it. Returns whether the
+    /// overview is drawn at all.
+    fn step_overview_transition(&mut self) -> bool {
+        let now = Instant::now();
+        let dt = now.duration_since(self.overview_progress_at).as_secs_f64() * 1000.0;
+        self.overview_progress_at = now;
+        if self.overview_swipe_from.is_none() {
+            let target = if self.control.overview_open() {
+                1.0
+            } else {
+                0.0
+            };
+            let step = dt / crate::overview::TRANSITION_MS;
+            self.overview_progress = if target > self.overview_progress {
+                (self.overview_progress + step).min(target)
+            } else {
+                (self.overview_progress - step).max(target)
+            };
+        }
+        self.overview_progress > 0.0
     }
 
     /// A press while the overview is open that no shell surface took:
@@ -1333,6 +1378,16 @@ impl Runtime {
             ManagerInput::SwipeUpdate { delta, .. } => match self.shell_swipe.as_mut() {
                 Some(travel) => {
                     *travel += delta;
+                    let travel = *travel;
+                    // GNOME's overview follows the fingers: a vertical
+                    // swipe moves the transition (up opens) as it goes.
+                    if travel.y.abs() > travel.x.abs() {
+                        let from = *self
+                            .overview_swipe_from
+                            .get_or_insert(self.overview_progress);
+                        self.overview_progress =
+                            (from - travel.y / OVERVIEW_SWIPE_DISTANCE).clamp(0.0, 1.0);
+                    }
                     true
                 }
                 None => false,
@@ -1341,6 +1396,17 @@ impl Runtime {
                 let Some(travel) = self.shell_swipe.take() else {
                     return false;
                 };
+                if let Some(from) = self.overview_swipe_from.take() {
+                    // Released: finish toward whichever side is nearer
+                    // (back where it began when cancelled).
+                    let open = if cancelled {
+                        from >= 0.5
+                    } else {
+                        self.overview_progress >= 0.5
+                    };
+                    self.control.set_overview(open);
+                    return true;
+                }
                 if !cancelled {
                     use crate::windows::SwipeAction;
                     match crate::windows::swipe_action(travel.x, travel.y) {
@@ -1507,7 +1573,7 @@ impl Runtime {
         if self.is_locked() {
             return None;
         }
-        let overview = self.control.overview_open().then(|| self.overview_layout());
+        let overview = (self.overview_progress > 0.0).then(|| self.overview_layout());
         let cards = overview.as_ref().filter(|_| !self.overview_search);
         let tile = overview
             .is_none()
@@ -1791,25 +1857,28 @@ impl Runtime {
     /// icon, caption and close button (window picker only, not while
     /// search or the app grid covers it).
     fn publish_overview_previews(&mut self) {
-        let (previews, hovered) =
-            if self.control.overview_open() && !self.overview_search && !self.overview_app_grid {
-                let scene = self.overview_layout();
-                let list: Vec<roost_shell_control::PreviewInfo> = scene
-                    .previews
-                    .iter()
-                    .filter(|p| p.active)
-                    .map(|p| roost_shell_control::PreviewInfo {
-                        window: p.id,
-                        x: p.rect.loc.x,
-                        y: p.rect.loc.y,
-                        width: p.rect.size.w,
-                        height: p.rect.size.h,
-                    })
-                    .collect();
-                (list, scene.hovered)
-            } else {
-                (Vec::new(), None)
-            };
+        let (previews, hovered) = if self.control.overview_open()
+            && self.overview_progress >= 1.0
+            && !self.overview_search
+            && !self.overview_app_grid
+        {
+            let scene = self.overview_layout();
+            let list: Vec<roost_shell_control::PreviewInfo> = scene
+                .previews
+                .iter()
+                .filter(|p| p.active)
+                .map(|p| roost_shell_control::PreviewInfo {
+                    window: p.id,
+                    x: p.rect.loc.x,
+                    y: p.rect.loc.y,
+                    width: p.rect.size.w,
+                    height: p.rect.size.h,
+                })
+                .collect();
+            (list, scene.hovered)
+        } else {
+            (Vec::new(), None)
+        };
         self.control.set_overview_previews(previews, hovered);
     }
 
@@ -2060,8 +2129,8 @@ impl Runtime {
         } else {
             self.desktop_color()
         };
-        let overview = (show_content && !overlay_visible && self.control.overview_open())
-            .then(|| self.overview_layout());
+        let drawn = self.step_overview_transition();
+        let overview = (show_content && !overlay_visible && drawn).then(|| self.overview_layout());
         // While search shows results, the workspace view steps aside.
         let cards = overview.as_ref().filter(|_| !self.overview_search);
         // GNOME's tile preview while a dragged window is over a snap edge.
@@ -2285,6 +2354,10 @@ impl Runtime {
 }
 
 /// Overview backdrop (GNOME 51's `#overviewGroup`, #222226).
+/// Vertical finger travel for a whole overview transition (logical
+/// touchpad units, as libinput reports swipe deltas).
+const OVERVIEW_SWIPE_DISTANCE: f64 = 300.0;
+
 const OVERVIEW_BACKGROUND: Color32F = Color32F::new(34.0 / 255.0, 34.0 / 255.0, 38.0 / 255.0, 1.0);
 
 /// The overview's solid fills (the workspace thumbnails strip) in
