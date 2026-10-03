@@ -2,7 +2,7 @@
 
 #[cfg(test)]
 mod protocol_version_tests {
-    use shell_control_schema::{ProtocolVersion, CURRENT_VERSION};
+    use roost_shell_control::{ProtocolVersion, CURRENT_VERSION};
 
     #[test]
     fn version_is_compatible_with_same_version() {
@@ -83,7 +83,7 @@ mod protocol_version_tests {
 
 #[cfg(test)]
 mod dynamic_workspace_count_tests {
-    use shell_control_schema::dynamic_workspace_count;
+    use roost_shell_control::dynamic_workspace_count;
 
     #[test]
     fn returns_one_when_no_occupied_and_active_is_zero() {
@@ -137,7 +137,7 @@ mod dynamic_workspace_count_tests {
 
 #[cfg(test)]
 mod frame_encoding_decoding_tests {
-    use shell_control_schema::{
+    use roost_shell_control::{
         decode_frame, encode_frame, DecodeError, Message, ProtocolVersion, CURRENT_VERSION,
     };
 
@@ -280,13 +280,13 @@ mod frame_encoding_decoding_tests {
             version: CURRENT_VERSION,
         };
         let frame = encode_frame(&msg);
-        assert!(frame.len() < shell_control_schema::MAX_FRAME_BYTES);
+        assert!(frame.len() < roost_shell_control::MAX_FRAME_BYTES);
     }
 }
 
 #[cfg(test)]
 mod constants_tests {
-    use shell_control_schema::{MAX_FRAME_BYTES, MAX_TITLE_LEN};
+    use roost_shell_control::{MAX_FRAME_BYTES, MAX_TITLE_LEN};
 
     #[test]
     fn max_frame_bytes_is_one_mib() {
