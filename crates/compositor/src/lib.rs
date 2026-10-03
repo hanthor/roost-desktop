@@ -49,6 +49,7 @@ use smithay::{
 pub mod control;
 #[cfg(feature = "drm")]
 pub mod drm;
+pub mod frame_timing;
 pub mod idle_monitor;
 pub mod ime;
 pub mod introspect;
@@ -65,6 +66,7 @@ pub mod runtime;
 pub mod screencast;
 pub mod screenshot;
 pub mod session_lock;
+pub mod spring;
 pub mod state;
 pub mod supervise;
 pub mod unlock;
@@ -148,6 +150,8 @@ pub struct State {
     pub(crate) window_requests: Vec<(wl_surface::WlSurface, WindowRequest)>,
     /// dmabuf, activation, viewporter and the other #89 protocols.
     pub(crate) protocols: protocols::Protocols,
+    /// presentation-time, fifo and commit-timing (#89).
+    pub(crate) frame_timing: frame_timing::FrameTiming,
     /// ext-session-lock-v1: the shell's lock screen surfaces.
     pub(crate) lock_protocol: session_lock::LockProtocol,
     /// Running X11 window manager, once the compatibility server is
@@ -493,7 +497,14 @@ impl SeatHandler for State {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&wl_surface::WlSurface>) {}
+    /// Keyboard focus moved: a shortcuts inhibitor suspended with
+    /// Super+Escape applies again once its surface is focused anew, as
+    /// in Mutter (#89).
+    fn focus_changed(&mut self, _seat: &Seat<Self>, focused: Option<&wl_surface::WlSurface>) {
+        if let Some(surface) = focused {
+            self.reactivate_inhibitor(surface);
+        }
+    }
 }
 
 /// Wayland seat name shared by the protocol state, the token store's
@@ -641,7 +652,9 @@ impl State {
         let mut seat_state = SeatState::new();
         let seat = seat_state.new_wl_seat(dh, SEAT_NAME);
         State {
-            compositor_state: CompositorState::new::<State>(dh),
+            // v6 (GNOME 51's): preferred buffer scale goes out per surface
+            // (`send_surface_scales` in the runtime).
+            compositor_state: CompositorState::new_v6::<State>(dh),
             shm_state: ShmState::new::<State>(dh, vec![]),
             xdg_shell_state: XdgShellState::new::<State>(dh),
             _output_manager_state: OutputManagerState::new_with_xdg_output::<State>(dh),
@@ -661,6 +674,7 @@ impl State {
             outputs: Vec::new(),
             window_requests: Vec::new(),
             protocols: protocols::Protocols::new(dh),
+            frame_timing: frame_timing::FrameTiming::new(dh),
             lock_protocol: session_lock::LockProtocol::new(dh),
             #[cfg(feature = "xwayland")]
             xwm: None,

@@ -11,6 +11,25 @@
 //! `--xim`: XIM serves X11 apps, but the daemon would reach whatever
 //! `DISPLAY` it inherits, the host's in a nested session). One
 //! GLib main loop drives both the Wayland socket and IBus's bus.
+//!
+//! IBus also hears what GNOME Shell tells it about the field: the text
+//! around the cursor (`SetSurroundingText`, and the engine's
+//! `DeleteSurroundingText` back), its content type, and where the text
+//! cursor is on screen (`SetCursorLocation`, so a candidate window
+//! lands at the caret). input-method-v2 gives an input method the
+//! cursor only through an input popup surface, in the text field's
+//! surface coordinates; the bridge holds one such popup (never drawn)
+//! and the compositor follows each rectangle it reports to the bridge,
+//! and only to it, with the same rectangle in global coordinates. The
+//! last rectangle before a `done` is therefore the global one.
+//!
+//! The candidate window is not the bridge's: as in GNOME, the shell is
+//! IBus's panel. `--panel disable` only stops the daemon spawning its
+//! own panel (ibus-ui-gtk3); the daemon routes panel calls to whoever
+//! owns `org.freedesktop.IBus.Panel` on its bus, which the GTK shell
+//! takes (crates/shell-gtk/src/ibus_panel.rs). Because the bridge's
+//! capabilities leave out lookup tables and auxiliary text, the
+//! engine's candidates go there, with the cursor location it sends.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -20,12 +39,13 @@ use std::time::{Duration, Instant};
 
 use gio::glib;
 use gio::prelude::*;
-use wayland_client::protocol::{wl_registry, wl_seat};
+use wayland_client::protocol::{wl_compositor, wl_registry, wl_seat, wl_surface};
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, WEnum};
 use wayland_protocols_misc::zwp_input_method_v2::client::{
     zwp_input_method_keyboard_grab_v2::{self, ZwpInputMethodKeyboardGrabV2},
     zwp_input_method_manager_v2::ZwpInputMethodManagerV2,
     zwp_input_method_v2::{self, ZwpInputMethodV2},
+    zwp_input_popup_surface_v2::{self, ZwpInputPopupSurfaceV2},
 };
 use wayland_protocols_misc::zwp_virtual_keyboard_v1::client::{
     zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1,
@@ -36,9 +56,10 @@ use xkbcommon::xkb;
 const IBUS: &str = "org.freedesktop.IBus";
 const IBUS_PATH: &str = "/org/freedesktop/IBus";
 const CONTEXT: &str = "org.freedesktop.IBus.InputContext";
-/// IBus capabilities: preedit text and focus (IBUS_CAP_PREEDIT_TEXT,
-/// IBUS_CAP_FOCUS), as GNOME Shell's input method sets.
-const CAPABILITIES: u32 = 1 | 8;
+/// IBus capabilities: preedit text, focus and surrounding text
+/// (IBUS_CAP_PREEDIT_TEXT, IBUS_CAP_FOCUS, IBUS_CAP_SURROUNDING_TEXT),
+/// as GNOME Shell's input method sets.
+const CAPABILITIES: u32 = 1 | 8 | 32;
 /// IBUS_RELEASE_MASK.
 const RELEASE: u32 = 1 << 30;
 /// How long a key may wait on IBus before it goes to the app anyway.
@@ -57,6 +78,20 @@ enum FromIbus {
         keycode: u32,
         state: u32,
     },
+    /// Delete `nchars` characters starting `offset` characters from
+    /// the cursor.
+    DeleteSurrounding {
+        offset: i32,
+        nchars: u32,
+    },
+}
+
+/// Text around the cursor as input-method-v2 gives it: offsets in bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Surrounding {
+    text: String,
+    cursor: u32,
+    anchor: u32,
 }
 
 /// Release version stamped at build time, as in every Roost binary.
@@ -141,7 +176,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (Some(seat), Some(manager)) = (bridge.seat.clone(), bridge.im_manager.clone()) else {
         return Err("the compositor offers no seat or input-method-v2".into());
     };
-    bridge.im = Some(manager.get_input_method(&seat, &qh, ()));
+    let im = manager.get_input_method(&seat, &qh, ());
+    // The popup that hears where the text cursor is.
+    if let Some(compositor) = &bridge.compositor {
+        let surface = compositor.create_surface(&qh, ());
+        let popup = im.get_input_popup_surface(&surface, &qh, ());
+        bridge._popup = Some((surface, popup));
+    }
+    bridge.im = Some(im);
     if let Some(vk_manager) = &bridge.vk_manager {
         bridge.vk = Some(vk_manager.create_virtual_keyboard(&seat, &qh, ()));
     }
@@ -304,6 +346,10 @@ fn ibus_event(member: &str, params: &glib::Variant) -> Option<FromIbus> {
             keycode: params.child_value(1).get::<u32>()?,
             state: params.child_value(2).get::<u32>()?,
         }),
+        "DeleteSurroundingText" => Some(FromIbus::DeleteSurrounding {
+            offset: params.child_value(0).get::<i32>()?,
+            nchars: params.child_value(1).get::<u32>()?,
+        }),
         _ => None,
     }
 }
@@ -314,13 +360,103 @@ fn ibus_text(value: &glib::Variant) -> Option<String> {
     inner.try_child_value(2)?.str().map(str::to_owned)
 }
 
+/// A serialized IBusText with no attributes, as libibus sends one:
+/// `v` holding `("IBusText", a{sv} {}, s text, v ("IBusAttrList",
+/// a{sv} {}, av []))`.
+fn ibus_text_variant(text: &str) -> glib::Variant {
+    let no_props = || glib::VariantDict::new(None).end();
+    let attrs = glib::Variant::tuple_from_iter([
+        "IBusAttrList".to_variant(),
+        no_props(),
+        glib::Variant::array_from_iter_with_type(
+            glib::VariantTy::VARIANT,
+            std::iter::empty::<glib::Variant>(),
+        ),
+    ]);
+    glib::Variant::from_variant(&glib::Variant::tuple_from_iter([
+        "IBusText".to_variant(),
+        no_props(),
+        text.to_variant(),
+        glib::Variant::from_variant(&attrs),
+    ]))
+}
+
+/// The largest char boundary at or before `byte` (clamped to the text).
+fn floor_boundary(text: &str, byte: usize) -> usize {
+    let mut byte = byte.min(text.len());
+    while !text.is_char_boundary(byte) {
+        byte -= 1;
+    }
+    byte
+}
+
+/// Characters before byte offset `byte` (IBus counts characters, the
+/// protocol bytes).
+fn char_offset(text: &str, byte: u32) -> u32 {
+    text[..floor_boundary(text, byte as usize)].chars().count() as u32
+}
+
+/// Byte offset of character `chars` (the text's length past its end).
+fn byte_offset(text: &str, chars: usize) -> usize {
+    text.char_indices()
+        .nth(chars)
+        .map_or(text.len(), |(i, _)| i)
+}
+
+/// IBus's `DeleteSurroundingText(offset, nchars)`, in characters from
+/// the cursor, as input-method-v2's `(before_length, after_length)` in
+/// bytes. `None` when the range does not touch the cursor: the
+/// protocol can only delete around it.
+fn delete_lengths(surrounding: &Surrounding, offset: i32, nchars: u32) -> Option<(u32, u32)> {
+    let text = surrounding.text.as_str();
+    let cursor = floor_boundary(text, surrounding.cursor as usize);
+    let cursor_chars = i64::from(char_offset(text, cursor as u32));
+    let start_chars = (cursor_chars + i64::from(offset)).max(0);
+    let end_chars = start_chars + i64::from(nchars);
+    if start_chars > cursor_chars || end_chars < cursor_chars {
+        return None;
+    }
+    let start = byte_offset(text, start_chars as usize);
+    let end = byte_offset(text, end_chars as usize);
+    Some(((cursor - start) as u32, (end - cursor) as u32))
+}
+
+/// text-input-v3's content type as IBus's (`SetContentType(purpose,
+/// hints)`, GTK's input purposes and hints, as GNOME Shell passes).
+fn ibus_content_type(hint: u32, purpose: u32) -> (u32, u32) {
+    // Purposes normal..pin share numbers; date, time and datetime have
+    // no IBus purpose; terminal is IBus's 10.
+    let purpose = match purpose {
+        0..=9 => purpose,
+        13 => 10,
+        _ => 0,
+    };
+    let hints = [
+        (0x1, 4),     // completion -> WORD_COMPLETION
+        (0x2, 1),     // spellcheck -> SPELLCHECK
+        (0x4, 64),    // auto_capitalization -> UPPERCASE_SENTENCES
+        (0x8, 8),     // lowercase -> LOWERCASE
+        (0x10, 16),   // uppercase -> UPPERCASE_CHARS
+        (0x20, 32),   // titlecase -> UPPERCASE_WORDS
+        (0x80, 2048), // sensitive_data -> PRIVATE
+    ]
+    .into_iter()
+    .filter(|(bit, _)| hint & bit != 0)
+    .fold(0, |bits, (_, ibus)| bits | ibus);
+    (purpose, hints)
+}
+
 /// The bridge's Wayland side.
 #[derive(Default)]
 struct Bridge {
     seat: Option<wl_seat::WlSeat>,
     im_manager: Option<ZwpInputMethodManagerV2>,
     vk_manager: Option<ZwpVirtualKeyboardManagerV1>,
+    compositor: Option<wl_compositor::WlCompositor>,
     im: Option<ZwpInputMethodV2>,
+    /// The input popup (never given a buffer) that carries the text
+    /// cursor's rectangle, and its surface.
+    _popup: Option<(wl_surface::WlSurface, ZwpInputPopupSurfaceV2)>,
     vk: Option<ZwpVirtualKeyboardV1>,
     grab: Option<ZwpInputMethodKeyboardGrabV2>,
     context: Option<IbusContext>,
@@ -330,6 +466,15 @@ struct Bridge {
     /// Activation pending the next `done`, and the applied one.
     pending_active: Option<bool>,
     active: bool,
+    /// Surrounding text and content type pending the next `done`, and
+    /// the applied surrounding text.
+    pending_surrounding: Option<Surrounding>,
+    surrounding: Option<Surrounding>,
+    pending_content_type: Option<(u32, u32)>,
+    /// The latest cursor rectangle (global, see the module doc), and
+    /// the one IBus last heard.
+    cursor_rect: Option<(i32, i32, i32, i32)>,
+    sent_cursor_rect: Option<(i32, i32, i32, i32)>,
     xkb: Option<(xkb::Keymap, xkb::State)>,
     vk_keymap: bool,
     gone: bool,
@@ -425,10 +570,7 @@ impl Bridge {
             } => {
                 let (text, cursor) = if visible {
                     // IBus counts characters; the protocol counts bytes.
-                    let byte = text
-                        .char_indices()
-                        .nth(cursor as usize)
-                        .map_or(text.len(), |(i, _)| i) as i32;
+                    let byte = byte_offset(&text, cursor as usize) as i32;
                     (text, byte)
                 } else {
                     (String::new(), 0)
@@ -443,20 +585,73 @@ impl Bridge {
             FromIbus::Forward { keycode, state } => {
                 self.forward(0, keycode, state & RELEASE == 0);
             }
+            FromIbus::DeleteSurrounding { offset, nchars } => {
+                let lengths = self
+                    .surrounding
+                    .as_ref()
+                    .and_then(|s| delete_lengths(s, offset, nchars));
+                match lengths {
+                    Some((before, after)) => {
+                        im.delete_surrounding_text(before, after);
+                        im.commit(self.serial);
+                    }
+                    None => eprintln!(
+                        "roost-ibus-bridge: cannot delete {nchars} characters at {offset} from the cursor"
+                    ),
+                }
+            }
         }
     }
 
-    /// A `done`: apply activation (focus in with a keyboard grab, or
-    /// focus out and release it).
+    /// A `done`: apply activation, then tell IBus about the field (its
+    /// content type, surrounding text and cursor), as GNOME Shell does.
     fn done(&mut self, qh: &QueueHandle<Self>) {
         self.serial = self.serial.wrapping_add(1);
-        let Some(active) = self.pending_active.take() else {
+        if let Some(active) = self.pending_active.take() {
+            self.activate(active, qh);
+        }
+        if !self.active {
+            return;
+        }
+        let Some(context) = &self.context else {
             return;
         };
+        if let Some((purpose, hints)) = self.pending_content_type.take() {
+            context.send("SetContentType", Some((purpose, hints).to_variant()));
+        }
+        if let Some(surrounding) = self.pending_surrounding.take() {
+            if self.surrounding.as_ref() != Some(&surrounding) {
+                let text = &surrounding.text;
+                let args = glib::Variant::tuple_from_iter([
+                    ibus_text_variant(text),
+                    char_offset(text, surrounding.cursor).to_variant(),
+                    char_offset(text, surrounding.anchor).to_variant(),
+                ]);
+                context.send("SetSurroundingText", Some(args));
+                self.surrounding = Some(surrounding);
+            }
+        }
+        if let Some(rect) = self
+            .cursor_rect
+            .filter(|r| Some(*r) != self.sent_cursor_rect)
+        {
+            context.send("SetCursorLocation", Some(rect.to_variant()));
+            if std::env::var_os("ROOST_IBUS_DEBUG").is_some() {
+                eprintln!("roost-ibus-bridge: cursor at {rect:?}");
+            }
+            self.sent_cursor_rect = Some(rect);
+        }
+    }
+
+    /// Focus in with a keyboard grab, or focus out and release it.
+    fn activate(&mut self, active: bool, qh: &QueueHandle<Self>) {
         if active == self.active {
             return;
         }
         self.active = active;
+        // A new field: what IBus heard about the last one is stale.
+        self.surrounding = None;
+        self.sent_cursor_rect = None;
         eprintln!(
             "roost-ibus-bridge: text field {}",
             if active { "focused" } else { "left" }
@@ -502,6 +697,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Bridge {
                 "zwp_virtual_keyboard_manager_v1" => {
                     state.vk_manager = Some(registry.bind(name, 1, qh, ()));
                 }
+                "wl_compositor" if state.compositor.is_none() => {
+                    state.compositor = Some(registry.bind(name, version.min(4), qh, ()));
+                }
                 _ => {}
             }
         }
@@ -518,14 +716,63 @@ impl Dispatch<ZwpInputMethodV2, ()> for Bridge {
         qh: &QueueHandle<Self>,
     ) {
         match event {
-            zwp_input_method_v2::Event::Activate => state.pending_active = Some(true),
+            zwp_input_method_v2::Event::Activate => {
+                // Activation resets the field's state (the protocol's
+                // rule): only what follows before `done` applies.
+                state.pending_active = Some(true);
+                state.pending_surrounding = None;
+                state.pending_content_type = Some((0, 0));
+            }
             zwp_input_method_v2::Event::Deactivate => state.pending_active = Some(false),
+            zwp_input_method_v2::Event::SurroundingText {
+                text,
+                cursor,
+                anchor,
+            } => {
+                state.pending_surrounding = Some(Surrounding {
+                    text,
+                    cursor,
+                    anchor,
+                });
+            }
+            zwp_input_method_v2::Event::ContentType { hint, purpose } => {
+                let hint = match hint {
+                    WEnum::Value(hint) => hint.bits(),
+                    WEnum::Unknown(bits) => bits,
+                };
+                let purpose = match purpose {
+                    WEnum::Value(purpose) => purpose as u32,
+                    WEnum::Unknown(value) => value,
+                };
+                state.pending_content_type = Some(ibus_content_type(hint, purpose));
+            }
             zwp_input_method_v2::Event::Done => state.done(qh),
             zwp_input_method_v2::Event::Unavailable => {
                 eprintln!("roost-ibus-bridge: another input method is active");
                 state.gone = true;
             }
             _ => {}
+        }
+    }
+}
+
+impl Dispatch<ZwpInputPopupSurfaceV2, ()> for Bridge {
+    fn event(
+        state: &mut Self,
+        _: &ZwpInputPopupSurfaceV2,
+        event: zwp_input_popup_surface_v2::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let zwp_input_popup_surface_v2::Event::TextInputRectangle {
+            x,
+            y,
+            width,
+            height,
+        } = event
+        {
+            state.cursor_rect = Some((x, y, width, height));
         }
     }
 }
@@ -598,6 +845,78 @@ fn load_keymap(fd: &std::os::fd::OwnedFd, size: u32) -> Option<xkb::Keymap> {
 }
 
 wayland_client::delegate_noop!(Bridge: ignore wl_seat::WlSeat);
+wayland_client::delegate_noop!(Bridge: ignore wl_compositor::WlCompositor);
+wayland_client::delegate_noop!(Bridge: ignore wl_surface::WlSurface);
 wayland_client::delegate_noop!(Bridge: ignore ZwpInputMethodManagerV2);
 wayland_client::delegate_noop!(Bridge: ignore ZwpVirtualKeyboardManagerV1);
 wayland_client::delegate_noop!(Bridge: ignore ZwpVirtualKeyboardV1);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn around(text: &str, cursor: u32) -> Surrounding {
+        Surrounding {
+            text: text.to_owned(),
+            cursor,
+            anchor: cursor,
+        }
+    }
+
+    #[test]
+    fn surrounding_offsets_count_characters_not_bytes() {
+        // 你 and 好 are three bytes each.
+        assert_eq!(char_offset("你好", 6), 2);
+        assert_eq!(char_offset("你好", 3), 1);
+        assert_eq!(char_offset("a你b", 4), 2);
+        // Inside a character, or past the end: clamped.
+        assert_eq!(char_offset("你好", 4), 1);
+        assert_eq!(char_offset("你好", 99), 2);
+        assert_eq!(byte_offset("你好", 1), 3);
+        assert_eq!(byte_offset("你好", 2), 6);
+        assert_eq!(byte_offset("你好", 5), 6);
+    }
+
+    #[test]
+    fn ibus_deletions_become_byte_lengths_around_the_cursor() {
+        // One character before the cursor: 好, three bytes.
+        assert_eq!(delete_lengths(&around("你好", 6), -1, 1), Some((3, 0)));
+        // Across the cursor: 你 before, b after.
+        assert_eq!(delete_lengths(&around("a你b", 4), -1, 2), Some((3, 1)));
+        // After the cursor only.
+        assert_eq!(delete_lengths(&around("a你b", 1), 0, 1), Some((0, 3)));
+        // Clamped to the text.
+        assert_eq!(delete_lengths(&around("你", 3), -5, 9), Some((3, 0)));
+        // Not touching the cursor: the protocol cannot say it.
+        assert_eq!(delete_lengths(&around("abcd", 2), 1, 1), None);
+        assert_eq!(delete_lengths(&around("abcd", 2), -2, 1), None);
+    }
+
+    #[test]
+    fn surrounding_text_is_packed_as_an_ibus_text() {
+        let packed = ibus_text_variant("你好");
+        assert_eq!(packed.type_().as_str(), "v");
+        let inner = packed.as_variant().unwrap();
+        assert_eq!(inner.type_().as_str(), "(sa{sv}sv)");
+        assert_eq!(inner.child_value(0).str(), Some("IBusText"));
+        let attrs = inner.child_value(3).as_variant().unwrap();
+        assert_eq!(attrs.type_().as_str(), "(sa{sv}av)");
+        assert_eq!(attrs.child_value(0).str(), Some("IBusAttrList"));
+        assert_eq!(attrs.child_value(2).n_children(), 0);
+        // What the bridge reads back from IBus's own signals.
+        assert_eq!(ibus_text(&packed).as_deref(), Some("你好"));
+        let args = glib::Variant::tuple_from_iter([packed, 2u32.to_variant(), 2u32.to_variant()]);
+        assert_eq!(args.type_().as_str(), "(vuu)");
+    }
+
+    #[test]
+    fn content_types_map_to_ibus_purposes_and_hints() {
+        // Normal text with spellcheck and completion.
+        assert_eq!(ibus_content_type(0x1 | 0x2, 0), (0, 4 | 1));
+        // A password field: purpose 8, sensitive data -> PRIVATE.
+        assert_eq!(ibus_content_type(0x80 | 0x40, 8), (8, 2048));
+        // Terminal, and date (no IBus purpose).
+        assert_eq!(ibus_content_type(0, 13), (10, 0));
+        assert_eq!(ibus_content_type(0, 10), (0, 0));
+    }
+}

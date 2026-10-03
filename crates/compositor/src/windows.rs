@@ -277,8 +277,18 @@ pub struct WindowManager {
     /// Gnome by default; Super+Shift+T flips the whole session.
     mode: SessionMode,
     /// Horizontal strip view offset in logical pixels (scroll mode).
-    /// Zero on entering scroll; clamped to the strip overflow.
+    /// Zero on entering scroll; clamped to the strip overflow. This is
+    /// the view's *target*: layout, configure sizes, input and tests
+    /// all use it, so clients are configured once at the target.
     strip_offset: f64,
+    /// Where the strip view is drawn right now: chases `strip_offset`
+    /// on niri's view-movement spring, stepped once per frame by
+    /// [`step_strip_view`](Self::step_strip_view). Only render
+    /// positions use it.
+    strip_shown: f64,
+    /// The running view spring and its elapsed seconds, while the drawn
+    /// view has not settled on the target.
+    strip_anim: Option<(crate::spring::Spring, f64)>,
     /// Last hub overview flag seen (set by the runtime each tick).
     overview_open: bool,
     /// Window focused before the overview parked keyboard focus.
@@ -336,6 +346,8 @@ impl WindowManager {
             grab: None,
             mode: SessionMode::Gnome,
             strip_offset: 0.0,
+            strip_shown: 0.0,
+            strip_anim: None,
             super_held: false,
             // add_keyboard below: 200 ms delay, 200 keys/s.
             repeat: (200, 200),
@@ -437,6 +449,40 @@ impl WindowManager {
     /// Only the active workspace renders; other workspaces keep their
     /// surfaces mapped but hidden.
     pub fn visible_windows(&self) -> Vec<(Window, Rectangle<i32, Logical>)> {
+        self.visible_entries()
+            .into_iter()
+            .map(|(_, window, geometry)| (window, geometry))
+            .collect()
+    }
+
+    /// [`visible_windows`](Self::visible_windows) where they are drawn
+    /// this frame: strip columns shift by how far the animated view
+    /// still trails its target. Every other use (input, configure,
+    /// output scale) keeps the target geometry.
+    pub fn render_windows(&self) -> Vec<(Window, Rectangle<i32, Logical>)> {
+        self.visible_entries()
+            .into_iter()
+            .map(|(id, window, geometry)| (window, self.shifted(id, geometry)))
+            .collect()
+    }
+
+    /// Where `id` is drawn this frame (see
+    /// [`render_windows`](Self::render_windows)).
+    pub fn render_geometry(&self, id: u64) -> Option<Rectangle<i32, Logical>> {
+        self.geometry(id).map(|geometry| self.shifted(id, geometry))
+    }
+
+    /// `geometry` moved by the strip view's lag when `id` is a strip
+    /// column: drawn x = target x + (target offset - drawn offset).
+    fn shifted(&self, id: u64, mut geometry: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
+        if self.mode == SessionMode::Scroll && self.window_layout(id) == Some(WindowLayout::Strip) {
+            geometry.loc.x += (self.strip_offset - self.strip_shown).round() as i32;
+        }
+        geometry
+    }
+
+    /// Visible windows bottom-to-top with their ids and target geometry.
+    fn visible_entries(&self) -> Vec<(u64, Window, Rectangle<i32, Logical>)> {
         let active = self.model.active_workspace();
         self.stacking
             .iter()
@@ -451,7 +497,7 @@ impl WindowManager {
                 self.windows
                     .get(&id)
                     .filter(|w| !w.minimized)
-                    .map(|w| (w.surface.clone(), w.geometry))
+                    .map(|w| (id, w.surface.clone(), w.geometry))
             })
             .collect()
     }
@@ -551,6 +597,7 @@ impl WindowManager {
         // arrived with a surface's first commits (e.g. initial
         // maximized) applies after the surface is mapped.
         self.drain_window_requests(state);
+        self.drain_pointer_warps(state);
         #[cfg(feature = "xwayland")]
         self.sync_seat_focus(state);
         // Overview focus parks last so newly mapped windows never
@@ -677,7 +724,16 @@ impl WindowManager {
     /// Shared tail of every map path (native and X11): stacking slot,
     /// scroll-mode membership, initial configure, and focus.
     fn finish_map(&mut self, state: &mut State, id: u64) {
-        self.stacking.push(id);
+        // niri opens a new column right of the focused one; floating
+        // windows go on top.
+        let after_focused = (self.mode == SessionMode::Scroll)
+            .then(|| self.model.focused())
+            .flatten()
+            .and_then(|focused| self.stacking.iter().position(|other| *other == focused));
+        match after_focused {
+            Some(index) => self.stacking.insert(index + 1, id),
+            None => self.stacking.push(id),
+        }
         // Forced strip membership: windows mapped mid-scroll join the
         // strip as columns. Dialogs keep their after-parent stacking
         // slot, so they land in the adjacent column — the strip is
@@ -1100,6 +1156,42 @@ impl WindowManager {
         true
     }
 
+    /// The window focus lands on when `id` is asked for: its mapped
+    /// modal dialog (that dialog's own, in turn), else `id` itself.
+    fn modal_target(&self, mut id: u64) -> u64 {
+        // Bounded: a parent cycle a client builds cannot spin here.
+        for _ in 0..8 {
+            let Some(parent) = self
+                .windows
+                .get(&id)
+                .and_then(|w| w.surface.wl_surface())
+                .map(|s| s.into_owned())
+            else {
+                break;
+            };
+            let dialog = self
+                .windows
+                .iter()
+                .filter(|(child, w)| **child != id && !w.minimized)
+                .find_map(|(child, w)| match w.surface.underlying_surface() {
+                    WindowSurface::Wayland(toplevel)
+                        if read_parent(toplevel).as_ref() == Some(&parent)
+                            && read_modal(toplevel) =>
+                    {
+                        Some(*child)
+                    }
+                    WindowSurface::Wayland(_) => None,
+                    #[cfg(feature = "xwayland")]
+                    _ => None,
+                });
+            match dialog {
+                Some(child) => id = child,
+                None => break,
+            }
+        }
+        id
+    }
+
     /// Focus while the overview holds the keyboard: the window is the
     /// one restored on close, rises, and takes the activated look.
     fn focus_parked(&mut self, id: Option<u64>) {
@@ -1123,8 +1215,16 @@ impl WindowManager {
     }
 
     fn apply_focus(&mut self, state: &mut State, id: Option<u64>) {
+        // GNOME attaches modal dialogs to their parent: the parent
+        // cannot take focus from its dialog (xdg-dialog, #89).
+        let id = id.map(|id| self.modal_target(id));
         let previous = self.model.focused();
         self.model.set_focused(id);
+        // The strip view follows focus (niri), new columns included.
+        if self.mode == SessionMode::Scroll && id.is_some() && previous != id {
+            self.follow_focus(state);
+            self.relayout_strip(state);
+        }
         if let Some(id) = id {
             // Activating a hidden window brings it back (GNOME).
             if let Some(window) = self.windows.get_mut(&id) {
@@ -1224,11 +1324,27 @@ impl WindowManager {
                 xdg_toplevel::State::Fullscreen,
                 xdg_toplevel::State::TiledLeft,
                 xdg_toplevel::State::TiledRight,
+                xdg_toplevel::State::TiledTop,
+                xdg_toplevel::State::TiledBottom,
             ] {
                 pending.states.unset(state);
             }
             match layout {
-                WindowLayout::Floating | WindowLayout::Strip => {}
+                WindowLayout::Floating => {}
+                // niri tells its columns they are tiled on every edge:
+                // client-side decorations drop their shadow and rounded
+                // corners, so columns meet the gaps (and the focus ring)
+                // square.
+                WindowLayout::Strip => {
+                    for state in [
+                        xdg_toplevel::State::TiledLeft,
+                        xdg_toplevel::State::TiledRight,
+                        xdg_toplevel::State::TiledTop,
+                        xdg_toplevel::State::TiledBottom,
+                    ] {
+                        pending.states.set(state);
+                    }
+                }
                 WindowLayout::Maximized => {
                     pending.states.set(xdg_toplevel::State::Maximized);
                 }
@@ -1549,7 +1665,8 @@ impl WindowManager {
     /// Pointer button: deliver to the focused window and focus the
     /// window under the cursor on press (click-to-focus). A press on a
     /// layer-shell surface moves keyboard focus there (unless the
-    /// overview park owns it) so panel menus and banners take keys; the
+    /// overview park owns it, or the surface asked for no keyboard, as
+    /// IBus's candidate window does) so panel menus take keys; the
     /// button itself follows pointer focus from the last motion.
     pub fn pointer_button(&mut self, state: &mut State, button: u32, pressed: bool, time: u32) {
         // Release ends a move/resize grab. It is still delivered (unless
@@ -1604,7 +1721,7 @@ impl WindowManager {
             if let Some((surface, _)) =
                 crate::layer::topmost_layer_at(state, pos.x as i32, pos.y as i32)
             {
-                if !self.overview_open {
+                if !self.overview_open && crate::layer::surface_takes_keyboard_on_press(&surface) {
                     let serial = SERIAL_COUNTER.next_serial();
                     if let Some(keyboard) = self.keyboard.clone() {
                         keyboard.set_focus(state, Some(surface.clone()), serial);
@@ -1779,7 +1896,10 @@ impl WindowManager {
         } else {
             mode
         };
-        let grabs: Vec<roost_shell_control::Accelerator> = if pressed {
+        // A window inhibiting shortcuts (keyboard-shortcuts-inhibit)
+        // gets the keys the shell grabbed too.
+        let inhibited = !self.lock_input_active && state.shortcuts_inhibited();
+        let grabs: Vec<roost_shell_control::Accelerator> = if pressed && !inhibited {
             self.accelerators
                 .iter()
                 .filter(|a| a.modes & mode_mask != 0)
@@ -2183,14 +2303,14 @@ impl WindowManager {
         }
     }
 
-    /// One strip column rectangle for `id`: full work-area height,
-    /// preset-proportion width with gaps between columns (niri
-    /// gaps-twice formula). Columns past the right edge overflow;
-    /// the strip never squeezes to fit.
+    /// One strip column rectangle for `id`: the work area's height less
+    /// a gap above and below, preset-proportion width with gaps between
+    /// columns and at the strip's ends (niri gaps-twice formula).
+    /// Columns past the right edge overflow; the strip never squeezes.
     fn strip_column_area(&self, state: &State, id: u64) -> Rectangle<i32, Logical> {
         let work = Self::work_area(state);
         let columns = self.strip_columns(state, id);
-        let mut x = work.loc.x - self.strip_offset as i32;
+        let mut x = work.loc.x + Self::STRIP_GAP - self.strip_offset as i32;
         let mut width = Self::strip_width(work.size.w, self.strip_proportion(id));
         for (other, w) in &columns {
             if *other == id {
@@ -2200,14 +2320,118 @@ impl WindowManager {
             x += w + Self::STRIP_GAP;
         }
         Rectangle {
-            loc: (x, work.loc.y).into(),
-            size: (width, work.size.h).into(),
+            loc: (x, work.loc.y + Self::STRIP_GAP).into(),
+            size: (width, (work.size.h - 2 * Self::STRIP_GAP).max(1)).into(),
         }
     }
 
-    /// Current strip view offset (scroll mode), for tests.
+    /// The farthest the view scrolls: the strip with its end gaps,
+    /// less the view.
+    fn strip_max_offset(&self, state: &State) -> f64 {
+        let work = Self::work_area(state);
+        let widths: Vec<(u64, i32)> = self
+            .strip_order()
+            .iter()
+            .map(|id| {
+                (
+                    *id,
+                    Self::strip_width(work.size.w, self.strip_proportion(*id)),
+                )
+            })
+            .collect();
+        let total = Self::strip_total(&widths) + 2 * Self::STRIP_GAP;
+        (total - work.size.w).max(0) as f64
+    }
+
+    /// niri's default view motion (`center-focused-column "never"`):
+    /// scroll the least that shows the focused column whole, a gap from
+    /// the edge it was beyond.
+    fn follow_focus(&mut self, state: &mut State) {
+        if self.mode != SessionMode::Scroll {
+            return;
+        }
+        let Some(focused) = self.model.focused() else {
+            return;
+        };
+        let work = Self::work_area(state);
+        let mut start = 0;
+        let mut width = None;
+        for id in self.strip_order() {
+            let w = Self::strip_width(work.size.w, self.strip_proportion(id));
+            if id == focused {
+                width = Some(w);
+                break;
+            }
+            start += w + Self::STRIP_GAP;
+        }
+        let Some(width) = width else { return };
+        // Column `start` sits at gap + start - offset in the view.
+        let left = f64::from(start);
+        let right = f64::from(start + width + 2 * Self::STRIP_GAP - work.size.w);
+        let mut offset = self.strip_offset;
+        if offset > left {
+            offset = left;
+        } else if offset < right {
+            offset = right;
+        }
+        self.strip_offset = offset.clamp(0.0, self.strip_max_offset(state));
+    }
+
+    /// Current strip view offset target (scroll mode): where the view
+    /// is going, which layout and tests use.
     pub fn strip_offset(&self) -> f64 {
         self.strip_offset
+    }
+
+    /// Where the strip view is drawn this frame; equals
+    /// [`strip_offset`](Self::strip_offset) once the spring settles.
+    pub fn strip_view(&self) -> f64 {
+        self.strip_shown
+    }
+
+    /// Whether the strip view is still moving toward its target.
+    pub fn strip_animating(&self) -> bool {
+        self.mode == SessionMode::Scroll && self.strip_shown != self.strip_offset
+    }
+
+    /// Jump the drawn view onto the target (no animation).
+    fn snap_strip_view(&mut self) {
+        self.strip_shown = self.strip_offset;
+        self.strip_anim = None;
+    }
+
+    /// Advance the drawn strip view `dt` seconds toward the target on
+    /// niri's default view-movement spring (critically damped,
+    /// stiffness 800, epsilon 0.0001). A target that moved mid-flight
+    /// restarts the spring from the drawn position with its current
+    /// velocity, as niri does. Called once per frame by the runtime;
+    /// returns whether the view is still moving (frames keep coming
+    /// only while it does).
+    pub fn step_strip_view(&mut self, dt: f64) -> bool {
+        use crate::spring::Spring;
+        if self.mode != SessionMode::Scroll {
+            self.snap_strip_view();
+            return false;
+        }
+        let target = self.strip_offset;
+        let (spring, t) = match self.strip_anim {
+            Some((spring, t)) if spring.to == target => (spring, t + dt.max(0.0)),
+            Some((spring, t)) => (
+                Spring::view_movement(spring.value_at(t), target, spring.velocity_at(t)),
+                0.0,
+            ),
+            None if self.strip_shown != target => {
+                (Spring::view_movement(self.strip_shown, target, 0.0), 0.0)
+            }
+            None => return false,
+        };
+        if spring.done_at(t) {
+            self.snap_strip_view();
+            return false;
+        }
+        self.strip_shown = spring.value_at(t);
+        self.strip_anim = Some((spring, t));
+        true
     }
 
     /// Scroll the strip by axis amounts (positive moves the view
@@ -2229,13 +2453,16 @@ impl WindowManager {
                 )
             })
             .collect();
-        let total = Self::strip_total(&widths);
-        let max = (total - work.size.w).max(0) as f64;
+        let _ = (&widths, work);
+        let max = self.strip_max_offset(state);
         let next = (self.strip_offset + horizontal + vertical).clamp(0.0, max);
         if next == self.strip_offset {
             return true;
         }
         self.strip_offset = next;
+        // Wheel and touchpad scrolling is direct manipulation: the view
+        // follows the fingers without a spring (niri's gesture too).
+        self.snap_strip_view();
         self.relayout_strip(state);
         true
     }
@@ -2263,6 +2490,7 @@ impl WindowManager {
         if let Some(window) = self.windows.get_mut(&focused) {
             window.preset = Some(next);
         }
+        self.follow_focus(state);
         self.relayout_strip(state);
         true
     }
@@ -2340,6 +2568,7 @@ impl WindowManager {
             return true;
         }
         self.stacking.swap(positions[slot], positions[other]);
+        self.follow_focus(state);
         self.relayout_strip(state);
         true
     }
@@ -2360,9 +2589,8 @@ impl WindowManager {
                 )
             })
             .collect();
-        let total = Self::strip_total(&widths);
-        let max = (total - work.size.w).max(0) as f64;
-        self.strip_offset = self.strip_offset.clamp(0.0, max);
+        let _ = (&widths, work);
+        self.strip_offset = self.strip_offset.clamp(0.0, self.strip_max_offset(state));
         let ids: Vec<u64> = self.windows.keys().copied().collect();
         for id in ids {
             if self.window_layout(id) == Some(WindowLayout::Strip) {
@@ -2384,6 +2612,10 @@ impl WindowManager {
         };
         if scroll {
             self.strip_offset = 0.0;
+            self.follow_focus(state);
+            // Entering the strip lays it out in place: nothing to
+            // animate from.
+            self.snap_strip_view();
             let ids: Vec<u64> = self.windows.keys().copied().collect();
             for id in ids {
                 self.apply_layout(state, id, WindowLayout::Strip);
@@ -2762,6 +2994,16 @@ fn read_app_id(surface: &ToplevelSurface) -> Option<String> {
             .data_map
             .get::<XdgToplevelSurfaceData>()
             .and_then(|data| data.lock().unwrap().app_id.clone())
+    })
+}
+
+/// Whether the client marked this toplevel a modal dialog (xdg-dialog).
+fn read_modal(surface: &ToplevelSurface) -> bool {
+    with_states(surface.wl_surface(), |states| {
+        states
+            .data_map
+            .get::<XdgToplevelSurfaceData>()
+            .is_some_and(|data| data.lock().unwrap().modal)
     })
 }
 
@@ -3146,6 +3388,10 @@ impl WindowManager {
             } => {
                 self.track_workspace_modifiers(keycode, pressed);
                 self.track_switcher_modifiers(keycode, pressed);
+                if !self.switcher_open && state.shortcuts_inhibited() {
+                    self.inhibited_key(state, keycode, pressed, time);
+                    return;
+                }
                 let modifier = self.is_alt(keycode)
                     || matches!(
                         keycode,
@@ -3319,6 +3565,56 @@ impl WindowManager {
                     pointer.frame(state);
                 }
             }
+        }
+    }
+
+    /// A key while the focused window inhibits shortcuts
+    /// (keyboard-shortcuts-inhibit): every chord reaches the window,
+    /// except Super+Escape, Mutter's restore-shortcuts, which hands the
+    /// shortcuts back (press and release stay with the compositor).
+    fn inhibited_key(&mut self, state: &mut State, keycode: u32, pressed: bool, time: u32) {
+        if !pressed && self.switcher_swallowed.contains(&keycode) {
+            self.switcher_swallowed.retain(|k| *k != keycode);
+            return;
+        }
+        if pressed && keycode == ESCAPE_KEYCODE && self.super_held && state.restore_shortcuts() {
+            eprintln!("roost-compositor: shortcuts restored");
+            self.switcher_swallowed.push(keycode);
+            return;
+        }
+        self.keyboard_key(state, keycode, pressed, time);
+    }
+
+    /// Pointer warps clients asked for (pointer-warp): honoured when
+    /// the surface still has pointer focus from the enter they name,
+    /// and lands inside a window or layer surface Roost placed.
+    fn drain_pointer_warps(&mut self, state: &mut State) {
+        for (surface, local, serial) in state.take_pointer_warps() {
+            let Some(pointer) = self.pointer.clone() else {
+                continue;
+            };
+            if pointer.current_focus().as_ref() != Some(&surface)
+                || pointer.last_enter().map(u32::from) != Some(serial)
+            {
+                continue;
+            }
+            let origin = self
+                .windows
+                .values()
+                .find(|w| w.surface.wl_surface().is_some_and(|s| *s == surface))
+                .map(|w| crate::popup::surface_origin(&surface, w.geometry.loc))
+                .or_else(|| {
+                    crate::layer::layer_layout(state)
+                        .into_iter()
+                        .find(|(s, _, _)| *s == surface)
+                        .map(|(_, (x, y), _)| Point::from((x, y)))
+                });
+            let Some(origin) = origin else {
+                continue;
+            };
+            let pos = origin.to_f64() + local;
+            let time = (crate::state::system_millis() & u64::from(u32::MAX)) as u32;
+            self.pointer_motion(state, pos, time);
         }
     }
 

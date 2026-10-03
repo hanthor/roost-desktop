@@ -16,6 +16,8 @@ popover	07-app-popover.png	Windows	App popovers	A header-bar menu opens as an xd
 tile-preview	08-tile-preview.png	Windows	Edge tiling	Dragging a window to the left edge shows the tile preview over the left half.	P-WM-02
 window-menu	24d-window-menu.png	Windows	Window menu	Right-clicking a header bar opens GNOME's window menu.	P-WM-05
 x11	20-x11-app.png	Windows	X11 apps	XWayland starts with the session, and X11 apps get GNOME placement and focus.	P-SY-04
+scroll-strip	24j-scroll-strip.png	Scrollable tiling	The strip	Super+Shift+T turns the windows into niri's strip: columns with 16px gaps, the view on the focused column, niri's focus ring around it.	P-WM-07
+scroll-follow	24k-scroll-follow.png	Scrollable tiling	Following focus	Super+R steps the column's width and Super+Left moves along the strip; the view scrolls the least that shows the focused column whole.	P-WM-07
 switcher	08b-switcher.png	Switcher	Alt+Tab	One icon per app in most-recently-used order; releasing Alt focuses the highlighted one.	P-WM-01
 switcher-thumbnails	08c-switcher-thumbnails.png	Switcher	Window thumbnails	An app with several windows shows them as thumbnails (Down, or Alt+Above_Tab).	P-WM-01
 overview	05-overview.png	Overview	Overview	Super opens the overview: live previews with app icons, the search entry and the dash.	P-OV-01
@@ -32,7 +34,10 @@ grid-reorder	11g-grid-reordered.png	Search and apps	Reordering	An app dropped on
 banner	12-banner.png	Notifications	Banners	A notification sent over org.freedesktop.Notifications shows a banner at the top.	P-NT-01
 notification-list	13-notification-list.png	Notifications	Notification list	The banner then waits in the date menu's list.	P-NT-02
 do-not-disturb	14-dnd-list.png	Notifications	Do Not Disturb	Do Not Disturb holds banners back but keeps them in the list.	P-NT-02
+notification-group	14b-notification-group.png	Notifications	Notification groups	An app's notifications group in the list: collapsed, the newest card shows with the next peeking out beneath it.	P-NT-02
+notification-group-expanded	14c-notification-group-expanded.png	Notifications	Expanded group	Pressing a group expands it to every card, under the app's name and a Collapse button.	P-NT-02
 ime	24i-ime-preedit.png	System	Input methods	IBus composes as in GNOME: pinyin waits in the preedit and Space commits the hanzi (a test engine; roost-ibus-bridge is IBus's client).	P-IN-01
+ime-candidates	24j-ime-candidates.png	System	Candidate window	The shell is IBus's panel, as GNOME Shell is: pinyin with several hanzi brings up GNOME's candidate popup under the text cursor, and a click commits one.	P-IN-01
 screenshot-ui	24e-screenshot-ui.png	System	Screenshot UI	Print opens GNOME's screenshot UI: area, screen or window.	P-SY-05
 polkit	24g-polkit.png	System	Authentication	polkit's requests show GNOME's authentication dialog.	
 end-session	22-end-session.png	System	End session	Power Off… opens GNOME's 60-second confirmation dialog.	P-SY-07
