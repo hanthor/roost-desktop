@@ -31,6 +31,7 @@ mod polkit;
 mod power;
 mod preview_chrome;
 mod providers;
+mod screencast;
 mod screenshot_ui;
 mod services;
 mod shell_dbus;
@@ -1151,11 +1152,22 @@ fn build(app: &adw::Application) {
     );
     let system = panel_menu_button(&indicators, "System", &qs);
 
+    // GNOME's screen recorder (org.gnome.Shell.Screencast) and its
+    // indicator, first in the panel's right box as in panel.js.
+    let recorder = {
+        let notify = notify.clone();
+        screencast::Recorder::new(Rc::new(move |summary: &str, body: &str| {
+            notify.post("Screenshot", "screencast-recorded-symbolic", summary, body);
+        }))
+    };
+    screencast::serve(recorder.clone());
+
     let bar = gtk::CenterBox::new();
     bar.set_start_widget(Some(&activities));
     bar.set_center_widget(Some(&clock));
     // AppIndicator items sit left of the system indicators.
     let end = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    end.append(&screencast::indicator(&recorder));
     end.append(&tray::tray());
     end.append(&system);
     bar.set_end_widget(Some(&end));
@@ -1280,6 +1292,7 @@ fn build(app: &adw::Application) {
             Rc::new(move |summary: &str, body: &str| {
                 notify_post.post("Screenshot", "screenshot-recorded-symbolic", summary, body);
             }),
+            recorder.clone(),
         )
     };
 
@@ -1369,6 +1382,7 @@ fn build(app: &adw::Application) {
                         }
                     }
                     Action::ShowScreenshotUi => screenshot_ui.open(),
+                    Action::ShowScreenRecordingUi => screenshot_ui.open_recording(),
                     Action::Screenshot => take_screenshot(false, notify.clone()),
                     Action::ScreenshotWindow => take_screenshot(true, notify.clone()),
                     Action::NextInputSource | Action::PreviousInputSource => {

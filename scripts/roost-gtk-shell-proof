@@ -99,6 +99,15 @@
 #                  date menu, Super+A the app grid (and back)
 #   G-KEY-BRIGHTNESS the brightness key steps the backlight through logind
 #   G-SCREENSHOT-UI  Print opens the screenshot UI; Screen + Capture saves
+#   G-SCREENSHOT-UI-WINDOW Window shows GNOME's window selector, the
+#                  focused window chosen; picking another and Capture
+#                  saves that window alone at its own size
+#   G-SCREENCAST-UI the video switch records the selection: the red
+#                  indicator shows in the panel, its stop button ends it,
+#                  and a VP8 WebM of the selection's size lands in
+#                  Videos/Screencasts
+#   G-SCREENCAST-DBUS org.gnome.Shell.Screencast records the screen
+#                  between Screencast and StopScreencast
 #   G-POLKIT       the shell is the polkit agent: GNOME's dialog, a wrong
 #                  password refused, the right one authorizing
 #   G-WINDOW-MENU  GNOME's window menu: Always on Top, Hide, and the
@@ -167,11 +176,15 @@ LOG="$ARTIFACTS/nested.log"
 ASSERTIONS="$ARTIFACTS/assertions.txt"
 : >"$ASSERTIONS"
 XDG_PICTURES_DIR="$ARTIFACTS/pictures"
-export XDG_PICTURES_DIR
+XDG_VIDEOS_DIR="$ARTIFACTS/videos"
+export XDG_PICTURES_DIR XDG_VIDEOS_DIR
 # A private PipeWire for screen casts (#61), never the user's own.
 # Short path: Unix sockets cap at 108 bytes.
 PIPEWIRE_RUNTIME_DIR="$(mktemp -d /tmp/roost-pw.XXXXXX)"
 export PIPEWIRE_RUNTIME_DIR
+# GStreamer (casts, recordings) says what goes wrong in the logs.
+GST_DEBUG="${GST_DEBUG:-2}"
+export GST_DEBUG
 PW_PIDS=""
 if command -v pipewire >/dev/null 2>&1 && command -v wireplumber >/dev/null 2>&1; then
     pipewire >"$ARTIFACTS/pipewire.log" 2>&1 &
@@ -1914,6 +1927,63 @@ dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -
 [ "$dims" = "$WIDTH,$HEIGHT" ] || fail G-SCREENSHOT-UI "the Screen capture is $dims, not $WIDTH,$HEIGHT"
 pass G-SCREENSHOT-UI "Print opens GNOME's screenshot UI; Screen and Capture save the whole screen"
 
+# GNOME's window selector: Window lays the windows out as previews with
+# the focused one chosen; choosing another test window and Capture saves
+# that window alone, at its own size.
+focused_app="$(jq -r '.focused_app_id' "$CSTATE")"
+target=""
+for t in Alpha Beta Gamma; do
+    [ "roost-test-$(echo "$t" | tr '[:upper:]' '[:lower:]')" = "$focused_app" ] && continue
+    target="$t"
+    break
+done
+want="$(jq -r ".windows[] | select(.app_id == \"roost-test-$(echo "$target" | tr '[:upper:]' '[:lower:]')\") | .rect | \"\(.[2]),\(.[3])\"" "$CSTATE" | head -1)"
+[ -n "$want" ] || fail G-SCREENSHOT-UI-WINDOW "no $target window to choose"
+sleep 1
+xdotool key Print
+end=$(($(date +%s) + 20))
+until "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-shot-win-open.json" 5 >/dev/null 2>&1 &&
+    showing "$ARTIFACTS/a11y-shot-win-open.json" "Capture" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.5; done
+showing "$ARTIFACTS/a11y-shot-win-open.json" "Capture" ||
+    fail G-SCREENSHOT-UI-WINDOW "Print did not open the screenshot UI"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-shot-ui-window.json" 20 \
+    --press "Window" || fail G-SCREENSHOT-UI-WINDOW "could not choose Window"
+for t in Alpha Beta Gamma; do
+    showing "$ARTIFACTS/a11y-shot-ui-window.json" "$t" ||
+        fail G-SCREENSHOT-UI-WINDOW "the window selector shows no $t window"
+done
+focused_title="$(jq -rn --arg a "$focused_app" '$a | sub("^roost-test-"; "") | (.[0:1] | ascii_upcase) + .[1:]')"
+jq -e --arg n "$focused_title" 'any(.[]; .name == $n and .showing and .checked)' \
+    "$ARTIFACTS/a11y-shot-ui-window.json" >/dev/null ||
+    fail G-SCREENSHOT-UI-WINDOW "the focused window ($focused_title) is not the one chosen"
+scrot "$ARTIFACTS/24e-screenshot-window-selector.png" >/dev/null
+# The selector covers the screen in GNOME's dark system background
+# (#222226).
+# shellcheck disable=SC2046
+set -- $(px "$ARTIFACTS/24e-screenshot-window-selector.png" 20 $((HEIGHT / 2)))
+if [ "${1:-0}" -lt 30 ] || [ "${1:-0}" -gt 38 ] || [ "${3:-0}" -lt 34 ] || [ "${3:-0}" -gt 42 ]; then
+    fail G-SCREENSHOT-UI-WINDOW "no window selector background (pixel ${1:-?} ${2:-?} ${3:-?})"
+fi
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-shot-ui-window-pick.json" 20 \
+    --press "$target" || fail G-SCREENSHOT-UI-WINDOW "could not choose the $target window"
+jq -e --arg n "$target" 'any(.[]; .name == $n and .showing and .checked)' \
+    "$ARTIFACTS/a11y-shot-ui-window-pick.json" >/dev/null ||
+    fail G-SCREENSHOT-UI-WINDOW "choosing $target did not select it"
+scrot "$ARTIFACTS/24e-screenshot-window-chosen.png" >/dev/null
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-shot-ui-window-capture.json" 20 \
+    --press "Capture" || fail G-SCREENSHOT-UI-WINDOW "could not press Capture"
+end=$(($(date +%s) + 15))
+until [ -n "$(find "$XDG_PICTURES_DIR/Screenshots" -name 'Screenshot From *.png' -newer "$ARTIFACTS/24e-screenshot-window-chosen.png" 2>/dev/null)" ] ||
+    [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+newest="$(find "$XDG_PICTURES_DIR/Screenshots" -name 'Screenshot From *.png' -newer "$ARTIFACTS/24e-screenshot-window-chosen.png" 2>/dev/null | head -1)"
+[ -n "$newest" ] || fail G-SCREENSHOT-UI-WINDOW "Capture saved nothing"
+cp "$newest" "$ARTIFACTS/screenshot-ui-window.png"
+dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$newest")"
+[ "$dims" = "$want" ] ||
+    fail G-SCREENSHOT-UI-WINDOW "the Window capture is $dims, the $target window is $want"
+pass G-SCREENSHOT-UI-WINDOW "Window shows GNOME's window selector ($focused_title chosen); choosing $target and Capture saves it alone ($dims)"
+sleep 1
+
 # Screen sharing (#61): the portal's calls, a frame over PipeWire.
 if [ -n "$PW_PIDS" ] && command -v gst-launch-1.0 >/dev/null 2>&1; then
     CAST="$ARTIFACTS/screencast.png"
@@ -1934,6 +2004,76 @@ if [ -n "$PW_PIDS" ] && command -v gst-launch-1.0 >/dev/null 2>&1; then
         fail G-WINDOW-CAST "window frame is $dims, not the window's $size"
     [ "$dims" != "$WIDTH,$HEIGHT" ] || fail G-WINDOW-CAST "window frame is the whole screen"
     pass G-WINDOW-CAST "a window shared over Introspect and RecordWindow ($(cat "$ARTIFACTS/window-cast.log"))"
+
+    # GNOME's screen recorder: the screenshot UI's video switch records
+    # the selection (GNOME's first one, a centred quarter) as VP8 WebM in
+    # Videos/Screencasts; the panel's red indicator stops it.
+    sleep 1
+    xdotool key Print
+    end=$(($(date +%s) + 20))
+    until "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-cast-open.json" 5 >/dev/null 2>&1 &&
+        showing "$ARTIFACTS/a11y-cast-open.json" "Capture" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.5; done
+    showing "$ARTIFACTS/a11y-cast-open.json" "Capture" || fail G-SCREENCAST-UI "Print did not open the screenshot UI"
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-cast-switch.json" 20 \
+        --press "Record Screen" || fail G-SCREENCAST-UI "could not switch to screencast"
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-cast-selection.json" 20 \
+        --press "Selection" || fail G-SCREENCAST-UI "could not choose Selection"
+    scrot "$ARTIFACTS/24i-screencast-ui.png" >/dev/null
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-cast-capture.json" 20 \
+        --press "Capture" || fail G-SCREENCAST-UI "could not press Capture"
+    end=$(($(date +%s) + 20))
+    until "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-cast-recording.json" 5 >/dev/null 2>&1 &&
+        showing "$ARTIFACTS/a11y-cast-recording.json" "Stop Screencast" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.5; done
+    showing "$ARTIFACTS/a11y-cast-recording.json" "Stop Screencast" ||
+        fail G-SCREENCAST-UI "no recording indicator in the panel"
+    sleep 3
+    scrot "$ARTIFACTS/24j-recording-indicator.png" >/dev/null
+    # The indicator is GNOME's red ($red_4) panel button.
+    ffmpeg -loglevel error -i "$ARTIFACTS/24j-recording-indicator.png" -vf "crop=$WIDTH:1:0:16" \
+        -f rawvideo -pix_fmt rgb24 - | od -An -tu1 -v | tr -s ' ' '\n' | awk 'NF' | paste - - - |
+        awk '$1 > 150 && $2 < 70 && $3 < 80 { found = 1 } END { exit !found }' ||
+        fail G-SCREENCAST-UI "no red recording indicator in the panel"
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-cast-stop.json" 20 \
+        --press "Stop Screencast" || fail G-SCREENCAST-UI "could not press Stop Screencast"
+    end=$(($(date +%s) + 20))
+    until [ -n "$(find "$XDG_VIDEOS_DIR/Screencasts" -name 'Screencast From *.webm' 2>/dev/null)" ] &&
+        "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-cast-stopped.json" 5 >/dev/null 2>&1 &&
+        ! showing "$ARTIFACTS/a11y-cast-stopped.json" "Stop Screencast" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.5; done
+    if showing "$ARTIFACTS/a11y-cast-stopped.json" "Stop Screencast"; then
+        fail G-SCREENCAST-UI "the indicator stayed after Stop"
+    fi
+    video="$(find "$XDG_VIDEOS_DIR/Screencasts" -name 'Screencast From *.webm' 2>/dev/null | head -1)"
+    [ -n "$video" ] || fail G-SCREENCAST-UI "no Videos/Screencasts/Screencast From *.webm"
+    cp "$video" "$ARTIFACTS/screencast-ui.webm"
+    info="$(ffprobe -v error -count_frames -select_streams v:0 \
+        -show_entries stream=codec_name,width,height,nb_read_frames -of csv=p=0 "$video")"
+    want_w=$((WIDTH / 4))
+    want_h=$((HEIGHT / 4))
+    case "$info" in
+        "vp8,$want_w,$want_h,"*) ;;
+        *) fail G-SCREENCAST-UI "the recording is '$info', not a ${want_w}x${want_h} VP8 video" ;;
+    esac
+    frames="${info##*,}"
+    [ "${frames:-0}" -ge 2 ] 2>/dev/null || fail G-SCREENCAST-UI "the recording has ${frames:-no} frames"
+    pass G-SCREENCAST-UI "the video switch records the selection ($info) to $(basename "$video") with GNOME's indicator"
+
+    # The service's own interface, as other callers use it.
+    reply="$(gdbus call --session --dest org.gnome.Shell.Screencast \
+        --object-path /org/gnome/Shell/Screencast \
+        --method org.gnome.Shell.Screencast.Screencast "Screencasts/D-Bus %d %t" "@a{sv} {}" 2>&1)" ||
+        fail G-SCREENCAST-DBUS "Screencast call failed: $reply"
+    dvideo="$(echo "$reply" | sed -n "s/^(true, '\(.*\)')$/\1/p")"
+    [ -n "$dvideo" ] || fail G-SCREENCAST-DBUS "unexpected reply: $reply"
+    sleep 3
+    reply="$(gdbus call --session --dest org.gnome.Shell.Screencast \
+        --object-path /org/gnome/Shell/Screencast \
+        --method org.gnome.Shell.Screencast.StopScreencast 2>&1)" ||
+        fail G-SCREENCAST-DBUS "StopScreencast call failed: $reply"
+    [ "$reply" = "(true,)" ] || fail G-SCREENCAST-DBUS "StopScreencast answered $reply"
+    info="$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name,width,height \
+        -of csv=p=0 "$dvideo" 2>&1)"
+    [ "$info" = "vp8,$WIDTH,$HEIGHT" ] || fail G-SCREENCAST-DBUS "the recording is '$info'"
+    pass G-SCREENCAST-DBUS "Screencast and StopScreencast record the screen to $(basename "$dvideo") ($info)"
 else
     echo "roost-gtk-shell-proof: G-SCREENCAST skipped (no pipewire, wireplumber or gstreamer)"
 fi

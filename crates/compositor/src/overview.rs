@@ -363,10 +363,25 @@ pub fn window_slots(
     area: Rectangle<i32, Logical>,
     windows: &[(u64, Rectangle<i32, Logical>)],
 ) -> Vec<(u64, Rectangle<i32, Logical>, f64)> {
+    window_slots_spaced(workarea, monitor_height, area, windows, PREVIEW_SPACING)
+}
+
+/// GNOME's screenshot window selector (screenshot.js
+/// `UIWindowSelectorLayout`): the same spread, its windows carrying no
+/// chrome, so only the 6px selection borders keep them apart.
+pub const SELECTOR_SPACING: f64 = 12.0;
+
+/// [`window_slots`] with `spacing` logical pixels between previews.
+pub fn window_slots_spaced(
+    workarea: Rectangle<i32, Logical>,
+    monitor_height: i32,
+    area: Rectangle<i32, Logical>,
+    windows: &[(u64, Rectangle<i32, Logical>)],
+    spacing: f64,
+) -> Vec<(u64, Rectangle<i32, Logical>, f64)> {
     if windows.is_empty() {
         return Vec::new();
     }
-    let spacing = PREVIEW_SPACING;
     // Small windows grow a little: lerp(1.5, 1, height / monitor height).
     let window_scale = |r: &Rectangle<i32, Logical>| {
         let ratio = f64::from(r.size.h) / f64::from(monitor_height.max(1));

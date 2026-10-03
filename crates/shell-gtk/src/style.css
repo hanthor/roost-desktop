@@ -73,6 +73,16 @@ window.roost-panel.overview.shaded {
   margin: 0 4px;
 }
 
+/* #panel .screen-recording-indicator: a filled $red_4 button, white
+   text and icon, 6px between the elapsed time and the stop icon. */
+.roost-panel button.panel-button.screen-recording-indicator {
+  background-color: #c01c28;
+  color: #ffffff;
+}
+.roost-panel button.panel-button.screen-recording-indicator:hover {
+  background-color: shade(#c01c28, 1.1);
+}
+
 /* #panel .privacy-indicator: the microphone while an app records. */
 .roost-panel .privacy-indicator {
   color: #ff7800;
@@ -1238,6 +1248,45 @@ window.roost-screenshot-ui .screenshot-ui-capture-button-circle {
 }
 window.roost-screenshot-ui button.screenshot-ui-capture-button:hover .screenshot-ui-capture-button-circle {
   background-color: #cccccc;
+}
+/* Screencast mode (:cast): the circle turns $red_4. */
+window.roost-screenshot-ui button.screenshot-ui-capture-button.cast .screenshot-ui-capture-button-circle {
+  background-color: #c01c28;
+}
+window.roost-screenshot-ui button.screenshot-ui-capture-button.cast:hover .screenshot-ui-capture-button-circle {
+  background-color: #d81f2d;
+}
+/* The window selector's windows: a 6px border outside each, 12px corners
+   ($modal_radius), the accent color when hovered (darker) and chosen
+   (with a 20% accent wash and the check in an accent circle). */
+window.roost-screenshot-ui button.screenshot-ui-window-selector-window {
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 6px solid transparent;
+  border-radius: 12px;
+  background: none;
+  box-shadow: none;
+  outline: none;
+  transition: border-color 200ms, background-color 200ms;
+}
+window.roost-screenshot-ui button.screenshot-ui-window-selector-window:hover {
+  border-color: shade(@accent_bg_color, 0.85);
+}
+window.roost-screenshot-ui button.screenshot-ui-window-selector-window:checked {
+  border-color: @accent_bg_color;
+  background-color: alpha(@accent_bg_color, 0.2);
+}
+window.roost-screenshot-ui .screenshot-ui-window-selector-check {
+  color: transparent;
+  border-radius: 999px;
+  padding: 12px;
+  -gtk-icon-size: 24px;
+  transition: color 200ms, background-color 200ms;
+}
+window.roost-screenshot-ui button.screenshot-ui-window-selector-window:checked .screenshot-ui-window-selector-check {
+  color: @accent_fg_color;
+  background-color: @accent_bg_color;
 }
 window.roost-screenshot-ui button.screenshot-ui-show-pointer-button {
   min-width: 16px;
