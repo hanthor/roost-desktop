@@ -1612,3 +1612,322 @@ mod grid_mode_tests {
         assert_eq!(grid_mode(600, 1600), (3, 8));
     }
 }
+
+/// A saved connection a wired device can use (NM `AvailableConnections`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WiredConnection {
+    pub path: String,
+    /// `connection.id`.
+    pub name: String,
+    /// `connection.timestamp`: when it was last up, 0 if never.
+    pub timestamp: u64,
+}
+
+/// One NetworkManager ethernet device as GNOME's wired toggle sees it
+/// (network.js `NMWiredDeviceItem`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WiredDevice {
+    pub path: String,
+    /// `NMDeviceState`.
+    pub state: u32,
+    /// The device's usable connections, any order.
+    pub connections: Vec<WiredConnection>,
+    /// The connection its active connection runs, and that active
+    /// connection's `NMActiveConnectionState`.
+    pub active: Option<(String, u32)>,
+    /// Its active connection is NetworkManager's primary connection.
+    pub primary: bool,
+}
+
+/// `NMActiveConnectionState` values GNOME's wired item tells apart.
+const AC_ACTIVATING: u32 = 1;
+const AC_ACTIVATED: u32 = 2;
+const AC_DEACTIVATED: u32 = 4;
+/// `NMConnectivityState` FULL.
+const CONNECTIVITY_FULL: u32 = 4;
+
+impl WiredDevice {
+    /// `NMMenuItem.state`: the active connection's, else DEACTIVATED.
+    fn ac_state(&self) -> u32 {
+        self.active.as_ref().map_or(AC_DEACTIVATED, |(_, s)| *s)
+    }
+
+    /// `is_active`: activating or up.
+    pub fn is_active(&self) -> bool {
+        self.ac_state() <= AC_ACTIVATED
+    }
+
+    /// GNOME lists a device only in these states (`_shouldShowDevice`):
+    /// not unmanaged, not unavailable (no cable).
+    pub fn shown(&self) -> bool {
+        matches!(
+            self.state,
+            30 | 40 | 50 | 60 | 70 | 80 | 90 | 100 | 110 | 120
+        )
+    }
+
+    /// `NMWiredDeviceItem.icon_name`, given NetworkManager's
+    /// `Connectivity`.
+    pub fn icon(&self, connectivity: u32) -> &'static str {
+        match self.ac_state() {
+            AC_ACTIVATING => "network-wired-acquiring-symbolic",
+            AC_ACTIVATED if !self.primary || connectivity == CONNECTIVITY_FULL => {
+                "network-wired-symbolic"
+            }
+            AC_ACTIVATED => "network-wired-no-route-symbolic",
+            _ => "network-wired-disconnected-symbolic",
+        }
+    }
+
+    /// The connections by name (`ItemSorter`'s order).
+    fn sorted(&self) -> Vec<&WiredConnection> {
+        let mut c: Vec<&WiredConnection> = self.connections.iter().collect();
+        c.sort_by(|a, b| a.name.cmp(&b.name));
+        c
+    }
+
+    /// `_getActivatableItem`: the most recently used connection, else
+    /// the first by name; `None` means connect automatically.
+    fn activatable(&self) -> Option<&WiredConnection> {
+        self.connections
+            .iter()
+            .filter(|c| c.timestamp > 0)
+            .max_by_key(|c| c.timestamp)
+            .or_else(|| self.sorted().into_iter().next())
+    }
+
+    /// What activating the device does (`NMDeviceItem.activate`).
+    pub fn click(&self) -> WiredAction {
+        if self.active.is_some() {
+            WiredAction::Disconnect
+        } else {
+            match self.activatable() {
+                Some(c) => WiredAction::Activate(c.path.clone()),
+                None => WiredAction::AutoConnect,
+            }
+        }
+    }
+
+    /// The device's menu rows (`NMDeviceItem._sync`): one profile is a
+    /// single row named for the device; several are radio rows plus
+    /// Turn Off while up; none is a Connect row.
+    pub fn menu(&self, device_name: &str) -> Vec<WiredRow> {
+        let active = self.active.as_ref().map(|(c, _)| c.as_str());
+        match self.connections.len() {
+            0 => vec![WiredRow::AutoConnect {
+                label: device_name.to_owned(),
+            }],
+            1 => vec![WiredRow::Single {
+                label: device_name.to_owned(),
+                active: self.is_active(),
+                action: self.click(),
+            }],
+            _ => {
+                let mut rows: Vec<WiredRow> = self
+                    .sorted()
+                    .into_iter()
+                    .map(|c| {
+                        let on = active == Some(c.path.as_str()) && self.is_active();
+                        WiredRow::Radio {
+                            label: c.name.clone(),
+                            active: on,
+                            // Radio mode only activates.
+                            action: (!on).then(|| WiredAction::Activate(c.path.clone())),
+                        }
+                    })
+                    .collect();
+                if self.is_active() {
+                    rows.push(WiredRow::TurnOff);
+                }
+                rows
+            }
+        }
+    }
+}
+
+/// What a wired click asks NetworkManager for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WiredAction {
+    /// `Device.Disconnect`.
+    Disconnect,
+    /// `ActivateConnection` of this saved connection on the device.
+    Activate(String),
+    /// `AddAndActivateConnection` of an empty connection (`_autoConnect`).
+    AutoConnect,
+}
+
+/// One row of GNOME's wired menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WiredRow {
+    /// No profile yet: the device's name, connecting automatically.
+    AutoConnect { label: String },
+    /// One profile: the device's name with a Connect/Disconnect subtitle.
+    Single {
+        label: String,
+        active: bool,
+        action: WiredAction,
+    },
+    /// Several profiles: each by name, a dot on the active one.
+    Radio {
+        label: String,
+        active: bool,
+        action: Option<WiredAction>,
+    },
+    /// Disconnect, under radio rows while up.
+    TurnOff,
+}
+
+/// GNOME's wired toggle (`NMWiredToggle`): shown with any listed
+/// device; checked while one is up; its icon is the primary device's
+/// (the first active one, else the most recently used); its subtitle
+/// is "N connected" with several up, else none (the device's name
+/// equals the title).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WiredToggle {
+    pub visible: bool,
+    pub checked: bool,
+    pub icon: &'static str,
+    pub subtitle: Option<String>,
+}
+
+pub fn wired_toggle(devices: &[WiredDevice], connectivity: u32) -> WiredToggle {
+    let shown: Vec<&WiredDevice> = devices.iter().filter(|d| d.shown()).collect();
+    let active: Vec<&&WiredDevice> = shown.iter().filter(|d| d.is_active()).collect();
+    let primary = wired_primary(devices);
+    WiredToggle {
+        visible: !shown.is_empty(),
+        checked: !active.is_empty(),
+        icon: primary.map_or("network-wired-disconnected-symbolic", |d| {
+            d.icon(connectivity)
+        }),
+        subtitle: (active.len() > 1).then(|| format!("{} connected", active.len())),
+    }
+}
+
+/// `NMToggle._getPrimaryItem`: the first active listed device, else
+/// the most recently used, else the first.
+pub fn wired_primary(devices: &[WiredDevice]) -> Option<&WiredDevice> {
+    let shown: Vec<&WiredDevice> = devices.iter().filter(|d| d.shown()).collect();
+    shown.iter().copied().find(|d| d.is_active()).or_else(|| {
+        shown
+            .iter()
+            .copied()
+            .filter(|d| d.connections.iter().any(|c| c.timestamp > 0))
+            .max_by_key(|d| d.connections.iter().map(|c| c.timestamp).max())
+            .or_else(|| shown.first().copied())
+    })
+}
+
+/// A toggle click (`NMToggle.activate`): every active device goes down;
+/// with none up, the primary device comes up.
+pub fn wired_click(devices: &[WiredDevice]) -> Vec<(String, WiredAction)> {
+    let active: Vec<(String, WiredAction)> = devices
+        .iter()
+        .filter(|d| d.shown() && d.is_active())
+        .map(|d| (d.path.clone(), WiredAction::Disconnect))
+        .collect();
+    if !active.is_empty() {
+        return active;
+    }
+    wired_primary(devices)
+        .map(|d| vec![(d.path.clone(), d.click())])
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod wired_tests {
+    use super::*;
+
+    fn conn(path: &str, name: &str, timestamp: u64) -> WiredConnection {
+        WiredConnection {
+            path: path.into(),
+            name: name.into(),
+            timestamp,
+        }
+    }
+
+    #[test]
+    fn wired_toggle_and_menu_follow_gnome() {
+        // A plugged-in device with no profile: shown, off, Connect row.
+        let mut dev = WiredDevice {
+            path: "/d/1".into(),
+            state: 30,
+            ..Default::default()
+        };
+        let t = wired_toggle(std::slice::from_ref(&dev), 4);
+        assert!(t.visible && !t.checked);
+        assert_eq!(t.icon, "network-wired-disconnected-symbolic");
+        assert_eq!(dev.click(), WiredAction::AutoConnect);
+        assert_eq!(
+            dev.menu("Wired"),
+            [WiredRow::AutoConnect {
+                label: "Wired".into()
+            }]
+        );
+        // No cable (unavailable): hidden.
+        dev.state = 20;
+        assert!(!wired_toggle(std::slice::from_ref(&dev), 4).visible);
+
+        // One profile, up as the primary connection without internet.
+        dev.state = 100;
+        dev.connections = vec![conn("/c/1", "Wired connection 1", 5)];
+        dev.active = Some(("/c/1".into(), 2));
+        dev.primary = true;
+        let t = wired_toggle(std::slice::from_ref(&dev), 3);
+        assert!(t.checked);
+        assert_eq!(t.subtitle, None);
+        assert_eq!(t.icon, "network-wired-no-route-symbolic");
+        assert_eq!(dev.icon(4), "network-wired-symbolic");
+        assert_eq!(dev.click(), WiredAction::Disconnect);
+        assert_eq!(
+            dev.menu("Wired"),
+            [WiredRow::Single {
+                label: "Wired".into(),
+                active: true,
+                action: WiredAction::Disconnect
+            }]
+        );
+
+        // Two profiles, down: the most recently used activates; radio
+        // rows by name, no Turn Off.
+        dev.connections = vec![conn("/c/2", "Office", 9), conn("/c/1", "Home", 5)];
+        dev.active = None;
+        dev.state = 30;
+        assert_eq!(dev.click(), WiredAction::Activate("/c/2".into()));
+        let rows = dev.menu("Wired");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0],
+            WiredRow::Radio {
+                label: "Home".into(),
+                active: false,
+                action: Some(WiredAction::Activate("/c/1".into()))
+            }
+        );
+        // Up on Home: a dot on it, Turn Off last.
+        dev.active = Some(("/c/1".into(), 1));
+        let rows = dev.menu("Wired");
+        assert_eq!(
+            rows[0],
+            WiredRow::Radio {
+                label: "Home".into(),
+                active: true,
+                action: None
+            }
+        );
+        assert_eq!(rows[2], WiredRow::TurnOff);
+        assert_eq!(dev.icon(4), "network-wired-acquiring-symbolic");
+
+        assert_eq!(
+            wired_click(std::slice::from_ref(&dev)),
+            [("/d/1".to_owned(), WiredAction::Disconnect)]
+        );
+        // Two devices up: "2 connected".
+        let mut other = dev.clone();
+        other.path = "/d/2".into();
+        assert_eq!(
+            wired_toggle(&[dev, other], 4).subtitle.as_deref(),
+            Some("2 connected")
+        );
+    }
+}

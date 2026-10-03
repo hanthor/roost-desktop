@@ -37,6 +37,7 @@
 #                    the bus (stub daemons on a private system bus, #55)
 #   G-QS-WIFI-MENU   the Wi-Fi menu scans, lists NetworkManager's networks
 #                    as GNOME does, and activates a saved one
+#   G-QS-WIRED  the wired menu disconnects; the Wired tile reconnects
 #   G-NM-AGENT       the shell is NetworkManager's secret agent: an unsaved
 #                    secured network asks for its password in GNOME's dialog
 #   G-QS-SOUND-MENU  the volume slider's menu lists the outputs and makes
@@ -972,6 +973,43 @@ open_qs
 showing "$ARTIFACTS/a11y-qs-wifi-on.json" "Roost Home" ||
     fail G-QS-WIFI-MENU "the tile does not name the connected network"
 pass G-QS-WIFI-MENU "the Wi-Fi menu scans, lists networks as GNOME does, and activates a saved one"
+
+# GNOME's wired menu: the active profile is one row named for the device
+# with a Disconnect subtitle; it takes the device down. The toggle then
+# brings the profile back and shows checked.
+wired_checked() {
+    jq -e --arg want "$2" 'any(.[]; .name == "Wired" and .role == "toggle button"
+        and (.checked | tostring) == $want)' "$1" >/dev/null
+}
+wired_checked "$ARTIFACTS/a11y-qs-wifi-on.json" true ||
+    fail G-QS-WIRED "the Wired tile is not checked with its profile up"
+qs_press "Wired Menu" wired-menu || fail G-QS-WIRED "could not open the wired menu"
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-wired-menu.json" 20 ||
+    fail G-QS-WIRED "accessibility dump failed"
+scrot "$ARTIFACTS/15e-wired-menu.png" >/dev/null
+showing "$ARTIFACTS/a11y-qs-wired-menu.json" "Disconnect Wired" ||
+    fail G-QS-WIRED "the menu has no Disconnect row for the active profile"
+showing "$ARTIFACTS/a11y-qs-wired-menu.json" "Wired Settings" ||
+    fail G-QS-WIRED "the menu has no Wired Settings item"
+qs_press "Disconnect Wired" wired-off || fail G-QS-WIRED "could not press Disconnect"
+grep -q "^Disconnect /org/freedesktop/NetworkManager/Devices/1" "$ROOST_STUB_NM_LOG" ||
+    fail G-QS-WIRED "Disconnect did not take the device down"
+sleep 1.5
+open_qs
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-wired-off.json" 20 ||
+    fail G-QS-WIRED "accessibility dump failed"
+wired_checked "$ARTIFACTS/a11y-qs-wired-off.json" false ||
+    fail G-QS-WIRED "the Wired tile stayed checked with the device down"
+qs_press "Wired" wired-on || fail G-QS-WIRED "could not press the Wired tile"
+grep -q "^ActivateConnection /org/freedesktop/NetworkManager/Settings/3 /org/freedesktop/NetworkManager/Devices/1" \
+    "$ROOST_STUB_NM_LOG" || fail G-QS-WIRED "the Wired tile did not bring its profile back"
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-wired-on.json" 20 ||
+    fail G-QS-WIRED "accessibility dump failed"
+wired_checked "$ARTIFACTS/a11y-qs-wired-on.json" true ||
+    fail G-QS-WIRED "the Wired tile is not checked again"
+pass G-QS-WIRED "the wired menu disconnects the profile and the Wired tile brings it back, as GNOME's do"
 
 # GNOME's network agent: an unsaved WPA2 network makes NetworkManager
 # ask the shell's agent, which shows GNOME's dialog; the typed password
