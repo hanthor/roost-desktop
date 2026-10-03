@@ -1813,8 +1813,14 @@ impl Runtime {
                     #[cfg(not(feature = "drm"))]
                     let _ = connector;
                     self.render_pixels(output, xrgb).and_then(|(w, h, pixels)| {
-                        crate::screencast::crop(&pixels, (w, h), *area)
-                            .map(|cropped| (area.2, area.3, cropped))
+                        let cropped = crate::screencast::crop(&pixels, (w, h), *area);
+                        if cropped.is_none() {
+                            eprintln!(
+                                "roost-compositor: screen cast area {area:?} is not inside the {w}x{h} frame ({} bytes)",
+                                pixels.len()
+                            );
+                        }
+                        cropped.map(|cropped| (area.2, area.3, cropped))
                     })
                 }
             };

@@ -89,7 +89,8 @@ impl PipeWire {
             .add_local_listener_with_user_data(())
             .state_changed({
                 let inner = inner.clone();
-                move |stream, (), _old, new| {
+                move |stream, (), old, new| {
+                    eprintln!("roost-compositor: screen cast {session_id}: {old:?} -> {new:?}");
                     let mut inner = inner.borrow_mut();
                     match new {
                         StreamState::Paused => {
