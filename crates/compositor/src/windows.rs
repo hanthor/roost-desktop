@@ -725,26 +725,28 @@ impl WindowManager {
             .unwrap_or((DEFAULT_WIDTH, DEFAULT_HEIGHT));
         let size: Size<i32, Logical> = (w.min(work.size.w), h.min(work.size.h)).into();
         let active = self.model.active_workspace();
-        let last = self.stacking.iter().rev().find_map(|id| {
-            (self.model.window(*id)?.workspace == active
-                && self.windows.get(id).is_some_and(|w| !w.unplaced))
-            .then(|| self.windows.get(id).map(|w| w.geometry.loc))
-            .flatten()
-        });
+        let others: Vec<Point<i32, Logical>> = self
+            .stacking
+            .iter()
+            .filter(|id| {
+                self.model
+                    .window(**id)
+                    .is_some_and(|m| m.workspace == active)
+            })
+            .filter_map(|id| self.windows.get(id))
+            .filter(|w| !w.unplaced && !w.minimized)
+            .map(|w| w.geometry.loc)
+            .collect();
         let centered: Point<i32, Logical> = (
             work.loc.x + (work.size.w - size.w) / 2,
             work.loc.y + (work.size.h - size.h) / 2,
         )
             .into();
-        let mut loc = match last {
-            None => centered,
-            Some(prev) => prev + Point::from((CASCADE_STEP, CASCADE_STEP)),
+        let mut loc = if others.is_empty() {
+            centered
+        } else {
+            next_cascade(centered, others, size, work)
         };
-        // Wrap back to the top-left of the work area when the cascade
-        // would push the window off it.
-        if loc.x + size.w > work.loc.x + work.size.w || loc.y + size.h > work.loc.y + work.size.h {
-            loc = work.loc;
-        }
         loc.x = loc.x.max(work.loc.x);
         loc.y = loc.y.max(work.loc.y);
         Rectangle::new(loc, size)
@@ -3624,6 +3626,49 @@ impl WindowManager {
     }
 }
 
+/// Mutter's `find_next_cascade` (place.c): starting where the window
+/// would go alone, each window whose corner sits within 10px of the
+/// cascade point pushes it one step down the diagonal, the windows taken
+/// north-west first; so a new window takes the first free slot of the
+/// cascade. A cascade running off the work area starts over at its
+/// top-left, 50px further right each time.
+fn next_cascade(
+    start: Point<i32, Logical>,
+    mut others: Vec<Point<i32, Logical>>,
+    size: Size<i32, Logical>,
+    work: Rectangle<i32, Logical>,
+) -> Point<i32, Logical> {
+    const THRESHOLD: i32 = 10;
+    const CASCADE_INTERVAL: i32 = 50;
+    others.sort_by_key(|p| {
+        let (x, y) = (i64::from(p.x), i64::from(p.y));
+        x * x + y * y
+    });
+    let (mut x, mut y) = (start.x, start.y);
+    let mut stage = 0;
+    let mut i = 0;
+    while i < others.len() {
+        let w = others[i];
+        if (w.x - x).abs() < THRESHOLD && (w.y - y).abs() < THRESHOLD {
+            x = w.x + CASCADE_STEP;
+            y = w.y + CASCADE_STEP;
+            if x + size.w > work.loc.x + work.size.w || y + size.h > work.loc.y + work.size.h {
+                stage += 1;
+                x = work.loc.x.max(0) + CASCADE_INTERVAL * stage;
+                y = work.loc.y.max(0);
+                if x + size.w < work.loc.x + work.size.w {
+                    i = 0;
+                    continue;
+                }
+                x = work.loc.x.max(0);
+                break;
+            }
+        }
+        i += 1;
+    }
+    (x, y).into()
+}
+
 /// Translate a winit backend [`InputEvent`] into [`ManagerInput`].
 /// Returns `None` for device add/remove and other unconsumed kinds.
 /// Button code synthesized for touch contacts: the shell gates tile,
@@ -3738,6 +3783,22 @@ pub fn translate_input<B: InputBackend>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_windows_take_the_first_free_cascade_slot_like_mutter() {
+        let work = Rectangle::new((0, 32).into(), (1280, 768).into());
+        let size: Size<i32, Logical> = (640, 420).into();
+        let c: Point<i32, Logical> = (320, 206).into();
+        let step = |n: i32| c + Point::from((50 * n, 50 * n));
+        // Mapped in order: each cascades from the last.
+        assert_eq!(next_cascade(c, vec![c], size, work), step(1));
+        assert_eq!(next_cascade(c, vec![step(1), c], size, work), step(2));
+        // The middle one gone: its slot is the first free one.
+        assert_eq!(next_cascade(c, vec![step(2), c], size, work), step(1));
+        // Off the work area: a new cascade from the top-left, 50px right.
+        let full = vec![c, step(1), step(2), step(3), step(4), step(5), step(6)];
+        assert_eq!(next_cascade(c, full, size, work), (50, 32).into());
+    }
 
     fn key(keycode: u32, pressed: bool) -> ManagerInput {
         ManagerInput::Key {

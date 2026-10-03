@@ -317,6 +317,21 @@ export async function run() {
         }
     }
 
+    // An app's popover (an xdg popup): a fourth test window opens its
+    // header-bar menu by itself, as Roost's capture does.
+    {
+        const launcher = new Gio.SubprocessLauncher({flags: Gio.SubprocessFlags.NONE});
+        launcher.setenv('ROOST_TEST_POPOVER', '1', true);
+        const before = global.get_window_actors().length;
+        const delta = launcher.spawnv(['/usr/bin/python3', '/lib/roost-test-window.py', 'Delta', '#c01c28']);
+        for (let t = 0; t < 100 && global.get_window_actors().length <= before; t++)
+            await Scripting.sleep(100);
+        await Scripting.sleep(3000);
+        await shot('19-app-popover');
+        delta.force_exit();
+        await Scripting.sleep(1000);
+    }
+
     // The lock screen: the curtain with the clock, then the unlock prompt.
     if (Main.screenShield) {
         Main.screenShield.lock(false);
