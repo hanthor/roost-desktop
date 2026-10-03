@@ -167,13 +167,24 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool scrot ffmpeg jq dbus libglib2.0-bin xwayland x11-apps pipewire wireplumber gstreamer1.0-pipewire gstreamer1.0-tools gstreamer1.0-plugins-good at-spi2-core python3-pyatspi fonts-cantarell shellcheck libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev meson ninja-build libwayland-dev wayland-protocols libpam-wrapper
       - run: scripts/ci-install-gtk4-layer-shell
-      - run: shellcheck scripts/roost-gtk-shell-proof
+      - run: shellcheck scripts/roost-gtk-shell-proof scripts/roost-walkthrough
+      # docs/walkthrough.md must match its manifest (docs/walkthrough.tsv).
+      - run: scripts/roost-walkthrough check
       # pam_wrapper backs G-UNLOCK; required so it never silently skips.
       - run: scripts/roost-gtk-shell-proof --artifacts gtk-shell-artifacts
         env:
           ROOST_REQUIRE_PAM_WRAPPER: "1"
       # Fractional scaling (#59): the same session at GNOME's 150 percent.
       - run: scripts/roost-scale-proof --artifacts gtk-shell-artifacts/scale
+      # The feature walkthrough from this run's frames: every frame the
+      # manifest names must still be taken, and the bundle is what a
+      # docs refresh commits (scripts/roost-walkthrough).
+      - run: scripts/roost-walkthrough build gtk-shell-artifacts --dest walkthrough
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: walkthrough
+          path: walkthrough/
+          retention-days: 90
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:

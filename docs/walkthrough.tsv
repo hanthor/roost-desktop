@@ -1,0 +1,40 @@
+# id	proof frame	section	title	caption	ledger
+panel	01-panel.png	Panel	Top bar	GNOME 51's black top bar: Activities with the workspace dots, the centred clock, and the status icons that open quick settings.	P-PN-01
+calendar	02-calendar.png	Panel	Date menu	The clock opens the notification list beside the calendar, with today's events from the calendar server underneath.	P-PN-02
+tray	03b-tray-menu.png	Panel	Tray menus	An AppIndicator (StatusNotifierItem) gets a panel icon, and its menu opens from the panel.	P-TR-01
+quick-settings	15-quick-settings-services.png	Quick settings	Quick settings	Volume and brightness sliders over the toggle grid. Each toggle reads its daemon: NetworkManager, BlueZ, power-profiles-daemon and GSettings.	P-PN-03
+wifi-menu	15b-wifi-menu.png	Quick settings	Wi-Fi menu	Networks grouped and sorted as GNOME does, scanned while the menu stays open; picking a saved one activates it.	P-PN-03
+network-agent	15d-network-agent.png	Quick settings	Wi-Fi password	A secured network NetworkManager has no secret for: the shell's secret agent asks with GNOME's dialog.	P-PN-03
+wired-menu	15e-wired-menu.png	Quick settings	Wired connections	The Wired toggle's menu: Disconnect for the active profile, and Wired Settings.	P-PN-03
+bluetooth-menu	15c-bluetooth-menu.png	Quick settings	Bluetooth menu	Paired devices with Connect or Disconnect, and Bluetooth Settings.	P-PN-03
+microphone	16b-microphone.png	Quick settings	Microphone	While an app records, an orange microphone leads the panel and a Microphone slider sits under the volume slider.	P-PN-03
+power-menu	21-power-menu.png	Quick settings	Power menu	Suspend, Restart…, Power Off… and Log Out…, open in place.	P-SY-07
+osd-volume	24b-osd.png	Quick settings	Volume OSD	gnome-settings-daemon's volume keys show GNOME's on-screen display through ShowOSD.	P-ST-01
+osd-brightness	24c-brightness-osd.png	Quick settings	Brightness OSD	The brightness key steps the backlight through logind and shows the level.	P-ST-01
+windows	04-windows.png	Windows	Windows	libadwaita windows placed by Mutter's cascade; the focused one on top.	P-WM-05
+popover	07-app-popover.png	Windows	App popovers	A header-bar menu opens as an xdg popup at the place its positioner asks for.	P-WM-06
+tile-preview	08-tile-preview.png	Windows	Edge tiling	Dragging a window to the left edge shows the tile preview over the left half.	P-WM-02
+window-menu	24d-window-menu.png	Windows	Window menu	Right-clicking a header bar opens GNOME's window menu.	P-WM-05
+x11	20-x11-app.png	Windows	X11 apps	XWayland starts with the session, and X11 apps get GNOME placement and focus.	P-SY-04
+switcher	08b-switcher.png	Switcher	Alt+Tab	One icon per app in most-recently-used order; releasing Alt focuses the highlighted one.	P-WM-01
+switcher-thumbnails	08c-switcher-thumbnails.png	Switcher	Window thumbnails	An app with several windows shows them as thumbnails (Down, or Alt+Above_Tab).	P-WM-01
+overview	05-overview.png	Overview	Overview	Super opens the overview: live previews with app icons, the search entry and the dash.	P-OV-01
+workspaces	24g-workspace-thumbnails.png	Overview	Workspaces	With windows on more than one workspace, the thumbnail strip shows above the previews.	P-OV-02
+overview-drag	24h-overview-drag.png	Overview	Moving windows	Dragging a preview onto the next workspace moves the window there.	P-OV-02
+workspace-popup	24f-workspace-popup.png	Overview	Workspace switcher	A workspace key outside the overview shows GNOME's workspace popup.	P-WM-03
+search	10-search.png	Search and apps	Search	Typing in the overview searches apps; the top hit is Enter's target.	P-OV-04
+search-provider	10b-search-provider.png	Search and apps	Search providers	GNOME Shell search providers over D-Bus add their own results.	P-OV-04
+app-grid	11-app-grid.png	Search and apps	App grid	Show Apps opens the grid, with GNOME's app folders as tiles.	P-OV-05
+app-folder	11b-app-folder.png	Search and apps	App folders	A folder opens GNOME's folder dialog with its apps.	P-OV-05
+app-grid-pages	11c-app-grid-pages.png	Search and apps	Pages	More apps than fit page the grid, with indicators and arrows.	P-OV-05
+folder-made	11f-folder-dialog.png	Search and apps	Making folders	Dropping one app on another makes a folder of the two.	P-OV-05
+grid-reorder	11g-grid-reordered.png	Search and apps	Reordering	An app dropped on a tile's edge moves there, and the order is saved to app-picker-layout.	P-OV-05
+banner	12-banner.png	Notifications	Banners	A notification sent over org.freedesktop.Notifications shows a banner at the top.	P-NT-01
+notification-list	13-notification-list.png	Notifications	Notification list	The banner then waits in the date menu's list.	P-NT-02
+do-not-disturb	14-dnd-list.png	Notifications	Do Not Disturb	Do Not Disturb holds banners back but keeps them in the list.	P-NT-02
+screenshot-ui	24e-screenshot-ui.png	System	Screenshot UI	Print opens GNOME's screenshot UI: area, screen or window.	P-SY-05
+polkit	24g-polkit.png	System	Authentication	polkit's requests show GNOME's authentication dialog.	
+end-session	22-end-session.png	System	End session	Power Off… opens GNOME's 60-second confirmation dialog.	P-SY-07
+lock	23-locked-after-suspend.png	System	Lock screen	Suspending locks the session; the curtain shows the clock.	P-LK-01
+unlock	24-unlock-prompt.png	System	Unlock	A key raises the unlock prompt; the password is checked through PAM.	P-LK-01
+scale	24-scale-125.png	System	Display scale	A 125% scale set through Mutter's DisplayConfig applies live.	P-SY-03
