@@ -72,6 +72,57 @@ ROOST_REQUIRE_PAM_WRAPPER=1 scripts/roost-gtk-shell-proof --artifacts gtk-shell-
 `scripts/roost-drm-smoke` loads a kernel module and starts seatd as root.
 Run it in a VM or a disposable machine rather than your desktop session.
 
+## Marlin VM lane
+
+The `marlin-vm` job (#68) boots the real TunaOS Marlin image with Roost
+installed and checks that the display manager logs into the Roost
+hardware session. Nothing runs inside the guest: the job reads the serial
+log and takes QMP screendumps from outside.
+
+1. It builds `packaging/marlin/Containerfile` (Marlin GNOME 51 plus the
+   Roost Arch package from `arch-package`) with rootful podman. On top of
+   that it builds the CI-only layer `packaging/marlin/vm-lane/Containerfile`.
+   This layer adds a `roost-test` user and turns on GDM automatic login
+   into "Roost (preview)". It also sends the kernel console and the
+   journal to `ttyS0`. The shipped image does not get these changes.
+2. It runs `bootc install to-disk --via-loopback --generic-image` from
+   that image to write a 20 GB raw disk.
+3. `scripts/roost-vm-lane --disk disk.raw --out vm-lane-artifacts` boots
+   the disk in QEMU/KVM with OVMF firmware and virtio-vga at 1280x800.
+   It writes these assertions to `assertions.txt`:
+
+| ID | What it asserts |
+|---|---|
+| `V-DRM` | The serial journal has `roost-compositor: drm: output ...`, so the compositor lit an output on the DRM/KMS backend |
+| `V-SHELL` | `roost-shell-gtk: keybindings:` appears and shell supervision never logs `BudgetExhausted` |
+| `V-PANEL` | The session opens on the overview, where the panel is transparent. After Escape, a screendump shows a pure black strip at y=5 across at least 90 percent of the width (the top panel) over a desktop that is not one flat color |
+| `V-NOPANIC` | No `panicked` anywhere in the serial log |
+
+The artifact (`marlin-vm`) holds `serial.log`, `roost-lines.log` (every
+`roost-*` line), the boot frames, `V-OVERVIEW.png` (the login overview),
+`V-SESSION.png` (the desktop), and `manifest.json`.
+The manifest records the base image digest, the test image ID, the Roost
+package, and the QEMU version. If the run fails or times out (15
+minutes), the script prints the relevant serial lines before exiting.
+
+After the assertions pass, `--tour` records a feature tour. The script
+sends keys and pointer clicks through QMP to open the overview and search,
+the app grid, quick settings, and the calendar. It then opens Disks,
+System Monitor, and Files, switches between them with Alt+Tab, and turns
+scroll mode on and off (Super+Shift+T, Super+R, Super+Left/Right). Last,
+it locks the screen from the quick settings lock button and unlocks it
+with the `roost-test` password. Roost does not bind Super+L yet. The
+script takes a screendump twice a second and plays the result back at
+double speed. Before each section it inserts a title card, a committed
+PNG in `scripts/lib/vm-tour-cards/` (`render.py` there redraws them). The
+`roost-tour` artifact, kept for 30 days, holds `roost-tour.webm`,
+`preview.webp`, and one `T-<section>.png` still per section. The tour
+asserts nothing; only a missing video fails the job.
+
+You need `/dev/kvm`, about 30 GB of free disk, and the podman and
+`bootc install` commands from the job to run this locally. Do not use your
+desktop session for it.
+
 ## Parity ledger check
 
 The `parity-ledger` job runs `scripts/roost-ledger` against the test list
@@ -84,7 +135,8 @@ scripts/roost-ledger check --tests test-list.txt \
   --assertions journey-artifacts/assertions.txt \
   --assertions gtk-shell-artifacts/assertions.txt \
   --assertions gtk-shell-artifacts/scale/assertions.txt \
-  --assertions drm-smoke-artifacts/assertions.txt
+  --assertions drm-smoke-artifacts/assertions.txt \
+  --assertions vm-lane-artifacts/assertions.txt
 ```
 
 `scripts/roost-ledger summary` prints status counts only.

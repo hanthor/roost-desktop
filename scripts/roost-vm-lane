@@ -1,0 +1,465 @@
+#!/usr/bin/env python3
+"""roost-vm-lane — boot the Marlin Roost disk and prove the hardware session (#68).
+
+Boots a raw disk installed from the CI-only test layer
+(packaging/marlin/vm-lane/Containerfile: GDM autologin of roost-test
+into "Roost (preview)", journal mirrored on ttyS0) in QEMU/KVM on OVMF at
+1280x800 with virtio-vga, then asserts from outside the guest:
+
+  V-DRM      the serial journal shows roost-compositor lit an output on
+             the DRM/KMS backend ("roost-compositor: drm: output ...")
+  V-SHELL    the GTK shell came up ("roost-shell-gtk: keybindings: ...")
+             and supervision never exhausted its restart budget
+  V-PANEL    after Escape leaves the startup overview, a QMP screendump
+             shows the GNOME 51-style pure black top panel across the
+             width at y=5, over a non-uniform desktop (not a blank or
+             splash screen)
+  V-NOPANIC  no "panicked" anywhere in the serial log
+
+Writes to --out: serial.log, roost-lines.log (every roost-* line),
+boot-NNN.png frames, V-OVERVIEW.png (the login overview),
+V-SESSION.png (the desktop), assertions.txt ("<ID> pass|fail
+<desc>", the format scripts/roost-ledger reads) and manifest.json.
+On timeout or failure, prints log excerpts and exits nonzero.
+
+With --tour, once the assertions pass it drives a scripted feature tour
+through QMP input (overview and search, app grid, quick settings,
+calendar, three apps and Alt+Tab, scroll mode, lock and unlock), screendumps
+it twice a second, splices in the title cards from scripts/lib/
+vm-tour-cards, and writes tour/roost-tour.webm, tour/preview.webp and a
+T-<section>.png still per section (needs ffmpeg with libvpx and libwebp).
+
+Usage:
+  scripts/roost-vm-lane --disk DISK.raw [--out DIR] [--timeout S] [--tour]
+                        [--meta KEY=VALUE ...]
+
+Needs qemu-system-x86_64 and OVMF; KVM strongly recommended. Reuses the
+QMP client from scripts/roost-baseline.
+"""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+_loader = importlib.machinery.SourceFileLoader("roost_baseline",
+                                               os.path.join(HERE, "roost-baseline"))
+_spec = importlib.util.spec_from_loader("roost_baseline", _loader)
+baseline = importlib.util.module_from_spec(_spec)
+_loader.exec_module(baseline)
+
+WIDTH, HEIGHT = baseline.WIDTH, baseline.HEIGHT
+DRM_RE = re.compile(r"roost-compositor: drm: output (\S+) (\d+)x(\d+)")
+SHELL_RE = re.compile(r"roost-shell-gtk: keybindings: ")
+EXHAUSTED = "shell supervision: BudgetExhausted"
+CARDS = os.path.join(HERE, "lib", "vm-tour-cards")
+TOUR_FPS = 2        # frames captured per second during the tour
+PLAY_FPS = 4        # playback rate: the tour plays at 2x
+CARD_HOLD = 10      # frames a title card is held (2.5 s at PLAY_FPS)
+OVMF = ("/usr/share/ovmf/OVMF.fd", "/usr/share/OVMF/OVMF_CODE.fd", "/usr/share/qemu/OVMF.fd")
+
+
+def log(msg):
+    print(f"roost-vm-lane: {msg}", flush=True)
+
+
+def read_text(path):
+    try:
+        with open(path, "rb") as fh:
+            return fh.read().decode("utf-8", "replace")
+    except FileNotFoundError:
+        return ""
+
+
+def excerpt(serial, n=60):
+    lines = serial.splitlines()
+    interesting = [ln for ln in lines if re.search(
+        r"roost|gdm|panicked|session-|Failed|error", ln, re.I)]
+    return ("--- last relevant serial lines ---\n" + "\n".join(interesting[-n:]) +
+            "\n--- last raw serial lines ---\n" + "\n".join(lines[-40:]))
+
+
+def read_ppm(path):
+    """Parse a binary P6 PPM (QMP screendump's default format)."""
+    with open(path, "rb") as fh:
+        data = fh.read()
+    fields, pos = [], 0
+    while len(fields) < 4:
+        while data[pos:pos + 1].isspace():
+            pos += 1
+        if data[pos:pos + 1] == b"#":
+            pos = data.index(b"\n", pos) + 1
+            continue
+        end = pos
+        while not data[end:end + 1].isspace():
+            end += 1
+        fields.append(data[pos:end])
+        pos = end
+    if fields[0] != b"P6" or int(fields[3]) != 255:
+        raise ValueError(f"unexpected PPM header {fields}")
+    w, h = int(fields[1]), int(fields[2])
+    return w, h, data[pos + 1:pos + 1 + w * h * 3]
+
+
+def check_panel(path):
+    """Black panel strip at y=5 over a non-uniform desktop."""
+    w, h, px = read_ppm(path)
+
+    def pixel(x, y):
+        i = (y * w + x) * 3
+        return px[i], px[i + 1], px[i + 2]
+
+    row = [pixel(x, 5) for x in range(w)]
+    black = sum(1 for p in row if max(p) <= 8) / w
+    body = {tuple(c >> 4 for c in pixel(x, y))
+            for y in range(h // 4, h * 3 // 4, 8) for x in range(0, w, 8)}
+    ok = (w, h) == (WIDTH, HEIGHT) and black >= 0.9 and len(body) >= 8
+    return ok, f"{w}x{h}, y=5 row {black:.0%} black, {len(body)} body colors"
+
+
+class Recorder:
+    """Screendump the VM TOUR_FPS times a second into numbered PNGs while
+    the tour drives input; marks splice a title card in at a frame index."""
+
+    def __init__(self, qmp, out):
+        self.qmp, self.dir = qmp, os.path.join(out, "frames")
+        os.makedirs(self.dir, exist_ok=True)
+        self.lock, self.stop, self.n, self.marks = threading.Lock(), threading.Event(), 0, []
+        self.stills = {}
+        cmd = qmp.cmd
+
+        def locked(name, **args):
+            with self.lock:
+                return cmd(name, **args)
+        qmp.cmd = locked
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self):
+        while not self.stop.is_set():
+            t = time.time()
+            try:
+                self.qmp.cmd("screendump", filename=os.path.join(self.dir, f"f{self.n:06d}.png"),
+                             format="png")
+                self.n += 1
+            except (OSError, RuntimeError, ValueError) as e:
+                log(f"tour: screendump failed: {e}")
+            self.stop.wait(max(0.0, 1 / TOUR_FPS - (time.time() - t)))
+
+    def mark(self, card):
+        log(f"tour: {card}")
+        self.marks.append((self.n, card))
+
+    def still(self, card, delay=0.0):
+        """Keep the next captured frame as this section's still."""
+        time.sleep(delay)
+        self.stills[card] = self.n + 1
+
+
+def run_tour(qmp, out):
+    """Scripted feature tour through QMP input, recorded to a WebM with a
+    title card per section. Returns a manifest entry."""
+    tour = os.path.join(out, "tour")
+    scratch = os.path.join(tour, ".work")
+    os.makedirs(scratch, exist_ok=True)
+    rec = Recorder(qmp, scratch)
+    keys, wait = qmp.keys, time.sleep
+
+    def launch(query):
+        keys("meta_l")
+        wait(1.5)
+        qmp.type_text(query)
+        wait(2.5)
+        keys("ret")
+        wait(7)
+
+    rec.thread.start()
+    try:
+        rec.mark("intro")
+        wait(4)
+        rec.still("intro")
+        rec.mark("overview")
+        keys("esc")
+        wait(2)
+        keys("meta_l")
+        wait(2.5)
+        qmp.type_text("files")
+        wait(3)
+        rec.still("overview")
+        keys("esc")
+        wait(1)
+        keys("esc")
+        wait(2)
+        rec.mark("app-grid")
+        keys("meta_l", "a")
+        wait(4)
+        rec.still("app-grid")
+        keys("esc")
+        wait(1)
+        keys("esc")
+        wait(2)
+        rec.mark("quick-settings")
+        qmp.click(WIDTH - 40, 12)
+        wait(4)
+        rec.still("quick-settings")
+        keys("esc")
+        wait(2)
+        rec.mark("calendar")
+        qmp.click(WIDTH // 2, 12)
+        wait(4)
+        rec.still("calendar")
+        keys("esc")
+        wait(2)
+        # Apps the Marlin GNOME image ships (its app grid has no Text
+        # Editor, and Settings opens slowly outside gnome-session).
+        rec.mark("alt-tab")
+        for query in ("disks", "system monitor", "files"):
+            launch(query)
+        keys("alt", "tab", hold_ms=1500)
+        rec.still("alt-tab", delay=1.0)
+        wait(3)
+        keys("alt", "tab", hold_ms=1500)
+        wait(3)
+        rec.mark("scroll")
+        keys("meta_l", "shift", "t")
+        wait(3)
+        keys("meta_l", "r")
+        wait(2.5)
+        keys("meta_l", "left")
+        wait(2.5)
+        rec.still("scroll")
+        keys("meta_l", "left")
+        wait(2.5)
+        keys("meta_l", "right")
+        wait(2.5)
+        keys("meta_l", "shift", "t")
+        wait(3)
+        # Roost binds no Super+L yet; lock from the quick-settings lock
+        # button as a user would, then unlock with roost-test's password
+        # through GDM's PAM stack (roost-lock).
+        rec.mark("lock")
+        qmp.click(WIDTH - 40, 12)
+        wait(2)
+        qmp.click(1185, 75)
+        wait(5)
+        rec.still("lock")
+        keys("shift")
+        wait(2)
+        qmp.type_text("roost")
+        wait(1)
+        keys("ret")
+        wait(5)
+    finally:
+        rec.stop.set()
+        rec.thread.join(timeout=10)
+
+    # Final sequence: captured frames with CARD_HOLD copies of each card
+    # spliced in at its mark. Cards are converted to RGB at the capture
+    # size so ffmpeg sees one pixel format throughout.
+    seq = os.path.join(scratch, "seq")
+    os.makedirs(seq, exist_ok=True)
+    cards, at = {}, {}
+    for idx, card in rec.marks:
+        at.setdefault(idx, []).append(card)
+    count = 0
+
+    def put(src):
+        nonlocal count
+        dst = os.path.join(seq, f"f{count:06d}.png")
+        try:
+            os.link(src, dst)
+        except OSError:
+            shutil.copyfile(src, dst)
+        count += 1
+
+    for i in range(rec.n + 1):
+        for card in at.get(i, []):
+            if card not in cards:
+                dst = os.path.join(scratch, f"card-{card}.png")
+                subprocess.run(["ffmpeg", "-loglevel", "error", "-y",
+                                "-i", os.path.join(CARDS, f"{card}.png"),
+                                "-vf", f"scale={WIDTH}:{HEIGHT}", "-pix_fmt", "rgb24", dst],
+                               check=True)
+                cards[card] = dst
+            for _ in range(CARD_HOLD):
+                put(cards[card])
+        frame = os.path.join(rec.dir, f"f{i:06d}.png")
+        if os.path.exists(frame) and os.path.getsize(frame) > 0:
+            put(frame)
+    pattern = os.path.join(seq, "f%06d.png")
+    webm = os.path.join(tour, "roost-tour.webm")
+    subprocess.run(["ffmpeg", "-loglevel", "warning", "-y", "-framerate", str(PLAY_FPS),
+                    "-i", pattern, "-c:v", "libvpx-vp9", "-crf", "36", "-b:v", "0", "-row-mt", "1", "-cpu-used", "4",
+                    "-pix_fmt", "yuv420p", webm], check=True)
+    subprocess.run(["ffmpeg", "-loglevel", "warning", "-y", "-framerate", str(PLAY_FPS),
+                    "-i", pattern, "-vf", "scale=640:-2:flags=lanczos", "-loop", "0",
+                    "-c:v", "libwebp", "-quality", "60", "-compression_level", "6",
+                    os.path.join(tour, "preview.webp")], check=False)
+    for card, idx in rec.stills.items():
+        frame = os.path.join(rec.dir, f"f{min(idx, rec.n - 1):06d}.png")
+        if os.path.exists(frame):
+            shutil.copyfile(frame, os.path.join(tour, f"T-{card}.png"))
+    shutil.rmtree(scratch, ignore_errors=True)
+    ok = os.path.exists(webm) and os.path.getsize(webm) > 0
+    log(f"tour: {rec.n} frames, {len(rec.marks)} sections -> {webm if ok else 'NO VIDEO'}")
+    return {"video": "tour/roost-tour.webm" if ok else None, "frames": rec.n,
+            "sections": [c for _, c in rec.marks], "capture_fps": TOUR_FPS,
+            "playback_fps": PLAY_FPS}
+
+
+def boot(disk, out, scratch, timeout):
+    ovmf = next((p for p in OVMF if os.path.exists(p)), None)
+    if not ovmf:
+        sys.exit("roost-vm-lane: OVMF firmware not found (install ovmf)")
+    kvm = os.access("/dev/kvm", os.R_OK | os.W_OK)
+    qmp_path = os.path.join(scratch, "qmp.sock")
+    serial = os.path.join(out, "serial.log")
+    qemu = ["qemu-system-x86_64", "-machine", "q35", "-m", "6144", "-smp", "4",
+            "-bios", ovmf,
+            "-drive", f"file={disk},format=raw,if=virtio,cache=unsafe",
+            "-device", f"virtio-vga,xres={WIDTH},yres={HEIGHT}",
+            "-device", "qemu-xhci", "-device", "usb-tablet", "-device", "usb-kbd",
+            "-display", "none", "-serial", f"file:{serial}",
+            "-qmp", f"unix:{qmp_path},server=on,wait=off",
+            "-nic", "user,model=virtio-net-pci"]
+    if kvm:
+        qemu[1:1] = ["-enable-kvm", "-cpu", "host"]
+    log(f"booting {disk} (kvm={kvm})")
+    return subprocess.Popen(qemu), qmp_path, serial, kvm
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--disk", required=True)
+    ap.add_argument("--out", default="vm-lane-artifacts")
+    ap.add_argument("--timeout", type=int, default=900)
+    ap.add_argument("--tour", action="store_true",
+                    help="after the assertions, record the feature tour video")
+    ap.add_argument("--meta", action="append", default=[], metavar="KEY=VALUE")
+    a = ap.parse_args()
+    out = os.path.abspath(a.out)
+    scratch = os.path.join(out, ".scratch")
+    os.makedirs(scratch, exist_ok=True)
+    results = {}
+
+    def record(test_id, ok, desc):
+        results[test_id] = (ok, desc)
+        log(f"{test_id} {'pass' if ok else 'FAIL'}: {desc}")
+
+    vm, qmp_path, serial_path, kvm = boot(os.path.abspath(a.disk), out, scratch, a.timeout)
+    start = time.time()
+    drm = shell = None
+    elapsed = 0.0
+    tour_info = None
+    panel_desc = "never checked"
+    try:
+        qmp = baseline.Qmp(qmp_path)
+        n = 0
+        while time.time() - start < a.timeout and vm.poll() is None:
+            text = read_text(serial_path)
+            drm = drm or DRM_RE.search(text)
+            shell = shell or SHELL_RE.search(text)
+            if n % 3 == 0:
+                qmp.frame(os.path.join(out, f"boot-{n // 3:03d}.png"))
+            n += 1
+            if EXHAUSTED in text or "panicked" in text:
+                log("shell supervision gave up or something panicked")
+                break
+            if drm and shell:
+                break
+            time.sleep(5)
+        elapsed = time.time() - start
+        if drm and shell:
+            log(f"session up after {elapsed:.0f}s; letting the shell settle")
+            time.sleep(15)
+            # roost-session opens on the overview, where the panel is
+            # transparent as in GNOME; keep that frame, then Escape to the
+            # desktop, where the panel is the solid black strip.
+            qmp.frame(os.path.join(out, "V-OVERVIEW.png"))
+            qmp.keys("esc")
+            time.sleep(3)
+            for attempt in range(8):
+                ppm = os.path.join(scratch, f"session-{attempt}.ppm")
+                qmp.cmd("screendump", filename=ppm, format="ppm")
+                for _ in range(50):
+                    if os.path.exists(ppm) and os.path.getsize(ppm) > 0:
+                        break
+                    time.sleep(0.1)
+                qmp.frame(os.path.join(out, "V-SESSION.png"))
+                ok, panel_desc = check_panel(ppm)
+                if ok:
+                    break
+                time.sleep(5)
+            else:
+                ok = False
+            record("V-PANEL", ok, f"screendump: {panel_desc}")
+            if a.tour:
+                try:
+                    tour_info = run_tour(qmp, out)
+                except (OSError, RuntimeError, subprocess.CalledProcessError) as e:
+                    log(f"tour failed: {e}")
+        qmp.cmd("quit")
+    finally:
+        try:
+            vm.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            vm.kill()
+
+    text = read_text(serial_path)
+    drm = drm or DRM_RE.search(text)
+    shell = shell or SHELL_RE.search(text)
+    record("V-DRM", bool(drm), f"DRM/KMS output lit: {drm.group(0) if drm else 'no drm: output line'}")
+    record("V-SHELL", bool(shell) and EXHAUSTED not in text,
+           "roost-shell-gtk started under supervision" if shell
+           else "no roost-shell-gtk: keybindings line")
+    results.setdefault("V-PANEL", (False, "session never came up, no screendump checked"))
+    panics = [ln for ln in text.splitlines() if "panicked" in ln]
+    record("V-NOPANIC", not panics, panics[0] if panics else "no panicked in serial log")
+
+    with open(os.path.join(out, "roost-lines.log"), "w") as fh:
+        fh.writelines(ln + "\n" for ln in text.splitlines() if "roost-" in ln)
+    with open(os.path.join(out, "assertions.txt"), "w") as fh:
+        for test_id in ("V-DRM", "V-SHELL", "V-PANEL", "V-NOPANIC"):
+            ok, desc = results[test_id]
+            fh.write(f"{test_id} {'pass' if ok else 'fail'} {desc}\n")
+    qemu_version = subprocess.run(["qemu-system-x86_64", "--version"], capture_output=True,
+                                  text=True).stdout.splitlines()[0]
+    manifest = {
+        "lane": "marlin-vm",
+        "session": "Roost (preview) via GDM autologin, DRM/KMS backend",
+        "disk": os.path.basename(a.disk),
+        "resolution": f"{WIDTH}x{HEIGHT}",
+        "kvm": kvm,
+        "qemu": qemu_version,
+        "session_up_s": round(elapsed) if drm and shell else None,
+        "captured_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "tour": tour_info,
+        "assertions": {k: {"pass": v[0], "detail": v[1]} for k, v in results.items()},
+    }
+    for kv in a.meta:
+        key, _, value = kv.partition("=")
+        manifest[key] = value
+    with open(os.path.join(out, "manifest.json"), "w") as fh:
+        json.dump(manifest, fh, indent=2)
+    for name in os.listdir(scratch):
+        os.remove(os.path.join(scratch, name))
+    os.rmdir(scratch)
+
+    failed = [k for k, (ok, _) in results.items() if not ok]
+    if a.tour and not failed and not (tour_info and tour_info["video"]):
+        sys.exit("roost-vm-lane: assertions passed but the tour video was not produced")
+    if failed:
+        print(excerpt(text), file=sys.stderr)
+        sys.exit(f"roost-vm-lane: FAILED {', '.join(sorted(failed))} "
+                 f"(after {elapsed:.0f}s of {a.timeout}s)")
+    log(f"OK: Roost hardware session up on Marlin in {elapsed:.0f}s; artifacts in {out}")
+
+
+if __name__ == "__main__":
+    main()
