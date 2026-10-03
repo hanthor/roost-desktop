@@ -24,7 +24,8 @@
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::drm::{
-    DrmDevice, DrmDeviceFd, DrmDeviceNotifier, DrmEvent, GbmBufferedSurface,
+    DrmDevice, DrmDeviceFd, DrmDeviceNotifier, DrmEvent, DrmEventMetadata, DrmEventTime,
+    GbmBufferedSurface,
 };
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::input::{Event, InputEvent, KeyState, KeyboardKeyEvent, PointerMotionEvent};
@@ -32,6 +33,7 @@ use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface}
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::session::libseat::{LibSeatSession, LibSeatSessionNotifier};
 use smithay::backend::session::{Event as SessionEvent, Session};
+use smithay::desktop::utils::OutputPresentationFeedback;
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::drm::control::{connector, crtc, Device as ControlDevice, ModeTypeFlags};
 use smithay::reexports::input::Libinput;
@@ -40,8 +42,24 @@ use smithay::utils::{DeviceFd, Logical, Physical, Point, Rectangle, Size};
 
 use crate::windows::ManagerInput;
 
-/// Scanout surface type: GBM buffers on the DRM device, no per-buffer data.
-pub type ScanoutSurface = GbmBufferedSurface<GbmAllocator<DrmDeviceFd>, ()>;
+/// Scanout surface type: GBM buffers on the DRM device, each queued
+/// frame carrying the presentation feedback of what it drew (#89).
+pub type ScanoutSurface = GbmBufferedSurface<GbmAllocator<DrmDeviceFd>, OutputPresentationFeedback>;
+
+/// A completed page flip: the frame is on the screen.
+pub struct PageFlip {
+    /// The flip was the primary output's (it paces fifo and commit
+    /// timers, as one output's frame clock does in Mutter).
+    pub primary: bool,
+    /// Feedback of the surfaces the frame drew.
+    pub feedback: Option<OutputPresentationFeedback>,
+    /// Kernel vblank timestamp on CLOCK_MONOTONIC, when it gave one.
+    pub time: Option<std::time::Duration>,
+    /// Kernel vblank sequence.
+    pub sequence: u64,
+    /// The output's refresh interval.
+    pub refresh: std::time::Duration,
+}
 
 /// One lit connector.
 pub struct DrmOutput {
@@ -408,18 +426,47 @@ impl DrmBackend {
         }
     }
 
-    /// Page flip completion: the output may render again.
-    pub fn on_drm_event(&mut self, event: DrmEvent) {
+    /// Page flip completion: the output may render again, and what its
+    /// frame drew has been presented.
+    pub fn on_drm_event(
+        &mut self,
+        event: DrmEvent,
+        metadata: &mut Option<DrmEventMetadata>,
+    ) -> Option<PageFlip> {
         match event {
             DrmEvent::VBlank(crtc) => {
-                if let Some(out) = self.outputs.iter_mut().find(|o| o.crtc == crtc) {
-                    if let Err(e) = out.surface.frame_submitted() {
+                let index = self.outputs.iter().position(|o| o.crtc == crtc)?;
+                let out = &mut self.outputs[index];
+                let feedback = match out.surface.frame_submitted() {
+                    Ok(feedback) => feedback,
+                    Err(e) => {
                         eprintln!("roost-compositor: drm: frame_submitted: {e}");
+                        None
                     }
-                    out.pending = false;
-                }
+                };
+                out.pending = false;
+                let (time, sequence) = match metadata.as_ref() {
+                    Some(meta) => (
+                        match meta.time {
+                            DrmEventTime::Monotonic(time) => Some(time),
+                            DrmEventTime::Realtime(_) => None,
+                        },
+                        u64::from(meta.sequence),
+                    ),
+                    None => (None, 0),
+                };
+                Some(PageFlip {
+                    primary: index == 0,
+                    feedback,
+                    time,
+                    sequence,
+                    refresh: crate::frame_timing::refresh_of(&out.output),
+                })
             }
-            DrmEvent::Error(e) => eprintln!("roost-compositor: drm: device error: {e}"),
+            DrmEvent::Error(e) => {
+                eprintln!("roost-compositor: drm: device error: {e}");
+                None
+            }
         }
     }
 

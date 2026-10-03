@@ -26,19 +26,45 @@
 //!   #89): touchpad gestures reach apps, games get raw motion and a
 //!   locked pointer.
 //!
+//! - xdg-dialog v1: a modal dialog is attached to its parent as in
+//!   GNOME (attach-modal-dialogs): focusing the parent focuses the
+//!   dialog. xdg-foreign v2 lets the portal parent its dialogs to the
+//!   app's window the same way.
+//! - xdg-system-bell v1: rings GNOME's `bell-window-system` theme sound
+//!   (Mutter's audible bell) through libcanberra's player.
+//! - xdg-toplevel-tag v1: each window keeps its tag and description.
+//! - keyboard-shortcuts-inhibit v1: virtual machines and remote desktops
+//!   get every key while focused; Super+Escape (Mutter's
+//!   restore-shortcuts) hands the shortcuts back until the window is
+//!   focused again. Granted at once: Roost has no GNOME Shell
+//!   permission dialog to ask with.
+//! - pointer-warp v1: a client may move the pointer within its own
+//!   surface while it has pointer focus (the enter serial must match).
+//! - presentation-time, fifo and commit-timing: see [`crate::frame_timing`].
+//!
 //! Deliberately absent, matching Mutter: xdg-decoration (GNOME is
 //! client-side decorations only).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use smithay::{
     backend::allocator::{dmabuf::Dmabuf, Format},
     delegate_cursor_shape, delegate_dmabuf, delegate_fractional_scale, delegate_idle_inhibit,
     delegate_input_method_manager, delegate_pointer_constraints, delegate_pointer_gestures,
     delegate_relative_pointer, delegate_single_pixel_buffer, delegate_text_input_manager,
-    delegate_viewporter, delegate_xdg_activation,
+    delegate_viewporter, delegate_xdg_activation, delegate_xdg_dialog, delegate_xdg_foreign,
+    delegate_xdg_system_bell, delegate_xdg_toplevel_tag,
     input::pointer::PointerHandle,
-    reexports::wayland_server::{protocol::wl_surface::WlSurface, DisplayHandle, Resource},
+    reexports::{
+        wayland_protocols::{
+            wp::pointer_warp::v1::server::wp_pointer_warp_v1::{self, WpPointerWarpV1},
+            xdg::shell::server::xdg_toplevel::XdgToplevel,
+        },
+        wayland_server::{
+            backend::GlobalId, protocol::wl_surface::WlSurface, Client, DataInit, Dispatch,
+            DisplayHandle, GlobalDispatch, New, Resource,
+        },
+    },
     utils::{Logical, Point, Rectangle},
     wayland::{
         compositor::with_states,
@@ -49,11 +75,16 @@ use smithay::{
         },
         idle_inhibit::{IdleInhibitHandler, IdleInhibitManagerState},
         input_method::{InputMethodHandler, InputMethodManagerState, PopupSurface as ImPopup},
+        keyboard_shortcuts_inhibit::{
+            KeyboardShortcutsInhibitHandler, KeyboardShortcutsInhibitState,
+            KeyboardShortcutsInhibitor, KeyboardShortcutsInhibitorSeat,
+        },
         pointer_constraints::{
             with_pointer_constraint, PointerConstraintsHandler, PointerConstraintsState,
         },
         pointer_gestures::PointerGesturesState,
         relative_pointer::RelativePointerManagerState,
+        shell::xdg::dialog::{XdgDialogHandler, XdgDialogState},
         single_pixel_buffer::SinglePixelBufferState,
         tablet_manager::TabletSeatHandler,
         text_input::TextInputManagerState,
@@ -61,6 +92,9 @@ use smithay::{
         xdg_activation::{
             XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
         },
+        xdg_foreign::{XdgForeignHandler, XdgForeignState},
+        xdg_system_bell::{XdgSystemBellHandler, XdgSystemBellState},
+        xdg_toplevel_tag::{XdgToplevelTagHandler, XdgToplevelTagManager},
     },
 };
 
@@ -86,6 +120,17 @@ pub(crate) struct Protocols {
     _relative_pointer: RelativePointerManagerState,
     _pointer_constraints: PointerConstraintsState,
     _virtual_keyboard: smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState,
+    _dialog: XdgDialogState,
+    _system_bell: XdgSystemBellState,
+    _toplevel_tag: XdgToplevelTagManager,
+    pub(crate) foreign: XdgForeignState,
+    pub(crate) shortcuts_inhibit: KeyboardShortcutsInhibitState,
+    _pointer_warp: GlobalId,
+    /// Pointer warps clients asked for, drained by the window manager:
+    /// surface, surface-local position, enter serial.
+    pub(crate) pointer_warps: Vec<(WlSurface, Point<f64, Logical>, u32)>,
+    /// The system bell (xdg-system-bell).
+    pub(crate) bell: Bell,
     /// Surfaces holding an idle inhibitor.
     pub(crate) inhibitors: Vec<WlSurface>,
     /// Scale fractional-scale clients are asked to render at (#59).
@@ -120,10 +165,95 @@ impl Protocols {
                     .get_data::<crate::ClientState>()
                     .is_some_and(|data| data.ime_bridge)
             }),
+            _dialog: XdgDialogState::new::<State>(dh),
+            _system_bell: XdgSystemBellState::new::<State>(dh),
+            _toplevel_tag: XdgToplevelTagManager::new::<State>(dh),
+            foreign: XdgForeignState::new::<State>(dh),
+            shortcuts_inhibit: KeyboardShortcutsInhibitState::new::<State>(dh),
+            _pointer_warp: dh.create_global::<State, WpPointerWarpV1, ()>(1, ()),
+            pointer_warps: Vec::new(),
+            bell: Bell::default(),
             inhibitors: Vec::new(),
             preferred_scale: 1.0,
         }
     }
+}
+
+/// The system bell: rings counted, sounds played through libcanberra's
+/// `canberra-gtk-play` when it is installed, at most one at a time.
+#[derive(Default)]
+pub(crate) struct Bell {
+    rings: u64,
+    last: Option<Instant>,
+    player: Option<std::process::Child>,
+}
+
+/// GNOME's bell sound (Mutter's `meta_bell_notify`).
+pub const BELL_SOUND: &str = "bell-window-system";
+
+impl Bell {
+    fn ring(&mut self) {
+        self.rings += 1;
+        // A burst of rings is one sound, as a held key would otherwise
+        // queue a sound per repeat.
+        let now = Instant::now();
+        if self
+            .last
+            .is_some_and(|last| now.duration_since(last) < Duration::from_millis(100))
+        {
+            return;
+        }
+        self.last = Some(now);
+        if let Some(child) = self.player.as_mut() {
+            match child.try_wait() {
+                Ok(None) => return,
+                _ => self.player = None,
+            }
+        }
+        if std::env::var_os("ROOST_BELL").is_some_and(|v| v == "0") {
+            return;
+        }
+        self.player = std::process::Command::new("canberra-gtk-play")
+            .args(["--id", BELL_SOUND, "--description", "Bell event"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok();
+    }
+}
+
+/// A window's xdg-toplevel-tag: what it is to the app ("main window",
+/// "settings") and a human description. Kept in the surface data.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ToplevelTag {
+    /// Untranslated tag, stable across runs.
+    pub tag: Option<String>,
+    /// Translated description for people.
+    pub description: Option<String>,
+}
+
+/// The tag and description a window's client gave it.
+pub fn toplevel_tag(surface: &WlSurface) -> ToplevelTag {
+    with_states(surface, |states| {
+        states
+            .data_map
+            .get::<std::sync::Mutex<ToplevelTag>>()
+            .map(|tag| tag.lock().unwrap().clone())
+            .unwrap_or_default()
+    })
+}
+
+fn update_tag(state: &State, toplevel: &XdgToplevel, update: impl FnOnce(&mut ToplevelTag)) {
+    let Some(surface) = state.xdg_shell_state.get_toplevel(toplevel) else {
+        return;
+    };
+    with_states(surface.wl_surface(), |states| {
+        let tag = states
+            .data_map
+            .get_or_insert_threadsafe(|| std::sync::Mutex::new(ToplevelTag::default()));
+        update(&mut tag.lock().unwrap());
+    });
 }
 
 impl State {
@@ -171,6 +301,53 @@ impl State {
             .into_iter()
             .find(|(s, _, _)| s == surface)
             .map(|(_, (x, y), _)| (x, y).into())
+    }
+
+    /// Times the system bell rang.
+    pub fn bell_rings(&self) -> u64 {
+        self.protocols.bell.rings
+    }
+
+    /// Whether the surface holding keyboard focus inhibits the
+    /// compositor's shortcuts (keyboard-shortcuts-inhibit).
+    pub fn shortcuts_inhibited(&self) -> bool {
+        let Some(focus) = self.seat.get_keyboard().and_then(|k| k.current_focus()) else {
+            return false;
+        };
+        self.seat
+            .keyboard_shortcuts_inhibitor_for_surface(&focus)
+            .is_some_and(|inhibitor| inhibitor.is_active())
+    }
+
+    /// Mutter's restore-shortcuts (Super+Escape): the focused surface's
+    /// inhibitor goes inactive until it is focused again. Returns
+    /// whether one was active.
+    pub fn restore_shortcuts(&mut self) -> bool {
+        let Some(focus) = self.seat.get_keyboard().and_then(|k| k.current_focus()) else {
+            return false;
+        };
+        match self.seat.keyboard_shortcuts_inhibitor_for_surface(&focus) {
+            Some(inhibitor) if inhibitor.is_active() => {
+                inhibitor.inactivate();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Keyboard focus moved to `surface`: an inhibitor the user
+    /// suspended with restore-shortcuts takes effect again.
+    pub(crate) fn reactivate_inhibitor(&self, surface: &WlSurface) {
+        if let Some(inhibitor) = self.seat.keyboard_shortcuts_inhibitor_for_surface(surface) {
+            if !inhibitor.is_active() {
+                inhibitor.activate();
+            }
+        }
+    }
+
+    /// Drain the pointer warps clients asked for.
+    pub(crate) fn take_pointer_warps(&mut self) -> Vec<(WlSurface, Point<f64, Logical>, u32)> {
+        std::mem::take(&mut self.protocols.pointer_warps)
     }
 
     /// Client that currently holds keyboard focus, if any.
@@ -340,6 +517,86 @@ impl PointerConstraintsHandler for State {
     }
 }
 delegate_pointer_constraints!(State);
+
+impl XdgDialogHandler for State {}
+delegate_xdg_dialog!(State);
+
+impl XdgForeignHandler for State {
+    fn xdg_foreign_state(&mut self) -> &mut XdgForeignState {
+        &mut self.protocols.foreign
+    }
+}
+delegate_xdg_foreign!(State);
+
+impl XdgSystemBellHandler for State {
+    fn ring(&mut self, _surface: Option<WlSurface>) {
+        self.protocols.bell.ring();
+    }
+}
+delegate_xdg_system_bell!(State);
+
+impl XdgToplevelTagHandler for State {
+    fn set_tag(&mut self, toplevel: XdgToplevel, tag: String) {
+        update_tag(self, &toplevel, |t| t.tag = Some(tag));
+    }
+
+    fn set_description(&mut self, toplevel: XdgToplevel, description: String) {
+        update_tag(self, &toplevel, |t| t.description = Some(description));
+    }
+}
+delegate_xdg_toplevel_tag!(State);
+
+impl KeyboardShortcutsInhibitHandler for State {
+    fn keyboard_shortcuts_inhibit_state(&mut self) -> &mut KeyboardShortcutsInhibitState {
+        &mut self.protocols.shortcuts_inhibit
+    }
+
+    /// Granted at once (GNOME Shell asks first; Roost has no such
+    /// dialog). Super+Escape takes the shortcuts back.
+    fn new_inhibitor(&mut self, inhibitor: KeyboardShortcutsInhibitor) {
+        inhibitor.activate();
+    }
+}
+smithay::delegate_keyboard_shortcuts_inhibit!(State);
+
+impl GlobalDispatch<WpPointerWarpV1, ()> for State {
+    fn bind(
+        _state: &mut Self,
+        _dh: &DisplayHandle,
+        _client: &Client,
+        resource: New<WpPointerWarpV1>,
+        _data: &(),
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        data_init.init(resource, ());
+    }
+}
+
+impl Dispatch<WpPointerWarpV1, ()> for State {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        _resource: &WpPointerWarpV1,
+        request: wp_pointer_warp_v1::Request,
+        _data: &(),
+        _dh: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        if let wp_pointer_warp_v1::Request::WarpPointer {
+            surface,
+            x,
+            y,
+            serial,
+            ..
+        } = request
+        {
+            state
+                .protocols
+                .pointer_warps
+                .push((surface, (x, y).into(), serial));
+        }
+    }
+}
 
 /// A text cursor rectangle in a surface's coordinates, placed globally
 /// by the surface's buffer origin.
