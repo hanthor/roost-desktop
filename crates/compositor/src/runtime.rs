@@ -720,13 +720,24 @@ impl Runtime {
         event_loop
             .handle()
             .insert_source(crate::screenshot::start(), |event, _, rt: &mut Runtime| {
-                if let calloop::channel::Event::Msg(request) = event {
-                    let saved = if request.window {
-                        rt.capture_window(&request.filename)
-                    } else {
-                        rt.capture(&request.filename)
-                    };
-                    let _ = request.reply.send(saved);
+                use crate::screenshot::Request;
+                match event {
+                    calloop::channel::Event::Msg(Request::Shot {
+                        filename,
+                        window,
+                        reply,
+                    }) => {
+                        let saved = if window {
+                            rt.capture_window(&filename)
+                        } else {
+                            rt.capture(&filename)
+                        };
+                        let _ = reply.send(saved);
+                    }
+                    calloop::channel::Event::Msg(Request::Windows { directory, reply }) => {
+                        let _ = reply.send(rt.capture_selector_windows(&directory));
+                    }
+                    calloop::channel::Event::Closed => {}
                 }
             })
             .map_err(|e| RuntimeError::Loop(e.to_string()))?;
@@ -1466,6 +1477,73 @@ impl Runtime {
         Some(path)
     }
 
+    /// GNOME's screenshot window selector (screenshot.js
+    /// `UIWindowSelector.capture`): every window on the active workspace,
+    /// minimized ones left out, each saved at full size into `directory`
+    /// and given its slot in the selector, laid out with GNOME's window
+    /// spread inside the selector's margins. Never while locked.
+    pub fn capture_selector_windows(
+        &mut self,
+        directory: &std::path::Path,
+    ) -> Vec<crate::screenshot::WindowShot> {
+        if self.is_locked() || std::fs::create_dir_all(directory).is_err() {
+            return Vec::new();
+        }
+        let size = self.state.primary_size();
+        let model = self.manager.model();
+        let active = model.active_workspace();
+        let focused = model.focused();
+        let mut windows: Vec<(u64, Rectangle<i32, Logical>)> = self
+            .manager
+            .overview_windows()
+            .into_iter()
+            .filter(|w| w.workspace == active && !self.manager.is_minimized(w.id))
+            .map(|w| (w.id, w.geometry))
+            .collect();
+        // GNOME sorts by stable sequence: creation order (Roost ids rise).
+        windows.sort_by_key(|(id, _)| *id);
+        let top = crate::windows::WORK_AREA_TOP;
+        let workarea = Rectangle::new((0, top).into(), (size.w, (size.h - top).max(1)).into());
+        let (ax, ay, aw, ah) = crate::screenshot::selector_area(size.w, size.h);
+        let area = Rectangle::new((ax, ay).into(), (aw, ah).into());
+        let slots = crate::overview::window_slots_spaced(
+            workarea,
+            size.h,
+            area,
+            &windows,
+            crate::overview::SELECTOR_SPACING,
+        );
+        let mut shots = Vec::new();
+        for (id, rect, _) in slots {
+            let title = self
+                .manager
+                .model()
+                .window(id)
+                .map(|w| w.title.clone())
+                .unwrap_or_default();
+            let Some((w, h, rgba)) =
+                self.render_window_pixels(id, None, smithay::backend::allocator::Fourcc::Abgr8888)
+            else {
+                continue;
+            };
+            let path = directory.join(format!("window-{id}.png"));
+            if crate::screenshot::save_png(&path, w as u32, h as u32, &rgba).is_err() {
+                continue;
+            }
+            shots.push(crate::screenshot::WindowShot {
+                id,
+                title,
+                focused: focused == Some(id),
+                x: rect.loc.x,
+                y: rect.loc.y,
+                width: rect.size.w,
+                height: rect.size.h,
+                path,
+            });
+        }
+        shots
+    }
+
     /// Physical size of window `id` at its output's scale, and the scale.
     fn window_pixel_size(&self, id: u64) -> Option<((i32, i32), f64)> {
         let geometry = self.manager.geometry(id)?;
@@ -1726,6 +1804,19 @@ impl Runtime {
                     };
                     self.render_pixels(output, xrgb)
                 }
+                CastTarget::Area(connector, area) => {
+                    let output = match &self.backend {
+                        Backend::Winit(_) => None,
+                        #[cfg(feature = "drm")]
+                        Backend::Drm(_) => Some(connector.as_str()),
+                    };
+                    #[cfg(not(feature = "drm"))]
+                    let _ = connector;
+                    self.render_pixels(output, xrgb).and_then(|(w, h, pixels)| {
+                        crate::screencast::crop(&pixels, (w, h), *area)
+                            .map(|cropped| (area.2, area.3, cropped))
+                    })
+                }
             };
             let Some((w, h, bgrx)) = frame else {
                 continue;
@@ -1762,6 +1853,7 @@ impl Runtime {
                     crate::mutter::CastTarget::Window(id) => {
                         self.window_pixel_size(*id).map(|(size, _)| size)
                     }
+                    crate::mutter::CastTarget::Area(_, (_, _, w, h)) => Some((*w, *h)),
                 };
                 let Some((width, height)) = size else {
                     crate::mutter::session_closed(&signal, session_id);

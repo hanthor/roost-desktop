@@ -31,6 +31,8 @@ pub enum Action {
     /// Open a new window of the nth dash app.
     OpenNewWindow(u8),
     ShowScreenshotUi,
+    /// The screenshot UI in screencast mode, or the recording stopped.
+    ShowScreenRecordingUi,
     Screenshot,
     ScreenshotWindow,
     BrightnessUp,
@@ -160,6 +162,13 @@ fn specs() -> Vec<Spec> {
             key: "show-screenshot-ui".into(),
             action: Action::ShowScreenshotUi,
             defaults: vec!["Print"],
+            modes: NORMAL_OVERVIEW,
+        },
+        Spec {
+            schema: Schema::Shell,
+            key: "show-screen-recording-ui".into(),
+            action: Action::ShowScreenRecordingUi,
+            defaults: vec!["<Ctrl><Shift><Alt>R"],
             modes: NORMAL_OVERVIEW,
         },
         Spec {
@@ -517,6 +526,7 @@ mod tests {
         assert_eq!(find(Action::OpenNewWindow(9)), ["<Super><Control>9"]);
         assert_eq!(find(Action::BrightnessUp), ["XF86MonBrightnessUp"]);
         assert_eq!(find(Action::ShowScreenshotUi), ["Print"]);
+        assert_eq!(find(Action::ShowScreenRecordingUi), ["<Ctrl><Shift><Alt>R"]);
         assert_eq!(find(Action::WindowMenu), ["<Alt>space"]);
         // GNOME 51's defaults for the keys the compositor used to own.
         assert_eq!(find(Action::Maximize), ["<Super>Up"]);
