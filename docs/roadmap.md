@@ -44,6 +44,11 @@ The plan store contains `plan.md`, `context.md`, `research.md`, and `test-plan.m
 
 ## Requirement traceability
 
+Parent requirements `R1`–`R16` are defined in the
+[parent requirement register](requirements.md). A bare `R<n>` in this
+document is a parent requirement; a spec's own requirements are written
+with their spek number (`001-R5`), per the register's naming rule.
+
 | Parent requirement area | Owning spek(s) | Evidence at completion |
 |---|---|---|
 | R1 Activities/overview; R2 launch/search; R3 panel/system controls | 002; 004 for service backend | Baseline journeys, recordings, responsiveness/failure cases |
