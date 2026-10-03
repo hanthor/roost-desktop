@@ -37,6 +37,8 @@ optdepends=(
     'greetd: login manager driving roost-greeter'
     'xorg-xwayland: X11 application support'
     'ibus: input methods (roost-ibus-bridge, as GNOME uses IBus)'
+    'gst-plugin-pipewire: screen recording from the screenshot UI'
+    'gst-plugins-good: screen recording (VP8 and WebM)'
 )
 options=('!lto' '!debug')
 backup=('etc/pam.d/roost-lock')
