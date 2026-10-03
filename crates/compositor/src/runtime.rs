@@ -441,6 +441,8 @@ pub struct Runtime {
     manager: WindowManager,
     control: ControlHub,
     shell: ShellDriver,
+    /// The IBus bridge, when IBus is installed.
+    ime: Option<crate::ime::ImeBridge>,
     overlay: Overlay,
     wallpaper: Wallpaper,
     triggers: TriggerState,
@@ -748,6 +750,7 @@ impl Runtime {
             manager,
             control,
             shell,
+            ime: crate::ime::ImeBridge::configured(&session.socket_name),
             overlay,
             wallpaper: Wallpaper::new(),
             triggers: TriggerState::default(),
@@ -2073,6 +2076,9 @@ impl Runtime {
                 self.overlay.show(Vec::new());
             }
         } else {
+            if let Some(ime) = &mut self.ime {
+                ime.poll(crate::state::system_millis(), &mut self.display.handle());
+            }
             match self.shell.poll(crate::state::system_millis()) {
                 ShellStatus::Running => {
                     if self.overlay.visible {

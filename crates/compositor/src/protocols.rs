@@ -80,6 +80,7 @@ pub(crate) struct Protocols {
     _gestures: PointerGesturesState,
     _relative_pointer: RelativePointerManagerState,
     _pointer_constraints: PointerConstraintsState,
+    _virtual_keyboard: smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState,
     /// Surfaces holding an idle inhibitor.
     pub(crate) inhibitors: Vec<WlSurface>,
     /// Scale fractional-scale clients are asked to render at (#59).
@@ -103,6 +104,17 @@ impl Protocols {
             _gestures: PointerGesturesState::new::<State>(dh),
             _relative_pointer: RelativePointerManagerState::new::<State>(dh),
             _pointer_constraints: PointerConstraintsState::new::<State>(dh),
+            // Only the compositor's IBus bridge may type for others: it
+            // returns the keys IBus does not take (GNOME offers no such
+            // protocol at all).
+            _virtual_keyboard: smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState::new::<
+                State,
+                _,
+            >(dh, |client| {
+                client
+                    .get_data::<crate::ClientState>()
+                    .is_some_and(|data| data.ime_bridge)
+            }),
             inhibitors: Vec::new(),
             preferred_scale: 1.0,
         }
@@ -260,6 +272,7 @@ impl InputMethodHandler for State {
     }
 }
 delegate_input_method_manager!(State);
+smithay::delegate_virtual_keyboard_manager!(State);
 
 delegate_pointer_gestures!(State);
 delegate_relative_pointer!(State);

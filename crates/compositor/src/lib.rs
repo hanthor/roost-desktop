@@ -50,6 +50,7 @@ pub mod control;
 #[cfg(feature = "drm")]
 pub mod drm;
 pub mod idle_monitor;
+pub mod ime;
 pub mod introspect;
 pub mod layer;
 pub mod lock;
@@ -167,6 +168,20 @@ pub struct State {
 #[derive(Default)]
 pub(crate) struct ClientState {
     compositor_state: CompositorClientState,
+    /// The IBus bridge the compositor spawned on a private socket: the
+    /// one client allowed a virtual keyboard (to hand back the keys
+    /// IBus does not take).
+    pub(crate) ime_bridge: bool,
+}
+
+impl ClientState {
+    /// State for the compositor's own IBus bridge.
+    pub(crate) fn ime_bridge() -> Self {
+        Self {
+            ime_bridge: true,
+            ..Self::default()
+        }
+    }
 }
 
 /// Client-initiated window state request (002 window actions).

@@ -222,6 +222,12 @@ Do Not Disturb holds banners back but keeps them in the list. (`P-NT-02`)
 
 ## System
 
+### Input methods
+
+IBus composes as in GNOME: pinyin waits in the preedit and Space commits the hanzi (a test engine; roost-ibus-bridge is IBus's client). (`P-IN-01`)
+
+![Input methods](walkthrough/ime.png)
+
 ### Screenshot UI
 
 Print opens GNOME's screenshot UI: area, screen or window. (`P-SY-05`)
