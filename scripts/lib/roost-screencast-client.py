@@ -94,6 +94,28 @@ loop.run()
 if not node:
     print("no PipeWireStreamAdded", file=sys.stderr)
     sys.exit(1)
+if "--record" in sys.argv[2:]:
+    # Diagnostics: run "pipewiresrc path=N <PIPELINE...>" for 3 s, stop it
+    # with SIGINT (EOS under -e) and say how it ended.
+    import signal
+    import time
+    rest = sys.argv[sys.argv.index("--record") + 1:]
+    proc = subprocess.Popen(["gst-launch-1.0", "-e", "-v", "pipewiresrc", f"path={node[0]}"] + rest,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    time.sleep(3)
+    proc.send_signal(signal.SIGINT)
+    try:
+        out, _ = proc.communicate(timeout=10)
+        how = f"exit {proc.returncode}"
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, _ = proc.communicate()
+        how = "hung after EOS"
+    call("org.gnome.Mutter.ScreenCast", session, "org.gnome.Mutter.ScreenCast.Session",
+         "Stop", None, "()")
+    chains = out.count("chain")
+    print(f"{how}; {chains} chain lines; tail: {out.strip().splitlines()[-3:]}")
+    sys.exit(0)
 grab = subprocess.run(
     ["gst-launch-1.0", "-q", "pipewiresrc", f"path={node[0]}", "num-buffers=1", "!",
      "videoconvert", "!", "pngenc", "!", "filesink", f"location={OUT}"],
