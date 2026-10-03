@@ -1937,6 +1937,76 @@ fn scroll_axis_clamps_at_overflow_bounds() {
 }
 
 #[test]
+fn strip_view_springs_to_target_while_geometry_jumps() {
+    let mut f = three_windows();
+    assert!(f.manager.set_scroll(&mut f.comp.state, true));
+    // Entering the strip lays it out in place: nothing to animate.
+    assert_eq!(f.manager.strip_view(), f.manager.strip_offset());
+    assert!(!f.manager.strip_animating());
+    // Start from the strip's end, settled.
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_c)));
+    while f.manager.step_strip_view(1.0 / 60.0) {}
+    assert_eq!(f.manager.strip_offset(), 632.0);
+    assert_eq!(f.manager.strip_view(), 632.0);
+
+    // Focusing alpha moves the target at once: geometry, configure and
+    // the reported offset are all at the target.
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    assert_eq!(f.manager.strip_offset(), 0.0);
+    assert_eq!(screen_xs(&f), (16, 648, 1280));
+    // Only the drawn view trails, still where it was.
+    assert_eq!(f.manager.strip_view(), 632.0);
+    assert!(f.manager.strip_animating());
+    assert_eq!(f.manager.render_geometry(f.id_a).unwrap().loc.x, -616);
+
+    // 60 Hz frames: the view glides monotonically onto the target and
+    // settles in niri's time; geometry never moves meanwhile.
+    let mut last = f.manager.strip_view();
+    let mut frames = 0;
+    while f.manager.step_strip_view(1.0 / 60.0) {
+        frames += 1;
+        let view = f.manager.strip_view();
+        assert!(view <= last && view >= 0.0, "view {view} after {last}");
+        last = view;
+        assert_eq!(screen_xs(&f), (16, 648, 1280));
+        let drawn = f.manager.render_geometry(f.id_a).unwrap().loc.x;
+        assert_eq!(drawn, 16 - view.round() as i32);
+        assert!(frames < 60, "never settled");
+    }
+    // ~0.42 s at 60 Hz, a little past niri's 0.33 s envelope estimate.
+    assert!((18..=28).contains(&frames), "settled after {frames} frames");
+    assert_eq!(f.manager.strip_view(), 0.0);
+    assert!(!f.manager.strip_animating());
+    assert_eq!(
+        f.manager.render_geometry(f.id_a),
+        f.manager.geometry(f.id_a)
+    );
+
+    // Retargeting mid-flight continues from where the view is drawn,
+    // with no jump.
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_c)));
+    for _ in 0..5 {
+        f.manager.step_strip_view(1.0 / 60.0);
+    }
+    let mid = f.manager.strip_view();
+    assert!(mid > 0.0 && mid < 632.0);
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    assert_eq!(f.manager.strip_offset(), 0.0);
+    f.manager.step_strip_view(1.0 / 60.0);
+    assert_eq!(f.manager.strip_view(), mid);
+    f.manager.step_strip_view(1.0 / 60.0);
+    // Still carrying its rightward velocity a moment, then turning.
+    assert!((f.manager.strip_view() - mid).abs() < 80.0);
+    while f.manager.step_strip_view(1.0 / 60.0) {}
+    assert_eq!(f.manager.strip_view(), 0.0);
+
+    // Wheel scrolling is direct: the view follows without a spring.
+    axis(&mut f.manager, &mut f.comp, 0.0, 120.0);
+    assert_eq!(f.manager.strip_view(), 120.0);
+    assert!(!f.manager.step_strip_view(1.0 / 60.0));
+}
+
+#[test]
 fn scroll_axis_ignored_without_overflow() {
     let mut comp = TestCompositor::new();
     let mut manager = comp.window_manager();

@@ -36,6 +36,7 @@
 #   G-NOTIFY-LIST    the calendar lists it instead of "No Notifications"
 #   G-NOTIFY-CLEAR   Clear empties the list
 #   G-NOTIFY-DND     with Do Not Disturb on, no banner, but listed
+#   G-NOTIFY-GROUP   two from one app group, collapsed; pressing expands
 #   G-QS-SERVICES    quick settings shows the tiles of the services on
 #                    the bus (stub daemons on a private system bus, #55)
 #   G-QS-WIFI-MENU   the Wi-Fi menu scans, lists NetworkManager's networks
@@ -57,6 +58,9 @@
 #   G-QS-ABSENT      with the daemons gone, their tiles hide (no hang)
 #   G-GL-WINDOW      a GTK window on the GL renderer maps and paints
 #                    (linux-dmabuf, #89)
+#   G-WAYLAND-INFO   wayland-info lists every global GNOME 51's Mutter
+#                    offers that Roost must, at its version or newer
+#                    (tests/protocols/gnome51-globals.tsv, P-SY-06)
 #   G-OV-SHELL-UI  the overview shows the search entry and the dash
 #   G-OV-SEARCH typing lists matching apps (#57)
 #   G-OV-LAUNCH Enter launches the top result and closes the overview
@@ -1040,6 +1044,35 @@ showing "$ARTIFACTS/a11y-dnd-list.json" "Quiet Note" ||
     fail G-NOTIFY-DND "the held-back notification is missing from the list"
 pass G-NOTIFY-DND "Do Not Disturb holds banners back but keeps the list"
 scrot "$ARTIFACTS/14-dnd-list.png" >/dev/null
+
+# GNOME 51 groups an app's notifications: collapsed, the newest card
+# shows in full with the older ones peeking out under it; pressing the
+# group expands it under a header with a Collapse button.
+notify "Quiet Two" "A second note from the same app" || fail G-NOTIFY-GROUP "Notify call failed"
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-group.json" 20 ||
+    fail G-NOTIFY-GROUP "accessibility dump failed"
+scrot "$ARTIFACTS/14b-notification-group.png" >/dev/null
+jq -e 'any(.[]; .name == "Roost Proof" and .role == "push button" and .showing)' \
+    "$ARTIFACTS/a11y-group.json" >/dev/null ||
+    fail G-NOTIFY-GROUP "no collapsed group named for the app"
+showing "$ARTIFACTS/a11y-group.json" "Quiet Two" ||
+    fail G-NOTIFY-GROUP "the collapsed group does not show its newest card"
+if showing "$ARTIFACTS/a11y-group.json" "Quiet Note"; then
+    fail G-NOTIFY-GROUP "the older card shows in full in a collapsed group"
+fi
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-group-open.json" 20 \
+    --press "Roost Proof" || fail G-NOTIFY-GROUP "could not press the group"
+scrot "$ARTIFACTS/14c-notification-group-expanded.png" >/dev/null
+for name in "Quiet Two" "Quiet Note" "Collapse"; do
+    showing "$ARTIFACTS/a11y-group-open.json" "$name" ||
+        fail G-NOTIFY-GROUP "the expanded group does not show \"$name\""
+done
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-group-cleared.json" 20 \
+    --press "Clear" || fail G-NOTIFY-GROUP "could not press Clear"
+showing "$ARTIFACTS/a11y-group-cleared.json" "No Notifications" ||
+    fail G-NOTIFY-GROUP "Clear did not empty the grouped list"
+pass G-NOTIFY-GROUP "an app's notifications group, collapsed, and expand on press"
 xdotool key Escape
 
 # Quick-settings services (#55): each toggle is read back from its daemon.
@@ -1290,6 +1323,22 @@ if [ "$1" -lt 150 ] || [ "$2" -gt 80 ] || [ "$3" -gt 80 ]; then
     fail G-GL-WINDOW "GL window did not paint its red body (pixel $rgb)"
 fi
 pass G-GL-WINDOW "a GL-rendered GTK window maps and paints"
+
+# The globals a client finds (P-SY-06, #89): wayland-info against this
+# session, compared with GNOME 51's capture. Here, after G-GL-WINDOW,
+# the renderer has reported its formats, so linux-dmabuf is advertised.
+if command -v wayland-info >/dev/null 2>&1; then
+    WAYLAND_DISPLAY="$SOCKET_NAME" wayland-info >"$ARTIFACTS/wayland-info.txt" 2>&1 ||
+        fail G-WAYLAND-INFO "wayland-info could not talk to the session"
+    "$PY" "$ROOT/scripts/roost-wayland-info-compare" "$ARTIFACTS/wayland-info.txt" \
+        --report "$ARTIFACTS/wayland-info-compare.txt" ||
+        fail G-WAYLAND-INFO "globals short of GNOME 51's (see wayland-info-compare.txt)"
+    pass G-WAYLAND-INFO "every expected GNOME 51 global is advertised at its version or newer"
+elif [ "${ROOST_REQUIRE_WAYLAND_INFO:-0}" = 1 ]; then
+    fail G-WAYLAND-INFO "wayland-info is required (ROOST_REQUIRE_WAYLAND_INFO=1) but not installed"
+else
+    echo "roost-gtk-shell-proof: G-WAYLAND-INFO skipped (no wayland-info)"
+fi
 
 # X11 by default (#59): the compositor starts XWayland when it is
 # installed, tells the shell DISPLAY, and apps launched from search get it.

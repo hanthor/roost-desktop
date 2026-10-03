@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""roost-wayland-info-compare — Roost's Wayland globals against GNOME 51's (P-SY-06, #89).
+
+Usage:
+  scripts/roost-wayland-info-compare ROOST_WAYLAND_INFO [--reference TSV] [--report FILE]
+
+ROOST_WAYLAND_INFO is `wayland-info` output captured against a Roost
+session. TSV (default tests/protocols/gnome51-globals.tsv) lists every
+global GNOME 51's Mutter advertises, one per line:
+
+  <interface> <TAB> <GNOME version> <TAB> <source> <TAB> <roost>
+
+<source> is `capture` (seen in tests/protocols/gnome51-wayland-info.txt,
+a wayland-info capture of GNOME 51) or `source` (read from Mutter 51's
+source: advertised only in setups the capture cannot reproduce).
+<roost> is what Roost must offer:
+  match        present at the GNOME version or newer
+  min:<v>      present at version <v> or newer (a known version gap)
+  gap:<ref>    absent today, a known gap tracked in <ref>
+  absent:<why> deliberately absent (GNOME parity choice or not planned)
+
+Fails (exit 1) when a `match` or `min:` global is missing or older than
+required. Known gaps that Roost now offers are reported so the list can
+be tightened. Globals Roost offers beyond GNOME's are listed.
+"""
+import argparse
+import os
+import re
+import sys
+
+LINE = re.compile(r"^interface: '([A-Za-z0-9_]+)',\s+version:\s+(\d+),\s+name:\s+\d+")
+
+
+def parse_wayland_info(path):
+    globals_ = {}
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            m = LINE.match(line)
+            if m:
+                name, version = m.group(1), int(m.group(2))
+                globals_[name] = max(version, globals_.get(name, 0))
+    return globals_
+
+
+def parse_reference(path):
+    rows = []
+    with open(path, encoding="utf-8") as fh:
+        for n, line in enumerate(fh, 1):
+            line = line.rstrip("\n")
+            if not line or line.startswith("#"):
+                continue
+            cells = line.split("\t")
+            if len(cells) != 4:
+                sys.exit(f"{path}:{n}: want 4 tab-separated cells, got {len(cells)}")
+            name, version, source, roost = cells
+            if source not in ("capture", "source"):
+                sys.exit(f"{path}:{n}: source must be capture or source, got {source}")
+            if not (roost == "match" or roost.split(":", 1)[0] in ("min", "gap", "absent")):
+                sys.exit(f"{path}:{n}: unknown roost expectation {roost}")
+            rows.append((name, int(version), source, roost))
+    return rows
+
+
+def compare(roost, reference):
+    failures, notes, lines = [], [], []
+    for name, gnome, source, expect in reference:
+        have = roost.get(name)
+        shown = "-" if have is None else str(have)
+        kind, _, arg = expect.partition(":")
+        if kind in ("match", "min"):
+            need = gnome if kind == "match" else int(arg)
+            if have is None:
+                verdict = "FAIL missing"
+                failures.append(f"{name}: missing (GNOME 51 has v{gnome})")
+            elif have < need:
+                verdict = f"FAIL v{have} < v{need}"
+                failures.append(f"{name}: v{have}, need v{need} (GNOME 51 has v{gnome})")
+            elif have < gnome:
+                verdict = f"ok (known gap: GNOME v{gnome})"
+            else:
+                verdict = "ok"
+        else:
+            if have is not None and have >= gnome:
+                verdict = f"now offered ({kind} {arg}): tighten the list"
+                notes.append(f"{name}: listed {expect} but Roost offers v{have}")
+            elif have is not None:
+                verdict = f"offered older ({kind} {arg})"
+            else:
+                verdict = f"{kind} {arg}"
+        lines.append(f"{name:<45} gnome v{gnome:<3} roost {shown:<4} {source:<8} {verdict}")
+    known = {row[0] for row in reference}
+    extras = sorted(n for n in roost if n not in known)
+    return failures, notes, lines, extras
+
+
+def main():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("roost")
+    ap.add_argument("--reference", default=os.path.join(root, "tests/protocols/gnome51-globals.tsv"))
+    ap.add_argument("--report")
+    a = ap.parse_args()
+    roost = parse_wayland_info(a.roost)
+    if "wl_compositor" not in roost:
+        sys.exit(f"roost-wayland-info-compare: no globals in {a.roost}")
+    failures, notes, lines, extras = compare(roost, parse_reference(a.reference))
+    out = ["Roost against GNOME 51 Wayland globals", *lines]
+    if extras:
+        out.append("Roost only: " + ", ".join(f"{n} v{roost[n]}" for n in extras))
+    out += [f"NOTE {n}" for n in notes]
+    out += [f"FAIL {f}" for f in failures]
+    text = "\n".join(out) + "\n"
+    sys.stdout.write(text)
+    if a.report:
+        with open(a.report, "w", encoding="utf-8") as fh:
+            fh.write(text)
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
