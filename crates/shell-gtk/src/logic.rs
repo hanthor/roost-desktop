@@ -1931,3 +1931,127 @@ mod wired_tests {
         );
     }
 }
+
+/// Whether an app is recording, from `wpctl status` (volume.js
+/// `_maybeShowInput`): a stream in the Audio section with an input port
+/// on an active link from a source ("64. input_FL  < Mic:capture_FL
+/// [active]"). GNOME's own level meters are left out: they read the
+/// input without recording it.
+pub fn wpctl_recording(status: &str) -> bool {
+    const SKIPPED: [&str; 3] = [
+        "pavucontrol",
+        "PulseAudio Volume Control",
+        "gnome-volume-control",
+    ];
+    let mut in_audio = false;
+    let mut in_streams = false;
+    let mut stream_skipped = false;
+    let mut stream_indent = usize::MAX;
+    for line in status.lines() {
+        let trimmed = line.trim_end();
+        if !trimmed.starts_with([' ', '│', '├', '└']) && !trimmed.is_empty() {
+            in_audio = trimmed.trim() == "Audio";
+            in_streams = false;
+            continue;
+        }
+        if !in_audio {
+            continue;
+        }
+        let body = trimmed.trim_start_matches([' ', '│', '├', '└', '─']);
+        if trimmed.contains("─ ") && body.ends_with(':') {
+            in_streams = body == "Streams:";
+            stream_indent = usize::MAX;
+            continue;
+        }
+        if !in_streams || body.is_empty() {
+            continue;
+        }
+        let indent = trimmed.chars().count() - body.chars().count();
+        let Some((_, rest)) = body.split_once(". ") else {
+            continue;
+        };
+        if indent <= stream_indent {
+            // A stream: its ports follow, indented further.
+            stream_indent = indent;
+            let name = rest.trim();
+            stream_skipped = SKIPPED.iter().any(|s| name.contains(s));
+        } else if !stream_skipped && rest.contains(" < ") && rest.contains("[active]") {
+            return true;
+        }
+    }
+    false
+}
+
+/// GNOME's microphone icon by level (volume.js `getIcon` with the
+/// input slider's icons).
+pub fn mic_icon(percent: f64, muted: bool) -> &'static str {
+    if muted || percent <= 0.0 {
+        return "microphone-sensitivity-muted-symbolic";
+    }
+    match (3.0 * percent / 100.0).ceil().clamp(1.0, 3.0) as u8 {
+        1 => "microphone-sensitivity-low-symbolic",
+        2 => "microphone-sensitivity-medium-symbolic",
+        _ => "microphone-sensitivity-high-symbolic",
+    }
+}
+
+#[cfg(test)]
+mod mic_tests {
+    use super::*;
+
+    const STATUS: &str = "PipeWire 'pipewire-0' [1.4.2, roost@host, cookie:1]
+ └─ Clients:
+        33. WirePlumber                         [1.4.2, roost@host, pid:10]
+
+Audio
+ ├─ Devices:
+ │      45. Built-in Audio                      [alsa]
+ │
+ ├─ Sinks:
+ │  *   48. Built-in Audio Analog Stereo        [vol: 0.80]
+ │
+ ├─ Sources:
+ │  *   49. Built-in Audio Analog Stereo        [vol: 0.50]
+ │
+ ├─ Filters:
+ │
+ └─ Streams:
+        63. Firefox
+             64. output_FL       > Built-in Audio Analog Stereo:playback_FL\t[active]
+        70. PulseAudio Volume Control
+             71. input_MONO      < Built-in Audio Analog Stereo:capture_FL\t[active]
+
+Video
+ └─ Streams:
+        80. Camera
+             81. input_0         < v4l2:capture_0\t[active]
+";
+
+    #[test]
+    fn recording_shows_like_gnome() {
+        // Playback and a level meter are not recording; neither is video.
+        assert!(!wpctl_recording(STATUS));
+        let recording = STATUS.replace(
+            "        70. PulseAudio Volume Control\n",
+            "        70. Voice Recorder\n",
+        );
+        assert!(wpctl_recording(&recording));
+        // A paused link records nothing.
+        assert!(!wpctl_recording(
+            &recording.replace("capture_FL\t[active]", "capture_FL\t[paused]")
+        ));
+        assert_eq!(
+            mic_icon(50.0, true),
+            "microphone-sensitivity-muted-symbolic"
+        );
+        assert_eq!(mic_icon(20.0, false), "microphone-sensitivity-low-symbolic");
+        assert_eq!(
+            mic_icon(50.0, false),
+            "microphone-sensitivity-medium-symbolic"
+        );
+        assert_eq!(
+            mic_icon(100.0, false),
+            "microphone-sensitivity-high-symbolic"
+        );
+    }
+}

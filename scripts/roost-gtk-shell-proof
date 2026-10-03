@@ -50,6 +50,7 @@
 #   G-QS-DARK        the Dark Style tile writes GNOME's color-scheme key
 #   G-QS-BRIGHTNESS  the brightness slider sets the backlight via logind
 #   G-QS-VOLUME      the volume slider sets the PipeWire sink volume
+#   G-QS-MIC         recording shows the microphone indicator and slider
 #   G-QS-ABSENT      with the daemons gone, their tiles hide (no hang)
 #   G-GL-WINDOW      a GTK window on the GL renderer maps and paints
 #                    (linux-dmabuf, #89)
@@ -291,18 +292,37 @@ VOLUME_FILE="$ARTIFACTS/volume"
 echo 0.80 >"$VOLUME_FILE"
 SINK_FILE="$ARTIFACTS/default-sink"
 echo 48 >"$SINK_FILE"
+# The default source, and an app recording from it while RECORDING_FILE
+# exists.
+MIC_FILE="$ARTIFACTS/mic-volume"
+echo 0.50 >"$MIC_FILE"
+RECORDING_FILE="$ARTIFACTS/recording"
 cat >"$ARTIFACTS/bin/wpctl" <<WPCTL
 #!/bin/sh
 mark() { [ "\$(cat "$SINK_FILE")" = "\$1" ] && echo "*" || echo " "; }
 case "\$1" in
-    get-volume) echo "Volume: \$(cat "$VOLUME_FILE")" ;;
-    set-volume) echo "\$3" >"$VOLUME_FILE" ;;
+    get-volume)
+        case "\$2" in
+            *SOURCE*) echo "Volume: \$(cat "$MIC_FILE")" ;;
+            *) echo "Volume: \$(cat "$VOLUME_FILE")" ;;
+        esac ;;
+    set-volume)
+        case "\$2" in
+            *SOURCE*) echo "\$3" >"$MIC_FILE" ;;
+            *) echo "\$3" >"$VOLUME_FILE" ;;
+        esac ;;
     set-default) echo "\$2" >"$SINK_FILE" ;;
     status)
         printf 'Audio\n ├─ Sinks:\n'
         printf ' │  %s   48. Built-in Audio Analog Stereo    [vol: 0.80]\n' "\$(mark 48)"
         printf ' │  %s   52. Roost HDMI Output               [vol: 1.00]\n' "\$(mark 52)"
-        printf ' │\n ├─ Sources:\n' ;;
+        printf ' │\n ├─ Sources:\n'
+        printf ' │  *   49. Built-in Audio Analog Stereo    [vol: 0.50]\n'
+        printf ' │\n └─ Streams:\n'
+        if [ -e "$RECORDING_FILE" ]; then
+            printf '        70. Voice Recorder\n'
+            printf '             71. input_MONO      < Built-in Audio Analog Stereo:capture_FL\t[active]\n'
+        fi ;;
     *) ;;
 esac
 WPCTL
@@ -1115,6 +1135,30 @@ pass G-QS-BRIGHTNESS "the brightness slider sets the backlight through logind"
 [ "$(cat "$VOLUME_FILE")" = 0.40 ] ||
     fail G-QS-VOLUME "sink volume is $(cat "$VOLUME_FILE"), not 0.40"
 pass G-QS-VOLUME "the volume slider sets the PipeWire sink volume"
+
+# GNOME's microphone: while an app records, an orange indicator leads
+# the panel and a Microphone slider sets the default source; both go
+# when the recording stops.
+mic_shown() {
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-mic-$1.json" 20 &&
+        showing "$ARTIFACTS/a11y-mic-$1.json" "$2"
+}
+mic_shown idle Microphone && fail G-QS-MIC "the Microphone slider shows with nothing recording"
+touch "$RECORDING_FILE"
+sleep 3
+mic_shown recording Microphone || fail G-QS-MIC "no Microphone slider while an app records"
+showing "$ARTIFACTS/a11y-mic-recording.json" "Microphone in use" ||
+    fail G-QS-MIC "no microphone indicator in the panel while an app records"
+scrot "$ARTIFACTS/16b-microphone.png" >/dev/null
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-mic.json" 20 \
+    --set Microphone 30 || fail G-QS-MIC "could not set Microphone"
+[ "$(cat "$MIC_FILE")" = 0.30 ] ||
+    fail G-QS-MIC "source volume is $(cat "$MIC_FILE"), not 0.30"
+rm -f "$RECORDING_FILE"
+sleep 3
+mic_shown stopped "Microphone in use" &&
+    fail G-QS-MIC "the microphone indicator stayed after the recording stopped"
+pass G-QS-MIC "an app recording shows the microphone indicator and slider; the slider sets the source"
 scrot "$ARTIFACTS/16-quick-settings-toggled.png" >/dev/null
 xdotool key Escape
 sleep 1
