@@ -555,6 +555,19 @@ window.roost-overview-grid {
   box-shadow: none;
 }
 
+/* .search-entry:focus, shown once typing starts: a 2px ring of the
+   accent mixed 60% with white at 0.8, over the accent mixed 5% into
+   the entry. */
+.roost-overview-search entry.search:not(.idle) {
+  background-color: #43454d;
+  color: #fafafb;
+  box-shadow: inset 0 0 0 2px rgba(134, 181, 239, 0.8);
+}
+
+.roost-overview-search entry.search:not(.idle) image {
+  color: #fafafb;
+}
+
 .roost-overview-search entry.search.idle {
   /* GNOME shows no caret until you type. */
   caret-color: transparent;
@@ -610,10 +623,33 @@ window.roost-overview-grid {
   background-color: rgba(250, 250, 251, 0.1);
 }
 
+/* GNOME 51's app results (.grid-search-results): no card, 145px tiles
+   (.grid-search-result: 12px padding, 24px corners, a 96px icon) 30px
+   apart, 21px under the entry; the first, Enter's target, is
+   highlighted (st-lighten(#222226, 8%)). */
 .overview-results {
-  background-color: alpha(#2a2a2f, 0.92);
+  background: none;
+  padding: 0;
+  margin-top: 6px;
+}
+
+.roost-overview-search .overview-results .overview-app {
+  padding: 12px;
   border-radius: 24px;
-  padding: 8px;
+  background: none;
+  box-shadow: none;
+  color: #fafafb;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
+  font-weight: normal;
+}
+
+.roost-overview-search .overview-results .overview-app:hover {
+  background-color: #323238;
+}
+
+.roost-overview-search .overview-results .overview-app.selected {
+  background-color: #35353b;
 }
 
 .overview-app {

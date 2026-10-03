@@ -175,7 +175,7 @@ impl OverviewUi {
         entry.set_width_request(370);
         entry.set_halign(gtk::Align::Center);
         entry.update_property(&[gtk::accessible::Property::Label("Search")]);
-        let results = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        let results = gtk::Box::new(gtk::Orientation::Horizontal, 30);
         results.add_css_class("overview-results");
         results.set_halign(gtk::Align::Center);
         results.set_visible(false);
@@ -336,8 +336,14 @@ impl OverviewUi {
         }
         let apps = self.apps.get();
         let hits = crate::logic::rank_apps(apps.apps(), query, MAX_RESULTS);
-        for hit in &hits {
-            let button = app_button(hit, 64, true);
+        for (i, hit) in hits.iter().enumerate() {
+            let button = app_button(hit, 96, true);
+            // GNOME's 145px result tile; the first is Enter's target.
+            fit_tile_label(&button);
+            button.set_size_request(145, 145);
+            if i == 0 {
+                button.add_css_class("selected");
+            }
             let entry = (*hit).clone();
             let apps = self.apps.clone();
             let actions = self.actions.clone();
