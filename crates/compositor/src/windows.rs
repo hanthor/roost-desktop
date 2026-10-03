@@ -597,6 +597,7 @@ impl WindowManager {
         // arrived with a surface's first commits (e.g. initial
         // maximized) applies after the surface is mapped.
         self.drain_window_requests(state);
+        self.drain_pointer_warps(state);
         #[cfg(feature = "xwayland")]
         self.sync_seat_focus(state);
         // Overview focus parks last so newly mapped windows never
@@ -1155,6 +1156,42 @@ impl WindowManager {
         true
     }
 
+    /// The window focus lands on when `id` is asked for: its mapped
+    /// modal dialog (that dialog's own, in turn), else `id` itself.
+    fn modal_target(&self, mut id: u64) -> u64 {
+        // Bounded: a parent cycle a client builds cannot spin here.
+        for _ in 0..8 {
+            let Some(parent) = self
+                .windows
+                .get(&id)
+                .and_then(|w| w.surface.wl_surface())
+                .map(|s| s.into_owned())
+            else {
+                break;
+            };
+            let dialog = self
+                .windows
+                .iter()
+                .filter(|(child, w)| **child != id && !w.minimized)
+                .find_map(|(child, w)| match w.surface.underlying_surface() {
+                    WindowSurface::Wayland(toplevel)
+                        if read_parent(toplevel).as_ref() == Some(&parent)
+                            && read_modal(toplevel) =>
+                    {
+                        Some(*child)
+                    }
+                    WindowSurface::Wayland(_) => None,
+                    #[cfg(feature = "xwayland")]
+                    _ => None,
+                });
+            match dialog {
+                Some(child) => id = child,
+                None => break,
+            }
+        }
+        id
+    }
+
     /// Focus while the overview holds the keyboard: the window is the
     /// one restored on close, rises, and takes the activated look.
     fn focus_parked(&mut self, id: Option<u64>) {
@@ -1178,6 +1215,9 @@ impl WindowManager {
     }
 
     fn apply_focus(&mut self, state: &mut State, id: Option<u64>) {
+        // GNOME attaches modal dialogs to their parent: the parent
+        // cannot take focus from its dialog (xdg-dialog, #89).
+        let id = id.map(|id| self.modal_target(id));
         let previous = self.model.focused();
         self.model.set_focused(id);
         // The strip view follows focus (niri), new columns included.
@@ -1856,7 +1896,10 @@ impl WindowManager {
         } else {
             mode
         };
-        let grabs: Vec<roost_shell_control::Accelerator> = if pressed {
+        // A window inhibiting shortcuts (keyboard-shortcuts-inhibit)
+        // gets the keys the shell grabbed too.
+        let inhibited = !self.lock_input_active && state.shortcuts_inhibited();
+        let grabs: Vec<roost_shell_control::Accelerator> = if pressed && !inhibited {
             self.accelerators
                 .iter()
                 .filter(|a| a.modes & mode_mask != 0)
@@ -2954,6 +2997,16 @@ fn read_app_id(surface: &ToplevelSurface) -> Option<String> {
     })
 }
 
+/// Whether the client marked this toplevel a modal dialog (xdg-dialog).
+fn read_modal(surface: &ToplevelSurface) -> bool {
+    with_states(surface.wl_surface(), |states| {
+        states
+            .data_map
+            .get::<XdgToplevelSurfaceData>()
+            .is_some_and(|data| data.lock().unwrap().modal)
+    })
+}
+
 /// Read the client's transient parent from the toplevel role data.
 fn read_parent(surface: &ToplevelSurface) -> Option<WlSurface> {
     with_states(surface.wl_surface(), |states| {
@@ -3335,6 +3388,10 @@ impl WindowManager {
             } => {
                 self.track_workspace_modifiers(keycode, pressed);
                 self.track_switcher_modifiers(keycode, pressed);
+                if !self.switcher_open && state.shortcuts_inhibited() {
+                    self.inhibited_key(state, keycode, pressed, time);
+                    return;
+                }
                 let modifier = self.is_alt(keycode)
                     || matches!(
                         keycode,
@@ -3508,6 +3565,56 @@ impl WindowManager {
                     pointer.frame(state);
                 }
             }
+        }
+    }
+
+    /// A key while the focused window inhibits shortcuts
+    /// (keyboard-shortcuts-inhibit): every chord reaches the window,
+    /// except Super+Escape, Mutter's restore-shortcuts, which hands the
+    /// shortcuts back (press and release stay with the compositor).
+    fn inhibited_key(&mut self, state: &mut State, keycode: u32, pressed: bool, time: u32) {
+        if !pressed && self.switcher_swallowed.contains(&keycode) {
+            self.switcher_swallowed.retain(|k| *k != keycode);
+            return;
+        }
+        if pressed && keycode == ESCAPE_KEYCODE && self.super_held && state.restore_shortcuts() {
+            eprintln!("roost-compositor: shortcuts restored");
+            self.switcher_swallowed.push(keycode);
+            return;
+        }
+        self.keyboard_key(state, keycode, pressed, time);
+    }
+
+    /// Pointer warps clients asked for (pointer-warp): honoured when
+    /// the surface still has pointer focus from the enter they name,
+    /// and lands inside a window or layer surface Roost placed.
+    fn drain_pointer_warps(&mut self, state: &mut State) {
+        for (surface, local, serial) in state.take_pointer_warps() {
+            let Some(pointer) = self.pointer.clone() else {
+                continue;
+            };
+            if pointer.current_focus().as_ref() != Some(&surface)
+                || pointer.last_enter().map(u32::from) != Some(serial)
+            {
+                continue;
+            }
+            let origin = self
+                .windows
+                .values()
+                .find(|w| w.surface.wl_surface().is_some_and(|s| *s == surface))
+                .map(|w| crate::popup::surface_origin(&surface, w.geometry.loc))
+                .or_else(|| {
+                    crate::layer::layer_layout(state)
+                        .into_iter()
+                        .find(|(s, _, _)| *s == surface)
+                        .map(|(_, (x, y), _)| Point::from((x, y)))
+                });
+            let Some(origin) = origin else {
+                continue;
+            };
+            let pos = origin.to_f64() + local;
+            let time = (crate::state::system_millis() & u64::from(u32::MAX)) as u32;
+            self.pointer_motion(state, pos, time);
         }
     }
 

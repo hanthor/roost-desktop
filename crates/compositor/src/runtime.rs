@@ -563,9 +563,13 @@ impl Runtime {
                     })
                     .map_err(|e| RuntimeError::Loop(e.to_string()))?;
                 handle
-                    .insert_source(sources.drm, |event, _, rt: &mut Runtime| {
-                        if let Backend::Drm(drm) = &mut rt.backend {
-                            drm.on_drm_event(event);
+                    .insert_source(sources.drm, |event, metadata, rt: &mut Runtime| {
+                        let flip = match &mut rt.backend {
+                            Backend::Drm(drm) => drm.on_drm_event(event, metadata),
+                            Backend::Winit(_) => None,
+                        };
+                        if let Some(flip) = flip {
+                            rt.page_flipped(flip);
                         }
                     })
                     .map_err(|e| RuntimeError::Loop(e.to_string()))?;
@@ -988,11 +992,19 @@ impl Runtime {
                     _ => {}
                 }
             }
-            let action = self.triggers.feed(
-                &input,
-                self.control.overview_open(),
-                self.manager.pointer_pos(),
-            );
+            // Super's tap belongs to a window inhibiting shortcuts
+            // (keyboard-shortcuts-inhibit, #89).
+            let inhibited =
+                matches!(input, ManagerInput::Key { .. }) && self.state.shortcuts_inhibited();
+            let action = if inhibited {
+                TriggerAction::None
+            } else {
+                self.triggers.feed(
+                    &input,
+                    self.control.overview_open(),
+                    self.manager.pointer_pos(),
+                )
+            };
             match action {
                 TriggerAction::None => {}
                 TriggerAction::Toggle => self.control.set_overview(!self.control.overview_open()),
@@ -1974,6 +1986,12 @@ impl Runtime {
             .flush_clients()
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
         self.manager.reconcile(&mut self.state);
+        // A client's pointer warp moved the manager's pointer: the
+        // drawn cursor follows (#89).
+        #[cfg(feature = "drm")]
+        if let Backend::Drm(drm) = &mut self.backend {
+            drm.set_pointer(self.manager.pointer_pos());
+        }
         // Publish the output inventory every tick (multi-monitor): the
         // hub broadcasts on change only, so the steady state costs one
         // short comparison. The inventory is the compositor's tracking
@@ -2149,6 +2167,39 @@ impl Runtime {
         Ok(!self.exit)
     }
 
+    /// A page flip completed (hardware): mark what the frame drew
+    /// presented with the kernel's vblank time and sequence, and on the
+    /// primary output advance fifo barriers and commit timers (#89).
+    #[cfg(feature = "drm")]
+    fn page_flipped(&mut self, flip: crate::drm::PageFlip) {
+        use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind;
+        use smithay::utils::{Monotonic, Time};
+        // Mutter's KMS flags: vsync'd, kernel-timestamped, completion
+        // reported by the hardware.
+        let (time, flags): (Time<Monotonic>, Kind) = match flip.time {
+            Some(time) => (
+                Time::from(time),
+                Kind::Vsync | Kind::HwClock | Kind::HwCompletion,
+            ),
+            None => (
+                self.state.presentation_now(),
+                Kind::Vsync | Kind::HwCompletion,
+            ),
+        };
+        if let Some(mut feedback) = flip.feedback {
+            feedback.presented::<_, Monotonic>(
+                time,
+                smithay::wayland::presentation::Refresh::fixed(flip.refresh),
+                flip.sequence,
+                flags,
+            );
+        }
+        if flip.primary {
+            let roots = crate::frame_timing::frame_roots(&self.state, &self.manager);
+            self.state.refresh_cycle(&roots, time, flip.refresh);
+        }
+    }
+
     /// Render all mapped toplevels stacked at the origin, then send frame
     /// callbacks. While the recovery overlay is visible the background
     /// shifts to a deep red (provisional overlay visual; full overlay
@@ -2277,6 +2328,14 @@ impl Runtime {
                 backend
                     .submit(Some(&[damage]))
                     .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+                // The host took the frame: presentation feedback,
+                // fifo barriers and commit timers (#89).
+                crate::frame_timing::present_nested_frame(
+                    &mut self.state,
+                    &self.manager,
+                    locked,
+                    self.stats.frames,
+                );
                 self.stats.frames += 1;
             }
             #[cfg(feature = "drm")]
@@ -2288,8 +2347,19 @@ impl Runtime {
                 let crate::drm::DrmBackend {
                     renderer, outputs, ..
                 } = &mut **drm;
+                // What each output's frame draws, for presentation
+                // feedback at its page flip (#89): a surface belongs to
+                // the output under its center, else the primary.
+                let drawn = crate::frame_timing::drawn_roots(&self.state, &self.manager, locked);
+                let rects: Vec<Rectangle<i32, Logical>> = outputs
+                    .iter()
+                    .map(|o| Rectangle::new(o.loc.into(), o.logical_size().into()))
+                    .collect();
+                let owner = |at: &smithay::utils::Point<i32, Logical>| {
+                    rects.iter().position(|r| r.contains(*at)).unwrap_or(0)
+                };
                 let mut queued = false;
-                for out in outputs.iter_mut() {
+                for (index, out) in outputs.iter_mut().enumerate() {
                     // Display-paced: one frame in flight per output.
                     if out.pending {
                         continue;
@@ -2400,7 +2470,14 @@ impl Runtime {
                             .finish()
                             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?
                     };
-                    if let Err(e) = out.surface.queue_buffer(Some(sync), None, ()) {
+                    let mine: Vec<_> = drawn
+                        .iter()
+                        .filter(|(_, at)| owner(at) == index)
+                        .map(|(surface, _)| surface.clone())
+                        .chain(lock_surface.clone())
+                        .collect();
+                    let feedback = crate::frame_timing::take_feedback(&mine, &out.output);
+                    if let Err(e) = out.surface.queue_buffer(Some(sync), None, feedback) {
                         eprintln!("roost-compositor: drm: queue_buffer {}: {e}", out.name);
                         continue;
                     }

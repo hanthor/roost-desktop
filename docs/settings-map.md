@@ -62,6 +62,7 @@ This page records that decision for R9 (knowledge entry
 | org.gnome.desktop.wm.keybindings switch-windows(-backward), cycle-windows, cycle-group | Ignored | GNOME 51 leaves switch-windows empty; no window-only switcher or cycling popup yet (#63) |
 | org.gnome.desktop.wm.preferences button-layout | Via GTK | Client-side decorations read it |
 | org.gnome.desktop.wm.preferences focus-mode, num-workspaces | Ignored | Click to focus and dynamic workspaces, as GNOME's defaults |
+| org.gnome.desktop.wm.preferences audible-bell, visual-bell | Ignored | The bell always sounds (GNOME's default audible bell) and never flashes (xdg-system-bell, #89) |
 | org.gnome.mutter dynamic-workspaces, edge-tiling | Ignored | Always on, as GNOME's defaults |
 | org.gnome.desktop.peripherals.keyboard repeat, delay, repeat-interval | Honored | Seat key repeat, live. Proof G-SETTINGS-INPUT |
 | org.gnome.desktop.peripherals.touchpad tap-to-click, natural-scroll, speed, disable-while-typing | Honored | libinput on hardware sessions, live and on hotplug |
