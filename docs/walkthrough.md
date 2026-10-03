@@ -254,6 +254,12 @@ IBus composes as in GNOME: pinyin waits in the preedit and Space commits the han
 
 ![Input methods](walkthrough/ime.png)
 
+### Candidate window
+
+The shell is IBus's panel, as GNOME Shell is: pinyin with several hanzi brings up GNOME's candidate popup under the text cursor, and a click commits one. (`P-IN-01`)
+
+![Candidate window](walkthrough/ime-candidates.png)
+
 ### Screenshot UI
 
 Print opens GNOME's screenshot UI: area, screen or window. (`P-SY-05`)

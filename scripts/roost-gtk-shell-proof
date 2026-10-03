@@ -133,6 +133,9 @@
 #                    the field
 #   G-IME-CURSOR     IBus hears the text cursor's location inside the
 #                    field's window, in global coordinates
+#   G-IME-CANDIDATES the shell is IBus's panel: "ni" shows 你 尼 泥 in
+#                    GNOME's candidate popup under the text cursor, and
+#                    clicking 尼 commits it
 #   G-SWITCHER-REBIND switch-applications rebound moves the switcher
 #                   to the new chord
 #   G-SWITCHER  Alt+Tab shows the switcher with every app (GNOME's
@@ -418,6 +421,10 @@ elif [ -n "${ROOST_REQUIRE_PAM_WRAPPER:-}" ]; then
     exit 1
 fi
 
+# The shell logs where it laid out IBus's candidates (G-IME-CANDIDATES
+# clicks one), the bridge each key's fate.
+ROOST_IBUS_DEBUG=1
+export ROOST_IBUS_DEBUG
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk -p roost-shell-host
 if [ -n "$PAM_ON" ]; then
     env LD_PRELOAD="$PAM_WRAPPER_LIB" PAM_WRAPPER=1 \
@@ -1631,6 +1638,75 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     [ "$inside" = yes ] ||
         fail G-IME-CURSOR "cursor location ($cursor) is not inside the IME window ($rect)"
     pass G-IME-CURSOR "IBus hears the text cursor at ($cursor), inside the field's window ($rect)"
+    # GNOME Shell is IBus's panel and draws its candidates
+    # (ibusCandidatePopup.js): the shell owns org.freedesktop.IBus.Panel
+    # on IBus's bus, "ni" brings up 你 尼 泥 under the text cursor with
+    # the first highlighted, and a click on 尼 commits it (the panel's
+    # CandidateClicked) without taking the keyboard from the field.
+    for _ in $(seq 1 20); do grep -q "IBus panel: owns org.freedesktop.IBus.Panel" "$LOG" && break; sleep 0.5; done
+    grep -q "IBus panel: owns org.freedesktop.IBus.Panel" "$LOG" ||
+        fail G-IME-CANDIDATES "the shell never became IBus's panel"
+    shown_before="$(grep -c 'ibus candidate 1 尼 at' "$LOG")"
+    xdotool type --delay 100 ni
+    cstate '.layers | any(.namespace == "roost-ibus-candidates")' "candidate window" 10 ||
+        fail G-IME-CANDIDATES "typing 'ni' showed no candidate window"
+    for _ in $(seq 1 20); do
+        [ "$(grep -c 'ibus candidate 1 尼 at' "$LOG")" -gt "$shown_before" ] && break
+        sleep 0.3
+    done
+    [ "$(grep -c 'ibus candidate 1 尼 at' "$LOG")" -gt "$shown_before" ] ||
+        fail G-IME-CANDIDATES "the candidate window never laid out 尼"
+    sleep 1
+    scrot "$ARTIFACTS/24j-ime-candidates.png" >/dev/null
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-ime-candidates.json" 20 ||
+        fail G-IME-CANDIDATES "no accessibility dump of the shell"
+    for hanzi in 你 尼 泥; do
+        jq -e --arg n "$hanzi" 'any(.[]; .name == $n and .showing)' \
+            "$ARTIFACTS/a11y-ime-candidates.json" >/dev/null ||
+            fail G-IME-CANDIDATES "candidate $hanzi is not shown"
+    done
+    cursor="$(sed -n 's/^roost-ibus-test-engine: cursor //p' "$ENGINE_LOG" | tail -1)"
+    popup="$(jq -r '.layers[] | select(.namespace == "roost-ibus-candidates") | .rect | "\(.[0]) \(.[1]) \(.[2]) \(.[3])"' "$CSTATE" | head -1)"
+    [ -n "$popup" ] || fail G-IME-CANDIDATES "the candidate window closed before it was checked"
+    # shellcheck disable=SC2086 # four and four numbers
+    set -- $cursor $popup
+    # The content (6px inside the surface: its shadow's room) starts at
+    # the cursor's left edge, 6px (the boxpointer's rise) under it.
+    near="$(awk -v cx="$1" -v cy="$2" -v ch="$4" -v px="$5" -v py="$6" 'BEGIN {
+        dx = px + 6 - cx; dy = py + 6 - (cy + ch + 6)
+        print (dx >= -4 && dx <= 4 && dy >= -4 && dy <= 4) ? "yes" : "no" }')"
+    [ "$near" = yes ] ||
+        fail G-IME-CANDIDATES "the candidate window ($popup) is not under the text cursor ($cursor)"
+    # GNOME's popup surface (#36363a) in its top padding, and the
+    # highlighted first row in the accent (#3584e4).
+    # shellcheck disable=SC2046
+    set -- $(px "$ARTIFACTS/24j-ime-candidates.png" $(($5 + 30)) $(($6 + 9))) "$5" "$6"
+    if [ "${1:-0}" -lt 46 ] || [ "${1:-0}" -gt 62 ] || [ "${3:-0}" -lt 50 ] || [ "${3:-0}" -gt 66 ]; then
+        fail G-IME-CANDIDATES "no #36363a popup surface at the candidate window's top (pixel ${1:-?} ${2:-?} ${3:-?})"
+    fi
+    surface="$1 $2 $3"
+    row0="$(grep 'ibus candidate 0 你 at' "$LOG" | tail -1 | sed 's/.* at //')"
+    # shellcheck disable=SC2086 # four numbers
+    set -- $row0
+    # shellcheck disable=SC2046
+    set -- $(px "$ARTIFACTS/24j-ime-candidates.png" $(($1 + 3)) $(($2 + $4 / 2)))
+    [ "${3:-0}" -gt $((${1:-255} + 60)) ] ||
+        fail G-IME-CANDIDATES "the first candidate is not highlighted (pixel ${1:-?} ${2:-?} ${3:-?})"
+    row1="$(grep 'ibus candidate 1 尼 at' "$LOG" | tail -1 | sed 's/.* at //')"
+    # shellcheck disable=SC2086 # four numbers
+    set -- $row1
+    xdotool mousemove --window "$WID" $(($1 + $3 / 2)) $(($2 + $4 / 2))
+    sleep 0.3
+    xdotool click 1
+    for _ in $(seq 1 20); do [ "$(cat "$IME_OUT" 2>/dev/null)" = "你|你好|2尼" ] && break; sleep 0.3; done
+    [ "$(cat "$IME_OUT" 2>/dev/null)" = "你|你好|2尼" ] ||
+        fail G-IME-CANDIDATES "clicking 尼 left the field holding '$(cat "$IME_OUT" 2>/dev/null)', not 你|你好|2尼 ($(grep 'candidate clicked' "$ENGINE_LOG" | tail -1))"
+    grep -q "candidate clicked 1 1 " "$ENGINE_LOG" ||
+        fail G-IME-CANDIDATES "the engine never heard CandidateClicked(1, 1, ...)"
+    cstate '.layers | any(.namespace == "roost-ibus-candidates") | not' "candidate window closed" 10 ||
+        fail G-IME-CANDIDATES "the candidate window stayed after the commit"
+    xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT - 40))
+    pass G-IME-CANDIDATES "the shell draws IBus's candidates (你 尼 泥) under the cursor, the first highlighted (surface $surface), and clicking 尼 commits it"
     # shellcheck disable=SC2086 # two pids
     kill $IME_PIDS 2>/dev/null || true
     IME_PIDS=""
