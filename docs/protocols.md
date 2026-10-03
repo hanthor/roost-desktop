@@ -3,10 +3,22 @@
 What Roost advertises to clients, against what GNOME 51's Mutter
 advertises. Ledger row P-SY-06 tracks the gaps.
 
-**Source of the Mutter column.** It is read from Mutter's Wayland setup
-code, not captured from the Marlin baseline VM. Capturing it with
-`wayland-info` inside the baseline VM is the open part of #89; until
-then treat the column as a reading, not evidence.
+**Source of the Mutter column.** A `wayland-info` capture of GNOME
+Shell 51.0 / Mutter 51.0 (Fedora 45, headless, 1280x800):
+`tests/protocols/gnome51-wayland-info.txt`, made by
+`scripts/roost-gnome-wayland-info`. Three globals do not appear headless
+(the DRM lease and syncobj managers need the native KMS backend; the
+Xwayland keyboard grab is offered to Xwayland only). They are listed from
+the interfaces built into the same `libmutter-51.so`, marked `source` in
+`tests/protocols/gnome51-globals.tsv`. This is upstream GNOME 51 in a
+Fedora container, not a capture from the Marlin baseline VM.
+
+**Comparison.** The proof stage G-WAYLAND-INFO runs `wayland-info`
+against the nested Roost session (saved as the `wayland-info.txt`
+artifact) and `scripts/roost-wayland-info-compare` checks it against
+`tests/protocols/gnome51-globals.tsv`. Every global marked `match` must
+be present at GNOME's version or newer, and every `min:` global at least
+at the version given. Known gaps are reported and do not fail the stage.
 
 **Golden test.** `crates/compositor/tests/protocols.rs` asserts the exact
 list and versions below. Adding or dropping a protocol updates the test
@@ -66,18 +78,28 @@ as niri does, so the stock portal works.
 
 ## Gaps against Mutter
 
-| Protocol | Roost | Tracked in |
-|---|---|---|
-| wp_presentation | missing | #89 |
-| zwp_tablet_manager_v2 | missing | #89 |
-| zwp_keyboard_shortcuts_inhibit_manager_v1 | missing | #89 |
-| zxdg_exporter_v2, zxdg_importer_v2 (xdg-foreign) | missing | #61 (portal dialogs) |
-| wp_linux_drm_syncobj_manager_v1 | missing | #89 |
-| wp_drm_lease_device_v1 | missing | #89 (VR headsets) |
-| wp_color_manager_v1 | missing | #89 |
-| xdg_toplevel_drag_v1, xdg_dialog_v1 | missing | #89 |
-| gtk_shell1 | missing | not planned: GTK4 needs none of it on a GNOME session |
-| zwp_linux_dmabuf_v1 version 4 and 5 feedback | version 3 only | #89 |
+From the GNOME 51 capture. The globals not listed here are offered at
+GNOME's version.
+
+| Protocol | GNOME 51 | Roost | Tracked in |
+|---|---|---|---|
+| wl_compositor | 6 | 5 | #89 |
+| xdg_wm_base | 7 | 6 | #89 |
+| wl_seat | 10 | 9 | #89 |
+| zwp_text_input_manager_v3 | 2 | 1 | #60 |
+| wp_presentation | 2 | missing | #89 |
+| zwp_tablet_manager_v2 | 2 | missing | #89 |
+| zwp_keyboard_shortcuts_inhibit_manager_v1 | 1 | missing | #89 |
+| zxdg_exporter_v1/v2, zxdg_importer_v1/v2 (xdg-foreign) | 1 | missing | #61 (portal dialogs) |
+| xdg_toplevel_drag_manager_v1, xdg_wm_dialog_v1, xdg_toplevel_tag_manager_v1 | 1 | missing | #89 |
+| xdg_session_manager_v1, xdg_system_bell_v1 | 1 | missing | #89 |
+| wp_color_manager_v1 (v2), wp_color_representation_manager_v1 | 2, 1 | missing | #89 |
+| wp_commit_timing_manager_v1, wp_fifo_manager_v1 | 1 | missing | #89 |
+| wp_pointer_warp_v1, ext_background_effect_manager_v1, wl_fixes | 1 | missing | #89 |
+| wp_linux_drm_syncobj_manager_v1, wp_drm_lease_device_v1 (native backend; from source) | — | missing | #89 (VR headsets for the lease) |
+| zwp_xwayland_keyboard_grab_manager_v1 (Xwayland only; from source) | — | missing | #89 |
+| gtk_shell1 | 7 | missing | not planned: GTK4 needs none of it on a GNOME session |
+| zwp_linux_dmabuf_v1 feedback (v4+) | native backend only | version 3 | #89 |
 
 ## Deliberate differences
 

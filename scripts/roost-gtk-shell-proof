@@ -57,6 +57,9 @@
 #   G-QS-ABSENT      with the daemons gone, their tiles hide (no hang)
 #   G-GL-WINDOW      a GTK window on the GL renderer maps and paints
 #                    (linux-dmabuf, #89)
+#   G-WAYLAND-INFO   wayland-info lists every global GNOME 51's Mutter
+#                    offers that Roost must, at its version or newer
+#                    (tests/protocols/gnome51-globals.tsv, P-SY-06)
 #   G-OV-SHELL-UI  the overview shows the search entry and the dash
 #   G-OV-SEARCH typing lists matching apps (#57)
 #   G-OV-LAUNCH Enter launches the top result and closes the overview
@@ -1283,6 +1286,22 @@ if [ "$1" -lt 150 ] || [ "$2" -gt 80 ] || [ "$3" -gt 80 ]; then
     fail G-GL-WINDOW "GL window did not paint its red body (pixel $rgb)"
 fi
 pass G-GL-WINDOW "a GL-rendered GTK window maps and paints"
+
+# The globals a client finds (P-SY-06, #89): wayland-info against this
+# session, compared with GNOME 51's capture. Here, after G-GL-WINDOW,
+# the renderer has reported its formats, so linux-dmabuf is advertised.
+if command -v wayland-info >/dev/null 2>&1; then
+    WAYLAND_DISPLAY="$SOCKET_NAME" wayland-info >"$ARTIFACTS/wayland-info.txt" 2>&1 ||
+        fail G-WAYLAND-INFO "wayland-info could not talk to the session"
+    "$PY" "$ROOT/scripts/roost-wayland-info-compare" "$ARTIFACTS/wayland-info.txt" \
+        --report "$ARTIFACTS/wayland-info-compare.txt" ||
+        fail G-WAYLAND-INFO "globals short of GNOME 51's (see wayland-info-compare.txt)"
+    pass G-WAYLAND-INFO "every expected GNOME 51 global is advertised at its version or newer"
+elif [ "${ROOST_REQUIRE_WAYLAND_INFO:-0}" = 1 ]; then
+    fail G-WAYLAND-INFO "wayland-info is required (ROOST_REQUIRE_WAYLAND_INFO=1) but not installed"
+else
+    echo "roost-gtk-shell-proof: G-WAYLAND-INFO skipped (no wayland-info)"
+fi
 
 # X11 by default (#59): the compositor starts XWayland when it is
 # installed, tells the shell DISPLAY, and apps launched from search get it.
