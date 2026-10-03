@@ -2167,13 +2167,6 @@ impl Runtime {
         Ok(!self.exit)
     }
 
-    /// Render all mapped toplevels stacked at the origin, then send frame
-    /// callbacks. While the recovery overlay is visible the background
-    /// shifts to a deep red (provisional overlay visual; full overlay
-    /// text rendering is deferred) so the shell-absent state is
-    /// unmistakable. While locked nothing beneath the lock surface may
-    /// show — no windows, no layer-shell chrome (panel, notifications),
-    /// no wallpaper — over a dark lock background.
     /// A page flip completed (hardware): mark what the frame drew
     /// presented with the kernel's vblank time and sequence, and on the
     /// primary output advance fifo barriers and commit timers (#89).
@@ -2207,6 +2200,13 @@ impl Runtime {
         }
     }
 
+    /// Render all mapped toplevels stacked at the origin, then send frame
+    /// callbacks. While the recovery overlay is visible the background
+    /// shifts to a deep red (provisional overlay visual; full overlay
+    /// text rendering is deferred) so the shell-absent state is
+    /// unmistakable. While locked nothing beneath the lock surface may
+    /// show — no windows, no layer-shell chrome (panel, notifications),
+    /// no wallpaper — over a dark lock background.
     fn render(&mut self) -> Result<(), RuntimeError> {
         let locked = self.is_locked();
         let show_content = content_visible(locked);
