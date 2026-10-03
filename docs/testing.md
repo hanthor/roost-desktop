@@ -98,6 +98,15 @@ log and takes QMP screendumps from outside.
 | `V-PANEL` | The session opens on the overview, where the panel is transparent. After Escape, a screendump shows a pure black strip at y=5 across at least 90 percent of the width (the top panel) over a desktop that is not one flat color |
 | `V-NOPANIC` | No `panicked` anywhere in the serial log |
 
+The test layer boots without plymouth (`plymouth.enable=0`). In one of
+the first five runs, plymouth quit about 10 seconds after the automatic
+login, and at the same moment GDM started its login greeter on the login
+VT. The greeter took DRM master from the running Roost session
+(`roost-compositor: drm: session paused`). If Roost loses the display
+this way, `V-PANEL` fails and its detail line says so. A user booting the
+shipped image with plymouth may hit the same race. It is not resolved
+yet.
+
 The artifact (`marlin-vm`) holds `serial.log`, `roost-lines.log` (every
 `roost-*` line), the boot frames, `V-OVERVIEW.png` (the login overview),
 `V-SESSION.png` (the desktop), and `manifest.json`.

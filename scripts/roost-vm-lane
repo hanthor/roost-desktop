@@ -419,6 +419,13 @@ def main():
            "roost-shell-gtk started under supervision" if shell
            else "no roost-shell-gtk: keybindings line")
     results.setdefault("V-PANEL", (False, "session never came up, no screendump checked"))
+    # GDM starting its greeter on the login VT takes DRM master from the
+    # running session; say so instead of leaving a bare pixel failure.
+    paused = "roost-compositor: drm: session paused" in text
+    greeter = re.search(r"New session '\d+' of user '[^']*' with class 'greeter'", text)
+    if paused and not results["V-PANEL"][0]:
+        results["V-PANEL"] = (False, results["V-PANEL"][1] + "; Roost lost the display"
+                              + (" to a GDM greeter session" if greeter else ""))
     panics = [ln for ln in text.splitlines() if "panicked" in ln]
     record("V-NOPANIC", not panics, panics[0] if panics else "no panicked in serial log")
 
@@ -438,6 +445,7 @@ def main():
         "kvm": kvm,
         "qemu": qemu_version,
         "session_up_s": round(elapsed) if drm and shell else None,
+        "drm_session_paused": paused,
         "captured_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "tour": tour_info,
         "assertions": {k: {"pass": v[0], "detail": v[1]} for k, v in results.items()},
