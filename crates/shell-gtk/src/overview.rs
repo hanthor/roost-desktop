@@ -21,9 +21,8 @@ use crate::live_apps::LiveApps;
 
 use crate::providers;
 
-/// Namespace the compositor parks overview keyboard focus on
-/// (`roost_compositor::layer::OVERVIEW_NAMESPACE`).
-pub const OVERVIEW_NAMESPACE: &str = "roost-shell-overview";
+/// Layer-shell namespace and contract constants shared with the compositor.
+pub use roost_shell_control::OVERVIEW_NAMESPACE;
 /// App results shown under the search entry (GNOME shows one row).
 pub const MAX_RESULTS: usize = 6;
 

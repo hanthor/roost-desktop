@@ -23,6 +23,26 @@ pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 /// [`decode_frame`] with [`DecodeError::TitleTooLong`].
 pub const MAX_TITLE_LEN: usize = 512;
 
+/// Layer-shell namespace for the overview surface (compositor ↔ shell contract).
+/// The compositor matches on this to identify the overview; the shell advertises it
+/// when creating the overview layer.
+pub const OVERVIEW_NAMESPACE: &str = "roost-shell-overview";
+
+/// Layer-shell namespace for the panel surface (compositor ↔ shell contract).
+/// The shell advertises this when creating the main panel layer.
+pub const PANEL_NAMESPACE: &str = "roost-shell-panel";
+
+/// Layer-shell namespace for the banner/notifications surface (compositor ↔ shell contract).
+/// The shell advertises this when creating the banner/notification layer.
+pub const BANNER_NAMESPACE: &str = "roost-shell-banner";
+
+/// Panel height in pixels (compositor ↔ shell contract).
+///
+/// The shell renders the panel at this height; the compositor uses this to inset
+/// the work area and position the Activities trigger strip. Must stay in sync
+/// across both implementations.
+pub const PANEL_HEIGHT: u32 = 32;
+
 /// Opaque window identifier minted by the compositor.
 ///
 /// Never reused during a compositor session (spec 001); the shell must treat
