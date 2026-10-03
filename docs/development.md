@@ -37,18 +37,15 @@ sudo dnf install -y \
 ```
 
 ### Spektacular CLI
-RWD uses [Spektacular](https://github.com/projectbluefin/spektacular) for specification and planning workflows. Install the CLI:
+RWD uses [Spektacular](https://github.com/hivecommons/spektacular) for specification and planning workflows. Install the CLI:
 
 ```bash
-# Clone the Spektacular repository
-git clone https://github.com/projectbluefin/spektacular.git
-cd spektacular
-cargo install --path .
+go install github.com/hivecommons/spektacular@latest
 ```
 
-Verify installation:
+Ensure `$(go env GOPATH)/bin` is on `PATH`, then verify installation:
 ```bash
-spek --version
+spektacular version check
 ```
 
 ## Project Structure
@@ -164,19 +161,19 @@ RWD uses Spektacular for planning and tracking implementation work. Each work it
 
 ```bash
 # List all specs and their plan status
-spek list
+spektacular spec file list
 
 # View a specific spec
-spek show <spec-id>
+spektacular spec show <spec-id>
 
 # Create a new spec (typically for maintainers)
-spek new --title "My feature" --category implementation
+spektacular spec new --title "My feature" --category implementation
 
 # Update plan state (e.g., transitioning from draft to ready)
-spek plan <spec-id> --state ready
+spektacular plan transition --state ready <spec-id>
 ```
 
-For more details, see the [Spektacular documentation](https://github.com/projectbluefin/spektacular).
+For more details, see the [Spektacular documentation](https://github.com/hivecommons/spektacular).
 
 ## Architecture and Design
 
