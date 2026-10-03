@@ -277,8 +277,18 @@ pub struct WindowManager {
     /// Gnome by default; Super+Shift+T flips the whole session.
     mode: SessionMode,
     /// Horizontal strip view offset in logical pixels (scroll mode).
-    /// Zero on entering scroll; clamped to the strip overflow.
+    /// Zero on entering scroll; clamped to the strip overflow. This is
+    /// the view's *target*: layout, configure sizes, input and tests
+    /// all use it, so clients are configured once at the target.
     strip_offset: f64,
+    /// Where the strip view is drawn right now: chases `strip_offset`
+    /// on niri's view-movement spring, stepped once per frame by
+    /// [`step_strip_view`](Self::step_strip_view). Only render
+    /// positions use it.
+    strip_shown: f64,
+    /// The running view spring and its elapsed seconds, while the drawn
+    /// view has not settled on the target.
+    strip_anim: Option<(crate::spring::Spring, f64)>,
     /// Last hub overview flag seen (set by the runtime each tick).
     overview_open: bool,
     /// Window focused before the overview parked keyboard focus.
@@ -336,6 +346,8 @@ impl WindowManager {
             grab: None,
             mode: SessionMode::Gnome,
             strip_offset: 0.0,
+            strip_shown: 0.0,
+            strip_anim: None,
             super_held: false,
             // add_keyboard below: 200 ms delay, 200 keys/s.
             repeat: (200, 200),
@@ -437,6 +449,40 @@ impl WindowManager {
     /// Only the active workspace renders; other workspaces keep their
     /// surfaces mapped but hidden.
     pub fn visible_windows(&self) -> Vec<(Window, Rectangle<i32, Logical>)> {
+        self.visible_entries()
+            .into_iter()
+            .map(|(_, window, geometry)| (window, geometry))
+            .collect()
+    }
+
+    /// [`visible_windows`](Self::visible_windows) where they are drawn
+    /// this frame: strip columns shift by how far the animated view
+    /// still trails its target. Every other use (input, configure,
+    /// output scale) keeps the target geometry.
+    pub fn render_windows(&self) -> Vec<(Window, Rectangle<i32, Logical>)> {
+        self.visible_entries()
+            .into_iter()
+            .map(|(id, window, geometry)| (window, self.shifted(id, geometry)))
+            .collect()
+    }
+
+    /// Where `id` is drawn this frame (see
+    /// [`render_windows`](Self::render_windows)).
+    pub fn render_geometry(&self, id: u64) -> Option<Rectangle<i32, Logical>> {
+        self.geometry(id).map(|geometry| self.shifted(id, geometry))
+    }
+
+    /// `geometry` moved by the strip view's lag when `id` is a strip
+    /// column: drawn x = target x + (target offset - drawn offset).
+    fn shifted(&self, id: u64, mut geometry: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
+        if self.mode == SessionMode::Scroll && self.window_layout(id) == Some(WindowLayout::Strip) {
+            geometry.loc.x += (self.strip_offset - self.strip_shown).round() as i32;
+        }
+        geometry
+    }
+
+    /// Visible windows bottom-to-top with their ids and target geometry.
+    fn visible_entries(&self) -> Vec<(u64, Window, Rectangle<i32, Logical>)> {
         let active = self.model.active_workspace();
         self.stacking
             .iter()
@@ -451,7 +497,7 @@ impl WindowManager {
                 self.windows
                     .get(&id)
                     .filter(|w| !w.minimized)
-                    .map(|w| (w.surface.clone(), w.geometry))
+                    .map(|w| (id, w.surface.clone(), w.geometry))
             })
             .collect()
     }
@@ -2287,9 +2333,61 @@ impl WindowManager {
         self.strip_offset = offset.clamp(0.0, self.strip_max_offset(state));
     }
 
-    /// Current strip view offset (scroll mode), for tests.
+    /// Current strip view offset target (scroll mode): where the view
+    /// is going, which layout and tests use.
     pub fn strip_offset(&self) -> f64 {
         self.strip_offset
+    }
+
+    /// Where the strip view is drawn this frame; equals
+    /// [`strip_offset`](Self::strip_offset) once the spring settles.
+    pub fn strip_view(&self) -> f64 {
+        self.strip_shown
+    }
+
+    /// Whether the strip view is still moving toward its target.
+    pub fn strip_animating(&self) -> bool {
+        self.mode == SessionMode::Scroll && self.strip_shown != self.strip_offset
+    }
+
+    /// Jump the drawn view onto the target (no animation).
+    fn snap_strip_view(&mut self) {
+        self.strip_shown = self.strip_offset;
+        self.strip_anim = None;
+    }
+
+    /// Advance the drawn strip view `dt` seconds toward the target on
+    /// niri's default view-movement spring (critically damped,
+    /// stiffness 800, epsilon 0.0001). A target that moved mid-flight
+    /// restarts the spring from the drawn position with its current
+    /// velocity, as niri does. Called once per frame by the runtime;
+    /// returns whether the view is still moving (frames keep coming
+    /// only while it does).
+    pub fn step_strip_view(&mut self, dt: f64) -> bool {
+        use crate::spring::Spring;
+        if self.mode != SessionMode::Scroll {
+            self.snap_strip_view();
+            return false;
+        }
+        let target = self.strip_offset;
+        let (spring, t) = match self.strip_anim {
+            Some((spring, t)) if spring.to == target => (spring, t + dt.max(0.0)),
+            Some((spring, t)) => (
+                Spring::view_movement(spring.value_at(t), target, spring.velocity_at(t)),
+                0.0,
+            ),
+            None if self.strip_shown != target => {
+                (Spring::view_movement(self.strip_shown, target, 0.0), 0.0)
+            }
+            None => return false,
+        };
+        if spring.done_at(t) {
+            self.snap_strip_view();
+            return false;
+        }
+        self.strip_shown = spring.value_at(t);
+        self.strip_anim = Some((spring, t));
+        true
     }
 
     /// Scroll the strip by axis amounts (positive moves the view
@@ -2318,6 +2416,9 @@ impl WindowManager {
             return true;
         }
         self.strip_offset = next;
+        // Wheel and touchpad scrolling is direct manipulation: the view
+        // follows the fingers without a spring (niri's gesture too).
+        self.snap_strip_view();
         self.relayout_strip(state);
         true
     }
@@ -2468,6 +2569,9 @@ impl WindowManager {
         if scroll {
             self.strip_offset = 0.0;
             self.follow_focus(state);
+            // Entering the strip lays it out in place: nothing to
+            // animate from.
+            self.snap_strip_view();
             let ids: Vec<u64> = self.windows.keys().copied().collect();
             for id in ids {
                 self.apply_layout(state, id, WindowLayout::Strip);

@@ -127,6 +127,11 @@
 #               and steps through them; W closes the focused one
 #   G-IME            IBus composes pinyin into hanzi in a GTK app
 #   G-SCROLL         niri's scrollable tiling: gaps, view follows focus, ring
+#   G-IME-SURROUNDING the engine sees the field's text around the
+#                    cursor (in characters) and its deletion reaches
+#                    the field
+#   G-IME-CURSOR     IBus hears the text cursor's location inside the
+#                    field's window, in global coordinates
 #   G-SWITCHER-REBIND switch-applications rebound moves the switcher
 #                   to the new chord
 #   G-SWITCHER  Alt+Tab shows the switcher with every app (GNOME's
@@ -1572,6 +1577,30 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     [ "$(cat "$IME_OUT" 2>/dev/null)" = "你好" ] ||
         fail G-IME "the field holds '$(cat "$IME_OUT" 2>/dev/null)', not 你好"
     pass G-IME "IBus composes in a GTK app: pinyin in preedit, Space commits 你好"
+    # Surrounding text, as GNOME Shell sends it: the engine sees "你好"
+    # with the cursor 2 characters in (6 bytes on the wire); F2 makes it
+    # delete the character before the cursor and commit what it saw.
+    ENGINE_LOG="$ARTIFACTS/ibus-engine.log"
+    for _ in $(seq 1 20); do grep -q "surrounding 你好 2 2" "$ENGINE_LOG" && break; sleep 0.3; done
+    grep -q "surrounding 你好 2 2" "$ENGINE_LOG" ||
+        fail G-IME-SURROUNDING "the engine never saw '你好' with the cursor at 2: $(grep surrounding "$ENGINE_LOG" | tail -3)"
+    xdotool key F2
+    for _ in $(seq 1 20); do [ "$(cat "$IME_OUT" 2>/dev/null)" = "你|你好|2" ] && break; sleep 0.3; done
+    [ "$(cat "$IME_OUT" 2>/dev/null)" = "你|你好|2" ] ||
+        fail G-IME-SURROUNDING "the field holds '$(cat "$IME_OUT" 2>/dev/null)', not 你|你好|2"
+    pass G-IME-SURROUNDING "the engine reads the field's surrounding text and deletes around the cursor"
+    # The candidate window's anchor: SetCursorLocation inside the
+    # field's window, in global (screen) coordinates.
+    cursor="$(sed -n 's/^roost-ibus-test-engine: cursor //p' "$ENGINE_LOG" | tail -1)"
+    [ -n "$cursor" ] || fail G-IME-CURSOR "IBus never heard a cursor location"
+    # shellcheck disable=SC2086 # four numbers
+    set -- $cursor
+    rect="$(jq -r '.windows[] | select(.app_id == "roost-ime") | .rect | "\(.[0]) \(.[1]) \(.[2]) \(.[3])"' "$CSTATE")"
+    inside="$(echo "$rect" | awk -v x="$1" -v y="$2" -v h="$4" \
+        '{ print (x >= $1 && x < $1 + $3 && y >= $2 && y < $2 + $4 && h > 0) ? "yes" : "no" }')"
+    [ "$inside" = yes ] ||
+        fail G-IME-CURSOR "cursor location ($cursor) is not inside the IME window ($rect)"
+    pass G-IME-CURSOR "IBus hears the text cursor at ($cursor), inside the field's window ($rect)"
     # shellcheck disable=SC2086 # two pids
     kill $IME_PIDS 2>/dev/null || true
     IME_PIDS=""
