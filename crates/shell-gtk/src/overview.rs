@@ -265,6 +265,21 @@ impl OverviewUi {
                 Rc::new(crate::folders::rename),
             ),
         }));
+        // An app dragged out of a folder's dialog leaves the folder.
+        {
+            let weak = Rc::downgrade(&ui);
+            ui.borrow()
+                .folder_dialog
+                .set_on_remove(Rc::new(move |folder, app| {
+                    crate::folders::remove_app(&folder, &app);
+                    let weak = weak.clone();
+                    gtk::glib::idle_add_local_once(move || {
+                        if let Some(ui) = weak.upgrade() {
+                            Self::rebuild_grid(&ui);
+                        }
+                    });
+                }));
+        }
         Self::wire(&ui);
         ui
     }
@@ -565,10 +580,29 @@ impl OverviewUi {
             )
             .collect();
         items.sort_by(|a, b| a.0.cmp(&b.0));
+        let weak_ui = Rc::downgrade(ui);
+        let live_apps = me.apps.clone();
         let launch_button = |entry: &AppEntry, size: i32, actions: Rc<dyn OverviewActions>| {
             let button = app_button(entry, size, true);
             button.add_css_class("grid-tile");
             fit_tile_label(&button);
+            // GNOME's grid edits: drag an app onto another to make a
+            // folder of the two.
+            drag_source(&button, format!("app:{}", entry.app_id));
+            {
+                let (target, weak_ui, live_apps) =
+                    (entry.clone(), weak_ui.clone(), live_apps.clone());
+                on_drop(&button, move |text| {
+                    let dragged = text.strip_prefix("app:")?.to_owned();
+                    if dragged == target.app_id {
+                        return None;
+                    }
+                    let apps = live_apps.get();
+                    let other = apps.apps().iter().find(|a| a.app_id == dragged)?;
+                    crate::folders::create(&[&target, other])?;
+                    Some(weak_ui.clone())
+                });
+            }
             let entry = entry.clone();
             button.connect_clicked(move |_| {
                 if roost_shell_host::apps::launch(&entry).is_ok() {
@@ -615,6 +649,15 @@ impl OverviewUi {
                     button.add_css_class("app-folder");
                     button.add_css_class("grid-tile");
                     button.update_property(&[gtk::accessible::Property::Label(&folder.name)]);
+                    // An app dropped on a folder joins it.
+                    {
+                        let (fid, weak_ui) = (folder.id.clone(), weak_ui.clone());
+                        on_drop(&button, move |text| {
+                            let dragged = text.strip_prefix("app:")?;
+                            crate::folders::add_app(&fid, dragged);
+                            Some(weak_ui.clone())
+                        });
+                    }
                     // GNOME's folder dialog with the apps as large tiles.
                     {
                         let dialog = me.folder_dialog.clone();
@@ -627,6 +670,8 @@ impl OverviewUi {
                                 .map(|entry| {
                                     let tile = app_button(entry, 96, true);
                                     tile.add_css_class("folder-tile");
+                                    // Dragged out onto the shade, it leaves.
+                                    drag_source(&tile, format!("folder-app:{id}:{}", entry.app_id));
                                     let (entry, actions, dialog) =
                                         (entry.clone(), actions.clone(), dialog.clone());
                                     tile.connect_clicked(move |_| {
@@ -905,4 +950,45 @@ fn step_page(carousel: &libadwaita::Carousel, step: i32) {
     let target = (current + step).clamp(0, carousel.n_pages() as i32 - 1);
     let page = carousel.nth_page(target as u32);
     carousel.scroll_to(&page, true);
+}
+
+/// Make `widget` a drag source of `text`, the widget itself as the
+/// icon (GNOME drags the tile).
+fn drag_source(widget: &impl IsA<gtk::Widget>, text: String) {
+    let source = gtk::DragSource::new();
+    source.set_actions(gtk::gdk::DragAction::MOVE);
+    source.set_content(Some(&gtk::gdk::ContentProvider::for_value(
+        &text.to_value(),
+    )));
+    let w = widget.clone().upcast::<gtk::Widget>();
+    source.connect_drag_begin(move |source, _| {
+        let paintable = gtk::WidgetPaintable::new(Some(&w));
+        source.set_icon(Some(&paintable), w.width() / 2, w.height() / 2);
+    });
+    widget.add_controller(source);
+}
+
+/// Accept a dropped string on `widget`: `act` edits the folders and
+/// returns the overview to rebuild (or `None` to refuse the drop).
+fn on_drop(
+    widget: &impl IsA<gtk::Widget>,
+    act: impl Fn(&str) -> Option<std::rc::Weak<RefCell<OverviewUi>>> + 'static,
+) {
+    let target = gtk::DropTarget::new(gtk::glib::Type::STRING, gtk::gdk::DragAction::MOVE);
+    target.connect_drop(move |_, value, _, _| {
+        let Ok(text) = value.get::<String>() else {
+            return false;
+        };
+        let Some(ui) = act(&text) else {
+            return false;
+        };
+        // Rebuilt after the drop finishes: the tiles go away with it.
+        gtk::glib::idle_add_local_once(move || {
+            if let Some(ui) = ui.upgrade() {
+                OverviewUi::rebuild_grid(&ui);
+            }
+        });
+        true
+    });
+    widget.add_controller(target);
 }

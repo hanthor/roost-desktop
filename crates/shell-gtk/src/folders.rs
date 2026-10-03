@@ -82,6 +82,12 @@ pub fn arrange<'a>(
 /// A translated folder name: the Name of `<data dir>/desktop-directories/
 /// <file>`, else the file stem.
 fn directory_name(file: &str) -> String {
+    directory_name_found(file).unwrap_or_else(|| file.trim_end_matches(".directory").to_owned())
+}
+
+/// A `.directory` file's translated Name, when one is installed
+/// (`Shell.util_get_translated_folder_name`).
+fn directory_name_found(file: &str) -> Option<String> {
     let dirs = std::iter::once(glib::user_data_dir()).chain(glib::system_data_dirs());
     for dir in dirs {
         let path: PathBuf = dir.join("desktop-directories").join(file);
@@ -91,11 +97,160 @@ fn directory_name(file: &str) -> String {
             .is_ok()
         {
             if let Ok(name) = key_file.locale_string("Desktop Entry", "Name", None) {
-                return name.to_string();
+                return Some(name.to_string());
             }
         }
     }
-    file.trim_end_matches(".directory").to_owned()
+    None
+}
+
+/// GNOME's `_findBestFolderName`: the first category every app shares
+/// whose `<category>.directory` is installed, by its translated name.
+pub fn best_folder_name(apps: &[&AppEntry]) -> Option<String> {
+    let first = apps.first()?;
+    first
+        .categories
+        .iter()
+        .filter(|c| !c.is_empty() && apps.iter().all(|a| a.categories.contains(c)))
+        .find_map(|c| directory_name_found(&format!("{c}.directory")))
+}
+
+/// GNOME's `FolderView.addApp` on a folder's lists: the app joins
+/// `apps` and leaves `excluded-apps`. Returns (apps, excluded).
+pub fn with_app(apps: &[String], excluded: &[String], app: &str) -> (Vec<String>, Vec<String>) {
+    let mut apps = apps.to_vec();
+    if !apps.iter().any(|a| same_app(a, app)) {
+        apps.push(app.to_owned());
+    }
+    let excluded = excluded
+        .iter()
+        .filter(|e| !same_app(e, app))
+        .cloned()
+        .collect();
+    (apps, excluded)
+}
+
+/// GNOME's `FolderView.removeApp` on a folder's lists: the app leaves
+/// `apps`; a category folder also excludes it. `None` when `apps` ends
+/// up empty: GNOME deletes the folder then.
+pub fn without_app(
+    apps: &[String],
+    categories: &[String],
+    excluded: &[String],
+    app: &str,
+) -> Option<(Vec<String>, Vec<String>)> {
+    let apps: Vec<String> = apps.iter().filter(|a| !same_app(a, app)).cloned().collect();
+    if apps.is_empty() {
+        return None;
+    }
+    let mut excluded = excluded.to_vec();
+    if !categories.is_empty() && !excluded.iter().any(|e| same_app(e, app)) {
+        excluded.push(app.to_owned());
+    }
+    Some((apps, excluded))
+}
+
+/// A desktop id as GNOME stores it in folder lists (`<id>.desktop`).
+fn desktop_id(app: &str) -> String {
+    if app.ends_with(".desktop") {
+        app.to_owned()
+    } else {
+        format!("{app}.desktop")
+    }
+}
+
+fn schemas_present() -> bool {
+    gio::SettingsSchemaSource::default().is_some_and(|source| {
+        source.lookup(SCHEMA, true).is_some() && source.lookup(FOLDER_SCHEMA, true).is_some()
+    })
+}
+
+fn folder_settings(id: &str) -> gio::Settings {
+    let path = format!("/org/gnome/desktop/app-folders/folders/{id}/");
+    gio::Settings::with_path(FOLDER_SCHEMA, &path)
+}
+
+/// GNOME's `createFolder`: a new folder (random id) holding `apps`,
+/// named after their common category, else "Unnamed Folder". Returns its
+/// id.
+pub fn create(apps: &[&AppEntry]) -> Option<String> {
+    if !schemas_present() || apps.is_empty() {
+        return None;
+    }
+    let id = glib::uuid_string_random().to_string();
+    let root = gio::Settings::new(SCHEMA);
+    let mut children: Vec<String> = root
+        .strv("folder-children")
+        .iter()
+        .map(|v| v.to_string())
+        .collect();
+    children.push(id.clone());
+    let refs: Vec<&str> = children.iter().map(String::as_str).collect();
+    let _ = root.set_strv("folder-children", refs.as_slice());
+    let s = folder_settings(&id);
+    let name = best_folder_name(apps).unwrap_or_else(|| "Unnamed Folder".to_owned());
+    let _ = s.set_string("name", &name);
+    let ids: Vec<String> = apps.iter().map(|a| desktop_id(&a.app_id)).collect();
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let _ = s.set_strv("apps", ids.as_slice());
+    gio::Settings::sync();
+    Some(id)
+}
+
+/// GNOME's `addApp`: put `app` in folder `id`.
+pub fn add_app(id: &str, app: &str) {
+    if !schemas_present() {
+        return;
+    }
+    let s = folder_settings(id);
+    let list = |key: &str| -> Vec<String> { s.strv(key).iter().map(|v| v.to_string()).collect() };
+    let (apps, excluded) = with_app(&list("apps"), &list("excluded-apps"), &desktop_id(app));
+    let a: Vec<&str> = apps.iter().map(String::as_str).collect();
+    let e: Vec<&str> = excluded.iter().map(String::as_str).collect();
+    let _ = s.set_strv("apps", a.as_slice());
+    let _ = s.set_strv("excluded-apps", e.as_slice());
+    gio::Settings::sync();
+}
+
+/// GNOME's `removeApp`: take `app` out of folder `id`, deleting the
+/// folder when its app list empties.
+pub fn remove_app(id: &str, app: &str) {
+    if !schemas_present() {
+        return;
+    }
+    let s = folder_settings(id);
+    let list = |key: &str| -> Vec<String> { s.strv(key).iter().map(|v| v.to_string()).collect() };
+    match without_app(
+        &list("apps"),
+        &list("categories"),
+        &list("excluded-apps"),
+        &desktop_id(app),
+    ) {
+        Some((apps, excluded)) => {
+            let a: Vec<&str> = apps.iter().map(String::as_str).collect();
+            let e: Vec<&str> = excluded.iter().map(String::as_str).collect();
+            let _ = s.set_strv("apps", a.as_slice());
+            let _ = s.set_strv("excluded-apps", e.as_slice());
+        }
+        None => {
+            // Resetting every key deletes the relocatable schema.
+            if let Some(schema) = s.settings_schema() {
+                for key in schema.list_keys() {
+                    s.reset(&key);
+                }
+            }
+            let root = gio::Settings::new(SCHEMA);
+            let children: Vec<String> = root
+                .strv("folder-children")
+                .iter()
+                .map(|v| v.to_string())
+                .filter(|c| c != id)
+                .collect();
+            let refs: Vec<&str> = children.iter().map(String::as_str).collect();
+            let _ = root.set_strv("folder-children", refs.as_slice());
+        }
+    }
+    gio::Settings::sync();
 }
 
 /// GNOME 51's default folders (appDisplay.js DEFAULT_FOLDERS, with the
@@ -244,6 +399,26 @@ pub fn load() -> Vec<Folder> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folder_lists_change_like_gnome() {
+        let v = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        // Adding: joins apps, leaves the exclusions.
+        let (apps, excluded) = with_app(&v(&["a.desktop"]), &v(&["b.desktop"]), "b.desktop");
+        assert_eq!(apps, v(&["a.desktop", "b.desktop"]));
+        assert!(excluded.is_empty());
+        // Removing from an app-list folder.
+        let (apps, excluded) =
+            without_app(&v(&["a.desktop", "b.desktop"]), &[], &[], "b.desktop").unwrap();
+        assert_eq!(apps, v(&["a.desktop"]));
+        assert!(excluded.is_empty());
+        // A category folder also excludes it.
+        let (_, excluded) =
+            without_app(&v(&["a.desktop", "b.desktop"]), &v(&["Game"]), &[], "b").unwrap();
+        assert_eq!(excluded, v(&["b"]));
+        // The last app out deletes the folder.
+        assert!(without_app(&v(&["a.desktop"]), &[], &[], "a").is_none());
+    }
 
     fn app(id: &str, name: &str, categories: &[&str]) -> AppEntry {
         AppEntry {

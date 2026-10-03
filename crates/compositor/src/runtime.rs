@@ -1637,6 +1637,12 @@ impl Runtime {
             view,
             &switcher_previews(&self.manager, &self.switcher_thumbnails),
         );
+        elements.top.extend(dnd_icon_elements(
+            renderer,
+            &self.state,
+            view,
+            self.manager.pointer_pos(),
+        ));
         let decor = decor_for_output(&decor_global, view);
         let previews = preview_elements(renderer, &self.manager, view, cards);
         let paper = backdrop(
@@ -2184,6 +2190,12 @@ impl Runtime {
                         view,
                         &switcher_previews(&self.manager, &self.switcher_thumbnails),
                     );
+                    elements.top.extend(dnd_icon_elements(
+                        renderer,
+                        &self.state,
+                        view,
+                        self.manager.pointer_pos(),
+                    ));
                     let decor = decor_for_output(&decor_global, view);
                     let previews = preview_elements(renderer, &self.manager, view, cards);
                     let paper = backdrop(
@@ -2278,6 +2290,12 @@ impl Runtime {
                         view,
                         &switcher_previews(&self.manager, &self.switcher_thumbnails),
                     );
+                    elements.top.extend(dnd_icon_elements(
+                        renderer,
+                        &self.state,
+                        view,
+                        self.manager.pointer_pos(),
+                    ));
                     let decor = decor_for_output(&decor_global, view);
                     let previews = preview_elements(renderer, &self.manager, view, cards);
                     let paper = backdrop(
@@ -2452,6 +2470,47 @@ fn previews_to_elements(
         }
     }
     crate::layer::front_to_back(out)
+}
+
+/// A drag's icon at the pointer, centred on it (front to back).
+fn dnd_icon_elements(
+    renderer: &mut GlesRenderer,
+    state: &State,
+    view: View,
+    pointer: Point<f64, Logical>,
+) -> Vec<PreviewElement> {
+    let Some(icon) = state.dnd_icon() else {
+        return Vec::new();
+    };
+    let size = smithay::wayland::compositor::with_states(&icon, |states| {
+        states
+            .data_map
+            .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>()
+            .and_then(|d| d.lock().ok().and_then(|d| d.surface_size()))
+    })
+    .unwrap_or_default();
+    let origin = view.physical(
+        pointer.x - f64::from(size.w) / 2.0,
+        pointer.y - f64::from(size.h) / 2.0,
+    );
+    let elements = render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(
+        renderer,
+        &icon,
+        origin,
+        view.scale,
+        1.0,
+        Kind::Unspecified,
+    );
+    crate::layer::front_to_back(
+        elements
+            .into_iter()
+            .map(|e| {
+                smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
+                    e, origin, 1.0,
+                )
+            })
+            .collect(),
+    )
 }
 
 /// GNOME's switcher thumbnails (altTab.js `_createWindowClone`): each
@@ -2833,6 +2892,12 @@ fn send_frame_callbacks(state: &State, manager: &WindowManager, frames: u64) {
     }
     for (surface, _, _) in crate::layer::layer_layout(state) {
         send_frames_surface_tree(&surface, &output, time, Some(Duration::ZERO), |_, _| {
+            Some(output.clone())
+        });
+    }
+    // A drag's icon animates on frame callbacks too.
+    if let Some(icon) = state.dnd_icon() {
+        send_frames_surface_tree(&icon, &output, time, Some(Duration::ZERO), |_, _| {
             Some(output.clone())
         });
     }
