@@ -1,5 +1,10 @@
 # Screenshots
 
+For the GTK shell's features (quick settings, the overview, app grid,
+notifications, lock screen and more), see the
+[walkthrough](walkthrough.md). The frames below come from the earlier
+proof harnesses.
+
 What the session looks like today. Every frame below is machine-generated,
 not hand-picked: each comes from the scripted proof harnesses
 (`scripts/roost-journey`, `scripts/roost-app-content`,

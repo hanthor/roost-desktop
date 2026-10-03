@@ -9,7 +9,7 @@
 //! compositor parks keyboard focus on it and typing goes straight to
 //! search.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk4 as gtk;
@@ -972,8 +972,33 @@ fn paged_grid(pages: Vec<gtk::FlowBox>) -> gtk::Widget {
         -1,
     );
     let next = arrow("go-next-symbolic", "Next Page", gtk::Align::End, 1);
+    // GNOME's page hints (.page-navigation-hint): while an item is
+    // dragged they take the arrows' place at the sides, a tenth of the
+    // grid wide each, lit (.dnd) while the drag is over them.
+    let hint = |side: &str, align: gtk::Align| {
+        let hint = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        hint.add_css_class("page-navigation-hint");
+        hint.add_css_class(side);
+        hint.set_halign(align);
+        hint.set_can_target(false);
+        hint.set_visible(false);
+        overlay.add_overlay(&hint);
+        hint
+    };
+    let pager = Rc::new(DragPager {
+        carousel: carousel.clone(),
+        previous_hint: hint("previous", gtk::Align::Start),
+        next_hint: hint("next", gtk::Align::End),
+        previous: previous.clone(),
+        next: next.clone(),
+        pages: n,
+        dragging: Cell::new(false),
+        initial: RefCell::new(None),
+        repeat: RefCell::new(None),
+        overshoot: Cell::new(-1.0),
+    });
     let sync = {
-        let (dots, previous, next) = (dots.clone(), previous.clone(), next.clone());
+        let (dots, pager) = (dots.clone(), pager.clone());
         move |page: u32| {
             for (i, dot) in dots.iter().enumerate() {
                 if i as u32 == page {
@@ -982,12 +1007,29 @@ fn paged_grid(pages: Vec<gtk::FlowBox>) -> gtk::Widget {
                     dot.remove_css_class("active");
                 }
             }
-            previous.set_visible(page > 0);
-            next.set_visible((page as usize) + 1 < n);
+            pager.sync(page);
         }
     };
     sync(0);
     carousel.connect_page_changed(move |_, page| sync(page));
+    let motion = gtk::DropControllerMotion::new();
+    {
+        let pager = pager.clone();
+        motion.connect_enter(move |m, x, _| {
+            let width = m.widget().map_or(0, |w| w.width());
+            pager.begin(width);
+            pager.motion(x, width);
+        });
+    }
+    {
+        let pager = pager.clone();
+        motion.connect_motion(move |m, x, _| {
+            let width = m.widget().map_or(0, |w| w.width());
+            pager.motion(x, width);
+        });
+    }
+    motion.connect_leave(move |_| pager.end());
+    overlay.add_controller(motion);
     // PageUp / PageDown, as GNOME's grid binds them.
     let keys = gtk::EventControllerKey::new();
     {
@@ -1009,6 +1051,140 @@ fn paged_grid(pages: Vec<gtk::FlowBox>) -> gtk::Widget {
 }
 
 /// One page forward or back, clamped.
+/// GNOME's page switching during a drag (appDisplay.js): bumping the
+/// pointer within 20px of the grid's edge turns the page at once, and
+/// hovering a page hint turns it after a second; either repeats every
+/// second while the pointer stays.
+struct DragPager {
+    carousel: libadwaita::Carousel,
+    previous_hint: gtk::Box,
+    next_hint: gtk::Box,
+    previous: gtk::Button,
+    next: gtk::Button,
+    pages: usize,
+    dragging: Cell<bool>,
+    initial: RefCell<Option<glib::SourceId>>,
+    repeat: RefCell<Option<glib::SourceId>>,
+    /// Where the pointer last bumped the edge (-1: not since leaving).
+    overshoot: Cell<f64>,
+}
+
+/// `DRAG_PAGE_SWITCH_IMMEDIATELY_THRESHOLD_PX`.
+const DRAG_EDGE_PX: f64 = 20.0;
+/// `DRAG_PAGE_SWITCH_INITIAL_TIMEOUT` and `_REPEAT_TIMEOUT`.
+const DRAG_PAGE_SWITCH: std::time::Duration = std::time::Duration::from_millis(1000);
+
+impl DragPager {
+    fn page(&self) -> u32 {
+        self.carousel.position().round() as u32
+    }
+
+    /// Arrows outside a drag, hints (where a page lies) during one.
+    fn sync(&self, page: u32) {
+        let before = page > 0;
+        let after = (page as usize) + 1 < self.pages;
+        let dragging = self.dragging.get();
+        self.previous.set_visible(before && !dragging);
+        self.next.set_visible(after && !dragging);
+        self.previous_hint.set_visible(before && dragging);
+        self.next_hint.set_visible(after && dragging);
+    }
+
+    fn begin(&self, width: i32) {
+        // A tenth of the grid each (PAGE_PREVIEW_RATIO / 2).
+        let w = (f64::from(width) * 0.1) as i32;
+        self.previous_hint.set_size_request(w, -1);
+        self.next_hint.set_size_request(w, -1);
+        self.dragging.set(true);
+        self.sync(self.page());
+    }
+
+    fn end(&self) {
+        self.reset();
+        self.dragging.set(false);
+        self.previous_hint.remove_css_class("dnd");
+        self.next_hint.remove_css_class("dnd");
+        self.sync(self.page());
+    }
+
+    fn reset(&self) {
+        if let Some(id) = self.initial.borrow_mut().take() {
+            id.remove();
+        }
+        if let Some(id) = self.repeat.borrow_mut().take() {
+            id.remove();
+        }
+        self.overshoot.set(-1.0);
+    }
+
+    fn turn_and_repeat(self: &Rc<Self>, step: i32) {
+        step_page(&self.carousel, step);
+        if let Some(id) = self.repeat.borrow_mut().take() {
+            id.remove();
+        }
+        let weak = Rc::downgrade(self);
+        let id = glib::timeout_add_local(DRAG_PAGE_SWITCH, move || match weak.upgrade() {
+            Some(pager) => {
+                step_page(&pager.carousel, step);
+                glib::ControlFlow::Continue
+            }
+            None => glib::ControlFlow::Break,
+        });
+        *self.repeat.borrow_mut() = Some(id);
+    }
+
+    fn motion(self: &Rc<Self>, x: f64, width: i32) {
+        let width = f64::from(width);
+        // 1) The edge: at once (_dragMaybeSwitchPageImmediately).
+        if x > DRAG_EDGE_PX && x < width - DRAG_EDGE_PX {
+            let last = self.overshoot.get();
+            if last >= 0.0 && (last - x).abs() > DRAG_EDGE_PX {
+                self.reset();
+            }
+        } else if self.overshoot.get() < 0.0 {
+            self.reset();
+            self.turn_and_repeat(if x <= DRAG_EDGE_PX { -1 } else { 1 });
+            self.overshoot.set(x);
+            return;
+        } else {
+            return;
+        }
+        // 2) A hint: after a second (_maybeSetupDragPageSwitchInitialTimeout).
+        let over_previous =
+            self.previous_hint.is_visible() && x < f64::from(self.previous_hint.width());
+        let over_next =
+            self.next_hint.is_visible() && x > width - f64::from(self.next_hint.width());
+        for (hint, over) in [
+            (&self.previous_hint, over_previous),
+            (&self.next_hint, over_next),
+        ] {
+            if over {
+                hint.add_css_class("dnd");
+            } else {
+                hint.remove_css_class("dnd");
+            }
+        }
+        if !over_previous && !over_next {
+            if self.overshoot.get() < 0.0 {
+                self.reset();
+            }
+            return;
+        }
+        if self.initial.borrow().is_some() || self.repeat.borrow().is_some() {
+            return;
+        }
+        let step = if over_previous { -1 } else { 1 };
+        let weak = Rc::downgrade(self);
+        let id = glib::timeout_add_local_once(DRAG_PAGE_SWITCH, move || {
+            if let Some(pager) = weak.upgrade() {
+                pager.initial.borrow_mut().take();
+                pager.turn_and_repeat(step);
+            }
+        });
+        *self.initial.borrow_mut() = Some(id);
+    }
+}
+
 fn step_page(carousel: &libadwaita::Carousel, step: i32) {
     let current = carousel.position().round() as i32;
     let target = (current + step).clamp(0, carousel.n_pages() as i32 - 1);
