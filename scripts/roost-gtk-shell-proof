@@ -175,6 +175,12 @@ echo '["org.roost.ProofNoFavorite.desktop"]' >"$XDG_DATA_HOME/roost-shell/favori
 PROBE_MARKER="$ARTIFACTS/probe-marker"
 rm -f "$PROBE_MARKER"
 mkdir -p "$XDG_DATA_HOME/applications"
+# The test windows are apps with (hidden) desktop entries, as most apps
+# are: windows no entry claims would each be an app of their own.
+for t in alpha beta gamma delta; do
+    printf '[Desktop Entry]\nName=Roost Test %s\nExec=true\nType=Application\nNoDisplay=true\n' "$t" \
+        >"$XDG_DATA_HOME/applications/roost-test-$t.desktop"
+done
 cat >"$XDG_DATA_HOME/applications/roost-probe.desktop" <<EOF
 [Desktop Entry]
 Name=Roost Probe
