@@ -38,12 +38,14 @@ pub use smithay::wayland::shell::wlr_layer::Layer;
 /// Shared with the shell-host: both the compositor and shell read these
 /// from the same source to prevent drift.
 pub use roost_shell_control::{
-    ACTIVITIES_STRIP_PX as _, BANNER_NAMESPACE, OVERVIEW_NAMESPACE, PANEL_HEIGHT, PANEL_NAMESPACE,
+    BANNER_NAMESPACE, OVERVIEW_NAMESPACE, PANEL_HEIGHT, PANEL_NAMESPACE,
 };
 
 /// One layer surface's placement request, as committed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayerRequest {
+    /// Anchored edges.
+    pub anchor: Anchor,
     /// Requested size (0 on an axis means "stretch between anchors").
     pub size: Size<i32, Logical>,
     /// Margins: top, right, bottom, left.
