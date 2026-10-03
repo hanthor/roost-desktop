@@ -741,6 +741,8 @@ window.roost-banners {
   border-radius: 18px;
   background: none;
   box-shadow: none;
+  /* The card's own weights, not the button's bold. */
+  font-weight: normal;
 }
 
 .message-view button.message-group:hover,

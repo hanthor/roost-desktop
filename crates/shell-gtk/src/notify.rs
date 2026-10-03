@@ -569,9 +569,13 @@ impl NotifyUi {
         let layout = stack_layout(members.len());
         let reveal = layout.last().map_or(0, |&(_, reach)| reach);
         top.set_margin_bottom(reveal);
+        // The top card is the overlay's main child, so it sizes the group
+        // and gets its height for the list's width (a measured overlay is
+        // allocated at least its height for its minimum width, which a
+        // wrapping card overshoots). The peeking cards fill the overlay
+        // above the card's margin, lowest first.
         let overlay = gtk::Overlay::new();
-        overlay.set_child(Some(&gtk::Box::new(gtk::Orientation::Vertical, 0)));
-        // Lowest first, so each card draws over the one under it.
+        overlay.set_child(Some(&top));
         for (k, &(inset, reach)) in layout.iter().enumerate().rev() {
             let stub = gtk::Box::new(gtk::Orientation::Vertical, 0);
             stub.add_css_class("message-stack-card");
@@ -586,8 +590,10 @@ impl NotifyUi {
             stub.set_can_target(false);
             overlay.add_overlay(&stub);
         }
-        overlay.add_overlay(&top);
-        overlay.set_measure_overlay(&top, true);
+        // Overlays draw over the main child; moving the card to the end
+        // of the overlay's children draws it over the stack instead
+        // (layout still treats it as the main child).
+        top.insert_before(&overlay, gtk::Widget::NONE);
 
         let group = gtk::Button::new();
         group.set_child(Some(&overlay));
