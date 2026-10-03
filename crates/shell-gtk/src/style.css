@@ -1391,6 +1391,23 @@ window.roost-folder-dialog button.folder-tile:hover {
   transform: none;
 }
 
+/* .page-navigation-hint: during a drag, a 5% white gradient fading
+   inward, rounded 24px on the grid side; lit to 10% while hovered. */
+.page-navigation-hint.next {
+  background-image: linear-gradient(to right, rgba(255, 255, 255, 0.05), transparent);
+  border-radius: 24px 0 0 24px;
+}
+
+.page-navigation-hint.previous {
+  background-image: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.05));
+  border-radius: 0 24px 24px 0;
+}
+
+.page-navigation-hint.dnd {
+  background-image: none;
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
 .page-navigation-arrow {
   margin: 6px;
   padding: 18px;

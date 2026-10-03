@@ -19,6 +19,7 @@
 #   G-OV-PICK   clicking a preview focuses that window, closes overview
 #   G-APP-POPOVER an app's menu popover opens (xdg popups, #88)
 #   G-APP-INSTALLED an app installed mid-session shows in search
+#   G-GRID-DRAG-PAGE a dragged app held at the grid's edge turns the page
 #   G-GRID-REORDER  an app dropped on a tile's edge moves there (saved
 #                   to app-picker-layout)
 #   G-FOLDER-DND    dragging an app onto another makes a GNOME folder of
@@ -750,6 +751,28 @@ showing "$ARTIFACTS/a11y-grid-page2.json" "Previous Page" ||
     fail G-APP-GRID-PAGES "Next Page did not turn to the second page"
 scrot "$ARTIFACTS/11d-app-grid-page2.png" >/dev/null
 pass G-APP-GRID-PAGES "thirty more apps page the grid; indicators and arrows show and Next Page turns it"
+
+# GNOME's page switching while dragging: an app held against the grid's
+# edge turns the page (no arrow to press mid-drag).
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-back.json" 20 \
+    --press "Previous Page" || fail G-GRID-DRAG-PAGE "could not press Previous Page"
+sleep 1
+xdotool mousemove --window "$WID" 202 305
+sleep 0.3
+xdotool mousedown 1
+for i in $(seq 1 20); do
+    xdotool mousemove --window "$WID" $((202 + (WIDTH - 6 - 202) * i / 20)) 330
+    sleep 0.03
+done
+sleep 0.8
+scrot "$ARTIFACTS/11h-grid-drag-edge.png" >/dev/null
+xdotool mouseup 1
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-drag-page.json" 20 ||
+    fail G-GRID-DRAG-PAGE "accessibility dump failed"
+showing "$ARTIFACTS/a11y-grid-drag-page.json" "Previous Page" ||
+    fail G-GRID-DRAG-PAGE "holding a dragged app at the edge did not turn the page"
+pass G-GRID-DRAG-PAGE "an app dragged against the grid's edge turns the page, as GNOME's grid does"
 xdotool key Escape
 cstate '.overview_open | not' "closed" || { xdotool key Escape; cstate '.overview_open | not' "closed" || fail G-APP-GRID-PAGES "overview stayed open"; }
 rm -f "$XDG_DATA_HOME"/applications/roost-page-*.desktop
