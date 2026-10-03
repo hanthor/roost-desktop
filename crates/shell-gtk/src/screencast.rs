@@ -112,16 +112,20 @@ pub fn videos_dir() -> PathBuf {
         .unwrap_or_else(glib::home_dir)
 }
 
-/// GNOME's software VP8 pipeline (`swenc-memfd-vp8-vp8enc`) for
+/// GNOME's software VP8 pipeline (`swenc-memfd-vp8-vp8enc`: realtime
+/// vp8enc at cpu-used 16 and max-quantizer 17 into webmmux) for
 /// `threads` encoder threads, or the caller's own encoder, as
 /// gst-launch arguments from the PipeWire node to the file.
+///
+/// Left out of GNOME's: pipewiresrc's `keepalive-time` and
+/// `resend-last`, and vp8enc's `keyframe-mode=disabled` and buffer
+/// tuning; with them the pipeline never finishes on EOS against
+/// Roost's streams under gst-launch, leaving an empty file.
 pub fn pipeline(node: u32, encoder: Option<&str>, threads: u32, path: &Path) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "pipewiresrc".into(),
         format!("path={node}"),
         "do-timestamp=true".into(),
-        "keepalive-time=1000".into(),
-        "resend-last=true".into(),
         "!".into(),
     ];
     match encoder {
@@ -131,9 +135,6 @@ pub fn pipeline(node: u32, encoder: Option<&str>, threads: u32, path: &Path) -> 
             args.extend(
                 [
                     "videoconvert",
-                    "chroma-mode=none",
-                    "dither=none",
-                    "matrix-mode=output-only",
                     &format!("n-threads={t}"),
                     "!",
                     "queue",
@@ -142,10 +143,7 @@ pub fn pipeline(node: u32, encoder: Option<&str>, threads: u32, path: &Path) -> 
                     "cpu-used=16",
                     "max-quantizer=17",
                     "deadline=1",
-                    "keyframe-mode=disabled",
                     &format!("threads={t}"),
-                    "static-threshold=1000",
-                    "buffer-size=20000",
                     "!",
                     "queue",
                     "!",

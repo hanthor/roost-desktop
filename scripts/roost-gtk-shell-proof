@@ -1817,10 +1817,9 @@ if [ -n "$PW_PIDS" ] && command -v gst-launch-1.0 >/dev/null 2>&1; then
 
     # DIAGNOSTICS (temporary): how recording pipelines fare on a cast.
     for variant in \
-        "! fakesink silent=false" \
-        "! videoconvert ! vp8enc deadline=1 ! webmmux ! filesink location=$ARTIFACTS/diag-a.webm" \
-        "do-timestamp=true ! videoconvert ! vp8enc deadline=1 ! webmmux ! filesink location=$ARTIFACTS/diag-b.webm" \
-        "do-timestamp=true keepalive-time=1000 resend-last=true ! videoconvert ! queue ! vp8enc cpu-used=16 max-quantizer=17 deadline=1 keyframe-mode=disabled static-threshold=1000 buffer-size=20000 ! queue ! webmmux ! filesink location=$ARTIFACTS/diag-c.webm"; do
+        "do-timestamp=true keepalive-time=1000 resend-last=true ! videoconvert ! vp8enc deadline=1 ! webmmux ! filesink location=$ARTIFACTS/diag-e.webm" \
+        "do-timestamp=true ! videoconvert ! vp8enc deadline=1 keyframe-mode=disabled static-threshold=1000 buffer-size=20000 ! webmmux ! filesink location=$ARTIFACTS/diag-f.webm" \
+        "do-timestamp=true ! videoconvert chroma-mode=none dither=none matrix-mode=output-only ! vp8enc deadline=1 ! webmmux ! filesink location=$ARTIFACTS/diag-g.webm"; do
         # shellcheck disable=SC2086
         echo "DIAG [$variant]: $("$PY" "$ROOT/scripts/lib/roost-screencast-client.py" /dev/null --record $variant 2>&1 | tail -1)" |
             tee -a "$ARTIFACTS/diag.log"
