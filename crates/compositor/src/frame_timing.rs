@@ -36,6 +36,7 @@ use smithay::{
         compositor::{with_surface_tree_downward, CompositorHandler, TraversalAction},
         fifo::{FifoBarrierCachedState, FifoManagerState},
         presentation::{PresentationState, Refresh},
+        seat::WaylandFocus,
     },
 };
 
