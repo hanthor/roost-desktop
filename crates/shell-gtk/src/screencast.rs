@@ -402,7 +402,7 @@ impl Recorder {
                 .map(Into::into),
         );
         let argv: Vec<&std::ffi::OsStr> = argv.iter().map(|a| a.as_os_str()).collect();
-        let process = match gio::Subprocess::newv(&argv, gio::SubprocessFlags::STDOUT_SILENCE) {
+        let process = match gio::Subprocess::newv(&argv, gio::SubprocessFlags::NONE) {
             Ok(p) => p,
             Err(e) => {
                 stop_session(&conn, &session);

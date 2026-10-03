@@ -169,6 +169,9 @@ export XDG_PICTURES_DIR XDG_VIDEOS_DIR
 # Short path: Unix sockets cap at 108 bytes.
 PIPEWIRE_RUNTIME_DIR="$(mktemp -d /tmp/roost-pw.XXXXXX)"
 export PIPEWIRE_RUNTIME_DIR
+# GStreamer (casts, recordings) says what goes wrong in the logs.
+GST_DEBUG="${GST_DEBUG:-2}"
+export GST_DEBUG
 PW_PIDS=""
 if command -v pipewire >/dev/null 2>&1 && command -v wireplumber >/dev/null 2>&1; then
     pipewire >"$ARTIFACTS/pipewire.log" 2>&1 &
