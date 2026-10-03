@@ -19,6 +19,8 @@
 #   G-OV-PICK   clicking a preview focuses that window, closes overview
 #   G-APP-POPOVER an app's menu popover opens (xdg popups, #88)
 #   G-APP-INSTALLED an app installed mid-session shows in search
+#   G-GRID-REORDER  an app dropped on a tile's edge moves there (saved
+#                   to app-picker-layout)
 #   G-FOLDER-DND    dragging an app onto another makes a GNOME folder of
 #                   them; dragging one out of the folder dialog removes it
 #   G-APP-GRID-PAGES enough apps page the grid: indicators and arrows show,
@@ -280,6 +282,22 @@ fi
 GSETTINGS_BACKEND=keyfile
 XDG_CONFIG_HOME="$ARTIFACTS/config"
 export GSETTINGS_BACKEND XDG_CONFIG_HOME
+# GNOME Shell's own keys the shell reads (the dash, the grid's order),
+# for hosts without gnome-shell's schema.
+if ! gsettings list-schemas 2>/dev/null | grep -qx org.gnome.shell; then
+    mkdir -p "$ARTIFACTS/schemas"
+    cat >"$ARTIFACTS/schemas/org.gnome.shell.gschema.xml" <<'XML'
+<schemalist>
+  <schema id="org.gnome.shell" path="/org/gnome/shell/">
+    <key name="favorite-apps" type="as"><default>[]</default></key>
+    <key name="app-picker-layout" type="aa{sv}"><default>[]</default></key>
+  </schema>
+</schemalist>
+XML
+    glib-compile-schemas "$ARTIFACTS/schemas"
+    GSETTINGS_SCHEMA_DIR="$ARTIFACTS/schemas${GSETTINGS_SCHEMA_DIR:+:$GSETTINGS_SCHEMA_DIR}"
+    export GSETTINGS_SCHEMA_DIR
+fi
 # Quick-settings daemons: stubs on a private "system" bus (#55), a fake
 # backlight, and a fake wpctl that records the sink volume.
 BACKLIGHT="$ARTIFACTS/backlight/roost-bl"
@@ -791,6 +809,37 @@ pass G-FOLDER-DND "an app dropped on another makes a GNOME folder; one dragged o
 xdotool key Escape
 cstate '.overview_open | not' "closed" || { xdotool key Escape; cstate '.overview_open | not' "closed" || fail G-FOLDER-DND "overview stayed open"; }
 rm -f "$XDG_DATA_HOME"/applications/roost-drag-*.desktop
+sleep 1.5
+
+# GNOME's grid reorder: an app dropped on another tile's edge takes its
+# place, and the grid is saved to org.gnome.shell app-picker-layout.
+for n in One Two Three; do
+    printf '[Desktop Entry]\nName=AAA Move %s\nExec=true\nType=Application\n' "$n" \
+        >"$XDG_DATA_HOME/applications/roost-move-$n.desktop"
+done
+sleep 1.5
+xdotool key super+a
+cstate '.overview_open and .overview_app_grid' "app grid" || fail G-GRID-REORDER "Super+A did not show the app grid"
+sleep 1.5
+# By name the cells read One, Three, Two: Two (third cell) onto the left
+# edge of One (first cell, x 146-259).
+drag 452 305 150 305
+scrot "$ARTIFACTS/11g-grid-reordered.png" >/dev/null
+layout="$(gsettings get org.gnome.shell app-picker-layout)"
+case "$layout" in
+    *"'roost-move-Two.desktop': <{'position': <0>}>"*) ;;
+    *) fail G-GRID-REORDER "the moved app is not first in app-picker-layout: $(echo "$layout" | cut -c1-200)" ;;
+esac
+case "$layout" in
+    *"'roost-move-One.desktop': <{'position': <1>}>"*"'roost-move-Three.desktop': <{'position': <2>}>"* | \
+        *"'roost-move-Three.desktop': <{'position': <2>}>"*"'roost-move-One.desktop': <{'position': <1>}>"*) ;;
+    *) fail G-GRID-REORDER "the apps it displaced did not each move one place on" ;;
+esac
+pass G-GRID-REORDER "an app dropped on a tile's edge takes its place and the grid is saved as GNOME saves it"
+xdotool key Escape
+cstate '.overview_open | not' "closed" || { xdotool key Escape; cstate '.overview_open | not' "closed" || fail G-GRID-REORDER "overview stayed open"; }
+gsettings reset org.gnome.shell app-picker-layout
+rm -f "$XDG_DATA_HOME"/applications/roost-move-*.desktop
 sleep 1.5
 
 # Search providers (#57): a D-Bus provider's result lists under the

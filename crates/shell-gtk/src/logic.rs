@@ -2055,3 +2055,182 @@ Video
         );
     }
 }
+
+/// Where a drop on an app-grid tile lands (iconGrid.js `DragLocation`):
+/// within 20px of either side it is between tiles, else on the tile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropEdge {
+    Start,
+    OnIcon,
+    End,
+}
+
+/// GNOME's `LEFT_DIVIDER_LEEWAY` and `RIGHT_DIVIDER_LEEWAY`.
+const DIVIDER_LEEWAY: f64 = 20.0;
+
+pub fn drop_edge(x: f64, width: f64) -> DropEdge {
+    if x < DIVIDER_LEEWAY {
+        DropEdge::Start
+    } else if x > width - DIVIDER_LEEWAY {
+        DropEdge::End
+    } else {
+        DropEdge::OnIcon
+    }
+}
+
+/// The grid's order (appDisplay.js `_compareItems`): items the saved
+/// `app-picker-layout` places come first by page and position, the rest
+/// by name. `items` are (id, name); returns indices into it.
+pub fn grid_order(items: &[(&str, &str)], layout: &[Vec<(String, i32)>]) -> Vec<usize> {
+    let place = |id: &str| {
+        layout.iter().enumerate().find_map(|(page, entries)| {
+            entries
+                .iter()
+                .find(|(key, _)| key == id)
+                .map(|(_, pos)| (page, *pos))
+        })
+    };
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    order.sort_by(|&a, &b| match (place(items[a].0), place(items[b].0)) {
+        (None, None) => items[a].1.to_lowercase().cmp(&items[b].1.to_lowercase()),
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (Some(pa), Some(pb)) => pa.cmp(&pb),
+    });
+    order
+}
+
+/// GNOME's drop between tiles (appDisplay.js `_getDropTarget` then
+/// `_moveItem`): the dragged item takes the target's place, the others
+/// reflowing away from where it came from; on an edge the reflow cannot
+/// push, the neighbour in that direction is the target instead (not
+/// past the row's ends). `None` when nothing moves.
+pub fn grid_reorder(
+    order: &[String],
+    source: &str,
+    target: usize,
+    edge: DropEdge,
+    columns: usize,
+) -> Option<Vec<String>> {
+    let from = order.iter().position(|id| id == source)?;
+    if from == target || edge == DropEdge::OnIcon || target >= order.len() {
+        return None;
+    }
+    let forward = from < target; // the reflow runs back toward `from`
+    let column = target % columns.max(1);
+    let mut to = target;
+    if edge == DropEdge::Start && forward && column > 0 {
+        to -= 1;
+    } else if edge == DropEdge::End && !forward && column + 1 < columns {
+        to += 1;
+    }
+    let mut out = order.to_vec();
+    let item = out.remove(from);
+    out.insert(to.min(out.len()), item);
+    (out != order).then_some(out)
+}
+
+/// The order as `app-picker-layout` pages (appDisplay.js `_savePages`):
+/// each item's position on its page.
+pub fn grid_pages(order: &[String], per_page: usize) -> Vec<Vec<(String, i32)>> {
+    order
+        .chunks(per_page.max(1))
+        .map(|page| {
+            page.iter()
+                .enumerate()
+                .map(|(i, id)| (id.clone(), i as i32))
+                .collect()
+        })
+        .collect()
+}
+
+/// A saved layout with `target` replaced by `folder` and `dragged`
+/// gone (renumbered), as GNOME's `_createFolder` places a new folder
+/// where the target was. `None` when there is no saved layout.
+pub fn grid_pages_replace(
+    pages: &[Vec<(String, i32)>],
+    target: &str,
+    folder: &str,
+    dragged: &str,
+) -> Option<Vec<Vec<(String, i32)>>> {
+    if pages.iter().all(|p| p.is_empty()) {
+        return None;
+    }
+    Some(
+        pages
+            .iter()
+            .map(|page| {
+                page.iter()
+                    .filter(|(id, _)| id != dragged)
+                    .map(|(id, _)| {
+                        if id == target {
+                            folder.to_owned()
+                        } else {
+                            id.clone()
+                        }
+                    })
+                    .enumerate()
+                    .map(|(i, id)| (id, i as i32))
+                    .collect()
+            })
+            .collect(),
+    )
+}
+
+#[cfg(test)]
+mod grid_layout_tests {
+    use super::*;
+
+    #[test]
+    fn grid_reorders_and_saves_like_gnome() {
+        // The saved layout first, the rest by name.
+        let items = [
+            ("c", "Cheese"),
+            ("a", "Abacus"),
+            ("z", "Zebra"),
+            ("b", "Boxes"),
+        ];
+        let layout = vec![vec![("z".to_owned(), 0), ("c".to_owned(), 1)]];
+        assert_eq!(grid_order(&items, &layout), [2, 0, 1, 3]);
+        assert_eq!(grid_order(&items, &[]), [1, 3, 0, 2]);
+
+        let ids: Vec<String> = ["a", "b", "c", "d", "e"].map(String::from).to_vec();
+        let ids_of = |v: Vec<String>| v.join("");
+        // Dragged forward onto the start edge of "d": it lands before d.
+        let moved = grid_reorder(&ids, "a", 3, DropEdge::Start, 8).unwrap();
+        assert_eq!(ids_of(moved), "bcade");
+        // Dragged back onto the end edge of "b": it lands after b.
+        let moved = grid_reorder(&ids, "e", 1, DropEdge::End, 8).unwrap();
+        assert_eq!(ids_of(moved), "abecd");
+        // Back onto the start edge: before the target.
+        assert_eq!(
+            ids_of(grid_reorder(&ids, "e", 1, DropEdge::Start, 8).unwrap()),
+            "aebcd"
+        );
+        // On the icon is a folder, not a move; onto itself nothing.
+        assert_eq!(grid_reorder(&ids, "a", 3, DropEdge::OnIcon, 8), None);
+        assert_eq!(grid_reorder(&ids, "c", 2, DropEdge::End, 8), None);
+        // Pages of two.
+        assert_eq!(
+            grid_pages(&ids, 2),
+            [
+                vec![("a".to_owned(), 0), ("b".to_owned(), 1)],
+                vec![("c".to_owned(), 0), ("d".to_owned(), 1)],
+                vec![("e".to_owned(), 0)],
+            ]
+        );
+        let saved = vec![vec![
+            ("a".to_owned(), 0),
+            ("b".to_owned(), 1),
+            ("c".to_owned(), 2),
+        ]];
+        assert_eq!(
+            grid_pages_replace(&saved, "b", "F", "a"),
+            Some(vec![vec![("F".to_owned(), 0), ("c".to_owned(), 1)]])
+        );
+        assert_eq!(grid_pages_replace(&[], "b", "F", "a"), None);
+        assert_eq!(drop_edge(10.0, 113.0), DropEdge::Start);
+        assert_eq!(drop_edge(56.0, 113.0), DropEdge::OnIcon);
+        assert_eq!(drop_edge(100.0, 113.0), DropEdge::End);
+    }
+}

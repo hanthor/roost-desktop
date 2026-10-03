@@ -576,19 +576,54 @@ impl OverviewUi {
             Folder(crate::folders::Folder, Vec<&'a AppEntry>),
             App(&'a AppEntry),
         }
-        let mut items: Vec<(String, Item)> = filled
+        // Keyed as app-picker-layout keys them: desktop ids, folder ids.
+        let unordered: Vec<(String, String, Item)> = filled
             .into_iter()
-            .map(|(f, members)| (f.name.to_lowercase(), Item::Folder(f, members)))
-            .chain(
-                loose
-                    .into_iter()
-                    .map(|a| (a.name.to_lowercase(), Item::App(a))),
-            )
+            .map(|(f, members)| (f.id.clone(), f.name.clone(), Item::Folder(f, members)))
+            .chain(loose.into_iter().map(|a| {
+                (
+                    format!("{}.desktop", a.app_id),
+                    a.name.clone(),
+                    Item::App(a),
+                )
+            }))
             .collect();
-        items.sort_by(|a, b| a.0.cmp(&b.0));
+        // GNOME's order: the saved layout, then the rest by name.
+        let keys: Vec<(&str, &str)> = unordered
+            .iter()
+            .map(|(id, name, _)| (id.as_str(), name.as_str()))
+            .collect();
+        let ranks = crate::logic::grid_order(&keys, &crate::folders::picker_layout());
+        let mut slots: Vec<Option<(String, String, Item)>> =
+            unordered.into_iter().map(Some).collect();
+        let items: Vec<(String, Item)> = ranks
+            .into_iter()
+            .filter_map(|i| slots[i].take())
+            .map(|(id, _, item)| (id, item))
+            .collect();
+        let order: Rc<Vec<String>> = Rc::new(items.iter().map(|(id, _)| id.clone()).collect());
         let weak_ui = Rc::downgrade(ui);
+        // GNOME's drop between tiles moves the dragged item there and
+        // saves the grid (app-picker-layout).
+        let reorder = {
+            let (order, weak_ui) = (order.clone(), weak_ui.clone());
+            Rc::new(
+                move |text: &str, target: &str, edge: crate::logic::DropEdge| {
+                    let source = match text.split_once(':') {
+                        Some(("app", id)) => format!("{id}.desktop"),
+                        Some(("folder", id)) => id.to_owned(),
+                        _ => return None,
+                    };
+                    let index = order.iter().position(|id| id == target)?;
+                    let moved = crate::logic::grid_reorder(&order, &source, index, edge, columns)?;
+                    crate::folders::save_picker_layout(&crate::logic::grid_pages(&moved, per_page));
+                    Some(weak_ui.clone())
+                },
+            )
+        };
         let live_apps = me.apps.clone();
         let launch_button = |entry: &AppEntry, size: i32, actions: Rc<dyn OverviewActions>| {
+            let key = format!("{}.desktop", entry.app_id);
             let button = app_button(entry, size, true);
             button.add_css_class("grid-tile");
             fit_tile_label(&button);
@@ -596,16 +631,33 @@ impl OverviewUi {
             // folder of the two.
             drag_source(&button, format!("app:{}", entry.app_id));
             {
-                let (target, weak_ui, live_apps) =
-                    (entry.clone(), weak_ui.clone(), live_apps.clone());
-                on_drop(&button, move |text| {
+                let (target, weak_ui, live_apps, reorder) = (
+                    entry.clone(),
+                    weak_ui.clone(),
+                    live_apps.clone(),
+                    reorder.clone(),
+                );
+                on_drop(&button, move |text, edge| {
+                    if edge != crate::logic::DropEdge::OnIcon {
+                        return reorder(text, &key, edge);
+                    }
                     let dragged = text.strip_prefix("app:")?.to_owned();
                     if dragged == target.app_id {
                         return None;
                     }
                     let apps = live_apps.get();
                     let other = apps.apps().iter().find(|a| a.app_id == dragged)?;
-                    crate::folders::create(&[&target, other])?;
+                    let folder = crate::folders::create(&[&target, other])?;
+                    // The folder takes the target's place in a saved grid.
+                    let pages = crate::logic::grid_pages_replace(
+                        &crate::folders::picker_layout(),
+                        &key,
+                        &folder,
+                        &format!("{dragged}.desktop"),
+                    );
+                    if let Some(pages) = pages {
+                        crate::folders::save_picker_layout(&pages);
+                    }
                     Some(weak_ui.clone())
                 });
             }
@@ -655,10 +707,16 @@ impl OverviewUi {
                     button.add_css_class("app-folder");
                     button.add_css_class("grid-tile");
                     button.update_property(&[gtk::accessible::Property::Label(&folder.name)]);
-                    // An app dropped on a folder joins it.
+                    // An app dropped on a folder joins it; between tiles,
+                    // folders move like apps.
+                    drag_source(&button, format!("folder:{}", folder.id));
                     {
-                        let (fid, weak_ui) = (folder.id.clone(), weak_ui.clone());
-                        on_drop(&button, move |text| {
+                        let (fid, weak_ui, reorder) =
+                            (folder.id.clone(), weak_ui.clone(), reorder.clone());
+                        on_drop(&button, move |text, edge| {
+                            if edge != crate::logic::DropEdge::OnIcon {
+                                return reorder(text, &fid, edge);
+                            }
                             let dragged = text.strip_prefix("app:")?;
                             crate::folders::add_app(&fid, dragged);
                             Some(weak_ui.clone())
@@ -978,14 +1036,16 @@ fn drag_source(widget: &impl IsA<gtk::Widget>, text: String) {
 /// returns the overview to rebuild (or `None` to refuse the drop).
 fn on_drop(
     widget: &impl IsA<gtk::Widget>,
-    act: impl Fn(&str) -> Option<std::rc::Weak<RefCell<OverviewUi>>> + 'static,
+    act: impl Fn(&str, crate::logic::DropEdge) -> Option<std::rc::Weak<RefCell<OverviewUi>>> + 'static,
 ) {
     let target = gtk::DropTarget::new(gtk::glib::Type::STRING, gtk::gdk::DragAction::MOVE);
-    target.connect_drop(move |_, value, _, _| {
+    target.connect_drop(move |t, value, x, _| {
         let Ok(text) = value.get::<String>() else {
             return false;
         };
-        let Some(ui) = act(&text) else {
+        let width = t.widget().map_or(0, |w| w.width());
+        let edge = crate::logic::drop_edge(x, f64::from(width));
+        let Some(ui) = act(&text, edge) else {
             return false;
         };
         // Rebuilt after the drop finishes: the tiles go away with it.
