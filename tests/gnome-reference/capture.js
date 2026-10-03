@@ -141,6 +141,14 @@ export async function run() {
         }
     }
     Main.overview.dash.showAppsButton.checked = false;
+    await Scripting.sleep(1500);
+    // Typing in the overview: the search results (apps only, external
+    // providers off on both sides).
+    Main.overview.searchEntry.grab_key_focus();
+    Main.overview.searchEntry.set_text('calc');
+    await Scripting.sleep(1500);
+    await shot('18-overview-search');
+    Main.overview.searchEntry.set_text('');
     Main.overview.hide();
     await Scripting.sleep(1500);
 

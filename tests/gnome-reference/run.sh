@@ -51,6 +51,9 @@ sleep 1
 exec dbus-run-session -- sh -c '
   gsettings set org.gnome.desktop.interface enable-animations false
   gsettings set org.gnome.shell welcome-dialog-last-shown-version "999"
+  # Search shows apps only: the host and the image have different
+  # search providers installed.
+  gsettings set org.gnome.desktop.search-providers disable-external true
   timeout 240 gnome-shell --headless --wayland --virtual-monitor "${GREF_SIZE:-1280x800}" \
       --automation-script /gref/capture.js
 '
