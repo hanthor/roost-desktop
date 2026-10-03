@@ -319,6 +319,8 @@ pub struct Session<'a> {
     input_source_switches: Vec<bool>,
     /// The switcher's thumbnail frames, when the shell sent new ones.
     switcher_thumbnails: Option<Vec<roost_shell_control::SwitcherThumbnail>>,
+    /// The shell's switcher keys, until the runtime drains them.
+    switcher_keys: Option<Vec<roost_shell_control::SwitcherKey>>,
 }
 
 impl std::fmt::Debug for Session<'_> {
@@ -386,6 +388,7 @@ impl<'a> Session<'a> {
             input_settings: None,
             input_source_switches: Vec::new(),
             switcher_thumbnails: None,
+            switcher_keys: None,
         };
         let msg = match session.conn.read_frame() {
             Ok(msg) => msg,
@@ -642,6 +645,17 @@ impl<'a> Session<'a> {
                 kind: CommandKind::SetSwitcherThumbnails { thumbnails },
             } => {
                 self.switcher_thumbnails = Some(thumbnails);
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: CommandStatus::Applied,
+                })?;
+                Ok(Handled::CommandResult { id, applied: true })
+            }
+            Message::Command {
+                id,
+                kind: CommandKind::SetSwitcherKeys { keys },
+            } => {
+                self.switcher_keys = Some(keys);
                 self.conn.write_frame(&Message::CommandResult {
                     id,
                     status: CommandStatus::Applied,
@@ -959,6 +973,7 @@ fn apply_command(
         | CommandKind::WindowAction { .. }
         | CommandKind::SwitchInputSource { .. }
         | CommandKind::SetSwitcherThumbnails { .. }
+        | CommandKind::SetSwitcherKeys { .. }
         | CommandKind::SetInputSettings(_) => (CommandStatus::Applied, None),
         CommandKind::Lock => {
             // Manual lock from the shell (session-lock set path):
@@ -1002,6 +1017,8 @@ pub struct PollOutcome {
     pub input_source_switches: Vec<bool>,
     /// New switcher thumbnail frames, if the shell sent any.
     pub switcher_thumbnails: Option<Vec<roost_shell_control::SwitcherThumbnail>>,
+    /// The shell's switcher keys, if it sent new ones.
+    pub switcher_keys: Option<Vec<roost_shell_control::SwitcherKey>>,
 }
 
 /// Peers accepted but not yet handshaken are capped so a same-user
@@ -1387,6 +1404,9 @@ impl ControlHub {
                         .extend(std::mem::take(&mut session.input_source_switches));
                     if let Some(thumbnails) = session.switcher_thumbnails.take() {
                         outcome.switcher_thumbnails = Some(thumbnails);
+                    }
+                    if let Some(keys) = session.switcher_keys.take() {
+                        outcome.switcher_keys = Some(keys);
                     }
                     if let Some(active) = session.overview_search.take() {
                         outcome.overview_search = Some(active);

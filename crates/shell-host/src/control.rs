@@ -529,6 +529,19 @@ impl ControlClient {
         Ok(id)
     }
 
+    /// The switcher's chords (GNOME's rebindable switcher keys).
+    pub fn set_switcher_keys(
+        &mut self,
+        keys: Vec<roost_shell_control::SwitcherKey>,
+    ) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::SetSwitcherKeys { keys },
+        })?;
+        Ok(id)
+    }
+
     /// Switch to the next (or previous) keyboard input source. Returns
     /// the request id.
     pub fn switch_input_source(&mut self, backward: bool) -> Result<u64, ControlError> {

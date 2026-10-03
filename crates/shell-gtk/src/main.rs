@@ -1421,7 +1421,19 @@ fn build(app: &adw::Application) {
                 mutter_settings.clone(),
                 gnome_shell.clone(),
             );
+            let shell = shell.clone();
             Rc::new(move || {
+                // The switcher's chords go to the compositor, which holds
+                // the popup open while their modifiers are held.
+                let switcher: Vec<roost_shell_control::SwitcherKey> =
+                    keybindings::switcher_keys(wm_settings.as_ref())
+                        .iter()
+                        .filter_map(|(a, kind)| keybindings::parse_switcher_key(a, *kind))
+                        .take(roost_shell_control::MAX_SWITCHER_KEYS)
+                        .collect();
+                if let Some(control) = shell.borrow_mut().control.as_mut() {
+                    let _ = control.set_switcher_keys(switcher);
+                }
                 let list = keybindings::bindings(
                     settings.as_ref(),
                     wm_settings.as_ref(),
