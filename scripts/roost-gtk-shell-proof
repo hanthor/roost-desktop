@@ -122,6 +122,7 @@
 #               row reaches the item (P-TR-01)
 #   G-SWITCHER-GROUP Alt+Above_Tab shows an app's windows as thumbnails
 #               and steps through them; W closes the focused one
+#   G-IME            IBus composes pinyin into hanzi in a GTK app
 #   G-SWITCHER-REBIND switch-applications rebound moves the switcher
 #                   to the new chord
 #   G-SWITCHER  Alt+Tab shows the switcher with every app (GNOME's
@@ -228,7 +229,12 @@ STUBS_PID=""
 SYSBUS_PID=""
 ACCEL_PID=""
 CAL_PID=""
+IME_PIDS=""
 cleanup() {
+    # shellcheck disable=SC2086
+    if [ -n "$IME_PIDS" ]; then kill $IME_PIDS 2>/dev/null || true; fi
+    # The bridge daemonized ibus-daemon for this session's display.
+    if command -v ibus >/dev/null 2>&1; then ibus exit >/dev/null 2>&1 || true; fi
     if [ -n "$CAL_PID" ]; then kill "$CAL_PID" 2>/dev/null || true; fi
     if [ -n "$ACCEL_PID" ]; then kill "$ACCEL_PID" 2>/dev/null || true; fi
     if [ -n "$COMPOSITOR_PID" ]; then kill "$COMPOSITOR_PID" 2>/dev/null || true; fi
@@ -402,7 +408,7 @@ elif [ -n "${ROOST_REQUIRE_PAM_WRAPPER:-}" ]; then
     exit 1
 fi
 
-cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk
+cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk -p roost-shell-host
 if [ -n "$PAM_ON" ]; then
     env LD_PRELOAD="$PAM_WRAPPER_LIB" PAM_WRAPPER=1 \
         PAM_WRAPPER_SERVICE_DIR="$ARTIFACTS/pam/services" \
@@ -1512,6 +1518,52 @@ sleep 1
 gsettings reset org.gnome.desktop.wm.keybindings switch-applications
 sleep 1
 pass G-SWITCHER-REBIND "GNOME's switch-applications rebinds: Ctrl+J steps and commits, Alt+Tab goes to apps"
+
+# GNOME's input methods: IBus composes in a GTK app, with
+# roost-ibus-bridge as IBus's client (GNOME Shell's part). A test engine
+# turns pinyin into hanzi: the pinyin stays in preedit, Space commits.
+if command -v ibus-daemon >/dev/null 2>&1 &&
+    "$PY" -c "import gi; gi.require_version('IBus', '1.0')" 2>/dev/null; then
+    for _ in $(seq 1 40); do grep -q "roost-ibus-bridge: ready" "$LOG" && break; sleep 0.5; done
+    grep -q "roost-ibus-bridge: ready" "$LOG" || fail G-IME "the IBus bridge never came up"
+    "$PY" -u "$ROOT/scripts/lib/roost-ibus-test-engine.py" >"$ARTIFACTS/ibus-engine.log" 2>&1 &
+    IME_PIDS="$!"
+    for _ in $(seq 1 30); do grep -q ready "$ARTIFACTS/ibus-engine.log" && break; sleep 0.5; done
+    grep -q ready "$ARTIFACTS/ibus-engine.log" || fail G-IME "the test engine did not register with IBus"
+    IME_OUT="$ARTIFACTS/ime.txt"
+    rm -f "$IME_OUT"
+    focused_before="$(grep -c 'roost-ibus-bridge: text field focused' "$LOG")"
+    WAYLAND_DISPLAY="$SOCKET_NAME" "$PY" "$ROOT/scripts/lib/roost-ime-window.py" "$IME_OUT" \
+        >"$ARTIFACTS/ime-window.log" 2>&1 &
+    IME_WINDOW="$!"
+    IME_PIDS="$IME_PIDS $IME_WINDOW"
+    cstate '.windows | any(.app_id == "roost-ime")' "ime window" || fail G-IME "the IME window never mapped"
+    for _ in $(seq 1 20); do
+        [ "$(grep -c 'roost-ibus-bridge: text field focused' "$LOG")" -gt "$focused_before" ] && break
+        sleep 0.3
+    done
+    sleep 0.5
+    xdotool type --delay 100 nihao
+    sleep 0.8
+    scrot "$ARTIFACTS/24i-ime-preedit.png" >/dev/null
+    [ ! -s "$IME_OUT" ] || fail G-IME "pinyin reached the field before a commit: $(cat "$IME_OUT")"
+    xdotool key space
+    for _ in $(seq 1 20); do [ "$(cat "$IME_OUT" 2>/dev/null)" = "你好" ] && break; sleep 0.3; done
+    [ "$(cat "$IME_OUT" 2>/dev/null)" = "你好" ] ||
+        fail G-IME "the field holds '$(cat "$IME_OUT" 2>/dev/null)', not 你好"
+    pass G-IME "IBus composes in a GTK app: pinyin in preedit, Space commits 你好"
+    # shellcheck disable=SC2086 # two pids
+    kill $IME_PIDS 2>/dev/null || true
+    IME_PIDS=""
+    # Back to a plain layout: later stages type straight to the apps.
+    ibus engine xkb:us::eng >/dev/null 2>&1 || true
+    cstate '.windows | any(.app_id == "roost-ime") | not' "ime window gone" ||
+        fail G-IME "the IME window did not close"
+elif [ "${ROOST_REQUIRE_IBUS:-0}" = 1 ]; then
+    fail G-IME "IBus is required (ROOST_REQUIRE_IBUS=1) but ibus-daemon or its GObject bindings are missing"
+else
+    echo "roost-gtk-shell-proof: G-IME skipped (IBus not installed)"
+fi
 
 # GNOME's workspace switcher popup: a dark pill above the bottom edge
 # right after a workspace key.
