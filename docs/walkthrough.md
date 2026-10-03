@@ -220,6 +220,18 @@ Do Not Disturb holds banners back but keeps them in the list. (`P-NT-02`)
 
 ![Do Not Disturb](walkthrough/do-not-disturb.png)
 
+### Notification groups
+
+An app's notifications group in the list: collapsed, the newest card shows with the next peeking out beneath it. (`P-NT-02`)
+
+![Notification groups](walkthrough/notification-group.png)
+
+### Expanded group
+
+Pressing a group expands it to every card, under the app's name and a Collapse button. (`P-NT-02`)
+
+![Expanded group](walkthrough/notification-group-expanded.png)
+
 ## System
 
 ### Input methods
