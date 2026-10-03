@@ -22,6 +22,14 @@
 //! and the compositor follows each rectangle it reports to the bridge,
 //! and only to it, with the same rectangle in global coordinates. The
 //! last rectangle before a `done` is therefore the global one.
+//!
+//! The candidate window is not the bridge's: as in GNOME, the shell is
+//! IBus's panel. `--panel disable` only stops the daemon spawning its
+//! own panel (ibus-ui-gtk3); the daemon routes panel calls to whoever
+//! owns `org.freedesktop.IBus.Panel` on its bus, which the GTK shell
+//! takes (crates/shell-gtk/src/ibus_panel.rs). Because the bridge's
+//! capabilities leave out lookup tables and auxiliary text, the
+//! engine's candidates go there, with the cursor location it sends.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
