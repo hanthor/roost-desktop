@@ -6,8 +6,11 @@ Usage: roost-service-stubs.py BACKLIGHT_DIR [POWER_LOG]
 Serves, on the bus at $DBUS_SYSTEM_BUS_ADDRESS (a private bus the proof
 starts), just enough of each daemon behind GNOME 51's quick settings:
 
-- NetworkManager: WirelessEnabled (rw), GetDevices with one ethernet
-  (activated) and one wifi device. The wifi device sees four access
+- NetworkManager: WirelessEnabled (rw), Connectivity (full) and
+  PrimaryConnection, GetDevices with one ethernet and one wifi device.
+  The ethernet device is up on its one saved profile ("Wired connection
+  1"); Device.Disconnect takes it down and ActivateConnection brings it
+  back, both appended to $ROOST_STUB_NM_LOG. The wifi device sees four access
   points (a saved WPA2 "Roost Home", an open "Roost Cafe", an 802.1X
   "Roost Office" and a hidden one); RequestScan, ActivateConnection and
   AddAndActivateConnection are appended to $ROOST_STUB_NM_LOG, and an
@@ -59,6 +62,13 @@ XML = """
       <arg type="o" direction="out"/>
     </method>
     <property name="WirelessEnabled" type="b" access="readwrite"/>
+    <property name="NetworkingEnabled" type="b" access="read"/>
+    <property name="Connectivity" type="u" access="read"/>
+    <property name="PrimaryConnection" type="o" access="read"/>
+  </interface>
+  <interface name="org.freedesktop.NetworkManager.Connection.Active">
+    <property name="Connection" type="o" access="read"/>
+    <property name="State" type="u" access="read"/>
   </interface>
   <interface name="org.freedesktop.NetworkManager.AgentManager">
     <method name="Register"><arg type="s" direction="in"/></method>
@@ -67,6 +77,8 @@ XML = """
     <property name="DeviceType" type="u" access="read"/>
     <property name="State" type="u" access="read"/>
     <property name="AvailableConnections" type="ao" access="read"/>
+    <property name="ActiveConnection" type="o" access="read"/>
+    <method name="Disconnect"/>
   </interface>
   <interface name="org.freedesktop.NetworkManager.Device.Wireless">
     <method name="RequestScan"><arg type="a{sv}" direction="in"/></method>
@@ -147,6 +159,9 @@ APS = [
 ]
 AP_PATH = NM + "/AccessPoint/{}"
 HOME_CONN = NM + "/Settings/1"
+WIRED_CONN = NM + "/Settings/3"
+WIRED_ACTIVE = NM + "/ActiveConnection/3"
+DEVICE = "org.freedesktop.NetworkManager.Device"
 WIRELESS = "org.freedesktop.NetworkManager.Device.Wireless"
 HCI = "/org/bluez/hci0"
 BT_DEVICES = [
@@ -160,13 +175,21 @@ SESSION = "/org/freedesktop/login1/session/auto"
 
 # (path, interface) -> {property: GLib.Variant}
 state = {
-    (NM, "org.freedesktop.NetworkManager"): {"WirelessEnabled": GLib.Variant("b", True)},
+    (NM, "org.freedesktop.NetworkManager"): {
+        "WirelessEnabled": GLib.Variant("b", True),
+        "NetworkingEnabled": GLib.Variant("b", True),
+        "Connectivity": GLib.Variant("u", 4),
+        "PrimaryConnection": GLib.Variant("o", WIRED_ACTIVE)},
     (DEV_ETH, "org.freedesktop.NetworkManager.Device"): {
         "DeviceType": GLib.Variant("u", 1), "State": GLib.Variant("u", 100),
-        "AvailableConnections": GLib.Variant("ao", [])},
+        "AvailableConnections": GLib.Variant("ao", [WIRED_CONN]),
+        "ActiveConnection": GLib.Variant("o", WIRED_ACTIVE)},
+    (WIRED_ACTIVE, "org.freedesktop.NetworkManager.Connection.Active"): {
+        "Connection": GLib.Variant("o", WIRED_CONN), "State": GLib.Variant("u", 2)},
     (DEV_WIFI, "org.freedesktop.NetworkManager.Device"): {
         "DeviceType": GLib.Variant("u", 2), "State": GLib.Variant("u", 30),
-        "AvailableConnections": GLib.Variant("ao", [HOME_CONN])},
+        "AvailableConnections": GLib.Variant("ao", [HOME_CONN]),
+        "ActiveConnection": GLib.Variant("o", "/")},
     (DEV_WIFI, WIRELESS): {
         "AccessPoints": GLib.Variant("ao", [AP_PATH.format(n) for n, *_ in APS]),
         "ActiveAccessPoint": GLib.Variant("o", "/"),
@@ -249,6 +272,24 @@ def method_call(c, sender, path, iface, method, params, invocation):
                                 "802-11-wireless-security", [], 1)),
                    None, Gio.DBusCallFlags.NONE, -1, None, answered)
         invocation.return_value(GLib.Variant("(oo)", (NM + "/Settings/2", NM + "/ActiveConnection/2")))
+    elif method == "Disconnect" and path == DEV_ETH:
+        log = os.environ.get("ROOST_STUB_NM_LOG")
+        if log:
+            with open(log, "a") as fh:
+                fh.write(f"Disconnect {path}\n")
+        wired_up(c, False)
+        invocation.return_value(None)
+    elif method in ("ActivateConnection", "AddAndActivateConnection") \
+            and params.unpack()[1] == DEV_ETH:
+        log = os.environ.get("ROOST_STUB_NM_LOG")
+        if log:
+            with open(log, "a") as fh:
+                fh.write(f"{method} {' '.join(a for a in params.unpack() if isinstance(a, str))}\n")
+        wired_up(c, True)
+        if method == "ActivateConnection":
+            invocation.return_value(GLib.Variant("(o)", (WIRED_ACTIVE,)))
+        else:
+            invocation.return_value(GLib.Variant("(oo)", (WIRED_CONN, WIRED_ACTIVE)))
     elif method in ("RequestScan", "ActivateConnection", "AddAndActivateConnection"):
         log = os.environ.get("ROOST_STUB_NM_LOG")
         args = params.unpack()
@@ -268,6 +309,12 @@ def method_call(c, sender, path, iface, method, params, invocation):
             invocation.return_value(GLib.Variant("(o)", (active,)))
         else:
             invocation.return_value(GLib.Variant("(oo)", (NM + "/Settings/2", active)))
+    elif method == "GetSettings" and path == WIRED_CONN:
+        invocation.return_value(GLib.Variant("(a{sa{sv}})", ({
+            "connection": {"id": GLib.Variant("s", "Wired connection 1"),
+                           "type": GLib.Variant("s", "802-3-ethernet"),
+                           "timestamp": GLib.Variant("t", 1790000000)},
+        },)))
     elif method == "GetSettings":
         invocation.return_value(GLib.Variant("(a{sa{sv}})", ({
             "connection": {"id": GLib.Variant("s", "Roost Home"),
@@ -316,6 +363,16 @@ def method_call(c, sender, path, iface, method, params, invocation):
         invocation.return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", method)
 
 
+def wired_up(c, up):
+    """The ethernet device's profile goes up or down, as NetworkManager
+    reports it: device state, active connection, primary connection."""
+    set_property(c, None, DEV_ETH, DEVICE, "State", GLib.Variant("u", 100 if up else 30))
+    set_property(c, None, DEV_ETH, DEVICE, "ActiveConnection",
+                 GLib.Variant("o", WIRED_ACTIVE if up else "/"))
+    set_property(c, None, NM, "org.freedesktop.NetworkManager", "PrimaryConnection",
+                 GLib.Variant("o", WIRED_ACTIVE if up else "/"))
+
+
 def get_property(c, sender, path, iface, prop):
     return state[(path, iface)][prop]
 
@@ -340,6 +397,8 @@ SERVICES = {
         (DEV_WIFI, WIRELESS),
         (NM + "/AgentManager", "org.freedesktop.NetworkManager.AgentManager"),
         (HOME_CONN, "org.freedesktop.NetworkManager.Settings.Connection"),
+        (WIRED_CONN, "org.freedesktop.NetworkManager.Settings.Connection"),
+        (WIRED_ACTIVE, "org.freedesktop.NetworkManager.Connection.Active"),
         *[(AP_PATH.format(n), "org.freedesktop.NetworkManager.AccessPoint") for n, *_ in APS],
     ]),
     "bluez": (["org.bluez"], [

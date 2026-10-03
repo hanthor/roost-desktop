@@ -37,6 +37,7 @@ mod switcher;
 mod tray;
 mod wifi;
 mod window_menu;
+mod wired;
 mod ws_popup;
 
 use std::cell::RefCell;
@@ -682,7 +683,18 @@ fn quick_settings_popover(
     }
     let wifi = qs_menu_tile("network-wireless-symbolic", "Wi-Fi", None, &wifi_menu_ui);
     wifi_menu.set_tile(wifi.clone());
-    let wired = qs_tile("network-wired-symbolic", "Wired", None);
+    // GNOME's wired menu: the devices' profiles, then Wired Settings.
+    let wired_menu_ui = QsMenu::new("network-wired-symbolic", "Wired Connections");
+    let wired_menu = wired::WiredMenu::new(wired_menu_ui.list());
+    wired_menu_ui.separator();
+    let (wired_settings, _) = wired_menu_ui.item(None, "Wired Settings");
+    wired_settings.connect_clicked(|_| {
+        let _ = std::process::Command::new("gnome-control-center")
+            .arg("network")
+            .spawn();
+    });
+    let wired = qs_menu_tile("network-wired-symbolic", "Wired", None, &wired_menu_ui);
+    wired_menu.set_tile(wired.clone());
     // GNOME's Bluetooth menu: devices, a placeholder, Bluetooth Settings.
     let bt_menu_ui = QsMenu::new("bluetooth-active-symbolic", "Bluetooth");
     let bt_list = bt_menu_ui.list();
@@ -730,7 +742,7 @@ fn quick_settings_popover(
     let dark = qs_tile("dark-mode-symbolic", "Dark Style", None);
     let dnd_tile = qs_tile("notifications-disabled-symbolic", "Do Not Disturb", None);
     grid.add(&wifi, Some(&wifi_menu_ui));
-    grid.add(&wired, None);
+    grid.add(&wired, Some(&wired_menu_ui));
     grid.add(&bluetooth, Some(&bt_menu_ui));
     grid.add(&power_mode, Some(&power_menu_ui));
     for tile in [&night, &dark, &dnd_tile] {
@@ -774,6 +786,7 @@ fn quick_settings_popover(
     // same way; their rows close the panel themselves.
     for menu in [
         &wifi_menu_ui.revealer,
+        &wired_menu_ui.revealer,
         &bt_menu_ui.revealer,
         &sound_menu_ui.revealer,
     ] {
@@ -790,7 +803,12 @@ fn quick_settings_popover(
         let menu = menu.clone();
         popover.connect_closed(move |_| menu.set_visible(false));
     }
-    for settings in [&all_networks, &bt_settings, &sound_settings] {
+    for settings in [
+        &all_networks,
+        &wired_settings,
+        &bt_settings,
+        &sound_settings,
+    ] {
         let popover = popover.clone();
         settings.connect_clicked(move |_| popover.popdown());
     }
@@ -817,6 +835,7 @@ fn quick_settings_popover(
     services::attach(&Rc::new(services::Widgets {
         wifi,
         wifi_menu,
+        wired_menu,
         bt_menu,
         wired,
         bluetooth,

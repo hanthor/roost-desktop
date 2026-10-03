@@ -255,6 +255,8 @@ pub struct Widgets {
     pub wifi: Tile,
     /// The Wi-Fi tile's network menu.
     pub wifi_menu: Rc<crate::wifi::WifiMenu>,
+    /// The wired tile's profile menu; it drives the tile too.
+    pub wired_menu: Rc<crate::wired::WiredMenu>,
     /// The Bluetooth tile's device menu.
     pub bt_menu: Rc<crate::bt_menu::BtMenu>,
     pub wired: Tile,
@@ -330,7 +332,6 @@ fn network(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
                 let left = Rc::new(Cell::new(paths.len()));
                 if paths.is_empty() {
                     w.wifi.present(false);
-                    w.wired.present(false);
                 }
                 for path in paths {
                     let dev = Remote::new(&conn, NM_NAME, &path, NM_DEVICE_IFACE);
@@ -364,18 +365,10 @@ fn network(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
                             let (wifi, wired, connected) = *seen.borrow();
                             w.wifi.present(wifi);
                             w.wifi_menu.attach(&conn, wifi_device.borrow().clone());
-                            w.wired.present(wired);
+                            w.wired_menu.attach(&conn);
                             // GNOME's primary network indicator: shown
                             // while the main connection is up.
-                            w.panel_network.set_visible(connected);
-                            w.wired.show_state(
-                                connected,
-                                Some(if connected {
-                                    "Connected"
-                                } else {
-                                    "Disconnected"
-                                }),
-                            );
+                            w.panel_network.set_visible(wired && connected);
                         }
                     });
                 }
@@ -393,7 +386,7 @@ fn network(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
                 refresh();
             } else {
                 w.wifi.present(false);
-                w.wired.present(false);
+                w.wired_menu.detach();
                 w.panel_network.set_visible(false);
             }
         });
@@ -402,16 +395,6 @@ fn network(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
         let nm = nm.clone();
         w.wifi
             .on_user_toggle(move |on| nm.set("WirelessEnabled", on.to_variant()));
-    }
-    // The wired tile mirrors the link; GNOME's own wired tile opens a
-    // menu rather than toggling, so a click only re-asserts the state.
-    {
-        let w2 = w.clone();
-        w.wired.on_user_toggle(move |_| {
-            let connected = w2.wired.subtitle.text() == "Connected";
-            w2.wired
-                .show_state(connected, Some(&w2.wired.subtitle.text()));
-        });
     }
 }
 
