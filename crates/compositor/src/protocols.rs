@@ -16,7 +16,12 @@
 //!
 //! - text-input v3 and input-method v2 (#60): IMEs such as fcitx5 type
 //!   into GTK apps; smithay relays focus and text, candidate popups are
-//!   tracked like any other popup.
+//!   tracked like any other popup. The compositor's IBus bridge also
+//!   hears where the text cursor is on screen: after smithay reports
+//!   the cursor rectangle to its input popup (in the text field's
+//!   surface coordinates, all input-method-v2 offers), the compositor
+//!   reports it again in global coordinates, which IBus's
+//!   `SetCursorLocation` wants (GNOME Shell knows them first-hand).
 //! - pointer-gestures, relative-pointer and pointer-constraints (#60,
 //!   #89): touchpad gestures reach apps, games get raw motion and a
 //!   locked pointer.
@@ -155,6 +160,19 @@ impl State {
         !self.protocols.inhibitors.is_empty()
     }
 
+    /// Where `surface`'s buffer origin lands globally: a mapped
+    /// toplevel's (its window rect less the client's shadow margin) or
+    /// a layer surface's.
+    fn surface_origin(&self, surface: &WlSurface) -> Option<Point<i32, Logical>> {
+        if let Some(window) = self.window_origins.get(surface) {
+            return Some(*window - crate::popup::window_geometry_loc(surface));
+        }
+        crate::layer::layer_layout(self)
+            .into_iter()
+            .find(|(s, _, _)| s == surface)
+            .map(|(_, (x, y), _)| (x, y).into())
+    }
+
     /// Client that currently holds keyboard focus, if any.
     fn keyboard_client(&self) -> Option<smithay::reexports::wayland_server::backend::ClientId> {
         let keyboard = self.seat.get_keyboard()?;
@@ -260,7 +278,30 @@ impl InputMethodHandler for State {
         }
     }
 
-    fn popup_repositioned(&mut self, _surface: ImPopup) {}
+    /// The text cursor moved. The IBus bridge's popup (and only its:
+    /// other input methods keep the protocol's surface coordinates)
+    /// hears the rectangle again, in global coordinates.
+    fn popup_repositioned(&mut self, mut surface: ImPopup) {
+        let is_bridge = surface.wl_surface().client().is_some_and(|c| {
+            c.get_data::<crate::ClientState>()
+                .is_some_and(|d| d.ime_bridge)
+        });
+        if !is_bridge {
+            return;
+        }
+        let Some(parent) = surface.get_parent().map(|p| p.surface.clone()) else {
+            return;
+        };
+        let Some(origin) = self.surface_origin(&parent) else {
+            return;
+        };
+        // smithay just stored the field's rectangle (surface-local).
+        let local = surface.text_input_rectangle();
+        let global = global_cursor_rect(origin, local);
+        surface.set_text_input_rectangle(global.loc.x, global.loc.y, global.size.w, global.size.h);
+        // Placement stays relative to the parent, as smithay set it.
+        surface.set_location(local.loc);
+    }
 
     /// Where the text field's window sits, so the candidate popup
     /// lands next to the caret.
@@ -299,3 +340,26 @@ impl PointerConstraintsHandler for State {
     }
 }
 delegate_pointer_constraints!(State);
+
+/// A text cursor rectangle in a surface's coordinates, placed globally
+/// by the surface's buffer origin.
+fn global_cursor_rect(
+    origin: Point<i32, Logical>,
+    local: Rectangle<i32, Logical>,
+) -> Rectangle<i32, Logical> {
+    Rectangle::new(origin + local.loc, local.size)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_bridge_hears_the_text_cursor_in_global_coordinates() {
+        // A window whose surface starts at (300, 200), caret 40 px in
+        // and 12 px down, 1 px wide and 18 tall.
+        let local = Rectangle::new((40, 12).into(), (1, 18).into());
+        let global = global_cursor_rect((300, 200).into(), local);
+        assert_eq!(global, Rectangle::new((340, 212).into(), (1, 18).into()));
+    }
+}

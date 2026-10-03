@@ -6,7 +6,12 @@ Usage: roost-ibus-test-engine.py
 Registers engine "roost-test" with the running ibus-daemon and makes it
 the global engine. Letters build a preedit (pinyin); Space commits its
 hanzi from a small table ("nihao" -> 你好), else the letters; BackSpace
-edits the preedit. Prints "roost-ibus-test-engine: ready" once set.
+edits the preedit. F2 reads the surrounding text the client sent,
+deletes the character before the cursor and commits "|TEXT|CURSOR" (so
+"你好" with the cursor after it becomes "你|你好|2"). Prints
+"roost-ibus-test-engine: ready" once set, and each surrounding text and
+cursor location IBus delivers ("surrounding TEXT CURSOR ANCHOR",
+"cursor X Y W H").
 """
 import gi
 
@@ -28,6 +33,18 @@ class RoostTestEngine(IBus.Engine):
     def __init__(self):
         super().__init__()
         self.buffer = ""
+        self.surrounding = None
+
+    def do_set_surrounding_text(self, text, cursor_pos, anchor_pos):
+        self.surrounding = (text.get_text(), cursor_pos)
+        print(
+            f"roost-ibus-test-engine: surrounding {text.get_text()} {cursor_pos} {anchor_pos}",
+            flush=True,
+        )
+        IBus.Engine.do_set_surrounding_text(self, text, cursor_pos, anchor_pos)
+
+    def do_set_cursor_location(self, x, y, w, h):
+        print(f"roost-ibus-test-engine: cursor {x} {y} {w} {h}", flush=True)
 
     def show(self):
         text = IBus.Text.new_from_string(self.buffer)
@@ -45,6 +62,11 @@ class RoostTestEngine(IBus.Engine):
             self.commit_text(IBus.Text.new_from_string(TABLE.get(self.buffer, self.buffer)))
             self.buffer = ""
             self.show()
+            return True
+        if keyval == IBus.KEY_F2 and self.surrounding and not self.buffer:
+            text, cursor = self.surrounding
+            self.delete_surrounding_text(-1, 1)
+            self.commit_text(IBus.Text.new_from_string(f"|{text}|{cursor}"))
             return True
         if keyval == IBus.KEY_BackSpace and self.buffer:
             self.buffer = self.buffer[:-1]

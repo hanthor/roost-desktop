@@ -58,6 +58,9 @@
 #   G-QS-ABSENT      with the daemons gone, their tiles hide (no hang)
 #   G-GL-WINDOW      a GTK window on the GL renderer maps and paints
 #                    (linux-dmabuf, #89)
+#   G-WAYLAND-INFO   wayland-info lists every global GNOME 51's Mutter
+#                    offers that Roost must, at its version or newer
+#                    (tests/protocols/gnome51-globals.tsv, P-SY-06)
 #   G-OV-SHELL-UI  the overview shows the search entry and the dash
 #   G-OV-SEARCH typing lists matching apps (#57)
 #   G-OV-LAUNCH Enter launches the top result and closes the overview
@@ -124,6 +127,12 @@
 #   G-SWITCHER-GROUP Alt+Above_Tab shows an app's windows as thumbnails
 #               and steps through them; W closes the focused one
 #   G-IME            IBus composes pinyin into hanzi in a GTK app
+#   G-SCROLL         niri's scrollable tiling: gaps, view follows focus, ring
+#   G-IME-SURROUNDING the engine sees the field's text around the
+#                    cursor (in characters) and its deletion reaches
+#                    the field
+#   G-IME-CURSOR     IBus hears the text cursor's location inside the
+#                    field's window, in global coordinates
 #   G-SWITCHER-REBIND switch-applications rebound moves the switcher
 #                   to the new chord
 #   G-SWITCHER  Alt+Tab shows the switcher with every app (GNOME's
@@ -1308,6 +1317,22 @@ if [ "$1" -lt 150 ] || [ "$2" -gt 80 ] || [ "$3" -gt 80 ]; then
 fi
 pass G-GL-WINDOW "a GL-rendered GTK window maps and paints"
 
+# The globals a client finds (P-SY-06, #89): wayland-info against this
+# session, compared with GNOME 51's capture. Here, after G-GL-WINDOW,
+# the renderer has reported its formats, so linux-dmabuf is advertised.
+if command -v wayland-info >/dev/null 2>&1; then
+    WAYLAND_DISPLAY="$SOCKET_NAME" wayland-info >"$ARTIFACTS/wayland-info.txt" 2>&1 ||
+        fail G-WAYLAND-INFO "wayland-info could not talk to the session"
+    "$PY" "$ROOT/scripts/roost-wayland-info-compare" "$ARTIFACTS/wayland-info.txt" \
+        --report "$ARTIFACTS/wayland-info-compare.txt" ||
+        fail G-WAYLAND-INFO "globals short of GNOME 51's (see wayland-info-compare.txt)"
+    pass G-WAYLAND-INFO "every expected GNOME 51 global is advertised at its version or newer"
+elif [ "${ROOST_REQUIRE_WAYLAND_INFO:-0}" = 1 ]; then
+    fail G-WAYLAND-INFO "wayland-info is required (ROOST_REQUIRE_WAYLAND_INFO=1) but not installed"
+else
+    echo "roost-gtk-shell-proof: G-WAYLAND-INFO skipped (no wayland-info)"
+fi
+
 # X11 by default (#59): the compositor starts XWayland when it is
 # installed, tells the shell DISPLAY, and apps launched from search get it.
 if command -v Xwayland >/dev/null 2>&1 && command -v xeyes >/dev/null 2>&1; then
@@ -1582,6 +1607,30 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     [ "$(cat "$IME_OUT" 2>/dev/null)" = "你好" ] ||
         fail G-IME "the field holds '$(cat "$IME_OUT" 2>/dev/null)', not 你好"
     pass G-IME "IBus composes in a GTK app: pinyin in preedit, Space commits 你好"
+    # Surrounding text, as GNOME Shell sends it: the engine sees "你好"
+    # with the cursor 2 characters in (6 bytes on the wire); F2 makes it
+    # delete the character before the cursor and commit what it saw.
+    ENGINE_LOG="$ARTIFACTS/ibus-engine.log"
+    for _ in $(seq 1 20); do grep -q "surrounding 你好 2 2" "$ENGINE_LOG" && break; sleep 0.3; done
+    grep -q "surrounding 你好 2 2" "$ENGINE_LOG" ||
+        fail G-IME-SURROUNDING "the engine never saw '你好' with the cursor at 2: $(grep surrounding "$ENGINE_LOG" | tail -3)"
+    xdotool key F2
+    for _ in $(seq 1 20); do [ "$(cat "$IME_OUT" 2>/dev/null)" = "你|你好|2" ] && break; sleep 0.3; done
+    [ "$(cat "$IME_OUT" 2>/dev/null)" = "你|你好|2" ] ||
+        fail G-IME-SURROUNDING "the field holds '$(cat "$IME_OUT" 2>/dev/null)', not 你|你好|2"
+    pass G-IME-SURROUNDING "the engine reads the field's surrounding text and deletes around the cursor"
+    # The candidate window's anchor: SetCursorLocation inside the
+    # field's window, in global (screen) coordinates.
+    cursor="$(sed -n 's/^roost-ibus-test-engine: cursor //p' "$ENGINE_LOG" | tail -1)"
+    [ -n "$cursor" ] || fail G-IME-CURSOR "IBus never heard a cursor location"
+    # shellcheck disable=SC2086 # four numbers
+    set -- $cursor
+    rect="$(jq -r '.windows[] | select(.app_id == "roost-ime") | .rect | "\(.[0]) \(.[1]) \(.[2]) \(.[3])"' "$CSTATE")"
+    inside="$(echo "$rect" | awk -v x="$1" -v y="$2" -v h="$4" \
+        '{ print (x >= $1 && x < $1 + $3 && y >= $2 && y < $2 + $4 && h > 0) ? "yes" : "no" }')"
+    [ "$inside" = yes ] ||
+        fail G-IME-CURSOR "cursor location ($cursor) is not inside the IME window ($rect)"
+    pass G-IME-CURSOR "IBus hears the text cursor at ($cursor), inside the field's window ($rect)"
     # shellcheck disable=SC2086 # two pids
     kill $IME_PIDS 2>/dev/null || true
     IME_PIDS=""
@@ -1594,6 +1643,41 @@ elif [ "${ROOST_REQUIRE_IBUS:-0}" = 1 ]; then
 else
     echo "roost-gtk-shell-proof: G-IME skipped (IBus not installed)"
 fi
+
+# niri's scrollable tiling (Super+Shift+T): the windows become a strip of
+# columns with 16px gaps on every side, the view follows the focused
+# column (whole on screen), niri's focus ring (4px of #7fc8ff) marks it,
+# Super+R steps its width and Super+Left moves focus along the strip.
+strip_whole() {
+    cstate ".focused_rect[1] == 48 and .focused_rect[3] == $((HEIGHT - 32 - 32)) and
+        .focused_rect[0] >= 16 and .focused_rect[0] + .focused_rect[2] <= $((WIDTH - 16))" "$1"
+}
+xdotool key super+shift+t
+cstate '.session_mode == "scroll"' "scroll mode" || fail G-SCROLL "Super+Shift+T did not enter scroll mode"
+sleep 1
+strip_whole "focused column whole" || fail G-SCROLL "the focused column is not whole with gaps: $(jq -c .focused_rect "$CSTATE")"
+scrot "$ARTIFACTS/24j-scroll-strip.png" >/dev/null
+fx="$(jq -r '.focused_rect[0]' "$CSTATE")"
+fy="$(jq -r '.focused_rect[1]' "$CSTATE")"
+# shellcheck disable=SC2046
+set -- $(px "$ARTIFACTS/24j-scroll-strip.png" $((fx - 2)) $((fy + 200)))
+# Columns are tiled on every edge, so no client shadow dims the ring.
+if [ "${1:-0}" -lt 122 ] || [ "${2:-0}" -lt 195 ] || [ "${3:-0}" -lt 250 ]; then
+    fail G-SCROLL "no focus ring left of the focused column (pixel ${1:-?} ${2:-?} ${3:-?})"
+fi
+before_w="$(jq -r '.focused_rect[2]' "$CSTATE")"
+before_id="$(jq -r '.focused' "$CSTATE")"
+xdotool key super+r
+cstate ".focused_rect[2] != $before_w" "preset" || fail G-SCROLL "Super+R did not change the column width"
+strip_whole "widened column whole" || fail G-SCROLL "the widened column is not whole on screen"
+xdotool key super+Left
+cstate ".focused != $before_id" "focus moved" || fail G-SCROLL "Super+Left did not move focus along the strip"
+strip_whole "newly focused column whole" || fail G-SCROLL "the view did not follow focus"
+scrot "$ARTIFACTS/24k-scroll-follow.png" >/dev/null
+xdotool key super+shift+t
+cstate '.session_mode == "gnome"' "floating again" || fail G-SCROLL "Super+Shift+T did not leave scroll mode"
+pass G-SCROLL "Super+Shift+T makes niri's strip: gaps, the view following focus, the focus ring, presets and focus moves"
+sleep 1
 
 # GNOME's workspace switcher popup: a dark pill above the bottom edge
 # right after a workspace key.

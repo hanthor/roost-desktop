@@ -481,6 +481,8 @@ pub struct Runtime {
     /// time; drawn eased), moving toward the open state each frame.
     overview_progress: f64,
     overview_progress_at: Instant,
+    /// Last strip-view spring step, for the per-frame time delta.
+    strip_view_at: Instant,
     /// A three-finger vertical swipe driving the transition: the
     /// progress it started from.
     overview_swipe_from: Option<f64>,
@@ -767,6 +769,7 @@ impl Runtime {
             shell_swipe: None,
             overview_progress: 0.0,
             overview_progress_at: Instant::now(),
+            strip_view_at: Instant::now(),
             overview_swipe_from: None,
             scale: clamp_scale(session.scale),
             input_settings: Default::default(),
@@ -1185,6 +1188,16 @@ impl Runtime {
             "focused_rect": focused
                 .and_then(|id| self.manager.geometry(id))
                 .map(|g| [g.loc.x, g.loc.y, g.size.w, g.size.h]),
+            // Floating ("gnome") or niri's strip ("scroll"), and how far
+            // the strip's view has scrolled.
+            "session_mode": match self.manager.session_mode() {
+                crate::windows::SessionMode::Scroll => "scroll",
+                crate::windows::SessionMode::Gnome => "gnome",
+            },
+            "strip_offset": self.manager.strip_offset(),
+            // Where the strip is drawn this frame: trails the target
+            // on niri's view-movement spring, equal once settled.
+            "strip_view": self.manager.strip_view(),
             "minimized": snapshot
                 .windows
                 .iter()
@@ -1303,6 +1316,15 @@ impl Runtime {
             };
         }
         self.overview_progress > 0.0
+    }
+
+    /// Advance the scroll-mode strip view on its spring by the time
+    /// since the last frame (niri's view-movement animation).
+    fn step_strip_view(&mut self) {
+        let now = Instant::now();
+        let dt = now.duration_since(self.strip_view_at).as_secs_f64();
+        self.strip_view_at = now;
+        self.manager.step_strip_view(dt);
     }
 
     /// A press while the overview is open that no shell surface took:
@@ -1633,6 +1655,11 @@ impl Runtime {
         );
         if let Some((_, rect)) = tile {
             elements.tile = tile_elements(rect, view, accent);
+        }
+        if overview.is_none() {
+            elements
+                .tile
+                .extend(focus_ring_elements(&self.manager, view));
         }
         elements.top = previews_to_elements(
             renderer,
@@ -2145,6 +2172,7 @@ impl Runtime {
             self.desktop_color()
         };
         let drawn = self.step_overview_transition();
+        self.step_strip_view();
         let overview = (show_content && !overlay_visible && drawn).then(|| self.overview_layout());
         // While search shows results, the workspace view steps aside.
         let cards = overview.as_ref().filter(|_| !self.overview_search);
@@ -2192,6 +2220,11 @@ impl Runtime {
                     );
                     if let Some((_, rect)) = tile {
                         elements.tile = tile_elements(rect, view, accent);
+                    }
+                    if overview.is_none() && show_content {
+                        elements
+                            .tile
+                            .extend(focus_ring_elements(&self.manager, view));
                     }
                     elements.top = previews_to_elements(
                         renderer,
@@ -2292,6 +2325,11 @@ impl Runtime {
                     );
                     if let Some((_, rect)) = tile {
                         elements.tile = tile_elements(rect, view, accent);
+                    }
+                    if overview.is_none() && show_content {
+                        elements
+                            .tile
+                            .extend(focus_ring_elements(&self.manager, view));
                     }
                     elements.top = previews_to_elements(
                         renderer,
@@ -2623,6 +2661,60 @@ fn tile_elements(
     })
 }
 
+/// niri's focus ring in scroll mode (its default `focus-ring`): 4px of
+/// #7fc8ff around the focused column, outside its edges, where the
+/// strip's 16px gaps leave room.
+fn focus_ring_elements(
+    manager: &WindowManager,
+    view: View,
+) -> Vec<smithay::backend::renderer::element::solid::SolidColorRenderElement> {
+    use smithay::backend::renderer::element::solid::SolidColorRenderElement;
+    use smithay::backend::renderer::element::Id;
+    const WIDTH: i32 = 4;
+    if manager.session_mode() != crate::windows::SessionMode::Scroll {
+        return Vec::new();
+    }
+    let Some(rect) = manager
+        .model()
+        .focused()
+        .and_then(|id| manager.render_geometry(id))
+    else {
+        return Vec::new();
+    };
+    let outer = view.physical(f64::from(rect.loc.x - WIDTH), f64::from(rect.loc.y - WIDTH));
+    let outer_end = view.physical(
+        f64::from(rect.loc.x + rect.size.w + WIDTH),
+        f64::from(rect.loc.y + rect.size.h + WIDTH),
+    );
+    let r = Rectangle::from_extremities(outer, outer_end);
+    let b = (f64::from(WIDTH) * view.scale).round().max(1.0) as i32;
+    let (w, h) = (r.size.w, r.size.h);
+    if w <= 2 * b || h <= 2 * b {
+        return Vec::new();
+    }
+    let color = Color32F::new(0x7f as f32 / 255.0, 0xc8 as f32 / 255.0, 1.0, 1.0);
+    let at = |x: i32, y: i32, w: i32, h: i32| -> Rectangle<i32, smithay::utils::Physical> {
+        Rectangle::new((r.loc.x + x, r.loc.y + y).into(), (w, h).into())
+    };
+    thread_local! {
+        static IDS: [Id; 4] = std::array::from_fn(|_| Id::new());
+    }
+    IDS.with(|ids| {
+        [
+            at(0, 0, w, b),
+            at(0, h - b, w, b),
+            at(0, b, b, h - 2 * b),
+            at(w - b, b, b, h - 2 * b),
+        ]
+        .into_iter()
+        .zip(ids.iter())
+        .map(|(geo, id)| {
+            SolidColorRenderElement::new(id.clone(), geo, 0usize, color, Kind::Unspecified)
+        })
+        .collect()
+    })
+}
+
 /// Window and layer-shell elements for one output whose top-left sits
 /// at `offset` in the global space. Empty while content is hidden
 /// (locked): nothing beneath the lock surface may show. `split` is the
@@ -2699,7 +2791,7 @@ fn scene_elements(
             Kind::Unspecified,
         ));
     };
-    for (window, geometry) in manager.visible_windows() {
+    for (window, geometry) in manager.render_windows() {
         // Unassociated X11 windows contribute no surface yet and
         // render nothing this frame.
         if let Some(surface) = window.wl_surface() {
