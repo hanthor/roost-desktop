@@ -481,6 +481,8 @@ pub struct Runtime {
     /// time; drawn eased), moving toward the open state each frame.
     overview_progress: f64,
     overview_progress_at: Instant,
+    /// Last strip-view spring step, for the per-frame time delta.
+    strip_view_at: Instant,
     /// A three-finger vertical swipe driving the transition: the
     /// progress it started from.
     overview_swipe_from: Option<f64>,
@@ -767,6 +769,7 @@ impl Runtime {
             shell_swipe: None,
             overview_progress: 0.0,
             overview_progress_at: Instant::now(),
+            strip_view_at: Instant::now(),
             overview_swipe_from: None,
             scale: clamp_scale(session.scale),
             input_settings: Default::default(),
@@ -1192,6 +1195,9 @@ impl Runtime {
                 crate::windows::SessionMode::Gnome => "gnome",
             },
             "strip_offset": self.manager.strip_offset(),
+            // Where the strip is drawn this frame: trails the target
+            // on niri's view-movement spring, equal once settled.
+            "strip_view": self.manager.strip_view(),
             "minimized": snapshot
                 .windows
                 .iter()
@@ -1310,6 +1316,15 @@ impl Runtime {
             };
         }
         self.overview_progress > 0.0
+    }
+
+    /// Advance the scroll-mode strip view on its spring by the time
+    /// since the last frame (niri's view-movement animation).
+    fn step_strip_view(&mut self) {
+        let now = Instant::now();
+        let dt = now.duration_since(self.strip_view_at).as_secs_f64();
+        self.strip_view_at = now;
+        self.manager.step_strip_view(dt);
     }
 
     /// A press while the overview is open that no shell surface took:
@@ -2157,6 +2172,7 @@ impl Runtime {
             self.desktop_color()
         };
         let drawn = self.step_overview_transition();
+        self.step_strip_view();
         let overview = (show_content && !overlay_visible && drawn).then(|| self.overview_layout());
         // While search shows results, the workspace view steps aside.
         let cards = overview.as_ref().filter(|_| !self.overview_search);
@@ -2661,7 +2677,7 @@ fn focus_ring_elements(
     let Some(rect) = manager
         .model()
         .focused()
-        .and_then(|id| manager.geometry(id))
+        .and_then(|id| manager.render_geometry(id))
     else {
         return Vec::new();
     };
@@ -2775,7 +2791,7 @@ fn scene_elements(
             Kind::Unspecified,
         ));
     };
-    for (window, geometry) in manager.visible_windows() {
+    for (window, geometry) in manager.render_windows() {
         // Unassociated X11 windows contribute no surface yet and
         // render nothing this frame.
         if let Some(surface) = window.wl_surface() {
