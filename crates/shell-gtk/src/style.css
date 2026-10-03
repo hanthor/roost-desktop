@@ -728,6 +728,69 @@ window.roost-banners {
   font-weight: bold;
 }
 
+/* Notification groups, GNOME 51's NotificationMessageGroup: collapsed,
+   the newest card shows in full and the next two peek out 10px and
+   7px below it, 6px further in per side, in darker greys; expanded, a
+   header of the app name and a round collapse button over every card. */
+.message-view button.message-group {
+  min-width: 0;
+  min-height: 0;
+  margin: 0 0 12px 0;
+  padding: 0;
+  border: none;
+  border-radius: 18px;
+  background: none;
+  box-shadow: none;
+  /* The card's own weights, not the button's bold. */
+  font-weight: normal;
+}
+
+.message-view button.message-group:hover,
+.message-view button.message-group:active {
+  background: none;
+}
+
+.message-view .message-group.collapsed .message {
+  margin-bottom: 0;
+}
+
+.message-stack-card {
+  border-radius: 18px;
+}
+
+.message-stack-card.second-in-stack {
+  background-color: #45454a;
+}
+
+.message-stack-card.lower-in-stack {
+  background-color: #3d3d42;
+}
+
+.message-group-header {
+  padding: 6px;
+}
+
+.message-group-title {
+  margin: 0 4px;
+  color: #ffffff;
+  font-weight: 800;
+  font-size: 1.364em;
+}
+
+.message-collapse-button {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 2px;
+  border-radius: 999px;
+  background-color: rgba(255, 255, 255, 0.2);
+  color: #ffffff;
+  box-shadow: none;
+}
+
+.message-collapse-button:hover {
+  background-color: rgba(255, 255, 255, 0.3);
+}
+
 /* Search providers (#57): GNOME 51 list results under the app row. */
 /* The compositor hides the workspace view while search shows results,
    so results sit on the overview background, as in GNOME. */
