@@ -504,6 +504,7 @@ fn qs_round(icon: &str, label: &str) -> gtk::Button {
 
 /// The panel's status icons that quick-settings services drive.
 struct PanelIcons {
+    mic: gtk::Image,
     network: gtk::Image,
     dnd: gtk::Image,
     volume: gtk::Image,
@@ -652,6 +653,19 @@ fn quick_settings_popover(
         });
     }
     volume_row.append(&sound_arrow);
+
+    // GNOME's microphone slider (volume.js `InputStreamSlider`): shown
+    // only while an app records; the icon button mutes.
+    let mic_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let mic_mute = gtk::Button::from_icon_name("microphone-sensitivity-medium-symbolic");
+    mic_mute.add_css_class("flat");
+    mic_mute.update_property(&[gtk::accessible::Property::Label("Mute")]);
+    mic_row.append(&mic_mute);
+    let mic = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 1.0);
+    mic.set_hexpand(true);
+    mic.update_property(&[gtk::accessible::Property::Label("Microphone")]);
+    mic_row.append(&mic);
+    mic_row.set_visible(false);
 
     // Brightness: hidden without a backlight.
     let brightness_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -842,6 +856,10 @@ fn quick_settings_popover(
         power_mode,
         power_header: power_menu_ui.header_icon.clone(),
         power_items,
+        panel_mic: icons.mic,
+        mic,
+        mic_mute,
+        mic_row: mic_row.clone(),
         panel_network: icons.network,
         panel_volume: icons.volume,
         panel_power_profile: icons.power_profile,
@@ -885,12 +903,14 @@ fn quick_settings_popover(
     col.append(&power_menu);
     col.append(&volume_row);
     col.append(&sound_menu_ui.revealer);
+    col.append(&mic_row);
     col.append(&brightness_row);
     col.append(&grid.grid);
     // Everything but an open toggle menu dims with the panel.
     for widget in [
         top.upcast_ref::<gtk::Widget>(),
         volume_row.upcast_ref(),
+        mic_row.upcast_ref(),
         brightness_row.upcast_ref(),
     ] {
         widget.add_css_class("qs-dimmable");
@@ -1074,6 +1094,10 @@ fn build(app: &adw::Application) {
         indicators.append(&image);
         image
     };
+    // Privacy indicators lead (the microphone in use, orange unless
+    // muted).
+    let panel_mic = status_icon("microphone-sensitivity-medium-symbolic", false);
+    panel_mic.update_property(&[gtk::accessible::Property::Label("Microphone in use")]);
     let panel_network = status_icon("network-wired-symbolic", false);
     let panel_dnd = status_icon("notifications-disabled-symbolic", false);
     let panel_volume = status_icon("audio-volume-high-symbolic", false);
@@ -1117,6 +1141,7 @@ fn build(app: &adw::Application) {
         &notify,
         &power_ui,
         PanelIcons {
+            mic: panel_mic,
             network: panel_network,
             dnd: panel_dnd,
             volume: panel_volume,

@@ -73,6 +73,11 @@ window.roost-panel.overview.shaded {
   margin: 0 4px;
 }
 
+/* #panel .privacy-indicator: the microphone while an app records. */
+.roost-panel .privacy-indicator {
+  color: #ff7800;
+}
+
 /* Workspace indicator (#panelActivities .workspace-dot): the active
    workspace is an 8px-tall pill (its width set in code, by count), the
    others 8px dots drawn at 6px (GNOME scales them to 0.75) in white at
