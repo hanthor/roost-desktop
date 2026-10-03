@@ -123,6 +123,7 @@
 #   G-SWITCHER-GROUP Alt+Above_Tab shows an app's windows as thumbnails
 #               and steps through them; W closes the focused one
 #   G-IME            IBus composes pinyin into hanzi in a GTK app
+#   G-SCROLL         niri's scrollable tiling: gaps, view follows focus, ring
 #   G-SWITCHER-REBIND switch-applications rebound moves the switcher
 #                   to the new chord
 #   G-SWITCHER  Alt+Tab shows the switcher with every app (GNOME's
@@ -1564,6 +1565,41 @@ elif [ "${ROOST_REQUIRE_IBUS:-0}" = 1 ]; then
 else
     echo "roost-gtk-shell-proof: G-IME skipped (IBus not installed)"
 fi
+
+# niri's scrollable tiling (Super+Shift+T): the windows become a strip of
+# columns with 16px gaps on every side, the view follows the focused
+# column (whole on screen), niri's focus ring (4px of #7fc8ff) marks it,
+# Super+R steps its width and Super+Left moves focus along the strip.
+strip_whole() {
+    cstate ".focused_rect[1] == 48 and .focused_rect[3] == $((HEIGHT - 32 - 32)) and
+        .focused_rect[0] >= 16 and .focused_rect[0] + .focused_rect[2] <= $((WIDTH - 16))" "$1"
+}
+xdotool key super+shift+t
+cstate '.session_mode == "scroll"' "scroll mode" || fail G-SCROLL "Super+Shift+T did not enter scroll mode"
+sleep 1
+strip_whole "focused column whole" || fail G-SCROLL "the focused column is not whole with gaps: $(jq -c .focused_rect "$CSTATE")"
+scrot "$ARTIFACTS/24j-scroll-strip.png" >/dev/null
+fx="$(jq -r '.focused_rect[0]' "$CSTATE")"
+fy="$(jq -r '.focused_rect[1]' "$CSTATE")"
+# shellcheck disable=SC2046
+set -- $(px "$ARTIFACTS/24j-scroll-strip.png" $((fx - 2)) $((fy + 200)))
+# Columns are tiled on every edge, so no client shadow dims the ring.
+if [ "${1:-0}" -lt 122 ] || [ "${2:-0}" -lt 195 ] || [ "${3:-0}" -lt 250 ]; then
+    fail G-SCROLL "no focus ring left of the focused column (pixel ${1:-?} ${2:-?} ${3:-?})"
+fi
+before_w="$(jq -r '.focused_rect[2]' "$CSTATE")"
+before_id="$(jq -r '.focused' "$CSTATE")"
+xdotool key super+r
+cstate ".focused_rect[2] != $before_w" "preset" || fail G-SCROLL "Super+R did not change the column width"
+strip_whole "widened column whole" || fail G-SCROLL "the widened column is not whole on screen"
+xdotool key super+Left
+cstate ".focused != $before_id" "focus moved" || fail G-SCROLL "Super+Left did not move focus along the strip"
+strip_whole "newly focused column whole" || fail G-SCROLL "the view did not follow focus"
+scrot "$ARTIFACTS/24k-scroll-follow.png" >/dev/null
+xdotool key super+shift+t
+cstate '.session_mode == "gnome"' "floating again" || fail G-SCROLL "Super+Shift+T did not leave scroll mode"
+pass G-SCROLL "Super+Shift+T makes niri's strip: gaps, the view following focus, the focus ring, presets and focus moves"
+sleep 1
 
 # GNOME's workspace switcher popup: a dark pill above the bottom edge
 # right after a workspace key.

@@ -116,6 +116,20 @@ XWayland starts with the session, and X11 apps get GNOME placement and focus. (`
 
 ![X11 apps](walkthrough/x11.png)
 
+## Scrollable tiling
+
+### The strip
+
+Super+Shift+T turns the windows into niri's strip: columns with 16px gaps, the view on the focused column, niri's focus ring around it. (`P-WM-07`)
+
+![The strip](walkthrough/scroll-strip.png)
+
+### Following focus
+
+Super+R steps the column's width and Super+Left moves along the strip; the view scrolls the least that shows the focused column whole. (`P-WM-07`)
+
+![Following focus](walkthrough/scroll-follow.png)
+
 ## Switcher
 
 ### Alt+Tab

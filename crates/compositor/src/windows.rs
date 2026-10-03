@@ -677,7 +677,16 @@ impl WindowManager {
     /// Shared tail of every map path (native and X11): stacking slot,
     /// scroll-mode membership, initial configure, and focus.
     fn finish_map(&mut self, state: &mut State, id: u64) {
-        self.stacking.push(id);
+        // niri opens a new column right of the focused one; floating
+        // windows go on top.
+        let after_focused = (self.mode == SessionMode::Scroll)
+            .then(|| self.model.focused())
+            .flatten()
+            .and_then(|focused| self.stacking.iter().position(|other| *other == focused));
+        match after_focused {
+            Some(index) => self.stacking.insert(index + 1, id),
+            None => self.stacking.push(id),
+        }
         // Forced strip membership: windows mapped mid-scroll join the
         // strip as columns. Dialogs keep their after-parent stacking
         // slot, so they land in the adjacent column — the strip is
@@ -1125,6 +1134,11 @@ impl WindowManager {
     fn apply_focus(&mut self, state: &mut State, id: Option<u64>) {
         let previous = self.model.focused();
         self.model.set_focused(id);
+        // The strip view follows focus (niri), new columns included.
+        if self.mode == SessionMode::Scroll && id.is_some() && previous != id {
+            self.follow_focus(state);
+            self.relayout_strip(state);
+        }
         if let Some(id) = id {
             // Activating a hidden window brings it back (GNOME).
             if let Some(window) = self.windows.get_mut(&id) {
@@ -1224,11 +1238,27 @@ impl WindowManager {
                 xdg_toplevel::State::Fullscreen,
                 xdg_toplevel::State::TiledLeft,
                 xdg_toplevel::State::TiledRight,
+                xdg_toplevel::State::TiledTop,
+                xdg_toplevel::State::TiledBottom,
             ] {
                 pending.states.unset(state);
             }
             match layout {
-                WindowLayout::Floating | WindowLayout::Strip => {}
+                WindowLayout::Floating => {}
+                // niri tells its columns they are tiled on every edge:
+                // client-side decorations drop their shadow and rounded
+                // corners, so columns meet the gaps (and the focus ring)
+                // square.
+                WindowLayout::Strip => {
+                    for state in [
+                        xdg_toplevel::State::TiledLeft,
+                        xdg_toplevel::State::TiledRight,
+                        xdg_toplevel::State::TiledTop,
+                        xdg_toplevel::State::TiledBottom,
+                    ] {
+                        pending.states.set(state);
+                    }
+                }
                 WindowLayout::Maximized => {
                     pending.states.set(xdg_toplevel::State::Maximized);
                 }
@@ -2183,14 +2213,14 @@ impl WindowManager {
         }
     }
 
-    /// One strip column rectangle for `id`: full work-area height,
-    /// preset-proportion width with gaps between columns (niri
-    /// gaps-twice formula). Columns past the right edge overflow;
-    /// the strip never squeezes to fit.
+    /// One strip column rectangle for `id`: the work area's height less
+    /// a gap above and below, preset-proportion width with gaps between
+    /// columns and at the strip's ends (niri gaps-twice formula).
+    /// Columns past the right edge overflow; the strip never squeezes.
     fn strip_column_area(&self, state: &State, id: u64) -> Rectangle<i32, Logical> {
         let work = Self::work_area(state);
         let columns = self.strip_columns(state, id);
-        let mut x = work.loc.x - self.strip_offset as i32;
+        let mut x = work.loc.x + Self::STRIP_GAP - self.strip_offset as i32;
         let mut width = Self::strip_width(work.size.w, self.strip_proportion(id));
         for (other, w) in &columns {
             if *other == id {
@@ -2200,9 +2230,61 @@ impl WindowManager {
             x += w + Self::STRIP_GAP;
         }
         Rectangle {
-            loc: (x, work.loc.y).into(),
-            size: (width, work.size.h).into(),
+            loc: (x, work.loc.y + Self::STRIP_GAP).into(),
+            size: (width, (work.size.h - 2 * Self::STRIP_GAP).max(1)).into(),
         }
+    }
+
+    /// The farthest the view scrolls: the strip with its end gaps,
+    /// less the view.
+    fn strip_max_offset(&self, state: &State) -> f64 {
+        let work = Self::work_area(state);
+        let widths: Vec<(u64, i32)> = self
+            .strip_order()
+            .iter()
+            .map(|id| {
+                (
+                    *id,
+                    Self::strip_width(work.size.w, self.strip_proportion(*id)),
+                )
+            })
+            .collect();
+        let total = Self::strip_total(&widths) + 2 * Self::STRIP_GAP;
+        (total - work.size.w).max(0) as f64
+    }
+
+    /// niri's default view motion (`center-focused-column "never"`):
+    /// scroll the least that shows the focused column whole, a gap from
+    /// the edge it was beyond.
+    fn follow_focus(&mut self, state: &mut State) {
+        if self.mode != SessionMode::Scroll {
+            return;
+        }
+        let Some(focused) = self.model.focused() else {
+            return;
+        };
+        let work = Self::work_area(state);
+        let mut start = 0;
+        let mut width = None;
+        for id in self.strip_order() {
+            let w = Self::strip_width(work.size.w, self.strip_proportion(id));
+            if id == focused {
+                width = Some(w);
+                break;
+            }
+            start += w + Self::STRIP_GAP;
+        }
+        let Some(width) = width else { return };
+        // Column `start` sits at gap + start - offset in the view.
+        let left = f64::from(start);
+        let right = f64::from(start + width + 2 * Self::STRIP_GAP - work.size.w);
+        let mut offset = self.strip_offset;
+        if offset > left {
+            offset = left;
+        } else if offset < right {
+            offset = right;
+        }
+        self.strip_offset = offset.clamp(0.0, self.strip_max_offset(state));
     }
 
     /// Current strip view offset (scroll mode), for tests.
@@ -2229,8 +2311,8 @@ impl WindowManager {
                 )
             })
             .collect();
-        let total = Self::strip_total(&widths);
-        let max = (total - work.size.w).max(0) as f64;
+        let _ = (&widths, work);
+        let max = self.strip_max_offset(state);
         let next = (self.strip_offset + horizontal + vertical).clamp(0.0, max);
         if next == self.strip_offset {
             return true;
@@ -2263,6 +2345,7 @@ impl WindowManager {
         if let Some(window) = self.windows.get_mut(&focused) {
             window.preset = Some(next);
         }
+        self.follow_focus(state);
         self.relayout_strip(state);
         true
     }
@@ -2340,6 +2423,7 @@ impl WindowManager {
             return true;
         }
         self.stacking.swap(positions[slot], positions[other]);
+        self.follow_focus(state);
         self.relayout_strip(state);
         true
     }
@@ -2360,9 +2444,8 @@ impl WindowManager {
                 )
             })
             .collect();
-        let total = Self::strip_total(&widths);
-        let max = (total - work.size.w).max(0) as f64;
-        self.strip_offset = self.strip_offset.clamp(0.0, max);
+        let _ = (&widths, work);
+        self.strip_offset = self.strip_offset.clamp(0.0, self.strip_max_offset(state));
         let ids: Vec<u64> = self.windows.keys().copied().collect();
         for id in ids {
             if self.window_layout(id) == Some(WindowLayout::Strip) {
@@ -2384,6 +2467,7 @@ impl WindowManager {
         };
         if scroll {
             self.strip_offset = 0.0;
+            self.follow_focus(state);
             let ids: Vec<u64> = self.windows.keys().copied().collect();
             for id in ids {
                 self.apply_layout(state, id, WindowLayout::Strip);

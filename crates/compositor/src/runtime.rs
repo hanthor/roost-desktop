@@ -1185,6 +1185,13 @@ impl Runtime {
             "focused_rect": focused
                 .and_then(|id| self.manager.geometry(id))
                 .map(|g| [g.loc.x, g.loc.y, g.size.w, g.size.h]),
+            // Floating ("gnome") or niri's strip ("scroll"), and how far
+            // the strip's view has scrolled.
+            "session_mode": match self.manager.session_mode() {
+                crate::windows::SessionMode::Scroll => "scroll",
+                crate::windows::SessionMode::Gnome => "gnome",
+            },
+            "strip_offset": self.manager.strip_offset(),
             "minimized": snapshot
                 .windows
                 .iter()
@@ -1633,6 +1640,11 @@ impl Runtime {
         );
         if let Some((_, rect)) = tile {
             elements.tile = tile_elements(rect, view, accent);
+        }
+        if overview.is_none() {
+            elements
+                .tile
+                .extend(focus_ring_elements(&self.manager, view));
         }
         elements.top = previews_to_elements(
             renderer,
@@ -2193,6 +2205,11 @@ impl Runtime {
                     if let Some((_, rect)) = tile {
                         elements.tile = tile_elements(rect, view, accent);
                     }
+                    if overview.is_none() && show_content {
+                        elements
+                            .tile
+                            .extend(focus_ring_elements(&self.manager, view));
+                    }
                     elements.top = previews_to_elements(
                         renderer,
                         &self.manager,
@@ -2292,6 +2309,11 @@ impl Runtime {
                     );
                     if let Some((_, rect)) = tile {
                         elements.tile = tile_elements(rect, view, accent);
+                    }
+                    if overview.is_none() && show_content {
+                        elements
+                            .tile
+                            .extend(focus_ring_elements(&self.manager, view));
                     }
                     elements.top = previews_to_elements(
                         renderer,
@@ -2617,6 +2639,60 @@ fn tile_elements(
         .into_iter()
         .zip(ids.iter())
         .map(|((geo, color), id)| {
+            SolidColorRenderElement::new(id.clone(), geo, 0usize, color, Kind::Unspecified)
+        })
+        .collect()
+    })
+}
+
+/// niri's focus ring in scroll mode (its default `focus-ring`): 4px of
+/// #7fc8ff around the focused column, outside its edges, where the
+/// strip's 16px gaps leave room.
+fn focus_ring_elements(
+    manager: &WindowManager,
+    view: View,
+) -> Vec<smithay::backend::renderer::element::solid::SolidColorRenderElement> {
+    use smithay::backend::renderer::element::solid::SolidColorRenderElement;
+    use smithay::backend::renderer::element::Id;
+    const WIDTH: i32 = 4;
+    if manager.session_mode() != crate::windows::SessionMode::Scroll {
+        return Vec::new();
+    }
+    let Some(rect) = manager
+        .model()
+        .focused()
+        .and_then(|id| manager.geometry(id))
+    else {
+        return Vec::new();
+    };
+    let outer = view.physical(f64::from(rect.loc.x - WIDTH), f64::from(rect.loc.y - WIDTH));
+    let outer_end = view.physical(
+        f64::from(rect.loc.x + rect.size.w + WIDTH),
+        f64::from(rect.loc.y + rect.size.h + WIDTH),
+    );
+    let r = Rectangle::from_extremities(outer, outer_end);
+    let b = (f64::from(WIDTH) * view.scale).round().max(1.0) as i32;
+    let (w, h) = (r.size.w, r.size.h);
+    if w <= 2 * b || h <= 2 * b {
+        return Vec::new();
+    }
+    let color = Color32F::new(0x7f as f32 / 255.0, 0xc8 as f32 / 255.0, 1.0, 1.0);
+    let at = |x: i32, y: i32, w: i32, h: i32| -> Rectangle<i32, smithay::utils::Physical> {
+        Rectangle::new((r.loc.x + x, r.loc.y + y).into(), (w, h).into())
+    };
+    thread_local! {
+        static IDS: [Id; 4] = std::array::from_fn(|_| Id::new());
+    }
+    IDS.with(|ids| {
+        [
+            at(0, 0, w, b),
+            at(0, h - b, w, b),
+            at(0, b, b, h - 2 * b),
+            at(w - b, b, b, h - 2 * b),
+        ]
+        .into_iter()
+        .zip(ids.iter())
+        .map(|(geo, id)| {
             SolidColorRenderElement::new(id.clone(), geo, 0usize, color, Kind::Unspecified)
         })
         .collect()
