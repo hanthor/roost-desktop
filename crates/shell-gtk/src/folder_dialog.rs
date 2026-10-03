@@ -11,6 +11,10 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
+/// Called with (folder id, app id) when an app is dragged out of the
+/// folder onto the shade.
+type OnRemove = Rc<dyn Fn(String, String)>;
+
 /// `.app-folder-dialog`: 722x720 (a 1px edge each side of 720).
 const DIALOG_W: i32 = 722;
 const DIALOG_H: i32 = 720;
@@ -35,6 +39,8 @@ pub struct FolderDialog {
     rename: Rename,
     /// Tells the top bar the overview behind it is shaded (or not).
     on_shade: RefCell<Option<OnShade>>,
+    /// An app dragged out of the folder: (folder id, app id).
+    on_remove: RefCell<Option<OnRemove>>,
 }
 
 impl FolderDialog {
@@ -110,6 +116,7 @@ impl FolderDialog {
             folder: RefCell::new(None),
             rename,
             on_shade: RefCell::new(None),
+            on_remove: RefCell::new(None),
         });
         {
             let weak = Rc::downgrade(&ui);
@@ -147,6 +154,39 @@ impl FolderDialog {
             });
         }
         ui.window.add_controller(click);
+        // An app dragged out of the dialog, onto the shade, leaves the
+        // folder (GNOME's FolderView removeApp); dropped back on the
+        // dialog it stays.
+        let drop = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
+        {
+            let weak = Rc::downgrade(&ui);
+            drop.connect_drop(move |_, value, x, y| {
+                let Some(ui) = weak.upgrade() else {
+                    return false;
+                };
+                let Ok(text) = value.get::<String>() else {
+                    return false;
+                };
+                let Some((folder, app)) = text
+                    .strip_prefix("folder-app:")
+                    .and_then(|rest| rest.split_once(':'))
+                else {
+                    return false;
+                };
+                let inside = ui.dialog.compute_bounds(&ui.window).is_some_and(|b| {
+                    b.contains_point(&gtk::graphene::Point::new(x as f32, y as f32))
+                });
+                if !inside {
+                    let f = ui.on_remove.borrow().clone();
+                    if let Some(f) = f {
+                        f(folder.to_owned(), app.to_owned());
+                    }
+                    ui.close();
+                }
+                true
+            });
+        }
+        ui.window.add_controller(drop);
         let keys = gtk::EventControllerKey::new();
         {
             let weak = Rc::downgrade(&ui);
@@ -175,6 +215,11 @@ impl FolderDialog {
     /// overview behind it too).
     pub fn set_on_shade(&self, f: OnShade) {
         *self.on_shade.borrow_mut() = Some(f);
+    }
+
+    /// Who to tell when an app is dragged out of the folder.
+    pub fn set_on_remove(&self, f: OnRemove) {
+        *self.on_remove.borrow_mut() = Some(f);
     }
 
     fn shade(&self, on: bool) {

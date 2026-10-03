@@ -112,6 +112,9 @@ pub struct State {
     /// Clipboard/drag-and-drop manager (toolkit clients such as GTK
     /// and Chromium refuse a display without this global).
     data_device_state: DataDeviceState,
+    /// The icon a client's drag-and-drop carries, drawn at the pointer
+    /// until the drop.
+    dnd_icon: Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>,
     /// Middle-click primary selection beside the clipboard.
     primary_selection_state: PrimarySelectionState,
     pub(crate) panel_surfaces: Vec<layer::PanelSurface>,
@@ -423,7 +426,35 @@ impl SelectionHandler for State {
     type SelectionUserData = ();
 }
 
-impl ClientDndGrabHandler for State {}
+impl ClientDndGrabHandler for State {
+    fn started(
+        &mut self,
+        _source: Option<smithay::reexports::wayland_server::protocol::wl_data_source::WlDataSource>,
+        icon: Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>,
+        _seat: Seat<Self>,
+    ) {
+        self.dnd_icon = icon;
+    }
+
+    fn dropped(
+        &mut self,
+        _target: Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>,
+        _validated: bool,
+        _seat: Seat<Self>,
+    ) {
+        self.dnd_icon = None;
+    }
+}
+
+impl State {
+    /// The icon of the drag in progress, if any (and still alive).
+    pub fn dnd_icon(
+        &self,
+    ) -> Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface> {
+        use smithay::reexports::wayland_server::Resource;
+        self.dnd_icon.clone().filter(|s| s.is_alive())
+    }
+}
 impl ServerDndGrabHandler for State {}
 
 impl DataDeviceHandler for State {
@@ -604,6 +635,7 @@ impl State {
             dh: dh.clone(),
             layer_shell_state: WlrLayerShellState::new::<State>(dh),
             data_device_state: DataDeviceState::new::<State>(dh),
+            dnd_icon: None,
             primary_selection_state: PrimarySelectionState::new::<State>(dh),
             panel_surfaces: Vec::new(),
             dead_layer_surfaces: std::collections::HashSet::new(),

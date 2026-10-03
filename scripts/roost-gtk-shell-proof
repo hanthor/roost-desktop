@@ -19,6 +19,8 @@
 #   G-OV-PICK   clicking a preview focuses that window, closes overview
 #   G-APP-POPOVER an app's menu popover opens (xdg popups, #88)
 #   G-APP-INSTALLED an app installed mid-session shows in search
+#   G-FOLDER-DND    dragging an app onto another makes a GNOME folder of
+#                   them; dragging one out of the folder dialog removes it
 #   G-APP-GRID-PAGES enough apps page the grid: indicators and arrows show,
 #                   and Next Page turns to the second page
 #   G-SEARCH-PROVIDER  typing lists a D-Bus search provider's result (#57)
@@ -704,6 +706,62 @@ pass G-APP-GRID-PAGES "thirty more apps page the grid; indicators and arrows sho
 xdotool key Escape
 cstate '.overview_open | not' "closed" || { xdotool key Escape; cstate '.overview_open | not' "closed" || fail G-APP-GRID-PAGES "overview stayed open"; }
 rm -f "$XDG_DATA_HOME"/applications/roost-page-*.desktop
+sleep 1.5
+
+# GNOME's folder edits by drag: one app onto another makes a folder of
+# the two (org.gnome.desktop.app-folders); one dragged out of the
+# folder's dialog onto the shade leaves it. Two apps named to sort first
+# sit in the first two cells (113px tiles 12px apart, centred).
+for n in One Two; do
+    printf '[Desktop Entry]\nName=AAA Drag %s\nExec=true\nType=Application\n' "$n" \
+        >"$XDG_DATA_HOME/applications/roost-drag-$n.desktop"
+done
+sleep 1.5
+before="$(gsettings get org.gnome.desktop.app-folders folder-children)"
+drag() {
+    xdotool mousemove --window "$WID" "$1" "$2"
+    sleep 0.3
+    xdotool mousedown 1
+    sleep 0.2
+    for i in $(seq 1 20); do
+        xdotool mousemove --window "$WID" $(($1 + ($3 - $1) * i / 20)) $(($2 + ($4 - $2) * i / 20))
+        sleep 0.03
+    done
+    sleep 0.4
+    xdotool mouseup 1
+    sleep 1.5
+}
+xdotool key super+a
+cstate '.overview_open and .overview_app_grid' "app grid" || fail G-FOLDER-DND "Super+A did not show the app grid"
+sleep 1.5
+drag 327 305 202 305
+scrot "$ARTIFACTS/11e-folder-made.png" >/dev/null
+after="$(gsettings get org.gnome.desktop.app-folders folder-children)"
+folder=""
+for f in $(echo "$after" | tr -d "[]',"); do
+    case " $(echo "$before" | tr -d "[]',") " in *" $f "*) ;; *) folder="$f" ;; esac
+done
+[ -n "$folder" ] || fail G-FOLDER-DND "dropping an app on another made no folder ($after)"
+fpath="org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/$folder/"
+apps="$(gsettings get "$fpath" apps)"
+case "$apps" in
+    *roost-drag-One.desktop*roost-drag-Two.desktop*|*roost-drag-Two.desktop*roost-drag-One.desktop*) ;;
+    *) fail G-FOLDER-DND "the new folder holds $apps" ;;
+esac
+name="$(gsettings get "$fpath" name | tr -d "'")"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-folder-new.json" 20 \
+    --press "$name" || fail G-FOLDER-DND "could not open the new folder '$name'"
+sleep 1.5
+scrot "$ARTIFACTS/11f-folder-dialog.png" >/dev/null
+# The dialog's second tile (AAA Drag Two) out onto the shade.
+drag 638 300 140 560
+apps="$(gsettings get "$fpath" apps)"
+[ "$apps" = "['roost-drag-One.desktop']" ] ||
+    fail G-FOLDER-DND "dragging an app out left the folder with $apps"
+pass G-FOLDER-DND "an app dropped on another makes a GNOME folder; one dragged out of its dialog leaves it"
+xdotool key Escape
+cstate '.overview_open | not' "closed" || { xdotool key Escape; cstate '.overview_open | not' "closed" || fail G-FOLDER-DND "overview stayed open"; }
+rm -f "$XDG_DATA_HOME"/applications/roost-drag-*.desktop
 sleep 1.5
 
 # Search providers (#57): a D-Bus provider's result lists under the
