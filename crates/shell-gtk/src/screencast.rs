@@ -180,11 +180,14 @@ enum Phase {
 /// Says something happened: (summary, body).
 pub type Notify = Rc<dyn Fn(&str, &str)>;
 
+/// Told whether a recording is in progress.
+pub type Watcher = Rc<dyn Fn(bool)>;
+
 /// One recording at a time, for the screenshot UI and D-Bus callers.
 pub struct Recorder {
     phase: RefCell<Phase>,
     /// Told when a recording starts (true) and ends (false).
-    watchers: RefCell<Vec<Rc<dyn Fn(bool)>>>,
+    watchers: RefCell<Vec<Watcher>>,
     notify: Notify,
     /// The D-Bus connection holding the name, for the Error signal.
     bus: RefCell<Option<gio::DBusConnection>>,
@@ -209,7 +212,7 @@ impl Recorder {
     }
 
     /// Call `watcher` whenever a recording starts or ends.
-    pub fn watch(&self, watcher: Rc<dyn Fn(bool)>) {
+    pub fn watch(&self, watcher: Watcher) {
         self.watchers.borrow_mut().push(watcher);
     }
 
