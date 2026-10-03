@@ -117,6 +117,8 @@
 #               row reaches the item (P-TR-01)
 #   G-SWITCHER-GROUP Alt+Above_Tab shows an app's windows as thumbnails
 #               and steps through them; W closes the focused one
+#   G-SWITCHER-REBIND switch-applications rebound moves the switcher
+#                   to the new chord
 #   G-SWITCHER  Alt+Tab shows the switcher with every app (GNOME's
 #               switch-applications; the three test windows are three apps), and
 #               releasing Alt focuses the highlighted one
@@ -1327,6 +1329,29 @@ cstate ".focused_rect[2] != $WIDTH" "restored" || fail G-WM-REBIND "Super+Down d
 gsettings reset org.gnome.desktop.wm.keybindings maximize
 sleep 1
 pass G-WM-REBIND "GNOME's maximize key rebinds: the old chord stops and the new one maximizes"
+
+# The switcher's keys rebind too: switch-applications on Ctrl+J steps
+# and commits on Control's release, and Alt+Tab is left to apps.
+gsettings set org.gnome.desktop.wm.keybindings switch-applications "['<Control>j']"
+sleep 1.5
+steps="$(grep -c 'switcher Step' "$LOG")"
+xdotool key alt+Tab
+sleep 1
+[ "$(grep -c 'switcher Step' "$LOG")" = "$steps" ] ||
+    fail G-SWITCHER-REBIND "Alt+Tab still stepped the switcher after switch-applications moved"
+commits="$(grep -c 'switcher Commit' "$LOG")"
+xdotool keydown Control_L
+xdotool key j
+sleep 0.5
+xdotool keyup Control_L
+sleep 1
+[ "$(grep -c 'switcher Step' "$LOG")" -gt "$steps" ] ||
+    fail G-SWITCHER-REBIND "Ctrl+J did not step the switcher"
+[ "$(grep -c 'switcher Commit' "$LOG")" -gt "$commits" ] ||
+    fail G-SWITCHER-REBIND "releasing Control did not commit the switcher"
+gsettings reset org.gnome.desktop.wm.keybindings switch-applications
+sleep 1
+pass G-SWITCHER-REBIND "GNOME's switch-applications rebinds: Ctrl+J steps and commits, Alt+Tab goes to apps"
 
 # GNOME's workspace switcher popup: a dark pill above the bottom edge
 # right after a workspace key.

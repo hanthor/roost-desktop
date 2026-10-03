@@ -17,9 +17,9 @@ use std::os::unix::net::UnixStream;
 use roost_compositor::layer::OVERVIEW_NAMESPACE;
 use roost_compositor::windows::{
     ManagerInput, SessionMode, TileSide, WindowLayout, WindowManager, ALT_LEFT_KEYCODE,
-    ARROW_DOWN_KEYCODE, ARROW_LEFT_KEYCODE, ARROW_RIGHT_KEYCODE, ARROW_UP_KEYCODE, ESCAPE_KEYCODE,
-    F4_KEYCODE, PAGE_DOWN_KEYCODE, PAGE_UP_KEYCODE, R_KEYCODE, SHIFT_LEFT_KEYCODE,
-    SUPER_LEFT_KEYCODE, TAB_KEYCODE, T_KEYCODE,
+    ARROW_DOWN_KEYCODE, ARROW_LEFT_KEYCODE, ARROW_RIGHT_KEYCODE, ARROW_UP_KEYCODE,
+    CTRL_LEFT_KEYCODE, ESCAPE_KEYCODE, F4_KEYCODE, GRAVE_KEYCODE, PAGE_DOWN_KEYCODE,
+    PAGE_UP_KEYCODE, R_KEYCODE, SHIFT_LEFT_KEYCODE, SUPER_LEFT_KEYCODE, TAB_KEYCODE, T_KEYCODE,
 };
 use roost_compositor::TestCompositor;
 use roost_shell_control::SwitcherAction;
@@ -807,6 +807,65 @@ fn super_tab_switches_applications_like_alt_tab() {
     assert_eq!(
         f.manager.take_switcher_queue(),
         vec![SwitcherAction::Commit]
+    );
+}
+
+#[test]
+fn rebound_switcher_keys_replace_the_builtin_chords() {
+    // GNOME's switch-applications rebound to Ctrl+J: the chord steps,
+    // Shift steps back, Control's release commits, and Alt+Tab is
+    // ordinary input again. Super+Above_Tab stays a group step.
+    use roost_shell_control::{SwitcherKey, SwitcherKeyKind, KEYSYM_ABOVE_TAB, MOD_CTRL, MOD_LOGO};
+    const J_KEYCODE: u32 = 36;
+    let mut f = two_windows();
+    f.manager.set_switcher_keys(vec![
+        SwitcherKey {
+            keysym: 0x6a,
+            mods: MOD_CTRL,
+            kind: SwitcherKeyKind::Applications,
+        },
+        SwitcherKey {
+            keysym: KEYSYM_ABOVE_TAB,
+            mods: MOD_LOGO,
+            kind: SwitcherKeyKind::Group,
+        },
+    ]);
+    press(&mut f.manager, &mut f.comp, ALT_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, TAB_KEYCODE);
+    release(&mut f.manager, &mut f.comp, TAB_KEYCODE);
+    release(&mut f.manager, &mut f.comp, ALT_LEFT_KEYCODE);
+    assert!(f.manager.take_switcher_queue().is_empty());
+
+    press(&mut f.manager, &mut f.comp, CTRL_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, J_KEYCODE);
+    release(&mut f.manager, &mut f.comp, J_KEYCODE);
+    press(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, J_KEYCODE);
+    release(&mut f.manager, &mut f.comp, J_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    assert_eq!(
+        f.manager.take_switcher_queue(),
+        vec![
+            SwitcherAction::Step { forward: true },
+            SwitcherAction::Step { forward: false }
+        ]
+    );
+    release(&mut f.manager, &mut f.comp, CTRL_LEFT_KEYCODE);
+    assert_eq!(
+        f.manager.take_switcher_queue(),
+        vec![SwitcherAction::Commit]
+    );
+
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, GRAVE_KEYCODE);
+    release(&mut f.manager, &mut f.comp, GRAVE_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    assert_eq!(
+        f.manager.take_switcher_queue(),
+        vec![
+            SwitcherAction::StepWindow { forward: true },
+            SwitcherAction::Commit
+        ]
     );
 }
 

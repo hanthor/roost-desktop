@@ -1974,6 +1974,9 @@ impl Runtime {
         if let Some(thumbnails) = outcome.switcher_thumbnails {
             self.switcher_thumbnails = thumbnails;
         }
+        if let Some(keys) = outcome.switcher_keys {
+            self.manager.set_switcher_keys(keys);
+        }
         for backward in outcome.input_source_switches {
             self.manager.switch_input_source(&mut self.state, backward);
         }

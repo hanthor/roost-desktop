@@ -245,8 +245,15 @@ pub struct WindowManager {
     menu_requests: Vec<(u64, i32, i32)>,
     /// The active workspace at the last reconcile.
     last_active_workspace: Option<u32>,
-    /// The switcher was opened with Super+Tab (Super's release commits).
-    switcher_by_super: bool,
+    /// The modifiers of the chord that opened the switcher, Shift
+    /// aside: releasing them all commits (GNOME's modifier mask).
+    switcher_opener: u32,
+    /// The shell's switcher chords (GNOME's `switch-applications` and
+    /// `switch-group` keys); `None` until it sends them, and then the
+    /// built-in Alt/Super+Tab and Above_Tab stand aside.
+    switcher_keys: Option<Vec<roost_shell_control::SwitcherKey>>,
+    /// Control held (either side), for switcher chords.
+    ctrl_held: bool,
     /// Workspace-switcher popups `(index, count)` for the shell.
     workspace_popups: Vec<(u32, u32)>,
     /// Super held (either side) for workspace keybindings.
@@ -320,7 +327,9 @@ impl WindowManager {
             lock_input_active: false,
             menu_requests: Vec::new(),
             last_active_workspace: None,
-            switcher_by_super: false,
+            switcher_opener: 0,
+            switcher_keys: None,
+            ctrl_held: false,
             workspace_popups: Vec::new(),
             swallowed_button: None,
             focus_awaits_surface: None,
@@ -1975,6 +1984,11 @@ impl WindowManager {
         self.accelerators = accelerators;
     }
 
+    /// Replace the switcher's chords (the shell's GNOME keybindings).
+    pub fn set_switcher_keys(&mut self, keys: Vec<roost_shell_control::SwitcherKey>) {
+        self.switcher_keys = Some(keys);
+    }
+
     /// Accelerators fired since the last call: `(action, time, mode)`.
     pub fn take_accelerators_fired(&mut self) -> Vec<(u32, u32, u32)> {
         std::mem::take(&mut self.accel_fired)
@@ -3143,14 +3157,36 @@ impl WindowManager {
                 if !pressed && self.switcher_swallowed.contains(&keycode) {
                     // The switcher took the press: the release too.
                     self.switcher_swallowed.retain(|k| *k != keycode);
+                } else if let Some((kind, opener)) = self.switcher_chord(state, keycode, pressed) {
+                    // One of the shell's switcher chords. The press and
+                    // its release stay invisible to apps.
+                    self.switcher_swallowed.push(keycode);
+                    let reopen = !self.switcher_open;
+                    if reopen {
+                        self.switcher_opener = opener;
+                    }
+                    self.switcher_open = true;
+                    use roost_shell_control::SwitcherKeyKind as K;
+                    self.push_switcher(match kind {
+                        K::Applications => SwitcherAction::Step { forward: true },
+                        K::ApplicationsBackward => SwitcherAction::Step { forward: false },
+                        K::Group => SwitcherAction::StepWindow { forward: true },
+                        K::GroupBackward => SwitcherAction::StepWindow { forward: false },
+                    });
+                    if reopen && opener == 0 {
+                        // No modifier to hold it open: GNOME picks at once.
+                        self.switcher_open = false;
+                        self.push_switcher(SwitcherAction::Commit);
+                    }
                 } else if pressed
                     && keycode == GRAVE_KEYCODE
+                    && self.switcher_keys.is_none()
                     && (self.switcher_open || self.alt_held || self.super_held)
                 {
                     // GNOME's switch-group (Alt+Above_Tab): the selected
                     // app's windows, opening the switcher when closed.
                     if !self.switcher_open {
-                        self.switcher_by_super = !self.alt_held;
+                        self.switcher_opener = self.builtin_opener();
                     }
                     self.switcher_open = true;
                     self.switcher_swallowed.push(keycode);
@@ -3160,7 +3196,7 @@ impl WindowManager {
                 } else if pressed
                     && self.switcher_open
                     && !modifier
-                    && keycode != TAB_KEYCODE
+                    && (keycode != TAB_KEYCODE || self.switcher_keys.is_some())
                     && keycode != ESCAPE_KEYCODE
                 {
                     // GNOME's switcher holds the keyboard: arrows, Q, W
@@ -3176,7 +3212,10 @@ impl WindowManager {
                     if pressed {
                         self.next_input_source(state);
                     }
-                } else if keycode == TAB_KEYCODE && (self.alt_held || self.super_held) {
+                } else if keycode == TAB_KEYCODE
+                    && self.switcher_keys.is_none()
+                    && (self.alt_held || self.super_held)
+                {
                     // Alt+Tab and Super+Tab (GNOME's switch-applications
                     // defaults). The whole chord stays invisible to apps:
                     // taps queue steps, releases are swallowed (an app
@@ -3185,7 +3224,7 @@ impl WindowManager {
                     if pressed {
                         if !self.switcher_open {
                             // Released, this modifier commits.
-                            self.switcher_by_super = !self.alt_held;
+                            self.switcher_opener = self.builtin_opener();
                         }
                         self.switcher_open = true;
                         self.push_switcher(SwitcherAction::Step {
@@ -3209,12 +3248,11 @@ impl WindowManager {
                     self.switcher_open = false;
                     self.push_switcher(SwitcherAction::Cancel);
                 } else {
-                    let opener = if self.switcher_by_super {
-                        keycode == SUPER_LEFT_KEYCODE || keycode == SUPER_RIGHT_KEYCODE
-                    } else {
-                        self.is_alt(keycode)
-                    };
-                    if !pressed && self.switcher_open && opener {
+                    if !pressed
+                        && self.switcher_open
+                        && modifier
+                        && self.held_mods() & self.switcher_opener == 0
+                    {
                         self.switcher_open = false;
                         self.push_switcher(SwitcherAction::Commit);
                     }
@@ -3400,7 +3438,8 @@ impl WindowManager {
             } else {
                 self.keyboard_key(state, keycode, pressed, time);
             }
-        } else if pressed
+        } else if builtin
+            && pressed
             && self.super_held
             && (keycode == PAGE_UP_KEYCODE || keycode == PAGE_DOWN_KEYCODE)
         {
@@ -3497,7 +3536,83 @@ impl WindowManager {
     fn track_switcher_modifiers(&mut self, keycode: u32, pressed: bool) {
         if self.is_alt(keycode) {
             self.alt_held = pressed;
+        } else if keycode == CTRL_LEFT_KEYCODE || keycode == CTRL_RIGHT_KEYCODE {
+            self.ctrl_held = pressed;
         }
+    }
+
+    /// The modifiers held now, as `MOD_*` bits.
+    fn held_mods(&self) -> u32 {
+        use roost_shell_control::{MOD_ALT, MOD_CTRL, MOD_LOGO, MOD_SHIFT};
+        [
+            (self.shift_held, MOD_SHIFT),
+            (self.ctrl_held, MOD_CTRL),
+            (self.alt_held, MOD_ALT),
+            (self.super_held, MOD_LOGO),
+        ]
+        .into_iter()
+        .filter(|(held, _)| *held)
+        .fold(0, |bits, (_, bit)| bits | bit)
+    }
+
+    /// The built-in chords' opener: Alt when held, else Super.
+    fn builtin_opener(&self) -> u32 {
+        if self.alt_held {
+            roost_shell_control::MOD_ALT
+        } else {
+            roost_shell_control::MOD_LOGO
+        }
+    }
+
+    /// The shell's switcher chord this press makes, with the modifiers
+    /// that hold the switcher open. Matched as Mutter matches: the key's
+    /// base-level keysym in the active layout and the exact modifiers;
+    /// Shift on a forward chord steps backward, as in GNOME's popup.
+    fn switcher_chord(
+        &self,
+        state: &mut State,
+        keycode: u32,
+        pressed: bool,
+    ) -> Option<(roost_shell_control::SwitcherKeyKind, u32)> {
+        use roost_shell_control::{SwitcherKeyKind as K, KEYSYM_ABOVE_TAB, MOD_SHIFT};
+        let keys = self
+            .switcher_keys
+            .as_ref()
+            .filter(|k| pressed && !k.is_empty())?;
+        let sym = self.base_keysym(state, keycode);
+        let mods = self.held_mods();
+        let key = keys.iter().find(|k| {
+            let same = if k.keysym == KEYSYM_ABOVE_TAB {
+                keycode == GRAVE_KEYCODE
+            } else {
+                sym == Some(k.keysym)
+            };
+            same && (k.mods == mods || k.mods | MOD_SHIFT == mods)
+        })?;
+        let flip = mods & MOD_SHIFT != 0 && key.mods & MOD_SHIFT == 0;
+        let kind = match (key.kind, flip) {
+            (K::Applications, true) => K::ApplicationsBackward,
+            (K::ApplicationsBackward, true) => K::Applications,
+            (K::Group, true) => K::GroupBackward,
+            (K::GroupBackward, true) => K::Group,
+            (kind, false) => kind,
+        };
+        Some((kind, key.mods & !MOD_SHIFT))
+    }
+
+    /// The keysym `keycode` types at the base level of the active layout.
+    fn base_keysym(&self, state: &mut State, keycode: u32) -> Option<u32> {
+        let keyboard = self.keyboard.clone()?;
+        keyboard.with_xkb_state(state, |context| {
+            let xkb = context.xkb().lock().ok()?;
+            let layout = xkb.active_layout().0;
+            // SAFETY: the keymap is only borrowed while the lock is held.
+            let keymap = unsafe { xkb.keymap() };
+            keymap
+                .key_get_syms_by_level((keycode + XKB_X11_OFFSET).into(), layout, 0)
+                .first()
+                .map(|sym| sym.raw())
+        })
     }
 
     /// Queue one switcher drive event with a greppable trail for the
