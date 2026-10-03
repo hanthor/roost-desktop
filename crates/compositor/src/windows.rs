@@ -1665,7 +1665,8 @@ impl WindowManager {
     /// Pointer button: deliver to the focused window and focus the
     /// window under the cursor on press (click-to-focus). A press on a
     /// layer-shell surface moves keyboard focus there (unless the
-    /// overview park owns it) so panel menus and banners take keys; the
+    /// overview park owns it, or the surface asked for no keyboard, as
+    /// IBus's candidate window does) so panel menus take keys; the
     /// button itself follows pointer focus from the last motion.
     pub fn pointer_button(&mut self, state: &mut State, button: u32, pressed: bool, time: u32) {
         // Release ends a move/resize grab. It is still delivered (unless
@@ -1720,7 +1721,7 @@ impl WindowManager {
             if let Some((surface, _)) =
                 crate::layer::topmost_layer_at(state, pos.x as i32, pos.y as i32)
             {
-                if !self.overview_open {
+                if !self.overview_open && crate::layer::surface_takes_keyboard_on_press(&surface) {
                     let serial = SERIAL_COUNTER.next_serial();
                     if let Some(keyboard) = self.keyboard.clone() {
                         keyboard.set_focus(state, Some(surface.clone()), serial);

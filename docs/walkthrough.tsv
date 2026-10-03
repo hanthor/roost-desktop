@@ -34,7 +34,10 @@ grid-reorder	11g-grid-reordered.png	Search and apps	Reordering	An app dropped on
 banner	12-banner.png	Notifications	Banners	A notification sent over org.freedesktop.Notifications shows a banner at the top.	P-NT-01
 notification-list	13-notification-list.png	Notifications	Notification list	The banner then waits in the date menu's list.	P-NT-02
 do-not-disturb	14-dnd-list.png	Notifications	Do Not Disturb	Do Not Disturb holds banners back but keeps them in the list.	P-NT-02
+notification-group	14b-notification-group.png	Notifications	Notification groups	An app's notifications group in the list: collapsed, the newest card shows with the next peeking out beneath it.	P-NT-02
+notification-group-expanded	14c-notification-group-expanded.png	Notifications	Expanded group	Pressing a group expands it to every card, under the app's name and a Collapse button.	P-NT-02
 ime	24i-ime-preedit.png	System	Input methods	IBus composes as in GNOME: pinyin waits in the preedit and Space commits the hanzi (a test engine; roost-ibus-bridge is IBus's client).	P-IN-01
+ime-candidates	24j-ime-candidates.png	System	Candidate window	The shell is IBus's panel, as GNOME Shell is: pinyin with several hanzi brings up GNOME's candidate popup under the text cursor, and a click commits one.	P-IN-01
 screenshot-ui	24e-screenshot-ui.png	System	Screenshot UI	Print opens GNOME's screenshot UI: area, screen or window.	P-SY-05
 polkit	24g-polkit.png	System	Authentication	polkit's requests show GNOME's authentication dialog.	
 end-session	22-end-session.png	System	End session	Power Off… opens GNOME's 60-second confirmation dialog.	P-SY-07

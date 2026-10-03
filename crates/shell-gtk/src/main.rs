@@ -18,6 +18,7 @@ mod calendar;
 mod events;
 mod folder_dialog;
 mod folders;
+mod ibus_panel;
 mod keybindings;
 mod live_apps;
 mod lock;
@@ -1286,6 +1287,9 @@ fn build(app: &adw::Application) {
     polkit::start(app.upcast_ref());
     // GNOME's NetworkManager secret agent (Wi-Fi passwords).
     network_agent::start(app.upcast_ref());
+
+    // GNOME Shell is IBus's panel: it draws the candidate window.
+    ibus_panel::start(app.upcast_ref());
 
     // GNOME's workspace switcher popup.
     let workspace_popup = ws_popup::WorkspacePopup::new(app.upcast_ref());
