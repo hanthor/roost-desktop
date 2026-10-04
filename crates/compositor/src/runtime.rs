@@ -1542,8 +1542,14 @@ impl Runtime {
                         let from = *self
                             .overview_swipe_from
                             .get_or_insert(self.overview_progress);
-                        self.overview_progress =
-                            (from - travel.y / OVERVIEW_SWIPE_DISTANCE).clamp(0.0, 1.0);
+                        let progress = (from - travel.y / OVERVIEW_SWIPE_DISTANCE).clamp(0.0, 1.0);
+                        self.overview_progress = if self.input_settings.enable_animations {
+                            progress
+                        } else if progress >= 0.5 {
+                            1.0
+                        } else {
+                            0.0
+                        };
                     }
                     true
                 }
@@ -1803,6 +1809,7 @@ impl Runtime {
             .is_none()
             .then(|| self.manager.tile_preview(&self.state))
             .flatten();
+        let tile = self.animated_tile_preview(tile);
         let accent = self.wallpaper.accent();
         let decor_global = cards
             .map(|layout| overview_decor(layout, accent))
