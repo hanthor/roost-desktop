@@ -2348,10 +2348,10 @@ impl Runtime {
                 if !self.is_locked() {
                     self.engage_lock();
                 }
-                locker.lock();
             } else {
                 eprintln!("roost-compositor: session lock refused for pid {pid:?}");
             }
+            self.state.resolve_lock_request(locker, ours);
         }
         // A lock client's unlock_and_destroy never unlocks by itself:
         // only a verified password clears the flag.
