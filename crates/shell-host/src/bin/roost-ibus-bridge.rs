@@ -432,6 +432,17 @@ fn ibus_content_type(hint: u32, purpose: u32) -> (u32, u32) {
     (purpose, hints)
 }
 
+/// Forward a visible composition update, or exactly one clear after it.
+/// Smithay forwards even an empty input-method string as non-null text-input
+/// preedit; GTK interprets a fresh non-null preedit as a composition start
+/// and deletes the selected text. Redundant IBus hide signals must not start it.
+fn preedit_update(active: &mut bool, text: &str, visible: bool) -> bool {
+    let showing = visible && !text.is_empty();
+    let forward = showing || *active;
+    *active = showing;
+    forward
+}
+
 /// The bridge's Wayland side.
 #[derive(Default)]
 struct Bridge {
@@ -452,6 +463,7 @@ struct Bridge {
     /// Activation pending the next `done`, and the applied one.
     pending_active: Option<bool>,
     active: bool,
+    preedit_active: bool,
     /// Surrounding text and content type pending the next `done`, and
     /// the applied surrounding text.
     pending_surrounding: Option<Surrounding>,
@@ -546,7 +558,9 @@ impl Bridge {
         }
         match event {
             FromIbus::Commit(text) => {
-                im.set_preedit_string(String::new(), 0, 0);
+                if std::mem::take(&mut self.preedit_active) {
+                    im.set_preedit_string(String::new(), 0, 0);
+                }
                 im.commit_string(text);
                 im.commit(self.serial);
             }
@@ -555,6 +569,9 @@ impl Bridge {
                 cursor,
                 visible,
             } => {
+                if !preedit_update(&mut self.preedit_active, &text, visible) {
+                    return;
+                }
                 let (text, cursor) = if visible {
                     // IBus counts characters; the protocol counts bytes.
                     let byte = byte_offset(&text, cursor as usize) as i32;
@@ -566,6 +583,9 @@ impl Bridge {
                 im.commit(self.serial);
             }
             FromIbus::HidePreedit => {
+                if !preedit_update(&mut self.preedit_active, "", false) {
+                    return;
+                }
                 im.set_preedit_string(String::new(), 0, 0);
                 im.commit(self.serial);
             }
@@ -651,6 +671,7 @@ impl Bridge {
             return;
         }
         self.active = active;
+        self.preedit_active = false;
         // A new field: what IBus heard about the last one is stale.
         self.surrounding = None;
         self.sent_cursor_rect = None;
@@ -860,6 +881,22 @@ mod tests {
             cursor,
             anchor: cursor,
         }
+    }
+
+    #[test]
+    fn hidden_preedit_never_starts_composition_in_a_new_field() {
+        let mut active = false;
+        assert!(!preedit_update(&mut active, "", false));
+        assert!(!preedit_update(&mut active, "", true));
+        assert!(preedit_update(&mut active, "ni", true));
+        assert!(preedit_update(&mut active, "nihao", true));
+        assert!(preedit_update(&mut active, "", false));
+        assert!(!preedit_update(&mut active, "", false));
+        // A focus change resets the applied composition, so a queued
+        // FocusOut hide cannot delete a newly focused field's selection.
+        assert!(preedit_update(&mut active, "ni", true));
+        active = false;
+        assert!(!preedit_update(&mut active, "ni", false));
     }
 
     #[test]
