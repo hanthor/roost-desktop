@@ -162,7 +162,7 @@ class Recorder:
         self.stills[card] = self.n + 1
 
 
-def run_tour(qmp, out):
+def run_tour(qmp, out, serial_path):
     """Scripted feature tour through QMP input, recorded to a WebM with a
     title card per section. Returns a manifest entry."""
     tour = os.path.join(out, "tour")
@@ -257,8 +257,21 @@ def run_tour(qmp, out):
         keys("ctrl", "a")
         qmp.type_text("roost")
         wait(1)
+        serial_offset = len(read_text(serial_path))
         keys("ret")
-        wait(5)
+        # PAM is asynchronous and has a ten-second deadline. Observe the
+        # actual authenticated unlock, rather than stopping after five seconds.
+        deadline = time.monotonic() + 15
+        unlocked = False
+        while time.monotonic() < deadline:
+            if "roost-vm-health: lock active=(false,)" in read_text(serial_path)[serial_offset:]:
+                unlocked = True
+                break
+            wait(0.2)
+        if not unlocked:
+            log("tour: PAM unlock did not arrive within 15 seconds")
+            qmp.frame(os.path.join(out, "V-UNLOCK-FAILED.png"))
+        wait(1)
     finally:
         rec.stop.set()
         rec.thread.join(timeout=10)
@@ -452,7 +465,7 @@ def main():
             record("V-PANEL", ok, f"screendump: {panel_desc}")
             if a.tour:
                 try:
-                    tour_info = run_tour(qmp, out)
+                    tour_info = run_tour(qmp, out, serial_path)
                 except (OSError, RuntimeError, subprocess.CalledProcessError) as e:
                     log(f"tour failed: {e}")
         # Give activation probes a bounded chance to report before shutdown.
