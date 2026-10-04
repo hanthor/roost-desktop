@@ -282,6 +282,14 @@ fn calendar_popover(notes: &gtk::Box) -> (gtk::Popover, Rc<calendar::CalendarUi>
         let cal = cal.clone();
         popover.connect_show(move |_| cal.reset());
     }
+    {
+        let popover = popover.downgrade();
+        cal.connect_open(move || {
+            if let Some(popover) = popover.upgrade() {
+                popover.popdown();
+            }
+        });
+    }
     (popover, cal)
 }
 
