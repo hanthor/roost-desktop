@@ -41,7 +41,7 @@ impl fmt::Display for Arg<'_> {
 }
 
 impl Arg<'_> {
-    pub fn write<T, U>(&self, buf: &mut T, fds: &mut U)
+    pub fn write<T, U>(&self, buf: &mut T, fds: &mut U) -> std::io::Result<()>
     where
         T: Extend<u8>,
         U: Extend<OwnedFd>,
@@ -54,8 +54,7 @@ impl Arg<'_> {
             }
             Arg::Int64(value) => buf.extend(value.to_ne_bytes()),
             Arg::Float(value) => buf.extend(value.to_ne_bytes()),
-            // XXX unwrap?
-            Arg::Fd(value) => fds.extend([value.try_clone_to_owned().unwrap()]),
+            Arg::Fd(value) => fds.extend([value.try_clone_to_owned()?]),
             Arg::String(None) => {
                 buf.extend(0u32.to_ne_bytes());
             }
@@ -73,6 +72,7 @@ impl Arg<'_> {
                 }
             }
         }
+        Ok(())
     }
 }
 

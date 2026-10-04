@@ -1,9 +1,13 @@
 # Local transport bound
 
 Source: published reis 0.7.1, MIT license, https://github.com/ids1024/reis.
-Only src/wire/backend.rs differs from the published crate: pre-decoder
-socket accumulation is limited to 2 MiB and 64 received file descriptors.
+src/wire/backend.rs bounds both undecoded incoming and unread outgoing
+accumulation to 2 MiB and 64 stored file descriptors. Outgoing overflow
+closes the connection and permanently stops further buffering.
+src/wire/arg.rs propagates FD-clone errors so resource exhaustion closes
+the connection instead of panicking.
 The upstream 1 MiB individual-message bound remains. Exceeding either limit
 fails the connection; Roost permanently revokes its RemoteDesktop grant.
-Regression tests cover continuous undecoded bytes and unconsumed FDs.
+Regression tests cover continuous undecoded bytes, unconsumed FDs and
+unread outgoing responses.
 This patch is required until equivalent upstream bounds are available.

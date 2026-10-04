@@ -29,6 +29,14 @@ struct Worker {
     disconnected: bool,
     bindings: u32,
 }
+impl Drop for Worker {
+    fn drop(&mut self) {
+        self.grant.stopped.store(true, Ordering::SeqCst);
+        let _ = self.to_loop.send(ToLoop::RemoteStop {
+            session_id: self.grant.id,
+        });
+    }
+}
 impl Worker {
     fn event(
         &mut self,
@@ -302,12 +310,9 @@ pub(crate) fn start(
                 }
             }
             thread_grant.stopped.store(true, Ordering::SeqCst);
-            if let Some(connection) = worker.connection {
+            if let Some(connection) = worker.connection.take() {
                 connection.disconnected(reis::ei::connection::DisconnectReason::Disconnected, None);
             }
-            let _ = to_loop.send(ToLoop::RemoteStop {
-                session_id: thread_grant.id,
-            });
         })?;
     Ok(())
 }

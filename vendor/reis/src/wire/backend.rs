@@ -32,10 +32,14 @@ const MAX_BUFFERED_FDS: usize = 64;
 struct Buffer {
     buf: VecDeque<u8>,
     fds: VecDeque<OwnedFd>,
+    failed: bool,
 }
 
 impl Buffer {
     fn flush_write(&mut self, socket: &UnixStream) -> rustix::io::Result<()> {
+        if self.failed {
+            return Err(Errno::PIPE);
+        }
         // TODO avoid allocation
         while !self.buf.is_empty() {
             let (slice1, slice2) = self.buf.as_slices();
@@ -315,6 +319,9 @@ impl Backend {
 
         let mut write = self.0.write.lock().unwrap();
 
+        if write.failed {
+            return;
+        }
         let start_len = write.buf.len();
 
         // Leave space for header
@@ -323,9 +330,22 @@ impl Backend {
         // Write arguments
         for arg in args {
             let write = &mut *write;
-            arg.write(&mut write.buf, &mut write.fds);
+            if arg.write(&mut write.buf, &mut write.fds).is_err() {
+                write.failed = true;
+                write.buf.clear();
+                write.fds.clear();
+                let _ = self.0.socket.shutdown(std::net::Shutdown::Both);
+                return;
+            }
         }
 
+        if write.buf.len() > MAX_BUFFERED_BYTES || write.fds.len() > MAX_BUFFERED_FDS {
+            write.failed = true;
+            write.buf.clear();
+            write.fds.clear();
+            let _ = self.0.socket.shutdown(std::net::Shutdown::Both);
+            return;
+        }
         // Write header now we know the length
         let header = Header {
             object_id,
@@ -356,6 +376,22 @@ fn is_reis_debug() -> bool {
 mod roost_transport_bounds {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn unread_outgoing_responses_cannot_accumulate_without_bound() {
+        let (server, _client) = UnixStream::pair().unwrap();
+        let backend = Backend::new(server, false).unwrap();
+        let value = "x".repeat(2048);
+        for _ in 0..2048 {
+            backend.request(1, 0, &[Arg::String(Some(&value))]);
+        }
+        let write = backend.0.write.lock().unwrap();
+        assert!(write.failed);
+        assert!(write.buf.is_empty());
+        assert!(write.fds.is_empty());
+        drop(write);
+        assert_eq!(backend.flush().unwrap_err(), Errno::PIPE);
+    }
 
     #[test]
     fn undecoded_socket_bytes_cannot_accumulate_without_bound() {
