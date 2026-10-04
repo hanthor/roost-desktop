@@ -293,8 +293,8 @@ pub fn transition(
             }
             // Thumbnail clones and neighbouring workspace clones travel with
             // their own card, retaining their scale and stacking order.
-            let center =
-                preview.rect.loc + (preview.rect.size.w / 2, preview.rect.size.h / 2).into();
+            let center = preview.rect.loc
+                + Point::<i32, Logical>::from((preview.rect.size.w / 2, preview.rect.size.h / 2));
             let thumbnail = layout.thumbnails.iter().find(|c| c.rect.contains(center));
             let owner = thumbnail.or_else(|| {
                 layout
