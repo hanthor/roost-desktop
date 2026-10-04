@@ -18,7 +18,7 @@ The parity target is a named, pinned GNOME release and configuration on the same
 - **Extensions:** separate, untrusted processes behind a capability broker. No privileged compositor Wayland socket, arbitrary native plugin ABI, raw input, clipboard, capture, filesystem, or network access by default. Wasmtime is a later optional worker implementation, not the security boundary by itself.
 - **System integration:** reuse system services and portals where appropriate. The portal backend mediates consent; compositor-enforced grants authorize capture and are revocable.
 
-Use Smithay/calloop's event model initially. Pointer/input/frame paths must not synchronously wait for shell, extensions, search, disk, or network work. GTK4/libadwaita and a Rust-native toolkit are compared before choosing the shell UI toolkit, with accessibility and parity as acceptance criteria.
+Use Smithay/calloop's event model initially. Pointer/input/frame paths must not synchronously wait for shell, extensions, search, disk, or network work. The shell toolkit choice is GTK4/libadwaita ([ADR 0006](adr/0006-gtk4-libadwaita-shell.md)); accessibility and visual parity remain acceptance criteria.
 
 ## Delivery tiers
 
@@ -51,8 +51,8 @@ Each spek has its own draft `plan.md`, `context.md`, and `research.md`; plans re
 
 ## Decisions still open
 
-Decided 2026-10-01: the parity baseline is **GNOME 51 as shipped in the TunaOS Marlin GNOME image**, and the first supported distribution is **TunaOS Marlin** (Arch Linux base, bootc image, x86_64). Both are recorded in [the roadmap](roadmap.md).
+Decided 2026-10-01: the parity baseline is **GNOME 51 as shipped in the TunaOS Marlin GNOME image**, and the first supported distribution is **TunaOS Marlin** (Arch Linux base, bootc image, x86_64). Both are recorded in [ADR 0007](adr/0007-gnome51-marlin-baseline.md) and [the roadmap](roadmap.md).
 
-Still open before a hardware or security implementation spek is approved: GPU matrix beyond the Marlin VM; same-UID process threat model and trusted-service credential binding; UI toolkit after the accessibility spike (the current hand-painted shell cannot reach parity or AT-SPI); 1.0 tiling requirement; settings compatibility map against GNOME 51 schemas; portal/capture grant lifecycle; and packaging/rollback strategy on bootc.
+Still open before a hardware or security implementation spek is approved: GPU matrix beyond the Marlin VM; same-UID process threat model and trusted-service credential binding; 1.0 tiling requirement; settings compatibility map against GNOME 51 schemas; portal/capture grant lifecycle; and packaging/rollback strategy on bootc.
 
 Current backend reality: the compositor runs nested (winit) or as a DRM/KMS hardware session (libseat, udev, GBM/EGL, libinput), chosen automatically by whether a host display exists. The hardware path is proven on vkms in CI; real-GPU qualification and the VM lane are tracked on the roadmap board.
