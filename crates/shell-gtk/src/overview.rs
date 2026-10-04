@@ -1012,6 +1012,9 @@ fn paged_grid(pages: Vec<gtk::FlowBox>) -> gtk::Widget {
     sync(0);
     carousel.connect_page_changed(move |_, page| sync(page));
     let motion = gtk::DropControllerMotion::new();
+    // Observe drags before a tile drop target consumes them, so edge
+    // paging remains active while the dragged item crosses child widgets.
+    motion.set_propagation_phase(gtk::PropagationPhase::Capture);
     {
         let pager = pager.clone();
         motion.connect_enter(move |m, x, _| {
