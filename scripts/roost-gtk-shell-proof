@@ -2799,6 +2799,11 @@ if grep -q 'ShellExited' "$LOG"; then
     fail G-SHELL-STABLE "the shell exited during the journey: $(grep -c ShellExited "$LOG") time(s)"
 fi
 pass G-SHELL-STABLE "the shell never exited or restarted"
+if grep -q 'GtkText - did not receive a focus-out event' "$LOG"; then
+    fail G-LOCK-FOCUS "password entry lost focus without clearing its cursor blink callback"
+fi
+pass G-LOCK-FOCUS "password rejection and acceptance leave no GtkText focus-out warning"
+
 
 # A hard shell crash must not leave a persistent monitor behind. Do this
 # after the normal journey's stability assertion, then require supervision

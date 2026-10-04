@@ -418,11 +418,17 @@ impl LockUi {
                 }
                 let password = entry.text().to_string();
                 message.set_label("");
+                // GtkText needs its normal focus-leave cleanup while still
+                // sensitive, including stopping its cursor blink callback.
+                if let Some(root) = entry.root() {
+                    root.set_focus(gtk::Widget::NONE);
+                }
                 entry.set_sensitive(false);
                 match (ui.send)(password) {
                     Some(id) => ui.pending.set(Some(id)),
                     None => {
                         entry.set_sensitive(true);
+                        entry.grab_focus();
                         message.set_label(FAILED);
                     }
                 }
