@@ -7,30 +7,37 @@ The compositor is a long-lived Rust process built with Smithay. The shell UI run
 See the [walkthrough](docs/walkthrough.md) for every feature as it looks
 today, in frames the GTK shell proof takes on each change.
 
+## Screenshots and overview demo
+
+![Roost overview with three live window previews](docs/walkthrough/overview-demo.png)
+
+| Quick settings | App grid |
+| --- | --- |
+| ![Roost quick settings with volume, brightness and service controls](docs/walkthrough/quick-settings-demo.png) | ![Roost app grid](docs/walkthrough/app-grid-demo.png) |
+
+![Overview demo: open the overview, select a window, and return to the desktop](docs/walkthrough/overview-demo.gif)
+
+[Play or download the overview video (MP4, 12 seconds)](docs/walkthrough/overview-demo.mp4).
+The demo shows an actual nested Roost session with three libadwaita test windows.
+See [capture details](docs/walkthrough/README-media.md) for source revisions and reproduction.
+
 ## Project status
 
-**Nested developer preview.** Four crates build and ship: a Smithay compositor
-(floating windows, workspaces, Alt-Tab, tiling halves, a scrollable strip mode,
-multi-output with hotplug migration, session lock, supervised shell restart,
-optional XWayland), a shell host (panel, quick-settings tiles, tray,
-notifications daemon, dock, overview search and launch, keyboard navigation,
-Rhai extensions, GSettings read and write-back), a greetd greeter, and the
-versioned control protocol between compositor and shell.
+**Nested developer preview.** A Smithay compositor supervises a GTK4/libadwaita
+shell with overview window previews, app grid and search, quick settings,
+notifications, calendar, keyboard navigation and AT-SPI accessibility. Roost
+also includes its session supervisor, shell host, greetd greeter and versioned
+control protocol. Floating windows, workspaces, Alt-Tab, half tiling, scrollable
+tiling and XWayland are covered by graphical CI journeys.
 
-What it is not yet:
+The DRM/KMS backend starts hardware sessions and is tested with virtual KMS
+in CI. Physical GPU, VT, suspend and long-running release qualification remain
+open. See [the parity ledger](docs/parity-ledger.md) for measured behavior and
+remaining gaps.
 
-- **Hardware sessions are new.** The DRM/KMS backend (libseat, GBM/EGL,
-  libinput) starts from a TTY and is proven on a virtual KMS device in CI,
-  but is not yet qualified on real GPUs. Nested runs inside another session
-  remain the main development path.
-- **Not visually at parity.** The shell paints its own pixels with a small
-  bitmap font; there is no toolkit, no app grid, no window previews, and no
-  AT-SPI bridge yet.
-
-**Parity baseline:** GNOME 51 as shipped in the TunaOS Marlin GNOME image
-(`ghcr.io/tuna-os/marlin:gnome`). Every parity claim is measured against
-that image on the same virtual machine; see
-[the parity ledger](docs/parity-ledger.md).
+**Parity target:** GNOME 51. Native GNOME 51 captures provide the visual
+reference. The published Marlin image was verified as GNOME Shell 50.5 on
+2026-10-04; a GNOME 51 Marlin benchmark image is being validated separately.
 
 **Target platform:** Roost is being tested as a TunaOS Marlin flavor (Arch
 base, bootc image). The Debian package remains for local development hosts.
