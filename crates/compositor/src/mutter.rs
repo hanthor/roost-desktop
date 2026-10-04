@@ -22,6 +22,10 @@ use zbus::object_server::{InterfaceRef, SignalEmitter};
 use zbus::zvariant::{DeserializeDict, OwnedObjectPath, OwnedValue, SerializeDict, Type, Value};
 use zbus::{fdo, interface, ObjectServer};
 
+pub(crate) mod remote_desktop;
+mod remote_eis;
+pub use remote_desktop::Input as RemoteInput;
+
 /// One lit output as the D-Bus side describes it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutputSnapshot {
@@ -101,6 +105,18 @@ pub type Windows = Arc<Mutex<Vec<WindowSnapshot>>>;
 
 /// Requests from D-Bus to the event loop.
 pub enum ToLoop {
+    RemoteInput {
+        session_id: u64,
+        grant: Arc<AtomicBool>,
+        pending: Arc<std::sync::atomic::AtomicU32>,
+        input: RemoteInput,
+    },
+    RemoteStop {
+        session_id: u64,
+    },
+    RemoteKeymap {
+        reply: std::sync::mpsc::Sender<String>,
+    },
     StartCast {
         session_id: u64,
         grant: Arc<AtomicBool>,
@@ -345,6 +361,7 @@ type Sessions = Arc<Mutex<Vec<(Session, OwnedObjectPath)>>>;
 
 #[derive(Clone)]
 struct ScreenCast {
+    remote: remote_desktop::RemoteSessions,
     authority: crate::capture_security::Authority,
     sessions: Sessions,
     outputs: Outputs,
@@ -424,7 +441,7 @@ impl ScreenCast {
     async fn create_session(
         &mut self,
         #[zbus(object_server)] server: &ObjectServer,
-        _properties: HashMap<String, OwnedValue>,
+        properties: HashMap<String, OwnedValue>,
         #[zbus(connection)] conn: &zbus::Connection,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> fdo::Result<OwnedObjectPath> {
@@ -438,6 +455,28 @@ impl ScreenCast {
                 "too many capture sessions".into(),
             ));
         }
+        let linked = if let Some(value) = properties.get("remote-desktop-session-id") {
+            let remote_id = <&str>::try_from(value)
+                .map_err(|_| fdo::Error::InvalidArgs("invalid remote session id".into()))?;
+            let remote = self
+                .remote
+                .lock()
+                .map_err(|_| fdo::Error::Failed("remote registry unavailable".into()))?;
+            let grant = remote
+                .get(remote_id)
+                .ok_or_else(|| crate::capture_security::denied("unknown remote session"))?;
+            if grant.owner != owner
+                || grant.stopped.load(Ordering::SeqCst)
+                || grant.started.load(Ordering::SeqCst)
+            {
+                return Err(crate::capture_security::denied(
+                    "remote grant cannot accept this stream",
+                ));
+            }
+            Some(grant.stopped.clone())
+        } else {
+            None
+        };
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let path = format!("/org/gnome/Mutter/ScreenCast/Session/u{id}");
         let path =
@@ -451,7 +490,7 @@ impl ScreenCast {
             to_loop: self.to_loop.clone(),
             next_id: self.next_id.clone(),
             streams: Arc::new(Mutex::new(Vec::new())),
-            stopped: Arc::new(AtomicBool::new(false)),
+            stopped: linked.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
             started: Arc::new(AtomicBool::new(false)),
         };
         server.at(&path, session.clone()).await?;
@@ -468,10 +507,8 @@ impl ScreenCast {
     }
 }
 
-#[interface(name = "org.gnome.Mutter.ScreenCast.Session")]
 impl Session {
-    async fn start(&self, #[zbus(header)] header: zbus::message::Header<'_>) -> fdo::Result<()> {
-        self.check_owner(&header)?;
+    fn start_streams(&self) -> fdo::Result<()> {
         self.authority.unlocked()?;
         if self.stopped.load(Ordering::SeqCst) {
             return Err(crate::capture_security::denied("session revoked"));
@@ -489,6 +526,14 @@ impl Session {
             });
         }
         Ok(())
+    }
+}
+
+#[interface(name = "org.gnome.Mutter.ScreenCast.Session")]
+impl Session {
+    async fn start(&self, #[zbus(header)] header: zbus::message::Header<'_>) -> fdo::Result<()> {
+        self.check_owner(&header)?;
+        self.start_streams()
     }
 
     async fn stop(
@@ -692,17 +737,29 @@ pub fn start(
                 to_loop: to_loop.clone(),
             };
             let sessions: Sessions = Default::default();
+            let remote: remote_desktop::RemoteSessions = Default::default();
+            let next_id = Arc::new(AtomicU64::new(1));
             let screencast = ScreenCast {
+                remote: remote.clone(),
                 sessions: sessions.clone(),
                 authority: authority.clone(),
                 outputs: outputs.clone(),
                 windows,
                 to_loop: to_loop.clone(),
-                next_id: Arc::new(AtomicU64::new(1)),
+                next_id: next_id.clone(),
+            };
+            let remote_desktop = remote_desktop::RemoteDesktop {
+                authority: authority.clone(),
+                remote: remote.clone(),
+                captures: sessions.clone(),
+                outputs: outputs.clone(),
+                to_loop: to_loop.clone(),
+                next_id,
             };
             let conn = match zbus::blocking::connection::Builder::session()
                 .and_then(|b| b.serve_at("/org/gnome/Mutter/ScreenCast", screencast))
                 .and_then(|b| b.serve_at("/org/gnome/Mutter/DisplayConfig", display_config))
+                .and_then(|b| b.serve_at("/org/gnome/Mutter/RemoteDesktop", remote_desktop))
                 .and_then(|b| b.build())
             {
                 Ok(conn) => conn,
@@ -715,6 +772,7 @@ pub fn start(
             for name in [
                 "org.gnome.Mutter.DisplayConfig",
                 "org.gnome.Mutter.ScreenCast",
+                "org.gnome.Mutter.RemoteDesktop",
             ] {
                 match conn.request_name_with_flags(name, flags) {
                     Ok(zbus::fdo::RequestNameReply::PrimaryOwner) => {
@@ -731,6 +789,27 @@ pub fn start(
             // bounds stream teardown; frames additionally fail closed on lock.
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(100));
+                let remote_snapshot = remote.lock().map(|s| s.clone()).unwrap_or_default();
+                for (remote_id, grant) in remote_snapshot {
+                    let alive = zbus::block_on(authority.owner_alive(conn.inner(), &grant.owner));
+                    if alive && !grant.stopped.load(Ordering::SeqCst) {
+                        continue;
+                    }
+                    grant.stopped.store(true, Ordering::SeqCst);
+                    let _ = to_loop.send(ToLoop::RemoteStop {
+                        session_id: grant.id,
+                    });
+                    let path = format!("/org/gnome/Mutter/RemoteDesktop/Session/u{}", grant.id);
+                    if let Ok(signal) = SignalEmitter::new(conn.inner(), path.clone()) {
+                        let _ = zbus::block_on(remote_desktop::RemoteSession::closed(&signal));
+                    }
+                    let _ = conn
+                        .object_server()
+                        .remove::<remote_desktop::RemoteSession, _>(path.as_str());
+                    if let Ok(mut remote) = remote.lock() {
+                        remote.remove(&remote_id);
+                    }
+                }
                 let snapshot = sessions.lock().map(|s| s.clone()).unwrap_or_default();
                 for (session, path) in snapshot {
                     let alive = zbus::block_on(authority.owner_alive(conn.inner(), &session.owner));

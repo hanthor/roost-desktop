@@ -434,6 +434,12 @@ pub fn restore_env(prev: Option<OsString>) {
 /// Live nested session: display, protocol state, backend, and outputs.
 /// Output handles live in the state's inventory (entry zero is the
 /// primary); the runtime reaches them through [`State`] accessors.
+struct RemoteHeld {
+    grant: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    keys: std::collections::HashSet<u32>,
+    buttons: std::collections::HashSet<u32>,
+}
+
 pub struct Runtime {
     display: Display<State>,
     state: State,
@@ -476,6 +482,7 @@ pub struct Runtime {
     cast_outputs: crate::mutter::Outputs,
     capture_authority: crate::capture_security::Authority,
     cast_grants: std::collections::HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    remote_held: std::collections::HashMap<u64, RemoteHeld>,
     /// Window list org.gnome.Shell.Introspect serves (window sharing).
     introspect: crate::introspect::Handle,
     /// A three-finger swipe in progress: its travel so far (#60).
@@ -807,6 +814,7 @@ impl Runtime {
             cast_outputs,
             capture_authority,
             cast_grants: Default::default(),
+            remote_held: Default::default(),
             introspect,
             idle_since: Instant::now(),
             unlock_results,
@@ -897,6 +905,10 @@ impl Runtime {
     fn engage_lock(&mut self) {
         self.lock.lock();
         self.control.set_locked(true);
+        let remote_ids: Vec<_> = self.remote_held.keys().copied().collect();
+        for id in remote_ids {
+            self.stop_remote_input(id);
+        }
         self.capture_authority.publish(true, self.shell.child_pid());
         self.control.set_overview(false);
         self.overlay.show(Vec::new());
@@ -1986,8 +1998,143 @@ impl Runtime {
     }
 
     /// One D-Bus screen-cast request.
+    fn stop_remote_input(&mut self, session_id: u64) {
+        let Some(held) = self.remote_held.remove(&session_id) else {
+            return;
+        };
+        held.grant.store(true, std::sync::atomic::Ordering::SeqCst);
+        let time = self.lock_now_ms() as u32;
+        for keycode in held.keys {
+            self.on_manager_input(ManagerInput::Key {
+                keycode,
+                pressed: false,
+                time,
+            });
+        }
+        for button in held.buttons {
+            self.on_manager_input(ManagerInput::Button {
+                button,
+                pressed: false,
+                time,
+            });
+        }
+    }
+
+    fn remote_input(
+        &mut self,
+        session_id: u64,
+        grant: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        input: crate::mutter::RemoteInput,
+    ) {
+        if self.is_locked() || grant.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let time = self.lock_now_ms() as u32;
+        let held = self
+            .remote_held
+            .entry(session_id)
+            .or_insert_with(|| RemoteHeld {
+                grant,
+                keys: Default::default(),
+                buttons: Default::default(),
+            });
+        use crate::mutter::RemoteInput;
+        let input = match input {
+            RemoteInput::Key { evdev, pressed } => {
+                let keycode = evdev + 8;
+                if (pressed && !held.keys.insert(keycode))
+                    || (!pressed && !held.keys.remove(&keycode))
+                {
+                    return;
+                }
+                ManagerInput::Key {
+                    keycode,
+                    pressed,
+                    time,
+                }
+            }
+            RemoteInput::Button { button, pressed } => {
+                if (pressed && !held.buttons.insert(button))
+                    || (!pressed && !held.buttons.remove(&button))
+                {
+                    return;
+                }
+                ManagerInput::Button {
+                    button,
+                    pressed,
+                    time,
+                }
+            }
+            RemoteInput::Relative { dx, dy } => {
+                let pos = self.manager.pointer_pos();
+                let target = (pos.x + dx, pos.y + dy);
+                let clamped = self
+                    .cast_outputs
+                    .lock()
+                    .ok()
+                    .and_then(|outputs| {
+                        outputs
+                            .iter()
+                            .map(|out| {
+                                let x = target.0.clamp(
+                                    f64::from(out.x),
+                                    f64::from(out.x) + f64::from(out.width) / out.scale - 1.0,
+                                );
+                                let y = target.1.clamp(
+                                    f64::from(out.y),
+                                    f64::from(out.y) + f64::from(out.height) / out.scale - 1.0,
+                                );
+                                (x, y, (target.0 - x).powi(2) + (target.1 - y).powi(2))
+                            })
+                            .min_by(|a, b| a.2.total_cmp(&b.2))
+                            .map(|(x, y, _)| (x, y))
+                    })
+                    .unwrap_or((pos.x, pos.y));
+                ManagerInput::Motion {
+                    pos: clamped.into(),
+                    time,
+                }
+            }
+            RemoteInput::Absolute { x, y } => ManagerInput::Motion {
+                pos: (x, y).into(),
+                time,
+            },
+            RemoteInput::Axis { dx, dy } => ManagerInput::Axis {
+                horizontal: dx,
+                vertical: dy,
+                time,
+            },
+        };
+        self.on_manager_input(input);
+    }
+
     fn on_screencast_request(&mut self, request: crate::mutter::ToLoop) {
         match request {
+            crate::mutter::ToLoop::RemoteInput {
+                session_id,
+                grant,
+                pending,
+                input,
+            } => {
+                pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                self.remote_input(session_id, grant, input);
+            }
+            crate::mutter::ToLoop::RemoteStop { session_id } => self.stop_remote_input(session_id),
+            crate::mutter::ToLoop::RemoteKeymap { reply } => {
+                let keymap = self
+                    .state
+                    .seat
+                    .get_keyboard()
+                    .map(|keyboard| {
+                        keyboard.with_xkb_state(&mut self.state, |context| {
+                            let xkb = context.xkb().lock().unwrap();
+                            // SAFETY: stringify under the Xkb mutex; no keymap reference or clone escapes.
+                            unsafe { xkb.keymap() }.get_as_string(1)
+                        })
+                    })
+                    .unwrap_or_default();
+                let _ = reply.send(keymap);
+            }
             crate::mutter::ToLoop::StartCast {
                 session_id,
                 grant,

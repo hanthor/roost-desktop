@@ -223,6 +223,34 @@ jobs:
           path: ${{ runner.temp }}/portal-security
           retention-days: 90
 
+  remote-security:
+    needs: arch-package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: roost-arch
+          path: ${{ runner.temp }}/remote-package
+      - run: sudo apt-get -o Acquire::Retries=3 update -qq && sudo apt-get install -y --no-install-recommends podman zstd shellcheck
+      - run: shellcheck scripts/roost-remote-security tests/remote-desktop-reference/run.sh
+      - name: Test packaged compositor with actual GNOME 51 RemoteDesktop consent and libei input
+        run: |
+          mkdir -p "$RUNNER_TEMP/remote-candidate"
+          package=$(find "$RUNNER_TEMP/remote-package" -name '*.pkg.tar.zst' -print -quit)
+          test -n "$package"
+          tar --zstd -xf "$package" -C "$RUNNER_TEMP/remote-candidate"
+          mkdir -p "$RUNNER_TEMP/remote-security"
+          printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/remote-security/candidate-commit.txt"
+          scripts/roost-remote-security --candidate "$RUNNER_TEMP/remote-candidate" --out "$RUNNER_TEMP/remote-security"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: remote-security
+          path: ${{ runner.temp }}/remote-security
+          retention-days: 90
+
   arch-package:
     # TunaOS Marlin is Arch-based: build, check, and install the Arch
     # package in a clean archlinux container (#69).
