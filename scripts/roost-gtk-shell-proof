@@ -286,7 +286,10 @@ cleanup() {
     # shellcheck disable=SC2086
     if [ -n "$IME_PIDS" ]; then kill $IME_PIDS 2>/dev/null || true; fi
     # The bridge daemonized ibus-daemon for this session's display.
-    if command -v ibus >/dev/null 2>&1; then ibus exit >/dev/null 2>&1 || true; fi
+    if [ -n "${SOCKET_NAME:-}" ] && command -v ibus >/dev/null 2>&1; then
+        env -u DISPLAY -u IBUS_ADDRESS -u WAYLAND_SOCKET WAYLAND_DISPLAY="$SOCKET_NAME" \
+            ibus exit >/dev/null 2>&1 || true
+    fi
     if [ -n "$SCREENSAVER_PID" ]; then kill "$SCREENSAVER_PID" 2>/dev/null || true; fi
     if [ -n "$CAL_PID" ]; then kill "$CAL_PID" 2>/dev/null || true; fi
     if [ -n "$ACCEL_PID" ]; then kill "$ACCEL_PID" 2>/dev/null || true; fi
