@@ -2257,7 +2257,9 @@ impl Runtime {
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
         self.manager.reconcile(&mut self.state);
         #[cfg(feature = "xwayland")]
-        if let Some(display) = self.x11_display {
+        // DISPLAY may be a reserved idle listener. An icon helper must not
+        // connect and accidentally activate XWayland before a real client.
+        if let Some(display) = self.x11_display.filter(|_| self.state.xwm.is_some()) {
             let windows = self.manager.x11_icon_identities();
             for (xid, id, raster) in self.x11_icon_reader.poll(display, windows.clone()) {
                 if windows.contains(&(xid, id)) {
