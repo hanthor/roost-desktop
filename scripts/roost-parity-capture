@@ -200,6 +200,7 @@ window_menu() {
     sleep 1
 }
 
+
 # A fresh wallpaper decodes once (then comes from the cache): wait for it.
 for _ in $(seq 1 60); do grep -q "wallpaper decoded" "$LOG" 2>/dev/null && break; sleep 0.5; done
 # A login opens on the overview, as GNOME's does; Escape leaves it.
