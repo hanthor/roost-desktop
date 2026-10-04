@@ -723,6 +723,7 @@ showing "$ARTIFACTS/a11y-cycle-keys.json" "Switch Windows" && fail G-CYCLE-KEYS 
 pass G-CYCLE-KEYS "bound forward/backward window and app-group cycling activate immediately without a popup"
 original="$(jq -r .focused "$CSTATE")"
 xdotool keydown Control_L key k
+cstate '.switcher_thumbnails == 4' "all window thumbnails" || fail G-WINDOW-SWITCHER "window switcher did not draw each window's thumbnail"
 sleep 0.7
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-window-switcher.json" 20 || fail G-WINDOW-SWITCHER "a11y dump failed"
 [ "$(jq '[.[] | select(.showing and .role == "list item" and .name == "Alpha: Alpha")] | length' "$ARTIFACTS/a11y-window-switcher.json")" = 2 ] || fail G-WINDOW-SWITCHER "Alpha windows were grouped instead of two entries"
