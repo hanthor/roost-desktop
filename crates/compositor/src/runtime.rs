@@ -2595,7 +2595,7 @@ impl Runtime {
                         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
                 }
                 send_surface_scales(&self.state, &self.manager);
-                send_frame_callbacks(&self.state, &self.manager, self.stats.frames);
+                send_frame_callbacks(&self.state, &self.manager);
                 backend
                     .submit(Some(&[damage]))
                     .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
@@ -2761,7 +2761,7 @@ impl Runtime {
                     // A pending page flip is not another rendered frame.
                     // Granting callbacks on every client dispatch here would
                     // let redraws outrun the display and keep the loop busy.
-                    send_frame_callbacks(&self.state, &self.manager, self.stats.frames);
+                    send_frame_callbacks(&self.state, &self.manager);
                     self.stats.frames += 1;
                 }
             }
@@ -3377,8 +3377,10 @@ fn send_surface_scales(state: &State, manager: &WindowManager) {
     }
 }
 
-fn send_frame_callbacks(state: &State, manager: &WindowManager, frames: u64) {
-    let time = Duration::from_millis(frames.saturating_mul(16));
+fn send_frame_callbacks(state: &State, manager: &WindowManager) {
+    // Frame callback time measures elapsed time, independently of refresh
+    // rate, idle periods, or how many frames the backend has queued.
+    let time = Duration::from(state.presentation_now());
     let Some(output) = state.primary_output() else {
         return;
     };
