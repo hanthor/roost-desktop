@@ -11,7 +11,7 @@
 //! takes input.
 
 use smithay::reexports::wayland_server::protocol::{wl_output::WlOutput, wl_surface::WlSurface};
-use smithay::reexports::wayland_server::Resource;
+use smithay::reexports::wayland_server::{backend::ClientId, Resource};
 use smithay::wayland::session_lock::{
     LockSurface, SessionLockHandler, SessionLockManagerState, SessionLocker,
 };
@@ -24,6 +24,8 @@ pub(crate) struct LockProtocol {
     /// A lock request awaiting the runtime's decision, with the
     /// requesting client's pid.
     pub(crate) pending: Option<(SessionLocker, Option<i32>)>,
+    /// Only this runtime-approved client may supply visible lock surfaces.
+    pub(crate) owner: Option<ClientId>,
     /// Lock surfaces by output name.
     pub(crate) surfaces: Vec<(LockSurface, String)>,
     /// The lock client asked to unlock (unlock_and_destroy).
@@ -35,6 +37,7 @@ impl LockProtocol {
         Self {
             state: SessionLockManagerState::new::<State, _>(dh, |_client| true),
             pending: None,
+            owner: None,
             surfaces: Vec::new(),
             client_unlocked: false,
         }
@@ -54,16 +57,41 @@ impl SessionLockHandler for State {
             .map(|credentials| credentials.pid);
         // A newer request replaces an older one (dropping the old
         // locker tells its client the lock failed).
+        let client = confirmation.ext_session_lock().client().map(|c| c.id());
+        let owner = self.lock_protocol.owner.as_ref();
+        // Replacement discards abandoned pending surfaces, while a foreign
+        // request cannot remove an already approved owner's surfaces.
+        self.lock_protocol.surfaces.retain(|(surface, _)| {
+            let surface_client = surface.wl_surface().client().map(|c| c.id());
+            surface_client
+                .as_ref()
+                .is_some_and(|id| Some(id) == owner || Some(id) == client.as_ref())
+        });
         self.lock_protocol.pending = Some((confirmation, pid));
-        self.lock_protocol.client_unlocked = false;
     }
 
     fn unlock(&mut self) {
         self.lock_protocol.client_unlocked = true;
+        self.lock_protocol.owner = None;
         self.lock_protocol.surfaces.clear();
     }
 
     fn new_surface(&mut self, surface: LockSurface, output: WlOutput) {
+        let Some(client) = surface.wl_surface().client().map(|c| c.id()) else {
+            return;
+        };
+        let pending_client = self
+            .lock_protocol
+            .pending
+            .as_ref()
+            .and_then(|(locker, _)| locker.ext_session_lock().client().map(|c| c.id()));
+        // Protocol clients may create surfaces before Locked. Keep those
+        // pending surfaces, but expose them only after runtime approval.
+        if self.lock_protocol.owner.as_ref() != Some(&client)
+            && pending_client.as_ref() != Some(&client)
+        {
+            return;
+        }
         let Some(output) = smithay::output::Output::from_resource(&output) else {
             return;
         };
@@ -85,7 +113,15 @@ impl SessionLockHandler for State {
         surface.send_configure();
         self.lock_protocol
             .surfaces
-            .retain(|(_, existing)| *existing != name);
+            .retain(|(existing_surface, existing)| {
+                *existing != name
+                    || existing_surface
+                        .wl_surface()
+                        .client()
+                        .map(|c| c.id())
+                        .as_ref()
+                        != Some(&client)
+            });
         self.lock_protocol.surfaces.push((surface, name));
     }
 }
@@ -99,12 +135,43 @@ impl State {
         self.lock_protocol.pending.take()
     }
 
-    /// The lock surface for `output`, if the lock client made one.
+    /// Resolve a request after the runtime has checked the supervised PID.
+    /// Denial cannot replace the current owner's surfaces or focus targets.
+    pub fn resolve_lock_request(&mut self, locker: SessionLocker, approved: bool) {
+        if approved {
+            self.lock_protocol.owner = locker.ext_session_lock().client().map(|c| c.id());
+            self.lock_protocol.client_unlocked = false;
+        }
+        let owner = self.lock_protocol.owner.as_ref();
+        self.lock_protocol.surfaces.retain(|(surface, _)| {
+            surface
+                .wl_surface()
+                .client()
+                .map(|c| c.id())
+                .as_ref()
+                .is_some_and(|id| Some(id) == owner)
+        });
+        if approved {
+            locker.lock();
+        }
+    }
+
+    fn approved_lock_surface(&self, surface: &LockSurface) -> bool {
+        surface.alive()
+            && surface
+                .wl_surface()
+                .client()
+                .map(|c| c.id())
+                .as_ref()
+                .is_some_and(|id| Some(id) == self.lock_protocol.owner.as_ref())
+    }
+
+    /// The lock surface for `output`, if the approved client made one.
     pub fn lock_surface_for(&self, output: &str) -> Option<WlSurface> {
         self.lock_protocol
             .surfaces
             .iter()
-            .find(|(surface, name)| name == output && surface.alive())
+            .find(|(surface, name)| name == output && self.approved_lock_surface(surface))
             .map(|(surface, _)| surface.wl_surface().clone())
     }
 
@@ -113,14 +180,17 @@ impl State {
         self.lock_protocol
             .surfaces
             .iter()
-            .filter(|(s, _)| s.alive())
+            .filter(|(s, _)| self.approved_lock_surface(s))
             .map(|(s, _)| s.wl_surface().clone())
             .collect()
     }
 
     /// Whether any lock surface is up.
     pub fn has_lock_surfaces(&self) -> bool {
-        self.lock_protocol.surfaces.iter().any(|(s, _)| s.alive())
+        self.lock_protocol
+            .surfaces
+            .iter()
+            .any(|(s, _)| self.approved_lock_surface(s))
     }
 
     /// Whether the lock client asked to unlock since the last check.
