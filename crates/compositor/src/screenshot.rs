@@ -140,7 +140,10 @@ impl Service {
         #[zbus(connection)] conn: &zbus::Connection,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<(bool, String)> {
-        self.authority.admit(conn, &header).await?;
+        self.authority.authenticate(conn, &header).await?;
+        if self.authority.unlocked().is_err() {
+            return Ok((false, String::new()));
+        }
         self.request(filename, false)
     }
 
@@ -155,7 +158,10 @@ impl Service {
         #[zbus(connection)] conn: &zbus::Connection,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<(bool, String)> {
-        self.authority.admit(conn, &header).await?;
+        self.authority.authenticate(conn, &header).await?;
+        if self.authority.unlocked().is_err() {
+            return Ok((false, String::new()));
+        }
         self.request(filename, true)
     }
 }
@@ -172,7 +178,10 @@ impl Service {
             .map_err(|_| zbus::fdo::Error::Failed("compositor gone".into()))?;
         match answer.recv_timeout(DEADLINE) {
             Ok(Some(path)) => Ok((true, path.to_string_lossy().into_owned())),
-            _ => Err(zbus::fdo::Error::Failed("screenshot failed".into())),
+            // Capture rechecks lock at frame delivery. A lock arriving after
+            // admission (or another normal capture failure) returns the same
+            // documented failure tuple, without exposing a filename.
+            _ => Ok((false, String::new())),
         }
     }
 }

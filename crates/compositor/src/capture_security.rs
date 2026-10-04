@@ -65,6 +65,18 @@ impl Authority {
     }
     pub async fn admit(&self, conn: &Connection, header: &Header<'_>) -> fdo::Result<String> {
         self.unlocked()?;
+        let sender = self.authenticate(conn, header).await?;
+        self.unlocked()?;
+        Ok(sender)
+    }
+    /// Authenticate desktop-service identity without authorizing capture.
+    /// Screenshot's documented false result can deny an authenticated locked
+    /// backend while other capture APIs retain their AccessDenied result.
+    pub async fn authenticate(
+        &self,
+        conn: &Connection,
+        header: &Header<'_>,
+    ) -> fdo::Result<String> {
         let sender = header.sender().ok_or_else(|| denied("missing sender"))?;
         let dbus = fdo::DBusProxy::new(conn).await?;
         let pid = dbus
@@ -84,7 +96,6 @@ impl Authority {
                 "capture requires the supervised shell or installed portal",
             ));
         }
-        self.unlocked()?;
         Ok(sender.to_string())
     }
 }
