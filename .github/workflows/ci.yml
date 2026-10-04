@@ -29,6 +29,8 @@ jobs:
       - run: sudo apt-get install -y meson ninja-build libwayland-dev wayland-protocols && scripts/ci-install-gtk4-layer-shell
       - run: scripts/roost-settings-inventory-check
       - run: cargo fmt --all -- --check
+      - run: rustfmt --edition 2021 --check third-party/smithay/src/xwayland/xserver.rs
+      - run: cargo test --manifest-path third-party/smithay/Cargo.toml --no-default-features --features xwayland,wayland_frontend prepared_socket
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # pam_wrapper runs the lock screen's PAM path for real (#62); it is
       # required here so the test can never silently skip.

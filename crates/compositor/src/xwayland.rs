@@ -87,6 +87,23 @@ impl XWaylandSupervisor {
         }
     }
 
+    /// Resume bounded supervision after a running server disconnects.
+    pub fn disconnected(&mut self, now_ms: u64) {
+        if self.attempts > self.policy.max_attempts {
+            self.readiness = Readiness::Absent {
+                reason: AbsentReason::SpawnFailed,
+            };
+            if !self.absent_logged {
+                self.absent_logged = true;
+                eprintln!("roost-compositor: xwayland: restart budget exhausted; native session continues");
+            }
+        } else {
+            self.readiness = Readiness::Pending;
+            self.next_allowed_ms =
+                now_ms.saturating_add(self.policy.next_delay(self.attempts.saturating_sub(1)));
+        }
+    }
+
     /// Current readiness. Never blocks and never spawns.
     pub fn readiness(&self) -> Readiness {
         self.readiness
@@ -221,6 +238,9 @@ pub fn spawn_xwayland(
     dh: &smithay::reexports::wayland_server::DisplayHandle,
     loop_handle: &calloop::LoopHandle<'static, crate::runtime::Runtime>,
     pending_client: &mut Option<smithay::reexports::wayland_server::Client>,
+    sockets: smithay::xwayland::XWaylandSockets,
+    source_token: &mut Option<calloop::RegistrationToken>,
+    active_client: &mut Option<smithay::reexports::wayland_server::Client>,
 ) -> Result<u32, AbsentReason> {
     use smithay::xwayland::XWayland;
 
@@ -236,11 +256,10 @@ pub fn spawn_xwayland(
         }
     };
     let envs: [(String, String); 0] = [];
-    let (xwayland, client) = XWayland::spawn(
+    let (xwayland, client) = XWayland::spawn_on_sockets(
         dh,
-        None,
+        sockets,
         envs,
-        true,
         stdio(),
         stdio(),
         // The server client carries Smithay's `XWaylandClientData`
@@ -250,19 +269,21 @@ pub fn spawn_xwayland(
     )
     .map_err(|_| AbsentReason::SpawnFailed)?;
     let display = xwayland.display_number();
+    *active_client = Some(client.clone());
     *pending_client = Some(client);
-    if loop_handle
+    let token = loop_handle
         .insert_source(
             xwayland,
             |event, _, runtime: &mut crate::runtime::Runtime| {
                 runtime.on_xwayland_event(event);
             },
         )
-        .is_err()
-    {
-        *pending_client = None;
-        return Err(AbsentReason::SpawnFailed);
-    }
+        .map_err(|_| {
+            *pending_client = None;
+            *active_client = None;
+            AbsentReason::SpawnFailed
+        })?;
+    *source_token = Some(token);
     Ok(display)
 }
 
@@ -295,12 +316,14 @@ pub fn on_xwayland_event(
                     );
                 }
                 Err(error) => {
+                    runtime.x11_startup_failed();
                     eprintln!("roost-compositor: xwayland: window manager failed: {error}");
                 }
             }
         }
         XWaylandEvent::Error => {
             runtime.take_pending_x11_client();
+            runtime.x11_startup_failed();
             eprintln!(
                 "roost-compositor: xwayland: server exited during startup; X11 windows unavailable"
             );
@@ -591,6 +614,32 @@ mod tests {
                 reason: AbsentReason::SpawnFailed
             }
         );
+    }
+
+    #[test]
+    fn running_disconnect_keeps_backoff_and_total_restart_budget() {
+        let mut sup = XWaylandSupervisor::new();
+        sup.request();
+        let calls = Cell::new(0);
+        let mut spawn = || {
+            calls.set(calls.get() + 1);
+            Ok(7)
+        };
+        sup.tick(0, Some(&mut spawn));
+        sup.disconnected(10);
+        sup.tick(509, Some(&mut spawn));
+        assert_eq!(calls.get(), 1);
+        sup.tick(510, Some(&mut spawn));
+        assert_eq!(calls.get(), 2);
+        sup.disconnected(520);
+        sup.tick(1520, Some(&mut spawn));
+        sup.disconnected(1530);
+        sup.tick(3530, Some(&mut spawn));
+        assert_eq!(calls.get(), 4);
+        sup.disconnected(3540);
+        sup.tick(99999, Some(&mut spawn));
+        assert_eq!(calls.get(), 4);
+        assert!(matches!(sup.readiness(), Readiness::Absent { .. }));
     }
 
     #[test]
