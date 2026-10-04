@@ -547,10 +547,23 @@ def main():
         call("loginctl", "terminate-session", inventory()["session"]["Id"])
         result = {"requested": "terminate session"}
     elif action == "greeter":
+        greeter_pids = call("pgrep", "-x", "gtkgreet", check=False).splitlines()
         result = {"greetd_active": call("systemctl", "is-active", "greetd.service") == "active",
-                  "greeter_pids": call("pgrep", "-x", "gtkgreet", check=False).splitlines(),
+                  "probe_uid": os.geteuid(),
+                  "greeter_pids": greeter_pids,
+                  "greeter_uids": [pathlib.Path(f"/proc/{pid}").stat().st_uid for pid in greeter_pids],
                   "compositor_pids": call("pgrep", "-u", str(OWNER.pw_uid), "-x",
                                           "roost-composito", check=False).splitlines()}
+    elif action == "published":
+        payload = pathlib.Path("/usr/share/roost-vm/shipped-payload.sha256")
+        call("sha256sum", "--check", str(payload))
+        package = pathlib.Path("/usr/share/roost-vm/shipped-package.txt").read_text().strip()
+        if call("pacman", "-Q", "roost") != package:
+            raise RuntimeError("shipped Roost package changed")
+        result = {"probe_uid": os.geteuid(), "package": package,
+                  "payload_sha256": payload.read_text().splitlines(),
+                  "shipped_packages": pathlib.Path("/usr/share/roost-vm/shipped-packages.txt").read_text().splitlines(),
+                  "fixture_packages": pathlib.Path("/usr/share/roost-vm/fixture-packages.txt").read_text().splitlines()}
     else:
         raise ValueError("unknown lifecycle action")
     print(json.dumps(result))

@@ -1,0 +1,7 @@
+# Sourced by greetd for the CI test user. The selected roost-session command
+# and all shipped binaries remain unchanged. Arch /bin/sh is verified Bash.
+export XDG_SESSION_TYPE=wayland
+export ROOST_COMPOSITOR_STATE="$XDG_RUNTIME_DIR/roost-vm-state.json"
+# Preserve greetd's selected command, but capture its actual output in the
+# journal instead of losing it on the VT. No input or credentials are logged.
+exec > >(systemd-cat --identifier=roost-vm-session) 2>&1

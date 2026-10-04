@@ -910,6 +910,62 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     record("V-LIFECYCLE", True, "all lifecycle operations completed; individual assertions remain mandatory")
 
 
+def greetd_login(qmp, agent_path, out, record):
+    """Drive the shipped graphical greeter, never an initial/autologin session."""
+    agent = None
+    deadline = time.monotonic() + 120
+    greeter = {}
+    while time.monotonic() < deadline:
+        try:
+            if agent is None:
+                agent = guest_agent.GuestAgent(agent_path)
+            greeter = agent.run("greeter")
+            if (greeter["probe_uid"] == 0 and greeter["greetd_active"]
+                    and greeter["greeter_pids"] and all(uid != 0 for uid in greeter["greeter_uids"])
+                    and not greeter["compositor_pids"]):
+                break
+        except (OSError, RuntimeError, ValueError):
+            if agent is not None:
+                agent.close()
+                agent = None
+        time.sleep(1)
+    else:
+        if agent is not None:
+            agent.close()
+        raise RuntimeError("shipped greetd/gtkgreet did not become ready")
+    try:
+        provenance = agent.run("published")
+        with open(os.path.join(out, "shipped-payload.json"), "w") as stream:
+            json.dump(provenance, stream, indent=2)
+        with open(os.path.join(out, "greeter-before-login.json"), "w") as stream:
+            json.dump(greeter, stream, indent=2)
+        time.sleep(5)
+        qmp.frame(os.path.join(out, "V-GREETD.png"))
+        # Upstream gtkgreet focuses its username entry, then the PAM secret
+        # entry. The public fixture values go only to QMP keyboard delivery.
+        qmp.type_text("roost-test")
+        qmp.keys("ret")
+        time.sleep(2)
+        qmp.type_text("roost")
+        qmp.keys("ret")
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            try:
+                owner = agent.run("inventory")
+                if (owner["session_uid"] != 0 and owner["session"]["Service"] == "greetd"
+                        and owner["session"]["User"] == str(owner["session_uid"])
+                        and any(p["executable"] == "roost-compositor" for p in owner["processes"])):
+                    record("V-GREETD-LOGIN", True,
+                           "shipped non-root gtkgreet → username/password PAM login → real non-root greetd Roost session; payload hashes unchanged")
+                    return True
+            except (OSError, RuntimeError, ValueError):
+                pass
+            time.sleep(1)
+        raise RuntimeError("graphical greetd PAM login did not produce a Roost session")
+    finally:
+        agent.close()
+
+
 class Recorder:
     """Screendump the VM TOUR_FPS times a second into numbered PNGs while
     the tour drives input; marks splice a title card in at a frame index."""
@@ -1226,6 +1282,8 @@ def repeat_boots(args):
                    "--timeout", str(args.timeout)]
         if args.tour and index == args.boots:
             command.append("--tour")
+        if args.greeter_login:
+            command.append("--greeter-login")
         for value in args.meta:
             command.extend(["--meta", value])
         result = subprocess.run(command, check=False)
@@ -1280,6 +1338,8 @@ def main():
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--tour", action="store_true",
                     help="after the assertions, record the feature tour video")
+    ap.add_argument("--greeter-login", action="store_true",
+                    help="enter fixture credentials through the shipped graphical greetd greeter")
     ap.add_argument("--meta", action="append", default=[], metavar="KEY=VALUE")
     ap.add_argument("--boots", type=int, default=1,
                     help="repeat pristine snapshot boots; tour only on the last boot")
@@ -1308,8 +1368,15 @@ def main():
     manager_ready = False
     try:
         qmp = baseline.Qmp(qmp_path)
+        login_ok = True
+        if a.greeter_login:
+            try:
+                login_ok = greetd_login(qmp, agent_path, out, record)
+            except (OSError, RuntimeError, ValueError) as error:
+                record("V-GREETD-LOGIN", False, str(error))
+                login_ok = False
         n = 0
-        while time.time() - start < a.timeout and vm.poll() is None:
+        while login_ok and time.time() - start < a.timeout and vm.poll() is None:
             text = read_text(serial_path)
             drm = drm or DRM_RE.search(text)
             shell = shell or SHELL_RE.search(text)
@@ -1441,7 +1508,8 @@ def main():
                                   text=True).stdout.splitlines()[0]
     manifest = {
         "lane": "marlin-vm",
-        "session": "Roost (preview) via CI-only greetd initial session, DRM/KMS backend",
+        "session": ("published Roost flavor via shipped gtkgreet PAM login, DRM/KMS backend"
+                    if a.greeter_login else "Roost (preview) via CI-only greetd initial session, DRM/KMS backend"),
         "disk": os.path.basename(a.disk),
         "resolution": f"{WIDTH}x{HEIGHT}",
         "kvm": kvm,
