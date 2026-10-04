@@ -787,6 +787,7 @@ cstate '[.windows[] | select(.app_id == "roost-test-alpha")] | length == 2' "sec
 cstate '.focused_app_id == "roost-test-alpha"' "alpha focused" ||
     fail G-SWITCHER-GROUP "the new Alpha window did not take the focus"
 sleep 1
+new_alpha="$(jq -r .focused "$CSTATE")"
 # Rebound window-only and direct-cycle keys (#216), with two windows
 # from Alpha proving that window switching does not group by app.
 gsettings set org.gnome.desktop.wm.keybindings cycle-group "['<Super>F1']"
@@ -827,17 +828,15 @@ for key in cycle-group cycle-group-backward cycle-windows cycle-windows-backward
     gsettings reset org.gnome.desktop.wm.keybindings "$key"
 done
 sleep 1
-second="$(jq -r .focused "$CSTATE")"
-# Return to Alpha if the window-only proof picked another app.
-if [ "$(jq -r .focused_app_id "$CSTATE")" != roost-test-alpha ]; then
-    for _ in $(seq 1 6); do
-        [ "$(jq -r .focused_app_id "$CSTATE")" = roost-test-alpha ] && break
-        xdotool key alt+Tab
-        sleep 0.5
-    done
-    cstate '.focused_app_id == "roost-test-alpha"' "alpha again" || fail G-SWITCHER-GROUP "could not return to Alpha"
-    second="$(jq -r .focused "$CSTATE")"
-fi
+# Restore the precise new Alpha fixture before the original group-switch
+# journey. Closing the original Alpha instead changes the legitimate dash
+# creation order and invalidates its existing accessibility golden.
+read -r ax ay <<EOF2
+$(jq -r ".windows[] | select(.id == $new_alpha) | .rect | \"\\(.[0] + 120) \\(.[1] + 20)\"" "$CSTATE")
+EOF2
+xdotool mousemove --window "$WID" "$ax" "$ay" click 1
+cstate ".focused == $new_alpha" "new Alpha restored" || fail G-SWITCHER-GROUP "could not restore the second Alpha fixture"
+second="$new_alpha"
 xdotool keydown Alt_L key grave
 cstate '.switcher_thumbnails == 2' "thumbnails" 5 ||
     { xdotool keyup Alt_L; fail G-SWITCHER-GROUP "Alt+Above_Tab drew no window thumbnails"; }
