@@ -339,6 +339,11 @@ sleep 1
 xdotool mousemove --window "$WID" $((WIDTH - 30)) 16 click 1
 park
 sleep 1
+# Record the lock state with an explicit URI, using the same exported
+# reference wallpaper so the comparison keeps its visual baseline.
+gsettings set org.gnome.desktop.screensaver picture-uri "$(gsettings get org.gnome.desktop.background picture-uri)"
+gsettings get org.gnome.desktop.screensaver picture-uri >"$OUT/lock-background-uri.txt"
+sleep 0.5
 press "Lock"
 shot 11-lock-screen 3
 xdotool mousemove 640 650 click 1
