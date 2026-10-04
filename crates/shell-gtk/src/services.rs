@@ -306,8 +306,7 @@ pub fn attach(w: &Rc<Widgets>) {
             Err(e) => eprintln!("roost-shell-gtk: no system bus, service tiles hidden: {e}"),
         },
     );
-    volume(w);
-    microphone(w);
+    audio(w);
 }
 
 fn network(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
@@ -650,6 +649,12 @@ fn wpctl(args: &[&str], done: impl FnOnce(Option<String>) + 'static) {
         Ok(p) => p,
         Err(_) => return done(None),
     };
+    let weak = proc.downgrade();
+    glib::timeout_add_seconds_local_once(2, move || {
+        if let Some(proc) = weak.upgrade() {
+            proc.force_exit();
+        }
+    });
     proc.communicate_utf8_async(None, None::<&gio::Cancellable>, move |res| {
         done(match res {
             Ok((out, _)) => out.map(|s| s.to_string()),
@@ -660,200 +665,283 @@ fn wpctl(args: &[&str], done: impl FnOnce(Option<String>) + 'static) {
 
 const SINK: &str = "@DEFAULT_AUDIO_SINK@";
 const SOURCE: &str = "@DEFAULT_AUDIO_SOURCE@";
-/// How often the shell looks for an app recording (GNOME hears it from
-/// PulseAudio; `wpctl` has to be asked).
-const RECORDING_POLL_SECONDS: u32 = 2;
 
-/// GNOME's microphone slider and privacy indicator (volume.js
-/// `InputIndicator`): both show only while an app records, with the
-/// default source's level; the indicator is orange unless muted.
-fn microphone(w: &Rc<Widgets>) {
-    let syncing = Rc::new(Cell::new(false));
-    let level = Rc::new(Cell::new((0.0, false)));
-    let read: Rc<dyn Fn()> = {
-        let (w, syncing, level) = (w.clone(), syncing.clone(), level.clone());
-        Rc::new(move || {
-            let (w, syncing, level) = (w.clone(), syncing.clone(), level.clone());
-            wpctl(&["status"], move |status| {
-                let hide = |w: &Widgets| {
-                    w.mic_row.set_visible(false);
-                    w.panel_mic.set_visible(false);
-                };
-                if !status.as_deref().is_some_and(logic::wpctl_recording) {
-                    return hide(&w);
-                }
-                wpctl(&["get-volume", SOURCE], move |out| {
-                    let Some((percent, muted)) = out.as_deref().and_then(logic::parse_wpctl_volume)
-                    else {
-                        return hide(&w);
-                    };
-                    level.set((percent, muted));
-                    let icon = logic::mic_icon(percent, muted);
-                    w.panel_mic.set_icon_name(Some(icon));
-                    if muted {
-                        w.panel_mic.remove_css_class("privacy-indicator");
-                    } else {
-                        w.panel_mic.add_css_class("privacy-indicator");
-                    }
-                    w.panel_mic.set_visible(true);
-                    w.mic_mute.set_icon_name(icon);
-                    w.mic_mute
-                        .update_property(&[gtk::accessible::Property::Label(if muted {
-                            "Unmute"
-                        } else {
-                            "Mute"
-                        })]);
-                    syncing.set(true);
-                    w.mic.set_value(if muted { 0.0 } else { percent });
-                    syncing.set(false);
-                    w.mic_row.set_visible(true);
-                });
-            });
-        })
-    };
-    read();
-    {
-        let read = read.clone();
-        glib::timeout_add_seconds_local(RECORDING_POLL_SECONDS, move || {
-            read();
-            glib::ControlFlow::Continue
-        });
-    }
-    {
-        let syncing = syncing.clone();
-        w.mic.connect_value_changed(move |s| {
-            if syncing.get() {
-                return;
+/// pw-dump --monitor delivers node, metadata and device-route events on
+/// the GLib loop. Widget changes happen in that callback, before the next
+/// frame, without a status/volume subprocess round trip or polling timer.
+struct AudioUi {
+    widgets: Rc<Widgets>,
+    state: RefCell<crate::audio_state::AudioState>,
+    last: RefCell<crate::audio_state::Snapshot>,
+    syncing: Cell<bool>,
+    process: RefCell<Option<gio::Subprocess>>,
+    stopping: Cell<bool>,
+}
+
+impl AudioUi {
+    fn update(self: &Rc<Self>, snapshot: crate::audio_state::Snapshot) {
+        if *self.last.borrow() == snapshot {
+            return;
+        }
+        let w = &self.widgets;
+        self.syncing.set(true);
+        if let Some((percent, muted)) = snapshot.sink {
+            if let Some(row) = w.volume.parent() {
+                row.set_visible(true);
             }
-            let arg = logic::wpctl_volume_arg(s.value());
-            wpctl(&["set-volume", SOURCE, &arg], |_| {});
+            w.panel_volume
+                .set_icon_name(Some(logic::volume_icon(percent, muted)));
+            w.panel_volume.set_visible(true);
+            w.volume.set_value(if muted { 0.0 } else { percent });
+            w.mute.set_icon_name(if muted {
+                "audio-volume-muted-symbolic"
+            } else {
+                "audio-volume-high-symbolic"
+            });
+        } else {
+            if let Some(row) = w.volume.parent() {
+                row.set_visible(false);
+            }
+            w.panel_volume.set_visible(false);
+        }
+        let recording = snapshot.recording && snapshot.source.is_some();
+        w.mic_row.set_visible(recording);
+        w.panel_mic.set_visible(recording);
+        if let Some((percent, muted)) = snapshot.source {
+            let icon = logic::mic_icon(percent, muted);
+            w.panel_mic.set_icon_name(Some(icon));
+            if muted {
+                w.panel_mic.remove_css_class("privacy-indicator");
+            } else {
+                w.panel_mic.add_css_class("privacy-indicator");
+            }
+            w.mic_mute.set_icon_name(icon);
+            w.mic_mute
+                .update_property(&[gtk::accessible::Property::Label(if muted {
+                    "Unmute"
+                } else {
+                    "Mute"
+                })]);
+            w.mic.set_value(if muted { 0.0 } else { percent });
+        }
+        self.syncing.set(false);
+        if snapshot.recording != self.last.borrow().recording {
+            eprintln!("roost-shell-gtk: audio recording event {recording}");
+            if let Some(panel) = w.panel_mic.ancestor(gtk::Window::static_type()) {
+                panel.add_tick_callback(move |_, _| {
+                    eprintln!("roost-shell-gtk: audio recording frame {recording}");
+                    glib::ControlFlow::Break
+                });
+            }
+        }
+        // Keep menu actors alive on volume/recording events; rebuild only
+        // when the set or selection of output routes actually changes.
+        if snapshot.outputs != self.last.borrow().outputs {
+            while let Some(child) = w.sound_list.first_child() {
+                w.sound_list.remove(&child);
+            }
+            for output in &snapshot.outputs {
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                row.append(&gtk::Image::from_icon_name(logic::sink_icon(&output.name)));
+                let label = gtk::Label::new(Some(&output.name));
+                label.set_xalign(0.0);
+                label.set_hexpand(true);
+                label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                row.append(&label);
+                let check = gtk::Image::from_icon_name("ornament-check-symbolic");
+                check.set_visible(output.selected);
+                row.append(&check);
+                let button = gtk::Button::builder().child(&row).build();
+                button.add_css_class("qs-menu-item");
+                button.update_property(&[gtk::accessible::Property::Label(&output.name)]);
+                let output = output.clone();
+                button.connect_clicked(move |b| {
+                    if let Some(popover) = b
+                        .ancestor(gtk::Popover::static_type())
+                        .and_downcast::<gtk::Popover>()
+                    {
+                        popover.popdown();
+                    }
+                    let sink = output.sink.to_string();
+                    if let (Some(device), Some((index, profile_device))) =
+                        (output.device, output.route)
+                    {
+                        // Route is a device parameter, while wpctl's default
+                        // is a node. Set the physical port before the default.
+                        let params =
+                            format!("{{ index: {index}, device: {profile_device}, save: true }}");
+                        audio_command(
+                            &["pw-cli", "set-param", &device.to_string(), "Route", &params],
+                            move |ok| {
+                                if ok {
+                                    wpctl(&["set-default", &sink], |_| {});
+                                }
+                            },
+                        );
+                    } else {
+                        wpctl(&["set-default", &sink], |_| {});
+                    }
+                });
+                w.sound_list.append(&button);
+            }
+            w.sound_arrow.set_visible(snapshot.outputs.len() > 1);
+        }
+        *self.last.borrow_mut() = snapshot;
+    }
+
+    fn retry(self: &Rc<Self>) {
+        if let Some(process) = self.process.borrow_mut().take() {
+            process.force_exit();
+        }
+        *self.state.borrow_mut() = crate::audio_state::AudioState::default();
+        self.update(crate::audio_state::Snapshot::default());
+        if self.stopping.get() {
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        glib::timeout_add_seconds_local_once(2, move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.start();
+            }
         });
     }
-    // volume.js `icon-clicked`: unmuting at zero restores a quarter.
-    w.mic_mute.connect_clicked(move |_| {
-        let (percent, muted) = level.get();
-        let read = read.clone();
-        let toggle = move || {
-            let read = read.clone();
-            wpctl(&["set-mute", SOURCE, "toggle"], move |_| read());
-        };
-        if muted && percent <= 0.0 {
-            wpctl(&["set-volume", SOURCE, "0.25"], move |_| toggle());
-        } else {
-            toggle();
+
+    fn start(self: &Rc<Self>) {
+        if self.stopping.get() {
+            return;
+        }
+        match gio::Subprocess::newv(
+            &[
+                "pw-dump".as_ref(),
+                "--monitor".as_ref(),
+                "--no-colors".as_ref(),
+            ],
+            gio::SubprocessFlags::STDOUT_PIPE | gio::SubprocessFlags::STDERR_SILENCE,
+        ) {
+            Ok(process) => {
+                let Some(stream) = process.stdout_pipe() else {
+                    self.retry();
+                    return;
+                };
+                *self.process.borrow_mut() = Some(process);
+                self.read(stream);
+            }
+            Err(_) => self.retry(),
+        }
+    }
+
+    fn read(self: &Rc<Self>, stream: gio::InputStream) {
+        let ui = self.clone();
+        let next = stream.clone();
+        stream.read_bytes_async(
+            65536,
+            glib::Priority::DEFAULT,
+            None::<&gio::Cancellable>,
+            move |result| {
+                if ui.stopping.get() {
+                    return;
+                }
+                let Ok(bytes) = result else {
+                    ui.retry();
+                    return;
+                };
+                if bytes.is_empty() {
+                    ui.retry();
+                    return;
+                }
+                let changed = ui.state.borrow_mut().feed(bytes.as_ref());
+                match changed {
+                    Ok(true) => {
+                        let snapshot = ui.state.borrow().snapshot();
+                        ui.update(snapshot);
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        eprintln!("roost-shell-gtk: {e}");
+                        ui.retry();
+                        return;
+                    }
+                }
+                ui.read(next);
+            },
+        );
+    }
+}
+
+fn audio_command(args: &[&str], done: impl FnOnce(bool) + 'static) {
+    let argv: Vec<&std::ffi::OsStr> = args.iter().map(std::ffi::OsStr::new).collect();
+    let Ok(process) = gio::Subprocess::newv(
+        &argv,
+        gio::SubprocessFlags::STDOUT_SILENCE | gio::SubprocessFlags::STDERR_SILENCE,
+    ) else {
+        done(false);
+        return;
+    };
+    process
+        .clone()
+        .wait_check_async(None::<&gio::Cancellable>, move |result| {
+            done(result.is_ok())
+        });
+    let weak = process.downgrade();
+    glib::timeout_add_seconds_local_once(2, move || {
+        if let Some(process) = weak.upgrade() {
+            process.force_exit();
         }
     });
 }
 
-fn volume(w: &Rc<Widgets>) {
-    let syncing = Rc::new(Cell::new(false));
-    let read: Rc<dyn Fn()> = {
-        let (w, syncing) = (w.clone(), syncing.clone());
-        Rc::new(move || {
-            let (w, syncing) = (w.clone(), syncing.clone());
-            wpctl(&["get-volume", SINK], move |out| {
-                match out.as_deref().and_then(logic::parse_wpctl_volume) {
-                    Some((percent, muted)) => {
-                        // GNOME shows the output slider only with a
-                        // default sink (volume.js `_shouldBeVisible`).
-                        if let Some(row) = w.volume.parent() {
-                            row.set_visible(true);
-                        }
-                        w.panel_volume
-                            .set_icon_name(Some(logic::volume_icon(percent, muted)));
-                        w.panel_volume.set_visible(true);
-                        w.volume.set_sensitive(true);
-                        w.mute.set_sensitive(true);
-                        syncing.set(true);
-                        w.volume.set_value(if muted { 0.0 } else { percent });
-                        syncing.set(false);
-                        w.mute.set_icon_name(if muted {
-                            "audio-volume-muted-symbolic"
-                        } else {
-                            "audio-volume-high-symbolic"
-                        });
-                    }
-                    None => {
-                        // No PipeWire sink: no slider, as in GNOME.
-                        if let Some(row) = w.volume.parent() {
-                            row.set_visible(false);
-                        }
-                        w.panel_volume.set_visible(false);
-                        w.volume.set_sensitive(false);
-                        w.mute.set_sensitive(false);
-                    }
-                }
-            });
-        })
-    };
-    read();
-    {
-        let read = read.clone();
-        w.volume.connect_map(move |_| read());
+fn audio(w: &Rc<Widgets>) {
+    // Hide initial default actors until the first complete graph arrives.
+    if let Some(row) = w.volume.parent() {
+        row.set_visible(false);
     }
-    // GNOME's output menu: one row per output, the default checked;
-    // picking one makes it the default and closes the panel.
-    let outputs: Rc<dyn Fn()> = {
-        let (w, read) = (w.clone(), read.clone());
-        Rc::new(move || {
-            let (w, read) = (w.clone(), read.clone());
-            wpctl(&["status"], move |out| {
-                let sinks = out
-                    .as_deref()
-                    .map(logic::parse_wpctl_sinks)
-                    .unwrap_or_default();
-                while let Some(child) = w.sound_list.first_child() {
-                    w.sound_list.remove(&child);
-                }
-                for sink in &sinks {
-                    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-                    row.append(&gtk::Image::from_icon_name(logic::sink_icon(&sink.name)));
-                    let label = gtk::Label::new(Some(&sink.name));
-                    label.set_xalign(0.0);
-                    label.set_hexpand(true);
-                    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                    row.append(&label);
-                    let check = gtk::Image::from_icon_name("ornament-check-symbolic");
-                    check.set_visible(sink.default);
-                    row.append(&check);
-                    let button = gtk::Button::builder().child(&row).build();
-                    button.add_css_class("qs-menu-item");
-                    button.update_property(&[gtk::accessible::Property::Label(&sink.name)]);
-                    let (id, read) = (sink.id.to_string(), read.clone());
-                    button.connect_clicked(move |b| {
-                        if let Some(popover) = b
-                            .ancestor(gtk::Popover::static_type())
-                            .and_downcast::<gtk::Popover>()
-                        {
-                            popover.popdown();
-                        }
-                        let read = read.clone();
-                        wpctl(&["set-default", &id], move |_| read());
-                    });
-                    w.sound_list.append(&button);
-                }
-                // volume.js: `menuEnabled = this._deviceItems.size > 1`.
-                w.sound_arrow.set_visible(sinks.len() > 1);
-            });
-        })
-    };
-    outputs();
-    {
-        let outputs = outputs.clone();
-        w.volume.connect_map(move |_| outputs());
-    }
-    {
-        let syncing = syncing.clone();
-        w.volume.connect_value_changed(move |s| {
-            if syncing.get() {
-                return;
+    w.panel_volume.set_visible(false);
+    w.mic_row.set_visible(false);
+    w.panel_mic.set_visible(false);
+    w.sound_arrow.set_visible(false);
+    let ui = Rc::new(AudioUi {
+        widgets: w.clone(),
+        state: RefCell::default(),
+        last: RefCell::default(),
+        syncing: Cell::new(false),
+        process: RefCell::new(None),
+        stopping: Cell::new(false),
+    });
+    for (slider, node) in [(&w.volume, SINK), (&w.mic, SOURCE)] {
+        let ui = ui.clone();
+        slider.connect_value_changed(move |s| {
+            if !ui.syncing.get() {
+                wpctl(
+                    &["set-volume", node, &logic::wpctl_volume_arg(s.value())],
+                    |_| {},
+                );
             }
-            let arg = logic::wpctl_volume_arg(s.value());
-            wpctl(&["set-volume", SINK, &arg], |_| {});
         });
     }
-    w.mute.connect_clicked(move |_| {
-        let read = read.clone();
-        wpctl(&["set-mute", SINK, "toggle"], move |_| read());
-    });
+    w.mute
+        .connect_clicked(|_| wpctl(&["set-mute", SINK, "toggle"], |_| {}));
+    {
+        let ui = ui.clone();
+        w.mic_mute.connect_clicked(move |_| {
+            if ui.last.borrow().source.is_some_and(|(v, m)| m && v <= 0.0) {
+                wpctl(&["set-volume", SOURCE, "0.25"], |_| {
+                    wpctl(&["set-mute", SOURCE, "toggle"], |_| {})
+                });
+            } else {
+                wpctl(&["set-mute", SOURCE, "toggle"], |_| {});
+            }
+        });
+    }
+    if let Some(app) = gio::Application::default() {
+        let weak = Rc::downgrade(&ui);
+        app.connect_shutdown(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                ui.stopping.set(true);
+                if let Some(p) = ui.process.borrow_mut().take() {
+                    p.force_exit();
+                }
+            }
+        });
+    }
+    ui.start();
 }
