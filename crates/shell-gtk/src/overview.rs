@@ -98,14 +98,20 @@ fn app_button(entry: &AppEntry, icon_size: i32, with_label: bool) -> gtk::Button
 /// Keep a grid tile at GNOME's 113px: its label ellipsizes inside the
 /// 89px icon box instead of widening the tile.
 fn fit_tile_label(button: &gtk::Button) {
-    let mut child = button.first_child();
-    while let Some(widget) = child {
+    // A folder's collage has descendants before its sibling label.
+    // Walk every branch, rather than following only the first child.
+    let mut pending = vec![button.clone().upcast::<gtk::Widget>()];
+    while let Some(widget) = pending.pop() {
         if let Some(label) = widget.downcast_ref::<gtk::Label>() {
             label.set_max_width_chars(1);
             label.set_hexpand(true);
             label.set_ellipsize(gtk::pango::EllipsizeMode::End);
         }
-        child = widget.first_child().or_else(|| widget.next_sibling());
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            pending.push(widget);
+        }
     }
     button.set_size_request(113, 113);
 }
@@ -729,6 +735,7 @@ impl OverviewUi {
                     button.add_css_class("app-folder");
                     button.set_tooltip_text(Some(&folder.name));
                     button.add_css_class("grid-tile");
+                    fit_tile_label(&button);
                     button.update_property(&[gtk::accessible::Property::Label(&folder.name)]);
                     grid_hover(&button, folder.id.clone(), reflow.clone());
                     // An app dropped on a folder joins it; between tiles,
