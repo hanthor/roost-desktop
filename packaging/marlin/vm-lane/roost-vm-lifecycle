@@ -208,10 +208,12 @@ def main():
                           "/usr/libexec/roost-vm-input"], stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
         result = {"started": "count-only GTK input probe"}
-    elif action == "input-count":
+    elif action in ("input-count", "input-ready"):
         result = json.loads(pathlib.Path(RUNTIME, "roost-vm-input.json").read_text())
         if pathlib.Path(f"/proc/{result['pid']}").stat().st_uid != OWNER.pw_uid:
             raise RuntimeError("input probe has the wrong owner")
+        if action == "input-count":
+            result = {key: result[key] for key in ("pid", "count")}
     elif action == "logout":
         call("loginctl", "terminate-session", inventory()["session"]["Id"])
         result = {"requested": "terminate session"}

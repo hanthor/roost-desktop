@@ -195,7 +195,25 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     probe = await_state(lambda state: any(w["app_id"] == "org.roost.VmInput" for w in state["state"]["windows"]))
     probe_window = next(w for w in probe["state"]["windows"] if w["app_id"] == "org.roost.VmInput")
     x, y, width, height = probe_window["rect"]
-    qmp.click(x + width // 2, y + height // 2)
+    # The compositor model can precede the client's first mapped buffer. Its
+    # proposed size may also exceed GTK's initial 400x240 buffer: click inside
+    # that buffer, then require the real client to observe keyboard activation.
+    for require_active in (False, True):
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            readiness = agent.run("input-ready")
+            with open(os.path.join(evidence, "input-ready.json"), "w") as stream:
+                json.dump(readiness, stream, indent=2)
+            if (readiness["mapped"] and readiness["width"] > 100
+                    and readiness["height"] > 100
+                    and (not require_active or readiness["active"])):
+                break
+            time.sleep(0.1)
+        else:
+            raise RuntimeError("real GTK input probe did not map/activate within its deadline")
+        if not require_active:
+            qmp.click(x + 100, y + 100)
+    frame("input-ready")
     initial_input = agent.run("input-count")
     qmp.keys("x")
     time.sleep(0.5)
