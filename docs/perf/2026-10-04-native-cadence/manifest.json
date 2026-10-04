@@ -1,0 +1,120 @@
+{
+  "workflow_run": 37200994800,
+  "observer_revision": "efa1dd33bb0304fa0ab6469a2048486b517980b4",
+  "files": [
+    {
+      "path": "gnome/report.json.xz",
+      "raw_sha256": "68d482951ef592122caae4f713ddf48f06517791f1da45ed57c8f605667fddd8",
+      "raw_bytes": 9560,
+      "compressed_sha256": "706093638bf83897507c0781d366a77115e84b98a0f325559420d38c15e39449"
+    },
+    {
+      "path": "gnome/presentation.json.xz",
+      "raw_sha256": "ba8c70343426016ac675fe029c9076f9cc831aa7f0866428f9f86d10a93d54e0",
+      "raw_bytes": 33290,
+      "compressed_sha256": "dfa420bce6d6df1de7a17c1935cc7c34cda197a2f9ae7144d34815f79b543a62"
+    },
+    {
+      "path": "gnome/samples.json.xz",
+      "raw_sha256": "b8ca442c77c45f9e3f39c0db255a05d42685fabbd8b917dc7b0c7fe0dc240456",
+      "raw_bytes": 4129577,
+      "compressed_sha256": "1a4af2f603ff9ad428203aa17a0daef4b50bed8b6ce82727dfe5c632bb7a3807"
+    },
+    {
+      "path": "gnome/guest-phases.json.xz",
+      "raw_sha256": "17d9626f35cdd0d65fc30a4a208be4359a0655c0c0b254b04b2e8faf9b27df0b",
+      "raw_bytes": 138,
+      "compressed_sha256": "d093d5ded14a7d8480fa10470da33ee27c8a90aefbfd0107d335259472a95965"
+    },
+    {
+      "path": "gnome/notifications.json.xz",
+      "raw_sha256": "e4bce2de42218a22a2081686fb8495e6e4c1db16a926e8c842602daa1887dbbc",
+      "raw_bytes": 832,
+      "compressed_sha256": "d7d47888104f29ab787da47b3f574cd08f322476da5432f5b4d9b6f2ec16f762"
+    },
+    {
+      "path": "gnome/observations.json.xz",
+      "raw_sha256": "28947472f212ffc5d8c9b184ad896c26534b9eb2df3c5f335305ce7e99c4a41f",
+      "raw_bytes": 3118,
+      "compressed_sha256": "30f20aef6728f853d97a564e940cd59588f0020805785ee6a71e736461ddc0de"
+    },
+    {
+      "path": "gnome/wayland-info-source.json.xz",
+      "raw_sha256": "8c307d70187ace3c56b46c52c9062aabb038529df7cb3215d198ebd962749661",
+      "raw_bytes": 107,
+      "compressed_sha256": "903738e484dd7110626a737c9fccc22cd9725c1a9bcf58acac3f83f8ce8d05b4"
+    },
+    {
+      "path": "roost/report.json.xz",
+      "raw_sha256": "db6f78ca4bd1c5589376c207ad68ab32e6ae28b2a143bbbe43f770ce6743e3b3",
+      "raw_bytes": 9596,
+      "compressed_sha256": "814f95ff4d45d578d711c8fe76346e8f121c215bdc40b0a4329b2ee8d0f882e1"
+    },
+    {
+      "path": "roost/presentation.json.xz",
+      "raw_sha256": "ef96436c7caaf51684a77a6d5087cbe01d65e0bb8117b1c5afb3a7ee60995f69",
+      "raw_bytes": 33614,
+      "compressed_sha256": "d395fad7ad171e3ad3341ea3d44a8a367605af29bba8d055b2bc92233ac20be5"
+    },
+    {
+      "path": "roost/samples.json.xz",
+      "raw_sha256": "2cd700b998238800ee24d36a0520053af7efcfa7010976858411b724dcd10d25",
+      "raw_bytes": 2643240,
+      "compressed_sha256": "fce11e32140dc77a4ecf8be6acd36dd5b3ce4f36cc372810182bcee2d9f4a0b5"
+    },
+    {
+      "path": "roost/guest-phases.json.xz",
+      "raw_sha256": "923f034929eed0fcf0dfaaf6bcb2c27737de139a73588b4152a7686593a3054d",
+      "raw_bytes": 138,
+      "compressed_sha256": "e39293b723653247939e4f8362d9a8b5c617cf3bf28433902e3dc8b860166e51"
+    },
+    {
+      "path": "roost/notifications.json.xz",
+      "raw_sha256": "0718a2a5b298e17cb71269e579194ec12b5960e4cb007e31eace0a3ff8871d8b",
+      "raw_bytes": 833,
+      "compressed_sha256": "b9883bbc4492df97d95e650df5addda33a988dfa73fe69ff42567c69e40f2e69"
+    },
+    {
+      "path": "roost/observations.json.xz",
+      "raw_sha256": "2dc301ffe49f42c4e417a7e478bcd55b6b11c7139b686d1ec31dcd6c656adcf4",
+      "raw_bytes": 3305,
+      "compressed_sha256": "1833c8268df6ecd493dd5dd741032209a051a3def8ef3ec703987e7395be54d4"
+    },
+    {
+      "path": "roost/wayland-info-source.json.xz",
+      "raw_sha256": "71b2b43870b258dd8183171cd1d3949baa44806e553a71826b51b8c1fdf88694",
+      "raw_bytes": 115,
+      "compressed_sha256": "cda6ecab818ac99e1d7fe45ddd9e610188bfeb39438378bcbed7f39a094ebd81"
+    },
+    {
+      "path": "base-digest",
+      "sha256": "09da15eacc10b43d920d50037b2005a297fd2ea01f3e03f3ca2649758b33e6ed",
+      "bytes": 72
+    },
+    {
+      "path": "baseline-packages.txt",
+      "sha256": "86651903c93c1543e1cf4137fc2f231b7a8ce55c13182122565b85546ecd58b8",
+      "bytes": 13780
+    },
+    {
+      "path": "gnome-version",
+      "sha256": "c15b360616ce04f9b77fb7ea957e88f2672f900c1ba8b780e8579828a645ef37",
+      "bytes": 17
+    },
+    {
+      "path": "package-run.json",
+      "sha256": "088dda2af61d82448b7ce0e433a1e2c16a66ee8d82e69458626d5625455608eb",
+      "bytes": 13140
+    },
+    {
+      "path": "package.sha256",
+      "sha256": "486223444220f069c1deda48afcd891705a9e3b7468872f23a4e41ab60a83d3f",
+      "bytes": 84
+    },
+    {
+      "path": "shared-image-id",
+      "sha256": "f4ea62acd7805d432447a2975af1b362a4fd1720194a035bd95df81bcdfbcb6a",
+      "bytes": 65
+    }
+  ]
+}
