@@ -389,7 +389,8 @@ export DBUS_SYSTEM_BUS_ADDRESS
 # NetworkManager's and BlueZ's stubs record what the shell asks of them.
 ROOST_STUB_NM_LOG="$ARTIFACTS/nm-calls"
 ROOST_NM_VPN_PLUGIN_DIR="$ARTIFACTS/vpn-plugins"
-export ROOST_NM_VPN_PLUGIN_DIR
+ROOST_NM_VPN_PROOF=1
+export ROOST_NM_VPN_PLUGIN_DIR ROOST_NM_VPN_PROOF
 ROOST_STUB_BT_LOG="$ARTIFACTS/bt-calls"
 export ROOST_STUB_NM_LOG ROOST_STUB_BT_LOG
 "$PY" "$ROOT/scripts/lib/roost-service-stubs.py" "$BACKLIGHT" >"$ARTIFACTS/stubs.log" 2>&1 &
@@ -1207,7 +1208,8 @@ command -v secret-tool >/dev/null || fail G-NM-ENTERPRISE "libsecret secret-tool
 command -v gnome-keyring-daemon >/dev/null || fail G-NM-ENTERPRISE "GNOME Keyring is required"
 printf 'roost-proof-keyring\n' | gnome-keyring-daemon --unlock --components=secrets --control-directory="$ARTIFACTS/keyring-control" >"$ARTIFACTS/keyring.log" 2>&1
 ROOST_NM_VPN_PLUGIN_DIR="$ARTIFACTS/vpn-plugins"
-export ROOST_NM_VPN_PLUGIN_DIR
+ROOST_NM_VPN_PROOF=1
+export ROOST_NM_VPN_PLUGIN_DIR ROOST_NM_VPN_PROOF
 # The shell inherited this directory at startup (set beside the NM log).
 mkdir -p "$ROOST_NM_VPN_PLUGIN_DIR"
 cat >"$ROOST_NM_VPN_PLUGIN_DIR/proof-auth" <<'VPNHELPER'

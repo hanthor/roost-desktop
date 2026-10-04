@@ -203,7 +203,7 @@ pub async fn lookup(uuid: &str, setting: &str, key: &str) -> Option<String> {
     tool(&args, None, false)
         .await
         .ok()
-        .map(|s| s.trim_end_matches('\n').to_owned())
+        .map(|s| s.strip_suffix('\n').unwrap_or(&s).to_owned())
         .filter(|s| !s.is_empty())
 }
 pub async fn store(
@@ -261,7 +261,7 @@ fn plugin(service: &str) -> Option<(String, bool)> {
         "/usr/lib/x86_64-linux-gnu/NetworkManager/VPN".to_owned(),
         "/etc/NetworkManager/VPN".to_owned(),
     ];
-    if std::env::var_os("ROOST_SHELL_DBUS_UNRESTRICTED").is_some() {
+    if std::env::var_os("ROOST_NM_VPN_PROOF").is_some() {
         if let Ok(dir) = std::env::var("ROOST_NM_VPN_PLUGIN_DIR") {
             dirs.insert(0, dir);
         }
