@@ -1,0 +1,31 @@
+#!/bin/sh
+# Same-runtime niri and Roost GTK captures plus geometry/timing/pixel reports.
+# Usage: roost-niri-compare --candidate DIR [--out DIR]
+# DIR holds usr/bin/roost-compositor and usr/bin/roost-shell-gtk (an extracted package).
+set -eu
+ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+OUT="$ROOT/target/niri-parity"
+CANDIDATE=""
+while [ $# -gt 0 ]; do
+    case "$1" in --out) OUT="$2"; shift 2;; --candidate) CANDIDATE="$2"; shift 2;; --help|-h) sed -n '2,4p' "$0"; exit 0;; *) echo "unknown argument: $1" >&2; exit 1;; esac
+done
+[ -n "$CANDIDATE" ] || { echo '--candidate is required' >&2; exit 1; }
+CANDIDATE="$(cd "$CANDIDATE" && pwd)"
+for binary in roost-compositor roost-shell-gtk; do [ -x "$CANDIDATE/usr/bin/$binary" ] || { echo "missing $binary" >&2; exit 1; }; done
+mkdir -p "$OUT"
+OUT="$(cd "$OUT" && pwd)"
+[ ! -e "$OUT/reference/01-strip-rest.png" ] || { echo 'use a fresh output directory' >&2; exit 1; }
+mkdir -p "$OUT/reference" "$OUT/candidate" "$OUT/difference"
+podman build -q -t localhost/roost-niri-reference "$ROOT/tests/niri-reference" >/dev/null
+for kind in reference candidate; do
+    case "$kind" in reference) run=/nref/run.sh;; candidate) run=/nref/run-roost.sh;; esac
+    podman run --rm --pull=never -v "$ROOT/tests/niri-reference:/nref:ro,Z" \
+        -v "$ROOT/scripts/lib:/lib:ro,Z" -v "$CANDIDATE:/candidate:ro,Z" \
+        -v "$OUT/$kind:/out:Z" localhost/roost-niri-reference \
+        dbus-run-session -- "$run" >"$OUT/$kind/capture.log" 2>&1
+ done
+python3 "$ROOT/scripts/lib/roost-parity-compare.py" "$OUT/reference" "$OUT/candidate" "$OUT/difference" \
+    01-strip-rest:0,32,1280,768 02-strip-preset:0,32,1280,768 \
+    03-strip-mid-scroll:0,32,1280,768 04-strip-scroll-settled:0,32,1280,768 >"$OUT/pixels.txt"
+python3 "$ROOT/scripts/lib/roost-scroll-verify.py" "$OUT" >"$OUT/geometry-timing.json"
+printf '%s\n' "niri comparison: $OUT"

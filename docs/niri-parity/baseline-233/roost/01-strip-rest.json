@@ -1,0 +1,82 @@
+{
+  "above": [],
+  "active_workspace": 0,
+  "focused": 3,
+  "focused_app_id": "roost-test-scroll three",
+  "focused_rect": [
+    648,
+    48,
+    616,
+    736
+  ],
+  "idle_timeout_ms": 300000,
+  "keyboard": {
+    "layout": "English (US)",
+    "layouts": [
+      "English (US)"
+    ],
+    "repeat_delay": 500,
+    "repeat_rate": 33
+  },
+  "layers": [
+    {
+      "namespace": "roost-panel",
+      "rect": [
+        0,
+        0,
+        1280,
+        32
+      ]
+    }
+  ],
+  "locked": false,
+  "minimized": [],
+  "overview_app_grid": false,
+  "overview_open": false,
+  "overview_progress": 0.0,
+  "overview_search": false,
+  "previews": [],
+  "session_mode": "scroll",
+  "strip_offset": 632.0,
+  "strip_view": 632.0,
+  "switcher_thumbnails": 0,
+  "thumbnails": [],
+  "tile_preview": null,
+  "windows": [
+    {
+      "app_id": "roost-test-scroll one",
+      "id": 1,
+      "rect": [
+        -616,
+        48,
+        616,
+        736
+      ],
+      "workspace": 0
+    },
+    {
+      "app_id": "roost-test-scroll two",
+      "id": 2,
+      "rect": [
+        16,
+        48,
+        616,
+        736
+      ],
+      "workspace": 0
+    },
+    {
+      "app_id": "roost-test-scroll three",
+      "id": 3,
+      "rect": [
+        648,
+        48,
+        616,
+        736
+      ],
+      "workspace": 0
+    }
+  ],
+  "workspace_cards": [],
+  "x11_display": ":0"
+}
