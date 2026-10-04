@@ -1,0 +1,60 @@
+{
+  "before": {
+    "provenance": {
+      "scope": "short idle critical-process CPU probe, not GNOME parity or endurance",
+      "source": "e5c1505c66d1ff4fb49fb6855f43fe90477df4c6",
+      "boot_id": "59040377-9674-463c-8104-567dd6b3fae7",
+      "kernel": "7.2.8-arch1-2",
+      "clock_ticks": 100,
+      "binaries": {
+        "roost-shell-gtk": "08b452b3aa5b615f7d93b8711097dda7a0a9e8e71aa1cbf453c1bc50b4ae7467",
+        "roost-compositor": "04319025e968441bf20bf51234828949c749b3adcae57c6dd47419dac896b6b8"
+      }
+    },
+    "sample_count": 15,
+    "duration_s": 30.042373274000056,
+    "cpu_percent_one_core": {
+      "roost-shell-gtk": {
+        "p50": 0.49931087484784886,
+        "p95": 0.9987118885032681,
+        "p99": 0.9987341116548454,
+        "population_stddev": 0.33949102302816286
+      },
+      "roost-compositor": {
+        "p50": 86.38425805184731,
+        "p95": 92.13904979266415,
+        "p99": 92.69097232137158,
+        "population_stddev": 2.892033743797406
+      }
+    }
+  },
+  "after": {
+    "provenance": {
+      "scope": "short idle critical-process CPU probe, not GNOME parity or endurance",
+      "source": "68dc3db9a6672d24c027245fa8284ab5b714cc79",
+      "boot_id": "59040377-9674-463c-8104-567dd6b3fae7",
+      "kernel": "7.2.8-arch1-2",
+      "clock_ticks": 100,
+      "binaries": {
+        "roost-compositor": "5622ab51d38b781517d9047b168e7d4f6c317d6c5de158e2033d4468c5a7a27c",
+        "roost-shell-gtk": "08b452b3aa5b615f7d93b8711097dda7a0a9e8e71aa1cbf453c1bc50b4ae7467"
+      }
+    },
+    "sample_count": 15,
+    "duration_s": 30.047646486999838,
+    "cpu_percent_one_core": {
+      "roost-compositor": {
+        "p50": 87.88150001412872,
+        "p95": 92.44761446468337,
+        "p99": 93.57115414849257,
+        "population_stddev": 2.7507963135583777
+      },
+      "roost-shell-gtk": {
+        "p50": 0.49926086376235934,
+        "p95": 0.4993272721962085,
+        "p99": 0.499328331661099,
+        "population_stddev": 0.2207622135860232
+      }
+    }
+  }
+}
