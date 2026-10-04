@@ -1,0 +1,12 @@
+[Unit]
+Description=CI-only Roost guest service health probes
+After=display-manager.service
+
+[Service]
+User=roost-test
+ExecStart=/usr/libexec/roost-vm-health
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

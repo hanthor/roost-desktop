@@ -16,7 +16,7 @@ license = "GPL-3.0-or-later"
 
 [workspace.dependencies]
 smithay = { version = "=0.7.0", default-features = false, features = ["wayland_frontend", "backend_winit", "desktop"] }
-calloop = "=0.14.4"
+calloop = "=0.14.5"
 wayland-protocols = "=0.32.13"
 wayland-protocols-wlr = "=0.3.12"
 wayland-server = "=0.31.14"

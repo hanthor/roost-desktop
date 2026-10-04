@@ -52,6 +52,8 @@ XML = """
 <node>
   <interface name="org.freedesktop.NetworkManager">
     <method name="GetDevices"><arg type="ao" direction="out"/></method>
+    <signal name="DeviceAdded"><arg type="o"/></signal>
+    <signal name="DeviceRemoved"><arg type="o"/></signal>
     <method name="ActivateConnection">
       <arg type="o" direction="in"/><arg type="o" direction="in"/>
       <arg type="o" direction="in"/><arg type="o" direction="out"/>
@@ -66,6 +68,11 @@ XML = """
     <property name="Connectivity" type="u" access="read"/>
     <property name="PrimaryConnection" type="o" access="read"/>
   </interface>
+  <interface name="org.roost.Proof.Network">
+    <method name="RequestSecrets"><arg type="s" direction="in"/><arg type="u" direction="in"/></method>
+    <method name="DeleteSecrets"><arg type="s" direction="in"/></method>
+    <method name="SecondWired"><arg type="b" direction="in"/></method>
+  </interface>
   <interface name="org.freedesktop.NetworkManager.Connection.Active">
     <property name="Connection" type="o" access="read"/>
     <property name="State" type="u" access="read"/>
@@ -75,6 +82,7 @@ XML = """
   </interface>
   <interface name="org.freedesktop.NetworkManager.Device">
     <property name="DeviceType" type="u" access="read"/>
+    <property name="Interface" type="s" access="read"/>
     <property name="State" type="u" access="read"/>
     <property name="AvailableConnections" type="ao" access="read"/>
     <property name="ActiveConnection" type="o" access="read"/>
@@ -157,6 +165,8 @@ NODE = Gio.DBusNodeInfo.new_for_xml(XML)
 NM = "/org/freedesktop/NetworkManager"
 DEV_ETH = NM + "/Devices/1"
 DEV_WIFI = NM + "/Devices/2"
+DEV_ETH2 = NM + "/Devices/3"
+second_wired = False
 APS = [
     # path suffix, ssid, strength, flags, rsn flags
     (1, "Roost Home", 70, 1, 0x188),
@@ -189,13 +199,16 @@ state = {
         "Connectivity": GLib.Variant("u", 4),
         "PrimaryConnection": GLib.Variant("o", WIRED_ACTIVE)},
     (DEV_ETH, "org.freedesktop.NetworkManager.Device"): {
-        "DeviceType": GLib.Variant("u", 1), "State": GLib.Variant("u", 100),
+        "DeviceType": GLib.Variant("u", 1), "Interface": GLib.Variant("s", "enp1s0"), "State": GLib.Variant("u", 100),
         "AvailableConnections": GLib.Variant("ao", [WIRED_CONN]),
         "ActiveConnection": GLib.Variant("o", WIRED_ACTIVE)},
+    (DEV_ETH2, DEVICE): {
+        "DeviceType": GLib.Variant("u", 1), "Interface": GLib.Variant("s", "enp2s0"), "State": GLib.Variant("u", 30),
+        "AvailableConnections": GLib.Variant("ao", []), "ActiveConnection": GLib.Variant("o", "/")},
     (WIRED_ACTIVE, "org.freedesktop.NetworkManager.Connection.Active"): {
         "Connection": GLib.Variant("o", WIRED_CONN), "State": GLib.Variant("u", 2)},
     (DEV_WIFI, "org.freedesktop.NetworkManager.Device"): {
-        "DeviceType": GLib.Variant("u", 2), "State": GLib.Variant("u", 30),
+        "DeviceType": GLib.Variant("u", 2), "Interface": GLib.Variant("s", "wlp1s0"), "State": GLib.Variant("u", 30),
         "AvailableConnections": GLib.Variant("ao", [HOME_CONN]),
         "ActiveConnection": GLib.Variant("o", "/")},
     (DEV_WIFI, WIRELESS): {
@@ -248,9 +261,66 @@ def secured_ap(path):
     return bool(props) and props["Flags"].unpack() & 1
 
 
+def proof_connection(kind):
+    """Real NM agent wire formats; flags1 select user/agent-owned storage."""
+    uuid = {"enterprise": "00000000-0000-4000-8000-000000000211",
+            "tls": "00000000-0000-4000-8000-000000000212",
+            "vpn": "00000000-0000-4000-8000-000000000213"}[kind]
+    connection = {"connection": {"uuid": GLib.Variant("s", uuid),
+                  "id": GLib.Variant("s", "Roost Office" if kind != "vpn" else "Roost VPN"),
+                  "type": GLib.Variant("s", "vpn" if kind == "vpn" else "802-11-wireless")}}
+    if kind == "vpn":
+        connection["vpn"] = {"service-type": GLib.Variant("s", "org.roost.Proof.VPN"),
+                             "data": GLib.Variant("a{ss}", {"password-flags": "1"}),
+                             "secrets": GLib.Variant("a{ss}", {})}
+        return connection, "vpn", ["password"]
+    connection["802-11-wireless"] = {"ssid": GLib.Variant("ay", b"Roost Office")}
+    connection["802-11-wireless-security"] = {"key-mgmt": GLib.Variant("s", "wpa-eap")}
+    connection["802-1x"] = {"identity": GLib.Variant("s", "alice"),
+                            "eap": GLib.Variant("as", ["tls" if kind == "tls" else "peap"]),
+                            "password-flags": GLib.Variant("u", 1),
+                            "private-key-password-flags": GLib.Variant("u", 1)}
+    return connection, "802-1x", (["private-key-password"] if kind == "tls" else ["identity", "password"])
+
+
+def proof_request(c, kind, flags, delete=False):
+    connection, setting, hints = proof_connection(kind)
+    def answered(bus, result):
+        try:
+            reply = bus.call_finish(result)
+            if delete:
+                line = f"ProofSecrets {kind} deleted"
+            else:
+                values = reply.unpack()[0][setting]
+                if setting == "vpn":
+                    values = values["secrets"]
+                line = f"ProofSecrets {kind} flags={flags} " + " ".join(f"{k}={v}" for k, v in sorted(values.items()))
+        except GLib.Error as error:
+            line = f"ProofSecrets {kind} flags={flags} error=" + str(Gio.DBusError.get_remote_error(error))
+        log = os.environ.get("ROOST_STUB_NM_LOG")
+        if log:
+            with open(log, "a") as fh:
+                fh.write(line + "\n")
+    for agent in agents[-1:]:
+        c.call(agent, "/org/freedesktop/NetworkManager/SecretAgent", "org.freedesktop.NetworkManager.SecretAgent",
+               "DeleteSecrets" if delete else "GetSecrets",
+               GLib.Variant("(a{sa{sv}}o)", (connection, NM + "/Settings/211")) if delete else
+               GLib.Variant("(a{sa{sv}}osasu)", (connection, NM + "/Settings/211", setting, hints, flags)),
+               None, Gio.DBusCallFlags.NONE, -1, None, answered)
+
+
 def method_call(c, sender, path, iface, method, params, invocation):
-    if method == "GetDevices":
-        invocation.return_value(GLib.Variant("(ao)", ([DEV_ETH, DEV_WIFI],)))
+    global second_wired
+    if iface == "org.roost.Proof.Network":
+        if method == "SecondWired":
+            second_wired = params.unpack()[0]
+            c.emit_signal(None, NM, "org.freedesktop.NetworkManager", "DeviceAdded" if second_wired else "DeviceRemoved", GLib.Variant("(o)", (DEV_ETH2,)))
+        else:
+            args = params.unpack()
+            proof_request(c, args[0], args[1] if len(args) > 1 else 0, method == "DeleteSecrets")
+        invocation.return_value(None)
+    elif method == "GetDevices":
+        invocation.return_value(GLib.Variant("(ao)", ([DEV_ETH, DEV_WIFI] + ([DEV_ETH2] if second_wired else []),)))
     elif method == "Register":
         agents.append(sender)
         invocation.return_value(None)
@@ -405,6 +475,8 @@ def serve(path, iface):
 SERVICES = {
     "nm": (["org.freedesktop.NetworkManager"], [
         (NM, "org.freedesktop.NetworkManager"),
+        (NM, "org.roost.Proof.Network"),
+        (DEV_ETH2, DEVICE),
         (DEV_ETH, "org.freedesktop.NetworkManager.Device"),
         (DEV_WIFI, "org.freedesktop.NetworkManager.Device"),
         (DEV_WIFI, WIRELESS),

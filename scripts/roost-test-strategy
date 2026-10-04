@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""Validate executable test inventory and report traceability gaps (#169/#8).
+
+This is a structural gate, not a line-coverage measurement or security review.
+"""
+import argparse
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tomllib
+
+ROOT = Path(__file__).resolve().parents[1]
+TEST = re.compile(r'#\[test\]\s*(?:#\[[^\]]*\]\s*)*(?:pub\s+)?(?:async\s+)?fn\s+(\w+)')
+ID = re.compile(r'\b(?:Roost|RWD)-[0-9][^\s`"<>]+')
+VALID_ID = re.compile(r'Roost-[0-9]{3}-R[1-9][0-9]*-[A-Za-z0-9]+$')
+# Existing executable cases are retained by name. Qualified spec IDs remain
+# a separate traceability gap until their owning requirements are reviewed.
+BOUNDARIES = {
+    'control channel': {
+        'positive': ('control.rs', 'hello_accept_replies_version_and_snapshot'),
+        'negative': ('control.rs', 'stale_major_is_rejected_with_typed_error_and_drop'),
+        'spoof/replay': ('control.rs', 'activation_token_live_store_allows_once_then_denies_replay'),
+        'exhaustion': ('peer_auth.rs', 'connection_flood_is_bounded_and_the_shell_still_gets_in'),
+        'process failure': ('recovery.rs', 'hundred_fault_runs_keep_apps_alive_and_resync'),
+    },
+    'locked session': {
+        'positive': ('unlock.rs', 'correct_password_dismisses_lock_intact'),
+        'negative': ('unlock.rs', 'triple_wrong_password_stays_locked_without_leak'),
+        'process failure': ('lock.rs', 'reconnect_while_locked_stays_locked'),
+    },
+}
+KINDS = ('positive', 'negative', 'spoof/replay', 'exhaustion', 'process failure')
+
+
+def inspect(root, executed=None):
+    errors, gaps, crates, source_tests, ids = [], [], [], {}, {}
+    for manifest in sorted((root / 'crates').glob('*/Cargo.toml')):
+        package = tomllib.loads(manifest.read_text())['package']['name']
+        files = sorted(manifest.parent.rglob('*.rs'))
+        files = [p for p in files if 'target' not in p.relative_to(manifest.parent).parts]
+        names = []
+        for path in files:
+            body = path.read_text()
+            tests = TEST.findall(body)
+            source_tests[path.relative_to(root).as_posix()] = set(tests)
+            names.extend(tests)
+            for found in ID.findall(body):
+                value = found.rstrip('.,;:)')
+                if not VALID_ID.fullmatch(value):
+                    errors.append(f'{path.relative_to(root)}: invalid stable ID {value}')
+                else:
+                    ids.setdefault(value, set()).add(path.relative_to(root).as_posix())
+        if not names:
+            errors.append(f'{package}: crate has no executable #[test] inventory')
+        crates.append({'crate': package, 'tests': len(names), 'files': len(files)})
+    for boundary, cases in BOUNDARIES.items():
+        for kind in KINDS:
+            if kind not in cases:
+                gaps.append(f'{boundary}: {kind} coverage is not registered')
+                continue
+            file, name = cases[kind]
+            path = f'crates/compositor/tests/{file}'
+            if name not in source_tests.get(path, set()):
+                errors.append(f'{boundary}/{kind}: required case {path}::{name} is missing')
+            if executed is not None and name not in executed:
+                errors.append(f'{boundary}/{kind}: {name} is absent from the CI test list')
+    for value, paths in ids.items():
+        if len(paths) > 1:
+            errors.append(f'duplicate stable ID {value}: {", ".join(sorted(paths))}')
+    if not ids:
+        gaps.append('Qualified Roost-<spek>-<requirement>-<case> IDs have not been assigned to legacy tests')
+    gaps.append('Line/branch coverage thresholds and security artifact completeness remain tracked by #8')
+    return {'crates': crates, 'stable_ids': ids, 'errors': errors, 'gaps': gaps}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--root', type=Path, default=ROOT)
+    parser.add_argument('--test-list', type=Path)
+    parser.add_argument('--report', type=Path, default=Path('test-strategy-report.md'))
+    args = parser.parse_args()
+    executed = None
+    if args.test_list:
+        executed = set()
+        for line in args.test_list.read_text().splitlines():
+            if line.endswith(': test'):
+                executed.add(line.removesuffix(': test').split('::')[-1])
+        if not executed:
+            sys.exit('roost-test-strategy: CI test list is empty')
+    result = inspect(args.root, executed)
+    revision = subprocess.check_output(['git', '-C', str(args.root), 'rev-parse', 'HEAD'], text=True).strip()
+    lines = ['# Test strategy compliance report', '', f'Source revision: `{revision}`', '',
+             'Structural inventory of named #[test] functions; counts do not measure line coverage or prove security.', '',
+             '| Crate | Named #[test] functions | Rust files |', '|---|---:|---:|']
+    lines += [f'| {r["crate"]} | {r["tests"]} | {r["files"]} |' for r in result['crates']]
+    lines += ['', f'CI test inventory supplied: {executed is not None}', '', '## Gate failures', '']
+    lines += [f'- {s}' for s in result['errors']] or ['None.']
+    lines += ['', '## Remaining coverage and traceability gaps', '']
+    lines += [f'- {s}' for s in result['gaps']]
+    args.report.write_text('\n'.join(lines) + '\n')
+    print(f'roost-test-strategy: {len(result["errors"])} failures; report {args.report}')
+    if result['errors']:
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()
