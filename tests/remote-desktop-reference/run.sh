@@ -29,7 +29,7 @@ export WAYLAND_DISPLAY=remote-proof GDK_BACKEND=wayland
 python3 /repo/scripts/lib/roost-remote-input-window.py /out/input.json >/out/window.log 2>&1 & pids="$pids $!"
 python3 /repo/scripts/lib/roost-a11y-dump.py roost-shell-gtk /out/a11y-shell.json 30
 sleep 1
-python3 /repo/scripts/lib/roost-capture-security-client.py > /out/untrusted-denial.log
+python3 /repo/scripts/lib/roost-remote-security-client.py > /out/untrusted-denial.log
 /usr/libexec/xdg-desktop-portal-gnome --replace >/out/backend.log 2>&1 & portal_backend_pid=$!; pids="$pids $portal_backend_pid"
 /usr/libexec/xdg-desktop-portal --replace >/out/frontend.log 2>&1 & pids="$pids $!"
 sleep 2
@@ -60,7 +60,7 @@ end=$((SECONDS + 5))
 touch /out/lock-grant.revoke
 wait "$client"
 until jq -e '.locked and .capture_streams == 0' "$ROOST_COMPOSITOR_STATE" >/dev/null; do [ "$SECONDS" -lt "$end" ] || exit 1; sleep .1; done
-python3 /repo/scripts/lib/roost-capture-security-client.py > /out/locked-denial.log
+python3 /repo/scripts/lib/roost-remote-security-client.py > /out/locked-denial.log
 python3 /repo/scripts/lib/roost-portal-remote-client.py /out/locked.png locked >/out/locked.log 2>&1 & client=$!; pids="$pids $client"
 sleep 2
 if [ ! -f /out/locked.response.json ]; then python3 /repo/scripts/lib/roost-portal-consent.py /out/a11y-locked.json grant; fi
