@@ -118,3 +118,19 @@ or branch coverage, certify a security boundary, or satisfy the release
 artifact checklist. Qualified legacy test IDs, coverage thresholds and
 complete boundary/artifact enforcement remain tracked by issue #8; the
 report keeps those gaps visible rather than treating them as a pass.
+
+`measured-coverage.yml` separately runs instrumented workspace tests with
+Rust 1.94.1, LLVM tools, and cargo-llvm-cov 0.9.1. Its artifact contains raw
+LLVM JSON, test output, exact source revision, package/tool versions, the
+reproduction command, and a report of source line/region coverage for every
+crate and the lock, PAM unlock, session-lock and IPC modules. Missing crate
+or security-module data fails the report. Source-file totals include inline
+unit-test code; integration-test files and external dependencies are excluded.
+This initial measurement establishes
+an observable baseline. `tests/coverage-floors.json` records its exact source
+and run and gates minimum line/region percentages for lock, PAM unlock,
+session-lock, IPC and window/input handling. The session-lock floor requires
+new real Wayland client cases rather than accepting its initial 25% result.
+The floors guard this documented source-file measurement scope; they do not
+claim branch coverage, GUI journey coverage or complete security boundary
+cases. Those remaining gates stay tracked by #8.
