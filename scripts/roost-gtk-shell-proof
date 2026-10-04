@@ -876,7 +876,7 @@ grid_origin() {
     grid_origin_y="$(jq --arg namespace "$grid_namespace" '.layers[] | select(.namespace == $namespace) | .rect[1]' "$CSTATE")"
 }
 grid_point() {
-    jq -er --arg name "$2" --argjson ox "$grid_origin_x" --argjson oy "$grid_origin_y" --argjson edge "${3:--1}" '[.[] | select(.showing and .role == "push button" and .name == $name and (.bounds[2] > 0) and (.bounds[3] > 0))][0].bounds | select(length == 4) | "\((.[0] + $ox + (if $edge >= 0 then $edge else .[2] / 2 end)) | floor) \((.[1] + $oy + .[3] / 2) | floor)"' "$1"
+    jq -er --arg name "$2" --argjson ox "$grid_origin_x" --argjson oy "$grid_origin_y" --argjson edge "${3:--1}" '[.[] | select(.showing and (.role == "push button" or .role == "button") and .name == $name and (.bounds[2] > 0) and (.bounds[3] > 0))][0].bounds | select(length == 4) | "\((.[0] + $ox + (if $edge >= 0 then $edge else .[2] / 2 end)) | floor) \((.[1] + $oy + .[3] / 2) | floor)"' "$1"
 }
 grid_edge() { grid_point "$1" "$2" 4; }
 # GNOME's page switching while dragging: an app held against the grid's
