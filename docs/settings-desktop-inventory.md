@@ -206,7 +206,7 @@ Source: [GTK Wayland settings translations](https://github.com/GNOME/gtk/blob/4.
 | cursor-size | Via GTK | GTK Wayland settings translation; clients follow the portal or GSettings fallback |
 | cursor-theme | Via GTK | GTK Wayland settings translation; clients follow the portal or GSettings fallback |
 | document-font-name | Ignored | No Roost consumer or verified toolkit translation for this preference |
-| enable-animations | Honored (partial) | Live idle shield fade duration; GTK animations follow it; compositor overview transitions do not yet honor it |
+| enable-animations | Honored | Live idle shield fade duration, GTK transitions and compositor overview/strip motion; proof G-ANIMATIONS-OFF |
 | enable-hot-corners | Honored | Live shell CSS/GTK rendering, clock, input policy or UPower percentage |
 | font-antialiasing | Honored | Live shell CSS/GTK rendering, clock, input policy or UPower percentage |
 | font-hinting | Honored | Live shell CSS/GTK rendering, clock, input policy or UPower percentage |

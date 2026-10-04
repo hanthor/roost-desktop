@@ -31,7 +31,7 @@ This page records that decision for R9 (knowledge entry
 | clock-format | Honored | Panel clock |
 | clock-show-weekday, clock-show-date, clock-show-seconds | Honored | Panel clock, built as gnome-desktop's wall clock builds it |
 | enable-hot-corners | Honored | Live. Proof G-SETTINGS-INPUT |
-| enable-animations | Honored (partial) | Live idle fade duration and GTK animations; compositor overview transitions do not yet honor it |
+| enable-animations | Honored | Live idle fade, GTK transitions and compositor overview/strip motion; disabled transitions finish immediately. Proof G-ANIMATIONS-OFF |
 | show-battery-percentage | Honored | UPower DisplayDevice panel percentage; updates live |
 
 ## Session, lock and notifications
