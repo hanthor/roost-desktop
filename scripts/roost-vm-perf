@@ -25,7 +25,7 @@ from vm_guest_agent import GuestAgent  # noqa: E402
 
 def guest_probe(agent, action, index=None):
     """Only this immutable CI helper is executed; no command/path input."""
-    if action not in ("clock", "notify"):
+    if action not in ("clock", "notify", "frames"):
         raise ValueError("unsupported performance probe")
     arguments = [action]
     if action == "notify":
@@ -62,6 +62,44 @@ def distribution(values):
     return {"count": len(values), "p50": percentile(.50), "p95": percentile(.95),
             "p99": percentile(.99), "min": values[0], "max": values[-1],
             "mean": statistics.mean(values)}
+
+
+def presentation_summary(trace):
+    """Validate actual feedback; retain unknown refresh and absent hardware flags."""
+    rows = trace.get("frames")
+    if not isinstance(rows, list) or len(rows) != 240:
+        raise ValueError("expected 240 presented frames")
+    for name in ("clock_id", "commits", "discarded", "pending"):
+        value = trace.get(name)
+        if type(value) is not int or value < 0:
+            raise ValueError(f"invalid presentation {name}")
+    if (trace["clock_id"] > 0xffffffff or not 240 <= trace["commits"] <= 1200
+            or trace["commits"] != len(rows) + trace["discarded"] + trace["pending"]):
+        raise ValueError("incomplete presentation accounting")
+    commits = set()
+    for row in rows:
+        for name in ("commit", "presented_ns", "refresh_ns", "sequence", "flags"):
+            if type(row.get(name)) is not int or row[name] < 0:
+                raise ValueError(f"invalid frame {name}")
+        if (not 1 <= row["commit"] <= trace["commits"] or row["commit"] in commits
+                or not 1 <= row["presented_ns"] <= 0xffffffffffffffff or row["refresh_ns"] > 0xffffffff
+                or row["flags"] > 15 or row["sequence"] > 0xffffffffffffffff):
+            raise ValueError("invalid or duplicate presented frame")
+        commits.add(row["commit"])
+    rows = sorted(rows, key=lambda row: row["commit"])
+    intervals = [right["presented_ns"] - left["presented_ns"]
+                 for left, right in zip(rows, rows[1:])]
+    if any(value <= 0 for value in intervals):
+        raise ValueError("nonmonotonic presentation timestamps")
+    return {"presented_count": len(rows), "commits": trace["commits"],
+            "discarded_count": trace["discarded"], "pending_count": trace["pending"],
+            "clock_id": trace["clock_id"],
+            "interval_ms": distribution([value / 1e6 for value in intervals]),
+            "reported_refresh_ms": distribution([row["refresh_ns"] / 1e6 for row in rows if row["refresh_ns"]]),
+            "unknown_refresh_count": sum(row["refresh_ns"] == 0 for row in rows),
+            "flag_counts": {name: sum(bool(row["flags"] & flag) for row in rows)
+                            for name, flag in (("vsync", 1), ("hw_clock", 2), ("hw_completion", 4), ("zero_copy", 8))},
+            "scope": "Native SHM xdg-toplevel with alternating damage, paced by wl_surface.frame. wp_presentation timestamps measure this client's presentation cadence, not compositor input-to-frame tracing. Hardware flags and unknown refresh are explicit."}
 
 
 def raw_samples(serial):
@@ -197,6 +235,9 @@ def main():
         time.sleep(30)
         guest_phases["idle_end"] = guest_probe(agent, "clock")["boottime_s"]
         phases["idle_end"] = time.clock_gettime(time.CLOCK_BOOTTIME)
+        presentation = guest_probe(agent, "frames")["presentation"]
+        (out / "presentation.json").write_text(json.dumps(presentation, indent=2))
+        pacing = presentation_summary(presentation)
         for query in ("disks", "system monitor", "files"):
             qmp.keys("meta_l")
             time.sleep(1)
@@ -247,6 +288,8 @@ def main():
         if not samples or any(s["unreadable"] for s in samples):
             raise RuntimeError("resource samples are missing or incomplete; inspect raw serial")
         globals_text, globals_meta = raw_globals(serial)
+        if presentation.get("socket") != globals_meta["socket"]:
+            raise RuntimeError("presentation probe did not use the captured desktop socket")
         (out / "wayland-info.txt").write_text(globals_text)
         (out / "wayland-info-source.json").write_text(json.dumps(globals_meta, indent=2))
         (out / "samples.json").write_text(json.dumps(samples, indent=2))
@@ -265,13 +308,14 @@ def main():
                   "guest_phases_boottime_s": guest_phases,
                   "accepted_notification_count": len(notifications),
                   "drm_memory": drm_memory_summary(samples),
+                  "presentation_cadence": pacing,
                   "overview_observed_upper_s":distribution([s["upper_s"] for s in observations]),
                   "limitations":["QMP observations are bounded host-visible response times, not compositor input-to-frame tracing.",
                                  "CPU counts surviving sampled processes; exited processes can consume unobserved CPU.",
                                  "PSS covers the test UID and excludes the observer and its descendants; root/GDM shared services are outside this scope.",
                                  "Whole-run summaries include startup and workload. Idle CPU uses guest-clock markers and only intervals wholly within the idle phase.",
                                  "DRM memory is optional driver-provided client accounting, not unique physical GPU allocation; unavailable samples are explicit.",
-                                 "Notification IDs prove service acceptance, not notification input-to-frame latency. Frame pacing, multiple cold/warm boots and 24-hour soak remain open.",
+                                 "Notification IDs prove service acceptance, not notification input-to-frame latency. Presentation cadence is a native client workload; compositor input tracing, multiple cold/warm boots and 24-hour soak remain open.",
                                  "No release threshold or claim of within-10-percent parity is introduced."]}
         (out / "report.json").write_text(json.dumps(report, indent=2))
         print(json.dumps({"desktop":args.desktop,"samples":len(samples),"observations":len(observations)}))

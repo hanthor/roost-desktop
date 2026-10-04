@@ -48,6 +48,10 @@ def capture_globals(uid):
             if (b"interface: 'wl_compositor'" not in raw
                     or b"interface: 'xdg_wm_base'" not in raw):
                 continue  # Ignore a private helper socket rather than mislabel it.
+            marker = Path("/run/roost-perf-desktop.json")
+            staged = marker.with_suffix(f".tmp-{os.getpid()}")
+            staged.write_text(json.dumps({"uid": uid, "socket": path.name}))
+            staged.replace(marker)
             for record in global_records(raw, path.name):
                 print("roost-perf-globals: " + json.dumps(record), flush=True)
             return True

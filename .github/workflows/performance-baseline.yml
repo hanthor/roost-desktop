@@ -4,6 +4,8 @@ on:
     paths:
       - .github/workflows/performance-baseline.yml
       - scripts/roost-vm-perf
+      - scripts/roost-frame-pacer-build
+      - scripts/lib/roost-frame-pacer.c
       - scripts/lib/roost-perf-*.py
       - packaging/marlin/perf/**
   workflow_dispatch:
@@ -49,7 +51,8 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift
           sudo mkdir -p /mnt/perf && sudo chown "$(id -u):$(id -g)" /mnt/perf
           sudo apt-get -o Acquire::Retries=3 update -qq
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf shellcheck
+          shellcheck scripts/roost-frame-pacer-build
       - name: Build one shared preview payload
         run: |
           set -euo pipefail
