@@ -282,7 +282,10 @@ cleanup() {
     # shellcheck disable=SC2086
     if [ -n "$IME_PIDS" ]; then kill $IME_PIDS 2>/dev/null || true; fi
     # The bridge daemonized ibus-daemon for this session's display.
-    if command -v ibus >/dev/null 2>&1; then ibus exit >/dev/null 2>&1 || true; fi
+    if [ -n "${SOCKET_NAME:-}" ] && command -v ibus >/dev/null 2>&1; then
+        env -u DISPLAY -u IBUS_ADDRESS -u WAYLAND_SOCKET WAYLAND_DISPLAY="$SOCKET_NAME" \
+            ibus exit >/dev/null 2>&1 || true
+    fi
     if [ -n "$SCREENSAVER_PID" ]; then kill "$SCREENSAVER_PID" 2>/dev/null || true; fi
     if [ -n "$CAL_PID" ]; then kill "$CAL_PID" 2>/dev/null || true; fi
     if [ -n "$ACCEL_PID" ]; then kill "$ACCEL_PID" 2>/dev/null || true; fi
@@ -517,18 +520,21 @@ fi
 
 # The shell logs where it laid out IBus's candidates (G-IME-CANDIDATES
 # clicks one), the bridge each key's fate.
+ROOST_IBUS=1
 ROOST_IBUS_DEBUG=1
-export ROOST_IBUS_DEBUG
+export ROOST_IBUS ROOST_IBUS_DEBUG
 ROOST_PROOF_SWIPE_INPUT="$ARTIFACTS/swipe-input.json"
 export ROOST_PROOF_SWIPE_INPUT
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk -p roost-shell-host
 if [ -n "$PAM_ON" ]; then
-    env LD_PRELOAD="$PAM_WRAPPER_LIB" PAM_WRAPPER=1 \
+    env IBUS_ADDRESS="unix:path=$ARTIFACTS/not-the-private-ibus" \
+        LD_PRELOAD="$PAM_WRAPPER_LIB" PAM_WRAPPER=1 \
         PAM_WRAPPER_SERVICE_DIR="$ARTIFACTS/pam/services" \
         "$ROOT/target/debug/roost-compositor" --backend winit --socket "roost-gtk-proof-$$" \
         --shell-bin "${ROOST_PROOF_SHELL_BIN:-$ROOT/target/debug/roost-shell-gtk}" >"$LOG" 2>&1 &
 else
-    "$ROOT/target/debug/roost-compositor" --backend winit --socket "roost-gtk-proof-$$" \
+    env IBUS_ADDRESS="unix:path=$ARTIFACTS/not-the-private-ibus" \
+        "$ROOT/target/debug/roost-compositor" --backend winit --socket "roost-gtk-proof-$$" \
         --shell-bin "${ROOST_PROOF_SHELL_BIN:-$ROOT/target/debug/roost-shell-gtk}" >"$LOG" 2>&1 &
 fi
 COMPOSITOR_PID=$!
@@ -703,7 +709,14 @@ if command -v Xwayland >/dev/null 2>&1; then
     if pgrep -P "$COMPOSITOR_PID" -x Xwayland >/dev/null; then
         fail G-X11-DEMAND "native startup spawned XWayland"
     fi
-    pass G-X11-DEMAND "native GTK startup advertises sockets without an XWayland process"
+    if command -v ibus-daemon >/dev/null 2>&1; then
+        pgrep -P "$COMPOSITOR_PID" -f '(^|/)roost-ibus-bridge( |$)' >/dev/null ||
+            fail G-X11-DEMAND "native IBus bridge is not running"
+        if pgrep -P "$COMPOSITOR_PID" -x ibus-x11 >/dev/null; then
+            fail G-X11-DEMAND "XIM connected before an application needed X11"
+        fi
+    fi
+    pass G-X11-DEMAND "native GTK and IBus startup advertise sockets without an XWayland or XIM process"
 fi
 SOCKET_NAME="$(sed -n 's/.*nested session on \([^ ]*\) .*/\1/p' "$LOG" | head -1)"
 # One at a time, so window ids (and with them GNOME's running-app order
@@ -1726,12 +1739,32 @@ if command -v Xwayland >/dev/null 2>&1 && command -v xeyes >/dev/null 2>&1; then
     x11_pid="$(pgrep -P "$COMPOSITOR_PID" -x Xwayland)"
     [ "$(printf '%s\n' "$x11_pid" | wc -l)" -eq 1 ] || fail G-X11-DEMAND "expected one owned compatibility process"
     native_ids="$(jq -c '[.windows[] | select(.app_id != "XEyes") | .id] | sort' "$CSTATE")"
+    old_xim_pid=""
+    if command -v ibus-daemon >/dev/null 2>&1; then
+        for _ in $(seq 1 30); do
+            old_xim_pid="$(pgrep -P "$COMPOSITOR_PID" -x ibus-x11 || true)"
+            [ -n "$old_xim_pid" ] && break
+            sleep 0.2
+        done
+        [ -n "$old_xim_pid" ] || fail G-X11-RESTART "XIM did not start after actual X11 readiness"
+    fi
     kill "$x11_pid"
     cstate 'all(.windows[]; .app_id != "XEyes")' "old X11 windows removed" 10 || fail G-X11-RESTART "stale X11 model survived server loss"
     cstate '.x11_ready' "bounded compatibility restart" 15 || fail G-X11-RESTART "server did not restart"
     [ "$(jq -c '[.windows[] | .id] | sort' "$CSTATE")" = "$native_ids" ] || fail G-X11-RESTART "native windows changed across restart"
     restarted_pid="$(pgrep -P "$COMPOSITOR_PID" -x Xwayland)"
     [ "$restarted_pid" != "$x11_pid" ] || fail G-X11-RESTART "old compatibility process remained"
+    if [ -n "$old_xim_pid" ]; then
+        for _ in $(seq 1 30); do
+            new_xim_pid="$(pgrep -P "$COMPOSITOR_PID" -x ibus-x11 || true)"
+            [ -n "$new_xim_pid" ] && [ "$new_xim_pid" != "$old_xim_pid" ] && break
+            sleep 0.2
+        done
+        if [ -z "$new_xim_pid" ] || [ "$new_xim_pid" = "$old_xim_pid" ]; then
+            fail G-X11-RESTART "XIM helper did not restart for the fresh X11 server"
+        fi
+        ! kill -0 "$old_xim_pid" 2>/dev/null || fail G-X11-RESTART "old XIM helper survived server loss"
+    fi
     env DISPLAY="$x11_display" xeyes >/dev/null 2>&1 &
     cstate '.focused_app_id == "XEyes" and .x11_ready' "reconnected X11 client" 15 || fail G-X11-RESTART "client did not reconnect on the same reserved display"
     pass G-X11-RESTART "server loss removes compatibility windows, preserves native IDs and accepts a new client on the same display"
@@ -2081,7 +2114,10 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     "$PY" -c "import gi; gi.require_version('IBus', '1.0')" 2>/dev/null; then
     for _ in $(seq 1 40); do grep -q "roost-ibus-bridge: ready" "$LOG" && break; sleep 0.5; done
     grep -q "roost-ibus-bridge: ready" "$LOG" || fail G-IME "the IBus bridge never came up"
-    "$PY" -u "$ROOT/scripts/lib/roost-ibus-test-engine.py" >"$ARTIFACTS/ibus-engine.log" 2>&1 &
+    # The engine belongs to the same private bus as the native bridge,
+    # rather than the outer display used to drive this nested proof.
+    env -u DISPLAY -u IBUS_ADDRESS -u WAYLAND_SOCKET WAYLAND_DISPLAY="$SOCKET_NAME" \
+        "$PY" -u "$ROOT/scripts/lib/roost-ibus-test-engine.py" >"$ARTIFACTS/ibus-engine.log" 2>&1 &
     IME_PIDS="$!"
     for _ in $(seq 1 30); do grep -q ready "$ARTIFACTS/ibus-engine.log" && break; sleep 0.5; done
     grep -q ready "$ARTIFACTS/ibus-engine.log" || fail G-IME "the test engine did not register with IBus"
@@ -2280,7 +2316,8 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     kill $IME_PIDS 2>/dev/null || true
     IME_PIDS=""
     # Back to a plain layout: later stages type straight to the apps.
-    ibus engine xkb:us::eng >/dev/null 2>&1 || true
+    env -u DISPLAY -u IBUS_ADDRESS -u WAYLAND_SOCKET WAYLAND_DISPLAY="$SOCKET_NAME" \
+        ibus engine xkb:us::eng >/dev/null 2>&1 || true
     cstate '.windows | any(.app_id == "roost-ime") | not' "ime window gone" ||
         fail G-IME "the IME window did not close"
 elif [ "${ROOST_REQUIRE_IBUS:-0}" = 1 ]; then

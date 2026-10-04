@@ -13,6 +13,11 @@ construction stay within Smithay. No fork or new upstream version is used.
 Advertised display and actual X11 window-manager readiness are separate. Helpers
 that connect to X11, including icon readers, must wait for window-manager
 readiness instead of treating DISPLAY advertisement as permission to connect.
+The native IBus bridge remains available from startup. Its XIM helper is a
+separate X11 client: it starts only after the window manager is ready and is
+stopped and reaped on server loss before a fresh helper can start. Native bridge,
+address probe and supervised shell discard inherited IBUS_ADDRESS; only the XIM
+helper receives the address discovered for the private Wayland-named bus.
 
 On server/manager failure the compositor removes the old source, compatibility
 windows and client, then retries on the same display with the existing bounded
