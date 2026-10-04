@@ -584,6 +584,13 @@ impl WindowManager {
         }
         #[cfg(feature = "xwayland")]
         self.drain_x11_events(state);
+        // Smithay's Window geometry uses a cached surface-tree bounding box.
+        // Refresh it after dispatched commits (including unsynchronized
+        // subsurfaces) before render-time width scaling reads the geometry.
+        // A newly constructed Window otherwise keeps its zero-size bbox.
+        for window in self.windows.values() {
+            window.surface.on_commit();
+        }
         self.place_committed(state);
         // Focus tracks the active workspace: a model-level switch (e.g.
         // shell FocusWorkspace) that strands focus on a hidden window

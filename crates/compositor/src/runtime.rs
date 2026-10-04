@@ -3172,9 +3172,13 @@ fn scene_elements(
                 split_from = Some(elements.len());
             }
             let origin = crate::popup::surface_origin(&surface, geometry.loc);
-            let sx = if manager.session_mode() == crate::windows::SessionMode::Scroll {
-                f64::from(geometry.size.w) / f64::from(window.geometry().size.w.max(1))
+            let committed_width = window.geometry().size.w;
+            let sx = if manager.session_mode() == crate::windows::SessionMode::Scroll
+                && committed_width > 0
+            {
+                f64::from(geometry.size.w) / f64::from(committed_width)
             } else {
+                // An unmapped tree has no committed bounds to scale yet.
                 1.0
             };
             tree(renderer, &mut elements, &surface, origin, sx);
