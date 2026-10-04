@@ -2904,6 +2904,7 @@ impl Runtime {
                         eprintln!("roost-compositor: drm: queue_buffer {}: {e}", out.name);
                         continue;
                     }
+                    out.trace_wake_submission();
                     out.pending = true;
                     queued = true;
                 }

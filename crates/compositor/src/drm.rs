@@ -80,9 +80,22 @@ pub struct DrmOutput {
     pub scale: f64,
     /// A frame is queued and its page flip has not completed yet.
     pub pending: bool,
+    wake_trace: bool,
 }
 
 impl DrmOutput {
+    pub fn trace_wake_submission(&mut self) {
+        if !std::mem::take(&mut self.wake_trace) {
+            return;
+        }
+        let state = self.surface.surface().get_crtc(self.crtc);
+        eprintln!(
+            "roost-compositor: drm: wake frame queued {} commit_pending={} crtc={state:?}",
+            self.name,
+            self.surface.surface().commit_pending(),
+        );
+    }
+
     /// Size in logical pixels (mode size over scale).
     pub fn logical_size(&self) -> (i32, i32) {
         crate::runtime::logical_size(self.size.w, self.size.h, self.scale)
@@ -105,6 +118,7 @@ pub struct DrmBackend {
     pub active: bool,
     sleep_reset_pending: bool,
     wake_flip_cutoff: Option<std::time::Duration>,
+    wake_event_traces: u8,
     pointer: Point<f64, Logical>,
     ctrl: bool,
     alt: bool,
@@ -302,6 +316,7 @@ impl DrmBackend {
                 loc: (0, 0),
                 scale: 1.0,
                 pending: false,
+                wake_trace: false,
             });
         }
         // GNOME's arrangement for exactly these connectors (#59): scale
@@ -373,6 +388,7 @@ impl DrmBackend {
                 active: true,
                 sleep_reset_pending: false,
                 wake_flip_cutoff: None,
+                wake_event_traces: 0,
                 pointer: (
                     f64::from(first_loc.0) + f64::from(first_w) / 2.0,
                     f64::from(first_loc.1) + f64::from(first_h) / 2.0,
@@ -445,6 +461,8 @@ impl DrmBackend {
             smithay::utils::Clock::<smithay::utils::Monotonic>::new().now(),
         ));
         eprintln!("roost-compositor: drm: system wake scanout reset");
+        let trace = std::env::var_os("ROOST_LOCK_TRACE").is_some();
+        self.wake_event_traces = if trace { 2 } else { 0 };
         // Pending and queued flips can be lost across S3. Drop both without
         // submitting an old queued scene or claiming presentation. Ordinary
         // frame_submitted() would submit queued_fb as a side effect.
@@ -454,12 +472,24 @@ impl DrmBackend {
             }
             out.surface.reset_buffers();
             out.pending = false;
+            out.wake_trace = trace;
         }
         // Reset actual connector/plane state too: an active VT does not imply
         // that the kernel restored its framebuffer. The next locked frame
         // commits the retained modes and surfaces again.
         if let Err(error) = self.drm.reset_state() {
             eprintln!("roost-compositor: drm: wake KMS reset failed: {error}");
+        }
+        if trace {
+            for out in &self.outputs {
+                eprintln!(
+                    "roost-compositor: drm: wake reset {} atomic={} commit_pending={} crtc={:?}",
+                    out.name,
+                    self.drm.is_atomic(),
+                    out.surface.surface().commit_pending(),
+                    self.drm.get_crtc(out.crtc),
+                );
+            }
         }
     }
 
@@ -472,6 +502,13 @@ impl DrmBackend {
     ) -> Option<PageFlip> {
         match event {
             DrmEvent::VBlank(crtc) => {
+                if self.wake_event_traces != 0 {
+                    self.wake_event_traces -= 1;
+                    eprintln!(
+                        "roost-compositor: drm: wake pageflip crtc={crtc:?} metadata={metadata:?} cutoff={:?}",
+                        self.wake_flip_cutoff,
+                    );
+                }
                 // A kernel completion already queued before the reset must
                 // not present feedback belonging to the newly queued frame.
                 if let (Some(cutoff), Some(meta)) = (self.wake_flip_cutoff, metadata.as_ref()) {
