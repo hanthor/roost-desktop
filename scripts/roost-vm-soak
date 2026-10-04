@@ -14,7 +14,7 @@ import time
 
 # The GTK shell is preferred; shell-host is the alternative legacy renderer.
 CRITICAL = ('roost-compositor', 'roost-shell-gtk')
-BINARIES = CRITICAL + ('roost-shell-host', 'roost-session', 'roost-ibus-bridge', 'roostctl')
+BINARIES = CRITICAL + ('roost-shell-host', 'roost-session', 'roost-ibus-bridge', 'roost-greeter')
 
 
 def identity(proc):
