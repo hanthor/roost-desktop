@@ -5,11 +5,14 @@ ARG BASE_IMAGE=ghcr.io/tuna-os/marlin:gnome
 FROM ${BASE_IMAGE}
 RUN sed -i '/^\[core\]/i [core-testing]\nInclude = /etc/pacman.d/mirrorlist\n\n[extra-testing]\nInclude = /etc/pacman.d/mirrorlist\n' /etc/pacman.conf && \
     pacman -Syu --noconfirm gnome-shell mutter gdm && \
+    kernel_count=0 && \
     for module_dir in /usr/lib/modules/*; do \
         test -d "$module_dir" || continue; \
         kernel="${module_dir##*/}"; \
-        test -f "$module_dir/vmlinuz" || exit 1; \
+        test -f "$module_dir/vmlinuz" || continue; \
+        kernel_count=$((kernel_count + 1)); \
         depmod "$kernel" && dracut --force "$module_dir/initramfs.img" "$kernel" || exit 1; \
     done && \
+    test "$kernel_count" -gt 0 && \
     gnome-shell --version | grep -Eq '^GNOME Shell 51([. ]|$)' && \
     pacman -Q > /usr/share/roost-perf-baseline-packages.txt
