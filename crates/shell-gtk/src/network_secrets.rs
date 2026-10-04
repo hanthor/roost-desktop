@@ -150,13 +150,13 @@ pub fn fields(connection: &glib::Variant, setting: &str, hints: &[String]) -> Op
 }
 
 /// Secret values travel through stdin/stdout, never process arguments or logs.
-async fn tool(args: &[String], input: Option<String>) -> Result<String, String> {
+async fn tool(args: &[String], input: Option<String>, missing_ok: bool) -> Result<String, String> {
     let argv: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
     let process = gio::Subprocess::newv(
         &argv,
         gio::SubprocessFlags::STDIN_PIPE
             | gio::SubprocessFlags::STDOUT_PIPE
-            | gio::SubprocessFlags::STDERR_SILENCE,
+            | gio::SubprocessFlags::STDERR_PIPE,
     )
     .map_err(|_| "secret helper is unavailable".to_owned())?;
     let timed = process.clone();
@@ -171,8 +171,13 @@ async fn tool(args: &[String], input: Option<String>) -> Result<String, String> 
     {
         timer.remove();
     }
-    let (out, _) = result.map_err(|_| "secret helper failed".to_owned())?;
-    if !process.is_successful() {
+    let (out, err) = result.map_err(|_| "secret helper failed".to_owned())?;
+    // secret-tool clear exits1 with no stderr when no item matches.
+    let absent = missing_ok
+        && process.has_exited()
+        && process.exit_status() == 1
+        && err.as_deref().unwrap_or_default().trim().is_empty();
+    if !process.is_successful() && !absent {
         return Err("secret helper failed".to_owned());
     }
     Ok(out.map(|s| s.to_string()).unwrap_or_default())
@@ -217,7 +222,7 @@ pub async fn store(
         format!("--label=Network secret for {id}/{setting}/{key}"),
     ];
     args.extend(attributes(uuid, setting, Some(key)));
-    tool(&args, Some(value.to_owned())).await.map(|_| ())
+    tool(&args, Some(value.to_owned()), false).await.map(|_| ())
 }
 pub async fn delete(uuid: &str, setting: &str) -> Result<(), String> {
     if uuid.is_empty() {
@@ -225,7 +230,7 @@ pub async fn delete(uuid: &str, setting: &str) -> Result<(), String> {
     }
     let mut args = vec!["secret-tool".into(), "clear".into()];
     args.extend(attributes(uuid, setting, None));
-    tool(&args, None).await.map(|_| ())
+    tool(&args, None, true).await.map(|_| ())
 }
 /// Only AGENT_OWNED (1), never system-owned, NOT_SAVED or NOT_REQUIRED.
 pub fn agent_owned(connection: &glib::Variant, setting: &str, key: &str) -> bool {
@@ -392,7 +397,7 @@ pub async fn vpn(
         }
     }
     input.push_str("DONE\n\n");
-    let output = tool(&args, Some(input)).await?;
+    let output = tool(&args, Some(input), false).await?;
     if output.is_empty() {
         return Ok(VpnPrompt {
             title: String::new(),
