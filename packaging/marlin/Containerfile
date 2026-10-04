@@ -23,11 +23,13 @@ FROM ${BASE_IMAGE}
 ARG ROOST_PKG
 COPY ${ROOST_PKG} /tmp/roost.pkg.tar.zst
 COPY packaging/marlin/roost-nested-preview.desktop /tmp/roost-nested-preview.desktop
+COPY packaging/marlin/roost-portals.conf /usr/share/xdg-desktop-portal/roost-portals.conf
 
-# gtk4-layer-shell is the one dependency the GNOME image lacks; refresh
-# the sync db so pacman -U can resolve it (no system upgrade: the
-# baseline's GNOME 51 and Mesa stay exactly as shipped).
+# Install the shell integrations explicitly: the base can omit calendar
+# libraries, portal backends and the optional screen-recording plugins.
+# Refresh package metadata without upgrading the baseline desktop.
 RUN pacman -Sy --noconfirm \
+    && pacman -S --needed --noconfirm evolution-data-server xdg-desktop-portal-gnome xdg-desktop-portal-gtk gst-plugin-pipewire gst-plugins-good \
     && pacman -U --noconfirm /tmp/roost.pkg.tar.zst \
     && sed -i 's/^Name=Roost$/Name=Roost (preview)/' /usr/share/wayland-sessions/roost.desktop \
     && install -Dm0644 /tmp/roost-nested-preview.desktop \
@@ -36,7 +38,12 @@ RUN pacman -Sy --noconfirm \
     && roost-compositor --version \
     && roost-shell-gtk --version \
     && grep -qx 'Name=Roost (preview)' /usr/share/wayland-sessions/roost.desktop \
-    && test -f /etc/pam.d/roost-lock
+    && test -f /etc/pam.d/roost-lock \
+    && test -x /usr/lib/gnome-shell-calendar-server \
+    && ldd /usr/lib/gnome-shell-calendar-server >/tmp/roost-calendar.ldd \
+    && ! grep -q 'not found' /tmp/roost-calendar.ldd \
+    && rm -f /tmp/roost-calendar.ldd \
+    && test -f /usr/share/xdg-desktop-portal/roost-portals.conf
 
 LABEL org.opencontainers.image.title="marlin-roost-preview" \
       org.opencontainers.image.description="TunaOS Marlin GNOME 51 plus Roost as a login-screen and nested preview" \
