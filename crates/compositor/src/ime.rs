@@ -102,8 +102,19 @@ impl ImeBridge {
         }
     }
 
-    pub fn set_x11_display(&mut self, display: u32) {
-        self.x11_display = Some(display);
+    /// The XIM helper may connect only after the compositor's XWM is ready.
+    /// Advertising reserved sockets alone must not activate XWayland.
+    pub fn set_ready_x11_display(&mut self, display: Option<u32>) {
+        if self.x11_display == display {
+            return;
+        }
+        if let Some(mut child) = self.xim.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.x11_display = display;
+        self.xim_starts = 0;
+        self.xim_next_ms = 0;
     }
 
     fn poll_xim(&mut self, now_ms: u64) {
@@ -199,4 +210,34 @@ fn spawn(bin: &Path, wayland_display: &str, dh: &mut DisplayHandle) -> std::io::
     dh.insert_client(ours, Arc::new(crate::ClientState::ime_bridge()))
         .map_err(std::io::Error::other)?;
     Ok(child)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn losing_xwm_reaps_xim_and_resets_its_restart_budget() {
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        let mut bridge = ImeBridge {
+            bin: PathBuf::new(),
+            wayland_display: "test".into(),
+            child: None,
+            starts: 1,
+            next_ms: 123,
+            x11_display: Some(5),
+            xim: Some(child),
+            xim_starts: MAX_RESTARTS + 1,
+            xim_next_ms: 456,
+        };
+        bridge.set_ready_x11_display(Some(5));
+        assert_eq!(bridge.xim.as_ref().unwrap().id(), pid);
+        bridge.set_ready_x11_display(None);
+        assert!(bridge.xim.is_none());
+        assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
+        assert_eq!((bridge.starts, bridge.next_ms), (1, 123));
+        bridge.set_ready_x11_display(Some(5));
+        assert_eq!((bridge.xim_starts, bridge.xim_next_ms), (0, 0));
+    }
 }

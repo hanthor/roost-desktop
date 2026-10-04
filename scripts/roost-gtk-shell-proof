@@ -517,8 +517,9 @@ fi
 
 # The shell logs where it laid out IBus's candidates (G-IME-CANDIDATES
 # clicks one), the bridge each key's fate.
+ROOST_IBUS=1
 ROOST_IBUS_DEBUG=1
-export ROOST_IBUS_DEBUG
+export ROOST_IBUS ROOST_IBUS_DEBUG
 ROOST_PROOF_SWIPE_INPUT="$ARTIFACTS/swipe-input.json"
 export ROOST_PROOF_SWIPE_INPUT
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk -p roost-shell-host
@@ -703,7 +704,14 @@ if command -v Xwayland >/dev/null 2>&1; then
     if pgrep -P "$COMPOSITOR_PID" -x Xwayland >/dev/null; then
         fail G-X11-DEMAND "native startup spawned XWayland"
     fi
-    pass G-X11-DEMAND "native GTK startup advertises sockets without an XWayland process"
+    if command -v ibus-daemon >/dev/null 2>&1; then
+        pgrep -P "$COMPOSITOR_PID" -f '(^|/)roost-ibus-bridge( |$)' >/dev/null ||
+            fail G-X11-DEMAND "native IBus bridge is not running"
+        if pgrep -P "$COMPOSITOR_PID" -x ibus-x11 >/dev/null; then
+            fail G-X11-DEMAND "XIM connected before an application needed X11"
+        fi
+    fi
+    pass G-X11-DEMAND "native GTK and IBus startup advertise sockets without an XWayland or XIM process"
 fi
 SOCKET_NAME="$(sed -n 's/.*nested session on \([^ ]*\) .*/\1/p' "$LOG" | head -1)"
 # One at a time, so window ids (and with them GNOME's running-app order
@@ -1726,12 +1734,31 @@ if command -v Xwayland >/dev/null 2>&1 && command -v xeyes >/dev/null 2>&1; then
     x11_pid="$(pgrep -P "$COMPOSITOR_PID" -x Xwayland)"
     [ "$(printf '%s\n' "$x11_pid" | wc -l)" -eq 1 ] || fail G-X11-DEMAND "expected one owned compatibility process"
     native_ids="$(jq -c '[.windows[] | select(.app_id != "XEyes") | .id] | sort' "$CSTATE")"
+    old_xim_pid=""
+    if command -v ibus-daemon >/dev/null 2>&1; then
+        for _ in $(seq 1 30); do
+            old_xim_pid="$(pgrep -P "$COMPOSITOR_PID" -x ibus-x11 || true)"
+            [ -n "$old_xim_pid" ] && break
+            sleep 0.2
+        done
+        [ -n "$old_xim_pid" ] || fail G-X11-RESTART "XIM did not start after actual X11 readiness"
+    fi
     kill "$x11_pid"
     cstate 'all(.windows[]; .app_id != "XEyes")' "old X11 windows removed" 10 || fail G-X11-RESTART "stale X11 model survived server loss"
     cstate '.x11_ready' "bounded compatibility restart" 15 || fail G-X11-RESTART "server did not restart"
     [ "$(jq -c '[.windows[] | .id] | sort' "$CSTATE")" = "$native_ids" ] || fail G-X11-RESTART "native windows changed across restart"
     restarted_pid="$(pgrep -P "$COMPOSITOR_PID" -x Xwayland)"
     [ "$restarted_pid" != "$x11_pid" ] || fail G-X11-RESTART "old compatibility process remained"
+    if [ -n "$old_xim_pid" ]; then
+        for _ in $(seq 1 30); do
+            new_xim_pid="$(pgrep -P "$COMPOSITOR_PID" -x ibus-x11 || true)"
+            [ -n "$new_xim_pid" ] && [ "$new_xim_pid" != "$old_xim_pid" ] && break
+            sleep 0.2
+        done
+        [ -n "$new_xim_pid" ] && [ "$new_xim_pid" != "$old_xim_pid" ] ||
+            fail G-X11-RESTART "XIM helper did not restart for the fresh X11 server"
+        ! kill -0 "$old_xim_pid" 2>/dev/null || fail G-X11-RESTART "old XIM helper survived server loss"
+    fi
     env DISPLAY="$x11_display" xeyes >/dev/null 2>&1 &
     cstate '.focused_app_id == "XEyes" and .x11_ready' "reconnected X11 client" 15 || fail G-X11-RESTART "client did not reconnect on the same reserved display"
     pass G-X11-RESTART "server loss removes compatibility windows, preserves native IDs and accepts a new client on the same display"
