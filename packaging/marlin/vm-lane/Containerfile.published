@@ -14,7 +14,9 @@ COPY packaging/marlin/vm-lane/roost-vm-health.service /usr/lib/systemd/system/ro
 RUN mkdir -p /usr/share/roost-vm \
     && pacman -Q roost > /usr/share/roost-vm/shipped-package.txt \
     && pacman -Q > /usr/share/roost-vm/shipped-packages.txt \
-    && sha256sum /usr/bin/roost-session /usr/bin/roost-compositor /usr/bin/roost-shell-gtk \
+    && sha256sum /usr/bin/roost-session /usr/bin/roost-compositor \
+         /usr/bin/roost-shell-host /usr/bin/roost-shell-gtk \
+         /usr/bin/roost-ibus-bridge /usr/bin/roost-greeter \
          /usr/libexec/tunaos/greetd-session /etc/greetd/config.toml /etc/greetd/gtkgreet.css \
          /etc/greetd/environments > /usr/share/roost-vm/shipped-payload.sha256 \
     && test "$(readlink -f /bin/sh)" = /usr/bin/bash \
