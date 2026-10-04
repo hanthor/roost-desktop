@@ -43,13 +43,22 @@ def inventory():
             continue
     sessions = [line.split() for line in call("loginctl", "list-sessions",
                                              "--no-legend", "--no-pager").splitlines()]
-    owned = [line[0] for line in sessions if len(line) > 1 and line[1] == str(OWNER.pw_uid)]
+    owned = []
+    for line in sessions:
+        if len(line) < 2 or line[1] != str(OWNER.pw_uid):
+            continue
+        description = call("loginctl", "show-session", line[0], "--property=Id",
+                           "--property=VTNr", "--property=User", "--property=Type",
+                           "--property=Service", "--property=Class")
+        properties = dict(item.split("=", 1) for item in description.splitlines())
+        if (properties.get("Service") == "greetd" and properties.get("VTNr") == "1"
+                and properties.get("User") == str(OWNER.pw_uid)
+                and not properties.get("Class", "").startswith("manager")):
+            owned.append(properties)
     if len(owned) != 1:
-        raise RuntimeError("expected exactly one session for the test owner")
-    session = call("loginctl", "show-session", owned[0], "--property=Id",
-                   "--property=VTNr", "--property=User", "--property=Type", "--property=Service")
+        raise RuntimeError("expected exactly one greetd user session on the configured VT")
     return {"probe_uid": os.geteuid(), "session_uid": OWNER.pw_uid,
-            "session": dict(line.split("=", 1) for line in session.splitlines()),
+            "session": owned[0],
             "state": {k: state[k] for k in ("locked", "windows", "focused", "active_workspace")},
             "processes": sorted(processes, key=lambda item: item["pid"])}
 
@@ -112,6 +121,19 @@ def main():
                   "capture_exit": attempt("grim", "/tmp/roost-vm-forbidden-capture.png"),
                   "input_exit": attempt("wtype", "untrusted-input"),
                   "capture_file": pathlib.Path("/tmp/roost-vm-forbidden-capture.png").exists()}
+    elif action == "start-input-probe":
+        compositor = next(p for p in inventory()["processes"] if p["executable"] == "roost-compositor")
+        subprocess.Popen(["runuser", "-u", OWNER.pw_name, "--", "env",
+                          f"XDG_RUNTIME_DIR={RUNTIME}",
+                          f"DBUS_SESSION_BUS_ADDRESS=unix:path={RUNTIME}/bus",
+                          f"WAYLAND_DISPLAY=roost-nested-{compositor['pid']}",
+                          "/usr/libexec/roost-vm-input"], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+        result = {"started": "count-only GTK input probe"}
+    elif action == "input-count":
+        result = json.loads(pathlib.Path(RUNTIME, "roost-vm-input.json").read_text())
+        if pathlib.Path(f"/proc/{result['pid']}").stat().st_uid != OWNER.pw_uid:
+            raise RuntimeError("input probe has the wrong owner")
     elif action == "logout":
         call("loginctl", "terminate-session", inventory()["session"]["Id"])
         result = {"requested": "terminate session"}

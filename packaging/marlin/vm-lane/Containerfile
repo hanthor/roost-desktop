@@ -22,6 +22,7 @@ COPY packaging/marlin/vm-lane/greetd.toml /etc/greetd/config.toml
 COPY packaging/marlin/vm-lane/gtkgreet.css /etc/greetd/gtkgreet.css
 COPY packaging/marlin/vm-lane/roost-vm-session /usr/libexec/roost-vm-session
 COPY packaging/marlin/vm-lane/roost-vm-lifecycle /usr/libexec/roost-vm-lifecycle
+COPY packaging/marlin/vm-lane/roost-vm-input /usr/libexec/roost-vm-input
 COPY packaging/marlin/vm-lane/roost-vm-lane.tmpfiles /usr/lib/tmpfiles.d/roost-vm-lane.conf
 COPY packaging/marlin/vm-lane/journald.conf /usr/lib/systemd/journald.conf.d/90-roost-vm-lane.conf
 COPY packaging/marlin/vm-lane/kargs.toml /usr/lib/bootc/kargs.d/90-roost-vm-lane.toml
@@ -33,11 +34,11 @@ COPY packaging/marlin/vm-lane/roost-vm-health.service /usr/lib/systemd/system/ro
 # seeded at install time, so the home directory and the AccountsService
 # record come from tmpfiles.d on every boot rather than from this layer.
 RUN pacman -Sy --noconfirm \
-    && pacman -S --needed --noconfirm greetd greetd-gtkgreet cage qemu-guest-agent python grim wtype wayland-utils \
+    && pacman -S --needed --noconfirm greetd greetd-gtkgreet cage qemu-guest-agent python python-gobject grim wtype wayland-utils \
     && useradd -M -d /home/roost-test -s /bin/bash -U roost-test \
     && echo 'roost-test:roost' | chpasswd \
     && test -f /usr/share/wayland-sessions/roost.desktop \
-    && chmod 0755 /usr/libexec/roost-vm-session /usr/libexec/roost-vm-lifecycle \
+    && chmod 0755 /usr/libexec/roost-vm-session /usr/libexec/roost-vm-lifecycle /usr/libexec/roost-vm-input \
     && printf 'roost-session\n' > /etc/greetd/environments \
     && systemctl disable gdm.service \
     && systemctl enable greetd.service roost-vm-health.service \

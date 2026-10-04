@@ -171,6 +171,18 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
         return (before["state"]["windows"] == after["state"]["windows"]
                 and identities(before) == identities(after))
 
+    agent.run("start-input-probe")
+    probe = await_state(lambda state: any(w["app_id"] == "org.roost.VmInput" for w in state["state"]["windows"]))
+    probe_window = next(w for w in probe["state"]["windows"] if w["app_id"] == "org.roost.VmInput")
+    x, y, width, height = probe_window["rect"]
+    qmp.click(x + width // 2, y + height // 2)
+    initial_input = agent.run("input-count")
+    qmp.keys("x")
+    time.sleep(0.5)
+    delivered_input = agent.run("input-count")
+    record("V-NORMAL-INPUT", delivered_input["pid"] == initial_input["pid"]
+           and delivered_input["count"] > initial_input["count"],
+           "real non-root GTK application receives ordinary QMP keyboard input while unlocked; count only")
     before = inventory("before")
     expected = {"roost-compositor", "roost-shell-gtk", "gnome-disks", "gnome-system-monitor", "nautilus"}
     nonroot = (before["probe_uid"] == 0 and before["session_uid"] != 0
@@ -218,12 +230,17 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     masked = difference(base_frame, frame("resumed-locked")) > 0.25
     record("V-SUSPEND", same_apps(before, resumed) and masked,
            "actual SUSPENDED → system_wakeup, locked/masked session, unchanged app IDs/rectangles and process start times")
+    qmp.type_text("probe")
+    time.sleep(0.5)
+    locked_input = agent.run("input-count")
+    record("V-NORMAL-INPUT-FAIL-CLOSED", locked_input == delivered_input,
+           "same real GTK client receives no ordinary QMP keys while locked; no key values recorded")
     capture = agent.run("capture-input")
     rejected = lambda code: 0 < code < 124  # A hung or unconnectable probe is not a denial proof.
     record("V-CAPTURE-INPUT-FAIL-CLOSED", capture["connect_exit"] == 0
            and rejected(capture["capture_exit"]) and rejected(capture["input_exit"])
            and not capture["capture_file"] and inventory("capture-denied")["state"]["locked"],
-           "untrusted real grim/wtype clients cannot capture or inject remote input while locked")
+           "reachable untrusted real grim/wtype clients are denied capture/virtual-keyboard interfaces while locked")
     # Repeat the real VT transition with the lock engaged, not only on the desktop.
     agent.run("vt", away)
     time.sleep(1)
@@ -236,6 +253,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
 
     agent.run("deny-unlock")
     try:
+        qmp.keys("esc")
         qmp.keys("ret")
         time.sleep(1)
         qmp.type_text("roost")
@@ -255,6 +273,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     time.sleep(2)
     recovered = inventory("shell-recovered")
     record("V-SHELL-FAIL-CLOSED", killed_mask and recovered["state"]["locked"] and same_apps(before, recovered, shell=False)
+           and agent.run("input-count") == delivered_input
            and difference(base_frame, frame("shell-recovered")) > 0.25,
            "portal stopped and lock UI killed; supervisor replacement stays locked/masked with original apps alive")
     qmp.keys("ret")
