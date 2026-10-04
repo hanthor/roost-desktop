@@ -116,9 +116,13 @@ impl ProtocolVersion {
     ///
     /// `0.20` appends the shell-to-compositor `SetSwitcherKeys` command
     /// (GNOME's rebindable switcher keys), again last.
+    ///
+    /// `0.21` appends `enable_animations` to `InputSettings`. Like earlier
+    /// positional struct extensions, the postcard body changes and both
+    /// sides ship together from this workspace.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 20,
+        minor: 21,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -664,6 +668,13 @@ pub struct InputSettings {
     pub mouse_speed_milli: i32,
     /// `org.gnome.desktop.interface enable-hot-corners`.
     pub hot_corners: bool,
+    /// `org.gnome.desktop.interface enable-animations` (default enabled).
+    #[serde(default = "animations_default")]
+    pub enable_animations: bool,
+}
+
+fn animations_default() -> bool {
+    true
 }
 
 impl Default for InputSettings {
@@ -683,6 +694,7 @@ impl Default for InputSettings {
             mouse_natural_scroll: false,
             mouse_speed_milli: 0,
             hot_corners: true,
+            enable_animations: true,
         }
     }
 }
@@ -1058,7 +1070,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 18).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 19).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 20).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 21).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 21).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 22).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }
