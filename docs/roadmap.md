@@ -1,10 +1,14 @@
 # Program roadmap and traceability
 
-**Status:** Active. Tier 1 (nested developer preview) is implemented; tier 2 (daily-driver candidate) is open. Work items live as GitHub issues on the Roost roadmap project board; this document keeps the program structure, gates, and traceability.  
+**Status:** Active. Tier 1 (nested developer preview) is implemented; tier 2 (daily-driver candidate) is open. Work items live as GitHub issues on the [Roost roadmap project board](https://github.com/users/hanthor/projects/4); this document keeps the program structure, gates, and traceability.
 **Architecture:** [Program architecture](architecture.md)  
 **Parity baseline:** GNOME 51, as shipped in the TunaOS Marlin GNOME image (`ghcr.io/tuna-os/marlin:gnome`). Decided 2026-10-01.  
 **Target platform:** TunaOS Marlin (Arch Linux base, bootc image), as a Roost flavor alongside the GNOME flavor. Reference and candidate run on the same VM image family so comparisons are like for like.  
 **Planning system:** Spektacular spec → plan → implement. Every delivery unit has a spek, a reviewed implementation plan, evidence, and an explicit gate.
+
+## Delivery tiers
+
+The project board's `1 Nested preview`, `2 Daily-driver candidate`, `3 Later`, and `Cross-cutting` values map to [the architecture tiers](architecture.md#delivery-tiers). A merged implementation is not a passed release gate: physical hardware, security, visual comparison and endurance evidence must still be recorded. [ADR 0007](adr/0007-gnome51-marlin-baseline.md) records the baseline and target choices.
 
 ## Delivery sequence
 
@@ -43,6 +47,11 @@ Specs 002 and 003 may proceed in parallel after the 001 compositor/control contr
 The plan store contains `plan.md`, `context.md`, `research.md`, and `test-plan.md` for each unit. Plans are drafts until reviewed against current source, confirmed dependencies, and explicit acceptance evidence. Do not begin implementation from a draft plan if a blocking decision or security boundary is unresolved.
 
 ## Requirement traceability
+
+Parent requirements `R1`–`R16` are defined in the
+[parent requirement register](requirements.md). A bare `R<n>` in this
+document is a parent requirement; a spec's own requirements are written
+with their spek number (`001-R5`), per the register's naming rule.
 
 | Parent requirement area | Owning spek(s) | Evidence at completion |
 |---|---|---|

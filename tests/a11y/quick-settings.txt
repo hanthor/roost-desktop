@@ -7,19 +7,18 @@ toggle button: System
 push button: Take Screenshot
 push button: Settings
 push button: Lock
-push button: Power Off
+push button: Power Off Menu
 push button: Mute
 slider: Volume
+toggle button: Open sound output menu
 slider: Brightness
-table cell: Wi-Fi
 toggle button: Wi-Fi
-table cell: Wired
+toggle button: Wi-Fi Menu
 toggle button: Wired
-table cell: Bluetooth
+toggle button: Wired Menu
 toggle button: Bluetooth
-table cell: Power Mode
+toggle button: Bluetooth Menu
 toggle button: Power Mode
-table cell: Dark Style
+toggle button: Power Mode Menu
 toggle button: Dark Style
-table cell: Do Not Disturb
 toggle button: Do Not Disturb

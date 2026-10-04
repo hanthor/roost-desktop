@@ -55,12 +55,13 @@ impl Action {
         let unit = if seconds == 1 { "second" } else { "seconds" };
         match self {
             Action::Restart => {
-                format!("The system will restart automatically in {seconds} {unit}.")
+                format!("The system will restart automatically in {seconds} {unit}")
             }
             Action::PowerOff => {
-                format!("The system will power off automatically in {seconds} {unit}.")
+                format!("The system will power off automatically in {seconds} {unit}")
             }
-            Action::LogOut => format!("You will be logged out automatically in {seconds} {unit}."),
+            // GNOME 51's strings, without a closing period.
+            Action::LogOut => format!("You will be logged out automatically in {seconds} {unit}"),
             Action::Suspend => String::new(),
         }
     }
@@ -163,25 +164,35 @@ impl PowerUi {
         dialog.set_exclusive_zone(-1);
         dialog.set_keyboard_mode(KeyboardMode::Exclusive);
         dialog.set_title(Some("End Session"));
+        // GNOME's ModalDialog (.modal-dialog.end-session-dialog): a 24em
+        // card, the title and countdown centered, two 43px buttons.
         let card = gtk::Box::new(gtk::Orientation::Vertical, 18);
-        card.add_css_class("end-session-card");
+        card.add_css_class("modal-dialog");
         card.set_halign(gtk::Align::Center);
         card.set_valign(gtk::Align::Center);
-        card.set_width_request(420);
+        card.set_size_request(400, -1);
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 18);
+        content.add_css_class("modal-dialog-content-box");
         let title = gtk::Label::new(None);
-        title.add_css_class("title-2");
+        title.add_css_class("message-dialog-title");
         let body = gtk::Label::new(None);
+        body.add_css_class("message-dialog-description");
         body.set_wrap(true);
+        body.set_max_width_chars(1);
+        body.set_hexpand(true);
         body.set_justify(gtk::Justification::Center);
+        content.append(&title);
+        content.append(&body);
         let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        buttons.add_css_class("modal-dialog-button-box");
         buttons.set_homogeneous(true);
         let cancel = gtk::Button::with_label("Cancel");
+        cancel.add_css_class("modal-dialog-button");
         let confirm = gtk::Button::with_label("");
-        confirm.add_css_class("destructive-action");
+        confirm.add_css_class("modal-dialog-button");
         buttons.append(&cancel);
         buttons.append(&confirm);
-        card.append(&title);
-        card.append(&body);
+        card.append(&content);
         card.append(&buttons);
         dialog.set_child(Some(&card));
 
@@ -255,31 +266,19 @@ impl PowerUi {
 
     /// Menu rows for this session, wired to their actions. Each row
     /// calls `close_menu` first (the quick-settings popover goes away).
-    pub fn menu(self: &Rc<Self>, close_menu: Rc<dyn Fn()>) -> gtk::Box {
-        let column = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        column.add_css_class("power-menu");
-        for action in menu_actions(self.nested) {
-            let label = match action {
-                Action::Restart => "Restart…",
-                Action::PowerOff => "Power Off…",
-                Action::LogOut => "Log Out…",
-                Action::Suspend => "Suspend",
-            };
-            let row = gtk::Button::with_label(label);
-            row.add_css_class("flat");
-            row.set_halign(gtk::Align::Fill);
-            let (me, close, action) = (self.clone(), close_menu.clone(), *action);
-            row.connect_clicked(move |_| {
-                close();
-                if action == Action::Suspend {
-                    me.perform(Action::Suspend);
-                } else {
-                    me.ask(action);
-                }
-            });
-            column.append(&row);
+    /// The actions the power menu offers here.
+    pub fn actions(&self) -> &'static [Action] {
+        menu_actions(self.nested)
+    }
+
+    /// Run a menu choice: Suspend at once, the rest through GNOME's
+    /// countdown dialog.
+    pub fn activate(self: &Rc<Self>, action: Action) {
+        if action == Action::Suspend {
+            self.perform(Action::Suspend);
+        } else {
+            self.ask(action);
         }
-        column
     }
 
     fn perform(&self, action: Action) {
@@ -295,6 +294,10 @@ impl PowerUi {
         self.confirm.set_label(action.title());
         self.body.set_text(&action.countdown_text(COUNTDOWN_S));
         self.dialog.present();
+        // Cancel holds the focus when the dialog opens, as in GNOME.
+        if let Some(cancel) = self.confirm.prev_sibling().and_downcast::<gtk::Button>() {
+            cancel.grab_focus();
+        }
         let me = self.clone();
         let id = glib::timeout_add_local(Duration::from_secs(1), move || {
             let left = me.left.get().saturating_sub(1);
@@ -355,15 +358,15 @@ mod tests {
     fn countdown_text_matches_gnome() {
         assert_eq!(
             Action::PowerOff.countdown_text(60),
-            "The system will power off automatically in 60 seconds."
+            "The system will power off automatically in 60 seconds"
         );
         assert_eq!(
             Action::Restart.countdown_text(1),
-            "The system will restart automatically in 1 second."
+            "The system will restart automatically in 1 second"
         );
         assert_eq!(
             Action::LogOut.countdown_text(5),
-            "You will be logged out automatically in 5 seconds."
+            "You will be logged out automatically in 5 seconds"
         );
     }
 }

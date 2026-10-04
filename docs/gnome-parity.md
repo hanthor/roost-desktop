@@ -1,0 +1,149 @@
+# Pixel parity with GNOME 51
+
+Roost aims to look like GNOME 51 to the pixel, element by element and
+state by state. The harness below measures that against GNOME Shell 51.0
+itself, not against screenshots or memory.
+
+## Reference: GNOME 51 in a container
+
+`scripts/roost-gnome-reference` builds `tests/gnome-reference/Containerfile`
+(Fedora 45, GNOME Shell 51.0) with podman. It runs `gnome-shell --headless`
+at 1280x800 with `capture.js` as its automation script, the way GNOME's own
+performance tests drive the shell. Roost's proof stubs stand in for
+NetworkManager, BlueZ, power-profiles-daemon and logind on a private
+system bus. Both sides use the same stubs, so quick settings show the same
+services.
+
+For each state the script writes a PNG and a JSON list of every visible
+styled actor. Each entry has its style class, name, rectangle, font and
+colours, so sizes and spacing can be read off exactly. The run also exports
+GNOME 51's default wallpapers (`adwaita-l.jxl`, `adwaita-d.jxl`).
+
+## Roost capture and comparison
+
+`scripts/roost-parity-capture` drives the nested compositor and GTK shell
+through the same states with the same settings and wallpaper.
+`scripts/lib/roost-parity-compare.py` stacks GNOME, Roost and their
+difference for each state, optionally cropped to one element. It prints
+the mean channel difference and the share of pixels that are visibly off.
+
+```sh
+scripts/roost-gnome-reference
+scripts/roost-parity-capture
+scripts/lib/roost-parity-compare.py target/gnome-reference target/roost-parity target/parity-compare
+scripts/lib/roost-parity-compare.py target/gnome-reference target/roost-parity target/parity-compare 01-desktop:0,0,1280,32
+```
+
+## States
+
+| State | What it shows |
+| --- | --- |
+| 00-startup-overview | GNOME opens the overview at login (reference only) |
+| 01-desktop | top bar over the default wallpaper |
+| 02-calendar | the date menu |
+| 03-quick-settings | quick settings |
+| 03b-power-mode-menu | the Power Mode toggle's menu, open in place |
+| 03c-power-menu | the shutdown menu, open in place |
+| 04-overview-empty | the overview with no windows |
+| 05b-app-folder | the System folder's dialog |
+| 05-app-grid | the app grid |
+| 06-windows | three windows on the desktop |
+| 06b-switcher | Alt+Tab |
+| 07-overview-windows | the overview with three windows |
+| 07b-overview-hover | a window preview hovered (caption and close button) |
+| 08-notification | a notification banner |
+| 09-calendar-with-notification | the date menu listing it |
+| 10-end-session | the Log Out dialog (gnome-session's EndSessionDialog) |
+| 11-lock-screen | the lock screen curtain (reference: a stubbed display manager lets GNOME lock) |
+| 12-osd-volume, 12b-osd-label, 12c-osd-overdrive | the OSD gnome-settings-daemon shows through ShowOSD |
+| 13-window-menu | the window menu on the focused window's header bar |
+| 14-screenshot-ui | the screenshot UI on Print |
+| 15-workspace-popup | the workspace switcher popup on Super+Page_Down |
+| 16-overview-workspaces | the overview with three workspaces (a window moved one right): the thumbnails strip, the shrunken card, the focused window still drawn activated |
+| 17-tile-preview | Gamma dragged to the left edge: the tile preview over the left half, above Alpha and below Gamma (GNOME's reference moves Gamma by the drag's offset and opens the preview through its own handler, since headless input is unreliable) |
+| 18-overview-search | "calc" typed in the overview: the app result under the focused entry (external search providers off on both sides, since the host and the image install different ones) |
+| 19-app-popover | a fourth test window opening its header-bar menu by itself (an xdg popup; headless input is not reliable in GNOME's reference), placed by the cascade's first free slot |
+| 11b-unlock-prompt | the unlock prompt, set to what a real session shows: the user's name and GDM's Password question (the stubbed display manager has no PAM conversation or AccountsService) |
+
+Both sides run the same services: the stubs serve power-profiles and
+logind only, since GNOME's NetworkManager and BlueZ clients need more
+than a stub. The virtual monitor has no backlight and there is no audio
+server. GNOME 51's Adwaita icons and Adwaita Sans come from the reference
+run, so the host's older theme and fonts do not leak in. Ubuntu, for
+example, defaults to Yaru and lacks `dark-mode-symbolic`.
+
+Both sides open the same three libadwaita test windows
+(`scripts/lib/roost-test-window.py`), one at a time, so window size,
+placement, stacking and decorations compare directly. Roost's capture
+sets GNOME 51's interface fonts, since the host's schema may still name
+Cantarell. Both sides switch apps the way releasing Alt does, and the
+Roost pointer rests in an empty corner, since GNOME's scripted run has
+no pointer motion and so shows no hover.
+
+## Where Roost stands
+
+Share of pixels visibly off (more than 24 levels) in each element crop:
+
+| Element | First measured | Now |
+| --- | --- | --- |
+| Login: the overview at start | not built | 0.3% |
+| Desktop and wallpaper | 96.1% | 0.1% |
+| Top bar | 35.2% | 0.7% (the clock's minutes) |
+| Quick settings | 68.4% | 1.2% (text rendering) |
+| Power Mode menu | not built | 0.5% |
+| Date menu | 16.5% | 0.3% |
+| Notification banner and list card | 11.3% | matches; the rest is what lies behind |
+| Overview, empty (cards, search, dash) | 53.5% | 0.4% |
+| App grid (thumbnails, tiles, folders, dash) | 56.1% | 0.2% |
+| App folder dialog | popover | 0.0% |
+| Overview search results | 0.8% | 0.3% |
+| Overview dash | not comparable | 0.0% |
+| Lock screen background (blurred, dimmed wallpaper) | not built | 1.4% beyond 8 levels |
+| Lock screen curtain (clock, date, hint) | not built | positions within 1px; the digits are the capture time |
+| Unlock prompt | not built | 0.1% of the screen, 0.5% of the prompt |
+
+Whole screens, with the same windows on both sides:
+
+| State | Before | Now |
+| --- | --- | --- |
+| Three windows mapped | 50.1% | 0.4% |
+| Alt+Tab switcher | 48.9% | 0.5% |
+| Overview with windows | 28.8% | 1.3% |
+| Overview, a preview hovered | 29.0% | 1.7% |
+| Notification banner | 48.9% | 0.4% |
+| Date menu listing it | 19.6% | 0.5% |
+| Log Out dialog | 35.6% | 0.4% |
+| OSD: volume, a layout label, volume past 100% | not built | 0.4% each |
+| Window menu (header-bar right click) | not built | 0.2% |
+| Screenshot UI (Print) | not built | 0.3% of the screen, 2.9% of the panel |
+| Workspace switcher popup | not built | 0.1% |
+| Overview with three workspaces (thumbnails strip) | not built | 1.4% |
+| Tile preview at the left edge | not built | 0.5% |
+| An app's popover, on a fourth window | 23.0% (cascade slot) | 0.5% |
+
+Roost's capture shows GNOME's installed apps, not the host's: each host
+entry is hidden by a `Hidden` copy in the user's application directory
+(the desktop-entry spec's override), GNOME's entries and folder names
+are copied in, GNOME 51's schemas come first, and the session is named
+GNOME so `OnlyShowIn` decides the same way.
+
+Both sides send the banner's notification over D-Bus. GNOME's message
+tray keeps a banner up while the user is away, so its scripted run tells
+the tray the user is back where Roost's capture moves the pointer.
+
+Getting there took two compositor changes. Windows now pick their own
+size and are placed on their first commit, as Mutter does: a new window
+is centred, and later ones cascade by Mutter's 50px. The switcher is
+centred on the whole monitor, top bar included.
+
+GTK and St differ in a few ways that matter when matching numbers:
+
+- GTK's `min-width` excludes padding, St's does not.
+- GNOME's 12px panel padding is a 3px border plus 9px of padding.
+- With two copies of an icon theme, GTK 4.14 takes the icon from the
+  later directory.
+- GTK 4's search entry node is `entry.search`, not `searchentry`.
+- GNOME 51's Adwaita wallpapers are Display P3 JPEG XL; mutter converts
+  them to sRGB, so Roost does too.
+- GNOME's lock screen blurs the wallpaper with a Gaussian of about
+  sigma 20 and dims it to 65%; fitted against GNOME's capture.

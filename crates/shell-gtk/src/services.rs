@@ -64,16 +64,23 @@ const LOGIND_SESSION_IFACE: &str = "org.freedesktop.login1.Session";
 pub struct Tile {
     pub button: gtk::ToggleButton,
     pub subtitle: gtk::Label,
+    /// The toggle's icon (GNOME swaps it with state, e.g. power profile).
+    pub icon: gtk::Image,
+    /// What the grid places and hides: the button, or the button with
+    /// its menu arrow.
+    pub outer: gtk::Widget,
     /// Set while the shell itself updates the button from daemon
     /// state, so the toggled handler does not echo it back.
     syncing: Rc<Cell<bool>>,
 }
 
 impl Tile {
-    pub fn new(button: gtk::ToggleButton, subtitle: gtk::Label) -> Self {
+    pub fn new(button: gtk::ToggleButton, subtitle: gtk::Label, icon: gtk::Image) -> Self {
         Self {
+            outer: button.clone().upcast(),
             button,
             subtitle,
+            icon,
             syncing: Rc::new(Cell::new(false)),
         }
     }
@@ -92,13 +99,9 @@ impl Tile {
         }
     }
 
-    /// Hide or show the whole tile (its grid cell collapses).
+    /// Hide or show the whole tile; the grid closes the gap.
     pub fn present(&self, present: bool) {
-        self.button.set_visible(present);
-        // In a FlowBox the cell is the parent: hide it too, or a gap stays.
-        if let Some(cell) = self.button.parent() {
-            cell.set_visible(present);
-        }
+        self.outer.set_visible(present);
     }
 
     /// Run `f` on user toggles only.
@@ -198,7 +201,7 @@ impl Remote {
 
 /// Call `f(true)` when `name` gains an owner and `f(false)` when it
 /// loses one, starting with the current state.
-fn watch_name(conn: &gio::DBusConnection, name: &str, f: impl Fn(bool) + 'static) {
+pub fn watch_name(conn: &gio::DBusConnection, name: &str, f: impl Fn(bool) + 'static) {
     let f = Rc::new(f);
     let sub = {
         let f = f.clone();
@@ -250,12 +253,35 @@ fn dict_string(d: &glib::VariantDict, key: &str) -> Option<String> {
 /// The tiles and sliders this module drives.
 pub struct Widgets {
     pub wifi: Tile,
+    /// The Wi-Fi tile's network menu.
+    pub wifi_menu: Rc<crate::wifi::WifiMenu>,
+    /// The wired tile's profile menu; it drives the tile too.
+    pub wired_menu: Rc<crate::wired::WiredMenu>,
+    /// The Bluetooth tile's device menu.
+    pub bt_menu: Rc<crate::bt_menu::BtMenu>,
     pub wired: Tile,
     pub bluetooth: Tile,
     pub power_mode: Tile,
+    /// The Power Mode menu: its header icon and one item per profile
+    /// (profile name, button, check ornament).
+    pub power_header: gtk::Image,
+    pub power_items: Vec<(&'static str, gtk::Button, gtk::Image)>,
+    /// Panel status icons GNOME shows only while they mean something
+    /// (panel.js `_indicators`): network, volume, power profile.
+    pub panel_network: gtk::Image,
+    pub panel_volume: gtk::Image,
+    pub panel_power_profile: gtk::Image,
+    /// The microphone: the panel's privacy indicator and the slider row.
+    pub panel_mic: gtk::Image,
+    pub mic: gtk::Scale,
+    pub mic_mute: gtk::Button,
+    pub mic_row: gtk::Box,
     pub volume: gtk::Scale,
     pub mute: gtk::Button,
     pub brightness_row: gtk::Box,
+    /// The sound output menu's rows and the slider's arrow opening it.
+    pub sound_list: gtk::Box,
+    pub sound_arrow: gtk::ToggleButton,
     pub brightness: gtk::Scale,
 }
 
@@ -281,6 +307,7 @@ pub fn attach(w: &Rc<Widgets>) {
         },
     );
     volume(w);
+    microphone(w);
 }
 
 fn network(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
@@ -296,7 +323,8 @@ fn network(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
                     return;
                 };
                 let on = dict_bool(&props, "WirelessEnabled").unwrap_or(false);
-                w1.wifi.show_state(on, Some(if on { "On" } else { "Off" }));
+                // GNOME's subtitle is the connected network's name.
+                w1.wifi_menu.set_enabled(on);
             });
             // Which tiles exist depends on the devices present.
             let (w, conn) = (w.clone(), conn.clone());
@@ -306,14 +334,16 @@ fn network(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
                     .map(|p| p.into_iter().map(|p| p.as_str().to_owned()).collect())
                     .unwrap_or_default();
                 let seen = Rc::new(RefCell::new((false, false, false)));
+                let wifi_device: Rc<RefCell<Option<String>>> = Rc::default();
                 let left = Rc::new(Cell::new(paths.len()));
                 if paths.is_empty() {
                     w.wifi.present(false);
-                    w.wired.present(false);
                 }
                 for path in paths {
                     let dev = Remote::new(&conn, NM_NAME, &path, NM_DEVICE_IFACE);
                     let (w, seen, left) = (w.clone(), seen.clone(), left.clone());
+                    let (wifi_device, conn, path) =
+                        (wifi_device.clone(), conn.clone(), path.clone());
                     dev.get_all(move |props| {
                         if let Some(props) = props {
                             let kind = props
@@ -325,7 +355,10 @@ fn network(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
                                 .unwrap_or(0);
                             let mut s = seen.borrow_mut();
                             match kind {
-                                Some(NM_DEVICE_WIFI) => s.0 = true,
+                                Some(NM_DEVICE_WIFI) => {
+                                    s.0 = true;
+                                    wifi_device.borrow_mut().get_or_insert(path);
+                                }
                                 Some(NM_DEVICE_ETHERNET) => {
                                     s.1 = true;
                                     s.2 |= state == NM_DEVICE_ACTIVATED;
@@ -337,15 +370,11 @@ fn network(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
                         if left.get() == 0 {
                             let (wifi, wired, connected) = *seen.borrow();
                             w.wifi.present(wifi);
-                            w.wired.present(wired);
-                            w.wired.show_state(
-                                connected,
-                                Some(if connected {
-                                    "Connected"
-                                } else {
-                                    "Disconnected"
-                                }),
-                            );
+                            w.wifi_menu.attach(&conn, wifi_device.borrow().clone());
+                            w.wired_menu.attach(&conn);
+                            // GNOME's primary network indicator: shown
+                            // while the main connection is up.
+                            w.panel_network.set_visible(wired && connected);
                         }
                     });
                 }
@@ -363,7 +392,8 @@ fn network(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
                 refresh();
             } else {
                 w.wifi.present(false);
-                w.wired.present(false);
+                w.wired_menu.detach();
+                w.panel_network.set_visible(false);
             }
         });
     }
@@ -371,16 +401,6 @@ fn network(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
         let nm = nm.clone();
         w.wifi
             .on_user_toggle(move |on| nm.set("WirelessEnabled", on.to_variant()));
-    }
-    // The wired tile mirrors the link; GNOME's own wired tile opens a
-    // menu rather than toggling, so a click only re-asserts the state.
-    {
-        let w2 = w.clone();
-        w.wired.on_user_toggle(move |_| {
-            let connected = w2.wired.subtitle.text() == "Connected";
-            w2.wired
-                .show_state(connected, Some(&w2.wired.subtitle.text()));
-        });
     }
 }
 
@@ -424,18 +444,16 @@ fn bluetooth(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
                                     let w3 = w2.clone();
                                     r2.get_all(move |p| {
                                         if let Some(on) = p.and_then(|p| dict_bool(&p, "Powered")) {
-                                            w3.bluetooth.show_state(
-                                                on,
-                                                Some(if on { "On" } else { "Off" }),
-                                            );
+                                            w3.bt_menu.set_powered(on);
                                         }
                                     });
                                 });
                                 *adapter.borrow_mut() = Some(remote);
                             }
                             w.bluetooth.present(true);
-                            w.bluetooth
-                                .show_state(powered, Some(if powered { "On" } else { "Off" }));
+                            // GNOME's subtitle names connected devices.
+                            w.bt_menu.attach(&conn);
+                            w.bt_menu.set_powered(powered);
                         }
                         None => w.bluetooth.present(false),
                     }
@@ -479,6 +497,21 @@ fn power_profiles(conn: &gio::DBusConnection, w: &Rc<Widgets>, which: usize) {
                     logic::power_mode_checked(&active),
                     Some(logic::power_mode_label(&active)),
                 );
+                let icon = logic::power_mode_icon(&active);
+                w.power_mode.icon.set_icon_name(Some(icon));
+                // The panel shows the profile only when not balanced.
+                w.panel_power_profile.set_icon_name(Some(icon));
+                w.panel_power_profile
+                    .set_visible(logic::power_mode_checked(&active));
+                w.power_header.set_icon_name(Some(icon));
+                if logic::power_mode_checked(&active) {
+                    w.power_header.add_css_class("active");
+                } else {
+                    w.power_header.remove_css_class("active");
+                }
+                for (name, _, ornament) in &w.power_items {
+                    ornament.set_visible(*name == active);
+                }
                 *profile.borrow_mut() = active;
             });
         })
@@ -506,6 +539,10 @@ fn power_profiles(conn: &gio::DBusConnection, w: &Rc<Widgets>, which: usize) {
             }
         });
     }
+    for (name, button, _) in &w.power_items {
+        let (ppd, name) = (ppd.clone(), *name);
+        button.connect_clicked(move |_| ppd.set("ActiveProfile", name.to_variant()));
+    }
     {
         let ppd = ppd.clone();
         w.power_mode.on_user_toggle(move |_| {
@@ -528,6 +565,31 @@ fn backlight() -> Option<(String, PathBuf)> {
         entry.file_name().to_string_lossy().into_owned(),
         entry.path(),
     ))
+}
+
+/// GNOME's brightness keys (brightnessManager.js): step the backlight
+/// by a twentieth through logind and return the new level (0..1) for
+/// the OSD, or `None` without a backlight.
+pub fn step_brightness(up: bool) -> Option<f64> {
+    let (name, dir) = backlight()?;
+    let max = read_u32(&dir.join("max_brightness"))?;
+    let now = read_u32(&dir.join("brightness"))?;
+    let percent = logic::brightness_step(logic::brightness_percent(now, max), up);
+    let value = logic::brightness_value(percent, max);
+    let conn = gio::bus_get_sync(gio::BusType::System, gio::Cancellable::NONE).ok()?;
+    conn.call(
+        Some(LOGIND_NAME),
+        LOGIND_SESSION_PATH,
+        LOGIND_SESSION_IFACE,
+        "SetBrightness",
+        Some(&("backlight", name.as_str(), value).to_variant()),
+        None,
+        gio::DBusCallFlags::NONE,
+        2000,
+        gio::Cancellable::NONE,
+        |_| {},
+    );
+    Some(percent / 100.0)
 }
 
 fn read_u32(path: &std::path::Path) -> Option<u32> {
@@ -597,6 +659,91 @@ fn wpctl(args: &[&str], done: impl FnOnce(Option<String>) + 'static) {
 }
 
 const SINK: &str = "@DEFAULT_AUDIO_SINK@";
+const SOURCE: &str = "@DEFAULT_AUDIO_SOURCE@";
+/// How often the shell looks for an app recording (GNOME hears it from
+/// PulseAudio; `wpctl` has to be asked).
+const RECORDING_POLL_SECONDS: u32 = 2;
+
+/// GNOME's microphone slider and privacy indicator (volume.js
+/// `InputIndicator`): both show only while an app records, with the
+/// default source's level; the indicator is orange unless muted.
+fn microphone(w: &Rc<Widgets>) {
+    let syncing = Rc::new(Cell::new(false));
+    let level = Rc::new(Cell::new((0.0, false)));
+    let read: Rc<dyn Fn()> = {
+        let (w, syncing, level) = (w.clone(), syncing.clone(), level.clone());
+        Rc::new(move || {
+            let (w, syncing, level) = (w.clone(), syncing.clone(), level.clone());
+            wpctl(&["status"], move |status| {
+                let hide = |w: &Widgets| {
+                    w.mic_row.set_visible(false);
+                    w.panel_mic.set_visible(false);
+                };
+                if !status.as_deref().is_some_and(logic::wpctl_recording) {
+                    return hide(&w);
+                }
+                wpctl(&["get-volume", SOURCE], move |out| {
+                    let Some((percent, muted)) = out.as_deref().and_then(logic::parse_wpctl_volume)
+                    else {
+                        return hide(&w);
+                    };
+                    level.set((percent, muted));
+                    let icon = logic::mic_icon(percent, muted);
+                    w.panel_mic.set_icon_name(Some(icon));
+                    if muted {
+                        w.panel_mic.remove_css_class("privacy-indicator");
+                    } else {
+                        w.panel_mic.add_css_class("privacy-indicator");
+                    }
+                    w.panel_mic.set_visible(true);
+                    w.mic_mute.set_icon_name(icon);
+                    w.mic_mute
+                        .update_property(&[gtk::accessible::Property::Label(if muted {
+                            "Unmute"
+                        } else {
+                            "Mute"
+                        })]);
+                    syncing.set(true);
+                    w.mic.set_value(if muted { 0.0 } else { percent });
+                    syncing.set(false);
+                    w.mic_row.set_visible(true);
+                });
+            });
+        })
+    };
+    read();
+    {
+        let read = read.clone();
+        glib::timeout_add_seconds_local(RECORDING_POLL_SECONDS, move || {
+            read();
+            glib::ControlFlow::Continue
+        });
+    }
+    {
+        let syncing = syncing.clone();
+        w.mic.connect_value_changed(move |s| {
+            if syncing.get() {
+                return;
+            }
+            let arg = logic::wpctl_volume_arg(s.value());
+            wpctl(&["set-volume", SOURCE, &arg], |_| {});
+        });
+    }
+    // volume.js `icon-clicked`: unmuting at zero restores a quarter.
+    w.mic_mute.connect_clicked(move |_| {
+        let (percent, muted) = level.get();
+        let read = read.clone();
+        let toggle = move || {
+            let read = read.clone();
+            wpctl(&["set-mute", SOURCE, "toggle"], move |_| read());
+        };
+        if muted && percent <= 0.0 {
+            wpctl(&["set-volume", SOURCE, "0.25"], move |_| toggle());
+        } else {
+            toggle();
+        }
+    });
+}
 
 fn volume(w: &Rc<Widgets>) {
     let syncing = Rc::new(Cell::new(false));
@@ -607,6 +754,14 @@ fn volume(w: &Rc<Widgets>) {
             wpctl(&["get-volume", SINK], move |out| {
                 match out.as_deref().and_then(logic::parse_wpctl_volume) {
                     Some((percent, muted)) => {
+                        // GNOME shows the output slider only with a
+                        // default sink (volume.js `_shouldBeVisible`).
+                        if let Some(row) = w.volume.parent() {
+                            row.set_visible(true);
+                        }
+                        w.panel_volume
+                            .set_icon_name(Some(logic::volume_icon(percent, muted)));
+                        w.panel_volume.set_visible(true);
                         w.volume.set_sensitive(true);
                         w.mute.set_sensitive(true);
                         syncing.set(true);
@@ -619,7 +774,11 @@ fn volume(w: &Rc<Widgets>) {
                         });
                     }
                     None => {
-                        // No PipeWire control: a disabled slider, never a hang.
+                        // No PipeWire sink: no slider, as in GNOME.
+                        if let Some(row) = w.volume.parent() {
+                            row.set_visible(false);
+                        }
+                        w.panel_volume.set_visible(false);
                         w.volume.set_sensitive(false);
                         w.mute.set_sensitive(false);
                     }
@@ -631,6 +790,57 @@ fn volume(w: &Rc<Widgets>) {
     {
         let read = read.clone();
         w.volume.connect_map(move |_| read());
+    }
+    // GNOME's output menu: one row per output, the default checked;
+    // picking one makes it the default and closes the panel.
+    let outputs: Rc<dyn Fn()> = {
+        let (w, read) = (w.clone(), read.clone());
+        Rc::new(move || {
+            let (w, read) = (w.clone(), read.clone());
+            wpctl(&["status"], move |out| {
+                let sinks = out
+                    .as_deref()
+                    .map(logic::parse_wpctl_sinks)
+                    .unwrap_or_default();
+                while let Some(child) = w.sound_list.first_child() {
+                    w.sound_list.remove(&child);
+                }
+                for sink in &sinks {
+                    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                    row.append(&gtk::Image::from_icon_name(logic::sink_icon(&sink.name)));
+                    let label = gtk::Label::new(Some(&sink.name));
+                    label.set_xalign(0.0);
+                    label.set_hexpand(true);
+                    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                    row.append(&label);
+                    let check = gtk::Image::from_icon_name("ornament-check-symbolic");
+                    check.set_visible(sink.default);
+                    row.append(&check);
+                    let button = gtk::Button::builder().child(&row).build();
+                    button.add_css_class("qs-menu-item");
+                    button.update_property(&[gtk::accessible::Property::Label(&sink.name)]);
+                    let (id, read) = (sink.id.to_string(), read.clone());
+                    button.connect_clicked(move |b| {
+                        if let Some(popover) = b
+                            .ancestor(gtk::Popover::static_type())
+                            .and_downcast::<gtk::Popover>()
+                        {
+                            popover.popdown();
+                        }
+                        let read = read.clone();
+                        wpctl(&["set-default", &id], move |_| read());
+                    });
+                    w.sound_list.append(&button);
+                }
+                // volume.js: `menuEnabled = this._deviceItems.size > 1`.
+                w.sound_arrow.set_visible(sinks.len() > 1);
+            });
+        })
+    };
+    outputs();
+    {
+        let outputs = outputs.clone();
+        w.volume.connect_map(move |_| outputs());
     }
     {
         let syncing = syncing.clone();

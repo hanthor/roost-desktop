@@ -3575,6 +3575,7 @@ impl ShellHost {
                     entry.path.as_os_str().to_owned(),
                 ],
                 icon: None,
+                categories: Vec::new(),
             };
             let _ = self.launcher.launch(&synthetic);
         }
@@ -4675,6 +4676,7 @@ mod tests {
                 keywords: Vec::new(),
                 argv: vec![std::ffi::OsString::from("/bin/true")],
                 icon: None,
+                categories: Vec::new(),
             };
             let mut host = ShellHost::new(
                 PanelConfig::default(),
@@ -5807,6 +5809,7 @@ mod tests {
                     keywords: Vec::new(),
                     argv: vec![std::ffi::OsString::from("/bin/true")],
                     icon: None,
+                    categories: Vec::new(),
                 }]),
                 Favorites::load(dir.path().join(crate::favorites::FAVORITES_FILE)),
             );
@@ -8386,6 +8389,7 @@ mod tests {
                     keywords: Vec::new(),
                     argv: vec![std::ffi::OsString::from("/bin/true")],
                     icon: icon.map(str::to_owned),
+                    categories: Vec::new(),
                 }]),
                 Favorites::load(dir.path().join(crate::favorites::FAVORITES_FILE)),
             );

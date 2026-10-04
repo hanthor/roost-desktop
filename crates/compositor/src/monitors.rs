@@ -110,12 +110,60 @@ pub fn path() -> Option<PathBuf> {
         .map(|dir| dir.join("monitors.xml"))
 }
 
-/// The user's arrangement for these connectors (empty when there is none).
+/// Roost's own saved arrangements (`$XDG_CONFIG_HOME/roost/monitors.xml`):
+/// what GNOME Settings applied in a Roost session. Kept apart from
+/// GNOME's file, whose full monitor specs (EDID vendor, product, serial)
+/// Roost cannot write yet, so a GNOME session's settings stay intact.
+pub fn roost_path() -> Option<PathBuf> {
+    path().and_then(|p| p.parent().map(|dir| dir.join("roost").join("monitors.xml")))
+}
+
+/// The user's arrangement for these connectors: Roost's own saved one
+/// first, then GNOME's (empty when there is none).
 pub fn load(connected: &[String]) -> HashMap<String, MonitorConfig> {
-    path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .map(|xml| choose(&parse(&xml), connected))
-        .unwrap_or_default()
+    for file in [roost_path(), path()].into_iter().flatten() {
+        if let Ok(xml) = std::fs::read_to_string(&file) {
+            let chosen = choose(&parse(&xml), connected);
+            if !chosen.is_empty() {
+                return chosen;
+            }
+        }
+    }
+    HashMap::new()
+}
+
+/// One arrangement as a monitors.xml document (GNOME's format).
+pub fn to_xml(configs: &[MonitorConfig]) -> String {
+    let escape = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    };
+    let mut out = String::from("<monitors version=\"2\">\n  <configuration>\n");
+    for c in configs {
+        out.push_str(&format!(
+            "    <logicalmonitor>\n      <x>{}</x>\n      <y>{}</y>\n      <scale>{}</scale>\n{}      <monitor>\n        <monitorspec>\n          <connector>{}</connector>\n        </monitorspec>\n      </monitor>\n    </logicalmonitor>\n",
+            c.x,
+            c.y,
+            c.scale,
+            if c.primary { "      <primary>yes</primary>\n" } else { "" },
+            escape(&c.connector),
+        ));
+    }
+    out.push_str("  </configuration>\n</monitors>\n");
+    out
+}
+
+/// Save an arrangement as Roost's own monitors.xml (atomic replace).
+pub fn save(configs: &[MonitorConfig]) -> std::io::Result<PathBuf> {
+    let file = roost_path().ok_or_else(|| std::io::Error::other("no config dir"))?;
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = file.with_extension("xml.tmp");
+    std::fs::write(&tmp, to_xml(configs))?;
+    std::fs::rename(&tmp, &file)?;
+    Ok(file)
 }
 
 #[cfg(test)]
@@ -155,6 +203,28 @@ mod tests {
         assert_eq!(configs[1][1].connector, "HDMI-A-1");
         assert_eq!((configs[1][1].x, configs[1][1].scale), (1504, 1.0));
         assert!(parse("<not xml").is_empty());
+    }
+
+    #[test]
+    fn saved_arrangements_read_back() {
+        let configs = vec![
+            MonitorConfig {
+                connector: "eDP-1".into(),
+                scale: 1.25,
+                x: 0,
+                y: 0,
+                primary: true,
+            },
+            MonitorConfig {
+                connector: "HDMI-A-1".into(),
+                scale: 1.0,
+                x: 1536,
+                y: 0,
+                primary: false,
+            },
+        ];
+        let back = parse(&to_xml(&configs));
+        assert_eq!(back, vec![configs]);
     }
 
     #[test]

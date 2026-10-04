@@ -18,14 +18,106 @@ pub const PATH: &str = "/org/gnome/Shell/Screenshot";
 /// Longest a caller waits for the frame.
 const DEADLINE: Duration = Duration::from_secs(10);
 
-/// One request from D-Bus: where to save (empty: GNOME's default).
-pub struct Request {
-    pub filename: PathBuf,
-    pub reply: mpsc::Sender<Option<PathBuf>>,
+/// One request from D-Bus.
+pub enum Request {
+    /// The screen or the focused window, saved where asked (empty:
+    /// GNOME's default).
+    Shot {
+        filename: PathBuf,
+        /// The focused window alone (`ScreenshotWindow`), not the screen.
+        window: bool,
+        reply: mpsc::Sender<Option<PathBuf>>,
+    },
+    /// Every window of the screenshot UI's window selector, each saved
+    /// into `directory` (Roost's `ScreenshotWindows`).
+    Windows {
+        directory: PathBuf,
+        reply: mpsc::Sender<Vec<WindowShot>>,
+    },
+}
+
+/// One window of GNOME's screenshot window selector: the window, where
+/// its preview sits (primary-output logical pixels, laid out as GNOME's
+/// `UIWindowSelectorLayout` does) and its picture at full size.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowShot {
+    pub id: u64,
+    pub title: String,
+    pub focused: bool,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub path: PathBuf,
+}
+
+/// GNOME's window selector container margins
+/// (`.screenshot-ui-window-selector-window-container`): 100px, and 200px
+/// at the bottom of the primary monitor to leave room for the panel.
+pub const SELECTOR_MARGIN: i32 = 100;
+pub const SELECTOR_MARGIN_BOTTOM: i32 = 200;
+
+/// Where the window selector lays windows out on a `width` x `height`
+/// output (logical pixels): `(x, y, width, height)`.
+pub fn selector_area(width: i32, height: i32) -> (i32, i32, i32, i32) {
+    (
+        SELECTOR_MARGIN,
+        SELECTOR_MARGIN,
+        (width - 2 * SELECTOR_MARGIN).max(1),
+        (height - SELECTOR_MARGIN - SELECTOR_MARGIN_BOTTOM).max(1),
+    )
 }
 
 struct Service {
     to_loop: calloop::channel::Sender<Request>,
+}
+
+/// Roost's own addition on the same object: the screenshot UI's window
+/// selector needs every window's picture, which GNOME Shell takes
+/// in-process (`paint_to_content`). Window contents are no more private
+/// than the screen, which `org.gnome.Shell.Screenshot` already hands out.
+struct WindowsService {
+    to_loop: calloop::channel::Sender<Request>,
+}
+
+/// One window as `ScreenshotWindows` answers it: id, title, focused,
+/// x, y, width, height, path.
+pub type WindowShotReply = (u64, String, bool, i32, i32, i32, i32, String);
+
+#[zbus::interface(name = "org.roost.Screenshot")]
+impl WindowsService {
+    /// `(directory) -> a(tsbiiiis)`: the active workspace's windows,
+    /// each saved as a PNG into `directory`, with their selector slots.
+    fn screenshot_windows(&self, directory: String) -> zbus::fdo::Result<Vec<WindowShotReply>> {
+        let directory = PathBuf::from(directory);
+        if !directory.is_absolute() {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "directory must be absolute".into(),
+            ));
+        }
+        let (reply, answer) = mpsc::channel();
+        self.to_loop
+            .send(Request::Windows { directory, reply })
+            .map_err(|_| zbus::fdo::Error::Failed("compositor gone".into()))?;
+        let shots = answer
+            .recv_timeout(DEADLINE)
+            .map_err(|_| zbus::fdo::Error::Failed("window screenshots failed".into()))?;
+        Ok(shots
+            .into_iter()
+            .map(|s| {
+                (
+                    s.id,
+                    s.title,
+                    s.focused,
+                    s.x,
+                    s.y,
+                    s.width,
+                    s.height,
+                    s.path.to_string_lossy().into_owned(),
+                )
+            })
+            .collect())
+    }
 }
 
 #[zbus::interface(name = "org.gnome.Shell.Screenshot")]
@@ -38,10 +130,29 @@ impl Service {
         _flash: bool,
         filename: String,
     ) -> zbus::fdo::Result<(bool, String)> {
+        self.request(filename, false)
+    }
+
+    /// `(include_frame, include_cursor, flash, filename)`: the focused
+    /// window. Roost windows draw their own frames, so it is always in.
+    fn screenshot_window(
+        &self,
+        _include_frame: bool,
+        _include_cursor: bool,
+        _flash: bool,
+        filename: String,
+    ) -> zbus::fdo::Result<(bool, String)> {
+        self.request(filename, true)
+    }
+}
+
+impl Service {
+    fn request(&self, filename: String, window: bool) -> zbus::fdo::Result<(bool, String)> {
         let (reply, answer) = mpsc::channel();
         self.to_loop
-            .send(Request {
+            .send(Request::Shot {
                 filename: PathBuf::from(filename),
+                window,
                 reply,
             })
             .map_err(|_| zbus::fdo::Error::Failed("compositor gone".into()))?;
@@ -61,7 +172,15 @@ pub fn start() -> calloop::channel::Channel<Request> {
         .name("roost-screenshot".into())
         .spawn(move || {
             let conn = match zbus::blocking::connection::Builder::session()
-                .and_then(|b| b.serve_at(PATH, Service { to_loop }))
+                .and_then(|b| {
+                    b.serve_at(
+                        PATH,
+                        Service {
+                            to_loop: to_loop.clone(),
+                        },
+                    )
+                })
+                .and_then(|b| b.serve_at(PATH, WindowsService { to_loop }))
                 .and_then(|b| b.build())
             {
                 Ok(conn) => conn,
@@ -166,6 +285,12 @@ mod tests {
                 "/home/u/Pictures/Screenshots/Screenshot From 2026-10-01 17-50-00.png"
             ))
         );
+    }
+
+    #[test]
+    fn the_window_selector_leaves_room_for_the_panel() {
+        assert_eq!(selector_area(1280, 800), (100, 100, 1080, 500));
+        assert_eq!(selector_area(100, 100), (100, 100, 1, 1));
     }
 
     #[test]

@@ -1,0 +1,33 @@
+# CI-only test layer for the Marlin VM lane (#68). NOT shipped.
+#
+# Derives from the marlin-roost-preview image (packaging/marlin/
+# Containerfile) and changes only what a hands-off boot test needs; the
+# shipped image keeps GDM's normal login screen and kernel arguments.
+#
+#   - a test user, roost-test (password "roost"), whose AccountsService
+#     record selects the Roost session;
+#   - GDM automatic login of that user straight into Roost;
+#   - kernel console on ttyS0 and journald forwarded to it, so the
+#     session's stderr (roost-compositor:, roost-shell-gtk:) reaches the
+#     QEMU serial log the lane asserts on.
+#
+# Built and installed to a raw disk by the marlin-vm job in
+# .github/workflows/ci.yml; booted by scripts/roost-vm-lane.
+
+ARG BASE_IMAGE=localhost/marlin-roost-preview:ci
+FROM ${BASE_IMAGE}
+
+COPY packaging/marlin/vm-lane/custom.conf /etc/gdm/custom.conf
+COPY packaging/marlin/vm-lane/roost-vm-lane.tmpfiles /usr/lib/tmpfiles.d/roost-vm-lane.conf
+COPY packaging/marlin/vm-lane/journald.conf /usr/lib/systemd/journald.conf.d/90-roost-vm-lane.conf
+COPY packaging/marlin/vm-lane/kargs.toml /usr/lib/bootc/kargs.d/90-roost-vm-lane.toml
+
+# /home is a symlink to /var/home on bootc systems and /var is only
+# seeded at install time, so the home directory and the AccountsService
+# record come from tmpfiles.d on every boot rather than from this layer.
+RUN useradd -M -d /home/roost-test -s /bin/bash -U roost-test \
+    && echo 'roost-test:roost' | chpasswd \
+    && test -f /usr/share/wayland-sessions/roost.desktop
+
+LABEL org.opencontainers.image.title="marlin-roost-vm-lane" \
+      org.opencontainers.image.description="CI-only Marlin Roost test layer: autologin into Roost, journal on serial"

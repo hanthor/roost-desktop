@@ -6,6 +6,7 @@ members = [
     "crates/shell-host",
     "crates/greeter",
     "crates/shell-gtk",
+    "crates/wallpaper",
 ]
 
 # Pinned per ADR 0001 (docs/adr/0001-nested-backend-smithay-pin.md).
@@ -30,11 +31,46 @@ rand = "0.10"
 gtk4 = "0.11"
 libadwaita = "0.9"
 gtk4-layer-shell = "0.8"
+gtk4-session-lock = { version = "0.4", features = ["v1_1"] }
 glib = "0.22"
 gio = "0.22"
 jiff = "0.2"
 xkbcommon = "=0.9.0"
 zbus = "5"
 image = "0.25"
+jxl-oxide = { version = "0.12", default-features = false, features = ["rayon"] }
 resvg = { version = "0.48", default-features = false, features = ["raster-images"] }
 rhai = "1.26"
+
+# Wallpaper decoding runs in debug builds too (proofs, nested sessions):
+# unoptimised, GNOME's 4K JPEG XL defaults take tens of seconds. The
+# generic image code is instantiated inside roost-wallpaper, so that
+# crate is optimised as well.
+[profile.dev.package.jxl-oxide]
+opt-level = 3
+[profile.dev.package.jxl-bitstream]
+opt-level = 3
+[profile.dev.package.jxl-coding]
+opt-level = 3
+[profile.dev.package.jxl-color]
+opt-level = 3
+[profile.dev.package.jxl-frame]
+opt-level = 3
+[profile.dev.package.jxl-grid]
+opt-level = 3
+[profile.dev.package.jxl-image]
+opt-level = 3
+[profile.dev.package.jxl-jbr]
+opt-level = 3
+[profile.dev.package.jxl-modular]
+opt-level = 3
+[profile.dev.package.jxl-render]
+opt-level = 3
+[profile.dev.package.jxl-threadpool]
+opt-level = 3
+[profile.dev.package.jxl-vardct]
+opt-level = 3
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.roost-wallpaper]
+opt-level = 3

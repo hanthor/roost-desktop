@@ -17,8 +17,8 @@ use smithay::{
     wayland::{
         compositor,
         shell::wlr_layer::{
-            Anchor, ExclusiveZone, LayerSurface, LayerSurfaceCachedState, LayerSurfaceConfigure,
-            WlrLayerShellHandler, WlrLayerShellState,
+            Anchor, ExclusiveZone, KeyboardInteractivity, LayerSurface, LayerSurfaceCachedState,
+            LayerSurfaceConfigure, WlrLayerShellHandler, WlrLayerShellState,
         },
     },
 };
@@ -289,6 +289,7 @@ impl WlrLayerShellHandler for State {
             output_name,
             surface: surface.wl_surface().clone(),
         });
+        self.refresh_initial_surface_scale(surface.wl_surface());
     }
 
     fn ack_configure(&mut self, surface: WlSurface, _configure: LayerSurfaceConfigure) {
@@ -351,6 +352,50 @@ pub fn layer_layout(state: &State) -> Vec<(WlSurface, (i32, i32), Layer)> {
     placed
 }
 
+/// The topmost mapped surface on the top or overlay layer that asked
+/// for exclusive keyboard interactivity: under wlr-layer-shell it gets
+/// the keyboard while mapped (a modal dialog, the unlock prompt).
+pub fn exclusive_keyboard_layer(state: &State) -> Option<WlSurface> {
+    layer_layout(state)
+        .into_iter()
+        .rev()
+        .filter(|(_, _, layer)| matches!(layer, Layer::Top | Layer::Overlay))
+        .map(|(surface, _, _)| surface)
+        .find(|surface| {
+            smithay::wayland::compositor::with_states(surface, |states| {
+                states
+                    .cached_state
+                    .get::<LayerSurfaceCachedState>()
+                    .current()
+                    .keyboard_interactivity
+                    == smithay::wayland::shell::wlr_layer::KeyboardInteractivity::Exclusive
+            })
+        })
+}
+
+/// Whether a press on a layer surface with this keyboard interactivity
+/// gives it the keyboard. wlr-layer-shell: a surface asking for `none`
+/// "is not interested in keyboard events and the compositor should
+/// never assign it the keyboard focus". IBus's candidate window is one:
+/// clicking a candidate must leave the keyboard (and with it the text
+/// field's input method) where it was, as in GNOME Shell.
+pub fn press_takes_keyboard(interactivity: KeyboardInteractivity) -> bool {
+    interactivity != KeyboardInteractivity::None
+}
+
+/// [`press_takes_keyboard`] for a mapped layer surface.
+pub fn surface_takes_keyboard_on_press(surface: &WlSurface) -> bool {
+    compositor::with_states(surface, |states| {
+        press_takes_keyboard(
+            states
+                .cached_state
+                .get::<LayerSurfaceCachedState>()
+                .current()
+                .keyboard_interactivity,
+        )
+    })
+}
+
 /// Frame draw order from a bottom-to-top stack: Smithay 0.7's
 /// `draw_render_elements` draws the first element topmost (it reverses
 /// the slice internally for painter's order), while the runtime builds
@@ -374,6 +419,21 @@ pub fn hit_layer_rect(rects: &[(i32, i32, i32, i32)], x: i32, y: i32) -> Option<
 /// Topmost layer surface at output coordinates, with its placed origin.
 /// Returns `None` where no mapped layer surface covers the point, so the
 /// caller falls through to window routing.
+/// Whether `surface` accepts input at `local` (surface coordinates):
+/// inside its committed input region, or anywhere when it set none.
+pub fn accepts_input(surface: &WlSurface, local: (i32, i32)) -> bool {
+    smithay::wayland::compositor::with_states(surface, |states| {
+        let mut attrs = states
+            .cached_state
+            .get::<smithay::wayland::compositor::SurfaceAttributes>();
+        attrs
+            .current()
+            .input_region
+            .as_ref()
+            .is_none_or(|region| region.contains(local))
+    })
+}
+
 pub fn topmost_layer_at(state: &State, x: i32, y: i32) -> Option<(WlSurface, (i32, i32))> {
     let placed = layer_layout(state);
     let rects: Vec<(i32, i32, i32, i32)> = placed
@@ -386,7 +446,14 @@ pub fn topmost_layer_at(state: &State, x: i32, y: i32) -> Option<(WlSurface, (i3
                 .and_then(|handle| handle.current_state().size)
                 .map(|size| (size.w, size.h))
                 .unwrap_or((0, 0));
-            (*ox, *oy, w, h)
+            // A surface takes no input outside its wl_surface input
+            // region (no region: all of it), so a click-through overlay
+            // such as the overview's preview chrome passes presses on.
+            if accepts_input(surface, (x - ox, y - oy)) {
+                (*ox, *oy, w, h)
+            } else {
+                (*ox, *oy, 0, 0)
+            }
         })
         .collect();
     hit_layer_rect(&rects, x, y).map(|index| {
@@ -420,7 +487,14 @@ impl State {
 
 #[cfg(test)]
 mod tests {
-    use super::{front_to_back, hit_layer_rect};
+    use super::{front_to_back, hit_layer_rect, press_takes_keyboard, KeyboardInteractivity};
+
+    #[test]
+    fn a_press_never_gives_the_keyboard_to_a_surface_that_wants_none() {
+        assert!(!press_takes_keyboard(KeyboardInteractivity::None));
+        assert!(press_takes_keyboard(KeyboardInteractivity::OnDemand));
+        assert!(press_takes_keyboard(KeyboardInteractivity::Exclusive));
+    }
 
     #[test]
     fn topmost_rect_wins_and_edges_hold() {
