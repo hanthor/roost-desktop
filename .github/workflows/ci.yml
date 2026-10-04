@@ -37,6 +37,13 @@ jobs:
       # Every listed test just passed: the parity-ledger job resolves
       # the ledger's cargo:<name> references against this list.
       - run: cargo test --workspace -q -- --list --format terse > test-list.txt
+      - run: scripts/roost-test-strategy --test-list test-list.txt --report test-strategy-report.md
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: executed-test-strategy-report
+          path: test-strategy-report.md
+          retention-days: 14
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: test-list
@@ -179,6 +186,16 @@ jobs:
           ROOST_REQUIRE_WAYLAND_INFO: "1"
       # Fractional scaling (#59): the same session at GNOME's 150 percent.
       - run: scripts/roost-scale-proof --artifacts gtk-shell-artifacts/scale
+      # Keep runnable binaries even when a later live proof assertion fails.
+      - if: always()
+        run: |
+          mkdir -p gtk-shell-artifacts/bin
+          cp target/debug/roost-compositor target/debug/roost-shell-gtk gtk-shell-artifacts/bin/
+          cp /usr/local/lib/*/libgtk4-layer-shell.so* gtk-shell-artifacts/bin/ 2>/dev/null || cp /usr/local/lib/libgtk4-layer-shell.so* gtk-shell-artifacts/bin/
+      # G-WS-INSERT publishes the targeted insertion frame/state. Full
+      # parity captures need native fonts, wallpapers and installed apps;
+      # use the uploaded binaries with that reference on the capture host.
+
       # The feature walkthrough from this run's frames: every frame the
       # manifest names must still be taken, and the bundle is what a
       # docs refresh commits (scripts/roost-walkthrough).
