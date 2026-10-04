@@ -24,6 +24,7 @@ struct Shown {
     /// (representative window, title, app id, the app's window count).
     items: Vec<(u64, String, Option<String>, usize)>,
     selected: Option<u64>,
+    all_windows: bool,
 }
 
 /// GNOME's ThumbnailSwitcher under the selected app: its windows' frames
@@ -131,6 +132,7 @@ impl SwitcherUi {
                     })
                     .collect(),
                 selected: model.switcher_app(),
+                all_windows: model.switcher_all_windows(),
             }
         } else {
             Shown::default()
@@ -346,10 +348,14 @@ impl SwitcherUi {
             icon.set_pixel_size(icon_size);
             // The app's name (window-backed apps: their app id), as
             // GNOME labels the tile.
-            let name = entry
-                .map(|e| e.name.clone())
-                .or_else(|| app_id.clone())
-                .unwrap_or_else(|| title.clone());
+            let name = if now.all_windows {
+                title.clone()
+            } else {
+                entry
+                    .map(|e| e.name.clone())
+                    .or_else(|| app_id.clone())
+                    .unwrap_or_else(|| title.clone())
+            };
             let label = gtk::Label::new(Some(&name));
             label.set_ellipsize(gtk::pango::EllipsizeMode::End);
             label.set_max_width_chars(1);

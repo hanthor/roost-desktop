@@ -286,6 +286,19 @@ impl NotifyUi {
         // The card's own 4px margin puts it 4px under the bar (GNOME).
         banner_window.set_margin(Edge::Top, 0);
         banner_window.set_keyboard_mode(KeyboardMode::None);
+        let keys = gtk::EventControllerKey::new();
+        let banner_weak = banner_window.downgrade();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if key == gtk::gdk::Key::Escape {
+                if let Some(window) = banner_weak.upgrade() {
+                    window.set_keyboard_mode(KeyboardMode::None);
+                }
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        banner_window.add_controller(keys);
         banner_window.set_title(Some("Notifications"));
         let banner_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
         banner_window.set_child(Some(&banner_box));
@@ -388,6 +401,18 @@ impl NotifyUi {
     /// Whether Do Not Disturb is on.
     pub fn dnd(&self) -> bool {
         self.center.lock().map(|c| c.dnd()).unwrap_or(false)
+    }
+
+    /// GNOME's Super+N gives the current banner keyboard focus.
+    pub fn focus_active(&self) {
+        if !self.banner_window.is_visible() {
+            return;
+        }
+        self.banner_window
+            .set_keyboard_mode(KeyboardMode::Exclusive);
+        self.banner_window.present();
+        self.banner_window.set_focus_visible(true);
+        self.banner_box.child_focus(gtk::DirectionType::TabForward);
     }
 
     /// Periodic work: claim the bus, expire banners, redraw on change.
@@ -497,6 +522,9 @@ impl NotifyUi {
             }
             c.add_controller(click);
             self.banner_box.append(&c);
+        }
+        if now.banners.is_empty() {
+            self.banner_window.set_keyboard_mode(KeyboardMode::None);
         }
         self.banner_window.set_visible(!now.banners.is_empty());
 

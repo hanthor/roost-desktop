@@ -1372,6 +1372,13 @@ fn build(app: &adw::Application) {
                     Action::ToggleApplicationView => {
                         overview::OverviewUi::toggle_apps(&overview_ui);
                     }
+                    Action::FocusActiveNotification => notify.focus_active(),
+                    Action::ShiftOverviewUp | Action::ShiftOverviewDown => {
+                        overview::OverviewUi::shift(
+                            &overview_ui,
+                            action == Action::ShiftOverviewUp,
+                        );
+                    }
                     Action::ToggleMessageTray => toggle(&clock),
                     Action::ToggleQuickSettings => toggle(&system),
                     Action::SwitchToApplication(n) => {
@@ -1508,9 +1515,40 @@ fn build(app: &adw::Application) {
                             );
                         }
                     }
-                    Action::BrightnessUp | Action::BrightnessDown => {
-                        let up = action == Action::BrightnessUp;
-                        if let Some(level) = services::step_brightness(up) {
+                    Action::BrightnessUp
+                    | Action::BrightnessDown
+                    | Action::BrightnessUpMonitor
+                    | Action::BrightnessDownMonitor
+                    | Action::BrightnessCycle
+                    | Action::BrightnessCycleMonitor => {
+                        let monitor = matches!(
+                            action,
+                            Action::BrightnessUpMonitor
+                                | Action::BrightnessDownMonitor
+                                | Action::BrightnessCycleMonitor
+                        );
+                        let output = shell
+                            .borrow()
+                            .control
+                            .as_ref()
+                            .and_then(|c| c.pointer_output().map(str::to_owned));
+                        // No pointer-output/backlight match means no write to a different screen.
+                        if monitor && output.is_none() {
+                            return;
+                        }
+                        let step = match action {
+                            Action::BrightnessUp | Action::BrightnessUpMonitor => {
+                                services::BrightnessStep::Up
+                            }
+                            Action::BrightnessDown | Action::BrightnessDownMonitor => {
+                                services::BrightnessStep::Down
+                            }
+                            _ => services::BrightnessStep::Cycle,
+                        };
+                        if let Some(level) = services::step_brightness_for(
+                            step,
+                            output.as_deref().filter(|_| monitor),
+                        ) {
                             osd_ui.show(&osd::OsdRequest {
                                 icon: Some("display-brightness-symbolic".into()),
                                 level: Some(level),

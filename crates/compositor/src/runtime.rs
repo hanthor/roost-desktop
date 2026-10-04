@@ -2095,6 +2095,19 @@ impl Runtime {
         // short comparison. The inventory is the compositor's tracking
         // handed over as-is — never a parallel database.
         self.control.set_outputs(self.state.output_infos());
+        let pointer = self.manager.pointer_pos();
+        let output = self
+            .state
+            .outputs
+            .iter()
+            .find(|output| {
+                pointer.x >= f64::from(output.loc.0)
+                    && pointer.y >= f64::from(output.loc.1)
+                    && pointer.x < f64::from(output.loc.0 + output.size.w)
+                    && pointer.y < f64::from(output.loc.1 + output.size.h)
+            })
+            .map(|output| output.name.clone());
+        self.control.set_pointer_output(output);
         let outcome = self.control.poll(self.manager.model_mut());
         for id in outcome.activated {
             self.manager.focus(&mut self.state, Some(id));
