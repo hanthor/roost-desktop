@@ -27,5 +27,8 @@ def call(_conn, _sender, _path, _interface, method, params, invocation):
 
 connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
 connection.register_object(PATH, node.interfaces[0], call, None, None)
-connection.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "RequestName", GLib.Variant("(su)", (BUS, 4)), None, Gio.DBusCallFlags.NONE, -1, None)
+reply = connection.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "RequestName", GLib.Variant("(su)", (BUS, 4)), None, Gio.DBusCallFlags.NONE, -1, None)
+if reply.unpack()[0] not in (1, 4):
+    raise RuntimeError("PermissionStore already has an owner on the proof bus")
+print("ready", flush=True)
 GLib.MainLoop().run()

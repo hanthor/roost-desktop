@@ -396,6 +396,11 @@ ROOST_STUB_BT_LOG="$ARTIFACTS/bt-calls"
 export ROOST_STUB_NM_LOG ROOST_STUB_BT_LOG
 "$PY" "$ROOT/scripts/lib/roost-service-stubs.py" "$BACKLIGHT" >"$ARTIFACTS/stubs.log" 2>&1 &
 STUBS_PID=$!
+# Own PermissionStore before portals can auto-activate the real daemon.
+"$PY" "$ROOT/scripts/lib/roost-permission-store-stub.py" "$ARTIFACTS/shortcut-permissions.json" >"$ARTIFACTS/permission-store.log" 2>&1 &
+PERMISSIONS_PID=$!
+for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/permission-store.log" && break; sleep 0.2; done
+grep -q ready "$ARTIFACTS/permission-store.log" || fail G-SHORTCUT-CONSENT "private PermissionStore did not own its bus name"
 for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/stubs.log" 2>/dev/null && break; sleep 0.5; done
 "$PY" "$ROOT/scripts/lib/roost-search-provider-stub.py" "$SEARCH_MARKER" >"$ARTIFACTS/provider.log" 2>&1 &
 PROVIDER_PID=$!
@@ -2299,9 +2304,6 @@ fi
 
 # A real Wayland requester drives the GTK consent UI and PermissionStore,
 # rather than injecting an answer into the compositor's test state.
-"$PY" "$ROOT/scripts/lib/roost-permission-store-stub.py" "$ARTIFACTS/shortcut-permissions.json" >"$ARTIFACTS/permission-store.log" 2>&1 &
-PERMISSIONS_PID=$!
-sleep 1
 for app in allow deny; do
     cat >"$XDG_DATA_HOME/applications/roost-consent-$app.desktop" <<DESKTOP
 [Desktop Entry]
