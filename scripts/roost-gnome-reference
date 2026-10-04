@@ -8,7 +8,7 @@
 # capture.js as its automation script, and writes DIR/<state>.png plus
 # DIR/<state>.json: every visible styled actor with its class, name,
 # rectangle, font and colours. Pair with scripts/roost-parity-capture
-# and scripts/lib/roost-parity-compare.py.
+# and scripts/proof-lib/roost-parity-compare.py.
 set -eu
 ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
 OUT="$ROOT/target/gnome-reference"
@@ -33,7 +33,7 @@ capture() {
     podman run --rm \
         -e GREF_USER_NAME="$USER_NAME" \
         -v "$ROOT/tests/gnome-reference:/gref:ro,Z" \
-        -v "$ROOT/scripts/lib:/lib:ro,Z" \
+        -v "$ROOT/scripts/lib:/proof-lib:ro,Z" \
         -v "$OUT:/out:Z" \
         "$IMAGE" /gref/run.sh >"$OUT/gnome-shell.log" 2>&1
 }

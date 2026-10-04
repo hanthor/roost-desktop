@@ -51,6 +51,10 @@ scripts/lib/roost-parity-compare.py target/gnome-reference target/roost-parity t
 | 06b-switcher | Alt+Tab |
 | 07-overview-windows | the overview with three windows |
 | 07b-overview-hover | a window preview hovered (caption and close button) |
+| 20-overview-dismiss-focus | Escape dismisses the overview and restores the previous focused test window; state JSON asserts the focused identity |
+| 21-maximized | Super+Up maximizes the focused test window |
+| 22-tiled-left, 22b-tiled-right | Super+Left/Right tile the focused test window to each half |
+| 23-workspace-switched | settled workspace after Super+Page_Down |
 | 08-notification | a notification banner |
 | 09-calendar-with-notification | the date menu listing it |
 | 10-end-session | the Log Out dialog (gnome-session's EndSessionDialog) |
@@ -148,3 +152,21 @@ GTK and St differ in a few ways that matter when matching numbers:
   them to sRGB, so Roost does too.
 - GNOME's lock screen blurs the wallpaper with a Gaussian of about
   sigma 20 and dims it to 65%; fitted against GNOME's capture.
+
+## Accessibility baseline
+
+The reference also records AT-SPI trees for the panel, quick settings and
+the overview with the three test windows. `scripts/roost-a11y-baseline
+update target/gnome-reference` keeps visible nodes, hierarchy, unnamed
+controls and state flags in `tests/a11y/gnome51/`, with the clock normalized.
+The committed [comparison](../tests/a11y/gnome51/comparison.md) catalogs
+these controls beside Roost's live proof goldens and explains the intended
+role, label and fixture differences. CI checks that this comparison still
+reflects the fixtures and goldens.
+
+The 2026-10-04 native capture asserts focus restoration and maximization,
+and records each window's rectangle, workspace and focused identity in
+`*.state.json`. Roost records equivalent compositor state alongside its
+frames and asserts focus restoration and exact maximize/tile bounds.
+Comparison measurements for these new states remain pending the matching
+Roost capture; the ledger retains its current evidence status meanwhile.

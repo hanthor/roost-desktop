@@ -245,6 +245,7 @@ xdotool keydown Alt_L key Tab
 shot 06b-switcher 1
 xdotool keyup Alt_L
 sleep 1
+previous_focus="$(jq -r .focused "$ROOST_COMPOSITOR_STATE")"
 xdotool key Super_L
 shot 07-overview-windows
 xdotool mousemove --window "$WID" 415 232
@@ -252,6 +253,32 @@ shot 07b-overview-hover
 park
 xdotool key Escape
 sleep 1
+shot 20-overview-dismiss-focus
+[ "$(jq -r .focused "$ROOST_COMPOSITOR_STATE")" = "$previous_focus" ] || {
+    echo "roost-parity-capture: Escape did not restore the previous focus" >&2; exit 1;
+}
+xdotool key super+Up
+shot 21-maximized
+jq -e --argjson w "$WIDTH" --argjson h "$HEIGHT" '.focused_rect == [0,32,$w,($h-32)]' "$ROOST_COMPOSITOR_STATE" >/dev/null || {
+    echo "roost-parity-capture: Super+Up did not maximize" >&2; exit 1;
+}
+xdotool key super+Down
+sleep 1
+xdotool key super+Left
+shot 22-tiled-left
+jq -e --argjson w "$WIDTH" --argjson h "$HEIGHT" '.focused_rect == [0,32,($w/2),($h-32)]' "$ROOST_COMPOSITOR_STATE" >/dev/null || {
+    echo "roost-parity-capture: Super+Left did not tile the left half" >&2; exit 1;
+}
+xdotool key super+Down
+sleep 1
+xdotool key super+Right
+shot 22b-tiled-right
+jq -e --argjson w "$WIDTH" --argjson h "$HEIGHT" '.focused_rect == [($w/2),32,($w/2),($h-32)]' "$ROOST_COMPOSITOR_STATE" >/dev/null || {
+    echo "roost-parity-capture: Super+Right did not tile the right half" >&2; exit 1;
+}
+xdotool key super+Down
+sleep 1
+
 # GNOME's reference uses Main.notify(): the "System" source with
 # cog-wheel-symbolic, which this app name and icon reproduce.
 gdbus call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications \
@@ -295,6 +322,7 @@ sleep 1
 # The workspace switcher popup: to the empty second workspace and back.
 xdotool key super+Page_Down
 shot 15-workspace-popup 0.35
+shot 23-workspace-switched 1.5
 xdotool key super+Page_Up
 sleep 1.2
 # The screenshot UI (Print).
