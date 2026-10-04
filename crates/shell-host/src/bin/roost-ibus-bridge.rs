@@ -337,7 +337,12 @@ fn ibus_event(member: &str, params: &glib::Variant) -> Option<FromIbus> {
 
 /// The string inside a serialized IBusText (`v` holding `(sa{sv}sv)`).
 fn ibus_text(value: &glib::Variant) -> Option<String> {
-    let inner = value.as_variant().unwrap_or_else(|| value.clone());
+    // as_variant calls g_variant_get_variant directly; its Option result does
+    // not protect ordinary serialized tuples from GLib's type assertion.
+    let mut inner = value.clone();
+    while inner.is_type(glib::VariantTy::VARIANT) {
+        inner = inner.as_variant()?;
+    }
     inner.try_child_value(2)?.str().map(str::to_owned)
 }
 
@@ -901,6 +906,21 @@ mod tests {
         assert_eq!(ibus_text(&packed).as_deref(), Some("你好"));
         let args = glib::Variant::tuple_from_iter([packed, 2u32.to_variant(), 2u32.to_variant()]);
         assert_eq!(args.type_().as_str(), "(vuu)");
+    }
+
+    #[test]
+    fn raw_and_nested_text_variants_decode_without_native_type_assertions() {
+        let boxed = ibus_text_variant("你好");
+        assert_eq!(
+            ibus_text(&boxed.as_variant().unwrap()).as_deref(),
+            Some("你好")
+        );
+        assert_eq!(
+            ibus_text(&glib::Variant::from_variant(&boxed)).as_deref(),
+            Some("你好")
+        );
+        assert_eq!(ibus_text(&"not a container".to_variant()), None);
+        assert_eq!(ibus_text(&42u32.to_variant()), None);
     }
 
     #[test]

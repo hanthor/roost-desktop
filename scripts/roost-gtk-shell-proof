@@ -2505,4 +2505,9 @@ if grep -q 'ShellExited' "$LOG"; then
     fail G-SHELL-STABLE "the shell exited during the journey: $(grep -c ShellExited "$LOG") time(s)"
 fi
 pass G-SHELL-STABLE "the shell never exited or restarted"
+if grep -q 'g_variant_get_variant: assertion' "$LOG"; then
+    fail G-IME-VARIANT-TYPES "IBus focus/composition emitted a native variant type critical"
+fi
+pass G-IME-VARIANT-TYPES "IBus focus/composition decoded variants without native type criticals"
+
 echo "roost-gtk-shell-proof: OK, artifacts in $ARTIFACTS"
