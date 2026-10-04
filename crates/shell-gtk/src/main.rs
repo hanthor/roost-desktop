@@ -18,6 +18,7 @@ mod calendar;
 mod events;
 mod folder_dialog;
 mod folders;
+mod group_animation;
 mod ibus_panel;
 mod keybindings;
 mod live_apps;
@@ -1738,6 +1739,15 @@ fn build(app: &adw::Application) {
                 }
                 if let Some(iface) = all[4].as_ref() {
                     out.hot_corners = iface.boolean("enable-hot-corners");
+                    if iface
+                        .settings_schema()
+                        .is_some_and(|schema| schema.has_key("enable-animations"))
+                    {
+                        out.enable_animations = iface.boolean("enable-animations");
+                    }
+                    if let Some(gtk_settings) = gtk::Settings::default() {
+                        gtk_settings.set_gtk_enable_animations(out.enable_animations);
+                    }
                 }
                 if let Some(control) = shell.borrow_mut().control.as_mut() {
                     let _ = control.set_input_settings(out);

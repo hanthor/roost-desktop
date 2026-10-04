@@ -116,10 +116,15 @@ impl ProtocolVersion {
     ///
     /// `0.20` appends the shell-to-compositor `SetSwitcherKeys` command
     /// (GNOME's rebindable switcher keys), again last.
-    /// `0.21` appends shortcut inhibition consent requests and responses.
+    ///
+    /// `0.21` appends `enable_animations` to `InputSettings`. Like earlier
+    /// positional struct extensions, the postcard body changes and both
+    /// sides ship together from this workspace.
+    ///
+    /// `0.22` appends shortcut inhibition consent requests and responses.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 21,
+        minor: 22,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -136,7 +141,7 @@ impl ProtocolVersion {
     }
 }
 
-/// Version spoken by this crate (`0.2`).
+/// Version spoken by this crate.
 pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion::CURRENT;
 
 /// Window state owned by the compositor and mirrored to the shell.
@@ -677,6 +682,13 @@ pub struct InputSettings {
     pub mouse_speed_milli: i32,
     /// `org.gnome.desktop.interface enable-hot-corners`.
     pub hot_corners: bool,
+    /// `org.gnome.desktop.interface enable-animations` (default enabled).
+    #[serde(default = "animations_default")]
+    pub enable_animations: bool,
+}
+
+fn animations_default() -> bool {
+    true
 }
 
 impl Default for InputSettings {
@@ -696,6 +708,7 @@ impl Default for InputSettings {
             mouse_natural_scroll: false,
             mouse_speed_milli: 0,
             hot_corners: true,
+            enable_animations: true,
         }
     }
 }
@@ -1043,8 +1056,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_21() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 21));
+    fn current_version_is_0_22() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 22));
     }
 
     #[test]
