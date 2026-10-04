@@ -1043,8 +1043,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_20() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 20));
+    fn current_version_is_0_21() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 21));
     }
 
     #[test]
@@ -1072,7 +1072,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 18).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 19).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 20).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 21).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 21).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 22).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }
