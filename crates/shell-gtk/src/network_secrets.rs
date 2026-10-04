@@ -6,7 +6,6 @@ use std::ffi::OsStr;
 use std::path::Path;
 
 use crate::network_agent::WifiSecret;
-use gio::prelude::*;
 
 #[derive(Clone, Debug)]
 pub struct Field {
@@ -412,6 +411,7 @@ pub async fn vpn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gio::prelude::*;
     #[test]
     fn enterprise_fields_respect_hints_and_secret_ownership() {
         use std::collections::HashMap;
