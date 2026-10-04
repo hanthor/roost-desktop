@@ -167,11 +167,11 @@ xdisplay="$(jq -r '.x11_display // empty' "$CSTATE")"
 DISPLAY="$xdisplay" "$PY" "$ROOT/scripts/lib/roost-scale-x11-window.py" \
     "$ARTIFACTS/x11-clicks.txt" >"$ARTIFACTS/window-X11.log" 2>&1 &
 X11_PID=$!
-cstate '.x11_ready and any(.windows[]; .title == "Roost Scale X11")' "X11 mapped" ||
+cstate '.x11_ready and any(.windows[]; .app_id == "roost-scale-x11")' "X11 mapped" ||
     fail S-X11-WINDOW "the genuine X11 client did not map"
 sleep 2
 scrot "$ARTIFACTS/04-x11.png" >/dev/null
-rect="$(jq -r '.windows[] | select(.title == "Roost Scale X11") | .rect | "\(.[0]) \(.[1]) \(.[2]) \(.[3])"' "$CSTATE")"
+rect="$(jq -r '.windows[] | select(.app_id == "roost-scale-x11") | .rect | "\(.[0]) \(.[1]) \(.[2]) \(.[3])"' "$CSTATE")"
 # shellcheck disable=SC2086
 set -- $rect
 wx=$1 wy=$2 ww=$3 wh=$4
