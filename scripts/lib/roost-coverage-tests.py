@@ -58,6 +58,28 @@ class CoverageReport(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'invalid lines counts'):
                 report.measure(document, ROOT)
 
+    def test_floors_reject_regression_and_zero_instrumentation(self):
+        _, files = report.measure(fixture(), ROOT)
+        policy = {'modules': {path: {'lines': 60, 'regions': 40} for path in report.SECURITY}}
+        self.assertEqual(report.enforce(files, policy), [])
+        files[report.SECURITY[0]]['lines'] = (5, 10)
+        self.assertEqual(len(report.enforce(files, policy)), 1)
+        files[report.SECURITY[0]]['lines'] = (0, 0)
+        self.assertEqual(len(report.enforce(files, policy)), 1)
+
+    def test_floors_cannot_omit_modules_or_disable_a_counter(self):
+        _, files = report.measure(fixture(), ROOT)
+        policy = {'modules': {path: {'lines': 60, 'regions': 40} for path in report.SECURITY}}
+        incomplete = copy.deepcopy(policy)
+        del incomplete['modules'][report.SECURITY[0]]
+        with self.assertRaisesRegex(ValueError, 'exactly the required'):
+            report.enforce(files, incomplete)
+        for floor in (0, True, 101):
+            invalid = copy.deepcopy(policy)
+            invalid['modules'][report.SECURITY[0]]['lines'] = floor
+            with self.assertRaisesRegex(ValueError, 'invalid lines floor'):
+                report.enforce(files, invalid)
+
     def test_rejects_empty_or_wrong_report_type(self):
         for document in ({'type': 'test-inventory'}, {'type': 'llvm.coverage.json.export', 'data': []}):
             with self.assertRaises(ValueError):

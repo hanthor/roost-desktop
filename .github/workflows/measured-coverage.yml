@@ -1,10 +1,10 @@
 name: Measured test coverage
 on:
   pull_request:
-    paths: ['crates/**', 'Cargo.*', 'scripts/roost-coverage-report', 'scripts/lib/roost-coverage-tests.py', '.github/workflows/measured-coverage.yml']
+    paths: ['crates/**', 'Cargo.*', 'tests/coverage-floors.json', 'scripts/roost-coverage-report', 'scripts/lib/roost-coverage-tests.py', '.github/workflows/measured-coverage.yml']
   push:
     branches: [main]
-    paths: ['crates/**', 'Cargo.*', 'scripts/roost-coverage-report', 'scripts/lib/roost-coverage-tests.py', '.github/workflows/measured-coverage.yml']
+    paths: ['crates/**', 'Cargo.*', 'tests/coverage-floors.json', 'scripts/roost-coverage-report', 'scripts/lib/roost-coverage-tests.py', '.github/workflows/measured-coverage.yml']
   workflow_dispatch:
 permissions:
   contents: read

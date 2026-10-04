@@ -13,6 +13,7 @@ SECURITY = (
     'crates/compositor/src/unlock.rs',
     'crates/compositor/src/session_lock.rs',
     'crates/compositor/src/control.rs',
+    'crates/compositor/src/windows.rs',
     'crates/shell-control-schema/src/lib.rs',
 )
 
@@ -56,6 +57,22 @@ def measure(document, root):
     return crates, files
 
 
+def enforce(files, policy):
+    if set(policy['modules']) != set(SECURITY):
+        raise ValueError('coverage floor policy must name exactly the required security modules')
+    failures = []
+    for path, floors in policy['modules'].items():
+        if set(floors) != {'lines', 'regions'}:
+            raise ValueError(f'{path}: both line and region floors are required')
+        for kind, floor in floors.items():
+            if type(floor) is not int or not 0 < floor <= 100:
+                raise ValueError(f'{path}: invalid {kind} floor')
+            covered, total = files[path][kind]
+            if total == 0 or covered * 100 < floor * total:
+                failures.append(f'{path}: {kind} {cell((covered, total))} below {floor}%')
+    return failures
+
+
 def cell(value):
     covered, total = value
     return f'{covered}/{total} ({100 * covered / total:.2f}%)' if total else '0/0 (not instrumented)'
@@ -65,9 +82,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('coverage', type=Path)
     parser.add_argument('--out', type=Path, required=True)
+    parser.add_argument('--floors', type=Path, default=ROOT / 'tests/coverage-floors.json')
     args = parser.parse_args()
     try:
         crates, files = measure(json.loads(args.coverage.read_text()), ROOT)
+        policy = json.loads(args.floors.read_text())
+        failures = enforce(files, policy)
     except (ValueError, KeyError, TypeError) as error:
         sys.exit(f'roost-coverage-report: {error}')
     revision = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
@@ -77,8 +97,10 @@ def main():
     lines += [f'| {name} | {cell(value["lines"])} | {cell(value["regions"])} |' for name, value in crates.items()]
     lines += ['', '## Security modules', '', '| Module | Lines | Regions |', '|---|---:|---:|']
     lines += [f'| `{path}` | {cell(files[path]["lines"])} | {cell(files[path]["regions"])} |' for path in SECURITY]
-    lines += ['', 'This first measurement establishes the baseline for reviewed module-specific floors. Missing crate/module data fails the job; percentage thresholds, complete boundary cases and artifact enforcement remain tracked by #8. No security certification is inferred from a coverage percentage.', '']
+    lines += ['', f'Module-specific line/region floors are recorded in tests/coverage-floors.json, with the initial measured baseline source and run. Missing data or a percentage below its floor fails the job. Complete boundary cases and artifact enforcement remain tracked by #8; no security certification is inferred from a coverage percentage.', '', '## Gate failures', '', *failures, '']
     args.out.write_text('\n'.join(lines))
+    if failures:
+        sys.exit('roost-coverage-report: ' + '; '.join(failures))
 
 
 if __name__ == '__main__':
