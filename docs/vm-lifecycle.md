@@ -9,6 +9,11 @@ number of CI VM profiles.
 The CI session wrapper routes its output through `systemd-cat` so greetd's
 VT output reaches the fixture's journal-to-serial capture.
 
+The Python lane.boot API keeps its original four-value return and original
+VM device profile by default. Lifecycle callers explicitly request
+`guest_agent=True` to add the QGA transport and receive its socket as a fifth
+value; existing performance callers keep working without a guest agent.
+
 QEMU's guest agent executes a fixed probe with a root UID, while the
 compositor, shell and application clients must belong to the non-root
 session owner. Artifacts record window IDs, app IDs, rectangles, process

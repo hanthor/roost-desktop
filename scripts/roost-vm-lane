@@ -635,7 +635,7 @@ def run_tour(qmp, out, serial_path):
             "playback_fps": PLAY_FPS}
 
 
-def boot(disk, out, scratch, timeout):
+def boot(disk, out, scratch, timeout, *, guest_agent=False):
     ovmf = next((p for p in OVMF if os.path.exists(p)), None)
     if not ovmf:
         sys.exit("roost-vm-lane: OVMF firmware not found (install ovmf)")
@@ -656,14 +656,16 @@ def boot(disk, out, scratch, timeout):
             "-device", "hda-duplex,audiodev=roost-audio",
             "-display", "none", "-serial", f"file:{serial}",
             "-qmp", f"unix:{qmp_path},server=on,wait=off",
-            "-device", "virtio-serial-pci",
-            "-chardev", f"socket,path={agent_path},server=on,wait=off,id=roost-qga",
-            "-device", "virtserialport,chardev=roost-qga,name=org.qemu.guest_agent.0",
             "-nic", "user,model=virtio-net-pci"]
+    if guest_agent:
+        qemu.extend(["-device", "virtio-serial-pci",
+                     "-chardev", f"socket,path={agent_path},server=on,wait=off,id=roost-qga",
+                     "-device", "virtserialport,chardev=roost-qga,name=org.qemu.guest_agent.0"])
     if kvm:
         qemu[1:1] = ["-enable-kvm", "-cpu", "host"]
     log(f"booting {disk} (kvm={kvm})")
-    return subprocess.Popen(qemu), qmp_path, serial, kvm, agent_path
+    result = subprocess.Popen(qemu), qmp_path, serial, kvm
+    return (*result, agent_path) if guest_agent else result
 
 
 def repeat_boots(args):
@@ -725,7 +727,7 @@ def main():
         results[test_id] = (ok, desc)
         log(f"{test_id} {'pass' if ok else 'FAIL'}: {desc}")
 
-    vm, qmp_path, serial_path, kvm, agent_path = boot(os.path.abspath(a.disk), out, scratch, a.timeout)
+    vm, qmp_path, serial_path, kvm, agent_path = boot(os.path.abspath(a.disk), out, scratch, a.timeout, guest_agent=True)
     start = time.time()
     drm = shell = None
     elapsed = 0.0
