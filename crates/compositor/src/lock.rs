@@ -185,3 +185,73 @@ mod tests {
         assert!(!content_visible(true));
     }
 }
+
+/// GNOME's long screen-shield fade, independent of the authentication latch.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct IdleBlank {
+    pub idle_ms: u64,
+    pub fade_ms: u64,
+}
+
+impl IdleBlank {
+    /// The shell publishes idle delay and animation duration beside its
+    /// wallpaper drop. Malformed/missing state disables blanking.
+    pub fn parse(text: &str) -> Self {
+        let mut lines = text.lines();
+        let Some(idle_ms) = lines.next().and_then(|v| v.parse::<u64>().ok()) else {
+            return Self::default();
+        };
+        let Some(fade_ms) = lines.next().and_then(|v| v.parse::<u64>().ok()) else {
+            return Self::default();
+        };
+        Self {
+            idle_ms,
+            fade_ms: fade_ms.min(10_000),
+        }
+    }
+
+    pub fn alpha(self, idle_elapsed_ms: u64) -> f32 {
+        if self.idle_ms == 0 || idle_elapsed_ms < self.idle_ms {
+            return 0.0;
+        }
+        if self.fade_ms == 0 {
+            return 1.0;
+        }
+        let progress = idle_elapsed_ms.saturating_sub(self.idle_ms) as f32 / self.fade_ms as f32;
+        let progress = progress.clamp(0.0, 1.0);
+        1.0 - (1.0 - progress).powi(2)
+    }
+}
+
+#[cfg(test)]
+mod blank_tests {
+    use super::*;
+
+    #[test]
+    fn idle_fade_then_activity_cancels_without_unlocking_a_lock() {
+        let blank = IdleBlank::parse("2000\n10000\n");
+        let mut lock = SessionLock::new(12_000);
+        assert_eq!(blank.alpha(lock.idle_ms(1999)), 0.0);
+        assert_eq!(blank.alpha(lock.idle_ms(7000)), 0.75);
+        assert!(!lock.check_timeout(7000));
+        lock.note_input(7000);
+        assert_eq!(blank.alpha(lock.idle_ms(7000)), 0.0);
+        assert!(!lock.check_timeout(12000));
+        assert!(lock.check_timeout(19000));
+        assert_eq!(blank.alpha(lock.idle_ms(19000)), 1.0);
+        lock.note_input(19001);
+        assert_eq!(blank.alpha(lock.idle_ms(19001)), 0.0);
+        assert!(
+            lock.is_locked(),
+            "wake activity never bypasses authentication"
+        );
+    }
+
+    #[test]
+    fn disabled_animations_blank_immediately_and_invalid_policy_stays_clear() {
+        assert_eq!(IdleBlank::parse("2000\n0").alpha(2000), 1.0);
+        assert_eq!(IdleBlank::parse("0\n10000").alpha(u64::MAX), 0.0);
+        assert_eq!(IdleBlank::parse("not a policy").alpha(u64::MAX), 0.0);
+        assert_eq!(IdleBlank::parse("2000\n10000").alpha(u64::MAX), 1.0);
+    }
+}
