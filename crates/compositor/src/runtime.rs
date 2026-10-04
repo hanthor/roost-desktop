@@ -63,8 +63,8 @@ use roost_greeter::client::GreeterClient;
 use crate::{ClientState, State};
 
 /// Maximum loop rate: dispatch blocks up to this long waiting for events,
-/// so the loop never spins, and repaint stays near 60 Hz. Damage-tracked
-/// repaint replaces this provisional pacing in a later slice.
+/// so the loop never spins. Unchanged DRM scenes retain their scanout;
+/// client callbacks and timing barriers still advance on the refresh clock.
 const FRAME_BUDGET: Duration = Duration::from_millis(16);
 
 /// Default nested output size (physical pixels).
@@ -532,6 +532,10 @@ pub struct Runtime {
     state_last: String,
     /// Opt-in synthetic touchpad phases for the nested proof harness.
     proof_swipe_last: String,
+    #[cfg(feature = "drm")]
+    last_drm_scene: std::collections::HashMap<String, SceneStamp>,
+    #[cfg(feature = "drm")]
+    last_drm_refresh: Instant,
 }
 
 /// Control socket path for a session: alongside the Wayland socket in the
@@ -853,6 +857,10 @@ impl Runtime {
                 .filter(|p| p.is_absolute()),
             state_last: String::new(),
             proof_swipe_last: String::new(),
+            #[cfg(feature = "drm")]
+            last_drm_scene: Default::default(),
+            #[cfg(feature = "drm")]
+            last_drm_refresh: Instant::now(),
         };
         // Reserve and advertise sockets, but spawn only when a real X11
         // client connects. Native clients do not start a compatibility process.
@@ -1328,6 +1336,7 @@ impl Runtime {
         #[cfg(not(feature = "xwayland"))]
         let x11_ready = false;
         let doc = serde_json::json!({
+            "rendered_frames": self.stats.frames,
             "x11_display": self.x11_display.map(|d| format!(":{d}")),
             "x11_ready": x11_ready,
             "idle_timeout_ms": self.lock.timeout_ms(),
@@ -2613,6 +2622,7 @@ impl Runtime {
             );
         }
         if flip.primary {
+            self.last_drm_refresh = Instant::now();
             let roots = crate::frame_timing::frame_roots(&self.state, &self.manager);
             self.state.refresh_cycle(&roots, time, flip.refresh);
         }
@@ -2786,13 +2796,6 @@ impl Runtime {
                     if out.pending {
                         continue;
                     }
-                    let (mut dmabuf, _age) = match out.surface.next_buffer() {
-                        Ok(buffer) => buffer,
-                        Err(e) => {
-                            eprintln!("roost-compositor: drm: next_buffer {}: {e}", out.name);
-                            continue;
-                        }
-                    };
                     let size = out.size;
                     let damage = Rectangle::from_size(size);
                     // Per-output scale from GNOME's monitors.xml (#59).
@@ -2846,6 +2849,31 @@ impl Runtime {
                         cards,
                         locked,
                     );
+                    let stamp = SceneStamp::new(
+                        self.state.surface_commits,
+                        size,
+                        view.scale,
+                        view.offset,
+                        background,
+                        accent,
+                        blank_alpha,
+                        locked,
+                        pointer,
+                        &paper,
+                        &elements,
+                        &decor,
+                        &previews,
+                    );
+                    if !out.needs_repaint && self.last_drm_scene.get(&out.name) == Some(&stamp) {
+                        continue;
+                    }
+                    let (mut dmabuf, _age) = match out.surface.next_buffer() {
+                        Ok(buffer) => buffer,
+                        Err(e) => {
+                            eprintln!("roost-compositor: drm: next_buffer {}: {e}", out.name);
+                            continue;
+                        }
+                    };
                     let sync = {
                         let mut target = renderer
                             .bind(&mut dmabuf)
@@ -2905,6 +2933,8 @@ impl Runtime {
                         continue;
                     }
                     out.pending = true;
+                    out.needs_repaint = false;
+                    self.last_drm_scene.insert(out.name.clone(), stamp);
                     queued = true;
                 }
                 send_surface_scales(&self.state, &self.manager);
@@ -2913,7 +2943,24 @@ impl Runtime {
                     // Granting callbacks on every client dispatch here would
                     // let redraws outrun the display and keep the loop busy.
                     send_frame_callbacks(&self.state, &self.manager);
+                    self.last_drm_refresh = Instant::now();
                     self.stats.frames += 1;
+                } else if !outputs.iter().any(|out| out.pending) {
+                    // Retaining a scanout frame does not stop the refresh clock.
+                    // Throttle callbacks even when client replies wake dispatch
+                    // immediately, and release future/FIFO commits without needing
+                    // another page flip. Presentation feedback is never invented.
+                    let refresh = outputs
+                        .first()
+                        .map(|out| crate::frame_timing::refresh_of(&out.output))
+                        .unwrap_or(crate::frame_timing::DEFAULT_REFRESH);
+                    if self.last_drm_refresh.elapsed() >= refresh {
+                        self.last_drm_refresh = Instant::now();
+                        let roots = crate::frame_timing::frame_roots(&self.state, &self.manager);
+                        let now = self.state.presentation_now();
+                        self.state.refresh_cycle(&roots, now, refresh);
+                        send_frame_callbacks(&self.state, &self.manager);
+                    }
                 }
             }
         }
@@ -3090,6 +3137,110 @@ fn switcher_previews(
             })
         })
         .collect()
+}
+
+/// All inputs to a rendered DRM scene. A surface commit forces a frame even
+/// when pixels are unchanged, so its pending presentation feedback is delivered.
+#[cfg(feature = "drm")]
+#[derive(PartialEq)]
+struct SceneStamp {
+    commits: u64,
+    size: smithay::utils::Size<i32, smithay::utils::Physical>,
+    scale: f64,
+    offset: (i32, i32),
+    background: [f32; 4],
+    accent: [f32; 3],
+    blank_alpha: f32,
+    locked: bool,
+    pointer: (f64, f64),
+    above: usize,
+    elements: Vec<Vec<ElementStamp>>,
+    decor: Vec<DecorStamp>,
+}
+
+#[cfg(feature = "drm")]
+#[derive(PartialEq)]
+struct DecorStamp {
+    color: [f32; 4],
+    rects: Vec<Rectangle<i32, smithay::utils::Physical>>,
+}
+
+#[cfg(feature = "drm")]
+#[derive(PartialEq)]
+struct ElementStamp {
+    id: smithay::backend::renderer::element::Id,
+    commit: smithay::backend::renderer::utils::CommitCounter,
+    src: Rectangle<f64, smithay::utils::Buffer>,
+    geometry: Rectangle<i32, smithay::utils::Physical>,
+    transform: Transform,
+    alpha: f32,
+}
+
+#[cfg(feature = "drm")]
+fn element_stamps<E: smithay::backend::renderer::element::Element>(
+    elements: &[E],
+    scale: f64,
+) -> Vec<ElementStamp> {
+    elements
+        .iter()
+        .map(|element| ElementStamp {
+            id: element.id().clone(),
+            commit: element.current_commit(),
+            src: element.src(),
+            geometry: element.geometry(scale.into()),
+            transform: element.transform(),
+            alpha: element.alpha(),
+        })
+        .collect()
+}
+
+#[cfg(feature = "drm")]
+impl SceneStamp {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        commits: u64,
+        size: smithay::utils::Size<i32, smithay::utils::Physical>,
+        scale: f64,
+        offset: (i32, i32),
+        background: Color32F,
+        accent: [f32; 3],
+        blank_alpha: f32,
+        locked: bool,
+        pointer: Point<f64, Logical>,
+        paper: &[smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<
+            GlesRenderer,
+        >],
+        scene: &Scene,
+        decor: &[(Color32F, Vec<Rectangle<i32, smithay::utils::Physical>>)],
+        previews: &[PreviewElement],
+    ) -> Self {
+        Self {
+            commits,
+            size,
+            scale,
+            offset,
+            background: background.components(),
+            accent,
+            blank_alpha,
+            locked,
+            pointer: (pointer.x, pointer.y),
+            above: scene.above,
+            elements: vec![
+                element_stamps(paper, 1.0),
+                element_stamps(&scene.elements, scale),
+                element_stamps(&scene.tile, 1.0),
+                element_stamps(&scene.top, scale),
+                element_stamps(previews, scale),
+            ],
+            decor: decor
+                .iter()
+                .map(|(color, rects)| DecorStamp {
+                    color: color.components(),
+                    rects: rects.clone(),
+                })
+                .collect(),
+        }
+    }
 }
 
 /// One output's surfaces, front to back, with GNOME's tile preview

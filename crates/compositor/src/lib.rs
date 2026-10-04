@@ -102,6 +102,8 @@ pub(crate) struct OutputEntry {
 
 /// Compositor dispatch state: protocol states plus their handlers.
 pub struct State {
+    /// Applied surface commits invalidate retained scanout, including feedback-only updates.
+    pub(crate) surface_commits: u64,
     compositor_state: CompositorState,
     shm_state: ShmState,
     xdg_shell_state: XdgShellState,
@@ -431,6 +433,7 @@ impl CompositorHandler for State {
     }
 
     fn commit(&mut self, surface: &wl_surface::WlSurface) {
+        self.surface_commits = self.surface_commits.wrapping_add(1);
         on_commit_buffer_handler::<State>(surface);
         self.popups.commit(surface);
         if let Some(smithay::desktop::PopupKind::Xdg(popup)) = self.popups.find_popup(surface) {
@@ -692,6 +695,7 @@ impl State {
             window_requests: Vec::new(),
             protocols: protocols::Protocols::new(dh),
             frame_timing: frame_timing::FrameTiming::new(dh),
+            surface_commits: 0,
             lock_protocol: session_lock::LockProtocol::new(dh),
             #[cfg(feature = "xwayland")]
             xwm: None,

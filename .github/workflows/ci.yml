@@ -154,8 +154,8 @@ jobs:
           toolchain: stable
       # One cache per job: target/ and the registry, keyed by Cargo.lock.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config seatd jq ffmpeg shellcheck libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev "linux-modules-extra-$(uname -r)"
-      - run: shellcheck scripts/roost-drm-smoke
+      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config libwayland-dev wayland-protocols seatd jq ffmpeg shellcheck libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev "linux-modules-extra-$(uname -r)"
+      - run: shellcheck scripts/roost-drm-smoke scripts/roost-frame-pacer-build
       - run: scripts/roost-drm-smoke --artifacts drm-smoke-artifacts
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()

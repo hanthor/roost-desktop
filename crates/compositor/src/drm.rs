@@ -80,6 +80,8 @@ pub struct DrmOutput {
     pub scale: f64,
     /// A frame is queued and its page flip has not completed yet.
     pub pending: bool,
+    /// First scanout or a VT/system-wake reset must repaint even an identical scene.
+    pub needs_repaint: bool,
 }
 
 impl DrmOutput {
@@ -302,6 +304,7 @@ impl DrmBackend {
                 loc: (0, 0),
                 scale: 1.0,
                 pending: false,
+                needs_repaint: true,
             });
         }
         // GNOME's arrangement for exactly these connectors (#59): scale
@@ -424,6 +427,7 @@ impl DrmBackend {
                 for out in &mut self.outputs {
                     out.surface.reset_buffers();
                     out.pending = false;
+                    out.needs_repaint = true;
                 }
                 self.active = true;
                 if self.sleep_reset_pending {
@@ -454,6 +458,7 @@ impl DrmBackend {
             }
             out.surface.reset_buffers();
             out.pending = false;
+            out.needs_repaint = true;
         }
         // Reset actual connector/plane state too: an active VT does not imply
         // that the kernel restored its framebuffer. The next locked frame
