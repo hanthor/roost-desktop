@@ -937,6 +937,9 @@ impl Runtime {
     /// the shell hears the result either way.
     fn finish_unlock(&mut self, request: u64, ok: bool) {
         self.unlock_inflight = false;
+        if std::env::var_os("ROOST_LOCK_TRACE").is_some() {
+            eprintln!("roost-compositor: lock authentication finished accepted={ok}");
+        }
         if ok && self.is_locked() {
             self.lock.unlock(self.lock_now_ms());
             self.control.set_locked(false);
@@ -2389,6 +2392,9 @@ impl Runtime {
                 self.control.finish_unlock(request, unlocked);
             } else {
                 self.unlock_inflight = true;
+                if std::env::var_os("ROOST_LOCK_TRACE").is_some() {
+                    eprintln!("roost-compositor: lock authentication started");
+                }
                 let reply = self.unlock_results.clone();
                 std::thread::spawn(move || {
                     let ok = crate::unlock::session_user()
