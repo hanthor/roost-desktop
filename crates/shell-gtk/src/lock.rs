@@ -215,7 +215,10 @@ impl LockUi {
         {
             let entry = entry.clone();
             submit_keys.connect_key_pressed(move |_, key, _, _| {
-                if matches!(key, gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter) {
+                if matches!(
+                    key,
+                    gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter | gtk::gdk::Key::ISO_Enter
+                ) {
                     if entry.is_sensitive() {
                         entry.emit_by_name::<()>("activate", &[]);
                     }
@@ -343,8 +346,10 @@ impl LockUi {
                     return glib::Propagation::Stop;
                 }
                 if on_prompt {
-                    if matches!(key, gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter)
-                        && std::env::var_os("ROOST_LOCK_TRACE").is_some()
+                    if matches!(
+                        key,
+                        gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter | gtk::gdk::Key::ISO_Enter
+                    ) && std::env::var_os("ROOST_LOCK_TRACE").is_some()
                     {
                         eprintln!(
                             "roost-shell-gtk: lock Return received sensitive={}",
