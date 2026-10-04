@@ -275,9 +275,13 @@ SYSBUS_PID=""
 ACCEL_PID=""
 CAL_PID=""
 SCREENSAVER_PID=""
+PERMISSIONS_PID=""
+INHIBITOR_PID=""
 SCROLL_PROBE_PID=""
 IME_PIDS=""
 cleanup() {
+    if [ -n "$INHIBITOR_PID" ]; then kill "$INHIBITOR_PID" 2>/dev/null || true; fi
+    if [ -n "$PERMISSIONS_PID" ]; then kill "$PERMISSIONS_PID" 2>/dev/null || true; fi
     if [ -n "$SCROLL_PROBE_PID" ]; then kill "$SCROLL_PROBE_PID" 2>/dev/null || true; fi
     # shellcheck disable=SC2086
     if [ -n "$IME_PIDS" ]; then kill $IME_PIDS 2>/dev/null || true; fi
@@ -474,6 +478,11 @@ ROOST_STUB_BT_LOG="$ARTIFACTS/bt-calls"
 export ROOST_STUB_NM_LOG ROOST_STUB_BT_LOG
 "$PY" "$ROOT/scripts/lib/roost-service-stubs.py" "$BACKLIGHT" >"$ARTIFACTS/stubs.log" 2>&1 &
 STUBS_PID=$!
+# Own PermissionStore before portals can auto-activate the real daemon.
+"$PY" "$ROOT/scripts/lib/roost-permission-store-stub.py" "$ARTIFACTS/shortcut-permissions.json" >"$ARTIFACTS/permission-store.log" 2>&1 &
+PERMISSIONS_PID=$!
+for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/permission-store.log" && break; sleep 0.2; done
+grep -q ready "$ARTIFACTS/permission-store.log" || fail G-SHORTCUT-CONSENT "private PermissionStore did not own its bus name"
 for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/stubs.log" 2>/dev/null && break; sleep 0.5; done
 "$PY" "$ROOT/scripts/lib/roost-search-provider-stub.py" "$SEARCH_MARKER" >"$ARTIFACTS/provider.log" 2>&1 &
 PROVIDER_PID=$!
@@ -526,6 +535,7 @@ export ROOST_IBUS ROOST_IBUS_DEBUG
 ROOST_PROOF_SWIPE_INPUT="$ARTIFACTS/swipe-input.json"
 export ROOST_PROOF_SWIPE_INPUT
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk -p roost-shell-host
+cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor --example shortcut-inhibit-client
 if [ -n "$PAM_ON" ]; then
     env IBUS_ADDRESS="unix:path=$ARTIFACTS/not-the-private-ibus" \
         LD_PRELOAD="$PAM_WRAPPER_LIB" PAM_WRAPPER=1 \
@@ -3060,6 +3070,79 @@ cstate "(.thumbnails | length) == $insert_count + 1 and any(.windows[]; .id == $
     fail G-WS-INSERT "placeholder drop did not insert and move the window"
 pass G-WS-INSERT "thumbnail gap shows a placeholder and inserts a dynamic workspace on drop"
 xdotool key Escape
+
+# A real Wayland requester drives the GTK consent UI and PermissionStore,
+# rather than injecting an answer into the compositor's test state.
+for app in allow deny; do
+    cat >"$XDG_DATA_HOME/applications/roost-consent-$app.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=Consent $app
+Exec=true
+NoDisplay=true
+DESKTOP
+done
+for scenario in allow remembered-allow deny remembered-deny unknown; do
+    case "$scenario" in
+        *allow) consent_app=roost-consent-allow ;;
+        *deny) consent_app=roost-consent-deny ;;
+        unknown) consent_app=roost-consent-unknown ;;
+    esac
+    trigger="$ARTIFACTS/consent-$scenario.request"
+    consent_log="$ARTIFACTS/consent-$scenario.log"
+    rm -f "$trigger"
+    WAYLAND_DISPLAY="$SOCKET_NAME" "$ROOT/target/debug/examples/shortcut-inhibit-client" "$consent_app" "$trigger" >"$consent_log" 2>&1 &
+    INHIBITOR_PID=$!
+    cstate ".focused_app_id == \"$consent_app\"" "consent client focused" || fail G-SHORTCUT-CONSENT "requester did not focus"
+    touch "$trigger"
+    end=$(($(date +%s) + 10))
+    until grep -q INACTIVE "$consent_log" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+    grep -q INACTIVE "$consent_log" || fail G-SHORTCUT-CONSENT "request did not start inactive"
+    sleep 0.7
+    case "$scenario" in
+        remembered-allow)
+            end=$(($(date +%s) + 10))
+            until grep -q '^ACTIVE' "$consent_log" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+            grep -q '^ACTIVE' "$consent_log" || fail G-SHORTCUT-CONSENT "remembered grant did not activate"
+            ;;
+        remembered-deny) ;;
+        *)
+            "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-consent-$scenario.json" 20 || fail G-SHORTCUT-CONSENT "dialog dump failed"
+            case "$scenario" in
+                allow) expected_title="Allow Consent allow to inhibit shortcuts?" ;;
+                deny) expected_title="Allow Consent deny to inhibit shortcuts?" ;;
+                unknown) expected_title="Allow this app to inhibit shortcuts?" ;;
+            esac
+            showing "$ARTIFACTS/a11y-consent-$scenario.json" "$expected_title" || fail G-SHORTCUT-CONSENT "application display name missing from consent"
+            showing "$ARTIFACTS/a11y-consent-$scenario.json" Allow || fail G-SHORTCUT-CONSENT "Allow missing"
+            showing "$ARTIFACTS/a11y-consent-$scenario.json" Deny || fail G-SHORTCUT-CONSENT "Deny missing"
+            showing "$ARTIFACTS/a11y-consent-$scenario.json" "You can restore shortcuts by pressing Super+Escape" || fail G-SHORTCUT-CONSENT "escape hint missing"
+            grep -q '^ACTIVE' "$consent_log" && fail G-SHORTCUT-CONSENT "request auto-granted before the user answered"
+            answer=Deny
+            [ "$scenario" = allow ] && answer=Allow
+            "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-consent-answer-$scenario.json" 20 --press "$answer" || fail G-SHORTCUT-CONSENT "could not answer"
+            sleep 0.7
+            ;;
+    esac
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-consent-after-$scenario.json" 20 || fail G-SHORTCUT-CONSENT "post-answer dump failed"
+    showing "$ARTIFACTS/a11y-consent-after-$scenario.json" "Allow inhibiting shortcuts" && fail G-SHORTCUT-CONSENT "dialog remained visible or remembered decision prompted"
+    case "$scenario" in
+        *allow)
+            grep -q '^ACTIVE' "$consent_log" || fail G-SHORTCUT-CONSENT "Allow did not activate"
+            xdotool key super+Escape
+            end=$(($(date +%s) + 5))
+            until [ "$(grep -c '^INACTIVE' "$consent_log" || true)" -ge 2 ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+            [ "$(grep -c '^INACTIVE' "$consent_log" || true)" -ge 2 ] || fail G-SHORTCUT-CONSENT "emergency escape did not restore shortcuts"
+            ;;
+        *) if grep -q '^ACTIVE' "$consent_log"; then fail G-SHORTCUT-CONSENT "Deny granted inhibition"; fi ;;
+    esac
+    kill "$INHIBITOR_PID" 2>/dev/null || true
+    wait "$INHIBITOR_PID" 2>/dev/null || true
+    INHIBITOR_PID=""
+    sleep 0.3
+done
+jq -e '."roost-consent-allow.desktop" == ["GRANTED"] and ."roost-consent-deny.desktop" == ["DENIED"] and (has("roost-consent-unknown.desktop") | not)' "$ARTIFACTS/shortcut-permissions.json" >/dev/null || fail G-SHORTCUT-CONSENT "PermissionStore did not remember exactly the known apps"
+pass G-SHORTCUT-CONSENT "live requests require Allow, Deny stays inactive, known app decisions persist without prompting, unknown apps are not remembered, Super+Escape restores input"
 
 "$ROOT/scripts/roost-a11y-golden" check "$ARTIFACTS" ||
     fail A11Y-GOLDEN "accessible trees differ from tests/a11y/ (see above)"
