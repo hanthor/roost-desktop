@@ -2345,10 +2345,20 @@ done
 rm -rf "$ARTIFACTS/backlight/aaa-other"
 pass G-MONITOR-BRIGHTNESS-KEYS "bound monitor up/down/cycle change only the connector under the pointer; cycle wraps"
 # A rebound notification key focuses the active banner's real button.
+# The earlier DND proof intentionally leaves banners disabled. Restore
+# them through the actual quick-settings control before testing focus.
+if [ "$(gsettings get org.gnome.desktop.notifications show-banners)" = false ]; then
+    open_qs
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-notification-enable.json" 20 --press "Do Not Disturb" || fail G-NOTIFICATION-FOCUS-KEY "could not turn off Do Not Disturb"
+    xdotool key Escape
+    sleep 0.5
+fi
+[ "$(gsettings get org.gnome.desktop.notifications show-banners)" = true ] || fail G-NOTIFICATION-FOCUS-KEY "banners remain disabled"
 gsettings set org.gnome.shell.keybindings focus-active-notification "['<Super>F6']"
 sleep 1.5
 notify "Focus Proof Banner" "Keyboard focus" || fail G-NOTIFICATION-FOCUS-KEY "Notify failed"
-sleep 0.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-notification-focus-before.json" 20 || fail G-NOTIFICATION-FOCUS-KEY "banner baseline dump failed"
+showing "$ARTIFACTS/a11y-notification-focus-before.json" "Focus Proof Banner" || fail G-NOTIFICATION-FOCUS-KEY "no active banner to focus"
 xdotool key super+F6
 sleep 0.5
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-notification-focus.json" 20 || fail G-NOTIFICATION-FOCUS-KEY "a11y dump failed"
