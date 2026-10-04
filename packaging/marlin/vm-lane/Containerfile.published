@@ -32,7 +32,6 @@ RUN mkdir -p /usr/share/roost-vm \
     && systemctl enable roost-vm-health.service \
     && systemctl add-wants multi-user.target qemu-guest-agent.service \
     && sha256sum --check /usr/share/roost-vm/shipped-payload.sha256 \
-    && pacman -Q roost | cmp - /usr/share/roost-vm/shipped-package.txt \
     && pacman -Q > /usr/share/roost-vm/fixture-packages.txt \
     && python3 -c 'from pathlib import Path; p=Path("/usr/share/roost-vm"); before=set((p/"shipped-packages.txt").read_text().splitlines()); after=set((p/"fixture-packages.txt").read_text().splitlines()); assert before <= after, "fixture installation changed shipped package versions"'
 
