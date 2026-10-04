@@ -32,6 +32,29 @@ class Evidence(unittest.TestCase):
             fixture(root)
             self.assertEqual(len(gate.check(root, REVISION)), 10)
 
+    def test_combined_report_preserves_measurement_and_current_traceability_gaps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture(root)
+            cases = gate.check(root, REVISION)
+            (root / 'coverage-report.md').write_text('measured crate lines 12/20, regions 18/30\n')
+            report = gate.combined_strategy_report(root, REVISION, cases)
+            self.assertIn(REVISION, report)
+            self.assertIn('measured crate lines 12/20, regions 18/30', report)
+            self.assertIn('Qualified Roost-', report)
+            self.assertIn('roost-compositor', report)
+            self.assertIn('unapproved_release_is_a_protocol_error_without_clearing_the_owner', report)
+            self.assertNotIn('Line/branch coverage thresholds and security artifact completeness remain', report)
+
+    def test_combined_report_rejects_nonexecuted_source_cases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture(root)
+            cases = gate.check(root, REVISION)
+            (root / 'test.log').write_text('test unrelated ... ok\n')
+            with self.assertRaisesRegex(ValueError, 'source/execution mismatch'):
+                gate.combined_strategy_report(root, REVISION, cases)
+
     def test_each_required_file_is_mandatory(self):
         for name in gate.REQUIRED:
             with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:

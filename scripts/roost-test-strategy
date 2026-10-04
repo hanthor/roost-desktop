@@ -73,7 +73,8 @@ def inspect(root, executed=None):
             errors.append(f'duplicate stable ID {value}: {", ".join(sorted(paths))}')
     if not ids:
         gaps.append('Qualified Roost-<spek>-<requirement>-<case> IDs have not been assigned to legacy tests')
-    gaps.append('Line/branch coverage thresholds and security artifact completeness remain tracked by #8')
+    gaps.append('Measured line/region floors and security artifacts run separately in measured-coverage.yml; this structural inventory does not measure them')
+    gaps.append('Broader protocol/lifecycle boundary registration and spec-qualified IDs remain tracked by #8; current stable-toolchain coverage does not measure branches')
     return {'crates': crates, 'stable_ids': ids, 'errors': errors, 'gaps': gaps}
 
 
