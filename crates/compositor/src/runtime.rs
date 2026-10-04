@@ -2757,8 +2757,11 @@ impl Runtime {
                     queued = true;
                 }
                 send_surface_scales(&self.state, &self.manager);
-                send_frame_callbacks(&self.state, &self.manager, self.stats.frames);
                 if queued {
+                    // A pending page flip is not another rendered frame.
+                    // Granting callbacks on every client dispatch here would
+                    // let redraws outrun the display and keep the loop busy.
+                    send_frame_callbacks(&self.state, &self.manager, self.stats.frames);
                     self.stats.frames += 1;
                 }
             }
