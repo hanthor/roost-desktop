@@ -549,6 +549,46 @@ scrot "$ARTIFACTS/03-quick-settings.png" >/dev/null
 showing "$ARTIFACTS/a11y-qs.json" "Dark Style" ||
     fail G-QS-OPEN "quick settings contents not showing"
 pass G-QS-OPEN "system indicators open quick settings"
+# A desktop has no battery. Hotplug and live UPower/settings changes must
+# update both the panel and the power summary without reopening the menu.
+battery_set() {
+    gdbus call --system --dest org.freedesktop.UPower \
+        --object-path /org/freedesktop/UPower/devices/DisplayDevice \
+        --method org.freedesktop.DBus.Properties.Set \
+        org.freedesktop.UPower.Device "$1" "$2" >/dev/null
+}
+battery_dump() {
+    sleep 1
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-battery.json" 20
+}
+if showing "$ARTIFACTS/a11y-qs.json" "37% · Discharging · 1∶30 remaining"; then
+    fail G-BATTERY "battery is visible on a desktop without one"
+fi
+gsettings set org.gnome.desktop.interface show-battery-percentage false
+battery_set IsPresent '<true>'
+battery_dump
+showing "$ARTIFACTS/a11y-battery.json" "37% · Discharging · 1∶30 remaining" ||
+    fail G-BATTERY "UPower discharging battery summary missing"
+if showing "$ARTIFACTS/a11y-battery.json" '37%'; then
+    fail G-BATTERY "panel percentage ignored disabled setting"
+fi
+gsettings set org.gnome.desktop.interface show-battery-percentage true
+battery_dump
+showing "$ARTIFACTS/a11y-battery.json" '37%' || fail G-BATTERY "percentage setting did not update live"
+battery_set State '<uint32 1>'
+battery_set Percentage '<82.0>'
+battery_dump
+showing "$ARTIFACTS/a11y-battery.json" '82%' || fail G-BATTERY "panel level did not update live"
+showing "$ARTIFACTS/a11y-battery.json" "82% · Charging · 0∶30 until full" ||
+    fail G-BATTERY "charging time did not update live"
+gsettings set org.gnome.desktop.interface show-battery-percentage false
+battery_set IsPresent '<false>'
+battery_dump
+if showing "$ARTIFACTS/a11y-battery.json" '82%'; then
+    fail G-BATTERY "removed battery stayed visible"
+fi
+pass G-BATTERY "UPower hotplug, charging/discharging and percentage setting update live"
+
 for label in "Wired" "Dark Style" "Do Not Disturb" "Volume" "Lock"; do
     showing "$ARTIFACTS/a11y-qs.json" "$label" ||
         fail A11Y-QS "no showing accessible control named '$label'"
@@ -1693,7 +1733,7 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     for _ in $(seq 1 20); do grep -q "IBus panel: owns org.freedesktop.IBus.Panel" "$LOG" && break; sleep 0.5; done
     grep -q "IBus panel: owns org.freedesktop.IBus.Panel" "$LOG" ||
         fail G-IME-CANDIDATES "the shell never became IBus's panel"
-    shown_before="$(grep -c 'ibus candidate 1 尼 at' "$LOG")"
+    shown_before="$(grep -c 'ibus candidate 1 尼 at' "$LOG" || true)"
     xdotool type --delay 100 ni
     cstate '.layers | any(.namespace == "roost-ibus-candidates")' "candidate window" 10 ||
         fail G-IME-CANDIDATES "typing 'ni' showed no candidate window"
