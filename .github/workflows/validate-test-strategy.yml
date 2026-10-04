@@ -1,0 +1,26 @@
+name: Validate test strategy compliance
+on:
+  push:
+    branches: [main]
+    paths: ['crates/**', 'docs/test-strategy.md', 'scripts/roost-test-strategy', '.github/workflows/validate-test-strategy.yml']
+  pull_request:
+    paths: ['crates/**', 'docs/test-strategy.md', 'scripts/roost-test-strategy', '.github/workflows/validate-test-strategy.yml']
+permissions:
+  contents: read
+concurrency:
+  group: test-strategy-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - run: scripts/roost-test-strategy --report test-strategy-report.md
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: test-strategy-report
+          path: test-strategy-report.md
+          if-no-files-found: error
+          retention-days: 14

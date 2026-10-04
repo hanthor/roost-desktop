@@ -189,10 +189,32 @@ impl WiredMenu {
         }
         let devices = self.devices.borrow().clone();
         let connectivity = self.connectivity.get();
-        for dev in devices.iter().filter(|d| d.shown()) {
-            for row in dev.menu(DEVICE_NAME) {
-                let button = self.row(dev, &row, connectivity);
-                self.list.append(&button);
+        let shown: Vec<_> = devices.iter().filter(|d| d.shown()).collect();
+        for dev in &shown {
+            if shown.len() > 1 {
+                // NMSectionItem's use-submenu: each adapter has its own
+                // expandable connection menu, rather than flattening rows.
+                let label = if dev.interface.is_empty() {
+                    format!(
+                        "{DEVICE_NAME} ({})",
+                        dev.path.rsplit('/').next().unwrap_or_default()
+                    )
+                } else {
+                    format!("{DEVICE_NAME} ({})", dev.interface)
+                };
+                let submenu = gtk::Expander::builder().label(&label).build();
+                submenu.update_property(&[gtk::accessible::Property::Label(&label)]);
+                submenu.add_css_class("nm-wired-submenu");
+                let rows = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                for row in dev.menu(DEVICE_NAME) {
+                    rows.append(&self.row(dev, &row, connectivity));
+                }
+                submenu.set_child(Some(&rows));
+                self.list.append(&submenu);
+            } else {
+                for row in dev.menu(DEVICE_NAME) {
+                    self.list.append(&self.row(dev, &row, connectivity));
+                }
             }
         }
         self.sync_tile();
@@ -374,6 +396,10 @@ fn read_device(
         let device = Rc::new(RefCell::new(WiredDevice {
             primary: active.is_some() && active == primary,
             path,
+            interface: props
+                .lookup_value("Interface", None)
+                .and_then(|v| v.get::<String>())
+                .unwrap_or_default(),
             state: u("State"),
             ..WiredDevice::default()
         }));

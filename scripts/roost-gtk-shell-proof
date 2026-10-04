@@ -411,6 +411,9 @@ SYSBUS_PID="$(echo "$SYSBUS_INFO" | sed -n 2p)"
 export DBUS_SYSTEM_BUS_ADDRESS
 # NetworkManager's and BlueZ's stubs record what the shell asks of them.
 ROOST_STUB_NM_LOG="$ARTIFACTS/nm-calls"
+ROOST_NM_VPN_PLUGIN_DIR="$ARTIFACTS/vpn-plugins"
+ROOST_NM_VPN_PROOF=1
+export ROOST_NM_VPN_PLUGIN_DIR ROOST_NM_VPN_PROOF
 ROOST_STUB_BT_LOG="$ARTIFACTS/bt-calls"
 export ROOST_STUB_NM_LOG ROOST_STUB_BT_LOG
 "$PY" "$ROOT/scripts/lib/roost-service-stubs.py" "$BACKLIGHT" >"$ARTIFACTS/stubs.log" 2>&1 &
@@ -1279,6 +1282,117 @@ grep -q "^Secrets psk=guest-pass-$$" "$ROOST_STUB_NM_LOG" ||
     fail G-NM-AGENT "NetworkManager got $(grep "^Secrets" "$ROOST_STUB_NM_LOG" || echo nothing), not the typed password"
 pass G-NM-AGENT "an unsaved secured network asks for its password in GNOME's dialog"
 sleep 1
+
+# A real private Secret Service, accessed by libsecret's secret-tool.
+command -v secret-tool >/dev/null || fail G-NM-ENTERPRISE "libsecret secret-tool is required"
+command -v gnome-keyring-daemon >/dev/null || fail G-NM-ENTERPRISE "GNOME Keyring is required"
+printf 'roost-proof-keyring\n' | gnome-keyring-daemon --unlock --components=secrets --control-directory="$ARTIFACTS/keyring-control" >"$ARTIFACTS/keyring.log" 2>&1
+ROOST_NM_VPN_PLUGIN_DIR="$ARTIFACTS/vpn-plugins"
+ROOST_NM_VPN_PROOF=1
+export ROOST_NM_VPN_PLUGIN_DIR ROOST_NM_VPN_PROOF
+# The shell inherited this directory at startup (set beside the NM log).
+mkdir -p "$ROOST_NM_VPN_PLUGIN_DIR"
+cat >"$ROOST_NM_VPN_PLUGIN_DIR/proof-auth" <<'VPNHELPER'
+#!/bin/sh
+# A real external-ui plugin protocol: consume connection data through DONE.
+while IFS= read -r line; do [ "$line" = DONE ] && break; done
+cat <<'UI'
+[VPN Plugin UI]
+Version=2
+Title=VPN authentication
+Description=Connect to Roost VPN
+[username]
+Value=alice
+ShouldAsk=false
+[password]
+Value=
+ShouldAsk=true
+Label=VPN Password
+IsSecret=true
+UI
+VPNHELPER
+chmod +x "$ROOST_NM_VPN_PLUGIN_DIR/proof-auth"
+cat >"$ROOST_NM_VPN_PLUGIN_DIR/proof.name" <<VPNNAME
+[VPN Connection]
+service=org.roost.Proof.VPN
+[GNOME]
+auth-dialog=$ROOST_NM_VPN_PLUGIN_DIR/proof-auth
+supports-external-ui-mode=true
+supports-hints=true
+VPNNAME
+nm_request() {
+    gdbus call --address "$DBUS_SYSTEM_BUS_ADDRESS" --dest org.freedesktop.NetworkManager \
+        --object-path /org/freedesktop/NetworkManager --method org.roost.Proof.Network.RequestSecrets "$1" "$2" >/dev/null
+}
+nm_answered() {
+    for _ in $(seq 1 30); do grep -q "$1" "$ROOST_STUB_NM_LOG" && return 0; sleep 0.5; done
+    return 1
+}
+nm_request enterprise 1
+sleep 2
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-nm-enterprise.json" 20 || fail G-NM-ENTERPRISE "dump failed"
+showing "$ARTIFACTS/a11y-nm-enterprise.json" Username || fail G-NM-ENTERPRISE "no identity field"
+showing "$ARTIFACTS/a11y-nm-enterprise.json" Password || fail G-NM-ENTERPRISE "no EAP password field"
+scrot "$ARTIFACTS/15e-network-enterprise.png" >/dev/null
+xdotool key ctrl+a
+xdotool type --delay 20 alice
+xdotool key Tab
+xdotool type --delay 20 enterprise-password
+xdotool key Return
+nm_answered '^ProofSecrets enterprise flags=1 identity=alice password=enterprise-password' || fail G-NM-ENTERPRISE "identity and password did not reach NM"
+# No interaction: the second request must use the actual keyring item.
+nm_request enterprise 0
+nm_answered '^ProofSecrets enterprise flags=0 identity=alice password=enterprise-password' || fail G-NM-ENTERPRISE "keyring lookup did not answer without a dialog"
+secret-tool lookup connection-uuid 00000000-0000-4000-8000-000000000211 setting-name 802-1x setting-key password | grep -qx enterprise-password || fail G-NM-ENTERPRISE "secret is absent from GNOME Keyring"
+gdbus call --address "$DBUS_SYSTEM_BUS_ADDRESS" --dest org.freedesktop.NetworkManager \
+    --object-path /org/freedesktop/NetworkManager --method org.roost.Proof.Network.DeleteSecrets enterprise >/dev/null
+nm_answered '^ProofSecrets enterprise deleted' || fail G-NM-ENTERPRISE "DeleteSecrets failed"
+if secret-tool lookup connection-uuid 00000000-0000-4000-8000-000000000211 setting-name 802-1x setting-key password >/dev/null; then fail G-NM-ENTERPRISE "DeleteSecrets retained the keyring item"; fi
+nm_request tls 1
+sleep 2
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-nm-tls.json" 20 || fail G-NM-ENTERPRISE "TLS dump failed"
+showing "$ARTIFACTS/a11y-nm-tls.json" "Private key password" || fail G-NM-ENTERPRISE "TLS did not ask for the private-key password"
+xdotool type --delay 20 private-key-password
+xdotool key Return
+nm_answered '^ProofSecrets tls flags=1 private-key-password=private-key-password' || fail G-NM-ENTERPRISE "TLS secret did not reach NM"
+pass G-NM-ENTERPRISE "802.1X identity/password and TLS key password; user secret stored, reused without interaction and deleted through libsecret"
+nm_request vpn 1
+sleep 2
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-nm-vpn.json" 20 || fail G-NM-VPN "VPN dump failed"
+showing "$ARTIFACTS/a11y-nm-vpn.json" "VPN authentication" || fail G-NM-VPN "no plugin-provided title"
+showing "$ARTIFACTS/a11y-nm-vpn.json" "VPN Password" || fail G-NM-VPN "no plugin-provided secret field"
+scrot "$ARTIFACTS/15f-network-vpn.png" >/dev/null
+xdotool type --delay 20 vpn-password
+xdotool key Return
+nm_answered '^ProofSecrets vpn flags=1 password=vpn-password username=alice' || fail G-NM-VPN "VPN secrets dictionary is wrong"
+nm_request vpn 0
+nm_answered '^ProofSecrets vpn flags=0 password=vpn-password username=alice' || fail G-NM-VPN "stored VPN password not reused"
+pass G-NM-VPN "external-UI VPN helper drives shell prompt, returned secret dictionary and keyring reuse"
+
+# NMSectionItem use-submenu changes live when a second adapter arrives.
+gdbus call --address "$DBUS_SYSTEM_BUS_ADDRESS" --dest org.freedesktop.NetworkManager \
+    --object-path /org/freedesktop/NetworkManager --method org.roost.Proof.Network.SecondWired true >/dev/null
+sleep 1
+open_qs
+qs_press "Wired Menu" wired-several || fail G-NM-WIRED "could not open wired menu"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-wired-several.json" 20 || fail G-NM-WIRED "dump failed"
+showing "$ARTIFACTS/a11y-wired-several.json" "Wired (enp1s0)" || fail G-NM-WIRED "first adapter has no submenu"
+showing "$ARTIFACTS/a11y-wired-several.json" "Wired (enp2s0)" || fail G-NM-WIRED "second adapter has no submenu"
+qs_press "Wired (enp1s0)" wired-submenu || fail G-NM-WIRED "could not expand adapter submenu"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-wired-submenu.json" 20 || fail G-NM-WIRED "submenu dump failed"
+"$PY" - "$ARTIFACTS/a11y-wired-submenu.json" <<'WIREDTREE' || fail G-NM-WIRED "connection action not inside expanded adapter"
+import json, sys
+nodes = json.load(open(sys.argv[1]))
+start = next(i for i, n in enumerate(nodes) if n['name'] == 'Wired (enp1s0)' and n['role'] != 'label')
+end = next((i for i in range(start + 1, len(nodes)) if nodes[i]['depth'] <= nodes[start]['depth']), len(nodes))
+assert any(n['showing'] and n['name'] == 'Disconnect Wired' for n in nodes[start + 1:end])
+WIREDTREE
+scrot "$ARTIFACTS/15g-wired-submenus.png" >/dev/null
+xdotool key Escape
+sleep 0.5
+gdbus call --address "$DBUS_SYSTEM_BUS_ADDRESS" --dest org.freedesktop.NetworkManager \
+    --object-path /org/freedesktop/NetworkManager --method org.roost.Proof.Network.SecondWired false >/dev/null
+pass G-NM-WIRED "each wired adapter has its own expandable connection submenu"
 open_qs
 
 qs_press "Wi-Fi" wifi || fail G-QS-WIFI "could not press Wi-Fi"
