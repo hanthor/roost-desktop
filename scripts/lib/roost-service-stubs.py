@@ -434,10 +434,16 @@ def method_call(c, sender, path, iface, method, params, invocation):
                 fh.write(f"{sender} {agent_path}\n")
         invocation.return_value(None)
     elif method == "SetBrightness":
-        _, _, value = params.unpack()
+        _, device, value = params.unpack()
+        # Match logind's device routing, so multi-backlight proofs can
+        # catch writes to the wrong connector rather than hiding them.
+        target = os.path.join(os.path.dirname(BACKLIGHT), device)
+        if not os.path.isdir(target):
+            invocation.return_dbus_error("org.freedesktop.login1.NoSuchDevice", device)
+            return
         # Atomically, as the kernel's attribute never reads half-written:
         # a reader racing a truncate-then-write would see it empty.
-        path = os.path.join(BACKLIGHT, "brightness")
+        path = os.path.join(target, "brightness")
         with open(path + ".tmp", "w") as fh:
             fh.write(f"{value}\n")
         os.replace(path + ".tmp", path)
