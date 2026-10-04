@@ -893,6 +893,11 @@ grid_origin() {
 grid_point() {
     jq -er --arg name "$2" --argjson ox "$grid_origin_x" --argjson oy "$grid_origin_y" --argjson edge "${3:--1}" '[.[] | select(.showing and (.role == "push button" or .role == "button") and .name == $name and (.bounds[2] > 0) and (.bounds[3] > 0))][0].bounds | select(length == 4) | "\((.[0] + $ox + (if $edge >= 0 then $edge else .[2] / 2 end)) | floor) \((.[1] + $oy + .[3] / 2) | floor)"' "$1"
 }
+# Carousel maps neighboring pages, so STATE_SHOWING alone includes tiles
+# outside its clip. Compare their real window bounds with the viewport.
+grid_shown() {
+    jq -e --arg name "$2" --argjson ox "$grid_origin_x" --argjson oy "$grid_origin_y" --argjson width "$WIDTH" --argjson height "$HEIGHT" 'any(.[]; .showing and (.role == "push button" or .role == "button") and .name == $name and .bounds[2] > 0 and .bounds[3] > 0 and .bounds[0] + $ox < $width and .bounds[0] + $ox + .bounds[2] > 0 and .bounds[1] + $oy < $height and .bounds[1] + $oy + .bounds[3] > 0)' "$1" >/dev/null
+}
 
 # GNOME's page switching while dragging: an app held against the grid's
 # edge turns the page (no arrow to press mid-drag).
@@ -1002,6 +1007,9 @@ sleep 1.5
 
 # GNOME's grid reorder: an app dropped on another tile's edge takes its
 # place, and the grid is saved to org.gnome.shell app-picker-layout.
+# The earlier folder drop persisted its catalog. Give this reorder proof
+# an explicit starting order before asserting exact positions 0, 1 and 2.
+gsettings set org.gnome.shell app-picker-layout "[{'roost-move-One.desktop': <{'position': <0>}>, 'roost-move-Three.desktop': <{'position': <1>}>, 'roost-move-Two.desktop': <{'position': <2>}>}]"
 for n in One Two Three; do
     printf '[Desktop Entry]\nName=AAA Move %s\nExec=true\nType=Application\n' "$n" \
         >"$XDG_DATA_HOME/applications/roost-move-$n.desktop"
@@ -1073,16 +1081,23 @@ xdotool key super+a
 cstate '.overview_open and .overview_app_grid' "short page setup" || fail G-GRID-SHORT-PAGES "app grid missing"
 sleep 1
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-short-before.json" 20 || fail G-GRID-SHORT-PAGES "setup dump failed"
-showing "$ARTIFACTS/a11y-grid-short-before.json" "AAA Move Three" || fail G-GRID-SHORT-PAGES "source missing from first page"
-if showing "$ARTIFACTS/a11y-grid-short-before.json" "AAA Move Two"; then fail G-GRID-SHORT-PAGES "saved second page was flattened"; fi
+grid_origin
+grid_shown "$ARTIFACTS/a11y-grid-short-before.json" "AAA Move Three" || fail G-GRID-SHORT-PAGES "source missing from first page"
+if grid_shown "$ARTIFACTS/a11y-grid-short-before.json" "AAA Move Two"; then fail G-GRID-SHORT-PAGES "saved second page was flattened"; fi
 grid_origin
 grid_coordinates="$(grid_point "$ARTIFACTS/a11y-grid-short-before.json" "AAA Move Three")" || fail G-GRID-SHORT-PAGES "source tile bounds missing"
 read -r source_x source_y <<EOF
 $grid_coordinates
 EOF
-xdotool mousemove --window "$WID" "$source_x" "$source_y" mousedown 1
-xdotool mousemove --window "$WID" $((source_x + 25)) "$source_y"
+xdotool mousemove --window "$WID" "$source_x" "$source_y"
+sleep 0.3
+xdotool mousedown 1
 sleep 0.1
+for step in $(seq 1 6); do
+    xdotool mousemove --window "$WID" $((source_x + step * 10)) "$source_y"
+    sleep 0.05
+done
+sleep 0.25
 xdotool mousemove --window "$WID" $((WIDTH - 6)) 330
 sleep 0.6
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-short-target.json" 20 || fail G-GRID-SHORT-PAGES "target page dump failed"
@@ -1100,8 +1115,8 @@ jq -e '.[0] == ["roost-move-One.desktop"] and .[1][0:2] == ["roost-move-Three.de
 printf '[Desktop Entry]\nName=ZZZ Rebuild Probe Two\nExec=true\nType=Application\n' >"$XDG_DATA_HOME/applications/roost-grid-rebuild-two.desktop"
 sleep 1.5
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-short-rebuilt.json" 20 || fail G-GRID-SHORT-PAGES "rebuild dump failed"
-showing "$ARTIFACTS/a11y-grid-short-rebuilt.json" "AAA Move One" || fail G-GRID-SHORT-PAGES "short first page lost its item"
-if showing "$ARTIFACTS/a11y-grid-short-rebuilt.json" "AAA Move Two" || showing "$ARTIFACTS/a11y-grid-short-rebuilt.json" "AAA Move Three"; then fail G-GRID-SHORT-PAGES "rebuilding filled the short first page"; fi
+grid_shown "$ARTIFACTS/a11y-grid-short-rebuilt.json" "AAA Move One" || fail G-GRID-SHORT-PAGES "short first page lost its item"
+if grid_shown "$ARTIFACTS/a11y-grid-short-rebuilt.json" "AAA Move Two" || grid_shown "$ARTIFACTS/a11y-grid-short-rebuilt.json" "AAA Move Three"; then fail G-GRID-SHORT-PAGES "rebuilding filled the short first page"; fi
 pass G-GRID-SHORT-PAGES "a cross-page drag leaves its source short and the saved boundary survives a catalog rebuild"
 xdotool key Escape
 cstate '.overview_open | not' "short grid closed" || fail G-GRID-SHORT-PAGES "overview stayed open"
