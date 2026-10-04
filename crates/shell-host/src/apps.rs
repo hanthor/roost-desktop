@@ -169,7 +169,11 @@ pub fn discover_system() -> Vec<AppEntry> {
 }
 
 fn from_crate_entry(entry: &CrateEntry) -> Option<AppEntry> {
-    if entry.hidden() || entry.no_display() {
+    from_crate_entry_for_launch(entry, false)
+}
+
+fn from_crate_entry_for_launch(entry: &CrateEntry, allow_no_display: bool) -> Option<AppEntry> {
+    if entry.hidden() || (!allow_no_display && entry.no_display()) {
         return None;
     }
     entry.exec()?;
@@ -239,6 +243,15 @@ pub fn entry_from_file(path: &std::path::Path) -> Option<AppEntry> {
     let locales: Vec<String> = LOCALES.iter().map(|s| s.to_string()).collect();
     let entry = CrateEntry::from_path(path, Some(&locales)).ok()?;
     from_crate_entry(&entry)
+}
+
+/// Resolve an explicitly selected default MIME handler. `NoDisplay` hides
+/// an app from menus, but does not prevent users choosing it as a handler.
+/// `Hidden` entries still mask installed copies and must never launch.
+pub fn handler_entry_from_file(path: &std::path::Path) -> Option<AppEntry> {
+    let locales: Vec<String> = LOCALES.iter().map(|s| s.to_string()).collect();
+    let entry = CrateEntry::from_path(path, Some(&locales)).ok()?;
+    from_crate_entry_for_launch(&entry, true)
 }
 
 /// [`SearchProvider`] over discovered entries: case-insensitive

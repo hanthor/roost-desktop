@@ -115,6 +115,14 @@ XML = """
     <property name="Trusted" type="b" access="read"/>
     <property name="Connected" type="b" access="read"/>
   </interface>
+  <interface name="org.freedesktop.UPower.Device">
+    <property name="IsPresent" type="b" access="readwrite"/>
+    <property name="Type" type="u" access="read"/>
+    <property name="State" type="u" access="readwrite"/>
+    <property name="Percentage" type="d" access="readwrite"/>
+    <property name="TimeToEmpty" type="x" access="readwrite"/>
+    <property name="TimeToFull" type="x" access="readwrite"/>
+  </interface>
   <interface name="org.freedesktop.UPower.PowerProfiles">
     <property name="ActiveProfile" type="s" access="readwrite"/>
     <property name="Profiles" type="aa{sv}" access="read"/>
@@ -210,6 +218,11 @@ state = {
     } for d, alias, icon, paired, connected in BT_DEVICES},
     ("/org/gnome/DisplayManager/Manager", "org.gnome.DisplayManager.Manager"): {
         "Version": GLib.Variant("s", "51.0"),
+    },
+    ("/org/freedesktop/UPower/devices/DisplayDevice", "org.freedesktop.UPower.Device"): {
+        "IsPresent": GLib.Variant("b", False), "Type": GLib.Variant("u", 2),
+        "State": GLib.Variant("u", 2), "Percentage": GLib.Variant("d", 37.0),
+        "TimeToEmpty": GLib.Variant("x", 5400), "TimeToFull": GLib.Variant("x", 1800),
     },
     (PPD, "org.freedesktop.UPower.PowerProfiles"): {
         "ActiveProfile": GLib.Variant("s", "balanced"),
@@ -411,6 +424,9 @@ SERVICES = {
         ("/", "org.freedesktop.DBus.ObjectManager"),
         (HCI, "org.bluez.Adapter1"),
         *[(f"{HCI}/{d}", "org.bluez.Device1") for d, *_ in BT_DEVICES],
+    ]),
+    "upower": (["org.freedesktop.UPower"], [
+        ("/org/freedesktop/UPower/devices/DisplayDevice", "org.freedesktop.UPower.Device"),
     ]),
     "ppd": (["org.freedesktop.UPower.PowerProfiles"], [
         (PPD, "org.freedesktop.UPower.PowerProfiles"),
