@@ -376,6 +376,14 @@ XML
     GSETTINGS_SCHEMA_DIR="$ARTIFACTS/schemas${GSETTINGS_SCHEMA_DIR:+:$GSETTINGS_SCHEMA_DIR}"
     export GSETTINGS_SCHEMA_DIR
 fi
+# Installed older Shell schemas can lack newer monitor bindings even though
+# org.gnome.shell exists. Preserve their bindings in a private fixture overlay.
+"$PY" "$ROOT/scripts/lib/roost-keybinding-schema.py" "$ARTIFACTS/schemas"
+if [ -f "$ARTIFACTS/schemas/org.roost.fixture-keybindings.gschema.xml" ]; then
+    glib-compile-schemas "$ARTIFACTS/schemas"
+    GSETTINGS_SCHEMA_DIR="$ARTIFACTS/schemas"
+    export GSETTINGS_SCHEMA_DIR
+fi
 # Media settings are also exercised on lean hosts without gsd's schema.
 if ! gsettings list-schemas 2>/dev/null | grep -qx org.gnome.settings-daemon.plugins.media-keys; then
     mkdir -p "$ARTIFACTS/schemas"
