@@ -545,6 +545,27 @@ pub fn control_socket_path(socket_name: &str) -> Option<std::path::PathBuf> {
         .map(|dir| dir.join(format!("roost-{socket_name}.control")))
 }
 
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        #[cfg(feature = "xwayland")]
+        {
+            // Event sources can retain loop handles after dispatch stops.
+            // Release our owned sources explicitly so XWayland's display
+            // lock/socket owner is dropped before the compositor exits.
+            for token in self.x11_watchers.drain(..) {
+                self.loop_handle.remove(token);
+            }
+            if let Some(token) = self.x11_source.take() {
+                self.loop_handle.remove(token);
+            }
+            self.x11_sockets = None;
+            self.state.xwm = None;
+            self.pending_x11_client = None;
+            self.active_x11_client = None;
+        }
+    }
+}
+
 impl Runtime {
     /// Build the session: display plus globals, output, backend window,
     /// and private socket. Does not run the loop (see [`run`]).
