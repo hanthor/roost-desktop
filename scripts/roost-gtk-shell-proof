@@ -2628,6 +2628,7 @@ pass G-KEY-BRIGHTNESS "the brightness key steps the backlight by a twentieth thr
 end=$(($(date +%s) + 15))
 until [ -s "$ROOST_STUB_POLKIT_LOG" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
 [ -s "$ROOST_STUB_POLKIT_LOG" ] || fail G-POLKIT "the shell never registered a polkit agent"
+polkit_focus_log_start=$(($(wc -l < "$LOG") + 1))
 read -r agent_name agent_path <"$ROOST_STUB_POLKIT_LOG"
 gdbus call --system --dest "$agent_name" --object-path "$agent_path" \
     --method org.freedesktop.PolicyKit1.AuthenticationAgent.BeginAuthentication \
@@ -2654,6 +2655,11 @@ grep -q "^()" "$ARTIFACTS/polkit-reply" ||
     fail G-POLKIT "the right password did not authorize: $(cat "$ARTIFACTS/polkit-reply")"
 pass G-POLKIT "polkit's request shows GNOME's dialog; a wrong password is refused, the right one authorizes"
 sleep 2
+sed -n "${polkit_focus_log_start},\$p" "$LOG" > "$ARTIFACTS/polkit-focus.log"
+if grep -q 'GtkText - did not receive a focus-out event' "$ARTIFACTS/polkit-focus.log"; then
+    fail G-POLKIT-FOCUS "authentication entry lost focus without clearing its cursor blink callback"
+fi
+pass G-POLKIT-FOCUS "polkit rejection and acceptance leave no GtkText focus-out warning"
 open_power_menu() {
     open_qs
     "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-$1.json" 20 --press "Power Off Menu"
@@ -2721,6 +2727,8 @@ ffmpeg -loglevel error -y -f lavfi -i color=c=0x00ff00:s=64x64 -frames:v 1 -thre
     "$ARTIFACTS/lock-background.png"
 gsettings set org.gnome.desktop.screensaver picture-uri "file://$ARTIFACTS/lock-background.png"
 sleep 1
+# Scope this regression to the lock journey; polkit has its own entry.
+lock_focus_log_start=$(($(wc -l < "$LOG") + 1))
 open_power_menu power-menu-3 || fail G-SUSPEND-LOCK "could not reopen the power menu"
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-suspend.json" 20 \
     --press "Suspend" || fail G-SUSPEND-LOCK "could not press Suspend"
@@ -2829,6 +2837,13 @@ if [ -n "$PAM_ON" ]; then
     gsettings set org.gnome.desktop.screensaver lock-delay 0
     gsettings reset org.gnome.desktop.screensaver picture-uri
     pass G-IDLE-FADE "idle fade cancels on activity, blanks before lock-delay, and wake keeps PAM mandatory"
+    # Include every lock wake, rejection and accepted unlock above, while
+    # keeping the evidence separate from unrelated authentication dialogs.
+    sed -n "${lock_focus_log_start},\$p" "$LOG" > "$ARTIFACTS/lock-focus.log"
+    if grep -q 'GtkText - did not receive a focus-out event' "$ARTIFACTS/lock-focus.log"; then
+        fail G-LOCK-FOCUS "password entry lost focus without clearing its cursor blink callback"
+    fi
+    pass G-LOCK-FOCUS "password rejection and acceptance leave no GtkText focus-out warning"
 
 else
     echo "roost-gtk-shell-proof: G-UNLOCK skipped (no pam_wrapper)"
@@ -2875,6 +2890,8 @@ if grep -q 'ShellExited' "$LOG"; then
     fail G-SHELL-STABLE "the shell exited during the journey: $(grep -c ShellExited "$LOG") time(s)"
 fi
 pass G-SHELL-STABLE "the shell never exited or restarted"
+
+
 
 # A hard shell crash must not leave a persistent monitor behind. Do this
 # after the normal journey's stability assertion, then require supervision
