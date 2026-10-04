@@ -47,6 +47,7 @@ use smithay::{
 };
 
 pub mod animation;
+pub mod capture_security;
 pub mod control;
 #[cfg(feature = "drm")]
 pub mod drm;
@@ -75,7 +76,10 @@ pub mod state;
 pub mod supervise;
 pub mod unlock;
 pub mod wallpaper;
+pub mod window_icons;
 pub mod windows;
+#[cfg(feature = "xwayland")]
+mod x11_icons;
 pub mod xwayland;
 
 /// One compositor-tracked output: protocol handle plus geometry.
@@ -102,6 +106,7 @@ pub(crate) struct OutputEntry {
 
 /// Compositor dispatch state: protocol states plus their handlers.
 pub struct State {
+    pub(crate) window_icons: window_icons::WindowIcons,
     compositor_state: CompositorState,
     shm_state: ShmState,
     xdg_shell_state: XdgShellState,
@@ -182,9 +187,17 @@ pub(crate) struct ClientState {
     /// one client allowed a virtual keyboard (to hand back the keys
     /// IBus does not take).
     pub(crate) ime_bridge: bool,
+    /// Optional liveness marker for an ordinary portal service connection.
+    service_alive: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl ClientState {
+    pub(crate) fn portal_service(alive: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        Self {
+            service_alive: Some(alive),
+            ..Self::default()
+        }
+    }
     /// State for the compositor's own IBus bridge.
     pub(crate) fn ime_bridge() -> Self {
         Self {
@@ -224,11 +237,17 @@ pub(crate) enum WindowRequest {
 
 impl ClientData for ClientState {
     fn initialized(&self, _client_id: ClientId) {}
-    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
+    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {
+        if let Some(alive) = &self.service_alive {
+            alive.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
 }
 
 impl BufferHandler for State {
-    fn buffer_destroyed(&mut self, _buffer: &wl_buffer::WlBuffer) {}
+    fn buffer_destroyed(&mut self, buffer: &wl_buffer::WlBuffer) {
+        self.window_icons.buffer_destroyed(buffer);
+    }
 }
 
 impl XdgShellHandler for State {
@@ -383,6 +402,7 @@ impl State {
 impl CompositorHandler for State {
     fn destroyed(&mut self, surface: &wl_surface::WlSurface) {
         self.initial_outputs.remove(surface);
+        self.window_icons.remove(surface);
     }
 
     fn compositor_state(&mut self) -> &mut CompositorState {
@@ -432,6 +452,7 @@ impl CompositorHandler for State {
 
     fn commit(&mut self, surface: &wl_surface::WlSurface) {
         on_commit_buffer_handler::<State>(surface);
+        self.window_icons.commit(surface);
         self.popups.commit(surface);
         if let Some(smithay::desktop::PopupKind::Xdg(popup)) = self.popups.find_popup(surface) {
             if !popup.is_initial_configure_sent() {
@@ -668,6 +689,7 @@ impl State {
         let mut seat_state = SeatState::new();
         let seat = seat_state.new_wl_seat(dh, SEAT_NAME);
         State {
+            window_icons: window_icons::WindowIcons::new(dh),
             // v6 (GNOME 51's): preferred buffer scale goes out per surface
             // (`send_surface_scales` in the runtime).
             compositor_state: CompositorState::new_v6::<State>(dh),
