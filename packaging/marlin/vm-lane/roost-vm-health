@@ -1,0 +1,29 @@
+#!/bin/bash
+# CI-only service probes on the actual guest user bus.
+set -u
+XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export XDG_RUNTIME_DIR
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+probe() {
+    local name=$1
+    shift
+    for ((attempt=0; attempt<60; attempt++)); do
+        if timeout 5 gdbus call --session "$@" >/dev/null 2>&1; then
+            echo "roost-vm-health: $name ready"
+            return 0
+        fi
+        sleep 2
+    done
+    echo "roost-vm-health: $name failed"
+    return 1
+}
+probe calendar --dest org.gnome.Shell.CalendarServer --object-path /org/gnome/Shell/CalendarServer --method org.freedesktop.DBus.Properties.Get org.gnome.Shell.CalendarServer HasCalendars || exit 1
+probe portal --dest org.freedesktop.portal.Desktop --object-path /org/freedesktop/portal/desktop --method org.freedesktop.portal.Settings.Read org.freedesktop.appearance color-scheme || exit 1
+previous=""
+while sleep 1; do
+    active=$(timeout 5 gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver --method org.gnome.ScreenSaver.GetActive 2>/dev/null) || continue
+    if [[ "$active" != "$previous" ]]; then
+        echo "roost-vm-health: lock active=$active"
+        previous=$active
+    fi
+done
