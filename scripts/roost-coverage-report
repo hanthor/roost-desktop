@@ -72,7 +72,7 @@ def main():
         sys.exit(f'roost-coverage-report: {error}')
     revision = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
     lines = ['# Measured workspace test coverage', '', f'Source revision: `{revision}`', '',
-             'LLVM coverage from instrumented workspace tests. Test functions and external dependencies are excluded from these source aggregates. GUI journeys, hardware paths and doctests are not included. Stable-toolchain line and region coverage does not measure branch coverage.', '',
+             'LLVM coverage from instrumented workspace tests. Integration-test files and external dependencies are excluded from these source-file aggregates; inline unit-test code remains included where it shares a source file. GUI journeys, hardware paths and doctests are not included. Stable-toolchain line and region coverage does not measure branch coverage.', '',
              '| Crate | Lines | Regions |', '|---|---:|---:|']
     lines += [f'| {name} | {cell(value["lines"])} | {cell(value["regions"])} |' for name, value in crates.items()]
     lines += ['', '## Security modules', '', '| Module | Lines | Regions |', '|---|---:|---:|']

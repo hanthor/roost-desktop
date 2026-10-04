@@ -124,7 +124,9 @@ Rust 1.94.1, LLVM tools, and cargo-llvm-cov 0.9.1. Its artifact contains raw
 LLVM JSON, test output, exact source revision, package/tool versions, the
 reproduction command, and a report of source line/region coverage for every
 crate and the lock, PAM unlock, session-lock and IPC modules. Missing crate
-or security-module data fails the report. This initial measurement establishes
+or security-module data fails the report. Source-file totals include inline
+unit-test code; integration-test files and external dependencies are excluded.
+This initial measurement establishes
 an observable baseline before module-specific percentage floors are set;
 it does not claim branch coverage, GUI journey coverage, or complete security
 boundary cases. Those remaining gates stay tracked by #8.
