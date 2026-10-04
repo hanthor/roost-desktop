@@ -28,8 +28,9 @@ python3 /repo/scripts/lib/roost-a11y-dump.py roost-shell-gtk /out/a11y-shell.jso
 sleep 1
 python3 /repo/scripts/lib/roost-capture-security-client.py > /out/untrusted-denial.log
 /usr/libexec/xdg-desktop-portal-gnome --replace >/out/backend.log 2>&1 & portal_backend_pid=$!; pids="$pids $portal_backend_pid"
+python3 /repo/scripts/lib/roost-portal-ready.py org.freedesktop.impl.portal.desktop.gnome org.freedesktop.impl.portal.ScreenCast /out/backend-ready.json
 /usr/libexec/xdg-desktop-portal --replace >/out/frontend.log 2>&1 & pids="$pids $!"
-sleep 2
+python3 /repo/scripts/lib/roost-portal-ready.py org.freedesktop.portal.Desktop org.freedesktop.portal.ScreenCast /out/frontend-ready.json
 for decision in cancel grant disconnect; do
     python3 /repo/scripts/lib/roost-portal-capture-client.py "/out/$decision.png" "$decision" >"/out/$decision.log" 2>&1 & client=$!; pids="$pids $client"
     python3 /repo/scripts/lib/roost-portal-consent.py "/out/a11y-$decision.json" "$decision"
@@ -45,8 +46,9 @@ kill "$portal_backend_pid"
 touch /out/backend-disconnect.revoke
 wait "$client"
 /usr/libexec/xdg-desktop-portal-gnome --replace >/out/backend-restarted.log 2>&1 & pids="$pids $!"
+python3 /repo/scripts/lib/roost-portal-ready.py org.freedesktop.impl.portal.desktop.gnome org.freedesktop.impl.portal.ScreenCast /out/backend-restarted-ready.json
 /usr/libexec/xdg-desktop-portal --replace >/out/frontend-restarted.log 2>&1 & pids="$pids $!"
-sleep 2
+python3 /repo/scripts/lib/roost-portal-ready.py org.freedesktop.portal.Desktop org.freedesktop.portal.ScreenCast /out/frontend-restarted-ready.json
 # Keep a genuine external portal stream active across the lock transition.
 python3 /repo/scripts/lib/roost-portal-capture-client.py /out/lock-grant.png revoke >/out/lock-grant.log 2>&1 & client=$!; pids="$pids $client"
 python3 /repo/scripts/lib/roost-portal-consent.py /out/a11y-lock-grant.json grant

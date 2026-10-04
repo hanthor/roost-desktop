@@ -2707,9 +2707,12 @@ if [ -n "$PW_PIDS" ] && command -v gst-launch-1.0 >/dev/null 2>&1; then
     printf '[preferred]\ndefault=gnome;gtk;\norg.freedesktop.impl.portal.ScreenCast=gnome\n' >"$XDG_CONFIG_HOME/xdg-desktop-portal/portals.conf"
     XDG_CURRENT_DESKTOP=GNOME WAYLAND_DISPLAY="$SOCKET_NAME" GDK_BACKEND=wayland GTK_A11Y=atspi XDG_SESSION_TYPE=wayland "$PORTAL_BACKEND" --replace >"$ARTIFACTS/portal-gnome.log" 2>&1 &
     PORTAL_PIDS="$!"
+    "$PY" "$ROOT/scripts/lib/roost-portal-ready.py" org.freedesktop.impl.portal.desktop.gnome org.freedesktop.impl.portal.ScreenCast "$ARTIFACTS/portal-backend-ready.json" ||
+        fail G-PORTAL-CONSENT "installed backend capabilities never became ready"
     XDG_CURRENT_DESKTOP=GNOME /usr/libexec/xdg-desktop-portal --replace >"$ARTIFACTS/portal-frontend.log" 2>&1 &
     PORTAL_PIDS="$PORTAL_PIDS $!"
-    sleep 2
+    "$PY" "$ROOT/scripts/lib/roost-portal-ready.py" org.freedesktop.portal.Desktop org.freedesktop.portal.ScreenCast "$ARTIFACTS/portal-frontend-ready.json" ||
+        fail G-PORTAL-CONSENT "frontend capabilities never became ready"
     for decision in cancel grant; do
         "$PY" "$ROOT/scripts/lib/roost-portal-capture-client.py" "$ARTIFACTS/portal-$decision.png" "$decision" >"$ARTIFACTS/portal-$decision.log" 2>&1 &
         PORTAL_CLIENT=$!
