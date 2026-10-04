@@ -745,15 +745,19 @@ mod service_tests {
     }
 }
 
-/// Idle-lock timeout from GNOME's keys (#63), `0` for never: the screen
-/// blanks after `idle-delay` seconds (`0` never) and, with
-/// `lock-enabled`, locks `lock-delay` seconds later. Roost locks at that
-/// point (it has no separate blank stage yet).
-pub fn idle_lock_ms(idle_delay_s: u32, lock_enabled: bool, lock_delay_s: u32) -> u64 {
+/// Idle lock follows the screen shield: fade for ten seconds, then lock,
+/// or a longer configured lock-delay. Disabled animations remove that minimum.
+pub fn idle_lock_ms(
+    idle_delay_s: u32,
+    lock_enabled: bool,
+    lock_delay_s: u32,
+    animations: bool,
+) -> u64 {
     if idle_delay_s == 0 || !lock_enabled {
         return 0;
     }
-    (u64::from(idle_delay_s) + u64::from(lock_delay_s)) * 1000
+    u64::from(idle_delay_s) * 1000
+        + (u64::from(lock_delay_s) * 1000).max(if animations { 10_000 } else { 0 })
 }
 
 #[cfg(test)]
@@ -762,10 +766,16 @@ mod idle_tests {
 
     #[test]
     fn idle_lock_follows_gnome_keys() {
-        assert_eq!(idle_lock_ms(300, true, 0), 300_000, "GNOME 51 default");
-        assert_eq!(idle_lock_ms(300, true, 30), 330_000);
-        assert_eq!(idle_lock_ms(0, true, 0), 0, "idle-delay 0 is never");
-        assert_eq!(idle_lock_ms(300, false, 0), 0, "lock disabled");
+        assert_eq!(
+            idle_lock_ms(300, true, 0, true),
+            310_000,
+            "GNOME 51 default"
+        );
+        assert_eq!(idle_lock_ms(300, true, 30, true), 330_000);
+        assert_eq!(idle_lock_ms(2, true, 0, false), 2000);
+        assert_eq!(idle_lock_ms(2, true, 20, false), 22000);
+        assert_eq!(idle_lock_ms(0, true, 0, true), 0, "idle-delay 0 is never");
+        assert_eq!(idle_lock_ms(300, false, 0, true), 0, "lock disabled");
     }
 }
 

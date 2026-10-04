@@ -159,3 +159,14 @@ its saved device Route before setting the sink default. Sinks without routes
 incomplete JSON and retained graph state, clears stale state on disconnect,
 and reconnects to a restarted daemon. The graphical gates use an event-driven
 FIFO fixture with the same JSON objects and route command arguments.
+
+Idle shield behavior follows GNOME's `screenShield.js`: the idle fade takes
+10,000 ms with ease-out-quad, and locking waits for the larger of that animation duration
+and `lock-delay`. With animations disabled the minimum disappears.
+`G-IDLE-FADE` drives a two-second idle policy, cancels the fade with
+activity, observes the blank stage before the delayed lock, and verifies
+that waking still requires PAM. `G-LOCK-BACKGROUND` uses a solid green
+screen-saver URI and checks its dimmed pixels. The parity lock frame sets
+an explicit URI to the exported reference wallpaper and retains it in
+`lock-background-uri.txt`; the custom-color proof is separate from that
+GNOME visual comparison.

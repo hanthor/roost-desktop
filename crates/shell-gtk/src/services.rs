@@ -271,6 +271,10 @@ pub struct Widgets {
     pub panel_network: gtk::Image,
     pub panel_volume: gtk::Image,
     pub panel_power_profile: gtk::Image,
+    pub panel_battery: gtk::Box,
+    pub battery_icon: gtk::Image,
+    pub battery_percentage: gtk::Label,
+    pub battery_summary: gtk::Label,
     /// The microphone: the panel's privacy indicator and the slider row.
     pub panel_mic: gtk::Image,
     pub mic: gtk::Scale,
@@ -302,6 +306,7 @@ pub fn attach(w: &Rc<Widgets>) {
                 bluetooth(&conn, &w2);
                 power_profiles(&conn, &w2, 0);
                 brightness(&conn, &w2);
+                battery(&conn, &w2);
             }
             Err(e) => eprintln!("roost-shell-gtk: no system bus, service tiles hidden: {e}"),
         },
@@ -954,4 +959,142 @@ fn audio(w: &Rc<Widgets>) {
         });
     }
     ui.start();
+}
+
+/// UPower's aggregate display device describes all laptop batteries together.
+fn battery(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
+    const NAME: &str = "org.freedesktop.UPower";
+    let remote = Remote::new(
+        conn,
+        NAME,
+        "/org/freedesktop/UPower/devices/DisplayDevice",
+        "org.freedesktop.UPower.Device",
+    );
+    let settings = crate::settings(crate::INTERFACE_SCHEMA).filter(|settings| {
+        settings
+            .settings_schema()
+            .is_some_and(|schema| schema.has_key("show-battery-percentage"))
+    });
+    let refresh: Rc<dyn Fn()> = {
+        let (remote, w, settings) = (remote.clone(), w.clone(), settings.clone());
+        Rc::new(move || {
+            let (w, settings) = (w.clone(), settings.clone());
+            remote.get_all(move |props| {
+                let present = props.as_ref().is_some_and(|p| {
+                    dict_bool(p, "IsPresent").unwrap_or(false)
+                        && p.lookup_value("Type", None).and_then(|v| v.get::<u32>()) == Some(2)
+                });
+                w.panel_battery.set_visible(present);
+                w.battery_summary.set_visible(present);
+                let Some(props) = props.filter(|_| present) else {
+                    return;
+                };
+                let percent = props
+                    .lookup_value("Percentage", None)
+                    .and_then(|v| v.get::<f64>())
+                    .unwrap_or(0.0)
+                    .clamp(0.0, 100.0)
+                    .round() as u32;
+                let state = props
+                    .lookup_value("State", None)
+                    .and_then(|v| v.get::<u32>())
+                    .unwrap_or(0);
+                w.battery_icon
+                    .set_icon_name(Some(&battery_icon(percent, state)));
+                w.battery_percentage.set_text(&format!("{percent}%"));
+                w.battery_percentage.set_visible(
+                    settings
+                        .as_ref()
+                        .is_some_and(|s| s.boolean("show-battery-percentage")),
+                );
+                let seconds = props
+                    .lookup_value(
+                        if state == 1 {
+                            "TimeToFull"
+                        } else {
+                            "TimeToEmpty"
+                        },
+                        None,
+                    )
+                    .and_then(|v| v.get::<i64>())
+                    .unwrap_or(0);
+                let summary = battery_summary(percent, state, seconds);
+                w.battery_summary.set_text(&summary);
+                w.panel_battery.set_tooltip_text(Some(&summary));
+                w.battery_icon
+                    .update_property(&[gtk::accessible::Property::Label(&summary)]);
+            });
+        })
+    };
+    {
+        let refresh = refresh.clone();
+        remote.watch(move || refresh());
+    }
+    if let Some(settings) = settings {
+        let refresh = refresh.clone();
+        settings.connect_changed(Some("show-battery-percentage"), move |_, _| refresh());
+    }
+    watch_name(conn, NAME, move |_| refresh());
+}
+
+fn battery_icon(percent: u32, state: u32) -> String {
+    if state == 3 {
+        return "battery-empty-symbolic".into();
+    }
+    if state == 4 {
+        return "battery-level-100-charged-symbolic".into();
+    }
+    let level = percent.min(100) / 10 * 10;
+    format!(
+        "battery-level-{level}{}-symbolic",
+        if matches!(state, 1 | 5) {
+            "-charging"
+        } else {
+            ""
+        }
+    )
+}
+
+fn battery_summary(percent: u32, state: u32, seconds: i64) -> String {
+    let status = match state {
+        1 | 5 => "Charging",
+        3 => "Empty",
+        4 => "Fully charged",
+        _ => "Discharging",
+    };
+    if seconds > 0 && matches!(state, 1 | 2) {
+        let minutes = seconds / 60;
+        format!(
+            "{percent}% · {status} · {}∶{:02} {}",
+            minutes / 60,
+            minutes % 60,
+            if state == 1 {
+                "until full"
+            } else {
+                "remaining"
+            }
+        )
+    } else {
+        format!("{percent}% · {status}")
+    }
+}
+
+#[cfg(test)]
+mod battery_tests {
+    use super::*;
+    #[test]
+    fn upower_battery_states_choose_icons_and_remaining_time() {
+        assert_eq!(battery_icon(37, 2), "battery-level-30-symbolic");
+        assert_eq!(battery_icon(37, 1), "battery-level-30-charging-symbolic");
+        assert_eq!(battery_icon(0, 3), "battery-empty-symbolic");
+        assert_eq!(battery_icon(100, 4), "battery-level-100-charged-symbolic");
+        assert_eq!(
+            battery_summary(37, 2, 5400),
+            "37% · Discharging · 1∶30 remaining"
+        );
+        assert_eq!(
+            battery_summary(82, 1, 1800),
+            "82% · Charging · 0∶30 until full"
+        );
+    }
 }
