@@ -71,7 +71,7 @@ impl Group {
         }
         self.set_height(from);
         let weak = Rc::downgrade(self);
-        let mut started = None;
+        let started = Cell::new(None);
         self.widget.add_tick_callback(move |_, clock| {
             let Some(group) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
@@ -79,7 +79,11 @@ impl Group {
             if generation != group.generation.get() {
                 return glib::ControlFlow::Break;
             }
-            let start = *started.get_or_insert(clock.frame_time());
+            let start = started.get().unwrap_or_else(|| {
+                let time = clock.frame_time();
+                started.set(Some(time));
+                time
+            });
             let elapsed_ms = (clock.frame_time() - start) as f64 / 1000.0;
             let enabled = gtk::Settings::default().is_none_or(|s| s.is_gtk_enable_animations());
             group.set_height(height_at(from, to, elapsed_ms, enabled));
