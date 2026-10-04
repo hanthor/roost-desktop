@@ -1158,6 +1158,42 @@ fn grid_hover(widget: &impl IsA<gtk::Widget>, target: String, reflow: Rc<GridRef
 /// GNOME's paged app grid (appDisplay.js): the pages side by side,
 /// flipped by the wheel, a swipe, PageUp/PageDown, the side arrows or
 /// the indicators; arrows and indicators only with more than one page.
+mod page_hint {
+    use gtk::prelude::*;
+    use gtk::subclass::prelude::*;
+    use gtk4 as gtk;
+
+    #[derive(Default)]
+    pub struct PageHint;
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for PageHint {
+        const NAME: &'static str = "RoostPageHint";
+        type Type = super::PageHint;
+        type ParentType = gtk::Fixed;
+    }
+    impl ObjectImpl for PageHint {}
+    impl WidgetImpl for PageHint {
+        fn measure(&self, orientation: gtk::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
+            if orientation == gtk::Orientation::Horizontal {
+                // Animated actors begin outside the clip. Their FixedLayout
+                // extents must never enlarge the 10% navigation hint.
+                let width = self.obj().width_request().max(0);
+                (width, width, -1, -1)
+            } else {
+                self.parent_measure(orientation, for_size)
+            }
+        }
+    }
+    impl FixedImpl for PageHint {}
+}
+
+glib::wrapper! {
+    struct PageHint(ObjectSubclass<page_hint::PageHint>)
+        @extends gtk::Fixed, gtk::Widget,
+        @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
+}
+
 fn paged_grid(pages: Vec<gtk::FlowBox>, reflow: Rc<GridReflow>) -> gtk::Widget {
     use libadwaita as adw;
     let carousel = adw::Carousel::new();
@@ -1220,7 +1256,7 @@ fn paged_grid(pages: Vec<gtk::FlowBox>, reflow: Rc<GridReflow>) -> gtk::Widget {
     // dragged they take the arrows' place at the sides, a tenth of the
     // grid wide each, lit (.dnd) while the drag is over them.
     let hint = |side: &str, align: gtk::Align| {
-        let hint = gtk::Fixed::new();
+        let hint = glib::Object::new::<PageHint>();
         hint.set_overflow(gtk::Overflow::Hidden);
         hint.set_vexpand(true);
         hint.set_accessible_role(gtk::AccessibleRole::Group);
@@ -1308,8 +1344,8 @@ fn paged_grid(pages: Vec<gtk::FlowBox>, reflow: Rc<GridReflow>) -> gtk::Widget {
 /// second while the pointer stays.
 struct DragPager {
     carousel: libadwaita::Carousel,
-    previous_hint: gtk::Fixed,
-    next_hint: gtk::Fixed,
+    previous_hint: PageHint,
+    next_hint: PageHint,
     previous: gtk::Button,
     next: gtk::Button,
     dragging: Cell<bool>,
@@ -1348,7 +1384,7 @@ impl DragPager {
         }
     }
 
-    fn preview(&self, hint: &gtk::Fixed, page: u32, direction: f64) {
+    fn preview(&self, hint: &PageHint, page: u32, direction: f64) {
         while let Some(child) = hint.first_child() {
             hint.remove(&child);
         }
