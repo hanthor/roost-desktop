@@ -125,6 +125,24 @@ pub enum Handled {
         /// Revision now held.
         to_revision: u64,
     },
+    /// A workspace key switched workspaces: show GNOME's popup.
+    WorkspacePopup {
+        /// The active workspace's position.
+        index: u32,
+        /// How many workspaces there are.
+        count: u32,
+    },
+    /// A client asked for GNOME's window menu.
+    WindowMenu(WindowMenuRequest),
+    /// A grabbed accelerator was pressed (org.gnome.Shell).
+    Accelerator {
+        /// The grab's action id.
+        action: u32,
+        /// The key event's time in milliseconds.
+        time: u32,
+        /// The action mode it fired in.
+        mode: u32,
+    },
     /// Compositor answered one command; match `id` against the value
     /// [`ControlClient::send_activation`] returned.
     CommandResult {
@@ -178,6 +196,11 @@ pub enum Handled {
         /// Variable count now held.
         count: usize,
     },
+    /// Where the overview's previews sit (UI state, not model truth).
+    OverviewPreviews {
+        /// Preview count now held.
+        count: usize,
+    },
 }
 
 /// Shell-side control client over a connected Unix socket.
@@ -201,6 +224,8 @@ pub struct ControlClient {
     outputs: Vec<OutputInfo>,
     /// Session environment from the compositor (#59).
     environment: Vec<(String, String)>,
+    /// Overview previews and the hovered one, from the compositor.
+    overview_previews: (Vec<roost_shell_control::PreviewInfo>, Option<u64>),
 }
 
 impl ControlClient {
@@ -229,12 +254,19 @@ impl ControlClient {
             locked: false,
             outputs: Vec::new(),
             environment: Vec::new(),
+            overview_previews: (Vec::new(), None),
         })
     }
 
     /// Shell-side view state (window list, overview flag).
     pub fn model(&self) -> &ShellModel {
         &self.model
+    }
+
+    /// Which desktop entry a window's app id belongs to (see
+    /// [`ShellModel::set_app_resolver`]).
+    pub fn set_app_resolver(&mut self, resolve: impl Fn(&str) -> Option<String> + 'static) {
+        self.model.set_app_resolver(resolve);
     }
 
     /// Revision of the last applied snapshot or delta (`None` before the
@@ -261,6 +293,11 @@ impl ControlClient {
     /// (empty before the first one), already applied to app launches.
     pub fn environment(&self) -> &[(String, String)] {
         &self.environment
+    }
+
+    /// The overview's window previews and the hovered one.
+    pub fn overview_previews(&self) -> (&[roost_shell_control::PreviewInfo], Option<u64>) {
+        (&self.overview_previews.0, self.overview_previews.1)
     }
 
     /// Output inventory from the latest `Outputs` message (empty
@@ -378,6 +415,30 @@ impl ControlClient {
         Ok(id)
     }
 
+    /// Send GNOME's input settings (#60). Returns the request id.
+    pub fn set_input_settings(
+        &mut self,
+        settings: roost_shell_control::InputSettings,
+    ) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::SetInputSettings(settings),
+        })?;
+        Ok(id)
+    }
+
+    /// Tell the compositor whether the overview shows the app grid, so
+    /// it draws the workspaces as thumbnails. Returns the request id.
+    pub fn set_overview_app_grid(&mut self, active: bool) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::SetOverviewAppGrid { active },
+        })?;
+        Ok(id)
+    }
+
     /// Tell the compositor whether overview search shows results, so
     /// it hides the workspace view meanwhile. Returns the request id.
     pub fn set_overview_search(&mut self, active: bool) -> Result<u64, ControlError> {
@@ -416,6 +477,101 @@ impl ControlClient {
         self.write_message(&Message::Command {
             id,
             kind: CommandKind::Lock,
+        })?;
+        Ok(id)
+    }
+
+    /// Replace the compositor's accelerator grabs (org.gnome.Shell's
+    /// GrabAccelerators), the full set each time. Returns the request id.
+    pub fn set_accelerators(
+        &mut self,
+        accelerators: Vec<roost_shell_control::Accelerator>,
+    ) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::SetAccelerators { accelerators },
+        })?;
+        Ok(id)
+    }
+
+    /// Make `workspace` active (GNOME's workspace keys). Returns the
+    /// request id.
+    pub fn focus_workspace(&mut self, workspace: u32) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::FocusWorkspace {
+                workspace: u64::from(workspace),
+            },
+        })?;
+        Ok(id)
+    }
+
+    /// Carry out one of GNOME's window-menu actions. Returns the request id.
+    pub fn window_action(
+        &mut self,
+        window: u64,
+        action: roost_shell_control::WindowAction,
+    ) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::WindowAction { window, action },
+        })?;
+        Ok(id)
+    }
+
+    /// Where the switcher's window thumbnails sit (empty: none).
+    pub fn set_switcher_thumbnails(
+        &mut self,
+        thumbnails: Vec<roost_shell_control::SwitcherThumbnail>,
+    ) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::SetSwitcherThumbnails { thumbnails },
+        })?;
+        Ok(id)
+    }
+
+    /// The switcher's chords (GNOME's rebindable switcher keys).
+    pub fn set_switcher_keys(
+        &mut self,
+        keys: Vec<roost_shell_control::SwitcherKey>,
+    ) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::SetSwitcherKeys { keys },
+        })?;
+        Ok(id)
+    }
+
+    /// Switch to the next (or previous) keyboard input source. Returns
+    /// the request id.
+    pub fn switch_input_source(&mut self, backward: bool) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::SwitchInputSource { backward },
+        })?;
+        Ok(id)
+    }
+
+    /// Offer the lock screen's password (ext-session-lock prompt). The
+    /// compositor verifies it off its loop (PAM or greetd) and answers
+    /// `Applied` once the session is unlocked or `Denied` when the
+    /// password was wrong; the unlocked snapshot follows an `Applied`.
+    /// The password is never logged (`Secret` redacts its `Debug`).
+    /// Returns the request id for `CommandResult` correlation.
+    pub fn unlock(&mut self, password: String) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::Unlock {
+                password: roost_shell_control::Secret(password),
+            },
         })?;
         Ok(id)
     }
@@ -531,6 +687,13 @@ impl ControlClient {
                     count: self.outputs.len(),
                 })
             }
+            Message::OverviewPreviews { previews, hovered } => {
+                // UI state for the shell's preview chrome, like Overview.
+                self.overview_previews = (previews, hovered);
+                Ok(Handled::OverviewPreviews {
+                    count: self.overview_previews.0.len(),
+                })
+            }
             Message::Environment { vars } => {
                 // Apps the shell launches inherit these (DISPLAY once
                 // XWayland is up). Not model truth, like Outputs.
@@ -539,6 +702,33 @@ impl ControlClient {
                 Ok(Handled::Environment {
                     count: self.environment.len(),
                 })
+            }
+            Message::WindowMenu {
+                window,
+                x,
+                y,
+                maximized,
+                above,
+                sticky,
+                workspace_left,
+                workspace_right,
+            } => Ok(Handled::WindowMenu(WindowMenuRequest {
+                window,
+                x,
+                y,
+                maximized,
+                above,
+                sticky,
+                workspace_left,
+                workspace_right,
+            })),
+            Message::WorkspacePopup { index, count } => {
+                Ok(Handled::WorkspacePopup { index, count })
+            }
+            Message::AcceleratorActivated { action, time, mode } => {
+                // A grabbed key combination: the shell signals its D-Bus
+                // owner. UI state; never touches the model.
+                Ok(Handled::Accelerator { action, time, mode })
             }
             Message::Overview { open } => {
                 // 002 R1: overview intent is UI state, not model truth —
@@ -554,6 +744,23 @@ impl ControlClient {
                 // overview's Enter path.
                 let selection = match action {
                     SwitcherAction::Step { forward } => self.model.switcher_step(forward),
+                    SwitcherAction::StepWindow { forward } => {
+                        self.model.switcher_step_window(forward)
+                    }
+                    SwitcherAction::Key { keysym } => {
+                        match self.model.switcher_key(keysym) {
+                            crate::model::SwitcherEffect::None => {}
+                            crate::model::SwitcherEffect::CloseWindow(id) => {
+                                self.close_window(id)?;
+                            }
+                            crate::model::SwitcherEffect::QuitApp(ids) => {
+                                for id in ids {
+                                    self.close_window(id)?;
+                                }
+                            }
+                        }
+                        self.model.switcher_selection()
+                    }
                     SwitcherAction::Cancel => {
                         self.model.switcher_cancel();
                         None
@@ -638,6 +845,20 @@ impl ControlClient {
     }
 }
 
+/// A window-menu request: where to draw GNOME's menu and the window's
+/// state for its items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowMenuRequest {
+    pub window: u64,
+    pub x: i32,
+    pub y: i32,
+    pub maximized: bool,
+    pub above: bool,
+    pub sticky: bool,
+    pub workspace_left: bool,
+    pub workspace_right: bool,
+}
+
 /// Short label for unexpected-message diagnostics.
 fn message_label(msg: &Message) -> &'static str {
     match msg {
@@ -651,6 +872,10 @@ fn message_label(msg: &Message) -> &'static str {
         Message::Switcher { .. } => "Switcher",
         Message::Outputs { .. } => "Outputs",
         Message::Environment { .. } => "Environment",
+        Message::OverviewPreviews { .. } => "OverviewPreviews",
+        Message::AcceleratorActivated { .. } => "AcceleratorActivated",
+        Message::WindowMenu { .. } => "WindowMenu",
+        Message::WorkspacePopup { .. } => "WorkspacePopup",
     }
 }
 

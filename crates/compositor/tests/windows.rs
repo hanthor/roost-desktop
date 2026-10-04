@@ -17,9 +17,9 @@ use std::os::unix::net::UnixStream;
 use roost_compositor::layer::OVERVIEW_NAMESPACE;
 use roost_compositor::windows::{
     ManagerInput, SessionMode, TileSide, WindowLayout, WindowManager, ALT_LEFT_KEYCODE,
-    ARROW_DOWN_KEYCODE, ARROW_LEFT_KEYCODE, ARROW_RIGHT_KEYCODE, ARROW_UP_KEYCODE, ESCAPE_KEYCODE,
-    F4_KEYCODE, PAGE_DOWN_KEYCODE, PAGE_UP_KEYCODE, R_KEYCODE, SHIFT_LEFT_KEYCODE,
-    SUPER_LEFT_KEYCODE, TAB_KEYCODE, T_KEYCODE,
+    ARROW_DOWN_KEYCODE, ARROW_LEFT_KEYCODE, ARROW_RIGHT_KEYCODE, ARROW_UP_KEYCODE,
+    CTRL_LEFT_KEYCODE, ESCAPE_KEYCODE, F4_KEYCODE, GRAVE_KEYCODE, PAGE_DOWN_KEYCODE,
+    PAGE_UP_KEYCODE, R_KEYCODE, SHIFT_LEFT_KEYCODE, SUPER_LEFT_KEYCODE, TAB_KEYCODE, T_KEYCODE,
 };
 use roost_compositor::TestCompositor;
 use roost_shell_control::SwitcherAction;
@@ -391,7 +391,7 @@ fn sync_client(
 
 /// Two mapped windows ("alpha" from client A, "beta" from client B) with
 /// a reconciled manager. Geometry: alpha at (0,0), beta cascaded to
-/// (32,32), both 800x600.
+/// (50,50), both 800x600.
 struct Fixture {
     comp: TestCompositor,
     manager: WindowManager,
@@ -446,7 +446,7 @@ fn two_windows() -> Fixture {
     }
 }
 
-/// A point inside alpha (0,0-800,600) but outside beta (32,32-832,632).
+/// A point inside alpha (0,0-800,600) but outside beta (50,50-850,650).
 fn alpha_only() -> Point<f64, Logical> {
     (10.0, 10.0).into()
 }
@@ -467,7 +467,7 @@ fn two_toplevels_map_with_cascaded_geometry() {
     assert_eq!((geo_b.size.w, geo_b.size.h), (800, 600));
     let mut locs = vec![(geo_a.loc.x, geo_a.loc.y), (geo_b.loc.x, geo_b.loc.y)];
     locs.sort();
-    assert_eq!(locs, vec![(0, 0), (32, 32)]);
+    assert_eq!(locs, vec![(0, 0), (50, 50)]);
 
     // Mapping focuses: exactly one window holds keyboard focus.
     let focused = f.manager.model().focused().unwrap();
@@ -476,14 +476,21 @@ fn two_toplevels_map_with_cascaded_geometry() {
 }
 
 #[test]
-fn pointer_motion_moves_focus_to_window_under_cursor() {
+fn focus_follows_clicks_not_motion() {
+    // GNOME's default click-to-focus: hovering never focuses or raises.
     let mut f = two_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
     f.manager
         .pointer_motion(&mut f.comp.state, beta_only(), 1000);
+    assert_eq!(f.manager.model().focused(), Some(f.id_a));
+    f.manager
+        .pointer_button(&mut f.comp.state, BTN_LEFT, true, 1001);
+    f.manager
+        .pointer_button(&mut f.comp.state, BTN_LEFT, false, 1002);
     assert_eq!(f.manager.model().focused(), Some(f.id_b));
     f.manager
-        .pointer_motion(&mut f.comp.state, alpha_only(), 1001);
-    assert_eq!(f.manager.model().focused(), Some(f.id_a));
+        .pointer_motion(&mut f.comp.state, alpha_only(), 1003);
+    assert_eq!(f.manager.model().focused(), Some(f.id_b));
 }
 
 #[test]
@@ -576,7 +583,7 @@ fn move_and_resize_update_geometry_and_advertise_size() {
     let mut f = two_windows();
     assert!(f.manager.move_window(f.id_b, 50, 60));
     let moved = f.manager.geometry(f.id_b).unwrap();
-    assert_eq!((moved.loc.x, moved.loc.y), (82, 92));
+    assert_eq!((moved.loc.x, moved.loc.y), (100, 110));
     assert!(!f.manager.move_window(999, 1, 1));
 
     assert!(f.manager.resize_window(f.id_b, 400, 300));
@@ -599,6 +606,60 @@ fn move_to_workspace_updates_model() {
     // Untouched windows keep their workspace.
     assert_eq!(f.manager.model().window(f.id_b).unwrap().workspace, 0);
     assert!(!f.manager.move_to_workspace(&mut f.comp.state, 999, 3));
+}
+
+#[test]
+fn window_menu_actions_follow_gnome() {
+    use roost_shell_control::WindowAction;
+    let mut f = two_windows();
+    // Always on Visible Workspace: shown on the next workspace too.
+    assert!(f
+        .manager
+        .window_action(&mut f.comp.state, f.id_a, WindowAction::ToggleSticky));
+    assert!(f.manager.is_sticky(f.id_a));
+    assert!(f.manager.switch_relative(&mut f.comp.state, 1));
+    assert_eq!(
+        f.manager.visible_windows().len(),
+        1,
+        "only the sticky window shows"
+    );
+    assert!(f.manager.switch_relative(&mut f.comp.state, -1));
+    // Hide takes it off the screen; activating it brings it back.
+    assert!(f
+        .manager
+        .window_action(&mut f.comp.state, f.id_b, WindowAction::Minimize));
+    assert!(f.manager.is_minimized(f.id_b));
+    assert_eq!(f.manager.visible_windows().len(), 1);
+    assert_ne!(f.manager.model().focused(), Some(f.id_b));
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    assert!(!f.manager.is_minimized(f.id_b));
+    // Move to Workspace: right, then left; none to the left of the first.
+    assert!(f.manager.window_action(
+        &mut f.comp.state,
+        f.id_b,
+        WindowAction::MoveToWorkspaceRight
+    ));
+    assert_eq!(f.manager.model().window(f.id_b).unwrap().workspace, 1);
+    assert!(f.manager.workspace_left_of(f.id_b));
+    assert!(f
+        .manager
+        .window_action(&mut f.comp.state, f.id_b, WindowAction::MoveToWorkspaceLeft));
+    assert_eq!(f.manager.model().window(f.id_b).unwrap().workspace, 0);
+    assert!(!f.manager.workspace_left_of(f.id_b));
+    assert!(!f
+        .manager
+        .window_action(&mut f.comp.state, f.id_b, WindowAction::MoveToWorkspaceLeft));
+    // Always on Top stays above a newly focused window.
+    assert!(f
+        .manager
+        .window_action(&mut f.comp.state, f.id_b, WindowAction::ToggleAbove));
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    let top = f.manager.visible_windows().last().map(|(w, _)| w.clone());
+    let b_surface = f.manager.surface_of(f.id_b);
+    assert_eq!(
+        top.and_then(|w| w.wl_surface().map(|s| s.into_owned())),
+        b_surface
+    );
 }
 
 #[test]
@@ -728,6 +789,84 @@ fn super_page_keys_switch_and_shift_moves_focused() {
     assert_eq!(f.manager.model().window(f.id_b).unwrap().workspace, 0);
     assert_eq!(f.manager.model().active_workspace(), 0);
     assert_eq!(f.manager.model().focused(), Some(f.id_b));
+}
+
+#[test]
+fn super_tab_switches_applications_like_alt_tab() {
+    // GNOME binds switch-applications to Super+Tab as well as Alt+Tab;
+    // Super's release commits, and no overview toggles.
+    let mut f = two_windows();
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, TAB_KEYCODE);
+    release(&mut f.manager, &mut f.comp, TAB_KEYCODE);
+    assert_eq!(
+        f.manager.take_switcher_queue(),
+        vec![SwitcherAction::Step { forward: true }]
+    );
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    assert_eq!(
+        f.manager.take_switcher_queue(),
+        vec![SwitcherAction::Commit]
+    );
+}
+
+#[test]
+fn rebound_switcher_keys_replace_the_builtin_chords() {
+    // GNOME's switch-applications rebound to Ctrl+J: the chord steps,
+    // Shift steps back, Control's release commits, and Alt+Tab is
+    // ordinary input again. Super+Above_Tab stays a group step.
+    use roost_shell_control::{SwitcherKey, SwitcherKeyKind, KEYSYM_ABOVE_TAB, MOD_CTRL, MOD_LOGO};
+    const J_KEYCODE: u32 = 36;
+    let mut f = two_windows();
+    f.manager.set_switcher_keys(vec![
+        SwitcherKey {
+            keysym: 0x6a,
+            mods: MOD_CTRL,
+            kind: SwitcherKeyKind::Applications,
+        },
+        SwitcherKey {
+            keysym: KEYSYM_ABOVE_TAB,
+            mods: MOD_LOGO,
+            kind: SwitcherKeyKind::Group,
+        },
+    ]);
+    press(&mut f.manager, &mut f.comp, ALT_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, TAB_KEYCODE);
+    release(&mut f.manager, &mut f.comp, TAB_KEYCODE);
+    release(&mut f.manager, &mut f.comp, ALT_LEFT_KEYCODE);
+    assert!(f.manager.take_switcher_queue().is_empty());
+
+    press(&mut f.manager, &mut f.comp, CTRL_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, J_KEYCODE);
+    release(&mut f.manager, &mut f.comp, J_KEYCODE);
+    press(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, J_KEYCODE);
+    release(&mut f.manager, &mut f.comp, J_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    assert_eq!(
+        f.manager.take_switcher_queue(),
+        vec![
+            SwitcherAction::Step { forward: true },
+            SwitcherAction::Step { forward: false }
+        ]
+    );
+    release(&mut f.manager, &mut f.comp, CTRL_LEFT_KEYCODE);
+    assert_eq!(
+        f.manager.take_switcher_queue(),
+        vec![SwitcherAction::Commit]
+    );
+
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, GRAVE_KEYCODE);
+    release(&mut f.manager, &mut f.comp, GRAVE_KEYCODE);
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    assert_eq!(
+        f.manager.take_switcher_queue(),
+        vec![
+            SwitcherAction::StepWindow { forward: true },
+            SwitcherAction::Commit
+        ]
+    );
 }
 
 #[test]
@@ -945,7 +1084,7 @@ fn client_maximize_request_applies_on_reconcile() {
 #[test]
 fn transient_dialog_centers_above_parent() {
     let mut f = layout_windows();
-    // Beta sits cascaded at (32,32); the dialog centers on it, which a
+    // Beta sits cascaded at (50,50); the dialog centers on it, which a
     // plain cascade to (64,64) would never produce. The dialog shares
     // beta's connection: Wayland object ids are connection-scoped, so
     // a cross-client parent is a protocol error, not a placement.
@@ -987,7 +1126,7 @@ fn transient_dialog_centers_above_parent() {
     let visible = f.manager.visible_windows();
     assert_eq!(visible.len(), 3);
     let geo = f.manager.geometry(id_c).unwrap();
-    assert_eq!((geo.loc.x, geo.loc.y), (32, 32));
+    assert_eq!((geo.loc.x, geo.loc.y), (50, 50));
 }
 
 #[test]
@@ -1336,30 +1475,33 @@ fn strip_geometry_gaps_overflow_and_advertise() {
     assert_eq!(f.manager.session_mode(), SessionMode::Scroll);
 
     // Work area is 1280x768 (800 minus the 32px panel); the default
-    // column is (1280 - 16) * 0.5 - 16 = 616 wide at full work height,
-    // stepped by 616 + 16 = 632 per column.
+    // column is (1280 - 16) * 0.5 - 16 = 616 wide, a 16px gap above and
+    // below (736 tall from y 48), stepped by 616 + 16 = 632 per column
+    // from a 16px start gap. The view follows the focused column
+    // (gamma, mapped last) to the strip's end: offset 632.
     let mut xs: Vec<i32> = [f.id_a, f.id_b, id_c]
         .into_iter()
         .map(|id| {
             let geo = f.manager.geometry(id).unwrap();
-            assert_eq!((geo.loc.y, geo.size.w, geo.size.h), (32, 616, 768));
+            assert_eq!((geo.loc.y, geo.size.w, geo.size.h), (48, 616, 736));
             assert_eq!(f.manager.window_layout(id), Some(WindowLayout::Strip));
             geo.loc.x
         })
         .collect();
     xs.sort();
-    assert_eq!(xs, vec![0, 632, 1264]);
+    assert_eq!(xs, vec![-616, 16, 648]);
+    assert_eq!(f.manager.strip_offset(), 632.0);
 
-    // The strip size is advertised through configure with no managed
-    // xdg state (same as floating).
+    // The strip size is advertised through configure, tiled on every
+    // edge.
     pump(&mut f.comp, &mut f.queue_a, &mut f.client_a, |c| {
-        c.configure_sizes.last() == Some(&(616, 768))
+        c.configure_sizes.last() == Some(&(616, 736))
     });
     pump(&mut f.comp, &mut f.queue_b, &mut f.client_b, |c| {
-        c.configure_sizes.last() == Some(&(616, 768))
+        c.configure_sizes.last() == Some(&(616, 736))
     });
     pump(&mut f.comp, &mut queue_c, &mut client_c, |c| {
-        c.configure_sizes.last() == Some(&(616, 768))
+        c.configure_sizes.last() == Some(&(616, 736))
     });
     for (name, states) in [
         ("alpha", f.client_a.configure_states.last()),
@@ -1369,7 +1511,15 @@ fn strip_geometry_gaps_overflow_and_advertise() {
         let states = states.expect("strip configure must advertise state");
         assert!(
             !has_state(states, 1) && !has_state(states, 2),
-            "{name} advertised a managed state in strip mode: {states:?}"
+            "{name} advertised maximized or fullscreen in strip mode: {states:?}"
+        );
+        // niri's columns are tiled on every edge (left, right, top,
+        // bottom): CSD drops its shadow and rounded corners.
+        assert!(
+            [5, 6, 7, 8]
+                .into_iter()
+                .all(|state| has_state(states, state)),
+            "{name} is not tiled on every edge in strip mode: {states:?}"
         );
     }
 
@@ -1492,9 +1642,17 @@ fn clear_three(f: &mut ThreeFixture) {
     f.client_c.keys.clear();
 }
 
-/// Column x positions of alpha/beta/gamma: the strip order focus
-/// motion must never disturb.
+/// Column x positions of alpha/beta/gamma along the strip (screen x
+/// plus the view offset, less the 16px start gap): the order focus
+/// motion must never disturb, whatever the view follows.
 fn column_xs(f: &ThreeFixture) -> (i32, i32, i32) {
+    let along = |id| f.manager.geometry(id).unwrap().loc.x + f.manager.strip_offset() as i32 - 16;
+    (along(f.id_a), along(f.id_b), along(f.id_c))
+}
+
+/// Column x positions of alpha/beta/gamma on screen: where the view
+/// puts them.
+fn screen_xs(f: &ThreeFixture) -> (i32, i32, i32) {
     (
         f.manager.geometry(f.id_a).unwrap().loc.x,
         f.manager.geometry(f.id_b).unwrap().loc.x,
@@ -1591,7 +1749,7 @@ fn scroll_shift_arrow_moves_focused_slot() {
     release(&mut f.manager, &mut f.comp, ARROW_RIGHT_KEYCODE);
     for id in [f.id_a, f.id_b, f.id_c] {
         let geo = f.manager.geometry(id).unwrap();
-        assert_eq!((geo.loc.y, geo.size.w, geo.size.h), (32, 616, 768));
+        assert_eq!((geo.loc.y, geo.size.w, geo.size.h), (48, 616, 736));
         assert_eq!(f.manager.window_layout(id), Some(WindowLayout::Strip));
     }
 
@@ -1687,8 +1845,8 @@ fn scroll_up_down_stay_columns_in_scroll() {
     press(&mut f.manager, &mut f.comp, ARROW_UP_KEYCODE);
     assert_eq!(f.manager.window_layout(f.id_b), Some(WindowLayout::Strip));
     let col = f.manager.geometry(f.id_b).unwrap();
-    assert_eq!((col.loc.x, col.loc.y), (632, 32));
-    assert_eq!((col.size.w, col.size.h), (616, 768));
+    assert_eq!((col.loc.x, col.loc.y), (648, 48));
+    assert_eq!((col.size.w, col.size.h), (616, 736));
     release(&mut f.manager, &mut f.comp, ARROW_UP_KEYCODE);
     // Super+Down afterwards keeps the column: no floating restore
     // mid-strip.
@@ -1700,7 +1858,7 @@ fn scroll_up_down_stay_columns_in_scroll() {
 
     // The column size is advertised with no managed xdg state.
     pump(&mut f.comp, &mut f.queue_b, &mut f.client_b, |c| {
-        c.configure_sizes.last() == Some(&(616, 768))
+        c.configure_sizes.last() == Some(&(616, 736))
     });
     let states = f
         .client_b
@@ -1739,19 +1897,20 @@ fn axis(manager: &mut WindowManager, comp: &mut TestCompositor, horizontal: f64,
 fn scroll_axis_moves_strip_view_and_reports_offset() {
     let mut f = three_windows();
     assert!(f.manager.set_scroll(&mut f.comp.state, true));
+    // Focusing alpha brings the view back to the strip's start.
     assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
-    assert_eq!(column_xs(&f), (0, 632, 1264));
+    assert_eq!(screen_xs(&f), (16, 648, 1280));
     assert_eq!(f.manager.strip_offset(), 0.0);
 
     // One vertical tick shifts every column left; the getter tracks
     // the accumulated offset.
     axis(&mut f.manager, &mut f.comp, 0.0, 120.0);
     assert_eq!(f.manager.strip_offset(), 120.0);
-    assert_eq!(column_xs(&f), (-120, 512, 1144));
+    assert_eq!(screen_xs(&f), (-104, 528, 1160));
     // Horizontal and vertical amounts accumulate into one offset.
     axis(&mut f.manager, &mut f.comp, 30.0, 0.0);
     assert_eq!(f.manager.strip_offset(), 150.0);
-    assert_eq!(column_xs(&f), (-150, 482, 1114));
+    assert_eq!(screen_xs(&f), (-134, 498, 1130));
     // Scrolling never moves focus.
     assert_eq!(f.manager.model().focused(), Some(f.id_a));
 }
@@ -1761,20 +1920,90 @@ fn scroll_axis_clamps_at_overflow_bounds() {
     let mut f = three_windows();
     assert!(f.manager.set_scroll(&mut f.comp.state, true));
     assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
-    // Three 616-wide columns with 16px gaps total 1880px on a
-    // 1280px work area: at most 600px of scroll.
+    // Three 616-wide columns with 16px gaps between and at both ends
+    // total 1912px on a 1280px work area: at most 632px of scroll.
     axis(&mut f.manager, &mut f.comp, 0.0, 100_000.0);
-    assert_eq!(f.manager.strip_offset(), 600.0);
-    assert_eq!(column_xs(&f), (-600, 32, 664));
+    assert_eq!(f.manager.strip_offset(), 632.0);
+    assert_eq!(screen_xs(&f), (-616, 16, 648));
     // Past the end further ticks are no-ops keeping geometry.
     axis(&mut f.manager, &mut f.comp, 0.0, 120.0);
-    assert_eq!(f.manager.strip_offset(), 600.0);
-    assert_eq!(column_xs(&f), (-600, 32, 664));
+    assert_eq!(f.manager.strip_offset(), 632.0);
+    assert_eq!(screen_xs(&f), (-616, 16, 648));
     // A huge pull back clamps at the start.
     axis(&mut f.manager, &mut f.comp, 0.0, -100_000.0);
     assert_eq!(f.manager.strip_offset(), 0.0);
-    assert_eq!(column_xs(&f), (0, 632, 1264));
+    assert_eq!(screen_xs(&f), (16, 648, 1280));
     assert_eq!(f.manager.model().focused(), Some(f.id_b));
+}
+
+#[test]
+fn strip_view_springs_to_target_while_geometry_jumps() {
+    let mut f = three_windows();
+    assert!(f.manager.set_scroll(&mut f.comp.state, true));
+    // Entering the strip lays it out in place: nothing to animate.
+    assert_eq!(f.manager.strip_view(), f.manager.strip_offset());
+    assert!(!f.manager.strip_animating());
+    // Start from the strip's end, settled.
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_c)));
+    while f.manager.step_strip_view(1.0 / 60.0) {}
+    assert_eq!(f.manager.strip_offset(), 632.0);
+    assert_eq!(f.manager.strip_view(), 632.0);
+
+    // Focusing alpha moves the target at once: geometry, configure and
+    // the reported offset are all at the target.
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    assert_eq!(f.manager.strip_offset(), 0.0);
+    assert_eq!(screen_xs(&f), (16, 648, 1280));
+    // Only the drawn view trails, still where it was.
+    assert_eq!(f.manager.strip_view(), 632.0);
+    assert!(f.manager.strip_animating());
+    assert_eq!(f.manager.render_geometry(f.id_a).unwrap().loc.x, -616);
+
+    // 60 Hz frames: the view glides monotonically onto the target and
+    // settles in niri's time; geometry never moves meanwhile.
+    let mut last = f.manager.strip_view();
+    let mut frames = 0;
+    while f.manager.step_strip_view(1.0 / 60.0) {
+        frames += 1;
+        let view = f.manager.strip_view();
+        assert!(view <= last && view >= 0.0, "view {view} after {last}");
+        last = view;
+        assert_eq!(screen_xs(&f), (16, 648, 1280));
+        let drawn = f.manager.render_geometry(f.id_a).unwrap().loc.x;
+        assert_eq!(drawn, 16 - view.round() as i32);
+        assert!(frames < 60, "never settled");
+    }
+    // ~0.42 s at 60 Hz, a little past niri's 0.33 s envelope estimate.
+    assert!((18..=28).contains(&frames), "settled after {frames} frames");
+    assert_eq!(f.manager.strip_view(), 0.0);
+    assert!(!f.manager.strip_animating());
+    assert_eq!(
+        f.manager.render_geometry(f.id_a),
+        f.manager.geometry(f.id_a)
+    );
+
+    // Retargeting mid-flight continues from where the view is drawn,
+    // with no jump.
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_c)));
+    for _ in 0..5 {
+        f.manager.step_strip_view(1.0 / 60.0);
+    }
+    let mid = f.manager.strip_view();
+    assert!(mid > 0.0 && mid < 632.0);
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    assert_eq!(f.manager.strip_offset(), 0.0);
+    f.manager.step_strip_view(1.0 / 60.0);
+    assert_eq!(f.manager.strip_view(), mid);
+    f.manager.step_strip_view(1.0 / 60.0);
+    // Still carrying its rightward velocity a moment, then turning.
+    assert!((f.manager.strip_view() - mid).abs() < 80.0);
+    while f.manager.step_strip_view(1.0 / 60.0) {}
+    assert_eq!(f.manager.strip_view(), 0.0);
+
+    // Wheel scrolling is direct: the view follows without a spring.
+    axis(&mut f.manager, &mut f.comp, 0.0, 120.0);
+    assert_eq!(f.manager.strip_view(), 120.0);
+    assert!(!f.manager.step_strip_view(1.0 / 60.0));
 }
 
 #[test]
@@ -1806,16 +2035,18 @@ fn scroll_axis_keeps_focused_window() {
     let mut f = three_windows();
     assert!(f.manager.set_scroll(&mut f.comp.state, true));
     assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
-    for _ in 0..5 {
-        axis(&mut f.manager, &mut f.comp, 0.0, 120.0);
-        assert_eq!(f.manager.model().focused(), Some(f.id_b));
-    }
-    assert_eq!(f.manager.strip_offset(), 600.0);
+    // The view sits at the end (it followed gamma); beta is whole.
+    assert_eq!(f.manager.strip_offset(), 632.0);
     for _ in 0..5 {
         axis(&mut f.manager, &mut f.comp, 0.0, -120.0);
         assert_eq!(f.manager.model().focused(), Some(f.id_b));
     }
-    assert_eq!(f.manager.strip_offset(), 0.0);
+    assert_eq!(f.manager.strip_offset(), 32.0);
+    for _ in 0..5 {
+        axis(&mut f.manager, &mut f.comp, 0.0, 120.0);
+        assert_eq!(f.manager.model().focused(), Some(f.id_b));
+    }
+    assert_eq!(f.manager.strip_offset(), 632.0);
 }
 
 #[test]
@@ -1836,14 +2067,17 @@ fn scroll_axis_ignored_in_gnome_mode() {
 #[test]
 fn reentering_scroll_resets_strip_offset() {
     let mut f = three_windows();
+    // Entering follows the focused column (gamma, at the end).
     assert!(f.manager.set_scroll(&mut f.comp.state, true));
-    axis(&mut f.manager, &mut f.comp, 0.0, 120.0);
-    assert_eq!(f.manager.strip_offset(), 120.0);
-    assert_eq!(column_xs(&f), (-120, 512, 1144));
+    assert_eq!(f.manager.strip_offset(), 632.0);
+    axis(&mut f.manager, &mut f.comp, 0.0, -120.0);
+    assert_eq!(f.manager.strip_offset(), 512.0);
+    assert_eq!(screen_xs(&f), (-496, 136, 768));
+    // Re-entering forgets the scroll and follows focus afresh.
     f.manager.set_scroll(&mut f.comp.state, false);
     assert!(f.manager.set_scroll(&mut f.comp.state, true));
-    assert_eq!(f.manager.strip_offset(), 0.0);
-    assert_eq!(column_xs(&f), (0, 632, 1264));
+    assert_eq!(f.manager.strip_offset(), 632.0);
+    assert_eq!(screen_xs(&f), (-616, 16, 648));
 }
 
 #[test]
@@ -1861,8 +2095,8 @@ fn scroll_maximize_joins_strip_as_column() {
     assert!(f.manager.set_maximized(&mut f.comp.state, f.id_b, true));
     assert_eq!(f.manager.window_layout(f.id_b), Some(WindowLayout::Strip));
     let col = f.manager.geometry(f.id_b).unwrap();
-    assert_eq!((col.loc.x, col.loc.y), (632, 32));
-    assert_eq!((col.size.w, col.size.h), (616, 768));
+    assert_eq!((col.loc.x, col.loc.y), (648, 48));
+    assert_eq!((col.size.w, col.size.h), (616, 736));
     // Un-maximizing mid-scroll stays a column too.
     assert!(f.manager.set_maximized(&mut f.comp.state, f.id_b, false));
     assert_eq!(f.manager.window_layout(f.id_b), Some(WindowLayout::Strip));
@@ -1871,7 +2105,7 @@ fn scroll_maximize_joins_strip_as_column() {
 
     // The column size is advertised with no Maximized state.
     pump(&mut f.comp, &mut f.queue_b, &mut f.client_b, |c| {
-        c.configure_sizes.last() == Some(&(616, 768))
+        c.configure_sizes.last() == Some(&(616, 736))
     });
     let states = f
         .client_b
@@ -1898,8 +2132,8 @@ fn scroll_fullscreen_joins_strip_as_column() {
     assert!(f.manager.set_fullscreen(&mut f.comp.state, f.id_b, true));
     assert_eq!(f.manager.window_layout(f.id_b), Some(WindowLayout::Strip));
     let col = f.manager.geometry(f.id_b).unwrap();
-    assert_eq!((col.loc.x, col.loc.y), (632, 32));
-    assert_eq!((col.size.w, col.size.h), (616, 768));
+    assert_eq!((col.loc.x, col.loc.y), (648, 48));
+    assert_eq!((col.size.w, col.size.h), (616, 736));
     // Un-fullscreen mid-scroll stays a column too.
     assert!(f.manager.set_fullscreen(&mut f.comp.state, f.id_b, false));
     assert_eq!(f.manager.window_layout(f.id_b), Some(WindowLayout::Strip));
@@ -1908,7 +2142,7 @@ fn scroll_fullscreen_joins_strip_as_column() {
 
     // The column size is advertised with no Fullscreen state.
     pump(&mut f.comp, &mut f.queue_b, &mut f.client_b, |c| {
-        c.configure_sizes.last() == Some(&(616, 768))
+        c.configure_sizes.last() == Some(&(616, 736))
     });
     let states = f
         .client_b
@@ -1933,8 +2167,8 @@ fn scroll_tile_reresolves_to_column() {
         .set_tiled(&mut f.comp.state, f.id_b, TileSide::Left));
     assert_eq!(f.manager.window_layout(f.id_b), Some(WindowLayout::Strip));
     let col = f.manager.geometry(f.id_b).unwrap();
-    assert_eq!((col.loc.x, col.loc.y), (632, 32));
-    assert_eq!((col.size.w, col.size.h), (616, 768));
+    assert_eq!((col.loc.x, col.loc.y), (648, 48));
+    assert_eq!((col.size.w, col.size.h), (616, 736));
     assert!(f
         .manager
         .set_tiled(&mut f.comp.state, f.id_b, TileSide::Right));
@@ -1968,18 +2202,18 @@ fn scroll_map_lands_directly_in_strip() {
     for id in [f.id_a, f.id_b, id_c] {
         assert_eq!(f.manager.window_layout(id), Some(WindowLayout::Strip));
         let geo = f.manager.geometry(id).unwrap();
-        assert_eq!((geo.loc.y, geo.size.w, geo.size.h), (32, 616, 768));
+        assert_eq!((geo.loc.y, geo.size.w, geo.size.h), (48, 616, 736));
     }
     let mut xs: Vec<i32> = [f.id_a, f.id_b, id_c]
         .into_iter()
         .map(|id| f.manager.geometry(id).unwrap().loc.x)
         .collect();
     xs.sort();
-    assert_eq!(xs, vec![0, 632, 1264]);
+    assert_eq!(xs, vec![-616, 16, 648]);
 
     // The strip size is advertised with no managed xdg state.
     pump(&mut f.comp, &mut queue_c, &mut client_c, |c| {
-        c.configure_sizes.last() == Some(&(616, 768))
+        c.configure_sizes.last() == Some(&(616, 736))
     });
     let states = client_c
         .configure_states
@@ -2009,8 +2243,8 @@ fn scroll_client_requests_join_as_columns() {
     f.manager.reconcile(&mut f.comp.state);
     assert_eq!(f.manager.window_layout(f.id_b), Some(WindowLayout::Strip));
     let col = f.manager.geometry(f.id_b).unwrap();
-    assert_eq!((col.loc.x, col.loc.y), (632, 32));
-    assert_eq!((col.size.w, col.size.h), (616, 768));
+    assert_eq!((col.loc.x, col.loc.y), (648, 48));
+    assert_eq!((col.size.w, col.size.h), (616, 736));
 
     f.client_b.toplevel.as_ref().unwrap().unset_maximized();
     f.queue_b.flush().unwrap();
@@ -2059,8 +2293,8 @@ fn gnome_maximized_toggle_scroll_restores_floating_exact() {
     assert_eq!(f.manager.session_mode(), SessionMode::Scroll);
     assert_eq!(f.manager.window_layout(f.id_a), Some(WindowLayout::Strip));
     let col = f.manager.geometry(f.id_a).unwrap();
-    assert_eq!((col.loc.x, col.loc.y), (0, 32));
-    assert_eq!((col.size.w, col.size.h), (616, 768));
+    assert_eq!((col.loc.x, col.loc.y), (16, 48));
+    assert_eq!((col.size.w, col.size.h), (616, 736));
 
     // Toggling back restores the exact floating geometry stashed
     // before the gnome maximize.
@@ -2165,7 +2399,7 @@ fn scroll_preset_forward_cycles_and_wraps() {
     // Full work height throughout the cycle.
     for id in [f.id_a, f.id_b, f.id_c] {
         let geo = f.manager.geometry(id).unwrap();
-        assert_eq!((geo.loc.y, geo.size.h), (32, 768));
+        assert_eq!((geo.loc.y, geo.size.h), (48, 736));
         assert_eq!(f.manager.window_layout(id), Some(WindowLayout::Strip));
     }
     sync_three(&mut f);
@@ -2313,7 +2547,7 @@ fn scroll_preset_survives_toggle_and_restores_floating() {
     assert_eq!(f.manager.geometry(f.id_b).unwrap(), before_b);
 
     // Re-entering scroll remembers the preset choice: alpha is still
-    // 2/3 wide with beta at 826 + 16 = 842.
+    // 2/3 wide with beta at 16 + 826 + 16 = 858.
     press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
     press(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
     press(&mut f.manager, &mut f.comp, T_KEYCODE);
@@ -2328,8 +2562,50 @@ fn scroll_preset_survives_toggle_and_restores_floating() {
             f.manager.geometry(f.id_a).unwrap().loc.x,
             f.manager.geometry(f.id_b).unwrap().loc.x
         ),
-        (0, 842)
+        (16, 858)
     );
+}
+
+#[test]
+fn new_columns_open_right_of_focus_and_the_view_follows_like_niri() {
+    let mut f = three_windows();
+    assert!(f.manager.set_scroll(&mut f.comp.state, true));
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    assert_eq!(f.manager.strip_offset(), 0.0);
+
+    // A window mapped mid-strip opens right of the focused column (niri),
+    // takes focus, and shows whole without the view moving.
+    let (conn_d, mut queue_d, mut client_d) = connect(&mut f.comp);
+    map_toplevel(&mut f.comp, &conn_d, &mut queue_d, &mut client_d, "delta");
+    f.manager.reconcile(&mut f.comp.state);
+    let id_d = f
+        .manager
+        .model()
+        .windows()
+        .find(|w| w.title == "delta")
+        .unwrap()
+        .id;
+    assert_eq!(f.manager.model().focused(), Some(id_d));
+    let along = |f: &ThreeFixture, id| {
+        f.manager.geometry(id).unwrap().loc.x + f.manager.strip_offset() as i32 - 16
+    };
+    assert_eq!(
+        [f.id_a, id_d, f.id_b, f.id_c].map(|id| along(&f, id)),
+        [0, 632, 1264, 1896]
+    );
+    assert_eq!(f.manager.strip_offset(), 0.0);
+    assert_eq!(f.manager.geometry(id_d).unwrap().loc.x, 648);
+
+    // Focusing the far column scrolls the least that shows it whole: it
+    // ends a gap from the right edge.
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_c)));
+    assert_eq!(f.manager.strip_offset(), 1264.0);
+    let gamma = f.manager.geometry(f.id_c).unwrap();
+    assert_eq!(gamma.loc.x + gamma.size.w, 1280 - 16);
+    // And back to the first: it starts a gap from the left edge.
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    assert_eq!(f.manager.strip_offset(), 0.0);
+    assert_eq!(f.manager.geometry(f.id_a).unwrap().loc.x, 16);
 }
 
 #[test]
@@ -2337,33 +2613,34 @@ fn scroll_preset_shrink_reclamps_offset() {
     let mut f = three_windows();
     assert!(f.manager.set_scroll(&mut f.comp.state, true));
     assert!(f.manager.focus(&mut f.comp.state, Some(f.id_c)));
-    // Three 616-wide columns with 16px gaps total 1880px on a 1280px
-    // work area: scroll to the 600px max first.
+    // Three 616-wide columns with 16px gaps between and at both ends
+    // total 1912px on a 1280px work area: the view sits at the 632px
+    // max, following gamma.
     axis(&mut f.manager, &mut f.comp, 0.0, 100_000.0);
-    assert_eq!(f.manager.strip_offset(), 600.0);
-    assert_eq!(column_xs(&f), (-600, 32, 664));
+    assert_eq!(f.manager.strip_offset(), 632.0);
+    assert_eq!(screen_xs(&f), (-616, 16, 648));
     sync_three(&mut f);
     clear_three(&mut f);
 
     // Cycling the focused last column narrower (1/2 -> 1/3 = 405)
-    // shrinks the strip to 616 + 616 + 405 + 32 = 1669px, so the max
-    // scroll drops to 389px and the stranded offset must re-clamp:
-    // alpha 0 - 389, beta 616 + 16 - 389 = 243, gamma 1264 - 389.
+    // shrinks the strip to 616 + 616 + 405 + 4 * 16 = 1701px, so the
+    // max scroll drops to 421px and the stranded offset re-clamps:
+    // alpha 16 - 421, beta 648 - 421 = 227, gamma 1280 - 421.
     press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
     press(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
     press(&mut f.manager, &mut f.comp, R_KEYCODE);
     assert_eq!(f.manager.geometry(f.id_c).unwrap().size.w, 405);
-    assert_eq!(f.manager.strip_offset(), 389.0);
-    assert_eq!(column_xs(&f), (-389, 243, 875));
+    assert_eq!(f.manager.strip_offset(), 421.0);
+    assert_eq!(screen_xs(&f), (-405, 227, 859));
     assert_eq!(f.manager.model().focused(), Some(f.id_c));
     release(&mut f.manager, &mut f.comp, R_KEYCODE);
     release(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
     release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
 
-    // No blank tail: the last column ends exactly at the work edge.
+    // No blank tail: the last column ends a gap from the work edge.
     let gamma = f.manager.geometry(f.id_c).unwrap();
-    assert_eq!((gamma.loc.y, gamma.size.h), (32, 768));
-    assert_eq!(gamma.loc.x + gamma.size.w, 1280);
+    assert_eq!((gamma.loc.y, gamma.size.h), (48, 736));
+    assert_eq!(gamma.loc.x + gamma.size.w, 1280 - 16);
     sync_three(&mut f);
     assert_no_r_press(&f);
 }
@@ -2540,4 +2817,38 @@ fn a_window_launched_from_the_overview_is_focused_when_it_closes() {
     f.manager.reconcile(&mut f.comp.state);
     assert_eq!(f.manager.model().focused(), Some(launched));
     drop((conn_c, queue_c, client_c, conn_d, queue_d, client_d));
+}
+
+#[test]
+fn shell_activation_deactivates_the_previous_window() {
+    // The shell's ActivateWindow sets the model's focus first, then the
+    // runtime applies it: the window that had focus must still hear it
+    // lost activation (one activated window, as under Mutter).
+    let mut f = two_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert!(f
+        .client_b
+        .configure_states
+        .last()
+        .is_some_and(|s| has_state(s, 4)));
+    let _ = f.manager.model_mut().set_focused(Some(f.id_a));
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert!(
+        f.client_a
+            .configure_states
+            .last()
+            .is_some_and(|s| has_state(s, 4)),
+        "the activated window hears it"
+    );
+    assert!(
+        f.client_b
+            .configure_states
+            .last()
+            .is_some_and(|s| !has_state(s, 4)),
+        "the previous window is deactivated"
+    );
 }

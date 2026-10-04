@@ -8,6 +8,8 @@
 # on a private session bus with the AT-SPI accessibility bus, then:
 #   G-PANEL     the panel maps (frame differs from the bare session)
 #   A11Y-PANEL  the panel controls are exposed to screen readers by name
+#   G-CAL-EVENTS the calendar server's events for today list in the date
+#               menu's events card, timed as GNOME formats them
 #   G-CAL-OPEN  clicking the clock opens the calendar popover (xdg popup
 #               on the layer surface, #88)
 #   G-QS-OPEN   clicking the system indicators opens quick settings
@@ -17,25 +19,48 @@
 #   G-OV-PICK   clicking a preview focuses that window, closes overview
 #   G-APP-POPOVER an app's menu popover opens (xdg popups, #88)
 #   G-APP-INSTALLED an app installed mid-session shows in search
+#   G-GRID-DRAG-PAGE a dragged app held at the grid's edge turns the page
+#   G-GRID-REORDER  an app dropped on a tile's edge moves there (saved
+#                   to app-picker-layout)
+#   G-FOLDER-DND    dragging an app onto another makes a GNOME folder of
+#                   them; dragging one out of the folder dialog removes it
+#   G-APP-GRID-PAGES enough apps page the grid: indicators and arrows show,
+#                   and Next Page turns to the second page
 #   G-SEARCH-PROVIDER  typing lists a D-Bus search provider's result (#57)
 #   G-SEARCH-VIEW      while search shows results the workspace view hides
 #   G-SEARCH-ACTIVATE  clicking it calls ActivateResult, closes overview
+#   G-APP-FOLDERS  GNOME's app-folders settings group the app grid: the
+#                  folder replaces its apps and opens to show them
 #   G-NOTIFY-BANNER  a D-Bus notification shows a banner (#56)
-#   G-NOTIFY-EXPIRE  the banner goes away by itself
+#   G-NOTIFY-EXPIRE  the banner waits for an away user, then goes 2 s after input
 #   G-NOTIFY-LIST    the calendar lists it instead of "No Notifications"
 #   G-NOTIFY-CLEAR   Clear empties the list
 #   G-NOTIFY-DND     with Do Not Disturb on, no banner, but listed
+#   G-NOTIFY-GROUP   two from one app group, collapsed; pressing expands
 #   G-QS-SERVICES    quick settings shows the tiles of the services on
 #                    the bus (stub daemons on a private system bus, #55)
+#   G-QS-WIFI-MENU   the Wi-Fi menu scans, lists NetworkManager's networks
+#                    as GNOME does, and activates a saved one
+#   G-QS-WIRED  the wired menu disconnects; the Wired tile reconnects
+#   G-NM-AGENT       the shell is NetworkManager's secret agent: an unsaved
+#                    secured network asks for its password in GNOME's dialog
+#   G-QS-SOUND-MENU  the volume slider's menu lists the outputs and makes
+#                    the picked one the default
 #   G-QS-WIFI        the Wi-Fi tile turns NetworkManager's radio off
+#   G-QS-BT-MENU     the Bluetooth menu lists paired devices as GNOME does
+#                    and connects one
 #   G-QS-BLUETOOTH   the Bluetooth tile powers the BlueZ adapter off
 #   G-QS-POWER       the Power Mode tile switches to power saver
 #   G-QS-DARK        the Dark Style tile writes GNOME's color-scheme key
 #   G-QS-BRIGHTNESS  the brightness slider sets the backlight via logind
 #   G-QS-VOLUME      the volume slider sets the PipeWire sink volume
+#   G-QS-MIC         recording shows the microphone indicator and slider
 #   G-QS-ABSENT      with the daemons gone, their tiles hide (no hang)
 #   G-GL-WINDOW      a GTK window on the GL renderer maps and paints
 #                    (linux-dmabuf, #89)
+#   G-WAYLAND-INFO   wayland-info lists every global GNOME 51's Mutter
+#                    offers that Roost must, at its version or newer
+#                    (tests/protocols/gnome51-globals.tsv, P-SY-06)
 #   G-OV-SHELL-UI  the overview shows the search entry and the dash
 #   G-OV-SEARCH typing lists matching apps (#57)
 #   G-OV-LAUNCH Enter launches the top result and closes the overview
@@ -43,6 +68,9 @@
 #   G-X11-APP      XWayland is on by default: an X11 app launched from
 #                  overview search gets DISPLAY and maps a window (#59)
 #   G-SETTINGS-CLOCK GNOME's clock-show-seconds key changes the panel clock
+#   G-SETTINGS-INPUT GNOME's input sources set the keymap (Super+Space
+#                  switches), repeat-interval the repeat rate, and
+#                  enable-hot-corners the hot corner (#60)
 #   G-SETTINGS-IDLE GNOME's idle-delay and lock-enabled keys set the
 #                  compositor's idle lock live (#63)
 #   G-SCREENSHOT   org.gnome.Shell.Screenshot saves the screen as a PNG
@@ -52,21 +80,75 @@
 #   G-SCREENCAST   a client doing what xdg-desktop-portal-gnome does lists
 #                  the monitor (Mutter DisplayConfig), records it (Mutter
 #                  ScreenCast) and pulls a frame over PipeWire (#61)
+#   G-WINDOW-CAST  window sharing: Introspect refuses non-portal callers,
+#                  lists windows to the portal, and RecordWindow streams
+#                  one window at its own size (#61)
+#   G-SCREENSHOT-WINDOW ScreenshotWindow saves the focused window alone
+#   G-DISPLAY-SETTINGS GNOME Settings' ApplyMonitorsConfig changes the
+#                  scale live and saves it to Roost's monitors.xml (#59)
 #   G-POWER-MENU   the power button opens GNOME's menu (Suspend,
 #                  Restart…, Power Off…, Log Out…) (#62)
+#   G-POWER-ESCAPE Escape dismisses the end-session dialog (it holds the
+#                  keyboard, layer-shell exclusivity)
 #   G-POWER-DIALOG Power Off… opens the 60 s end-session dialog, and
 #                  Cancel closes it with nothing done
 #   G-POWER-OFF    confirming the dialog asks logind to power off
+#   G-ACCEL        org.gnome.Shell: an allowlisted caller grabs a media key,
+#                  the key fires AcceleratorActivated, and ShowOSD shows
+#   G-KEYBINDINGS  GNOME Shell's keys: Super+S quick settings, Super+V the
+#                  date menu, Super+A the app grid (and back)
+#   G-KEY-BRIGHTNESS the brightness key steps the backlight through logind
+#   G-SCREENSHOT-UI  Print opens the screenshot UI; Screen + Capture saves
+#   G-SCREENSHOT-UI-WINDOW Window shows GNOME's window selector, the
+#                  focused window chosen; picking another and Capture
+#                  saves that window alone at its own size
+#   G-SCREENCAST-UI the video switch records the selection: the red
+#                  indicator shows in the panel, its stop button ends it,
+#                  and a VP8 WebM of the selection's size lands in
+#                  Videos/Screencasts
+#   G-SCREENCAST-DBUS org.gnome.Shell.Screencast records the screen
+#                  between Screencast and StopScreencast
+#   G-POLKIT       the shell is the polkit agent: GNOME's dialog, a wrong
+#                  password refused, the right one authorizing
+#   G-WINDOW-MENU  GNOME's window menu: Always on Top, Hide, and the
+#                  overview brings the hidden window back
+#   G-WM-KEYS      Alt+Space, Alt+F10, Super+End/Home (wm keybindings)
+#   G-WM-REBIND    GNOME's maximize key rebinds through its settings:
+#                  the old chord stops, the new one maximizes
+#   G-WS-POPUP     a workspace key shows the workspace switcher popup
+#   G-WS-THUMBS    three workspaces put GNOME's thumbnails strip in the
+#                  overview, and a thumbnail click switches workspace
+#   G-OV-DND       dragging a window's preview onto the next workspace's
+#                  card moves the window there, the overview staying open
 #   G-SUSPEND-LOCK Suspend asks logind, and its PrepareForSleep locks
 #                  the session before sleep
+#   G-UNLOCK       GNOME's lock screen: a wrong password is refused and
+#                  the right one unlocks through PAM (pam_wrapper)
 #   A11Y-GOLDEN    the panel, calendar, quick settings and overview
 #                  accessible trees match tests/a11y/ (#71)
 #   G-SHELL-STABLE the shell never exits or restarts during the journey
 
 #   G-APP-DRAG  dragging an app's header bar moves the window (#58)
+#   G-TILE-PREVIEW dragging a window to the left edge shows GNOME's tile
+#               preview over the left half; dragging back drops it
 #   G-TRAY      an AppIndicator item shows in the panel and its menu
 #               row reaches the item (P-TR-01)
-#   G-SWITCHER  Alt+Tab shows the switcher with every window, and
+#   G-SWITCHER-GROUP Alt+Above_Tab shows an app's windows as thumbnails
+#               and steps through them; W closes the focused one
+#   G-IME            IBus composes pinyin into hanzi in a GTK app
+#   G-SCROLL         niri's scrollable tiling: gaps, view follows focus, ring
+#   G-IME-SURROUNDING the engine sees the field's text around the
+#                    cursor (in characters) and its deletion reaches
+#                    the field
+#   G-IME-CURSOR     IBus hears the text cursor's location inside the
+#                    field's window, in global coordinates
+#   G-IME-CANDIDATES the shell is IBus's panel: "ni" shows 你 尼 泥 in
+#                    GNOME's candidate popup under the text cursor, and
+#                    clicking 尼 commits it
+#   G-SWITCHER-REBIND switch-applications rebound moves the switcher
+#                   to the new chord
+#   G-SWITCHER  Alt+Tab shows the switcher with every app (GNOME's
+#               switch-applications; the three test windows are three apps), and
 #               releasing Alt focuses the highlighted one
 # Frames and accessibility dumps land in the artifacts dir; assertions in
 # assertions.txt for the parity ledger.
@@ -94,11 +176,15 @@ LOG="$ARTIFACTS/nested.log"
 ASSERTIONS="$ARTIFACTS/assertions.txt"
 : >"$ASSERTIONS"
 XDG_PICTURES_DIR="$ARTIFACTS/pictures"
-export XDG_PICTURES_DIR
+XDG_VIDEOS_DIR="$ARTIFACTS/videos"
+export XDG_PICTURES_DIR XDG_VIDEOS_DIR
 # A private PipeWire for screen casts (#61), never the user's own.
 # Short path: Unix sockets cap at 108 bytes.
 PIPEWIRE_RUNTIME_DIR="$(mktemp -d /tmp/roost-pw.XXXXXX)"
 export PIPEWIRE_RUNTIME_DIR
+# GStreamer (casts, recordings) says what goes wrong in the logs.
+GST_DEBUG="${GST_DEBUG:-2}"
+export GST_DEBUG
 PW_PIDS=""
 if command -v pipewire >/dev/null 2>&1 && command -v wireplumber >/dev/null 2>&1; then
     pipewire >"$ARTIFACTS/pipewire.log" 2>&1 &
@@ -120,6 +206,12 @@ echo '["org.roost.ProofNoFavorite.desktop"]' >"$XDG_DATA_HOME/roost-shell/favori
 PROBE_MARKER="$ARTIFACTS/probe-marker"
 rm -f "$PROBE_MARKER"
 mkdir -p "$XDG_DATA_HOME/applications"
+# The test windows are apps with (hidden) desktop entries, as most apps
+# are: windows no entry claims would each be an app of their own.
+for t in alpha beta gamma delta; do
+    printf '[Desktop Entry]\nName=Roost Test %s\nExec=true\nType=Application\nNoDisplay=true\n' "$t" \
+        >"$XDG_DATA_HOME/applications/roost-test-$t.desktop"
+done
 cat >"$XDG_DATA_HOME/applications/roost-probe.desktop" <<EOF
 [Desktop Entry]
 Name=Roost Probe
@@ -161,7 +253,18 @@ OWNED_XVFB=""
 COMPOSITOR_PID=""
 STUBS_PID=""
 SYSBUS_PID=""
+ACCEL_PID=""
+CAL_PID=""
+SCREENSAVER_PID=""
+IME_PIDS=""
 cleanup() {
+    # shellcheck disable=SC2086
+    if [ -n "$IME_PIDS" ]; then kill $IME_PIDS 2>/dev/null || true; fi
+    # The bridge daemonized ibus-daemon for this session's display.
+    if command -v ibus >/dev/null 2>&1; then ibus exit >/dev/null 2>&1 || true; fi
+    if [ -n "$SCREENSAVER_PID" ]; then kill "$SCREENSAVER_PID" 2>/dev/null || true; fi
+    if [ -n "$CAL_PID" ]; then kill "$CAL_PID" 2>/dev/null || true; fi
+    if [ -n "$ACCEL_PID" ]; then kill "$ACCEL_PID" 2>/dev/null || true; fi
     if [ -n "$COMPOSITOR_PID" ]; then kill "$COMPOSITOR_PID" 2>/dev/null || true; fi
     if [ -n "$OWNED_XVFB" ]; then kill "$OWNED_XVFB" 2>/dev/null || true; fi
     if [ -n "$STUBS_PID" ]; then kill "$STUBS_PID" 2>/dev/null || true; fi
@@ -214,6 +317,22 @@ fi
 GSETTINGS_BACKEND=keyfile
 XDG_CONFIG_HOME="$ARTIFACTS/config"
 export GSETTINGS_BACKEND XDG_CONFIG_HOME
+# GNOME Shell's own keys the shell reads (the dash, the grid's order),
+# for hosts without gnome-shell's schema.
+if ! gsettings list-schemas 2>/dev/null | grep -qx org.gnome.shell; then
+    mkdir -p "$ARTIFACTS/schemas"
+    cat >"$ARTIFACTS/schemas/org.gnome.shell.gschema.xml" <<'XML'
+<schemalist>
+  <schema id="org.gnome.shell" path="/org/gnome/shell/">
+    <key name="favorite-apps" type="as"><default>[]</default></key>
+    <key name="app-picker-layout" type="aa{sv}"><default>[]</default></key>
+  </schema>
+</schemalist>
+XML
+    glib-compile-schemas "$ARTIFACTS/schemas"
+    GSETTINGS_SCHEMA_DIR="$ARTIFACTS/schemas${GSETTINGS_SCHEMA_DIR:+:$GSETTINGS_SCHEMA_DIR}"
+    export GSETTINGS_SCHEMA_DIR
+fi
 # Quick-settings daemons: stubs on a private "system" bus (#55), a fake
 # backlight, and a fake wpctl that records the sink volume.
 BACKLIGHT="$ARTIFACTS/backlight/roost-bl"
@@ -224,11 +343,39 @@ ROOST_BACKLIGHT_ROOT="$ARTIFACTS/backlight"
 export ROOST_BACKLIGHT_ROOT
 VOLUME_FILE="$ARTIFACTS/volume"
 echo 0.80 >"$VOLUME_FILE"
+SINK_FILE="$ARTIFACTS/default-sink"
+echo 48 >"$SINK_FILE"
+# The default source, and an app recording from it while RECORDING_FILE
+# exists.
+MIC_FILE="$ARTIFACTS/mic-volume"
+echo 0.50 >"$MIC_FILE"
+RECORDING_FILE="$ARTIFACTS/recording"
 cat >"$ARTIFACTS/bin/wpctl" <<WPCTL
 #!/bin/sh
+mark() { [ "\$(cat "$SINK_FILE")" = "\$1" ] && echo "*" || echo " "; }
 case "\$1" in
-    get-volume) echo "Volume: \$(cat "$VOLUME_FILE")" ;;
-    set-volume) echo "\$3" >"$VOLUME_FILE" ;;
+    get-volume)
+        case "\$2" in
+            *SOURCE*) echo "Volume: \$(cat "$MIC_FILE")" ;;
+            *) echo "Volume: \$(cat "$VOLUME_FILE")" ;;
+        esac ;;
+    set-volume)
+        case "\$2" in
+            *SOURCE*) echo "\$3" >"$MIC_FILE" ;;
+            *) echo "\$3" >"$VOLUME_FILE" ;;
+        esac ;;
+    set-default) echo "\$2" >"$SINK_FILE" ;;
+    status)
+        printf 'Audio\n ├─ Sinks:\n'
+        printf ' │  %s   48. Built-in Audio Analog Stereo    [vol: 0.80]\n' "\$(mark 48)"
+        printf ' │  %s   52. Roost HDMI Output               [vol: 1.00]\n' "\$(mark 52)"
+        printf ' │\n ├─ Sources:\n'
+        printf ' │  *   49. Built-in Audio Analog Stereo    [vol: 0.50]\n'
+        printf ' │\n └─ Streams:\n'
+        if [ -e "$RECORDING_FILE" ]; then
+            printf '        70. Voice Recorder\n'
+            printf '             71. input_MONO      < Built-in Audio Analog Stereo:capture_FL\t[active]\n'
+        fi ;;
     *) ;;
 esac
 WPCTL
@@ -239,20 +386,70 @@ SYSBUS_INFO="$(dbus-daemon --session --fork --print-address=1 --print-pid=1)"
 DBUS_SYSTEM_BUS_ADDRESS="$(echo "$SYSBUS_INFO" | sed -n 1p)"
 SYSBUS_PID="$(echo "$SYSBUS_INFO" | sed -n 2p)"
 export DBUS_SYSTEM_BUS_ADDRESS
+# NetworkManager's and BlueZ's stubs record what the shell asks of them.
+ROOST_STUB_NM_LOG="$ARTIFACTS/nm-calls"
+ROOST_STUB_BT_LOG="$ARTIFACTS/bt-calls"
+export ROOST_STUB_NM_LOG ROOST_STUB_BT_LOG
 "$PY" "$ROOT/scripts/lib/roost-service-stubs.py" "$BACKLIGHT" >"$ARTIFACTS/stubs.log" 2>&1 &
 STUBS_PID=$!
 for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/stubs.log" 2>/dev/null && break; sleep 0.5; done
 "$PY" "$ROOT/scripts/lib/roost-search-provider-stub.py" "$SEARCH_MARKER" >"$ARTIFACTS/provider.log" 2>&1 &
 PROVIDER_PID=$!
 for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/provider.log" 2>/dev/null && break; sleep 0.5; done
+# gnome-shell's calendar server, with today's events seeded.
+cat >"$ARTIFACTS/events.json" <<'EVENTS'
+[{"summary": "Design review", "day": 0, "start": "10:00", "end": "10:30"},
+ {"summary": "Release day", "day": 0},
+ {"summary": "Retro", "day": 1, "start": "15:00", "end": "16:00"}]
+EVENTS
+"$PY" "$ROOT/scripts/lib/roost-calendar-server-stub.py" "$ARTIFACTS/events.json" \
+    >"$ARTIFACTS/calendar-server.log" 2>&1 &
+CAL_PID=$!
+for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/calendar-server.log" 2>/dev/null && break; sleep 0.5; done
 
 # The full power menu needs a hardware session; logind is the stub.
 ROOST_SESSION_KIND=hardware
 export ROOST_SESSION_KIND
+# The polkit agent checks passwords through a helper stand-in, and the
+# Authority stub records where the agent registered.
+ROOST_POLKIT_HELPER="$ROOT/scripts/lib/roost-polkit-helper-stub.py"
+ROOST_STUB_POLKIT_LOG="$ARTIFACTS/polkit-agent"
+export ROOST_POLKIT_HELPER ROOST_STUB_POLKIT_LOG
 
-cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk
-"$ROOT/target/debug/roost-compositor" --backend winit --socket "roost-gtk-proof-$$" \
-    --shell-bin "${ROOST_PROOF_SHELL_BIN:-$ROOT/target/debug/roost-shell-gtk}" >"$LOG" 2>&1 &
+# The lock screen's password goes through a real PAM stack: pam_wrapper
+# serves the compositor's roost-lock service from a private password
+# file, so G-UNLOCK proves wrong passwords fail and the right one
+# unlocks, without root.
+PAM_WRAPPER_LIB=/usr/lib/x86_64-linux-gnu/libpam_wrapper.so
+PAM_MATRIX=/usr/lib/x86_64-linux-gnu/pam_wrapper/pam_matrix.so
+UNLOCK_PASSWORD="roost-proof-$$"
+PAM_ON=""
+if [ -e "$PAM_WRAPPER_LIB" ] && [ -e "$PAM_MATRIX" ]; then
+    mkdir -p "$ARTIFACTS/pam/services"
+    echo "$(id -un):$UNLOCK_PASSWORD:roost-lock" >"$ARTIFACTS/pam/passdb"
+    printf 'auth required %s passdb=%s\naccount required %s passdb=%s\n' \
+        "$PAM_MATRIX" "$ARTIFACTS/pam/passdb" "$PAM_MATRIX" "$ARTIFACTS/pam/passdb" \
+        >"$ARTIFACTS/pam/services/roost-lock"
+    PAM_ON=1
+elif [ -n "${ROOST_REQUIRE_PAM_WRAPPER:-}" ]; then
+    echo "roost-gtk-shell-proof: pam_wrapper is required but missing" >&2
+    exit 1
+fi
+
+# The shell logs where it laid out IBus's candidates (G-IME-CANDIDATES
+# clicks one), the bridge each key's fate.
+ROOST_IBUS_DEBUG=1
+export ROOST_IBUS_DEBUG
+cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk -p roost-shell-host
+if [ -n "$PAM_ON" ]; then
+    env LD_PRELOAD="$PAM_WRAPPER_LIB" PAM_WRAPPER=1 \
+        PAM_WRAPPER_SERVICE_DIR="$ARTIFACTS/pam/services" \
+        "$ROOT/target/debug/roost-compositor" --backend winit --socket "roost-gtk-proof-$$" \
+        --shell-bin "${ROOST_PROOF_SHELL_BIN:-$ROOT/target/debug/roost-shell-gtk}" >"$LOG" 2>&1 &
+else
+    "$ROOT/target/debug/roost-compositor" --backend winit --socket "roost-gtk-proof-$$" \
+        --shell-bin "${ROOST_PROOF_SHELL_BIN:-$ROOT/target/debug/roost-shell-gtk}" >"$LOG" 2>&1 &
+fi
 COMPOSITOR_PID=$!
 
 WID=""
@@ -301,6 +498,14 @@ scrot "$ARTIFACTS/02-calendar.png" >/dev/null
 showing "$ARTIFACTS/a11y-calendar.json" "No Notifications" ||
     fail G-CAL-OPEN "calendar popover contents not showing"
 pass G-CAL-OPEN "clock opens the calendar and notification list"
+for name in "Design review" "Release day" "All Day" "10:00 – 10:30"; do
+    showing "$ARTIFACTS/a11y-calendar.json" "$name" ||
+        fail G-CAL-EVENTS "the events card does not show \"$name\""
+done
+if showing "$ARTIFACTS/a11y-calendar.json" "Retro"; then
+    fail G-CAL-EVENTS "tomorrow's event shows under today"
+fi
+pass G-CAL-EVENTS "today's calendar-server events list in the events card, timed as GNOME does"
 xdotool key Escape
 sleep 1
 
@@ -359,9 +564,15 @@ cstate() {
     return 1
 }
 SOCKET_NAME="$(sed -n 's/.*nested session on \([^ ]*\) .*/\1/p' "$LOG" | head -1)"
+# One at a time, so window ids (and with them GNOME's running-app order
+# in the dash) follow Alpha, Beta, Gamma.
+n=0
 for spec in Alpha:#3584e4 Beta:#2ec27e Gamma:#e66100; do
     WAYLAND_DISPLAY="$SOCKET_NAME" "$PY" "$ROOT/scripts/lib/roost-test-window.py" \
         "${spec%%:*}" "${spec#*:}" >"$ARTIFACTS/window-${spec%%:*}.log" 2>&1 &
+    n=$((n + 1))
+    cstate "(.windows | length) == $n" "window $n" ||
+        fail G-WINDOWS "${spec%%:*} never mapped"
 done
 cstate '(.windows | length) == 3' "three app windows" ||
     fail G-WINDOWS "three libadwaita windows never mapped"
@@ -419,6 +630,32 @@ cstate ".windows[] | select(.app_id == \"roost-test-beta\") | (.rect[0] - $bx) >
     fail G-APP-DRAG "dragging Beta's header bar did not move it by the drag distance"
 pass G-APP-DRAG "dragging an app's header bar moves the window (#58)"
 
+# Edge tiling: held at the left edge, GNOME's tile preview covers the
+# left half (accent at half opacity); dragged back, it goes and the
+# window does not tile.
+read -r bx by bw <<EOF2
+$(jq -r '.windows[] | select(.app_id == "roost-test-beta") | .rect | "\(.[0]) \(.[1]) \(.[2])"' "$CSTATE")
+EOF2
+xdotool mousemove --window "$WID" $((bx + 131)) $((by + 20))
+xdotool mousedown 1
+xdotool mousemove --window "$WID" $((bx + 120)) $((by + 20))
+sleep 0.5
+for step in 1 2 3 4 5 6 7 8; do
+    xdotool mousemove --window "$WID" $(((bx + 120) * (8 - step) / 8 + 1)) $((by + 20 + step * 5))
+    sleep 0.05
+done
+cstate ".tile_preview.rect == [0, 32, $((WIDTH / 2)), $((HEIGHT - 32))]" "tile preview" 5 ||
+    fail G-TILE-PREVIEW "no left-half tile preview at the left edge"
+sleep 0.5
+scrot "$ARTIFACTS/08-tile-preview.png" >/dev/null
+xdotool mousemove --window "$WID" $((bx + 120)) $((by + 20))
+cstate '.tile_preview == null' "no preview" 5 ||
+    fail G-TILE-PREVIEW "the preview stayed after leaving the edge"
+xdotool mouseup 1
+cstate ".windows[] | select(.app_id == \"roost-test-beta\") | .rect[2] == $bw" "untiled" ||
+    fail G-TILE-PREVIEW "the window tiled after leaving the edge"
+pass G-TILE-PREVIEW "dragging to the left edge shows GNOME's tile preview; leaving the edge drops it"
+
 # Alt-Tab (P-WM-01): hold Alt, step once, read the switcher, release.
 xdotool keydown Alt_L
 xdotool key Tab
@@ -429,7 +666,7 @@ scrot "$ARTIFACTS/08b-switcher.png" >/dev/null
 items="$(jq '[.[] | select(.role == "list item" and .showing)] | length' "$ARTIFACTS/a11y-switcher.json")"
 picked="$(jq -r '[.[] | select(.role == "list item" and .showing and .selected)][0].name // ""' "$ARTIFACTS/a11y-switcher.json")"
 xdotool keyup Alt_L
-[ "$items" = 3 ] || fail G-SWITCHER "switcher shows $items windows, not 3"
+[ "$items" = 3 ] || fail G-SWITCHER "switcher shows $items apps, not 3"
 case "$picked" in
     *": "*) ;;
     *) fail G-SWITCHER "no highlighted window in the switcher" ;;
@@ -439,7 +676,37 @@ title="${picked#*: }"
 want="roost-test-$(echo "$title" | tr '[:upper:]' '[:lower:]')"
 cstate ".focused_app_id == \"$want\"" "switched" ||
     fail G-SWITCHER "releasing Alt did not focus '$title'"
-pass G-SWITCHER "Alt+Tab shows every window and focuses the highlighted one"
+pass G-SWITCHER "Alt+Tab shows every app and focuses the highlighted one"
+
+# GNOME's switch-group: with a second Alpha window, Alt+Above_Tab shows
+# Alpha's windows as thumbnails (drawn by the compositor) and moves to
+# the other one; W closes the focused thumbnail's window.
+WAYLAND_DISPLAY="$SOCKET_NAME" "$PY" "$ROOT/scripts/lib/roost-test-window.py" \
+    Alpha "#1c71d8" >"$ARTIFACTS/window-Alpha2.log" 2>&1 &
+cstate '[.windows[] | select(.app_id == "roost-test-alpha")] | length == 2' "second alpha" ||
+    fail G-SWITCHER-GROUP "a second Alpha window never mapped"
+cstate '.focused_app_id == "roost-test-alpha"' "alpha focused" ||
+    fail G-SWITCHER-GROUP "the new Alpha window did not take the focus"
+sleep 1
+second="$(jq -r .focused "$CSTATE")"
+xdotool keydown Alt_L key grave
+cstate '.switcher_thumbnails == 2' "thumbnails" 5 ||
+    { xdotool keyup Alt_L; fail G-SWITCHER-GROUP "Alt+Above_Tab drew no window thumbnails"; }
+sleep 0.5
+scrot "$ARTIFACTS/08c-switcher-thumbnails.png" >/dev/null
+xdotool keyup Alt_L
+cstate ".focused != $second and .focused_app_id == \"roost-test-alpha\" and .switcher_thumbnails == 0" \
+    "other alpha" || fail G-SWITCHER-GROUP "Alt+Above_Tab did not move to Alpha's other window"
+sleep 0.5
+xdotool keydown Alt_L key grave
+sleep 1
+xdotool key w
+sleep 0.5
+xdotool keyup Alt_L
+cstate '[.windows[] | select(.app_id == "roost-test-alpha")] | length == 1' "closed" ||
+    fail G-SWITCHER-GROUP "W did not close the focused thumbnail's window"
+pass G-SWITCHER-GROUP "Alt+Above_Tab shows an app's windows as thumbnails, steps to one, and W closes it"
+sleep 1
 scrot "$ARTIFACTS/08-dragged.png" >/dev/null
 
 # Overview shell surfaces (#54, #57): search entry, dash, app grid.
@@ -494,6 +761,148 @@ pass G-APP-INSTALLED "an app installed mid-session shows in search"
 xdotool key Escape
 cstate '.overview_open | not' "closed" || { xdotool key Escape; cstate '.overview_open | not' "closed" || fail G-APP-INSTALLED "overview stayed open"; }
 
+# GNOME's paged app grid: thirty more apps make a second page, with the
+# page indicators and the side arrows; Next Page turns to it.
+for i in $(seq -w 1 30); do
+    printf '[Desktop Entry]\nName=Roost Page App %s\nExec=true\nType=Application\n' "$i" \
+        >"$XDG_DATA_HOME/applications/roost-page-$i.desktop"
+done
+sleep 1.5
+xdotool key super+a
+cstate '.overview_open and .overview_app_grid' "app grid" || fail G-APP-GRID-PAGES "Super+A did not show the app grid"
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-pages.json" 20 ||
+    fail G-APP-GRID-PAGES "accessibility dump failed"
+scrot "$ARTIFACTS/11c-app-grid-pages.png" >/dev/null
+for name in "Next Page" "Page 1" "Page 2"; do
+    showing "$ARTIFACTS/a11y-grid-pages.json" "$name" || fail G-APP-GRID-PAGES "no '$name' with two pages"
+done
+if showing "$ARTIFACTS/a11y-grid-pages.json" "Previous Page"; then
+    fail G-APP-GRID-PAGES "Previous Page shows on the first page"
+fi
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-next.json" 20 \
+    --press "Next Page" || fail G-APP-GRID-PAGES "could not press Next Page"
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-page2.json" 20 ||
+    fail G-APP-GRID-PAGES "accessibility dump failed"
+showing "$ARTIFACTS/a11y-grid-page2.json" "Previous Page" ||
+    fail G-APP-GRID-PAGES "Next Page did not turn to the second page"
+scrot "$ARTIFACTS/11d-app-grid-page2.png" >/dev/null
+pass G-APP-GRID-PAGES "thirty more apps page the grid; indicators and arrows show and Next Page turns it"
+
+# GNOME's page switching while dragging: an app held against the grid's
+# edge turns the page (no arrow to press mid-drag).
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-back.json" 20 \
+    --press "Previous Page" || fail G-GRID-DRAG-PAGE "could not press Previous Page"
+sleep 1
+xdotool mousemove --window "$WID" 202 305
+sleep 0.3
+xdotool mousedown 1
+for i in $(seq 1 20); do
+    xdotool mousemove --window "$WID" $((202 + (WIDTH - 6 - 202) * i / 20)) 330
+    sleep 0.03
+done
+sleep 0.8
+scrot "$ARTIFACTS/11h-grid-drag-edge.png" >/dev/null
+xdotool mouseup 1
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-drag-page.json" 20 ||
+    fail G-GRID-DRAG-PAGE "accessibility dump failed"
+showing "$ARTIFACTS/a11y-grid-drag-page.json" "Previous Page" ||
+    fail G-GRID-DRAG-PAGE "holding a dragged app at the edge did not turn the page"
+pass G-GRID-DRAG-PAGE "an app dragged against the grid's edge turns the page, as GNOME's grid does"
+xdotool key Escape
+cstate '.overview_open | not' "closed" || { xdotool key Escape; cstate '.overview_open | not' "closed" || fail G-APP-GRID-PAGES "overview stayed open"; }
+rm -f "$XDG_DATA_HOME"/applications/roost-page-*.desktop
+sleep 1.5
+
+# GNOME's folder edits by drag: one app onto another makes a folder of
+# the two (org.gnome.desktop.app-folders); one dragged out of the
+# folder's dialog onto the shade leaves it. Two apps named to sort first
+# sit in the first two cells (113px tiles 12px apart, centred).
+for n in One Two; do
+    printf '[Desktop Entry]\nName=AAA Drag %s\nExec=true\nType=Application\n' "$n" \
+        >"$XDG_DATA_HOME/applications/roost-drag-$n.desktop"
+done
+sleep 1.5
+before="$(gsettings get org.gnome.desktop.app-folders folder-children)"
+drag() {
+    xdotool mousemove --window "$WID" "$1" "$2"
+    sleep 0.3
+    xdotool mousedown 1
+    sleep 0.2
+    for i in $(seq 1 20); do
+        xdotool mousemove --window "$WID" $(($1 + ($3 - $1) * i / 20)) $(($2 + ($4 - $2) * i / 20))
+        sleep 0.03
+    done
+    sleep 0.4
+    xdotool mouseup 1
+    sleep 1.5
+}
+xdotool key super+a
+cstate '.overview_open and .overview_app_grid' "app grid" || fail G-FOLDER-DND "Super+A did not show the app grid"
+sleep 1.5
+drag 327 305 202 305
+scrot "$ARTIFACTS/11e-folder-made.png" >/dev/null
+after="$(gsettings get org.gnome.desktop.app-folders folder-children)"
+folder=""
+for f in $(echo "$after" | tr -d "[]',"); do
+    case " $(echo "$before" | tr -d "[]',") " in *" $f "*) ;; *) folder="$f" ;; esac
+done
+[ -n "$folder" ] || fail G-FOLDER-DND "dropping an app on another made no folder ($after)"
+fpath="org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/$folder/"
+apps="$(gsettings get "$fpath" apps)"
+case "$apps" in
+    *roost-drag-One.desktop*roost-drag-Two.desktop*|*roost-drag-Two.desktop*roost-drag-One.desktop*) ;;
+    *) fail G-FOLDER-DND "the new folder holds $apps" ;;
+esac
+name="$(gsettings get "$fpath" name | tr -d "'")"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-folder-new.json" 20 \
+    --press "$name" || fail G-FOLDER-DND "could not open the new folder '$name'"
+sleep 1.5
+scrot "$ARTIFACTS/11f-folder-dialog.png" >/dev/null
+# The dialog's second tile (AAA Drag Two) out onto the shade.
+drag 638 300 140 560
+apps="$(gsettings get "$fpath" apps)"
+[ "$apps" = "['roost-drag-One.desktop']" ] ||
+    fail G-FOLDER-DND "dragging an app out left the folder with $apps"
+pass G-FOLDER-DND "an app dropped on another makes a GNOME folder; one dragged out of its dialog leaves it"
+xdotool key Escape
+cstate '.overview_open | not' "closed" || { xdotool key Escape; cstate '.overview_open | not' "closed" || fail G-FOLDER-DND "overview stayed open"; }
+rm -f "$XDG_DATA_HOME"/applications/roost-drag-*.desktop
+sleep 1.5
+
+# GNOME's grid reorder: an app dropped on another tile's edge takes its
+# place, and the grid is saved to org.gnome.shell app-picker-layout.
+for n in One Two Three; do
+    printf '[Desktop Entry]\nName=AAA Move %s\nExec=true\nType=Application\n' "$n" \
+        >"$XDG_DATA_HOME/applications/roost-move-$n.desktop"
+done
+sleep 1.5
+xdotool key super+a
+cstate '.overview_open and .overview_app_grid' "app grid" || fail G-GRID-REORDER "Super+A did not show the app grid"
+sleep 1.5
+# By name the cells read One, Three, Two: Two (third cell) onto the left
+# edge of One (first cell, x 146-259).
+drag 452 305 150 305
+scrot "$ARTIFACTS/11g-grid-reordered.png" >/dev/null
+layout="$(gsettings get org.gnome.shell app-picker-layout)"
+case "$layout" in
+    *"'roost-move-Two.desktop': <{'position': <0>}>"*) ;;
+    *) fail G-GRID-REORDER "the moved app is not first in app-picker-layout: $(echo "$layout" | cut -c1-200)" ;;
+esac
+case "$layout" in
+    *"'roost-move-One.desktop': <{'position': <1>}>"*"'roost-move-Three.desktop': <{'position': <2>}>"* | \
+        *"'roost-move-Three.desktop': <{'position': <2>}>"*"'roost-move-One.desktop': <{'position': <1>}>"*) ;;
+    *) fail G-GRID-REORDER "the apps it displaced did not each move one place on" ;;
+esac
+pass G-GRID-REORDER "an app dropped on a tile's edge takes its place and the grid is saved as GNOME saves it"
+xdotool key Escape
+cstate '.overview_open | not' "closed" || { xdotool key Escape; cstate '.overview_open | not' "closed" || fail G-GRID-REORDER "overview stayed open"; }
+gsettings reset org.gnome.shell app-picker-layout
+rm -f "$XDG_DATA_HOME"/applications/roost-move-*.desktop
+sleep 1.5
+
 # Search providers (#57): a D-Bus provider's result lists under the
 # apps, and clicking it hands the result back to the provider.
 xdotool key Super_L
@@ -532,6 +941,35 @@ pass G-OV-APPGRID "Show Apps opens the app grid"
 scrot "$ARTIFACTS/11-app-grid.png" >/dev/null
 xdotool key Escape
 
+# App folders, from GNOME's own keys.
+xdotool key Escape
+if ! cstate '.overview_open | not' "closed" 3; then
+    xdotool key Super_L
+    cstate '.overview_open | not' "closed" || fail G-APP-FOLDERS "overview would not close"
+fi
+FOLDER=org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/ProbeTools/
+gsettings set org.gnome.desktop.app-folders folder-children "['ProbeTools']"
+gsettings set "$FOLDER" name 'Probe Tools'
+gsettings set "$FOLDER" apps "['roost-probe.desktop']"
+xdotool key Super_L
+cstate '.overview_open' "overview" || fail G-APP-FOLDERS "overview did not open"
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-folders.json" 20 --press "Show Apps" ||
+    fail G-APP-FOLDERS "could not press Show Apps"
+showing "$ARTIFACTS/a11y-folders.json" "Probe Tools" ||
+    fail G-APP-FOLDERS "the grid has no Probe Tools folder"
+if showing "$ARTIFACTS/a11y-folders.json" "Roost Probe"; then
+    fail G-APP-FOLDERS "a foldered app still shows loose in the grid"
+fi
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-folder-open.json" 20 --press "Probe Tools" ||
+    fail G-APP-FOLDERS "could not open the folder"
+scrot "$ARTIFACTS/11b-app-folder.png" >/dev/null
+showing "$ARTIFACTS/a11y-folder-open.json" "Roost Probe" ||
+    fail G-APP-FOLDERS "the open folder does not show its app"
+pass G-APP-FOLDERS "GNOME's app folders group the grid and open to their apps"
+xdotool key Escape
+sleep 1
+
 # Notifications (#56). Close whatever the grid left open first (#97).
 xdotool key Escape
 if ! cstate '.overview_open | not' "closed" 3; then
@@ -549,6 +987,8 @@ open_calendar() {
     xdotool mousemove --window "$WID" $((WIDTH / 2)) 16 click 1
     sleep 2
 }
+# Two quiet seconds first: the banner arrives while the user is away.
+sleep 2
 notify "Proof Banner" "Sent over D-Bus" || fail G-NOTIFY-BANNER "Notify call failed"
 sleep 1
 scrot "$ARTIFACTS/12-banner.png" >/dev/null
@@ -558,13 +998,22 @@ showing "$ARTIFACTS/a11y-banner.json" "Proof Banner" ||
     fail G-NOTIFY-BANNER "no banner showing for the notification"
 pass G-NOTIFY-BANNER "a D-Bus notification shows a banner"
 
+# GNOME's message tray: a banner that arrives while the user is away
+# waits for them (org.gnome.Mutter.IdleMonitor), then goes 2 s after
+# their next input.
 sleep 6
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-away.json" 20 ||
+    fail G-NOTIFY-EXPIRE "accessibility dump failed"
+showing "$ARTIFACTS/a11y-away.json" "Proof Banner" ||
+    fail G-NOTIFY-EXPIRE "the banner left while the user was away"
+xdotool mousemove --window "$WID" $((WIDTH / 3)) $((HEIGHT / 2))
+sleep 3.5
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-expired.json" 20 ||
     fail G-NOTIFY-EXPIRE "accessibility dump failed"
 if showing "$ARTIFACTS/a11y-expired.json" "Proof Banner"; then
-    fail G-NOTIFY-EXPIRE "banner still showing after its timeout"
+    fail G-NOTIFY-EXPIRE "banner still showing 2 s after the user came back"
 fi
-pass G-NOTIFY-EXPIRE "the banner expires by itself"
+pass G-NOTIFY-EXPIRE "the banner waits for an away user and goes 2 s after their input"
 
 open_calendar
 scrot "$ARTIFACTS/13-notification-list.png" >/dev/null
@@ -610,6 +1059,35 @@ showing "$ARTIFACTS/a11y-dnd-list.json" "Quiet Note" ||
     fail G-NOTIFY-DND "the held-back notification is missing from the list"
 pass G-NOTIFY-DND "Do Not Disturb holds banners back but keeps the list"
 scrot "$ARTIFACTS/14-dnd-list.png" >/dev/null
+
+# GNOME 51 groups an app's notifications: collapsed, the newest card
+# shows in full with the older ones peeking out under it; pressing the
+# group expands it under a header with a Collapse button.
+notify "Quiet Two" "A second note from the same app" || fail G-NOTIFY-GROUP "Notify call failed"
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-group.json" 20 ||
+    fail G-NOTIFY-GROUP "accessibility dump failed"
+scrot "$ARTIFACTS/14b-notification-group.png" >/dev/null
+jq -e 'any(.[]; .name == "Roost Proof" and .role == "push button" and .showing)' \
+    "$ARTIFACTS/a11y-group.json" >/dev/null ||
+    fail G-NOTIFY-GROUP "no collapsed group named for the app"
+showing "$ARTIFACTS/a11y-group.json" "Quiet Two" ||
+    fail G-NOTIFY-GROUP "the collapsed group does not show its newest card"
+if showing "$ARTIFACTS/a11y-group.json" "Quiet Note"; then
+    fail G-NOTIFY-GROUP "the older card shows in full in a collapsed group"
+fi
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-group-open.json" 20 \
+    --press "Roost Proof" || fail G-NOTIFY-GROUP "could not press the group"
+scrot "$ARTIFACTS/14c-notification-group-expanded.png" >/dev/null
+for name in "Quiet Two" "Quiet Note" "Collapse"; do
+    showing "$ARTIFACTS/a11y-group-open.json" "$name" ||
+        fail G-NOTIFY-GROUP "the expanded group does not show \"$name\""
+done
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-group-cleared.json" 20 \
+    --press "Clear" || fail G-NOTIFY-GROUP "could not press Clear"
+showing "$ARTIFACTS/a11y-group-cleared.json" "No Notifications" ||
+    fail G-NOTIFY-GROUP "Clear did not empty the grouped list"
+pass G-NOTIFY-GROUP "an app's notifications group, collapsed, and expand on press"
 xdotool key Escape
 
 # Quick-settings services (#55): each toggle is read back from its daemon.
@@ -634,11 +1112,139 @@ for label in "Wi-Fi" "Wired" "Bluetooth" "Power Mode" "Brightness" "Volume"; do
 done
 pass G-QS-SERVICES "quick settings shows a tile per service on the bus"
 
+# GNOME's Wi-Fi menu: opening it scans; the saved network comes first,
+# then by signal; the hidden one is left out; a saved network activates
+# its connection and becomes the tile's subtitle.
+qs_press "Wi-Fi Menu" wifi-menu || fail G-QS-WIFI-MENU "could not open the Wi-Fi menu"
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-wifi-menu.json" 20 ||
+    fail G-QS-WIFI-MENU "accessibility dump failed"
+scrot "$ARTIFACTS/15b-wifi-menu.png" >/dev/null
+grep -q '^RequestScan' "$ROOST_STUB_NM_LOG" 2>/dev/null ||
+    fail G-QS-WIFI-MENU "opening the menu did not ask NetworkManager to scan"
+order="$(jq -r '[.[] | select(.showing) | .name | select(test("Signal strength"))] | join("|")' \
+    "$ARTIFACTS/a11y-qs-wifi-menu.json")"
+want="Roost Home, Secure, Signal strength 70%|Roost Cafe, Not secure, Signal strength 85%|Roost Office, Secure, Signal strength 60%|Roost Guest, Secure, Signal strength 50%"
+[ "$order" = "$want" ] || fail G-QS-WIFI-MENU "networks are '$order', not '$want'"
+qs_press "Roost Home, Secure, Signal strength 70%" wifi-home ||
+    fail G-QS-WIFI-MENU "could not press Roost Home"
+grep -q "^ActivateConnection /org/freedesktop/NetworkManager/Settings/1" "$ROOST_STUB_NM_LOG" ||
+    fail G-QS-WIFI-MENU "Roost Home did not activate its saved connection"
+# Picking a network closes the panel, as GNOME's menus do.
+sleep 1.5
+open_qs
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-wifi-on.json" 20 ||
+    fail G-QS-WIFI-MENU "accessibility dump failed"
+showing "$ARTIFACTS/a11y-qs-wifi-on.json" "Roost Home" ||
+    fail G-QS-WIFI-MENU "the tile does not name the connected network"
+pass G-QS-WIFI-MENU "the Wi-Fi menu scans, lists networks as GNOME does, and activates a saved one"
+
+# GNOME's wired menu: the active profile is one row named for the device
+# with a Disconnect subtitle; it takes the device down. The toggle then
+# brings the profile back and shows checked.
+wired_checked() {
+    jq -e --arg want "$2" 'any(.[]; .name == "Wired" and .role == "toggle button"
+        and (.checked | tostring) == $want)' "$1" >/dev/null
+}
+wired_checked "$ARTIFACTS/a11y-qs-wifi-on.json" true ||
+    fail G-QS-WIRED "the Wired tile is not checked with its profile up"
+qs_press "Wired Menu" wired-menu || fail G-QS-WIRED "could not open the wired menu"
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-wired-menu.json" 20 ||
+    fail G-QS-WIRED "accessibility dump failed"
+scrot "$ARTIFACTS/15e-wired-menu.png" >/dev/null
+showing "$ARTIFACTS/a11y-qs-wired-menu.json" "Disconnect Wired" ||
+    fail G-QS-WIRED "the menu has no Disconnect row for the active profile"
+showing "$ARTIFACTS/a11y-qs-wired-menu.json" "Wired Settings" ||
+    fail G-QS-WIRED "the menu has no Wired Settings item"
+qs_press "Disconnect Wired" wired-off || fail G-QS-WIRED "could not press Disconnect"
+grep -q "^Disconnect /org/freedesktop/NetworkManager/Devices/1" "$ROOST_STUB_NM_LOG" ||
+    fail G-QS-WIRED "Disconnect did not take the device down"
+sleep 1.5
+open_qs
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-wired-off.json" 20 ||
+    fail G-QS-WIRED "accessibility dump failed"
+wired_checked "$ARTIFACTS/a11y-qs-wired-off.json" false ||
+    fail G-QS-WIRED "the Wired tile stayed checked with the device down"
+qs_press "Wired" wired-on || fail G-QS-WIRED "could not press the Wired tile"
+grep -q "^ActivateConnection /org/freedesktop/NetworkManager/Settings/3 /org/freedesktop/NetworkManager/Devices/1" \
+    "$ROOST_STUB_NM_LOG" || fail G-QS-WIRED "the Wired tile did not bring its profile back"
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-wired-on.json" 20 ||
+    fail G-QS-WIRED "accessibility dump failed"
+wired_checked "$ARTIFACTS/a11y-qs-wired-on.json" true ||
+    fail G-QS-WIRED "the Wired tile is not checked again"
+pass G-QS-WIRED "the wired menu disconnects the profile and the Wired tile brings it back, as GNOME's do"
+
+# GNOME's network agent: an unsaved WPA2 network makes NetworkManager
+# ask the shell's agent, which shows GNOME's dialog; the typed password
+# goes back to NetworkManager.
+grep -q "network agent registered" "$LOG" || fail G-NM-AGENT "the shell never registered a secret agent"
+qs_press "Wi-Fi Menu" wifi-menu-again || fail G-NM-AGENT "could not reopen the Wi-Fi menu"
+sleep 1
+qs_press "Roost Guest, Secure, Signal strength 50%" wifi-guest ||
+    fail G-NM-AGENT "could not press Roost Guest"
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-nm-agent.json" 20 ||
+    fail G-NM-AGENT "accessibility dump failed"
+showing "$ARTIFACTS/a11y-nm-agent.json" "Authentication required" ||
+    fail G-NM-AGENT "no Authentication required dialog"
+scrot "$ARTIFACTS/15d-network-agent.png" >/dev/null
+xdotool type --delay 30 "guest-pass-$$"
+xdotool key Return
+for _ in $(seq 1 20); do grep -q "^Secrets" "$ROOST_STUB_NM_LOG" && break; sleep 0.5; done
+grep -q "^Secrets psk=guest-pass-$$" "$ROOST_STUB_NM_LOG" ||
+    fail G-NM-AGENT "NetworkManager got $(grep "^Secrets" "$ROOST_STUB_NM_LOG" || echo nothing), not the typed password"
+pass G-NM-AGENT "an unsaved secured network asks for its password in GNOME's dialog"
+sleep 1
+open_qs
+
 qs_press "Wi-Fi" wifi || fail G-QS-WIFI "could not press Wi-Fi"
 sysprop org.freedesktop.NetworkManager /org/freedesktop/NetworkManager \
     org.freedesktop.NetworkManager WirelessEnabled | grep -q false ||
     fail G-QS-WIFI "NetworkManager's WirelessEnabled is still true"
 pass G-QS-WIFI "the Wi-Fi tile turns NetworkManager's radio off"
+
+# GNOME's Bluetooth menu: paired devices only, connected first; the
+# tile names the connected one; a row connects its device.
+qs_press "Bluetooth Menu" bt-menu || fail G-QS-BT-MENU "could not open the Bluetooth menu"
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-bt-menu.json" 20 ||
+    fail G-QS-BT-MENU "accessibility dump failed"
+scrot "$ARTIFACTS/15c-bluetooth-menu.png" >/dev/null
+order="$(jq -r '[.[] | select(.showing) | .name | select(test("^(Connect to|Disconnect) "))] | join("|")' \
+    "$ARTIFACTS/a11y-qs-bt-menu.json")"
+want="Disconnect Keyboard|Connect to Headphones"
+[ "$order" = "$want" ] || fail G-QS-BT-MENU "devices are '$order', not '$want'"
+[ "$(jq '[.[] | select(.showing and .name == "Keyboard")] | length' "$ARTIFACTS/a11y-qs-bt-menu.json")" -ge 2 ] ||
+    fail G-QS-BT-MENU "the tile does not name the connected device"
+qs_press "Connect to Headphones" bt-connect || fail G-QS-BT-MENU "could not press Headphones"
+grep -q "^Connect /org/bluez/hci0/dev_AA_AA_AA_AA_AA_01" "$ROOST_STUB_BT_LOG" ||
+    fail G-QS-BT-MENU "Headphones did not connect through BlueZ"
+sleep 1
+open_qs
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-bt-two.json" 20 ||
+    fail G-QS-BT-MENU "accessibility dump failed"
+showing "$ARTIFACTS/a11y-qs-bt-two.json" "2 Connected" ||
+    fail G-QS-BT-MENU "the tile does not count two connected devices"
+pass G-QS-BT-MENU "the Bluetooth menu lists paired devices as GNOME does and connects one"
+
+# GNOME's sound output menu: both outputs, the default checked; picking
+# one makes it the default.
+qs_press "Open sound output menu" sound-menu || fail G-QS-SOUND-MENU "could not open the sound output menu"
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-sound.json" 20 ||
+    fail G-QS-SOUND-MENU "accessibility dump failed"
+for name in "Built-in Audio Analog Stereo" "Roost HDMI Output"; do
+    showing "$ARTIFACTS/a11y-qs-sound.json" "$name" ||
+        fail G-QS-SOUND-MENU "no '$name' output listed"
+done
+qs_press "Roost HDMI Output" sound-hdmi || fail G-QS-SOUND-MENU "could not press Roost HDMI Output"
+for _ in $(seq 1 10); do [ "$(cat "$SINK_FILE")" = 52 ] && break; sleep 0.3; done
+[ "$(cat "$SINK_FILE")" = 52 ] || fail G-QS-SOUND-MENU "the default sink is $(cat "$SINK_FILE"), not 52"
+pass G-QS-SOUND-MENU "the volume slider's menu lists the outputs and makes the picked one the default"
+sleep 1
+open_qs
 
 qs_press "Bluetooth" bt || fail G-QS-BLUETOOTH "could not press Bluetooth"
 sysprop org.bluez /org/bluez/hci0 org.bluez.Adapter1 Powered | grep -q false ||
@@ -668,6 +1274,30 @@ pass G-QS-BRIGHTNESS "the brightness slider sets the backlight through logind"
 [ "$(cat "$VOLUME_FILE")" = 0.40 ] ||
     fail G-QS-VOLUME "sink volume is $(cat "$VOLUME_FILE"), not 0.40"
 pass G-QS-VOLUME "the volume slider sets the PipeWire sink volume"
+
+# GNOME's microphone: while an app records, an orange indicator leads
+# the panel and a Microphone slider sets the default source; both go
+# when the recording stops.
+mic_shown() {
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-mic-$1.json" 20 &&
+        showing "$ARTIFACTS/a11y-mic-$1.json" "$2"
+}
+mic_shown idle Microphone && fail G-QS-MIC "the Microphone slider shows with nothing recording"
+touch "$RECORDING_FILE"
+sleep 3
+mic_shown recording Microphone || fail G-QS-MIC "no Microphone slider while an app records"
+showing "$ARTIFACTS/a11y-mic-recording.json" "Microphone in use" ||
+    fail G-QS-MIC "no microphone indicator in the panel while an app records"
+scrot "$ARTIFACTS/16b-microphone.png" >/dev/null
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-mic.json" 20 \
+    --set Microphone 30 || fail G-QS-MIC "could not set Microphone"
+[ "$(cat "$MIC_FILE")" = 0.30 ] ||
+    fail G-QS-MIC "source volume is $(cat "$MIC_FILE"), not 0.30"
+rm -f "$RECORDING_FILE"
+sleep 3
+mic_shown stopped "Microphone in use" &&
+    fail G-QS-MIC "the microphone indicator stayed after the recording stopped"
+pass G-QS-MIC "an app recording shows the microphone indicator and slider; the slider sets the source"
 scrot "$ARTIFACTS/16-quick-settings-toggled.png" >/dev/null
 xdotool key Escape
 sleep 1
@@ -708,6 +1338,22 @@ if [ "$1" -lt 150 ] || [ "$2" -gt 80 ] || [ "$3" -gt 80 ]; then
     fail G-GL-WINDOW "GL window did not paint its red body (pixel $rgb)"
 fi
 pass G-GL-WINDOW "a GL-rendered GTK window maps and paints"
+
+# The globals a client finds (P-SY-06, #89): wayland-info against this
+# session, compared with GNOME 51's capture. Here, after G-GL-WINDOW,
+# the renderer has reported its formats, so linux-dmabuf is advertised.
+if command -v wayland-info >/dev/null 2>&1; then
+    WAYLAND_DISPLAY="$SOCKET_NAME" wayland-info >"$ARTIFACTS/wayland-info.txt" 2>&1 ||
+        fail G-WAYLAND-INFO "wayland-info could not talk to the session"
+    "$PY" "$ROOT/scripts/roost-wayland-info-compare" "$ARTIFACTS/wayland-info.txt" \
+        --report "$ARTIFACTS/wayland-info-compare.txt" ||
+        fail G-WAYLAND-INFO "globals short of GNOME 51's (see wayland-info-compare.txt)"
+    pass G-WAYLAND-INFO "every expected GNOME 51 global is advertised at its version or newer"
+elif [ "${ROOST_REQUIRE_WAYLAND_INFO:-0}" = 1 ]; then
+    fail G-WAYLAND-INFO "wayland-info is required (ROOST_REQUIRE_WAYLAND_INFO=1) but not installed"
+else
+    echo "roost-gtk-shell-proof: G-WAYLAND-INFO skipped (no wayland-info)"
+fi
 
 # X11 by default (#59): the compositor starts XWayland when it is
 # installed, tells the shell DISPLAY, and apps launched from search get it.
@@ -750,6 +1396,33 @@ jq -e 'any(.[]; .role == "label" and (.name | test("[0-9]+:[0-9]{2}:[0-9]{2}")))
 gsettings set org.gnome.desktop.interface clock-show-seconds false
 pass G-SETTINGS-CLOCK "GNOME's clock-show-seconds changes the panel clock"
 
+# GNOME's input settings (#60).
+gsettings set org.gnome.desktop.input-sources sources "[('xkb', 'us'), ('xkb', 'de')]"
+cstate '.keyboard.layouts == ["English (US)", "German"]' "two sources" ||
+    fail G-SETTINGS-INPUT "input sources did not become the keymap"
+xdotool key super+space
+cstate '.keyboard.layout == "German"' "next source" ||
+    fail G-SETTINGS-INPUT "Super+Space did not switch to the next input source"
+gsettings set org.gnome.desktop.peripherals.keyboard repeat-interval 50
+cstate '.keyboard.repeat_rate == 20' "repeat" ||
+    fail G-SETTINGS-INPUT "repeat-interval 50 ms did not set 20 keys/s"
+gsettings set org.gnome.desktop.interface enable-hot-corners false
+sleep 1
+xdotool mousemove --window "$WID" 1 1
+sleep 1
+xdotool mousemove --window "$WID" 0 0
+sleep 1
+if jq -e '.overview_open' "$CSTATE" >/dev/null; then
+    fail G-SETTINGS-INPUT "the hot corner opened the overview with enable-hot-corners off"
+fi
+xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
+gsettings set org.gnome.desktop.interface enable-hot-corners true
+gsettings set org.gnome.desktop.peripherals.keyboard repeat-interval 30
+gsettings set org.gnome.desktop.input-sources sources "[('xkb', 'us')]"
+cstate '.keyboard.layouts == ["English (US)"]' "one source" ||
+    fail G-SETTINGS-INPUT "the keymap did not return to us"
+pass G-SETTINGS-INPUT "input sources, Super+Space, key repeat and the hot corner follow GNOME"
+
 # GNOME settings (#63): the idle lock follows idle-delay and
 # lock-enabled as they change.
 gsettings set org.gnome.desktop.session idle-delay 600
@@ -763,6 +1436,427 @@ gsettings set org.gnome.desktop.session idle-delay 300
 cstate '.idle_timeout_ms == 300000' "idle 300" ||
     fail G-SETTINGS-IDLE "the idle lock did not follow back to 300 s"
 pass G-SETTINGS-IDLE "GNOME's idle-delay and lock-enabled set the idle lock live"
+
+# org.gnome.Shell for gnome-settings-daemon: a caller outside GNOME's
+# allowlist is refused; the media-keys daemon's grab takes the key away
+# from apps, fires AcceleratorActivated, and its ShowOSD shows the OSD.
+if gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/Shell \
+    --method org.gnome.Shell.GrabAccelerator "<Super>F9" 1 0 >/dev/null 2>&1; then
+    fail G-ACCEL "a caller outside the allowlist grabbed an accelerator"
+fi
+ACCEL_MARKER="$ARTIFACTS/accel-marker"
+rm -f "$ACCEL_MARKER"
+"$PY" "$ROOT/scripts/lib/roost-accel-probe.py" "$ACCEL_MARKER" >"$ARTIFACTS/accel.log" 2>&1 &
+ACCEL_PID=$!
+end=$(($(date +%s) + 10))
+until grep -q grabbed "$ACCEL_MARKER" 2>/dev/null || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+grep -q "grabbed [1-9]" "$ACCEL_MARKER" 2>/dev/null ||
+    fail G-ACCEL "the media-keys stand-in could not grab XF86AudioRaiseVolume"
+xdotool key XF86AudioRaiseVolume
+end=$(($(date +%s) + 5))
+until grep -q activated "$ACCEL_MARKER" 2>/dev/null || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+grep -q "activated" "$ACCEL_MARKER" ||
+    fail G-ACCEL "pressing the grabbed key fired no AcceleratorActivated"
+sleep 0.5
+scrot "$ARTIFACTS/24b-osd.png" >/dev/null
+pass G-ACCEL "gnome-settings-daemon's grab fires on its key and its ShowOSD shows the OSD"
+
+# GNOME Shell's own keybindings (org.gnome.shell.keybindings defaults).
+sleep 2
+xdotool key super+s
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-key-qs.json" 20 ||
+    fail G-KEYBINDINGS "accessibility dump failed"
+showing "$ARTIFACTS/a11y-key-qs.json" "Dark Style" ||
+    fail G-KEYBINDINGS "Super+S did not open quick settings"
+xdotool key Escape
+sleep 1
+xdotool key super+v
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-key-tray.json" 20 ||
+    fail G-KEYBINDINGS "accessibility dump failed"
+showing "$ARTIFACTS/a11y-key-tray.json" "Previous month" ||
+    fail G-KEYBINDINGS "Super+V did not open the date menu"
+xdotool key Escape
+sleep 1
+xdotool key super+a
+cstate '.overview_open' "app grid" || fail G-KEYBINDINGS "Super+A did not open the overview"
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-key-grid.json" 20 ||
+    fail G-KEYBINDINGS "accessibility dump failed"
+showing "$ARTIFACTS/a11y-key-grid.json" "Probe Tools" ||
+    fail G-KEYBINDINGS "Super+A did not show the app grid"
+xdotool key super+a
+cstate '.overview_open | not' "closed" || fail G-KEYBINDINGS "Super+A again did not leave the app grid"
+# The shell hides its overview surfaces on its next frame: let it.
+sleep 1
+pass G-KEYBINDINGS "Super+S, Super+V and Super+A open GNOME's menus and the app grid"
+
+# GNOME's window menu on a header bar's right click: Always on Top, then
+# Hide; the hidden window still shows in the overview, and picking it
+# there brings it back.
+pick_alpha() {
+    xdotool key Super_L
+    cstate '.overview_open and (.previews | length) > 0' "overview" || return 1
+    sleep 1
+    alpha="$(jq -r '.previews[] | select(.app_id == "roost-test-alpha") | .rect | "\(.[0] + .[2] / 2) \(.[1] + .[3] / 2)"' "$CSTATE")"
+    [ -n "$alpha" ] || return 1
+    # shellcheck disable=SC2086
+    xdotool mousemove --window "$WID" $alpha click 1
+    cstate '(.overview_open | not) and .focused_app_id == "roost-test-alpha"' "alpha"
+}
+window_menu() {
+    header="$(jq -r '.focused_rect | "\(.[0] + 60) \(.[1] + 20)"' "$CSTATE")"
+    # shellcheck disable=SC2086
+    xdotool mousemove --window "$WID" $header click 3
+    sleep 1.5
+}
+pick_alpha || fail G-WINDOW-MENU "could not focus Alpha from the overview"
+alpha_id="$(jq -r .focused "$CSTATE")"
+window_menu
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-window-menu.json" 20 ||
+    fail G-WINDOW-MENU "accessibility dump failed"
+showing "$ARTIFACTS/a11y-window-menu.json" "Hide" ||
+    fail G-WINDOW-MENU "the right click opened no window menu"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-window-menu-press.json" 20 \
+    --press "Always on Top" || fail G-WINDOW-MENU "the window menu has no Always on Top"
+cstate "any(.above[]; . == $alpha_id)" "above" ||
+    fail G-WINDOW-MENU "Always on Top did not keep the window above"
+window_menu
+scrot "$ARTIFACTS/24d-window-menu.png" >/dev/null
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-window-menu-2.json" 20 \
+    --press "Hide" || fail G-WINDOW-MENU "could not press Hide"
+cstate "any(.minimized[]; . == $alpha_id) and .focused != $alpha_id" "hidden" ||
+    fail G-WINDOW-MENU "Hide did not take the window away"
+pick_alpha || fail G-WINDOW-MENU "the hidden window could not be picked from the overview"
+cstate "any(.minimized[]; . == $alpha_id) | not" "restored" ||
+    fail G-WINDOW-MENU "picking the hidden window did not bring it back"
+pass G-WINDOW-MENU "the header-bar menu keeps a window on top, hides it, and the overview brings it back"
+
+# GNOME's window-manager keys (org.gnome.desktop.wm.keybindings).
+sleep 1
+xdotool key alt+space
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-wm-menu.json" 20 ||
+    fail G-WM-KEYS "accessibility dump failed"
+showing "$ARTIFACTS/a11y-wm-menu.json" "Hide" || fail G-WM-KEYS "Alt+Space opened no window menu"
+xdotool key Escape
+sleep 1
+before_w="$(jq -r '.focused_rect[2]' "$CSTATE")"
+xdotool key alt+F10
+cstate ".focused_rect[2] == $WIDTH" "maximized" || fail G-WM-KEYS "Alt+F10 did not maximize"
+xdotool key alt+F10
+cstate ".focused_rect[2] == $before_w" "restored" || fail G-WM-KEYS "Alt+F10 again did not restore"
+first_ws="$(jq -r '.active_workspace' "$CSTATE")"
+xdotool key super+End
+cstate ".active_workspace != $first_ws" "last workspace" || fail G-WM-KEYS "Super+End stayed put"
+xdotool key super+Home
+cstate ".active_workspace == $first_ws" "first workspace" || fail G-WM-KEYS "Super+Home did not come back"
+pass G-WM-KEYS "Alt+Space, Alt+F10 and Super+End/Home do what GNOME's window-manager keys do"
+
+# The window-manager keys follow org.gnome.desktop.wm.keybindings, the
+# compositor's defaults standing aside: rebinding maximize moves it.
+cstate ".focused_rect[2] != $WIDTH" "not maximized" ||
+    fail G-WM-REBIND "the focused window is maximized before the test"
+gsettings set org.gnome.desktop.wm.keybindings maximize "['<Super>F9']"
+for _ in $(seq 1 20); do grep -qF 'maximize on ["<Super>F9"]' "$LOG" && break; sleep 0.3; done
+sleep 0.5
+xdotool key super+Up
+sleep 1.5
+cstate ".focused_rect[2] != $WIDTH" "unbound" 3 ||
+    fail G-WM-REBIND "Super+Up still maximized after maximize moved to Super+F9"
+xdotool key super+F9
+cstate ".focused_rect[2] == $WIDTH" "rebound" || fail G-WM-REBIND "Super+F9 did not maximize"
+xdotool key super+Down
+cstate ".focused_rect[2] != $WIDTH" "restored" || fail G-WM-REBIND "Super+Down did not restore"
+gsettings reset org.gnome.desktop.wm.keybindings maximize
+sleep 1
+pass G-WM-REBIND "GNOME's maximize key rebinds: the old chord stops and the new one maximizes"
+
+# The switcher's keys rebind too: switch-applications on Ctrl+J steps
+# and commits on Control's release, and Alt+Tab is left to apps.
+gsettings set org.gnome.desktop.wm.keybindings switch-applications "['<Control>j']"
+sleep 1.5
+steps="$(grep -c 'switcher Step' "$LOG")"
+xdotool key alt+Tab
+sleep 1
+[ "$(grep -c 'switcher Step' "$LOG")" = "$steps" ] ||
+    fail G-SWITCHER-REBIND "Alt+Tab still stepped the switcher after switch-applications moved"
+commits="$(grep -c 'switcher Commit' "$LOG")"
+xdotool keydown Control_L
+xdotool key j
+sleep 0.5
+xdotool keyup Control_L
+sleep 1
+[ "$(grep -c 'switcher Step' "$LOG")" -gt "$steps" ] ||
+    fail G-SWITCHER-REBIND "Ctrl+J did not step the switcher"
+[ "$(grep -c 'switcher Commit' "$LOG")" -gt "$commits" ] ||
+    fail G-SWITCHER-REBIND "releasing Control did not commit the switcher"
+gsettings reset org.gnome.desktop.wm.keybindings switch-applications
+sleep 1
+pass G-SWITCHER-REBIND "GNOME's switch-applications rebinds: Ctrl+J steps and commits, Alt+Tab goes to apps"
+
+# GNOME's input methods: IBus composes in a GTK app, with
+# roost-ibus-bridge as IBus's client (GNOME Shell's part). A test engine
+# turns pinyin into hanzi: the pinyin stays in preedit, Space commits.
+if command -v ibus-daemon >/dev/null 2>&1 &&
+    "$PY" -c "import gi; gi.require_version('IBus', '1.0')" 2>/dev/null; then
+    for _ in $(seq 1 40); do grep -q "roost-ibus-bridge: ready" "$LOG" && break; sleep 0.5; done
+    grep -q "roost-ibus-bridge: ready" "$LOG" || fail G-IME "the IBus bridge never came up"
+    "$PY" -u "$ROOT/scripts/lib/roost-ibus-test-engine.py" >"$ARTIFACTS/ibus-engine.log" 2>&1 &
+    IME_PIDS="$!"
+    for _ in $(seq 1 30); do grep -q ready "$ARTIFACTS/ibus-engine.log" && break; sleep 0.5; done
+    grep -q ready "$ARTIFACTS/ibus-engine.log" || fail G-IME "the test engine did not register with IBus"
+    IME_OUT="$ARTIFACTS/ime.txt"
+    rm -f "$IME_OUT"
+    focused_before="$(grep -c 'roost-ibus-bridge: text field focused' "$LOG")"
+    WAYLAND_DISPLAY="$SOCKET_NAME" "$PY" "$ROOT/scripts/lib/roost-ime-window.py" "$IME_OUT" \
+        >"$ARTIFACTS/ime-window.log" 2>&1 &
+    IME_WINDOW="$!"
+    IME_PIDS="$IME_PIDS $IME_WINDOW"
+    cstate '.windows | any(.app_id == "roost-ime")' "ime window" || fail G-IME "the IME window never mapped"
+    for _ in $(seq 1 20); do
+        [ "$(grep -c 'roost-ibus-bridge: text field focused' "$LOG")" -gt "$focused_before" ] && break
+        sleep 0.3
+    done
+    sleep 0.5
+    xdotool type --delay 100 nihao
+    sleep 0.8
+    scrot "$ARTIFACTS/24i-ime-preedit.png" >/dev/null
+    [ ! -s "$IME_OUT" ] || fail G-IME "pinyin reached the field before a commit: $(cat "$IME_OUT")"
+    xdotool key space
+    for _ in $(seq 1 20); do [ "$(cat "$IME_OUT" 2>/dev/null)" = "你好" ] && break; sleep 0.3; done
+    [ "$(cat "$IME_OUT" 2>/dev/null)" = "你好" ] ||
+        fail G-IME "the field holds '$(cat "$IME_OUT" 2>/dev/null)', not 你好"
+    pass G-IME "IBus composes in a GTK app: pinyin in preedit, Space commits 你好"
+    # Surrounding text, as GNOME Shell sends it: the engine sees "你好"
+    # with the cursor 2 characters in (6 bytes on the wire); F2 makes it
+    # delete the character before the cursor and commit what it saw.
+    ENGINE_LOG="$ARTIFACTS/ibus-engine.log"
+    for _ in $(seq 1 20); do grep -q "surrounding 你好 2 2" "$ENGINE_LOG" && break; sleep 0.3; done
+    grep -q "surrounding 你好 2 2" "$ENGINE_LOG" ||
+        fail G-IME-SURROUNDING "the engine never saw '你好' with the cursor at 2: $(grep surrounding "$ENGINE_LOG" | tail -3)"
+    xdotool key F2
+    for _ in $(seq 1 20); do [ "$(cat "$IME_OUT" 2>/dev/null)" = "你|你好|2" ] && break; sleep 0.3; done
+    [ "$(cat "$IME_OUT" 2>/dev/null)" = "你|你好|2" ] ||
+        fail G-IME-SURROUNDING "the field holds '$(cat "$IME_OUT" 2>/dev/null)', not 你|你好|2"
+    pass G-IME-SURROUNDING "the engine reads the field's surrounding text and deletes around the cursor"
+    # The candidate window's anchor: SetCursorLocation inside the
+    # field's window, in global (screen) coordinates.
+    cursor="$(sed -n 's/^roost-ibus-test-engine: cursor //p' "$ENGINE_LOG" | tail -1)"
+    [ -n "$cursor" ] || fail G-IME-CURSOR "IBus never heard a cursor location"
+    # shellcheck disable=SC2086 # four numbers
+    set -- $cursor
+    rect="$(jq -r '.windows[] | select(.app_id == "roost-ime") | .rect | "\(.[0]) \(.[1]) \(.[2]) \(.[3])"' "$CSTATE")"
+    inside="$(echo "$rect" | awk -v x="$1" -v y="$2" -v h="$4" \
+        '{ print (x >= $1 && x < $1 + $3 && y >= $2 && y < $2 + $4 && h > 0) ? "yes" : "no" }')"
+    [ "$inside" = yes ] ||
+        fail G-IME-CURSOR "cursor location ($cursor) is not inside the IME window ($rect)"
+    pass G-IME-CURSOR "IBus hears the text cursor at ($cursor), inside the field's window ($rect)"
+    # GNOME Shell is IBus's panel and draws its candidates
+    # (ibusCandidatePopup.js): the shell owns org.freedesktop.IBus.Panel
+    # on IBus's bus, "ni" brings up 你 尼 泥 under the text cursor with
+    # the first highlighted, and a click on 尼 commits it (the panel's
+    # CandidateClicked) without taking the keyboard from the field.
+    for _ in $(seq 1 20); do grep -q "IBus panel: owns org.freedesktop.IBus.Panel" "$LOG" && break; sleep 0.5; done
+    grep -q "IBus panel: owns org.freedesktop.IBus.Panel" "$LOG" ||
+        fail G-IME-CANDIDATES "the shell never became IBus's panel"
+    shown_before="$(grep -c 'ibus candidate 1 尼 at' "$LOG")"
+    xdotool type --delay 100 ni
+    cstate '.layers | any(.namespace == "roost-ibus-candidates")' "candidate window" 10 ||
+        fail G-IME-CANDIDATES "typing 'ni' showed no candidate window"
+    for _ in $(seq 1 20); do
+        [ "$(grep -c 'ibus candidate 1 尼 at' "$LOG")" -gt "$shown_before" ] && break
+        sleep 0.3
+    done
+    [ "$(grep -c 'ibus candidate 1 尼 at' "$LOG")" -gt "$shown_before" ] ||
+        fail G-IME-CANDIDATES "the candidate window never laid out 尼"
+    sleep 1
+    scrot "$ARTIFACTS/24j-ime-candidates.png" >/dev/null
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-ime-candidates.json" 20 ||
+        fail G-IME-CANDIDATES "no accessibility dump of the shell"
+    for hanzi in 你 尼 泥; do
+        jq -e --arg n "$hanzi" 'any(.[]; .name == $n and .showing)' \
+            "$ARTIFACTS/a11y-ime-candidates.json" >/dev/null ||
+            fail G-IME-CANDIDATES "candidate $hanzi is not shown"
+    done
+    cursor="$(sed -n 's/^roost-ibus-test-engine: cursor //p' "$ENGINE_LOG" | tail -1)"
+    popup="$(jq -r '.layers[] | select(.namespace == "roost-ibus-candidates") | .rect | "\(.[0]) \(.[1]) \(.[2]) \(.[3])"' "$CSTATE" | head -1)"
+    [ -n "$popup" ] || fail G-IME-CANDIDATES "the candidate window closed before it was checked"
+    # shellcheck disable=SC2086 # four and four numbers
+    set -- $cursor $popup
+    # The content (6px inside the surface: its shadow's room) starts at
+    # the cursor's left edge, 6px (the boxpointer's rise) under it.
+    near="$(awk -v cx="$1" -v cy="$2" -v ch="$4" -v px="$5" -v py="$6" 'BEGIN {
+        dx = px + 6 - cx; dy = py + 6 - (cy + ch + 6)
+        print (dx >= -4 && dx <= 4 && dy >= -4 && dy <= 4) ? "yes" : "no" }')"
+    [ "$near" = yes ] ||
+        fail G-IME-CANDIDATES "the candidate window ($popup) is not under the text cursor ($cursor)"
+    # GNOME's popup surface (#36363a) in its top padding, and the
+    # highlighted first row in the accent (#3584e4).
+    # shellcheck disable=SC2046
+    set -- $(px "$ARTIFACTS/24j-ime-candidates.png" $(($5 + 30)) $(($6 + 9))) "$5" "$6"
+    if [ "${1:-0}" -lt 46 ] || [ "${1:-0}" -gt 62 ] || [ "${3:-0}" -lt 50 ] || [ "${3:-0}" -gt 66 ]; then
+        fail G-IME-CANDIDATES "no #36363a popup surface at the candidate window's top (pixel ${1:-?} ${2:-?} ${3:-?})"
+    fi
+    surface="$1 $2 $3"
+    row0="$(grep 'ibus candidate 0 你 at' "$LOG" | tail -1 | sed 's/.* at //')"
+    # shellcheck disable=SC2086 # four numbers
+    set -- $row0
+    # shellcheck disable=SC2046
+    set -- $(px "$ARTIFACTS/24j-ime-candidates.png" $(($1 + 3)) $(($2 + $4 / 2)))
+    [ "${3:-0}" -gt $((${1:-255} + 60)) ] ||
+        fail G-IME-CANDIDATES "the first candidate is not highlighted (pixel ${1:-?} ${2:-?} ${3:-?})"
+    row1="$(grep 'ibus candidate 1 尼 at' "$LOG" | tail -1 | sed 's/.* at //')"
+    # shellcheck disable=SC2086 # four numbers
+    set -- $row1
+    xdotool mousemove --window "$WID" $(($1 + $3 / 2)) $(($2 + $4 / 2))
+    sleep 0.3
+    xdotool click 1
+    for _ in $(seq 1 20); do [ "$(cat "$IME_OUT" 2>/dev/null)" = "你|你好|2尼" ] && break; sleep 0.3; done
+    [ "$(cat "$IME_OUT" 2>/dev/null)" = "你|你好|2尼" ] ||
+        fail G-IME-CANDIDATES "clicking 尼 left the field holding '$(cat "$IME_OUT" 2>/dev/null)', not 你|你好|2尼 ($(grep 'candidate clicked' "$ENGINE_LOG" | tail -1))"
+    grep -q "candidate clicked 1 1 " "$ENGINE_LOG" ||
+        fail G-IME-CANDIDATES "the engine never heard CandidateClicked(1, 1, ...)"
+    cstate '.layers | any(.namespace == "roost-ibus-candidates") | not' "candidate window closed" 10 ||
+        fail G-IME-CANDIDATES "the candidate window stayed after the commit"
+    xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT - 40))
+    pass G-IME-CANDIDATES "the shell draws IBus's candidates (你 尼 泥) under the cursor, the first highlighted (surface $surface), and clicking 尼 commits it"
+    # shellcheck disable=SC2086 # two pids
+    kill $IME_PIDS 2>/dev/null || true
+    IME_PIDS=""
+    # Back to a plain layout: later stages type straight to the apps.
+    ibus engine xkb:us::eng >/dev/null 2>&1 || true
+    cstate '.windows | any(.app_id == "roost-ime") | not' "ime window gone" ||
+        fail G-IME "the IME window did not close"
+elif [ "${ROOST_REQUIRE_IBUS:-0}" = 1 ]; then
+    fail G-IME "IBus is required (ROOST_REQUIRE_IBUS=1) but ibus-daemon or its GObject bindings are missing"
+else
+    echo "roost-gtk-shell-proof: G-IME skipped (IBus not installed)"
+fi
+
+# niri's scrollable tiling (Super+Shift+T): the windows become a strip of
+# columns with 16px gaps on every side, the view follows the focused
+# column (whole on screen), niri's focus ring (4px of #7fc8ff) marks it,
+# Super+R steps its width and Super+Left moves focus along the strip.
+strip_whole() {
+    cstate ".focused_rect[1] == 48 and .focused_rect[3] == $((HEIGHT - 32 - 32)) and
+        .focused_rect[0] >= 16 and .focused_rect[0] + .focused_rect[2] <= $((WIDTH - 16))" "$1"
+}
+xdotool key super+shift+t
+cstate '.session_mode == "scroll"' "scroll mode" || fail G-SCROLL "Super+Shift+T did not enter scroll mode"
+sleep 1
+strip_whole "focused column whole" || fail G-SCROLL "the focused column is not whole with gaps: $(jq -c .focused_rect "$CSTATE")"
+scrot "$ARTIFACTS/24j-scroll-strip.png" >/dev/null
+fx="$(jq -r '.focused_rect[0]' "$CSTATE")"
+fy="$(jq -r '.focused_rect[1]' "$CSTATE")"
+# shellcheck disable=SC2046
+set -- $(px "$ARTIFACTS/24j-scroll-strip.png" $((fx - 2)) $((fy + 200)))
+# Columns are tiled on every edge, so no client shadow dims the ring.
+if [ "${1:-0}" -lt 122 ] || [ "${2:-0}" -lt 195 ] || [ "${3:-0}" -lt 250 ]; then
+    fail G-SCROLL "no focus ring left of the focused column (pixel ${1:-?} ${2:-?} ${3:-?})"
+fi
+before_w="$(jq -r '.focused_rect[2]' "$CSTATE")"
+before_id="$(jq -r '.focused' "$CSTATE")"
+xdotool key super+r
+cstate ".focused_rect[2] != $before_w" "preset" || fail G-SCROLL "Super+R did not change the column width"
+strip_whole "widened column whole" || fail G-SCROLL "the widened column is not whole on screen"
+xdotool key super+Left
+cstate ".focused != $before_id" "focus moved" || fail G-SCROLL "Super+Left did not move focus along the strip"
+strip_whole "newly focused column whole" || fail G-SCROLL "the view did not follow focus"
+scrot "$ARTIFACTS/24k-scroll-follow.png" >/dev/null
+xdotool key super+shift+t
+cstate '.session_mode == "gnome"' "floating again" || fail G-SCROLL "Super+Shift+T did not leave scroll mode"
+pass G-SCROLL "Super+Shift+T makes niri's strip: gaps, the view following focus, the focus ring, presets and focus moves"
+sleep 1
+
+# GNOME's workspace switcher popup: a dark pill above the bottom edge
+# right after a workspace key.
+xdotool key super+Page_Down
+sleep 0.3
+scrot "$ARTIFACTS/24f-workspace-popup.png" >/dev/null
+# shellcheck disable=SC2046
+set -- $(px "$ARTIFACTS/24f-workspace-popup.png" $((WIDTH / 2 - 20)) $((HEIGHT - 59 - 28)))
+xdotool key super+Page_Up
+if [ "${1:-0}" -ge 70 ] || [ "${2:-0}" -ge 70 ] || [ "${3:-0}" -ge 75 ]; then
+    fail G-WS-POPUP "no switcher pill above the bottom edge (pixel ${1:-?} ${2:-?} ${3:-?})"
+fi
+pass G-WS-POPUP "a workspace key shows GNOME's workspace switcher popup"
+sleep 1
+
+# GNOME's workspace thumbnails: a window moved one workspace right makes
+# three (the trailing empty one included), so the overview shows the
+# strip; a thumbnail click switches there with the overview still open.
+home_ws="$(jq -r '.active_workspace' "$CSTATE")"
+moved="$(jq -r .focused "$CSTATE")"
+window_menu
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-ws-right.json" 20 \
+    --press "Move to Workspace Right" || fail G-WS-THUMBS "the window menu has no Move to Workspace Right"
+cstate ".active_workspace == $home_ws and any(.windows[]; .id == $moved and .workspace == $home_ws + 1)" \
+    "moved" || fail G-WS-THUMBS "the window did not move one workspace right"
+sleep 1
+xdotool key Super_L
+cstate '.overview_open and (.thumbnails | length) == 3' "strip" ||
+    fail G-WS-THUMBS "the overview shows no three-thumbnail strip"
+sleep 1.5
+scrot "$ARTIFACTS/24g-workspace-thumbnails.png" >/dev/null
+ring="$(jq -r '.thumbnails[] | select(.active) | .rect | "\(.[0] - 2) \(.[1] + .[3] / 2)"' "$CSTATE")"
+# shellcheck disable=SC2046,SC2086
+set -- $(px "$ARTIFACTS/24g-workspace-thumbnails.png" $ring)
+if [ "${3:-0}" -le 180 ] || [ "${1:-255}" -ge 100 ]; then
+    fail G-WS-THUMBS "no accent indicator around the active thumbnail (pixel ${1:-?} ${2:-?} ${3:-?})"
+fi
+target="$(jq -r ".thumbnails[] | select(.workspace == $home_ws + 1) | .rect | \"\(.[0] + .[2] / 2) \(.[1] + .[3] / 2)\"" "$CSTATE")"
+# shellcheck disable=SC2086
+xdotool mousemove --window "$WID" $target click 1
+cstate ".overview_open and .active_workspace == $home_ws + 1" "switched" ||
+    fail G-WS-THUMBS "a thumbnail click did not switch workspace"
+xdotool key Escape
+cstate "(.overview_open | not) and .focused == $moved" "closed" ||
+    fail G-WS-THUMBS "closing the overview did not focus the moved window"
+pass G-WS-THUMBS "three workspaces show GNOME's thumbnails strip and a thumbnail click switches"
+# Put the window back where the journey expects it.
+sleep 1
+window_menu
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-ws-left.json" 20 \
+    --press "Move to Workspace Left" || fail G-WS-THUMBS "the window menu has no Move to Workspace Left"
+xdotool key super+Page_Up
+cstate ".active_workspace == $home_ws and .focused == $moved" "home" ||
+    fail G-WS-THUMBS "could not return the window home"
+sleep 1
+
+# GNOME's window drag in the overview: a preview dropped on the right
+# neighbor's card moves that window one workspace right.
+xdotool key Super_L
+cstate ".overview_open and any(.previews[]; .id == $moved)" "overview" ||
+    fail G-OV-DND "the overview shows no preview of the window"
+sleep 1
+read -r px0 py0 <<EOF2
+$(jq -r ".previews[] | select(.id == $moved) | .rect | \"\(.[0] + .[2] / 2 | floor) \(.[1] + .[3] / 2 | floor)\"" "$CSTATE")
+EOF2
+xdotool mousemove --window "$WID" "$px0" "$py0"
+xdotool mousedown 1
+for step in $(seq 1 12); do
+    xdotool mousemove --window "$WID" $((px0 + (WIDTH - 50 - px0) * step / 12)) $((py0 + (HEIGHT / 2 - py0) * step / 12))
+    sleep 0.05
+done
+sleep 0.5
+scrot "$ARTIFACTS/24h-overview-drag.png" >/dev/null
+xdotool mouseup 1
+cstate ".overview_open and any(.windows[]; .id == $moved and .workspace == $home_ws + 1)" "dropped" ||
+    fail G-OV-DND "dropping the preview on the next card did not move the window there"
+pass G-OV-DND "dragging a preview onto the next workspace's card moves the window there"
+xdotool key Escape
+sleep 1
+xdotool key super+Page_Down
+cstate ".focused == $moved" "on the next workspace" || fail G-OV-DND "could not reach the moved window"
+window_menu
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-dnd-left.json" 20 \
+    --press "Move to Workspace Left" || fail G-OV-DND "the window menu has no Move to Workspace Left"
+xdotool key super+Page_Up
+cstate ".active_workspace == $home_ws and .focused == $moved" "home" ||
+    fail G-OV-DND "could not return the window home"
+sleep 1
 
 # Screenshots (#61): GNOME Shell's interface, as the portal calls it.
 SHOT="$ARTIFACTS/screenshot.png"
@@ -780,6 +1874,19 @@ dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -
 [ "$(px "$SHOT" 300 5)" = "0 0 0" ] || fail G-SCREENSHOT "top of the screenshot is not the black bar (flipped?)"
 [ "$(px "$SHOT" 5 $((HEIGHT - 5)))" != "0 0 0" ] || fail G-SCREENSHOT "bottom of the screenshot is black (flipped?)"
 pass G-SCREENSHOT "org.gnome.Shell.Screenshot saves the screen the right way up"
+
+WSHOT="$ARTIFACTS/screenshot-window.png"
+reply="$(gdbus call --session --dest org.gnome.Shell.Screenshot \
+    --object-path /org/gnome/Shell/Screenshot \
+    --method org.gnome.Shell.Screenshot.ScreenshotWindow true false false "$WSHOT" 2>&1)" ||
+    fail G-SCREENSHOT-WINDOW "ScreenshotWindow call failed: $reply"
+[ "$reply" = "(true, '$WSHOT')" ] || fail G-SCREENSHOT-WINDOW "unexpected reply: $reply"
+dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$WSHOT")"
+want="$(jq -r '.focused as $f | .windows[] | select(.id == $f) | .rect | "\(.[2]),\(.[3])"' "$CSTATE" | head -1)"
+if [ -z "$want" ] || [ "$dims" != "$want" ]; then
+    fail G-SCREENSHOT-WINDOW "window screenshot is $dims, focused window is ${want:-none}"
+fi
+pass G-SCREENSHOT-WINDOW "ScreenshotWindow saves the focused window ($dims)"
 
 open_qs
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-shot.json" 20 \
@@ -800,6 +1907,85 @@ xdotool key Escape
 sleep 1
 pass G-SCREENSHOT-BUTTON "the button saves to Pictures/Screenshots and notifies"
 
+# GNOME's screenshot UI on Print: Screen, then Capture saves the whole
+# screen where GNOME does.
+before="$(find "$XDG_PICTURES_DIR/Screenshots" -name 'Screenshot From *.png' 2>/dev/null | wc -l)"
+xdotool key Print
+end=$(($(date +%s) + 20))
+until "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-shot-ui.json" 5 >/dev/null 2>&1 &&
+    showing "$ARTIFACTS/a11y-shot-ui.json" "Capture" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.5; done
+showing "$ARTIFACTS/a11y-shot-ui.json" "Capture" || fail G-SCREENSHOT-UI "Print did not open the screenshot UI"
+scrot "$ARTIFACTS/24e-screenshot-ui.png" >/dev/null
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-shot-ui-screen.json" 20 \
+    --press "Screen" || fail G-SCREENSHOT-UI "could not choose Screen"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-shot-ui-capture.json" 20 \
+    --press "Capture" || fail G-SCREENSHOT-UI "could not press Capture"
+end=$(($(date +%s) + 15))
+until [ "$(find "$XDG_PICTURES_DIR/Screenshots" -name 'Screenshot From *.png' 2>/dev/null | wc -l)" -gt "$before" ] ||
+    [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+newest="$(find "$XDG_PICTURES_DIR/Screenshots" -name 'Screenshot From *.png' -newer "$ARTIFACTS/24e-screenshot-ui.png" 2>/dev/null | head -1)"
+[ -n "$newest" ] || fail G-SCREENSHOT-UI "Capture saved nothing"
+dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$newest")"
+[ "$dims" = "$WIDTH,$HEIGHT" ] || fail G-SCREENSHOT-UI "the Screen capture is $dims, not $WIDTH,$HEIGHT"
+pass G-SCREENSHOT-UI "Print opens GNOME's screenshot UI; Screen and Capture save the whole screen"
+
+# GNOME's window selector: Window lays the windows out as previews with
+# the focused one chosen; choosing another test window and Capture saves
+# that window alone, at its own size.
+focused_app="$(jq -r '.focused_app_id' "$CSTATE")"
+target=""
+for t in Alpha Beta Gamma; do
+    [ "roost-test-$(echo "$t" | tr '[:upper:]' '[:lower:]')" = "$focused_app" ] && continue
+    target="$t"
+    break
+done
+want="$(jq -r ".windows[] | select(.app_id == \"roost-test-$(echo "$target" | tr '[:upper:]' '[:lower:]')\") | .rect | \"\(.[2]),\(.[3])\"" "$CSTATE" | head -1)"
+[ -n "$want" ] || fail G-SCREENSHOT-UI-WINDOW "no $target window to choose"
+sleep 1
+xdotool key Print
+end=$(($(date +%s) + 20))
+until "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-shot-win-open.json" 5 >/dev/null 2>&1 &&
+    showing "$ARTIFACTS/a11y-shot-win-open.json" "Capture" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.5; done
+showing "$ARTIFACTS/a11y-shot-win-open.json" "Capture" ||
+    fail G-SCREENSHOT-UI-WINDOW "Print did not open the screenshot UI"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-shot-ui-window.json" 20 \
+    --press "Window" || fail G-SCREENSHOT-UI-WINDOW "could not choose Window"
+for t in Alpha Beta Gamma; do
+    showing "$ARTIFACTS/a11y-shot-ui-window.json" "$t" ||
+        fail G-SCREENSHOT-UI-WINDOW "the window selector shows no $t window"
+done
+focused_title="$(jq -rn --arg a "$focused_app" '$a | sub("^roost-test-"; "") | (.[0:1] | ascii_upcase) + .[1:]')"
+jq -e --arg n "$focused_title" 'any(.[]; .name == $n and .showing and .checked)' \
+    "$ARTIFACTS/a11y-shot-ui-window.json" >/dev/null ||
+    fail G-SCREENSHOT-UI-WINDOW "the focused window ($focused_title) is not the one chosen"
+scrot "$ARTIFACTS/24e-screenshot-window-selector.png" >/dev/null
+# The selector covers the screen in GNOME's dark system background
+# (#222226).
+# shellcheck disable=SC2046
+set -- $(px "$ARTIFACTS/24e-screenshot-window-selector.png" 20 $((HEIGHT / 2)))
+if [ "${1:-0}" -lt 30 ] || [ "${1:-0}" -gt 38 ] || [ "${3:-0}" -lt 34 ] || [ "${3:-0}" -gt 42 ]; then
+    fail G-SCREENSHOT-UI-WINDOW "no window selector background (pixel ${1:-?} ${2:-?} ${3:-?})"
+fi
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-shot-ui-window-pick.json" 20 \
+    --press "$target" || fail G-SCREENSHOT-UI-WINDOW "could not choose the $target window"
+jq -e --arg n "$target" 'any(.[]; .name == $n and .showing and .checked)' \
+    "$ARTIFACTS/a11y-shot-ui-window-pick.json" >/dev/null ||
+    fail G-SCREENSHOT-UI-WINDOW "choosing $target did not select it"
+scrot "$ARTIFACTS/24e-screenshot-window-chosen.png" >/dev/null
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-shot-ui-window-capture.json" 20 \
+    --press "Capture" || fail G-SCREENSHOT-UI-WINDOW "could not press Capture"
+end=$(($(date +%s) + 15))
+until [ -n "$(find "$XDG_PICTURES_DIR/Screenshots" -name 'Screenshot From *.png' -newer "$ARTIFACTS/24e-screenshot-window-chosen.png" 2>/dev/null)" ] ||
+    [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+newest="$(find "$XDG_PICTURES_DIR/Screenshots" -name 'Screenshot From *.png' -newer "$ARTIFACTS/24e-screenshot-window-chosen.png" 2>/dev/null | head -1)"
+[ -n "$newest" ] || fail G-SCREENSHOT-UI-WINDOW "Capture saved nothing"
+cp "$newest" "$ARTIFACTS/screenshot-ui-window.png"
+dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$newest")"
+[ "$dims" = "$want" ] ||
+    fail G-SCREENSHOT-UI-WINDOW "the Window capture is $dims, the $target window is $want"
+pass G-SCREENSHOT-UI-WINDOW "Window shows GNOME's window selector ($focused_title chosen); choosing $target and Capture saves it alone ($dims)"
+sleep 1
+
 # Screen sharing (#61): the portal's calls, a frame over PipeWire.
 if [ -n "$PW_PIDS" ] && command -v gst-launch-1.0 >/dev/null 2>&1; then
     CAST="$ARTIFACTS/screencast.png"
@@ -809,9 +1995,109 @@ if [ -n "$PW_PIDS" ] && command -v gst-launch-1.0 >/dev/null 2>&1; then
     [ "$dims" = "$WIDTH,$HEIGHT" ] || fail G-SCREENCAST "cast frame is $dims, not $WIDTH,$HEIGHT"
     [ "$(px "$CAST" 300 5)" = "0 0 0" ] || fail G-SCREENCAST "cast frame does not show the top bar"
     pass G-SCREENCAST "monitor recorded over Mutter ScreenCast, frame pulled from PipeWire ($(cat "$ARTIFACTS/screencast.log"))"
+    WCAST="$ARTIFACTS/window-cast.png"
+    "$PY" "$ROOT/scripts/lib/roost-screencast-client.py" "$WCAST" --window \
+        >"$ARTIFACTS/window-cast.log" 2>&1 ||
+        fail G-WINDOW-CAST "window cast failed: $(tail -3 "$ARTIFACTS/window-cast.log")"
+    # "node N window ID WxH TITLE": the frame is the window's own size.
+    size="$(awk '{print $5}' "$ARTIFACTS/window-cast.log")"
+    dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$WCAST")"
+    [ "$dims" = "$(echo "$size" | tr x ,)" ] ||
+        fail G-WINDOW-CAST "window frame is $dims, not the window's $size"
+    [ "$dims" != "$WIDTH,$HEIGHT" ] || fail G-WINDOW-CAST "window frame is the whole screen"
+    pass G-WINDOW-CAST "a window shared over Introspect and RecordWindow ($(cat "$ARTIFACTS/window-cast.log"))"
+
+    # GNOME's screen recorder: the screenshot UI's video switch records
+    # the selection (GNOME's first one, a centred quarter) as VP8 WebM in
+    # Videos/Screencasts; the panel's red indicator stops it.
+    sleep 1
+    xdotool key Print
+    end=$(($(date +%s) + 20))
+    until "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-cast-open.json" 5 >/dev/null 2>&1 &&
+        showing "$ARTIFACTS/a11y-cast-open.json" "Capture" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.5; done
+    showing "$ARTIFACTS/a11y-cast-open.json" "Capture" || fail G-SCREENCAST-UI "Print did not open the screenshot UI"
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-cast-switch.json" 20 \
+        --press "Record Screen" || fail G-SCREENCAST-UI "could not switch to screencast"
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-cast-selection.json" 20 \
+        --press "Selection" || fail G-SCREENCAST-UI "could not choose Selection"
+    scrot "$ARTIFACTS/24i-screencast-ui.png" >/dev/null
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-cast-capture.json" 20 \
+        --press "Capture" || fail G-SCREENCAST-UI "could not press Capture"
+    end=$(($(date +%s) + 20))
+    until "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-cast-recording.json" 5 >/dev/null 2>&1 &&
+        showing "$ARTIFACTS/a11y-cast-recording.json" "Stop Screencast" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.5; done
+    showing "$ARTIFACTS/a11y-cast-recording.json" "Stop Screencast" ||
+        fail G-SCREENCAST-UI "no recording indicator in the panel"
+    sleep 3
+    scrot "$ARTIFACTS/24j-recording-indicator.png" >/dev/null
+    # The indicator is GNOME's red ($red_4) panel button.
+    ffmpeg -loglevel error -i "$ARTIFACTS/24j-recording-indicator.png" -vf "crop=$WIDTH:1:0:16" \
+        -f rawvideo -pix_fmt rgb24 - | od -An -tu1 -v | tr -s ' ' '\n' | awk 'NF' | paste - - - |
+        awk '$1 > 150 && $2 < 70 && $3 < 80 { found = 1 } END { exit !found }' ||
+        fail G-SCREENCAST-UI "no red recording indicator in the panel"
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-cast-stop.json" 20 \
+        --press "Stop Screencast" || fail G-SCREENCAST-UI "could not press Stop Screencast"
+    end=$(($(date +%s) + 20))
+    until [ -n "$(find "$XDG_VIDEOS_DIR/Screencasts" -name 'Screencast From *.webm' 2>/dev/null)" ] &&
+        "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-cast-stopped.json" 5 >/dev/null 2>&1 &&
+        ! showing "$ARTIFACTS/a11y-cast-stopped.json" "Stop Screencast" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.5; done
+    if showing "$ARTIFACTS/a11y-cast-stopped.json" "Stop Screencast"; then
+        fail G-SCREENCAST-UI "the indicator stayed after Stop"
+    fi
+    video="$(find "$XDG_VIDEOS_DIR/Screencasts" -name 'Screencast From *.webm' 2>/dev/null | head -1)"
+    [ -n "$video" ] || fail G-SCREENCAST-UI "no Videos/Screencasts/Screencast From *.webm"
+    cp "$video" "$ARTIFACTS/screencast-ui.webm"
+    info="$(ffprobe -v error -count_frames -select_streams v:0 \
+        -show_entries stream=codec_name,width,height,nb_read_frames -of csv=p=0 "$video")"
+    want_w=$((WIDTH / 4))
+    want_h=$((HEIGHT / 4))
+    case "$info" in
+        "vp8,$want_w,$want_h,"*) ;;
+        *) fail G-SCREENCAST-UI "the recording is '$info', not a ${want_w}x${want_h} VP8 video" ;;
+    esac
+    frames="${info##*,}"
+    [ "${frames:-0}" -ge 2 ] 2>/dev/null || fail G-SCREENCAST-UI "the recording has ${frames:-no} frames"
+    pass G-SCREENCAST-UI "the video switch records the selection ($info) to $(basename "$video") with GNOME's indicator"
+
+    # The service's own interface, as other callers use it.
+    reply="$(gdbus call --session --dest org.gnome.Shell.Screencast \
+        --object-path /org/gnome/Shell/Screencast \
+        --method org.gnome.Shell.Screencast.Screencast "Screencasts/D-Bus %d %t" "@a{sv} {}" 2>&1)" ||
+        fail G-SCREENCAST-DBUS "Screencast call failed: $reply"
+    dvideo="$(echo "$reply" | sed -n "s/^(true, '\(.*\)')$/\1/p")"
+    [ -n "$dvideo" ] || fail G-SCREENCAST-DBUS "unexpected reply: $reply"
+    sleep 3
+    reply="$(gdbus call --session --dest org.gnome.Shell.Screencast \
+        --object-path /org/gnome/Shell/Screencast \
+        --method org.gnome.Shell.Screencast.StopScreencast 2>&1)" ||
+        fail G-SCREENCAST-DBUS "StopScreencast call failed: $reply"
+    [ "$reply" = "(true,)" ] || fail G-SCREENCAST-DBUS "StopScreencast answered $reply"
+    info="$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name,width,height \
+        -of csv=p=0 "$dvideo" 2>&1)"
+    [ "$info" = "vp8,$WIDTH,$HEIGHT" ] || fail G-SCREENCAST-DBUS "the recording is '$info'"
+    pass G-SCREENCAST-DBUS "Screencast and StopScreencast record the screen to $(basename "$dvideo") ($info)"
 else
     echo "roost-gtk-shell-proof: G-SCREENCAST skipped (no pipewire, wireplumber or gstreamer)"
 fi
+
+# Display settings (#59): what GNOME Settings' Displays panel sends.
+apply_display() {
+    gdbus call --session --dest org.gnome.Mutter.DisplayConfig \
+        --object-path /org/gnome/Mutter/DisplayConfig \
+        --method org.gnome.Mutter.DisplayConfig.ApplyMonitorsConfig \
+        -- 0 "$1" "[(0, 0, $2, uint32 0, true, [('roost-0', '${WIDTH}x${HEIGHT}@60.000', @a{sv} {})])]" \
+        "@a{sv} {}" >>"$ARTIFACTS/display-settings.log" 2>&1
+}
+apply_display 2 1.25 || fail G-DISPLAY-SETTINGS "ApplyMonitorsConfig failed: $(tail -2 "$ARTIFACTS/display-settings.log")"
+cstate '.layers | any(.namespace == "roost-panel" and .rect[2] == 1024)' "125 percent" ||
+    fail G-DISPLAY-SETTINGS "the layout did not follow scale 1.25"
+grep -q '<scale>1.25</scale>' "$XDG_CONFIG_HOME/roost/monitors.xml" 2>/dev/null ||
+    fail G-DISPLAY-SETTINGS "the arrangement was not saved to roost/monitors.xml"
+scrot "$ARTIFACTS/24-scale-125.png" >/dev/null
+apply_display 1 1 || fail G-DISPLAY-SETTINGS "restoring scale 1 failed"
+cstate ".layers | any(.namespace == \"roost-panel\" and .rect[2] == $WIDTH)" "100 percent" ||
+    fail G-DISPLAY-SETTINGS "the layout did not return to scale 1"
+pass G-DISPLAY-SETTINGS "ApplyMonitorsConfig changes the scale live and saves it"
 
 # Power (#62), against the logind stub (restarted: G-QS-ABSENT stopped
 # it). The proof runs the shell as a hardware session for the full menu.
@@ -819,10 +2105,55 @@ POWER_LOG="$ARTIFACTS/power-log"
 : >"$POWER_LOG"
 "$PY" "$ROOT/scripts/lib/roost-service-stubs.py" "$BACKLIGHT" "$POWER_LOG" >>"$ARTIFACTS/stubs.log" 2>&1 &
 STUBS_PID=$!
+
+# GNOME Shell's brightness keys step the backlight through logind (back
+# on the bus now) and show the brightness OSD.
+sleep 2
+before="$(cat "$BACKLIGHT/brightness")"
+xdotool key XF86MonBrightnessUp
+end=$(($(date +%s) + 5))
+until [ "$(cat "$BACKLIGHT/brightness")" != "$before" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+after="$(cat "$BACKLIGHT/brightness")"
+[ "$after" -gt "$before" ] ||
+    fail G-KEY-BRIGHTNESS "the brightness key left the backlight at $after (was $before)"
+scrot "$ARTIFACTS/24c-brightness-osd.png" >/dev/null
+pass G-KEY-BRIGHTNESS "the brightness key steps the backlight by a twentieth through logind"
+
+# GNOME Shell as the polkit agent: polkit (the Authority stub, back on
+# the bus) asks the agent to authenticate; a wrong password says so and
+# asks again, the right one authorizes.
+end=$(($(date +%s) + 15))
+until [ -s "$ROOST_STUB_POLKIT_LOG" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+[ -s "$ROOST_STUB_POLKIT_LOG" ] || fail G-POLKIT "the shell never registered a polkit agent"
+read -r agent_name agent_path <"$ROOST_STUB_POLKIT_LOG"
+gdbus call --system --dest "$agent_name" --object-path "$agent_path" \
+    --method org.freedesktop.PolicyKit1.AuthenticationAgent.BeginAuthentication \
+    org.roost.proof "Authentication is required to run the Roost proof." "" "{}" cookie-1 \
+    "[('unix-user', {'uid': <uint32 $(id -u)>})]" >"$ARTIFACTS/polkit-reply" 2>&1 &
+end=$(($(date +%s) + 15))
+until "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-polkit.json" 5 >/dev/null 2>&1 &&
+    showing "$ARTIFACTS/a11y-polkit.json" "Authenticate" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.5; done
+showing "$ARTIFACTS/a11y-polkit.json" "Authenticate" || fail G-POLKIT "no Authentication Required dialog"
+sleep 1
+scrot "$ARTIFACTS/24g-polkit.png" >/dev/null
+xdotool type --delay 30 "not-it"
+xdotool key Return
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-polkit-failed.json" 20 ||
+    fail G-POLKIT "accessibility dump failed"
+showing "$ARTIFACTS/a11y-polkit-failed.json" "Sorry, that didn’t work. Please try again." ||
+    fail G-POLKIT "a wrong password did not say so"
+xdotool type --delay 30 "roost-proof"
+xdotool key Return
+end=$(($(date +%s) + 10))
+until grep -q "^()" "$ARTIFACTS/polkit-reply" 2>/dev/null || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
+grep -q "^()" "$ARTIFACTS/polkit-reply" ||
+    fail G-POLKIT "the right password did not authorize: $(cat "$ARTIFACTS/polkit-reply")"
+pass G-POLKIT "polkit's request shows GNOME's dialog; a wrong password is refused, the right one authorizes"
 sleep 2
 open_power_menu() {
     open_qs
-    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-$1.json" 20 --press "Power Off"
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-$1.json" 20 --press "Power Off Menu"
 }
 open_power_menu power-menu || fail G-POWER-MENU "could not press the power button"
 scrot "$ARTIFACTS/21-power-menu.png" >/dev/null
@@ -846,6 +2177,21 @@ fi
 [ ! -s "$POWER_LOG" ] || fail G-POWER-DIALOG "Cancel still called logind: $(cat "$POWER_LOG")"
 pass G-POWER-DIALOG "Power Off… opens the countdown dialog and Cancel does nothing"
 
+# Escape cancels too, as in GNOME: the dialog holds the keyboard
+# (layer-shell keyboard exclusivity).
+open_power_menu power-menu-esc || fail G-POWER-ESCAPE "could not reopen the power menu"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-power-esc.json" 20 \
+    --press "Log Out…" || fail G-POWER-ESCAPE "could not press Log Out…"
+sleep 1
+xdotool key Escape
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-power-esc-after.json" 20 ||
+    fail G-POWER-ESCAPE "accessibility dump failed"
+if jq -e 'any(.[]; .showing and (.name | test("automatically in")))' "$ARTIFACTS/a11y-power-esc-after.json" >/dev/null; then
+    fail G-POWER-ESCAPE "Escape left the end-session dialog up"
+fi
+pass G-POWER-ESCAPE "Escape dismisses the end-session dialog"
+
 open_power_menu power-menu-2 || fail G-POWER-OFF "could not reopen the power menu"
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-power-dialog-2.json" 20 \
     --press "Power Off…" || fail G-POWER-OFF "could not press Power Off…"
@@ -856,6 +2202,17 @@ until grep -q PowerOff "$POWER_LOG" 2>/dev/null || [ "$(date +%s)" -gt "$end" ];
 grep -q PowerOff "$POWER_LOG" || fail G-POWER-OFF "logind never got PowerOff"
 pass G-POWER-OFF "confirming the dialog asks logind to power off"
 
+# Monitor confirmed lock transitions over GNOME's public screen-saver API.
+gdbus monitor --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver \
+    >"$ARTIFACTS/screensaver-signals.log" 2>&1 &
+SCREENSAVER_PID=$!
+sleep 1
+screen_active() {
+    gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver \
+        --method org.gnome.ScreenSaver.GetActive
+}
+screen_active | grep -q false || fail G-SCREENSAVER "screen saver started active"
+
 open_power_menu power-menu-3 || fail G-SUSPEND-LOCK "could not reopen the power menu"
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-suspend.json" 20 \
     --press "Suspend" || fail G-SUSPEND-LOCK "could not press Suspend"
@@ -865,6 +2222,59 @@ grep -q Suspend "$POWER_LOG" || fail G-SUSPEND-LOCK "logind never got Suspend"
 cstate '.locked' "locked" 10 || fail G-SUSPEND-LOCK "PrepareForSleep did not lock the session"
 scrot "$ARTIFACTS/23-locked-after-suspend.png" >/dev/null
 pass G-SUSPEND-LOCK "Suspend asks logind, and PrepareForSleep locks the session"
+screen_active | grep -q true || fail G-SCREENSAVER "GetActive did not reflect the lock"
+gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver \
+    --method org.gnome.ScreenSaver.SetActive false >/dev/null || fail G-SCREENSAVER "SetActive failed"
+cstate '.locked' "still locked after SetActive(false)" 5 || fail G-SCREENSAVER "D-Bus unlocked without authentication"
+pass G-SCREENSAVER "GetActive reports the compositor lock; SetActive(false) cannot bypass PAM"
+
+# GNOME's lock screen (ext-session-lock): a click lifts the curtain, a
+# wrong password is refused and the session stays locked, the right one
+# unlocks it and the windows come back.
+if [ -n "$PAM_ON" ]; then
+    sleep 1
+    xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT * 3 / 4)) click 1
+    sleep 1
+    scrot "$ARTIFACTS/24-unlock-prompt.png" >/dev/null
+    xdotool type --delay 30 "not-the-password"
+    xdotool key Return
+    sleep 2
+    cstate '.locked' "still locked after a wrong password" 5 ||
+        fail G-UNLOCK "a wrong password unlocked the session"
+    scrot "$ARTIFACTS/25-unlock-denied.png" >/dev/null
+    xdotool type --delay 30 "$UNLOCK_PASSWORD"
+    xdotool key Return
+    cstate '(.locked | not) and (.windows | length) > 0' "unlocked" 15 ||
+        fail G-UNLOCK "the right password did not unlock the session"
+    scrot "$ARTIFACTS/26-unlocked.png" >/dev/null
+    pass G-UNLOCK "a wrong password is refused, the right one unlocks through PAM"
+    sleep 0.5
+    screen_active | grep -q false || fail G-LOCK-KEY "GetActive stayed locked after authentication"
+    xdotool key super+l
+    cstate '.locked' "Super+L locked" 10 || fail G-LOCK-KEY "Super+L did not lock"
+    sleep 0.5
+    screen_active | grep -q true || fail G-LOCK-KEY "GetActive missed Super+L"
+    xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT * 3 / 4)) click 1
+    sleep 1
+    xdotool type --delay 30 "$UNLOCK_PASSWORD"
+    xdotool key Return
+    cstate '(.locked | not)' "shortcut lock unlocked through PAM" 15 || fail G-LOCK-KEY "shortcut lock did not unlock"
+    sleep 0.5
+    grep -q 'ActiveChanged.*true' "$ARTIFACTS/screensaver-signals.log" || fail G-LOCK-KEY "no active signal"
+    grep -q 'ActiveChanged.*false' "$ARTIFACTS/screensaver-signals.log" || fail G-LOCK-KEY "no inactive signal"
+    pass G-LOCK-KEY "Super+L locks; PAM unlocks; ActiveChanged publishes both transitions"
+    gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/ScreenSaver \
+        --method org.gnome.ScreenSaver.Lock >/dev/null || fail G-DBUS-LOCK "D-Bus Lock failed"
+    cstate '.locked' "D-Bus locked" 5 || fail G-DBUS-LOCK "D-Bus Lock replied without locking"
+    xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT * 3 / 4)) click 1
+    sleep 1
+    xdotool type --delay 30 "$UNLOCK_PASSWORD"
+    xdotool key Return
+    cstate '(.locked | not)' "D-Bus lock unlocked through PAM" 15 || fail G-DBUS-LOCK "D-Bus lock did not unlock"
+    pass G-DBUS-LOCK "org.gnome.Shell exposes the screen-saver object and Lock waits for confirmation"
+else
+    echo "roost-gtk-shell-proof: G-UNLOCK skipped (no pam_wrapper)"
+fi
 
 "$ROOT/scripts/roost-a11y-golden" check "$ARTIFACTS" ||
     fail A11Y-GOLDEN "accessible trees differ from tests/a11y/ (see above)"

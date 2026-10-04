@@ -1,0 +1,49 @@
+#!/bin/sh
+# Capture GNOME 51 itself in the states Roost recreates, for pixel parity.
+#
+# Usage: roost-gnome-reference [--out DIR]
+#
+# Builds tests/gnome-reference/Containerfile (Fedora 45, GNOME Shell
+# 51.0) with podman, runs gnome-shell headless at 1280x800 with
+# capture.js as its automation script, and writes DIR/<state>.png plus
+# DIR/<state>.json: every visible styled actor with its class, name,
+# rectangle, font and colours. Pair with scripts/roost-parity-capture
+# and scripts/lib/roost-parity-compare.py.
+set -eu
+ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+OUT="$ROOT/target/gnome-reference"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --out) OUT="$2"; shift 2 ;;
+        --help|-h) sed -n '2,12p' "$0"; exit 0 ;;
+        *) echo "roost-gnome-reference: unknown argument $1" >&2; exit 1 ;;
+    esac
+done
+command -v podman >/dev/null 2>&1 || { echo "roost-gnome-reference: needs podman" >&2; exit 1; }
+mkdir -p "$OUT"
+OUT="$(cd "$OUT" && pwd)"
+IMAGE=localhost/roost-gnome51-reference
+podman build -q -t "$IMAGE" "$ROOT/tests/gnome-reference" >/dev/null
+rm -rf "$OUT"/*.png "$OUT"/*.json "$OUT/share"
+# The unlock prompt shows the user's name; use the one Roost's lock
+# screen will show for whoever runs the comparison (GECOS, else login).
+USER_NAME="$(getent passwd "$(id -un)" | cut -d: -f5 | cut -d, -f1)"
+[ -n "$USER_NAME" ] || USER_NAME="$(id -un)"
+capture() {
+    podman run --rm \
+        -e GREF_USER_NAME="$USER_NAME" \
+        -v "$ROOT/tests/gnome-reference:/gref:ro,Z" \
+        -v "$ROOT/scripts/lib:/lib:ro,Z" \
+        -v "$OUT:/out:Z" \
+        "$IMAGE" /gref/run.sh >"$OUT/gnome-shell.log" 2>&1
+}
+# A headless gnome-shell occasionally stalls at startup; one retry.
+capture || capture || {
+    echo "roost-gnome-reference: gnome-shell failed; see $OUT/gnome-shell.log" >&2
+    exit 1
+}
+grep -q 'GREF done' "$OUT/gnome-shell.log" || {
+    echo "roost-gnome-reference: capture incomplete; see $OUT/gnome-shell.log" >&2
+    exit 1
+}
+echo "roost-gnome-reference: $(find "$OUT" -maxdepth 1 -name '*.png' | wc -l) GNOME 51 frames in $OUT"

@@ -46,8 +46,24 @@ fn session_argv(
     argv.push(compositor.as_os_str().to_owned());
     argv.push(OsString::from("--shell-bin"));
     argv.push(shell.as_os_str().to_owned());
+    // A login opens on the overview, as GNOME's does.
+    argv.push(OsString::from("--startup-overview"));
     argv.extend(extra.iter().cloned());
     argv
+}
+
+/// `XDG_CURRENT_DESKTOP` for the session: the display manager's value
+/// (from the session file's `DesktopNames=Roost;GNOME;`) when it set one,
+/// else `Roost:GNOME` (greeters that skip DesktopNames, nested runs).
+/// Naming GNOME second makes GNOME-only apps show, GNOME's schema
+/// overrides apply, and xdg-desktop-portal pick GNOME's backend, whose
+/// Shell and Mutter interfaces Roost serves, as Ubuntu's `ubuntu:GNOME`
+/// does.
+fn current_desktop(set: Option<&std::ffi::OsStr>) -> Option<&'static str> {
+    match set {
+        Some(value) if !value.is_empty() => None,
+        _ => Some("Roost:GNOME"),
+    }
 }
 
 fn print_help() {
@@ -77,7 +93,12 @@ fn main() -> ExitCode {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        let err = std::process::Command::new(&argv[0]).args(&argv[1..]).exec();
+        let mut command = std::process::Command::new(&argv[0]);
+        command.args(&argv[1..]);
+        if let Some(desktop) = current_desktop(std::env::var_os("XDG_CURRENT_DESKTOP").as_deref()) {
+            command.env("XDG_CURRENT_DESKTOP", desktop);
+        }
+        let err = command.exec();
         eprintln!(
             "roost-session: cannot exec {}: {err}",
             argv[0].to_string_lossy()
@@ -107,6 +128,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_session_names_gnome_after_roost() {
+        assert_eq!(current_desktop(None), Some("Roost:GNOME"));
+        assert_eq!(
+            current_desktop(Some(std::ffi::OsStr::new(""))),
+            Some("Roost:GNOME")
+        );
+        assert_eq!(
+            current_desktop(Some(std::ffi::OsStr::new("Roost:GNOME"))),
+            None
+        );
+        let file = include_str!("../../../../share/wayland-sessions/roost.desktop");
+        assert!(file.lines().any(|l| l == "DesktopNames=Roost;GNOME;"));
+    }
+
+    #[test]
     fn argv_pins_shell_before_passthrough() {
         let argv = session_argv(
             std::path::Path::new("/usr/bin/roost-compositor"),
@@ -123,6 +159,7 @@ mod tests {
                 "/usr/bin/roost-compositor",
                 "--shell-bin",
                 "/usr/bin/roost-shell-host",
+                "--startup-overview",
                 "--socket",
                 "s0",
             ]
@@ -136,7 +173,11 @@ mod tests {
             std::path::Path::new("roost-shell-host"),
             &[],
         );
-        assert_eq!(argv.len(), 3);
+        assert_eq!(
+            argv.len(),
+            4,
+            "compositor, --shell-bin, shell, --startup-overview"
+        );
     }
 
     #[test]

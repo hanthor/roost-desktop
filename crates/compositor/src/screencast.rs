@@ -1,7 +1,7 @@
 //! PipeWire screen-cast streams (#61), adapted from niri's
 //! `src/screencasting/pw_utils.rs` (GPL-3.0-or-later, like Roost).
 //!
-//! First cut: monitor streams in BGRx over shared memory (PipeWire
+//! Monitor and window streams in BGRx over shared memory (PipeWire
 //! allocates and maps the memfd buffers), full frames at most every
 //! [`FRAME_INTERVAL`]. dmabuf zero-copy, damage tracking and cursor
 //! metadata, which niri also does, come later.
@@ -30,6 +30,8 @@ use pipewire::stream::{StreamFlags, StreamListener, StreamRc, StreamState};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{Interest, LoopHandle, Mode, PostAction};
 use zbus::object_server::SignalEmitter;
+
+use crate::mutter::CastTarget;
 
 /// Longest gap a client waits between frames, and the shortest we send.
 pub const FRAME_INTERVAL: Duration = Duration::from_millis(33);
@@ -74,11 +76,12 @@ impl PipeWire {
     pub fn start_cast(
         &self,
         session_id: u64,
-        connector: String,
+        target: CastTarget,
         width: i32,
         height: i32,
         signal: SignalEmitter<'static>,
     ) -> Option<Cast> {
+        let session_signal = signal.clone();
         let stream =
             StreamRc::new(self.core.clone(), "roost-screen-cast", PropertiesBox::new()).ok()?;
         let inner = Rc::new(RefCell::new(Inner::default()));
@@ -86,7 +89,8 @@ impl PipeWire {
             .add_local_listener_with_user_data(())
             .state_changed({
                 let inner = inner.clone();
-                move |stream, (), _old, new| {
+                move |stream, (), old, new| {
+                    eprintln!("roost-compositor: screen cast {session_id}: {old:?} -> {new:?}");
                     let mut inner = inner.borrow_mut();
                     match new {
                         StreamState::Paused => {
@@ -187,7 +191,9 @@ impl PipeWire {
             .ok()?;
         Some(Cast {
             session_id,
-            connector,
+            target,
+            offered: (width, height),
+            signal: session_signal,
             stream,
             _listener: listener,
             inner,
@@ -209,8 +215,12 @@ struct Inner {
 /// One running stream.
 pub struct Cast {
     pub session_id: u64,
-    /// Output this stream shows.
-    pub connector: String,
+    /// Monitor or window this stream shows.
+    pub target: CastTarget,
+    /// Size last offered to the consumer (window casts follow resizes).
+    offered: (i32, i32),
+    /// The stream's D-Bus emitter, for ending the session.
+    signal: SignalEmitter<'static>,
     stream: StreamRc,
     _listener: StreamListener<()>,
     inner: Rc<RefCell<Inner>>,
@@ -233,6 +243,25 @@ impl Cast {
             return None;
         }
         inner.size
+    }
+
+    /// Offer the consumer a new frame size (a cast window resized), the
+    /// way niri does: a fresh format; frames keep the old size until the
+    /// consumer accepts and new buffers arrive.
+    pub fn resize(&mut self, width: i32, height: i32) {
+        if self.offered == (width, height) || width <= 0 || height <= 0 {
+            return;
+        }
+        let mut buffer = Vec::new();
+        let format = make_pod(&mut buffer, video_format(width as u32, height as u32));
+        if self.stream.update_params(&mut [format]).is_ok() {
+            self.offered = (width, height);
+        }
+    }
+
+    /// Tell the consumer its session ended (the cast window closed).
+    pub fn close(&self) {
+        crate::mutter::session_closed(&self.signal, self.session_id);
     }
 
     /// Whether PipeWire reported the stream broken.
@@ -282,6 +311,30 @@ impl Cast {
     }
 }
 
+/// The `(x, y, width, height)` part of a 4-byte-per-pixel frame of
+/// `size`, rows top-down; `None` when the area leaves the frame.
+pub fn crop(
+    pixels: &[u8],
+    (frame_w, frame_h): (i32, i32),
+    (x, y, w, h): (i32, i32, i32, i32),
+) -> Option<Vec<u8>> {
+    if x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > frame_w || y + h > frame_h {
+        return None;
+    }
+    let bpp = BYTES_PER_PIXEL as usize;
+    let stride = frame_w as usize * bpp;
+    if pixels.len() < stride * frame_h as usize {
+        return None;
+    }
+    let row = w as usize * bpp;
+    let mut out = Vec::with_capacity(row * h as usize);
+    for line in y as usize..(y + h) as usize {
+        let start = line * stride + x as usize * bpp;
+        out.extend_from_slice(&pixels[start..start + row]);
+    }
+    Some(out)
+}
+
 fn video_format(width: u32, height: u32) -> pod::Object {
     pod::object!(
         SpaTypes::ObjectParamFormat,
@@ -318,4 +371,23 @@ fn make_pod(buffer: &mut Vec<u8>, object: pod::Object) -> &Pod {
     )
     .expect("pod serializes");
     Pod::from_bytes(buffer).expect("pod parses")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn areas_crop_out_of_frames() {
+        // A 3x2 frame whose pixels count up.
+        let frame: Vec<u8> = (0u8..6).flat_map(|p| [p, p, p, 255]).collect();
+        let cropped = crop(&frame, (3, 2), (1, 0, 2, 2)).unwrap();
+        let firsts: Vec<u8> = cropped.chunks(4).map(|p| p[0]).collect();
+        assert_eq!(firsts, [1, 2, 4, 5]);
+        assert!(
+            crop(&frame, (3, 2), (2, 0, 2, 1)).is_none(),
+            "past the edge"
+        );
+        assert!(crop(&frame, (3, 2), (0, 0, 0, 1)).is_none(), "empty");
+    }
 }

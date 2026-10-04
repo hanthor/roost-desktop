@@ -2,7 +2,51 @@ frame: Top Bar
 push button: Activities
 push button: Date and Time
 toggle button: Date and Time
-check box: Do Not Disturb
 push button: Clear
+push button: <date>
+push button: Previous month
+push button: Next month
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
+push button: #
 push button: System
 toggle button: System

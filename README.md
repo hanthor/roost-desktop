@@ -4,6 +4,9 @@ A new, independent Wayland desktop session with a GNOME-inspired everyday workfl
 
 The compositor is a long-lived Rust process built with Smithay. The shell UI runs as a supervised Wayland client. The first delivery target is a nested developer preview that can map ordinary applications and recover its shell UI after a shell crash.
 
+See the [walkthrough](docs/walkthrough.md) for every feature as it looks
+today, in frames the GTK shell proof takes on each change.
+
 ## Project status
 
 **Nested developer preview.** Four crates build and ship: a Smithay compositor
@@ -36,18 +39,34 @@ base, bootc image). The Debian package remains for local development hosts.
 [docs/roadmap.md](docs/roadmap.md) keeps the program structure, gates, and
 requirement traceability.
 
+## Prerequisites
+
+- **Rust stable** with `rustfmt` and `clippy` (CI uses the current stable
+  toolchain; no MSRV is declared, crates use edition 2021).
+- **System libraries**: libseat, libinput, libudev, GBM, libdrm,
+  libxkbcommon, GTK 4, libadwaita, PipeWire, Wayland and gtk4-layer-shell
+  development files, plus EGL (Mesa llvmpipe is enough) to run a nested
+  session. The [development guide](docs/development.md#prerequisites)
+  has the exact Ubuntu and Arch package lists CI uses.
+- **Spektacular CLI**, only for spec and plan work, not for building or
+  running Roost:
+  `go install github.com/hivecommons/spektacular@latest`, then
+  `spektacular version check` (see [Continue with Spektacular](#continue-with-spektacular)).
+
 ## Contributing and Development
 
 **Want to contribute?** Start with the [development guide](docs/development.md). It covers:
 - Setting up your build environment
 - Understanding the project structure
-- Running a nested RWD session locally
+- Running a nested Roost session locally ([troubleshooting](docs/nested-session.md#troubleshooting))
+- [Running tests locally](docs/testing.md), the same checks CI runs
 - Spektacular workflows for planning and tracking
 
 ## Planning
 
 - [Program architecture](docs/architecture.md)
 - [Program roadmap and requirement traceability](docs/roadmap.md)
+- [Parent requirement register](docs/requirements.md)
 - [Verification and test strategy](docs/test-strategy.md)
 - [Research intake rules](docs/research/README.md)
 - [First spek: nested compositor and shell recovery](.spektacular/specs/20260927170317-a01f0011-001-nested-compositor-shell-recovery.md)

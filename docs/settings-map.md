@@ -25,7 +25,7 @@ This page records that decision for R9 (knowledge entry
 | gtk-theme, icon-theme, cursor-theme, cursor-size | Via GTK | Inside apps. The compositor's own cursor ignores them (#89) |
 | clock-format | Honored | Panel clock |
 | clock-show-weekday, clock-show-date, clock-show-seconds | Honored | Panel clock, built as gnome-desktop's wall clock builds it |
-| enable-hot-corners | Ignored | The hot corner is always on (#63) |
+| enable-hot-corners | Honored | Live. Proof G-SETTINGS-INPUT |
 | enable-animations | Ignored | Roost has no animations yet |
 | show-battery-percentage | Ignored | No battery indicator yet (#55) |
 
@@ -40,6 +40,7 @@ This page records that decision for R9 (knowledge entry
 | org.gnome.desktop.search-providers (all keys) | Honored | disable-external, disabled, enabled and sort-order. Proof G-SEARCH-PROVIDER |
 | org.gnome.desktop.background picture-uri, picture-uri-dark | Honored | Wallpaper |
 | org.gnome.shell favorite-apps | Honored | Used for the dash when Roost has no pins of its own |
+| org.gnome.desktop.app-folders (folder-children and each folder's name, apps, categories, excluded-apps, translate) | Honored | App-grid folders, read on each grid open. Proof G-APP-FOLDERS |
 | org.gnome.shell enabled-extensions | Ignored | GNOME Shell extensions are JavaScript. Roost has its own extension point |
 | org.gnome.settings-daemon.plugins.color night-light-enabled | Honored (write only) | The Night Light tile writes it, but Roost applies no colour temperature yet (#89 gamma control) |
 
@@ -48,15 +49,24 @@ This page records that decision for R9 (knowledge entry
 | File | Status | Notes |
 |---|---|---|
 | ~/.config/monitors.xml | Honored | The arrangement for the lit connectors sets each output's scale, position and primary monitor (hardware sessions). Proof D-SCALE |
+| GNOME Settings' Displays panel | Honored | ApplyMonitorsConfig over org.gnome.Mutter.DisplayConfig changes scale and position live; "keep changes" saves to ~/.config/roost/monitors.xml, which Roost reads before GNOME's file (GNOME's own file is never rewritten). Proof G-DISPLAY-SETTINGS |
 
 ## Window management and input
 
 | Schema and key | Status | Notes |
 |---|---|---|
-| org.gnome.desktop.wm.keybindings, org.gnome.shell.keybindings, org.gnome.mutter.keybindings | Ignored | Roost uses GNOME's default bindings, fixed (#63) |
+| org.gnome.shell.keybindings show-screenshot-ui, toggle-overview, toggle-application-view, toggle-message-tray, toggle-quick-settings, switch-to-application-1..9, open-new-window-application-1..9, screenshot, screenshot-window, screen-brightness-up, screen-brightness-down | Honored | read live, GNOME 51's defaults when the schema is missing; grabbed through the compositor like any accelerator (`crates/shell-gtk/src/keybindings.rs`) |
+| org.gnome.shell.keybindings show-screen-recording-ui, focus-active-notification, shift-overview-up/down, the per-monitor brightness keys | Ignored | no screen recording, notification focus, or per-monitor brightness yet (#63) |
+| org.gnome.settings-daemon.plugins.media-keys screensaver | Honored | Read live by the shell, with Super+L as the default; works without gsd-media-keys. Proof G-LOCK-KEY |
+| org.gnome.desktop.wm.keybindings activate-window-menu, toggle-maximized, maximize, unmaximize, minimize, close, begin-move, begin-resize, switch-input-source(-backward), switch-to-workspace-1/last/left/right, move-to-workspace-1/last/left/right; org.gnome.mutter.keybindings toggle-tiled-left/right | Honored | read live (GNOME 51's defaults without the schema), grabbed like any accelerator; once the shell grabs them the compositor's built-in defaults stand aside, so a rebound key moves and an emptied one reaches apps |
+| org.gnome.desktop.wm.keybindings switch-applications(-backward), switch-group(-backward) | Honored | read live (GNOME 51's defaults without the schema) and handed to the compositor, which holds the switcher open while the chord's modifiers are held and commits when they are released; Shift steps backward, `Above_Tab` is the key above Tab |
+| org.gnome.desktop.wm.keybindings switch-windows(-backward), cycle-windows, cycle-group | Ignored | GNOME 51 leaves switch-windows empty; no window-only switcher or cycling popup yet (#63) |
 | org.gnome.desktop.wm.preferences button-layout | Via GTK | Client-side decorations read it |
 | org.gnome.desktop.wm.preferences focus-mode, num-workspaces | Ignored | Click to focus and dynamic workspaces, as GNOME's defaults |
+| org.gnome.desktop.wm.preferences audible-bell, visual-bell | Ignored | The bell always sounds (GNOME's default audible bell) and never flashes (xdg-system-bell, #89) |
 | org.gnome.mutter dynamic-workspaces, edge-tiling | Ignored | Always on, as GNOME's defaults |
-| org.gnome.desktop.peripherals.* | Ignored | Keyboard repeat, touchpad and mouse use libinput defaults (#60) |
-| org.gnome.desktop.input-sources sources, xkb-options | Ignored | The keymap comes from the environment (#60) |
+| org.gnome.desktop.peripherals.keyboard repeat, delay, repeat-interval | Honored | Seat key repeat, live. Proof G-SETTINGS-INPUT |
+| org.gnome.desktop.peripherals.touchpad tap-to-click, natural-scroll, speed, disable-while-typing | Honored | libinput on hardware sessions, live and on hotplug |
+| org.gnome.desktop.peripherals.mouse natural-scroll, speed | Honored | libinput on hardware sessions |
+| org.gnome.desktop.input-sources sources, xkb-options | Honored | xkb sources become one keymap in order; Super+Space switches; IBus sources are skipped (#60). Proof G-SETTINGS-INPUT |
 | org.gnome.desktop.a11y.* | Via GTK | Where GTK implements them. Compositor features like zoom are missing |

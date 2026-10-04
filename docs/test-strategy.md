@@ -77,7 +77,7 @@ Timing rule: any test that depends on scheduler latency waits on a wall-clock de
 
 ## 4. Test design and traceability
 
-- Assign stable IDs `Roost-<spek>-<requirement>-<case>` and link each spec requirement to unit, protocol, integration, manual, security, or performance cases.
+- Assign stable IDs `Roost-<spek>-<requirement>-<case>` and link each spec requirement to unit, protocol, integration, manual, security, or performance cases. The `<requirement>` field is the named spek's own requirement, so `Roost-001-R5-01` is a case for `001-R5`, never parent requirement `R5`; see the naming rule in the [parent requirement register](requirements.md#naming-rule).
 - Every security boundary gets positive, negative, spoofing/replay, resource exhaustion, and process-failure cases.
 - Every workflow gets normal, cancellation, timeout/unavailable-service, and recovery behavior where applicable.
 - Property tests cover invariants rather than implementation details: no invisible/orphaned windows after output changes; no focus to unauthorized surfaces; monotonic state revisions; quota bounds; lock remains latched until valid unlock.

@@ -1,147 +1,140 @@
 # Development Guide
 
-Welcome to Rust Wayland Desktop (RWD). This guide covers everything you need to set up your development environment, understand the codebase structure, and contribute to the project.
+Welcome to Roost. This guide covers everything you need to set up your development environment, understand the codebase structure, and contribute to the project.
 
 ## Prerequisites
 
-Before you start, ensure you have the following installed:
+### Rust toolchain
 
-### Core toolchain
-- **Rust** (latest stable or 1.82+): Install from [rustup.rs](https://rustup.rs)
-- **Cargo**: Installed automatically with Rust
-- **Git**: For version control
+- **Rust stable** with `rustfmt` and `clippy`, from [rustup.rs](https://rustup.rs):
+  `rustup component add rustfmt clippy`. CI builds with the current stable
+  toolchain. No crate declares a `rust-version` (MSRV); all crates use
+  edition 2021, and some dependencies need a recent stable compiler.
+- **Git**.
 
-### System dependencies
-On Ubuntu/Debian:
-```bash
+### System packages
+
+The list below is what the CI `check` job installs on Ubuntu 24.04
+(`.github/workflows/ci.yml`); it is enough to build, lint and test the
+whole workspace:
+
+```sh
 sudo apt-get install -y \
-  libwayland-dev \
-  libxkbcommon-dev \
-  libpipewire-0.3-dev \
-  libgtk-4-dev \
-  libadwaita-1-dev \
-  libsystemd-dev \
-  pkg-config
+  libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev \
+  libxkbcommon-dev pkg-config libgtk-4-dev libpipewire-0.3-dev \
+  libadwaita-1-dev libpam-wrapper \
+  meson ninja-build libwayland-dev wayland-protocols
+scripts/ci-install-gtk4-layer-shell
 ```
 
-On Fedora:
-```bash
-sudo dnf install -y \
-  wayland-devel \
-  libxkbcommon-devel \
-  pipewire-devel \
-  gtk4-devel \
-  libadwaita-devel \
-  systemd-devel \
-  pkg-config
+Ubuntu does not package gtk4-layer-shell, which the GTK shell links;
+`scripts/ci-install-gtk4-layer-shell` builds it from source and installs it
+under `/usr/local`. The `pipewire` crate also needs libclang (`libclang-dev`)
+at build time; GitHub's runners have it preinstalled. `libpam-wrapper` is
+only needed for the lock-screen PAM test, which skips without it.
+
+To run a nested session, also install the libraries the nested backend
+loads at startup and, on a machine without a display, Xvfb:
+
+```sh
+sudo apt-get install -y libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 xvfb
 ```
 
-### Spektacular CLI
-RWD uses [Spektacular](https://github.com/projectbluefin/spektacular) for specification and planning workflows. Install the CLI:
+Each proof script needs a few more packages; [running tests locally](testing.md)
+lists them per script.
 
-```bash
-# Clone the Spektacular repository
-git clone https://github.com/projectbluefin/spektacular.git
-cd spektacular
-cargo install --path .
+On Arch Linux (TunaOS Marlin's base), the `arch-package` CI job builds with:
+
+```sh
+sudo pacman -S --needed base-devel git rust pkgconf clang pipewire gtk4 \
+  gtk4-layer-shell libadwaita libxkbcommon libxkbcommon-x11 mesa wayland \
+  dbus glib2 seatd libinput systemd-libs libdrm
 ```
 
-Verify installation:
-```bash
-spek --version
+### Spektacular CLI (planning work only)
+
+Building, testing and running Roost do not need Spektacular. You need it
+only to read or change specs and plans, which are managed through the
+[Spektacular](https://github.com/hivecommons/spektacular) CLI rather than by
+editing `.spektacular/` by hand. It is a Go program; with a Go toolchain
+installed:
+
+```sh
+go install github.com/hivecommons/spektacular@latest
+export PATH="$(go env GOPATH)/bin:$PATH"
+spektacular version check
 ```
 
 ## Project Structure
 
-The project is organized as a Cargo workspace with four main crates:
+The project is a Cargo workspace with six crates. Each crate's `README.md`
+lists its purpose, public API, and dependents.
 
 ```
-rust-wayland-desktop/
+roost-desktop/
 ├── crates/
-│   ├── compositor/          # rwd-compositor binary
-│   │                        # Smithay-based Wayland compositor core
-│   │                        # Handles rendering, input, protocol negotiation
-│   │
-│   ├── shell-host/          # rwd-shell-host binary
-│   │                        # Shell UI client that connects to compositor
-│   │                        # Responsible for panels, widgets, window chrome
-│   │
-│   ├── shell-control-schema/# Shared protocol and serialization
-│   │                        # Messages between compositor and shell-host
-│   │                        # Uses postcard for compact encoding
-│   │
-│   └── greeter/             # rwd-greeter binary
-│                            # Login/authentication UI
+│   ├── compositor/           # roost-compositor and roost-session binaries (Smithay)
+│   ├── shell-control-schema/ # roost-shell-control: compositor/shell IPC protocol
+│   ├── shell-host/           # roost-shell-host: original shell binary and shared shell logic
+│   ├── shell-gtk/            # roost-shell-gtk: GTK4/libadwaita shell (ADR 0006)
+│   ├── greeter/              # roost-greeter: greetd login greeter
+│   └── wallpaper/            # roost-wallpaper: wallpaper decoding
 │
-├── docs/
-│   ├── architecture.md      # Program architecture and design principles
-│   ├── test-strategy.md     # Verification layers and test environments
-│   ├── roadmap.md           # Feature roadmap and requirement traceability
-│   ├── adr/                 # Architecture Decision Records
-│   └── nested-session.md    # Nested session architecture and crash recovery
-│
-├── .spektacular/            # Spektacular specifications and planning
-│   ├── specs/               # Spec documents for each work slice
-│   ├── plans/               # Implementation plans tracked by spec
-│   ├── knowledge/           # Research and design notes
-│   └── work/                # Tracking data for each plan state
-│
-├── scripts/
-│   ├── rwd-nested           # One-command nested session launcher and journey harness
-│   ├── rwd-journey          # App mapping and interaction test harness
-│   ├── rwd-app-content      # Content generation for testing
-│   └── rwd-scroll-proof     # Scroll mode correctness proof
-│
-└── Cargo.toml              # Workspace configuration and pinned dependencies
+├── docs/                     # architecture, roadmap, test strategy, ADRs, guides
+├── packaging/                # Arch package and Marlin image (scripts/roost-release builds the .deb)
+├── scripts/                  # nested launcher, proof scripts, release and ledger tools
+├── tests/                    # a11y golden trees, GNOME 51 reference container
+└── Cargo.toml                # workspace configuration and pinned dependencies
 ```
 
 ## Setting Up Your Environment
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/hanthor/rust-wayland-desktop.git
-   cd rust-wayland-desktop
+   git clone https://github.com/hanthor/roost-desktop.git
+   cd roost-desktop
    ```
 
 2. **Build all crates:**
    ```bash
-   cargo build
+   cargo build --workspace
    ```
 
-3. **Run tests (current: planning phase, no runtime tests yet):**
+3. **Run the tests** (see [running tests locally](testing.md) for clippy,
+   fmt and the nested proofs CI runs):
    ```bash
-   cargo test
+   cargo test --workspace
    ```
 
 ## Running the Nested Compositor
 
-The nested compositor runs inside your current Wayland or X11 session for safe development and testing. It creates a virtual RWD session as a client of your host display.
+The nested compositor runs inside your current Wayland or X11 session for safe development and testing. It creates a Roost session as a client of your host display.
 
 ### First-time setup
 
 ```bash
-# Build and start a nested RWD session
+# Build and start a nested Roost session
 ./scripts/roost-nested run
 ```
 
 This command:
-- Builds both `rwd-compositor` and `rwd-shell-host` in release mode
-- Starts the compositor on a private socket (named `rwd-nested-<pid>` by default)
-- Logs output to `~/.local/state/rwd-nested/rwd-nested-<pid>/nested.log`
+- Builds `roost-compositor` and `roost-shell-host` (debug build)
+- Starts the compositor on a private socket (named `roost-nested-<pid>` by default)
+- Logs output to `~/.local/state/roost-nested/roost-nested-<pid>/nested.log`
 - Displays the socket name and log path for reference
 
 The session runs until you press Ctrl+C or terminate the process.
 
 ### Testing shell crashes and recovery
 
-RWD implements a supervised shell-host restart mechanism. Test it with:
+Roost implements a supervised shell-host restart mechanism. Test it with:
 
 ```bash
 # In one terminal, start the nested session:
 ./scripts/roost-nested run
 
 # In another terminal, simulate a shell crash:
-./scripts/roost-nested kill-shell --socket rwd-nested-<pid>
+./scripts/roost-nested kill-shell --socket roost-nested-<pid>
 ```
 
 The compositor will:
@@ -154,7 +147,7 @@ See `docs/nested-session.md` for details on the crash recovery design.
 
 ## Understanding Spektacular Workflows
 
-RWD uses Spektacular for planning and tracking implementation work. Each work item has:
+Roost uses Spektacular for planning and tracking implementation work. Each work item has:
 
 - **Spec**: A specification document (in `.spektacular/specs/`)
 - **Plan**: Implementation roadmap and checklist (in `.spektacular/plans/`)
@@ -163,36 +156,30 @@ RWD uses Spektacular for planning and tracking implementation work. Each work it
 ### Common Spektacular commands
 
 ```bash
-# List all specs and their plan status
-spek list
+# List specs (use the full timestamp-prefixed name in later commands)
+spektacular spec file list
 
-# View a specific spec
-spek show <spec-id>
-
-# Create a new spec (typically for maintainers)
-spek new --title "My feature" --category implementation
-
-# Update plan state (e.g., transitioning from draft to ready)
-spek plan <spec-id> --state ready
+# Start the plan workflow for a spec
+spektacular plan new --data '{"name":"<full spec name>"}'
 ```
 
-For more details, see the [Spektacular documentation](https://github.com/projectbluefin/spektacular).
+Run `spektacular <command> --help` for the rest. For more details, see the [Spektacular repository](https://github.com/hivecommons/spektacular) and [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Architecture and Design
 
-For deeper understanding of RWD's design:
+For deeper understanding of Roost's design:
 
 - **Architecture overview**: Read `docs/architecture.md` for the compositor/shell separation, nested recovery design, and long-term roadmap
 - **Design decisions**: Check `docs/adr/` (Architecture Decision Records) for rationale on key choices (e.g., Smithay pinning, backend selection)
 - **Verification strategy**: See `docs/test-strategy.md` for how we validate each layer (unit tests, protocol probes, integration tests, hardware qualification)
-- **Test strategy and matrix**: RWD targets multiple environments, GPU configurations, and client types; the test strategy document details the coverage plan
+- **Test strategy and matrix**: Roost targets multiple environments, GPU configurations, and client types; the test strategy document details the coverage plan
 
 ## Workflow for contributors
 
 1. **Choose a spec**: Find an open spec in `.spektacular/specs/` or create one
 2. **Review the plan**: Check the associated plan in `.spektacular/plans/` for implementation guidance
 3. **Implement**: Edit crates as needed, using the test strategy guide to add tests
-4. **Test locally**: Run `cargo build`, `cargo test`, and use `./scripts/roost-nested run` to validate
+4. **Test locally**: Follow [running tests locally](testing.md) and use `./scripts/roost-nested run` to validate
 5. **Create a PR**: Reference the spec number and plan state in your PR body
 6. **Update spec/plan state**: Once merged, update the spec and plan in Spektacular to reflect completion
 
@@ -220,7 +207,7 @@ is no retry policy for deterministic tests: `gh run rerun --failed` is a
 diagnostic, not a fix.
 
 ### Debugging
-- Compositor logs: Check the output of `./scripts/roost-nested run` or tail the log file
+- Compositor logs: Check the output of `./scripts/roost-nested run` or tail the log file; [nested session troubleshooting](nested-session.md#troubleshooting) explains the common lines
 - Shell-host logs: Printed to the same log file as the compositor
 - Nested shell interaction: Use `./scripts/roost-nested shell-pid` to identify the shell process for attaching a debugger
 
@@ -233,7 +220,7 @@ If you find a bug or have a feature request:
    - Clear title and description
    - Steps to reproduce (for bugs)
    - Expected vs. actual behavior
-   - Environment (distro, GPU, Rust version, RWD commit)
+   - Environment (distro, GPU, Rust version, Roost commit); for nested-session bugs, see [filing a bug](nested-session.md#filing-a-bug)
 3. Reference relevant specs in `.spektacular/specs/` if applicable
 
 ## Further reading
@@ -242,6 +229,6 @@ If you find a bug or have a feature request:
 - **Roadmap**: `docs/roadmap.md` for the full vision and current priorities
 - **Smithay documentation**: https://docs.rs/smithay/latest/smithay/
 - **Wayland protocol specs**: https://wayland.freedesktop.org/
-- **Spektacular**: https://github.com/projectbluefin/spektacular
+- **Spektacular**: https://github.com/hivecommons/spektacular
 
-Welcome to the project, and happy hacking! 🚀
+Welcome to the project, and happy hacking!

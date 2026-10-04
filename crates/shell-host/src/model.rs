@@ -81,6 +81,55 @@ pub struct ShellModel {
     switcher_open: bool,
     /// Index into [`mru`](Self::mru_order) of the switcher selection.
     switcher_index: usize,
+    /// The thumbnails' focus: an index into the selected app's windows
+    /// (GNOME's `_currentWindow` with `_thumbnailsFocused`), or `None`
+    /// while the app icon itself is selected.
+    switcher_window: Option<usize>,
+    /// Which app a window belongs to (GNOME's WindowTracker).
+    app_resolver: AppResolver,
+}
+
+/// Maps a window's app id to the desktop entry it belongs to, or `None`
+/// when no entry claims it: GNOME then makes the window an app of its
+/// own (a window-backed app). Unset, every app id is its own app.
+#[derive(Default)]
+pub struct AppResolver(Option<ResolveFn>);
+
+type ResolveFn = Box<dyn Fn(&str) -> Option<String>>;
+
+impl std::fmt::Debug for AppResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "AppResolver(set)"
+        } else {
+            "AppResolver(unset)"
+        })
+    }
+}
+
+/// What a key in the open switcher asks of the caller (GNOME's
+/// AppSwitcherPopup `_keyPressHandler`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwitcherEffect {
+    /// Nothing beyond the selection change.
+    None,
+    /// Close this window (W or F4 on a thumbnail).
+    CloseWindow(u64),
+    /// Quit the selected app: close each of its windows (Q).
+    QuitApp(Vec<u64>),
+}
+
+/// Keysyms the switcher acts on.
+pub mod switcher_keys {
+    pub const LEFT: u32 = 0xff51;
+    pub const UP: u32 = 0xff52;
+    pub const RIGHT: u32 = 0xff53;
+    pub const DOWN: u32 = 0xff54;
+    pub const F4: u32 = 0xffc1;
+    pub const Q: u32 = 0x71;
+    pub const Q_UPPER: u32 = 0x51;
+    pub const W: u32 = 0x77;
+    pub const W_UPPER: u32 = 0x57;
 }
 
 impl ShellModel {
@@ -203,11 +252,155 @@ impl ShellModel {
         self.switcher_open
     }
 
-    /// Current switcher selection, if the switcher is open and nonempty.
+    /// The switcher's items: GNOME's Alt+Tab (`switch-applications`)
+    /// shows one item per app, in most-recently-used order, each standing
+    /// for that app's most recent window. Windows with no app id, or
+    /// none a desktop entry claims, are their own app.
+    pub fn switcher_items(&self) -> Vec<u64> {
+        let mut seen: Vec<String> = Vec::new();
+        self.mru
+            .iter()
+            .copied()
+            .filter(|id| {
+                let key = self.app_key(*id);
+                if seen.contains(&key) {
+                    false
+                } else {
+                    seen.push(key);
+                    true
+                }
+            })
+            .collect()
+    }
+
+    /// How many windows the app of window `id` has open (GNOME draws an
+    /// arrow under switcher items with more than one).
+    pub fn app_window_count(&self, id: u64) -> usize {
+        let key = self.app_key(id);
+        self.windows
+            .iter()
+            .filter(|w| self.app_key(w.id) == key)
+            .count()
+    }
+
+    /// Resolve app ids to desktop entries from now on (GNOME's
+    /// WindowTracker): windows no entry claims stop grouping by app id.
+    pub fn set_app_resolver(&mut self, resolve: impl Fn(&str) -> Option<String> + 'static) {
+        self.app_resolver = AppResolver(Some(Box::new(resolve)));
+    }
+
+    fn app_key(&self, id: u64) -> String {
+        let app_id = self
+            .windows
+            .iter()
+            .find(|w| w.id == id)
+            .and_then(|w| w.app_id.as_deref());
+        match (app_id, &self.app_resolver.0) {
+            (Some(app_id), Some(resolve)) => resolve(app_id),
+            (Some(app_id), None) => Some(app_id.to_owned()),
+            (None, _) => None,
+        }
+        .unwrap_or_else(|| format!("window:{id}"))
+    }
+
+    /// Current switcher selection, if the switcher is open and nonempty:
+    /// the focused thumbnail's window, else the selected app's most
+    /// recent window.
     pub fn switcher_selection(&self) -> Option<u64> {
+        let app = self
+            .switcher_open
+            .then(|| self.switcher_items().get(self.switcher_index).copied())
+            .flatten()?;
+        match self.switcher_window {
+            Some(w) => self.app_windows(app).get(w).copied().or(Some(app)),
+            None => Some(app),
+        }
+    }
+
+    /// The selected app's representative window while the switcher is
+    /// open (the icon highlighted).
+    pub fn switcher_app(&self) -> Option<u64> {
         self.switcher_open
-            .then(|| self.mru.get(self.switcher_index).copied())
+            .then(|| self.switcher_items().get(self.switcher_index).copied())
             .flatten()
+    }
+
+    /// The focused thumbnail, if the thumbnails hold the focus.
+    pub fn switcher_window(&self) -> Option<usize> {
+        self.switcher_open.then_some(self.switcher_window).flatten()
+    }
+
+    /// The windows of the app of window `id`, most recent first (GNOME's
+    /// `cachedWindows`).
+    pub fn app_windows(&self, id: u64) -> Vec<u64> {
+        let key = self.app_key(id);
+        self.mru
+            .iter()
+            .copied()
+            .filter(|w| self.app_key(*w) == key)
+            .collect()
+    }
+
+    /// GNOME's `switch-group` (Alt+Above_Tab): open on the current app
+    /// with its next window focused (its only one when it has one), or
+    /// step through the selected app's windows. Returns the selection.
+    pub fn switcher_step_window(&mut self, forward: bool) -> Option<u64> {
+        let items = self.switcher_items();
+        let first = *items.first()?;
+        if !self.switcher_open {
+            self.switcher_open = true;
+            self.switcher_index = 0;
+            let n = self.app_windows(first).len();
+            self.switcher_window = Some(match (forward, n) {
+                (false, n) => n.saturating_sub(1),
+                (true, n) if n > 1 => 1,
+                _ => 0,
+            });
+            return self.switcher_selection();
+        }
+        let app = items.get(self.switcher_index).copied()?;
+        let n = self.app_windows(app).len().max(1);
+        self.switcher_window = Some(match self.switcher_window {
+            // The first Above_Tab only moves the focus into the
+            // thumbnails, onto the first window.
+            None if forward => 0,
+            None => n - 1,
+            Some(w) if forward => (w + 1) % n,
+            Some(w) => (w + n - 1) % n,
+        });
+        self.switcher_selection()
+    }
+
+    /// A key in the open switcher: arrows move between apps, or between
+    /// windows once the thumbnails hold the focus; Down focuses the
+    /// thumbnails, Up leaves them; Q quits the app, W or F4 closes the
+    /// focused thumbnail's window.
+    pub fn switcher_key(&mut self, keysym: u32) -> SwitcherEffect {
+        use switcher_keys::*;
+        let items = self.switcher_items();
+        let Some(app) = self.switcher_app() else {
+            return SwitcherEffect::None;
+        };
+        let windows = self.app_windows(app);
+        let n_apps = items.len();
+        match (keysym, self.switcher_window) {
+            (Q | Q_UPPER, _) => return SwitcherEffect::QuitApp(windows),
+            (W | W_UPPER | F4, Some(w)) => {
+                if let Some(id) = windows.get(w) {
+                    return SwitcherEffect::CloseWindow(*id);
+                }
+            }
+            (LEFT, Some(w)) => self.switcher_window = Some((w + windows.len() - 1) % windows.len()),
+            (RIGHT, Some(w)) => self.switcher_window = Some((w + 1) % windows.len()),
+            (UP, Some(_)) => self.switcher_window = None,
+            (LEFT, None) => {
+                self.switcher_index = (self.switcher_index + n_apps - 1) % n_apps;
+            }
+            (RIGHT, None) => self.switcher_index = (self.switcher_index + 1) % n_apps,
+            (DOWN, None) => self.switcher_window = Some(0),
+            _ => {}
+        }
+        SwitcherEffect::None
     }
 
     /// Move `id` to the MRU front (no-op for unknown ids).
@@ -235,11 +428,17 @@ impl ShellModel {
             self.touch_mru(selected);
         }
         if self.switcher_open {
-            if self.mru.is_empty() {
+            let items = self.switcher_items().len();
+            if items == 0 {
                 self.switcher_open = false;
                 self.switcher_index = 0;
+                self.switcher_window = None;
             } else {
-                self.switcher_index = self.switcher_index.min(self.mru.len() - 1);
+                self.switcher_index = self.switcher_index.min(items - 1);
+                // A closed window can leave the focus past the end.
+                let app = self.switcher_items()[self.switcher_index];
+                let n = self.app_windows(app).len();
+                self.switcher_window = self.switcher_window.filter(|w| *w < n);
             }
         }
     }
@@ -249,21 +448,24 @@ impl ShellModel {
     /// steps wrap around. Returns the new selection, or `None` with no
     /// windows (the switcher stays closed).
     pub fn switcher_step(&mut self, forward: bool) -> Option<u64> {
-        if self.mru.is_empty() {
+        let items = self.switcher_items();
+        if items.is_empty() {
             return None;
         }
+        // A new app takes the focus back from the thumbnails.
+        self.switcher_window = None;
         if !self.switcher_open {
             self.switcher_open = true;
-            self.switcher_index = if self.mru.len() >= 2 { 1 } else { 0 };
+            self.switcher_index = if items.len() >= 2 { 1 } else { 0 };
         } else if forward {
-            self.switcher_index = (self.switcher_index + 1) % self.mru.len();
+            self.switcher_index = (self.switcher_index + 1) % items.len();
         } else {
             self.switcher_index = self
                 .switcher_index
                 .checked_sub(1)
-                .unwrap_or(self.mru.len() - 1);
+                .unwrap_or(items.len() - 1);
         }
-        self.mru.get(self.switcher_index).copied()
+        items.get(self.switcher_index).copied()
     }
 
     /// Commit the switcher: close it and return the selection for the
@@ -272,6 +474,7 @@ impl ShellModel {
         let selection = self.switcher_selection();
         self.switcher_open = false;
         self.switcher_index = 0;
+        self.switcher_window = None;
         selection
     }
 
@@ -279,6 +482,7 @@ impl ShellModel {
     pub fn switcher_cancel(&mut self) {
         self.switcher_open = false;
         self.switcher_index = 0;
+        self.switcher_window = None;
     }
 
     /// Mirror another model's switcher overlay (host sync path, after
@@ -287,7 +491,7 @@ impl ShellModel {
     pub fn apply_switcher_state(&mut self, open: bool, selection: Option<u64>) {
         match (open, selection) {
             (true, Some(id)) => {
-                if let Some(index) = self.mru.iter().position(|known| *known == id) {
+                if let Some(index) = self.switcher_items().iter().position(|known| *known == id) {
                     self.switcher_open = true;
                     self.switcher_index = index;
                 } else {
@@ -327,6 +531,109 @@ mod tests {
             WindowEntry::new(1, "Terminal", true),
             WindowEntry::new(2, "Browser", false),
         ]
+    }
+
+    #[test]
+    fn switcher_groups_windows_by_app_like_gnome() {
+        let mut model = ShellModel::new();
+        let windows = vec![
+            WindowEntry::new(1, "Doc 1", true).with_app_id(Some("editor".into())),
+            WindowEntry::new(2, "Web", false).with_app_id(Some("browser".into())),
+            WindowEntry::new(3, "Doc 2", false).with_app_id(Some("editor".into())),
+        ];
+        model.apply_window_list(windows, vec![0]);
+        // One item per app, each the app's most recent window.
+        let items = model.switcher_items();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], 1, "the focused editor window leads");
+        assert_eq!(model.app_window_count(1), 2);
+        assert_eq!(model.app_window_count(2), 1);
+        // Alt+Tab goes straight to the other app.
+        assert_eq!(model.switcher_step(true), Some(2));
+        assert_eq!(
+            model.switcher_step(true),
+            Some(1),
+            "wraps over apps, not windows"
+        );
+    }
+
+    #[test]
+    fn window_backed_apps_stand_alone_like_gnome() {
+        // Only "editor" has a desktop entry (editor.desktop): the two
+        // "tool" windows have none, so each is its own app.
+        let mut model = ShellModel::new();
+        model.set_app_resolver(|app_id| (app_id == "editor").then(|| "editor.desktop".into()));
+        model.apply_window_list(
+            vec![
+                WindowEntry::new(1, "Doc 1", true).with_app_id(Some("editor".into())),
+                WindowEntry::new(2, "Tool A", false).with_app_id(Some("tool".into())),
+                WindowEntry::new(3, "Doc 2", false).with_app_id(Some("editor".into())),
+                WindowEntry::new(4, "Tool B", false).with_app_id(Some("tool".into())),
+            ],
+            vec![0],
+        );
+        assert_eq!(model.switcher_items().len(), 3);
+        assert_eq!(model.app_window_count(1), 2);
+        assert_eq!(model.app_window_count(2), 1);
+        assert_eq!(model.app_windows(4), vec![4]);
+    }
+
+    fn editor_and_browser() -> ShellModel {
+        let mut model = ShellModel::new();
+        model.apply_window_list(
+            vec![
+                WindowEntry::new(1, "Doc 1", true).with_app_id(Some("editor".into())),
+                WindowEntry::new(2, "Web", false).with_app_id(Some("browser".into())),
+                WindowEntry::new(3, "Doc 2", false).with_app_id(Some("editor".into())),
+            ],
+            vec![0],
+        );
+        model
+    }
+
+    #[test]
+    fn switch_group_steps_through_the_apps_windows_like_gnome() {
+        let mut model = editor_and_browser();
+        assert_eq!(model.app_windows(1), vec![1, 3]);
+        // Alt+Above_Tab opens on the current app's next window.
+        assert_eq!(model.switcher_step_window(true), Some(3));
+        assert_eq!(model.switcher_window(), Some(1));
+        assert_eq!(model.switcher_step_window(true), Some(1), "wraps");
+        // Left/Right move between windows while the thumbnails hold the
+        // focus; Up gives it back to the icon.
+        model.switcher_key(switcher_keys::RIGHT);
+        assert_eq!(model.switcher_selection(), Some(3));
+        model.switcher_key(switcher_keys::UP);
+        assert_eq!(model.switcher_window(), None);
+        assert_eq!(model.switcher_selection(), Some(1));
+        // Now Right moves to the next app; Down focuses its windows.
+        model.switcher_key(switcher_keys::RIGHT);
+        assert_eq!(model.switcher_selection(), Some(2));
+        model.switcher_key(switcher_keys::DOWN);
+        assert_eq!(model.switcher_window(), Some(0));
+        assert_eq!(model.switcher_commit(), Some(2));
+    }
+
+    #[test]
+    fn switcher_keys_close_and_quit_like_gnome() {
+        let mut model = editor_and_browser();
+        model.switcher_step_window(true);
+        assert_eq!(
+            model.switcher_key(switcher_keys::W),
+            SwitcherEffect::CloseWindow(3)
+        );
+        assert_eq!(
+            model.switcher_key(switcher_keys::Q),
+            SwitcherEffect::QuitApp(vec![1, 3])
+        );
+        // Alt+Tab takes the focus back to the app icons.
+        model.switcher_step(true);
+        assert_eq!(model.switcher_window(), None);
+        assert_eq!(
+            model.switcher_key(switcher_keys::W),
+            SwitcherEffect::None,
+            "W only closes a focused thumbnail"
+        );
     }
 
     #[test]

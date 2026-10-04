@@ -71,6 +71,9 @@ fn main() -> ExitCode {
             "--xwayland" => {
                 session.xwayland = true;
             }
+            "--startup-overview" => {
+                session.startup_overview = true;
+            }
             "--backend" => match args.next().as_deref().and_then(BackendChoice::parse) {
                 Some(choice) => session.backend = choice,
                 None => {
@@ -86,7 +89,7 @@ fn main() -> ExitCode {
                 println!("roost-compositor: nested Roost session (001 developer preview)");
                 println!();
                 println!(
-                    "Usage: roost-compositor [--backend auto|winit|drm] [--socket NAME] [--width W] [--height H] [--shell-bin PATH] [--xwayland]"
+                    "Usage: roost-compositor [--backend auto|winit|drm] [--socket NAME] [--width W] [--height H] [--shell-bin PATH] [--xwayland] [--startup-overview]"
                 );
                 println!();
                 println!("Starts one isolated nested Wayland session on a private");
@@ -99,6 +102,8 @@ fn main() -> ExitCode {
                 println!("roost-shell-host sibling) is spawned supervised with a");
                 println!("finite restart budget; WAYLAND_DISPLAY is set for this");
                 println!("process only and restored on shutdown.");
+                println!("--startup-overview opens the overview at start, as GNOME");
+                println!("does at login (roost-session passes it).");
                 return ExitCode::SUCCESS;
             }
             other => {
