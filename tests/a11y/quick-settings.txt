@@ -20,5 +20,6 @@ toggle button: Bluetooth
 toggle button: Bluetooth Menu
 toggle button: Power Mode
 toggle button: Power Mode Menu
+toggle button: Night Light
 toggle button: Dark Style
 toggle button: Do Not Disturb
