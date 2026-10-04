@@ -289,6 +289,26 @@ export async function run() {
             Main.overview.show();
             await Scripting.sleep(1500);
             await shot('16-overview-workspaces');
+            // Use GNOME's actual drag-over target, then capture the
+            // insertion slot and shifted thumbnails before dropping.
+            let thumbs = null;
+            let preview = null;
+            const findDragActors = actor => {
+                if (actor instanceof St.Widget && actor.has_style_class_name('workspace-thumbnails'))
+                    thumbs = actor;
+                if (!preview && actor.constructor.$gtype.name.includes('WindowPreview'))
+                    preview = actor;
+                actor.get_children().forEach(findDragActors);
+            };
+            findDragActors(global.stage);
+            if (!thumbs || !preview)
+                throw new Error('workspace insertion capture has no thumbnail box or preview');
+            const second = thumbs._thumbnails[1];
+            thumbs.handleDragOver(preview, preview, second.x - 3, second.y + second.height / 2, global.get_current_time());
+            await shot('16b-workspace-insertion-placeholder');
+            thumbs._dropPlaceholderPos = -1;
+            thumbs.queue_relayout();
+
             Main.overview.hide();
             await Scripting.sleep(1000);
         }
