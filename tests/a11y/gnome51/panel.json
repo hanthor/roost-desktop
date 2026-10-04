@@ -1,0 +1,334 @@
+{
+ "source": "GNOME Shell 51.0 AT-SPI",
+ "state": "panel",
+ "nodes": [
+  {
+   "role": "window",
+   "name": "Main stage",
+   "depth": 1,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 2,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "Window group",
+   "depth": 3,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 4,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 5,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 3,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 4,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 5,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 6,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "toggle button",
+   "name": "Activities",
+   "depth": 7,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 8,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 9,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 10,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 9,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 10,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 5,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 6,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "menu",
+   "name": "",
+   "depth": 7,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 8,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "label",
+   "name": "<clock>",
+   "depth": 9,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "text",
+   "name": "",
+   "depth": 10,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 5,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 6,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 6,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 6,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 6,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 6,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 6,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "menu",
+   "name": "System",
+   "depth": 7,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 8,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 9,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 10,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 11,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "Top window group",
+   "depth": 3,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 3,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "Input panel group",
+   "depth": 3,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 4,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 4,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 3,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 3,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "Feedback group",
+   "depth": 3,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  }
+ ]
+}

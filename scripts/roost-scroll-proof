@@ -121,6 +121,11 @@ echo "roost-scroll-proof: nested geometry $(xdotool getwindowgeometry "$WID" | t
 xdotool windowfocus --sync "$WID"
 sleep 3
 
+# Observe callback timestamps on a real client before the browser journey.
+WAYLAND_DISPLAY="$SOCKET" cargo run --quiet --manifest-path "$ROOT/Cargo.toml" \
+    -p roost-compositor --example frame_callback_clock -- "$ARTIFACTS/frame-probe.shm" \
+    >"$ARTIFACTS/frame-callback-clock.log" 2>&1
+
 # One browser, three green pages: three xdg-toplevels in map order.
 PW_ENV="${RUNNER_TEMP:-/tmp}/roost-pw-scroll-$$"
 python3 -m venv "$PW_ENV"

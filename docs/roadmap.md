@@ -1,8 +1,10 @@
 # Program roadmap and traceability
 
+The [public 12-month roadmap](../ROADMAP.md) records dated priorities, release status, adoption evidence and contribution opportunities.
+
 **Status:** Active. Tier 1 (nested developer preview) is implemented; tier 2 (daily-driver candidate) is open. Work items live as GitHub issues on the [Roost roadmap project board](https://github.com/users/hanthor/projects/4); this document keeps the program structure, gates, and traceability.
 **Architecture:** [Program architecture](architecture.md)  
-**Parity baseline:** GNOME 51, as shipped in the TunaOS Marlin GNOME image (`ghcr.io/tuna-os/marlin:gnome`). Decided 2026-10-01.  
+**Parity target:** GNOME 51 on the Marlin image family. Decided 2026-10-01. The published Marlin GNOME image measured on 2026-10-04 contains GNOME Shell 50.5, so GNOME 51 comparison evidence must identify its separately upgraded reference payload.
 **Target platform:** TunaOS Marlin (Arch Linux base, bootc image), as a Roost flavor alongside the GNOME flavor. Reference and candidate run on the same VM image family so comparisons are like for like.  
 **Planning system:** Spektacular spec → plan → implement. Every delivery unit has a spek, a reviewed implementation plan, evidence, and an explicit gate.
 
