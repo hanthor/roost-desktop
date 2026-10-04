@@ -1,0 +1,750 @@
+{
+ "source": "GNOME Shell 51.0 AT-SPI",
+ "state": "quick-settings",
+ "nodes": [
+  {
+   "role": "window",
+   "name": "Main stage",
+   "depth": 1,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 2,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "Window group",
+   "depth": 3,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 4,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 5,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 3,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 4,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 5,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 6,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "toggle button",
+   "name": "Activities",
+   "depth": 7,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 8,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 9,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 10,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 9,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 10,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 5,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 6,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "menu",
+   "name": "",
+   "depth": 7,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 8,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "label",
+   "name": "<clock>",
+   "depth": 9,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "text",
+   "name": "",
+   "depth": 10,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 5,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 6,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 6,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 6,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 6,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 6,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 6,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "menu",
+   "name": "System",
+   "depth": 7,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 8,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 9,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 10,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 11,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "Top window group",
+   "depth": 3,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 3,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "Input panel group",
+   "depth": 3,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 4,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 4,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 3,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 3,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "Feedback group",
+   "depth": 3,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 3,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 4,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 5,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 5,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 6,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 7,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "button",
+   "name": "",
+   "depth": 8,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 9,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "button",
+   "name": "Take Screenshot",
+   "depth": 10,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 11,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 12,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "button",
+   "name": "Settings",
+   "depth": 10,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 11,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 12,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 10,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "button",
+   "name": "Lock Screen",
+   "depth": 10,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 11,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 12,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "button",
+   "name": "Power Off Menu",
+   "depth": 10,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 11,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 12,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "button",
+   "name": "",
+   "depth": 8,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 9,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "toggle button",
+   "name": "",
+   "depth": 10,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 11,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 12,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 13,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 12,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "label",
+   "name": "Power Mode",
+   "depth": 13,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "text",
+   "name": "",
+   "depth": 14,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "label",
+   "name": "Balanced",
+   "depth": 13,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "text",
+   "name": "",
+   "depth": 14,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 10,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "button",
+   "name": "Open power profiles menu",
+   "depth": 10,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 11,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 12,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "toggle button",
+   "name": "",
+   "depth": 8,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 9,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 10,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 11,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 10,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "label",
+   "name": "Dark Style",
+   "depth": 11,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "text",
+   "name": "",
+   "depth": 12,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "toggle button",
+   "name": "",
+   "depth": 8,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 9,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 10,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 11,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 10,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "label",
+   "name": "Do Not Disturb",
+   "depth": 11,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "text",
+   "name": "",
+   "depth": 12,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 8,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  },
+  {
+   "role": "panel",
+   "name": "",
+   "depth": 4,
+   "showing": true,
+   "checked": false,
+   "selected": false
+  }
+ ]
+}

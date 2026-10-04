@@ -2852,3 +2852,21 @@ fn shell_activation_deactivates_the_previous_window() {
         "the previous window is deactivated"
     );
 }
+
+#[test]
+fn strip_columns_resize_on_primary_output_failover_without_losing_focus() {
+    let mut f = layout_windows();
+    f.comp.state.add_output("secondary", None, 1024, 768);
+    f.manager.set_scroll(&mut f.comp.state, true);
+    let focused = f.manager.model().focused();
+    let workspace = f.manager.model().active_workspace();
+    assert!(f.comp.state.remove_output("roost-0"));
+    f.manager.reapply_derived_layouts(&mut f.comp.state);
+    for id in [f.id_a, f.id_b] {
+        let geometry = f.manager.geometry(id).unwrap();
+        assert_eq!((geometry.size.w, geometry.size.h), (488, 704));
+        assert_eq!(f.manager.window_layout(id), Some(WindowLayout::Strip));
+    }
+    assert_eq!(f.manager.model().focused(), focused);
+    assert_eq!(f.manager.model().active_workspace(), workspace);
+}

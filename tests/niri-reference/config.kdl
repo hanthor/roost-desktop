@@ -1,0 +1,18 @@
+// Match Roost's nested output and reserve its 32px shell panel area.
+layout {
+    gaps 16
+    center-focused-column "never"
+    default-column-width { proportion 0.5; }
+    preset-column-widths { proportion 0.333333; proportion 0.5; proportion 0.666667; }
+    focus-ring { width 4; active-color "#7fc8ff"; inactive-color "#505050"; }
+    border { off; }
+    struts { top 32; }
+}
+prefer-no-csd
+cursor { hide-after-inactive-ms 100; }
+binds {
+    Mod+Left { focus-column-left; }
+    Mod+Right { focus-column-right; }
+    Mod+R { switch-preset-column-width; }
+}
+hotkey-overlay { skip-at-startup; }

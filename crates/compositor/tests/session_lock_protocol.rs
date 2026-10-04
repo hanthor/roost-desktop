@@ -185,7 +185,8 @@ fn approved_lock_configures_scaled_output_and_unlock_only_requests_release() {
     let manager: ExtSessionLockManagerV1 = peer.bind(1);
     let lock = manager.lock(&peer.queue.handle(), 2);
     pump(&mut comp, &mut peer);
-    comp.state.take_lock_request().unwrap().0.lock();
+    let pending = comp.state.take_lock_request().unwrap().0;
+    comp.state.resolve_lock_request(pending, true);
     pump(&mut comp, &mut peer);
     assert_eq!(peer.client.events, vec![(2, true)]);
     let compositor: WlCompositor = peer.bind(6);
@@ -252,7 +253,8 @@ fn disconnected_lock_client_leaves_no_live_surface_or_unlock_request() {
     let manager: ExtSessionLockManagerV1 = peer.bind(1);
     let lock = manager.lock(&peer.queue.handle(), 3);
     pump(&mut comp, &mut peer);
-    comp.state.take_lock_request().unwrap().0.lock();
+    let pending = comp.state.take_lock_request().unwrap().0;
+    comp.state.resolve_lock_request(pending, true);
     pump(&mut comp, &mut peer);
     let compositor: WlCompositor = peer.bind(6);
     let output: WlOutput = peer.bind(4);
@@ -271,4 +273,102 @@ fn disconnected_lock_client_leaves_no_live_surface_or_unlock_request() {
         !comp.state.take_client_unlock(),
         "client death is never authentication"
     );
+}
+
+fn pending_surface(
+    comp: &mut TestCompositor,
+    peer: &mut Peer,
+    tag: u32,
+) -> (ExtSessionLockV1, ExtSessionLockSurfaceV1, WlSurface) {
+    let manager: ExtSessionLockManagerV1 = peer.bind(1);
+    let compositor: WlCompositor = peer.bind(6);
+    let output: WlOutput = peer.bind(4);
+    let lock = manager.lock(&peer.queue.handle(), tag);
+    let surface = compositor.create_surface(&peer.queue.handle(), ());
+    let role = lock.get_lock_surface(&surface, &output, &peer.queue.handle(), ());
+    pump(comp, peer);
+    (lock, role, surface)
+}
+
+#[test]
+fn early_surface_becomes_visible_only_after_approval() {
+    let mut comp = compositor();
+    let mut peer = connect(&mut comp);
+    let (_lock, _role, _surface) = pending_surface(&mut comp, &mut peer, 20);
+    assert_eq!(peer.client.configured, vec![(1000, 600)]);
+    assert!(!comp.state.has_lock_surfaces());
+    assert!(comp.state.lock_surface_for("fixture").is_none());
+    assert!(comp.state.lock_surfaces().is_empty());
+    let pending = comp.state.take_lock_request().unwrap().0;
+    comp.state.resolve_lock_request(pending, true);
+    pump(&mut comp, &mut peer);
+    assert_eq!(peer.client.events, vec![(20, true)]);
+    assert!(comp.state.has_lock_surfaces());
+    assert_eq!(comp.state.lock_surfaces().len(), 1);
+}
+
+#[test]
+fn denied_early_surface_never_becomes_a_focus_or_render_target() {
+    let mut comp = compositor();
+    let mut peer = connect(&mut comp);
+    let (_lock, _role, _surface) = pending_surface(&mut comp, &mut peer, 21);
+    let pending = comp.state.take_lock_request().unwrap().0;
+    comp.state.resolve_lock_request(pending, false);
+    pump(&mut comp, &mut peer);
+    assert_eq!(peer.client.events, vec![(21, false)]);
+    assert!(!comp.state.has_lock_surfaces());
+    assert!(comp.state.lock_surface_for("fixture").is_none());
+    assert!(comp.state.lock_surfaces().is_empty());
+    assert!(!comp.state.take_client_unlock());
+}
+
+#[test]
+fn rejected_second_client_preserves_the_approved_output_surface() {
+    let mut comp = compositor();
+    let mut owner = connect(&mut comp);
+    let (_owner_lock, _owner_role, _owner_surface) = pending_surface(&mut comp, &mut owner, 22);
+    let pending = comp.state.take_lock_request().unwrap().0;
+    comp.state.resolve_lock_request(pending, true);
+    pump(&mut comp, &mut owner);
+    let original = comp.state.lock_surface_for("fixture").unwrap();
+    let mut other = connect(&mut comp);
+    let (_other_lock, _other_role, _other_surface) = pending_surface(&mut comp, &mut other, 23);
+    assert_eq!(comp.state.lock_surface_for("fixture").unwrap(), original);
+    assert_eq!(comp.state.lock_surfaces(), vec![original.clone()]);
+    let pending = comp.state.take_lock_request().unwrap().0;
+    comp.state.resolve_lock_request(pending, false);
+    pump(&mut comp, &mut other);
+    assert_eq!(other.client.events, vec![(23, false)]);
+    assert_eq!(comp.state.lock_surface_for("fixture").unwrap(), original);
+    assert_eq!(comp.state.lock_surfaces(), vec![original]);
+    assert!(!comp.state.take_client_unlock());
+}
+
+#[test]
+fn unapproved_release_is_a_protocol_error_without_clearing_the_owner() {
+    let mut comp = compositor();
+    let mut owner = connect(&mut comp);
+    let (_owner_lock, _owner_role, _owner_surface) = pending_surface(&mut comp, &mut owner, 24);
+    let pending = comp.state.take_lock_request().unwrap().0;
+    comp.state.resolve_lock_request(pending, true);
+    pump(&mut comp, &mut owner);
+    let original = comp.state.lock_surface_for("fixture").unwrap();
+    let mut other = connect(&mut comp);
+    let manager: ExtSessionLockManagerV1 = other.bind(1);
+    let unapproved = manager.lock(&other.queue.handle(), 25);
+    pump(&mut comp, &mut other);
+    let pending = comp.state.take_lock_request().unwrap().0;
+    comp.state.resolve_lock_request(pending, false);
+    pump(&mut comp, &mut other);
+    unapproved.unlock_and_destroy();
+    other.queue.flush().unwrap();
+    pump(&mut comp, &mut owner);
+    if let Some(guard) = other.queue.prepare_read() {
+        let _ = guard.read();
+    }
+    let _ = other.queue.dispatch_pending(&mut other.client);
+    assert!(other.conn.protocol_error().is_some());
+    assert_eq!(comp.state.lock_surface_for("fixture").unwrap(), original);
+    assert_eq!(comp.state.lock_surfaces(), vec![original]);
+    assert!(!comp.state.take_client_unlock());
 }
