@@ -200,7 +200,7 @@ pub async fn lookup(uuid: &str, setting: &str, key: &str) -> Option<String> {
     }
     let mut args = vec!["secret-tool".into(), "lookup".into()];
     args.extend(attributes(uuid, setting, Some(key)));
-    tool(&args, None)
+    tool(&args, None, false)
         .await
         .ok()
         .map(|s| s.trim_end_matches('\n').to_owned())
