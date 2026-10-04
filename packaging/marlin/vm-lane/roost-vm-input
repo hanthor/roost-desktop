@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""Real Wayland GTK client recording only key counts, never key values/text."""
+import json
+import os
+import pathlib
+
+import gi
+gi.require_version("Gtk", "4.0")
+from gi.repository import Gtk
+
+path = pathlib.Path(os.environ["XDG_RUNTIME_DIR"], "roost-vm-input.json")
+count = 0
+
+
+def publish():
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"pid": os.getpid(), "count": count}))
+    temporary.replace(path)
+
+
+def activate(app):
+    window = Gtk.ApplicationWindow(application=app, title="VM input probe")
+    window.set_default_size(400, 240)
+    button = Gtk.Button(label="Count-only input probe")
+    window.set_child(button)
+    controller = Gtk.EventControllerKey()
+    controller.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+    def pressed(*_arguments):
+        global count
+        count += 1
+        button.set_label(f"Keys received: {count}")
+        publish()
+        return True
+    controller.connect("key-pressed", pressed)
+    window.add_controller(controller)
+    window.present()
+    button.grab_focus()
+    publish()
+
+
+app = Gtk.Application(application_id="org.roost.VmInput")
+app.connect("activate", activate)
+app.run([])

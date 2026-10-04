@@ -519,9 +519,10 @@ pub struct Runtime {
     /// `last_stamp + anchor.elapsed()`.
     idle_since: Instant,
     /// Lock-screen password checks report back here.
-    unlock_results: calloop::channel::Sender<(u64, bool)>,
+    unlock_results: calloop::channel::Sender<(u64, u64, bool)>,
     /// A password check is running.
     unlock_inflight: bool,
+    unlock_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// org.gnome.Mutter.IdleMonitor.
     idle_monitor: crate::idle_monitor::IdleMonitor,
     exit: bool,
@@ -785,12 +786,12 @@ impl Runtime {
             .map_err(|e| RuntimeError::Loop(e.to_string()))?;
 
         // Lock-screen password checks finish here, between frames.
-        let (unlock_results, unlock_source) = calloop::channel::channel::<(u64, bool)>();
+        let (unlock_results, unlock_source) = calloop::channel::channel::<(u64, u64, bool)>();
         event_loop
             .handle()
             .insert_source(unlock_source, |event, _, rt: &mut Runtime| {
-                if let calloop::channel::Event::Msg((request, ok)) = event {
-                    rt.finish_unlock(request, ok);
+                if let calloop::channel::Event::Msg((request, generation, ok)) = event {
+                    rt.finish_unlock(request, generation, ok);
                 }
             })
             .map_err(|e| RuntimeError::Loop(e.to_string()))?;
@@ -843,6 +844,7 @@ impl Runtime {
             idle_since: Instant::now(),
             unlock_results,
             unlock_inflight: false,
+            unlock_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             idle_monitor: crate::idle_monitor::start(),
             exit: false,
             stats: RunStats::default(),
@@ -974,17 +976,24 @@ impl Runtime {
     /// A lock-screen password check finished: a verified password
     /// clears the lock (the shell then destroys its lock surfaces), and
     /// the shell hears the result either way.
-    fn finish_unlock(&mut self, request: u64, ok: bool) {
+    fn finish_unlock(&mut self, request: u64, generation: u64, ok: bool) {
         self.unlock_inflight = false;
+        let applied = ok
+            && generation
+                == self
+                    .unlock_generation
+                    .load(std::sync::atomic::Ordering::Acquire);
         if std::env::var_os("ROOST_LOCK_TRACE").is_some() {
-            eprintln!("roost-compositor: lock authentication finished accepted={ok}");
+            eprintln!(
+                "roost-compositor: lock authentication finished accepted={ok} applied={applied}"
+            );
         }
-        if ok && self.is_locked() {
+        if applied && self.is_locked() {
             self.lock.unlock(self.lock_now_ms());
             self.control.set_locked(false);
             self.overlay.hide();
         }
-        self.control.finish_unlock(request, ok);
+        self.control.finish_unlock(request, applied);
     }
 
     /// Route one backend input event: consumed by the lock surface while
@@ -2445,10 +2454,13 @@ impl Runtime {
                     eprintln!("roost-compositor: lock authentication started");
                 }
                 let reply = self.unlock_results.clone();
+                let generation = self
+                    .unlock_generation
+                    .load(std::sync::atomic::Ordering::Acquire);
                 std::thread::spawn(move || {
                     let ok = crate::unlock::session_user()
                         .is_some_and(|user| crate::unlock::verify(&user, &password.0));
-                    let _ = reply.send((request, ok));
+                    let _ = reply.send((request, generation, ok));
                 });
             }
         }
@@ -3600,6 +3612,18 @@ pub fn run(session: &NestedSession) -> Result<RunStats, RuntimeError> {
     } else {
         None
     };
+    #[cfg(feature = "drm")]
+    let sleep_monitor = if matches!(runtime.backend, Backend::Drm(_)) {
+        match crate::sleep::Monitor::start(runtime.unlock_generation.clone()) {
+            Ok(monitor) => Some(monitor),
+            Err(error) => {
+                eprintln!("roost-compositor: logind sleep monitor unavailable: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     // Graceful shutdown on SIGTERM/SIGINT: ending the loop drops the
     // runtime, whose supervisor kills the shell child (ADR 0003 kill
     // on exit). Without this a signal would bypass `Drop` and orphan
@@ -3618,6 +3642,20 @@ pub fn run(session: &NestedSession) -> Result<RunStats, RuntimeError> {
         let dispatched = event_loop
             .dispatch(Some(FRAME_BUDGET), &mut runtime)
             .map_err(|e| RuntimeError::Loop(e.to_string()));
+        #[cfg(feature = "drm")]
+        if let Some(monitor) = &sleep_monitor {
+            let (lock, wake) = monitor.take();
+            if lock {
+                runtime.engage_lock();
+            }
+            if wake {
+                // Lock is compositor-owned even if the supervised shell died.
+                runtime.engage_lock();
+                if let Backend::Drm(drm) = &mut runtime.backend {
+                    drm.resume_from_sleep();
+                }
+            }
+        }
         let ticked = dispatched.and_then(|_| runtime.tick());
         match ticked {
             Ok(true) => continue,

@@ -2,7 +2,7 @@
 """roost-vm-lane — boot the Marlin Roost disk and prove the hardware session (#68).
 
 Boots a raw disk installed from the CI-only test layer
-(packaging/marlin/vm-lane/Containerfile: GDM autologin of roost-test
+(packaging/marlin/vm-lane/Containerfile: greetd initial session of roost-test
 into "Roost (preview)", journal mirrored on ttyS0) in QEMU/KVM on OVMF at
 1280x800 with virtio-vga, then asserts from outside the guest:
 
@@ -54,6 +54,10 @@ _loader = importlib.machinery.SourceFileLoader("roost_baseline",
 _spec = importlib.util.spec_from_loader("roost_baseline", _loader)
 baseline = importlib.util.module_from_spec(_spec)
 _loader.exec_module(baseline)
+_guest_loader = importlib.machinery.SourceFileLoader("vm_guest_agent", os.path.join(HERE, "lib", "vm_guest_agent.py"))
+_guest_spec = importlib.util.spec_from_loader("vm_guest_agent", _guest_loader)
+guest_agent = importlib.util.module_from_spec(_guest_spec)
+_guest_loader.exec_module(guest_agent)
 
 WIDTH, HEIGHT = baseline.WIDTH, baseline.HEIGHT
 DRM_RE = re.compile(r"roost-compositor: drm: output (\S+) (\d+)x(\d+)")
@@ -81,7 +85,7 @@ def read_text(path):
 def excerpt(serial, n=60):
     lines = serial.splitlines()
     interesting = [ln for ln in lines if re.search(
-        r"roost|gdm|panicked|session-|Failed|error", ln, re.I)]
+        r"roost|greetd|panicked|session-|Failed|error", ln, re.I)]
     return ("--- last relevant serial lines ---\n" + "\n".join(interesting[-n:]) +
             "\n--- last raw serial lines ---\n" + "\n".join(lines[-40:]))
 
@@ -122,6 +126,307 @@ def check_panel(path):
             for y in range(h // 4, h * 3 // 4, 8) for x in range(0, w, 8)}
     ok = (w, h) == (WIDTH, HEIGHT) and black >= 0.9 and len(body) >= 8
     return ok, f"{w}x{h}, y=5 row {black:.0%} black, {len(body)} body colors"
+
+
+def run_lifecycle(qmp, agent, out, serial_path, record):
+    """Actual DRM/logind lifecycle on the final boot, with unchanged app identities."""
+    evidence = os.path.join(out, "lifecycle")
+    os.makedirs(evidence, exist_ok=True)
+
+    def inventory(label):
+        state = agent.run("inventory")
+        with open(os.path.join(evidence, f"{label}.json"), "w") as stream:
+            json.dump(state, stream, indent=2)
+        return state
+
+    def await_state(predicate, timeout=15):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            state = agent.run("inventory")
+            if predicate(state):
+                return state
+            time.sleep(0.2)
+        raise RuntimeError("lifecycle state did not arrive within its deadline")
+
+    def frame(label):
+        qmp.frame(os.path.join(evidence, f"{label}.png"))
+        ppm = os.path.join(evidence, f"{label}.ppm")
+        qmp.cmd("screendump", filename=ppm, format="ppm")
+        return read_ppm(ppm)
+
+    def difference(left, right):
+        if left[:2] != right[:2]:
+            raise RuntimeError("lifecycle frame dimensions changed")
+        width, height = left[:2]
+        first = width * 64 * 3  # Clock/panel changes are outside the repaint comparison.
+        changed = sum(max(abs(a - b) for a, b in zip(left[2][i:i+3], right[2][i:i+3])) > 24
+                      for i in range(first, width * height * 3, 3))
+        return changed / (width * (height - 64))
+
+    def same_apps(before, after, shell=True):
+        names = {"roost-compositor", "gnome-disks", "gnome-system-monitor", "nautilus"}
+        if shell:
+            names.add("roost-shell-gtk")
+        identities = lambda value: [p for p in value["processes"] if p["executable"] in names]
+        return (before["state"]["windows"] == after["state"]["windows"]
+                and identities(before) == identities(after))
+
+    def changed_pixels(left, right, rect):
+        if left[:2] != right[:2]:
+            raise RuntimeError("client repaint frame dimensions changed")
+        x, y, width, height = rect
+        image_width, image_height = left[:2]
+        changed = 0
+        for row in range(max(0, y), min(image_height, y + height)):
+            for column in range(max(0, x), min(image_width, x + width)):
+                offset = (row * image_width + column) * 3
+                changed += max(abs(a - b) for a, b in zip(left[2][offset:offset+3],
+                                                          right[2][offset:offset+3])) > 24
+        return changed
+
+    agent.run("start-input-probe")
+    probe = await_state(lambda state: any(w["app_id"] == "org.roost.VmInput" for w in state["state"]["windows"]))
+    probe_window = next(w for w in probe["state"]["windows"] if w["app_id"] == "org.roost.VmInput")
+    x, y, width, height = probe_window["rect"]
+    qmp.click(x + width // 2, y + height // 2)
+    initial_input = agent.run("input-count")
+    qmp.keys("x")
+    time.sleep(0.5)
+    delivered_input = agent.run("input-count")
+    record("V-NORMAL-INPUT", delivered_input["pid"] == initial_input["pid"]
+           and delivered_input["count"] > initial_input["count"],
+           "real non-root GTK application receives ordinary QMP keyboard input while unlocked; count only")
+    before = inventory("before")
+    expected = {"roost-compositor", "roost-shell-gtk", "gnome-disks", "gnome-system-monitor", "nautilus"}
+    nonroot = (before["probe_uid"] == 0 and before["session_uid"] != 0
+               and before["session"]["User"] == str(before["session_uid"])
+               and before["session"]["Service"] == "greetd"
+               and all(p["uid"] == before["session_uid"] for p in before["processes"]))
+    intact = expected <= {p["executable"] for p in before["processes"]} and len(before["state"]["windows"]) >= 3
+    record("V-LIFECYCLE-OWNER", nonroot and intact, "root probe, non-root greetd session and three real app processes/surfaces")
+    if not nonroot or not intact or before["state"]["locked"]:
+        raise RuntimeError("lifecycle preconditions failed")
+    base_frame = frame("before-vt")
+    vt = int(before["session"]["VTNr"])
+    away = 2 if vt != 2 else 3
+    offset = len(read_text(serial_path))
+    switched = agent.run("vt", away)
+    time.sleep(2)
+    frame("vt-away")
+    returned = agent.run("vt", vt)
+    time.sleep(3)
+    after_vt = inventory("after-vt")
+    vt_frame = frame("after-vt")
+    delta = difference(base_frame, vt_frame)
+    events = read_text(serial_path)[offset:]
+    qmp.keys("x")
+    deadline = time.monotonic() + 5
+    repaint_pixels = 0
+    updated_input = delivered_input
+    while time.monotonic() < deadline:
+        updated_input = agent.run("input-count")
+        repaint_pixels = changed_pixels(vt_frame, frame("vt-client-repaint"), probe_window["rect"])
+        if (updated_input["pid"] == delivered_input["pid"]
+                and updated_input["count"] > delivered_input["count"] and repaint_pixels >= 8):
+            break
+        time.sleep(0.1)
+    repainted = (updated_input["pid"] == delivered_input["pid"]
+                 and updated_input["count"] > delivered_input["count"] and repaint_pixels >= 8)
+    delivered_input = updated_input
+    record("V-VT", switched["active_vt"] == f"tty{away}" and returned["active_vt"] == f"tty{vt}"
+           and "drm: session paused" in events and "drm: session activated" in events
+           and same_apps(before, after_vt) and delta < 0.20 and repainted,
+           f"actual VT away/back, exact app/process identities, body difference {delta:.2%}, fresh count/client repaint {repaint_pixels} pixels")
+
+    def suspend_and_check(label="", test_id="V-SUSPEND"):
+        request = agent.run("suspend")
+        with open(os.path.join(evidence, f"{label}suspend-request.json"), "w") as stream:
+            json.dump(request, stream, indent=2)
+        deadline = time.monotonic() + 30
+        suspended = False
+        while time.monotonic() < deadline:
+            if qmp.cmd("query-status")["status"] == f"{label}suspended":
+                suspended = True
+                break
+            time.sleep(0.2)
+        if not suspended:
+            record(test_id, False, "logind suspend never reached QEMU SUSPENDED; no pause substitute")
+            raise RuntimeError("real suspend did not occur")
+        suspended_frame = frame(f"{label}suspended")
+        qmp.cmd("system_wakeup")
+        # The first response after wake must already be locked. Waiting for a
+        # later transition would hide an exposed desktop during resume.
+        resumed = inventory(f"{label}first-resume")
+        resumed_frame = frame(f"{label}first-resume")
+        if not resumed["state"]["locked"]:
+            record(test_id, False, "first resume snapshot exposed an unlocked session")
+            raise RuntimeError("first resume snapshot exposed an unlocked session")
+        # QEMU's inactive-output placeholder differs from the desktop too. Require
+        # the actual varied lock mask to repaint, while every state remains locked.
+        deadline = time.monotonic() + 5
+        repainted = False
+        while True:
+            width, height, pixels = resumed_frame
+            colors = {tuple(value >> 4 for value in pixels[(y * width + x) * 3:(y * width + x) * 3 + 3])
+                      for y in range(64, height, 8) for x in range(0, width, 8)}
+            repainted = (len(colors) >= 8 and difference(base_frame, resumed_frame) > 0.25
+                         and difference(suspended_frame, resumed_frame) < 0.20)
+            if repainted or time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
+            state = inventory(f"{label}resume-repaint")
+            if not state["state"]["locked"] or not same_apps(before, state):
+                raise RuntimeError("resume repaint exposed or replaced the session")
+            resumed_frame = frame(f"{label}resumed-locked")
+        record(test_id, same_apps(before, resumed) and repainted,
+               f"actual SUSPENDED → system_wakeup, first state locked, real lock mask repainted={repainted}, unchanged app IDs/rectangles and process start times")
+        if not repainted:
+            raise RuntimeError("actual lock mask did not repaint after resume; inactive output is not a mask")
+        return resumed
+
+    # Start the first real suspend from the unlocked desktop: never hide
+    # a prepare-for-sleep locking race with a preemptive test lock.
+    resumed = suspend_and_check()
+
+    # Submit a correct password to a real delayed PAM stack before sleep.
+    # Its later success must not unlock the new sleep-lock generation.
+    agent.run("delay-unlock")
+    try:
+        agent.run("lock")
+        await_state(lambda state: state["state"]["locked"])
+        qmp.keys("esc")
+        qmp.keys("ret")
+        time.sleep(1)
+        qmp.keys("ctrl", "a")
+        qmp.type_text("roost")
+        stale_auth_offset = len(read_text(serial_path))
+        qmp.keys("ret")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if agent.run("delayed-auth-state")["real_pam_delay_running"]:
+                break
+            time.sleep(0.1)
+        else:
+            raise RuntimeError("actual PAM delay child did not start before suspend")
+    finally:
+        # The executing PAM context has already loaded its real stack.
+        agent.run("restore-unlock")
+    resumed = suspend_and_check("auth-", "V-SLEEP-AUTH-SUSPEND")
+    deadline = time.monotonic() + 25
+    stale_rejected = False
+    while time.monotonic() < deadline:
+        state = inventory("sleep-auth-pending")
+        if not state["state"]["locked"] or not same_apps(before, state):
+            record("V-SLEEP-AUTH-FAIL-CLOSED", False, "pre-sleep PAM result exposed or replaced the session")
+            raise RuntimeError("pre-sleep authentication unlocked the resumed session")
+        trace = read_text(serial_path)[stale_auth_offset:]
+        stale_rejected = ("lock authentication finished accepted=true applied=false" in trace
+                          and "roost-shell-gtk: lock command result applied=false" in trace)
+        if stale_rejected:
+            break
+        time.sleep(0.2)
+    record("V-SLEEP-AUTH-FAIL-CLOSED", stale_rejected,
+           "real delayed PAM accepts correct pre-sleep password, but stale generation is refused and locked apps stay intact")
+    if not stale_rejected:
+        raise RuntimeError("actual successful pre-sleep PAM rejection was not observed")
+    qmp.keys("ctrl", "a")
+    qmp.type_text("roost")
+    qmp.keys("ret")
+    fresh = await_state(lambda state: not state["state"]["locked"], timeout=15)
+    record("V-SLEEP-FRESH-AUTH", same_apps(before, fresh),
+           "fresh correct PAM submission after stale-result refusal unlocks the same session")
+    client_before = frame("resume-client-before")
+    qmp.click(x + width // 2, y + height // 2)
+    qmp.keys("x")
+    deadline = time.monotonic() + 5
+    resume_pixels = 0
+    while time.monotonic() < deadline:
+        updated_input = agent.run("input-count")
+        resume_pixels = changed_pixels(client_before, frame("resume-client-repaint"), probe_window["rect"])
+        if (updated_input["pid"] == delivered_input["pid"]
+                and updated_input["count"] > delivered_input["count"] and resume_pixels >= 8):
+            break
+        time.sleep(0.1)
+    record("V-SLEEP-CLIENT-REPAINT", updated_input["pid"] == delivered_input["pid"]
+           and updated_input["count"] > delivered_input["count"] and resume_pixels >= 8,
+           f"same real GTK app receives fresh keyboard input and repaints {resume_pixels} pixels after wake/unlock")
+    delivered_input = updated_input
+    agent.run("lock")
+    await_state(lambda state: state["state"]["locked"])
+    time.sleep(1)
+    qmp.type_text("probe")
+    time.sleep(0.5)
+    locked_input = agent.run("input-count")
+    record("V-NORMAL-INPUT-FAIL-CLOSED", locked_input == delivered_input,
+           "same real GTK client receives no ordinary QMP keys while locked; no key values recorded")
+    capture = agent.run("capture-input")
+    rejected = lambda code: 0 < code < 124  # A hung or unconnectable probe is not a denial proof.
+    record("V-CAPTURE-INPUT-FAIL-CLOSED", capture["connect_exit"] == 0
+           and rejected(capture["capture_exit"]) and rejected(capture["input_exit"])
+           and not capture["capture_file"] and inventory("capture-denied")["state"]["locked"],
+           "reachable untrusted real grim/wtype clients are denied capture/virtual-keyboard interfaces while locked")
+    # Repeat the real VT transition with the lock engaged, not only on the desktop.
+    agent.run("vt", away)
+    time.sleep(1)
+    agent.run("vt", vt)
+    time.sleep(2)
+    locked_vt = inventory("locked-vt")
+    record("V-VT-FAIL-CLOSED", locked_vt["state"]["locked"] and same_apps(before, locked_vt)
+           and difference(base_frame, frame("locked-vt")) > 0.25,
+           "VT away/back while locked repaints the mask and preserves app/process identities")
+
+    agent.run("deny-unlock")
+    try:
+        qmp.keys("esc")
+        qmp.keys("ret")
+        time.sleep(1)
+        qmp.keys("ctrl", "a")
+        qmp.type_text("roost")
+        auth_offset = len(read_text(serial_path))
+        qmp.keys("ret")
+        time.sleep(12)
+        denied = inventory("pam-denied")
+        auth_trace = read_text(serial_path)[auth_offset:]
+        attempted = ("roost-shell-gtk: lock password submitted" in auth_trace
+                     and "roost-shell-gtk: lock command result applied=false" in auth_trace)
+        record("V-AUTH-FAIL-CLOSED", attempted and denied["state"]["locked"] and same_apps(before, denied),
+               "fresh submitted/refused milestones: real pam_deny service rejects the correct fixture password; apps remain inaccessible")
+    finally:
+        agent.run("restore-unlock")
+    agent.run("stop-portal")
+    agent.run("kill-shell")
+    killed_mask = difference(base_frame, frame("shell-killed")) > 0.25
+    recovered = await_state(lambda state: state["state"]["locked"] and
+                            any(p["executable"] == "roost-shell-gtk" and p not in resumed["processes"]
+                                for p in state["processes"]), timeout=30)
+    time.sleep(2)
+    recovered = inventory("shell-recovered")
+    record("V-SHELL-FAIL-CLOSED", killed_mask and recovered["state"]["locked"] and same_apps(before, recovered, shell=False)
+           and agent.run("input-count") == delivered_input
+           and difference(base_frame, frame("shell-recovered")) > 0.25,
+           "portal stopped and lock UI killed; supervisor replacement stays locked/masked with original apps alive")
+    qmp.keys("ret")
+    time.sleep(1)
+    qmp.keys("ctrl", "a")
+    qmp.type_text("roost")
+    qmp.keys("ret")
+    await_state(lambda state: not state["state"]["locked"])
+    inventory("authenticated")
+    agent.run("logout")
+    deadline = time.monotonic() + 30
+    greeter = {}
+    while time.monotonic() < deadline:
+        greeter = agent.run("greeter")
+        if greeter["greetd_active"] and greeter["greeter_pids"] and not greeter["compositor_pids"]:
+            break
+        time.sleep(0.5)
+    with open(os.path.join(evidence, "greeter.json"), "w") as stream:
+        json.dump(greeter, stream, indent=2)
+    frame("logout-greeter")
+    record("V-LOGOUT", bool(greeter.get("greetd_active") and greeter.get("greeter_pids")
+                             and not greeter.get("compositor_pids")),
+           "real session termination returns to active greetd with gtkgreet and no original compositor")
+    record("V-LIFECYCLE", True, "all lifecycle operations completed; individual assertions remain mandatory")
 
 
 class Recorder:
@@ -330,12 +635,13 @@ def run_tour(qmp, out, serial_path):
             "playback_fps": PLAY_FPS}
 
 
-def boot(disk, out, scratch, timeout):
+def boot(disk, out, scratch, timeout, *, guest_agent=False):
     ovmf = next((p for p in OVMF if os.path.exists(p)), None)
     if not ovmf:
         sys.exit("roost-vm-lane: OVMF firmware not found (install ovmf)")
     kvm = os.access("/dev/kvm", os.R_OK | os.W_OK)
     qmp_path = os.path.join(scratch, "qmp.sock")
+    agent_path = os.path.join(scratch, "qga.sock")
     serial = os.path.join(out, "serial.log")
     qemu = ["qemu-system-x86_64", "-machine", "q35", "-m", "6144", "-smp", "4",
             "-bios", ovmf, "-snapshot",
@@ -351,10 +657,15 @@ def boot(disk, out, scratch, timeout):
             "-display", "none", "-serial", f"file:{serial}",
             "-qmp", f"unix:{qmp_path},server=on,wait=off",
             "-nic", "user,model=virtio-net-pci"]
+    if guest_agent:
+        qemu.extend(["-device", "virtio-serial-pci",
+                     "-chardev", f"socket,path={agent_path},server=on,wait=off,id=roost-qga",
+                     "-device", "virtserialport,chardev=roost-qga,name=org.qemu.guest_agent.0"])
     if kvm:
         qemu[1:1] = ["-enable-kvm", "-cpu", "host"]
     log(f"booting {disk} (kvm={kvm})")
-    return subprocess.Popen(qemu), qmp_path, serial, kvm
+    result = subprocess.Popen(qemu), qmp_path, serial, kvm
+    return (*result, agent_path) if guest_agent else result
 
 
 def repeat_boots(args):
@@ -416,12 +727,14 @@ def main():
         results[test_id] = (ok, desc)
         log(f"{test_id} {'pass' if ok else 'FAIL'}: {desc}")
 
-    vm, qmp_path, serial_path, kvm = boot(os.path.abspath(a.disk), out, scratch, a.timeout)
+    vm, qmp_path, serial_path, kvm, agent_path = boot(os.path.abspath(a.disk), out, scratch, a.timeout, guest_agent=True)
     start = time.time()
     drm = shell = None
     elapsed = 0.0
     tour_info = None
     panel_desc = "never checked"
+    tour_serial_end = None
+    manager_ready = False
     try:
         qmp = baseline.Qmp(qmp_path)
         n = 0
@@ -463,11 +776,43 @@ def main():
             else:
                 ok = False
             record("V-PANEL", ok, f"screendump: {panel_desc}")
+            agent = None
+            try:
+                agent = guest_agent.GuestAgent(agent_path)
+                owner = agent.run("inventory")
+                manager_ready = (owner["probe_uid"] == 0 and owner["session_uid"] != 0
+                                 and owner["session"]["User"] == str(owner["session_uid"])
+                                 and owner["session"]["Service"] == "greetd"
+                                 and any(p["executable"] == "roost-compositor" and p["uid"] == owner["session_uid"]
+                                         for p in owner["processes"]))
+                with open(os.path.join(out, "session-owner.json"), "w") as stream:
+                    json.dump(owner, stream, indent=2)
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                log(f"guest session ownership probe failed: {error}")
+            finally:
+                if agent is not None:
+                    agent.close()
             if a.tour:
                 try:
                     tour_info = run_tour(qmp, out, serial_path)
-                except (OSError, RuntimeError, subprocess.CalledProcessError) as e:
-                    log(f"tour failed: {e}")
+                    tour_serial_end = len(read_text(serial_path))
+                    agent = guest_agent.GuestAgent(agent_path)
+                    try:
+                        run_lifecycle(qmp, agent, out, serial_path, record)
+                    finally:
+                        agent.close()
+                except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e:
+                    record("V-LIFECYCLE", False, f"tour/lifecycle failed: {e}")
+                    try:
+                        diagnostic_agent = guest_agent.GuestAgent(agent_path)
+                        try:
+                            diagnostics = diagnostic_agent.run("diagnostics")
+                            with open(os.path.join(out, "lifecycle-failure-diagnostics.json"), "w") as stream:
+                                json.dump(diagnostics, stream, indent=2)
+                        finally:
+                            diagnostic_agent.close()
+                    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                        log(f"bounded lifecycle failure diagnostics unavailable: {error}")
         # Give activation probes a bounded chance to report before shutdown.
         deadline = time.time() + 180
         while drm and shell and time.time() < deadline:
@@ -497,8 +842,8 @@ def main():
     if paused and not results["V-PANEL"][0]:
         results["V-PANEL"] = (False, results["V-PANEL"][1] + "; Roost lost the display"
                               + (" to a GDM greeter session" if greeter else ""))
-    record("V-GDM", "session services: GDM session and display registered" in text and not paused,
-           "explicit GDM registration and no DRM session pause")
+    record("V-DISPLAY-MANAGER", manager_ready,
+           "real logind greetd session and non-root compositor UID verified; intentional lifecycle VT pauses are permitted")
     for name in ("calendar", "portal", "portal-gnome"):
         record(f"V-{name.upper()}", f"roost-vm-health: {name} ready" in text and (name != "portal" or "roost-vm-health: portal-gnome ready" in text),
                f"guest user bus {name} activation responds")
@@ -509,7 +854,7 @@ def main():
         record("V-MEDIA-VOLUME", "roost-vm-health: audio-hda ready" in text and observed[:5] == expected,
                f"virtual HDA output: up/down/mute/unmute {observed}")
     if a.tour:
-        transitions = re.findall(r"roost-vm-health: lock active=\((true|false),\)", text)
+        transitions = re.findall(r"roost-vm-health: lock active=\((true|false),\)", text[:tour_serial_end])
         record("V-LOCK", transitions == ["false", "true", "false"],
                f"Super+L and PAM unlock transitions: {transitions}")
     panics = [ln for ln in text.splitlines() if "panicked" in ln]
@@ -525,7 +870,7 @@ def main():
                                   text=True).stdout.splitlines()[0]
     manifest = {
         "lane": "marlin-vm",
-        "session": "Roost (preview) via GDM autologin, DRM/KMS backend",
+        "session": "Roost (preview) via CI-only greetd initial session, DRM/KMS backend",
         "disk": os.path.basename(a.disk),
         "resolution": f"{WIDTH}x{HEIGHT}",
         "kvm": kvm,

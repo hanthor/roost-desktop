@@ -1,0 +1,31 @@
+diff --git a/src/backend/drm/surface/gbm.rs b/src/backend/drm/surface/gbm.rs
+index b367f00..ebe51f4 100644
+--- a/src/backend/drm/surface/gbm.rs
++++ b/src/backend/drm/surface/gbm.rs
+@@ -313,6 +313,26 @@ where
+         Ok(())
+     }
+ 
++    /// Discard buffers abandoned by a device reset, without submitting any
++    /// queued frame or claiming that a pending frame was displayed.
++    ///
++    /// Returns the pending and queued user data (at most two entries), so the
++    /// caller can discard presentation feedback. The unqueued next buffer is
++    /// released too. The current scanout buffer remains retained until KMS
++    /// state is reset. Callers must reset the device/surface state and buffer
++    /// pool before rendering again, and ignore stale pre-reset completions.
++    pub fn discard_pending_frames(&mut self) -> Vec<U> {
++        let mut discarded = Vec::with_capacity(2);
++        self.next_fb = None;
++        if let Some((_slot, user_data)) = self.pending_fb.take() {
++            discarded.push(user_data);
++        }
++        if let Some(queued) = self.queued_fb.take() {
++            discarded.push(queued.user_data);
++        }
++        discarded
++    }
++
+     /// Marks the current frame as submitted.
+     ///
+     /// *Note*: Needs to be called, after the vblank event of the matching [`DrmDevice`](super::super::DrmDevice)

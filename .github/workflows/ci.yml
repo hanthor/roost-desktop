@@ -29,9 +29,10 @@ jobs:
       - run: sudo apt-get install -y meson ninja-build libwayland-dev wayland-protocols && scripts/ci-install-gtk4-layer-shell
       - run: scripts/roost-a11y-baseline check
       - run: python3 scripts/lib/roost-soak-tests.py
+      - run: python3 scripts/lib/vm-boot-tests.py
       - run: scripts/roost-settings-inventory-check
       - run: cargo fmt --all -- --check
-      - run: rustfmt --edition 2021 --check third-party/smithay/src/xwayland/xserver.rs
+      - run: rustfmt --edition 2021 --check third-party/smithay/src/xwayland/xserver.rs third-party/smithay/src/backend/drm/surface/gbm.rs
       - run: cargo test --locked --manifest-path third-party/smithay/Cargo.toml --no-default-features --features xwayland,wayland_frontend prepared_socket
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # pam_wrapper runs the lock screen's PAM path for real (#62); it is
@@ -305,7 +306,7 @@ jobs:
   marlin-vm:
     # Real-VM lane (#68): install the Marlin Roost image (plus the CI-only
     # autologin/serial-journal layer in packaging/marlin/vm-lane) to a
-    # raw disk with bootc, boot it in QEMU/KVM, and prove GDM logs into
+    # raw disk with bootc, boot it in QEMU/KVM, and prove greetd starts
     # the Roost hardware session on the DRM/KMS backend. The image is
     # rebuilt rootful here (bootc install reads it from root's storage),
     # in parallel with marlin-image rather than after it.

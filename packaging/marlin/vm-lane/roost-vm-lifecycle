@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""CI-only root probes through QGA. Never print credentials or process argv."""
+import json
+import os
+import pathlib
+import pwd
+import subprocess
+import sys
+
+OWNER = pwd.getpwnam("roost-test")
+RUNTIME = f"/run/user/{OWNER.pw_uid}"
+STATE = pathlib.Path(RUNTIME, "roost-vm-state.json")
+
+
+def call(*args, user=False, check=True):
+    command = list(args)
+    if user:
+        command = ["runuser", "-u", OWNER.pw_name, "--", "env",
+                   f"XDG_RUNTIME_DIR={RUNTIME}",
+                   f"DBUS_SESSION_BUS_ADDRESS=unix:path={RUNTIME}/bus", *command]
+    return subprocess.run(command, capture_output=True, text=True,
+                          timeout=15, check=check).stdout.strip()
+
+
+def inventory():
+    state = json.loads(STATE.read_text())
+    processes = []
+    for path in pathlib.Path("/proc").iterdir():
+        if not path.name.isdigit():
+            continue
+        try:
+            uid = path.stat().st_uid
+            executable = pathlib.Path(os.readlink(path / "exe")).name
+            if uid != OWNER.pw_uid or executable not in {
+                "roost-compositor", "roost-shell-gtk", "gnome-disks",
+                "gnome-system-monitor", "nautilus",
+            }:
+                continue
+            stat = (path / "stat").read_text().rsplit(")", 1)[1].split()
+            processes.append({"pid": int(path.name), "uid": uid,
+                              "executable": executable, "start_ticks": int(stat[19])})
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+    sessions = [line.split() for line in call("loginctl", "list-sessions",
+                                             "--no-legend", "--no-pager").splitlines()]
+    owned = []
+    for line in sessions:
+        if len(line) < 2 or line[1] != str(OWNER.pw_uid):
+            continue
+        description = call("loginctl", "show-session", line[0], "--property=Id",
+                           "--property=VTNr", "--property=User", "--property=Type",
+                           "--property=Service", "--property=Class")
+        properties = dict(item.split("=", 1) for item in description.splitlines())
+        if (properties.get("Service") == "greetd" and properties.get("VTNr") == "1"
+                and properties.get("User") == str(OWNER.pw_uid)
+                and not properties.get("Class", "").startswith("manager")):
+            owned.append(properties)
+    if len(owned) != 1:
+        raise RuntimeError("expected exactly one greetd user session on the configured VT")
+    return {"probe_uid": os.geteuid(), "session_uid": OWNER.pw_uid,
+            "session": owned[0],
+            "state": {k: state[k] for k in ("locked", "windows", "focused", "active_workspace")},
+            "processes": sorted(processes, key=lambda item: item["pid"])}
+
+
+def main():
+    if os.geteuid() != 0 or OWNER.pw_uid == 0:
+        raise RuntimeError("probe must be root and session owner must not be root")
+    action = sys.argv[1]
+    if action == "inventory":
+        result = inventory()
+    elif action == "suspend":
+        # Queue real logind suspend, so QGA can reply before the guest sleeps.
+        policy = {name: pathlib.Path(f"/sys/power/{name}").read_text().strip()
+                  for name in ("state", "mem_sleep")}
+        call("systemd-run", "--unit=roost-vm-suspend", "--collect", "--on-active=1s",
+             "--timer-property=AccuracySec=100ms", "busctl", "--system", "call",
+             "org.freedesktop.login1", "/org/freedesktop/login1",
+             "org.freedesktop.login1.Manager", "Suspend", "b", "false")
+        result = {"scheduled": "logind Manager.Suspend(false)", "power_policy": policy}
+    elif action == "vt":
+        target = int(sys.argv[2])
+        if not 1 <= target <= 12:
+            raise ValueError("VT outside test range")
+        call("chvt", str(target))
+        result = {"active_vt": pathlib.Path("/sys/class/tty/tty0/active").read_text().strip()}
+    elif action == "diagnostics":
+        # Names and kernel wait sites only: no argv, environment or input data.
+        processes = []
+        for path in pathlib.Path("/proc").iterdir():
+            if not path.name.isdigit():
+                continue
+            try:
+                stat = (path / "stat").read_text().rsplit(")", 1)[1].split()
+                name = (path / "comm").read_text().strip()
+                if name in {"chvt", "python3", "roost-composito", "systemd-logind", "qemu-ga"}:
+                    processes.append({"pid": int(path.name), "name": name, "state": stat[0],
+                                      "wait_site": (path / "wchan").read_text().strip()})
+            except (FileNotFoundError, PermissionError, ProcessLookupError):
+                continue
+        result = {"active_vt": pathlib.Path("/sys/class/tty/tty0/active").read_text().strip(),
+                  "processes": sorted(processes, key=lambda item: item["pid"])}
+    elif action == "lock":
+        call("gdbus", "call", "--session", "--dest", "org.gnome.ScreenSaver",
+             "--object-path", "/org/gnome/ScreenSaver", "--method", "org.gnome.ScreenSaver.Lock",
+             user=True)
+        result = {"requested": "lock"}
+    elif action == "delay-unlock":
+        service = pathlib.Path("/etc/pam.d/roost-lock")
+        original = service.read_text()
+        service.rename(service.with_suffix(".vm-backup"))
+        # Delay the real PAM stack; neither credentials nor outcomes are faked.
+        service.write_text("auth required pam_exec.so /usr/bin/sleep 12\n" + original)
+        result = {"pam": "real stack delayed"}
+    elif action == "delayed-auth-state":
+        compositor = next(p for p in inventory()["processes"] if p["executable"] == "roost-compositor")
+        waiting = False
+        for path in pathlib.Path("/proc").iterdir():
+            if not path.name.isdigit():
+                continue
+            try:
+                stat = (path / "stat").read_text().rsplit(")", 1)[1].split()
+                if (path.stat().st_uid == OWNER.pw_uid and (path / "comm").read_text().strip() == "sleep"
+                        and int(stat[1]) == compositor["pid"]):
+                    waiting = True
+            except (FileNotFoundError, PermissionError, ProcessLookupError):
+                continue
+        result = {"real_pam_delay_running": waiting}
+    elif action == "deny-unlock":
+        # Real PAM failure, not a substitute authenticator or fake daemon.
+        service = pathlib.Path("/etc/pam.d/roost-lock")
+        service.rename(service.with_suffix(".vm-backup"))
+        service.write_text("auth required pam_deny.so\naccount required pam_deny.so\n")
+        result = {"pam": "deny"}
+    elif action == "restore-unlock":
+        pathlib.Path("/etc/pam.d/roost-lock.vm-backup").rename("/etc/pam.d/roost-lock")
+        result = {"pam": "restored"}
+    elif action == "kill-shell":
+        processes = inventory()["processes"]
+        for process in processes:
+            if process["executable"] == "roost-shell-gtk":
+                os.kill(process["pid"], 9)
+        result = {"killed": "shell"}
+    elif action == "stop-portal":
+        call("systemctl", "--user", "stop", "xdg-desktop-portal.service",
+             "xdg-desktop-portal-gnome.service", user=True)
+        result = {"stopped": "portal"}
+    elif action == "capture-input":
+        compositor = next(p for p in inventory()["processes"] if p["executable"] == "roost-compositor")
+        # The actual DRM session uses this socket, as runtime::default_for_pid does.
+        display = f"WAYLAND_DISPLAY=roost-nested-{compositor['pid']}"
+        def attempt(*args):
+            try:
+                result = subprocess.run(["runuser", "-u", OWNER.pw_name, "--", "env",
+                                         f"XDG_RUNTIME_DIR={RUNTIME}", display, "timeout", "-s", "KILL", "5", *args],
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                        timeout=7, check=False)
+                return result.returncode
+            except subprocess.TimeoutExpired:
+                return -1
+        result = {"connect_exit": attempt("wayland-info"),
+                  "capture_exit": attempt("grim", "/tmp/roost-vm-forbidden-capture.png"),
+                  "input_exit": attempt("wtype", "untrusted-input"),
+                  "capture_file": pathlib.Path("/tmp/roost-vm-forbidden-capture.png").exists()}
+    elif action == "start-input-probe":
+        compositor = next(p for p in inventory()["processes"] if p["executable"] == "roost-compositor")
+        subprocess.Popen(["runuser", "-u", OWNER.pw_name, "--", "env",
+                          f"XDG_RUNTIME_DIR={RUNTIME}",
+                          f"DBUS_SESSION_BUS_ADDRESS=unix:path={RUNTIME}/bus",
+                          f"WAYLAND_DISPLAY=roost-nested-{compositor['pid']}",
+                          "/usr/libexec/roost-vm-input"], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+        result = {"started": "count-only GTK input probe"}
+    elif action == "input-count":
+        result = json.loads(pathlib.Path(RUNTIME, "roost-vm-input.json").read_text())
+        if pathlib.Path(f"/proc/{result['pid']}").stat().st_uid != OWNER.pw_uid:
+            raise RuntimeError("input probe has the wrong owner")
+    elif action == "logout":
+        call("loginctl", "terminate-session", inventory()["session"]["Id"])
+        result = {"requested": "terminate session"}
+    elif action == "greeter":
+        result = {"greetd_active": call("systemctl", "is-active", "greetd.service") == "active",
+                  "greeter_pids": call("pgrep", "-x", "gtkgreet", check=False).splitlines(),
+                  "compositor_pids": call("pgrep", "-u", str(OWNER.pw_uid), "-x",
+                                          "roost-composito", check=False).splitlines()}
+    else:
+        raise ValueError("unknown lifecycle action")
+    print(json.dumps(result))
+
+
+if __name__ == "__main__":
+    main()

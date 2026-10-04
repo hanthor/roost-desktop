@@ -1,4 +1,4 @@
-# Roost Smithay 0.7.0 socket preparation patch
+# Roost Smithay 0.7.0 additive patches
 
 Source: published crates.io smithay 0.7.0, upstream tag v0.7.0,
 crate VCS commit a166cf4c94b5aedc332a65aa1dd753e8148829c3.
@@ -12,7 +12,18 @@ Borrowed listening FDs permit readiness watches. XWayland::spawn_on_sockets
 consumes that exact owner, retaining queued first-client bytes and Smithay's
 private ClientData construction. The existing spawn API delegates unchanged.
 
-Only src/xwayland/mod.rs and xserver.rs differ from upstream. The socket
+The socket preparation patch changes src/xwayland/mod.rs and xserver.rs. The socket
 handoff regression test sends real bytes before transferring the owner.
 This source lives outside Cargo's registry vendor directory so factory
 cargo vendor --locked vendor remains a separate offline dependency closure.
+
+Issue #62 additionally changes src/backend/drm/surface/gbm.rs; its isolated
+source diff is retained in SLEEP-RESET-API-PATCH.diff. The additive
+GbmBufferedSurface::discard_pending_frames API removes pending_fb, queued_fb
+and next_fb without calling submit or marking a buffer presented. It returns
+at most two user-data entries so Roost can explicitly discard abandoned
+presentation feedback. current_fb remains retained until KMS reset. This
+avoids frame_submitted's implicit queued-frame submission during S3 recovery;
+Roost resets the buffer pool and KMS state, and ignores pre-reset monotonic
+vblank completions before queuing the locked scene. Existing APIs and the
+pinned 0.7.0 version remain unchanged.

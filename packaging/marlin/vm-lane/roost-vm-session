@@ -1,0 +1,7 @@
+#!/bin/bash
+set -eu
+export XDG_SESSION_TYPE=wayland
+export ROOST_COMPOSITOR_STATE="$XDG_RUNTIME_DIR/roost-vm-state.json"
+# greetd attaches session output to its VT. Route only this CI fixture's
+# output to journald, whose existing fixture forwards it to the serial port.
+exec systemd-cat --identifier=roost-vm-session /usr/bin/roost-session
