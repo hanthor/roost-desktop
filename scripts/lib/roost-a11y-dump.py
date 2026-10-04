@@ -21,7 +21,7 @@ import pyatspi
 
 def bounds(acc):
     try:
-        rect = acc.queryComponent().getExtents(pyatspi.DESKTOP_COORDS)
+        rect = acc.queryComponent().getExtents(pyatspi.WINDOW_COORDS)
         return [rect.x, rect.y, rect.width, rect.height]
     except Exception:
         return None
