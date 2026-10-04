@@ -932,6 +932,9 @@ impl Runtime {
     /// the shell hears the result either way.
     fn finish_unlock(&mut self, request: u64, ok: bool) {
         self.unlock_inflight = false;
+        if std::env::var_os("ROOST_LOCK_TRACE").is_some() {
+            eprintln!("roost-compositor: lock authentication finished accepted={ok}");
+        }
         if ok && self.is_locked() {
             self.lock.unlock(self.lock_now_ms());
             self.control.set_locked(false);
@@ -1273,8 +1276,12 @@ impl Runtime {
             })).collect::<Vec<_>>(),
             "previews": previews,
             "thumbnails": thumbnails,
+            "workspace_placeholder": scene.as_ref().and_then(|s| s.placeholder).map(|(at, r)| serde_json::json!({
+                "workspace": at, "rect": [r.loc.x, r.loc.y, r.size.w, r.size.h],
+            })),
             "overview_progress": self.overview_progress,
             "workspace_cards": workspace_cards,
+
             // The Alt+Tab switcher's window thumbnails being drawn.
             "switcher_thumbnails": self.switcher_thumbnails.len(),
             // GNOME's tile preview while a dragged window is over a
@@ -1344,6 +1351,11 @@ impl Runtime {
         }
         match self.overview_drag {
             Some((id, start, true)) => {
+                if let Some(at) =
+                    crate::overview::insertion_target(&scene, self.manager.pointer_pos())
+                {
+                    crate::overview::show_placeholder(&mut scene, at);
+                }
                 crate::overview::drag_preview(&mut scene, id, start, self.manager.pointer_pos());
             }
             // GNOME grows the preview under the pointer by 5px a side.
@@ -1479,7 +1491,13 @@ impl Runtime {
             return;
         }
         let pos = self.manager.pointer_pos();
-        let Some(target) = crate::overview::drop_target(&self.overview_layout(), pos) else {
+        let layout = self.overview_layout();
+        if let Some(at) = crate::overview::insertion_target(&layout, pos) {
+            self.manager
+                .insert_workspace_and_move(&mut self.state, id, at);
+            return;
+        }
+        let Some(target) = crate::overview::drop_target(&layout, pos) else {
             return;
         };
         let here = self.manager.model().window(id).map(|w| w.workspace);
@@ -2334,6 +2352,9 @@ impl Runtime {
                 self.control.finish_unlock(request, unlocked);
             } else {
                 self.unlock_inflight = true;
+                if std::env::var_os("ROOST_LOCK_TRACE").is_some() {
+                    eprintln!("roost-compositor: lock authentication started");
+                }
                 let reply = self.unlock_results.clone();
                 std::thread::spawn(move || {
                     let ok = crate::unlock::session_user()

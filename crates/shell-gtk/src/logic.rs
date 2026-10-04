@@ -675,14 +675,6 @@ pub fn power_mode_label(profile: &str) -> &'static str {
     }
 }
 
-/// Parse `wpctl get-volume` output (`Volume: 0.40 [MUTED]`) into a
-/// 0..=100 percentage and the mute flag. `None` on anything else.
-pub fn parse_wpctl_volume(out: &str) -> Option<(f64, bool)> {
-    let rest = out.trim().strip_prefix("Volume:")?.trim();
-    let value: f64 = rest.split_whitespace().next()?.parse().ok()?;
-    Some(((value * 100.0).clamp(0.0, 150.0), rest.contains("[MUTED]")))
-}
-
 /// `wpctl set-volume` argument for a 0..=100 slider value.
 pub fn wpctl_volume_arg(percent: f64) -> String {
     format!("{:.2}", percent.clamp(0.0, 100.0) / 100.0)
@@ -737,13 +729,7 @@ mod service_tests {
     }
 
     #[test]
-    fn wpctl_volume_parses_level_and_mute() {
-        assert_eq!(parse_wpctl_volume("Volume: 0.40\n"), Some((40.0, false)));
-        assert_eq!(
-            parse_wpctl_volume("Volume: 1.00 [MUTED]"),
-            Some((100.0, true))
-        );
-        assert_eq!(parse_wpctl_volume("Error: no default sink"), None);
+    fn wpctl_volume_argument_is_bounded() {
         assert_eq!(wpctl_volume_arg(40.0), "0.40");
         assert_eq!(wpctl_volume_arg(250.0), "1.00");
     }
@@ -1468,58 +1454,6 @@ mod bt_tests {
     }
 }
 
-/// One PipeWire sink from `wpctl status`: id, description, default.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Sink {
-    pub id: u32,
-    pub name: String,
-    pub default: bool,
-}
-
-/// The Audio section's sinks from `wpctl status` (WirePlumber's tree:
-/// "│  *   48. Built-in Audio Analog Stereo   [vol: 0.40]").
-pub fn parse_wpctl_sinks(status: &str) -> Vec<Sink> {
-    let mut out = Vec::new();
-    let mut in_audio = false;
-    let mut in_sinks = false;
-    for line in status.lines() {
-        let trimmed = line.trim_end();
-        if !trimmed.starts_with([' ', '│', '├', '└']) && !trimmed.is_empty() {
-            in_audio = trimmed.trim() == "Audio";
-            in_sinks = false;
-            continue;
-        }
-        if !in_audio {
-            continue;
-        }
-        let body = trimmed.trim_start_matches([' ', '│', '├', '└', '─']);
-        if trimmed.contains("─ ") && body.ends_with(':') {
-            in_sinks = body == "Sinks:";
-            continue;
-        }
-        if !in_sinks {
-            continue;
-        }
-        let body = body.trim();
-        let (default, body) = match body.strip_prefix('*') {
-            Some(rest) => (true, rest.trim_start()),
-            None => (false, body),
-        };
-        let Some((id, rest)) = body.split_once(". ") else {
-            continue;
-        };
-        let Ok(id) = id.trim().parse::<u32>() else {
-            continue;
-        };
-        let name = rest.split(" [").next().unwrap_or(rest).trim().to_owned();
-        if !name.is_empty() {
-            out.push(Sink { id, name, default });
-        }
-    }
-    out
-}
-
-/// A sink's menu icon, as GNOME picks one per form factor.
 pub fn sink_icon(name: &str) -> &'static str {
     let lower = name.to_lowercase();
     if lower.contains("headphone") || lower.contains("headset") {
@@ -1528,64 +1462,6 @@ pub fn sink_icon(name: &str) -> &'static str {
         "video-display-symbolic"
     } else {
         "audio-speakers-symbolic"
-    }
-}
-
-#[cfg(test)]
-mod sink_tests {
-    use super::*;
-
-    const STATUS: &str = "PipeWire 'pipewire-0' [1.0.5, user@host, cookie:1]
- └─ Clients:
-        33. WirePlumber                         [1.0.5, user@host, pid:1]
-
-Audio
- ├─ Devices:
- │      42. Built-in Audio                      [alsa]
- │  
- ├─ Sinks:
- │  *   48. Built-in Audio Analog Stereo        [vol: 0.40]
- │      52. HDMI / DisplayPort 1 Output         [vol: 1.00 MUTED]
- │      60. WH-1000XM4 Headphones               [vol: 0.55]
- │  
- ├─ Sink endpoints:
- │  
- ├─ Sources:
- │  *   49. Built-in Audio Analog Stereo        [vol: 1.00]
- │  
- └─ Streams:
-
-Video
- ├─ Sinks:
- │      70. Not audio                           [vol: 1.00]
-";
-
-    #[test]
-    fn sinks_parse_from_wpctl_status() {
-        let sinks = parse_wpctl_sinks(STATUS);
-        assert_eq!(
-            sinks,
-            vec![
-                Sink {
-                    id: 48,
-                    name: "Built-in Audio Analog Stereo".into(),
-                    default: true
-                },
-                Sink {
-                    id: 52,
-                    name: "HDMI / DisplayPort 1 Output".into(),
-                    default: false
-                },
-                Sink {
-                    id: 60,
-                    name: "WH-1000XM4 Headphones".into(),
-                    default: false
-                },
-            ]
-        );
-        assert_eq!(sink_icon(&sinks[1].name), "video-display-symbolic");
-        assert_eq!(sink_icon(&sinks[2].name), "audio-headphones-symbolic");
-        assert!(parse_wpctl_sinks("").is_empty());
     }
 }
 
@@ -1944,58 +1820,6 @@ mod wired_tests {
     }
 }
 
-/// Whether an app is recording, from `wpctl status` (volume.js
-/// `_maybeShowInput`): a stream in the Audio section with an input port
-/// on an active link from a source ("64. input_FL  < Mic:capture_FL
-/// [active]"). GNOME's own level meters are left out: they read the
-/// input without recording it.
-pub fn wpctl_recording(status: &str) -> bool {
-    const SKIPPED: [&str; 3] = [
-        "pavucontrol",
-        "PulseAudio Volume Control",
-        "gnome-volume-control",
-    ];
-    let mut in_audio = false;
-    let mut in_streams = false;
-    let mut stream_skipped = false;
-    let mut stream_indent = usize::MAX;
-    for line in status.lines() {
-        let trimmed = line.trim_end();
-        if !trimmed.starts_with([' ', '│', '├', '└']) && !trimmed.is_empty() {
-            in_audio = trimmed.trim() == "Audio";
-            in_streams = false;
-            continue;
-        }
-        if !in_audio {
-            continue;
-        }
-        let body = trimmed.trim_start_matches([' ', '│', '├', '└', '─']);
-        if trimmed.contains("─ ") && body.ends_with(':') {
-            in_streams = body == "Streams:";
-            stream_indent = usize::MAX;
-            continue;
-        }
-        if !in_streams || body.is_empty() {
-            continue;
-        }
-        let indent = trimmed.chars().count() - body.chars().count();
-        let Some((_, rest)) = body.split_once(". ") else {
-            continue;
-        };
-        if indent <= stream_indent {
-            // A stream: its ports follow, indented further.
-            stream_indent = indent;
-            let name = rest.trim();
-            stream_skipped = SKIPPED.iter().any(|s| name.contains(s));
-        } else if !stream_skipped && rest.contains(" < ") && rest.contains("[active]") {
-            return true;
-        }
-    }
-    false
-}
-
-/// GNOME's microphone icon by level (volume.js `getIcon` with the
-/// input slider's icons).
 pub fn mic_icon(percent: f64, muted: bool) -> &'static str {
     if muted || percent <= 0.0 {
         return "microphone-sensitivity-muted-symbolic";
@@ -2011,47 +1835,8 @@ pub fn mic_icon(percent: f64, muted: bool) -> &'static str {
 mod mic_tests {
     use super::*;
 
-    const STATUS: &str = "PipeWire 'pipewire-0' [1.4.2, roost@host, cookie:1]
- └─ Clients:
-        33. WirePlumber                         [1.4.2, roost@host, pid:10]
-
-Audio
- ├─ Devices:
- │      45. Built-in Audio                      [alsa]
- │
- ├─ Sinks:
- │  *   48. Built-in Audio Analog Stereo        [vol: 0.80]
- │
- ├─ Sources:
- │  *   49. Built-in Audio Analog Stereo        [vol: 0.50]
- │
- ├─ Filters:
- │
- └─ Streams:
-        63. Firefox
-             64. output_FL       > Built-in Audio Analog Stereo:playback_FL\t[active]
-        70. PulseAudio Volume Control
-             71. input_MONO      < Built-in Audio Analog Stereo:capture_FL\t[active]
-
-Video
- └─ Streams:
-        80. Camera
-             81. input_0         < v4l2:capture_0\t[active]
-";
-
     #[test]
     fn recording_shows_like_gnome() {
-        // Playback and a level meter are not recording; neither is video.
-        assert!(!wpctl_recording(STATUS));
-        let recording = STATUS.replace(
-            "        70. PulseAudio Volume Control\n",
-            "        70. Voice Recorder\n",
-        );
-        assert!(wpctl_recording(&recording));
-        // A paused link records nothing.
-        assert!(!wpctl_recording(
-            &recording.replace("capture_FL\t[active]", "capture_FL\t[paused]")
-        ));
         assert_eq!(
             mic_icon(50.0, true),
             "microphone-sensitivity-muted-symbolic"
