@@ -47,6 +47,7 @@ use smithay::{
 };
 
 pub mod animation;
+pub mod capture_security;
 pub mod control;
 #[cfg(feature = "drm")]
 pub mod drm;
@@ -184,9 +185,17 @@ pub(crate) struct ClientState {
     /// one client allowed a virtual keyboard (to hand back the keys
     /// IBus does not take).
     pub(crate) ime_bridge: bool,
+    /// Optional liveness marker for an ordinary portal service connection.
+    service_alive: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl ClientState {
+    pub(crate) fn portal_service(alive: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        Self {
+            service_alive: Some(alive),
+            ..Self::default()
+        }
+    }
     /// State for the compositor's own IBus bridge.
     pub(crate) fn ime_bridge() -> Self {
         Self {
@@ -226,7 +235,11 @@ pub(crate) enum WindowRequest {
 
 impl ClientData for ClientState {
     fn initialized(&self, _client_id: ClientId) {}
-    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
+    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {
+        if let Some(alive) = &self.service_alive {
+            alive.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
 }
 
 impl BufferHandler for State {

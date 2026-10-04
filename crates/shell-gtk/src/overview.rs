@@ -1603,6 +1603,12 @@ impl DragPager {
     }
 
     fn motion(self: &Rc<Self>, x: f64, width: i32) {
+        if std::env::var_os("ROOST_GRID_TRACE").is_some() {
+            eprintln!(
+                "roost-grid: pager motion x={x:.0} width={width} page={}",
+                self.page()
+            );
+        }
         let width = f64::from(width);
         // 1) The edge: at once (_dragMaybeSwitchPageImmediately).
         if x > DRAG_EDGE_PX && x < width - DRAG_EDGE_PX {
