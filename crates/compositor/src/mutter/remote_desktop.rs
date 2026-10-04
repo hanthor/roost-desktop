@@ -376,6 +376,7 @@ impl RemoteSession {
     ) -> fdo::Result<()> {
         self.unsupported(&header)
     }
+    #[zbus(name = "ConnectToEIS")]
     async fn connect_to_eis(
         &self,
         options: HashMap<String, OwnedValue>,
@@ -419,6 +420,28 @@ impl RemoteSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn session_introspection_uses_gnome_eis_acronym() {
+        let (sender, _receiver) = calloop::channel::channel();
+        let session = RemoteSession {
+            grant: RemoteGrant {
+                id: 1,
+                owner: ":1.1".into(),
+                stopped: Arc::new(AtomicBool::new(false)),
+                started: Arc::new(AtomicBool::new(false)),
+                pending: Arc::new(AtomicU32::new(0)),
+                eis_opened: Arc::new(AtomicBool::new(false)),
+            },
+            authority: Default::default(),
+            captures: Default::default(),
+            outputs: Default::default(),
+            to_loop: sender,
+        };
+        let mut xml = String::new();
+        zbus::object_server::Interface::introspect_to_writer(&session, &mut xml, 0);
+        assert!(xml.contains("method name=\"ConnectToEIS\""));
+        assert!(!xml.contains("method name=\"ConnectToEis\""));
+    }
     #[test]
     fn selected_capabilities_reject_malformed_or_unadvertised_types() {
         assert_eq!(device_types(None).unwrap(), 3);
