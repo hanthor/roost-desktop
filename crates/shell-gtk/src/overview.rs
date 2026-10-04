@@ -1317,6 +1317,12 @@ fn paged_grid(pages: Vec<gtk::FlowBox>, reflow: Rc<GridReflow>) -> gtk::Widget {
         let pager = pager.clone();
         motion.connect_motion(move |m, x, _| {
             let width = m.widget().map_or(0, |w| w.width());
+            // A drop can start over a descendant before this overlay
+            // observes its initial crossing. Motion still proves that
+            // a drag is present, so initialize the page hints here too.
+            if !pager.dragging.get() {
+                pager.begin(width);
+            }
             pager.motion(x, width);
         });
     }
@@ -1473,6 +1479,9 @@ impl DragPager {
     }
 
     fn begin(&self, width: i32) {
+        if std::env::var_os("ROOST_GRID_TRACE").is_some() {
+            eprintln!("roost-shell-gtk: grid pager drag entered width={width}");
+        }
         // A tenth of the grid each (PAGE_PREVIEW_RATIO / 2).
         let w = (f64::from(width) * 0.1) as i32;
         self.previous_hint.set_size_request(w, -1);
@@ -1482,6 +1491,9 @@ impl DragPager {
     }
 
     fn end(&self) {
+        if std::env::var_os("ROOST_GRID_TRACE").is_some() {
+            eprintln!("roost-shell-gtk: grid pager drag left");
+        }
         self.reset();
         self.dragging.set(false);
         self.previous_hint.remove_css_class("dnd");
@@ -1584,6 +1596,9 @@ fn drag_source(widget: &impl IsA<gtk::Widget>, text: String) -> gtk::DragSource 
     )));
     let w = widget.clone().upcast::<gtk::Widget>();
     source.connect_drag_begin(move |source, _| {
+        if std::env::var_os("ROOST_GRID_TRACE").is_some() {
+            eprintln!("roost-shell-gtk: app tile drag started");
+        }
         let paintable = gtk::WidgetPaintable::new(Some(&w));
         source.set_icon(Some(&paintable), w.width() / 2, w.height() / 2);
     });

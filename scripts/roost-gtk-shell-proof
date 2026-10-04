@@ -459,6 +459,8 @@ fi
 # clicks one), the bridge each key's fate.
 ROOST_IBUS_DEBUG=1
 export ROOST_IBUS_DEBUG
+ROOST_GRID_TRACE=1
+export ROOST_GRID_TRACE
 ROOST_PROOF_SWIPE_INPUT="$ARTIFACTS/swipe-input.json"
 export ROOST_PROOF_SWIPE_INPUT
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk -p roost-shell-host
@@ -890,9 +892,9 @@ xdotool mousedown 1
 xdotool mousemove --window "$WID" $((page_source_x + 25)) "$page_source_y"
 sleep 0.25
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-page-peek.json" 20 || fail G-GRID-PAGE-PEEK "preview dump failed"
+scrot "$ARTIFACTS/11h-grid-page-peek.png" >/dev/null
 showing "$ARTIFACTS/a11y-grid-page-peek.json" "Next page preview" || fail G-GRID-PAGE-PEEK "next page hint missing during drag"
 jq -e 'any(.[]; .showing and .role == "image" and (.name | startswith("Roost Page App")))' "$ARTIFACTS/a11y-grid-page-peek.json" >/dev/null || fail G-GRID-PAGE-PEEK "neighboring page icons did not enter the hint"
-scrot "$ARTIFACTS/11h-grid-page-peek.png" >/dev/null
 peek_rect="$(jq -r --argjson ox "$grid_origin_x" --argjson oy "$grid_origin_y" '.[] | select(.showing and .name == "Next page preview") | .bounds | "\(.[0] + $ox) \(.[1] + $oy) \(.[2]) \(.[3])"' "$ARTIFACTS/a11y-grid-page-peek.json" | head -1)"
 # shellcheck disable=SC2086
 set -- $peek_rect
