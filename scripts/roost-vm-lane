@@ -461,17 +461,29 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     agent.run("logout")
     deadline = time.monotonic() + 30
     greeter = {}
+    greeter_visible = False
     while time.monotonic() < deadline:
         greeter = agent.run("greeter")
         if greeter["greetd_active"] and greeter["greeter_pids"] and not greeter["compositor_pids"]:
-            break
+            width, height, pixels = frame("logout-greeter")
+            # The CI greeter stylesheet has a #222226 window background.
+            # Require that painted surface plus visible light controls/text;
+            # process startup, a black scanout or a uniform fill cannot pass.
+            background = sum(all(abs(pixels[i + channel] - value) <= 4
+                                 for channel, value in enumerate((34, 34, 38)))
+                             for i in range(0, len(pixels), 3)) / (width * height)
+            light = sum(min(pixels[i:i + 3]) > 160 for i in range(0, len(pixels), 3))
+            greeter["paint"] = {"background_fraction": background, "light_pixels": light}
+            greeter_visible = background > 0.25 and light >= 100
+            if greeter_visible:
+                break
         time.sleep(0.5)
     with open(os.path.join(evidence, "greeter.json"), "w") as stream:
         json.dump(greeter, stream, indent=2)
-    frame("logout-greeter")
-    record("V-LOGOUT", bool(greeter.get("greetd_active") and greeter.get("greeter_pids")
-                             and not greeter.get("compositor_pids")),
-           "real session termination returns to active greetd with gtkgreet and no original compositor")
+    record("V-LOGOUT", greeter_visible,
+           "real session termination returns to a painted gtkgreet surface under active greetd, with no original compositor")
+    if not greeter_visible:
+        raise RuntimeError("live gtkgreet did not paint its actual visible surface after logout")
     record("V-LIFECYCLE", True, "all lifecycle operations completed; individual assertions remain mandatory")
 
 
