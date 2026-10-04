@@ -32,6 +32,7 @@ mod power;
 mod preview_chrome;
 mod providers;
 mod screencast;
+mod screensaver;
 mod screenshot_ui;
 mod services;
 mod shell_dbus;
@@ -1276,6 +1277,23 @@ fn build(app: &adw::Application) {
     // org.gnome.Shell for the rest of GNOME: the OSD gnome-settings-daemon
     // shows for volume and brightness keys, search and the app grid.
     let osd_ui = osd::OsdUi::new(app.upcast_ref());
+    let screensaver = screensaver::start(
+        {
+            let shell = shell.clone();
+            Rc::new(move || {
+                let mut shell = shell.borrow_mut();
+                let control = shell.control.as_mut().ok_or("compositor disconnected")?;
+                control
+                    .lock()
+                    .map(|_| ())
+                    .map_err(|_| "lock request failed")
+            })
+        },
+        {
+            let shell = shell.clone();
+            Rc::new(move || shell.borrow().control.as_ref().is_some_and(|c| c.locked()))
+        },
+    );
     let gnome_shell = shell_dbus::start(Rc::new(GnomeShellDbus {
         osd: osd_ui.clone(),
         overview: overview_ui.clone(),
@@ -1339,6 +1357,13 @@ fn build(app: &adw::Application) {
                     apps.get().entry(id).cloned()
                 };
                 match action {
+                    Action::LockScreen => {
+                        if let Some(control) = shell.borrow_mut().control.as_mut() {
+                            if let Err(e) = control.lock() {
+                                eprintln!("roost-shell-gtk: lock failed: {e}");
+                            }
+                        }
+                    }
                     Action::ToggleOverview => {
                         if let Some(control) = shell.borrow_mut().control.as_mut() {
                             let _ = control.toggle_overview();
@@ -1499,11 +1524,13 @@ fn build(app: &adw::Application) {
         let settings = keybindings::settings();
         let wm_settings = keybindings::wm_settings();
         let mutter_settings = keybindings::mutter_settings();
+        let media_settings = keybindings::media_settings();
         let apply: Rc<dyn Fn()> = {
-            let (settings, wm_settings, mutter_settings, gnome_shell) = (
+            let (settings, wm_settings, mutter_settings, media_settings, gnome_shell) = (
                 settings.clone(),
                 wm_settings.clone(),
                 mutter_settings.clone(),
+                media_settings.clone(),
                 gnome_shell.clone(),
             );
             let shell = shell.clone();
@@ -1523,6 +1550,7 @@ fn build(app: &adw::Application) {
                     settings.as_ref(),
                     wm_settings.as_ref(),
                     mutter_settings.as_ref(),
+                    media_settings.as_ref(),
                 );
                 let accels: Vec<(String, u32)> = list
                     .iter()
@@ -1549,7 +1577,7 @@ fn build(app: &adw::Application) {
             })
         };
         apply();
-        for settings in [settings, wm_settings, mutter_settings]
+        for settings in [settings, wm_settings, mutter_settings, media_settings]
             .into_iter()
             .flatten()
         {
@@ -1802,6 +1830,7 @@ fn build(app: &adw::Application) {
                 .is_some_and(|c| c.model().is_overview_open());
             drop(shell);
             lock_ui.sync(locked);
+            screensaver.sync(locked);
             for (action, time, mode) in accelerators {
                 gnome_shell.accelerator_activated(action, time, mode);
             }
