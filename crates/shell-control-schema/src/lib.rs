@@ -747,6 +747,85 @@ pub enum SwitcherAction {
     },
 }
 
+/// Unified error type for the control protocol, spoken by both compositor
+/// and shell-host endpoints.
+///
+/// This type spans wire-level failures (Io, Decode, Unexpected), semantic
+/// protocol violations (Remote, WouldBlock), and application-level failures
+/// (NoActiveWindow). Both peers use this type so errors are consistently
+/// named across the channel boundary and callers can handle either side's
+/// failures uniformly.
+///
+/// Nonblocking contract (spec R6): `WouldBlock` surfaces immediately when
+/// a socket is not ready; on write backpressure, the connection should be
+/// dropped rather than retried (a partial frame may remain buffered).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlError {
+    /// Underlying socket I/O failure.
+    Io(std::io::Error),
+    /// Frame failed schema validation (oversize, malformed, stale major,
+    /// over-long title). The offending frame is dropped.
+    Decode(DecodeError),
+    /// Nonblocking socket not ready (spec R6). On a write that returns
+    /// this, the connection holds a partial frame and must be dropped.
+    WouldBlock,
+    /// Peer closed the connection or sent a message the current step
+    /// cannot use (unexpected or out-of-order).
+    Unexpected(String),
+    /// The peer (compositor when called from shell-host) answered with a
+    /// typed [`Message::Error`] where a response was required.
+    Remote {
+        /// Machine-readable category.
+        kind: ErrorKind,
+        /// Compositor diagnostics (never sensitive content).
+        message: String,
+    },
+    /// Application-level constraint violated: e.g., a shell-host command
+    /// like `send_activation` needs a selected window but none exists.
+    AppConstraint(String),
+}
+
+impl std::fmt::Display for ControlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "control socket I/O: {e}"),
+            Self::Decode(e) => write!(f, "control decode: {e}"),
+            Self::WouldBlock => write!(f, "control socket not ready"),
+            Self::Unexpected(e) => write!(f, "unexpected message or state: {e}"),
+            Self::Remote { kind, message } => {
+                write!(f, "remote error ({kind:?}): {message}")
+            }
+            Self::AppConstraint(e) => write!(f, "constraint: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ControlError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            Self::Decode(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for ControlError {
+    fn from(e: std::io::Error) -> Self {
+        if e.kind() == std::io::ErrorKind::WouldBlock {
+            Self::WouldBlock
+        } else {
+            Self::Io(e)
+        }
+    }
+}
+
+impl From<DecodeError> for ControlError {
+    fn from(e: DecodeError) -> Self {
+        Self::Decode(e)
+    }
+}
+
 /// Compositor-minted activation Bearer [REDACTED] authorizing one privileged window action.
 ///
 /// Opaque to the shell: minting, expiry (30 s), one-use removal, seat

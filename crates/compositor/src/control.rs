@@ -38,69 +38,15 @@ use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 
 use roost_shell_control::{
-    decode_frame, encode_frame, ActivationToken, CommandKind, CommandStatus, DecodeError,
-    ErrorKind, Message, OutputInfo, ProtocolVersion, StateOp, SwitcherAction, WorkspaceInfo,
-    CURRENT_VERSION, MAX_FRAME_BYTES,
+    decode_frame, encode_frame, ActivationToken, CommandKind, CommandStatus, ControlError,
+    DecodeError, ErrorKind, Message, OutputInfo, ProtocolVersion, StateOp, SwitcherAction,
+    WorkspaceInfo, CURRENT_VERSION, MAX_FRAME_BYTES,
 };
 
 use crate::state::{StateChange, StateModel, TokenStore, WindowEntry};
 
-/// Failure of a control-channel operation.
-#[derive(Debug)]
-pub enum ControlError {
-    /// Underlying socket I/O failure.
-    Io(std::io::Error),
-    /// Frame failed schema validation (oversize, malformed, stale major,
-    /// over-long title). The offending frame is dropped.
-    Decode(DecodeError),
-    /// Nonblocking socket not ready (spec R6). Nothing was consumed from a
-    /// read; a write may be partial, so drop the connection on write
-    /// backpressure (see module docs).
-    WouldBlock,
-    /// Peer closed with no complete frame buffered.
-    Closed,
-    /// Peer violated the session protocol (e.g. first message is not
-    /// `Hello`). A typed `Error` was sent where possible.
-    Protocol(String),
-}
-
-impl std::fmt::Display for ControlError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(e) => write!(f, "control socket I/O: {e}"),
-            Self::Decode(e) => write!(f, "control decode: {e}"),
-            Self::WouldBlock => write!(f, "control socket not ready"),
-            Self::Closed => write!(f, "control peer closed"),
-            Self::Protocol(e) => write!(f, "control protocol: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for ControlError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(e) => Some(e),
-            Self::Decode(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<std::io::Error> for ControlError {
-    fn from(e: std::io::Error) -> Self {
-        if e.kind() == std::io::ErrorKind::WouldBlock {
-            Self::WouldBlock
-        } else {
-            Self::Io(e)
-        }
-    }
-}
-
-impl From<DecodeError> for ControlError {
-    fn from(e: DecodeError) -> Self {
-        Self::Decode(e)
-    }
-}
+// ControlError is now defined in roost_shell_control and re-exported above.
+// It unifies error types across compositor and shell-host endpoints.
 
 /// Bound control socket. Wraps an already-bound [`UnixListener`] (tests pass
 /// a bound socket or use a socketpair directly with [`ControlConn`]).
@@ -172,7 +118,7 @@ impl ControlConn {
             match self.stream.read(&mut chunk) {
                 Ok(0) => {
                     if self.rbuf.is_empty() {
-                        return Err(ControlError::Closed);
+                        return Err(ControlError::Unexpected("peer closed".into()));
                     }
                     return Err(ControlError::Decode(DecodeError::Truncated {
                         expected: self.rbuf.len(),
@@ -193,7 +139,7 @@ impl ControlConn {
         let mut written = 0;
         while written < frame.len() {
             match self.stream.write(&frame[written..]) {
-                Ok(0) => return Err(ControlError::Closed),
+                Ok(0) => return Err(ControlError::Unexpected("peer closed on write".into())),
                 Ok(n) => written += n,
                 Err(e) => return Err(ControlError::from(e)),
             }
@@ -407,7 +353,7 @@ impl<'a> Session<'a> {
                 kind: ErrorKind::UnknownCommand,
                 message: "expected Hello as first message".to_owned(),
             });
-            return Err(ControlError::Protocol(
+            return Err(ControlError::Unexpected(
                 "first message is not Hello".to_owned(),
             ));
         };
