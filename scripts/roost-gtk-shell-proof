@@ -462,10 +462,18 @@ case "\$1" in
 esac
 "$PY" "$ROOT/scripts/lib/roost-audio-fixture.py" "$ARTIFACTS" --event
 WPCTL
-# Status comes from events; commands still exercise real asynchronous callers.
+# Only audio monitoring uses the event fixture. Capture revocation must inspect
+# actual PipeWire nodes with the installed one-shot tool, never the endless FIFO.
+PW_DUMP_REAL="$(command -v pw-dump || true)"
 cat >"$ARTIFACTS/bin/pw-dump" <<PW_DUMP
 #!/bin/sh
-exec "$PY" "$ROOT/scripts/lib/roost-audio-fixture.py" "$ARTIFACTS"
+for arg do
+    if [ "\$arg" = --monitor ] || [ "\$arg" = -m ]; then
+        exec "$PY" "$ROOT/scripts/lib/roost-audio-fixture.py" "$ARTIFACTS"
+    fi
+done
+[ -n "$PW_DUMP_REAL" ] || exit 127
+exec "$PW_DUMP_REAL" "\$@"
 PW_DUMP
 cat >"$ARTIFACTS/bin/pw-cli" <<PW_CLI
 #!/bin/sh
