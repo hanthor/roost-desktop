@@ -4,7 +4,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 [ "$#" = 4 ] && [ "$1" = --candidate ] && [ "$3" = --out ] || { echo 'usage: roost-remote-security --candidate DIR --out DIR' >&2; exit 2; }
 candidate="$(realpath "$2")"
 out="$(realpath -m "$4")"
-[ -x "$candidate/usr/bin/roost-compositor" ] && [ -x "$candidate/usr/bin/roost-shell-gtk" ] || { echo 'packaged compositor and GTK shell required' >&2; exit 2; }
+if [ ! -x "$candidate/usr/bin/roost-compositor" ] || [ ! -x "$candidate/usr/bin/roost-shell-gtk" ]; then
+    echo 'packaged compositor and GTK shell required' >&2
+    exit 2
+fi
 [ ! -f "$out/assertions.txt" ] || { echo 'use a fresh artifact directory' >&2; exit 2; }
 mkdir -p "$out"
 podman build --tag localhost/roost-remote-reference --file "$ROOT/tests/remote-desktop-reference/Containerfile" "$ROOT/tests/remote-desktop-reference"
