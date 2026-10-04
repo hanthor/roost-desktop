@@ -219,6 +219,26 @@ impl ImeBridge {
 /// also bounds workers if an external child cannot finish being reaped.
 fn bounded_address_probe(mut command: Command) -> Option<String> {
     command.stdout(Stdio::piped()).stderr(Stdio::null());
+    #[cfg(target_os = "linux")]
+    {
+        let owner = rustix::process::getpid();
+        // SAFETY: these are only async-signal-safe prctl/getppid syscalls and
+        // raw OS error construction between fork and exec.
+        unsafe {
+            command.pre_exec(move || {
+                rustix::process::set_parent_process_death_signal(Some(
+                    rustix::process::Signal::KILL,
+                ))?;
+                // The owner may have exited before prctl installed the signal.
+                if rustix::process::getppid() != Some(owner) {
+                    return Err(std::io::Error::from_raw_os_error(
+                        rustix::io::Errno::CHILD.raw_os_error(),
+                    ));
+                }
+                Ok(())
+            });
+        }
+    }
     let mut child = command.spawn().ok()?;
     let result = (|| {
         let mut output = child.stdout.take()?;
@@ -332,6 +352,81 @@ mod tests {
         let started = Instant::now();
         assert!(bounded_address_probe(command).is_none());
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn address_probe_owner_fixture() {
+        let Some(path) = std::env::var_os("ROOST_XIM_PROBE_OWNER_FIXTURE") else {
+            return;
+        };
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                r#"printf '%s' "$$" > "$ROOST_XIM_PROBE_PID_FILE"; exec sleep 30"#,
+            ])
+            .env("ROOST_XIM_PROBE_PID_FILE", path);
+        let _ = bounded_address_probe(command);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn owner_exit_terminates_an_in_flight_address_probe() {
+        let path = std::env::temp_dir().join(format!(
+            "roost-xim-owner-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut owner = Command::new(std::env::current_exe().unwrap())
+            .args(["address_probe_owner_fixture", "--nocapture"])
+            .env("ROOST_XIM_PROBE_OWNER_FIXTURE", &path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let pid = loop {
+            if let Ok(pid) = std::fs::read_to_string(&path) {
+                if let Ok(pid) = pid.parse::<u32>() {
+                    break Some(pid);
+                }
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let owner_was_running = owner.try_wait().unwrap().is_none();
+        let _ = owner.kill();
+        let _ = owner.wait();
+        let _ = std::fs::remove_file(path);
+        let pid = pid.expect("address probe never started in its isolated owner");
+        assert!(
+            owner_was_running,
+            "owner exited before the abrupt-exit fixture"
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"));
+            // A dead orphan may await init's reaping; it must never keep running.
+            let running = stat.is_ok_and(|s| {
+                !s.rsplit_once(") ")
+                    .is_some_and(|(_, fields)| fields.starts_with('Z'))
+            });
+            if !running {
+                break;
+            }
+            if Instant::now() >= deadline {
+                if let Some(pid) = rustix::process::Pid::from_raw(pid as i32) {
+                    let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+                }
+                panic!("probe outlived its owner");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]
