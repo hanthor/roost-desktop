@@ -130,6 +130,12 @@ Super+R steps the column's width and Super+Left moves along the strip; the view 
 
 ![Following focus](walkthrough/scroll-follow.png)
 
+### Column widths
+
+Super+R cycles through 1/3, 1/2 and 2/3 widths; a widened column keeps its width as focus moves. The [same-size niri comparison](niri-parity.md) records matching geometry and the remaining pixel differences. (`P-WM-07`)
+
+![Column widths](walkthrough/scroll-presets.png)
+
 ## Switcher
 
 ### Alt+Tab

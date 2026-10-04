@@ -1,0 +1,5 @@
+state                                      mean   off%
+01-strip-rest-0_32_1280_768                1.95    6.7
+02-strip-preset-0_32_1280_768              1.56    5.3
+03-strip-mid-scroll-0_32_1280_768          9.48   11.5
+04-strip-scroll-settled-0_32_1280_768      1.58    5.5
