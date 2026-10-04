@@ -1,0 +1,127 @@
+--- a/src/xwayland/mod.rs
++++ b/src/xwayland/mod.rs
+@@ -15,5 +15,5 @@
+ mod xserver;
+ pub mod xwm;
+ 
+-pub use self::xserver::{XWayland, XWaylandClientData, XWaylandEvent};
++pub use self::xserver::{XWayland, XWaylandClientData, XWaylandEvent, XWaylandSockets};
+ pub use self::xwm::{X11Surface, X11Wm, XwmHandler};
+--- a/src/xwayland/xserver.rs
++++ b/src/xwayland/xserver.rs
+@@ -1,7 +1,7 @@
+ use std::{
+     env,
+     ffi::OsStr,
+-    os::fd::{BorrowedFd, OwnedFd},
++    os::fd::{AsFd, BorrowedFd, OwnedFd},
+     os::unix::{
+         io::{AsRawFd, RawFd},
+         net::UnixStream,
+@@ -19,6 +19,39 @@
+ use crate::{utils::user_data::UserDataMap, wayland::compositor::CompositorClientState};
+ 
+ use super::x11_sockets::{prepare_x11_sockets, X11Lock};
++
++/// Reserved X11 display sockets, prepared without starting XWayland.
++///
++/// Keep this owner alive while advertising its display. Poll the borrowed
++/// listening descriptors for readability without accepting the connection;
++/// then move the owner into [`XWayland::spawn_on_sockets`]. The pending client
++/// remains queued on the same sockets handed to XWayland. Drop any cloned
++/// readiness descriptors when stopping or replacing this reservation.
++#[derive(Debug)]
++pub struct XWaylandSockets {
++    lock: X11Lock,
++    listen_sockets: Vec<UnixStream>,
++}
++
++impl XWaylandSockets {
++    /// Reserve a free display and its filesystem and optional abstract sockets.
++    /// No process is started and no Wayland client is inserted.
++    pub fn prepare(display: impl Into<Option<u32>>, open_abstract_socket: bool) -> std::io::Result<Self> {
++        let (lock, listen_sockets) = prepare_x11_sockets(display.into(), open_abstract_socket)?;
++        Ok(Self { lock, listen_sockets })
++    }
++
++    /// Display number suitable for advertising `DISPLAY` before server startup.
++    pub fn display_number(&self) -> u32 {
++        self.lock.display_number()
++    }
++
++    /// Non-consuming readiness handles for the listening sockets.
++    /// Readability means a pending connection can trigger server startup.
++    pub fn listen_fds(&self) -> impl Iterator<Item = BorrowedFd<'_>> {
++        self.listen_sockets.iter().map(AsFd::as_fd)
++    }
++}
+ 
+ /// A handle to a running XWayland process. Using XWayland as an xserver for
+ /// X11-based clients requires two connections: one wayland socket, where
+@@ -124,10 +157,32 @@
+         V: AsRef<OsStr>,
+         F: FnOnce(&UserDataMap),
+     {
++        let sockets = XWaylandSockets::prepare(display, open_abstract_socket)?;
++        Self::spawn_on_sockets(dh, sockets, envs, stdout, stderr, user_data)
++    }
++
++    /// Start XWayland on an existing display reservation, preserving queued
++    /// client connections. The reservation's lock stays owned by the returned
++    /// instance. All client data and process setup remain internal to Smithay.
++    ///
++    /// This otherwise has the same readiness events and arguments as [`Self::spawn`].
++    pub fn spawn_on_sockets<K, V, I, F>(
++        dh: &DisplayHandle,
++        sockets: XWaylandSockets,
++        envs: I,
++        stdout: impl Into<std::process::Stdio>,
++        stderr: impl Into<std::process::Stdio>,
++        user_data: F,
++    ) -> std::io::Result<(Self, Client)>
++    where
++        I: IntoIterator<Item = (K, V)>,
++        K: AsRef<OsStr>,
++        V: AsRef<OsStr>,
++        F: FnOnce(&UserDataMap),
++    {
+         let (x_wm_x11, x_wm_me) = UnixStream::pair()?;
+         let (wl_x11, wl_me) = UnixStream::pair()?;
+-
+-        let (lock, listen_sockets) = prepare_x11_sockets(display.into(), open_abstract_socket)?;
++        let XWaylandSockets { lock, listen_sockets } = sockets;
+         let display_number = lock.display_number();
+ 
+         // XWayland writes the the display number and a newline to this pipe when it's ready.
+@@ -400,3 +455,31 @@
+     rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::empty())?;
+     Ok(())
+ }
++
++#[cfg(test)]
++mod socket_preparation_tests {
++    use super::*;
++    use std::io::{Read, Write};
++
++    #[test]
++    fn prepared_socket_handoff_preserves_pending_client_bytes() {
++        let prepared = XWaylandSockets::prepare(None, false).unwrap();
++        let path = format!("/tmp/.X11-unix/X{}", prepared.display_number());
++        let mut client = UnixStream::connect(path).unwrap();
++        client.write_all(b"queued").unwrap();
++
++        // A server receives the same listening socket after ownership moves;
++        // the readiness observer never accepts or replaces the connection.
++        fn accept_after_handoff(prepared: XWaylandSockets) -> UnixStream {
++            let listener = prepared.listen_fds().next().unwrap();
++            UnixStream::from(rustix::net::accept(listener).unwrap())
++        }
++        let mut server = accept_after_handoff(prepared);
++        server
++            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
++            .unwrap();
++        let mut bytes = [0; 6];
++        server.read_exact(&mut bytes).unwrap();
++        assert_eq!(&bytes, b"queued");
++    }
++}

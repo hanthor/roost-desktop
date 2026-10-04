@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-exclude = ["third-party/reis"]
+exclude = ["third-party/reis", "third-party/smithay"]
 members = [
     "crates/compositor",
     "crates/shell-control-schema",
@@ -79,3 +79,5 @@ opt-level = 3
 # Upstream reis0.7.1 plus bounded pre-decoder socket accumulation.
 [patch.crates-io]
 reis = { path = "third-party/reis" }
+
+smithay = { path = "third-party/smithay" }
