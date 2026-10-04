@@ -580,6 +580,8 @@ impl CandidatePopup {
         let (ox, oy) = self.state.borrow().origin;
         let (sx, sy) = window.surface_transform();
         let mut lines = Vec::new();
+        let vertical = self.area.orientation() == gtk::Orientation::Vertical;
+        let mut previous_end = None;
         for (i, row) in self.rows.iter().enumerate() {
             if !row.row.is_visible() || !self.area.is_visible() {
                 continue;
@@ -587,9 +589,22 @@ impl CandidatePopup {
             let Some(b) = row.row.compute_bounds(window) else {
                 return false;
             };
-            if b.width() <= 0.0 {
+            let (minimum, _) = row.row.preferred_size();
+            // Tick callbacks run before layout. Positive old allocations
+            // can put every newly shown row at the same origin; do not
+            // publish those as coordinates for pixel checks or clicks.
+            if b.width() < minimum.width() as f32 || b.height() < minimum.height() as f32 {
                 return false;
             }
+            let (start, length) = if vertical {
+                (b.y(), b.height())
+            } else {
+                (b.x(), b.width())
+            };
+            if previous_end.is_some_and(|end| start < end) {
+                return false;
+            }
+            previous_end = Some(start + length);
             lines.push(format!(
                 "roost-shell-gtk: ibus candidate {i} {} at {} {} {} {}",
                 row.label.label(),
