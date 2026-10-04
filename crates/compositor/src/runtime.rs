@@ -2488,10 +2488,12 @@ impl Runtime {
         // runtime triggers converge here); the next reconcile parks
         // or restores keyboard focus.
         self.manager.set_overview_open(self.control.overview_open());
+        // Reap and restart the supervised lock UI even while locked.
+        // Supervision is nonblocking and cannot clear the lock flag.
+        let shell_status = self.shell.poll(crate::state::system_millis());
         // While locked the overlay stays up with its empty list no
         // matter what the shell does: a shell restart while locked
-        // keeps the lock screen up. Otherwise the shell step never
-        // blocks the tick as before.
+        // keeps the lock screen up.
         if self.is_locked() {
             if !self.overlay.visible {
                 self.overlay.show(Vec::new());
@@ -2500,7 +2502,7 @@ impl Runtime {
             if let Some(ime) = &mut self.ime {
                 ime.poll(crate::state::system_millis(), &mut self.display.handle());
             }
-            match self.shell.poll(crate::state::system_millis()) {
+            match shell_status {
                 ShellStatus::Running => {
                     if self.overlay.visible {
                         self.overlay.hide();

@@ -139,10 +139,10 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
             json.dump(state, stream, indent=2)
         return state
 
-    def await_state(predicate, timeout=15):
+    def await_state(predicate, timeout=15, label=None):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            state = agent.run("inventory")
+            state = inventory(label) if label else agent.run("inventory")
             if predicate(state):
                 return state
             time.sleep(0.2)
@@ -162,6 +162,13 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
         changed = sum(max(abs(a - b) for a, b in zip(left[2][i:i+3], right[2][i:i+3])) > 24
                       for i in range(first, width * height * 3, 3))
         return changed / (width * (height - 64))
+
+    def varied_mask(image):
+        # The inactive QEMU placeholder has only two quantized colors.
+        width, height, pixels = image
+        colors = {tuple(value >> 4 for value in pixels[(y * width + x) * 3:(y * width + x) * 3 + 3])
+                  for y in range(64, height, 8) for x in range(0, width, 8)}
+        return len(colors) >= 8 and difference(base_frame, image) > 0.25
 
     def same_apps(before, after, shell=True):
         names = {"roost-compositor", "gnome-disks", "gnome-system-monitor", "nautilus"}
@@ -296,10 +303,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
         deadline = time.monotonic() + 5
         repainted = False
         while True:
-            width, height, pixels = resumed_frame
-            colors = {tuple(value >> 4 for value in pixels[(y * width + x) * 3:(y * width + x) * 3 + 3])
-                      for y in range(64, height, 8) for x in range(0, width, 8)}
-            repainted = (len(colors) >= 8 and difference(base_frame, resumed_frame) > 0.25
+            repainted = (varied_mask(resumed_frame)
                          and difference(suspended_frame, resumed_frame) < 0.20)
             if repainted or time.monotonic() >= deadline:
                 break
@@ -414,7 +418,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     time.sleep(2)
     locked_vt = inventory("locked-vt")
     record("V-VT-FAIL-CLOSED", locked_vt["state"]["locked"] and same_apps(before, locked_vt)
-           and difference(base_frame, frame("locked-vt")) > 0.25,
+           and varied_mask(frame("locked-vt")),
            "VT away/back while locked repaints the mask and preserves app/process identities")
 
     agent.run("deny-unlock")
@@ -437,15 +441,15 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
         agent.run("restore-unlock")
     agent.run("stop-portal")
     agent.run("kill-shell")
-    killed_mask = difference(base_frame, frame("shell-killed")) > 0.25
+    killed_mask = varied_mask(frame("shell-killed"))
     recovered = await_state(lambda state: state["state"]["locked"] and
                             any(p["executable"] == "roost-shell-gtk" and p not in resumed["processes"]
-                                for p in state["processes"]), timeout=30)
+                                for p in state["processes"]), timeout=30, label="shell-recovering")
     time.sleep(2)
     recovered = inventory("shell-recovered")
     record("V-SHELL-FAIL-CLOSED", killed_mask and recovered["state"]["locked"] and same_apps(before, recovered, shell=False)
            and agent.run("input-count") == delivered_input
-           and difference(base_frame, frame("shell-recovered")) > 0.25,
+           and varied_mask(frame("shell-recovered")),
            "portal stopped and lock UI killed; supervisor replacement stays locked/masked with original apps alive")
     qmp.keys("ret")
     time.sleep(1)
