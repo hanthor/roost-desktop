@@ -1,0 +1,16 @@
+{"scope": "short idle critical-process CPU probe, not GNOME parity or endurance", "source": "68dc3db9a6672d24c027245fa8284ab5b714cc79", "boot_id": "59040377-9674-463c-8104-567dd6b3fae7", "kernel": "7.2.8-arch1-2", "clock_ticks": 100, "binaries": {"roost-compositor": "5622ab51d38b781517d9047b168e7d4f6c317d6c5de158e2033d4468c5a7a27c", "roost-shell-gtk": "08b452b3aa5b615f7d93b8711097dda7a0a9e8e71aa1cbf453c1bc50b4ae7467"}}
+{"sample": 0, "interval_s": 2.0027698599997166, "cpu_percent": {"roost-compositor": 86.38036923524727, "roost-shell-gtk": 0.4993084926892906}}
+{"sample": 1, "interval_s": 2.0029609220000566, "cpu_percent": {"roost-compositor": 86.87139029465052, "roost-shell-gtk": 0.49926086376235934}}
+{"sample": 2, "interval_s": 2.002689225000722, "cpu_percent": {"roost-compositor": 86.38384719922664, "roost-shell-gtk": 0.49932859652732164}}
+{"sample": 3, "interval_s": 2.0028506389999166, "cpu_percent": {"roost-compositor": 88.87332711383847, "roost-shell-gtk": 0.0}}
+{"sample": 4, "interval_s": 2.0028623139996853, "cpu_percent": {"roost-compositor": 89.37209450136378, "roost-shell-gtk": 0.49928544414169707}}
+{"sample": 5, "interval_s": 2.003153067999847, "cpu_percent": {"roost-compositor": 93.85203906944487, "roost-shell-gtk": 0.499212973773643}}
+{"sample": 6, "interval_s": 2.0028650969998125, "cpu_percent": {"roost-compositor": 87.87411606684785, "roost-shell-gtk": 0.49928475037981734}}
+{"sample": 7, "interval_s": 2.0026968130005116, "cpu_percent": {"roost-compositor": 87.88150001412872, "roost-shell-gtk": 0.4993267046257314}}
+{"sample": 8, "interval_s": 2.0027918850000788, "cpu_percent": {"roost-compositor": 84.88151029231543, "roost-shell-gtk": 0.0}}
+{"sample": 9, "interval_s": 2.00552196299941, "cpu_percent": {"roost-compositor": 88.25632591691148, "roost-shell-gtk": 0.4986233102650366}}
+{"sample": 10, "interval_s": 2.0026756070001284, "cpu_percent": {"roost-compositor": 89.3804265525208, "roost-shell-gtk": 0.0}}
+{"sample": 11, "interval_s": 2.002719734000493, "cpu_percent": {"roost-compositor": 82.38796332745346, "roost-shell-gtk": 0.4993209898633544}}
+{"sample": 12, "interval_s": 2.003359585999533, "cpu_percent": {"roost-compositor": 91.84571820549988, "roost-shell-gtk": 0.49916151198641234}}
+{"sample": 13, "interval_s": 2.004827710000427, "cpu_percent": {"roost-compositor": 90.28207216866603, "roost-shell-gtk": 0.0}}
+{"sample": 14, "interval_s": 2.0029020639994997, "cpu_percent": {"roost-compositor": 85.37611652291088, "roost-shell-gtk": 0.49927553522170115}}
