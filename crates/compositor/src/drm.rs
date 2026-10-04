@@ -445,13 +445,12 @@ impl DrmBackend {
             smithay::utils::Clock::<smithay::utils::Monotonic>::new().now(),
         ));
         eprintln!("roost-compositor: drm: system wake scanout reset");
-        // A pending flip can be lost across S3. Retire its buffer without
-        // claiming presentation; Runtime never queues another while pending.
+        // Pending and queued flips can be lost across S3. Drop both without
+        // submitting an old queued scene or claiming presentation. Ordinary
+        // frame_submitted() would submit queued_fb as a side effect.
         for out in &mut self.outputs {
-            match out.surface.frame_submitted() {
-                Ok(Some(mut feedback)) => feedback.discarded(),
-                Ok(None) => {}
-                Err(error) => eprintln!("roost-compositor: drm: wake buffer retirement: {error}"),
+            for mut feedback in out.surface.discard_pending_frames() {
+                feedback.discarded();
             }
             out.surface.reset_buffers();
             out.pending = false;

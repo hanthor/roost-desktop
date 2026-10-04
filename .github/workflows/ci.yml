@@ -31,7 +31,7 @@ jobs:
       - run: python3 scripts/lib/roost-soak-tests.py
       - run: scripts/roost-settings-inventory-check
       - run: cargo fmt --all -- --check
-      - run: rustfmt --edition 2021 --check third-party/smithay/src/xwayland/xserver.rs
+      - run: rustfmt --edition 2021 --check third-party/smithay/src/xwayland/xserver.rs third-party/smithay/src/backend/drm/surface/gbm.rs
       - run: cargo test --locked --manifest-path third-party/smithay/Cargo.toml --no-default-features --features xwayland,wayland_frontend prepared_socket
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # pam_wrapper runs the lock screen's PAM path for real (#62); it is
