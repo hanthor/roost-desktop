@@ -1189,7 +1189,7 @@ mod page_hint {
 }
 
 glib::wrapper! {
-    struct PageHint(ObjectSubclass<page_hint::PageHint>)
+    pub struct PageHint(ObjectSubclass<page_hint::PageHint>)
         @extends gtk::Fixed, gtk::Widget,
         @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
 }
