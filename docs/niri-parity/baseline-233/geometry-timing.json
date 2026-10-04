@@ -1,0 +1,167 @@
+{
+  "dimensions": [
+    1280,
+    800
+  ],
+  "endpoints": {
+    "01-strip-rest": {
+      "focused_rect": [
+        648,
+        48,
+        616,
+        736
+      ],
+      "niri_size": [
+        616,
+        736
+      ],
+      "content_off_percent": 0.0
+    },
+    "02-strip-preset": {
+      "focused_rect": [
+        438,
+        48,
+        826,
+        736
+      ],
+      "niri_size": [
+        826,
+        736
+      ],
+      "content_off_percent": 0.0
+    },
+    "04-strip-scroll-settled": {
+      "focused_rect": [
+        16,
+        48,
+        616,
+        736
+      ],
+      "niri_size": [
+        616,
+        736
+      ],
+      "content_off_percent": 0.0
+    }
+  },
+  "timing": {
+    "niri": {
+      "sampled_settle_ms": 300,
+      "samples": [
+        {
+          "green_right": 422,
+          "elapsed_ms": 0,
+          "capture_started_ms": 0,
+          "requested_ms": 0
+        },
+        {
+          "green_right": 422,
+          "elapsed_ms": 163.24818698922172,
+          "capture_started_ms": 50.10585696436465,
+          "requested_ms": 50
+        },
+        {
+          "green_right": 536,
+          "elapsed_ms": 152.70501404302195,
+          "capture_started_ms": 100.39071802748367,
+          "requested_ms": 100
+        },
+        {
+          "green_right": 583,
+          "elapsed_ms": 206.87148900469765,
+          "capture_started_ms": 150.64400900155306,
+          "requested_ms": 150
+        },
+        {
+          "green_right": 603,
+          "elapsed_ms": 220.86378402309492,
+          "capture_started_ms": 200.10072400327772,
+          "requested_ms": 200
+        },
+        {
+          "green_right": 631,
+          "elapsed_ms": 382.528952031862,
+          "capture_started_ms": 300.1007710117847,
+          "requested_ms": 300
+        },
+        {
+          "green_right": 627,
+          "elapsed_ms": 474.42090895492584,
+          "capture_started_ms": 400.1412159996107,
+          "requested_ms": 400
+        },
+        {
+          "green_right": 632,
+          "elapsed_ms": 616.5123070240952,
+          "capture_started_ms": 600.1095829997212,
+          "requested_ms": 600
+        },
+        {
+          "green_right": 632,
+          "elapsed_ms": 817.7342599956319,
+          "capture_started_ms": 800.1113170175813,
+          "requested_ms": 800
+        }
+      ]
+    },
+    "roost": {
+      "sampled_settle_ms": 400,
+      "samples": [
+        {
+          "green_right": 422,
+          "elapsed_ms": 0,
+          "capture_started_ms": 0,
+          "requested_ms": 0
+        },
+        {
+          "green_right": 422,
+          "elapsed_ms": 110.6591850402765,
+          "capture_started_ms": 52.92309500509873,
+          "requested_ms": 50
+        },
+        {
+          "green_right": 494,
+          "elapsed_ms": 116.6510179755278,
+          "capture_started_ms": 100.09936802089214,
+          "requested_ms": 100
+        },
+        {
+          "green_right": 522,
+          "elapsed_ms": 198.41768097830936,
+          "capture_started_ms": 152.0145209506154,
+          "requested_ms": 150
+        },
+        {
+          "green_right": 590,
+          "elapsed_ms": 251.69595499755815,
+          "capture_started_ms": 202.78960099676624,
+          "requested_ms": 200
+        },
+        {
+          "green_right": 625,
+          "elapsed_ms": 338.3904140209779,
+          "capture_started_ms": 300.8339070365764,
+          "requested_ms": 300
+        },
+        {
+          "green_right": 631,
+          "elapsed_ms": 431.55054398812354,
+          "capture_started_ms": 400.1682929811068,
+          "requested_ms": 400
+        },
+        {
+          "green_right": 632,
+          "elapsed_ms": 611.0756029956974,
+          "capture_started_ms": 600.0998879899271,
+          "requested_ms": 600
+        },
+        {
+          "green_right": 632,
+          "elapsed_ms": 815.7926260028034,
+          "capture_started_ms": 800.0797869754024,
+          "requested_ms": 800
+        }
+      ]
+    }
+  }
+}

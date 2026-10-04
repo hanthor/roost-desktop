@@ -118,12 +118,22 @@ impl Consent {
         } else {
             format!("{app}.desktop")
         };
-        let desktop = roost_shell_host::apps::discover_system()
-            .into_iter()
-            .find(|a| a.app_id == desktop_id);
-        let name = desktop.as_ref().map(|a| a.name.clone());
         let stem = desktop_id.trim_end_matches(".desktop");
-        let known = !stem.contains('/') && roost_shell_host::apps::desktop_file_exists(stem);
+        // Consent also identifies NoDisplay apps, which catalog discovery
+        // excludes. Resolve the first desktop file in XDG precedence order.
+        let desktop = (!stem.contains('/'))
+            .then(|| {
+                roost_shell_host::apps::default_app_dirs()
+                    .into_iter()
+                    .map(|dir| dir.join(&desktop_id))
+                    .find(|path| path.is_file())
+            })
+            .flatten();
+        let name = desktop
+            .as_deref()
+            .and_then(roost_shell_host::apps::handler_entry_from_file)
+            .map(|entry| entry.name);
+        let known = desktop.is_some();
         let stable = known.then_some(desktop_id.clone());
         let name = name.or_else(|| known.then_some(desktop_id));
         self.title.set_text(

@@ -1,0 +1,196 @@
+#!/usr/bin/python3
+"""Guest-only endurance observer; it does not measure frame pacing or GPU memory."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import signal
+import tempfile
+import subprocess
+import time
+
+# The GTK shell is preferred; shell-host is the alternative legacy renderer.
+CRITICAL = ('roost-compositor', 'roost-shell-gtk')
+BINARIES = CRITICAL + ('roost-shell-host', 'roost-session', 'roost-ibus-bridge', 'roost-greeter')
+
+
+def identity(proc):
+    fields = (proc / 'stat').read_text().rsplit(')', 1)[1].split()
+    return fields[0], int(fields[19])
+
+
+def sample(uid, proc_root=Path('/proc')):
+    totals = dict(pss_kib=0, rss_kib=0, fds=0, processes=0)
+    critical = {name: [] for name in CRITICAL}
+    for proc in proc_root.iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            if proc.stat().st_uid != uid:
+                continue
+            state, started = identity(proc)
+            if state in ('Z', 'X', 'x'):
+                continue
+            command = Path(os.readlink(proc / 'exe')).name
+            memory = {}
+            for line in (proc / 'smaps_rollup').read_text().splitlines():
+                parts = line.split()
+                if parts[0] in ('Pss:', 'Rss:'):
+                    memory[parts[0]] = int(parts[1])
+            fds = len(list((proc / 'fd').iterdir()))
+            if identity(proc)[1] != started:
+                raise RuntimeError(f'PID {proc.name} changed identity during sampling')
+            if not {'Pss:', 'Rss:'} <= memory.keys():
+                raise RuntimeError(f'PID {proc.name} has incomplete memory counters')
+            totals['pss_kib'] += memory['Pss:']
+            totals['rss_kib'] += memory['Rss:']
+            totals['fds'] += fds
+            totals['processes'] += 1
+            if command in critical:
+                critical[command].append([int(proc.name), started])
+        except FileNotFoundError:
+            # A departed process is absent, never represented as zero memory.
+            continue
+        except ProcessLookupError:
+            if not proc.exists() or identity(proc)[0] in ('Z', 'X', 'x'):
+                continue
+            raise
+    if any(len(value) != 1 for value in critical.values()):
+        raise RuntimeError(f'expected one of each critical session process: {critical}')
+    return totals | {'critical': critical}
+
+
+def call(command, timeout=10):
+    # Kill the whole helper group on timeout, and bound captured output.
+    with tempfile.TemporaryFile() as output:
+        process = subprocess.Popen(command, stdout=output, stderr=output, start_new_session=True)
+        deadline = time.monotonic() + timeout
+        try:
+            while process.poll() is None:
+                if os.fstat(output.fileno()).st_size > 65536:
+                    raise RuntimeError('health helper exceeded 64 KiB output budget')
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('health helper exceeded its deadline')
+                time.sleep(0.05)
+            if os.fstat(output.fileno()).st_size > 65536:
+                raise RuntimeError('health helper exceeded 64 KiB output budget')
+            output.seek(0)
+            value = output.read().decode('utf-8', errors='replace').strip()
+            if process.returncode != 0:
+                raise RuntimeError(f'health helper failed ({process.returncode}): {value}')
+            return value
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+
+
+def main(args):
+    if os.geteuid() != 0:
+        raise RuntimeError('run the observer as root to read complete PSS counters')
+    uid = pwd.getpwnam(args.user).pw_uid
+    if uid == 0:
+        raise RuntimeError('observe a non-root session UID')
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    if any(out.iterdir()):
+        raise RuntimeError('artifact directory must be fresh and empty')
+    boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    binaries = {name: hashlib.sha256(Path('/usr/bin', name).read_bytes()).hexdigest()
+                for name in BINARIES}
+    provenance = {'user': args.user, 'uid': uid, 'source_revision': args.source_revision,
+                  'boot_id': boot, 'binaries_sha256': binaries,
+                  'kernel': os.uname().release, 'cpu_count': os.cpu_count(),
+                  'meminfo': Path('/proc/meminfo').read_text(),
+                  'drm_drivers': {card.name: os.path.basename(os.path.realpath(card / 'device/driver'))
+                                  for card in Path('/sys/class/drm').glob('card[0-9]')},
+                  'bootc_status': json.loads(call(['bootc', 'status', '--json'], 30)),
+                  'started_unix_s': time.time(), 'requested_duration_s': args.seconds,
+                  'interval_s': args.interval, 'warmup_s': args.warmup,
+                  'limits': {'pss': 'baseline * 1.5 + 16384 KiB',
+                             'fds': 'baseline * 1.5 + 32',
+                             'processes': 'baseline + 12'}}
+    (out / 'provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
+    start = time.monotonic()
+    original = baseline = None
+    report = {'complete': False, 'samples': 0, 'limitations': [
+        'No frame pacing, GPU memory or input latency measurement.',
+        'PSS scope is the session UID; root services and kernel memory are excluded.',
+        'This observes process stability and service responsiveness, without service fault injection.',
+        'The source revision is supplied by the deployment record; binary hashes are measured.']}
+    try:
+        with (out / 'samples.jsonl').open('a', buffering=1) as stream:
+            while True:
+                elapsed = time.monotonic() - start
+                if Path('/proc/sys/kernel/random/boot_id').read_text().strip() != boot:
+                    raise RuntimeError('guest rebooted during the observation')
+                value = sample(uid)
+                if original is None:
+                    original = value['critical']
+                if value['critical'] != original:
+                    raise RuntimeError('critical process exited or restarted')
+                command = ['runuser', '-u', args.user, '--', 'env',
+                           f'XDG_RUNTIME_DIR=/run/user/{uid}',
+                           f'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus',
+                           'gdbus', 'call', '--session', '--dest', 'org.gnome.ScreenSaver',
+                           '--object-path', '/org/gnome/ScreenSaver', '--method',
+                           'org.gnome.ScreenSaver.GetActive']
+                value['lock_reply'] = call(command)
+                if value['lock_reply'] not in ('(true,)', '(false,)'):
+                    raise RuntimeError('unexpected screen-saver health reply')
+                user_bus = command[:7]
+                for name, destination, method, parameters in (
+                    ('calendar', 'org.gnome.Shell.CalendarServer', 'org.freedesktop.DBus.Peer.Ping', []),
+                    ('portal', 'org.freedesktop.portal.Desktop', 'org.freedesktop.portal.Settings.Read',
+                     ['org.freedesktop.appearance', 'color-scheme']),
+                    ('portal_gnome', 'org.freedesktop.impl.portal.desktop.gnome',
+                     'org.freedesktop.DBus.Peer.Ping', []),
+                ):
+                    object_path = '/org/gnome/Shell/CalendarServer' if name == 'calendar' else '/org/freedesktop/portal/desktop'
+                    value[name + '_reply'] = call(user_bus + ['gdbus', 'call', '--session', '--dest',
+                                                            destination, '--object-path', object_path,
+                                                            '--method', method] + parameters)
+                value['elapsed_s'] = round(elapsed, 3)
+                stream.write(json.dumps(value) + '\n')
+                report['samples'] += 1
+                if baseline is None and elapsed >= args.warmup:
+                    baseline = value
+                    report['baseline'] = baseline
+                if baseline is not None:
+                    limits = {'pss_kib': baseline['pss_kib'] * 1.5 + 16384,
+                              'fds': baseline['fds'] * 1.5 + 32,
+                              'processes': baseline['processes'] + 12}
+                    for key, limit in limits.items():
+                        if value[key] > limit:
+                            raise RuntimeError(f'{key} grew to {value[key]} beyond {limit}')
+                if elapsed >= args.seconds:
+                    report['complete'] = True
+                    break
+                time.sleep(min(args.interval, max(0, args.seconds - (time.monotonic() - start))))
+    except Exception as error:
+        report['failure'] = str(error)
+        raise
+    finally:
+        report['elapsed_s'] = time.monotonic() - start
+        (out / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--user', required=True)
+    parser.add_argument('--source-revision', required=True)
+    parser.add_argument('--out', required=True)
+    parser.add_argument('--seconds', type=int, default=86400)
+    parser.add_argument('--interval', type=int, default=60)
+    parser.add_argument('--warmup', type=int, default=600)
+    args = parser.parse_args()
+    if not re.fullmatch('[0-9a-f]{40}', args.source_revision):
+        parser.error('source revision must be the exact 40-digit hexadecimal commit')
+    if args.seconds <= args.warmup or args.interval <= 0 or args.warmup < 0:
+        parser.error('duration must exceed nonnegative warmup; interval must be positive')
+    main(args)

@@ -1279,8 +1279,13 @@ impl WindowManager {
         let id = id.map(|id| self.modal_target(id));
         let previous = self.model.focused();
         self.model.set_focused(id);
-        // The strip view follows focus (niri), new columns included.
-        if self.mode == SessionMode::Scroll && id.is_some() && previous != id {
+        // Shell activation may set model focus before this manager runs.
+        // Compare the last applied activation too, so Alt+Tab follows the
+        // selected column while ordinary reassertion preserves wheel panning.
+        if self.mode == SessionMode::Scroll
+            && id.is_some()
+            && (previous != id || self.activated != id)
+        {
             self.follow_focus(state);
             self.relayout_strip(state);
         }
