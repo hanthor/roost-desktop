@@ -16,7 +16,7 @@ At this update, GitHub reports three contributor entries, zero stars and zero fo
 2. Complete secure screen sharing and RemoteDesktop integration ([#61](https://github.com/hanthor/roost-desktop/issues/61)). Require real GNOME portal consent, authenticated ownership, disconnect and lock revocation, and verified input delivery for each advertised capability.
 3. Qualify one signed amd64 Marlin Roost image ([#69](https://github.com/hanthor/roost-desktop/issues/69)): current-source package, clean installation, graphical login, portals, PAM, boot and update/rollback evidence. This scope adds no ISO or LUKS matrix cells.
 4. Run the actual 24-hour endurance and comparable performance work ([#203](https://github.com/hanthor/roost-desktop/issues/203), [#73](https://github.com/hanthor/roost-desktop/issues/73)). Record binary/image provenance, resource growth, frame pacing and failures. Investigate measured regressions before making performance parity claims.
-5. Record hardware and session qualification ([#62](https://github.com/hanthor/roost-desktop/issues/62), [#68](https://github.com/hanthor/roost-desktop/issues/68)): physical GPU/driver combinations, mixed displays, VT switching, suspend/resume, logout and fail-closed lock behavior. AWS virtio VM evidence covers its own profile only.
+5. Record hardware and session qualification ([#62](https://github.com/hanthor/roost-desktop/issues/62), [#68](https://github.com/hanthor/roost-desktop/issues/68)): physical GPU/driver combinations, mixed displays, VT switching, suspend/resume, logout and fail-closed lock behavior. AWS KubeVirt VM evidence covers its own profile only.
 
 ## Six to twelve months: 2027-04-04–2027-10-04
 
