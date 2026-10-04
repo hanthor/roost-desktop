@@ -168,5 +168,22 @@ The 2026-10-04 native capture asserts focus restoration and maximization,
 and records each window's rectangle, workspace and focused identity in
 `*.state.json`. Roost records equivalent compositor state alongside its
 frames and asserts focus restoration and exact maximize/tile bounds.
-Comparison measurements for these new states remain pending the matching
-Roost capture; the ledger retains its current evidence status meanwhile.
+The paired 2026-10-04 captures use GNOME Shell 51.0 and Roost binaries from
+[CI job 111350817693](https://github.com/hanthor/roost-desktop/actions/runs/37172493269/job/111350817693),
+commit `e101d566048986c3c8c78e193cd41a26b44947bd`, with the native fonts,
+icons and wallpaper. The GTK live proof passed; that job's later standalone
+ShellCheck failed on the old cleanup expression, which was corrected.
+The recorded native and Roost window states are committed in
+`tests/gnome-reference/baseline-state.json` and `roost-baseline-state.json`.
+
+| State | Pixels visibly off | Recorded behavior |
+| --- | --- | --- |
+| 20-overview-dismiss-focus | 0.4% | Beta regains focus; its rectangle remains 370,256,640,420 |
+| 21-maximized | 0.3% | Beta occupies 0,32,1280,768 on both sides |
+| 22-tiled-left | 0.5% | Beta occupies 0,32,640,768 on both sides |
+| 22b-tiled-right | 0.3% | Beta occupies 640,32,640,768 on both sides |
+| 23-workspace-switched | 0.0% | Workspace 1 is active; no window is focused; all three windows remain on workspace 0 |
+
+These are full 1280x800 frame comparisons with the same threshold as the
+other measurements above. Each capture asserts the keyboard action's
+focus, workspace or rectangle result before continuing.

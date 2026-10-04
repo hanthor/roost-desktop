@@ -189,6 +189,14 @@ press() { "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$WORK/pr
 # Park the pointer where nothing reacts to it: GNOME's scripted
 # reference has no pointer motion, so nothing there shows hover.
 park() { xdotool mousemove --window "$WID" $((WIDTH - 4)) $((HEIGHT - 4)); }
+window_menu() {
+    header="$(jq -r '.focused_rect | "\(.[0] + 60) \(.[1] + 20)"' "$ROOST_COMPOSITOR_STATE")"
+    # shellcheck disable=SC2086
+    xdotool mousemove --window "$WID" $header
+    sleep 0.2
+    xdotool click 3
+    sleep 1
+}
 
 # A fresh wallpaper decodes once (then comes from the cache): wait for it.
 for _ in $(seq 1 60); do grep -q "wallpaper decoded" "$LOG" 2>/dev/null && break; sleep 0.5; done
@@ -319,7 +327,7 @@ osd "{'icon': <'audio-volume-overamplified-symbolic'>, 'level': <1.25>, 'max_lev
 shot 12c-osd-overdrive 0.5
 sleep 2
 # The window menu: a right click on the focused window's header bar.
-xdotool mousemove --window "$WID" 500 280 click 3
+window_menu
 shot 13-window-menu 1
 xdotool key Escape
 park
@@ -343,7 +351,7 @@ xdotool key Escape
 sleep 1
 # Three workspaces (the focused window moved one to the right through
 # its window menu, the view staying put): the overview's thumbnails.
-xdotool mousemove --window "$WID" 500 280 click 3
+window_menu
 sleep 1
 press "Move to Workspace Right"
 park

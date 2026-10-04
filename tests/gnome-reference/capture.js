@@ -321,8 +321,9 @@ export async function run() {
     // bar at (500, 280) opens it (Roost's capture right-clicks there).
     const focused = global.display.focus_window;
     if (focused) {
+        const frame = focused.get_frame_rect();
         Main.wm._windowMenuManager.showWindowMenuForWindow(focused,
-            Meta.WindowMenuType.WM, {x: 500, y: 280, width: 0, height: 0});
+            Meta.WindowMenuType.WM, {x: frame.x + 60, y: frame.y + 20, width: 0, height: 0});
         await Scripting.sleep(600);
         await shot('13-window-menu');
         Main.wm._windowMenuManager._manager.activeMenu?.close();
