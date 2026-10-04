@@ -13,12 +13,36 @@ the interfaces built into the same `libmutter-51.so`, marked `source` in
 `tests/protocols/gnome51-globals.tsv`. This is upstream GNOME 51 in a
 Fedora container, not a capture from the Marlin baseline VM.
 
+**Native Marlin reference.** [Run 37196669447](https://github.com/hanthor/roost-desktop/actions/runs/37196669447)
+also captured GNOME Shell/Mutter 51.0 in the derived Marlin GNOME 51
+baseline on the shared four-vCPU, 6 GiB, 1280×800 QEMU/KVM profile.
+`tests/protocols/marlin-gnome-wayland-info.txt` retains its full output;
+`marlin-roost-wayland-info.txt` retains the same run's candidate capture.
+`marlin-gnome51-source.json` records capture digests, image/package identity,
+the trusted package source and the actual observer checkout. The Roost
+package is source `7546647e5967825f522a352ee781e0908f889d1e`, so this retained
+candidate capture does not certify subsequent implementation changes.
+
+This native session exposes 41 globals. Its existing 40 match the headless
+capture's versions; `wp_drm_lease_device_v1` is additionally observed at v1.
+`tests/protocols/marlin-gnome51-globals.tsv` preserves the same explicit
+Roost version floors and deviations, marks the lease as captured, and
+keeps the two still-unobserved syncobj/Xwayland-private entries as
+source-derived floors. Bochs scanout still exposes dmabuf v3, so this
+VM does not establish the dmabuf feedback version of a GPU-capable Mutter
+backend. The headless reference remains a separate regression input.
+
 **Comparison.** The proof stage G-WAYLAND-INFO runs `wayland-info`
 against the nested Roost session (saved as the `wayland-info.txt`
 artifact) and `scripts/roost-wayland-info-compare` checks it against
 `tests/protocols/gnome51-globals.tsv`. Every global marked `match` must
 be present at GNOME's version or newer, and every `min:` global at least
 at the version given. Known gaps are reported and do not fail the stage.
+
+The same stage additionally compares against the native Marlin TSV,
+retaining `wayland-info-marlin-compare.txt`. Every native captured global
+is represented by a match, a version floor or a recorded deviation; a
+source-only floor is never described as a measured native version.
 
 **Golden test.** `crates/compositor/tests/protocols.rs` asserts the exact
 list and versions below. Adding or dropping a protocol updates the test
@@ -127,7 +151,8 @@ GNOME's version.
 | wp_color_manager_v1 (v2), wp_color_representation_manager_v1 | 2, 1 | missing | not in Smithay 0.7: needs a colour-managed renderer (ICC/HDR, YUV conversion); the GLES path is sRGB only (#89) |
 | ext_background_effect_manager_v1 | 1 | missing | not in Smithay 0.7: needs a blur pass in the renderer (#89) |
 | wl_fixes | 1 | missing | not in wayland-server 0.31; its `destroy_registry` frees a registry object, which wayland-backend owns (#89) |
-| wp_linux_drm_syncobj_manager_v1, wp_drm_lease_device_v1 (native backend; from source) | — | missing | hardware only: explicit sync needs the DRM backend's syncobj import and the lease needs connectors to hand out (VR headsets); not testable nested (#68, #89) |
+| wp_drm_lease_device_v1 | 1 (native Marlin capture) | missing | lease needs connectors to hand out for VR headsets; recorded deviation, not exercised by the nested session (#68, #89) |
+| wp_linux_drm_syncobj_manager_v1 | source-derived floor 1; absent in this VM capture | missing | explicit sync needs the DRM backend's syncobj import; GPU-capable native acceptance remains open (#68, #89) |
 | zwp_xwayland_keyboard_grab_manager_v1 (Xwayland only; from source) | — | missing | only rootful Xwayland with `-host-grab` uses it, and Mutter allows grabs only per `xwayland-grab-access-rules`; Roost runs rootless Xwayland (#89) |
 | gtk_shell1 | 7 | missing | not planned: GTK4 needs none of it on a GNOME session |
 | zwp_linux_dmabuf_v1 feedback (v4+) | native backend only | version 3 | #89 |
