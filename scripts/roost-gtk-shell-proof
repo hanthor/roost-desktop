@@ -909,7 +909,7 @@ grid_edge() { grid_point "$1" "$2" 4; }
     --press "Previous Page" || fail G-GRID-DRAG-PAGE "could not press Previous Page"
 sleep 1
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-page-source.json" 20 || fail G-GRID-DRAG-PAGE "source dump failed"
-grid_origin
+grid_origin roost-shell-appgrid
 page_source="$(jq -r '[.[] | select(.showing and .role == "table cell")][0].name' "$ARTIFACTS/a11y-grid-page-source.json")"
 grid_coordinates="$(grid_point "$ARTIFACTS/a11y-grid-page-source.json" "$page_source")" || fail G-GRID-DRAG-PAGE "source tile has no actual bounds"
 read -r page_source_x page_source_y <<EOF
@@ -2779,7 +2779,9 @@ if [ -n "${x11_display:-}" ]; then
     wait "$COMPOSITOR_PID" || fail G-X11-CLEANUP "compositor did not exit gracefully"
     COMPOSITOR_PID=""
     display_number="${x11_display#:}"
-    [ ! -e "/tmp/.X11-unix/X$display_number" ] && [ ! -e "/tmp/.X$display_number-lock" ] || fail G-X11-CLEANUP "owned socket or display lock survived shutdown"
+    if [ -e "/tmp/.X11-unix/X$display_number" ] || [ -e "/tmp/.X$display_number-lock" ]; then
+        fail G-X11-CLEANUP "owned socket or display lock survived shutdown"
+    fi
     pass G-X11-CLEANUP "graceful shutdown removes owned listening sockets and display lock"
 fi
 
