@@ -231,6 +231,7 @@ Name=Roost Calendar Probe
 Exec=$ARTIFACTS/calendar-probe %u
 Type=Application
 MimeType=x-scheme-handler/calendar;
+NoDisplay=true
 EOF
 mkdir -p "$ARTIFACTS/config"
 cat >"$ARTIFACTS/config/mimeapps.list" <<EOF
