@@ -1,0 +1,10 @@
+{
+  "backend": "actual nested winit in Xvfb; no KMS or physical GPU claim",
+  "requested_s": 16,
+  "frames": 274,
+  "batches": 2,
+  "raw_sha256": "538d2eb0a838904c3b1a08ab1de05d5e4ed67da769c987863a09808f113d707a",
+  "native_probe_binary_sha256": "78b9172b477f104f88ea69b4ba5868d962f0c8b0c3bb2bcb144bdfa99055bc7c",
+  "native_probe_source_sha256": "f923433dc3056eb492c57ff86251449368f0bb66a6a26dc800db178b265f28e0",
+  "compositor_binary_sha256": "d57f3652e1064b1d522310f336fb58521f4347bc7fc25661d55cb4cb80501a18"
+}
