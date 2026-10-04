@@ -159,3 +159,22 @@ screen-saver URI and checks its dimmed pixels. The parity lock frame sets
 an explicit URI to the exported reference wallpaper and retains it in
 `lock-background-uri.txt`; the custom-color proof is separate from that
 GNOME visual comparison.
+
+## Workspace insertion comparison
+
+State `16b-workspace-insertion-placeholder` compares GNOME 51’s native
+insertion handler with an actual held Roost preview drag. Both place the
+marker at `[619,102,18,26]` and shift later thumbnails to x=643 and x=692.
+The strip crop `530,96,220,30` has mean channel difference 2.41 and 3.6%
+of pixels above the usual 24-level threshold. The marker crop
+`619,102,18,24` has mean difference 0.69 and 0.0% above threshold; its
+bottom two pixels are excluded because the actual Roost drag ghost
+begins there, while the native synthetic handler has no ghost.
+
+[Recorded source and metrics](../tests/gnome-reference/workspace-insertion-comparison.json)
+and the [three-row comparison image](../tests/gnome-reference/workspace-insertion-strip.png)
+retain this evidence. Roost binaries came from GTK job `111359239198`,
+run `37175952333`, checkout merge `49a70b0` (PR 240 head `ad87517` into
+PR 234 head `bd18c76`). The full GTK proof, including `G-WS-INSERT`,
+passed. Capture with `--workspace-insertion-only` isolates this state
+from screenshot-helper startup and fails if the placeholder is absent.
