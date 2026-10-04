@@ -1,6 +1,2 @@
-# CI-only (VM lane): kernel console on the first serial port as well.
-# No plymouth: once in five runs, plymouth quitting about 10 s after the
-# autologin coincided with GDM starting its greeter on the login VT,
-# which took the display from the running Roost session (drm: session
-# paused). See docs/testing.md, "Marlin VM lane".
-kargs = ["console=tty0", "console=ttyS0,115200n8", "systemd.journald.forward_to_console=1", "plymouth.enable=0"]
+# CI-only: mirror the journal on serial while retaining the shipping splash.
+kargs = ["console=tty0", "console=ttyS0,115200n8", "systemd.journald.forward_to_console=1"]

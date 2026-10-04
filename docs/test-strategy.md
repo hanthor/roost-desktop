@@ -102,3 +102,19 @@ Spec 000 establishes distributions; spec 006 applies the project targets on the 
 - **Release blocker:** any unresolved critical lock/capture/input/clipboard/IME/accessibility issue, app-surface loss on shell crash, unexplained growth, missing support evidence, or broken recovery path.
 
 No implementation or test is considered complete because a test command exits successfully; its coverage and artifacts must match the requirement and supported environment being claimed.
+
+## 7. Automated structural compliance
+
+`validate-test-strategy.yml` runs `scripts/roost-test-strategy` for crate,
+strategy and validator changes. It rejects crates with no named executable
+test functions, invalid or duplicated stable test IDs, and removal of the
+registered IPC/security/recovery cases. The main CI check supplies its test
+list after the workspace tests pass, so registered cases must also appear
+in that executed inventory. Both jobs retain a source-stamped compliance
+report, including the remaining traceability and boundary-case gaps.
+
+This inventory is a structural regression gate. It does not measure line
+or branch coverage, certify a security boundary, or satisfy the release
+artifact checklist. Qualified legacy test IDs, coverage thresholds and
+complete boundary/artifact enforcement remain tracked by issue #8; the
+report keeps those gaps visible rather than treating them as a pass.
