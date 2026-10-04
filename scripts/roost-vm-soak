@@ -22,6 +22,13 @@ def identity(proc):
     return fields[0], int(fields[19])
 
 
+def is_departed(proc):
+    try:
+        return identity(proc)[0] in ('Z', 'X', 'x')
+    except (FileNotFoundError, ProcessLookupError):
+        return True
+
+
 def sample(uid, proc_root=Path('/proc')):
     totals = dict(pss_kib=0, rss_kib=0, fds=0, processes=0)
     critical = {name: [] for name in CRITICAL}
@@ -55,7 +62,7 @@ def sample(uid, proc_root=Path('/proc')):
             # A departed process is absent, never represented as zero memory.
             continue
         except ProcessLookupError:
-            if not proc.exists() or identity(proc)[0] in ('Z', 'X', 'x'):
+            if is_departed(proc):
                 continue
             raise
     if any(len(value) != 1 for value in critical.values()):
