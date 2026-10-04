@@ -24,5 +24,8 @@ non-fatal to the native session.
 The GTK proof requires native startup without an owned XWayland process,
 first-client mapping through the reserved sockets, real process termination,
 compatibility-window cleanup and same-display reconnect while native IDs stay
-unchanged, then socket/lock cleanup at graceful shutdown. Those candidate gates
-remain pending until exact-head CI passes. Physical GPU/VT behavior is separate.
+unchanged, then socket/lock cleanup at graceful shutdown. These gates passed
+on candidate `3719d3f39a657e6f447c000cff94e23fec41d710` in
+[CI 37192378020](https://github.com/hanthor/roost-desktop/actions/runs/37192378020),
+along with package and Marlin VM checks; all 13 current-head checks succeeded
+before merge. Physical GPU/VT behavior is separate.
