@@ -27,6 +27,7 @@ struct Worker {
     origin: (i32, i32),
     connection: Option<Connection>,
     disconnected: bool,
+    bindings: u32,
 }
 impl Worker {
     fn event(
@@ -51,6 +52,13 @@ impl Worker {
                 return calloop::PostAction::Remove;
             }
             EisRequestSourceEvent::Request(EisRequest::Bind(request)) => {
+                // Rebinding emits device objects and keymap FDs. Bound churn
+                // even if a malicious client never acknowledges old objects.
+                self.bindings += 1;
+                if self.bindings > 32 {
+                    self.disconnected = true;
+                    return calloop::PostAction::Remove;
+                }
                 if let Some(device) = self.device.take() {
                     device.remove();
                 }
@@ -260,6 +268,7 @@ pub(crate) fn start(
                 origin,
                 connection: None,
                 disconnected: false,
+                bindings: 0,
             };
             let Ok(mut event_loop) = calloop::EventLoop::<Worker>::try_new() else {
                 thread_grant.stopped.store(true, Ordering::SeqCst);

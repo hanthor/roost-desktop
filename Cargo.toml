@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["vendor/reis"]
 members = [
     "crates/compositor",
     "crates/shell-control-schema",
@@ -74,3 +75,7 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.roost-wallpaper]
 opt-level = 3
+
+# Upstream reis0.7.1 plus bounded pre-decoder socket accumulation.
+[patch.crates-io]
+reis = { path = "vendor/reis" }

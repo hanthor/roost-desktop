@@ -28,7 +28,11 @@ guarantees. Capture nodes share the revocation flag and stop with their grant.
 
 Touch, keysym/text injection and clipboard transfer are not implemented or
 advertised. EIS output regions and keymap are snapshots at connection time;
-clients need a new consent session after output/keymap changes. EIS receiver contexts are
+clients need a new consent session after output/keymap changes. Rebinding is
+limited to 32 device generations per connection to bound unacknowledged object
+and outgoing keymap-FD churn. The vendored reis 0.7.1 transport additionally fails
+when pre-decoder bytes exceed 2 MiB or received FD storage exceeds 64; its upstream
+1 MiB message limit remains. See vendor/reis/ROOST-PATCH.md and regression tests. EIS receiver contexts are
 rejected. No physical input device, GPU or VT acceptance follows from nested
 software-rendered proof.
 

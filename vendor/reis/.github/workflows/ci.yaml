@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  check-and-build:
+    strategy:
+      matrix:
+        rust_version: ['1.71.1', stable]
+    runs-on: ubuntu-latest
+    outputs:
+      libei_version: ${{ steps.libei_version.outputs.libei_version }}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ matrix.rust_version }}
+        components: clippy, rustfmt
+    - run: sudo apt-get -qq update
+    - run: sudo apt-get install -y libxkbcommon-dev
+
+    - run: cargo fmt --all -- --check
+
+    # Make sure there are no broken intra-doc links with and without features
+    - run: RUSTDOCFLAGS="--deny warnings" cargo doc --no-deps --all-features
+    - run: RUSTDOCFLAGS="--deny warnings" cargo doc --no-deps
+
+    - run: cargo clippy --all-features -- -Dwarnings
+      if: matrix.rust_version != 'stable'
+    - run: cargo clippy --all-features --all-targets -- -Dwarnings
+      if: matrix.rust_version == 'stable'
+
+    # Sanity check: generic code doesn't depend on features
+    - run: cargo check
+
+    - run: cargo build --all-features
+      if: matrix.rust_version != 'stable'
+    - run: cargo build --all-features --examples
+      if: matrix.rust_version == 'stable'
+
+    - run: echo libei_version="$(cat LIBEI_VERSION)" >> "$GITHUB_OUTPUT"
+      id: libei_version
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: reis-demo-server
+        path: target/debug/examples/reis-demo-server
+  libei-test:
+    runs-on: ubuntu-latest
+    needs: check-and-build
+    steps:
+    - run: git clone -b "$libei_version" https://gitlab.freedesktop.org/libinput/libei .
+      env:
+        libei_version: ${{needs.check-and-build.outputs.libei_version}}
+    - uses: actions/download-artifact@v4
+      with:
+        name: reis-demo-server
+    - run: chmod +x reis-demo-server
+    - run: sudo apt-get -qq update
+    - run: sudo apt-get install -y meson libsystemd-dev python3-pytest python3-structlog python3-attr python3-dbusmock python3-pip
+    - run: pip3 install strenum
+    - run: meson setup build
+    - run: meson compile -C build
+    - run: |
+        mkdir xdg
+        export XDG_RUNTIME_DIR=$PWD/xdg
+        export LIBEI_TEST_SERVER=$PWD/reis-demo-server
+        export LIBEI_TEST_SOCKET=$PWD/xdg/eis-0
+        cd build && pytest-3
