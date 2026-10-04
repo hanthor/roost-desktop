@@ -2066,9 +2066,9 @@ if [ -n "$PW_PIDS" ] && command -v gst-launch-1.0 >/dev/null 2>&1; then
     [ -x "$PORTAL_BACKEND" ] || fail G-PORTAL-CONSENT "installed GNOME backend missing"
     mkdir -p "$XDG_CONFIG_HOME/xdg-desktop-portal"
     printf '[preferred]\ndefault=gnome;gtk;\norg.freedesktop.impl.portal.ScreenCast=gnome\n' >"$XDG_CONFIG_HOME/xdg-desktop-portal/portals.conf"
-    XDG_CURRENT_DESKTOP=GNOME WAYLAND_DISPLAY="$SOCKET_NAME" GDK_BACKEND=wayland GTK_A11Y=atspi "$PORTAL_BACKEND" >"$ARTIFACTS/portal-gnome.log" 2>&1 &
+    XDG_CURRENT_DESKTOP=GNOME WAYLAND_DISPLAY="$SOCKET_NAME" GDK_BACKEND=wayland GTK_A11Y=atspi XDG_SESSION_TYPE=wayland "$PORTAL_BACKEND" --replace >"$ARTIFACTS/portal-gnome.log" 2>&1 &
     PORTAL_PIDS="$!"
-    XDG_CURRENT_DESKTOP=GNOME /usr/libexec/xdg-desktop-portal >"$ARTIFACTS/portal-frontend.log" 2>&1 &
+    XDG_CURRENT_DESKTOP=GNOME /usr/libexec/xdg-desktop-portal --replace >"$ARTIFACTS/portal-frontend.log" 2>&1 &
     PORTAL_PIDS="$PORTAL_PIDS $!"
     sleep 2
     for decision in cancel grant; do
