@@ -83,6 +83,8 @@ for bin in roost-compositor roost-session roost-shell-host roost-ibus-bridge roo
 done
 install -m0644 share/wayland-sessions/roost.desktop \
     "$STAGE/usr/share/wayland-sessions/roost.desktop"
+install -Dm0644 share/systemd/user/roost-session.target \
+    "$STAGE/usr/lib/systemd/user/roost-session.target"
 # Lock-screen PAM service (#62); a conffile, so local edits survive.
 install -m0644 share/pam.d/roost-lock "$STAGE/etc/pam.d/roost-lock"
 echo /etc/pam.d/roost-lock >"$STAGE/DEBIAN/conffiles"

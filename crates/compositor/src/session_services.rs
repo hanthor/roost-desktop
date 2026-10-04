@@ -55,7 +55,7 @@ pub struct SessionServices {
 impl Drop for SessionServices {
     fn drop(&mut self) {
         self.alive.store(false, Ordering::Release);
-        let args = ["--user", "--no-block", "stop", "graphical-session.target"]
+        let args = ["--user", "--no-block", "stop", "roost-session.target"]
             .into_iter()
             .map(str::to_owned)
             .collect::<Vec<_>>();
@@ -132,7 +132,9 @@ pub fn publish(socket: &str) -> SessionServices {
                 if !alive.load(Ordering::Acquire) {
                     return;
                 }
-                let start_graphical = ["--user", "start", "graphical-session.target"]
+                // systemd refuses a manual start of graphical-session.target.
+                // Our packaged target pulls it in through BindsTo instead.
+                let start_graphical = ["--user", "start", "roost-session.target"]
                     .into_iter()
                     .map(str::to_owned)
                     .collect::<Vec<_>>();
@@ -143,7 +145,7 @@ pub fn publish(socket: &str) -> SessionServices {
                 // Drop may race the worker's start. Stop again if shutdown
                 // occurred before systemd acknowledged the target.
                 if !alive.load(Ordering::Acquire) {
-                    let stop = ["--user", "--no-block", "stop", "graphical-session.target"]
+                    let stop = ["--user", "--no-block", "stop", "roost-session.target"]
                         .into_iter()
                         .map(str::to_owned)
                         .collect::<Vec<_>>();

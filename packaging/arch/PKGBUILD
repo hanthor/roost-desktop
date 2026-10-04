@@ -95,6 +95,8 @@ package() {
     done
     install -Dm0644 "$root/share/wayland-sessions/roost.desktop" \
         "$pkgdir/usr/share/wayland-sessions/roost.desktop"
+    install -Dm0644 "$root/share/systemd/user/roost-session.target" \
+        "$pkgdir/usr/lib/systemd/user/roost-session.target"
     # Lock-screen PAM service (#62): unlock under GDM, where no greetd runs.
     install -Dm0644 "$root/share/pam.d/roost-lock" "$pkgdir/etc/pam.d/roost-lock"
     install -Dm0644 "$root/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

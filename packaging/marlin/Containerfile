@@ -38,6 +38,7 @@ RUN pacman -Sy --noconfirm \
     && roost-compositor --version \
     && roost-shell-gtk --version \
     && grep -qx 'Name=Roost (preview)' /usr/share/wayland-sessions/roost.desktop \
+    && test -f /usr/lib/systemd/user/roost-session.target \
     && test -f /etc/pam.d/roost-lock \
     && test -x /usr/lib/gnome-shell-calendar-server \
     && ldd /usr/lib/gnome-shell-calendar-server >/tmp/roost-calendar.ldd \
