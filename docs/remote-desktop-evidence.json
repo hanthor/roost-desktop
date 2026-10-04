@@ -1,0 +1,23 @@
+{
+  "candidate_commit": "8019c16641ebb9e42330306071e8224c31cea620",
+  "artifact_workflow_run": 37184167578,
+  "runtime_versions": [
+    "xdg-desktop-portal-gnome-51.0-1.fc45.x86_64",
+    "xdg-desktop-portal-1.22.1-2.fc45.x86_64",
+    "pipewire-1.6.9-1.fc45.x86_64",
+    "gtk4-4.24.1-1.fc45.x86_64",
+    "libadwaita-1.10.0-2.fc45.x86_64",
+    "libei-1.6.0-3.fc45.x86_64"
+  ],
+  "result": "GNOME51 genuine RemoteDesktop portal: Cancel, keyboard/pointer grant, linked PipeWire frame, foreign input denial, legacy GTK delivery, libei GTK delivery/FD revocation, Close/client/backend disconnect, active lock revocation and locked denial; touch/clipboard unsupported",
+  "locked_denial": {
+    "mode": "locked",
+    "response": 2,
+    "stage": "CreateSession"
+  },
+  "limitations": [
+    "Nested software rendering only; no physical GPU/VT acceptance.",
+    "Touch and clipboard unsupported.",
+    "Published next-head aggregate seat-count variant must pass exact-head CI; this packaged capture used prior identity telemetry."
+  ]
+}
