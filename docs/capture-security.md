@@ -27,5 +27,11 @@ latencies after Close/client/backend/lock were 0.045/0.094/0.116/0.036
 seconds; a new locked frontend request returned response 2. These are
 individual observed values, not latency guarantees. The complete CI gate
 remains pending: its first dedicated portal job stopped at ShellCheck
-before runtime, and its broader GTK job clicked empty grid space. Both
-drivers are corrected for the next candidate; security assertions remain.
+before runtime, and its broader GTK job failed a drag driven by fixed grid coordinates.
+The held-pointer screenshot does not establish the initial allocation. The
+replacement driver uses WINDOW_COORDS plus the actual grid/folder layer origin
+and accepts both GTK button role names. A focused local GNOME 51 / GTK 4.24
+paging probe using the same 95 package selected the visible tile at 202.5,312.5
+(window bounds 146,24,113,113 plus layer origin 0,232); its real edge drag
+turned the page. The broader CI journey remains required; security assertions
+remain unchanged.
