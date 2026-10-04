@@ -109,10 +109,10 @@ Source: [GTK Wayland settings translations](https://github.com/GNOME/gtk/blob/4.
 |---|---|---|
 | color-shading-type | Ignored | Roost implements the wallpaper URI/placement/primary color subset; no slideshow, shading or metadata policy |
 | picture-opacity | Ignored | Roost implements the wallpaper URI/placement/primary color subset; no slideshow, shading or metadata policy |
-| picture-options | Honored | Live wallpaper drop consumed by compositor; placement and solid-color fallback |
-| picture-uri | Honored | Live wallpaper drop consumed by compositor; placement and solid-color fallback |
-| picture-uri-dark | Honored | Live wallpaper drop consumed by compositor; placement and solid-color fallback |
-| primary-color | Honored | Live wallpaper drop consumed by compositor; placement and solid-color fallback |
+| picture-options | Honored (partial) | none hides the picture; every other mode currently uses compositor zoom placement |
+| picture-uri | Honored | Live wallpaper URI or solid-color fallback consumed by compositor |
+| picture-uri-dark | Honored | Live wallpaper URI or solid-color fallback consumed by compositor |
+| primary-color | Honored | Live wallpaper URI or solid-color fallback consumed by compositor |
 | secondary-color | Ignored | Roost implements the wallpaper URI/placement/primary color subset; no slideshow, shading or metadata policy |
 | show-desktop-icons | Ignored | Roost implements the wallpaper URI/placement/primary color subset; no slideshow, shading or metadata policy |
 ## org.gnome.desktop.break-reminders
