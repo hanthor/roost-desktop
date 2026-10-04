@@ -854,6 +854,17 @@ pass G-APP-INSTALLED "an app installed mid-session shows in search"
 xdotool key Escape
 cstate '.overview_open | not' "closed" || { xdotool key Escape; cstate '.overview_open | not' "closed" || fail G-APP-INSTALLED "overview stayed open"; }
 
+# A long folder label must not enlarge homogeneous grid cells or push
+# the pager outside the compositor's viewport. Keep the original folders
+# so subsequent drag/folder fixtures start with the same catalog.
+grid_original_folders="$(gsettings get org.gnome.desktop.app-folders folder-children)"
+grid_long_folder=org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/ViewportProof/
+grid_long_name='Roost Extremely Long Folder Name For Viewport Regression'
+gsettings set org.gnome.desktop.app-folders folder-children "['ViewportProof']"
+gsettings set "$grid_long_folder" name "$grid_long_name"
+gsettings set "$grid_long_folder" translate false
+gsettings set "$grid_long_folder" apps "['roost-probe.desktop']"
+
 # GNOME's paged app grid: thirty more apps make a second page, with the
 # page indicators and the side arrows; Next Page turns to it.
 for i in $(seq -w 1 30); do
@@ -867,6 +878,21 @@ sleep 1.5
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-pages.json" 20 ||
     fail G-APP-GRID-PAGES "accessibility dump failed"
 scrot "$ARTIFACTS/11c-app-grid-pages.png" >/dev/null
+showing "$ARTIFACTS/a11y-grid-pages.json" "$grid_long_name" ||
+    fail G-GRID-FOLDER-WIDTH "long folder fixture is missing"
+cstate '.layers | any(.namespace == "roost-shell-appgrid")' "app-grid viewport" ||
+    fail G-GRID-FOLDER-WIDTH "app-grid layer missing"
+grid_viewport="$(jq -c '.layers[] | select(.namespace == "roost-shell-appgrid") | .rect' "$CSTATE")"
+jq -e --argjson viewport "$grid_viewport" '
+    any(.[]; .showing and .role == "frame" and .name == "App Grid"
+        and .bounds[2] > 0 and .bounds[2] <= $viewport[2])
+    and any(.[]; .showing and (.role == "push button" or .role == "button")
+        and .name == "Next Page" and .bounds[2] > 0
+        and .bounds[0] + .bounds[2] / 2 >= 0
+        and .bounds[0] + .bounds[2] / 2 < $viewport[2])
+' "$ARTIFACTS/a11y-grid-pages.json" >/dev/null ||
+    fail G-GRID-FOLDER-WIDTH "long folder widened the frame or pushed the Next Page click center outside the viewport"
+pass G-GRID-FOLDER-WIDTH "a long folder label preserves the grid viewport and visible Next Page button"
 for name in "Next Page" "Page 1" "Page 2"; do
     showing "$ARTIFACTS/a11y-grid-pages.json" "$name" || fail G-APP-GRID-PAGES "no '$name' with two pages"
 done
@@ -944,6 +970,8 @@ sleep 1
 showing "$ARTIFACTS/a11y-grid-drag-page.json" "Previous Page" ||
     fail G-GRID-DRAG-PAGE "holding a dragged app at the edge did not turn the page"
 pass G-GRID-DRAG-PAGE "an app dragged against the grid's edge turns the page, as GNOME's grid does"
+gsettings set org.gnome.desktop.app-folders folder-children "$grid_original_folders"
+sleep 1
 xdotool key Escape
 cstate '.overview_open | not' "closed" || { xdotool key Escape; cstate '.overview_open | not' "closed" || fail G-APP-GRID-PAGES "overview stayed open"; }
 rm -f "$XDG_DATA_HOME"/applications/roost-page-*.desktop
