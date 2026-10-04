@@ -698,7 +698,13 @@ impl WindowManager {
         let window = Window::new_wayland_window(surface.clone());
         let id = self.insert_managed(&title, app_id.as_deref());
         self.surface_index.insert(surface.wl_surface().clone(), id);
-        let geometry = self.placement(state);
+        let target = state
+            .initial_outputs
+            .get(surface.wl_surface())
+            .and_then(|name| state.outputs.iter().find(|entry| &entry.name == name))
+            .or_else(|| state.new_window_output())
+            .map(|entry| Rectangle::new(entry.loc.into(), entry.size));
+        let geometry = self.placement_on(state, None, target);
         // With a real output the client chooses its size first (Mutter's
         // empty initial configure); headless tests keep the cascade.
         let unplaced = Self::work_area(state).size.w > 0;
@@ -757,18 +763,34 @@ impl WindowManager {
     /// the most recent by one step, kept inside the work area (never
     /// under the top bar). Without an output (headless tests) the plain
     /// cascade from the origin stands.
-    fn placement(&mut self, state: &State) -> Rectangle<i32, Logical> {
-        self.placement_sized(state, None)
-    }
-
-    /// [`placement`](Self::placement) for a window that brings its own
+    /// Automatic placement for a window that brings its own
     /// size (X11 clients ask for one at map); `None` uses the default.
+    #[cfg(feature = "xwayland")]
     fn placement_sized(
         &mut self,
         state: &State,
         wanted: Option<Size<i32, Logical>>,
     ) -> Rectangle<i32, Logical> {
-        let work = Self::work_area(state);
+        let target = state
+            .new_window_output()
+            .map(|entry| Rectangle::new(entry.loc.into(), entry.size));
+        self.placement_on(state, wanted, target)
+    }
+
+    fn placement_on(
+        &mut self,
+        state: &State,
+        wanted: Option<Size<i32, Logical>>,
+        target: Option<Rectangle<i32, Logical>>,
+    ) -> Rectangle<i32, Logical> {
+        let work = target
+            .map(|output| {
+                Rectangle::new(
+                    (output.loc.x, output.loc.y + WORK_AREA_TOP).into(),
+                    (output.size.w, (output.size.h - WORK_AREA_TOP).max(0)).into(),
+                )
+            })
+            .unwrap_or_else(|| Self::work_area(state));
         if work.size.w <= 0 || work.size.h <= 0 {
             let mut rect = self.cascade_geometry();
             if let Some(size) = wanted {
@@ -790,7 +812,7 @@ impl WindowManager {
                     .is_some_and(|m| m.workspace == active)
             })
             .filter_map(|id| self.windows.get(id))
-            .filter(|w| !w.unplaced && !w.minimized)
+            .filter(|w| !w.unplaced && !w.minimized && work.contains(w.geometry.loc))
             .map(|w| w.geometry.loc)
             .collect();
         let centered: Point<i32, Logical> = (
@@ -836,7 +858,19 @@ impl WindowManager {
                 .get(&id)
                 .is_some_and(|w| w.layout == WindowLayout::Floating);
             if floating {
-                let geometry = self.placement_sized(state, Some(size));
+                // Preserve the target selected before the first buffer, even
+                // if the pointer moved while the client was rendering it.
+                let target = self.windows.get(&id).and_then(|window| {
+                    state
+                        .outputs
+                        .iter()
+                        .find(|entry| {
+                            Rectangle::new(entry.loc.into(), entry.size)
+                                .contains(window.geometry.loc)
+                        })
+                        .map(|entry| Rectangle::new(entry.loc.into(), entry.size))
+                });
+                let geometry = self.placement_on(state, Some(size), target);
                 if let Some(window) = self.windows.get_mut(&id) {
                     window.geometry = geometry;
                     window.unplaced = false;
