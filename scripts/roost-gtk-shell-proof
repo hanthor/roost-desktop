@@ -1604,6 +1604,12 @@ pick_alpha || fail G-WINDOW-MENU "the hidden window could not be picked from the
 cstate "any(.minimized[]; . == $alpha_id) | not" "restored" ||
     fail G-WINDOW-MENU "picking the hidden window did not bring it back"
 pass G-WINDOW-MENU "the header-bar menu keeps a window on top, hides it, and the overview brings it back"
+# Restore the fixture's stacking state so later pointer-driven tests do
+# not hit pinned Alpha through another application's window.
+window_menu
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-window-menu-unpin.json" 20 \
+    --press "Always on Top" || fail G-WINDOW-MENU "could not restore ordinary stacking"
+cstate "any(.above[]; . == $alpha_id) | not" "Alpha unpinned" || fail G-WINDOW-MENU "Alpha stayed above later test windows"
 
 # GNOME's window-manager keys (org.gnome.desktop.wm.keybindings).
 sleep 1
@@ -1726,16 +1732,21 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
         fail G-IME-CURSOR "cursor location ($cursor) is not inside the IME window ($rect)"
     pass G-IME-CURSOR "IBus hears the text cursor at ($cursor), inside the field's window ($rect)"
     # Moving only the parent must update the global caret, without typing.
-    cursor_before="$cursor"
+    cstate '.focused_app_id == "roost-ime"' "IME focused for movement" || fail G-IME-CURSOR-MOVE "another window owns keyboard focus"
+    # shellcheck disable=SC2086
+    set -- $cursor
+    expected_cursor="$(($1 + 65)) $(($2 + 45)) $3 $4"
     # shellcheck disable=SC2086
     set -- $rect
+    ime_x=$1 ime_y=$2
     xdotool mousemove --window "$WID" $(($1 + 200)) $(($2 + 30)) keydown Super_L mousedown 1
     xdotool mousemove_relative -- 65 45
     xdotool mouseup 1 keyup Super_L
+    cstate ".windows | any(.app_id == \"roost-ime\" and .rect[0] == $((ime_x + 65)) and .rect[1] == $((ime_y + 45)))" "IME window moved exactly" || fail G-IME-CURSOR-MOVE "drag moved another window or used the wrong displacement"
     end=$(($(date +%s) + 5))
-    until [ "$(sed -n 's/^roost-ibus-test-engine: cursor //p' "$ENGINE_LOG" | tail -1)" != "$cursor_before" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+    until [ "$(sed -n 's/^roost-ibus-test-engine: cursor //p' "$ENGINE_LOG" | tail -1)" = "$expected_cursor" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
     cursor="$(sed -n 's/^roost-ibus-test-engine: cursor //p' "$ENGINE_LOG" | tail -1)"
-    [ "$cursor" != "$cursor_before" ] || fail G-IME-CURSOR-MOVE "moving the window did not update IBus's caret"
+    [ "$cursor" = "$expected_cursor" ] || fail G-IME-CURSOR-MOVE "caret did not follow the exact window displacement: $cursor expected $expected_cursor"
     pass G-IME-CURSOR-MOVE "moving the focused window refreshes IBus's global cursor without typing"
     # A field inside a real xdg popup keeps the IM keyboard grab active.
     # Escape must survive the IBus virtual-key return with its keymap intact.
@@ -1748,6 +1759,7 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-ime "$ARTIFACTS/a11y-ime-qs-closed.json" 20 || fail G-IME-ESCAPE "post-Escape dump failed"
     if showing "$ARTIFACTS/a11y-ime-qs-closed.json" "IME Popover Field"; then fail G-IME-ESCAPE "Escape did not close the popover with the composing engine enabled"; fi
     pass G-IME-ESCAPE "Escape closes the GTK popover while the composing engine is enabled"
+    cstate '.focused_app_id == "roost-ime"' "IME focus after Escape" || fail G-IME-ESCAPE "Escape transferred focus to another application"
     # GNOME Shell is IBus's panel and draws its candidates
     # (ibusCandidatePopup.js): the shell owns org.freedesktop.IBus.Panel
     # on IBus's bus, "ni" brings up 你 尼 泥 under the text cursor with
