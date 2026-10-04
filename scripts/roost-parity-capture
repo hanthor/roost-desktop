@@ -20,11 +20,13 @@ if [ -z "${ROOST_PARITY_PRIVATE_BUS:-}" ]; then
 fi
 ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
 OUT="$ROOT/target/roost-parity"
+INSERTION_ONLY=0
 WIDTH=1280
 HEIGHT=800
 while [ $# -gt 0 ]; do
     case "$1" in
         --out) OUT="$2"; shift 2 ;;
+        --workspace-insertion-only) INSERTION_ONLY=1; shift ;;
         --help|-h) sed -n '2,11p' "$0"; exit 0 ;;
         *) echo "roost-parity-capture: unknown argument $1" >&2; exit 1 ;;
     esac
@@ -344,16 +346,21 @@ sleep 1.2
 jq -e ' .active_workspace == 0 ' "$ROOST_COMPOSITOR_STATE" >/dev/null || {
     echo "roost-parity-capture: Super+Page_Up did not restore the workspace" >&2; exit 1;
 }
+if [ "$INSERTION_ONLY" = 0 ]; then
 # The screenshot UI (Print).
 xdotool key Print
 shot 14-screenshot-ui 6
 # Close through its visible action, matching the native capture’s close().
 # This also ensures the screenshot overlay releases pointer ownership.
-press "Close"
+xdotool mousemove --window "$WID" $((WIDTH / 2 + 158)) $((HEIGHT / 2 + 179))
+sleep 0.2
+xdotool click 1
+park
 sleep 1
 jq -e '[.layers[]? | select(.namespace == "roost-screenshot-ui")] | length == 0' "$ROOST_COMPOSITOR_STATE" >/dev/null || {
     echo "roost-parity-capture: screenshot overlay did not close" >&2; exit 1;
 }
+fi
 # Three workspaces (the focused window moved one to the right through
 # its window menu, the view staying put): the overview's thumbnails.
 window_menu
@@ -376,6 +383,10 @@ shot 16b-workspace-insertion-placeholder 1
 jq -e '.workspace_placeholder.workspace == 1' "$ROOST_COMPOSITOR_STATE" >/dev/null || {
     echo "roost-parity-capture: thumbnail gap has no insertion placeholder" >&2; exit 1;
 }
+if [ "$INSERTION_ONLY" = 1 ]; then
+    echo "roost-parity-capture: insertion frame in $OUT"
+    exit 0
+fi
 # Cancel without a drop so following capture states keep their workspaces.
 xdotool key Escape
 xdotool mouseup 1
