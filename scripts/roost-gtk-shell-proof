@@ -276,8 +276,10 @@ SYSBUS_PID=""
 ACCEL_PID=""
 CAL_PID=""
 SCREENSAVER_PID=""
+SCROLL_PROBE_PID=""
 IME_PIDS=""
 cleanup() {
+    if [ -n "$SCROLL_PROBE_PID" ]; then kill "$SCROLL_PROBE_PID" 2>/dev/null || true; fi
     # shellcheck disable=SC2086
     if [ -n "$IME_PIDS" ]; then kill $IME_PIDS 2>/dev/null || true; fi
     # The bridge daemonized ibus-daemon for this session's display.
@@ -354,6 +356,37 @@ XML
     GSETTINGS_SCHEMA_DIR="$ARTIFACTS/schemas${GSETTINGS_SCHEMA_DIR:+:$GSETTINGS_SCHEMA_DIR}"
     export GSETTINGS_SCHEMA_DIR
 fi
+# Media settings are also exercised on lean hosts without gsd's schema.
+if ! gsettings list-schemas 2>/dev/null | grep -qx org.gnome.settings-daemon.plugins.media-keys; then
+    mkdir -p "$ARTIFACTS/schemas"
+    "$PY" - "$ARTIFACTS/schemas/org.gnome.media-keys.gschema.xml" <<'MEDIA_SCHEMA'
+import sys
+import xml.etree.ElementTree as ET
+root = ET.Element('schemalist')
+schema = ET.SubElement(root, 'schema', id='org.gnome.settings-daemon.plugins.media-keys', path='/org/gnome/settings-daemon/plugins/media-keys/')
+def key(name, kind, default):
+    ET.SubElement(ET.SubElement(schema, 'key', name=name, type=kind), 'default').text = default
+key('screensaver', 'as', "['<Super>l']")
+key('volume-step', 'i', '6')
+for name, defaults in {
+    'volume-up': ['XF86AudioRaiseVolume', '<Ctrl>XF86AudioRaiseVolume'],
+    'volume-down': ['XF86AudioLowerVolume', '<Ctrl>XF86AudioLowerVolume'],
+    'volume-mute': ['XF86AudioMute'],
+    'mic-mute': ['XF86AudioMicMute'],
+    'volume-up-quiet': ['<Alt>XF86AudioRaiseVolume', '<Alt><Ctrl>XF86AudioRaiseVolume'],
+    'volume-down-quiet': ['<Alt>XF86AudioLowerVolume', '<Alt><Ctrl>XF86AudioLowerVolume'],
+    'volume-mute-quiet': ['<Alt>XF86AudioMute'],
+    'volume-up-precise': ['<Shift>XF86AudioRaiseVolume', '<Ctrl><Shift>XF86AudioRaiseVolume'],
+    'volume-down-precise': ['<Shift>XF86AudioLowerVolume', '<Ctrl><Shift>XF86AudioLowerVolume'],
+}.items():
+    key(name, 'as', '[]')
+    key(name + '-static', 'as', repr(defaults))
+ET.ElementTree(root).write(sys.argv[1], encoding='unicode')
+MEDIA_SCHEMA
+    glib-compile-schemas "$ARTIFACTS/schemas"
+    GSETTINGS_SCHEMA_DIR="$ARTIFACTS/schemas"
+    export GSETTINGS_SCHEMA_DIR
+fi
 # Quick-settings daemons: stubs on a private "system" bus (#55), a fake
 # backlight, and a fake wpctl that records the sink volume.
 BACKLIGHT="$ARTIFACTS/backlight/roost-bl"
@@ -364,6 +397,10 @@ ROOST_BACKLIGHT_ROOT="$ARTIFACTS/backlight"
 export ROOST_BACKLIGHT_ROOT
 VOLUME_FILE="$ARTIFACTS/volume"
 echo 0.80 >"$VOLUME_FILE"
+VOLUME_MUTED_FILE="$ARTIFACTS/volume-muted"
+MIC_MUTED_FILE="$ARTIFACTS/mic-muted"
+echo 0 >"$VOLUME_MUTED_FILE"
+echo 0 >"$MIC_MUTED_FILE"
 SINK_FILE="$ARTIFACTS/default-sink"
 echo 48 >"$SINK_FILE"
 # The default source, and an app recording from it while RECORDING_FILE
@@ -374,17 +411,21 @@ RECORDING_FILE="$ARTIFACTS/recording"
 cat >"$ARTIFACTS/bin/wpctl" <<WPCTL
 #!/bin/sh
 mark() { [ "\$(cat "$SINK_FILE")" = "\$1" ] && echo "*" || echo " "; }
+muted() { [ "\$(cat "\$1")" = 1 ] && printf ' [MUTED]' || true; }
 case "\$1" in
     get-volume)
         case "\$2" in
-            *SOURCE*) echo "Volume: \$(cat "$MIC_FILE")" ;;
-            *) echo "Volume: \$(cat "$VOLUME_FILE")" ;;
+            *SOURCE*) echo "Volume: \$(cat "$MIC_FILE")\$(muted "$MIC_MUTED_FILE")" ;;
+            *) echo "Volume: \$(cat "$VOLUME_FILE")\$(muted "$VOLUME_MUTED_FILE")" ;;
         esac ;;
     set-volume)
         case "\$2" in
             *SOURCE*) echo "\$3" >"$MIC_FILE" ;;
             *) echo "\$3" >"$VOLUME_FILE" ;;
         esac ;;
+    set-mute)
+        case "\$2" in *SOURCE*) mute_file="$MIC_MUTED_FILE" ;; *) mute_file="$VOLUME_MUTED_FILE" ;; esac
+        case "\$3" in toggle) echo "\$((1 - \$(cat "\$mute_file")))" >"\$mute_file" ;; *) echo "\$3" >"\$mute_file" ;; esac ;;
     set-default) echo "\$2" >"$SINK_FILE" ;;
     status)
         printf 'Audio\n ├─ Sinks:\n'
@@ -1819,8 +1860,8 @@ ACCEL_PID=$!
 end=$(($(date +%s) + 10))
 until grep -q grabbed "$ACCEL_MARKER" 2>/dev/null || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
 grep -q "grabbed [1-9]" "$ACCEL_MARKER" 2>/dev/null ||
-    fail G-ACCEL "the media-keys stand-in could not grab XF86AudioRaiseVolume"
-xdotool key XF86AudioRaiseVolume
+    fail G-ACCEL "the media-keys stand-in could not grab XF86AudioPlay"
+xdotool key XF86AudioPlay
 end=$(($(date +%s) + 5))
 until grep -q activated "$ACCEL_MARKER" 2>/dev/null || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
 grep -q "activated" "$ACCEL_MARKER" ||
@@ -1828,6 +1869,58 @@ grep -q "activated" "$ACCEL_MARKER" ||
 sleep 0.5
 scrot "$ARTIFACTS/24b-osd.png" >/dev/null
 pass G-ACCEL "gnome-settings-daemon's grab fires on its key and its ShowOSD shows the OSD"
+
+# Native media actions work even without gsd-media-keys. These assert
+# the actual asynchronous backend mutations, including GNOME's unmute rule.
+echo 0.40 >"$VOLUME_FILE"
+echo 0 >"$VOLUME_MUTED_FILE"
+media_volume() {
+    expected=$1
+    for _ in $(seq 1 30); do
+        [ "$(cat "$VOLUME_FILE")" = "$expected" ] && return 0
+        sleep 0.1
+    done
+    return 1
+}
+xdotool key XF86AudioRaiseVolume
+media_volume 0.4600 || fail G-MEDIA-VOLUME "volume up did not apply the 6% step"
+xdotool key XF86AudioLowerVolume
+media_volume 0.4000 || fail G-MEDIA-VOLUME "volume down did not apply the 6% step"
+xdotool key shift+XF86AudioRaiseVolume
+media_volume 0.4200 || fail G-MEDIA-VOLUME "precise volume up did not use 2%"
+xdotool key XF86AudioMute
+for _ in $(seq 1 30); do [ "$(cat "$VOLUME_MUTED_FILE")" = 1 ] && break; sleep 0.1; done
+[ "$(cat "$VOLUME_MUTED_FILE")" = 1 ] || fail G-MEDIA-VOLUME "volume mute did not mute"
+xdotool key XF86AudioRaiseVolume
+for _ in $(seq 1 30); do [ "$(cat "$VOLUME_MUTED_FILE")" = 0 ] && break; sleep 0.1; done
+if [ "$(cat "$VOLUME_MUTED_FILE")" != 0 ] || [ "$(cat "$VOLUME_FILE")" != 0.4200 ]; then
+    fail G-MEDIA-VOLUME "unmuting increased or lost the existing volume"
+fi
+xdotool key XF86AudioMicMute
+for _ in $(seq 1 30); do [ "$(cat "$MIC_MUTED_FILE")" = 1 ] && break; sleep 0.1; done
+[ "$(cat "$MIC_MUTED_FILE")" = 1 ] || fail G-MEDIA-VOLUME "microphone mute did not mute"
+xdotool key XF86AudioMicMute
+for _ in $(seq 1 30); do [ "$(cat "$MIC_MUTED_FILE")" = 0 ] && break; sleep 0.1; done
+[ "$(cat "$MIC_MUTED_FILE")" = 0 ] || fail G-MEDIA-VOLUME "microphone unmute did not unmute"
+# Live rebinding and an empty static array must take effect without restart.
+MEDIA_SCHEMA=org.gnome.settings-daemon.plugins.media-keys
+gsettings set "$MEDIA_SCHEMA" volume-up-static '[]'
+sleep 0.7
+xdotool key XF86AudioRaiseVolume
+sleep 0.7
+[ "$(cat "$VOLUME_FILE")" = 0.4200 ] || fail G-MEDIA-VOLUME "an explicitly disabled hardware key still changed volume"
+gsettings set "$MEDIA_SCHEMA" volume-up "['F8']"
+gsettings set "$MEDIA_SCHEMA" volume-step 10
+sleep 0.7
+xdotool key F8
+media_volume 0.5200 || fail G-MEDIA-VOLUME "live rebound volume key ignored the configured step"
+gsettings reset "$MEDIA_SCHEMA" volume-up
+gsettings reset "$MEDIA_SCHEMA" volume-up-static
+gsettings reset "$MEDIA_SCHEMA" volume-step
+sleep 0.7
+echo 0.4200 >"$VOLUME_FILE"
+scrot "$ARTIFACTS/media-volume-osd.png" >/dev/null
+pass G-MEDIA-VOLUME "native volume/precise/mute/microphone keys mutate PipeWire state; unmute preserves the level"
 
 # GNOME Shell's own keybindings (org.gnome.shell.keybindings defaults).
 sleep 2
@@ -2108,6 +2201,7 @@ fi
 # column (whole on screen), niri's focus ring (4px of #7fc8ff) marks it,
 # Super+R steps its width and Super+Left moves focus along the strip.
 strip_whole() {
+    cstate '((.strip_view - .strip_offset) | fabs) < 0.1' "scroll view settled" 5 || return 1
     cstate ".focused_rect[1] == 48 and .focused_rect[3] == $((HEIGHT - 32 - 32)) and
         .focused_rect[0] >= 16 and .focused_rect[0] + .focused_rect[2] <= $((WIDTH - 16))" "$1"
 }
@@ -2133,6 +2227,79 @@ xdotool key super+Left
 cstate ".focused != $before_id" "focus moved" || fail G-SCROLL "Super+Left did not move focus along the strip"
 strip_whole "newly focused column whole" || fail G-SCROLL "the view did not follow focus"
 scrot "$ARTIFACTS/24k-scroll-follow.png" >/dev/null
+# Insert at the focused column, move it, and close it through the GTK client.
+scroll_parent="$(jq -r .focused "$CSTATE")"
+scroll_parent_x="$(jq -r --argjson id "$scroll_parent" '.strip_offset as $v | .windows[] | select(.id == $id) | (.rect[0] + $v | round)' "$CSTATE")"
+scroll_parent_w="$(jq -r '.focused_rect[2]' "$CSTATE")"
+scroll_count="$(jq '.windows | length' "$CSTATE")"
+SCROLL_REQUESTS="$ARTIFACTS/scroll-requests.json"
+rm -f "$SCROLL_REQUESTS" "$SCROLL_REQUESTS.ack"
+WAYLAND_DISPLAY="$SOCKET_NAME" ROOST_TEST_REQUESTS="$SCROLL_REQUESTS" "$PY" "$ROOT/scripts/lib/roost-test-window.py" "Scroll Probe" '#00a040' >"$ARTIFACTS/scroll-probe.log" 2>&1 &
+SCROLL_PROBE_PID=$!
+cstate ".windows | length == $((scroll_count + 1))" "new scroll column" || fail G-SCROLL-COLUMNS "new column did not map"
+scroll_probe="$(jq -r .focused "$CSTATE")"
+sleep 1
+probe_x="$(jq -r --argjson id "$scroll_probe" '.strip_offset as $v | .windows[] | select(.id == $id) | (.rect[0] + $v | round)' "$CSTATE")"
+[ "$probe_x" -eq $((scroll_parent_x + scroll_parent_w + 16)) ] || fail G-SCROLL-COLUMNS "new column not right of focus"
+strip_whole "new column whole" || fail G-SCROLL-COLUMNS "new column outside view"
+# Roost's current policy keeps these client requests in the strip. This
+# differs from niri fullscreen and is recorded explicitly in docs/niri-parity.md.
+scroll_request() {
+    printf '{"generation":%s,"request":"%s"}\n' "$1" "$2" >"$SCROLL_REQUESTS"
+    end=$(($(date +%s) + 5))
+    until [ "$(cat "$SCROLL_REQUESTS.ack" 2>/dev/null)" = "$1" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.1; done
+    [ "$(cat "$SCROLL_REQUESTS.ack" 2>/dev/null)" = "$1" ] || fail G-SCROLL-LAYOUTS "client request not acknowledged"
+    sleep 0.3
+    strip_whole "$2 kept a column" || fail G-SCROLL-LAYOUTS "$2 escaped the strip"
+    cstate '.focused_rect[2] == 616' "request kept width" || fail G-SCROLL-LAYOUTS "$2 changed the preset"
+}
+scroll_request 1 fullscreen
+scroll_request 2 unfullscreen
+scroll_request 3 maximize
+scroll_request 4 unmaximize
+fx="$(jq -r '.focused_rect[0]' "$CSTATE")"
+drag $((fx + 200)) 70 2 100
+strip_whole "edge tiling kept a column" || fail G-SCROLL-LAYOUTS "edge snap escaped strip"
+pass G-SCROLL-LAYOUTS "fullscreen, maximize and edge tiling requests retain Roost's strip membership"
+xdotool key super+shift+Left
+sleep 1
+moved_x="$(jq -r --argjson id "$scroll_probe" '.strip_offset as $v | .windows[] | select(.id == $id) | (.rect[0] + $v | round)' "$CSTATE")"
+[ "$moved_x" -lt "$probe_x" ] || fail G-SCROLL-COLUMNS "Super+Shift+Left did not move the column"
+wheel_before="$(jq .strip_offset "$CSTATE")"
+xdotool mousemove --window "$WID" $((WIDTH - 10)) 400 click 5
+cstate ".strip_offset != $wheel_before" "strip wheel" || fail G-SCROLL-WHEEL "wheel did not move view"
+pass G-SCROLL-WHEEL "wheel moves the strip view without changing membership"
+xdotool key Super_L
+cstate '.overview_open and .session_mode == "scroll" and (.previews | length) > 0' "occupied scroll overview previews" || fail G-SCROLL-OVERVIEW "overview changed mode"
+sleep 1
+scrot "$ARTIFACTS/24l-scroll-overview.png" >/dev/null
+xdotool key Escape
+cstate '.overview_open == false' "scroll overview closed" || fail G-SCROLL-OVERVIEW "overview did not close"
+scroll_workspace="$(jq .active_workspace "$CSTATE")"
+xdotool key ctrl+alt+Right
+cstate ".active_workspace != $scroll_workspace and .session_mode == \"scroll\"" "scroll workspace" || fail G-SCROLL-WORKSPACES "workspace switch failed"
+xdotool key Super_L
+cstate ".overview_open and any(.workspace_cards[]; .active and .workspace != $scroll_workspace) and any(.workspace_cards[]; (.active | not) and .workspace == $scroll_workspace and .rect[2] > 0 and .rect[3] > 0)" "scroll workspace cards" || fail G-SCROLL-WORKSPACES "active and occupied neighbor workspace cards missing"
+sleep 1
+scrot "$ARTIFACTS/24m-scroll-workspaces.png" >/dev/null
+xdotool key Escape
+cstate '.overview_open == false' "scroll thumbnails closed" || fail G-SCROLL-WORKSPACES "overview did not close"
+xdotool key ctrl+alt+Left
+cstate ".active_workspace == $scroll_workspace" "scroll workspace restored" || fail G-SCROLL-WORKSPACES "workspace not restored"
+pass G-SCROLL-WORKSPACES "workspace switching and overview thumbnails preserve scroll mode"
+pass G-SCROLL-OVERVIEW "overview previews coexist with the strip"
+xdotool keydown Alt_L key Tab
+cstate '.session_mode == "scroll" and any(.layers[]; .namespace == "roost-shell-switcher")' "scroll switcher" || fail G-SCROLL-SWITCHER "switcher changed mode"
+sleep 1
+scrot "$ARTIFACTS/24n-scroll-switcher.png" >/dev/null
+xdotool keyup Alt_L
+cstate 'all(.layers[]; .namespace != "roost-shell-switcher")' "scroll switcher closed" || fail G-SCROLL-SWITCHER "switcher did not close"
+strip_whole "switcher selected column whole" || fail G-SCROLL-SWITCHER "switcher did not follow focus"
+pass G-SCROLL-SWITCHER "Alt+Tab selects a column and follows it"
+kill "$SCROLL_PROBE_PID" 2>/dev/null || true
+SCROLL_PROBE_PID=""
+cstate ".windows | length == $scroll_count" "scroll column closed" || fail G-SCROLL-COLUMNS "column did not close"
+pass G-SCROLL-COLUMNS "new columns insert right of focus, move with Super+Shift+Left and close"
 xdotool key super+shift+t
 cstate '.session_mode == "gnome"' "floating again" || fail G-SCROLL "Super+Shift+T did not leave scroll mode"
 pass G-SCROLL "Super+Shift+T makes niri's strip: gaps, the view following focus, the focus ring, presets and focus moves"
@@ -2638,6 +2805,12 @@ done
 pass G-LOCK-BACKGROUND "picture-uri supplies the blurred, dimmed lock background"
 pass G-SUSPEND-LOCK "Suspend asks logind, and PrepareForSleep locks the session"
 screen_active | grep -q true || fail G-SCREENSAVER "GetActive did not reflect the lock"
+xdotool key XF86AudioRaiseVolume
+media_volume 0.4800 || fail G-MEDIA-LOCK "volume up did not work while locked"
+xdotool key XF86AudioLowerVolume
+media_volume 0.4200 || fail G-MEDIA-LOCK "volume down did not work while locked"
+cstate '.locked' "still locked after media keys" 5 || fail G-MEDIA-LOCK "media keys unlocked the session"
+pass G-MEDIA-LOCK "volume keys work on the lock screen without unlocking"
 gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver \
     --method org.gnome.ScreenSaver.SetActive false >/dev/null || fail G-SCREENSAVER "SetActive failed"
 cstate '.locked' "still locked after SetActive(false)" 5 || fail G-SCREENSAVER "D-Bus unlocked without authentication"
