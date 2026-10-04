@@ -528,12 +528,14 @@ ROOST_PROOF_SWIPE_INPUT="$ARTIFACTS/swipe-input.json"
 export ROOST_PROOF_SWIPE_INPUT
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk -p roost-shell-host
 if [ -n "$PAM_ON" ]; then
-    env LD_PRELOAD="$PAM_WRAPPER_LIB" PAM_WRAPPER=1 \
+    env IBUS_ADDRESS="unix:path=$ARTIFACTS/not-the-private-ibus" \
+        LD_PRELOAD="$PAM_WRAPPER_LIB" PAM_WRAPPER=1 \
         PAM_WRAPPER_SERVICE_DIR="$ARTIFACTS/pam/services" \
         "$ROOT/target/debug/roost-compositor" --backend winit --socket "roost-gtk-proof-$$" \
         --shell-bin "${ROOST_PROOF_SHELL_BIN:-$ROOT/target/debug/roost-shell-gtk}" >"$LOG" 2>&1 &
 else
-    "$ROOT/target/debug/roost-compositor" --backend winit --socket "roost-gtk-proof-$$" \
+    env IBUS_ADDRESS="unix:path=$ARTIFACTS/not-the-private-ibus" \
+        "$ROOT/target/debug/roost-compositor" --backend winit --socket "roost-gtk-proof-$$" \
         --shell-bin "${ROOST_PROOF_SHELL_BIN:-$ROOT/target/debug/roost-shell-gtk}" >"$LOG" 2>&1 &
 fi
 COMPOSITOR_PID=$!
