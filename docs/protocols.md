@@ -82,7 +82,7 @@ and this page together.
 | zxdg_exporter_v2, zxdg_importer_v2 | 1 | xdg-foreign: the portal parents its dialogs to the app's window, which centres and attaches them like the app's own |
 | xdg_system_bell_v1 | 1 | plays GNOME's `bell-window-system` sound through `canberra-gtk-play` when installed (Mutter's audible bell); a burst of rings is one sound |
 | xdg_toplevel_tag_manager_v1 | 1 | each window keeps its tag and description |
-| zwp_keyboard_shortcuts_inhibit_manager_v1 | 1 | the focused window gets every key, the shell's grabs, Super and Alt+Tab included; Super+Escape (Mutter's restore-shortcuts) takes them back until the window is focused again |
+| zwp_keyboard_shortcuts_inhibit_manager_v1 | 1 | after Allow, the focused window gets every key, the shell's grabs, Super and Alt+Tab included; Super+Escape (Mutter's restore-shortcuts) takes them back until the window is focused again |
 | wp_pointer_warp_v1 | 1 | honoured while the surface has pointer focus from the enter serial it names; nested, the host pointer stays where it is |
 
 ### xdg-activation policy
@@ -113,10 +113,19 @@ presentation-time, fifo and commit-timing follow the frame path
 
 ### Keyboard shortcuts inhibit
 
-GNOME Shell asks before letting an app take the shortcuts ("Allow
-inhibiting shortcuts?") and remembers the answer. Roost has no such
-dialog yet and grants at once; Super+Escape always takes the shortcuts
-back, as in GNOME.
+Roost asks before letting a focused, mapped app take shortcuts. The GTK
+shell shows a modal with Deny and Allow and explains Super+Escape.
+Only Allow activates the inhibitor; Deny cannot be undone by refocusing.
+Known desktop apps use GNOME's PermissionStore (`gnome` table,
+`shortcuts-inhibitor` id, `GRANTED`/`DENIED` values), so remembered grants
+skip the dialog. Unknown apps are never remembered. An unavailable store
+opens the dialog. Background requests, stale responses, destroyed surfaces
+and requests outstanding at lock or a switch to another app fail closed.
+The non-GTK fallback shell has no consent UI and keeps requests inactive.
+Super+Escape always takes granted shortcuts back until the window is
+focused again. GNOME's configurable Xwayland exemption rules are not
+implemented. `scripts/roost-shortcut-proof` exercises Allow, Deny, refocus,
+emergency restore, stale focus and lock through a real Wayland test client.
 
 ## GNOME D-Bus interfaces
 
@@ -163,3 +172,5 @@ GNOME's version.
   decorations only, and the golden test asserts the absence.
 - **layer-shell is present,** unlike Mutter. Roost's shell is a separate
   process and draws its panel, overview and banners through it.
+
+`xdg_toplevel_icon_manager_v1` v1 accepts square SHM icons and sanitized theme names, applied on the next surface commit. PNGs live in a private, bounded compositor cache. X11 `_NET_WM_ICON` and legacy square TrueColor `WM_HINTS` pixmaps (24/32-bit color, optional 1-bit transparency mask) are read on a bounded worker for mapped window identities. Palette and unsupported visuals fall back to a generic app icon.
