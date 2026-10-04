@@ -3228,6 +3228,10 @@ fn send_frame_callbacks(state: &State, manager: &WindowManager, frames: u64) {
 pub fn run(session: &NestedSession) -> Result<RunStats, RuntimeError> {
     let (mut runtime, mut event_loop) = Runtime::launch(session)?;
     let prev_env = apply_nested_env(&session.socket_name);
+    #[cfg(feature = "drm")]
+    if matches!(runtime.backend, Backend::Drm(_)) {
+        crate::session_services::publish(&session.socket_name);
+    }
     // Graceful shutdown on SIGTERM/SIGINT: ending the loop drops the
     // runtime, whose supervisor kills the shell child (ADR 0003 kill
     // on exit). Without this a signal would bypass `Drop` and orphan
