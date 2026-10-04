@@ -4,7 +4,7 @@ Updated 2026-10-04. This is the public contribution roadmap; [program gates and 
 
 ## Current status
 
-Roost has a nested developer preview and an actual Marlin VM test lane. The daily-driver candidate remains open. The target is a Roost flavor of TunaOS Marlin, with GNOME 51 as its comparison baseline. The published Marlin GNOME image measured on 2026-10-04 still contains GNOME Shell 50.5; GNOME 51 comparisons require a separately recorded, fully upgraded reference payload. A build or merged feature alone does not establish parity or release readiness.
+Roost has a nested developer preview, an actual Marlin VM test lane, and a signed experimental amd64 Marlin Roost image. The daily-driver candidate remains open. TunaOS merged the Roost flavor in [PR #2991](https://github.com/tuna-os/tunaOS/pull/2991). Its qualified image passed an actual AWS KubeVirt bootc switch, shipped greeter selection and PAM login; the installed `0.1.0-2` package is pinned to Roost `c28f96eb` and needs a refresh with later fixes before endurance qualification. GNOME 51 remains the comparison baseline. The published Marlin GNOME image measured on 2026-10-04 still contains GNOME Shell 50.5; GNOME 51 comparisons require a separately recorded, fully upgraded reference payload. A build or merged feature alone does not establish parity or release readiness.
 
 The latest GitHub release entry is [v0.0.0-ci, “Demo media bundle”](https://github.com/hanthor/roost-desktop/releases/tag/v0.0.0-ci), published 2026-10-01. It contains screenshots and videos, not an installable desktop release. The six session binaries use development package version 0.1.0. The [README](README.md) now shows real screenshots and an overview recording.
 
@@ -14,9 +14,9 @@ At this update, GitHub reports three contributor entries, zero stars and zero fo
 
 1. Finish and validate the core shell journeys: workspace insertion, app-grid hover/page behavior, notifications, shortcut consent, IME caret placement and live settings interoperability. Keep concrete GNOME differences in the [parity ledger](docs/gnome-parity.md), with actual graphical acceptance evidence.
 2. Complete secure screen sharing and RemoteDesktop integration ([#61](https://github.com/hanthor/roost-desktop/issues/61)). Require real GNOME portal consent, authenticated ownership, disconnect and lock revocation, and verified input delivery for each advertised capability.
-3. Qualify one signed amd64 Marlin Roost image ([#69](https://github.com/hanthor/roost-desktop/issues/69)): current-source package, clean installation, graphical login, portals, PAM, boot and update/rollback evidence. This scope adds no ISO or LUKS matrix cells.
+3. Refresh and qualify the admitted signed amd64 Marlin Roost image: current-source package, clean installation, graphical login, portals, PAM, boot and update/rollback evidence. Initial flavor admission and boot/login acceptance are complete ([#69](https://github.com/hanthor/roost-desktop/issues/69)); later source fixes and endurance qualification remain open. This scope adds no ISO or LUKS matrix cells.
 4. Run the actual 24-hour endurance and comparable performance work ([#203](https://github.com/hanthor/roost-desktop/issues/203), [#73](https://github.com/hanthor/roost-desktop/issues/73)). Record binary/image provenance, resource growth, frame pacing and failures. Investigate measured regressions before making performance parity claims.
-5. Record hardware and session qualification ([#62](https://github.com/hanthor/roost-desktop/issues/62), [#68](https://github.com/hanthor/roost-desktop/issues/68)): physical GPU/driver combinations, mixed displays, VT switching, suspend/resume, logout and fail-closed lock behavior. AWS KubeVirt VM evidence covers its own profile only.
+5. Record session lifecycle qualification ([#62](https://github.com/hanthor/roost-desktop/issues/62), [#68](https://github.com/hanthor/roost-desktop/issues/68)): real VM suspend/resume, VT switching, logout and fail-closed lock behavior, plus the separate physical GPU/driver and mixed-display support matrix. AWS KubeVirt VM evidence covers its own profile only.
 
 ## Six to twelve months: 2027-04-04–2027-10-04
 
