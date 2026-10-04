@@ -107,7 +107,7 @@ Version: $VERSION
 Section: x11
 Priority: optional
 Architecture: amd64
-Depends: libxkbcommon0, libxkbcommon-x11-0, libegl1, libgl1, libgbm1, libseat1, libinput10, libudev1, libdrm2, libgtk-4-1, libadwaita-1-0, libpipewire-0.3-0t64 | libpipewire-0.3-0, libglib2.0-0t64 | libglib2.0-0
+Depends: libsecret-tools, libxkbcommon0, libxkbcommon-x11-0, libegl1, libgl1, libgbm1, libseat1, libinput10, libudev1, libdrm2, libgtk-4-1, libadwaita-1-0, libpipewire-0.3-0t64 | libpipewire-0.3-0, libglib2.0-0t64 | libglib2.0-0
 Recommends: ibus, gstreamer1.0-tools, gstreamer1.0-pipewire, gstreamer1.0-plugins-good
 Maintainer: Roost Developers <roost@example.invalid>
 Description: Roost Wayland desktop session

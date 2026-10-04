@@ -185,3 +185,57 @@ Read `nested.log` in the artifacts directory first (`compositor.log` for
 [nested session troubleshooting](nested-session.md#troubleshooting). Do not
 retry a deterministic test until it passes: the timing rule in the
 [development guide](development.md#writing-a-test) applies.
+
+## Bounded nested stress
+
+`nested stress` runs four concurrent Wayland GTK clients. Each round maps
+and destroys 400 windows; three warmup rounds settle renderer caches.
+After every measured round, Escape and Super must still change the
+compositor's overview state, and every destroyed window must disappear.
+The lane then sends 1,000 notifications and closes each over D-Bus.
+
+The per-change smoke uses ten measured rounds; nightly uses 300. The
+report retains PSS/RSS, file descriptors and descendant process counts
+for the compositor and supervised shell after each round. Final PSS must
+stay within warmup PSS × 1.25 + 64 MiB, and fd count within warmup + 32.
+These diagnostic bounds catch unbounded growth in this workload; they
+are separate from the GNOME performance targets in #73. A panic, lost
+input response, orphaned window or hung worker fails the lane. Logs,
+metrics, final state, assertions and the exact source revision are kept.
+
+Run it on a development host after building the compositor and GTK shell:
+
+```sh
+scripts/roost-stress --rounds 10 --out /tmp/roost-stress-fresh
+```
+
+Use a fresh empty artifact directory for each run. The harness starts its
+own Xvfb, session bus and private user state. It covers client churn and
+notification flood portions of #203; malformed Wayland requests, service
+faults, hotplug, locked-input adversaries and a measured 24-hour VM soak
+remain open.
+
+## Control decoder fuzzing
+
+The `control decoder fuzz` workflow exercises both arbitrary length-prefixed
+frames and mutated postcard bodies with a generated valid length prefix.
+Successful decodes must re-encode into another valid frame. Seed inputs
+include a Hello, a truncated varint, and an oversized declared frame.
+
+Pull requests touching the decoder or fuzz harness run each target for
+60 seconds; the nightly lane runs each for 600 seconds. The address
+sanitizer, five-second per-input timeout and 2 GiB RSS limit turn crashes,
+hangs and runaway allocation into failures. Logs, the resulting corpus,
+and crash artifacts are retained for 14 days. A found crash needs a small
+regression test in the protocol crate before its fix is merged.
+
+To reproduce locally, install the pinned tool and toolchain, then run:
+
+```sh
+rustup toolchain install nightly-2026-08-28
+cargo install cargo-fuzz --version 0.13.2 --locked
+cargo +nightly-2026-08-28 fuzz run control_body -- -max_total_time=60 -max_len=1048580 -timeout=5 -rss_limit_mb=2048
+```
+
+This covers the decoder portion of #203. Wayland misuse, client churn,
+service failures and a measured long soak remain separate stress gates.

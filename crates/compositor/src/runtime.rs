@@ -450,6 +450,7 @@ pub struct Runtime {
     /// from input timestamps. The hub mirror carries the flag to shell
     /// snapshots; the shell never owns it.
     lock: SessionLock,
+    blank: crate::lock::IdleBlank,
     /// On-demand XWayland server supervisor. Idle until the first X11
     /// need is recorded via [`Runtime::request_x11`]; the window-model
     /// join installs the real spawner, until then ticks are no-ops.
@@ -516,6 +517,8 @@ pub struct Runtime {
     /// `ROOST_COMPOSITOR_STATE` snapshot path (journeys only).
     state_path: Option<std::path::PathBuf>,
     state_last: String,
+    /// Opt-in synthetic touchpad phases for the nested proof harness.
+    proof_swipe_last: String,
 }
 
 /// Control socket path for a session: alongside the Wayland socket in the
@@ -772,6 +775,7 @@ impl Runtime {
             wallpaper: Wallpaper::new(),
             triggers: TriggerState::default(),
             lock: SessionLock::new(idle_timeout_ms()),
+            blank: crate::lock::IdleBlank::default(),
             xwayland: XWaylandSupervisor::new(),
             loop_handle,
             #[cfg(feature = "xwayland")]
@@ -802,6 +806,7 @@ impl Runtime {
                 .map(std::path::PathBuf::from)
                 .filter(|p| p.is_absolute()),
             state_last: String::new(),
+            proof_swipe_last: String::new(),
         };
         // Session-level X11 opt-in is the recorded first X11 need:
         // the supervisor leaves `Idle` and the next tick may spawn
@@ -863,6 +868,10 @@ impl Runtime {
                 .try_into()
                 .unwrap_or(u64::MAX),
         )
+    }
+
+    fn blank_alpha(&self) -> f32 {
+        self.blank.alpha(self.lock.idle_ms(self.lock_now_ms()))
     }
 
     /// Whether the session is locked (hub flag: what the snapshots say).
@@ -939,6 +948,7 @@ impl Runtime {
     fn on_manager_input(&mut self, input: ManagerInput) {
         // Every timestamped event feeds the idle accumulator first,
         // including events consumed below: activity is activity.
+        let waking_blank = self.blank_alpha() > 0.0;
         self.lock.note_input(input_time(&input));
         self.idle_since = Instant::now();
         self.idle_monitor.activity();
@@ -956,6 +966,11 @@ impl Runtime {
             for (action, time, mode) in self.manager.take_accelerators_fired() {
                 self.control.queue_accelerator(action, time, mode);
             }
+            return;
+        }
+        if waking_blank {
+            // Activity cancels the idle shield; the wake event belongs to
+            // that shield, not the previously focused application.
             return;
         }
         // Three-finger swipes are the shell's (GNOME 51): consumed here,
@@ -1168,14 +1183,27 @@ impl Runtime {
         // where they say.
         let scene =
             (overview_open && self.overview_progress >= 1.0).then(|| self.overview_layout());
+        // Record the drawn transition separately from settled click targets.
+        let transition_scene = (self.overview_progress > 0.0).then(|| self.overview_layout());
+        let workspace_cards: Vec<serde_json::Value> = transition_scene
+            .iter()
+            .flat_map(|l| l.cards.iter())
+            .map(|c| {
+                serde_json::json!({
+                    "workspace": c.workspace, "active": c.active, "alpha": c.alpha,
+                    "rect": [c.rect.loc.x, c.rect.loc.y, c.rect.size.w, c.rect.size.h],
+                })
+            })
+            .collect();
         // GNOME's workspace thumbnails strip (three or more workspaces).
-        let thumbnails: Vec<serde_json::Value> = scene
+        let thumbnails: Vec<serde_json::Value> = transition_scene
             .iter()
             .flat_map(|l| l.thumbnails.iter())
             .map(|t| {
                 serde_json::json!({
                     "workspace": t.workspace,
                     "active": t.active,
+                    "alpha": t.alpha,
                     "rect": [t.rect.loc.x, t.rect.loc.y, t.rect.size.w, t.rect.size.h],
                 })
             })
@@ -1200,6 +1228,7 @@ impl Runtime {
         let doc = serde_json::json!({
             "x11_display": self.x11_display.map(|d| format!(":{d}")),
             "idle_timeout_ms": self.lock.timeout_ms(),
+            "idle_blank_alpha": self.blank_alpha(),
             "overview_search": self.overview_search,
             "overview_app_grid": self.overview_app_grid,
             "keyboard": keyboard,
@@ -1241,6 +1270,8 @@ impl Runtime {
             })).collect::<Vec<_>>(),
             "previews": previews,
             "thumbnails": thumbnails,
+            "overview_progress": self.overview_progress,
+            "workspace_cards": workspace_cards,
             // The Alt+Tab switcher's window thumbnails being drawn.
             "switcher_thumbnails": self.switcher_thumbnails.len(),
             // GNOME's tile preview while a dragged window is over a
@@ -1410,6 +1441,52 @@ impl Runtime {
         if here != Some(target) {
             self.manager.move_to_workspace(&mut self.state, id, target);
         }
+    }
+
+    /// Feed explicitly opted-in nested proofs through the real gesture handler.
+    /// Each atomically replaced JSON file is consumed once; ordinary sessions
+    /// never read it because state instrumentation is also required.
+    fn proof_swipe_input(&mut self) {
+        if self.state_path.is_none() {
+            return;
+        }
+        let Some(path) = std::env::var_os("ROOST_PROOF_SWIPE_INPUT")
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_absolute())
+        else {
+            return;
+        };
+        if !std::fs::metadata(&path).is_ok_and(|m| m.len() <= 4096) {
+            return;
+        }
+        let Ok(body) = std::fs::read_to_string(path) else {
+            return;
+        };
+        if body == self.proof_swipe_last {
+            return;
+        }
+        self.proof_swipe_last = body.clone();
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
+            return;
+        };
+        let time = crate::state::system_millis() as u32;
+        let input = match value["phase"].as_str() {
+            Some("begin") => ManagerInput::SwipeBegin { fingers: 3, time },
+            Some("update") => ManagerInput::SwipeUpdate {
+                delta: (
+                    value["dx"].as_f64().unwrap_or(0.0),
+                    value["dy"].as_f64().unwrap_or(0.0),
+                )
+                    .into(),
+                time,
+            },
+            Some("end") => ManagerInput::SwipeEnd {
+                cancelled: value["cancelled"].as_bool().unwrap_or(false),
+                time,
+            },
+            _ => return,
+        };
+        self.on_manager_input(input);
     }
 
     /// Track a three-finger swipe; returns whether `input` was one of
@@ -1653,6 +1730,7 @@ impl Runtime {
                 Target {
                     damage: Rectangle::from_size(size),
                     scale,
+                    blank_alpha: 0.0,
                 },
                 &[],
                 &[],
@@ -1688,6 +1766,7 @@ impl Runtime {
         if self.is_locked() {
             return None;
         }
+        let blank_alpha = self.blank_alpha();
         let overview = (self.overview_progress > 0.0).then(|| self.overview_layout());
         let cards = overview.as_ref().filter(|_| !self.overview_search);
         let tile = overview
@@ -1786,6 +1865,7 @@ impl Runtime {
                 Target {
                     damage,
                     scale: view.scale,
+                    blank_alpha,
                 },
                 &decor,
                 &previews,
@@ -2077,6 +2157,12 @@ impl Runtime {
     }
 
     fn tick(&mut self) -> Result<bool, RuntimeError> {
+        if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+            let text =
+                std::fs::read_to_string(std::path::PathBuf::from(dir).join("roost-idle-blank"))
+                    .unwrap_or_default();
+            self.blank = crate::lock::IdleBlank::parse(&text);
+        }
         self.display
             .dispatch_clients(&mut self.state)
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
@@ -2257,6 +2343,7 @@ impl Runtime {
                 .tick(crate::state::system_millis(), Some(&mut spawner));
         }
         self.stats.shell_restarts = self.shell.restarts_used();
+        self.proof_swipe_input();
         self.publish_state();
         self.publish_cast_outputs();
         self.publish_overview_previews();
@@ -2307,6 +2394,7 @@ impl Runtime {
     /// no wallpaper — over a dark lock background.
     fn render(&mut self) -> Result<(), RuntimeError> {
         let locked = self.is_locked();
+        let blank_alpha = self.blank_alpha();
         let show_content = content_visible(locked);
         let overlay_visible = self.overlay.visible;
         let background = if locked {
@@ -2341,6 +2429,7 @@ impl Runtime {
         let show_paper = show_content && !overlay_visible && overview.is_none();
         match &mut self.backend {
             Backend::Winit(backend) => {
+                backend.window().set_cursor_visible(blank_alpha < 1.0);
                 let size = backend.window_size();
                 let damage = Rectangle::from_size(size);
                 {
@@ -2413,6 +2502,7 @@ impl Runtime {
                         Target {
                             damage,
                             scale: view.scale,
+                            blank_alpha,
                         },
                         &decor,
                         &previews,
@@ -2537,13 +2627,14 @@ impl Runtime {
                             Target {
                                 damage,
                                 scale: view.scale,
+                                blank_alpha,
                             },
                             &decor,
                             &previews,
                         )?;
                         // Software pointer on top (no host cursor on
                         // bare hardware); hidden while locked.
-                        if !locked {
+                        if !locked && blank_alpha < 1.0 {
                             let (outline, fill) =
                                 crate::drm::cursor_rects(pointer, out.loc, out.scale);
                             let clip = |rects: Vec<Rectangle<i32, smithay::utils::Physical>>| {
@@ -3039,7 +3130,7 @@ fn backdrop(
             let loc = view.physical(f64::from(r.loc.x), f64::from(r.loc.y));
             let end = view.physical(f64::from(r.loc.x + r.size.w), f64::from(r.loc.y + r.size.h));
             let rect = Rectangle::new(loc, (end.x - loc.x, end.y - loc.y).into());
-            wallpaper.card_element(renderer, output, work_top, rect)
+            wallpaper.card_element(renderer, output, work_top, rect, card.alpha)
         })
         .collect()
 }
@@ -3051,6 +3142,7 @@ fn backdrop(
 struct Target {
     damage: Rectangle<i32, smithay::utils::Physical>,
     scale: f64,
+    blank_alpha: f32,
 }
 
 fn draw_scene(
@@ -3064,7 +3156,11 @@ fn draw_scene(
     decor: &[(Color32F, Vec<Rectangle<i32, smithay::utils::Physical>>)],
     previews: &[PreviewElement],
 ) -> Result<(), RuntimeError> {
-    let Target { damage, scale } = target;
+    let Target {
+        damage,
+        scale,
+        blank_alpha,
+    } = target;
     frame
         .clear(background, &[damage])
         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
@@ -3107,6 +3203,19 @@ fn draw_scene(
         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
     if !scene.top.is_empty() {
         draw_render_elements(frame, scale, &scene.top, &[damage])
+            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    }
+    if blank_alpha > 0.0 {
+        use smithay::backend::renderer::element::{solid::SolidColorRenderElement, Id, Kind};
+        thread_local! { static SHIELD: Id = Id::new(); }
+        let shield = SolidColorRenderElement::new(
+            SHIELD.with(Clone::clone),
+            damage,
+            0usize,
+            Color32F::new(0.0, 0.0, 0.0, blank_alpha),
+            Kind::Unspecified,
+        );
+        draw_render_elements::<GlesRenderer, _, _>(frame, 1.0, &[shield], &[damage])
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
     }
     Ok(())
