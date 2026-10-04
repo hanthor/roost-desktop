@@ -137,6 +137,7 @@ pub struct NetworkAgent {
     ok: gtk::Button,
     pending: RefCell<Option<Pending>>,
     generation: Cell<u64>,
+    replying: RefCell<Option<(String, String)>>,
 }
 impl NetworkAgent {
     fn new(app: &gtk::Application) -> Rc<Self> {
@@ -193,6 +194,7 @@ impl NetworkAgent {
             ok,
             pending: RefCell::default(),
             generation: Cell::new(0),
+            replying: RefCell::default(),
         });
         let weak = Rc::downgrade(&agent);
         cancel.connect_clicked(move |_| {
@@ -414,7 +416,7 @@ impl NetworkAgent {
         }
         self.clear();
     }
-    fn reply_values(&self) {
+    fn reply_values(self: &Rc<Self>) {
         let Some(mut p) = self.pending.borrow_mut().take() else {
             return;
         };
@@ -424,19 +426,44 @@ impl NetworkAgent {
                 p.values.insert(key, f.value);
             }
         }
+        let generation = self.generation.get();
+        *self.replying.borrow_mut() = Some((p.connection_path.clone(), p.setting.clone()));
+        let weak = Rc::downgrade(self);
         glib::MainContext::default().spawn_local(async move {
             let conn = network_secrets::section(&p.connection, "connection");
             let uuid = network_secrets::text(conn.as_ref(), "uuid");
             let id = network_secrets::text(conn.as_ref(), "id");
             for (key, value) in &p.values {
                 if network_secrets::agent_owned(&p.connection, &p.setting, key) {
-                    if let Err(error) =
-                        network_secrets::store(&uuid, &id, &p.setting, key, value).await
+                    let stored = network_secrets::store(&uuid, &id, &p.setting, key, value).await;
+                    if weak
+                        .upgrade()
+                        .is_none_or(|a| a.generation.get() != generation)
                     {
+                        p.invocation
+                            .return_dbus_error(USER_CANCELED, "the request was cancelled");
+                        return;
+                    }
+                    if let Err(error) = stored {
+                        if let Some(agent) = weak.upgrade() {
+                            agent.replying.borrow_mut().take();
+                        }
                         p.invocation.return_dbus_error(NO_SECRETS, &error);
                         return;
                     }
                 }
+            }
+            if let Some(agent) = weak.upgrade() {
+                if agent.generation.get() != generation {
+                    p.invocation
+                        .return_dbus_error(USER_CANCELED, "the request was cancelled");
+                    return;
+                }
+                agent.replying.borrow_mut().take();
+            } else {
+                p.invocation
+                    .return_dbus_error(USER_CANCELED, "the agent stopped");
+                return;
             }
             let inner = glib::VariantDict::new(None);
             if p.setting == "vpn" {
@@ -461,6 +488,11 @@ impl NetworkAgent {
             .borrow()
             .as_ref()
             .is_some_and(|p| p.connection_path == connection_path && p.setting == setting)
+            || self
+                .replying
+                .borrow()
+                .as_ref()
+                .is_some_and(|(path, name)| path == connection_path && name == setting)
         {
             self.reply(false);
         }

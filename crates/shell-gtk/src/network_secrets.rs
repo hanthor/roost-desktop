@@ -18,6 +18,9 @@ pub struct Field {
 }
 impl Field {
     pub fn valid(&self, value: &str) -> bool {
+        if self.key.as_deref() == Some("pin") {
+            return (4..=8).contains(&value.len()) && value.bytes().all(|c| c.is_ascii_digit());
+        }
         self.key.is_none()
             || self
                 .validator
