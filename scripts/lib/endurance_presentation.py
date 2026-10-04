@@ -75,6 +75,8 @@ class Reader:
                             or (self.previous_ns is not None and stamp <= self.previous_ns)):
                         raise ValueError("duplicate/backward native presentation feedback")
                     if self.previous_ns is not None:
+                        if stamp - self.previous_ns > 2_000_000_000:
+                            raise ValueError("native presentation stalled for more than two seconds")
                         intervals.append((stamp - self.previous_ns) / 1e6)
                     self.previous_ns, self.previous_commit = stamp, commit
                     unknown_refresh += refresh == 0

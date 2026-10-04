@@ -81,6 +81,13 @@ class PresentationFailures(unittest.TestCase):
             with self.assertRaises(ValueError):
                 Reader(io.BytesIO(raw), 3).finish()
 
+    def test_actual_presentation_gap_cannot_hide_behind_fast_delivery(self):
+        rows = self.rows()
+        for sample in rows[0]['frames'][1:]:
+            sample['presented_ns'] += 3_000_000_000
+        with self.assertRaisesRegex(ValueError, 'stalled'):
+            Reader(io.BytesIO(self.encoded(rows)), 3).finish()
+
 
 class ProcessFailures(unittest.TestCase):
     def setUp(self):

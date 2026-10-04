@@ -183,6 +183,8 @@ def main(args):
                     if os.fstat(probe_output.fileno()).st_size > 4 * 1024**3:
                         raise RuntimeError('native presentation output exceeded 4 GiB budget')
                     value['presentation'] = presentation.poll()
+                    if elapsed > 20 and not presentation.batch:
+                        raise RuntimeError('native presentation startup produced no bounded feedback batch')
                     report['presentation'] = value['presentation']
                 if original is None:
                     original = value['critical']

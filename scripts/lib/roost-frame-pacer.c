@@ -217,7 +217,7 @@ int main(int argc, char **argv) {
     while (!s.closed && (s.endurance || s.presented < TARGET) && monotonic_s() < deadline) {
         if (wl_display_dispatch_pending(s.display) < 0) { io_failed = true; break; }
         if (s.endurance && ((s.last_presented && monotonic_s() - s.last_presented > 2) ||
-            (!s.last_presented && monotonic_s() - s.started > 15))) {
+            (s.total_presented < TARGET && monotonic_s() - s.started > 15))) {
             fprintf(stderr, "endurance presentation stalled\n"); io_failed = true; break;
         }
         draw(&s);
