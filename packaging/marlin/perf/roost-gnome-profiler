@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import time
 
 from gi.repository import Gio, GLib
@@ -43,6 +44,10 @@ def main():
             or metadata.st_mode & 0o022 or not stat.S_ISREG(metadata.st_mode)):
         raise RuntimeError("profiler peer is not the installed session GNOME Shell")
 
+    version = subprocess.check_output([str(installed), "--version"], text=True, timeout=5).strip()
+    if version != "GNOME Shell 51.0":
+        raise RuntimeError("frame ownership analysis requires the pinned GNOME Shell 51.0")
+
     if args.action == "start":
         descriptor = os.open(capture, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         started = False
@@ -57,6 +62,7 @@ def main():
             with marker.open("x") as stream:
                 os.chmod(marker, 0o600)
                 json.dump({"owner": owner, "pid": pid, "uid": uid,
+                           "gnome_shell_version": version,
                            "started_monotonic_ns": time.monotonic_ns()}, stream)
         except BaseException:
             # Never stop somebody else's profile when Start itself failed.
@@ -78,6 +84,8 @@ def main():
             saved = json.load(stream)
         if (saved["owner"], saved["pid"], saved["uid"]) != (owner, pid, uid):
             raise RuntimeError("GNOME profiler owner changed during the workload")
+        if saved.get("gnome_shell_version") != version:
+            raise RuntimeError("GNOME Shell version changed during profiling")
         bus.call_sync(owner, OBJECT, INTERFACE, "Stop", None,
                       GLib.VariantType.new("()"), Gio.DBusCallFlags.NONE, 5000, None)
         marker.unlink()
