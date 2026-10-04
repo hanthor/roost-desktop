@@ -348,6 +348,7 @@ impl Wallpaper {
         output: Size<i32, Logical>,
         work_top: i32,
         card: Rectangle<i32, Physical>,
+        alpha: f32,
     ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
         if card.size.w <= 0 || card.size.h <= 0 {
             return None;
@@ -413,7 +414,7 @@ impl Wallpaper {
                 f64::from(card.loc.y - cached.margin),
             )),
             &cached.buffer,
-            None,
+            Some(alpha),
             None,
             None,
             Kind::Unspecified,
