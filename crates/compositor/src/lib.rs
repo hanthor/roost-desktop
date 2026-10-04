@@ -46,6 +46,7 @@ use smithay::{
     },
 };
 
+pub mod animation;
 pub mod control;
 #[cfg(feature = "drm")]
 pub mod drm;

@@ -5,6 +5,13 @@ mod protocol_version_tests {
     use roost_shell_control::{ProtocolVersion, CURRENT_VERSION};
 
     #[test]
+    fn shipped_animation_minor_accepts_current_and_rejects_future() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 21));
+        assert!(ProtocolVersion::new(0, 21).is_compatible_with(&CURRENT_VERSION));
+        assert!(!ProtocolVersion::new(0, 22).is_compatible_with(&CURRENT_VERSION));
+    }
+
+    #[test]
     fn version_is_compatible_with_same_version() {
         let version = ProtocolVersion { major: 1, minor: 2 };
         assert!(version.is_compatible_with(&version));

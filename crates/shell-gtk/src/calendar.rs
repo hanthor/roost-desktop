@@ -349,7 +349,7 @@ fn launch_calendar(day: Date) -> bool {
     if entry.app_id == "org.gnome.Calendar.desktop" {
         entry.argv.push("--date".into());
         entry.argv.push(day.to_string().into());
-    } else if info.as_ref().is_some_and(|info| info.supports_uris()) {
+    } else if info.is_some() {
         entry.argv.push(format!("calendar:///{}", day).into());
     }
     roost_shell_host::apps::launch(&entry).is_ok()
