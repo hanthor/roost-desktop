@@ -1767,8 +1767,9 @@ if command -v Xwayland >/dev/null 2>&1 && command -v xeyes >/dev/null 2>&1; then
             [ -n "$new_xim_pid" ] && [ "$new_xim_pid" != "$old_xim_pid" ] && break
             sleep 0.2
         done
-        [ -n "$new_xim_pid" ] && [ "$new_xim_pid" != "$old_xim_pid" ] ||
+        if [ -z "$new_xim_pid" ] || [ "$new_xim_pid" = "$old_xim_pid" ]; then
             fail G-X11-RESTART "XIM helper did not restart for the fresh X11 server"
+        fi
         ! kill -0 "$old_xim_pid" 2>/dev/null || fail G-X11-RESTART "old XIM helper survived server loss"
     fi
     env DISPLAY="$x11_display" xeyes >/dev/null 2>&1 &
