@@ -2034,6 +2034,15 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     if showing "$ARTIFACTS/a11y-ime-shell-closed.json" "Dark Style"; then fail G-IME-SHELL-ESCAPE "Escape did not close the layer-shell popover with the composing engine enabled"; fi
     cstate '.focused_app_id == "roost-ime"' "IME focus after shell Escape" || fail G-IME-SHELL-ESCAPE "shell Escape did not return to the text field"
     pass G-IME-SHELL-ESCAPE "Escape closes shell quick settings with the composing engine enabled and returns to the field"
+    # GTK selects existing Entry text when focus returns from a popover.
+    # Restore the end caret explicitly so the candidate appends to the
+    # surrounding-text fixture rather than replacing that selection.
+    [ "$(cat "$IME_OUT")" = "你|你好|2" ] || fail G-IME-CANDIDATES "popover focus changed the surrounding-text fixture"
+    xdotool key End
+    end=$(($(date +%s) + 5))
+    until [ "$(grep '^roost-ibus-test-engine: surrounding ' "$ENGINE_LOG" | tail -1)" = "roost-ibus-test-engine: surrounding 你|你好|2 6 6" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.1; done
+    [ "$(grep '^roost-ibus-test-engine: surrounding ' "$ENGINE_LOG" | tail -1)" = "roost-ibus-test-engine: surrounding 你|你好|2 6 6" ] ||
+        fail G-IME-CANDIDATES "the field's end caret/selection was not restored after the popover"
     # GNOME Shell is IBus's panel and draws its candidates
     # (ibusCandidatePopup.js): the shell owns org.freedesktop.IBus.Panel
     # on IBus's bus, "ni" brings up 你 尼 泥 under the text cursor with
