@@ -1914,7 +1914,10 @@ impl Runtime {
         self.casts.retain(|cast| {
             let gone =
                 matches!(cast.target, CastTarget::Window(id) if manager.geometry(id).is_none());
-            if gone {
+            if gone || cast.failed() {
+                if let Some(grant) = self.cast_grants.get(&cast.session_id) {
+                    grant.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 cast.close();
             }
             !cast.failed()
