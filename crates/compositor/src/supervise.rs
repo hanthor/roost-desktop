@@ -410,6 +410,9 @@ impl ShellDriver {
         let mut remake = || {
             let mut command = Command::new(bin);
             command.env("WAYLAND_DISPLAY", wayland_display);
+            // The shell's IBus panel must discover this session's private bus,
+            // rather than inherit an outer session's explicit address.
+            command.env_remove("IBUS_ADDRESS");
             command.env("ROOST_CONTROL_SOCKET", control_socket);
             command.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
             command
