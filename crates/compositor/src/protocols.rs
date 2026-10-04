@@ -620,16 +620,22 @@ impl Dispatch<
                 if grab.is_some() { keyboard.unset_grab(state); }
                 keyboard.input_forward(state, key.saturating_add(8).into(),
                     if pressed == 1 { smithay::backend::input::KeyState::Pressed } else { smithay::backend::input::KeyState::Released },
-                    smithay::utils::SERIAL_COUNTER.next_serial(), time, true);
+                    smithay::utils::SERIAL_COUNTER.next_serial(), time, false);
                 if let Some((serial, grab)) = grab { keyboard.set_grab(state, grab, serial); }
             }
-            // Physical input already sent modifiers with the same keymap.
-            Request::Modifiers { .. } => {
+            // Preserve the bridge's event order: newer physical events may
+            // already have updated the compositor state while IBus replies.
+            Request::Modifiers { mods_depressed, mods_latched, mods_locked, group } => {
                 use smithay::input::keyboard::KeyboardTarget;
                 if let Some(keyboard) = state.seat.get_keyboard() {
                     if let Some(focus) = keyboard.current_focus() {
                         let seat = state.seat.clone();
-                        focus.modifiers(&seat, state, keyboard.modifier_state(), smithay::utils::SERIAL_COUNTER.next_serial());
+                        let mut modifiers = keyboard.modifier_state();
+                        modifiers.serialized.depressed = mods_depressed;
+                        modifiers.serialized.latched = mods_latched;
+                        modifiers.serialized.locked = mods_locked;
+                        modifiers.serialized.layout_effective = group;
+                        focus.modifiers(&seat, state, modifiers, smithay::utils::SERIAL_COUNTER.next_serial());
                     }
                 }
             },
