@@ -2762,7 +2762,7 @@ impl Runtime {
             }
             #[cfg(feature = "drm")]
             Backend::Drm(drm) => {
-                if !drm.active {
+                if !drm.scanout_ready() {
                     return Ok(());
                 }
                 let pointer = drm.pointer();

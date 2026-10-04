@@ -24,6 +24,6 @@ and next_fb without calling submit or marking a buffer presented. It returns
 at most two user-data entries so Roost can explicitly discard abandoned
 presentation feedback. current_fb remains retained until KMS reset. This
 avoids frame_submitted's implicit queued-frame submission during S3 recovery;
-Roost resets the buffer pool and KMS state, and ignores pre-reset monotonic
+Roost resets the buffer pool and KMS state, then drains obsolete queued DRM
 vblank completions before queuing the locked scene. Existing APIs and the
 pinned 0.7.0 version remain unchanged.

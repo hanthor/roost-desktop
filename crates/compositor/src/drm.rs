@@ -117,7 +117,7 @@ pub struct DrmBackend {
     /// Whether the session currently owns the VT.
     pub active: bool,
     sleep_reset_pending: bool,
-    wake_flip_cutoff: Option<std::time::Duration>,
+    wake_scanout_blocked: bool,
     wake_event_traces: u8,
     pointer: Point<f64, Logical>,
     ctrl: bool,
@@ -387,7 +387,7 @@ impl DrmBackend {
                 libinput,
                 active: true,
                 sleep_reset_pending: false,
-                wake_flip_cutoff: None,
+                wake_scanout_blocked: false,
                 wake_event_traces: 0,
                 pointer: (
                     f64::from(first_loc.0) + f64::from(first_w) / 2.0,
@@ -451,15 +451,13 @@ impl DrmBackend {
 
     /// Recover scanout after real system sleep, independently of VT events.
     pub fn resume_from_sleep(&mut self) {
+        self.wake_scanout_blocked = true;
         if !self.active {
             // Never program KMS off-seat; retain the wake until activation.
             self.sleep_reset_pending = true;
             return;
         }
         self.sleep_reset_pending = false;
-        self.wake_flip_cutoff = Some(std::time::Duration::from(
-            smithay::utils::Clock::<smithay::utils::Monotonic>::new().now(),
-        ));
         eprintln!("roost-compositor: drm: system wake scanout reset");
         let trace = std::env::var_os("ROOST_LOCK_TRACE").is_some();
         self.wake_event_traces = if trace { 2 } else { 0 };
@@ -479,7 +477,28 @@ impl DrmBackend {
         // commits the retained modes and surfaces again.
         if let Err(error) = self.drm.reset_state() {
             eprintln!("roost-compositor: drm: wake KMS reset failed: {error}");
+            // An unsuccessful reset cannot retire old kernel completions.
+            // Stay masked without submitting a frame whose feedback could
+            // be attached to an abandoned flip. VT activation can recover.
+            self.sleep_reset_pending = true;
+            return;
         }
+        // The blocking disable commit has retired previous scanout. Drain
+        // its already queued completions before the first new submission.
+        // A valid modeset event can report the last vblank before submission,
+        // so its timestamp cannot identify an abandoned pre-sleep frame.
+        match drain_reset_events(|| self.drm.receive_events().map(|events| events.count())) {
+            Ok(count) if trace => {
+                eprintln!("roost-compositor: drm: wake obsolete events drained={count}");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("roost-compositor: drm: wake event drain failed: {error}");
+                self.sleep_reset_pending = true;
+                return;
+            }
+        }
+        self.wake_scanout_blocked = false;
         if trace {
             for out in &self.outputs {
                 eprintln!(
@@ -491,6 +510,11 @@ impl DrmBackend {
                 );
             }
         }
+    }
+
+    /// A failed wake reset/drain must not submit until recovery succeeds.
+    pub fn scanout_ready(&self) -> bool {
+        self.active && !self.wake_scanout_blocked
     }
 
     /// Page flip completion: the output may render again, and what its
@@ -505,16 +529,8 @@ impl DrmBackend {
                 if self.wake_event_traces != 0 {
                     self.wake_event_traces -= 1;
                     eprintln!(
-                        "roost-compositor: drm: wake pageflip crtc={crtc:?} metadata={metadata:?} cutoff={:?}",
-                        self.wake_flip_cutoff,
+                        "roost-compositor: drm: wake pageflip crtc={crtc:?} metadata={metadata:?}",
                     );
-                }
-                // A kernel completion already queued before the reset must
-                // not present feedback belonging to the newly queued frame.
-                if let (Some(cutoff), Some(meta)) = (self.wake_flip_cutoff, metadata.as_ref()) {
-                    if matches!(meta.time, DrmEventTime::Monotonic(time) if time <= cutoff) {
-                        return None;
-                    }
                 }
                 let index = self.outputs.iter().position(|o| o.crtc == crtc)?;
                 let out = &mut self.outputs[index];
@@ -656,6 +672,62 @@ impl DrmBackend {
             .first()
             .map(|o| (o.size.w, o.size.h).into())
             .unwrap_or_else(|| (1, 1).into())
+    }
+}
+
+/// Bound nonblocking 1024-byte DRM event reads after the synchronous reset.
+/// No new frames are submitted until the old queue reaches WouldBlock.
+fn drain_reset_events(
+    mut receive: impl FnMut() -> std::io::Result<usize>,
+) -> std::io::Result<usize> {
+    let mut drained = 0;
+    for _ in 0..32 {
+        match receive() {
+            Ok(0) => return Ok(drained),
+            Ok(count) => drained += count,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(drained),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::other(
+        "DRM event queue did not become empty after reset",
+    ))
+}
+
+#[cfg(test)]
+mod wake_event_tests {
+    use super::drain_reset_events;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn old_completions_are_drained_before_new_submission() {
+        let mut reads = [
+            Ok(2),
+            Err(Error::from(ErrorKind::Interrupted)),
+            Ok(1),
+            Err(Error::from(ErrorKind::WouldBlock)),
+        ]
+        .into_iter();
+        assert_eq!(drain_reset_events(|| reads.next().unwrap()).unwrap(), 3);
+        assert!(reads.next().is_none());
+    }
+
+    #[test]
+    fn unbounded_or_failed_drain_never_qualifies_as_empty() {
+        let mut calls = 0;
+        assert!(drain_reset_events(|| {
+            calls += 1;
+            Ok(1)
+        })
+        .is_err());
+        assert_eq!(calls, 32);
+        assert_eq!(
+            drain_reset_events(|| Err(Error::from(ErrorKind::PermissionDenied)))
+                .unwrap_err()
+                .kind(),
+            ErrorKind::PermissionDenied
+        );
     }
 }
 

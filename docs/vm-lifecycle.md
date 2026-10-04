@@ -46,7 +46,12 @@ requires exact window and process identity preservation.
 
 The compositor also listens to the trusted logind system-bus sleep signal:
 preparation invalidates pending authentication generations and engages its own lock; wake restores KMS connector/plane
-state and retires lost flip buffers without marking them presented. Wake
+state and retires lost flip buffers without marking them presented. After
+the blocking device reset, bounded nonblocking reads drain obsolete kernel
+completions before any new frame is submitted. A valid modeset completion
+can carry the preceding vblank's timestamp, so timestamps alone do not
+identify abandoned frames. A failed reset or drain keeps scanout blocked
+until recovery succeeds. Wake
 recovery does not depend on a VT change; an off-seat wake waits for seat
 activation. This does not establish a delay inhibitor or physical masked
 frame acknowledgement before sleep.
