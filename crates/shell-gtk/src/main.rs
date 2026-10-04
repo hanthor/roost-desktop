@@ -13,6 +13,7 @@
 //! The compositor runs one supervised shell; select this one with
 //! `ROOST_SHELL_BIN=roost-shell-gtk` while it grows to parity.
 
+mod audio_state;
 mod bt_menu;
 mod calendar;
 mod events;
