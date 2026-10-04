@@ -3553,6 +3553,7 @@ dependencies = [
  "libc",
  "roost-shell-control",
  "roost-shell-host",
+ "serde_json",
  "xkbcommon 0.9.0",
 ]
 

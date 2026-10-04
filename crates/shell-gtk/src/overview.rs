@@ -1024,6 +1024,11 @@ fn paged_grid(pages: Vec<gtk::FlowBox>) -> gtk::Widget {
         let pager = pager.clone();
         motion.connect_motion(move |m, x, _| {
             let width = m.widget().map_or(0, |w| w.width());
+            // A drag originating in a descendant can deliver motion before
+            // an overlay enter crossing. Initialize paging on either event.
+            if !pager.dragging.get() {
+                pager.begin(width);
+            }
             pager.motion(x, width);
         });
     }
