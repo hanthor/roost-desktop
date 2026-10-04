@@ -1,6 +1,6 @@
 # Program roadmap and traceability
 
-**Status:** Active. Tier 1 (nested developer preview) is implemented; tier 2 (daily-driver candidate) is open. Work items live as GitHub issues on the [Roost roadmap project board](https://github.com/users/hanthor/projects/4); this document keeps the program structure, gates, and traceability.  
+**Status:** Active. Tier 1 (nested developer preview) is implemented; tier 2 (daily-driver candidate) is open. Work items live as GitHub issues on the [Roost roadmap project board](https://github.com/users/hanthor/projects/4); this document keeps the program structure, gates, and traceability.
 **Architecture:** [Program architecture](architecture.md)  
 **Parity baseline:** GNOME 51, as shipped in the TunaOS Marlin GNOME image (`ghcr.io/tuna-os/marlin:gnome`). Decided 2026-10-01.  
 **Target platform:** TunaOS Marlin (Arch Linux base, bootc image), as a Roost flavor alongside the GNOME flavor. Reference and candidate run on the same VM image family so comparisons are like for like.  
