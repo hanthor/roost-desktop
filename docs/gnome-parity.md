@@ -148,6 +148,18 @@ GTK and St differ in a few ways that matter when matching numbers:
 - GNOME's lock screen blurs the wallpaper with a Gaussian of about
   sigma 20 and dims it to 65%; fitted against GNOME's capture.
 
+Audio state comes from a persistent `pw-dump --monitor --no-colors` stream.
+Recording node creation, removal and state changes update the microphone
+indicator and slider in the GTK event callback, before the next frame; there
+is no recording poll or extra volume query. Default-node metadata and node
+Props provide the live volume and mute state. Device EnumRoute and Route
+parameters supply separate output-port rows. Selecting a physical port sets
+its saved device Route before setting the sink default. Sinks without routes
+(such as a virtual output) retain a single row. The event decoder bounds both
+incomplete JSON and retained graph state, clears stale state on disconnect,
+and reconnects to a restarted daemon. The graphical gates use an event-driven
+FIFO fixture with the same JSON objects and route command arguments.
+
 Idle shield behavior follows GNOME's `screenShield.js`: the idle fade takes
 10,000 ms with ease-out-quad, and locking waits for the larger of that animation duration
 and `lock-delay`. With animations disabled the minimum disappears.

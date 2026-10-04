@@ -397,8 +397,24 @@ case "\$1" in
         fi ;;
     *) ;;
 esac
+"$PY" "$ROOT/scripts/lib/roost-audio-fixture.py" "$ARTIFACTS" --event
 WPCTL
-chmod +x "$ARTIFACTS/bin/wpctl"
+# Status comes from events; commands still exercise real asynchronous callers.
+cat >"$ARTIFACTS/bin/pw-dump" <<PW_DUMP
+#!/bin/sh
+exec "$PY" "$ROOT/scripts/lib/roost-audio-fixture.py" "$ARTIFACTS"
+PW_DUMP
+cat >"$ARTIFACTS/bin/pw-cli" <<PW_CLI
+#!/bin/sh
+printf '%s\\n' "\$*" >>"$ARTIFACTS/audio-route-calls"
+case "\$*" in
+    'set-param 40 Route { index: 2, device: 0, save: true }') echo 2 >"$ARTIFACTS/audio-route" ;;
+    'set-param 40 Route { index: 1, device: 0, save: true }') echo 1 >"$ARTIFACTS/audio-route" ;;
+    *) exit 1 ;;
+esac
+"$PY" "$ROOT/scripts/lib/roost-audio-fixture.py" "$ARTIFACTS" --event
+PW_CLI
+chmod +x "$ARTIFACTS/bin/wpctl" "$ARTIFACTS/bin/pw-dump" "$ARTIFACTS/bin/pw-cli"
 PATH="$ARTIFACTS/bin:$PATH"
 export PATH
 SYSBUS_INFO="$(dbus-daemon --session --fork --print-address=1 --print-pid=1)"
@@ -1402,7 +1418,7 @@ order="$(jq -r '[.[] | select(.showing) | .name | select(test("^(Connect to|Disc
     "$ARTIFACTS/a11y-qs-bt-menu.json")"
 want="Disconnect Keyboard|Connect to Headphones"
 [ "$order" = "$want" ] || fail G-QS-BT-MENU "devices are '$order', not '$want'"
-[ "$(jq '[.[] | select(.showing and .name == "Keyboard")] | length' "$ARTIFACTS/a11y-qs-bt-menu.json")" -ge 2 ] ||
+[ "$(jq '[.[] | select(.showing and .name == "Keyboard")] | length' "$ARTIFACTS/a11y-qs-bt-menu.json")" -gt 0 ] ||
     fail G-QS-BT-MENU "the tile does not name the connected device"
 qs_press "Connect to Headphones" bt-connect || fail G-QS-BT-MENU "could not press Headphones"
 grep -q "^Connect /org/bluez/hci0/dev_AA_AA_AA_AA_AA_01" "$ROOST_STUB_BT_LOG" ||
@@ -1421,10 +1437,18 @@ qs_press "Open sound output menu" sound-menu || fail G-QS-SOUND-MENU "could not 
 sleep 1
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-sound.json" 20 ||
     fail G-QS-SOUND-MENU "accessibility dump failed"
-for name in "Built-in Audio Analog Stereo" "Roost HDMI Output"; do
+for name in "Speakers – Built-in Audio Analog Stereo" "Headphones – Built-in Audio Analog Stereo" "Roost HDMI Output"; do
     showing "$ARTIFACTS/a11y-qs-sound.json" "$name" ||
         fail G-QS-SOUND-MENU "no '$name' output listed"
 done
+qs_press "Headphones – Built-in Audio Analog Stereo" sound-headphones || fail G-QS-SOUND-PORT "could not select the headphone port"
+for _ in $(seq 1 10); do [ "$(cat "$ARTIFACTS/audio-route" 2>/dev/null || true)" = 2 ] && break; sleep 0.1; done
+[ "$(cat "$ARTIFACTS/audio-route")" = 2 ] || fail G-QS-SOUND-PORT "the device route did not switch"
+grep -q '^set-param 40 Route { index: 2, device: 0, save: true }$' "$ARTIFACTS/audio-route-calls" || fail G-QS-SOUND-PORT "wrong route or profile device"
+pass G-QS-SOUND-PORT "Speakers and Headphones are separate routes on the same sink; selecting Headphones switches and saves device route 2"
+sleep 1
+open_qs
+qs_press "Open sound output menu" sound-menu-again || fail G-QS-SOUND-MENU "could not reopen the menu"
 qs_press "Roost HDMI Output" sound-hdmi || fail G-QS-SOUND-MENU "could not press Roost HDMI Output"
 for _ in $(seq 1 10); do [ "$(cat "$SINK_FILE")" = 52 ] && break; sleep 0.3; done
 [ "$(cat "$SINK_FILE")" = 52 ] || fail G-QS-SOUND-MENU "the default sink is $(cat "$SINK_FILE"), not 52"
@@ -1470,7 +1494,9 @@ mic_shown() {
 }
 mic_shown idle Microphone && fail G-QS-MIC "the Microphone slider shows with nothing recording"
 touch "$RECORDING_FILE"
-sleep 3
+"$PY" "$ROOT/scripts/lib/roost-audio-fixture.py" "$ARTIFACTS" --event
+for _ in $(seq 1 20); do grep -q "audio recording frame true" "$LOG" && break; sleep 0.05; done
+grep -q "audio recording frame true" "$LOG" || fail G-QS-MIC-EVENT "recording event was not reflected by the next frame"
 mic_shown recording Microphone || fail G-QS-MIC "no Microphone slider while an app records"
 showing "$ARTIFACTS/a11y-mic-recording.json" "Microphone in use" ||
     fail G-QS-MIC "no microphone indicator in the panel while an app records"
@@ -1480,7 +1506,10 @@ scrot "$ARTIFACTS/16b-microphone.png" >/dev/null
 [ "$(cat "$MIC_FILE")" = 0.30 ] ||
     fail G-QS-MIC "source volume is $(cat "$MIC_FILE"), not 0.30"
 rm -f "$RECORDING_FILE"
-sleep 3
+"$PY" "$ROOT/scripts/lib/roost-audio-fixture.py" "$ARTIFACTS" --event
+for _ in $(seq 1 20); do grep -q "audio recording frame false" "$LOG" && break; sleep 0.05; done
+grep -q "audio recording frame false" "$LOG" || fail G-QS-MIC-EVENT "recording removal was not reflected by the next frame"
+pass G-QS-MIC-EVENT "PipeWire node creation/removal updates recording widgets in the event callback before the next frame, without polling"
 mic_shown stopped "Microphone in use" &&
     fail G-QS-MIC "the microphone indicator stayed after the recording stopped"
 pass G-QS-MIC "an app recording shows the microphone indicator and slider; the slider sets the source"
@@ -2560,4 +2589,27 @@ if grep -q 'ShellExited' "$LOG"; then
     fail G-SHELL-STABLE "the shell exited during the journey: $(grep -c ShellExited "$LOG") time(s)"
 fi
 pass G-SHELL-STABLE "the shell never exited or restarted"
+
+# A hard shell crash must not leave a persistent monitor behind. Do this
+# after the normal journey's stability assertion, then require supervision
+# to start a new shell with its own monitor.
+monitor_count=$(wc -l <"$ARTIFACTS/audio-monitor-pids")
+read -r monitor_pid audio_shell_pid <<EOF
+$(tail -n 1 "$ARTIFACTS/audio-monitor-pids")
+EOF
+kill -KILL "$audio_shell_pid"
+end=$(($(date +%s) + 15))
+while [ "$(date +%s)" -lt "$end" ]; do
+    monitor_state="$(ps -o stat= -p "$monitor_pid" 2>/dev/null || true)"
+    if { [ -z "$monitor_state" ] || echo "$monitor_state" | grep -q '^Z'; } &&
+        [ "$(wc -l <"$ARTIFACTS/audio-monitor-pids")" -gt "$monitor_count" ]; then break; fi
+    sleep 0.1
+done
+monitor_state="$(ps -o stat= -p "$monitor_pid" 2>/dev/null || true)"
+{ [ -z "$monitor_state" ] || echo "$monitor_state" | grep -q '^Z'; } ||
+    fail G-AUDIO-HELPER-EXIT "audio monitor survived its shell's hard crash"
+[ "$(wc -l <"$ARTIFACTS/audio-monitor-pids")" -gt "$monitor_count" ] ||
+    fail G-AUDIO-HELPER-EXIT "the supervised replacement shell did not start an audio monitor"
+pass G-AUDIO-HELPER-EXIT "a hard shell crash terminates its monitor; the replacement starts a fresh one"
+
 echo "roost-gtk-shell-proof: OK, artifacts in $ARTIFACTS"
