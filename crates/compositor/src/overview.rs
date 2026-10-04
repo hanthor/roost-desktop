@@ -85,6 +85,8 @@ pub struct OverviewLayout {
     /// GNOME's workspace thumbnails strip, left to right (empty below
     /// [`THUMBNAILS_MIN_WORKSPACES`]).
     pub thumbnails: Vec<WorkspaceCard>,
+    /// The new-workspace drop slot, visible only during a window drag.
+    pub placeholder: Option<(u32, Rectangle<i32, Logical>)>,
 }
 
 /// GNOME shows the thumbnails strip once dynamic workspaces number more
@@ -188,6 +190,64 @@ pub fn drag_preview(
     // Not a click target while it rides the pointer.
     p.active = false;
     layout.previews.push(p);
+}
+
+/// Insertion gaps before/between/after thumbnails. GNOME opens a slot
+/// when the pointer enters a gap rather than an existing thumbnail.
+pub fn insertion_target(layout: &OverviewLayout, pos: Point<f64, Logical>) -> Option<u32> {
+    let first = layout.thumbnails.first()?;
+    let last = layout.thumbnails.last()?;
+    if pos.y < f64::from(first.rect.loc.y)
+        || pos.y >= f64::from(first.rect.loc.y + first.rect.size.h)
+    {
+        return None;
+    }
+    let pad = f64::from(THUMBNAILS_PAD);
+    const CUT: f64 = 10.0;
+    if pos.x >= f64::from(first.rect.loc.x) - pad && pos.x < f64::from(first.rect.loc.x) + CUT {
+        return Some(first.workspace);
+    }
+    for pair in layout.thumbnails.windows(2) {
+        let left = pair[0].rect;
+        if pos.x >= f64::from(left.loc.x + left.size.w) && pos.x < f64::from(pair[1].rect.loc.x) {
+            return Some(pair[1].workspace);
+        }
+    }
+    // The last shown thumbnail is GNOME's trailing empty workspace;
+    // use its slot for an end drop rather than leaving an extra empty gap.
+    let end = f64::from(last.rect.loc.x + last.rect.size.w);
+    (pos.x >= end && pos.x <= end + pad + f64::from(last.rect.size.w)).then_some(last.workspace)
+}
+
+/// Spread the thumbnails around a new-workspace slot, keeping their
+/// miniature windows aligned with their cards.
+pub fn show_placeholder(layout: &mut OverviewLayout, at: u32) {
+    let Some(first) = layout.thumbnails.first() else {
+        return;
+    };
+    let size = first.rect.size;
+    let step = 18 + THUMBNAILS_PAD;
+    let x = layout
+        .thumbnails
+        .iter()
+        .find(|t| t.workspace >= at)
+        .map(|t| t.rect.loc.x)
+        .unwrap_or_else(|| {
+            let t = layout.thumbnails.last().unwrap();
+            t.rect.loc.x + t.rect.size.w + THUMBNAILS_PAD
+        });
+    let y = first.rect.loc.y;
+    for thumb in &mut layout.thumbnails {
+        let old = thumb.rect;
+        let offset = if thumb.workspace >= at { step } else { 0 };
+        for preview in &mut layout.previews {
+            if !preview.active && old.contains(preview.rect.loc) {
+                preview.rect.loc.x += offset;
+            }
+        }
+        thumb.rect.loc.x += offset;
+    }
+    layout.placeholder = Some((at, Rectangle::new((x, y).into(), (18, size.h).into())));
 }
 
 /// The workspace a window dropped at `pos` goes to: a thumbnail, or a
@@ -773,7 +833,34 @@ pub fn thumbnail_decor(layout: &OverviewLayout, accent: [f32; 3]) -> Vec<DecorFi
         }
         ring.retain(|r| r.size.w > 0);
     }
-    vec![(FILL, fills), (accent, ring)]
+    let mut decor = vec![(FILL, fills), (accent, ring)];
+    if let Some((_, rect)) = layout.placeholder {
+        // GNOME's workspace-placeholder.svg: a fading vertical line,
+        // a radial halo and a small solid white center. CSS reserves 18px.
+        let scale = f64::from(rect.size.h) / 76.0;
+        let cx = f64::from(rect.loc.x) + f64::from(rect.size.w) / 2.0;
+        let cy = f64::from(rect.loc.y) + f64::from(rect.size.h) / 2.0;
+        for y in rect.loc.y..rect.loc.y + rect.size.h {
+            for x in rect.loc.x..rect.loc.x + rect.size.w {
+                let dx = (f64::from(x) + 0.5 - cx).abs();
+                let dy = (f64::from(y) + 0.5 - cy).abs();
+                let distance = dx.hypot(dy);
+                let line = (scale + 0.5 - dx).clamp(0.0, 1.0)
+                    * (1.0 - dy / (38.0 * scale)).clamp(0.0, 1.0)
+                    * 0.49375;
+                let glow = (1.0 - distance / (13.5 * scale)).clamp(0.0, 1.0) * 0.43125;
+                let dot = (4.57692 * scale + 0.5 - distance).clamp(0.0, 1.0);
+                let alpha = 1.0 - (1.0 - line) * (1.0 - glow) * (1.0 - dot);
+                if alpha > 0.0 {
+                    decor.push((
+                        [1.0, 1.0, 1.0, alpha as f32],
+                        vec![Rectangle::new((x, y).into(), (1, 1).into())],
+                    ));
+                }
+            }
+        }
+    }
+    decor
 }
 
 /// Thumbnail scale of the work area in the app grid state.
@@ -1205,5 +1292,46 @@ mod tests {
         let on_right = Point::from(((right.loc.x + 10) as f64, (right.loc.y + 10) as f64));
         assert_eq!(hit(&l, on_right), OverviewHit::Workspace(1));
         assert_eq!(hit(&l, Point::from((5.0, 790.0))), OverviewHit::Dismiss);
+    }
+    #[test]
+    fn window_drag_insertion_gaps_spread_thumbnails() {
+        let mut l = layout(
+            output(),
+            32,
+            &[0, 1],
+            0,
+            &[win(3, 0, 100, 100, 600, 400), win(4, 1, 200, 200, 600, 400)],
+        );
+        let first = l.thumbnails[0].rect;
+        let second = l.thumbnails[1].rect;
+        let gap = Point::from((
+            f64::from(first.loc.x + first.size.w + 3),
+            f64::from(first.loc.y + 10),
+        ));
+        assert_eq!(insertion_target(&l, gap), Some(1));
+        let last = l.thumbnails.last().unwrap();
+        let after = (
+            f64::from(last.rect.loc.x + last.rect.size.w + 3),
+            f64::from(last.rect.loc.y + 10),
+        )
+            .into();
+        assert_eq!(insertion_target(&l, after), Some(last.workspace));
+        assert_eq!(
+            insertion_target(
+                &l,
+                (
+                    f64::from(first.loc.x + first.size.w / 2),
+                    f64::from(first.loc.y + 10)
+                )
+                    .into()
+            ),
+            None
+        );
+        show_placeholder(&mut l, 1);
+        assert_eq!(l.placeholder.unwrap().0, 1);
+        assert_eq!(l.placeholder.unwrap().1.size.w, 18);
+        assert_eq!(l.thumbnails[0].rect.loc.x, first.loc.x);
+        assert!(l.thumbnails[1].rect.loc.x > second.loc.x);
+        assert!(thumbnail_decor(&l, [0.2, 0.5, 0.8]).len() > 2);
     }
 }

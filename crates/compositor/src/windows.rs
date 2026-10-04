@@ -2904,6 +2904,15 @@ impl WindowManager {
         true
     }
 
+    /// Create the workspace represented by an overview drop placeholder.
+    pub fn insert_workspace_and_move(&mut self, state: &mut State, id: u64, at: u32) -> bool {
+        if !self.windows.contains_key(&id) || !self.model.insert_workspace_and_move(id, at) {
+            return false;
+        }
+        self.focus_topmost(state, self.model.active_workspace());
+        true
+    }
+
     /// Switch the active workspace, focusing its topmost window (or
     /// nothing when empty). Returns false for unknown ids.
     pub fn switch_workspace(&mut self, state: &mut State, workspace: u32) -> bool {
