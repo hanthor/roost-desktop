@@ -13,7 +13,7 @@
 use std::os::unix::net::UnixStream;
 
 use roost_compositor::TestCompositor;
-use roost_shell_control::{OVERVIEW_NAMESPACE, PANEL_NAMESPACE};
+use roost_shell_control::{OVERVIEW_NAMESPACE, PANEL_HEIGHT, PANEL_NAMESPACE};
 use smithay::wayland::{
     compositor::with_states,
     shell::wlr_layer::{
