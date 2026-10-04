@@ -212,6 +212,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         queue.dispatch_pending(&mut bridge)?;
+        // Popup rectangles also arrive independently of input-method done:
+        // moving a parent must update IBus without another text edit.
+        bridge.sync_cursor();
         bridge.apply_incoming();
         if bridge.gone {
             return Ok(());
@@ -609,6 +612,18 @@ impl Bridge {
                 self.surrounding = Some(surrounding);
             }
         }
+        self.sync_cursor();
+    }
+
+    /// Forward independent popup placement updates after the event batch
+    /// has applied any pending focus transition.
+    fn sync_cursor(&mut self) {
+        if !self.active {
+            return;
+        }
+        let Some(context) = &self.context else {
+            return;
+        };
         if let Some(rect) = self
             .cursor_rect
             .filter(|r| Some(*r) != self.sent_cursor_rect)
