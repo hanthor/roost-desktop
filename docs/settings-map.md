@@ -24,7 +24,7 @@ This page records that decision for R9 (knowledge entry
 |---|---|---|
 | color-scheme | Honored | The Dark Style tile writes it. The shell and apps follow it through libadwaita. Proof G-QS-DARK |
 | accent-color | Via GTK | libadwaita applies it |
-| font-name | Honored | Live shell CSS face/base size and GTK client font settings; proof G-SETTINGS-FONT |
+| font-name | Honored | Live shell CSS family, base size, weight, style and stretch (with semantic emphasis preserved) and GTK client font settings; proof G-SETTINGS-FONT |
 | document-font-name, monospace-font-name | Ignored by shell | Applications may choose to read these; Roost chrome uses font-name |
 | text-scaling-factor | Via GTK | Live GTK Wayland DPI translation; proof G-SETTINGS-FONT |
 | gtk-theme, icon-theme, cursor-theme, cursor-size | Via GTK | Inside apps. The compositor's own cursor ignores them (#89) |

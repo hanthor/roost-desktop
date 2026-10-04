@@ -1027,12 +1027,37 @@ fn build(app: &adw::Application) {
                 11.0
             };
             let unit = if font.is_size_absolute() { "px" } else { "pt" };
+            let weight = gtk::glib::translate::IntoGlib::into_glib(font.weight());
+            let style = match font.style() {
+                gtk::pango::Style::Italic => "italic",
+                gtk::pango::Style::Oblique => "oblique",
+                _ => "normal",
+            };
+            let stretch = match font.stretch() {
+                gtk::pango::Stretch::UltraCondensed => "ultra-condensed",
+                gtk::pango::Stretch::ExtraCondensed => "extra-condensed",
+                gtk::pango::Stretch::Condensed => "condensed",
+                gtk::pango::Stretch::SemiCondensed => "semi-condensed",
+                gtk::pango::Stretch::SemiExpanded => "semi-expanded",
+                gtk::pango::Stretch::Expanded => "expanded",
+                gtk::pango::Stretch::ExtraExpanded => "extra-expanded",
+                gtk::pango::Stretch::UltraExpanded => "ultra-expanded",
+                _ => "normal",
+            };
             let css = include_str!("style.css")
                 .replace(
                     "font-family: \"Adwaita Sans\", \"Cantarell\", sans-serif;",
-                    &format!("font-family: \"{family}\", sans-serif;"),
+                    &format!(
+                        "font-family: \"{family}\", sans-serif; font-weight: {weight}; font-style: {style}; font-stretch: {stretch};"
+                    ),
                 )
-                .replace("font-size: 11pt;", &format!("font-size: {size}{unit};"));
+                .replace("font-size: 11pt;", &format!("font-size: {size}{unit};"))
+                .replace("font-weight: normal;", &format!("font-weight: {weight};"))
+                .replace("font-weight: 400;", &format!("font-weight: {weight};"))
+                // Preserve semantic emphasis without weakening a heavy user font.
+                .replace("font-weight: bold;", &format!("font-weight: {};", weight.max(700)))
+                .replace("font-weight: 700;", &format!("font-weight: {};", weight.max(700)))
+                .replace("font-weight: 800;", &format!("font-weight: {};", weight.max(800)));
             provider.load_from_string(&css);
         }
     };

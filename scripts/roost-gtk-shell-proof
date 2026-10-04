@@ -1478,6 +1478,9 @@ scrot "$ARTIFACTS/settings-font-before.png" >/dev/null
 gsettings set org.gnome.desktop.interface font-name 'Monospace 20'
 sleep 1
 scrot "$ARTIFACTS/settings-font-after.png" >/dev/null
+gsettings set org.gnome.desktop.interface font-name 'Monospace Bold Italic Condensed 20'
+sleep 1
+scrot "$ARTIFACTS/settings-font-styled.png" >/dev/null
 gsettings set org.gnome.desktop.interface font-name 'Sans 11'
 gsettings set org.gnome.desktop.interface text-scaling-factor 1.75
 sleep 1
@@ -1493,11 +1496,18 @@ for name in ["settings-font-after.png", "settings-scale-after.png"]:
     hist = ImageChops.difference(before, after).convert("L").histogram()
     changed = sum(hist[25:]) / (280 * 32)
     assert changed > 0.03, (name, changed)
+# Same family and size: this change must come from the selected font's style.
+plain = Image.open(root / "settings-font-after.png").convert("RGB").crop((500, 0, 780, 32))
+styled = Image.open(root / "settings-font-styled.png").convert("RGB").crop((500, 0, 780, 32))
+hist = ImageChops.difference(plain, styled).convert("L").histogram()
+changed = sum(hist[25:]) / (280 * 32)
+assert changed > 0.01, ("styled font", changed)
+print(f"styled font changed {changed:.3%} of panel pixels")
 PYFONT
 gsettings set org.gnome.desktop.interface font-name "$original_font"
 gsettings set org.gnome.desktop.interface text-scaling-factor "$original_scale"
 sleep 1
-pass G-SETTINGS-FONT "font-name and text-scaling-factor change the running panel"
+pass G-SETTINGS-FONT "font-name family/size/style and text-scaling-factor change the running panel"
 
 # GNOME's input settings (#60).
 gsettings set org.gnome.desktop.input-sources sources "[('xkb', 'us'), ('xkb', 'de')]"
