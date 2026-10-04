@@ -6,49 +6,28 @@ mod protocol_version_tests {
 
     #[test]
     fn version_is_compatible_with_same_version() {
-        let version = ProtocolVersion {
-            major: 1,
-            minor: 2,
-        };
+        let version = ProtocolVersion { major: 1, minor: 2 };
         assert!(version.is_compatible_with(&version));
     }
 
     #[test]
     fn version_is_compatible_with_higher_minor() {
-        let older = ProtocolVersion {
-            major: 1,
-            minor: 0,
-        };
-        let newer = ProtocolVersion {
-            major: 1,
-            minor: 5,
-        };
+        let older = ProtocolVersion { major: 1, minor: 0 };
+        let newer = ProtocolVersion { major: 1, minor: 5 };
         assert!(older.is_compatible_with(&newer));
     }
 
     #[test]
     fn version_is_not_compatible_with_different_major() {
-        let v1 = ProtocolVersion {
-            major: 1,
-            minor: 0,
-        };
-        let v2 = ProtocolVersion {
-            major: 2,
-            minor: 0,
-        };
+        let v1 = ProtocolVersion { major: 1, minor: 0 };
+        let v2 = ProtocolVersion { major: 2, minor: 0 };
         assert!(!v1.is_compatible_with(&v2));
     }
 
     #[test]
     fn version_is_not_compatible_with_lower_minor() {
-        let older = ProtocolVersion {
-            major: 1,
-            minor: 5,
-        };
-        let newer = ProtocolVersion {
-            major: 1,
-            minor: 0,
-        };
+        let older = ProtocolVersion { major: 1, minor: 5 };
+        let newer = ProtocolVersion { major: 1, minor: 0 };
         assert!(!older.is_compatible_with(&newer));
     }
 
@@ -72,10 +51,7 @@ mod protocol_version_tests {
 
     #[test]
     fn version_copy_trait_works() {
-        let v1 = ProtocolVersion {
-            major: 1,
-            minor: 0,
-        };
+        let v1 = ProtocolVersion { major: 1, minor: 0 };
         let v2 = v1; // Copy, not move
         assert_eq!(v1, v2);
     }
@@ -152,8 +128,8 @@ mod frame_encoding_decoding_tests {
         assert!(frame.len() >= 4);
         // First 4 bytes are length prefix in little-endian
         let len_bytes = &frame[..4];
-        let len = u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]])
-            as usize;
+        let len =
+            u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]) as usize;
         assert_eq!(frame.len(), len + 4);
     }
 
@@ -226,9 +202,12 @@ mod frame_encoding_decoding_tests {
         let frame = encode_frame(&msg);
 
         let header_bytes = &frame[..4];
-        let decoded_len =
-            u32::from_le_bytes([header_bytes[0], header_bytes[1], header_bytes[2], header_bytes[3]])
-                as usize;
+        let decoded_len = u32::from_le_bytes([
+            header_bytes[0],
+            header_bytes[1],
+            header_bytes[2],
+            header_bytes[3],
+        ]) as usize;
 
         // Body should be exactly the declared length
         let body = &frame[4..];
@@ -268,7 +247,10 @@ mod frame_encoding_decoding_tests {
         let frame = encode_frame(&msg);
 
         let result = decode_frame(&frame);
-        assert!(matches!(result, Err(DecodeError::IncompatibleVersion { .. })));
+        assert!(matches!(
+            result,
+            Err(DecodeError::IncompatibleVersion { .. })
+        ));
     }
 
     #[test]
