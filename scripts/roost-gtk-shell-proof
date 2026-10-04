@@ -333,6 +333,37 @@ XML
     GSETTINGS_SCHEMA_DIR="$ARTIFACTS/schemas${GSETTINGS_SCHEMA_DIR:+:$GSETTINGS_SCHEMA_DIR}"
     export GSETTINGS_SCHEMA_DIR
 fi
+# Media settings are also exercised on lean hosts without gsd's schema.
+if ! gsettings list-schemas 2>/dev/null | grep -qx org.gnome.settings-daemon.plugins.media-keys; then
+    mkdir -p "$ARTIFACTS/schemas"
+    "$PY" - "$ARTIFACTS/schemas/org.gnome.media-keys.gschema.xml" <<'MEDIA_SCHEMA'
+import sys
+import xml.etree.ElementTree as ET
+root = ET.Element('schemalist')
+schema = ET.SubElement(root, 'schema', id='org.gnome.settings-daemon.plugins.media-keys', path='/org/gnome/settings-daemon/plugins/media-keys/')
+def key(name, kind, default):
+    ET.SubElement(ET.SubElement(schema, 'key', name=name, type=kind), 'default').text = default
+key('screensaver', 'as', "['<Super>l']")
+key('volume-step', 'i', '6')
+for name, defaults in {
+    'volume-up': ['XF86AudioRaiseVolume', '<Ctrl>XF86AudioRaiseVolume'],
+    'volume-down': ['XF86AudioLowerVolume', '<Ctrl>XF86AudioLowerVolume'],
+    'volume-mute': ['XF86AudioMute'],
+    'mic-mute': ['XF86AudioMicMute'],
+    'volume-up-quiet': ['<Alt>XF86AudioRaiseVolume', '<Alt><Ctrl>XF86AudioRaiseVolume'],
+    'volume-down-quiet': ['<Alt>XF86AudioLowerVolume', '<Alt><Ctrl>XF86AudioLowerVolume'],
+    'volume-mute-quiet': ['<Alt>XF86AudioMute'],
+    'volume-up-precise': ['<Shift>XF86AudioRaiseVolume', '<Ctrl><Shift>XF86AudioRaiseVolume'],
+    'volume-down-precise': ['<Shift>XF86AudioLowerVolume', '<Ctrl><Shift>XF86AudioLowerVolume'],
+}.items():
+    key(name, 'as', '[]')
+    key(name + '-static', 'as', repr(defaults))
+ET.ElementTree(root).write(sys.argv[1], encoding='unicode')
+MEDIA_SCHEMA
+    glib-compile-schemas "$ARTIFACTS/schemas"
+    GSETTINGS_SCHEMA_DIR="$ARTIFACTS/schemas"
+    export GSETTINGS_SCHEMA_DIR
+fi
 # Quick-settings daemons: stubs on a private "system" bus (#55), a fake
 # backlight, and a fake wpctl that records the sink volume.
 BACKLIGHT="$ARTIFACTS/backlight/roost-bl"
@@ -1500,6 +1531,23 @@ for _ in $(seq 1 30); do [ "$(cat "$MIC_MUTED_FILE")" = 1 ] && break; sleep 0.1;
 xdotool key XF86AudioMicMute
 for _ in $(seq 1 30); do [ "$(cat "$MIC_MUTED_FILE")" = 0 ] && break; sleep 0.1; done
 [ "$(cat "$MIC_MUTED_FILE")" = 0 ] || fail G-MEDIA-VOLUME "microphone unmute did not unmute"
+# Live rebinding and an empty static array must take effect without restart.
+MEDIA_SCHEMA=org.gnome.settings-daemon.plugins.media-keys
+gsettings set "$MEDIA_SCHEMA" volume-up-static '[]'
+sleep 0.7
+xdotool key XF86AudioRaiseVolume
+sleep 0.7
+[ "$(cat "$VOLUME_FILE")" = 0.4200 ] || fail G-MEDIA-VOLUME "an explicitly disabled hardware key still changed volume"
+gsettings set "$MEDIA_SCHEMA" volume-up "['F8']"
+gsettings set "$MEDIA_SCHEMA" volume-step 10
+sleep 0.7
+xdotool key F8
+media_volume 0.5200 || fail G-MEDIA-VOLUME "live rebound volume key ignored the configured step"
+gsettings reset "$MEDIA_SCHEMA" volume-up
+gsettings reset "$MEDIA_SCHEMA" volume-up-static
+gsettings reset "$MEDIA_SCHEMA" volume-step
+sleep 0.7
+echo 0.4200 >"$VOLUME_FILE"
 scrot "$ARTIFACTS/media-volume-osd.png" >/dev/null
 pass G-MEDIA-VOLUME "native volume/precise/mute/microphone keys mutate PipeWire state; unmute preserves the level"
 
