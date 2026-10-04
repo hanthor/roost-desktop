@@ -516,6 +516,8 @@ pub struct Runtime {
     /// `ROOST_COMPOSITOR_STATE` snapshot path (journeys only).
     state_path: Option<std::path::PathBuf>,
     state_last: String,
+    /// Opt-in synthetic touchpad phases for the nested proof harness.
+    proof_swipe_last: String,
 }
 
 /// Control socket path for a session: alongside the Wayland socket in the
@@ -802,6 +804,7 @@ impl Runtime {
                 .map(std::path::PathBuf::from)
                 .filter(|p| p.is_absolute()),
             state_last: String::new(),
+            proof_swipe_last: String::new(),
         };
         // Session-level X11 opt-in is the recorded first X11 need:
         // the supervisor leaves `Idle` and the next tick may spawn
@@ -1168,14 +1171,27 @@ impl Runtime {
         // where they say.
         let scene =
             (overview_open && self.overview_progress >= 1.0).then(|| self.overview_layout());
+        // Record the drawn transition separately from settled click targets.
+        let transition_scene = (self.overview_progress > 0.0).then(|| self.overview_layout());
+        let workspace_cards: Vec<serde_json::Value> = transition_scene
+            .iter()
+            .flat_map(|l| l.cards.iter())
+            .map(|c| {
+                serde_json::json!({
+                    "workspace": c.workspace, "active": c.active, "alpha": c.alpha,
+                    "rect": [c.rect.loc.x, c.rect.loc.y, c.rect.size.w, c.rect.size.h],
+                })
+            })
+            .collect();
         // GNOME's workspace thumbnails strip (three or more workspaces).
-        let thumbnails: Vec<serde_json::Value> = scene
+        let thumbnails: Vec<serde_json::Value> = transition_scene
             .iter()
             .flat_map(|l| l.thumbnails.iter())
             .map(|t| {
                 serde_json::json!({
                     "workspace": t.workspace,
                     "active": t.active,
+                    "alpha": t.alpha,
                     "rect": [t.rect.loc.x, t.rect.loc.y, t.rect.size.w, t.rect.size.h],
                 })
             })
@@ -1241,6 +1257,8 @@ impl Runtime {
             })).collect::<Vec<_>>(),
             "previews": previews,
             "thumbnails": thumbnails,
+            "overview_progress": self.overview_progress,
+            "workspace_cards": workspace_cards,
             // The Alt+Tab switcher's window thumbnails being drawn.
             "switcher_thumbnails": self.switcher_thumbnails.len(),
             // GNOME's tile preview while a dragged window is over a
@@ -1410,6 +1428,52 @@ impl Runtime {
         if here != Some(target) {
             self.manager.move_to_workspace(&mut self.state, id, target);
         }
+    }
+
+    /// Feed explicitly opted-in nested proofs through the real gesture handler.
+    /// Each atomically replaced JSON file is consumed once; ordinary sessions
+    /// never read it because state instrumentation is also required.
+    fn proof_swipe_input(&mut self) {
+        if self.state_path.is_none() {
+            return;
+        }
+        let Some(path) = std::env::var_os("ROOST_PROOF_SWIPE_INPUT")
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_absolute())
+        else {
+            return;
+        };
+        if !std::fs::metadata(&path).is_ok_and(|m| m.len() <= 4096) {
+            return;
+        }
+        let Ok(body) = std::fs::read_to_string(path) else {
+            return;
+        };
+        if body == self.proof_swipe_last {
+            return;
+        }
+        self.proof_swipe_last = body.clone();
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
+            return;
+        };
+        let time = crate::state::system_millis() as u32;
+        let input = match value["phase"].as_str() {
+            Some("begin") => ManagerInput::SwipeBegin { fingers: 3, time },
+            Some("update") => ManagerInput::SwipeUpdate {
+                delta: (
+                    value["dx"].as_f64().unwrap_or(0.0),
+                    value["dy"].as_f64().unwrap_or(0.0),
+                )
+                    .into(),
+                time,
+            },
+            Some("end") => ManagerInput::SwipeEnd {
+                cancelled: value["cancelled"].as_bool().unwrap_or(false),
+                time,
+            },
+            _ => return,
+        };
+        self.on_manager_input(input);
     }
 
     /// Track a three-finger swipe; returns whether `input` was one of
@@ -2270,6 +2334,7 @@ impl Runtime {
                 .tick(crate::state::system_millis(), Some(&mut spawner));
         }
         self.stats.shell_restarts = self.shell.restarts_used();
+        self.proof_swipe_input();
         self.publish_state();
         self.publish_cast_outputs();
         self.publish_overview_previews();
@@ -3052,7 +3117,7 @@ fn backdrop(
             let loc = view.physical(f64::from(r.loc.x), f64::from(r.loc.y));
             let end = view.physical(f64::from(r.loc.x + r.size.w), f64::from(r.loc.y + r.size.h));
             let rect = Rectangle::new(loc, (end.x - loc.x, end.y - loc.y).into());
-            wallpaper.card_element(renderer, output, work_top, rect)
+            wallpaper.card_element(renderer, output, work_top, rect, card.alpha)
         })
         .collect()
 }
@@ -3241,6 +3306,10 @@ fn send_frame_callbacks(state: &State, manager: &WindowManager, frames: u64) {
 pub fn run(session: &NestedSession) -> Result<RunStats, RuntimeError> {
     let (mut runtime, mut event_loop) = Runtime::launch(session)?;
     let prev_env = apply_nested_env(&session.socket_name);
+    #[cfg(feature = "drm")]
+    if matches!(runtime.backend, Backend::Drm(_)) {
+        crate::session_services::publish(&session.socket_name);
+    }
     // Graceful shutdown on SIGTERM/SIGINT: ending the loop drops the
     // runtime, whose supervisor kills the shell child (ADR 0003 kill
     // on exit). Without this a signal would bypass `Drop` and orphan

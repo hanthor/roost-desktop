@@ -66,6 +66,7 @@ pub mod runtime;
 pub mod screencast;
 pub mod screenshot;
 pub mod session_lock;
+pub mod session_services;
 pub mod spring;
 pub mod state;
 pub mod supervise;
@@ -145,6 +146,8 @@ pub struct State {
     /// test) registers the first entry; readers fall back to zero
     /// sizes, which configure zero sizes.
     pub(crate) outputs: Vec<OutputEntry>,
+    /// Target remembered when the first preferred scale is sent, before mapping.
+    pub(crate) initial_outputs: std::collections::HashMap<wl_surface::WlSurface, String>,
     /// Client window-state requests awaiting the manager's next
     /// `reconcile` drain (002 window actions).
     pub(crate) window_requests: Vec<(wl_surface::WlSurface, WindowRequest)>,
@@ -232,6 +235,10 @@ impl XdgShellHandler for State {
 
     fn new_toplevel(&mut self, _surface: ToplevelSurface) {}
 
+    fn parent_changed(&mut self, surface: ToplevelSurface) {
+        self.refresh_initial_surface_scale(surface.wl_surface());
+    }
+
     /// Track the popup and place it where its positioner asks; the
     /// initial configure goes out on its first commit.
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
@@ -239,9 +246,11 @@ impl XdgShellHandler for State {
             state.geometry = positioner.get_geometry();
             state.positioner = positioner;
         });
+        let wl_surface = surface.wl_surface().clone();
         let _ = self
             .popups
             .track_popup(smithay::desktop::PopupKind::Xdg(surface));
+        self.refresh_initial_surface_scale(&wl_surface);
     }
 
     /// Explicit grab (menus): keyboard focus moves to the popup and an
@@ -369,6 +378,10 @@ impl State {
 }
 
 impl CompositorHandler for State {
+    fn destroyed(&mut self, surface: &wl_surface::WlSurface) {
+        self.initial_outputs.remove(surface);
+    }
+
     fn compositor_state(&mut self) -> &mut CompositorState {
         &mut self.compositor_state
     }
@@ -671,6 +684,7 @@ impl State {
             popup_grab: Vec::new(),
             popup_refocus: false,
             window_origins: std::collections::HashMap::new(),
+            initial_outputs: std::collections::HashMap::new(),
             outputs: Vec::new(),
             window_requests: Vec::new(),
             protocols: protocols::Protocols::new(dh),
@@ -840,6 +854,42 @@ impl State {
     /// Wire records for the shell, primary first: the inventory as the
     /// shell already knows how to paint it — size, primary, handles
     /// implied by the bound surfaces.
+    /// Output chosen for a new window: pointer, keyboard focus, primary.
+    /// Placement and the first fractional-scale event use the same policy.
+    pub(crate) fn new_window_output(&self) -> Option<&OutputEntry> {
+        let pointer = self.seat.get_pointer().map(|p| p.current_location());
+        let focused = self
+            .seat
+            .get_keyboard()
+            .and_then(|k| k.current_focus())
+            .and_then(|s| self.window_origins.get(&s).copied());
+        self.outputs
+            .iter()
+            .find(|entry| {
+                pointer.is_some_and(|p| {
+                    smithay::utils::Rectangle::new(entry.loc.into(), entry.size)
+                        .to_f64()
+                        .contains(p)
+                })
+            })
+            .or_else(|| {
+                self.outputs.iter().find(|entry| {
+                    focused.is_some_and(|p| {
+                        smithay::utils::Rectangle::new(entry.loc.into(), entry.size).contains(p)
+                    })
+                })
+            })
+            .or_else(|| self.outputs.iter().find(|entry| entry.primary))
+    }
+
+    /// First preferred scale before a new window has committed a buffer.
+    pub fn initial_window_scale(&self) -> f64 {
+        self.new_window_output()
+            .and_then(|entry| entry.output.as_ref())
+            .map(|output| output.current_scale().fractional_scale())
+            .unwrap_or(self.protocols.preferred_scale)
+    }
+
     /// Scale of the output a logical rect overlaps most (the primary on
     /// a tie or no overlap), as niri picks it for a window (#59).
     pub fn scale_for(
