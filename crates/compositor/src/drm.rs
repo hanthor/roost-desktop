@@ -103,6 +103,8 @@ pub struct DrmBackend {
     pub libinput: Libinput,
     /// Whether the session currently owns the VT.
     pub active: bool,
+    sleep_reset_pending: bool,
+    wake_flip_cutoff: Option<std::time::Duration>,
     pointer: Point<f64, Logical>,
     ctrl: bool,
     alt: bool,
@@ -369,6 +371,8 @@ impl DrmBackend {
                 outputs,
                 libinput,
                 active: true,
+                sleep_reset_pending: false,
+                wake_flip_cutoff: None,
                 pointer: (
                     f64::from(first_loc.0) + f64::from(first_w) / 2.0,
                     f64::from(first_loc.1) + f64::from(first_h) / 2.0,
@@ -422,7 +426,41 @@ impl DrmBackend {
                     out.pending = false;
                 }
                 self.active = true;
+                if self.sleep_reset_pending {
+                    self.resume_from_sleep();
+                }
             }
+        }
+    }
+
+    /// Recover scanout after real system sleep, independently of VT events.
+    pub fn resume_from_sleep(&mut self) {
+        if !self.active {
+            // Never program KMS off-seat; retain the wake until activation.
+            self.sleep_reset_pending = true;
+            return;
+        }
+        self.sleep_reset_pending = false;
+        self.wake_flip_cutoff = Some(std::time::Duration::from(
+            smithay::utils::Clock::<smithay::utils::Monotonic>::new().now(),
+        ));
+        eprintln!("roost-compositor: drm: system wake scanout reset");
+        // A pending flip can be lost across S3. Retire its buffer without
+        // claiming presentation; Runtime never queues another while pending.
+        for out in &mut self.outputs {
+            match out.surface.frame_submitted() {
+                Ok(Some(mut feedback)) => feedback.discarded(),
+                Ok(None) => {}
+                Err(error) => eprintln!("roost-compositor: drm: wake buffer retirement: {error}"),
+            }
+            out.surface.reset_buffers();
+            out.pending = false;
+        }
+        // Reset actual connector/plane state too: an active VT does not imply
+        // that the kernel restored its framebuffer. The next locked frame
+        // commits the retained modes and surfaces again.
+        if let Err(error) = self.drm.reset_state() {
+            eprintln!("roost-compositor: drm: wake KMS reset failed: {error}");
         }
     }
 
@@ -435,6 +473,13 @@ impl DrmBackend {
     ) -> Option<PageFlip> {
         match event {
             DrmEvent::VBlank(crtc) => {
+                // A kernel completion already queued before the reset must
+                // not present feedback belonging to the newly queued frame.
+                if let (Some(cutoff), Some(meta)) = (self.wake_flip_cutoff, metadata.as_ref()) {
+                    if matches!(meta.time, DrmEventTime::Monotonic(time) if time <= cutoff) {
+                        return None;
+                    }
+                }
                 let index = self.outputs.iter().position(|o| o.crtc == crtc)?;
                 let out = &mut self.outputs[index];
                 let feedback = match out.surface.frame_submitted() {

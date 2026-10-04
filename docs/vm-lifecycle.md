@@ -23,7 +23,7 @@ feature tour:
 | V-LIFECYCLE-OWNER | Root probe, non-root greetd session, three application surfaces/processes |
 | V-NORMAL-INPUT / V-NORMAL-INPUT-FAIL-CLOSED | A real GTK client receives ordinary QMP keys while unlocked, then receives none while locked; artifacts contain only counts and PID, never key values |
 | V-VT | VT away/back, DRM pause/activate events, unchanged process identities and app rectangles, matching body plus a fresh visible count update from the real GTK client |
-| V-SUSPEND | Real logind suspend reaches QEMU `suspended`; the first guest snapshot after `system_wakeup` must already be locked, with masked pixels and all application identities intact |
+| V-SUSPEND | Real logind suspend reaches QEMU `suspended`; the first guest snapshot after `system_wakeup` must already be locked, with all application identities intact; the real varied lock mask must repaint within five seconds, matching the pre-suspend mask; QEMU inactive-output placeholders fail |
 | V-VT-FAIL-CLOSED | VT away/back while locked keeps the mask and original application processes |
 | V-AUTH-FAIL-CLOSED | Real PAM service temporarily uses `pam_deny`; fresh submitted/refused milestones prove the correct test password was attempted and denied; original service restored afterward |
 | V-CAPTURE-INPUT-FAIL-CLOSED | Reachable real untrusted grim/wtype clients are denied capture/virtual-keyboard interfaces while locked; a successful Wayland connection is required and timeouts do not count as refusal; this does not assert that these interfaces are available while unlocked |
@@ -36,6 +36,13 @@ lock transitions. A QEMU pause is never a substitute for guest suspend.
 The repaint comparison excludes the panel clock and tolerates up to 20%
 changed body pixels for applications such as System Monitor; it also
 requires exact window and process identity preservation.
+
+The compositor also listens to the trusted logind system-bus sleep signal:
+preparation engages its own lock, and wake restores KMS connector/plane
+state and retires lost flip buffers without marking them presented. Wake
+recovery does not depend on a VT change; an off-seat wake waits for seat
+activation. This does not establish a delay inhibitor or physical masked
+frame acknowledgement before sleep.
 
 These new gates require their own actual CI results before acceptance.
 Output hotplug and loss of every compositor-adjacent service remain

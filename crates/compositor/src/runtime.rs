@@ -3459,6 +3459,18 @@ pub fn run(session: &NestedSession) -> Result<RunStats, RuntimeError> {
     } else {
         None
     };
+    #[cfg(feature = "drm")]
+    let sleep_monitor = if matches!(runtime.backend, Backend::Drm(_)) {
+        match crate::sleep::Monitor::start() {
+            Ok(monitor) => Some(monitor),
+            Err(error) => {
+                eprintln!("roost-compositor: logind sleep monitor unavailable: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
     // Graceful shutdown on SIGTERM/SIGINT: ending the loop drops the
     // runtime, whose supervisor kills the shell child (ADR 0003 kill
     // on exit). Without this a signal would bypass `Drop` and orphan
@@ -3477,6 +3489,20 @@ pub fn run(session: &NestedSession) -> Result<RunStats, RuntimeError> {
         let dispatched = event_loop
             .dispatch(Some(FRAME_BUDGET), &mut runtime)
             .map_err(|e| RuntimeError::Loop(e.to_string()));
+        #[cfg(feature = "drm")]
+        if let Some(monitor) = &sleep_monitor {
+            let (lock, wake) = monitor.take();
+            if lock {
+                runtime.engage_lock();
+            }
+            if wake {
+                // Lock is compositor-owned even if the supervised shell died.
+                runtime.engage_lock();
+                if let Backend::Drm(drm) = &mut runtime.backend {
+                    drm.resume_from_sleep();
+                }
+            }
+        }
         let ticked = dispatched.and_then(|_| runtime.tick());
         match ticked {
             Ok(true) => continue,

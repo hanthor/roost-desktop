@@ -68,6 +68,8 @@ pub mod screencast;
 pub mod screenshot;
 pub mod session_lock;
 pub mod session_services;
+#[cfg(feature = "drm")]
+pub mod sleep;
 pub mod spring;
 pub mod state;
 pub mod supervise;
