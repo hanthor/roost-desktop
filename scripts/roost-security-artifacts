@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Gate security evidence completeness, not the truth of arbitrary uploaded logs."""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+from pathlib import Path
+import re
+import subprocess
+
+ROOT = Path(__file__).resolve().parents[1]
+loader = importlib.machinery.SourceFileLoader('test_strategy', str(ROOT / 'scripts/roost-test-strategy'))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+strategy = importlib.util.module_from_spec(spec)
+loader.exec_module(strategy)
+REQUIRED = ('source-revision.txt', 'rustc.txt', 'observer-version.txt', 'kernel.txt',
+            'packages.txt', 'reproduce.txt', 'test.log', 'coverage.json', 'coverage-report.md')
+
+
+def check(directory, expected_revision):
+    bodies = {}
+    for name in REQUIRED:
+        path = directory / name
+        if not path.is_file() or not path.stat().st_size:
+            raise ValueError(f'missing or empty required security evidence: {name}')
+        bodies[name] = path.read_text()
+        if not bodies[name].strip():
+            raise ValueError(f'blank required security evidence: {name}')
+    revision = bodies['source-revision.txt'].strip()
+    if not re.fullmatch(r'[0-9a-f]{40}', revision) or revision != expected_revision:
+        raise ValueError('security evidence source does not match the checked revision')
+    if 'ROOST_REQUIRE_PAM_WRAPPER=1' not in bodies['reproduce.txt']:
+        raise ValueError('security reproduction must require the real PAM wrapper')
+    document = json.loads(bodies['coverage.json'])
+    if document.get('type') != 'llvm.coverage.json.export' or not document.get('data'):
+        raise ValueError('missing LLVM coverage export')
+    passed = {name.split('::')[-1] for name in
+              re.findall(r'^test (\S+) \.\.\. ok\s*$', bodies['test.log'], re.MULTILINE)}
+    cases = []
+    for boundary, required in strategy.BOUNDARIES.items():
+        for kind in strategy.KINDS:
+            if kind not in required:
+                raise ValueError(f'unregistered security boundary case: {boundary}/{kind}')
+            file, name = required[kind]
+            if name not in passed:
+                raise ValueError(f'no passing executed security case: {boundary}/{kind}: {name}')
+            cases.append((boundary, kind, file, name))
+    return cases
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('directory', type=Path)
+    parser.add_argument('--expected-revision')
+    args = parser.parse_args()
+    revision = args.expected_revision or subprocess.check_output(
+        ['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+    try:
+        cases = check(args.directory, revision)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        parser.exit(1, f'roost-security-artifacts: {error}\n')
+    lines = ['# Security evidence completeness', '', f'Source: `{revision}`', '',
+             'The registered control and lock cases executed successfully. This checklist',
+             'does not establish complete boundary coverage or authenticate arbitrary logs.', '',
+             '| Boundary | Case kind | Executed test |', '| --- | --- | --- |']
+    lines += [f'| {boundary} | {kind} | {file}::{name} |' for boundary, kind, file, name in cases]
+    (args.directory / 'security-artifacts-report.md').write_text('\n'.join(lines) + '\n')
+    print(f'roost-security-artifacts: {len(cases)} registered cases and all required artifacts passed')
+
+
+if __name__ == '__main__':
+    main()
