@@ -15,3 +15,17 @@ The packaged-candidate `portal-security` lane verifies `xdg-desktop-portal-gnome
 The proof additionally launches the root-owned installed GNOME backend and desktop portal frontend on its private bus. A real frontend client exercises CreateSession, SelectSources, Start, Cancel/Share in the actual AT-SPI picker, OpenPipeWireRemote frame consumption and owner Close; another unique caller cannot close its session. The frontend is tested again while locked. These stages are source assertions pending CI evidence.
 
 Issue #61 remains partial until this genuine external portal journey passes and RemoteDesktop implementation/acceptance is complete. No RemoteDesktop interface is advertised by this change. The GTK proof's former raw Python caller pretending to be the portal is no longer accepted or counted as consent evidence.
+
+On 2026-10-04 the CI-built Arch package at `95f71c0` (run
+37178711148, artifact 11295256952) passed the focused genuine GNOME 51
+proof locally without a Rust/GTK build. Installed versions were GNOME
+portal 51.0, frontend 1.22.1, PipeWire 1.6.9, GTK 4.24.1 and libadwaita
+1.10.0. It exercised actual picker Cancel/Share, FD/frame consumption,
+foreign-owner denial, ordinary/spoofed caller denial, creator disconnect,
+backend disconnect and active lock revocation. Observed node-removal
+latencies after Close/client/backend/lock were 0.045/0.094/0.116/0.036
+seconds; a new locked frontend request returned response 2. These are
+individual observed values, not latency guarantees. The complete CI gate
+remains pending: its first dedicated portal job stopped at ShellCheck
+before runtime, and its broader GTK job clicked empty grid space. Both
+drivers are corrected for the next candidate; security assertions remain.
