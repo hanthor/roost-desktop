@@ -171,6 +171,19 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
         return (before["state"]["windows"] == after["state"]["windows"]
                 and identities(before) == identities(after))
 
+    def changed_pixels(left, right, rect):
+        if left[:2] != right[:2]:
+            raise RuntimeError("client repaint frame dimensions changed")
+        x, y, width, height = rect
+        image_width, image_height = left[:2]
+        changed = 0
+        for row in range(max(0, y), min(image_height, y + height)):
+            for column in range(max(0, x), min(image_width, x + width)):
+                offset = (row * image_width + column) * 3
+                changed += max(abs(a - b) for a, b in zip(left[2][offset:offset+3],
+                                                          right[2][offset:offset+3])) > 24
+        return changed
+
     agent.run("start-input-probe")
     probe = await_state(lambda state: any(w["app_id"] == "org.roost.VmInput" for w in state["state"]["windows"]))
     probe_window = next(w for w in probe["state"]["windows"] if w["app_id"] == "org.roost.VmInput")
@@ -206,12 +219,28 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     vt_frame = frame("after-vt")
     delta = difference(base_frame, vt_frame)
     events = read_text(serial_path)[offset:]
+    qmp.keys("x")
+    deadline = time.monotonic() + 5
+    repaint_pixels = 0
+    updated_input = delivered_input
+    while time.monotonic() < deadline:
+        updated_input = agent.run("input-count")
+        repaint_pixels = changed_pixels(vt_frame, frame("vt-client-repaint"), probe_window["rect"])
+        if (updated_input["pid"] == delivered_input["pid"]
+                and updated_input["count"] > delivered_input["count"] and repaint_pixels >= 8):
+            break
+        time.sleep(0.1)
+    repainted = (updated_input["pid"] == delivered_input["pid"]
+                 and updated_input["count"] > delivered_input["count"] and repaint_pixels >= 8)
+    delivered_input = updated_input
     record("V-VT", switched["active_vt"] == f"tty{away}" and returned["active_vt"] == f"tty{vt}"
            and "drm: session paused" in events and "drm: session activated" in events
-           and same_apps(before, after_vt) and delta < 0.20,
-           f"actual VT away/back, exact app/process identities, repainted body difference {delta:.2%}")
+           and same_apps(before, after_vt) and delta < 0.20 and repainted,
+           f"actual VT away/back, exact app/process identities, body difference {delta:.2%}, fresh count/client repaint {repaint_pixels} pixels")
 
-    agent.run("suspend")
+    request = agent.run("suspend")
+    with open(os.path.join(evidence, "suspend-request.json"), "w") as stream:
+        json.dump(request, stream, indent=2)
     deadline = time.monotonic() + 30
     suspended = False
     while time.monotonic() < deadline:
@@ -258,12 +287,17 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
         qmp.keys("esc")
         qmp.keys("ret")
         time.sleep(1)
+        qmp.keys("ctrl", "a")
         qmp.type_text("roost")
+        auth_offset = len(read_text(serial_path))
         qmp.keys("ret")
         time.sleep(12)
         denied = inventory("pam-denied")
-        record("V-AUTH-FAIL-CLOSED", denied["state"]["locked"] and same_apps(before, denied),
-               "real pam_deny service refuses even the correct fixture password; apps remain inaccessible")
+        auth_trace = read_text(serial_path)[auth_offset:]
+        attempted = ("roost-shell-gtk: lock password submitted" in auth_trace
+                     and "roost-shell-gtk: lock command result applied=false" in auth_trace)
+        record("V-AUTH-FAIL-CLOSED", attempted and denied["state"]["locked"] and same_apps(before, denied),
+               "fresh submitted/refused milestones: real pam_deny service rejects the correct fixture password; apps remain inaccessible")
     finally:
         agent.run("restore-unlock")
     agent.run("stop-portal")

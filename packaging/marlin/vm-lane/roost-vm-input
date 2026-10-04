@@ -28,6 +28,7 @@ def activate(app):
     def pressed(*_arguments):
         global count
         count += 1
+        button.set_label(f"Keys received: {count}")
         publish()
         return True
     controller.connect("key-pressed", pressed)
