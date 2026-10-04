@@ -2231,8 +2231,10 @@ done
 echo 1000 >"$BACKLIGHT/brightness"
 xdotool key super+F3
 end=$(($(date +%s) + 10))
-until [ "$(cat "$BACKLIGHT/brightness")" = 0 ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
-[ "$(cat "$BACKLIGHT/brightness")" = 0 ] || fail G-MONITOR-BRIGHTNESS-KEYS "cycle did not wrap at full brightness"
+# GNOME normalized zero maps to the hardware minimum, not a powered-off
+# panel: Mutter's sysfs floor is max(1, max_brightness / 100).
+until [ "$(cat "$BACKLIGHT/brightness")" = 10 ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+[ "$(cat "$BACKLIGHT/brightness")" = 10 ] || fail G-MONITOR-BRIGHTNESS-KEYS "cycle did not wrap to the GNOME hardware minimum"
 for key in screen-brightness-up-monitor screen-brightness-down-monitor screen-brightness-cycle-monitor; do
     gsettings reset org.gnome.shell.keybindings "$key"
 done
