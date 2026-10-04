@@ -1187,6 +1187,48 @@ for label in "Wi-Fi" "Wired" "Bluetooth" "Power Mode" "Brightness" "Volume"; do
 done
 pass G-QS-SERVICES "quick settings shows a tile per service on the bus"
 
+# An external writer must update both DND chrome and the banner policy.
+gsettings set org.gnome.desktop.notifications show-banners true
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-dnd-external-off.json" 20 ||
+    fail G-SETTINGS-NOTIFICATIONS "DND off dump failed"
+jq -e 'any(.[]; .name == "Do Not Disturb" and .role == "toggle button" and .showing and (.checked | not))' \
+    "$ARTIFACTS/a11y-dnd-external-off.json" >/dev/null || fail G-SETTINGS-NOTIFICATIONS "external true did not uncheck DND"
+gsettings set org.gnome.desktop.notifications show-banners false
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-dnd-external-on.json" 20 ||
+    fail G-SETTINGS-NOTIFICATIONS "DND on dump failed"
+jq -e 'any(.[]; .name == "Do Not Disturb" and .role == "toggle button" and .showing and .checked)' \
+    "$ARTIFACTS/a11y-dnd-external-on.json" >/dev/null || fail G-SETTINGS-NOTIFICATIONS "external false did not check DND"
+xdotool key Escape
+sleep 1
+notify "External Quiet" "External show-banners false" || fail G-SETTINGS-NOTIFICATIONS "Notify failed"
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-dnd-external-quiet.json" 20 ||
+    fail G-SETTINGS-NOTIFICATIONS "quiet banner dump failed"
+if showing "$ARTIFACTS/a11y-dnd-external-quiet.json" "External Quiet"; then
+    fail G-SETTINGS-NOTIFICATIONS "external false allowed a banner"
+fi
+gsettings set org.gnome.desktop.notifications show-banners true
+sleep 1
+notify "External Banner" "External show-banners true" || fail G-SETTINGS-NOTIFICATIONS "Notify failed"
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-dnd-external-banner.json" 20 ||
+    fail G-SETTINGS-NOTIFICATIONS "allowed banner dump failed"
+showing "$ARTIFACTS/a11y-dnd-external-banner.json" "External Banner" ||
+    fail G-SETTINGS-NOTIFICATIONS "external true did not allow a banner"
+# Expire the banner and return to the preceding proof's DND-on state.
+xdotool mousemove --window "$WID" $((WIDTH / 3)) $((HEIGHT / 2))
+sleep 3.5
+open_calendar
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-dnd-external-cleared.json" 20 --press "Clear" ||
+    fail G-SETTINGS-NOTIFICATIONS "could not clear external proof notifications"
+xdotool key Escape
+gsettings set org.gnome.desktop.notifications show-banners false
+sleep 1
+open_qs
+pass G-SETTINGS-NOTIFICATIONS "external show-banners flips update DND toggle and suppress/allow banners"
+
 # GNOME's Wi-Fi menu: opening it scans; the saved network comes first,
 # then by signal; the hidden one is left out; a saved network activates
 # its connection and becomes the tile's subtitle.

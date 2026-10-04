@@ -894,15 +894,24 @@ fn quick_settings_popover(
     }));
     // Do Not Disturb drives the shell's notification store (banners
     // held back) and mirrors GNOME's show-banners key.
-    let notes_settings = settings(NOTIFICATIONS_SCHEMA);
+    let notes_settings = settings(NOTIFICATIONS_SCHEMA).filter(|notes| {
+        notes
+            .settings_schema()
+            .is_some_and(|schema| schema.has_key("show-banners"))
+    });
     if let Some(notes) = notes_settings.as_ref() {
         notify.set_dnd(!notes.boolean("show-banners"));
+        let notify = notify.clone();
+        notes.connect_changed(Some("show-banners"), move |notes, _| {
+            notify.set_dnd(!notes.boolean("show-banners"));
+        });
     }
     dnd.set_active(notify.dnd());
     {
         let notify = notify.clone();
         dnd.connect_toggled(move |t| {
             notify.set_dnd(t.is_active());
+            // This closure retains Settings and its external-change subscription.
             if let Some(notes) = notes_settings.as_ref() {
                 let _ = notes.set_boolean("show-banners", !t.is_active());
             }

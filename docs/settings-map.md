@@ -41,7 +41,7 @@ This page records that decision for R9 (knowledge entry
 | org.gnome.desktop.session idle-delay | Honored | Live, through the shell's `SetIdleTimeout` command. Proof G-SETTINGS-IDLE |
 | org.gnome.desktop.screensaver lock-enabled, lock-delay | Honored | Idle fades to black over ten seconds; lock waits for the larger of fade duration and lock-delay. Activity cancels blanking; an authenticated lock remains latched |
 | org.gnome.desktop.screensaver picture-uri | Honored | Blurred, dimmed lock background; empty or missing files fall back to the desktop wallpaper |
-| org.gnome.desktop.notifications show-banners | Honored | Mirrors Do Not Disturb both ways. Proof G-NOTIFY-DND |
+| org.gnome.desktop.notifications show-banners | Honored | Mirrors Do Not Disturb live in both directions. Proof G-NOTIFY-DND and G-SETTINGS-NOTIFICATIONS (external writes and banner policy) |
 | org.gnome.desktop.search-providers (all keys) | Honored | disable-external, disabled, enabled and sort-order. Proof G-SEARCH-PROVIDER |
 | org.gnome.desktop.background picture-uri, picture-uri-dark | Honored | Wallpaper |
 | org.gnome.shell favorite-apps | Honored | Used for the dash when Roost has no pins of its own |
