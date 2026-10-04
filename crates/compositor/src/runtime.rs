@@ -714,8 +714,8 @@ impl Runtime {
         // sharing through the stock GNOME portal.
         let cast_outputs: crate::mutter::Outputs = Default::default();
         // org.gnome.Shell.Introspect: the portal's window picker.
-        let introspect = crate::introspect::start(cast_outputs.clone());
         let capture_authority = crate::capture_security::Authority::default();
+        let introspect = crate::introspect::start(cast_outputs.clone(), capture_authority.clone());
         event_loop
             .handle()
             .insert_source(
