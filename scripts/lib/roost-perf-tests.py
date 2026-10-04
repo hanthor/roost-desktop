@@ -3,6 +3,7 @@
 import importlib.machinery
 import importlib.util
 import json
+import base64
 from pathlib import Path
 import tempfile
 import unittest
@@ -162,6 +163,52 @@ class Accounting(unittest.TestCase):
         self.assertEqual(result["p95"], 9)
         self.assertEqual(result["p99"], 9)
         self.assertEqual(host.distribution([]), {"count":0})
+
+    def test_idle_cpu_excludes_intervals_crossing_either_guest_clock_boundary(self):
+        rows = [{"cpu_interval_start_boottime_s": i, "boottime_s": i+1,
+                 "cpu_observed_percent": 2} for i in range(100, 120)]
+        rows += [{"cpu_interval_start_boottime_s": 99, "boottime_s": 101,
+                  "cpu_observed_percent": 999},
+                 {"cpu_interval_start_boottime_s": 119, "boottime_s": 121,
+                  "cpu_observed_percent": 999},
+                 {"cpu_interval_start_boottime_s": None, "boottime_s": 100,
+                  "cpu_observed_percent": None}]
+        result = host.idle_cpu(rows, 100, 120)
+        self.assertEqual(result["count"], 20)
+        self.assertEqual(result["max"], 2)
+        with self.assertRaisesRegex(ValueError, "fewer than 20"):
+            host.idle_cpu(rows, 101, 120)
+        with self.assertRaisesRegex(ValueError, "invalid guest idle"):
+            host.idle_cpu(rows, 120, 100)
+
+    def test_guest_phase_probe_requires_executed_complete_valid_output(self):
+        class Agent:
+            def __init__(self, result, **flags):
+                self.commands = []
+                self.status = {"exited": True, "exitcode": 0,
+                               "out-data": base64.b64encode(json.dumps(result).encode()).decode(),
+                               **flags}
+
+            def command(self, name, **arguments):
+                self.commands.append((name, arguments))
+                return {"pid": 7} if name == "guest-exec" else self.status
+
+        agent = Agent({"boottime_s": 100, "notification_id": 9})
+        self.assertEqual(host.guest_probe(agent, "notify", 3)["notification_id"], 9)
+        self.assertEqual(agent.commands[0][1]["path"], "/usr/libexec/roost-perf-phase")
+        self.assertEqual(agent.commands[0][1]["arg"], ["notify", "--index", "3"])
+        for flags in ({"exitcode": 1}, {"out-truncated": True}, {"err-truncated": True}):
+            with self.subTest(flags=flags), self.assertRaisesRegex(RuntimeError, "failed"):
+                host.guest_probe(Agent({"boottime_s": 100}, **flags), "clock")
+        for clock in (None, True, -1, float("nan")):
+            with self.subTest(clock=clock), self.assertRaisesRegex(ValueError, "invalid guest clock"):
+                host.guest_probe(Agent({"boottime_s": clock}), "clock")
+        for identity in (0, True, None, 0x100000000):
+            with self.subTest(identity=identity), self.assertRaisesRegex(ValueError, "notification ID"):
+                host.guest_probe(Agent({"boottime_s": 100, "notification_id": identity}), "notify", 0)
+        for action, index in (("exec", None), ("notify", -1), ("notify", 10), ("notify", True)):
+            with self.assertRaises(ValueError):
+                host.guest_probe(agent, action, index)
 
 
 if __name__ == "__main__":

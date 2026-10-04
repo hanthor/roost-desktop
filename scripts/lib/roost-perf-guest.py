@@ -185,11 +185,12 @@ def main():
     if args.interval <= 0:
         ap.error("interval must be positive")
     uid = pwd.getpwnam(args.user).pw_uid if args.user else os.getuid()
-    previous, previous_at = {}, None
+    previous, previous_at, previous_boot_at = {}, None, None
     globals_captured = False
     ticks = os.sysconf("SC_CLK_TCK")
     while True:
         start = time.monotonic()
+        boot_start = time.clock_gettime(time.CLOCK_BOOTTIME)
         row = sample(uid, observer=os.getpid())
         current = {(p["pid"], p["start_ticks"]): p["cpu_ticks"] for p in row["processes"]}
         delta = sum(max(0, count - previous.get(key, count)) for key, count in current.items())
@@ -197,8 +198,9 @@ def main():
                    hz=ticks, cpu_observed_percent=(100 * delta / ticks / (start - previous_at)
                                                   if previous_at is not None else None),
                    departed_processes=len(previous.keys() - current.keys()))
+        row["cpu_interval_start_boottime_s"] = previous_boot_at
         print("roost-perf-sample: " + json.dumps(row, separators=(",", ":")), flush=True)
-        previous, previous_at = current, start
+        previous, previous_at, previous_boot_at = current, start, boot_start
         if not globals_captured:
             globals_captured = capture_globals(uid)
         time.sleep(max(0, args.interval - (time.monotonic() - start)))

@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""CI-only fixed guest-clock/notification probes, reached through QGA."""
+import argparse
+import json
+import pwd
+import re
+import subprocess
+import time
+
+
+def notify(index):
+    if not 0 <= index < 10:
+        raise ValueError("notification index outside the fixed workload")
+    uid = pwd.getpwnam("roost-test").pw_uid
+    result = subprocess.run([
+        "runuser", "-u", "roost-test", "--", "env", "-i", "PATH=/usr/bin:/bin",
+        f"XDG_RUNTIME_DIR=/run/user/{uid}",
+        f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
+        "gdbus", "call", "--session", "--dest", "org.freedesktop.Notifications",
+        "--object-path", "/org/freedesktop/Notifications",
+        "--method", "org.freedesktop.Notifications.Notify",
+        "Roost performance fixture", "0", "dialog-information",
+        f"Performance notification {index + 1}", "Fixed benchmark workload",
+        "[]", "{}", "5000"], text=True, capture_output=True, timeout=15, check=True)
+    match = re.fullmatch(r"\(uint32 ([0-9]+),\)\s*", result.stdout)
+    if not match or int(match[1]) == 0:
+        raise RuntimeError("notification service returned no valid notification ID")
+    return int(match[1])
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=("clock", "notify"))
+    parser.add_argument("--index", type=int, default=0)
+    args = parser.parse_args()
+    result = {}
+    if args.action == "notify":
+        result["notification_id"] = notify(args.index)
+    result["boottime_s"] = time.clock_gettime(time.CLOCK_BOOTTIME)
+    print(json.dumps(result))
+
+
+if __name__ == "__main__":
+    main()
