@@ -2,7 +2,7 @@
 # Capture Roost in the states scripts/roost-gnome-reference captures GNOME
 # 51 in, at the same size and with the same service stubs.
 #
-# Usage: roost-parity-capture [--out DIR]
+# Usage: roost-parity-capture [--out DIR] [--workspace-insertion-only]
 #
 # Runs the nested compositor and GTK shell on a private Xvfb and buses,
 # then writes DIR/<state>.png for: 00-startup-overview, 01-desktop, 02-calendar,
@@ -349,7 +349,17 @@ jq -e ' .active_workspace == 0 ' "$ROOST_COMPOSITOR_STATE" >/dev/null || {
 if [ "$INSERTION_ONLY" = 0 ]; then
 # The screenshot UI (Print).
 xdotool key Print
-shot 14-screenshot-ui 6
+# The helper can start slowly on loaded CI hosts; wait for its mapped surface.
+for _ in $(seq 1 60); do
+    if jq -e '[.layers[]? | select(.namespace == "roost-screenshot-ui")] | length > 0' "$ROOST_COMPOSITOR_STATE" >/dev/null; then
+        break
+    fi
+    sleep 0.5
+done
+jq -e '[.layers[]? | select(.namespace == "roost-screenshot-ui")] | length > 0' "$ROOST_COMPOSITOR_STATE" >/dev/null || {
+    echo "roost-parity-capture: screenshot overlay did not map" >&2; exit 1;
+}
+shot 14-screenshot-ui 1
 # Close through its visible action, matching the native capture’s close().
 # This also ensures the screenshot overlay releases pointer ownership.
 xdotool mousemove --window "$WID" $((WIDTH / 2 + 158)) $((HEIGHT / 2 + 179))
