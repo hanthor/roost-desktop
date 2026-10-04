@@ -331,20 +331,21 @@ impl CalendarUi {
 /// Resolve the preferred calendar handler; an absent handler is a quiet no-op.
 fn launch_calendar(day: Date) -> bool {
     let info = gio::AppInfo::default_for_type("x-scheme-handler/calendar", false)
-        .or_else(|| gio::AppInfo::default_for_type("text/calendar", false))
-        .and_then(|info| info.downcast::<gio::DesktopAppInfo>().ok())
-        .or_else(|| gio::DesktopAppInfo::new("org.gnome.Calendar.desktop"));
-    let Some(info) = info else { return false };
-    let Some(path) = info.filename() else {
-        return false;
-    };
-    let Some(mut entry) = roost_shell_host::apps::entry_from_file(&path) else {
+        .or_else(|| gio::AppInfo::default_for_type("text/calendar", false));
+    let id = info
+        .as_ref()
+        .and_then(|info| info.id())
+        .unwrap_or_else(|| "org.gnome.Calendar.desktop".into());
+    let Some(mut entry) = roost_shell_host::apps::default_app_dirs()
+        .iter()
+        .find_map(|dir| roost_shell_host::apps::entry_from_file(&dir.join(id.as_str())))
+    else {
         return false;
     };
     if entry.app_id == "org.gnome.Calendar.desktop" {
         entry.argv.push("--date".into());
         entry.argv.push(day.to_string().into());
-    } else if info.supports_uris() {
+    } else if info.as_ref().is_some_and(|info| info.supports_uris()) {
         entry.argv.push(format!("calendar:///{}", day).into());
     }
     roost_shell_host::apps::launch(&entry).is_ok()
