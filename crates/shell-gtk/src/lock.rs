@@ -134,6 +134,9 @@ impl LockUi {
             return;
         }
         self.pending.set(None);
+        if std::env::var_os("ROOST_LOCK_TRACE").is_some() {
+            eprintln!("roost-shell-gtk: lock command result applied={applied}");
+        }
         for screen in self.screens.borrow().iter() {
             screen.entry.set_sensitive(true);
             if !applied {
@@ -319,6 +322,14 @@ impl LockUi {
                     return glib::Propagation::Stop;
                 }
                 if on_prompt {
+                    if matches!(key, gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter)
+                        && std::env::var_os("ROOST_LOCK_TRACE").is_some()
+                    {
+                        eprintln!(
+                            "roost-shell-gtk: lock Return received sensitive={}",
+                            entry.is_sensitive()
+                        );
+                    }
                     return glib::Propagation::Proceed;
                 }
                 // Shift and Caps Lock alone do not lift the curtain.
@@ -375,6 +386,9 @@ impl LockUi {
                 let Some(ui) = weak.upgrade() else { return };
                 if ui.pending.get().is_some() {
                     return;
+                }
+                if std::env::var_os("ROOST_LOCK_TRACE").is_some() {
+                    eprintln!("roost-shell-gtk: lock password submitted");
                 }
                 let password = entry.text().to_string();
                 message.set_label("");
