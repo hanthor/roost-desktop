@@ -116,12 +116,20 @@ pub(crate) fn queue_input(
     if grant.stopped.load(Ordering::SeqCst) || !grant.started.load(Ordering::SeqCst) {
         return Err(crate::capture_security::denied("remote grant is inactive"));
     }
-    grant
-        .pending
-        .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-            n.checked_add(1).filter(|n| *n <= 256)
-        })
-        .map_err(|_| fdo::Error::LimitsExceeded("remote input queue full".into()))?;
+    let mut pending = grant.pending.load(Ordering::SeqCst);
+    loop {
+        let next = pending
+            .checked_add(1)
+            .filter(|next| *next <= 256)
+            .ok_or_else(|| fdo::Error::LimitsExceeded("remote input queue full".into()))?;
+        match grant
+            .pending
+            .compare_exchange_weak(pending, next, Ordering::SeqCst, Ordering::SeqCst)
+        {
+            Ok(_) => break,
+            Err(current) => pending = current,
+        }
+    }
     if to_loop
         .send(ToLoop::RemoteInput {
             session_id: grant.id,
