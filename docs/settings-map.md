@@ -1,7 +1,11 @@
 # GNOME settings compatibility map
 
 Roost reads GNOME 51's own GSettings schemas. It ships no shim schemas
-and runs no translating daemon. The Marlin image already carries
+and runs no translating daemon.
+
+The [exhaustive desktop inventory](settings-desktop-inventory.md) lists
+every one of the 429 GNOME 51 desktop-schema keys. The sections below
+explain common keys and related Shell/Mutter/settings-daemon settings. The Marlin image already carries
 `gsettings-desktop-schemas`, so the keys exist, and GNOME Settings and
 `gsettings` keep working unchanged. Ledger row P-ST-01 tracks this page.
 
@@ -20,13 +24,14 @@ This page records that decision for R9 (knowledge entry
 |---|---|---|
 | color-scheme | Honored | The Dark Style tile writes it. The shell and apps follow it through libadwaita. Proof G-QS-DARK |
 | accent-color | Via GTK | libadwaita applies it |
-| font-name, document-font-name, monospace-font-name | Via GTK | The shell is GTK, so its text follows too |
-| text-scaling-factor | Via GTK | |
+| font-name | Honored | Live shell CSS family, base size, weight, style and stretch (with semantic emphasis preserved) and GTK client font settings; proof G-SETTINGS-FONT |
+| document-font-name, monospace-font-name | Ignored by shell | Applications may choose to read these; Roost chrome uses font-name |
+| text-scaling-factor | Via GTK | Live GTK Wayland DPI translation; proof G-SETTINGS-FONT |
 | gtk-theme, icon-theme, cursor-theme, cursor-size | Via GTK | Inside apps. The compositor's own cursor ignores them (#89) |
 | clock-format | Honored | Panel clock |
 | clock-show-weekday, clock-show-date, clock-show-seconds | Honored | Panel clock, built as gnome-desktop's wall clock builds it |
 | enable-hot-corners | Honored | Live. Proof G-SETTINGS-INPUT |
-| enable-animations | Read live | GTK transitions and compositor overview/strip motion finish immediately when disabled |
+| enable-animations | Honored | Live idle fade, GTK transitions and compositor overview/strip motion; disabled transitions finish immediately. Proof G-ANIMATIONS-OFF |
 | show-battery-percentage | Honored | UPower DisplayDevice panel percentage; updates live |
 
 ## Session, lock and notifications
@@ -36,7 +41,7 @@ This page records that decision for R9 (knowledge entry
 | org.gnome.desktop.session idle-delay | Honored | Live, through the shell's `SetIdleTimeout` command. Proof G-SETTINGS-IDLE |
 | org.gnome.desktop.screensaver lock-enabled, lock-delay | Honored | Idle fades to black over ten seconds; lock waits for the larger of fade duration and lock-delay. Activity cancels blanking; an authenticated lock remains latched |
 | org.gnome.desktop.screensaver picture-uri | Honored | Blurred, dimmed lock background; empty or missing files fall back to the desktop wallpaper |
-| org.gnome.desktop.notifications show-banners | Honored | Mirrors Do Not Disturb both ways. Proof G-NOTIFY-DND |
+| org.gnome.desktop.notifications show-banners | Honored | Mirrors Do Not Disturb live in both directions. Proof G-NOTIFY-DND and G-SETTINGS-NOTIFICATIONS (external writes and banner policy) |
 | org.gnome.desktop.search-providers (all keys) | Honored | disable-external, disabled, enabled and sort-order. Proof G-SEARCH-PROVIDER |
 | org.gnome.desktop.background picture-uri, picture-uri-dark | Honored | Wallpaper |
 | org.gnome.shell favorite-apps | Honored | Used for the dash when Roost has no pins of its own |
@@ -69,5 +74,10 @@ This page records that decision for R9 (knowledge entry
 | org.gnome.desktop.peripherals.keyboard repeat, delay, repeat-interval | Honored | Seat key repeat, live. Proof G-SETTINGS-INPUT |
 | org.gnome.desktop.peripherals.touchpad tap-to-click, natural-scroll, speed, disable-while-typing | Honored | libinput on hardware sessions, live and on hotplug |
 | org.gnome.desktop.peripherals.mouse natural-scroll, speed | Honored | libinput on hardware sessions |
-| org.gnome.desktop.input-sources sources, xkb-options | Honored | xkb sources become one keymap in order; Super+Space switches; IBus sources are skipped (#60). Proof G-SETTINGS-INPUT |
+| org.gnome.desktop.input-sources sources, xkb-options | Honored | xkb sources become one keymap in order; Super+Space switches; IBus sources use the supervised bridge (#60). Proof G-SETTINGS-INPUT |
 | org.gnome.desktop.a11y.* | Via GTK | Where GTK implements them. Compositor features like zoom are missing |
+
+`J-SETTINGS-LIVE` changes `clock-format` with `gsettings set` during the
+nested journey and asserts the shell’s consumed settings snapshot before
+restoring it. GTK font/scale, dark style, input, idle and rebound keybinding
+changes have separate live graphical gates.

@@ -1,0 +1,1721 @@
+{
+  "source": "gsettings-desktop-schemas-51.0-1.fc45.x86_64 in localhost/roost-gnome51-reference",
+  "keys": [
+    {
+      "schema": "org.gnome.desktop.a11y",
+      "key": "always-show-text-caret"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y",
+      "key": "always-show-universal-access-status"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.applications",
+      "key": "screen-keyboard-enabled"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.applications",
+      "key": "screen-magnifier-enabled"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.applications",
+      "key": "screen-reader-enabled"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.interface",
+      "key": "high-contrast"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.interface",
+      "key": "keyboard-focus-visible-timeout"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.interface",
+      "key": "reduced-motion"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.interface",
+      "key": "show-status-shapes"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.keyboard",
+      "key": "bouncekeys-beep-reject"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.keyboard",
+      "key": "bouncekeys-delay"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.keyboard",
+      "key": "bouncekeys-enable"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.keyboard",
+      "key": "disable-timeout"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.keyboard",
+      "key": "enable"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.keyboard",
+      "key": "feature-state-change-beep"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.keyboard",
+      "key": "mousekeys-accel-time"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.keyboard",
+      "key": "mousekeys-enable"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.keyboard",
+      "key": "mousekeys-init-delay"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.keyboard",
+      "key": "mousekeys-max-speed"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.keyboard",
+      "key": "slowkeys-beep-accept"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.keyboard",
+      "key": "slowkeys-beep-press"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.keyboard",
+      "key": "slowkeys-beep-reject"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.keyboard",
+      "key": "slowkeys-delay"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.keyboard",
+      "key": "slowkeys-enable"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.keyboard",
+      "key": "stickykeys-enable"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.keyboard",
+      "key": "stickykeys-modifier-beep"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.keyboard",
+      "key": "stickykeys-two-key-off"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.keyboard",
+      "key": "timeout-enable"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.keyboard",
+      "key": "togglekeys-enable"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.magnifier",
+      "key": "brightness-blue"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.magnifier",
+      "key": "brightness-green"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.magnifier",
+      "key": "brightness-red"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.magnifier",
+      "key": "caret-tracking"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.magnifier",
+      "key": "color-saturation"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.magnifier",
+      "key": "contrast-blue"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.magnifier",
+      "key": "contrast-green"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.magnifier",
+      "key": "contrast-red"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.magnifier",
+      "key": "cross-hairs-clip"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.magnifier",
+      "key": "cross-hairs-color"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.magnifier",
+      "key": "cross-hairs-length"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.magnifier",
+      "key": "cross-hairs-opacity"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.magnifier",
+      "key": "cross-hairs-thickness"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.magnifier",
+      "key": "focus-tracking"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.magnifier",
+      "key": "invert-lightness"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.magnifier",
+      "key": "lens-mode"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.magnifier",
+      "key": "mag-factor"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.magnifier",
+      "key": "mouse-tracking"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.magnifier",
+      "key": "screen-position"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.magnifier",
+      "key": "scroll-at-edges"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.magnifier",
+      "key": "show-cross-hairs"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.mouse",
+      "key": "click-type-window-visible"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.mouse",
+      "key": "dwell-click-enabled"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.mouse",
+      "key": "dwell-gesture-double"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.mouse",
+      "key": "dwell-gesture-drag"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.mouse",
+      "key": "dwell-gesture-secondary"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.mouse",
+      "key": "dwell-gesture-single"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.mouse",
+      "key": "dwell-mode"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.mouse",
+      "key": "dwell-threshold"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.mouse",
+      "key": "dwell-time"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.mouse",
+      "key": "secondary-click-enabled"
+    },
+    {
+      "schema": "org.gnome.desktop.a11y.mouse",
+      "key": "secondary-click-time"
+    },
+    {
+      "schema": "org.gnome.desktop.app-folders",
+      "key": "folder-children"
+    },
+    {
+      "schema": "org.gnome.desktop.app-folders.folder",
+      "key": "apps"
+    },
+    {
+      "schema": "org.gnome.desktop.app-folders.folder",
+      "key": "categories"
+    },
+    {
+      "schema": "org.gnome.desktop.app-folders.folder",
+      "key": "excluded-apps"
+    },
+    {
+      "schema": "org.gnome.desktop.app-folders.folder",
+      "key": "name"
+    },
+    {
+      "schema": "org.gnome.desktop.app-folders.folder",
+      "key": "translate"
+    },
+    {
+      "schema": "org.gnome.desktop.background",
+      "key": "color-shading-type"
+    },
+    {
+      "schema": "org.gnome.desktop.background",
+      "key": "picture-opacity"
+    },
+    {
+      "schema": "org.gnome.desktop.background",
+      "key": "picture-options"
+    },
+    {
+      "schema": "org.gnome.desktop.background",
+      "key": "picture-uri"
+    },
+    {
+      "schema": "org.gnome.desktop.background",
+      "key": "picture-uri-dark"
+    },
+    {
+      "schema": "org.gnome.desktop.background",
+      "key": "primary-color"
+    },
+    {
+      "schema": "org.gnome.desktop.background",
+      "key": "secondary-color"
+    },
+    {
+      "schema": "org.gnome.desktop.background",
+      "key": "show-desktop-icons"
+    },
+    {
+      "schema": "org.gnome.desktop.break-reminders",
+      "key": "selected-breaks"
+    },
+    {
+      "schema": "org.gnome.desktop.break-reminders.eyesight",
+      "key": "countdown"
+    },
+    {
+      "schema": "org.gnome.desktop.break-reminders.eyesight",
+      "key": "delay-seconds"
+    },
+    {
+      "schema": "org.gnome.desktop.break-reminders.eyesight",
+      "key": "duration-seconds"
+    },
+    {
+      "schema": "org.gnome.desktop.break-reminders.eyesight",
+      "key": "fade-screen"
+    },
+    {
+      "schema": "org.gnome.desktop.break-reminders.eyesight",
+      "key": "interval-seconds"
+    },
+    {
+      "schema": "org.gnome.desktop.break-reminders.eyesight",
+      "key": "lock-screen"
+    },
+    {
+      "schema": "org.gnome.desktop.break-reminders.eyesight",
+      "key": "notify"
+    },
+    {
+      "schema": "org.gnome.desktop.break-reminders.eyesight",
+      "key": "notify-overdue"
+    },
+    {
+      "schema": "org.gnome.desktop.break-reminders.eyesight",
+      "key": "notify-upcoming"
+    },
+    {
+      "schema": "org.gnome.desktop.break-reminders.eyesight",
+      "key": "play-sound"
+    },
+    {
+      "schema": "org.gnome.desktop.break-reminders.movement",
+      "key": "countdown"
+    },
+    {
+      "schema": "org.gnome.desktop.break-reminders.movement",
+      "key": "delay-seconds"
+    },
+    {
+      "schema": "org.gnome.desktop.break-reminders.movement",
+      "key": "duration-seconds"
+    },
+    {
+      "schema": "org.gnome.desktop.break-reminders.movement",
+      "key": "fade-screen"
+    },
+    {
+      "schema": "org.gnome.desktop.break-reminders.movement",
+      "key": "interval-seconds"
+    },
+    {
+      "schema": "org.gnome.desktop.break-reminders.movement",
+      "key": "lock-screen"
+    },
+    {
+      "schema": "org.gnome.desktop.break-reminders.movement",
+      "key": "notify"
+    },
+    {
+      "schema": "org.gnome.desktop.break-reminders.movement",
+      "key": "notify-overdue"
+    },
+    {
+      "schema": "org.gnome.desktop.break-reminders.movement",
+      "key": "notify-upcoming"
+    },
+    {
+      "schema": "org.gnome.desktop.break-reminders.movement",
+      "key": "play-sound"
+    },
+    {
+      "schema": "org.gnome.desktop.calendar",
+      "key": "show-weekdate"
+    },
+    {
+      "schema": "org.gnome.desktop.calendar",
+      "key": "week-start-day"
+    },
+    {
+      "schema": "org.gnome.desktop.datetime",
+      "key": "automatic-timezone"
+    },
+    {
+      "schema": "org.gnome.desktop.default-applications.office.calendar",
+      "key": "exec"
+    },
+    {
+      "schema": "org.gnome.desktop.default-applications.office.calendar",
+      "key": "needs-term"
+    },
+    {
+      "schema": "org.gnome.desktop.default-applications.office.tasks",
+      "key": "exec"
+    },
+    {
+      "schema": "org.gnome.desktop.default-applications.office.tasks",
+      "key": "needs-term"
+    },
+    {
+      "schema": "org.gnome.desktop.default-applications.terminal",
+      "key": "exec"
+    },
+    {
+      "schema": "org.gnome.desktop.default-applications.terminal",
+      "key": "exec-arg"
+    },
+    {
+      "schema": "org.gnome.desktop.input-sources",
+      "key": "current"
+    },
+    {
+      "schema": "org.gnome.desktop.input-sources",
+      "key": "mru-sources"
+    },
+    {
+      "schema": "org.gnome.desktop.input-sources",
+      "key": "per-window"
+    },
+    {
+      "schema": "org.gnome.desktop.input-sources",
+      "key": "show-all-sources"
+    },
+    {
+      "schema": "org.gnome.desktop.input-sources",
+      "key": "sources"
+    },
+    {
+      "schema": "org.gnome.desktop.input-sources",
+      "key": "xkb-model"
+    },
+    {
+      "schema": "org.gnome.desktop.input-sources",
+      "key": "xkb-options"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "accent-color"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "avatar-directories"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "can-change-accels"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "clock-format"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "clock-show-date"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "clock-show-seconds"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "clock-show-weekday"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "color-scheme"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "cursor-blink"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "cursor-blink-time"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "cursor-blink-timeout"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "cursor-size"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "cursor-theme"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "document-font-name"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "enable-animations"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "enable-hot-corners"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "font-antialiasing"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "font-hinting"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "font-name"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "font-rendering"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "font-rgba-order"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "gtk-color-palette"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "gtk-color-scheme"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "gtk-enable-primary-paste"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "gtk-im-module"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "gtk-im-preedit-style"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "gtk-im-status-style"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "gtk-key-theme"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "gtk-theme"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "gtk-timeout-initial"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "gtk-timeout-repeat"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "icon-theme"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "locate-pointer"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "menubar-accel"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "menubar-detachable"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "menus-have-tearoff"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "monospace-font-name"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "overlay-scrolling"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "scaling-factor"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "show-battery-percentage"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "text-scaling-factor"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "toolbar-detachable"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "toolbar-icons-size"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "toolbar-style"
+    },
+    {
+      "schema": "org.gnome.desktop.interface",
+      "key": "toolkit-accessibility"
+    },
+    {
+      "schema": "org.gnome.desktop.lockdown",
+      "key": "disable-application-handlers"
+    },
+    {
+      "schema": "org.gnome.desktop.lockdown",
+      "key": "disable-command-line"
+    },
+    {
+      "schema": "org.gnome.desktop.lockdown",
+      "key": "disable-lock-screen"
+    },
+    {
+      "schema": "org.gnome.desktop.lockdown",
+      "key": "disable-log-out"
+    },
+    {
+      "schema": "org.gnome.desktop.lockdown",
+      "key": "disable-print-setup"
+    },
+    {
+      "schema": "org.gnome.desktop.lockdown",
+      "key": "disable-printing"
+    },
+    {
+      "schema": "org.gnome.desktop.lockdown",
+      "key": "disable-save-to-disk"
+    },
+    {
+      "schema": "org.gnome.desktop.lockdown",
+      "key": "disable-show-password"
+    },
+    {
+      "schema": "org.gnome.desktop.lockdown",
+      "key": "disable-user-switching"
+    },
+    {
+      "schema": "org.gnome.desktop.lockdown",
+      "key": "mount-removable-storage-devices-as-read-only"
+    },
+    {
+      "schema": "org.gnome.desktop.lockdown",
+      "key": "user-administration-disabled"
+    },
+    {
+      "schema": "org.gnome.desktop.media-handling",
+      "key": "automount"
+    },
+    {
+      "schema": "org.gnome.desktop.media-handling",
+      "key": "automount-open"
+    },
+    {
+      "schema": "org.gnome.desktop.media-handling",
+      "key": "autorun-never"
+    },
+    {
+      "schema": "org.gnome.desktop.media-handling",
+      "key": "autorun-x-content-ignore"
+    },
+    {
+      "schema": "org.gnome.desktop.media-handling",
+      "key": "autorun-x-content-open-folder"
+    },
+    {
+      "schema": "org.gnome.desktop.media-handling",
+      "key": "autorun-x-content-start-app"
+    },
+    {
+      "schema": "org.gnome.desktop.notifications",
+      "key": "application-children"
+    },
+    {
+      "schema": "org.gnome.desktop.notifications",
+      "key": "show-banners"
+    },
+    {
+      "schema": "org.gnome.desktop.notifications",
+      "key": "show-in-lock-screen"
+    },
+    {
+      "schema": "org.gnome.desktop.notifications.application",
+      "key": "application-id"
+    },
+    {
+      "schema": "org.gnome.desktop.notifications.application",
+      "key": "details-in-lock-screen"
+    },
+    {
+      "schema": "org.gnome.desktop.notifications.application",
+      "key": "enable"
+    },
+    {
+      "schema": "org.gnome.desktop.notifications.application",
+      "key": "enable-sound-alerts"
+    },
+    {
+      "schema": "org.gnome.desktop.notifications.application",
+      "key": "force-expanded"
+    },
+    {
+      "schema": "org.gnome.desktop.notifications.application",
+      "key": "show-banners"
+    },
+    {
+      "schema": "org.gnome.desktop.notifications.application",
+      "key": "show-in-lock-screen"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.keyboard",
+      "key": "delay"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.keyboard",
+      "key": "numlock-state"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.keyboard",
+      "key": "remember-numlock-state"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.keyboard",
+      "key": "repeat"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.keyboard",
+      "key": "repeat-interval"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.mouse",
+      "key": "accel-profile"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.mouse",
+      "key": "custom-accel-config"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.mouse",
+      "key": "double-click"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.mouse",
+      "key": "drag-threshold"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.mouse",
+      "key": "left-handed"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.mouse",
+      "key": "middle-click-emulation"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.mouse",
+      "key": "natural-scroll"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.mouse",
+      "key": "scroll-wheel-emulation-button"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.mouse",
+      "key": "scroll-wheel-emulation-button-lock"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.mouse",
+      "key": "speed"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.pointingstick",
+      "key": "accel-profile"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.pointingstick",
+      "key": "custom-accel-config"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.pointingstick",
+      "key": "scroll-method"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.pointingstick",
+      "key": "speed"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.tablet",
+      "key": "area"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.tablet",
+      "key": "keep-aspect"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.tablet",
+      "key": "left-handed"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.tablet",
+      "key": "mapping"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.tablet",
+      "key": "output"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.tablet.deprecated",
+      "key": "display"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.tablet.pad-button",
+      "key": "action"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.tablet.pad-button",
+      "key": "keybinding"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.tablet.stylus",
+      "key": "button-action"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.tablet.stylus",
+      "key": "button-keybinding"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.tablet.stylus",
+      "key": "eraser-button-action"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.tablet.stylus",
+      "key": "eraser-button-keybinding"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.tablet.stylus",
+      "key": "eraser-button-mode"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.tablet.stylus",
+      "key": "eraser-pressure-curve"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.tablet.stylus",
+      "key": "eraser-pressure-range"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.tablet.stylus",
+      "key": "pressure-curve"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.tablet.stylus",
+      "key": "pressure-range"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.tablet.stylus",
+      "key": "secondary-button-action"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.tablet.stylus",
+      "key": "secondary-button-keybinding"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.tablet.stylus",
+      "key": "tertiary-button-action"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.tablet.stylus",
+      "key": "tertiary-button-keybinding"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.touchpad",
+      "key": "accel-profile"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.touchpad",
+      "key": "click-method"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.touchpad",
+      "key": "custom-accel-config"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.touchpad",
+      "key": "disable-while-typing"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.touchpad",
+      "key": "disable-while-typing-timeout"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.touchpad",
+      "key": "edge-scrolling-enabled"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.touchpad",
+      "key": "left-handed"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.touchpad",
+      "key": "middle-click-emulation"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.touchpad",
+      "key": "natural-scroll"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.touchpad",
+      "key": "scroll-speed"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.touchpad",
+      "key": "send-events"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.touchpad",
+      "key": "speed"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.touchpad",
+      "key": "tap-and-drag"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.touchpad",
+      "key": "tap-and-drag-lock"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.touchpad",
+      "key": "tap-button-map"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.touchpad",
+      "key": "tap-to-click"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.touchpad",
+      "key": "two-finger-scrolling-enabled"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.touchscreen",
+      "key": "orientation-lock"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.touchscreen",
+      "key": "output"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.trackball",
+      "key": "accel-profile"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.trackball",
+      "key": "custom-accel-config"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.trackball",
+      "key": "middle-click-emulation"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.trackball",
+      "key": "scroll-wheel-emulation-button"
+    },
+    {
+      "schema": "org.gnome.desktop.peripherals.trackball",
+      "key": "scroll-wheel-emulation-button-lock"
+    },
+    {
+      "schema": "org.gnome.desktop.privacy",
+      "key": "disable-camera"
+    },
+    {
+      "schema": "org.gnome.desktop.privacy",
+      "key": "disable-microphone"
+    },
+    {
+      "schema": "org.gnome.desktop.privacy",
+      "key": "disable-sound-output"
+    },
+    {
+      "schema": "org.gnome.desktop.privacy",
+      "key": "hide-identity"
+    },
+    {
+      "schema": "org.gnome.desktop.privacy",
+      "key": "old-files-age"
+    },
+    {
+      "schema": "org.gnome.desktop.privacy",
+      "key": "privacy-screen"
+    },
+    {
+      "schema": "org.gnome.desktop.privacy",
+      "key": "recent-files-max-age"
+    },
+    {
+      "schema": "org.gnome.desktop.privacy",
+      "key": "remember-app-usage"
+    },
+    {
+      "schema": "org.gnome.desktop.privacy",
+      "key": "remember-recent-files"
+    },
+    {
+      "schema": "org.gnome.desktop.privacy",
+      "key": "remove-old-temp-files"
+    },
+    {
+      "schema": "org.gnome.desktop.privacy",
+      "key": "remove-old-trash-files"
+    },
+    {
+      "schema": "org.gnome.desktop.privacy",
+      "key": "report-technical-problems"
+    },
+    {
+      "schema": "org.gnome.desktop.privacy",
+      "key": "send-software-usage-stats"
+    },
+    {
+      "schema": "org.gnome.desktop.privacy",
+      "key": "show-full-name-in-top-bar"
+    },
+    {
+      "schema": "org.gnome.desktop.privacy",
+      "key": "usb-protection"
+    },
+    {
+      "schema": "org.gnome.desktop.privacy",
+      "key": "usb-protection-level"
+    },
+    {
+      "schema": "org.gnome.desktop.remote-desktop.rdp",
+      "key": "auth-methods"
+    },
+    {
+      "schema": "org.gnome.desktop.remote-desktop.rdp",
+      "key": "enable"
+    },
+    {
+      "schema": "org.gnome.desktop.remote-desktop.rdp",
+      "key": "kerberos-keytab"
+    },
+    {
+      "schema": "org.gnome.desktop.remote-desktop.rdp",
+      "key": "negotiate-port"
+    },
+    {
+      "schema": "org.gnome.desktop.remote-desktop.rdp",
+      "key": "port"
+    },
+    {
+      "schema": "org.gnome.desktop.remote-desktop.rdp",
+      "key": "screen-share-mode"
+    },
+    {
+      "schema": "org.gnome.desktop.remote-desktop.rdp",
+      "key": "tls-cert"
+    },
+    {
+      "schema": "org.gnome.desktop.remote-desktop.rdp",
+      "key": "tls-key"
+    },
+    {
+      "schema": "org.gnome.desktop.remote-desktop.rdp",
+      "key": "view-only"
+    },
+    {
+      "schema": "org.gnome.desktop.remote-desktop.rdp.headless",
+      "key": "auth-methods"
+    },
+    {
+      "schema": "org.gnome.desktop.remote-desktop.rdp.headless",
+      "key": "enable"
+    },
+    {
+      "schema": "org.gnome.desktop.remote-desktop.rdp.headless",
+      "key": "kerberos-keytab"
+    },
+    {
+      "schema": "org.gnome.desktop.remote-desktop.rdp.headless",
+      "key": "negotiate-port"
+    },
+    {
+      "schema": "org.gnome.desktop.remote-desktop.rdp.headless",
+      "key": "port"
+    },
+    {
+      "schema": "org.gnome.desktop.remote-desktop.vnc",
+      "key": "auth-method"
+    },
+    {
+      "schema": "org.gnome.desktop.remote-desktop.vnc",
+      "key": "enable"
+    },
+    {
+      "schema": "org.gnome.desktop.remote-desktop.vnc",
+      "key": "encryption"
+    },
+    {
+      "schema": "org.gnome.desktop.remote-desktop.vnc",
+      "key": "negotiate-port"
+    },
+    {
+      "schema": "org.gnome.desktop.remote-desktop.vnc",
+      "key": "port"
+    },
+    {
+      "schema": "org.gnome.desktop.remote-desktop.vnc",
+      "key": "screen-share-mode"
+    },
+    {
+      "schema": "org.gnome.desktop.remote-desktop.vnc",
+      "key": "view-only"
+    },
+    {
+      "schema": "org.gnome.desktop.remote-desktop.vnc.headless",
+      "key": "enable"
+    },
+    {
+      "schema": "org.gnome.desktop.remote-desktop.vnc.headless",
+      "key": "negotiate-port"
+    },
+    {
+      "schema": "org.gnome.desktop.remote-desktop.vnc.headless",
+      "key": "port"
+    },
+    {
+      "schema": "org.gnome.desktop.screen-time-limits",
+      "key": "daily-limit-enabled"
+    },
+    {
+      "schema": "org.gnome.desktop.screen-time-limits",
+      "key": "daily-limit-seconds"
+    },
+    {
+      "schema": "org.gnome.desktop.screen-time-limits",
+      "key": "grayscale"
+    },
+    {
+      "schema": "org.gnome.desktop.screen-time-limits",
+      "key": "history-enabled"
+    },
+    {
+      "schema": "org.gnome.desktop.screensaver",
+      "key": "color-shading-type"
+    },
+    {
+      "schema": "org.gnome.desktop.screensaver",
+      "key": "embedded-keyboard-command"
+    },
+    {
+      "schema": "org.gnome.desktop.screensaver",
+      "key": "embedded-keyboard-enabled"
+    },
+    {
+      "schema": "org.gnome.desktop.screensaver",
+      "key": "idle-activation-enabled"
+    },
+    {
+      "schema": "org.gnome.desktop.screensaver",
+      "key": "lock-delay"
+    },
+    {
+      "schema": "org.gnome.desktop.screensaver",
+      "key": "lock-enabled"
+    },
+    {
+      "schema": "org.gnome.desktop.screensaver",
+      "key": "logout-command"
+    },
+    {
+      "schema": "org.gnome.desktop.screensaver",
+      "key": "logout-delay"
+    },
+    {
+      "schema": "org.gnome.desktop.screensaver",
+      "key": "logout-enabled"
+    },
+    {
+      "schema": "org.gnome.desktop.screensaver",
+      "key": "picture-opacity"
+    },
+    {
+      "schema": "org.gnome.desktop.screensaver",
+      "key": "picture-options"
+    },
+    {
+      "schema": "org.gnome.desktop.screensaver",
+      "key": "picture-uri"
+    },
+    {
+      "schema": "org.gnome.desktop.screensaver",
+      "key": "primary-color"
+    },
+    {
+      "schema": "org.gnome.desktop.screensaver",
+      "key": "restart-enabled"
+    },
+    {
+      "schema": "org.gnome.desktop.screensaver",
+      "key": "secondary-color"
+    },
+    {
+      "schema": "org.gnome.desktop.screensaver",
+      "key": "show-full-name-in-top-bar"
+    },
+    {
+      "schema": "org.gnome.desktop.screensaver",
+      "key": "status-message-enabled"
+    },
+    {
+      "schema": "org.gnome.desktop.screensaver",
+      "key": "user-switch-enabled"
+    },
+    {
+      "schema": "org.gnome.desktop.search-providers",
+      "key": "disable-external"
+    },
+    {
+      "schema": "org.gnome.desktop.search-providers",
+      "key": "disabled"
+    },
+    {
+      "schema": "org.gnome.desktop.search-providers",
+      "key": "enabled"
+    },
+    {
+      "schema": "org.gnome.desktop.search-providers",
+      "key": "sort-order"
+    },
+    {
+      "schema": "org.gnome.desktop.session",
+      "key": "idle-delay"
+    },
+    {
+      "schema": "org.gnome.desktop.session",
+      "key": "save-restore"
+    },
+    {
+      "schema": "org.gnome.desktop.session",
+      "key": "session-name"
+    },
+    {
+      "schema": "org.gnome.desktop.sound",
+      "key": "allow-volume-above-100-percent"
+    },
+    {
+      "schema": "org.gnome.desktop.sound",
+      "key": "event-sounds"
+    },
+    {
+      "schema": "org.gnome.desktop.sound",
+      "key": "input-feedback-sounds"
+    },
+    {
+      "schema": "org.gnome.desktop.sound",
+      "key": "theme-name"
+    },
+    {
+      "schema": "org.gnome.desktop.thumbnail-cache",
+      "key": "maximum-age"
+    },
+    {
+      "schema": "org.gnome.desktop.thumbnail-cache",
+      "key": "maximum-size"
+    },
+    {
+      "schema": "org.gnome.desktop.thumbnailers",
+      "key": "disable"
+    },
+    {
+      "schema": "org.gnome.desktop.thumbnailers",
+      "key": "disable-all"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "activate-window-menu"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "always-on-top"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "begin-move"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "begin-resize"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "close"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "cycle-group"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "cycle-group-backward"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "cycle-panels"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "cycle-panels-backward"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "cycle-windows"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "cycle-windows-backward"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "lower"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "maximize"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "maximize-horizontally"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "maximize-vertically"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "minimize"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-center"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-corner-ne"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-corner-nw"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-corner-se"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-corner-sw"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-monitor-down"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-monitor-left"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-monitor-right"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-monitor-up"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-side-e"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-side-n"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-side-s"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-side-w"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-workspace-1"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-workspace-10"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-workspace-11"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-workspace-12"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-workspace-2"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-workspace-3"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-workspace-4"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-workspace-5"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-workspace-6"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-workspace-7"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-workspace-8"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-workspace-9"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-workspace-down"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-workspace-last"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-workspace-left"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-workspace-right"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "move-to-workspace-up"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "panel-main-menu"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "panel-run-dialog"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "raise"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "raise-or-lower"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "set-spew-mark"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "show-desktop"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-applications"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-applications-backward"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-group"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-group-backward"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-input-source"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-input-source-backward"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-panels"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-panels-backward"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-to-workspace-1"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-to-workspace-10"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-to-workspace-11"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-to-workspace-12"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-to-workspace-2"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-to-workspace-3"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-to-workspace-4"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-to-workspace-5"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-to-workspace-6"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-to-workspace-7"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-to-workspace-8"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-to-workspace-9"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-to-workspace-down"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-to-workspace-last"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-to-workspace-left"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-to-workspace-right"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-to-workspace-up"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-windows"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "switch-windows-backward"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "toggle-above"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "toggle-fullscreen"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "toggle-maximized"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "toggle-on-all-workspaces"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.keybindings",
+      "key": "unmaximize"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.preferences",
+      "key": "action-double-click-titlebar"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.preferences",
+      "key": "action-middle-click-titlebar"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.preferences",
+      "key": "action-right-click-titlebar"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.preferences",
+      "key": "audible-bell"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.preferences",
+      "key": "auto-raise"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.preferences",
+      "key": "auto-raise-delay"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.preferences",
+      "key": "button-layout"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.preferences",
+      "key": "disable-workarounds"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.preferences",
+      "key": "focus-mode"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.preferences",
+      "key": "focus-new-windows"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.preferences",
+      "key": "mouse-button-modifier"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.preferences",
+      "key": "num-workspaces"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.preferences",
+      "key": "raise-on-click"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.preferences",
+      "key": "resize-with-right-button"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.preferences",
+      "key": "theme"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.preferences",
+      "key": "titlebar-font"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.preferences",
+      "key": "titlebar-uses-system-font"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.preferences",
+      "key": "visual-bell"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.preferences",
+      "key": "visual-bell-type"
+    },
+    {
+      "schema": "org.gnome.desktop.wm.preferences",
+      "key": "workspace-names"
+    }
+  ]
+}
