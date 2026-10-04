@@ -3108,6 +3108,12 @@ impl ShellHost {
             },
             "windows": windows,
             "focused_window": self.model.windows().iter().find(|w| w.active).map(|w| w.id),
+            "settings": {
+                "clock_format": match self.tiles.settings.clock_format {
+                    ClockFormat::TwentyFour => "24h",
+                    ClockFormat::Twelve => "12h",
+                },
+            },
             "notifications": {"banners": banners, "unread": unread},
             "dock": dock,
         })
