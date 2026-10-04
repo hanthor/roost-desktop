@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Measure one GNOME or Roost guest using the same VM profile (#73)."""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import statistics
+import subprocess
+import time
+
+HERE = Path(__file__).resolve().parent
+loader = importlib.machinery.SourceFileLoader("vm_lane", str(HERE / "roost-vm-lane"))
+spec = importlib.util.spec_from_loader("vm_lane", loader)
+lane = importlib.util.module_from_spec(spec)
+loader.exec_module(lane)
+
+
+def distribution(values):
+    values = sorted(values)
+    if not values:
+        return {"count": 0}
+    def percentile(p):
+        return values[min(len(values)-1, max(0, __import__("math").ceil(p * len(values))-1))]
+    return {"count": len(values), "p50": percentile(.50), "p95": percentile(.95),
+            "p99": percentile(.99), "min": values[0], "max": values[-1],
+            "mean": statistics.mean(values)}
+
+
+def raw_samples(serial):
+    result = []
+    for line in serial.splitlines():
+        if "roost-perf-sample: " in line:
+            try:
+                result.append(json.loads(line.split("roost-perf-sample: ", 1)[1]))
+            except json.JSONDecodeError:
+                continue
+    return result
+
+
+def frame(qmp, path):
+    qmp.cmd("screendump", filename=str(path), format="ppm")
+    return lane.read_ppm(str(path))[2]
+
+
+def changed(before, after):
+    # Ignore the clock/top panel and a five-pixel cursor region by requiring
+    # a broad visible response, rather than treating one changed pixel as input.
+    return sum(abs(x-y) > 24 for x, y in zip(before[32*1280*3:], after[32*1280*3:])) > 1280*800*.01
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--disk", required=True)
+    ap.add_argument("--desktop", required=True, choices=("gnome", "roost"))
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--timeout", type=int, default=900)
+    ap.add_argument("--meta", action="append", default=[])
+    args = ap.parse_args()
+    out = Path(args.out).resolve()
+    out.mkdir(parents=True, exist_ok=False)
+    scratch = out / ".work"
+    scratch.mkdir()
+    vm, qmp_path, serial_path, kvm = lane.boot(os.path.abspath(args.disk), str(out), str(scratch), args.timeout)
+    started = time.monotonic()
+    observations, phases = [], {}
+    try:
+        qmp = lane.baseline.Qmp(qmp_path)
+        ready = False
+        while time.monotonic()-started < args.timeout and vm.poll() is None:
+            if raw_samples(lane.read_text(serial_path)):
+                qmp.keys("esc")
+                time.sleep(2)
+                path = scratch / "ready.ppm"
+                frame(qmp, path)
+                ready, _ = lane.check_panel(str(path))
+                if ready:
+                    break
+            time.sleep(2)
+        if not ready:
+            raise RuntimeError("the guest never displayed its desktop panel")
+        panel_upper_s = time.monotonic()-started
+        qmp.frame(str(out / "panel.png"))
+        phases["idle_start"] = time.clock_gettime(time.CLOCK_BOOTTIME)
+        time.sleep(30)
+        phases["idle_end"] = time.clock_gettime(time.CLOCK_BOOTTIME)
+        for query in ("disks", "system monitor", "files"):
+            qmp.keys("meta_l")
+            time.sleep(1)
+            qmp.type_text(query)
+            time.sleep(1)
+            qmp.keys("ret")
+            time.sleep(8)
+        phases["workload_start"] = time.clock_gettime(time.CLOCK_BOOTTIME)
+        for index in range(20):
+            before = frame(qmp, scratch / "before.ppm")
+            start = time.monotonic()
+            qmp.keys("meta_l")
+            previous_start = start
+            while time.monotonic()-start < 10:
+                poll_start = time.monotonic()
+                after = frame(qmp, scratch / "after.ppm")
+                poll_end = time.monotonic()
+                if changed(before, after):
+                    observations.append({"index": index, "action": "overview-open" if index % 2 == 0 else "overview-close",
+                                         "lower_s": previous_start-start, "upper_s": poll_end-start,
+                                         "capture_s": poll_end-poll_start})
+                    qmp.frame(str(out / f"overview-{index:02d}.png"))
+                    break
+                previous_start = poll_start
+                time.sleep(.02)
+            else:
+                raise RuntimeError(f"overview input {index} produced no broad visible response")
+            time.sleep(1)
+        for _ in range(10):
+            qmp.keys("meta_l", "pgdn")
+            time.sleep(1)
+            qmp.keys("meta_l", "pgup")
+            time.sleep(1)
+        phases["workload_end"] = time.clock_gettime(time.CLOCK_BOOTTIME)
+        time.sleep(30)
+        serial = lane.read_text(serial_path)
+        samples = raw_samples(serial)
+        if not samples or any(s["unreadable"] for s in samples):
+            raise RuntimeError("resource samples are missing or incomplete; inspect raw serial")
+        (out / "samples.json").write_text(json.dumps(samples, indent=2))
+        (out / "observations.json").write_text(json.dumps(observations, indent=2))
+        # Host and guest boottime clocks are different. Keep host phases as
+        # provenance, and summarize guest samples only by their guest timestamps.
+        report = {"desktop": args.desktop, "vm_profile": {"memory_mib":6144,"vcpus":4,"resolution":[1280,800],"kvm":kvm},
+                  "meta": args.meta, "host": {"kernel":os.uname().release,"cpu":Path("/proc/cpuinfo").read_text(),
+                                              "qemu":subprocess.check_output(["qemu-system-x86_64","--version"],text=True)},
+                  "panel_observed_upper_s":panel_upper_s,"host_phases_boottime_s":phases,
+                  "whole_user_pss_kib":distribution([s["pss_kib"] for s in samples]),
+                  "whole_user_cpu_observed_percent":distribution([s["cpu_observed_percent"] for s in samples if s["cpu_observed_percent"] is not None]),
+                  "overview_observed_upper_s":distribution([s["upper_s"] for s in observations]),
+                  "limitations":["QMP observations are bounded host-visible response times, not compositor input-to-frame tracing.",
+                                 "CPU counts surviving sampled processes; exited processes can consume unobserved CPU.",
+                                 "PSS covers the test UID and excludes the observer and its descendants; root/GDM shared services are outside this scope.",
+                                 "Raw guest samples include startup, idle and workload; host phases cannot partition guest clocks without synchronization.",
+                                 "GPU memory, frame pacing, notification load, multiple cold/warm boots and 24-hour soak remain open.",
+                                 "No release threshold or claim of within-10-percent parity is introduced."]}
+        (out / "report.json").write_text(json.dumps(report, indent=2))
+        print(json.dumps({"desktop":args.desktop,"samples":len(samples),"observations":len(observations)}))
+    finally:
+        vm.terminate()
+        try:
+            vm.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            vm.kill();vm.wait()
+
+
+if __name__ == "__main__":
+    main()
