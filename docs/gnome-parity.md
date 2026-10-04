@@ -187,3 +187,14 @@ The recorded native and Roost window states are committed in
 These are full 1280x800 frame comparisons with the same threshold as the
 other measurements above. Each capture asserts the keyboard action's
 focus, workspace or rectangle result before continuing.
+
+Idle shield behavior follows GNOME's `screenShield.js`: the idle fade takes
+10,000 ms with ease-out-quad, and locking waits for the larger of that animation duration
+and `lock-delay`. With animations disabled the minimum disappears.
+`G-IDLE-FADE` drives a two-second idle policy, cancels the fade with
+activity, observes the blank stage before the delayed lock, and verifies
+that waking still requires PAM. `G-LOCK-BACKGROUND` uses a solid green
+screen-saver URI and checks its dimmed pixels. The parity lock frame sets
+an explicit URI to the exported reference wallpaper and retains it in
+`lock-background-uri.txt`; the custom-color proof is separate from that
+GNOME visual comparison.

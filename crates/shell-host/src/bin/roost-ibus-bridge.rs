@@ -200,7 +200,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &wayland_fd,
                 rustix::event::PollFlags::IN,
             )];
-            rustix::event::poll(&mut fds, 50)?;
+            rustix::event::poll(
+                &mut fds,
+                Some(&rustix::event::Timespec {
+                    tv_sec: 0,
+                    tv_nsec: 50_000_000,
+                }),
+            )?;
             if fds[0].revents().contains(rustix::event::PollFlags::IN) {
                 let _ = guard.read();
             }

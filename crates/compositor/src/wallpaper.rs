@@ -262,7 +262,7 @@ impl Wallpaper {
         h: i32,
     ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
         let output = Size::<i32, Logical>::from((w, h));
-        let uri = self.refresh(output)?;
+        let uri = self.refresh_picture(output, true)?;
         if !self
             .locked
             .iter()
@@ -315,15 +315,25 @@ impl Wallpaper {
     /// Re-read the drop file and start or collect the decode for
     /// `output`; the current URI when there is a picture to show.
     fn refresh(&mut self, output: Size<i32, Logical>) -> Option<String> {
+        self.refresh_picture(output, false)
+    }
+
+    fn refresh_picture(&mut self, output: Size<i32, Logical>, lock: bool) -> Option<String> {
         let area = output.w.max(0) as u64 * output.h.max(0) as u64;
         if area == 0 || area > MAX_WALLPAPER_AREA {
             return None;
         }
         let text = std::fs::read_to_string(wallpaper_drop_path()).unwrap_or_default();
         let mut lines = text.lines();
-        let uri = lines.next().unwrap_or_default().trim().to_owned();
+        let mut uri = lines.next().unwrap_or_default().trim().to_owned();
         self.color = lines.next().and_then(parse_color);
         self.accent = lines.next().and_then(parse_color);
+        if lock {
+            let screensaver = lines.next().unwrap_or_default().trim();
+            if wallpaper_uri_to_path(screensaver).is_some_and(|path| path.is_file()) {
+                uri = screensaver.to_owned();
+            }
+        }
         if uri.is_empty() {
             return None;
         }
