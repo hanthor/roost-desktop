@@ -27,7 +27,7 @@ This page records that decision for R9 (knowledge entry
 | clock-show-weekday, clock-show-date, clock-show-seconds | Honored | Panel clock, built as gnome-desktop's wall clock builds it |
 | enable-hot-corners | Honored | Live. Proof G-SETTINGS-INPUT |
 | enable-animations | Ignored | Roost has no animations yet |
-| show-battery-percentage | Ignored | No battery indicator yet (#55) |
+| show-battery-percentage | Honored | UPower DisplayDevice panel percentage; updates live |
 
 ## Session, lock and notifications
 

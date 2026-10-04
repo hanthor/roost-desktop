@@ -511,6 +511,9 @@ struct PanelIcons {
     dnd: gtk::Image,
     volume: gtk::Image,
     power_profile: gtk::Image,
+    battery: gtk::Box,
+    battery_icon: gtk::Image,
+    battery_percentage: gtk::Label,
 }
 
 fn quick_settings_popover(
@@ -848,6 +851,9 @@ fn quick_settings_popover(
         }
         None => night.present(false),
     }
+    let battery_summary = gtk::Label::new(None);
+    battery_summary.set_xalign(0.0);
+    battery_summary.set_visible(false);
     services::attach(&Rc::new(services::Widgets {
         wifi,
         wifi_menu,
@@ -865,6 +871,10 @@ fn quick_settings_popover(
         panel_network: icons.network,
         panel_volume: icons.volume,
         panel_power_profile: icons.power_profile,
+        panel_battery: icons.battery,
+        battery_icon: icons.battery_icon,
+        battery_percentage: icons.battery_percentage,
+        battery_summary: battery_summary.clone(),
         volume: slider,
         mute,
         brightness_row: brightness_row.clone(),
@@ -902,6 +912,7 @@ fn quick_settings_popover(
     }
 
     col.append(&top);
+    col.append(&battery_summary);
     col.append(&power_menu);
     col.append(&volume_row);
     col.append(&sound_menu_ui.revealer);
@@ -1104,6 +1115,14 @@ fn build(app: &adw::Application) {
     let panel_dnd = status_icon("notifications-disabled-symbolic", false);
     let panel_volume = status_icon("audio-volume-high-symbolic", false);
     let panel_power_profile = status_icon("power-profile-balanced-symbolic", false);
+    let panel_battery = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let battery_icon = gtk::Image::from_icon_name("battery-level-100-symbolic");
+    battery_icon.add_css_class("system-status-icon");
+    let battery_percentage = gtk::Label::new(None);
+    panel_battery.append(&battery_icon);
+    panel_battery.append(&battery_percentage);
+    panel_battery.set_visible(false);
+    indicators.append(&panel_battery);
     status_icon("system-shutdown-symbolic", true);
     let power_ui = {
         let shell = shell.clone();
@@ -1148,6 +1167,9 @@ fn build(app: &adw::Application) {
             dnd: panel_dnd,
             volume: panel_volume,
             power_profile: panel_power_profile,
+            battery: panel_battery,
+            battery_icon,
+            battery_percentage,
         },
     );
     let system = panel_menu_button(&indicators, "System", &qs);
