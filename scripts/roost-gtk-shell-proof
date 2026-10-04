@@ -2333,4 +2333,24 @@ if grep -q 'ShellExited' "$LOG"; then
     fail G-SHELL-STABLE "the shell exited during the journey: $(grep -c ShellExited "$LOG") time(s)"
 fi
 pass G-SHELL-STABLE "the shell never exited or restarted"
+
+# A hard shell crash must not leave a persistent monitor behind. Do this
+# after the normal journey's stability assertion, then require supervision
+# to start a new shell with its own monitor.
+read -r monitor_pid audio_shell_pid <"$ARTIFACTS/audio-monitor-pids"
+kill -KILL "$audio_shell_pid"
+end=$(($(date +%s) + 15))
+while [ "$(date +%s)" -lt "$end" ]; do
+    monitor_state="$(ps -o stat= -p "$monitor_pid" 2>/dev/null || true)"
+    if { [ -z "$monitor_state" ] || echo "$monitor_state" | grep -q '^Z'; } &&
+        [ "$(wc -l <"$ARTIFACTS/audio-monitor-pids")" -ge 2 ]; then break; fi
+    sleep 0.1
+done
+monitor_state="$(ps -o stat= -p "$monitor_pid" 2>/dev/null || true)"
+{ [ -z "$monitor_state" ] || echo "$monitor_state" | grep -q '^Z'; } ||
+    fail G-AUDIO-HELPER-EXIT "audio monitor survived its shell's hard crash"
+[ "$(wc -l <"$ARTIFACTS/audio-monitor-pids")" -ge 2 ] ||
+    fail G-AUDIO-HELPER-EXIT "the supervised replacement shell did not start an audio monitor"
+pass G-AUDIO-HELPER-EXIT "a hard shell crash terminates its monitor; the replacement starts a fresh one"
+
 echo "roost-gtk-shell-proof: OK, artifacts in $ARTIFACTS"

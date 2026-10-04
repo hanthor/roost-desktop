@@ -61,6 +61,8 @@ except FileExistsError:
     pass
 # RDWR keeps the reader alive between independently opened event writers.
 fd = os.open(fifo, os.O_RDWR)
+with (root / "audio-monitor-pids").open("a") as pids:
+    pids.write(f"{os.getpid()} {os.getppid()}\n")
 emit()
 with os.fdopen(fd, 'rb', buffering=0) as events:
     while events.read(4096):

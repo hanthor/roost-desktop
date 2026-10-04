@@ -810,14 +810,24 @@ impl AudioUi {
         if self.stopping.get() {
             return;
         }
-        match gio::Subprocess::newv(
-            &[
-                "pw-dump".as_ref(),
-                "--monitor".as_ref(),
-                "--no-colors".as_ref(),
-            ],
+        let launcher = gio::SubprocessLauncher::new(
             gio::SubprocessFlags::STDOUT_PIPE | gio::SubprocessFlags::STDERR_SILENCE,
-        ) {
+        );
+        let parent = std::process::id() as libc::pid_t;
+        // This callback runs between fork and exec. It uses only Linux
+        // syscalls, without allocating or touching GLib/thread locks.
+        launcher.set_child_setup(move || unsafe {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM, 0, 0, 0) != 0
+                || libc::getppid() != parent
+            {
+                libc::_exit(127);
+            }
+        });
+        match launcher.spawnv(&[
+            "pw-dump".as_ref(),
+            "--monitor".as_ref(),
+            "--no-colors".as_ref(),
+        ]) {
             Ok(process) => {
                 let Some(stream) = process.stdout_pipe() else {
                     self.retry();
