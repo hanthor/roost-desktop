@@ -2737,6 +2737,12 @@ for scenario in allow remembered-allow deny remembered-deny unknown; do
         remembered-deny) ;;
         *)
             "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-consent-$scenario.json" 20 || fail G-SHORTCUT-CONSENT "dialog dump failed"
+            case "$scenario" in
+                allow) expected_title="Allow Consent allow to inhibit shortcuts?" ;;
+                deny) expected_title="Allow Consent deny to inhibit shortcuts?" ;;
+                unknown) expected_title="Allow this app to inhibit shortcuts?" ;;
+            esac
+            showing "$ARTIFACTS/a11y-consent-$scenario.json" "$expected_title" || fail G-SHORTCUT-CONSENT "application display name missing from consent"
             showing "$ARTIFACTS/a11y-consent-$scenario.json" Allow || fail G-SHORTCUT-CONSENT "Allow missing"
             showing "$ARTIFACTS/a11y-consent-$scenario.json" Deny || fail G-SHORTCUT-CONSENT "Deny missing"
             showing "$ARTIFACTS/a11y-consent-$scenario.json" "You can restore shortcuts by pressing Super+Escape" || fail G-SHORTCUT-CONSENT "escape hint missing"
