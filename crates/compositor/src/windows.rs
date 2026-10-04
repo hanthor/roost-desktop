@@ -543,6 +543,7 @@ impl WindowManager {
             .into_iter()
             .filter_map(|(w, g)| w.wl_surface().map(|s| (s.into_owned(), g.loc)))
             .collect();
+        state.refresh_ime_cursor_origins();
         // Never pull focus out from under a live grab.
         if state.take_popup_refocus() && !state.popup_grab_active() {
             let focused = self.model.focused();
@@ -964,6 +965,17 @@ impl WindowManager {
         }
         self.finish_map(state, id);
         id
+    }
+
+    /// Remove compatibility windows after the server connection is lost.
+    /// Native windows keep their model IDs and surfaces across a restart.
+    #[cfg(feature = "xwayland")]
+    pub fn clear_x11_windows(&mut self, state: &mut State) {
+        let ids: Vec<_> = self.x11_index.values().copied().collect();
+        for id in ids {
+            self.unmap(state, id);
+        }
+        state.x11_events.clear();
     }
 
     /// Drain queued X11 manager events: map/unmap/size and identity
