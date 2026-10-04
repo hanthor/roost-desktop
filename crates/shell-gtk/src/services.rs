@@ -872,7 +872,11 @@ fn battery(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
         "/org/freedesktop/UPower/devices/DisplayDevice",
         "org.freedesktop.UPower.Device",
     );
-    let settings = crate::settings(crate::INTERFACE_SCHEMA);
+    let settings = crate::settings(crate::INTERFACE_SCHEMA).filter(|settings| {
+        settings
+            .settings_schema()
+            .is_some_and(|schema| schema.has_key("show-battery-percentage"))
+    });
     let refresh: Rc<dyn Fn()> = {
         let (remote, w, settings) = (remote.clone(), w.clone(), settings.clone());
         Rc::new(move || {
