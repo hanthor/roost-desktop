@@ -493,7 +493,7 @@ def main():
         volumes = re.findall(r"roost-vm-health: volume=(0\.[0-9]+)( \[MUTED\])?", text)
         observed = [(round(float(level), 2), bool(muted)) for level, muted in volumes]
         expected = [(0.40, False), (0.46, False), (0.40, False), (0.40, True), (0.40, False)]
-        record("V-MEDIA-VOLUME", observed[:5] == expected,
+        record("V-MEDIA-VOLUME", "roost-vm-health: audio-hda ready" in text and observed[:5] == expected,
                f"virtual HDA output: up/down/mute/unmute {observed}")
     if a.tour:
         transitions = re.findall(r"roost-vm-health: lock active=\((true|false),\)", text)

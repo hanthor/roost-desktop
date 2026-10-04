@@ -24,7 +24,8 @@ probe portal-gnome --dest org.freedesktop.impl.portal.desktop.gnome --object-pat
 # only in this CI guest, then observe hardware-key mutations through
 # PipeWire itself, independent of the shell's OSD.
 for ((attempt=0; attempt<60; attempt++)); do
-    if timeout 5 wpctl get-volume @DEFAULT_AUDIO_SINK@ >/dev/null 2>&1; then
+    if timeout 5 wpctl inspect @DEFAULT_AUDIO_SINK@ 2>/dev/null | grep -q 'node.name.*alsa_output'; then
+        echo "roost-vm-health: audio-hda ready"
         timeout 5 wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.40
         timeout 5 wpctl set-mute @DEFAULT_AUDIO_SINK@ 0
         break
