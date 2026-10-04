@@ -2163,11 +2163,7 @@ pub fn grid_layout_pages(
                 (items.iter().any(|(key, _)| *key == id) && placed.insert(id.clone())).then_some(id)
             })
             .collect();
-        if ids.is_empty() {
-            pages.push(Vec::new());
-        } else {
-            pages.extend(ids.chunks(capacity).map(|page| page.to_vec()));
-        }
+        pages.extend(ids.chunks(capacity).map(|page| page.to_vec()));
     }
     if pages.is_empty() {
         pages.push(Vec::new());
@@ -2223,6 +2219,9 @@ pub fn grid_move_in_pages(
             result[page].insert(0, spill);
         }
     }
+    // GNOME removes a page when its last icon leaves; non-empty short
+    // pages retain their boundary (iconGrid.js _removeItemData).
+    result.retain(|page| !page.is_empty());
     (result != pages).then_some(result)
 }
 
@@ -2308,6 +2307,23 @@ mod grid_layout_tests {
         assert_eq!(
             grid_layout_pages(&[("a", "A"), ("b", "B")], &saved, 2),
             vec![vec!["a"], vec!["b"]]
+        );
+    }
+
+    #[test]
+    fn moving_the_last_icon_removes_only_the_empty_page() {
+        let pages = vec![vec!["a".into()], vec!["b".into(), "c".into()]];
+        assert_eq!(
+            grid_move_in_pages(&pages, "a", "b", DropEdge::Start, 3, 3).unwrap(),
+            vec![vec!["a", "b", "c"]]
+        );
+        assert_eq!(
+            grid_layout_pages(
+                &[("b", "B")],
+                &[vec![("gone".into(), 0)], vec![("b".into(), 0)]],
+                3
+            ),
+            vec![vec!["b"]]
         );
     }
 
