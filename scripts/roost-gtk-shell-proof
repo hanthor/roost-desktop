@@ -1559,9 +1559,19 @@ cp "$CSTATE" "$ARTIFACTS/window-icons-state.json"
 xdotool key Escape
 cstate '.overview_open == false' "icon overview closed" || fail G-WINDOW-ICONS "overview did not close"
 xdotool keydown Alt_L key Tab
-cstate '.switcher_open' "icon switcher" || fail G-WINDOW-ICONS "switcher did not open"
+cstate 'any(.layers[]; .namespace == "roost-shell-switcher")' "icon switcher" || fail G-WINDOW-ICONS "switcher did not open"
 sleep 1
 scrot "$ARTIFACTS/20b-window-icons-switcher.png" >/dev/null
+"$PY" - "$ARTIFACTS/20a-window-icons-overview.png" "$ARTIFACTS/20b-window-icons-switcher.png" <<'PYICON'
+from PIL import Image
+import sys
+for path in sys.argv[1:]:
+    pixels = Image.open(path).convert("RGB").getdata()
+    # The native probe has a distinctive magenta quadrant absent from its client.
+    magenta = sum(r > 200 and 35 < g < 110 and 120 < b < 220 for r, g, b in pixels)
+    if magenta < 16:
+        raise SystemExit(path + ": native window icon pixels missing")
+PYICON
 xdotool keyup Alt_L
 kill "$ICON_PID" 2>/dev/null || true
 ICON_PID=""
