@@ -2021,7 +2021,7 @@ xdotool mousemove --window "$WID" $((WIDTH - 10)) 400 click 5
 cstate ".strip_offset != $wheel_before" "strip wheel" || fail G-SCROLL-WHEEL "wheel did not move view"
 pass G-SCROLL-WHEEL "wheel moves the strip view without changing membership"
 xdotool key Super_L
-cstate '.overview_open and .session_mode == "scroll"' "scroll overview" || fail G-SCROLL-OVERVIEW "overview changed mode"
+cstate '.overview_open and .session_mode == "scroll" and (.previews | length) > 0' "occupied scroll overview previews" || fail G-SCROLL-OVERVIEW "overview changed mode"
 sleep 1
 scrot "$ARTIFACTS/24l-scroll-overview.png" >/dev/null
 xdotool key Escape
@@ -2030,7 +2030,7 @@ scroll_workspace="$(jq .active_workspace "$CSTATE")"
 xdotool key ctrl+alt+Right
 cstate ".active_workspace != $scroll_workspace and .session_mode == \"scroll\"" "scroll workspace" || fail G-SCROLL-WORKSPACES "workspace switch failed"
 xdotool key Super_L
-cstate '.overview_open and (.thumbnails | length) > 0' "scroll thumbnails" || fail G-SCROLL-WORKSPACES "workspace thumbnails missing"
+cstate ".overview_open and any(.workspace_cards[]; .active and .workspace != $scroll_workspace) and any(.workspace_cards[]; (.active | not) and .workspace == $scroll_workspace and .rect[2] > 0 and .rect[3] > 0)" "scroll workspace cards" || fail G-SCROLL-WORKSPACES "active and occupied neighbor workspace cards missing"
 sleep 1
 scrot "$ARTIFACTS/24m-scroll-workspaces.png" >/dev/null
 xdotool key Escape
@@ -2040,11 +2040,11 @@ cstate ".active_workspace == $scroll_workspace" "scroll workspace restored" || f
 pass G-SCROLL-WORKSPACES "workspace switching and overview thumbnails preserve scroll mode"
 pass G-SCROLL-OVERVIEW "overview previews coexist with the strip"
 xdotool keydown Alt_L key Tab
-cstate '.switcher_open and .session_mode == "scroll"' "scroll switcher" || fail G-SCROLL-SWITCHER "switcher changed mode"
+cstate '.session_mode == "scroll" and any(.layers[]; .namespace == "roost-shell-switcher")' "scroll switcher" || fail G-SCROLL-SWITCHER "switcher changed mode"
 sleep 1
 scrot "$ARTIFACTS/24n-scroll-switcher.png" >/dev/null
 xdotool keyup Alt_L
-cstate '.switcher_open == false' "scroll switcher closed" || fail G-SCROLL-SWITCHER "switcher did not close"
+cstate 'all(.layers[]; .namespace != "roost-shell-switcher")' "scroll switcher closed" || fail G-SCROLL-SWITCHER "switcher did not close"
 strip_whole "switcher selected column whole" || fail G-SCROLL-SWITCHER "switcher did not follow focus"
 pass G-SCROLL-SWITCHER "Alt+Tab selects a column and follows it"
 kill "$SCROLL_PROBE_PID" 2>/dev/null || true
