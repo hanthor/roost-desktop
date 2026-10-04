@@ -847,11 +847,16 @@ sleep 1
 # Restore the precise new Alpha fixture before the original group-switch
 # journey. Closing the original Alpha instead changes the legitimate dash
 # creation order and invalidates its existing accessibility golden.
+xdotool key Super_L
+cstate ".overview_open and any(.previews[]; .id == $new_alpha)" "new Alpha preview" ||
+    fail G-SWITCHER-GROUP "the overview has no preview of the second Alpha fixture"
+sleep 1
 read -r ax ay <<EOF2
-$(jq -r ".windows[] | select(.id == $new_alpha) | .rect | \"\\(.[0] + 120) \\(.[1] + 20)\"" "$CSTATE")
+$(jq -r ".previews[] | select(.id == $new_alpha) | .rect | \"\(.[0] + .[2] / 2 | floor) \(.[1] + .[3] / 2 | floor)\"" "$CSTATE")
 EOF2
 xdotool mousemove --window "$WID" "$ax" "$ay" click 1
-cstate ".focused == $new_alpha" "new Alpha restored" || fail G-SWITCHER-GROUP "could not restore the second Alpha fixture"
+cstate ".overview_open == false and .focused == $new_alpha" "new Alpha restored" ||
+    fail G-SWITCHER-GROUP "could not restore the second Alpha fixture through its overview preview"
 second="$new_alpha"
 xdotool keydown Alt_L key grave
 cstate '.switcher_thumbnails == 2' "thumbnails" 5 ||
