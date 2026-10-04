@@ -264,6 +264,53 @@ impl StateModel {
         true
     }
 
+    /// Insert a workspace before `at`, shifting later windows and the active
+    /// workspace, then place the dragged window in the new slot.
+    pub fn insert_workspace_and_move(&mut self, id: u64, at: u32) -> bool {
+        if !self.windows.contains_key(&id)
+            || self.workspaces.iter().any(|&w| w >= at && w == u32::MAX)
+        {
+            return false;
+        }
+        let shifted: Vec<_> = self
+            .windows
+            .values()
+            .filter(|w| w.id != id && w.workspace >= at)
+            .map(|w| (w.id, w.workspace + 1))
+            .collect();
+        for workspace in &mut self.workspaces {
+            if *workspace >= at {
+                *workspace += 1;
+            }
+        }
+        for (id, workspace) in shifted {
+            self.update(
+                id,
+                WindowUpdate {
+                    workspace: Some(workspace),
+                    ..Default::default()
+                },
+            );
+        }
+        if self.active >= at {
+            let previous = self.active;
+            self.active += 1;
+            self.commit(StateChange::ActiveWorkspaceChanged {
+                previous,
+                active: self.active,
+            });
+        }
+        self.update(
+            id,
+            WindowUpdate {
+                workspace: Some(at),
+                ..Default::default()
+            },
+        );
+        self.prune_workspaces();
+        true
+    }
+
     /// Move keyboard focus. `None` unfocuses. Returns false (no bump, no
     /// change) when targeting an unknown window. Updates the windows'
     /// `focused` flags, bumps the revision, appends `FocusChanged`.
