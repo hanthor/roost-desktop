@@ -1185,9 +1185,6 @@ impl Runtime {
     /// Advertise the reserved display to apps, independently of XWM readiness.
     pub fn set_x11_display(&mut self, display: u32) {
         self.x11_display = Some(display);
-        if let Some(ime) = &mut self.ime {
-            ime.set_x11_display(display);
-        }
         self.control
             .set_environment(vec![("DISPLAY".to_owned(), format!(":{display}"))]);
     }
@@ -2478,6 +2475,15 @@ impl Runtime {
         if !self.is_locked() && self.lock.check_timeout(self.lock_now_ms()) {
             self.engage_lock();
         }
+        // XIM is an X11 client itself: keep it off merely advertised sockets,
+        // and retire the helper on server loss even while the session is locked.
+        #[cfg(feature = "xwayland")]
+        let ready_x11_display = self.x11_display.filter(|_| self.state.xwm.is_some());
+        #[cfg(not(feature = "xwayland"))]
+        let ready_x11_display = None;
+        if let Some(ime) = &mut self.ime {
+            ime.set_ready_x11_display(ready_x11_display);
+        }
         // Overview focus follows the hub flag (shell commands and
         // runtime triggers converge here); the next reconcile parks
         // or restores keyboard focus.
@@ -2537,6 +2543,9 @@ impl Runtime {
                 self.x11_failed = false;
                 self.pending_x11_client = None;
                 self.state.xwm = None;
+                if let Some(ime) = &mut self.ime {
+                    ime.set_ready_x11_display(None);
+                }
                 self.manager.clear_x11_windows(&mut self.state);
                 self.xwayland.disconnected(now);
             }
