@@ -6,6 +6,7 @@ use std::ffi::OsStr;
 use std::path::Path;
 
 use crate::network_agent::WifiSecret;
+use gio::prelude::*;
 
 #[derive(Clone, Debug)]
 pub struct Field {
@@ -148,21 +149,92 @@ pub fn fields(connection: &glib::Variant, setting: &str, hints: &[String]) -> Op
     }
 }
 
+const HELPER_OUTPUT_LIMIT: usize = 1024 * 1024;
+async fn read_bounded(
+    process: gio::Subprocess,
+    stream: gio::InputStream,
+) -> Result<String, String> {
+    let mut output = Vec::new();
+    loop {
+        let bytes = match stream
+            .read_bytes_future(4096, glib::Priority::DEFAULT)
+            .await
+        {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                process.force_exit();
+                return Err("secret helper failed".into());
+            }
+        };
+        if bytes.is_empty() {
+            break;
+        }
+        if output.len() + bytes.len() > HELPER_OUTPUT_LIMIT {
+            process.force_exit();
+            return Err("secret helper output is too large".into());
+        }
+        output.extend_from_slice(bytes.as_ref());
+    }
+    String::from_utf8(output).map_err(|_| "secret helper output is not UTF-8".into())
+}
+
 /// Secret values travel through stdin/stdout, never process arguments or logs.
 async fn tool(args: &[String], input: Option<String>, missing_ok: bool) -> Result<String, String> {
     let argv: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
-    let process = gio::Subprocess::newv(
-        &argv,
+    let launcher = gio::SubprocessLauncher::new(
         gio::SubprocessFlags::STDIN_PIPE
             | gio::SubprocessFlags::STDOUT_PIPE
             | gio::SubprocessFlags::STDERR_PIPE,
-    )
-    .map_err(|_| "secret helper is unavailable".to_owned())?;
+    );
+    let parent = std::process::id() as libc::pid_t;
+    // Only async-signal-safe syscalls between fork and exec.
+    launcher.set_child_setup(move || unsafe {
+        if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0
+            || libc::getppid() != parent
+        {
+            libc::_exit(127);
+        }
+    });
+    let process = launcher
+        .spawn(&argv)
+        .map_err(|_| "secret helper is unavailable".to_owned())?;
     let timed = process.clone();
     let timer = glib::timeout_add_local_once(std::time::Duration::from_secs(30), move || {
         timed.force_exit()
     });
-    let result = process.communicate_utf8_future(input).await;
+    // Drain both pipes concurrently, with fixed bounds even for a broken plugin.
+    let context = glib::MainContext::default();
+    let stdout = context.spawn_local(read_bounded(
+        process.clone(),
+        process.stdout_pipe().unwrap(),
+    ));
+    let stderr = context.spawn_local(read_bounded(
+        process.clone(),
+        process.stderr_pipe().unwrap(),
+    ));
+    let stdin = process.stdin_pipe().unwrap();
+    let write = async {
+        let bytes = input.unwrap_or_default().into_bytes();
+        if bytes.len() > HELPER_OUTPUT_LIMIT {
+            return Err("secret helper input is too large".to_owned());
+        }
+        stdin
+            .write_all_future(bytes, glib::Priority::DEFAULT)
+            .await
+            .map_err(|_| "secret helper failed".to_owned())?;
+        stdin
+            .close_future(glib::Priority::DEFAULT)
+            .await
+            .map_err(|_| "secret helper failed".to_owned())
+    }
+    .await;
+    if write.is_err() {
+        process.force_exit();
+    }
+    let out = stdout.await.map_err(|_| "secret helper failed".to_owned());
+    let err = stderr.await.map_err(|_| "secret helper failed".to_owned());
+    let waited = process.wait_future().await;
+    let result = write.and_then(|_| out?).and_then(|out| Ok((out, err??)));
     // A fired one-shot source is already gone; only remove a still-live source.
     if glib::MainContext::default()
         .find_source_by_id(&timer)
@@ -170,16 +242,15 @@ async fn tool(args: &[String], input: Option<String>, missing_ok: bool) -> Resul
     {
         timer.remove();
     }
-    let (out, err) = result.map_err(|_| "secret helper failed".to_owned())?;
+    let (out, err) = result?;
+    waited.map_err(|_| "secret helper failed".to_owned())?;
     // secret-tool clear exits1 with no stderr when no item matches.
-    let absent = missing_ok
-        && process.has_exited()
-        && process.exit_status() == 1
-        && err.as_deref().unwrap_or_default().trim().is_empty();
+    let absent =
+        missing_ok && process.has_exited() && process.exit_status() == 1 && err.trim().is_empty();
     if !process.is_successful() && !absent {
         return Err("secret helper failed".to_owned());
     }
-    Ok(out.map(|s| s.to_string()).unwrap_or_default())
+    Ok(out)
 }
 fn attributes(uuid: &str, setting: &str, key: Option<&str>) -> Vec<String> {
     let mut args = vec![
@@ -411,7 +482,34 @@ pub async fn vpn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gio::prelude::*;
+    #[test]
+    fn helper_output_is_bounded_and_the_process_is_reaped() {
+        let context = glib::MainContext::default();
+        context
+            .with_thread_default(|| {
+                context.block_on(async {
+                    let result = tool(
+                        &["sh".into(), "-c".into(), "head -c 1048577 /dev/zero".into()],
+                        None,
+                        false,
+                    )
+                    .await;
+                    assert_eq!(result.unwrap_err(), "secret helper output is too large");
+                    assert_eq!(
+                        tool(
+                            &["sh".into(), "-c".into(), "printf valid".into()],
+                            None,
+                            false
+                        )
+                        .await
+                        .unwrap(),
+                        "valid"
+                    );
+                });
+            })
+            .unwrap();
+    }
+
     #[test]
     fn enterprise_fields_respect_hints_and_secret_ownership() {
         use std::collections::HashMap;
