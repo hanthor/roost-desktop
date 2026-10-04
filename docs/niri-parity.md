@@ -1,5 +1,22 @@
 # Scroll mode and niri
 
+The post-animation #238 package was also captured after all 13 checks passed
+and it merged as `27fd8bf`. [Raw paired frames and reports](niri-parity/animation-238/provenance.json)
+use candidate `571ff66`, run 37177834905, against the same niri/Fedora fixture.
+Endpoint client sizes remain 616×736 / 826×736, with **0.0% differing client
+content pixels**. Whole-work-area rest/preset/settled results remain
+6.7% / 5.3% / 5.5%; the nominal 100ms transient differs by 11.5% (mean 9.48).
+At that sample niri captures during 104–153ms with the right edge at 493px;
+Roost captures during 101–135ms with it still at 422px. Both first reach a
+one-pixel settle in the nominal 400ms sample: niri 401–446ms, Roost 415–467ms.
+The nominal 300ms niri capture took 300–537ms, illustrating why these are
+interval samples rather than precise animation-duration claims. Both are
+settled by 600ms. This records a visible transient difference after #238;
+it does not claim exact timing parity. The current comparison PR still
+requires its independent CI recapture and full acceptance gate.
+
+The retained pre-animation baseline follows for comparison.
+
 The comparison uses niri **26.04** from Fedora 45 and the fully green Roost
 PR #233 package, before #238's column animation changes. It is a measured
 baseline, not evidence for the later animation implementation. The package
@@ -64,8 +81,9 @@ for checking the interpretation.
 The deterministic spring tests separately check the formula and settle
 threshold: critically damped, stiffness 800, epsilon 0.0001, matching
 [niri 26.04's defaults](https://github.com/niri-wm/niri/blob/v26.04/niri-config/src/animations.rs).
-#238 adds that spring to column width and position. Its behavior must be
-measured from its own CI build; the #233 captures do not establish that result.
+#238 adds that spring to column width and position. The post-animation
+package measurements above establish its observed behavior; #233's captures
+remain evidence only for the earlier baseline.
 
 The GTK proof now checks insertion right of focus, column movement and
 closure, wheel scrolling, overview previews, workspace thumbnails,
