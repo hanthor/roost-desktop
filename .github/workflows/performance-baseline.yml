@@ -1,5 +1,11 @@
 name: Marlin performance samples
 on:
+  pull_request:
+    paths:
+      - .github/workflows/performance-baseline.yml
+      - scripts/roost-vm-perf
+      - scripts/lib/roost-perf-*.py
+      - packaging/marlin/perf/**
   workflow_dispatch:
     inputs:
       package_run:

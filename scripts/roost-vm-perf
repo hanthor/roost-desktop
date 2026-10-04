@@ -47,7 +47,7 @@ def frame(qmp, path):
 def changed(before, after):
     # Ignore the clock/top panel and a five-pixel cursor region by requiring
     # a broad visible response, rather than treating one changed pixel as input.
-    return sum(abs(x-y) > 24 for x, y in zip(before[32*1280*3:], after[32*1280*3:])) > 1280*800*.01
+    return sum(abs(x-y) > 24 for x, y in zip(before[32*1280*3:], after[32*1280*3:])) > 1280*800*3*.10
 
 
 def main():

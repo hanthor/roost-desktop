@@ -45,6 +45,10 @@ def sample(uid, proc=Path("/proc"), observer=None):
             memory = dict(line.split(":", 1) for line in (path / "smaps_rollup").read_text().splitlines() if ":" in line)
             row.update(pss_kib=int(memory["Pss"].split()[0]), rss_kib=int(memory["Rss"].split()[0]),
                        fds=len(list((path / "fd").iterdir())))
+            current_identity = read_process(path)
+            if current_identity["start_ticks"] != row["start_ticks"] or current_identity["uid"] != uid:
+                errors.append({"pid": pid, "error": "ProcessIdentityChanged"})
+                continue
             rows.append(row)
         except (OSError, ValueError, KeyError) as error:
             errors.append({"pid": pid, "error": type(error).__name__})
