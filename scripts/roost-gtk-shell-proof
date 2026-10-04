@@ -2600,7 +2600,8 @@ if [ -n "$PAM_ON" ]; then
     sleep 1
     scrot "$ARTIFACTS/24-unlock-prompt.png" >/dev/null
     xdotool type --delay 30 "not-the-password"
-    xdotool key Return
+    # Keypad Enter uses the same fail-closed submission as Return.
+    xdotool key KP_Enter
     sleep 2
     cstate '.locked' "still locked after a wrong password" 5 ||
         fail G-UNLOCK "a wrong password unlocked the session"
