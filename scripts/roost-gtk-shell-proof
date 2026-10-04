@@ -1023,9 +1023,16 @@ grid_coordinates="$(grid_point "$ARTIFACTS/a11y-grid-before-hover.json" "AAA Mov
 read -r target_x target_y <<EOF
 $grid_coordinates
 EOF
-xdotool mousemove --window "$WID" "$source_x" "$source_y" mousedown 1
-xdotool mousemove --window "$WID" $((source_x - 25)) "$source_y"
+xdotool mousemove --window "$WID" "$source_x" "$source_y"
+sleep 0.3
+xdotool mousedown 1
 sleep 0.1
+# Recognize the drag before crossing to the target, as in the page proof.
+for step in $(seq 1 6); do
+    xdotool mousemove --window "$WID" $((source_x - step * 10)) "$source_y"
+    sleep 0.05
+done
+sleep 0.25
 xdotool mousemove --window "$WID" "$target_x" "$target_y"
 sleep 0.35
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-live-hover.json" 20 || fail G-GRID-HOVER "hover dump failed"

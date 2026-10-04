@@ -1305,16 +1305,22 @@ fn paged_grid(pages: Vec<gtk::FlowBox>, reflow: Rc<GridReflow>) -> gtk::Widget {
         overshoot: Cell::new(-1.0),
     });
     let sync = {
-        let (dots, pager) = (dots.clone(), pager.clone());
+        // Carousel owns this callback. Indicator click callbacks and the
+        // pager reference Carousel, so strong captures would retain the grid.
+        let dots: Vec<_> = dots.iter().map(|dot| dot.downgrade()).collect();
+        let pager = Rc::downgrade(&pager);
         move |page: u32| {
             for (i, dot) in dots.iter().enumerate() {
+                let Some(dot) = dot.upgrade() else { continue };
                 if i as u32 == page {
                     dot.add_css_class("active");
                 } else {
                     dot.remove_css_class("active");
                 }
             }
-            pager.sync(page);
+            if let Some(pager) = pager.upgrade() {
+                pager.sync(page);
+            }
         }
     };
     sync(0);
@@ -1623,8 +1629,10 @@ fn drag_source(widget: &impl IsA<gtk::Widget>, text: String) -> gtk::DragSource 
     source.set_content(Some(&gtk::gdk::ContentProvider::for_value(
         &text.to_value(),
     )));
-    let w = widget.clone().upcast::<gtk::Widget>();
+    // The widget owns its controller; the callback must not own the widget.
+    let w = widget.clone().upcast::<gtk::Widget>().downgrade();
     source.connect_drag_begin(move |source, _| {
+        let Some(w) = w.upgrade() else { return };
         if std::env::var_os("ROOST_GRID_TRACE").is_some() {
             eprintln!("roost-shell-gtk: app tile drag started");
         }
