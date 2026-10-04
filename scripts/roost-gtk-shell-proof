@@ -415,6 +415,23 @@ MEDIA_SCHEMA
     GSETTINGS_SCHEMA_DIR="$ARTIFACTS/schemas"
     export GSETTINGS_SCHEMA_DIR
 fi
+# Night Light is present whenever gsd's color schema is installed. Supply
+# the same exercised key on lean hosts so installing a genuine portal's
+# dependencies cannot change this journey's accessibility tree.
+if ! gsettings list-schemas 2>/dev/null | grep -qx org.gnome.settings-daemon.plugins.color; then
+    mkdir -p "$ARTIFACTS/schemas"
+    cat >"$ARTIFACTS/schemas/org.roost.fixture-color.gschema.xml" <<'COLOR_SCHEMA'
+<schemalist>
+  <schema id="org.gnome.settings-daemon.plugins.color" path="/org/gnome/settings-daemon/plugins/color/">
+    <key name="night-light-enabled" type="b"><default>false</default></key>
+  </schema>
+</schemalist>
+COLOR_SCHEMA
+    glib-compile-schemas "$ARTIFACTS/schemas"
+    GSETTINGS_SCHEMA_DIR="$ARTIFACTS/schemas"
+    export GSETTINGS_SCHEMA_DIR
+fi
+gsettings set org.gnome.settings-daemon.plugins.color night-light-enabled false
 # Quick-settings daemons: stubs on a private "system" bus (#55), a fake
 # backlight, and a fake wpctl that records the sink volume.
 BACKLIGHT="$ARTIFACTS/backlight/roost-bl"
@@ -1853,6 +1870,14 @@ scheme="$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null)"
 [ "$scheme" = "'prefer-dark'" ] ||
     fail G-QS-DARK "color-scheme is $scheme, not 'prefer-dark'"
 pass G-QS-DARK "the Dark Style tile writes GNOME's color-scheme key"
+
+qs_press "Night Light" night-on || fail G-QS-NIGHT "could not enable Night Light"
+[ "$(gsettings get org.gnome.settings-daemon.plugins.color night-light-enabled)" = true ] ||
+    fail G-QS-NIGHT "Night Light did not enable its GNOME color key"
+qs_press "Night Light" night-off || fail G-QS-NIGHT "could not disable Night Light"
+[ "$(gsettings get org.gnome.settings-daemon.plugins.color night-light-enabled)" = false ] ||
+    fail G-QS-NIGHT "Night Light did not disable its GNOME color key"
+pass G-QS-NIGHT "the real tile enables and disables GNOME's night-light-enabled key"
 
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-brightness.json" 20 \
     --set Brightness 30 || fail G-QS-BRIGHTNESS "could not set Brightness"
