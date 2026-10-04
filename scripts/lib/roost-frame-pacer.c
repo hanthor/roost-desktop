@@ -14,6 +14,7 @@
 #include <wayland-client.h>
 #include "xdg-shell-client-protocol.h"
 #include "presentation-time-client-protocol.h"
+#include "idle-inhibit-client-protocol.h"
 
 #define WIDTH 320
 #define HEIGHT 180
@@ -30,6 +31,8 @@ struct state {
     struct wl_shm *shm;
     struct xdg_wm_base *wm;
     struct wp_presentation *presentation;
+    struct zwp_idle_inhibit_manager_v1 *idle_manager;
+    struct zwp_idle_inhibitor_v1 *inhibitor;
     struct wl_surface *surface;
     struct xdg_surface *xdg;
     struct xdg_toplevel *toplevel;
@@ -40,7 +43,11 @@ struct state {
     uint32_t clock_id;
     bool clock_known, configured, frame_ready, closed;
     unsigned presented, discarded, commits;
+    unsigned total_presented, batch, batch_commit_start;
+    bool endurance;
+    double started, last_presented;
 };
+static void print_samples(struct state *s);
 static double monotonic_s(void) {
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) { perror("clock_gettime"); exit(1); }
@@ -74,6 +81,12 @@ static void presented(void *data, struct wp_presentation_feedback *proxy,
         s->samples[s->presented++] = (struct sample){f->commit,
             (((uint64_t)sec_hi << 32) | sec_lo) * UINT64_C(1000000000) + ns,
             ((uint64_t)seq_hi << 32) | seq_lo, refresh, flags};
+        s->total_presented++;
+        s->last_presented = monotonic_s();
+        if (s->endurance && s->presented == TARGET) {
+            print_samples(s);
+            s->presented = 0; s->batch++; s->batch_commit_start = s->commits;
+        }
     }
     feedback_remove(f);
 }
@@ -109,6 +122,8 @@ static void global(void *data, struct wl_registry *registry, uint32_t name, cons
     } else if (!strcmp(interface, "wp_presentation")) {
         s->presentation = wl_registry_bind(registry, name, &wp_presentation_interface, 1);
         wp_presentation_add_listener(s->presentation, &presentation_listener, s);
+    } else if (s->endurance && !strcmp(interface, "zwp_idle_inhibit_manager_v1")) {
+        s->idle_manager = wl_registry_bind(registry, name, &zwp_idle_inhibit_manager_v1_interface, 1);
     }
 }
 static void global_remove(void *data, struct wl_registry *registry, uint32_t name) { (void)data; (void)registry; (void)name; }
@@ -132,7 +147,7 @@ static int make_buffers(struct state *s) {
     return 0;
 }
 static void draw(struct state *s) {
-    if (!s->configured || !s->frame_ready || s->commits >= MAX_COMMITS) return;
+    if (!s->configured || !s->frame_ready || s->commits - s->batch_commit_start >= MAX_COMMITS) return;
     struct buffer *b = !s->buffers[0].busy ? &s->buffers[0] : (!s->buffers[1].busy ? &s->buffers[1] : NULL);
     if (!b) return;
     for (int y = 0; y < HEIGHT; y++) for (int x = 0; x < WIDTH; x++)
@@ -150,21 +165,45 @@ static void draw(struct state *s) {
     wl_surface_commit(s->surface);
     b->busy = true; s->frame_ready = false;
 }
-int main(void) {
+static void print_samples(struct state *s) {
+    if (s->endurance) printf("{\"kind\":\"presentation-batch\",\"batch\":%u,\"elapsed_s\":%.6f,\"presented_total\":%u,", s->batch, monotonic_s() - s->started, s->total_presented);
+    else putchar('{');
+    printf("\"clock_id\":%" PRIu32 ",\"commits\":%u,\"discarded\":%u,\"pending\":%u,\"frames\":[", s->clock_id, s->commits, s->discarded, s->commits - s->total_presented - s->discarded);
+    for (unsigned i = 0; i < s->presented; i++) {
+        struct sample *v = &s->samples[i];
+        printf("%s{\"commit\":%" PRIu64 ",\"presented_ns\":%" PRIu64 ",\"refresh_ns\":%" PRIu32 ",\"sequence\":%" PRIu64 ",\"flags\":%" PRIu32 "}", i ? "," : "", v->commit, v->timestamp, v->refresh, v->sequence, v->flags);
+    }
+    puts("]}"); fflush(stdout);
+}
+int main(int argc, char **argv) {
     struct state s = { .frame_ready = true };
-    double deadline = monotonic_s() + 15;
+    unsigned seconds = 15;
+    if (argc != 1) {
+        char *end = NULL;
+        errno = 0;
+        long value = argc == 3 ? strtol(argv[2], &end, 10) : 0;
+        if (argc != 3 || strcmp(argv[1], "--endurance-seconds") || errno ||
+            !end || end == argv[2] || *end || value < 1 || value > 86400) {
+            fprintf(stderr, "usage: roost-frame-pacer [--endurance-seconds 1..86400]\n"); return 2;
+        }
+        s.endurance = true; seconds = (unsigned)value;
+    }
+    s.started = monotonic_s();
+    double deadline = s.started + seconds;
     s.display = wl_display_connect(NULL);
     if (!s.display) { perror("Wayland connection"); return 1; }
     struct wl_registry *registry = wl_display_get_registry(s.display);
     wl_registry_add_listener(registry, &registry_listener, &s);
     /* The outer helper also enforces a process deadline during roundtrips. */
     if (wl_display_roundtrip(s.display) < 0 || wl_display_roundtrip(s.display) < 0 ||
-        !s.compositor || !s.shm || !s.wm || !s.presentation || !s.clock_known) {
+        !s.compositor || !s.shm || !s.wm || !s.presentation || !s.clock_known ||
+        (s.endurance && !s.idle_manager)) {
         fprintf(stderr, "required native presentation globals/clock unavailable\n"); return 1;
     }
     struct timespec clock_check;
     if (clock_gettime((clockid_t)s.clock_id, &clock_check) != 0 || make_buffers(&s) != 0) { perror("presentation clock/buffers"); return 1; }
     s.surface = wl_compositor_create_surface(s.compositor);
+    if (s.endurance) s.inhibitor = zwp_idle_inhibit_manager_v1_create_inhibitor(s.idle_manager, s.surface);
     s.xdg = xdg_wm_base_get_xdg_surface(s.wm, s.surface);
     xdg_surface_add_listener(s.xdg, &xdg_listener, &s);
     s.toplevel = xdg_surface_get_toplevel(s.xdg);
@@ -174,28 +213,32 @@ int main(void) {
     xdg_toplevel_set_min_size(s.toplevel, WIDTH, HEIGHT);
     xdg_toplevel_set_max_size(s.toplevel, WIDTH, HEIGHT);
     wl_surface_commit(s.surface);
-    while (!s.closed && s.presented < TARGET && monotonic_s() < deadline) {
-        if (wl_display_dispatch_pending(s.display) < 0) break;
+    bool io_failed = false;
+    while (!s.closed && (s.endurance || s.presented < TARGET) && monotonic_s() < deadline) {
+        if (wl_display_dispatch_pending(s.display) < 0) { io_failed = true; break; }
+        if (s.endurance && ((s.last_presented && monotonic_s() - s.last_presented > 2) ||
+            (!s.last_presented && monotonic_s() - s.started > 15))) {
+            fprintf(stderr, "endurance presentation stalled\n"); io_failed = true; break;
+        }
         draw(&s);
         int flushed = wl_display_flush(s.display);
-        if (flushed < 0 && errno != EAGAIN) break;
+        if (flushed < 0 && errno != EAGAIN) { io_failed = true; break; }
         struct pollfd fd = { .fd = wl_display_get_fd(s.display), .events = POLLIN | (flushed < 0 ? POLLOUT : 0) };
         int ready = poll(&fd, 1, 100);
-        if (ready < 0 && errno != EINTR) break;
-        if (ready > 0 && (fd.revents & (POLLERR | POLLHUP | POLLNVAL))) break;
-        if (ready > 0 && (fd.revents & POLLIN) && wl_display_dispatch(s.display) < 0) break;
+        if (ready < 0 && errno != EINTR) { io_failed = true; break; }
+        if (ready > 0 && (fd.revents & (POLLERR | POLLHUP | POLLNVAL))) { io_failed = true; break; }
+        if (ready > 0 && (fd.revents & POLLIN) && wl_display_dispatch(s.display) < 0) { io_failed = true; break; }
     }
     int result = 1;
-    if (s.presented == TARGET && !s.closed) {
-        printf("{\"clock_id\":%" PRIu32 ",\"commits\":%u,\"discarded\":%u,\"pending\":%u,\"frames\":[", s.clock_id, s.commits, s.discarded, s.commits - s.presented - s.discarded);
-        for (unsigned i = 0; i < s.presented; i++) {
-            struct sample *v = &s.samples[i];
-            printf("%s{\"commit\":%" PRIu64 ",\"presented_ns\":%" PRIu64 ",\"refresh_ns\":%" PRIu32 ",\"sequence\":%" PRIu64 ",\"flags\":%" PRIu32 "}", i ? "," : "", v->commit, v->timestamp, v->refresh, v->sequence, v->flags);
-        }
-        puts("]}"); result = 0;
+    if (!s.closed && !io_failed && (s.endurance ? (monotonic_s() >= deadline && s.total_presented > 1) : s.presented == TARGET)) {
+        if (s.presented) print_samples(&s);
+        if (s.endurance) printf("{\"kind\":\"complete\",\"elapsed_s\":%.6f,\"requested_s\":%u,\"presented_total\":%u,\"commits\":%u,\"discarded\":%u,\"pending\":%u}\n", monotonic_s() - s.started, seconds, s.total_presented, s.commits, s.discarded, s.commits - s.total_presented - s.discarded);
+        result = 0;
     } else fprintf(stderr, "presentation incomplete: %u/%u, commits %u, discarded %u\n", s.presented, TARGET, s.commits, s.discarded);
     while (s.feedbacks) feedback_remove(s.feedbacks);
     if (s.callback) wl_callback_destroy(s.callback);
+    if (s.inhibitor) zwp_idle_inhibitor_v1_destroy(s.inhibitor);
+    if (s.idle_manager) zwp_idle_inhibit_manager_v1_destroy(s.idle_manager);
     xdg_toplevel_destroy(s.toplevel); xdg_surface_destroy(s.xdg); wl_surface_destroy(s.surface);
     for (int i = 0; i < 2; i++) wl_buffer_destroy(s.buffers[i].proxy);
     munmap(s.buffers[0].pixels, BYTES * 2);

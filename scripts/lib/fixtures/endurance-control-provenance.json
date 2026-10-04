@@ -1,0 +1,7 @@
+{
+  "backend": "actual nested winit in Xvfb; no KMS or physical GPU claim",
+  "requested_s": 3,
+  "raw_sha256": "31b8067c61a4b13ddd60f46fd5e2a806b7ba050681995599489848b58415e05e",
+  "compositor_binary_sha256": "6d99803810ecdf6fd6ff11527b4c2038a261dd3c3b811fc2251cf8213738f259",
+  "generator": "Native roost-frame-pacer --endurance-seconds 3, with ordinary mapped idle inhibitor."
+}
