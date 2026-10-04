@@ -1,0 +1,5 @@
+#!/bin/bash
+set -eu
+export XDG_SESSION_TYPE=wayland
+export ROOST_COMPOSITOR_STATE="$XDG_RUNTIME_DIR/roost-vm-state.json"
+exec /usr/bin/roost-session

@@ -2,11 +2,12 @@
 #
 # Derives from the marlin-roost-preview image (packaging/marlin/
 # Containerfile) and changes only what a hands-off boot test needs; the
-# shipped image keeps GDM's normal login screen and kernel arguments.
+# shipped preview image keeps GDM's normal login screen and kernel arguments.
 #
 #   - a test user, roost-test (password "roost"), whose AccountsService
 #     record selects the Roost session;
-#   - GDM automatic login of that user straight into Roost;
+#   - a CI-only greetd initial session of that user straight into Roost,
+#     then the qualified Cage/gtkgreet login screen after logout;
 #   - kernel console on ttyS0 and journald forwarded to it, so the
 #     session's stderr (roost-compositor:, roost-shell-gtk:) reaches the
 #     QEMU serial log the lane asserts on.
@@ -17,7 +18,10 @@
 ARG BASE_IMAGE=localhost/marlin-roost-preview:ci
 FROM ${BASE_IMAGE}
 
-COPY packaging/marlin/vm-lane/custom.conf /etc/gdm/custom.conf
+COPY packaging/marlin/vm-lane/greetd.toml /etc/greetd/config.toml
+COPY packaging/marlin/vm-lane/gtkgreet.css /etc/greetd/gtkgreet.css
+COPY packaging/marlin/vm-lane/roost-vm-session /usr/libexec/roost-vm-session
+COPY packaging/marlin/vm-lane/roost-vm-lifecycle /usr/libexec/roost-vm-lifecycle
 COPY packaging/marlin/vm-lane/roost-vm-lane.tmpfiles /usr/lib/tmpfiles.d/roost-vm-lane.conf
 COPY packaging/marlin/vm-lane/journald.conf /usr/lib/systemd/journald.conf.d/90-roost-vm-lane.conf
 COPY packaging/marlin/vm-lane/kargs.toml /usr/lib/bootc/kargs.d/90-roost-vm-lane.toml
@@ -28,11 +32,17 @@ COPY packaging/marlin/vm-lane/roost-vm-health.service /usr/lib/systemd/system/ro
 # /home is a symlink to /var/home on bootc systems and /var is only
 # seeded at install time, so the home directory and the AccountsService
 # record come from tmpfiles.d on every boot rather than from this layer.
-RUN useradd -M -d /home/roost-test -s /bin/bash -U roost-test \
+RUN pacman -Sy --noconfirm \
+    && pacman -S --needed --noconfirm greetd greetd-gtkgreet cage qemu-guest-agent python grim wtype wayland-utils \
+    && useradd -M -d /home/roost-test -s /bin/bash -U roost-test \
     && echo 'roost-test:roost' | chpasswd \
     && test -f /usr/share/wayland-sessions/roost.desktop \
-    && systemctl enable roost-vm-health.service \
+    && chmod 0755 /usr/libexec/roost-vm-session /usr/libexec/roost-vm-lifecycle \
+    && printf 'roost-session\n' > /etc/greetd/environments \
+    && systemctl disable gdm.service \
+    && systemctl enable greetd.service roost-vm-health.service \
+    && systemctl add-wants multi-user.target qemu-guest-agent.service \
     && printf '\nROOST_LOCK_TRACE=1\n' >> /etc/environment
 
 LABEL org.opencontainers.image.title="marlin-roost-vm-lane" \
-      org.opencontainers.image.description="CI-only Marlin Roost test layer: autologin into Roost, journal on serial"
+      org.opencontainers.image.description="CI-only Marlin Roost test layer: greetd initial session, real lifecycle probes, journal on serial"

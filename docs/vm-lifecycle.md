@@ -1,0 +1,43 @@
+# Marlin VM lifecycle proof
+
+The existing `marlin-vm` CI job installs the ordinary Marlin preview image,
+then a CI-only fixture layer. The fixture starts `roost-test` once through
+greetd's initial session. Its default greeter is Cage with normal-window
+gtkgreet, matching the measured TunaOS launcher; logout must reach that
+actual greeter. This changes neither the shipped preview image nor the
+number of CI VM profiles.
+
+QEMU's guest agent executes a fixed probe with a root UID, while the
+compositor, shell and application clients must belong to the non-root
+session owner. Artifacts record window IDs, app IDs, rectangles, process
+PIDs/start ticks and redacted session metadata. They contain no process
+arguments, passwords or application titles.
+
+The last of the existing five pristine boots runs these checks after the
+feature tour:
+
+| Gate | Actual operation and evidence |
+| --- | --- |
+| V-LIFECYCLE-OWNER | Root probe, non-root greetd session, three application surfaces/processes |
+| V-VT | VT away/back, DRM pause/activate events, unchanged process identities and app rectangles, body repaint comparison |
+| V-SUSPEND | Real logind suspend reaches QEMU `suspended`; `system_wakeup` resumes locked, with masked pixels and all application identities intact |
+| V-VT-FAIL-CLOSED | VT away/back while locked keeps the mask and original application processes |
+| V-AUTH-FAIL-CLOSED | Real PAM service temporarily uses `pam_deny`; even the correct test password cannot unlock; original service restored afterward |
+| V-CAPTURE-INPUT-FAIL-CLOSED | Real untrusted grim/wtype clients are refused while locked; a successful Wayland connection is required and timeouts do not count as refusal |
+| V-SHELL-FAIL-CLOSED | Stop the portal and kill the lock UI; original app/compositor identities survive and the supervised replacement stays locked |
+| V-LOGOUT | Terminate the real logind session; active greetd has gtkgreet and no original compositor |
+
+The original tour's `V-LOCK` still requires exactly unlocked → locked →
+unlocked. Its observations end before lifecycle operations add their own
+lock transitions. A QEMU pause is never a substitute for guest suspend.
+The repaint comparison excludes the panel clock and tolerates up to 20%
+changed body pixels for applications such as System Monitor; it also
+requires exact window and process identity preservation.
+
+These new gates require their own actual CI results before acceptance.
+Output hotplug and loss of every compositor-adjacent service remain
+unproven, as do physical hardware and 24-hour soak. This document does not
+claim those parts of issue #62 are complete.
+
+Protocol references: [QEMU guest agent](https://www.qemu.org/docs/master/interop/qemu-ga-ref.html)
+and [QEMU wake-up](https://www.qemu.org/docs/master/interop/qemu-qmp-ref.html#command-system-wakeup).

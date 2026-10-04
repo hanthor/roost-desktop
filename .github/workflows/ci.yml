@@ -277,7 +277,7 @@ jobs:
   marlin-vm:
     # Real-VM lane (#68): install the Marlin Roost image (plus the CI-only
     # autologin/serial-journal layer in packaging/marlin/vm-lane) to a
-    # raw disk with bootc, boot it in QEMU/KVM, and prove GDM logs into
+    # raw disk with bootc, boot it in QEMU/KVM, and prove greetd starts
     # the Roost hardware session on the DRM/KMS backend. The image is
     # rebuilt rootful here (bootc install reads it from root's storage),
     # in parallel with marlin-image rather than after it.
