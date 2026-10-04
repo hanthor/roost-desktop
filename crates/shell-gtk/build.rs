@@ -17,7 +17,10 @@ fn main() {
             .filter(|n| n.ends_with(".svg"))
             .collect();
         names.sort();
-        files.extend(names.into_iter().map(|n| format!("scalable/{context}/{n}")));
+        files.extend(names.into_iter()
+            // Skip files with problematic characters that break artifact upload ZIP compression (ENTRYNOTSUPPORTED)
+            .filter(|n| n.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/'))
+            .map(|n| format!("scalable/{context}/{n}")));
     }
     let mut xml = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<gresources>\n  <gresource prefix=\"/org/roost/Shell/icons\">\n",
