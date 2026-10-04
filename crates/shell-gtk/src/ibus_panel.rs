@@ -100,7 +100,12 @@ const XML: &str = r#"<node>
 /// The string inside a serialized IBusText (`v` holding `(sa{sv}sv)`),
 /// as roost-ibus-bridge reads it.
 pub fn ibus_text(value: &glib::Variant) -> Option<String> {
-    let inner = value.as_variant().unwrap_or_else(|| value.clone());
+    // as_variant calls g_variant_get_variant directly; its Option result does
+    // not protect ordinary serialized tuples from GLib's type assertion.
+    let mut inner = value.clone();
+    while inner.is_type(glib::VariantTy::VARIANT) {
+        inner = inner.as_variant()?;
+    }
     inner.try_child_value(2)?.str().map(str::to_owned)
 }
 
@@ -123,8 +128,8 @@ pub struct LookupTable {
 /// i orientation, av candidates, av labels)` (ibuslookuptable.c).
 pub fn lookup_table(value: &glib::Variant) -> Option<LookupTable> {
     let mut table = value.clone();
-    while let Some(inner) = table.as_variant() {
-        table = inner;
+    while table.is_type(glib::VariantTy::VARIANT) {
+        table = table.as_variant()?;
     }
     if table.try_child_value(0)?.str()? != "IBusLookupTable" {
         return None;
@@ -580,6 +585,8 @@ impl CandidatePopup {
         let (ox, oy) = self.state.borrow().origin;
         let (sx, sy) = window.surface_transform();
         let mut lines = Vec::new();
+        let vertical = self.area.orientation() == gtk::Orientation::Vertical;
+        let mut previous_end = None;
         for (i, row) in self.rows.iter().enumerate() {
             if !row.row.is_visible() || !self.area.is_visible() {
                 continue;
@@ -587,9 +594,22 @@ impl CandidatePopup {
             let Some(b) = row.row.compute_bounds(window) else {
                 return false;
             };
-            if b.width() <= 0.0 {
+            let (minimum, _) = row.row.preferred_size();
+            // Tick callbacks run before layout. Positive old allocations
+            // can put every newly shown row at the same origin; do not
+            // publish those as coordinates for pixel checks or clicks.
+            if b.width() < minimum.width() as f32 || b.height() < minimum.height() as f32 {
                 return false;
             }
+            let (start, length) = if vertical {
+                (b.y(), b.height())
+            } else {
+                (b.x(), b.width())
+            };
+            if previous_end.is_some_and(|end| start < end) {
+                return false;
+            }
+            previous_end = Some(start + length);
             lines.push(format!(
                 "roost-shell-gtk: ibus candidate {i} {} at {} {} {} {}",
                 row.label.label(),
@@ -783,6 +803,27 @@ mod tests {
         assert!(table.labels.is_empty());
         // Not a table.
         assert_eq!(lookup_table(&text("ni")), None);
+    }
+
+    #[test]
+    fn raw_and_nested_ibus_variants_decode_without_native_type_assertions() {
+        let boxed_text = text("你好");
+        let raw_text = boxed_text.as_variant().unwrap();
+        for value in [
+            raw_text,
+            boxed_text.clone(),
+            glib::Variant::from_variant(&boxed_text),
+        ] {
+            assert_eq!(ibus_text(&value).as_deref(), Some("你好"));
+        }
+        let boxed = serialized(5, 1, 2, &["你", "尼"], &[]);
+        let expected = lookup_table(&boxed);
+        assert_eq!(lookup_table(&boxed.as_variant().unwrap()), expected);
+        assert_eq!(lookup_table(&glib::Variant::from_variant(&boxed)), expected);
+        for value in ["not a container".to_variant(), 42u32.to_variant()] {
+            assert_eq!(ibus_text(&value), None);
+            assert_eq!(lookup_table(&value), None);
+        }
     }
 
     #[test]

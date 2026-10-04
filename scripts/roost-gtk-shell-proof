@@ -1299,6 +1299,14 @@ showing "$ARTIFACTS/a11y-group-cleared.json" "No Notifications" ||
     fail G-NOTIFY-GROUP "Clear did not empty the grouped list"
 pass G-NOTIFY-GROUP "an app's notifications group, collapsed, and expand on press"
 xdotool key Escape
+# The next click belongs to the panel, after the calendar's popup grab
+# has actually closed and returned pointer focus.
+for _ in $(seq 1 20); do
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-group-closed.json" 20 || fail G-NOTIFY-GROUP "post-Escape calendar dump failed"
+    showing "$ARTIFACTS/a11y-group-closed.json" "No Notifications" || break
+    sleep 0.1
+done
+if showing "$ARTIFACTS/a11y-group-closed.json" "No Notifications"; then fail G-NOTIFY-GROUP "Escape did not close the calendar before opening quick settings"; fi
 
 # Quick-settings services (#55): each toggle is read back from its daemon.
 sysprop() {
@@ -2088,6 +2096,12 @@ pick_alpha || fail G-WINDOW-MENU "the hidden window could not be picked from the
 cstate "any(.minimized[]; . == $alpha_id) | not" "restored" ||
     fail G-WINDOW-MENU "picking the hidden window did not bring it back"
 pass G-WINDOW-MENU "the header-bar menu keeps a window on top, hides it, and the overview brings it back"
+# Restore the fixture's stacking state so later pointer-driven tests do
+# not hit pinned Alpha through another application's window.
+window_menu
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-window-menu-unpin.json" 20 \
+    --press "Always on Top" || fail G-WINDOW-MENU "could not restore ordinary stacking"
+cstate "any(.above[]; . == $alpha_id) | not" "Alpha unpinned" || fail G-WINDOW-MENU "Alpha stayed above later test windows"
 
 # GNOME's window-manager keys (org.gnome.desktop.wm.keybindings).
 sleep 1
@@ -2197,6 +2211,11 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     [ "$(cat "$IME_OUT" 2>/dev/null)" = "你|你好|2" ] ||
         fail G-IME-SURROUNDING "the field holds '$(cat "$IME_OUT" 2>/dev/null)', not 你|你好|2"
     pass G-IME-SURROUNDING "the engine reads the field's surrounding text and deletes around the cursor"
+    # Wait for the asynchronous edit and its final caret layout before
+    # recording the baseline used by the exact movement gate.
+    for _ in $(seq 1 20); do grep -q "surrounding 你|你好|2 6 6" "$ENGINE_LOG" && break; sleep 0.1; done
+    grep -q "surrounding 你|你好|2 6 6" "$ENGINE_LOG" || fail G-IME-CURSOR "IBus did not hear the edited field"
+    sleep 0.5
     # The candidate window's anchor: SetCursorLocation inside the
     # field's window, in global (screen) coordinates.
     cursor="$(sed -n 's/^roost-ibus-test-engine: cursor //p' "$ENGINE_LOG" | tail -1)"
@@ -2209,6 +2228,55 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     [ "$inside" = yes ] ||
         fail G-IME-CURSOR "cursor location ($cursor) is not inside the IME window ($rect)"
     pass G-IME-CURSOR "IBus hears the text cursor at ($cursor), inside the field's window ($rect)"
+    # Moving only the parent must update the global caret, without typing.
+    cstate '.focused_app_id == "roost-ime"' "IME focused for movement" || fail G-IME-CURSOR-MOVE "another window owns keyboard focus"
+    # shellcheck disable=SC2086
+    set -- $cursor
+    expected_cursor="$(($1 + 65)) $(($2 + 45)) $3 $4"
+    # shellcheck disable=SC2086
+    set -- $rect
+    ime_x=$1 ime_y=$2
+    xdotool mousemove --window "$WID" $(($1 + 200)) $(($2 + 30)) keydown Super_L mousedown 1
+    xdotool mousemove_relative -- 65 45
+    xdotool mouseup 1 keyup Super_L
+    cstate ".windows | any(.app_id == \"roost-ime\" and .rect[0] == $((ime_x + 65)) and .rect[1] == $((ime_y + 45)))" "IME window moved exactly" || fail G-IME-CURSOR-MOVE "drag moved another window or used the wrong displacement"
+    end=$(($(date +%s) + 5))
+    until [ "$(sed -n 's/^roost-ibus-test-engine: cursor //p' "$ENGINE_LOG" | tail -1)" = "$expected_cursor" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+    cursor="$(sed -n 's/^roost-ibus-test-engine: cursor //p' "$ENGINE_LOG" | tail -1)"
+    [ "$cursor" = "$expected_cursor" ] || fail G-IME-CURSOR-MOVE "caret did not follow the exact window displacement: $cursor expected $expected_cursor"
+    pass G-IME-CURSOR-MOVE "moving the focused window refreshes IBus's global cursor without typing"
+    # A field inside a real xdg popup keeps the IM keyboard grab active.
+    # Escape must survive the IBus virtual-key return with its keymap intact.
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-ime "$ARTIFACTS/a11y-ime-open.json" 20 --press "IME Popover" || fail G-IME-ESCAPE "could not open field popover"
+    sleep 0.5
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-ime "$ARTIFACTS/a11y-ime-qs-open.json" 20 || fail G-IME-ESCAPE "popover dump failed"
+    showing "$ARTIFACTS/a11y-ime-qs-open.json" "IME Popover Field" || fail G-IME-ESCAPE "field popover did not open"
+    xdotool key Escape
+    sleep 0.5
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-ime "$ARTIFACTS/a11y-ime-qs-closed.json" 20 || fail G-IME-ESCAPE "post-Escape dump failed"
+    if showing "$ARTIFACTS/a11y-ime-qs-closed.json" "IME Popover Field"; then fail G-IME-ESCAPE "Escape did not close the popover with the composing engine enabled"; fi
+    pass G-IME-ESCAPE "Escape closes the GTK popover while the composing engine is enabled"
+    cstate '.focused_app_id == "roost-ime"' "IME focus after Escape" || fail G-IME-ESCAPE "Escape transferred focus to another application"
+    # Cover the original layer-shell regression too, after the focused
+    # application's keys have passed through the composing engine.
+    open_qs
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-ime-shell-open.json" 20 || fail G-IME-SHELL-ESCAPE "shell popover dump failed"
+    showing "$ARTIFACTS/a11y-ime-shell-open.json" "Dark Style" || fail G-IME-SHELL-ESCAPE "shell quick settings did not open"
+    xdotool key Escape
+    sleep 0.5
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-ime-shell-closed.json" 20 || fail G-IME-SHELL-ESCAPE "post-Escape shell dump failed"
+    if showing "$ARTIFACTS/a11y-ime-shell-closed.json" "Dark Style"; then fail G-IME-SHELL-ESCAPE "Escape did not close the layer-shell popover with the composing engine enabled"; fi
+    cstate '.focused_app_id == "roost-ime"' "IME focus after shell Escape" || fail G-IME-SHELL-ESCAPE "shell Escape did not return to the text field"
+    pass G-IME-SHELL-ESCAPE "Escape closes shell quick settings with the composing engine enabled and returns to the field"
+    # GTK selects existing Entry text when focus returns from a popover.
+    # Restore the end caret explicitly so the candidate appends to the
+    # surrounding-text fixture rather than replacing that selection.
+    [ "$(cat "$IME_OUT")" = "你|你好|2" ] || fail G-IME-CANDIDATES "popover focus changed the surrounding-text fixture"
+    xdotool key End
+    end=$(($(date +%s) + 5))
+    until [ "$(grep '^roost-ibus-test-engine: surrounding ' "$ENGINE_LOG" | tail -1)" = "roost-ibus-test-engine: surrounding 你|你好|2 6 6" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.1; done
+    [ "$(grep '^roost-ibus-test-engine: surrounding ' "$ENGINE_LOG" | tail -1)" = "roost-ibus-test-engine: surrounding 你|你好|2 6 6" ] ||
+        fail G-IME-CANDIDATES "the field's end caret/selection was not restored after the popover"
     # GNOME Shell is IBus's panel and draws its candidates
     # (ibusCandidatePopup.js): the shell owns org.freedesktop.IBus.Panel
     # on IBus's bus, "ni" brings up 你 尼 泥 under the text cursor with
@@ -2278,6 +2346,28 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
         fail G-IME-CANDIDATES "the candidate window stayed after the commit"
     xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT - 40))
     pass G-IME-CANDIDATES "the shell draws IBus's candidates (你 尼 泥) under the cursor, the first highlighted (surface $surface), and clicking 尼 commits it"
+    # XIM talks to the session's XWayland, never the outer Xvfb display.
+    x11_display="$(jq -r .x11_display "$CSTATE")"
+    [ "$x11_display" != null ] || fail G-IME-XIM "XWayland display missing"
+    for _ in $(seq 1 30); do grep -q "XIM started on $x11_display" "$LOG" && break; sleep 0.2; done
+    grep -q "XIM started on $x11_display" "$LOG" || fail G-IME-XIM "private XIM server never started"
+    XIM_OUT="$ARTIFACTS/xim.txt"
+    DISPLAY="$x11_display" GDK_BACKEND=x11 GTK_IM_MODULE=xim XMODIFIERS=@im=ibus "$PY" "$ROOT/scripts/lib/roost-xim-window.py" "$XIM_OUT" >"$ARTIFACTS/xim-window.log" 2>&1 &
+    XIM_WINDOW=$!
+    IME_PIDS="$IME_PIDS $XIM_WINDOW"
+    cstate '.focused_app_id == "roost-xim" and .focused_rect[2] >= 300' "XIM client focus" ||
+        fail G-IME-XIM "private X11 field never received focus at its requested size"
+    sleep 1.5
+    if grep -q 'No IM module matching GTK_IM_MODULE=xim' "$ARTIFACTS/xim-window.log"; then
+        fail G-IME-XIM "the client has no XIM module"
+    fi
+    xdotool type --delay 100 nihao
+    xdotool key space
+    end=$(($(date +%s) + 10))
+    until [ "$(cat "$XIM_OUT" 2>/dev/null)" = 你好 ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+    [ "$(cat "$XIM_OUT" 2>/dev/null)" = 你好 ] || fail G-IME-XIM "X11 field did not compose through XIM: $(cat "$XIM_OUT" 2>/dev/null)"
+    kill "$XIM_WINDOW" 2>/dev/null || true
+    pass G-IME-XIM "the X11 field composes through XIM on the private XWayland display"
     # shellcheck disable=SC2086 # two pids
     kill $IME_PIDS 2>/dev/null || true
     IME_PIDS=""
@@ -2827,6 +2917,7 @@ pass G-NOTIFICATION-FOCUS-KEY "the rebound key focuses the active banner; Escape
 end=$(($(date +%s) + 15))
 until [ -s "$ROOST_STUB_POLKIT_LOG" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
 [ -s "$ROOST_STUB_POLKIT_LOG" ] || fail G-POLKIT "the shell never registered a polkit agent"
+polkit_focus_log_start=$(($(wc -l < "$LOG") + 1))
 read -r agent_name agent_path <"$ROOST_STUB_POLKIT_LOG"
 gdbus call --system --dest "$agent_name" --object-path "$agent_path" \
     --method org.freedesktop.PolicyKit1.AuthenticationAgent.BeginAuthentication \
@@ -2853,6 +2944,11 @@ grep -q "^()" "$ARTIFACTS/polkit-reply" ||
     fail G-POLKIT "the right password did not authorize: $(cat "$ARTIFACTS/polkit-reply")"
 pass G-POLKIT "polkit's request shows GNOME's dialog; a wrong password is refused, the right one authorizes"
 sleep 2
+sed -n "${polkit_focus_log_start},\$p" "$LOG" > "$ARTIFACTS/polkit-focus.log"
+if grep -q 'GtkText - did not receive a focus-out event' "$ARTIFACTS/polkit-focus.log"; then
+    fail G-POLKIT-FOCUS "authentication entry lost focus without clearing its cursor blink callback"
+fi
+pass G-POLKIT-FOCUS "polkit rejection and acceptance leave no GtkText focus-out warning"
 open_power_menu() {
     open_qs
     "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-$1.json" 20 --press "Power Off Menu"
@@ -2920,6 +3016,8 @@ ffmpeg -loglevel error -y -f lavfi -i color=c=0x00ff00:s=64x64 -frames:v 1 -thre
     "$ARTIFACTS/lock-background.png"
 gsettings set org.gnome.desktop.screensaver picture-uri "file://$ARTIFACTS/lock-background.png"
 sleep 1
+# Scope this regression to the lock journey; polkit has its own entry.
+lock_focus_log_start=$(($(wc -l < "$LOG") + 1))
 open_power_menu power-menu-3 || fail G-SUSPEND-LOCK "could not reopen the power menu"
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-suspend.json" 20 \
     --press "Suspend" || fail G-SUSPEND-LOCK "could not press Suspend"
@@ -2992,11 +3090,18 @@ if [ -n "$PAM_ON" ]; then
     gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/ScreenSaver \
         --method org.gnome.ScreenSaver.Lock >/dev/null || fail G-DBUS-LOCK "D-Bus Lock failed"
     cstate '.locked' "D-Bus locked" 5 || fail G-DBUS-LOCK "D-Bus Lock replied without locking"
-    xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT * 3 / 4)) click 1
-    sleep 1
-    xdotool type --delay 30 "$UNLOCK_PASSWORD"
+    # The first printable key lifts the curtain and becomes exactly one
+    # password character. Do not click, clear, or replace the entry here:
+    # PAM acceptance proves the wake key was neither lost nor inserted twice.
+    sleep 0.5
+    first_password_char=${UNLOCK_PASSWORD%"${UNLOCK_PASSWORD#?}"}
+    xdotool type --delay 30 "$first_password_char"
+    sleep 0.3
+    xdotool type --delay 30 "${UNLOCK_PASSWORD#?}"
     xdotool key Return
-    cstate '(.locked | not)' "D-Bus lock unlocked through PAM" 15 || fail G-DBUS-LOCK "D-Bus lock did not unlock"
+    cstate '(.locked | not)' "first-printable lock wake authenticated through PAM" 15 ||
+        fail G-LOCK-FIRST-PRINTABLE "first wake character was lost, duplicated, or could not authenticate"
+    pass G-LOCK-FIRST-PRINTABLE "a printable wake key becomes exactly one password character and PAM unlocks"
     pass G-DBUS-LOCK "org.gnome.Shell exposes the screen-saver object and Lock waits for confirmation"
 
     # A short idle policy must fade, cancel on activity, then latch only
@@ -3028,6 +3133,13 @@ if [ -n "$PAM_ON" ]; then
     gsettings set org.gnome.desktop.screensaver lock-delay 0
     gsettings reset org.gnome.desktop.screensaver picture-uri
     pass G-IDLE-FADE "idle fade cancels on activity, blanks before lock-delay, and wake keeps PAM mandatory"
+    # Include every lock wake, rejection and accepted unlock above, while
+    # keeping the evidence separate from unrelated authentication dialogs.
+    sed -n "${lock_focus_log_start},\$p" "$LOG" > "$ARTIFACTS/lock-focus.log"
+    if grep -q 'GtkText - did not receive a focus-out event' "$ARTIFACTS/lock-focus.log"; then
+        fail G-LOCK-FOCUS "password entry lost focus without clearing its cursor blink callback"
+    fi
+    pass G-LOCK-FOCUS "password rejection and acceptance leave no GtkText focus-out warning"
 
 else
     echo "roost-gtk-shell-proof: G-UNLOCK skipped (no pam_wrapper)"
@@ -3147,6 +3259,13 @@ if grep -q 'ShellExited' "$LOG"; then
     fail G-SHELL-STABLE "the shell exited during the journey: $(grep -c ShellExited "$LOG") time(s)"
 fi
 pass G-SHELL-STABLE "the shell never exited or restarted"
+if grep -q 'g_variant_get_variant: assertion' "$LOG"; then
+    fail G-IME-VARIANT-TYPES "IBus focus/composition emitted a native variant type critical"
+fi
+pass G-IME-VARIANT-TYPES "IBus focus/composition decoded variants without native type criticals"
+
+
+
 
 # A hard shell crash must not leave a persistent monitor behind. Do this
 # after the normal journey's stability assertion, then require supervision
