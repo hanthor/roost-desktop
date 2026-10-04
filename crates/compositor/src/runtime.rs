@@ -535,6 +535,9 @@ pub struct Runtime {
     #[cfg(feature = "drm")]
     last_drm_scene: std::collections::HashMap<String, SceneStamp>,
     #[cfg(feature = "drm")]
+    drm_damage:
+        std::collections::HashMap<String, smithay::backend::renderer::damage::OutputDamageTracker>,
+    #[cfg(feature = "drm")]
     last_drm_refresh: Instant,
 }
 
@@ -859,6 +862,8 @@ impl Runtime {
             proof_swipe_last: String::new(),
             #[cfg(feature = "drm")]
             last_drm_scene: Default::default(),
+            #[cfg(feature = "drm")]
+            drm_damage: Default::default(),
             #[cfg(feature = "drm")]
             last_drm_refresh: Instant::now(),
         };
@@ -2797,7 +2802,6 @@ impl Runtime {
                         continue;
                     }
                     let size = out.size;
-                    let damage = Rectangle::from_size(size);
                     // Per-output scale from GNOME's monitors.xml (#59).
                     let view = View {
                         offset: out.loc,
@@ -2867,13 +2871,44 @@ impl Runtime {
                     if !out.needs_repaint && self.last_drm_scene.get(&out.name) == Some(&stamp) {
                         continue;
                     }
-                    let (mut dmabuf, _age) = match out.surface.next_buffer() {
+                    let (mut dmabuf, age) = match out.surface.next_buffer() {
                         Ok(buffer) => buffer,
                         Err(e) => {
                             eprintln!("roost-compositor: drm: next_buffer {}: {e}", out.name);
                             continue;
                         }
                     };
+                    // Buffer age includes changes since this particular swapchain
+                    // buffer was last submitted, not just the newest client damage.
+                    // Global colors/decor, cursor, lock and output changes conservatively
+                    // reset tracking; a fresh/reset buffer always receives a full paint.
+                    let reset = out.needs_repaint
+                        || self
+                            .last_drm_scene
+                            .get(&out.name)
+                            .is_none_or(|old| !old.same_global_drawing(&stamp));
+                    if reset {
+                        self.drm_damage.insert(
+                            out.name.clone(),
+                            smithay::backend::renderer::damage::OutputDamageTracker::new(
+                                size,
+                                1.0,
+                                Transform::Normal,
+                            ),
+                        );
+                    }
+                    let tracker = self.drm_damage.entry(out.name.clone()).or_insert_with(|| {
+                        smithay::backend::renderer::damage::OutputDamageTracker::new(
+                            size,
+                            1.0,
+                            Transform::Normal,
+                        )
+                    });
+                    let damage = drm_damage_region(
+                        tracker,
+                        if reset { 0 } else { usize::from(age) },
+                        &stamp,
+                    )?;
                     let sync = {
                         let mut target = renderer
                             .bind(&mut dmabuf)
@@ -2930,6 +2965,10 @@ impl Runtime {
                     let feedback = crate::frame_timing::take_feedback(&mine, &out.output);
                     if let Err(e) = out.surface.queue_buffer(Some(sync), None, feedback) {
                         eprintln!("roost-compositor: drm: queue_buffer {}: {e}", out.name);
+                        // The acquired buffer may now contain an unsubmitted partial
+                        // update. Reset before retrying; it cannot reuse cached damage.
+                        out.needs_repaint = true;
+                        self.drm_damage.remove(&out.name);
                         continue;
                     }
                     out.pending = true;
@@ -3166,7 +3205,7 @@ struct DecorStamp {
 }
 
 #[cfg(feature = "drm")]
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 struct ElementStamp {
     id: smithay::backend::renderer::element::Id,
     commit: smithay::backend::renderer::utils::CommitCounter,
@@ -3174,6 +3213,51 @@ struct ElementStamp {
     geometry: Rectangle<i32, smithay::utils::Physical>,
     transform: Transform,
     alpha: f32,
+    opaque: Vec<Rectangle<i32, smithay::utils::Physical>>,
+}
+
+#[cfg(feature = "drm")]
+impl smithay::backend::renderer::element::Element for ElementStamp {
+    fn id(&self) -> &smithay::backend::renderer::element::Id {
+        &self.id
+    }
+    fn current_commit(&self) -> smithay::backend::renderer::utils::CommitCounter {
+        self.commit
+    }
+    fn src(&self) -> Rectangle<f64, smithay::utils::Buffer> {
+        self.src
+    }
+    fn geometry(
+        &self,
+        _scale: smithay::utils::Scale<f64>,
+    ) -> Rectangle<i32, smithay::utils::Physical> {
+        self.geometry
+    }
+    fn transform(&self) -> Transform {
+        self.transform
+    }
+    fn alpha(&self) -> f32 {
+        self.alpha
+    }
+}
+
+#[cfg(feature = "drm")]
+fn drm_damage_region(
+    tracker: &mut smithay::backend::renderer::damage::OutputDamageTracker,
+    age: usize,
+    stamp: &SceneStamp,
+) -> Result<Rectangle<i32, smithay::utils::Physical>, RuntimeError> {
+    // All stamp geometries use physical pixels; this conservative representation
+    // declares no opacity and never suppresses a damaged element behind another.
+    let elements: Vec<_> = stamp.elements.iter().flatten().cloned().collect();
+    let (damage, _) = tracker
+        .damage_output(age, &elements)
+        .map_err(|error| RuntimeError::Dispatch(error.to_string()))?;
+    // Feedback-only surface commits still submit an actual scanout frame. When
+    // no pixels changed, update one pixel instead of fabricating presentation.
+    Ok(damage
+        .and_then(|rects| rects.iter().copied().reduce(Rectangle::merge))
+        .unwrap_or_else(|| Rectangle::new((0, 0).into(), (1, 1).into())))
 }
 
 #[cfg(feature = "drm")]
@@ -3190,12 +3274,36 @@ fn element_stamps<E: smithay::backend::renderer::element::Element>(
             geometry: element.geometry(scale.into()),
             transform: element.transform(),
             alpha: element.alpha(),
+            opaque: element
+                .opaque_regions(scale.into())
+                .iter()
+                .copied()
+                .collect(),
         })
         .collect()
 }
 
 #[cfg(feature = "drm")]
 impl SceneStamp {
+    fn same_global_drawing(&self, old: &Self) -> bool {
+        self.size == old.size
+            && self.scale == old.scale
+            && self.offset == old.offset
+            && self.background == old.background
+            && self.accent == old.accent
+            && self.blank_alpha == old.blank_alpha
+            && self.locked == old.locked
+            && self.pointer == old.pointer
+            && self.above == old.above
+            && self.decor == old.decor
+            // The conservative tracker claims no opacity, but actual drawing
+            // can optimize by these regions. Region changes force a full paint.
+            && self.elements.len() == old.elements.len()
+            && self.elements.iter().zip(&old.elements).all(|(new, old)| {
+                new.len() == old.len() && new.iter().zip(old).all(|(new, old)| new.opaque == old.opaque)
+            })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new(
         commits: u64,
@@ -3831,5 +3939,83 @@ fn input_time(input: &ManagerInput) -> u64 {
         | ManagerInput::SwipeUpdate { time, .. }
         | ManagerInput::SwipeEnd { time, .. } => u64::from(time),
         ManagerInput::RelativeMotion { utime, .. } => utime / 1000,
+    }
+}
+
+#[cfg(all(test, feature = "drm"))]
+mod retained_buffer_damage_tests {
+    use super::*;
+    use smithay::backend::renderer::{
+        damage::OutputDamageTracker,
+        element::{solid::SolidColorRenderElement, Id},
+    };
+
+    fn stamp(id: &Id, x: i32, commit: usize) -> SceneStamp {
+        let scene = Scene {
+            elements: Vec::new(),
+            above: 0,
+            top: Vec::new(),
+            tile: vec![SolidColorRenderElement::new(
+                id.clone(),
+                Rectangle::new((x, 0).into(), (8, 8).into()),
+                commit,
+                Color32F::new(1.0, 0.0, 0.0, 1.0),
+                Kind::Unspecified,
+            )],
+        };
+        SceneStamp::new(
+            commit as u64,
+            (32, 32).into(),
+            1.0,
+            (0, 0),
+            Color32F::new(0.0, 0.0, 0.0, 1.0),
+            [0.0; 3],
+            0.0,
+            false,
+            (0.0, 0.0).into(),
+            &[],
+            &scene,
+            &[],
+            &[],
+        )
+    }
+
+    #[test]
+    fn recycled_buffer_repaints_damage_from_intervening_frames() {
+        let id = Id::new();
+        let mut tracker = OutputDamageTracker::new((32, 32), 1.0, Transform::Normal);
+        let full = Rectangle::from_size((32, 32).into());
+        assert_eq!(
+            drm_damage_region(&mut tracker, 0, &stamp(&id, 0, 0)).unwrap(),
+            full
+        );
+        drm_damage_region(&mut tracker, 1, &stamp(&id, 8, 1)).unwrap();
+        // This buffer last contained the first frame. Repainting only the
+        // newest B-to-C move would leave A's old pixels in that buffer.
+        let damage = drm_damage_region(&mut tracker, 2, &stamp(&id, 16, 2)).unwrap();
+        assert!(damage.contains((1, 1)));
+        assert!(damage.contains((23, 7)));
+        assert!(damage.size.w < 32 && damage.size.h < 32);
+        // Unknown or out-of-history age must initialize the entire buffer.
+        assert_eq!(
+            drm_damage_region(&mut tracker, 100, &stamp(&id, 16, 2)).unwrap(),
+            full
+        );
+    }
+
+    #[test]
+    fn feedback_only_update_submits_a_frame_without_full_output_damage() {
+        let id = Id::new();
+        let mut tracker = OutputDamageTracker::new((32, 32), 1.0, Transform::Normal);
+        let scene = stamp(&id, 0, 0);
+        drm_damage_region(&mut tracker, 0, &scene).unwrap();
+        let damage = drm_damage_region(&mut tracker, 1, &scene).unwrap();
+        assert_eq!(damage, Rectangle::new((0, 0).into(), (1, 1).into()));
+        // Removing an element must erase its previous pixels, even when no
+        // new render element occupies them.
+        let mut empty = stamp(&id, 0, 0);
+        empty.elements.iter_mut().for_each(Vec::clear);
+        let damage = drm_damage_region(&mut tracker, 1, &empty).unwrap();
+        assert!(damage.contains((7, 7)));
     }
 }
