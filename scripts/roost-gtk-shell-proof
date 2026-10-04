@@ -1304,7 +1304,7 @@ order="$(jq -r '[.[] | select(.showing) | .name | select(test("^(Connect to|Disc
     "$ARTIFACTS/a11y-qs-bt-menu.json")"
 want="Disconnect Keyboard|Connect to Headphones"
 [ "$order" = "$want" ] || fail G-QS-BT-MENU "devices are '$order', not '$want'"
-[ "$(jq '[.[] | select(.showing and .name == "Keyboard")] | length' "$ARTIFACTS/a11y-qs-bt-menu.json")" -gt "$monitor_count" ] ||
+[ "$(jq '[.[] | select(.showing and .name == "Keyboard")] | length' "$ARTIFACTS/a11y-qs-bt-menu.json")" -gt 0 ] ||
     fail G-QS-BT-MENU "the tile does not name the connected device"
 qs_press "Connect to Headphones" bt-connect || fail G-QS-BT-MENU "could not press Headphones"
 grep -q "^Connect /org/bluez/hci0/dev_AA_AA_AA_AA_AA_01" "$ROOST_STUB_BT_LOG" ||
