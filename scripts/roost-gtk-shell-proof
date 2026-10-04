@@ -840,8 +840,9 @@ for step in 1 2 3 4 5 6; do
     sleep 0.1
 done
 xdotool mouseup 1
-# GTK starts the move after its drag threshold, so the window follows
-# the pointer from there: it moves by most, not all, of the drag.
+# GTK requests the move after its drag threshold. The compositor uses
+# the initiating press coordinates; retain the strict distance bounds
+# while checking the real asynchronous client and pointer journey.
 cstate ".windows[] | select(.app_id == \"roost-test-beta\") | (.rect[0] - $bx) >= 75 and (.rect[0] - $bx) <= 150 and (.rect[1] - $by) >= 30 and (.rect[1] - $by) <= 60" "drag" ||
     fail G-APP-DRAG "dragging Beta's header bar did not move it by the drag distance"
 pass G-APP-DRAG "dragging an app's header bar moves the window (#58)"
