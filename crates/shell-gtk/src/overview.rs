@@ -818,6 +818,20 @@ impl OverviewUi {
         }
     }
 
+    /// GNOME's overview state keys: session -> picker -> apps and back.
+    pub fn shift(ui: &Rc<RefCell<Self>>, up: bool) {
+        let (open, apps) = {
+            let me = ui.borrow();
+            (me.open, me.grid.is_visible())
+        };
+        match (open, apps, up) {
+            (false, _, true) | (true, true, false) => Self::focus_search(ui),
+            (true, false, true) => Self::show_apps(ui),
+            (true, false, false) => ui.borrow().actions.close_overview(),
+            _ => {}
+        }
+    }
+
     /// Follow the compositor's overview state.
     pub fn set_open(ui: &Rc<RefCell<Self>>, open: bool) {
         let signature = {

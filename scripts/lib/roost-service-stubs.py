@@ -115,6 +115,14 @@ XML = """
     <property name="Trusted" type="b" access="read"/>
     <property name="Connected" type="b" access="read"/>
   </interface>
+  <interface name="org.freedesktop.UPower.Device">
+    <property name="IsPresent" type="b" access="readwrite"/>
+    <property name="Type" type="u" access="read"/>
+    <property name="State" type="u" access="readwrite"/>
+    <property name="Percentage" type="d" access="readwrite"/>
+    <property name="TimeToEmpty" type="x" access="readwrite"/>
+    <property name="TimeToFull" type="x" access="readwrite"/>
+  </interface>
   <interface name="org.freedesktop.UPower.PowerProfiles">
     <property name="ActiveProfile" type="s" access="readwrite"/>
     <property name="Profiles" type="aa{sv}" access="read"/>
@@ -210,6 +218,11 @@ state = {
     } for d, alias, icon, paired, connected in BT_DEVICES},
     ("/org/gnome/DisplayManager/Manager", "org.gnome.DisplayManager.Manager"): {
         "Version": GLib.Variant("s", "51.0"),
+    },
+    ("/org/freedesktop/UPower/devices/DisplayDevice", "org.freedesktop.UPower.Device"): {
+        "IsPresent": GLib.Variant("b", False), "Type": GLib.Variant("u", 2),
+        "State": GLib.Variant("u", 2), "Percentage": GLib.Variant("d", 37.0),
+        "TimeToEmpty": GLib.Variant("x", 5400), "TimeToFull": GLib.Variant("x", 1800),
     },
     (PPD, "org.freedesktop.UPower.PowerProfiles"): {
         "ActiveProfile": GLib.Variant("s", "balanced"),
@@ -351,10 +364,16 @@ def method_call(c, sender, path, iface, method, params, invocation):
                 fh.write(f"{sender} {agent_path}\n")
         invocation.return_value(None)
     elif method == "SetBrightness":
-        _, _, value = params.unpack()
+        _, device, value = params.unpack()
+        # Match logind's device routing, so multi-backlight proofs can
+        # catch writes to the wrong connector rather than hiding them.
+        target = os.path.join(os.path.dirname(BACKLIGHT), device)
+        if not os.path.isdir(target):
+            invocation.return_dbus_error("org.freedesktop.login1.NoSuchDevice", device)
+            return
         # Atomically, as the kernel's attribute never reads half-written:
         # a reader racing a truncate-then-write would see it empty.
-        path = os.path.join(BACKLIGHT, "brightness")
+        path = os.path.join(target, "brightness")
         with open(path + ".tmp", "w") as fh:
             fh.write(f"{value}\n")
         os.replace(path + ".tmp", path)
@@ -405,6 +424,9 @@ SERVICES = {
         ("/", "org.freedesktop.DBus.ObjectManager"),
         (HCI, "org.bluez.Adapter1"),
         *[(f"{HCI}/{d}", "org.bluez.Device1") for d, *_ in BT_DEVICES],
+    ]),
+    "upower": (["org.freedesktop.UPower"], [
+        ("/org/freedesktop/UPower/devices/DisplayDevice", "org.freedesktop.UPower.Device"),
     ]),
     "ppd": (["org.freedesktop.UPower.PowerProfiles"], [
         (PPD, "org.freedesktop.UPower.PowerProfiles"),

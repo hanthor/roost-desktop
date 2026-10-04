@@ -219,6 +219,25 @@ Exec=touch $PROBE_MARKER
 Icon=applications-system
 Type=Application
 EOF
+# Default calendar launch probe: its argv records the selected day.
+cat >"$ARTIFACTS/calendar-probe" <<EOF
+#!/bin/sh
+printf '%s\\n' "\$@" >"$ARTIFACTS/calendar-launch"
+EOF
+chmod +x "$ARTIFACTS/calendar-probe"
+cat >"$XDG_DATA_HOME/applications/roost-calendar-probe.desktop" <<EOF
+[Desktop Entry]
+Name=Roost Calendar Probe
+Exec=$ARTIFACTS/calendar-probe %u
+Type=Application
+MimeType=x-scheme-handler/calendar;
+NoDisplay=true
+EOF
+mkdir -p "$ARTIFACTS/config"
+cat >"$ARTIFACTS/config/mimeapps.list" <<EOF
+[Default Applications]
+x-scheme-handler/calendar=roost-calendar-probe.desktop;
+EOF
 # A GNOME Shell search provider owned by the probe app (#57).
 SEARCH_MARKER="$ARTIFACTS/search-marker"
 rm -f "$SEARCH_MARKER"
@@ -258,10 +277,14 @@ CAL_PID=""
 SCREENSAVER_PID=""
 ICON_PID=""
 HINTS_PID=""
+PERMISSIONS_PID=""
+INHIBITOR_PID=""
 IME_PIDS=""
 cleanup() {
     if [ -n "$ICON_PID" ]; then kill "$ICON_PID" 2>/dev/null || true; fi
     if [ -n "$HINTS_PID" ]; then kill "$HINTS_PID" 2>/dev/null || true; fi
+    if [ -n "$INHIBITOR_PID" ]; then kill "$INHIBITOR_PID" 2>/dev/null || true; fi
+    if [ -n "$PERMISSIONS_PID" ]; then kill "$PERMISSIONS_PID" 2>/dev/null || true; fi
     # shellcheck disable=SC2086
     if [ -n "$IME_PIDS" ]; then kill $IME_PIDS 2>/dev/null || true; fi
     # The bridge daemonized ibus-daemon for this session's display.
@@ -331,6 +354,15 @@ if ! gsettings list-schemas 2>/dev/null | grep -qx org.gnome.shell; then
     <key name="favorite-apps" type="as"><default>[]</default></key>
     <key name="app-picker-layout" type="aa{sv}"><default>[]</default></key>
   </schema>
+  <schema id="org.gnome.shell.keybindings" path="/org/gnome/shell/keybindings/">
+    <key name="focus-active-notification" type="as"><default>['&lt;Super&gt;n']</default></key>
+    <key name="shift-overview-up" type="as"><default>['&lt;Super&gt;&lt;Alt&gt;Up']</default></key>
+    <key name="shift-overview-down" type="as"><default>['&lt;Super&gt;&lt;Alt&gt;Down']</default></key>
+    <key name="screen-brightness-up-monitor" type="as"><default>['&lt;Shift&gt;XF86MonBrightnessUp']</default></key>
+    <key name="screen-brightness-down-monitor" type="as"><default>['&lt;Shift&gt;XF86MonBrightnessDown']</default></key>
+    <key name="screen-brightness-cycle" type="as"><default>['XF86MonBrightnessCycle']</default></key>
+    <key name="screen-brightness-cycle-monitor" type="as"><default>['&lt;Shift&gt;XF86MonBrightnessCycle']</default></key>
+  </schema>
 </schemalist>
 XML
     glib-compile-schemas "$ARTIFACTS/schemas"
@@ -396,6 +428,11 @@ ROOST_STUB_BT_LOG="$ARTIFACTS/bt-calls"
 export ROOST_STUB_NM_LOG ROOST_STUB_BT_LOG
 "$PY" "$ROOT/scripts/lib/roost-service-stubs.py" "$BACKLIGHT" >"$ARTIFACTS/stubs.log" 2>&1 &
 STUBS_PID=$!
+# Own PermissionStore before portals can auto-activate the real daemon.
+"$PY" "$ROOT/scripts/lib/roost-permission-store-stub.py" "$ARTIFACTS/shortcut-permissions.json" >"$ARTIFACTS/permission-store.log" 2>&1 &
+PERMISSIONS_PID=$!
+for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/permission-store.log" && break; sleep 0.2; done
+grep -q ready "$ARTIFACTS/permission-store.log" || fail G-SHORTCUT-CONSENT "private PermissionStore did not own its bus name"
 for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/stubs.log" 2>/dev/null && break; sleep 0.5; done
 "$PY" "$ROOT/scripts/lib/roost-search-provider-stub.py" "$SEARCH_MARKER" >"$ARTIFACTS/provider.log" 2>&1 &
 PROVIDER_PID=$!
@@ -448,6 +485,7 @@ ROOST_PROOF_SWIPE_INPUT="$ARTIFACTS/swipe-input.json"
 export ROOST_PROOF_SWIPE_INPUT
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk -p roost-shell-host
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor --example icon-probe
+cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor --example shortcut-inhibit-client
 if [ -n "$PAM_ON" ]; then
     env LD_PRELOAD="$PAM_WRAPPER_LIB" PAM_WRAPPER=1 \
         PAM_WRAPPER_SERVICE_DIR="$ARTIFACTS/pam/services" \
@@ -513,6 +551,17 @@ if showing "$ARTIFACTS/a11y-calendar.json" "Retro"; then
     fail G-CAL-EVENTS "tomorrow's event shows under today"
 fi
 pass G-CAL-EVENTS "today's calendar-server events list in the events card, timed as GNOME does"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-calendar-launch.json" 20 --press "Open Calendar" ||
+    fail G-CAL-LAUNCH "events card has no accessible launch action"
+sleep 1
+[ "$(cat "$ARTIFACTS/calendar-launch" 2>/dev/null)" = "calendar:///$(date +%F)" ] ||
+    fail G-CAL-LAUNCH "default calendar did not launch at the selected day"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-calendar-closed.json" 20
+if showing "$ARTIFACTS/a11y-calendar-closed.json" "Open Calendar"; then
+    fail G-CAL-LAUNCH "calendar popover stayed open after launch"
+fi
+pass G-CAL-LAUNCH "default calendar launches selected day through Roost and closes the menu"
+
 xdotool key Escape
 sleep 1
 
@@ -524,6 +573,46 @@ scrot "$ARTIFACTS/03-quick-settings.png" >/dev/null
 showing "$ARTIFACTS/a11y-qs.json" "Dark Style" ||
     fail G-QS-OPEN "quick settings contents not showing"
 pass G-QS-OPEN "system indicators open quick settings"
+# A desktop has no battery. Hotplug and live UPower/settings changes must
+# update both the panel and the power summary without reopening the menu.
+battery_set() {
+    gdbus call --system --dest org.freedesktop.UPower \
+        --object-path /org/freedesktop/UPower/devices/DisplayDevice \
+        --method org.freedesktop.DBus.Properties.Set \
+        org.freedesktop.UPower.Device "$1" "$2" >/dev/null
+}
+battery_dump() {
+    sleep 1
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-battery.json" 20
+}
+if showing "$ARTIFACTS/a11y-qs.json" "37% · Discharging · 1∶30 remaining"; then
+    fail G-BATTERY "battery is visible on a desktop without one"
+fi
+gsettings set org.gnome.desktop.interface show-battery-percentage false
+battery_set IsPresent '<true>'
+battery_dump
+showing "$ARTIFACTS/a11y-battery.json" "37% · Discharging · 1∶30 remaining" ||
+    fail G-BATTERY "UPower discharging battery summary missing"
+if showing "$ARTIFACTS/a11y-battery.json" '37%'; then
+    fail G-BATTERY "panel percentage ignored disabled setting"
+fi
+gsettings set org.gnome.desktop.interface show-battery-percentage true
+battery_dump
+showing "$ARTIFACTS/a11y-battery.json" '37%' || fail G-BATTERY "percentage setting did not update live"
+battery_set State '<uint32 1>'
+battery_set Percentage '<82.0>'
+battery_dump
+showing "$ARTIFACTS/a11y-battery.json" '82%' || fail G-BATTERY "panel level did not update live"
+showing "$ARTIFACTS/a11y-battery.json" "82% · Charging · 0∶30 until full" ||
+    fail G-BATTERY "charging time did not update live"
+gsettings set org.gnome.desktop.interface show-battery-percentage false
+battery_set IsPresent '<false>'
+battery_dump
+if showing "$ARTIFACTS/a11y-battery.json" '82%'; then
+    fail G-BATTERY "removed battery stayed visible"
+fi
+pass G-BATTERY "UPower hotplug, charging/discharging and percentage setting update live"
+
 for label in "Wired" "Dark Style" "Do Not Disturb" "Volume" "Lock"; do
     showing "$ARTIFACTS/a11y-qs.json" "$label" ||
         fail A11Y-QS "no showing accessible control named '$label'"
@@ -695,7 +784,57 @@ cstate '[.windows[] | select(.app_id == "roost-test-alpha")] | length == 2' "sec
 cstate '.focused_app_id == "roost-test-alpha"' "alpha focused" ||
     fail G-SWITCHER-GROUP "the new Alpha window did not take the focus"
 sleep 1
+# Rebound window-only and direct-cycle keys (#216), with two windows
+# from Alpha proving that window switching does not group by app.
+gsettings set org.gnome.desktop.wm.keybindings cycle-group "['<Super>F1']"
+gsettings set org.gnome.desktop.wm.keybindings cycle-group-backward "['<Super><Shift>F1']"
+gsettings set org.gnome.desktop.wm.keybindings cycle-windows "['<Super>F2']"
+gsettings set org.gnome.desktop.wm.keybindings cycle-windows-backward "['<Super><Shift>F2']"
+gsettings set org.gnome.desktop.wm.keybindings switch-windows "['<Control>k']"
+gsettings set org.gnome.desktop.wm.keybindings switch-windows-backward "['<Control><Shift>k']"
+sleep 1.5
+original="$(jq -r .focused "$CSTATE")"
+xdotool key super+F1
+cstate ".focused != $original and .focused_app_id == \"roost-test-alpha\"" "cycle group" || fail G-CYCLE-KEYS "cycle-group did not move within Alpha"
+xdotool key super+shift+F1
+cstate ".focused == $original" "cycle group backward" || fail G-CYCLE-KEYS "cycle-group-backward did not return"
+xdotool key super+F2
+cstate ".focused != $original" "cycle windows" || fail G-CYCLE-KEYS "cycle-windows did not move"
+cycled="$(jq -r .focused "$CSTATE")"
+xdotool key super+shift+F2
+cstate ".focused != $cycled" "cycle windows backward" || fail G-CYCLE-KEYS "cycle-windows-backward did not move"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-cycle-keys.json" 20 || fail G-CYCLE-KEYS "a11y dump failed"
+showing "$ARTIFACTS/a11y-cycle-keys.json" "Switch Windows" && fail G-CYCLE-KEYS "direct cycling opened a popup"
+pass G-CYCLE-KEYS "bound forward/backward window and app-group cycling activate immediately without a popup"
+original="$(jq -r .focused "$CSTATE")"
+xdotool keydown Control_L key k
+cstate '.switcher_thumbnails == 4' "all window thumbnails" || fail G-WINDOW-SWITCHER "window switcher did not draw each window's thumbnail"
+sleep 0.7
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-window-switcher.json" 20 || fail G-WINDOW-SWITCHER "a11y dump failed"
+[ "$(jq '[.[] | select(.showing and .role == "list item" and .name == "Alpha: Alpha")] | length' "$ARTIFACTS/a11y-window-switcher.json")" = 2 ] || fail G-WINDOW-SWITCHER "Alpha windows were grouped instead of two entries"
+xdotool keyup Control_L
+cstate ".focused != $original" "window switcher commit" || fail G-WINDOW-SWITCHER "releasing Control did not activate the window"
+original="$(jq -r .focused "$CSTATE")"
+xdotool keydown Control_L keydown Shift_L key k
+sleep 0.5
+xdotool keyup Shift_L keyup Control_L
+cstate ".focused != $original" "window switcher backward" || fail G-WINDOW-SWITCHER "backward window switching did not move"
+pass G-WINDOW-SWITCHER "bound switch-windows forward/backward show separate window entries and commit on modifier release"
+for key in cycle-group cycle-group-backward cycle-windows cycle-windows-backward switch-windows switch-windows-backward; do
+    gsettings reset org.gnome.desktop.wm.keybindings "$key"
+done
+sleep 1
 second="$(jq -r .focused "$CSTATE")"
+# Return to Alpha if the window-only proof picked another app.
+if [ "$(jq -r .focused_app_id "$CSTATE")" != roost-test-alpha ]; then
+    for _ in $(seq 1 6); do
+        [ "$(jq -r .focused_app_id "$CSTATE")" = roost-test-alpha ] && break
+        xdotool key alt+Tab
+        sleep 0.5
+    done
+    cstate '.focused_app_id == "roost-test-alpha"' "alpha again" || fail G-SWITCHER-GROUP "could not return to Alpha"
+    second="$(jq -r .focused "$CSTATE")"
+fi
 xdotool keydown Alt_L key grave
 cstate '.switcher_thumbnails == 2' "thumbnails" 5 ||
     { xdotool keyup Alt_L; fail G-SWITCHER-GROUP "Alt+Above_Tab drew no window thumbnails"; }
@@ -1468,17 +1607,41 @@ cstate '.keyboard.layouts == ["English (US)"]' "one source" ||
     fail G-SETTINGS-INPUT "the keymap did not return to us"
 pass G-SETTINGS-INPUT "input sources, Super+Space, key repeat and the hot corner follow GNOME"
 
+# Disabling animations is live and snaps compositor and GTK transitions.
+gsettings set org.gnome.desktop.interface enable-animations false
+cstate '(.animations_enabled | not)' "animations disabled" ||
+    fail G-ANIMATIONS-OFF "enable-animations false did not reach the compositor"
+xdotool key Super_L
+cstate '.overview_open and .overview_progress == 1' "instant overview" ||
+    fail G-ANIMATIONS-OFF "the disabled overview did not jump to its open state"
+cp "$CSTATE" "$ARTIFACTS/animations-disabled-open.json"
+xdotool key Escape
+cstate '(.overview_open | not) and .overview_progress == 0' "instant desktop" ||
+    fail G-ANIMATIONS-OFF "the disabled overview did not jump to its closed state"
+xdotool key super+shift+t
+cstate '.session_mode == "scroll" and .strip_view == .strip_offset' "instant strip" ||
+    fail G-ANIMATIONS-OFF "the disabled strip view did not match its target"
+xdotool key super+Left
+cstate '.strip_view == .strip_offset' "instant focus" ||
+    fail G-ANIMATIONS-OFF "the disabled strip view lagged after a focus move"
+xdotool key super+shift+t
+cstate '.session_mode == "gnome"' "floating" || fail G-ANIMATIONS-OFF "could not restore floating mode"
+gsettings set org.gnome.desktop.interface enable-animations true
+cstate '.animations_enabled' "animations enabled" ||
+    fail G-ANIMATIONS-OFF "enable-animations true did not restore live animation"
+pass G-ANIMATIONS-OFF "enable-animations is live: overview and strip states jump when disabled"
+
 # GNOME settings (#63): the idle lock follows idle-delay and
 # lock-enabled as they change.
 gsettings set org.gnome.desktop.session idle-delay 600
-cstate '.idle_timeout_ms == 600000' "idle 600" ||
+cstate '.idle_timeout_ms == 610000' "idle 600" ||
     fail G-SETTINGS-IDLE "idle-delay 600 did not reach the compositor"
 gsettings set org.gnome.desktop.screensaver lock-enabled false
 cstate '.idle_timeout_ms > 1e18' "lock off" ||
     fail G-SETTINGS-IDLE "lock-enabled false did not turn the idle lock off"
 gsettings set org.gnome.desktop.screensaver lock-enabled true
 gsettings set org.gnome.desktop.session idle-delay 300
-cstate '.idle_timeout_ms == 300000' "idle 300" ||
+cstate '.idle_timeout_ms == 310000' "idle 300" ||
     fail G-SETTINGS-IDLE "the idle lock did not follow back to 300 s"
 pass G-SETTINGS-IDLE "GNOME's idle-delay and lock-enabled set the idle lock live"
 
@@ -1536,6 +1699,21 @@ cstate '.overview_open | not' "closed" || fail G-KEYBINDINGS "Super+A again did 
 # The shell hides its overview surfaces on its next frame: let it.
 sleep 1
 pass G-KEYBINDINGS "Super+S, Super+V and Super+A open GNOME's menus and the app grid"
+# Both directions are rebound, then walk every overview state.
+gsettings set org.gnome.shell.keybindings shift-overview-up "['<Super>F8']"
+gsettings set org.gnome.shell.keybindings shift-overview-down "['<Super>F7']"
+sleep 1.5
+xdotool key super+F8
+cstate '.overview_open and (.overview_app_grid | not)' "picker" || fail G-OVERVIEW-STATE-KEYS "up did not open the picker"
+xdotool key super+F8
+cstate '.overview_open and .overview_app_grid' "apps" || fail G-OVERVIEW-STATE-KEYS "up did not show apps"
+xdotool key super+F7
+cstate '.overview_open and (.overview_app_grid | not)' "picker again" || fail G-OVERVIEW-STATE-KEYS "down did not return to picker"
+xdotool key super+F7
+cstate '(.overview_open | not)' "session" || fail G-OVERVIEW-STATE-KEYS "down did not return to session"
+gsettings reset org.gnome.shell.keybindings shift-overview-up
+gsettings reset org.gnome.shell.keybindings shift-overview-down
+pass G-OVERVIEW-STATE-KEYS "rebound up/down keys walk session, picker, apps and back"
 
 # GNOME's window menu on a header bar's right click: Always on Top, then
 # Hide; the hidden window still shows in the overview, and picking it
@@ -1706,7 +1884,7 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     for _ in $(seq 1 20); do grep -q "IBus panel: owns org.freedesktop.IBus.Panel" "$LOG" && break; sleep 0.5; done
     grep -q "IBus panel: owns org.freedesktop.IBus.Panel" "$LOG" ||
         fail G-IME-CANDIDATES "the shell never became IBus's panel"
-    shown_before="$(grep -c 'ibus candidate 1 尼 at' "$LOG")"
+    shown_before="$(grep -c 'ibus candidate 1 尼 at' "$LOG" || true)"
     xdotool type --delay 100 ni
     cstate '.layers | any(.namespace == "roost-ibus-candidates")' "candidate window" 10 ||
         fail G-IME-CANDIDATES "typing 'ni' showed no candidate window"
@@ -2177,6 +2355,50 @@ after="$(cat "$BACKLIGHT/brightness")"
     fail G-KEY-BRIGHTNESS "the brightness key left the backlight at $after (was $before)"
 scrot "$ARTIFACTS/24c-brightness-osd.png" >/dev/null
 pass G-KEY-BRIGHTNESS "the brightness key steps the backlight by a twentieth through logind"
+# Per-monitor keys must identify the pointer's connector, even with a
+# different backlight sorting first. The fake device mirrors sysfs.
+mkdir -p "$ARTIFACTS/devices/card0-roost-0" "$ARTIFACTS/devices/card0-other" "$ARTIFACTS/backlight/aaa-other"
+ln -s "$ARTIFACTS/devices/card0-roost-0" "$BACKLIGHT/device"
+ln -s "$ARTIFACTS/devices/card0-other" "$ARTIFACTS/backlight/aaa-other/device"
+echo 1000 >"$ARTIFACTS/backlight/aaa-other/max_brightness"
+echo 700 >"$ARTIFACTS/backlight/aaa-other/brightness"
+echo 500 >"$BACKLIGHT/brightness"
+gsettings set org.gnome.shell.keybindings screen-brightness-up-monitor "['<Super>F5']"
+gsettings set org.gnome.shell.keybindings screen-brightness-down-monitor "['<Super>F4']"
+gsettings set org.gnome.shell.keybindings screen-brightness-cycle-monitor "['<Super>F3']"
+sleep 1.5
+xdotool mousemove --window "$WID" 600 450
+for spec in 'F5:550' 'F4:500' 'F3:550'; do
+    xdotool key "super+${spec%%:*}"
+    end=$(($(date +%s) + 10))
+    until [ "$(cat "$BACKLIGHT/brightness")" = "${spec#*:}" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+    [ "$(cat "$BACKLIGHT/brightness")" = "${spec#*:}" ] || fail G-MONITOR-BRIGHTNESS-KEYS "${spec%%:*} did not set ${spec#*:} on the pointer's monitor"
+    [ "$(cat "$ARTIFACTS/backlight/aaa-other/brightness")" = 700 ] || fail G-MONITOR-BRIGHTNESS-KEYS "a different monitor's backlight changed"
+done
+echo 1000 >"$BACKLIGHT/brightness"
+xdotool key super+F3
+end=$(($(date +%s) + 10))
+# GNOME normalized zero maps to the hardware minimum, not a powered-off
+# panel: Mutter's sysfs floor is max(1, max_brightness / 100).
+until [ "$(cat "$BACKLIGHT/brightness")" = 10 ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+[ "$(cat "$BACKLIGHT/brightness")" = 10 ] || fail G-MONITOR-BRIGHTNESS-KEYS "cycle did not wrap to the GNOME hardware minimum"
+for key in screen-brightness-up-monitor screen-brightness-down-monitor screen-brightness-cycle-monitor; do
+    gsettings reset org.gnome.shell.keybindings "$key"
+done
+rm -rf "$ARTIFACTS/backlight/aaa-other"
+pass G-MONITOR-BRIGHTNESS-KEYS "bound monitor up/down/cycle change only the connector under the pointer; cycle wraps"
+# A rebound notification key focuses the active banner's real button.
+gsettings set org.gnome.shell.keybindings focus-active-notification "['<Super>F6']"
+sleep 1.5
+notify "Focus Proof Banner" "Keyboard focus" || fail G-NOTIFICATION-FOCUS-KEY "Notify failed"
+sleep 0.5
+xdotool key super+F6
+sleep 0.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-notification-focus.json" 20 || fail G-NOTIFICATION-FOCUS-KEY "a11y dump failed"
+jq -e '.[] | select(.showing and .focused and .name == "Close")' "$ARTIFACTS/a11y-notification-focus.json" >/dev/null || fail G-NOTIFICATION-FOCUS-KEY "banner's Close button did not get keyboard focus"
+xdotool key Escape
+gsettings reset org.gnome.shell.keybindings focus-active-notification
+pass G-NOTIFICATION-FOCUS-KEY "the rebound key focuses the active banner; Escape restores client input"
 
 # GNOME Shell as the polkit agent: polkit (the Authority stub, back on
 # the bus) asks the agent to authenticate; a wrong password says so and
@@ -2272,6 +2494,11 @@ screen_active() {
 }
 screen_active | grep -q false || fail G-SCREENSAVER "screen saver started active"
 
+# A distinct solid background makes the screen-saver URI observable.
+ffmpeg -loglevel error -y -f lavfi -i color=c=0x00ff00:s=64x64 -frames:v 1 -threads 1 \
+    "$ARTIFACTS/lock-background.png"
+gsettings set org.gnome.desktop.screensaver picture-uri "file://$ARTIFACTS/lock-background.png"
+sleep 1
 open_power_menu power-menu-3 || fail G-SUSPEND-LOCK "could not reopen the power menu"
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-suspend.json" 20 \
     --press "Suspend" || fail G-SUSPEND-LOCK "could not press Suspend"
@@ -2280,6 +2507,18 @@ until grep -q Suspend "$POWER_LOG" 2>/dev/null || [ "$(date +%s)" -gt "$end" ]; 
 grep -q Suspend "$POWER_LOG" || fail G-SUSPEND-LOCK "logind never got Suspend"
 cstate '.locked' "locked" 10 || fail G-SUSPEND-LOCK "PrepareForSleep did not lock the session"
 scrot "$ARTIFACTS/23-locked-after-suspend.png" >/dev/null
+# Wait for asynchronous decode and test the unobscured lower-left pixel.
+end=$(($(date +%s) + 15))
+while :; do
+    scrot "$ARTIFACTS/23b-lock-background.png" >/dev/null
+    rgb=$(px "$ARTIFACTS/23b-lock-background.png" 10 $((HEIGHT - 10)))
+    # shellcheck disable=SC2086 # three RGB channels
+    set -- $rgb
+    [ "${1:-255}" -lt 20 ] && [ "${2:-0}" -gt 150 ] && [ "${2:-255}" -lt 180 ] && [ "${3:-255}" -lt 20 ] && break
+    [ "$(date +%s)" -ge "$end" ] && fail G-LOCK-BACKGROUND "custom screen-saver background not drawn: $rgb"
+    sleep 0.3
+done
+pass G-LOCK-BACKGROUND "picture-uri supplies the blurred, dimmed lock background"
 pass G-SUSPEND-LOCK "Suspend asks logind, and PrepareForSleep locks the session"
 screen_active | grep -q true || fail G-SCREENSAVER "GetActive did not reflect the lock"
 gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver \
@@ -2331,9 +2570,107 @@ if [ -n "$PAM_ON" ]; then
     xdotool key Return
     cstate '(.locked | not)' "D-Bus lock unlocked through PAM" 15 || fail G-DBUS-LOCK "D-Bus lock did not unlock"
     pass G-DBUS-LOCK "org.gnome.Shell exposes the screen-saver object and Lock waits for confirmation"
+
+    # A short idle policy must fade, cancel on activity, then latch only
+    # after the configured lock delay. Waking the blank stage cannot unlock.
+    gsettings set org.gnome.desktop.interface enable-animations true
+    gsettings set org.gnome.desktop.screensaver lock-delay 15
+    gsettings set org.gnome.desktop.session idle-delay 2
+    cstate '.idle_timeout_ms == 17000' "short idle policy" 5 || fail G-IDLE-FADE "idle policy not applied"
+    xdotool mousemove --window "$WID" 20 $((HEIGHT - 20))
+    cstate '(.locked | not) and .idle_blank_alpha > 0.25 and .idle_blank_alpha < 0.95' "idle fade" 10 ||
+        fail G-IDLE-FADE "no cancellable fade before lock"
+    scrot "$ARTIFACTS/27-idle-fade.png" >/dev/null
+    xdotool mousemove --window "$WID" 30 $((HEIGHT - 30))
+    cstate '(.locked | not) and .idle_blank_alpha == 0' "fade cancelled" 5 ||
+        fail G-IDLE-FADE "activity did not cancel fade"
+    cstate '(.locked | not) and .idle_blank_alpha == 1' "blank before lock delay" 15 ||
+        fail G-IDLE-FADE "blank stage did not precede delayed lock"
+    cstate '.locked and .idle_blank_alpha == 1' "idle locked" 10 ||
+        fail G-IDLE-FADE "lock-delay did not latch"
+    scrot "$ARTIFACTS/28-idle-blank-locked.png" >/dev/null
+    xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT * 3 / 4)) click 1
+    cstate '.locked and .idle_blank_alpha == 0' "woke while still locked" 5 ||
+        fail G-IDLE-FADE "waking the blank stage bypassed the lock"
+    sleep 1
+    xdotool type --delay 30 "$UNLOCK_PASSWORD"
+    xdotool key Return
+    cstate '(.locked | not)' "idle lock authenticated" 15 || fail G-IDLE-FADE "idle lock failed to unlock through PAM"
+    gsettings set org.gnome.desktop.session idle-delay 300
+    gsettings set org.gnome.desktop.screensaver lock-delay 0
+    gsettings reset org.gnome.desktop.screensaver picture-uri
+    pass G-IDLE-FADE "idle fade cancels on activity, blanks before lock-delay, and wake keeps PAM mandatory"
+
 else
     echo "roost-gtk-shell-proof: G-UNLOCK skipped (no pam_wrapper)"
 fi
+
+# A real Wayland requester drives the GTK consent UI and PermissionStore,
+# rather than injecting an answer into the compositor's test state.
+for app in allow deny; do
+    cat >"$XDG_DATA_HOME/applications/roost-consent-$app.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=Consent $app
+Exec=true
+NoDisplay=true
+DESKTOP
+done
+for scenario in allow remembered-allow deny remembered-deny unknown; do
+    case "$scenario" in
+        *allow) consent_app=roost-consent-allow ;;
+        *deny) consent_app=roost-consent-deny ;;
+        unknown) consent_app=roost-consent-unknown ;;
+    esac
+    trigger="$ARTIFACTS/consent-$scenario.request"
+    consent_log="$ARTIFACTS/consent-$scenario.log"
+    rm -f "$trigger"
+    WAYLAND_DISPLAY="$SOCKET_NAME" "$ROOT/target/debug/examples/shortcut-inhibit-client" "$consent_app" "$trigger" >"$consent_log" 2>&1 &
+    INHIBITOR_PID=$!
+    cstate ".focused_app_id == \"$consent_app\"" "consent client focused" || fail G-SHORTCUT-CONSENT "requester did not focus"
+    touch "$trigger"
+    end=$(($(date +%s) + 10))
+    until grep -q INACTIVE "$consent_log" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+    grep -q INACTIVE "$consent_log" || fail G-SHORTCUT-CONSENT "request did not start inactive"
+    sleep 0.7
+    case "$scenario" in
+        remembered-allow)
+            end=$(($(date +%s) + 10))
+            until grep -q '^ACTIVE' "$consent_log" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+            grep -q '^ACTIVE' "$consent_log" || fail G-SHORTCUT-CONSENT "remembered grant did not activate"
+            ;;
+        remembered-deny) ;;
+        *)
+            "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-consent-$scenario.json" 20 || fail G-SHORTCUT-CONSENT "dialog dump failed"
+            showing "$ARTIFACTS/a11y-consent-$scenario.json" Allow || fail G-SHORTCUT-CONSENT "Allow missing"
+            showing "$ARTIFACTS/a11y-consent-$scenario.json" Deny || fail G-SHORTCUT-CONSENT "Deny missing"
+            showing "$ARTIFACTS/a11y-consent-$scenario.json" "You can restore shortcuts by pressing Super+Escape" || fail G-SHORTCUT-CONSENT "escape hint missing"
+            grep -q '^ACTIVE' "$consent_log" && fail G-SHORTCUT-CONSENT "request auto-granted before the user answered"
+            answer=Deny
+            [ "$scenario" = allow ] && answer=Allow
+            "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-consent-answer-$scenario.json" 20 --press "$answer" || fail G-SHORTCUT-CONSENT "could not answer"
+            sleep 0.7
+            ;;
+    esac
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-consent-after-$scenario.json" 20 || fail G-SHORTCUT-CONSENT "post-answer dump failed"
+    showing "$ARTIFACTS/a11y-consent-after-$scenario.json" "Allow inhibiting shortcuts" && fail G-SHORTCUT-CONSENT "dialog remained visible or remembered decision prompted"
+    case "$scenario" in
+        *allow)
+            grep -q '^ACTIVE' "$consent_log" || fail G-SHORTCUT-CONSENT "Allow did not activate"
+            xdotool key super+Escape
+            end=$(($(date +%s) + 5))
+            until [ "$(grep -c '^INACTIVE' "$consent_log" || true)" -ge 2 ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+            [ "$(grep -c '^INACTIVE' "$consent_log" || true)" -ge 2 ] || fail G-SHORTCUT-CONSENT "emergency escape did not restore shortcuts"
+            ;;
+        *) if grep -q '^ACTIVE' "$consent_log"; then fail G-SHORTCUT-CONSENT "Deny granted inhibition"; fi ;;
+    esac
+    kill "$INHIBITOR_PID" 2>/dev/null || true
+    wait "$INHIBITOR_PID" 2>/dev/null || true
+    INHIBITOR_PID=""
+    sleep 0.3
+done
+jq -e '."roost-consent-allow.desktop" == ["GRANTED"] and ."roost-consent-deny.desktop" == ["DENIED"] and (has("roost-consent-unknown.desktop") | not)' "$ARTIFACTS/shortcut-permissions.json" >/dev/null || fail G-SHORTCUT-CONSENT "PermissionStore did not remember exactly the known apps"
+pass G-SHORTCUT-CONSENT "live requests require Allow, Deny stays inactive, known app decisions persist without prompting, unknown apps are not remembered, Super+Escape restores input"
 
 "$ROOT/scripts/roost-a11y-golden" check "$ARTIFACTS" ||
     fail A11Y-GOLDEN "accessible trees differ from tests/a11y/ (see above)"

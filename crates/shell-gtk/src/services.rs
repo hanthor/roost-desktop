@@ -271,6 +271,10 @@ pub struct Widgets {
     pub panel_network: gtk::Image,
     pub panel_volume: gtk::Image,
     pub panel_power_profile: gtk::Image,
+    pub panel_battery: gtk::Box,
+    pub battery_icon: gtk::Image,
+    pub battery_percentage: gtk::Label,
+    pub battery_summary: gtk::Label,
     /// The microphone: the panel's privacy indicator and the slider row.
     pub panel_mic: gtk::Image,
     pub mic: gtk::Scale,
@@ -302,6 +306,7 @@ pub fn attach(w: &Rc<Widgets>) {
                 bluetooth(&conn, &w2);
                 power_profiles(&conn, &w2, 0);
                 brightness(&conn, &w2);
+                battery(&conn, &w2);
             }
             Err(e) => eprintln!("roost-shell-gtk: no system bus, service tiles hidden: {e}"),
         },
@@ -558,23 +563,70 @@ fn backlight() -> Option<(String, PathBuf)> {
     let root = std::env::var_os("ROOST_BACKLIGHT_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/sys/class/backlight"));
-    let mut entries: Vec<_> = std::fs::read_dir(&root).ok()?.flatten().collect();
+    backlight_for(&root, None)
+}
+
+/// Kernel backlights associated with a DRM connector have a cardN-CONNECTOR
+/// ancestor (directly or via `device`). Never substitute another monitor.
+fn backlight_for(root: &std::path::Path, output: Option<&str>) -> Option<(String, PathBuf)> {
+    let mut entries: Vec<_> = std::fs::read_dir(root).ok()?.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
-    let entry = entries.into_iter().next()?;
+    let entry = entries.into_iter().find(|entry| {
+        output.is_none_or(|output| {
+            [entry.path(), entry.path().join("device")]
+                .iter()
+                .filter_map(|path| std::fs::canonicalize(path).ok())
+                .any(|path| {
+                    path.ancestors().any(|ancestor| {
+                        ancestor
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .and_then(|name| name.strip_prefix("card"))
+                            .and_then(|name| name.split_once('-'))
+                            .is_some_and(|(card, connector)| {
+                                !card.is_empty()
+                                    && card.chars().all(|c| c.is_ascii_digit())
+                                    && connector == output
+                            })
+                    })
+                })
+        })
+    })?;
     Some((
         entry.file_name().to_string_lossy().into_owned(),
         entry.path(),
     ))
 }
 
+#[derive(Clone, Copy)]
+pub enum BrightnessStep {
+    Up,
+    Down,
+    Cycle,
+}
+
 /// GNOME's brightness keys (brightnessManager.js): step the backlight
 /// by a twentieth through logind and return the new level (0..1) for
 /// the OSD, or `None` without a backlight.
-pub fn step_brightness(up: bool) -> Option<f64> {
-    let (name, dir) = backlight()?;
+pub fn step_brightness_for(step: BrightnessStep, output: Option<&str>) -> Option<f64> {
+    let root = std::env::var_os("ROOST_BACKLIGHT_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/sys/class/backlight"));
+    let (name, dir) = backlight_for(&root, output)?;
     let max = read_u32(&dir.join("max_brightness"))?;
     let now = read_u32(&dir.join("brightness"))?;
-    let percent = logic::brightness_step(logic::brightness_percent(now, max), up);
+    let current = logic::brightness_percent(now, max);
+    let percent = match step {
+        BrightnessStep::Up => logic::brightness_step(current, true),
+        BrightnessStep::Down => logic::brightness_step(current, false),
+        BrightnessStep::Cycle => {
+            if current >= 100.0 {
+                0.0
+            } else {
+                logic::brightness_step(current, true)
+            }
+        }
+    };
     let value = logic::brightness_value(percent, max);
     let conn = gio::bus_get_sync(gio::BusType::System, gio::Cancellable::NONE).ok()?;
     conn.call(
@@ -856,4 +908,170 @@ fn volume(w: &Rc<Widgets>) {
         let read = read.clone();
         wpctl(&["set-mute", SINK, "toggle"], move |_| read());
     });
+}
+
+#[cfg(test)]
+mod monitor_backlight_tests {
+    use super::*;
+    #[test]
+    fn monitor_brightness_never_uses_a_different_connectors_backlight() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("backlight");
+        std::fs::create_dir_all(&root).unwrap();
+        for (name, connector) in [("aaa-external", "HDMI-A-1"), ("intel-backlight", "eDP-1")] {
+            let path = root.join(name);
+            let device = temp.path().join(format!("drm/card0-{connector}"));
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::create_dir_all(&device).unwrap();
+            symlink(device, path.join("device")).unwrap();
+        }
+        assert_eq!(
+            backlight_for(&root, Some("eDP-1")).unwrap().0,
+            "intel-backlight"
+        );
+        assert_eq!(
+            backlight_for(&root, Some("HDMI-A-1")).unwrap().0,
+            "aaa-external"
+        );
+        assert!(backlight_for(&root, Some("DP-2")).is_none());
+    }
+}
+
+/// UPower's aggregate display device describes all laptop batteries together.
+fn battery(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
+    const NAME: &str = "org.freedesktop.UPower";
+    let remote = Remote::new(
+        conn,
+        NAME,
+        "/org/freedesktop/UPower/devices/DisplayDevice",
+        "org.freedesktop.UPower.Device",
+    );
+    let settings = crate::settings(crate::INTERFACE_SCHEMA).filter(|settings| {
+        settings
+            .settings_schema()
+            .is_some_and(|schema| schema.has_key("show-battery-percentage"))
+    });
+    let refresh: Rc<dyn Fn()> = {
+        let (remote, w, settings) = (remote.clone(), w.clone(), settings.clone());
+        Rc::new(move || {
+            let (w, settings) = (w.clone(), settings.clone());
+            remote.get_all(move |props| {
+                let present = props.as_ref().is_some_and(|p| {
+                    dict_bool(p, "IsPresent").unwrap_or(false)
+                        && p.lookup_value("Type", None).and_then(|v| v.get::<u32>()) == Some(2)
+                });
+                w.panel_battery.set_visible(present);
+                w.battery_summary.set_visible(present);
+                let Some(props) = props.filter(|_| present) else {
+                    return;
+                };
+                let percent = props
+                    .lookup_value("Percentage", None)
+                    .and_then(|v| v.get::<f64>())
+                    .unwrap_or(0.0)
+                    .clamp(0.0, 100.0)
+                    .round() as u32;
+                let state = props
+                    .lookup_value("State", None)
+                    .and_then(|v| v.get::<u32>())
+                    .unwrap_or(0);
+                w.battery_icon
+                    .set_icon_name(Some(&battery_icon(percent, state)));
+                w.battery_percentage.set_text(&format!("{percent}%"));
+                w.battery_percentage.set_visible(
+                    settings
+                        .as_ref()
+                        .is_some_and(|s| s.boolean("show-battery-percentage")),
+                );
+                let seconds = props
+                    .lookup_value(
+                        if state == 1 {
+                            "TimeToFull"
+                        } else {
+                            "TimeToEmpty"
+                        },
+                        None,
+                    )
+                    .and_then(|v| v.get::<i64>())
+                    .unwrap_or(0);
+                let summary = battery_summary(percent, state, seconds);
+                w.battery_summary.set_text(&summary);
+                w.panel_battery.set_tooltip_text(Some(&summary));
+                w.battery_icon
+                    .update_property(&[gtk::accessible::Property::Label(&summary)]);
+            });
+        })
+    };
+    {
+        let refresh = refresh.clone();
+        remote.watch(move || refresh());
+    }
+    if let Some(settings) = settings {
+        let refresh = refresh.clone();
+        settings.connect_changed(Some("show-battery-percentage"), move |_, _| refresh());
+    }
+    watch_name(conn, NAME, move |_| refresh());
+}
+
+fn battery_icon(percent: u32, state: u32) -> String {
+    if state == 3 {
+        return "battery-empty-symbolic".into();
+    }
+    if state == 4 {
+        return "battery-level-100-charged-symbolic".into();
+    }
+    let level = percent.min(100) / 10 * 10;
+    format!(
+        "battery-level-{level}{}-symbolic",
+        if matches!(state, 1 | 5) {
+            "-charging"
+        } else {
+            ""
+        }
+    )
+}
+
+fn battery_summary(percent: u32, state: u32, seconds: i64) -> String {
+    let status = match state {
+        1 | 5 => "Charging",
+        3 => "Empty",
+        4 => "Fully charged",
+        _ => "Discharging",
+    };
+    if seconds > 0 && matches!(state, 1 | 2) {
+        let minutes = seconds / 60;
+        format!(
+            "{percent}% · {status} · {}∶{:02} {}",
+            minutes / 60,
+            minutes % 60,
+            if state == 1 {
+                "until full"
+            } else {
+                "remaining"
+            }
+        )
+    } else {
+        format!("{percent}% · {status}")
+    }
+}
+
+#[cfg(test)]
+mod battery_tests {
+    use super::*;
+    #[test]
+    fn upower_battery_states_choose_icons_and_remaining_time() {
+        assert_eq!(battery_icon(37, 2), "battery-level-30-symbolic");
+        assert_eq!(battery_icon(37, 1), "battery-level-30-charging-symbolic");
+        assert_eq!(battery_icon(0, 3), "battery-empty-symbolic");
+        assert_eq!(battery_icon(100, 4), "battery-level-100-charged-symbolic");
+        assert_eq!(
+            battery_summary(37, 2, 5400),
+            "37% · Discharging · 1∶30 remaining"
+        );
+        assert_eq!(
+            battery_summary(82, 1, 1800),
+            "82% · Charging · 0∶30 until full"
+        );
+    }
 }

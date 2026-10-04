@@ -173,6 +173,7 @@ pub struct NotifyUi {
     first_seen: RefCell<HashMap<u64, BannerTimer>>,
     /// The groups the user expanded, by source key.
     expanded: RefCell<HashSet<String>>,
+    group_widgets: RefCell<HashMap<String, Rc<crate::group_animation::Group>>>,
     shown: RefCell<Shown>,
     last_bus_try: RefCell<Option<Instant>>,
 }
@@ -286,6 +287,19 @@ impl NotifyUi {
         // The card's own 4px margin puts it 4px under the bar (GNOME).
         banner_window.set_margin(Edge::Top, 0);
         banner_window.set_keyboard_mode(KeyboardMode::None);
+        let keys = gtk::EventControllerKey::new();
+        let banner_weak = banner_window.downgrade();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if key == gtk::gdk::Key::Escape {
+                if let Some(window) = banner_weak.upgrade() {
+                    window.set_keyboard_mode(KeyboardMode::None);
+                }
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        banner_window.add_controller(keys);
         banner_window.set_title(Some("Notifications"));
         let banner_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
         banner_window.set_child(Some(&banner_box));
@@ -342,6 +356,7 @@ impl NotifyUi {
             clear_bound: std::cell::Cell::new(false),
             first_seen: RefCell::new(HashMap::new()),
             expanded: RefCell::new(HashSet::new()),
+            group_widgets: RefCell::new(HashMap::new()),
             shown: RefCell::new(Shown {
                 banners: vec![u64::MAX],
                 ..Default::default()
@@ -388,6 +403,24 @@ impl NotifyUi {
     /// Whether Do Not Disturb is on.
     pub fn dnd(&self) -> bool {
         self.center.lock().map(|c| c.dnd()).unwrap_or(false)
+    }
+
+    /// GNOME's Super+N gives the current banner keyboard focus.
+    pub fn focus_active(&self) {
+        if !self.banner_window.is_visible() {
+            return;
+        }
+        self.banner_window
+            .set_keyboard_mode(KeyboardMode::Exclusive);
+        self.banner_window.present();
+        self.banner_window.set_focus_visible(true);
+        self.banner_box.child_focus(gtk::DirectionType::TabForward);
+    }
+
+    /// A locked session must not keep the banner's exclusive keyboard grab.
+    pub fn release_focus(&self) {
+        self.banner_window.set_keyboard_mode(KeyboardMode::None);
+        self.banner_window.set_focus_visible(false);
     }
 
     /// Periodic work: claim the bus, expire banners, redraw on change.
@@ -498,9 +531,13 @@ impl NotifyUi {
             c.add_controller(click);
             self.banner_box.append(&c);
         }
+        if now.banners.is_empty() {
+            self.banner_window.set_keyboard_mode(KeyboardMode::None);
+        }
         self.banner_window.set_visible(!now.banners.is_empty());
 
         // History list.
+        self.group_widgets.borrow_mut().clear();
         while let Some(child) = self.list.first_child() {
             self.list.remove(&child);
         }
@@ -518,10 +555,15 @@ impl NotifyUi {
                     close.connect_clicked(move |_| me.remove(&[id]));
                     self.list.append(&c);
                 }
-                _ if now.expanded.contains(key) => {
-                    self.list.append(&self.expanded_group(key, &members));
+                _ => {
+                    let group = crate::group_animation::Group::new(
+                        &self.collapsed_group(key, &members),
+                        &self.expanded_group(key, &members),
+                        now.expanded.contains(key),
+                    );
+                    self.list.append(&group.widget);
+                    self.group_widgets.borrow_mut().insert(key.clone(), group);
                 }
-                _ => self.list.append(&self.collapsed_group(key, &members)),
             }
         }
         let any = !now.history.is_empty();
@@ -557,7 +599,16 @@ impl NotifyUi {
         } else {
             self.expanded.borrow_mut().remove(key);
         }
-        self.refresh();
+        let group = self.group_widgets.borrow().get(key).cloned();
+        if let Some(group) = group {
+            group.set_expanded(on);
+            // Prevent the refresh ticker rebuilding the group mid-animation.
+            let mut expanded: Vec<_> = self.expanded.borrow().iter().cloned().collect();
+            expanded.sort();
+            self.shown.borrow_mut().expanded = expanded;
+        } else {
+            self.refresh();
+        }
     }
 
     /// A collapsed group (2+ notifications), as GNOME 51 stacks it: the

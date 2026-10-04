@@ -29,6 +29,7 @@ def walk(acc, depth, out):
             "checked": acc.getState().contains(pyatspi.STATE_CHECKED)
             or acc.getState().contains(pyatspi.STATE_PRESSED),
             "selected": acc.getState().contains(pyatspi.STATE_SELECTED),
+            "focused": acc.getState().contains(pyatspi.STATE_FOCUSED),
         })
         for i in range(acc.childCount):
             child = acc.getChildAtIndex(i)

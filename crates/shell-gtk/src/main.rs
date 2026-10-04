@@ -18,6 +18,7 @@ mod calendar;
 mod events;
 mod folder_dialog;
 mod folders;
+mod group_animation;
 mod ibus_panel;
 mod keybindings;
 mod live_apps;
@@ -36,6 +37,7 @@ mod screensaver;
 mod screenshot_ui;
 mod services;
 mod shell_dbus;
+mod shortcut_consent;
 mod switcher;
 mod tray;
 mod wifi;
@@ -297,6 +299,14 @@ fn calendar_popover(notes: &gtk::Box) -> (gtk::Popover, Rc<calendar::CalendarUi>
         let cal = cal.clone();
         popover.connect_show(move |_| cal.reset());
     }
+    {
+        let popover = popover.downgrade();
+        cal.connect_open(move || {
+            if let Some(popover) = popover.upgrade() {
+                popover.popdown();
+            }
+        });
+    }
     (popover, cal)
 }
 
@@ -526,6 +536,9 @@ struct PanelIcons {
     dnd: gtk::Image,
     volume: gtk::Image,
     power_profile: gtk::Image,
+    battery: gtk::Box,
+    battery_icon: gtk::Image,
+    battery_percentage: gtk::Label,
 }
 
 fn quick_settings_popover(
@@ -863,6 +876,9 @@ fn quick_settings_popover(
         }
         None => night.present(false),
     }
+    let battery_summary = gtk::Label::new(None);
+    battery_summary.set_xalign(0.0);
+    battery_summary.set_visible(false);
     services::attach(&Rc::new(services::Widgets {
         wifi,
         wifi_menu,
@@ -880,6 +896,10 @@ fn quick_settings_popover(
         panel_network: icons.network,
         panel_volume: icons.volume,
         panel_power_profile: icons.power_profile,
+        panel_battery: icons.battery,
+        battery_icon: icons.battery_icon,
+        battery_percentage: icons.battery_percentage,
+        battery_summary: battery_summary.clone(),
         volume: slider,
         mute,
         brightness_row: brightness_row.clone(),
@@ -917,6 +937,7 @@ fn quick_settings_popover(
     }
 
     col.append(&top);
+    col.append(&battery_summary);
     col.append(&power_menu);
     col.append(&volume_row);
     col.append(&sound_menu_ui.revealer);
@@ -1119,6 +1140,14 @@ fn build(app: &adw::Application) {
     let panel_dnd = status_icon("notifications-disabled-symbolic", false);
     let panel_volume = status_icon("audio-volume-high-symbolic", false);
     let panel_power_profile = status_icon("power-profile-balanced-symbolic", false);
+    let panel_battery = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let battery_icon = gtk::Image::from_icon_name("battery-level-100-symbolic");
+    battery_icon.add_css_class("system-status-icon");
+    let battery_percentage = gtk::Label::new(None);
+    panel_battery.append(&battery_icon);
+    panel_battery.append(&battery_percentage);
+    panel_battery.set_visible(false);
+    indicators.append(&panel_battery);
     status_icon("system-shutdown-symbolic", true);
     let power_ui = {
         let shell = shell.clone();
@@ -1163,6 +1192,9 @@ fn build(app: &adw::Application) {
             dnd: panel_dnd,
             volume: panel_volume,
             power_profile: panel_power_profile,
+            battery: panel_battery,
+            battery_icon,
+            battery_percentage,
         },
     );
     let system = panel_menu_button(&indicators, "System", &qs);
@@ -1386,6 +1418,13 @@ fn build(app: &adw::Application) {
                     Action::ToggleApplicationView => {
                         overview::OverviewUi::toggle_apps(&overview_ui);
                     }
+                    Action::FocusActiveNotification => notify.focus_active(),
+                    Action::ShiftOverviewUp | Action::ShiftOverviewDown => {
+                        overview::OverviewUi::shift(
+                            &overview_ui,
+                            action == Action::ShiftOverviewUp,
+                        );
+                    }
                     Action::ToggleMessageTray => toggle(&clock),
                     Action::ToggleQuickSettings => toggle(&system),
                     Action::SwitchToApplication(n) => {
@@ -1522,9 +1561,40 @@ fn build(app: &adw::Application) {
                             );
                         }
                     }
-                    Action::BrightnessUp | Action::BrightnessDown => {
-                        let up = action == Action::BrightnessUp;
-                        if let Some(level) = services::step_brightness(up) {
+                    Action::BrightnessUp
+                    | Action::BrightnessDown
+                    | Action::BrightnessUpMonitor
+                    | Action::BrightnessDownMonitor
+                    | Action::BrightnessCycle
+                    | Action::BrightnessCycleMonitor => {
+                        let monitor = matches!(
+                            action,
+                            Action::BrightnessUpMonitor
+                                | Action::BrightnessDownMonitor
+                                | Action::BrightnessCycleMonitor
+                        );
+                        let output = shell
+                            .borrow()
+                            .control
+                            .as_ref()
+                            .and_then(|c| c.pointer_output().map(str::to_owned));
+                        // No pointer-output/backlight match means no write to a different screen.
+                        if monitor && output.is_none() {
+                            return;
+                        }
+                        let step = match action {
+                            Action::BrightnessUp | Action::BrightnessUpMonitor => {
+                                services::BrightnessStep::Up
+                            }
+                            Action::BrightnessDown | Action::BrightnessDownMonitor => {
+                                services::BrightnessStep::Down
+                            }
+                            _ => services::BrightnessStep::Cycle,
+                        };
+                        if let Some(level) = services::step_brightness_for(
+                            step,
+                            output.as_deref().filter(|_| monitor),
+                        ) {
                             osd_ui.show(&osd::OsdRequest {
                                 icon: Some("display-brightness-symbolic".into()),
                                 level: Some(level),
@@ -1607,8 +1677,10 @@ fn build(app: &adw::Application) {
     {
         let background = settings("org.gnome.desktop.background");
         let interface = settings(INTERFACE_SCHEMA);
+        let screensaver = settings(SCREENSAVER_SCHEMA);
         let publish: Rc<dyn Fn()> = {
-            let (background, interface) = (background.clone(), interface.clone());
+            let (background, interface, screensaver) =
+                (background.clone(), interface.clone(), screensaver.clone());
             Rc::new(move || {
                 let Some(bg) = background.as_ref() else {
                     return;
@@ -1616,7 +1688,7 @@ fn build(app: &adw::Application) {
                 let dark = interface
                     .as_ref()
                     .is_some_and(|i| i.string("color-scheme") == "prefer-dark");
-                let text = logic::wallpaper_drop(
+                let mut text = logic::wallpaper_drop(
                     &bg.string("picture-uri"),
                     &bg.string("picture-uri-dark"),
                     dark,
@@ -1632,6 +1704,28 @@ fn build(app: &adw::Application) {
                         .map(|i| i.string("accent-color").to_string())
                         .unwrap_or_default(),
                 );
+                let lock_uri = screensaver
+                    .as_ref()
+                    .filter(|s| {
+                        s.settings_schema()
+                            .is_some_and(|schema| schema.has_key("picture-uri"))
+                    })
+                    .map(|s| {
+                        let uri = s.string("picture-uri");
+                        if !uri.starts_with("file://") {
+                            return String::new();
+                        }
+                        // GIO decodes escaped path components before the
+                        // compositor's simple local-file drop reader.
+                        gio::File::for_uri(&uri)
+                            .path()
+                            .filter(|path| path.is_absolute())
+                            .map(|path| format!("file://{}", path.display()))
+                            .unwrap_or_default()
+                    })
+                    .unwrap_or_default();
+                text.push_str(&lock_uri);
+                text.push('\n');
                 let dir = std::env::var_os("XDG_RUNTIME_DIR")
                     .map(std::path::PathBuf::from)
                     .unwrap_or_else(std::env::temp_dir);
@@ -1643,7 +1737,7 @@ fn build(app: &adw::Application) {
             })
         };
         publish();
-        for s in [background, interface].into_iter().flatten() {
+        for s in [background, interface, screensaver].into_iter().flatten() {
             let publish = publish.clone();
             // `publish` holds both settings objects, so they live as long
             // as this handler does.
@@ -1697,6 +1791,15 @@ fn build(app: &adw::Application) {
                 }
                 if let Some(iface) = all[4].as_ref() {
                     out.hot_corners = iface.boolean("enable-hot-corners");
+                    if iface
+                        .settings_schema()
+                        .is_some_and(|schema| schema.has_key("enable-animations"))
+                    {
+                        out.enable_animations = iface.boolean("enable-animations");
+                    }
+                    if let Some(gtk_settings) = gtk::Settings::default() {
+                        gtk_settings.set_gtk_enable_animations(out.enable_animations);
+                    }
                 }
                 if let Some(control) = shell.borrow_mut().control.as_mut() {
                     let _ = control.set_input_settings(out);
@@ -1716,9 +1819,14 @@ fn build(app: &adw::Application) {
     {
         let session = settings(SESSION_SCHEMA);
         let screensaver = settings(SCREENSAVER_SCHEMA);
+        let interface = settings(INTERFACE_SCHEMA);
         let send: Rc<dyn Fn()> = {
-            let (shell, session, screensaver) =
-                (shell.clone(), session.clone(), screensaver.clone());
+            let (shell, session, screensaver, interface) = (
+                shell.clone(),
+                session.clone(),
+                screensaver.clone(),
+                interface.clone(),
+            );
             Rc::new(move || {
                 let idle = session
                     .as_ref()
@@ -1728,14 +1836,33 @@ fn build(app: &adw::Application) {
                     .as_ref()
                     .map(|s| (s.boolean("lock-enabled"), s.uint("lock-delay")))
                     .unwrap_or((true, 0));
-                let ms = logic::idle_lock_ms(idle, enabled, delay);
+                let animations = interface
+                    .as_ref()
+                    .filter(|s| {
+                        s.settings_schema()
+                            .is_some_and(|schema| schema.has_key("enable-animations"))
+                    })
+                    .is_none_or(|s| s.boolean("enable-animations"));
+                let ms = logic::idle_lock_ms(idle, enabled, delay, animations);
+                if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+                    let dir = std::path::PathBuf::from(dir);
+                    let temporary = dir.join(".roost-idle-blank.tmp");
+                    let policy = format!(
+                        "{}\n{}\n",
+                        u64::from(idle) * 1000,
+                        if animations { 10_000 } else { 0 }
+                    );
+                    if std::fs::write(&temporary, policy).is_ok() {
+                        let _ = std::fs::rename(temporary, dir.join("roost-idle-blank"));
+                    }
+                }
                 if let Some(control) = shell.borrow_mut().control.as_mut() {
                     let _ = control.set_idle_timeout(ms);
                 }
             })
         };
         send();
-        for settings in [session, screensaver].into_iter().flatten() {
+        for settings in [session, screensaver, interface].into_iter().flatten() {
             let send = send.clone();
             settings.connect_changed(None, move |_, _| send());
             // Keep the settings object (and its signal) alive.
@@ -1770,9 +1897,21 @@ fn build(app: &adw::Application) {
         )
     };
 
+    let shortcut_consent = {
+        let shell = shell.clone();
+        shortcut_consent::Consent::new(
+            app.upcast_ref(),
+            Rc::new(move |request, allow| {
+                if let Some(control) = shell.borrow_mut().control.as_mut() {
+                    let _ = control.shortcut_consent(request, allow);
+                }
+            }),
+        )
+    };
     // Compositor state: drain the control socket every frame.
     {
         let shell = shell.clone();
+        let notify = notify.clone();
         let overview_ui = overview_ui.clone();
         let switcher_ui = switcher_ui.clone();
         let panel_window = window.clone();
@@ -1796,6 +1935,7 @@ fn build(app: &adw::Application) {
             let mut results = Vec::new();
             let mut accelerators = Vec::new();
             let mut menus = Vec::new();
+            let mut consent = None;
             let mut popups = Vec::new();
             if let Some(control) = shell.control.as_mut() {
                 loop {
@@ -1804,6 +1944,7 @@ fn build(app: &adw::Application) {
                             let _ = control.request_snapshot();
                         }
                         Ok(Handled::WindowMenu(request)) => menus.push(request),
+                        Ok(Handled::ShortcutConsent(request)) => consent = Some(request),
                         Ok(Handled::WorkspacePopup { index, count }) => {
                             popups.push((index, count));
                         }
@@ -1843,8 +1984,16 @@ fn build(app: &adw::Application) {
                 .as_ref()
                 .is_some_and(|c| c.model().is_overview_open());
             drop(shell);
+            if locked {
+                notify.release_focus();
+            }
             lock_ui.sync(locked);
             screensaver.sync(locked);
+            if locked {
+                shortcut_consent.dismiss();
+            } else if let Some(request) = consent {
+                shortcut_consent.sync(request);
+            }
             for (action, time, mode) in accelerators {
                 gnome_shell.accelerator_activated(action, time, mode);
             }

@@ -26,6 +26,7 @@ struct Shown {
     /// (representative window, title, app id, the app's window count).
     items: Vec<SwitcherItem>,
     selected: Option<u64>,
+    all_windows: bool,
 }
 
 /// GNOME's ThumbnailSwitcher under the selected app: its windows' frames
@@ -58,6 +59,7 @@ pub struct SwitcherUi {
     thumbs: RefCell<Thumbs>,
     /// The frames last laid out, for the compositor to draw into.
     frames: RefCell<Vec<(u64, gtk::Box)>>,
+    window_frames: RefCell<Vec<(u64, gtk::Box)>>,
     /// When the selected app was selected (for the popup delay).
     selected_since: Cell<Option<(u64, Instant)>>,
     /// The tiles by representative window, to place the thumbnails.
@@ -110,6 +112,7 @@ impl SwitcherUi {
             thumbs_row,
             thumbs: Default::default(),
             frames: Default::default(),
+            window_frames: Default::default(),
             selected_since: Cell::new(None),
             tiles: Default::default(),
         })
@@ -134,6 +137,7 @@ impl SwitcherUi {
                     })
                     .collect(),
                 selected: model.switcher_app(),
+                all_windows: model.switcher_all_windows(),
             }
         } else {
             Shown::default()
@@ -167,6 +171,7 @@ impl SwitcherUi {
             }
         };
         let windows: Vec<(u64, String)> = app
+            .filter(|_| !now.all_windows)
             .map(|a| {
                 model
                     .app_windows(a)
@@ -299,6 +304,34 @@ impl SwitcherUi {
     /// Where the thumbnails' frames sit on screen, once laid out (none
     /// while hidden): what the compositor draws the windows into.
     pub fn thumbnail_frames(&self) -> Vec<SwitcherThumbnail> {
+        if self.window.is_visible() && self.shown.borrow().all_windows {
+            let geometry = gtk::gdk::Display::default()
+                .and_then(|d| d.monitors().item(0))
+                .and_downcast::<gtk::gdk::Monitor>()
+                .map(|m| m.geometry());
+            let (width, height) = geometry.map_or((1280, 800), |g| (g.width(), g.height()));
+            let x0 = (width - self.window.width()) / 2;
+            let y0 = (height - self.window.height()) / 2;
+            return self
+                .window_frames
+                .borrow()
+                .iter()
+                .filter_map(|(window, frame)| {
+                    if frame.width() == 0 || frame.height() == 0 {
+                        return None;
+                    }
+                    let p =
+                        frame.compute_point(&self.window, &gtk::graphene::Point::new(0.0, 0.0))?;
+                    Some(SwitcherThumbnail {
+                        window: *window,
+                        x: x0 + p.x() as i32,
+                        y: y0 + p.y() as i32,
+                        width: frame.width(),
+                        height: frame.height(),
+                    })
+                })
+                .collect();
+        }
         if !self.thumbs_window.is_visible() {
             return Vec::new();
         }
@@ -329,6 +362,7 @@ impl SwitcherUi {
             self.row.remove(&child);
         }
         self.tiles.borrow_mut().clear();
+        self.window_frames.borrow_mut().clear();
         let apps = self.apps.get();
         let width = gtk::gdk::Display::default()
             .and_then(|d| d.monitors().item(0))
@@ -355,20 +389,32 @@ impl SwitcherUi {
                 Some(icon) => gtk::Image::from_icon_name(&icon),
                 None => gtk::Image::from_icon_name("application-x-executable"),
             };
-            icon.set_pixel_size(icon_size);
+            icon.set_pixel_size(if now.all_windows { 32 } else { icon_size });
             // The app's name (window-backed apps: their app id), as
             // GNOME labels the tile.
-            let name = entry
-                .map(|e| e.name.clone())
-                .or_else(|| app_id.clone())
-                .unwrap_or_else(|| title.clone());
+            let name = if now.all_windows {
+                title.clone()
+            } else {
+                entry
+                    .map(|e| e.name.clone())
+                    .or_else(|| app_id.clone())
+                    .unwrap_or_else(|| title.clone())
+            };
             let label = gtk::Label::new(Some(&name));
             label.set_ellipsize(gtk::pango::EllipsizeMode::End);
             label.set_max_width_chars(1);
             label.set_hexpand(true);
             let tile = gtk::Box::new(gtk::Orientation::Vertical, 0);
             tile.add_css_class("item-box");
-            tile.set_size_request(icon_size + 31, icon_size + 31);
+            if now.all_windows {
+                let frame = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                frame.add_css_class("thumbnail");
+                frame.set_size_request(160, 100);
+                tile.append(&frame);
+                self.window_frames.borrow_mut().push((*id, frame));
+            } else {
+                tile.set_size_request(icon_size + 31, icon_size + 31);
+            }
             tile.append(&icon);
             tile.append(&label);
             self.tiles.borrow_mut().push((*id, tile.clone()));

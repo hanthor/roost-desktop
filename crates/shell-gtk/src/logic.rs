@@ -706,10 +706,11 @@ pub fn brightness_step(percent: f64, up: bool) -> f64 {
 }
 
 /// Backlight value for a slider percentage. Never zero: a black
-/// screen is not a brightness level (GNOME keeps a floor too).
+/// screen is not a brightness level. GNOME 51's sysfs backlight minimum
+/// is max(1, max_brightness / 100), so zero percent selects that floor.
 pub fn brightness_value(percent: f64, max: u32) -> u32 {
     let raw = (percent.clamp(0.0, 100.0) * max as f64 / 100.0).round() as u32;
-    raw.clamp(1.min(max), max)
+    raw.clamp((max / 100).max(1).min(max), max)
 }
 
 #[cfg(test)]
@@ -753,21 +754,27 @@ mod service_tests {
         assert_eq!(brightness_percent(512, 1024), 50.0);
         assert_eq!(brightness_percent(5, 0), 0.0);
         assert_eq!(brightness_value(50.0, 1024), 512);
-        assert_eq!(brightness_value(0.0, 1024), 1);
+        assert_eq!(brightness_value(0.0, 1024), 10);
+        assert_eq!(brightness_value(0.0, 1000), 10);
+        assert_eq!(brightness_value(0.0, 20), 1);
         assert_eq!(brightness_value(100.0, 1024), 1024);
         assert_eq!(brightness_value(30.0, 0), 0);
     }
 }
 
-/// Idle-lock timeout from GNOME's keys (#63), `0` for never: the screen
-/// blanks after `idle-delay` seconds (`0` never) and, with
-/// `lock-enabled`, locks `lock-delay` seconds later. Roost locks at that
-/// point (it has no separate blank stage yet).
-pub fn idle_lock_ms(idle_delay_s: u32, lock_enabled: bool, lock_delay_s: u32) -> u64 {
+/// Idle lock follows the screen shield: fade for ten seconds, then lock,
+/// or a longer configured lock-delay. Disabled animations remove that minimum.
+pub fn idle_lock_ms(
+    idle_delay_s: u32,
+    lock_enabled: bool,
+    lock_delay_s: u32,
+    animations: bool,
+) -> u64 {
     if idle_delay_s == 0 || !lock_enabled {
         return 0;
     }
-    (u64::from(idle_delay_s) + u64::from(lock_delay_s)) * 1000
+    u64::from(idle_delay_s) * 1000
+        + (u64::from(lock_delay_s) * 1000).max(if animations { 10_000 } else { 0 })
 }
 
 #[cfg(test)]
@@ -776,10 +783,16 @@ mod idle_tests {
 
     #[test]
     fn idle_lock_follows_gnome_keys() {
-        assert_eq!(idle_lock_ms(300, true, 0), 300_000, "GNOME 51 default");
-        assert_eq!(idle_lock_ms(300, true, 30), 330_000);
-        assert_eq!(idle_lock_ms(0, true, 0), 0, "idle-delay 0 is never");
-        assert_eq!(idle_lock_ms(300, false, 0), 0, "lock disabled");
+        assert_eq!(
+            idle_lock_ms(300, true, 0, true),
+            310_000,
+            "GNOME 51 default"
+        );
+        assert_eq!(idle_lock_ms(300, true, 30, true), 330_000);
+        assert_eq!(idle_lock_ms(2, true, 0, false), 2000);
+        assert_eq!(idle_lock_ms(2, true, 20, false), 22000);
+        assert_eq!(idle_lock_ms(0, true, 0, true), 0, "idle-delay 0 is never");
+        assert_eq!(idle_lock_ms(300, false, 0, true), 0, "lock disabled");
     }
 }
 

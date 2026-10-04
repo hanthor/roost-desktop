@@ -116,11 +116,20 @@ impl ProtocolVersion {
     ///
     /// `0.20` appends the shell-to-compositor `SetSwitcherKeys` command
     /// (GNOME's rebindable switcher keys), again last.
-    /// `0.21` appends window-backed icon metadata to WindowInfo.
+    ///
+    /// `0.21` appends `enable_animations` to `InputSettings`. Like earlier
+    /// positional struct extensions, the postcard body changes and both
+    /// sides ship together from this workspace.
+    ///
+    /// `0.22` appends shortcut inhibition consent requests and responses.
+    ///
+    /// `0.23` appends window/cycle switcher actions and pointer output.
+    ///
+    /// `0.24` appends window-backed icon metadata to WindowInfo.
     /// Postcard positional structs require peers to upgrade together.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 21,
+        minor: 24,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -137,7 +146,7 @@ impl ProtocolVersion {
     }
 }
 
-/// Version spoken by this crate (`0.2`).
+/// Version spoken by this crate.
 pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion::CURRENT;
 
 /// Window state owned by the compositor and mirrored to the shell.
@@ -326,6 +335,13 @@ pub enum CommandKind {
         /// Every bound chord.
         keys: Vec<SwitcherKey>,
     },
+    /// Trusted shell response to a compositor-issued consent request.
+    ShortcutConsent {
+        /// The pending request, never a window id.
+        request: u64,
+        /// Explicit Allow (or a remembered grant), otherwise Deny.
+        allow: bool,
+    },
 }
 
 /// Switcher thumbnails held at once.
@@ -361,6 +377,14 @@ pub enum SwitcherKeyKind {
     Group,
     /// `switch-group-backward`.
     GroupBackward,
+    /// WindowSwitcherPopup: one item for each window.
+    Windows,
+    WindowsBackward,
+    /// Immediate cycling, without showing a popup.
+    CycleWindows,
+    CycleWindowsBackward,
+    CycleGroup,
+    CycleGroupBackward,
 }
 
 /// One switcher thumbnail frame, in global logical pixels.
@@ -624,6 +648,13 @@ pub enum Message {
         /// How many workspaces there are (GNOME's dynamic count).
         count: u32,
     },
+    /// Show consent for this inhibitor; `None` dismisses a stale dialog.
+    ShortcutConsent {
+        /// Request id and stable application id (empty for unknown apps).
+        request: Option<(u64, String)>,
+    },
+    /// The connector under the pointer, used by per-monitor brightness keys.
+    PointerOutput { name: Option<String> },
 }
 
 /// GNOME's dynamic workspace count: one empty workspace always follows
@@ -668,6 +699,13 @@ pub struct InputSettings {
     pub mouse_speed_milli: i32,
     /// `org.gnome.desktop.interface enable-hot-corners`.
     pub hot_corners: bool,
+    /// `org.gnome.desktop.interface enable-animations` (default enabled).
+    #[serde(default = "animations_default")]
+    pub enable_animations: bool,
+}
+
+fn animations_default() -> bool {
+    true
 }
 
 impl Default for InputSettings {
@@ -687,6 +725,7 @@ impl Default for InputSettings {
             mouse_natural_scroll: false,
             mouse_speed_milli: 0,
             hot_corners: true,
+            enable_animations: true,
         }
     }
 }
@@ -717,6 +756,10 @@ pub enum SwitcherAction {
         /// The xkb keysym.
         keysym: u32,
     },
+    /// Window switcher: every window is a separate entry.
+    StepAllWindows { forward: bool },
+    /// Cycle immediately without a popup, optionally within the focused app.
+    Cycle { forward: bool, group: bool },
 }
 
 /// Compositor-minted activation Bearer [REDACTED] authorizing one privileged window action.
@@ -971,6 +1014,8 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
         | Message::AcceleratorActivated { .. }
         | Message::WindowMenu { .. }
         | Message::WorkspacePopup { .. }
+        | Message::PointerOutput { .. }
+        | Message::ShortcutConsent { .. }
         | Message::Command { .. }
         | Message::CommandResult { .. }
         | Message::Error { .. }
@@ -1034,8 +1079,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_21() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 21));
+    fn current_version_is_0_24() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 24));
     }
 
     #[test]
@@ -1062,8 +1107,12 @@ mod tests {
         assert!(ProtocolVersion::new(0, 17).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 18).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 19).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 20).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 21).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 22).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 22).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 23).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 24).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 25).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }

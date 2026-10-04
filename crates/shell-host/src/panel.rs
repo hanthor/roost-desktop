@@ -3670,8 +3670,11 @@ impl ShellHost {
             self.overview_hits.clear();
             self.settle_focus();
         }
-        self.model
-            .apply_switcher_state(model.is_switcher_open(), model.switcher_selection());
+        self.model.apply_switcher_state(
+            model.is_switcher_open(),
+            model.switcher_selection(),
+            model.switcher_all_windows(),
+        );
         // Keep switch-to-instance answers on compositor truth.
         self.windows.refresh(&self.model);
     }
@@ -4176,9 +4179,15 @@ fn pump_wayland(
         &fd,
         rustix::event::PollFlags::IN,
     )];
-    let readable = rustix::event::poll(&mut fds, 0)
-        .map(|n| n > 0)
-        .unwrap_or(false);
+    let readable = rustix::event::poll(
+        &mut fds,
+        Some(&rustix::event::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        }),
+    )
+    .map(|n| n > 0)
+    .unwrap_or(false);
     if readable {
         if let Some(guard) = queue.prepare_read() {
             guard.read().map_err(|e| PanelError::Flush(e.to_string()))?;

@@ -450,6 +450,7 @@ pub struct Runtime {
     /// from input timestamps. The hub mirror carries the flag to shell
     /// snapshots; the shell never owns it.
     lock: SessionLock,
+    blank: crate::lock::IdleBlank,
     /// On-demand XWayland server supervisor. Idle until the first X11
     /// need is recorded via [`Runtime::request_x11`]; the window-model
     /// join installs the real spawner, until then ticks are no-ops.
@@ -481,6 +482,7 @@ pub struct Runtime {
     /// time; drawn eased), moving toward the open state each frame.
     overview_progress: f64,
     overview_progress_at: Instant,
+    tile_animation: Option<(u64, crate::animation::EaseRect, Instant)>,
     /// Last strip-view spring step, for the per-frame time delta.
     strip_view_at: Instant,
     /// A three-finger vertical swipe driving the transition: the
@@ -776,6 +778,7 @@ impl Runtime {
             wallpaper: Wallpaper::new(),
             triggers: TriggerState::default(),
             lock: SessionLock::new(idle_timeout_ms()),
+            blank: crate::lock::IdleBlank::default(),
             xwayland: XWaylandSupervisor::new(),
             loop_handle,
             #[cfg(feature = "xwayland")]
@@ -790,6 +793,7 @@ impl Runtime {
             shell_swipe: None,
             overview_progress: 0.0,
             overview_progress_at: Instant::now(),
+            tile_animation: None,
             strip_view_at: Instant::now(),
             overview_swipe_from: None,
             scale: clamp_scale(session.scale),
@@ -872,6 +876,10 @@ impl Runtime {
         )
     }
 
+    fn blank_alpha(&self) -> f32 {
+        self.blank.alpha(self.lock.idle_ms(self.lock_now_ms()))
+    }
+
     /// Whether the session is locked (hub flag: what the snapshots say).
     fn is_locked(&self) -> bool {
         self.control.is_locked()
@@ -883,6 +891,7 @@ impl Runtime {
     fn engage_lock(&mut self) {
         self.lock.lock();
         self.control.set_locked(true);
+        self.state.set_shortcut_inhibition_locked(true);
         self.control.set_overview(false);
         self.overlay.show(Vec::new());
     }
@@ -931,6 +940,7 @@ impl Runtime {
         if ok && self.is_locked() {
             self.lock.unlock(self.lock_now_ms());
             self.control.set_locked(false);
+            self.state.set_shortcut_inhibition_locked(false);
             self.overlay.hide();
         }
         self.control.finish_unlock(request, ok);
@@ -946,6 +956,7 @@ impl Runtime {
     fn on_manager_input(&mut self, input: ManagerInput) {
         // Every timestamped event feeds the idle accumulator first,
         // including events consumed below: activity is activity.
+        let waking_blank = self.blank_alpha() > 0.0;
         self.lock.note_input(input_time(&input));
         self.idle_since = Instant::now();
         self.idle_monitor.activity();
@@ -963,6 +974,11 @@ impl Runtime {
             for (action, time, mode) in self.manager.take_accelerators_fired() {
                 self.control.queue_accelerator(action, time, mode);
             }
+            return;
+        }
+        if waking_blank {
+            // Activity cancels the idle shield; the wake event belongs to
+            // that shield, not the previously focused application.
             return;
         }
         // Three-finger swipes are the shell's (GNOME 51): consumed here,
@@ -1220,10 +1236,12 @@ impl Runtime {
         let doc = serde_json::json!({
             "x11_display": self.x11_display.map(|d| format!(":{d}")),
             "idle_timeout_ms": self.lock.timeout_ms(),
+            "idle_blank_alpha": self.blank_alpha(),
             "overview_search": self.overview_search,
             "overview_app_grid": self.overview_app_grid,
             "keyboard": keyboard,
             "overview_open": overview_open,
+            "animations_enabled": self.input_settings.enable_animations,
             "locked": self.is_locked(),
             "active_workspace": model.active_workspace(),
             "focused": focused,
@@ -1354,7 +1372,11 @@ impl Runtime {
             } else {
                 0.0
             };
-            let step = dt / crate::overview::TRANSITION_MS;
+            let step = if self.input_settings.enable_animations {
+                dt / crate::overview::TRANSITION_MS
+            } else {
+                1.0
+            };
             self.overview_progress = if target > self.overview_progress {
                 (self.overview_progress + step).min(target)
             } else {
@@ -1362,6 +1384,44 @@ impl Runtime {
             };
         }
         self.overview_progress > 0.0
+    }
+
+    fn animated_tile_preview(
+        &mut self,
+        target: Option<(u64, Rectangle<i32, Logical>)>,
+    ) -> Option<(u64, Rectangle<i32, Logical>)> {
+        let Some((id, to)) = target else {
+            self.tile_animation = None;
+            return None;
+        };
+        let now = Instant::now();
+        let unchanged = self
+            .tile_animation
+            .as_ref()
+            .is_some_and(|(old, animation, _)| *old == id && animation.to == to);
+        if !unchanged {
+            let from = self
+                .tile_animation
+                .as_ref()
+                .filter(|(old, _, _)| *old == id)
+                .map(|(_, animation, start)| {
+                    animation.value_at(
+                        now.duration_since(*start).as_secs_f64(),
+                        self.input_settings.enable_animations,
+                    )
+                })
+                .or_else(|| self.manager.render_geometry(id))
+                .unwrap_or(to);
+            self.tile_animation = Some((id, crate::animation::EaseRect { from, to }, now));
+        }
+        let (_, animation, start) = self.tile_animation.as_ref()?;
+        Some((
+            id,
+            animation.value_at(
+                now.duration_since(*start).as_secs_f64(),
+                self.input_settings.enable_animations,
+            ),
+        ))
     }
 
     /// Advance the scroll-mode strip view on its spring by the time
@@ -1502,8 +1562,14 @@ impl Runtime {
                         let from = *self
                             .overview_swipe_from
                             .get_or_insert(self.overview_progress);
-                        self.overview_progress =
-                            (from - travel.y / OVERVIEW_SWIPE_DISTANCE).clamp(0.0, 1.0);
+                        let progress = (from - travel.y / OVERVIEW_SWIPE_DISTANCE).clamp(0.0, 1.0);
+                        self.overview_progress = if self.input_settings.enable_animations {
+                            progress
+                        } else if progress >= 0.5 {
+                            1.0
+                        } else {
+                            0.0
+                        };
                     }
                     true
                 }
@@ -1722,6 +1788,7 @@ impl Runtime {
                 Target {
                     damage: Rectangle::from_size(size),
                     scale,
+                    blank_alpha: 0.0,
                 },
                 &[],
                 &[],
@@ -1757,12 +1824,14 @@ impl Runtime {
         if self.is_locked() {
             return None;
         }
+        let blank_alpha = self.blank_alpha();
         let overview = (self.overview_progress > 0.0).then(|| self.overview_layout());
         let cards = overview.as_ref().filter(|_| !self.overview_search);
         let tile = overview
             .is_none()
             .then(|| self.manager.tile_preview(&self.state))
             .flatten();
+        let tile = self.animated_tile_preview(tile);
         let accent = self.wallpaper.accent();
         let decor_global = cards
             .map(|layout| overview_decor(layout, accent))
@@ -1855,6 +1924,7 @@ impl Runtime {
                 Target {
                     damage,
                     scale: view.scale,
+                    blank_alpha,
                 },
                 &decor,
                 &previews,
@@ -2008,6 +2078,15 @@ impl Runtime {
         self.manager
             .apply_keyboard_settings(&mut self.state, &settings);
         self.triggers.set_hot_corner(settings.hot_corners);
+        self.manager
+            .set_animations_enabled(settings.enable_animations);
+        if !settings.enable_animations {
+            self.overview_progress = if self.control.overview_open() {
+                1.0
+            } else {
+                0.0
+            };
+        }
         #[cfg(feature = "drm")]
         if let Backend::Drm(drm) = &mut self.backend {
             drm.apply_input_settings(&settings);
@@ -2146,6 +2225,12 @@ impl Runtime {
     }
 
     fn tick(&mut self) -> Result<bool, RuntimeError> {
+        if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+            let text =
+                std::fs::read_to_string(std::path::PathBuf::from(dir).join("roost-idle-blank"))
+                    .unwrap_or_default();
+            self.blank = crate::lock::IdleBlank::parse(&text);
+        }
         self.display
             .dispatch_clients(&mut self.state)
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
@@ -2175,9 +2260,31 @@ impl Runtime {
         // short comparison. The inventory is the compositor's tracking
         // handed over as-is — never a parallel database.
         self.control.set_outputs(self.state.output_infos());
+        let pointer = self.manager.pointer_pos();
+        let output = self
+            .state
+            .outputs
+            .iter()
+            .find(|output| {
+                pointer.x >= f64::from(output.loc.0)
+                    && pointer.y >= f64::from(output.loc.1)
+                    && pointer.x < f64::from(output.loc.0 + output.size.w)
+                    && pointer.y < f64::from(output.loc.1 + output.size.h)
+            })
+            .map(|output| output.name.clone());
+        self.control.set_pointer_output(output);
         let outcome = self.control.poll(self.manager.model_mut());
         for id in outcome.activated {
             self.manager.focus(&mut self.state, Some(id));
+        }
+        for (request, allow) in outcome.shortcut_consent {
+            if !self.is_locked() {
+                self.state.answer_shortcut_consent(request, allow);
+            }
+        }
+        if let Some(request) = self.state.take_shortcut_consent_update() {
+            self.control
+                .queue_message(roost_shell_control::Message::ShortcutConsent { request });
         }
         for id in outcome.closed {
             self.manager.close_window(id);
@@ -2388,6 +2495,7 @@ impl Runtime {
     /// no wallpaper — over a dark lock background.
     fn render(&mut self) -> Result<(), RuntimeError> {
         let locked = self.is_locked();
+        let blank_alpha = self.blank_alpha();
         let show_content = content_visible(locked);
         let overlay_visible = self.overlay.visible;
         let background = if locked {
@@ -2410,6 +2518,7 @@ impl Runtime {
         let tile = (show_content && overview.is_none())
             .then(|| self.manager.tile_preview(&self.state))
             .flatten();
+        let tile = self.animated_tile_preview(tile);
         let accent = self.wallpaper.accent();
         let decor_global = cards
             .map(|layout| overview_decor(layout, accent))
@@ -2422,6 +2531,7 @@ impl Runtime {
         let show_paper = show_content && !overlay_visible && overview.is_none();
         match &mut self.backend {
             Backend::Winit(backend) => {
+                backend.window().set_cursor_visible(blank_alpha < 1.0);
                 let size = backend.window_size();
                 let damage = Rectangle::from_size(size);
                 {
@@ -2494,6 +2604,7 @@ impl Runtime {
                         Target {
                             damage,
                             scale: view.scale,
+                            blank_alpha,
                         },
                         &decor,
                         &previews,
@@ -2618,13 +2729,14 @@ impl Runtime {
                             Target {
                                 damage,
                                 scale: view.scale,
+                                blank_alpha,
                             },
                             &decor,
                             &previews,
                         )?;
                         // Software pointer on top (no host cursor on
                         // bare hardware); hidden while locked.
-                        if !locked {
+                        if !locked && blank_alpha < 1.0 {
                             let (outline, fill) =
                                 crate::drm::cursor_rects(pointer, out.loc, out.scale);
                             let clip = |rects: Vec<Rectangle<i32, smithay::utils::Physical>>| {
@@ -2849,7 +2961,7 @@ fn switcher_previews(
 /// slotted in: `elements[..above]` draw over the preview (the dragged
 /// window, its popups and the shell's layers), the rest beneath it.
 struct Scene {
-    elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
+    elements: Vec<PreviewElement>,
     above: usize,
     tile: Vec<smithay::backend::renderer::element::solid::SolidColorRenderElement>,
     /// Window thumbnails over everything (the Alt+Tab switcher's).
@@ -2861,7 +2973,16 @@ impl Scene {
     fn flat(elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>) -> Self {
         let above = elements.len();
         Self {
-            elements,
+            elements: elements
+                .into_iter()
+                .map(|element| {
+                    use smithay::backend::renderer::element::Element;
+                    let origin = element.geometry(1.0.into()).loc;
+                    smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
+                        element, origin, 1.0,
+                    )
+                })
+                .collect(),
             above,
             tile: Vec::new(),
             top: Vec::new(),
@@ -3031,21 +3152,33 @@ fn scene_elements(
         }
         return Scene::flat(crate::layer::front_to_back(elements));
     }
-    let mut elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
+    let mut elements: Vec<PreviewElement> = Vec::new();
     // Bottom-to-top index where the dragged window starts.
     let mut split_from = None;
     let tree = |renderer: &mut GlesRenderer,
-                elements: &mut Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
+                elements: &mut Vec<PreviewElement>,
                 surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
-                at: Point<i32, Logical>| {
-        elements.extend(render_elements_from_surface_tree(
-            renderer,
-            surface,
-            view.physical(f64::from(at.x), f64::from(at.y)),
-            view.scale,
-            1.0,
-            Kind::Unspecified,
-        ));
+                at: Point<i32, Logical>,
+                sx: f64| {
+        let origin = view.physical(f64::from(at.x), f64::from(at.y));
+        elements.extend(
+            render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(
+                renderer,
+                surface,
+                origin,
+                view.scale,
+                1.0,
+                Kind::Unspecified,
+            )
+            .into_iter()
+            .map(|element| {
+                smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
+                    element,
+                    origin,
+                    (sx, 1.0),
+                )
+            }),
+        );
     };
     for (window, geometry) in manager.render_windows() {
         // Unassociated X11 windows contribute no surface yet and
@@ -3055,19 +3188,24 @@ fn scene_elements(
                 split_from = Some(elements.len());
             }
             let origin = crate::popup::surface_origin(&surface, geometry.loc);
-            tree(renderer, &mut elements, &surface, origin);
+            let sx = if manager.session_mode() == crate::windows::SessionMode::Scroll {
+                f64::from(geometry.size.w) / f64::from(window.geometry().size.w.max(1))
+            } else {
+                1.0
+            };
+            tree(renderer, &mut elements, &surface, origin, sx);
             // Popups (#88) right above their window.
             for popup in crate::popup::placed_popups(&surface, origin, true) {
-                tree(renderer, &mut elements, &popup.surface, popup.origin);
+                tree(renderer, &mut elements, &popup.surface, popup.origin, 1.0);
             }
         }
     }
     // Layer shell above windows: panel strip, then overview, each with
     // its popups (toolkit popovers hang off layer surfaces).
     for (surface, (x, y), _) in crate::layer::layer_layout(state) {
-        tree(renderer, &mut elements, &surface, (x, y).into());
+        tree(renderer, &mut elements, &surface, (x, y).into(), 1.0);
         for popup in crate::popup::placed_popups(&surface, (x, y).into(), false) {
-            tree(renderer, &mut elements, &popup.surface, popup.origin);
+            tree(renderer, &mut elements, &popup.surface, popup.origin, 1.0);
         }
     }
     // `elements` accumulates bottom-to-top (windows, then
@@ -3132,6 +3270,7 @@ fn backdrop(
 struct Target {
     damage: Rectangle<i32, smithay::utils::Physical>,
     scale: f64,
+    blank_alpha: f32,
 }
 
 fn draw_scene(
@@ -3145,7 +3284,11 @@ fn draw_scene(
     decor: &[(Color32F, Vec<Rectangle<i32, smithay::utils::Physical>>)],
     previews: &[PreviewElement],
 ) -> Result<(), RuntimeError> {
-    let Target { damage, scale } = target;
+    let Target {
+        damage,
+        scale,
+        blank_alpha,
+    } = target;
     frame
         .clear(background, &[damage])
         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
@@ -3188,6 +3331,19 @@ fn draw_scene(
         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
     if !scene.top.is_empty() {
         draw_render_elements(frame, scale, &scene.top, &[damage])
+            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    }
+    if blank_alpha > 0.0 {
+        use smithay::backend::renderer::element::{solid::SolidColorRenderElement, Id, Kind};
+        thread_local! { static SHIELD: Id = Id::new(); }
+        let shield = SolidColorRenderElement::new(
+            SHIELD.with(Clone::clone),
+            damage,
+            0usize,
+            Color32F::new(0.0, 0.0, 0.0, blank_alpha),
+            Kind::Unspecified,
+        );
+        draw_render_elements::<GlesRenderer, _, _>(frame, 1.0, &[shield], &[damage])
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
     }
     Ok(())
