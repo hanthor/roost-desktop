@@ -191,6 +191,8 @@ press() { "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$WORK/pr
 # Park the pointer where nothing reacts to it: GNOME's scripted
 # reference has no pointer motion, so nothing there shows hover.
 park() { xdotool mousemove --window "$WID" $((WIDTH - 4)) $((HEIGHT - 4)); }
+
+
 window_menu() {
     header="$(jq -r '.focused_rect | "\(.[0] + 60) \(.[1] + 20)"' "$ROOST_COMPOSITOR_STATE")"
     # shellcheck disable=SC2086
@@ -199,7 +201,6 @@ window_menu() {
     xdotool click 3
     sleep 1
 }
-
 
 # A fresh wallpaper decodes once (then comes from the cache): wait for it.
 for _ in $(seq 1 60); do grep -q "wallpaper decoded" "$LOG" 2>/dev/null && break; sleep 0.5; done

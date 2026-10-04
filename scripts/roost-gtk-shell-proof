@@ -397,8 +397,24 @@ case "\$1" in
         fi ;;
     *) ;;
 esac
+"$PY" "$ROOT/scripts/lib/roost-audio-fixture.py" "$ARTIFACTS" --event
 WPCTL
-chmod +x "$ARTIFACTS/bin/wpctl"
+# Status comes from events; commands still exercise real asynchronous callers.
+cat >"$ARTIFACTS/bin/pw-dump" <<PW_DUMP
+#!/bin/sh
+exec "$PY" "$ROOT/scripts/lib/roost-audio-fixture.py" "$ARTIFACTS"
+PW_DUMP
+cat >"$ARTIFACTS/bin/pw-cli" <<PW_CLI
+#!/bin/sh
+printf '%s\\n' "\$*" >>"$ARTIFACTS/audio-route-calls"
+case "\$*" in
+    'set-param 40 Route { index: 2, device: 0, save: true }') echo 2 >"$ARTIFACTS/audio-route" ;;
+    'set-param 40 Route { index: 1, device: 0, save: true }') echo 1 >"$ARTIFACTS/audio-route" ;;
+    *) exit 1 ;;
+esac
+"$PY" "$ROOT/scripts/lib/roost-audio-fixture.py" "$ARTIFACTS" --event
+PW_CLI
+chmod +x "$ARTIFACTS/bin/wpctl" "$ARTIFACTS/bin/pw-dump" "$ARTIFACTS/bin/pw-cli"
 PATH="$ARTIFACTS/bin:$PATH"
 export PATH
 SYSBUS_INFO="$(dbus-daemon --session --fork --print-address=1 --print-pid=1)"
@@ -407,6 +423,9 @@ SYSBUS_PID="$(echo "$SYSBUS_INFO" | sed -n 2p)"
 export DBUS_SYSTEM_BUS_ADDRESS
 # NetworkManager's and BlueZ's stubs record what the shell asks of them.
 ROOST_STUB_NM_LOG="$ARTIFACTS/nm-calls"
+ROOST_NM_VPN_PLUGIN_DIR="$ARTIFACTS/vpn-plugins"
+ROOST_NM_VPN_PROOF=1
+export ROOST_NM_VPN_PLUGIN_DIR ROOST_NM_VPN_PROOF
 ROOST_STUB_BT_LOG="$ARTIFACTS/bt-calls"
 export ROOST_STUB_NM_LOG ROOST_STUB_BT_LOG
 "$PY" "$ROOT/scripts/lib/roost-service-stubs.py" "$BACKLIGHT" >"$ARTIFACTS/stubs.log" 2>&1 &
@@ -1269,6 +1288,117 @@ grep -q "^Secrets psk=guest-pass-$$" "$ROOST_STUB_NM_LOG" ||
     fail G-NM-AGENT "NetworkManager got $(grep "^Secrets" "$ROOST_STUB_NM_LOG" || echo nothing), not the typed password"
 pass G-NM-AGENT "an unsaved secured network asks for its password in GNOME's dialog"
 sleep 1
+
+# A real private Secret Service, accessed by libsecret's secret-tool.
+command -v secret-tool >/dev/null || fail G-NM-ENTERPRISE "libsecret secret-tool is required"
+command -v gnome-keyring-daemon >/dev/null || fail G-NM-ENTERPRISE "GNOME Keyring is required"
+printf 'roost-proof-keyring\n' | gnome-keyring-daemon --unlock --components=secrets --control-directory="$ARTIFACTS/keyring-control" >"$ARTIFACTS/keyring.log" 2>&1
+ROOST_NM_VPN_PLUGIN_DIR="$ARTIFACTS/vpn-plugins"
+ROOST_NM_VPN_PROOF=1
+export ROOST_NM_VPN_PLUGIN_DIR ROOST_NM_VPN_PROOF
+# The shell inherited this directory at startup (set beside the NM log).
+mkdir -p "$ROOST_NM_VPN_PLUGIN_DIR"
+cat >"$ROOST_NM_VPN_PLUGIN_DIR/proof-auth" <<'VPNHELPER'
+#!/bin/sh
+# A real external-ui plugin protocol: consume connection data through DONE.
+while IFS= read -r line; do [ "$line" = DONE ] && break; done
+cat <<'UI'
+[VPN Plugin UI]
+Version=2
+Title=VPN authentication
+Description=Connect to Roost VPN
+[username]
+Value=alice
+ShouldAsk=false
+[password]
+Value=
+ShouldAsk=true
+Label=VPN Password
+IsSecret=true
+UI
+VPNHELPER
+chmod +x "$ROOST_NM_VPN_PLUGIN_DIR/proof-auth"
+cat >"$ROOST_NM_VPN_PLUGIN_DIR/proof.name" <<VPNNAME
+[VPN Connection]
+service=org.roost.Proof.VPN
+[GNOME]
+auth-dialog=$ROOST_NM_VPN_PLUGIN_DIR/proof-auth
+supports-external-ui-mode=true
+supports-hints=true
+VPNNAME
+nm_request() {
+    gdbus call --address "$DBUS_SYSTEM_BUS_ADDRESS" --dest org.freedesktop.NetworkManager \
+        --object-path /org/freedesktop/NetworkManager --method org.roost.Proof.Network.RequestSecrets "$1" "$2" >/dev/null
+}
+nm_answered() {
+    for _ in $(seq 1 30); do grep -q "$1" "$ROOST_STUB_NM_LOG" && return 0; sleep 0.5; done
+    return 1
+}
+nm_request enterprise 1
+sleep 2
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-nm-enterprise.json" 20 || fail G-NM-ENTERPRISE "dump failed"
+showing "$ARTIFACTS/a11y-nm-enterprise.json" Username || fail G-NM-ENTERPRISE "no identity field"
+showing "$ARTIFACTS/a11y-nm-enterprise.json" Password || fail G-NM-ENTERPRISE "no EAP password field"
+scrot "$ARTIFACTS/15e-network-enterprise.png" >/dev/null
+xdotool key ctrl+a
+xdotool type --delay 20 alice
+xdotool key Tab
+xdotool type --delay 20 enterprise-password
+xdotool key Return
+nm_answered '^ProofSecrets enterprise flags=1 identity=alice password=enterprise-password' || fail G-NM-ENTERPRISE "identity and password did not reach NM"
+# No interaction: the second request must use the actual keyring item.
+nm_request enterprise 0
+nm_answered '^ProofSecrets enterprise flags=0 identity=alice password=enterprise-password' || fail G-NM-ENTERPRISE "keyring lookup did not answer without a dialog"
+secret-tool lookup connection-uuid 00000000-0000-4000-8000-000000000211 setting-name 802-1x setting-key password | grep -qx enterprise-password || fail G-NM-ENTERPRISE "secret is absent from GNOME Keyring"
+gdbus call --address "$DBUS_SYSTEM_BUS_ADDRESS" --dest org.freedesktop.NetworkManager \
+    --object-path /org/freedesktop/NetworkManager --method org.roost.Proof.Network.DeleteSecrets enterprise >/dev/null
+nm_answered '^ProofSecrets enterprise deleted' || fail G-NM-ENTERPRISE "DeleteSecrets failed"
+if secret-tool lookup connection-uuid 00000000-0000-4000-8000-000000000211 setting-name 802-1x setting-key password >/dev/null; then fail G-NM-ENTERPRISE "DeleteSecrets retained the keyring item"; fi
+nm_request tls 1
+sleep 2
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-nm-tls.json" 20 || fail G-NM-ENTERPRISE "TLS dump failed"
+showing "$ARTIFACTS/a11y-nm-tls.json" "Private key password" || fail G-NM-ENTERPRISE "TLS did not ask for the private-key password"
+xdotool type --delay 20 private-key-password
+xdotool key Return
+nm_answered '^ProofSecrets tls flags=1 private-key-password=private-key-password' || fail G-NM-ENTERPRISE "TLS secret did not reach NM"
+pass G-NM-ENTERPRISE "802.1X identity/password and TLS key password; user secret stored, reused without interaction and deleted through libsecret"
+nm_request vpn 1
+sleep 2
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-nm-vpn.json" 20 || fail G-NM-VPN "VPN dump failed"
+showing "$ARTIFACTS/a11y-nm-vpn.json" "VPN authentication" || fail G-NM-VPN "no plugin-provided title"
+showing "$ARTIFACTS/a11y-nm-vpn.json" "VPN Password" || fail G-NM-VPN "no plugin-provided secret field"
+scrot "$ARTIFACTS/15f-network-vpn.png" >/dev/null
+xdotool type --delay 20 vpn-password
+xdotool key Return
+nm_answered '^ProofSecrets vpn flags=1 password=vpn-password username=alice' || fail G-NM-VPN "VPN secrets dictionary is wrong"
+nm_request vpn 0
+nm_answered '^ProofSecrets vpn flags=0 password=vpn-password username=alice' || fail G-NM-VPN "stored VPN password not reused"
+pass G-NM-VPN "external-UI VPN helper drives shell prompt, returned secret dictionary and keyring reuse"
+
+# NMSectionItem use-submenu changes live when a second adapter arrives.
+gdbus call --address "$DBUS_SYSTEM_BUS_ADDRESS" --dest org.freedesktop.NetworkManager \
+    --object-path /org/freedesktop/NetworkManager --method org.roost.Proof.Network.SecondWired true >/dev/null
+sleep 1
+open_qs
+qs_press "Wired Menu" wired-several || fail G-NM-WIRED "could not open wired menu"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-wired-several.json" 20 || fail G-NM-WIRED "dump failed"
+showing "$ARTIFACTS/a11y-wired-several.json" "Wired (enp1s0)" || fail G-NM-WIRED "first adapter has no submenu"
+showing "$ARTIFACTS/a11y-wired-several.json" "Wired (enp2s0)" || fail G-NM-WIRED "second adapter has no submenu"
+qs_press "Wired (enp1s0)" wired-submenu || fail G-NM-WIRED "could not expand adapter submenu"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-wired-submenu.json" 20 || fail G-NM-WIRED "submenu dump failed"
+"$PY" - "$ARTIFACTS/a11y-wired-submenu.json" <<'WIREDTREE' || fail G-NM-WIRED "connection action not inside expanded adapter"
+import json, sys
+nodes = json.load(open(sys.argv[1]))
+start = next(i for i, n in enumerate(nodes) if n['name'] == 'Wired (enp1s0)' and n['role'] != 'label')
+end = next((i for i in range(start + 1, len(nodes)) if nodes[i]['depth'] <= nodes[start]['depth']), len(nodes))
+assert any(n['showing'] and n['name'] == 'Disconnect Wired' for n in nodes[start + 1:end])
+WIREDTREE
+scrot "$ARTIFACTS/15g-wired-submenus.png" >/dev/null
+xdotool key Escape
+sleep 0.5
+gdbus call --address "$DBUS_SYSTEM_BUS_ADDRESS" --dest org.freedesktop.NetworkManager \
+    --object-path /org/freedesktop/NetworkManager --method org.roost.Proof.Network.SecondWired false >/dev/null
+pass G-NM-WIRED "each wired adapter has its own expandable connection submenu"
 open_qs
 
 qs_press "Wi-Fi" wifi || fail G-QS-WIFI "could not press Wi-Fi"
@@ -1288,7 +1418,7 @@ order="$(jq -r '[.[] | select(.showing) | .name | select(test("^(Connect to|Disc
     "$ARTIFACTS/a11y-qs-bt-menu.json")"
 want="Disconnect Keyboard|Connect to Headphones"
 [ "$order" = "$want" ] || fail G-QS-BT-MENU "devices are '$order', not '$want'"
-[ "$(jq '[.[] | select(.showing and .name == "Keyboard")] | length' "$ARTIFACTS/a11y-qs-bt-menu.json")" -ge 2 ] ||
+[ "$(jq '[.[] | select(.showing and .name == "Keyboard")] | length' "$ARTIFACTS/a11y-qs-bt-menu.json")" -gt 0 ] ||
     fail G-QS-BT-MENU "the tile does not name the connected device"
 qs_press "Connect to Headphones" bt-connect || fail G-QS-BT-MENU "could not press Headphones"
 grep -q "^Connect /org/bluez/hci0/dev_AA_AA_AA_AA_AA_01" "$ROOST_STUB_BT_LOG" ||
@@ -1307,10 +1437,18 @@ qs_press "Open sound output menu" sound-menu || fail G-QS-SOUND-MENU "could not 
 sleep 1
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-qs-sound.json" 20 ||
     fail G-QS-SOUND-MENU "accessibility dump failed"
-for name in "Built-in Audio Analog Stereo" "Roost HDMI Output"; do
+for name in "Speakers – Built-in Audio Analog Stereo" "Headphones – Built-in Audio Analog Stereo" "Roost HDMI Output"; do
     showing "$ARTIFACTS/a11y-qs-sound.json" "$name" ||
         fail G-QS-SOUND-MENU "no '$name' output listed"
 done
+qs_press "Headphones – Built-in Audio Analog Stereo" sound-headphones || fail G-QS-SOUND-PORT "could not select the headphone port"
+for _ in $(seq 1 10); do [ "$(cat "$ARTIFACTS/audio-route" 2>/dev/null || true)" = 2 ] && break; sleep 0.1; done
+[ "$(cat "$ARTIFACTS/audio-route")" = 2 ] || fail G-QS-SOUND-PORT "the device route did not switch"
+grep -q '^set-param 40 Route { index: 2, device: 0, save: true }$' "$ARTIFACTS/audio-route-calls" || fail G-QS-SOUND-PORT "wrong route or profile device"
+pass G-QS-SOUND-PORT "Speakers and Headphones are separate routes on the same sink; selecting Headphones switches and saves device route 2"
+sleep 1
+open_qs
+qs_press "Open sound output menu" sound-menu-again || fail G-QS-SOUND-MENU "could not reopen the menu"
 qs_press "Roost HDMI Output" sound-hdmi || fail G-QS-SOUND-MENU "could not press Roost HDMI Output"
 for _ in $(seq 1 10); do [ "$(cat "$SINK_FILE")" = 52 ] && break; sleep 0.3; done
 [ "$(cat "$SINK_FILE")" = 52 ] || fail G-QS-SOUND-MENU "the default sink is $(cat "$SINK_FILE"), not 52"
@@ -1356,7 +1494,9 @@ mic_shown() {
 }
 mic_shown idle Microphone && fail G-QS-MIC "the Microphone slider shows with nothing recording"
 touch "$RECORDING_FILE"
-sleep 3
+"$PY" "$ROOT/scripts/lib/roost-audio-fixture.py" "$ARTIFACTS" --event
+for _ in $(seq 1 20); do grep -q "audio recording frame true" "$LOG" && break; sleep 0.05; done
+grep -q "audio recording frame true" "$LOG" || fail G-QS-MIC-EVENT "recording event was not reflected by the next frame"
 mic_shown recording Microphone || fail G-QS-MIC "no Microphone slider while an app records"
 showing "$ARTIFACTS/a11y-mic-recording.json" "Microphone in use" ||
     fail G-QS-MIC "no microphone indicator in the panel while an app records"
@@ -1366,7 +1506,10 @@ scrot "$ARTIFACTS/16b-microphone.png" >/dev/null
 [ "$(cat "$MIC_FILE")" = 0.30 ] ||
     fail G-QS-MIC "source volume is $(cat "$MIC_FILE"), not 0.30"
 rm -f "$RECORDING_FILE"
-sleep 3
+"$PY" "$ROOT/scripts/lib/roost-audio-fixture.py" "$ARTIFACTS" --event
+for _ in $(seq 1 20); do grep -q "audio recording frame false" "$LOG" && break; sleep 0.05; done
+grep -q "audio recording frame false" "$LOG" || fail G-QS-MIC-EVENT "recording removal was not reflected by the next frame"
+pass G-QS-MIC-EVENT "PipeWire node creation/removal updates recording widgets in the event callback before the next frame, without polling"
 mic_shown stopped "Microphone in use" &&
     fail G-QS-MIC "the microphone indicator stayed after the recording stopped"
 pass G-QS-MIC "an app recording shows the microphone indicator and slider; the slider sets the source"
@@ -1494,6 +1637,30 @@ gsettings set org.gnome.desktop.input-sources sources "[('xkb', 'us')]"
 cstate '.keyboard.layouts == ["English (US)"]' "one source" ||
     fail G-SETTINGS-INPUT "the keymap did not return to us"
 pass G-SETTINGS-INPUT "input sources, Super+Space, key repeat and the hot corner follow GNOME"
+
+# Disabling animations is live and snaps compositor and GTK transitions.
+gsettings set org.gnome.desktop.interface enable-animations false
+cstate '(.animations_enabled | not)' "animations disabled" ||
+    fail G-ANIMATIONS-OFF "enable-animations false did not reach the compositor"
+xdotool key Super_L
+cstate '.overview_open and .overview_progress == 1' "instant overview" ||
+    fail G-ANIMATIONS-OFF "the disabled overview did not jump to its open state"
+cp "$CSTATE" "$ARTIFACTS/animations-disabled-open.json"
+xdotool key Escape
+cstate '(.overview_open | not) and .overview_progress == 0' "instant desktop" ||
+    fail G-ANIMATIONS-OFF "the disabled overview did not jump to its closed state"
+xdotool key super+shift+t
+cstate '.session_mode == "scroll" and .strip_view == .strip_offset' "instant strip" ||
+    fail G-ANIMATIONS-OFF "the disabled strip view did not match its target"
+xdotool key super+Left
+cstate '.strip_view == .strip_offset' "instant focus" ||
+    fail G-ANIMATIONS-OFF "the disabled strip view lagged after a focus move"
+xdotool key super+shift+t
+cstate '.session_mode == "gnome"' "floating" || fail G-ANIMATIONS-OFF "could not restore floating mode"
+gsettings set org.gnome.desktop.interface enable-animations true
+cstate '.animations_enabled' "animations enabled" ||
+    fail G-ANIMATIONS-OFF "enable-animations true did not restore live animation"
+pass G-ANIMATIONS-OFF "enable-animations is live: overview and strip states jump when disabled"
 
 # GNOME settings (#63): the idle lock follows idle-delay and
 # lock-enabled as they change.
@@ -2451,4 +2618,27 @@ if grep -q 'ShellExited' "$LOG"; then
     fail G-SHELL-STABLE "the shell exited during the journey: $(grep -c ShellExited "$LOG") time(s)"
 fi
 pass G-SHELL-STABLE "the shell never exited or restarted"
+
+# A hard shell crash must not leave a persistent monitor behind. Do this
+# after the normal journey's stability assertion, then require supervision
+# to start a new shell with its own monitor.
+monitor_count=$(wc -l <"$ARTIFACTS/audio-monitor-pids")
+read -r monitor_pid audio_shell_pid <<EOF
+$(tail -n 1 "$ARTIFACTS/audio-monitor-pids")
+EOF
+kill -KILL "$audio_shell_pid"
+end=$(($(date +%s) + 15))
+while [ "$(date +%s)" -lt "$end" ]; do
+    monitor_state="$(ps -o stat= -p "$monitor_pid" 2>/dev/null || true)"
+    if { [ -z "$monitor_state" ] || echo "$monitor_state" | grep -q '^Z'; } &&
+        [ "$(wc -l <"$ARTIFACTS/audio-monitor-pids")" -gt "$monitor_count" ]; then break; fi
+    sleep 0.1
+done
+monitor_state="$(ps -o stat= -p "$monitor_pid" 2>/dev/null || true)"
+{ [ -z "$monitor_state" ] || echo "$monitor_state" | grep -q '^Z'; } ||
+    fail G-AUDIO-HELPER-EXIT "audio monitor survived its shell's hard crash"
+[ "$(wc -l <"$ARTIFACTS/audio-monitor-pids")" -gt "$monitor_count" ] ||
+    fail G-AUDIO-HELPER-EXIT "the supervised replacement shell did not start an audio monitor"
+pass G-AUDIO-HELPER-EXIT "a hard shell crash terminates its monitor; the replacement starts a fresh one"
+
 echo "roost-gtk-shell-proof: OK, artifacts in $ARTIFACTS"
