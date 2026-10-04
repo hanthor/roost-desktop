@@ -1234,7 +1234,7 @@ order="$(jq -r '[.[] | select(.showing) | .name | select(test("^(Connect to|Disc
     "$ARTIFACTS/a11y-qs-bt-menu.json")"
 want="Disconnect Keyboard|Connect to Headphones"
 [ "$order" = "$want" ] || fail G-QS-BT-MENU "devices are '$order', not '$want'"
-[ "$(jq '[.[] | select(.showing and .name == "Keyboard")] | length' "$ARTIFACTS/a11y-qs-bt-menu.json")" -ge 2 ] ||
+[ "$(jq '[.[] | select(.showing and .name == "Keyboard")] | length' "$ARTIFACTS/a11y-qs-bt-menu.json")" -gt "$monitor_count" ] ||
     fail G-QS-BT-MENU "the tile does not name the connected device"
 qs_press "Connect to Headphones" bt-connect || fail G-QS-BT-MENU "could not press Headphones"
 grep -q "^Connect /org/bluez/hci0/dev_AA_AA_AA_AA_AA_01" "$ROOST_STUB_BT_LOG" ||
@@ -2337,19 +2337,22 @@ pass G-SHELL-STABLE "the shell never exited or restarted"
 # A hard shell crash must not leave a persistent monitor behind. Do this
 # after the normal journey's stability assertion, then require supervision
 # to start a new shell with its own monitor.
-read -r monitor_pid audio_shell_pid <"$ARTIFACTS/audio-monitor-pids"
+monitor_count=$(wc -l <"$ARTIFACTS/audio-monitor-pids")
+read -r monitor_pid audio_shell_pid <<EOF
+$(tail -n 1 "$ARTIFACTS/audio-monitor-pids")
+EOF
 kill -KILL "$audio_shell_pid"
 end=$(($(date +%s) + 15))
 while [ "$(date +%s)" -lt "$end" ]; do
     monitor_state="$(ps -o stat= -p "$monitor_pid" 2>/dev/null || true)"
     if { [ -z "$monitor_state" ] || echo "$monitor_state" | grep -q '^Z'; } &&
-        [ "$(wc -l <"$ARTIFACTS/audio-monitor-pids")" -ge 2 ]; then break; fi
+        [ "$(wc -l <"$ARTIFACTS/audio-monitor-pids")" -gt "$monitor_count" ]; then break; fi
     sleep 0.1
 done
 monitor_state="$(ps -o stat= -p "$monitor_pid" 2>/dev/null || true)"
 { [ -z "$monitor_state" ] || echo "$monitor_state" | grep -q '^Z'; } ||
     fail G-AUDIO-HELPER-EXIT "audio monitor survived its shell's hard crash"
-[ "$(wc -l <"$ARTIFACTS/audio-monitor-pids")" -ge 2 ] ||
+[ "$(wc -l <"$ARTIFACTS/audio-monitor-pids")" -gt "$monitor_count" ] ||
     fail G-AUDIO-HELPER-EXIT "the supervised replacement shell did not start an audio monitor"
 pass G-AUDIO-HELPER-EXIT "a hard shell crash terminates its monitor; the replacement starts a fresh one"
 
