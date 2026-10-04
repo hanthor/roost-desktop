@@ -457,11 +457,28 @@ fn an_inhibiting_window_gets_the_shortcuts_until_super_escape() {
     chord(&mut manager, &mut comp, PAGE_DOWN_KEYCODE);
     assert_eq!(manager.model().active_workspace(), 0);
 
+    // Registered shell grabs must obey the same consent. This catches a
+    // global accelerator bypass even when built-in workspace keys work.
+    manager.set_accelerators(vec![roost_shell_control::Accelerator {
+        action: 77,
+        keysym: 0xff56, // Page_Down
+        mods: roost_shell_control::MOD_LOGO,
+        modes: roost_shell_control::MODE_NORMAL,
+    }]);
+    chord(&mut manager, &mut comp, PAGE_DOWN_KEYCODE);
+    assert!(manager.take_accelerators_fired().is_empty());
+
     // Super+Escape (Mutter's restore-shortcuts) takes them back.
     chord(&mut manager, &mut comp, ESCAPE_KEYCODE);
     pump(&mut comp, &mut manager, &mut [&mut peer]);
     assert!(!comp.state.shortcuts_inhibited());
     assert_eq!(peer.client.inhibitor_active, Some(false));
+    chord(&mut manager, &mut comp, PAGE_DOWN_KEYCODE);
+    assert_eq!(
+        manager.take_accelerators_fired(),
+        [(77, 5000, roost_shell_control::MODE_NORMAL)]
+    );
+    manager.set_accelerators(vec![]);
     chord(&mut manager, &mut comp, PAGE_DOWN_KEYCODE);
     assert_eq!(manager.model().active_workspace(), 1);
 }
