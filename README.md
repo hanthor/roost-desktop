@@ -98,3 +98,5 @@ The plan workflow should refresh its draft from the current source and the linke
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
+
+The [public roadmap](ROADMAP.md) records priorities through October 2027, current release limits and contribution opportunities.
