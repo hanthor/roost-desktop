@@ -2106,7 +2106,9 @@ impl Runtime {
         use crate::mutter::RemoteInput;
         let input = match input {
             RemoteInput::Key { evdev, pressed } => {
-                let keycode = evdev + 8;
+                // ManagerInput uses evdev; WindowManager adds the XKB offset
+                // when delivering to the seat, exactly as for local input.
+                let keycode = evdev;
                 if (pressed && !held.keys.insert(keycode))
                     || (!pressed && !held.keys.remove(&keycode))
                 {

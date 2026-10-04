@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-[ "$#" = 4 ] && [ "$1" = --candidate ] && [ "$3" = --out ] || { echo 'usage: roost-remote-security --candidate DIR --out DIR' >&2; exit 2; }
+if [ "$#" != 4 ] || [ "$1" != --candidate ] || [ "$3" != --out ]; then echo 'usage: roost-remote-security --candidate DIR --out DIR' >&2; exit 2; fi
 candidate="$(realpath "$2")"
 out="$(realpath -m "$4")"
 if [ ! -x "$candidate/usr/bin/roost-compositor" ] || [ ! -x "$candidate/usr/bin/roost-shell-gtk" ]; then

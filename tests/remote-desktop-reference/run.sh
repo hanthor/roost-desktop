@@ -35,13 +35,13 @@ python3 /repo/scripts/lib/roost-remote-security-client.py > /out/untrusted-denia
 sleep 2
 for decision in cancel grant eis disconnect; do
     python3 /repo/scripts/lib/roost-portal-remote-client.py "/out/$decision.png" "$decision" >"/out/$decision.log" 2>&1 & client=$!; pids="$pids $client"
-    python3 /repo/scripts/lib/roost-portal-consent.py "/out/a11y-$decision.json" "$decision"
+    python3 /repo/scripts/lib/roost-portal-consent.py "/out/a11y-$decision.json" "$decision" remote
     wait "$client"
 done
 [ -s /out/grant.png ] && [ -s /out/disconnect.png ] && [ ! -f /out/cancel.png ]
 # Losing the trusted backend process revokes the compositor grant itself.
 python3 /repo/scripts/lib/roost-portal-remote-client.py /out/backend-disconnect.png backend-disconnect >/out/backend-disconnect.log 2>&1 & client=$!; pids="$pids $client"
-python3 /repo/scripts/lib/roost-portal-consent.py /out/a11y-backend-disconnect.json grant
+python3 /repo/scripts/lib/roost-portal-consent.py /out/a11y-backend-disconnect.json grant remote
 end=$((SECONDS + 30))
 until [ -s /out/backend-disconnect.active ]; do [ "$SECONDS" -lt "$end" ] || exit 1; sleep .1; done
 kill "$portal_backend_pid"
@@ -52,7 +52,7 @@ wait "$client"
 sleep 2
 # Keep a genuine external portal stream active across the lock transition.
 python3 /repo/scripts/lib/roost-portal-remote-client.py /out/lock-grant.png revoke >/out/lock-grant.log 2>&1 & client=$!; pids="$pids $client"
-python3 /repo/scripts/lib/roost-portal-consent.py /out/a11y-lock-grant.json grant
+python3 /repo/scripts/lib/roost-portal-consent.py /out/a11y-lock-grant.json grant remote
 end=$((SECONDS + 30))
 until [ -s /out/lock-grant.active ] && jq -e '.capture_streams > 0 and (.locked | not)' "$ROOST_COMPOSITOR_STATE" >/dev/null; do [ "$SECONDS" -lt "$end" ] || exit 1; sleep .1; done
 gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver --method org.gnome.ScreenSaver.SetActive true >/out/lock.log
@@ -63,7 +63,7 @@ until jq -e '.locked and .capture_streams == 0' "$ROOST_COMPOSITOR_STATE" >/dev/
 python3 /repo/scripts/lib/roost-remote-security-client.py > /out/locked-denial.log
 python3 /repo/scripts/lib/roost-portal-remote-client.py /out/locked.png locked >/out/locked.log 2>&1 & client=$!; pids="$pids $client"
 sleep 2
-if [ ! -f /out/locked.response.json ]; then python3 /repo/scripts/lib/roost-portal-consent.py /out/a11y-locked.json grant; fi
+if [ ! -f /out/locked.response.json ]; then python3 /repo/scripts/lib/roost-portal-consent.py /out/a11y-locked.json grant remote; fi
 wait "$client"
 [ ! -f /out/locked.png ]
 pw-dump > /out/locked-pipewire.json
