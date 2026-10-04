@@ -699,6 +699,16 @@ cstate() {
     cat "$CSTATE" >&2 2>/dev/null || true
     return 1
 }
+# Reserving an X11 display must not launch a compatibility process. The
+# panel/calendar are already real native Wayland clients at this point.
+if command -v Xwayland >/dev/null 2>&1; then
+    cstate '.x11_display != null and (.x11_ready | not)' "reserved X11 sockets" 10 ||
+        fail G-X11-DEMAND "native startup did not reserve an idle display"
+    if pgrep -P "$COMPOSITOR_PID" -x Xwayland >/dev/null; then
+        fail G-X11-DEMAND "native startup spawned XWayland"
+    fi
+    pass G-X11-DEMAND "native GTK startup advertises sockets without an XWayland process"
+fi
 SOCKET_NAME="$(sed -n 's/.*nested session on \([^ ]*\) .*/\1/p' "$LOG" | head -1)"
 # One at a time, so window ids (and with them GNOME's running-app order
 # in the dash) follow Alpha, Beta, Gamma.
@@ -970,7 +980,7 @@ grid_edge() { grid_point "$1" "$2" 4; }
     --press "Previous Page" || fail G-GRID-DRAG-PAGE "could not press Previous Page"
 sleep 1
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-page-source.json" 20 || fail G-GRID-DRAG-PAGE "source dump failed"
-grid_origin
+grid_origin roost-shell-appgrid
 page_source="$(jq -r '[.[] | select(.showing and .role == "table cell")][0].name' "$ARTIFACTS/a11y-grid-page-source.json")"
 grid_coordinates="$(grid_point "$ARTIFACTS/a11y-grid-page-source.json" "$page_source")" || fail G-GRID-DRAG-PAGE "source tile has no actual bounds"
 read -r page_source_x page_source_y <<EOF
@@ -1735,8 +1745,8 @@ else
     echo "roost-gtk-shell-proof: G-WAYLAND-INFO skipped (no wayland-info)"
 fi
 
-# X11 by default (#59): the compositor starts XWayland when it is
-# installed, tells the shell DISPLAY, and apps launched from search get it.
+# X11 by default (#59/#219): the shell advertises reserved sockets; the
+# first real X11 connection starts the server and maps that queued client.
 if command -v Xwayland >/dev/null 2>&1 && command -v xeyes >/dev/null 2>&1; then
     cstate '.x11_display != null' "xwayland" 30 || fail G-X11-APP "XWayland never came up"
     x11_display="$(jq -r '.x11_display' "$CSTATE")"
@@ -1760,7 +1770,20 @@ if command -v Xwayland >/dev/null 2>&1 && command -v xeyes >/dev/null 2>&1; then
         fail G-X11-APP "the X11 window was placed under the top bar"
     sleep 1
     scrot "$ARTIFACTS/20-x11-app.png" >/dev/null
-    pass G-X11-APP "an X11 app launched from search gets DISPLAY $x11_display and maps"
+    cstate '.x11_ready' "X11 manager ready" || fail G-X11-APP "manager not ready"
+    x11_pid="$(pgrep -P "$COMPOSITOR_PID" -x Xwayland)"
+    [ "$(printf '%s\n' "$x11_pid" | wc -l)" -eq 1 ] || fail G-X11-DEMAND "expected one owned compatibility process"
+    native_ids="$(jq -c '[.windows[] | select(.app_id != "XEyes") | .id] | sort' "$CSTATE")"
+    kill "$x11_pid"
+    cstate 'all(.windows[]; .app_id != "XEyes")' "old X11 windows removed" 10 || fail G-X11-RESTART "stale X11 model survived server loss"
+    cstate '.x11_ready' "bounded compatibility restart" 15 || fail G-X11-RESTART "server did not restart"
+    [ "$(jq -c '[.windows[] | .id] | sort' "$CSTATE")" = "$native_ids" ] || fail G-X11-RESTART "native windows changed across restart"
+    restarted_pid="$(pgrep -P "$COMPOSITOR_PID" -x Xwayland)"
+    [ "$restarted_pid" != "$x11_pid" ] || fail G-X11-RESTART "old compatibility process remained"
+    env DISPLAY="$x11_display" xeyes >/dev/null 2>&1 &
+    cstate '.focused_app_id == "XEyes" and .x11_ready' "reconnected X11 client" 15 || fail G-X11-RESTART "client did not reconnect on the same reserved display"
+    pass G-X11-RESTART "server loss removes compatibility windows, preserves native IDs and accepts a new client on the same display"
+    pass G-X11-APP "the first X11 app launched from search gets DISPLAY $x11_display and maps"
 else
     echo "roost-gtk-shell-proof: G-X11-APP skipped (no Xwayland or xeyes)"
 fi
@@ -3106,5 +3129,16 @@ monitor_state="$(ps -o stat= -p "$monitor_pid" 2>/dev/null || true)"
 [ "$(wc -l <"$ARTIFACTS/audio-monitor-pids")" -gt "$monitor_count" ] ||
     fail G-AUDIO-HELPER-EXIT "the supervised replacement shell did not start an audio monitor"
 pass G-AUDIO-HELPER-EXIT "a hard shell crash terminates its monitor; the replacement starts a fresh one"
+
+if [ -n "${x11_display:-}" ]; then
+    kill "$COMPOSITOR_PID"
+    wait "$COMPOSITOR_PID" || fail G-X11-CLEANUP "compositor did not exit gracefully"
+    COMPOSITOR_PID=""
+    display_number="${x11_display#:}"
+    if [ -e "/tmp/.X11-unix/X$display_number" ] || [ -e "/tmp/.X$display_number-lock" ]; then
+        fail G-X11-CLEANUP "owned socket or display lock survived shutdown"
+    fi
+    pass G-X11-CLEANUP "graceful shutdown removes owned listening sockets and display lock"
+fi
 
 echo "roost-gtk-shell-proof: OK, artifacts in $ARTIFACTS"
