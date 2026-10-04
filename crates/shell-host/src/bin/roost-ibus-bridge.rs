@@ -500,10 +500,11 @@ impl Bridge {
         });
         let state = self.ibus_state() | if pressed { 0 } else { RELEASE };
         let started = Instant::now();
-        let handled = self
-            .context
-            .as_ref()
-            .is_some_and(|context| context.process_key(keyval, key, state));
+        let handled = self.active
+            && self
+                .context
+                .as_ref()
+                .is_some_and(|context| context.process_key(keyval, key, state));
         if std::env::var_os("ROOST_IBUS_DEBUG").is_some() {
             eprintln!(
                 "roost-ibus-bridge: key {key} sym {keyval:#x} pressed {pressed}: IBus took it: {handled} ({:?})",
@@ -636,7 +637,10 @@ impl Bridge {
         }
     }
 
-    /// Focus in with a keyboard grab, or focus out and release it.
+    /// Focus the IBus context while retaining one stable keyboard grab.
+    /// A field-to-field Tab transition must not destroy/recreate the grab:
+    /// physical keys can arrive between those requests. Inactive contexts
+    /// forward keys directly instead of sending them through IBus.
     fn activate(&mut self, active: bool, qh: &QueueHandle<Self>) {
         if active == self.active {
             return;
@@ -653,12 +657,11 @@ impl Bridge {
             context.send(if active { "FocusIn" } else { "FocusOut" }, None);
         }
         // Every focused field goes through IBus, including keyboard layouts.
-        if active {
-            if self.grab.is_none() {
-                self.grab = self.im.as_ref().map(|im| im.grab_keyboard(qh, ()));
-            }
-        } else if let Some(grab) = self.grab.take() {
-            grab.release();
+        // Retain the supervised connection's grab across field changes and
+        // periods without a field; key() bypasses IBus while inactive.
+        // Connection teardown releases the grab if the bridge exits.
+        if active && self.grab.is_none() {
+            self.grab = self.im.as_ref().map(|im| im.grab_keyboard(qh, ()));
         }
     }
 }
