@@ -61,6 +61,8 @@ pub mod mutter;
 pub mod overlay;
 pub mod overview;
 pub mod pam;
+#[cfg(feature = "drm")]
+mod performance_trace;
 pub mod popup;
 pub mod protocols;
 pub mod runtime;
