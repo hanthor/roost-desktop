@@ -219,6 +219,25 @@ Exec=touch $PROBE_MARKER
 Icon=applications-system
 Type=Application
 EOF
+# Default calendar launch probe: its argv records the selected day.
+cat >"$ARTIFACTS/calendar-probe" <<EOF
+#!/bin/sh
+printf '%s\\n' "\$@" >"$ARTIFACTS/calendar-launch"
+EOF
+chmod +x "$ARTIFACTS/calendar-probe"
+cat >"$XDG_DATA_HOME/applications/roost-calendar-probe.desktop" <<EOF
+[Desktop Entry]
+Name=Roost Calendar Probe
+Exec=$ARTIFACTS/calendar-probe %u
+Type=Application
+MimeType=x-scheme-handler/calendar;
+NoDisplay=true
+EOF
+mkdir -p "$ARTIFACTS/config"
+cat >"$ARTIFACTS/config/mimeapps.list" <<EOF
+[Default Applications]
+x-scheme-handler/calendar=roost-calendar-probe.desktop;
+EOF
 # A GNOME Shell search provider owned by the probe app (#57).
 SEARCH_MARKER="$ARTIFACTS/search-marker"
 rm -f "$SEARCH_MARKER"
@@ -508,6 +527,17 @@ if showing "$ARTIFACTS/a11y-calendar.json" "Retro"; then
     fail G-CAL-EVENTS "tomorrow's event shows under today"
 fi
 pass G-CAL-EVENTS "today's calendar-server events list in the events card, timed as GNOME does"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-calendar-launch.json" 20 --press "Open Calendar" ||
+    fail G-CAL-LAUNCH "events card has no accessible launch action"
+sleep 1
+[ "$(cat "$ARTIFACTS/calendar-launch" 2>/dev/null)" = "calendar:///$(date +%F)" ] ||
+    fail G-CAL-LAUNCH "default calendar did not launch at the selected day"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-calendar-closed.json" 20
+if showing "$ARTIFACTS/a11y-calendar-closed.json" "Open Calendar"; then
+    fail G-CAL-LAUNCH "calendar popover stayed open after launch"
+fi
+pass G-CAL-LAUNCH "default calendar launches selected day through Roost and closes the menu"
+
 xdotool key Escape
 sleep 1
 
@@ -519,6 +549,46 @@ scrot "$ARTIFACTS/03-quick-settings.png" >/dev/null
 showing "$ARTIFACTS/a11y-qs.json" "Dark Style" ||
     fail G-QS-OPEN "quick settings contents not showing"
 pass G-QS-OPEN "system indicators open quick settings"
+# A desktop has no battery. Hotplug and live UPower/settings changes must
+# update both the panel and the power summary without reopening the menu.
+battery_set() {
+    gdbus call --system --dest org.freedesktop.UPower \
+        --object-path /org/freedesktop/UPower/devices/DisplayDevice \
+        --method org.freedesktop.DBus.Properties.Set \
+        org.freedesktop.UPower.Device "$1" "$2" >/dev/null
+}
+battery_dump() {
+    sleep 1
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-battery.json" 20
+}
+if showing "$ARTIFACTS/a11y-qs.json" "37% · Discharging · 1∶30 remaining"; then
+    fail G-BATTERY "battery is visible on a desktop without one"
+fi
+gsettings set org.gnome.desktop.interface show-battery-percentage false
+battery_set IsPresent '<true>'
+battery_dump
+showing "$ARTIFACTS/a11y-battery.json" "37% · Discharging · 1∶30 remaining" ||
+    fail G-BATTERY "UPower discharging battery summary missing"
+if showing "$ARTIFACTS/a11y-battery.json" '37%'; then
+    fail G-BATTERY "panel percentage ignored disabled setting"
+fi
+gsettings set org.gnome.desktop.interface show-battery-percentage true
+battery_dump
+showing "$ARTIFACTS/a11y-battery.json" '37%' || fail G-BATTERY "percentage setting did not update live"
+battery_set State '<uint32 1>'
+battery_set Percentage '<82.0>'
+battery_dump
+showing "$ARTIFACTS/a11y-battery.json" '82%' || fail G-BATTERY "panel level did not update live"
+showing "$ARTIFACTS/a11y-battery.json" "82% · Charging · 0∶30 until full" ||
+    fail G-BATTERY "charging time did not update live"
+gsettings set org.gnome.desktop.interface show-battery-percentage false
+battery_set IsPresent '<false>'
+battery_dump
+if showing "$ARTIFACTS/a11y-battery.json" '82%'; then
+    fail G-BATTERY "removed battery stayed visible"
+fi
+pass G-BATTERY "UPower hotplug, charging/discharging and percentage setting update live"
+
 for label in "Wired" "Dark Style" "Do Not Disturb" "Volume" "Lock"; do
     showing "$ARTIFACTS/a11y-qs.json" "$label" ||
         fail A11Y-QS "no showing accessible control named '$label'"
@@ -1428,14 +1498,14 @@ pass G-SETTINGS-INPUT "input sources, Super+Space, key repeat and the hot corner
 # GNOME settings (#63): the idle lock follows idle-delay and
 # lock-enabled as they change.
 gsettings set org.gnome.desktop.session idle-delay 600
-cstate '.idle_timeout_ms == 600000' "idle 600" ||
+cstate '.idle_timeout_ms == 610000' "idle 600" ||
     fail G-SETTINGS-IDLE "idle-delay 600 did not reach the compositor"
 gsettings set org.gnome.desktop.screensaver lock-enabled false
 cstate '.idle_timeout_ms > 1e18' "lock off" ||
     fail G-SETTINGS-IDLE "lock-enabled false did not turn the idle lock off"
 gsettings set org.gnome.desktop.screensaver lock-enabled true
 gsettings set org.gnome.desktop.session idle-delay 300
-cstate '.idle_timeout_ms == 300000' "idle 300" ||
+cstate '.idle_timeout_ms == 310000' "idle 300" ||
     fail G-SETTINGS-IDLE "the idle lock did not follow back to 300 s"
 pass G-SETTINGS-IDLE "GNOME's idle-delay and lock-enabled set the idle lock live"
 
@@ -1663,7 +1733,7 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     for _ in $(seq 1 20); do grep -q "IBus panel: owns org.freedesktop.IBus.Panel" "$LOG" && break; sleep 0.5; done
     grep -q "IBus panel: owns org.freedesktop.IBus.Panel" "$LOG" ||
         fail G-IME-CANDIDATES "the shell never became IBus's panel"
-    shown_before="$(grep -c 'ibus candidate 1 尼 at' "$LOG")"
+    shown_before="$(grep -c 'ibus candidate 1 尼 at' "$LOG" || true)"
     xdotool type --delay 100 ni
     cstate '.layers | any(.namespace == "roost-ibus-candidates")' "candidate window" 10 ||
         fail G-IME-CANDIDATES "typing 'ni' showed no candidate window"
@@ -2229,6 +2299,11 @@ screen_active() {
 }
 screen_active | grep -q false || fail G-SCREENSAVER "screen saver started active"
 
+# A distinct solid background makes the screen-saver URI observable.
+ffmpeg -loglevel error -y -f lavfi -i color=c=0x00ff00:s=64x64 -frames:v 1 -threads 1 \
+    "$ARTIFACTS/lock-background.png"
+gsettings set org.gnome.desktop.screensaver picture-uri "file://$ARTIFACTS/lock-background.png"
+sleep 1
 open_power_menu power-menu-3 || fail G-SUSPEND-LOCK "could not reopen the power menu"
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-suspend.json" 20 \
     --press "Suspend" || fail G-SUSPEND-LOCK "could not press Suspend"
@@ -2237,6 +2312,18 @@ until grep -q Suspend "$POWER_LOG" 2>/dev/null || [ "$(date +%s)" -gt "$end" ]; 
 grep -q Suspend "$POWER_LOG" || fail G-SUSPEND-LOCK "logind never got Suspend"
 cstate '.locked' "locked" 10 || fail G-SUSPEND-LOCK "PrepareForSleep did not lock the session"
 scrot "$ARTIFACTS/23-locked-after-suspend.png" >/dev/null
+# Wait for asynchronous decode and test the unobscured lower-left pixel.
+end=$(($(date +%s) + 15))
+while :; do
+    scrot "$ARTIFACTS/23b-lock-background.png" >/dev/null
+    rgb=$(px "$ARTIFACTS/23b-lock-background.png" 10 $((HEIGHT - 10)))
+    # shellcheck disable=SC2086 # three RGB channels
+    set -- $rgb
+    [ "${1:-255}" -lt 20 ] && [ "${2:-0}" -gt 150 ] && [ "${2:-255}" -lt 180 ] && [ "${3:-255}" -lt 20 ] && break
+    [ "$(date +%s)" -ge "$end" ] && fail G-LOCK-BACKGROUND "custom screen-saver background not drawn: $rgb"
+    sleep 0.3
+done
+pass G-LOCK-BACKGROUND "picture-uri supplies the blurred, dimmed lock background"
 pass G-SUSPEND-LOCK "Suspend asks logind, and PrepareForSleep locks the session"
 screen_active | grep -q true || fail G-SCREENSAVER "GetActive did not reflect the lock"
 gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver \
@@ -2288,6 +2375,37 @@ if [ -n "$PAM_ON" ]; then
     xdotool key Return
     cstate '(.locked | not)' "D-Bus lock unlocked through PAM" 15 || fail G-DBUS-LOCK "D-Bus lock did not unlock"
     pass G-DBUS-LOCK "org.gnome.Shell exposes the screen-saver object and Lock waits for confirmation"
+
+    # A short idle policy must fade, cancel on activity, then latch only
+    # after the configured lock delay. Waking the blank stage cannot unlock.
+    gsettings set org.gnome.desktop.interface enable-animations true
+    gsettings set org.gnome.desktop.screensaver lock-delay 15
+    gsettings set org.gnome.desktop.session idle-delay 2
+    cstate '.idle_timeout_ms == 17000' "short idle policy" 5 || fail G-IDLE-FADE "idle policy not applied"
+    xdotool mousemove --window "$WID" 20 $((HEIGHT - 20))
+    cstate '(.locked | not) and .idle_blank_alpha > 0.25 and .idle_blank_alpha < 0.95' "idle fade" 10 ||
+        fail G-IDLE-FADE "no cancellable fade before lock"
+    scrot "$ARTIFACTS/27-idle-fade.png" >/dev/null
+    xdotool mousemove --window "$WID" 30 $((HEIGHT - 30))
+    cstate '(.locked | not) and .idle_blank_alpha == 0' "fade cancelled" 5 ||
+        fail G-IDLE-FADE "activity did not cancel fade"
+    cstate '(.locked | not) and .idle_blank_alpha == 1' "blank before lock delay" 15 ||
+        fail G-IDLE-FADE "blank stage did not precede delayed lock"
+    cstate '.locked and .idle_blank_alpha == 1' "idle locked" 10 ||
+        fail G-IDLE-FADE "lock-delay did not latch"
+    scrot "$ARTIFACTS/28-idle-blank-locked.png" >/dev/null
+    xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT * 3 / 4)) click 1
+    cstate '.locked and .idle_blank_alpha == 0' "woke while still locked" 5 ||
+        fail G-IDLE-FADE "waking the blank stage bypassed the lock"
+    sleep 1
+    xdotool type --delay 30 "$UNLOCK_PASSWORD"
+    xdotool key Return
+    cstate '(.locked | not)' "idle lock authenticated" 15 || fail G-IDLE-FADE "idle lock failed to unlock through PAM"
+    gsettings set org.gnome.desktop.session idle-delay 300
+    gsettings set org.gnome.desktop.screensaver lock-delay 0
+    gsettings reset org.gnome.desktop.screensaver picture-uri
+    pass G-IDLE-FADE "idle fade cancels on activity, blanks before lock-delay, and wake keeps PAM mandatory"
+
 else
     echo "roost-gtk-shell-proof: G-UNLOCK skipped (no pam_wrapper)"
 fi
