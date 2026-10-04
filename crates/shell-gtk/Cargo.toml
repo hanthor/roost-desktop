@@ -19,6 +19,7 @@ glib.workspace = true
 gio.workspace = true
 jiff.workspace = true
 libc = "0.2"
+serde_json.workspace = true
 roost-shell-host = { path = "../shell-host", version = "0.1.0" }
 roost-shell-control = { path = "../shell-control-schema", version = "0.1.0" }
 

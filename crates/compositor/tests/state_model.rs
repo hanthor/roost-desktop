@@ -49,3 +49,23 @@ fn token_policy_end_to_end() {
         }
     );
 }
+
+#[test]
+fn workspace_insertion_shifts_windows_and_active_workspace() {
+    let mut m = StateModel::new();
+    let dragged = m.insert("drag", None, 0);
+    let home = m.insert("home", None, 0);
+    let right = m.insert("right", None, 1);
+    m.set_active_workspace(1);
+    assert!(m.insert_workspace_and_move(dragged, 1));
+    assert_eq!(m.window(dragged).unwrap().workspace, 1);
+    assert_eq!(m.window(home).unwrap().workspace, 0);
+    assert_eq!(m.window(right).unwrap().workspace, 2);
+    assert_eq!(m.active_workspace(), 2);
+    assert_eq!(m.workspaces(), &[0, 1, 2]);
+    let before = m.snapshot();
+    assert!(!m.insert_workspace_and_move(u64::MAX, 0));
+    assert_eq!(m.snapshot(), before);
+    m.remove(dragged);
+    assert_eq!(m.workspaces(), &[0, 2]);
+}
