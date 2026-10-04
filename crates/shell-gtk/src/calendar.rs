@@ -45,7 +45,7 @@ pub struct CalendarUi {
     month_label: gtk::Label,
     grid: gtk::Grid,
     events_title: gtk::Label,
-    events_card: gtk::Box,
+    events_card: gtk::Button,
     events_list: gtk::Box,
     source: std::cell::RefCell<Option<Rc<crate::events::EventSource>>>,
     clock_format: Cell<logic::ClockFormat>,
@@ -101,7 +101,8 @@ impl CalendarUi {
         // Events card (dateMenu.js EventsSection): the selected day's
         // title over its events, or "No Events"; shown while the
         // calendar server has calendars.
-        let events = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let events = gtk::Button::new();
+        events.update_property(&[gtk::accessible::Property::Label("Open Calendar")]);
         events.add_css_class("events-button");
         let events_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
         events_box.add_css_class("events-box");
@@ -112,7 +113,7 @@ impl CalendarUi {
         events_list.add_css_class("events-list");
         events_box.append(&events_title);
         events_box.append(&events_list);
-        events.append(&events_box);
+        events.set_child(Some(&events_box));
         column.append(&events);
 
         let ui = Rc::new(Self {
@@ -147,6 +148,17 @@ impl CalendarUi {
         }
         ui.render();
         ui
+    }
+
+    /// Launch the selected day through the same session-aware path as overview apps.
+    pub fn connect_open(self: &Rc<Self>, close: impl Fn() + 'static) {
+        let ui = Rc::downgrade(self);
+        self.events_card.connect_clicked(move |_| {
+            let Some(ui) = ui.upgrade() else { return };
+            if launch_calendar(ui.selected.get()) {
+                close();
+            }
+        });
     }
 
     /// Take events from GNOME's calendar server.
@@ -314,4 +326,31 @@ impl CalendarUi {
             self.events_list.append(&placeholder);
         }
     }
+}
+
+/// Resolve the preferred calendar handler; an absent handler is a quiet no-op.
+fn launch_calendar(day: Date) -> bool {
+    let info = gio::AppInfo::default_for_type("x-scheme-handler/calendar", false)
+        .or_else(|| gio::AppInfo::default_for_type("text/calendar", false));
+    let id = info
+        .as_ref()
+        .and_then(|info| info.id())
+        .unwrap_or_else(|| "org.gnome.Calendar.desktop".into());
+    let Some(path) = roost_shell_host::apps::default_app_dirs()
+        .iter()
+        .map(|dir| dir.join(id.as_str()))
+        .find(|path| path.is_file())
+    else {
+        return false;
+    };
+    let Some(mut entry) = roost_shell_host::apps::handler_entry_from_file(&path) else {
+        return false;
+    };
+    if entry.app_id == "org.gnome.Calendar.desktop" {
+        entry.argv.push("--date".into());
+        entry.argv.push(day.to_string().into());
+    } else if info.as_ref().is_some_and(|info| info.supports_uris()) {
+        entry.argv.push(format!("calendar:///{}", day).into());
+    }
+    roost_shell_host::apps::launch(&entry).is_ok()
 }

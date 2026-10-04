@@ -219,6 +219,25 @@ Exec=touch $PROBE_MARKER
 Icon=applications-system
 Type=Application
 EOF
+# Default calendar launch probe: its argv records the selected day.
+cat >"$ARTIFACTS/calendar-probe" <<EOF
+#!/bin/sh
+printf '%s\\n' "\$@" >"$ARTIFACTS/calendar-launch"
+EOF
+chmod +x "$ARTIFACTS/calendar-probe"
+cat >"$XDG_DATA_HOME/applications/roost-calendar-probe.desktop" <<EOF
+[Desktop Entry]
+Name=Roost Calendar Probe
+Exec=$ARTIFACTS/calendar-probe %u
+Type=Application
+MimeType=x-scheme-handler/calendar;
+NoDisplay=true
+EOF
+mkdir -p "$ARTIFACTS/config"
+cat >"$ARTIFACTS/config/mimeapps.list" <<EOF
+[Default Applications]
+x-scheme-handler/calendar=roost-calendar-probe.desktop;
+EOF
 # A GNOME Shell search provider owned by the probe app (#57).
 SEARCH_MARKER="$ARTIFACTS/search-marker"
 rm -f "$SEARCH_MARKER"
@@ -506,6 +525,17 @@ if showing "$ARTIFACTS/a11y-calendar.json" "Retro"; then
     fail G-CAL-EVENTS "tomorrow's event shows under today"
 fi
 pass G-CAL-EVENTS "today's calendar-server events list in the events card, timed as GNOME does"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-calendar-launch.json" 20 --press "Open Calendar" ||
+    fail G-CAL-LAUNCH "events card has no accessible launch action"
+sleep 1
+[ "$(cat "$ARTIFACTS/calendar-launch" 2>/dev/null)" = "calendar:///$(date +%F)" ] ||
+    fail G-CAL-LAUNCH "default calendar did not launch at the selected day"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-calendar-closed.json" 20
+if showing "$ARTIFACTS/a11y-calendar-closed.json" "Open Calendar"; then
+    fail G-CAL-LAUNCH "calendar popover stayed open after launch"
+fi
+pass G-CAL-LAUNCH "default calendar launches selected day through Roost and closes the menu"
+
 xdotool key Escape
 sleep 1
 
