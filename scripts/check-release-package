@@ -30,6 +30,7 @@ for path in \
     usr/bin/roost-ibus-bridge \
     usr/bin/roost-greeter \
     usr/share/wayland-sessions/roost.desktop \
+    usr/lib/systemd/user/roost-session.target \
     etc/pam.d/roost-lock; do
     printf '%s' "$CONTENTS" | grep -q "$path" || fail "missing $path"
 done
