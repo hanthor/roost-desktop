@@ -1572,9 +1572,11 @@ impl ControlHub {
                     let _ = session.send_environment(&self.environment);
                     let _ = session.send_overview_previews(&self.previews.0, self.previews.1);
                 }
-                let _ = session.send_window_menu(&Message::PointerOutput {
-                    name: self.pointer_output.clone(),
-                });
+                if self.pointer_output.is_some() {
+                    let _ = session.send_window_menu(&Message::PointerOutput {
+                        name: self.pointer_output.clone(),
+                    });
+                }
                 self.sessions.push(session);
                 self.session_peers.push(peer);
             }

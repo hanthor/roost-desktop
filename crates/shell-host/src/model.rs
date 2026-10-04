@@ -559,7 +559,8 @@ impl ShellModel {
     /// Mirror another model's switcher overlay (host sync path, after
     /// the window list already matches): open with the same selection
     /// when it names a known window, else close.
-    pub fn apply_switcher_state(&mut self, open: bool, selection: Option<u64>) {
+    pub fn apply_switcher_state(&mut self, open: bool, selection: Option<u64>, all_windows: bool) {
+        self.switcher_all_windows = all_windows;
         match (open, selection) {
             (true, Some(id)) => {
                 if let Some(index) = self.switcher_items().iter().position(|known| *known == id) {

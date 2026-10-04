@@ -166,6 +166,7 @@ impl SwitcherUi {
             }
         };
         let windows: Vec<(u64, String)> = app
+            .filter(|_| !now.all_windows)
             .map(|a| {
                 model
                     .app_windows(a)
