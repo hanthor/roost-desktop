@@ -173,6 +173,7 @@ pub struct NotifyUi {
     first_seen: RefCell<HashMap<u64, BannerTimer>>,
     /// The groups the user expanded, by source key.
     expanded: RefCell<HashSet<String>>,
+    group_widgets: RefCell<HashMap<String, Rc<crate::group_animation::Group>>>,
     shown: RefCell<Shown>,
     last_bus_try: RefCell<Option<Instant>>,
 }
@@ -342,6 +343,7 @@ impl NotifyUi {
             clear_bound: std::cell::Cell::new(false),
             first_seen: RefCell::new(HashMap::new()),
             expanded: RefCell::new(HashSet::new()),
+            group_widgets: RefCell::new(HashMap::new()),
             shown: RefCell::new(Shown {
                 banners: vec![u64::MAX],
                 ..Default::default()
@@ -501,6 +503,7 @@ impl NotifyUi {
         self.banner_window.set_visible(!now.banners.is_empty());
 
         // History list.
+        self.group_widgets.borrow_mut().clear();
         while let Some(child) = self.list.first_child() {
             self.list.remove(&child);
         }
@@ -518,10 +521,15 @@ impl NotifyUi {
                     close.connect_clicked(move |_| me.remove(&[id]));
                     self.list.append(&c);
                 }
-                _ if now.expanded.contains(key) => {
-                    self.list.append(&self.expanded_group(key, &members));
+                _ => {
+                    let group = crate::group_animation::Group::new(
+                        &self.collapsed_group(key, &members),
+                        &self.expanded_group(key, &members),
+                        now.expanded.contains(key),
+                    );
+                    self.list.append(&group.widget);
+                    self.group_widgets.borrow_mut().insert(key.clone(), group);
                 }
-                _ => self.list.append(&self.collapsed_group(key, &members)),
             }
         }
         let any = !now.history.is_empty();
@@ -557,7 +565,16 @@ impl NotifyUi {
         } else {
             self.expanded.borrow_mut().remove(key);
         }
-        self.refresh();
+        let group = self.group_widgets.borrow().get(key).cloned();
+        if let Some(group) = group {
+            group.set_expanded(on);
+            // Prevent the refresh ticker rebuilding the group mid-animation.
+            let mut expanded: Vec<_> = self.expanded.borrow().iter().cloned().collect();
+            expanded.sort();
+            self.shown.borrow_mut().expanded = expanded;
+        } else {
+            self.refresh();
+        }
     }
 
     /// A collapsed group (2+ notifications), as GNOME 51 stacks it: the
