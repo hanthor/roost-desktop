@@ -28,6 +28,8 @@ BOUNDARIES = {
     'locked session': {
         'positive': ('unlock.rs', 'correct_password_dismisses_lock_intact'),
         'negative': ('unlock.rs', 'triple_wrong_password_stays_locked_without_leak'),
+        'spoof/replay': ('session_lock_protocol.rs', 'unapproved_release_is_a_protocol_error_without_clearing_the_owner'),
+        'exhaustion': ('session_lock_protocol.rs', 'replacing_pending_requests_finishes_old_owners_without_granting_them'),
         'process failure': ('lock.rs', 'reconnect_while_locked_stays_locked'),
     },
 }

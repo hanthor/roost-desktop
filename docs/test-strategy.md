@@ -134,3 +134,16 @@ new real Wayland client cases rather than accepting its initial 25% result.
 The floors guard this documented source-file measurement scope; they do not
 claim branch coverage, GUI journey coverage or complete security boundary
 cases. Those remaining gates stay tracked by #8.
+
+The measured coverage lane requires complete security evidence before a green
+run: exact source revision, compiler and observer versions, kernel and installed
+packages, a reproduction command requiring PAM wrapper support, executed test
+logs, LLVM coverage JSON and its measured report. `roost-security-artifacts`
+checks these files and requires successful execution of the registered positive,
+negative, spoof/replay, exhaustion and process-failure cases for the control and
+locked-session boundaries. Failed, ignored or merely listed tests do not satisfy
+this gate. The resulting checklist is retained with the coverage artifact.
+
+Registration does not imply every security boundary is covered, nor authenticate
+logs obtained outside trusted CI. Spec-qualified legacy test IDs and broader
+protocol/lifecycle boundary registration remain tracked by #8.
