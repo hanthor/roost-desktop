@@ -148,3 +148,14 @@ GTK and St differ in a few ways that matter when matching numbers:
   them to sRGB, so Roost does too.
 - GNOME's lock screen blurs the wallpaper with a Gaussian of about
   sigma 20 and dims it to 65%; fitted against GNOME's capture.
+
+Idle shield behavior follows GNOME's `screenShield.js`: the idle fade takes
+10,000 ms with ease-out-quad, and locking waits for the larger of that animation duration
+and `lock-delay`. With animations disabled the minimum disappears.
+`G-IDLE-FADE` drives a two-second idle policy, cancels the fade with
+activity, observes the blank stage before the delayed lock, and verifies
+that waking still requires PAM. `G-LOCK-BACKGROUND` uses a solid green
+screen-saver URI and checks its dimmed pixels. The parity lock frame sets
+an explicit URI to the exported reference wallpaper and retains it in
+`lock-background-uri.txt`; the custom-color proof is separate from that
+GNOME visual comparison.
