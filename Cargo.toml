@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["third-party/smithay"]
 members = [
     "crates/compositor",
     "crates/shell-control-schema",
@@ -74,3 +75,6 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.roost-wallpaper]
 opt-level = 3
+
+[patch.crates-io]
+smithay = { path = "third-party/smithay" }
