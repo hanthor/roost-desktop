@@ -1161,6 +1161,14 @@ showing "$ARTIFACTS/a11y-group-cleared.json" "No Notifications" ||
     fail G-NOTIFY-GROUP "Clear did not empty the grouped list"
 pass G-NOTIFY-GROUP "an app's notifications group, collapsed, and expand on press"
 xdotool key Escape
+# The next click belongs to the panel, after the calendar's popup grab
+# has actually closed and returned pointer focus.
+for _ in $(seq 1 20); do
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-group-closed.json" 20 || fail G-NOTIFY-GROUP "post-Escape calendar dump failed"
+    showing "$ARTIFACTS/a11y-group-closed.json" "No Notifications" || break
+    sleep 0.1
+done
+if showing "$ARTIFACTS/a11y-group-closed.json" "No Notifications"; then fail G-NOTIFY-GROUP "Escape did not close the calendar before opening quick settings"; fi
 
 # Quick-settings services (#55): each toggle is read back from its daemon.
 sysprop() {
