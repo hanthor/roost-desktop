@@ -1086,7 +1086,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 19).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 20).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 21).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 22).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 22).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 23).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }
