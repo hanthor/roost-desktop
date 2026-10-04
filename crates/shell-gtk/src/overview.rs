@@ -33,6 +33,9 @@ pub trait OverviewActions {
     /// Raise an existing window by compositor id.
     fn activate_window(&self, id: u64);
     /// Running windows as `(id, app_id)`.
+    fn window_icon(&self, _id: u64) -> Option<String> {
+        None
+    }
     fn running(&self) -> Vec<(u64, Option<String>)>;
     /// Search results are showing (or not): the compositor hides the
     /// workspace view meanwhile.
@@ -142,6 +145,7 @@ pub struct OverviewUi {
     first_remote_hit: Rc<RefCell<Option<(providers::Remote, String)>>>,
     dash: gtk::ApplicationWindow,
     dash_row: gtk::Box,
+    dash_signature: Vec<(u64, Option<String>, Option<String>)>,
     grid: gtk::ApplicationWindow,
     apps: Rc<LiveApps>,
     favorites: Vec<String>,
@@ -259,6 +263,7 @@ impl OverviewUi {
             first_remote_hit: Rc::new(RefCell::new(None)),
             dash,
             dash_row,
+            dash_signature: Vec::new(),
             grid,
             apps,
             favorites,
@@ -431,8 +436,8 @@ impl OverviewUi {
             .collect();
         let favorites = shown.len();
         // Running windows no installed app claims become window-backed
-        // apps, as GNOME's WindowTracker makes them: one per app id (or
-        // window), with the generic icon.
+        // apps, as GNOME's WindowTracker makes them: one per window,
+        // with the window icon.
         let mut orphans: Vec<(u64, String)> = Vec::new();
         for (window, app) in &running {
             match app
@@ -446,9 +451,7 @@ impl OverviewUi {
                 }
                 None => {
                     let key = app.clone().unwrap_or_else(|| format!("window:{window}"));
-                    if !orphans.iter().any(|(_, k)| *k == key) {
-                        orphans.push((*window, key));
-                    }
+                    orphans.push((*window, key));
                 }
             }
         }
@@ -490,7 +493,10 @@ impl OverviewUi {
                 generic_name: None,
                 keywords: Vec::new(),
                 argv: Vec::new(),
-                icon: Some("application-x-executable".to_owned()),
+                icon: me
+                    .actions
+                    .window_icon(window)
+                    .or_else(|| Some("application-x-executable".to_owned())),
                 categories: Vec::new(),
             };
             let button = dash_tile(&entry, true);
@@ -540,7 +546,7 @@ impl OverviewUi {
         // The grid sits between the search entry and the dash.
         let (columns, rows) = crate::logic::grid_mode(mon_w, mon_h - 250);
         let per_page = columns * rows;
-        let new_page = || {
+        let new_page = move || {
             let flow = gtk::FlowBox::new();
             flow.set_selection_mode(gtk::SelectionMode::None);
             flow.set_homogeneous(true);
@@ -558,18 +564,6 @@ impl OverviewUi {
             flow.set_size_request(columns as i32 * 113 + (columns as i32 - 1) * 12, -1);
             flow.add_css_class("icon-grid");
             flow
-        };
-        let mut pages: Vec<gtk::FlowBox> = vec![new_page()];
-        let mut on_page = 0usize;
-        let mut add = |widget: &gtk::Widget| {
-            if on_page == per_page {
-                pages.push(new_page());
-                on_page = 0;
-            }
-            if let Some(page) = pages.last() {
-                page.insert(widget, -1);
-            }
-            on_page += 1;
         };
         // GNOME's app-folders: folders and loose apps share one
         // alphabetical grid; a folder opens its apps in a popover.
@@ -598,6 +592,31 @@ impl OverviewUi {
             .iter()
             .map(|(id, name, _)| (id.as_str(), name.as_str()))
             .collect();
+        let layout =
+            crate::logic::grid_layout_pages(&keys, &crate::folders::picker_layout(), per_page);
+        let pages: Vec<gtk::FlowBox> = layout.iter().map(|_| new_page()).collect();
+        let reflow = Rc::new(GridReflow {
+            order: RefCell::new(layout.clone()),
+            original: RefCell::new(None),
+            widgets: RefCell::new(std::collections::HashMap::new()),
+            pages: RefCell::new(pages.iter().map(|page| page.downgrade()).collect()),
+            carousel: RefCell::new(None),
+            new_page: Rc::new(new_page),
+            columns,
+            per_page,
+        });
+        let add = |id: &str, widget: &gtk::Widget| {
+            widget.set_widget_name(id);
+            reflow
+                .widgets
+                .borrow_mut()
+                .insert(id.to_owned(), widget.downgrade());
+            let index = layout
+                .iter()
+                .position(|page| page.iter().any(|key| key == id))
+                .unwrap_or(0);
+            pages[index].insert(widget, -1);
+        };
         let ranks = crate::logic::grid_order(&keys, &crate::folders::picker_layout());
         let mut slots: Vec<Option<(String, String, Item)>> =
             unordered.into_iter().map(Some).collect();
@@ -606,12 +625,11 @@ impl OverviewUi {
             .filter_map(|i| slots[i].take())
             .map(|(id, _, item)| (id, item))
             .collect();
-        let order: Rc<Vec<String>> = Rc::new(items.iter().map(|(id, _)| id.clone()).collect());
         let weak_ui = Rc::downgrade(ui);
         // GNOME's drop between tiles moves the dragged item there and
         // saves the grid (app-picker-layout).
         let reorder = {
-            let (order, weak_ui) = (order.clone(), weak_ui.clone());
+            let (reflow, weak_ui) = (reflow.clone(), weak_ui.clone());
             Rc::new(
                 move |text: &str, target: &str, edge: crate::logic::DropEdge| {
                     let source = match text.split_once(':') {
@@ -619,9 +637,8 @@ impl OverviewUi {
                         Some(("folder", id)) => id.to_owned(),
                         _ => return None,
                     };
-                    let index = order.iter().position(|id| id == target)?;
-                    let moved = crate::logic::grid_reorder(&order, &source, index, edge, columns)?;
-                    crate::folders::save_picker_layout(&crate::logic::grid_pages(&moved, per_page));
+                    reflow.move_item(&source, target, edge);
+                    reflow.commit();
                     Some(weak_ui.clone())
                 },
             )
@@ -632,9 +649,14 @@ impl OverviewUi {
             let button = app_button(entry, size, true);
             button.add_css_class("grid-tile");
             fit_tile_label(&button);
+            grid_hover(&button, key.clone(), reflow.clone());
             // GNOME's grid edits: drag an app onto another to make a
             // folder of the two.
-            drag_source(&button, format!("app:{}", entry.app_id));
+            let drag = drag_source(&button, format!("app:{}", entry.app_id));
+            {
+                let reflow = reflow.clone();
+                drag.connect_drag_end(move |_, _, _| reflow.cancel());
+            }
             {
                 let (target, weak_ui, live_apps, reorder) = (
                     entry.clone(),
@@ -642,17 +664,21 @@ impl OverviewUi {
                     live_apps.clone(),
                     reorder.clone(),
                 );
+                let reflow = reflow.clone();
                 on_drop(&button, move |text, edge| {
                     if edge != crate::logic::DropEdge::OnIcon {
                         return reorder(text, &key, edge);
                     }
                     let dragged = text.strip_prefix("app:")?.to_owned();
                     if dragged == target.app_id {
-                        return None;
+                        // Live reflow may put the dragged tile underneath
+                        // the pointer. Its own center accepts that move.
+                        return reorder(text, &key, crate::logic::DropEdge::Start);
                     }
                     let apps = live_apps.get();
                     let other = apps.apps().iter().find(|a| a.app_id == dragged)?;
                     let folder = crate::folders::create(&[&target, other])?;
+                    reflow.commit();
                     // The folder takes the target's place in a saved grid.
                     let pages = crate::logic::grid_pages_replace(
                         &crate::folders::picker_layout(),
@@ -674,10 +700,13 @@ impl OverviewUi {
             });
             button
         };
-        for (_, item) in items {
+        for (key, item) in items {
             match item {
                 Item::App(entry) => {
-                    add(launch_button(entry, 64, me.actions.clone()).upcast_ref());
+                    add(
+                        &key,
+                        launch_button(entry, 64, me.actions.clone()).upcast_ref(),
+                    );
                 }
                 Item::Folder(folder, members) => {
                     // GNOME's createFolderIcon: a 64px square of four
@@ -710,20 +739,31 @@ impl OverviewUi {
                     button.add_css_class("flat");
                     button.add_css_class("overview-app");
                     button.add_css_class("app-folder");
+                    button.set_tooltip_text(Some(&folder.name));
                     button.add_css_class("grid-tile");
                     fit_tile_label(&button);
                     button.update_property(&[gtk::accessible::Property::Label(&folder.name)]);
+                    grid_hover(&button, folder.id.clone(), reflow.clone());
                     // An app dropped on a folder joins it; between tiles,
                     // folders move like apps.
-                    drag_source(&button, format!("folder:{}", folder.id));
+                    let drag = drag_source(&button, format!("folder:{}", folder.id));
+                    {
+                        let reflow = reflow.clone();
+                        drag.connect_drag_end(move |_, _, _| reflow.cancel());
+                    }
                     {
                         let (fid, weak_ui, reorder) =
                             (folder.id.clone(), weak_ui.clone(), reorder.clone());
+                        let reflow = reflow.clone();
                         on_drop(&button, move |text, edge| {
+                            if text.strip_prefix("folder:") == Some(fid.as_str()) {
+                                return reorder(text, &fid, crate::logic::DropEdge::Start);
+                            }
                             if edge != crate::logic::DropEdge::OnIcon {
                                 return reorder(text, &fid, edge);
                             }
                             let dragged = text.strip_prefix("app:")?;
+                            reflow.commit();
                             crate::folders::add_app(&fid, dragged);
                             Some(weak_ui.clone())
                         });
@@ -756,11 +796,11 @@ impl OverviewUi {
                             dialog.open(&id, &name, tiles);
                         });
                     }
-                    add(button.upcast_ref());
+                    add(&key, button.upcast_ref());
                 }
             }
         }
-        me.grid.set_child(Some(&paged_grid(pages)));
+        me.grid.set_child(Some(&paged_grid(pages, reflow)));
     }
 
     /// Who to tell when the folder dialog shades the overview.
@@ -818,11 +858,38 @@ impl OverviewUi {
         }
     }
 
+    /// GNOME's overview state keys: session -> picker -> apps and back.
+    pub fn shift(ui: &Rc<RefCell<Self>>, up: bool) {
+        let (open, apps) = {
+            let me = ui.borrow();
+            (me.open, me.grid.is_visible())
+        };
+        match (open, apps, up) {
+            (false, _, true) | (true, true, false) => Self::focus_search(ui),
+            (true, false, true) => Self::show_apps(ui),
+            (true, false, false) => ui.borrow().actions.close_overview(),
+            _ => {}
+        }
+    }
+
     /// Follow the compositor's overview state.
     pub fn set_open(ui: &Rc<RefCell<Self>>, open: bool) {
+        let signature = {
+            let me = ui.borrow();
+            me.actions
+                .running()
+                .into_iter()
+                .map(|(id, app)| (id, app, me.actions.window_icon(id)))
+                .collect::<Vec<_>>()
+        };
         if ui.borrow().open == open {
+            if open && ui.borrow().dash_signature != signature {
+                ui.borrow_mut().dash_signature = signature;
+                Self::rebuild_dash(ui);
+            }
             return;
         }
+        ui.borrow_mut().dash_signature = signature;
         ui.borrow_mut().open = open;
         if open {
             Self::rebuild_dash(ui);
@@ -918,12 +985,279 @@ fn fill_section(
     section.append(&rows);
 }
 
+struct GridReflow {
+    order: RefCell<Vec<Vec<String>>>,
+    original: RefCell<Option<Vec<Vec<String>>>>,
+    widgets: RefCell<std::collections::HashMap<String, glib::WeakRef<gtk::Widget>>>,
+    pages: RefCell<Vec<glib::WeakRef<gtk::FlowBox>>>,
+    carousel: RefCell<Option<glib::WeakRef<libadwaita::Carousel>>>,
+    new_page: Rc<dyn Fn() -> gtk::FlowBox>,
+    columns: usize,
+    per_page: usize,
+}
+
+impl GridReflow {
+    fn move_item(&self, source: &str, target: &str, edge: crate::logic::DropEdge) {
+        let current = self.order.borrow().clone();
+        let Some(moved) = crate::logic::grid_move_in_pages(
+            &current,
+            source,
+            target,
+            edge,
+            self.columns,
+            self.per_page,
+        ) else {
+            return;
+        };
+        if self.original.borrow().is_none() {
+            *self.original.borrow_mut() = Some(current);
+        }
+        *self.order.borrow_mut() = moved;
+        self.arrange();
+    }
+
+    fn commit(&self) {
+        crate::folders::save_picker_layout(&crate::logic::grid_save_pages(&self.order.borrow()));
+        self.original.borrow_mut().take();
+    }
+
+    fn cancel(&self) {
+        let original = self.original.borrow_mut().take();
+        if let Some(original) = original {
+            *self.order.borrow_mut() = original;
+            self.arrange();
+        }
+    }
+
+    fn arrange(&self) {
+        let order = self.order.borrow().clone();
+        let mut pages: Vec<_> = self
+            .pages
+            .borrow()
+            .iter()
+            .filter_map(|page| page.upgrade())
+            .collect();
+        let carousel = self
+            .carousel
+            .borrow()
+            .as_ref()
+            .and_then(|carousel| carousel.upgrade());
+        while pages.len() < order.len() {
+            let page = (self.new_page)();
+            if let Some(carousel) = carousel.as_ref() {
+                carousel.append(&page);
+            }
+            self.pages.borrow_mut().push(page.downgrade());
+            pages.push(page);
+        }
+        let widgets = self.widgets.borrow().clone();
+        for (page_index, ids) in order.iter().enumerate() {
+            let page = &pages[page_index];
+            for id in ids {
+                let Some(widget) = widgets.get(id).and_then(|widget| widget.upgrade()) else {
+                    continue;
+                };
+                let parent = widget.parent().and_downcast::<gtk::FlowBoxChild>();
+                let previous = parent
+                    .as_ref()
+                    .and_then(|child| child.parent())
+                    .and_downcast::<gtk::FlowBox>();
+                if previous.as_ref() != Some(page) {
+                    if let (Some(previous), Some(parent)) = (previous, parent) {
+                        parent.set_child(gtk::Widget::NONE);
+                        previous.remove(&parent);
+                    }
+                    page.insert(&widget, -1);
+                }
+            }
+            let ranks: std::collections::HashMap<String, usize> = ids
+                .iter()
+                .enumerate()
+                .map(|(rank, id)| (id.clone(), rank))
+                .collect();
+            page.set_sort_func(move |a, b| {
+                let rank = |child: &gtk::FlowBoxChild| {
+                    child
+                        .child()
+                        .and_then(|widget| ranks.get(widget.widget_name().as_str()).copied())
+                        .unwrap_or(usize::MAX)
+                };
+                rank(a).cmp(&rank(b)).into()
+            });
+        }
+        while pages.len() > order.len() {
+            let page = pages.pop().unwrap();
+            if let Some(carousel) = carousel.as_ref() {
+                carousel.remove(&page);
+            }
+            self.pages.borrow_mut().pop();
+        }
+    }
+}
+
+/// Read drag data without claiming the drop (the existing target still
+/// handles folders and final persistence). A tile edge reflows at 200ms.
+fn grid_hover(widget: &impl IsA<gtk::Widget>, target: String, reflow: Rc<GridReflow>) {
+    struct Hover {
+        text: RefCell<Option<String>>,
+        edge: Cell<crate::logic::DropEdge>,
+        timer: RefCell<Option<glib::SourceId>>,
+        generation: Cell<u64>,
+        applied: Cell<bool>,
+        target: String,
+        reflow: Rc<GridReflow>,
+    }
+    impl Hover {
+        fn stop(&self) {
+            if let Some(timer) = self.timer.borrow_mut().take() {
+                timer.remove();
+            }
+        }
+        fn motion(self: &Rc<Self>, edge: crate::logic::DropEdge) {
+            if self.edge.replace(edge) != edge {
+                self.stop();
+                self.applied.set(false);
+            }
+            if edge == crate::logic::DropEdge::OnIcon
+                || self.timer.borrow().is_some()
+                || self.applied.get()
+            {
+                return;
+            }
+            let Some(text) = self.text.borrow().clone() else {
+                return;
+            };
+            let source = match text.split_once(':') {
+                Some(("app", id)) => format!("{id}.desktop"),
+                Some(("folder", id)) => id.to_owned(),
+                _ => return,
+            };
+            let weak = Rc::downgrade(self);
+            *self.timer.borrow_mut() = Some(glib::timeout_add_local_once(
+                std::time::Duration::from_millis(200),
+                move || {
+                    if let Some(hover) = weak.upgrade() {
+                        hover.timer.borrow_mut().take();
+                        hover.applied.set(true);
+                        if std::env::var_os("ROOST_GRID_TRACE").is_some() {
+                            eprintln!("roost-shell-gtk: grid hover timer fired edge={edge:?}");
+                        }
+                        hover.reflow.move_item(&source, &hover.target, edge);
+                    }
+                },
+            ));
+        }
+    }
+    let hover = Rc::new(Hover {
+        text: RefCell::new(None),
+        edge: Cell::new(crate::logic::DropEdge::OnIcon),
+        timer: RefCell::new(None),
+        generation: Cell::new(0),
+        applied: Cell::new(false),
+        target,
+        reflow,
+    });
+    let motion = gtk::DropControllerMotion::new();
+    {
+        let hover = hover.clone();
+        motion.connect_enter(move |motion, x, _| {
+            hover.generation.set(hover.generation.get() + 1);
+            let generation = hover.generation.get();
+            if std::env::var_os("ROOST_GRID_TRACE").is_some() {
+                eprintln!(
+                    "roost-shell-gtk: grid hover entered x={x} width={}",
+                    motion.widget().map_or(0, |w| w.width())
+                );
+            }
+            let edge =
+                crate::logic::drop_edge(x, f64::from(motion.widget().map_or(0, |w| w.width())));
+            hover.motion(edge);
+            if let Some(drop) = motion.drop() {
+                let hover = hover.clone();
+                drop.read_value_async(
+                    glib::Type::STRING,
+                    glib::Priority::DEFAULT,
+                    gio::Cancellable::NONE,
+                    move |result| {
+                        if hover.generation.get() != generation {
+                            return;
+                        }
+                        *hover.text.borrow_mut() =
+                            result.ok().and_then(|value| value.get::<String>().ok());
+                        if std::env::var_os("ROOST_GRID_TRACE").is_some() {
+                            eprintln!(
+                                "roost-shell-gtk: grid hover data ready={} edge={:?}",
+                                hover.text.borrow().is_some(),
+                                hover.edge.get()
+                            );
+                        }
+                        hover.motion(hover.edge.get());
+                    },
+                );
+            }
+        });
+    }
+    {
+        let hover = hover.clone();
+        motion.connect_motion(move |motion, x, _| {
+            hover.motion(crate::logic::drop_edge(
+                x,
+                f64::from(motion.widget().map_or(0, |w| w.width())),
+            ))
+        });
+    }
+    motion.connect_leave(move |_| {
+        hover.stop();
+        hover.generation.set(hover.generation.get() + 1);
+        hover.text.borrow_mut().take();
+        hover.applied.set(false);
+    });
+    widget.add_controller(motion);
+}
+
 /// GNOME's paged app grid (appDisplay.js): the pages side by side,
 /// flipped by the wheel, a swipe, PageUp/PageDown, the side arrows or
 /// the indicators; arrows and indicators only with more than one page.
-fn paged_grid(pages: Vec<gtk::FlowBox>) -> gtk::Widget {
+mod page_hint {
+    use gtk::prelude::*;
+    use gtk::subclass::prelude::*;
+    use gtk4 as gtk;
+
+    #[derive(Default)]
+    pub struct PageHint;
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for PageHint {
+        const NAME: &'static str = "RoostPageHint";
+        type Type = super::PageHint;
+        type ParentType = gtk::Fixed;
+    }
+    impl ObjectImpl for PageHint {}
+    impl WidgetImpl for PageHint {
+        fn measure(&self, orientation: gtk::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
+            if orientation == gtk::Orientation::Horizontal {
+                // Animated actors begin outside the clip. Their FixedLayout
+                // extents must never enlarge the 10% navigation hint.
+                let width = self.obj().width_request().max(0);
+                (width, width, -1, -1)
+            } else {
+                self.parent_measure(orientation, for_size)
+            }
+        }
+    }
+    impl FixedImpl for PageHint {}
+}
+
+glib::wrapper! {
+    pub struct PageHint(ObjectSubclass<page_hint::PageHint>)
+        @extends gtk::Fixed, gtk::Widget,
+        @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
+}
+
+fn paged_grid(pages: Vec<gtk::FlowBox>, reflow: Rc<GridReflow>) -> gtk::Widget {
     use libadwaita as adw;
     let carousel = adw::Carousel::new();
+    *reflow.carousel.borrow_mut() = Some(carousel.downgrade());
     carousel.set_allow_scroll_wheel(true);
     carousel.set_hexpand(true);
     carousel.set_vexpand(true);
@@ -982,7 +1316,15 @@ fn paged_grid(pages: Vec<gtk::FlowBox>) -> gtk::Widget {
     // dragged they take the arrows' place at the sides, a tenth of the
     // grid wide each, lit (.dnd) while the drag is over them.
     let hint = |side: &str, align: gtk::Align| {
-        let hint = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let hint = glib::Object::new::<PageHint>();
+        hint.set_overflow(gtk::Overflow::Hidden);
+        hint.set_vexpand(true);
+        hint.set_accessible_role(gtk::AccessibleRole::Group);
+        hint.update_property(&[gtk::accessible::Property::Label(if side == "previous" {
+            "Previous page preview"
+        } else {
+            "Next page preview"
+        })]);
         hint.add_css_class("page-navigation-hint");
         hint.add_css_class(side);
         hint.set_halign(align);
@@ -997,23 +1339,28 @@ fn paged_grid(pages: Vec<gtk::FlowBox>) -> gtk::Widget {
         next_hint: hint("next", gtk::Align::End),
         previous: previous.clone(),
         next: next.clone(),
-        pages: n,
         dragging: Cell::new(false),
         initial: RefCell::new(None),
         repeat: RefCell::new(None),
         overshoot: Cell::new(-1.0),
     });
     let sync = {
-        let (dots, pager) = (dots.clone(), pager.clone());
+        // Carousel owns this callback. Indicator click callbacks and the
+        // pager reference Carousel, so strong captures would retain the grid.
+        let dots: Vec<_> = dots.iter().map(|dot| dot.downgrade()).collect();
+        let pager = Rc::downgrade(&pager);
         move |page: u32| {
             for (i, dot) in dots.iter().enumerate() {
+                let Some(dot) = dot.upgrade() else { continue };
                 if i as u32 == page {
                     dot.add_css_class("active");
                 } else {
                     dot.remove_css_class("active");
                 }
             }
-            pager.sync(page);
+            if let Some(pager) = pager.upgrade() {
+                pager.sync(page);
+            }
         }
     };
     sync(0);
@@ -1031,8 +1378,9 @@ fn paged_grid(pages: Vec<gtk::FlowBox>) -> gtk::Widget {
         let pager = pager.clone();
         motion.connect_motion(move |m, x, _| {
             let width = m.widget().map_or(0, |w| w.width());
-            // A drag originating in a descendant can deliver motion before
-            // an overlay enter crossing. Initialize paging on either event.
+            // A drop can start over a descendant before this overlay
+            // observes its initial crossing. Motion still proves that
+            // a drag is present, so initialize the page hints here too.
             if !pager.dragging.get() {
                 pager.begin(width);
             }
@@ -1068,11 +1416,10 @@ fn paged_grid(pages: Vec<gtk::FlowBox>) -> gtk::Widget {
 /// second while the pointer stays.
 struct DragPager {
     carousel: libadwaita::Carousel,
-    previous_hint: gtk::Box,
-    next_hint: gtk::Box,
+    previous_hint: PageHint,
+    next_hint: PageHint,
     previous: gtk::Button,
     next: gtk::Button,
-    pages: usize,
     dragging: Cell<bool>,
     initial: RefCell<Option<glib::SourceId>>,
     repeat: RefCell<Option<glib::SourceId>>,
@@ -1093,21 +1440,122 @@ impl DragPager {
     /// Arrows outside a drag, hints (where a page lies) during one.
     fn sync(&self, page: u32) {
         let before = page > 0;
-        let after = (page as usize) + 1 < self.pages;
+        let after = page + 1 < self.carousel.n_pages();
         let dragging = self.dragging.get();
         self.previous.set_visible(before && !dragging);
         self.next.set_visible(after && !dragging);
         self.previous_hint.set_visible(before && dragging);
         self.next_hint.set_visible(after && dragging);
+        if dragging {
+            if before {
+                self.preview(&self.previous_hint, page - 1, -1.0);
+            }
+            if after {
+                self.preview(&self.next_hint, page + 1, 1.0);
+            }
+        }
+    }
+
+    fn preview(&self, hint: &PageHint, page: u32, direction: f64) {
+        while let Some(child) = hint.first_child() {
+            hint.remove(&child);
+        }
+        let Some(flow) = self.carousel.nth_page(page).downcast::<gtk::FlowBox>().ok() else {
+            return;
+        };
+        let width = hint.width().max(hint.width_request());
+        let mut tiles = Vec::new();
+        let mut child = flow.first_child();
+        while let Some(tile) = child {
+            child = tile.next_sibling();
+            let Some(widget) = tile
+                .downcast::<gtk::FlowBoxChild>()
+                .ok()
+                .and_then(|tile| tile.child())
+            else {
+                continue;
+            };
+            let Some(point) = widget.compute_point(&flow, &gtk::graphene::Point::new(0.0, 0.0))
+            else {
+                continue;
+            };
+            tiles.push((widget, point));
+        }
+        // FlowBox centers its columns, leaving a gutter wider than the
+        // 10% hint. Crop from the first/last actual tile, rather than
+        // showing that empty page margin instead of neighboring icons.
+        let crop = if direction < 0.0 {
+            tiles.iter().fold(0.0_f64, |edge, (widget, point)| {
+                edge.max(f64::from(point.x()) + f64::from(widget.width()))
+            }) - f64::from(width)
+        } else {
+            tiles
+                .iter()
+                .map(|(_, point)| f64::from(point.x()))
+                .reduce(f64::min)
+                .unwrap_or(0.0)
+        }
+        .max(0.0);
+        let enabled =
+            gtk::Settings::default().is_none_or(|settings| settings.is_gtk_enable_animations());
+        let mut actors = Vec::new();
+        for (widget, point) in tiles {
+            let x = f64::from(point.x()) - crop;
+            let y = f64::from(point.y());
+            if x + f64::from(widget.width()) <= 0.0 || x >= f64::from(width) {
+                continue;
+            }
+            let picture = gtk::Picture::for_paintable(&gtk::WidgetPaintable::new(Some(&widget)));
+            picture.set_size_request(widget.width(), widget.height());
+            picture.set_can_target(false);
+            if let Some(name) = widget.tooltip_text() {
+                picture.update_property(&[gtk::accessible::Property::Label(&name)]);
+            }
+            hint.put(
+                &picture,
+                x + if enabled {
+                    direction * f64::from(width)
+                } else {
+                    0.0
+                },
+                y,
+            );
+            actors.push((picture, x, y));
+        }
+        if !enabled {
+            return;
+        }
+        let hint = hint.clone();
+        let started = std::time::Instant::now();
+        glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+            if !hint.is_visible() {
+                return glib::ControlFlow::Break;
+            }
+            let enabled =
+                gtk::Settings::default().is_none_or(|settings| settings.is_gtk_enable_animations());
+            let progress = if enabled {
+                (started.elapsed().as_secs_f64() / 0.150).min(1.0)
+            } else {
+                1.0
+            };
+            let remaining = (1.0 - progress).powi(3);
+            for (actor, x, y) in &actors {
+                if actor.parent().as_ref() != Some(hint.upcast_ref()) {
+                    return glib::ControlFlow::Break;
+                }
+                hint.move_(actor, x + direction * f64::from(width) * remaining, *y);
+            }
+            if progress == 1.0 {
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
     }
 
     fn begin(&self, width: i32) {
         if std::env::var_os("ROOST_GRID_TRACE").is_some() {
-            eprintln!(
-                "roost-grid: pager begin width={width} page={} pages={}",
-                self.page(),
-                self.pages
-            );
+            eprintln!("roost-shell-gtk: grid pager drag entered width={width}");
         }
         // A tenth of the grid each (PAGE_PREVIEW_RATIO / 2).
         let w = (f64::from(width) * 0.1) as i32;
@@ -1119,7 +1567,7 @@ impl DragPager {
 
     fn end(&self) {
         if std::env::var_os("ROOST_GRID_TRACE").is_some() {
-            eprintln!("roost-grid: pager end");
+            eprintln!("roost-shell-gtk: grid pager drag left");
         }
         self.reset();
         self.dragging.set(false);
@@ -1221,21 +1669,24 @@ fn step_page(carousel: &libadwaita::Carousel, step: i32) {
 
 /// Make `widget` a drag source of `text`, the widget itself as the
 /// icon (GNOME drags the tile).
-fn drag_source(widget: &impl IsA<gtk::Widget>, text: String) {
+fn drag_source(widget: &impl IsA<gtk::Widget>, text: String) -> gtk::DragSource {
     let source = gtk::DragSource::new();
     source.set_actions(gtk::gdk::DragAction::MOVE);
     source.set_content(Some(&gtk::gdk::ContentProvider::for_value(
         &text.to_value(),
     )));
-    let w = widget.clone().upcast::<gtk::Widget>();
+    // The widget owns its controller; the callback must not own the widget.
+    let w = widget.clone().upcast::<gtk::Widget>().downgrade();
     source.connect_drag_begin(move |source, _| {
+        let Some(w) = w.upgrade() else { return };
         if std::env::var_os("ROOST_GRID_TRACE").is_some() {
-            eprintln!("roost-grid: source begin");
+            eprintln!("roost-shell-gtk: app tile drag started");
         }
         let paintable = gtk::WidgetPaintable::new(Some(&w));
         source.set_icon(Some(&paintable), w.width() / 2, w.height() / 2);
     });
-    widget.add_controller(source);
+    widget.add_controller(source.clone());
+    source
 }
 
 /// Accept a dropped string on `widget`: `act` edits the folders and

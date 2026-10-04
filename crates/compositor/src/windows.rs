@@ -534,6 +534,11 @@ impl WindowManager {
     /// dead ones, sync titles, and drain client window-state requests.
     /// Called once per loop tick after client dispatch, and directly
     /// by tests.
+    #[cfg(feature = "xwayland")]
+    pub(crate) fn x11_icon_identities(&self) -> Vec<(u32, u64)> {
+        self.x11_index.iter().map(|(x, id)| (*x, *id)).collect()
+    }
+
     pub fn reconcile(&mut self, state: &mut State) {
         // Popups (#88): drop dead trees, and once the last grabbed popup
         // is gone hand keyboard focus back to the focused window.
@@ -570,6 +575,9 @@ impl WindowManager {
                     seen.push(self.map(state, surface));
                 }
             }
+        }
+        for (surface, id) in &self.surface_index {
+            self.model.set_icon(*id, state.window_icons.get(surface));
         }
         // Liveness runs over the unified handles: `Window::alive`
         // delegates per variant, so native and X11 windows drop on
@@ -1127,6 +1135,7 @@ impl WindowManager {
                 #[cfg(feature = "xwayland")]
                 WindowSurface::X11(surface) => {
                     self.x11_index.remove(&surface.window_id());
+                    state.window_icons.remove_cache(&format!("x11:{id}"));
                 }
             }
         }
@@ -1963,8 +1972,8 @@ impl WindowManager {
         } else {
             mode
         };
-        // A window inhibiting shortcuts (keyboard-shortcuts-inhibit)
-        // gets the keys the shell grabbed too.
+        // A window with approved shortcut inhibition receives the shell's
+        // grabbed accelerators too. Lock input always remains compositor-owned.
         let inhibited = !self.lock_input_active && state.shortcuts_inhibited();
         let grabs: Vec<roost_shell_control::Accelerator> = if pressed && !inhibited {
             self.accelerators
@@ -3519,17 +3528,37 @@ impl WindowManager {
                     // One of the shell's switcher chords. The press and
                     // its release stay invisible to apps.
                     self.switcher_swallowed.push(keycode);
+                    use roost_shell_control::SwitcherKeyKind as K;
+                    if matches!(
+                        kind,
+                        K::CycleWindows
+                            | K::CycleWindowsBackward
+                            | K::CycleGroup
+                            | K::CycleGroupBackward
+                    ) {
+                        if self.switcher_open {
+                            self.push_switcher(SwitcherAction::Cancel);
+                        }
+                        self.switcher_open = false;
+                        self.push_switcher(SwitcherAction::Cycle {
+                            forward: matches!(kind, K::CycleWindows | K::CycleGroup),
+                            group: matches!(kind, K::CycleGroup | K::CycleGroupBackward),
+                        });
+                        return;
+                    }
                     let reopen = !self.switcher_open;
                     if reopen {
                         self.switcher_opener = opener;
                     }
                     self.switcher_open = true;
-                    use roost_shell_control::SwitcherKeyKind as K;
                     self.push_switcher(match kind {
                         K::Applications => SwitcherAction::Step { forward: true },
                         K::ApplicationsBackward => SwitcherAction::Step { forward: false },
                         K::Group => SwitcherAction::StepWindow { forward: true },
                         K::GroupBackward => SwitcherAction::StepWindow { forward: false },
+                        K::Windows => SwitcherAction::StepAllWindows { forward: true },
+                        K::WindowsBackward => SwitcherAction::StepAllWindows { forward: false },
+                        _ => unreachable!("cycle keys returned above"),
                     });
                     if reopen && opener == 0 {
                         // No modifier to hold it open: GNOME picks at once.
@@ -4003,6 +4032,12 @@ impl WindowManager {
             (K::ApplicationsBackward, true) => K::Applications,
             (K::Group, true) => K::GroupBackward,
             (K::GroupBackward, true) => K::Group,
+            (K::Windows, true) => K::WindowsBackward,
+            (K::WindowsBackward, true) => K::Windows,
+            (K::CycleWindows, true) => K::CycleWindowsBackward,
+            (K::CycleWindowsBackward, true) => K::CycleWindows,
+            (K::CycleGroup, true) => K::CycleGroupBackward,
+            (K::CycleGroupBackward, true) => K::CycleGroup,
             (kind, false) => kind,
         };
         Some((kind, key.mods & !MOD_SHIFT))

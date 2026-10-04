@@ -74,7 +74,10 @@ pub mod state;
 pub mod supervise;
 pub mod unlock;
 pub mod wallpaper;
+pub mod window_icons;
 pub mod windows;
+#[cfg(feature = "xwayland")]
+mod x11_icons;
 pub mod xwayland;
 
 /// One compositor-tracked output: protocol handle plus geometry.
@@ -101,6 +104,7 @@ pub(crate) struct OutputEntry {
 
 /// Compositor dispatch state: protocol states plus their handlers.
 pub struct State {
+    pub(crate) window_icons: window_icons::WindowIcons,
     compositor_state: CompositorState,
     shm_state: ShmState,
     xdg_shell_state: XdgShellState,
@@ -239,7 +243,9 @@ impl ClientData for ClientState {
 }
 
 impl BufferHandler for State {
-    fn buffer_destroyed(&mut self, _buffer: &wl_buffer::WlBuffer) {}
+    fn buffer_destroyed(&mut self, buffer: &wl_buffer::WlBuffer) {
+        self.window_icons.buffer_destroyed(buffer);
+    }
 }
 
 impl XdgShellHandler for State {
@@ -394,6 +400,7 @@ impl State {
 impl CompositorHandler for State {
     fn destroyed(&mut self, surface: &wl_surface::WlSurface) {
         self.initial_outputs.remove(surface);
+        self.window_icons.remove(surface);
     }
 
     fn compositor_state(&mut self) -> &mut CompositorState {
@@ -443,6 +450,7 @@ impl CompositorHandler for State {
 
     fn commit(&mut self, surface: &wl_surface::WlSurface) {
         on_commit_buffer_handler::<State>(surface);
+        self.window_icons.commit(surface);
         self.popups.commit(surface);
         if let Some(smithay::desktop::PopupKind::Xdg(popup)) = self.popups.find_popup(surface) {
             if !popup.is_initial_configure_sent() {
@@ -679,6 +687,7 @@ impl State {
         let mut seat_state = SeatState::new();
         let seat = seat_state.new_wl_seat(dh, SEAT_NAME);
         State {
+            window_icons: window_icons::WindowIcons::new(dh),
             // v6 (GNOME 51's): preferred buffer scale goes out per surface
             // (`send_surface_scales` in the runtime).
             compositor_state: CompositorState::new_v6::<State>(dh),
