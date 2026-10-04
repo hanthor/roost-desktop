@@ -660,7 +660,9 @@ impl OverviewUi {
                     }
                     let dragged = text.strip_prefix("app:")?.to_owned();
                     if dragged == target.app_id {
-                        return None;
+                        // Live reflow may put the dragged tile underneath
+                        // the pointer. Its own center accepts that move.
+                        return reorder(text, &key, crate::logic::DropEdge::Start);
                     }
                     let apps = live_apps.get();
                     let other = apps.apps().iter().find(|a| a.app_id == dragged)?;
@@ -742,6 +744,9 @@ impl OverviewUi {
                             (folder.id.clone(), weak_ui.clone(), reorder.clone());
                         let reflow = reflow.clone();
                         on_drop(&button, move |text, edge| {
+                            if text.strip_prefix("folder:") == Some(fid.as_str()) {
+                                return reorder(text, &fid, crate::logic::DropEdge::Start);
+                            }
                             if edge != crate::logic::DropEdge::OnIcon {
                                 return reorder(text, &fid, edge);
                             }

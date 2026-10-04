@@ -981,6 +981,11 @@ after_x="$(jq '[.[] | select(.showing and .role == "push button" and .name == "A
 [ "$after_x" -gt "$before_x" ] || fail G-GRID-HOVER "the neighboring tile did not reflow while the button remained down"
 [ "$(gsettings get org.gnome.shell app-picker-layout)" = "$layout_before_hover" ] || fail G-GRID-HOVER "hover persisted an unfinished drag"
 scrot "$ARTIFACTS/11g-grid-live-hover.png" >/dev/null
+# Reflow puts the dragged tile in the vacant slot. Dropping on its own
+# center commits the preview instead of treating it as a cancelled drag.
+release_point="$(jq -r '[.[] | select(.showing and .role == "push button" and .name == "AAA Move Two")][0].bounds | "\(.[0] + .[2] / 2) \(.[1] + .[3] / 2)"' "$ARTIFACTS/a11y-grid-live-hover.json")"
+# shellcheck disable=SC2086
+xdotool mousemove --window "$WID" $release_point
 xdotool mouseup 1
 sleep 1.5
 pass G-GRID-HOVER "a tile edge reflows after the 200ms delay while dragging, with persistence deferred to drop"
