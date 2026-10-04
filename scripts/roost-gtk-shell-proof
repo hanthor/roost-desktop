@@ -1917,7 +1917,11 @@ if command -v wayland-info >/dev/null 2>&1; then
     "$PY" "$ROOT/scripts/roost-wayland-info-compare" "$ARTIFACTS/wayland-info.txt" \
         --report "$ARTIFACTS/wayland-info-compare.txt" ||
         fail G-WAYLAND-INFO "globals short of GNOME 51's (see wayland-info-compare.txt)"
-    pass G-WAYLAND-INFO "every expected GNOME 51 global is advertised at its version or newer"
+    "$PY" "$ROOT/scripts/roost-wayland-info-compare" "$ARTIFACTS/wayland-info.txt" \
+        --reference "$ROOT/tests/protocols/marlin-gnome51-globals.tsv" \
+        --report "$ARTIFACTS/wayland-info-marlin-compare.txt" ||
+        fail G-WAYLAND-INFO "globals short of native Marlin GNOME 51's recorded expectations"
+    pass G-WAYLAND-INFO "headless and native Marlin GNOME 51 comparisons satisfy version floors, with gaps recorded"
 elif [ "${ROOST_REQUIRE_WAYLAND_INFO:-0}" = 1 ]; then
     fail G-WAYLAND-INFO "wayland-info is required (ROOST_REQUIRE_WAYLAND_INFO=1) but not installed"
 else
