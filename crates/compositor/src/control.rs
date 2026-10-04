@@ -860,6 +860,7 @@ fn window_to_wire(
     mint: &dyn Fn(Option<&str>) -> String,
 ) -> roost_shell_control::WindowInfo {
     roost_shell_control::WindowInfo {
+        icon: w.icon.clone(),
         id: w.id,
         title: w.title.clone(),
         app_id: w.app_id.clone(),

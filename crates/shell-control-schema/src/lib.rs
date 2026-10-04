@@ -116,9 +116,11 @@ impl ProtocolVersion {
     ///
     /// `0.20` appends the shell-to-compositor `SetSwitcherKeys` command
     /// (GNOME's rebindable switcher keys), again last.
+    /// `0.21` appends window-backed icon metadata to WindowInfo.
+    /// Postcard positional structs require peers to upgrade together.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 20,
+        minor: 21,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -158,6 +160,8 @@ pub struct WindowInfo {
     /// allows exactly one activation and expires after 30 s. Never logged
     /// (redacted `Debug` on [`ActivationToken`]).
     pub activation_token: String,
+    /// Compositor-owned PNG cache path or sanitized theme icon name.
+    pub icon: Option<String>,
 }
 
 /// Workspace state owned by the compositor and mirrored to the shell.
@@ -991,6 +995,7 @@ mod tests {
 
     fn sample_window(id: WindowId) -> WindowInfo {
         WindowInfo {
+            icon: None,
             id,
             title: format!("Terminal {id}"),
             app_id: Some("org.example.Terminal".to_owned()),
@@ -1029,8 +1034,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_20() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 20));
+    fn current_version_is_0_21() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 21));
     }
 
     #[test]
@@ -1057,8 +1062,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 17).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 18).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 19).is_compatible_with(&ours));
-        assert!(ProtocolVersion::new(0, 20).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 21).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 21).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 22).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }

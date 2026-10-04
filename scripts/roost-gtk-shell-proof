@@ -256,8 +256,12 @@ SYSBUS_PID=""
 ACCEL_PID=""
 CAL_PID=""
 SCREENSAVER_PID=""
+ICON_PID=""
+HINTS_PID=""
 IME_PIDS=""
 cleanup() {
+    if [ -n "$ICON_PID" ]; then kill "$ICON_PID" 2>/dev/null || true; fi
+    if [ -n "$HINTS_PID" ]; then kill "$HINTS_PID" 2>/dev/null || true; fi
     # shellcheck disable=SC2086
     if [ -n "$IME_PIDS" ]; then kill $IME_PIDS 2>/dev/null || true; fi
     # The bridge daemonized ibus-daemon for this session's display.
@@ -443,6 +447,7 @@ export ROOST_IBUS_DEBUG
 ROOST_PROOF_SWIPE_INPUT="$ARTIFACTS/swipe-input.json"
 export ROOST_PROOF_SWIPE_INPUT
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk -p roost-shell-host
+cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor --example icon-probe
 if [ -n "$PAM_ON" ]; then
     env LD_PRELOAD="$PAM_WRAPPER_LIB" PAM_WRAPPER=1 \
         PAM_WRAPPER_SERVICE_DIR="$ARTIFACTS/pam/services" \
@@ -1382,10 +1387,48 @@ if command -v Xwayland >/dev/null 2>&1 && command -v xeyes >/dev/null 2>&1; then
         fail G-X11-APP "the X11 window was placed under the top bar"
     sleep 1
     scrot "$ARTIFACTS/20-x11-app.png" >/dev/null
+    # An app without a matching desktop file supplies its window icon.
+    x11_window="$(DISPLAY="$x11_display" xdotool search --class XEyes | head -1)"
+    DISPLAY="$x11_display" xprop -id "$x11_window" -f _NET_WM_ICON 32c -set _NET_WM_ICON '2,2,4293935280,4280340624,4280340624,4293935280'
+    cstate '.windows[] | select(.app_id == "XEyes") | .icon != null' "X11 icon" || fail G-WINDOW-ICONS "X11 icon never reached model"
+    x11_icon="$(jq -r '.windows[] | select(.app_id == "XEyes") | .icon' "$CSTATE")"
+    [ -s "$x11_icon" ] || fail G-WINDOW-ICONS "X11 icon cache missing"
+    cp "$x11_icon" "$ARTIFACTS/x11-window-icon.png"
+    DISPLAY="$x11_display" "$ROOT/target/debug/examples/icon-probe" --x11-hints >"$ARTIFACTS/hints-probe.log" 2>&1 &
+    HINTS_PID=$!
+    cstate '.windows[] | select(.app_id == "RoostHintsProbe") | .icon != null' "WM_HINTS icon" || fail G-WINDOW-ICONS "legacy pixmap icon never reached model"
+    hints_icon="$(jq -r '.windows[] | select(.app_id == "RoostHintsProbe") | .icon' "$CSTATE")"
+    [ -s "$hints_icon" ] || fail G-WINDOW-ICONS "WM_HINTS icon cache missing"
+    cp "$hints_icon" "$ARTIFACTS/wm-hints-window-icon.png"
     pass G-X11-APP "an X11 app launched from search gets DISPLAY $x11_display and maps"
 else
     echo "roost-gtk-shell-proof: G-X11-APP skipped (no Xwayland or xeyes)"
 fi
+
+# Raw Wayland SHM icon: GTK versions on the runner need not implement the new protocol.
+WAYLAND_DISPLAY="$SOCKET_NAME" "$ROOT/target/debug/examples/icon-probe" >"$ARTIFACTS/icon-probe.log" 2>&1 &
+ICON_PID=$!
+cstate '.windows[] | select(.app_id == "roost-window-icon-probe") | .icon != null' "Wayland icon" || fail G-WINDOW-ICONS "Wayland icon never reached model"
+native_icon="$(jq -r '.windows[] | select(.app_id == "roost-window-icon-probe") | .icon' "$CSTATE")"
+[ -s "$native_icon" ] || fail G-WINDOW-ICONS "Wayland icon cache missing"
+cp "$native_icon" "$ARTIFACTS/wayland-window-icon.png"
+xdotool key Super_L
+cstate '.overview_open' "icon overview" || fail G-WINDOW-ICONS "overview did not open"
+sleep 1
+scrot "$ARTIFACTS/20a-window-icons-overview.png" >/dev/null
+cp "$CSTATE" "$ARTIFACTS/window-icons-state.json"
+xdotool key Escape
+cstate '.overview_open == false' "icon overview closed" || fail G-WINDOW-ICONS "overview did not close"
+xdotool keydown Alt_L key Tab
+cstate '.switcher_open' "icon switcher" || fail G-WINDOW-ICONS "switcher did not open"
+sleep 1
+scrot "$ARTIFACTS/20b-window-icons-switcher.png" >/dev/null
+xdotool keyup Alt_L
+kill "$ICON_PID" 2>/dev/null || true
+ICON_PID=""
+if [ -n "$HINTS_PID" ]; then kill "$HINTS_PID" 2>/dev/null || true; fi
+HINTS_PID=""
+pass G-WINDOW-ICONS "native SHM and X11 window icons reach PNG cache, overview chrome/dash and switcher"
 
 # GNOME's clock keys reach the panel clock within its 1 s tick.
 gsettings set org.gnome.desktop.interface clock-show-seconds true

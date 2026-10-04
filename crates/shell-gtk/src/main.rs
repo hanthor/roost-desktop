@@ -137,6 +137,19 @@ impl overview::OverviewActions for ShellActions {
         }
     }
 
+    fn window_icon(&self, id: u64) -> Option<String> {
+        self.0
+            .borrow()
+            .control
+            .as_ref()?
+            .model()
+            .windows()
+            .iter()
+            .find(|w| w.id == id)?
+            .icon
+            .clone()
+    }
+
     fn running(&self) -> Vec<(u64, Option<String>)> {
         self.0
             .borrow()
@@ -1866,6 +1879,15 @@ fn build(app: &adw::Application) {
                         .as_deref()
                         .and_then(|app| providers::provider_app(&apps, app))
                         .and_then(|entry| entry.icon.clone())
+                        .or_else(|| {
+                            window
+                                .app_id
+                                .as_deref()
+                                .and_then(|app| providers::provider_app(&apps, app))
+                                .is_none()
+                                .then(|| window.icon.clone())
+                                .flatten()
+                        })
                         .map(|icon| -> gio::Icon {
                             if icon.starts_with('/') {
                                 gio::FileIcon::new(&gio::File::for_path(&icon)).upcast()

@@ -138,3 +138,5 @@ GNOME's version.
   decorations only, and the golden test asserts the absence.
 - **layer-shell is present,** unlike Mutter. Roost's shell is a separate
   process and draws its panel, overview and banners through it.
+
+`xdg_toplevel_icon_manager_v1` v1 accepts square SHM icons and sanitized theme names, applied on the next surface commit. PNGs live in a private, bounded compositor cache. X11 `_NET_WM_ICON` and legacy square TrueColor `WM_HINTS` pixmaps (24/32-bit color, optional 1-bit transparency mask) are read on a bounded worker for mapped window identities. Palette and unsupported visuals fall back to a generic app icon.

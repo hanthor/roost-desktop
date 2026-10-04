@@ -34,6 +34,9 @@ pub trait OverviewActions {
     /// Raise an existing window by compositor id.
     fn activate_window(&self, id: u64);
     /// Running windows as `(id, app_id)`.
+    fn window_icon(&self, _id: u64) -> Option<String> {
+        None
+    }
     fn running(&self) -> Vec<(u64, Option<String>)>;
     /// Search results are showing (or not): the compositor hides the
     /// workspace view meanwhile.
@@ -137,6 +140,7 @@ pub struct OverviewUi {
     first_remote_hit: Rc<RefCell<Option<(providers::Remote, String)>>>,
     dash: gtk::ApplicationWindow,
     dash_row: gtk::Box,
+    dash_signature: Vec<(u64, Option<String>, Option<String>)>,
     grid: gtk::ApplicationWindow,
     apps: Rc<LiveApps>,
     favorites: Vec<String>,
@@ -254,6 +258,7 @@ impl OverviewUi {
             first_remote_hit: Rc::new(RefCell::new(None)),
             dash,
             dash_row,
+            dash_signature: Vec::new(),
             grid,
             apps,
             favorites,
@@ -485,7 +490,10 @@ impl OverviewUi {
                 generic_name: None,
                 keywords: Vec::new(),
                 argv: Vec::new(),
-                icon: Some("application-x-executable".to_owned()),
+                icon: me
+                    .actions
+                    .window_icon(window)
+                    .or_else(|| Some("application-x-executable".to_owned())),
                 categories: Vec::new(),
             };
             let button = dash_tile(&entry, true);
@@ -814,9 +822,22 @@ impl OverviewUi {
 
     /// Follow the compositor's overview state.
     pub fn set_open(ui: &Rc<RefCell<Self>>, open: bool) {
+        let signature = {
+            let me = ui.borrow();
+            me.actions
+                .running()
+                .into_iter()
+                .map(|(id, app)| (id, app, me.actions.window_icon(id)))
+                .collect::<Vec<_>>()
+        };
         if ui.borrow().open == open {
+            if open && ui.borrow().dash_signature != signature {
+                ui.borrow_mut().dash_signature = signature;
+                Self::rebuild_dash(ui);
+            }
             return;
         }
+        ui.borrow_mut().dash_signature = signature;
         ui.borrow_mut().open = open;
         if open {
             Self::rebuild_dash(ui);
