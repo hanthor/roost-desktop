@@ -823,7 +823,7 @@ impl AudioUi {
                 libc::_exit(127);
             }
         });
-        match launcher.spawnv(&[
+        match launcher.spawn(&[
             "pw-dump".as_ref(),
             "--monitor".as_ref(),
             "--no-colors".as_ref(),
