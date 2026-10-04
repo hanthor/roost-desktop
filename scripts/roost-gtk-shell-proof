@@ -1300,7 +1300,13 @@ showing "$ARTIFACTS/a11y-wired-several.json" "Wired (enp1s0)" || fail G-NM-WIRED
 showing "$ARTIFACTS/a11y-wired-several.json" "Wired (enp2s0)" || fail G-NM-WIRED "second adapter has no submenu"
 qs_press "Wired (enp1s0)" wired-submenu || fail G-NM-WIRED "could not expand adapter submenu"
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-wired-submenu.json" 20 || fail G-NM-WIRED "submenu dump failed"
-showing "$ARTIFACTS/a11y-wired-submenu.json" "Disconnect Wired connection 1" || fail G-NM-WIRED "profile not inside expanded adapter"
+"$PY" - "$ARTIFACTS/a11y-wired-submenu.json" <<'WIREDTREE' || fail G-NM-WIRED "connection action not inside expanded adapter"
+import json, sys
+nodes = json.load(open(sys.argv[1]))
+start = next(i for i, n in enumerate(nodes) if n['name'] == 'Wired (enp1s0)' and n['role'] != 'label')
+end = next((i for i in range(start + 1, len(nodes)) if nodes[i]['depth'] <= nodes[start]['depth']), len(nodes))
+assert any(n['showing'] and n['name'] == 'Disconnect Wired' for n in nodes[start + 1:end])
+WIREDTREE
 scrot "$ARTIFACTS/15g-wired-submenus.png" >/dev/null
 xdotool key Escape
 sleep 0.5
