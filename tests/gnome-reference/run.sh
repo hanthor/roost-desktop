@@ -45,11 +45,13 @@ mkdir -p /run/systemd/seats
 # Only what GNOME's headless session can use, so Roost's capture can run
 # the same: power profiles and logind (its NetworkManager and BlueZ
 # clients need more than the stubs offer).
-ROOST_STUB_SERVICES=ppd,logind,gdm python3 /lib/roost-service-stubs.py /tmp/backlight >/tmp/stubs.log 2>&1 &
+ROOST_STUB_SERVICES=ppd,logind,gdm python3 /proof-lib/roost-service-stubs.py /tmp/backlight >/tmp/stubs.log 2>&1 &
 sleep 1
 # shellcheck disable=SC2016 # expands in the inner shell
 exec dbus-run-session -- sh -c '
   gsettings set org.gnome.desktop.interface enable-animations false
+  gsettings set org.gnome.desktop.interface toolkit-accessibility true
+  /usr/libexec/at-spi-bus-launcher --launch-immediately >/tmp/atspi.log 2>&1 &
   gsettings set org.gnome.shell welcome-dialog-last-shown-version "999"
   # Search shows apps only: the host and the image have different
   # search providers installed.

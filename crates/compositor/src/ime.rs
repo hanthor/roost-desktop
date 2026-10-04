@@ -28,6 +28,10 @@ pub struct ImeBridge {
     child: Option<Child>,
     starts: u32,
     next_ms: u64,
+    x11_display: Option<u32>,
+    xim: Option<Child>,
+    xim_starts: u32,
+    xim_next_ms: u64,
 }
 
 impl ImeBridge {
@@ -61,11 +65,16 @@ impl ImeBridge {
             child: None,
             starts: 0,
             next_ms: 0,
+            x11_display: None,
+            xim: None,
+            xim_starts: 0,
+            xim_next_ms: 0,
         })
     }
 
     /// Start, or restart after an exit (bounded), never blocking.
     pub fn poll(&mut self, now_ms: u64, dh: &mut DisplayHandle) {
+        self.poll_xim(now_ms);
         if let Some(child) = &mut self.child {
             match child.try_wait() {
                 Ok(None) => return,
@@ -92,10 +101,74 @@ impl ImeBridge {
             }
         }
     }
+
+    pub fn set_x11_display(&mut self, display: u32) {
+        self.x11_display = Some(display);
+    }
+
+    fn poll_xim(&mut self, now_ms: u64) {
+        let Some(display) = self.x11_display else {
+            return;
+        };
+        if let Some(child) = &mut self.xim {
+            if matches!(child.try_wait(), Ok(None)) {
+                return;
+            }
+            self.xim = None;
+            self.xim_next_ms = now_ms + RESTART_DELAY_MS;
+        }
+        if now_ms < self.xim_next_ms || self.xim_starts > MAX_RESTARTS {
+            return;
+        }
+        self.xim_next_ms = now_ms + RESTART_DELAY_MS;
+        let bin = std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|path| {
+                std::env::split_paths(&path)
+                    .map(|p| p.join("ibus-x11"))
+                    .collect::<Vec<_>>()
+            })
+            .chain([
+                PathBuf::from("/usr/libexec/ibus-x11"),
+                PathBuf::from("/usr/lib/ibus/ibus-x11"),
+                PathBuf::from("/usr/lib64/ibus/ibus-x11"),
+            ])
+            .find(|path| path.is_file());
+        let Some(bin) = bin else { return };
+        // Resolve the bridge's own IBus bus, never the host X display's bus.
+        let address = Command::new("ibus")
+            .arg("address")
+            .env("WAYLAND_DISPLAY", &self.wayland_display)
+            .env_remove("DISPLAY")
+            .output()
+            .ok()
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty() && s != "(null)");
+        let Some(address) = address else { return };
+        self.xim_starts += 1;
+        match Command::new(bin)
+            .env("DISPLAY", format!(":{display}"))
+            .env("WAYLAND_DISPLAY", &self.wayland_display)
+            .env("IBUS_ADDRESS", address)
+            .env_remove("WAYLAND_SOCKET")
+            .spawn()
+        {
+            Ok(child) => {
+                self.xim = Some(child);
+                eprintln!("roost-compositor: ime: XIM started on :{display}");
+            }
+            Err(error) => eprintln!("roost-compositor: ime: XIM failed: {error}"),
+        }
+    }
 }
 
 impl Drop for ImeBridge {
     fn drop(&mut self) {
+        if let Some(child) = &mut self.xim {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
         if let Some(child) = &mut self.child {
             let _ = child.kill();
             let _ = child.wait();
