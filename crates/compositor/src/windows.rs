@@ -534,6 +534,11 @@ impl WindowManager {
     /// dead ones, sync titles, and drain client window-state requests.
     /// Called once per loop tick after client dispatch, and directly
     /// by tests.
+    #[cfg(feature = "xwayland")]
+    pub(crate) fn x11_icon_identities(&self) -> Vec<(u32, u64)> {
+        self.x11_index.iter().map(|(x, id)| (*x, *id)).collect()
+    }
+
     pub fn reconcile(&mut self, state: &mut State) {
         // Popups (#88): drop dead trees, and once the last grabbed popup
         // is gone hand keyboard focus back to the focused window.
@@ -570,6 +575,9 @@ impl WindowManager {
                     seen.push(self.map(state, surface));
                 }
             }
+        }
+        for (surface, id) in &self.surface_index {
+            self.model.set_icon(*id, state.window_icons.get(surface));
         }
         // Liveness runs over the unified handles: `Window::alive`
         // delegates per variant, so native and X11 windows drop on
@@ -1127,6 +1135,7 @@ impl WindowManager {
                 #[cfg(feature = "xwayland")]
                 WindowSurface::X11(surface) => {
                     self.x11_index.remove(&surface.window_id());
+                    state.window_icons.remove_cache(&format!("x11:{id}"));
                 }
             }
         }

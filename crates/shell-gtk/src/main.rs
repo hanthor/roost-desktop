@@ -142,6 +142,20 @@ impl overview::OverviewActions for ShellActions {
         }
     }
 
+    fn window_icon(&self, id: u64) -> Option<String> {
+        self.0
+            .borrow()
+            .control
+            .as_ref()?
+            .model()
+            .windows()
+            .iter()
+            .find(|w| w.id == id)?
+            .icon
+            .clone()
+            .filter(|icon| usable_window_icon(icon))
+    }
+
     fn running(&self) -> Vec<(u64, Option<String>)> {
         self.0
             .borrow()
@@ -2132,6 +2146,17 @@ fn build(app: &adw::Application) {
                         .as_deref()
                         .and_then(|app| providers::provider_app(&apps, app))
                         .and_then(|entry| entry.icon.clone())
+                        .or_else(|| {
+                            window
+                                .app_id
+                                .as_deref()
+                                .and_then(|app| providers::provider_app(&apps, app))
+                                .is_none()
+                                .then(|| {
+                                    window.icon.clone().filter(|icon| usable_window_icon(icon))
+                                })
+                                .flatten()
+                        })
                         .map(|icon| -> gio::Icon {
                             if icon.starts_with('/') {
                                 gio::FileIcon::new(&gio::File::for_path(&icon)).upcast()
@@ -2154,6 +2179,14 @@ fn build(app: &adw::Application) {
     }
 
     window.present();
+}
+
+fn usable_window_icon(icon: &str) -> bool {
+    if icon.starts_with('/') {
+        std::path::Path::new(icon).is_file()
+    } else {
+        gtk::gdk::Display::default().is_some_and(|d| gtk::IconTheme::for_display(&d).has_icon(icon))
+    }
 }
 
 fn main() -> glib::ExitCode {

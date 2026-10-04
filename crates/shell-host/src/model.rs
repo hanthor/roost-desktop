@@ -20,6 +20,7 @@
 /// `workspace` scopes overview rendering to the active workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowEntry {
+    pub icon: Option<String>,
     /// Compositor-issued opaque window id.
     pub id: u64,
     /// Untrusted client-provided title.
@@ -38,12 +39,18 @@ impl WindowEntry {
     /// Build a window entry with the given id, title, and active flag.
     pub fn new(id: u64, title: impl Into<String>, active: bool) -> Self {
         Self {
+            icon: None,
             id,
             title: title.into(),
             active,
             workspace: 0,
             app_id: None,
         }
+    }
+
+    pub fn with_icon(mut self, icon: Option<String>) -> Self {
+        self.icon = icon;
+        self
     }
 
     /// Attach the workspace, for overview filtering.

@@ -144,9 +144,12 @@ impl ProtocolVersion {
     /// `0.22` appends shortcut inhibition consent requests and responses.
     ///
     /// `0.23` appends window/cycle switcher actions and pointer output.
+    ///
+    /// `0.24` appends window-backed icon metadata to WindowInfo.
+    /// Postcard positional structs require peers to upgrade together.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 23,
+        minor: 24,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -186,6 +189,8 @@ pub struct WindowInfo {
     /// allows exactly one activation and expires after 30 s. Never logged
     /// (redacted `Debug` on [`ActivationToken`]).
     pub activation_token: String,
+    /// Compositor-owned PNG cache path or sanitized theme icon name.
+    pub icon: Option<String>,
 }
 
 /// Workspace state owned by the compositor and mirrored to the shell.
@@ -1055,6 +1060,7 @@ mod tests {
 
     fn sample_window(id: WindowId) -> WindowInfo {
         WindowInfo {
+            icon: None,
             id,
             title: format!("Terminal {id}"),
             app_id: Some("org.example.Terminal".to_owned()),
@@ -1093,8 +1099,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_23() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 23));
+    fn current_version_is_0_24() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 24));
     }
 
     #[test]
@@ -1125,7 +1131,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 21).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 22).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 23).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 24).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 24).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 25).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }

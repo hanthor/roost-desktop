@@ -513,6 +513,8 @@ pub struct Runtime {
     /// Reserved X11 display, advertised before XWayland starts (#219).
     /// Actual window-manager readiness is independently state.xwm.is_some().
     x11_display: Option<u32>,
+    #[cfg(feature = "xwayland")]
+    x11_icon_reader: crate::x11_icons::Reader,
     /// Real-time anchor of the last input event. Input stamps live on
     /// the backend event clock while idle is measured here, so each
     /// tick evaluates the lock in the input base as
@@ -824,6 +826,8 @@ impl Runtime {
             #[cfg(feature = "xwayland")]
             x11_failed: false,
             x11_display: None,
+            #[cfg(feature = "xwayland")]
+            x11_icon_reader: crate::x11_icons::Reader::new(),
             overview_search: false,
             overview_app_grid: false,
             overview_drag: None,
@@ -1362,6 +1366,7 @@ impl Runtime {
             "windows": self.manager.overview_windows().iter().map(|w| serde_json::json!({
                 "id": w.id,
                 "app_id": app_of(w.id),
+                "icon": model.window(w.id).and_then(|w| w.icon.clone()),
                 "workspace": w.workspace,
                 "rect": [w.geometry.loc.x, w.geometry.loc.y, w.geometry.size.w, w.geometry.size.h],
             })).collect::<Vec<_>>(),
@@ -2340,6 +2345,19 @@ impl Runtime {
             .flush_clients()
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
         self.manager.reconcile(&mut self.state);
+        #[cfg(feature = "xwayland")]
+        // DISPLAY may be a reserved idle listener. An icon helper must not
+        // connect and accidentally activate XWayland before a real client.
+        if let Some(display) = self.x11_display.filter(|_| self.state.xwm.is_some()) {
+            let windows = self.manager.x11_icon_identities();
+            for (xid, id, raster) in self.x11_icon_reader.poll(display, windows.clone()) {
+                if windows.contains(&(xid, id)) {
+                    let icon =
+                        raster.and_then(|r| self.state.window_icons.cache(format!("x11:{id}"), r));
+                    self.manager.model_mut().set_icon(id, icon);
+                }
+            }
+        }
         // A client's pointer warp moved the manager's pointer: the
         // drawn cursor follows (#89).
         #[cfg(feature = "drm")]

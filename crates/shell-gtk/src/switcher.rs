@@ -18,11 +18,13 @@ use roost_shell_host::model::ShellModel;
 /// Layer namespace (matches the legacy shell's switcher surface).
 pub const NAMESPACE: &str = "roost-shell-switcher";
 
+type SwitcherItem = (u64, String, Option<String>, usize, Option<String>);
+
 /// What is on screen, to rebuild only on change.
 #[derive(PartialEq, Default, Clone)]
 struct Shown {
     /// (representative window, title, app id, the app's window count).
-    items: Vec<(u64, String, Option<String>, usize)>,
+    items: Vec<SwitcherItem>,
     selected: Option<u64>,
     all_windows: bool,
 }
@@ -130,6 +132,7 @@ impl SwitcherUi {
                             w.title.clone(),
                             w.app_id.clone(),
                             model.app_window_count(w.id),
+                            w.icon.clone(),
                         )
                     })
                     .collect(),
@@ -367,12 +370,21 @@ impl SwitcherUi {
             .map(|m| m.geometry().width())
             .unwrap_or(1280);
         let icon_size = crate::logic::switcher_icon_size(now.items.len(), width);
-        for (id, title, app_id, windows) in &now.items {
+        for (id, title, app_id, windows, window_icon) in &now.items {
             let entry = app_id.as_deref().and_then(|a| {
                 apps.entry(a.trim_end_matches(".desktop"))
                     .or_else(|| apps.entry(a))
             });
-            let icon = match entry.and_then(|e| e.icon.clone()) {
+            let icon = match entry.and_then(|e| e.icon.clone()).or_else(|| {
+                entry
+                    .is_none()
+                    .then(|| {
+                        window_icon
+                            .clone()
+                            .filter(|icon| crate::usable_window_icon(icon))
+                    })
+                    .flatten()
+            }) {
                 Some(icon) if icon.starts_with('/') => gtk::Image::from_file(icon),
                 Some(icon) => gtk::Image::from_icon_name(&icon),
                 None => gtk::Image::from_icon_name("application-x-executable"),
