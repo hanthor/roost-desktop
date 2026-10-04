@@ -975,6 +975,17 @@ impl WindowManager {
         id
     }
 
+    /// Remove compatibility windows after the server connection is lost.
+    /// Native windows keep their model IDs and surfaces across a restart.
+    #[cfg(feature = "xwayland")]
+    pub fn clear_x11_windows(&mut self, state: &mut State) {
+        let ids: Vec<_> = self.x11_index.values().copied().collect();
+        for id in ids {
+            self.unmap(state, id);
+        }
+        state.x11_events.clear();
+    }
+
     /// Drain queued X11 manager events: map/unmap/size and identity
     /// updates plus maximize/fullscreen requests, all on the one
     /// manager call path. (xwayland feature only.)

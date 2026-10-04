@@ -19,6 +19,14 @@ import time
 import pyatspi
 
 
+def bounds(acc):
+    try:
+        rect = acc.queryComponent().getExtents(pyatspi.WINDOW_COORDS)
+        return [rect.x, rect.y, rect.width, rect.height]
+    except Exception:
+        return None
+
+
 def walk(acc, depth, out):
     try:
         out.append({
@@ -30,6 +38,7 @@ def walk(acc, depth, out):
             or acc.getState().contains(pyatspi.STATE_PRESSED),
             "selected": acc.getState().contains(pyatspi.STATE_SELECTED),
             "focused": acc.getState().contains(pyatspi.STATE_FOCUSED),
+            "bounds": bounds(acc),
         })
         for i in range(acc.childCount):
             child = acc.getChildAtIndex(i)
