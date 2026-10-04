@@ -3676,8 +3676,11 @@ impl ShellHost {
             self.overview_hits.clear();
             self.settle_focus();
         }
-        self.model
-            .apply_switcher_state(model.is_switcher_open(), model.switcher_selection());
+        self.model.apply_switcher_state(
+            model.is_switcher_open(),
+            model.switcher_selection(),
+            model.switcher_all_windows(),
+        );
         // Keep switch-to-instance answers on compositor truth.
         self.windows.refresh(&self.model);
     }
