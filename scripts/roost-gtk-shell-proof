@@ -862,15 +862,25 @@ showing "$ARTIFACTS/a11y-grid-page2.json" "Previous Page" ||
 scrot "$ARTIFACTS/11d-app-grid-page2.png" >/dev/null
 pass G-APP-GRID-PAGES "thirty more apps page the grid; indicators and arrows show and Next Page turns it"
 
+# Read the actual rendered tile, since catalog and layout allocation can
+# move it. A drag must begin on an icon, not an assumed empty coordinate.
+grid_point() {
+    jq -er --arg name "$2" '[.[] | select(.showing and .role == "push button" and .name == $name and (.bounds[2] > 0) and (.bounds[3] > 0))][0].bounds | select(length == 4) | "\((.[0] + .[2] / 2) | floor) \((.[1] + .[3] / 2) | floor)"' "$1"
+}
 # GNOME's page switching while dragging: an app held against the grid's
 # edge turns the page (no arrow to press mid-drag).
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-back.json" 20 \
     --press "Previous Page" || fail G-GRID-DRAG-PAGE "could not press Previous Page"
 sleep 1
-xdotool mousemove --window "$WID" 202 305
+page_source="$(jq -r '[.[] | select(.showing and .role == "table cell")][0].name' "$ARTIFACTS/a11y-grid-back.json")"
+grid_coordinates="$(grid_point "$ARTIFACTS/a11y-grid-back.json" "$page_source")" || fail G-GRID-DRAG-PAGE "source tile has no actual bounds"
+read -r page_source_x page_source_y <<EOF
+$grid_coordinates
+EOF
+xdotool mousemove --window "$WID" "$page_source_x" "$page_source_y"
 sleep 0.3
 xdotool mousedown 1
-xdotool mousemove --window "$WID" 400 330
+xdotool mousemove --window "$WID" $((page_source_x + 25)) "$page_source_y"
 sleep 0.25
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-page-peek.json" 20 || fail G-GRID-PAGE-PEEK "preview dump failed"
 showing "$ARTIFACTS/a11y-grid-page-peek.json" "Next page preview" || fail G-GRID-PAGE-PEEK "next page hint missing during drag"
@@ -883,7 +893,7 @@ ffmpeg -nostdin -loglevel error -y -i "$ARTIFACTS/11h-grid-page-peek.png" -vf "c
 "$PY" -c 'import sys; data=open(sys.argv[1], "rb").read(); sys.exit(0 if sum(pixel > 150 for pixel in data) > 20 else 1)' "$ARTIFACTS/grid-page-peek.gray" || fail G-GRID-PAGE-PEEK "hint contains no visible icon or label pixels"
 pass G-GRID-PAGE-PEEK "neighboring page icons slide into the 10% hint over 150ms and paint real pixels"
 for i in $(seq 1 20); do
-    xdotool mousemove --window "$WID" $((400 + (WIDTH - 6 - 400) * i / 20)) 330
+    xdotool mousemove --window "$WID" $((page_source_x + 25 + (WIDTH - 6 - page_source_x - 25) * i / 20)) "$page_source_y"
     sleep 0.03
 done
 sleep 0.8
@@ -970,10 +980,18 @@ sleep 1.5
 # edge of One (first cell, x 146-259).
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-before-hover.json" 20 || fail G-GRID-HOVER "baseline dump failed"
 layout_before_hover="$(gsettings get org.gnome.shell app-picker-layout)"
-xdotool mousemove --window "$WID" 452 305 mousedown 1
-xdotool mousemove --window "$WID" 430 305
+grid_coordinates="$(grid_point "$ARTIFACTS/a11y-grid-before-hover.json" "AAA Move Two")" || fail G-GRID-HOVER "source tile bounds missing"
+read -r source_x source_y <<EOF
+$grid_coordinates
+EOF
+grid_coordinates="$(jq -er '[.[] | select(.showing and .role == "push button" and .name == "AAA Move One")][0].bounds | select(length == 4) | "\((.[0] + 4) | floor) \((.[1] + .[3] / 2) | floor)"' "$ARTIFACTS/a11y-grid-before-hover.json")" || fail G-GRID-HOVER "target edge bounds missing"
+read -r target_x target_y <<EOF
+$grid_coordinates
+EOF
+xdotool mousemove --window "$WID" "$source_x" "$source_y" mousedown 1
+xdotool mousemove --window "$WID" $((source_x - 25)) "$source_y"
 sleep 0.1
-xdotool mousemove --window "$WID" 150 305
+xdotool mousemove --window "$WID" "$target_x" "$target_y"
 sleep 0.35
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-live-hover.json" 20 || fail G-GRID-HOVER "hover dump failed"
 before_x="$(jq '[.[] | select(.showing and .role == "push button" and .name == "AAA Move One")][0].bounds[0]' "$ARTIFACTS/a11y-grid-before-hover.json")"
@@ -1014,12 +1032,21 @@ sleep 1
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-short-before.json" 20 || fail G-GRID-SHORT-PAGES "setup dump failed"
 showing "$ARTIFACTS/a11y-grid-short-before.json" "AAA Move Three" || fail G-GRID-SHORT-PAGES "source missing from first page"
 if showing "$ARTIFACTS/a11y-grid-short-before.json" "AAA Move Two"; then fail G-GRID-SHORT-PAGES "saved second page was flattened"; fi
-xdotool mousemove --window "$WID" 327 305 mousedown 1
-xdotool mousemove --window "$WID" 350 305
+grid_coordinates="$(grid_point "$ARTIFACTS/a11y-grid-short-before.json" "AAA Move Three")" || fail G-GRID-SHORT-PAGES "source tile bounds missing"
+read -r source_x source_y <<EOF
+$grid_coordinates
+EOF
+xdotool mousemove --window "$WID" "$source_x" "$source_y" mousedown 1
+xdotool mousemove --window "$WID" $((source_x + 25)) "$source_y"
 sleep 0.1
 xdotool mousemove --window "$WID" $((WIDTH - 6)) 330
 sleep 0.6
-xdotool mousemove --window "$WID" 150 305
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-short-target.json" 20 || fail G-GRID-SHORT-PAGES "target page dump failed"
+grid_coordinates="$(jq -er '[.[] | select(.showing and .role == "push button" and .name == "AAA Move Two")][0].bounds | select(length == 4) | "\((.[0] + 4) | floor) \((.[1] + .[3] / 2) | floor)"' "$ARTIFACTS/a11y-grid-short-target.json")" || fail G-GRID-SHORT-PAGES "target edge bounds missing"
+read -r target_x target_y <<EOF
+$grid_coordinates
+EOF
+xdotool mousemove --window "$WID" "$target_x" "$target_y"
 sleep 0.35
 xdotool mouseup 1
 sleep 1.5
