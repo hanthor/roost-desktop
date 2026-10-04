@@ -891,16 +891,42 @@ showing "$ARTIFACTS/a11y-grid-page2.json" "Previous Page" ||
 scrot "$ARTIFACTS/11d-app-grid-page2.png" >/dev/null
 pass G-APP-GRID-PAGES "thirty more apps page the grid; indicators and arrows show and Next Page turns it"
 
+# Select the rendered icon through actual accessibility bounds, including
+# the descendant button; distribution app catalogs change grid allocation.
+grid_origin() {
+    grid_namespace="${1:-roost-shell-appgrid}"
+    cstate ".layers | any(.namespace == \"$grid_namespace\")" "grid layer" || fail G-GRID-DRAG-PAGE "grid layer missing"
+    grid_origin_x="$(jq --arg namespace "$grid_namespace" '.layers[] | select(.namespace == $namespace) | .rect[0]' "$CSTATE")"
+    grid_origin_y="$(jq --arg namespace "$grid_namespace" '.layers[] | select(.namespace == $namespace) | .rect[1]' "$CSTATE")"
+}
+grid_point() {
+    jq -er --arg name "$2" --argjson ox "$grid_origin_x" --argjson oy "$grid_origin_y" --argjson edge "${3:--1}" '[.[] | select(.showing and (.role == "push button" or .role == "button") and .name == $name and (.bounds[2] > 0) and (.bounds[3] > 0))][0].bounds | select(length == 4) | "\((.[0] + $ox + (if $edge >= 0 then $edge else .[2] / 2 end)) | floor) \((.[1] + $oy + .[3] / 2) | floor)"' "$1"
+}
+grid_edge() { grid_point "$1" "$2" 4; }
 # GNOME's page switching while dragging: an app held against the grid's
 # edge turns the page (no arrow to press mid-drag).
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-back.json" 20 \
     --press "Previous Page" || fail G-GRID-DRAG-PAGE "could not press Previous Page"
 sleep 1
-xdotool mousemove --window "$WID" 202 305
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-page-source.json" 20 || fail G-GRID-DRAG-PAGE "source dump failed"
+grid_origin
+page_source="$(jq -r '[.[] | select(.showing and .role == "table cell")][0].name' "$ARTIFACTS/a11y-grid-page-source.json")"
+grid_coordinates="$(grid_point "$ARTIFACTS/a11y-grid-page-source.json" "$page_source")" || fail G-GRID-DRAG-PAGE "source tile has no actual bounds"
+read -r page_source_x page_source_y <<EOF
+$grid_coordinates
+EOF
+xdotool mousemove --window "$WID" "$page_source_x" "$page_source_y"
 sleep 0.3
 xdotool mousedown 1
+sleep 0.1
+# Establish a real held-pointer drag before approaching the page edge.
+# This sequence passed the actual GTK page-peek/page-change gate in #244.
+for step in $(seq 1 6); do
+    xdotool mousemove --window "$WID" $((page_source_x + step * 10)) "$page_source_y"
+    sleep 0.05
+done
 for i in $(seq 1 20); do
-    xdotool mousemove --window "$WID" $((202 + (WIDTH - 6 - 202) * i / 20)) 330
+    xdotool mousemove --window "$WID" $((page_source_x + 60 + (WIDTH - 6 - page_source_x - 60) * i / 20)) "$page_source_y"
     sleep 0.03
 done
 sleep 0.8
