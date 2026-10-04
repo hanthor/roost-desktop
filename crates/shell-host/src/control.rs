@@ -510,7 +510,7 @@ impl ControlClient {
         Ok(id)
     }
 
-    /// Carry out one of GNOME's window-menu actions. Returns the request id.
+    /// Answer the compositor's pending shortcut consent request.
     pub fn shortcut_consent(&mut self, request: u64, allow: bool) -> Result<u64, ControlError> {
         let id = self.alloc_request_id();
         self.write_message(&Message::Command {
@@ -520,6 +520,7 @@ impl ControlClient {
         Ok(id)
     }
 
+    /// Carry out one of GNOME's window-menu actions. Returns the request id.
     pub fn window_action(
         &mut self,
         window: u64,

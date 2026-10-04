@@ -503,7 +503,8 @@ fn shortcut_consent_cannot_survive_a_lock_or_focus_change() {
     let _other = window(&mut peer, "other");
     pump(&mut comp, &mut manager, &mut [&mut peer]);
     comp.state.answer_shortcut_consent(request, true);
-    manager.focus(&mut comp.state, Some(id_of(&manager, "vm")));
+    let vm = id_of(&manager, "vm");
+    manager.focus(&mut comp.state, Some(vm));
     assert!(!comp.state.shortcuts_inhibited());
     assert!(comp.state.shortcut_consent_request().is_none());
     inhibitor.destroy();

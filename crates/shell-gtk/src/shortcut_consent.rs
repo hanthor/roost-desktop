@@ -4,7 +4,6 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use gio::prelude::*;
 use glib::variant::ToVariant;
 use gtk::prelude::*;
 use gtk4 as gtk;
@@ -119,8 +118,10 @@ impl Consent {
         } else {
             format!("{app}.desktop")
         };
-        let desktop = gio::DesktopAppInfo::new(&desktop_id);
-        let name = desktop.as_ref().map(|a| a.display_name().to_string());
+        let desktop = roost_shell_host::apps::discover_system()
+            .into_iter()
+            .find(|a| a.app_id == desktop_id);
+        let name = desktop.as_ref().map(|a| a.name.clone());
         let stable = desktop.map(|_| desktop_id);
         self.title.set_text(
             &name
