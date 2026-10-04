@@ -541,6 +541,16 @@ fn schema(id: &str) -> Option<gio::Settings> {
     Some(gio::Settings::new(id))
 }
 
+/// GNOME's configurable percentage step (precise bindings always use 2%).
+pub fn volume_step(media: Option<&gio::Settings>) -> f64 {
+    media
+        .filter(|s| {
+            s.settings_schema()
+                .is_some_and(|schema| schema.has_key("volume-step"))
+        })
+        .map_or(6.0, |s| f64::from(s.int("volume-step").clamp(1, 20)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,14 +684,4 @@ mod tests {
             );
         }
     }
-}
-
-/// GNOME's configurable percentage step (precise bindings always use 2%).
-pub fn volume_step(media: Option<&gio::Settings>) -> f64 {
-    media
-        .filter(|s| {
-            s.settings_schema()
-                .is_some_and(|schema| schema.has_key("volume-step"))
-        })
-        .map_or(6.0, |s| f64::from(s.int("volume-step").clamp(1, 20)))
 }
