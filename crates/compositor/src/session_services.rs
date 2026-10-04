@@ -79,6 +79,33 @@ pub fn publish(socket: &str) {
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(15) {
             if run("gdbus", &args) {
+                // Tell GDM the session and display are ready rather than
+                // letting its timed non-GNOME fallback hand off plymouth.
+                let mut registration = [
+                    "call",
+                    "--system",
+                    "--dest",
+                    "org.gnome.DisplayManager",
+                    "--object-path",
+                    "/org/gnome/DisplayManager/Manager",
+                    "--method",
+                    "org.gnome.DisplayManager.Manager.RegisterSession",
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+                if run("gdbus", &registration) {
+                    *registration.last_mut().unwrap() =
+                        "org.gnome.DisplayManager.Manager.RegisterDisplay".into();
+                    if run("gdbus", &registration) {
+                        eprintln!("roost-compositor: session services: GDM session and display registered");
+                    } else {
+                        eprintln!(
+                            "roost-compositor: session services: GDM display registration failed"
+                        );
+                    }
+                }
+
                 let reset = [
                     "--user",
                     "reset-failed",

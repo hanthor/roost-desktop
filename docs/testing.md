@@ -76,8 +76,9 @@ Run it in a VM or a disposable machine rather than your desktop session.
 
 The `marlin-vm` job (#68) boots the real TunaOS Marlin image with Roost
 installed and checks that the display manager logs into the Roost
-hardware session. Nothing runs inside the guest: the job reads the serial
-log and takes QMP screendumps from outside.
+hardware session. A CI-only guest service probes the calendar and portal
+on the test user bus; the runner reads the serial log and takes QMP
+screendumps from outside.
 
 1. It builds `packaging/marlin/Containerfile` (Marlin GNOME 51 plus the
    Roost Arch package from `arch-package`) with rootful podman. On top of
@@ -87,7 +88,7 @@ log and takes QMP screendumps from outside.
    journal to `ttyS0`. The shipped image does not get these changes.
 2. It runs `bootc install to-disk --via-loopback --generic-image` from
    that image to write a 20 GB raw disk.
-3. `scripts/roost-vm-lane --disk disk.raw --out vm-lane-artifacts` boots
+3. `scripts/roost-vm-lane --disk disk.raw --out vm-lane-artifacts --boots 5` boots
    the disk in QEMU/KVM with OVMF firmware and virtio-vga at 1280x800.
    It writes these assertions to `assertions.txt`:
 
@@ -98,14 +99,19 @@ log and takes QMP screendumps from outside.
 | `V-PANEL` | The session opens on the overview, where the panel is transparent. After Escape, a screendump shows a pure black strip at y=5 across at least 90 percent of the width (the top panel) over a desktop that is not one flat color |
 | `V-NOPANIC` | No `panicked` anywhere in the serial log |
 
-The test layer boots without plymouth (`plymouth.enable=0`). In one of
-the first five runs, plymouth quit about 10 seconds after the automatic
-login, and at the same moment GDM started its login greeter on the login
-VT. The greeter took DRM master from the running Roost session
-(`roost-compositor: drm: session paused`). If Roost loses the display
-this way, `V-PANEL` fails and its detail line says so. A user booting the
-shipped image with plymouth may hit the same race. It is not resolved
-yet.
+The lane retains plymouth and makes five pristine snapshot boots. Roost
+explicitly registers its ready session and display with GDM instead of
+relying on GDM's delayed fallback. Every boot must retain DRM ownership
+and show the panel. Earlier tests disabled plymouth after a greeter stole
+DRM master about ten seconds after autologin; the repeated gate now tests
+that startup path directly.
+
+Additional gates are `V-GDM` (explicit registration, no session pause),
+`V-CALENDAR` (CalendarServer responds), `V-PORTAL` (portal Settings responds),
+`V-LOCK` (the final tour observes unlocked → locked → unlocked), and
+`V-REPEAT` (all five boots pass). Earlier boots keep their own artifacts
+under `repeat-NN/`; `repeat-manifest.json` records every boot, while the
+root `assertions.txt` aggregates results for the parity ledger.
 
 The artifact (`marlin-vm`) holds `serial.log`, `roost-lines.log` (every
 `roost-*` line), the boot frames, `V-OVERVIEW.png` (the login overview),
@@ -119,8 +125,8 @@ sends keys and pointer clicks through QMP to open the overview and search,
 the app grid, quick settings, and the calendar. It then opens Disks,
 System Monitor, and Files, switches between them with Alt+Tab, and turns
 scroll mode on and off (Super+Shift+T, Super+R, Super+Left/Right). Last,
-it locks the screen from the quick settings lock button and unlocks it
-with the `roost-test` password. Roost does not bind Super+L yet. The
+it locks the screen with Super+L and unlocks it with the `roost-test`
+password through PAM. Only the last repeated boot records the tour. The
 script takes a screendump twice a second and plays the result back at
 double speed. Before each section it inserts a title card, a committed
 PNG in `scripts/lib/vm-tour-cards/` (`render.py` there redraws them). The
