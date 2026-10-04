@@ -1,0 +1,29 @@
+[package]
+name = "roost-control-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+roost-shell-control = { path = "../crates/shell-control-schema" }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "control_frame"
+path = "fuzz_targets/control_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "control_body"
+path = "fuzz_targets/control_body.rs"
+test = false
+doc = false
+bench = false
