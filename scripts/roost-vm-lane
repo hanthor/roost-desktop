@@ -943,7 +943,9 @@ def greetd_login(qmp, agent_path, out, record):
         qmp.frame(os.path.join(out, "V-GREETD.png"))
         # Upstream gtkgreet focuses its username entry, then the PAM secret
         # entry. The public fixture values go only to QMP keyboard delivery.
-        qmp.type_text("roost-test")
+        qmp.type_text("roost")
+        qmp.keys("minus")  # QEMU qcode is "minus", not the literal '-'.
+        qmp.type_text("test")
         qmp.keys("ret")
         time.sleep(2)
         qmp.type_text("roost")
@@ -1235,11 +1237,13 @@ def finish_constraint_proof(agent, qmp, original_mouse, evidence, report):
         raise RuntimeError("actual constraint cleanup failed: " + json.dumps(cleanup_errors))
 
 
-def boot(disk, out, scratch, timeout, *, guest_agent=False, native_relative_mouse=False):
+def boot(disk, out, scratch, timeout, require_kvm=False, *, guest_agent=False, native_relative_mouse=False):
     ovmf = next((p for p in OVMF if os.path.exists(p)), None)
     if not ovmf:
         sys.exit("roost-vm-lane: OVMF firmware not found (install ovmf)")
     kvm = os.access("/dev/kvm", os.R_OK | os.W_OK)
+    if require_kvm and not kvm:
+        sys.exit("roost-vm-lane: KVM required but /dev/kvm is not accessible; refusing emulation")
     qmp_path = os.path.join(scratch, "qmp.sock")
     agent_path = os.path.join(scratch, "qga.sock")
     serial = os.path.join(out, "serial.log")
@@ -1284,6 +1288,8 @@ def repeat_boots(args):
             command.append("--tour")
         if args.greeter_login:
             command.append("--greeter-login")
+        if args.require_kvm:
+            command.append("--require-kvm")
         for value in args.meta:
             command.extend(["--meta", value])
         result = subprocess.run(command, check=False)
@@ -1340,6 +1346,8 @@ def main():
                     help="after the assertions, record the feature tour video")
     ap.add_argument("--greeter-login", action="store_true",
                     help="enter fixture credentials through the shipped graphical greetd greeter")
+    ap.add_argument("--require-kvm", action="store_true",
+                    help="refuse emulation when the qualification profile requires KVM")
     ap.add_argument("--meta", action="append", default=[], metavar="KEY=VALUE")
     ap.add_argument("--boots", type=int, default=1,
                     help="repeat pristine snapshot boots; tour only on the last boot")
@@ -1358,7 +1366,7 @@ def main():
         results[test_id] = (ok, desc)
         log(f"{test_id} {'pass' if ok else 'FAIL'}: {desc}")
 
-    vm, qmp_path, serial_path, kvm, agent_path = boot(os.path.abspath(a.disk), out, scratch, a.timeout, guest_agent=True, native_relative_mouse=True)
+    vm, qmp_path, serial_path, kvm, agent_path = boot(os.path.abspath(a.disk), out, scratch, a.timeout, a.require_kvm, guest_agent=True, native_relative_mouse=True)
     start = time.time()
     drm = shell = None
     elapsed = 0.0
