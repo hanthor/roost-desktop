@@ -249,6 +249,14 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
                            "guest": agent.run("diagnostics")}, stream, indent=2)
 
         gpu_snapshot("before-suspend")
+        with open(os.path.join(evidence, f"{label}before-suspend-gpu.json")) as stream:
+            caps = json.load(stream)["guest"]["gpu_pci_caps"]
+        pm_ready = (len(caps) == 1 and all(item["pcie_capability"] and item["pm_capability"]
+                                         and item["no_soft_reset"] for item in caps.values()))
+        record(f"{test_id}-GPU-PM", pm_ready,
+               "actual guest PCIe GPU advertises PM no-soft-reset; shared preserved-resource profile")
+        if not pm_ready:
+            raise RuntimeError("guest GPU lacks the required actual PM preservation capability")
         gpu_events = ("virtio_gpu_cmd_set_scanout", "virtio_gpu_cmd_res_create_2d",
                       "virtio_gpu_cmd_res_unref", "virtio_gpu_cmd_res_back_attach",
                       "virtio_gpu_cmd_res_back_detach")
@@ -272,6 +280,9 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
             record(test_id, False, "logind suspend never reached QEMU SUSPENDED; no pause substitute")
             raise RuntimeError("real suspend did not occur")
         suspended_frame = frame(f"{label}suspended")
+        wake_trace_offset = os.path.getsize(gpu_log) if os.path.exists(gpu_log) else 0
+        with open(os.path.join(evidence, f"{label}gpu-trace-wake.json"), "w") as stream:
+            json.dump({"log": os.path.basename(gpu_log), "offset": wake_trace_offset}, stream, indent=2)
         qmp.cmd("system_wakeup")
         # The first response after wake must already be locked. Waiting for a
         # later transition would hide an exposed desktop during resume.
@@ -298,10 +309,21 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
                 raise RuntimeError("resume repaint exposed or replaced the session")
             resumed_frame = frame(f"{label}resumed-locked")
         gpu_snapshot("post-resume")
-        record(test_id, same_apps(before, resumed) and repainted,
+        if os.path.exists(gpu_log):
+            with open(gpu_log, "rb") as stream:
+                stream.seek(wake_trace_offset)
+                uploaded = stream.read().decode("utf-8", errors="replace")
+        else:
+            uploaded = ""
+        queues_alive = ("virtio_gpu_cmd_res_create_2d" in uploaded
+                        and "virtio_gpu_cmd_res_back_attach" in uploaded
+                        and bool(re.search(r"virtio_gpu_cmd_set_scanout id 0, res 0x[1-9a-f]", uploaded)))
+        record(f"{test_id}-GPU-UPLOAD", queues_alive,
+               "host trace receives fresh resource creation, backing attachment and nonzero scanout after actual wake")
+        record(test_id, same_apps(before, resumed) and repainted and queues_alive,
                f"actual SUSPENDED → system_wakeup, first state locked, real lock mask repainted={repainted}, unchanged app IDs/rectangles and process start times")
-        if not repainted:
-            raise RuntimeError("actual lock mask did not repaint after resume; inactive output is not a mask")
+        if not repainted or not queues_alive:
+            raise RuntimeError("actual lock mask or fresh host GPU uploads missing after resume; inactive output is not a mask")
         return resumed
 
     # Start the first real suspend from the unlocked desktop: never hide
@@ -666,7 +688,7 @@ def boot(disk, out, scratch, timeout, *, guest_agent=False):
     qemu = ["qemu-system-x86_64", "-machine", "q35", "-m", "6144", "-smp", "4",
             "-bios", ovmf, "-snapshot",
             "-drive", f"file={disk},format=raw,if=virtio,cache=unsafe",
-            "-device", f"virtio-vga,xres={WIDTH},yres={HEIGHT}",
+            *baseline.gpu_devices(),
             "-device", "qemu-xhci", "-device", "usb-tablet", "-device", "usb-kbd",
             # The virtio keyboard carries multimedia evdev codes; USB's
             # boot-protocol keyboard has no consumer-control usages.
@@ -896,6 +918,8 @@ def main():
         "resolution": f"{WIDTH}x{HEIGHT}",
         "kvm": kvm,
         "qemu": qemu_version,
+        "gpu_profile": baseline.GPU_PROFILE,
+        "gpu_devices": baseline.gpu_devices(),
         "session_up_s": round(elapsed) if drm and shell else None,
         "drm_session_paused": paused,
         "captured_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

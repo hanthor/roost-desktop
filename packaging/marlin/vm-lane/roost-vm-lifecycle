@@ -22,6 +22,33 @@ def call(*args, user=False, check=True):
                           timeout=15, check=check).stdout.strip()
 
 
+
+def gpu_pci_caps():
+    result = {}
+    for card in pathlib.Path("/sys/class/drm").glob("card[0-9]*"):
+        config = card / "device/config"
+        if not config.exists():
+            continue
+        with config.open("rb") as stream:
+            data = stream.read(256)
+        if len(data) < 64:
+            continue
+        pm = pcie = 0
+        offset, seen = data[0x34] & ~3, set()
+        while 0x40 <= offset < len(data) - 1 and offset not in seen:
+            seen.add(offset)
+            if data[offset] == 1:
+                pm = offset
+            elif data[offset] == 0x10:
+                pcie = offset
+            offset = data[offset + 1] & ~3
+        control = int.from_bytes(data[pm + 4:pm + 6], "little") if pm else 0
+        result[card.name] = {"slot": (card / "device").resolve().name,
+                             "pm_capability": pm, "pcie_capability": pcie,
+                             "no_soft_reset": bool(control & 8), "power_state": control & 3}
+    return result
+
+
 def inventory():
     state = json.loads(STATE.read_text())
     processes = []
@@ -100,6 +127,7 @@ def main():
                 continue
         result = {"active_vt": pathlib.Path("/sys/class/tty/tty0/active").read_text().strip(),
                   "kernel_release": os.uname().release,
+                  "gpu_pci_caps": gpu_pci_caps(),
                   "gpu_drivers": {path.name: (path / "device/driver").resolve().name
                                   for path in pathlib.Path("/sys/class/drm").glob("card[0-9]*")
                                   if (path / "device/driver").exists()},

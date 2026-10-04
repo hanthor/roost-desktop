@@ -63,3 +63,32 @@ claim those parts of issue #62 are complete.
 
 Protocol references: [QEMU guest agent](https://www.qemu.org/docs/master/interop/qemu-ga-ref.html)
 and [QEMU wake-up](https://www.qemu.org/docs/master/interop/qemu-qmp-ref.html#command-system-wakeup).
+
+The shared GPU profile `virtio-vga-pcie-pm-preserved-v1` keeps the same
+virtio-vga, resolution, CPU, RAM and workloads. It places that GPU behind
+one PCIe root port and advertises PM no-soft-reset. All native GNOME
+capture and Roost/performance boot callers use the same GPU arguments;
+manifest/report fields record them. Fresh GNOME comparison evidence must
+use this profile; old-profile latency or cadence does not qualify it.
+The actual guest PCI capability chain must include PCIe, PM and the
+no-soft-reset bit, and each real resume must produce fresh host resource
+creation, backing attachment and nonzero scanout commands as well as the
+painted lock mask. A configured flag alone never passes the gate. The
+shipping AWS Bochs GPU is a separate, unmeasured suspend profile.
+
+The diagnosed fixture runs kernel 7.2.8-arch1-2 and QEMU 10.2.1. In
+[Linux 7.2.8 virtio GPU](https://raw.githubusercontent.com/gregkh/linux/v7.2.8/drivers/gpu/drm/virtio/virtgpu_drv.c)
+the driver has no freeze/restore callbacks. The
+[PCI PM path](https://raw.githubusercontent.com/gregkh/linux/v7.2.8/drivers/virtio/virtio_pci_common.c)
+skips reset when the device advertises no-soft-reset; otherwise
+[virtio restore](https://raw.githubusercontent.com/gregkh/linux/v7.2.8/drivers/virtio/virtio.c)
+resets the device. [QEMU 10.2 virtio PCI](https://raw.githubusercontent.com/qemu/qemu/v10.2.0/hw/virtio/virtio-pci.c)
+provides that capability only behind a PCIe port and preserves the device
+in D3hot. A [GPU reset](https://raw.githubusercontent.com/qemu/qemu/v10.2.0/hw/display/virtio-gpu.c)
+destroys its resources and clears the display. The prior actual trial
+37211055978/111464650400 reached real S3, stayed locked with apps intact
+and processed guest pageflips, but showed inactive host output and no
+fresh resource uploads. It remains a failed qualification. The supported
+PM profile requires its own strict actual run; no kernel/package override,
+extra VM matrix cell or physical hardware claim is introduced. QEMU 10.2
+is required, so the existing performance runner uses ubuntu-26.04.
