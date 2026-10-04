@@ -35,6 +35,8 @@ tempfile = "3"
 roost-wallpaper = { path = "../wallpaper" }
 serde_json.workspace = true
 rustix.workspace = true
+# GNOME51 RemoteDesktop.ConnectToEIS: bounded, revocable input transport.
+reis = { version = "=0.7.1", features = ["calloop"] }
 
 [features]
 default = ["drm", "xwayland"]

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [ "$#" != 4 ] || [ "$1" != --candidate ] || [ "$3" != --out ]; then echo 'usage: roost-remote-security --candidate DIR --out DIR' >&2; exit 2; fi
+candidate="$(realpath "$2")"
+out="$(realpath -m "$4")"
+if [ ! -x "$candidate/usr/bin/roost-compositor" ] || [ ! -x "$candidate/usr/bin/roost-shell-gtk" ]; then
+    echo 'packaged compositor and GTK shell required' >&2
+    exit 2
+fi
+[ ! -f "$out/assertions.txt" ] || { echo 'use a fresh artifact directory' >&2; exit 2; }
+mkdir -p "$out"
+# Runtime sockets are not evidence files and cannot be archived. Preserve all
+# regular logs/JSON/screenshots even when the proof fails.
+cleanup_artifacts() { find "$out" \( -type s -o -type p -o -type b -o -type c \) -delete; }
+trap cleanup_artifacts EXIT
+podman build --tag localhost/roost-remote-reference --file "$ROOT/tests/remote-desktop-reference/Containerfile" "$ROOT/tests/remote-desktop-reference"
+podman run --rm --network=none --security-opt label=disable --volume "$ROOT:/repo:ro" --volume "$candidate:/candidate:ro" --volume "$out:/out" localhost/roost-remote-reference /repo/tests/remote-desktop-reference/run.sh
