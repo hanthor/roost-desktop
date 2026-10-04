@@ -69,6 +69,7 @@ pub fn selector_area(width: i32, height: i32) -> (i32, i32, i32, i32) {
 }
 
 struct Service {
+    authority: crate::capture_security::Authority,
     to_loop: calloop::channel::Sender<Request>,
 }
 
@@ -77,6 +78,7 @@ struct Service {
 /// in-process (`paint_to_content`). Window contents are no more private
 /// than the screen, which `org.gnome.Shell.Screenshot` already hands out.
 struct WindowsService {
+    authority: crate::capture_security::Authority,
     to_loop: calloop::channel::Sender<Request>,
 }
 
@@ -88,7 +90,13 @@ pub type WindowShotReply = (u64, String, bool, i32, i32, i32, i32, String);
 impl WindowsService {
     /// `(directory) -> a(tsbiiiis)`: the active workspace's windows,
     /// each saved as a PNG into `directory`, with their selector slots.
-    fn screenshot_windows(&self, directory: String) -> zbus::fdo::Result<Vec<WindowShotReply>> {
+    async fn screenshot_windows(
+        &self,
+        directory: String,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> zbus::fdo::Result<Vec<WindowShotReply>> {
+        self.authority.admit(conn, &header).await?;
         let directory = PathBuf::from(directory);
         if !directory.is_absolute() {
             return Err(zbus::fdo::Error::InvalidArgs(
@@ -124,24 +132,30 @@ impl WindowsService {
 impl Service {
     /// GNOME Shell's signature: `(include_cursor, flash, filename) ->
     /// (success, filename_used)`.
-    fn screenshot(
+    async fn screenshot(
         &self,
         _include_cursor: bool,
         _flash: bool,
         filename: String,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<(bool, String)> {
+        self.authority.admit(conn, &header).await?;
         self.request(filename, false)
     }
 
     /// `(include_frame, include_cursor, flash, filename)`: the focused
     /// window. Roost windows draw their own frames, so it is always in.
-    fn screenshot_window(
+    async fn screenshot_window(
         &self,
         _include_frame: bool,
         _include_cursor: bool,
         _flash: bool,
         filename: String,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<(bool, String)> {
+        self.authority.admit(conn, &header).await?;
         self.request(filename, true)
     }
 }
@@ -166,7 +180,7 @@ impl Service {
 /// Serve the interface on the session bus from a thread. Returns the
 /// receiving end for the event loop; the thread ends quietly when there
 /// is no bus or the name is taken (a real GNOME Shell is running).
-pub fn start() -> calloop::channel::Channel<Request> {
+pub fn start(authority: crate::capture_security::Authority) -> calloop::channel::Channel<Request> {
     let (to_loop, from_dbus) = calloop::channel::channel();
     let _ = std::thread::Builder::new()
         .name("roost-screenshot".into())
@@ -176,11 +190,12 @@ pub fn start() -> calloop::channel::Channel<Request> {
                     b.serve_at(
                         PATH,
                         Service {
+                            authority: authority.clone(),
                             to_loop: to_loop.clone(),
                         },
                     )
                 })
-                .and_then(|b| b.serve_at(PATH, WindowsService { to_loop }))
+                .and_then(|b| b.serve_at(PATH, WindowsService { to_loop, authority }))
                 .and_then(|b| b.build())
             {
                 Ok(conn) => conn,

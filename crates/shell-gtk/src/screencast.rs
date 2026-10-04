@@ -563,19 +563,7 @@ fn primary_monitor() -> Option<(i32, i32, i32, i32)> {
     Some((g.x(), g.y(), g.width(), g.height()))
 }
 
-/// The options GNOME's interface takes: `draw-cursor` (ignored: the
-/// compositor's streams have no cursor yet), `framerate` (ignored) and
-/// `pipeline`, the caller's own encoder.
-fn encoder_option(options: &glib::Variant) -> Option<String> {
-    glib::VariantDict::new(Some(options))
-        .lookup::<String>("pipeline")
-        .ok()
-        .flatten()
-        .filter(|p| !p.trim().is_empty())
-}
-
-/// Own `org.gnome.Shell.Screencast` and serve it from `recorder`. Like
-/// GNOME's service, it answers any caller on the session bus.
+/// Own the recorder interface; external callers use the desktop portal.
 pub fn serve(recorder: Rc<Recorder>) {
     let node = match gio::DBusNodeInfo::for_xml(XML) {
         Ok(node) => node,
@@ -593,61 +581,17 @@ pub fn serve(recorder: Rc<Recorder>) {
         gio::BusNameOwnerFlags::NONE,
         move |conn, _| {
             *recorder.bus.borrow_mut() = Some(conn.clone());
-            let calls = recorder.clone();
             let registered = conn
                 .register_object(PATH, &info)
-                .method_call(move |_, _, _, _, method, params, invocation| {
-                    let start =
-                        |area: Option<(i32, i32, i32, i32)>,
-                         template: String,
-                         options: glib::Variant,
-                         invocation: gio::DBusMethodInvocation| {
-                            let encoder = encoder_option(&options);
-                            calls.start(area, &template, encoder, move |result| match result {
-                                Ok(path) => invocation.return_value(Some(
-                                    &(true, path.to_string_lossy().into_owned()).to_variant(),
-                                )),
-                                Err(e) => invocation
-                                    .return_dbus_error("org.freedesktop.DBus.Error.Failed", &e),
-                            });
-                        };
-                    // The options dictionary is the last argument.
-                    let options = |at: usize| params.try_child_value(at);
-                    let text =
-                        |at: usize| params.try_child_value(at).and_then(|v| v.get::<String>());
-                    let int = |at: usize| params.try_child_value(at).and_then(|v| v.get::<i32>());
-                    match method {
-                        "Screencast" => match (text(0), options(1)) {
-                            (Some(template), Some(options)) => {
-                                start(None, template, options, invocation)
-                            }
-                            _ => invocation.return_dbus_error(
-                                "org.freedesktop.DBus.Error.InvalidArgs",
-                                method,
-                            ),
-                        },
-                        "ScreencastArea" => {
-                            match (int(0), int(1), int(2), int(3), text(4), options(5)) {
-                                (
-                                    Some(x),
-                                    Some(y),
-                                    Some(w),
-                                    Some(h),
-                                    Some(template),
-                                    Some(options),
-                                ) => start(Some((x, y, w, h)), template, options, invocation),
-                                _ => invocation.return_dbus_error(
-                                    "org.freedesktop.DBus.Error.InvalidArgs",
-                                    method,
-                                ),
-                            }
-                        }
-                        "StopScreencast" => calls.stop(move |saved| {
-                            invocation.return_value(Some(&(saved,).to_variant()));
-                        }),
-                        _ => invocation
-                            .return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", method),
-                    }
+                .method_call(move |_, _, _, _, _, _, invocation| {
+                    // This recorder has a consent surface only through the
+                    // screenshot UI. External callers use the desktop portal;
+                    // proxying arbitrary D-Bus calls as the supervised shell
+                    // would otherwise bypass the compositor's admission gate.
+                    invocation.return_dbus_error(
+                        "org.freedesktop.DBus.Error.AccessDenied",
+                        "screen recording requires the screenshot UI or desktop portal",
+                    );
                 })
                 .property(|_, _, _, _, property| match property {
                     "ScreencastSupported" => supported().to_variant(),

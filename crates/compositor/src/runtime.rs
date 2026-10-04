@@ -474,6 +474,8 @@ pub struct Runtime {
     casts: Vec<crate::screencast::Cast>,
     /// Monitor list the Mutter D-Bus side serves.
     cast_outputs: crate::mutter::Outputs,
+    capture_authority: crate::capture_security::Authority,
+    cast_grants: std::collections::HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Window list org.gnome.Shell.Introspect serves (window sharing).
     introspect: crate::introspect::Handle,
     /// A three-finger swipe in progress: its travel so far (#60).
@@ -713,10 +715,15 @@ impl Runtime {
         let cast_outputs: crate::mutter::Outputs = Default::default();
         // org.gnome.Shell.Introspect: the portal's window picker.
         let introspect = crate::introspect::start(cast_outputs.clone());
+        let capture_authority = crate::capture_security::Authority::default();
         event_loop
             .handle()
             .insert_source(
-                crate::mutter::start(cast_outputs.clone(), introspect.windows.clone()),
+                crate::mutter::start(
+                    cast_outputs.clone(),
+                    introspect.windows.clone(),
+                    capture_authority.clone(),
+                ),
                 |event, _, rt: &mut Runtime| {
                     if let calloop::channel::Event::Msg(request) = event {
                         rt.on_screencast_request(request);
@@ -728,27 +735,30 @@ impl Runtime {
         // thread are answered between frames.
         event_loop
             .handle()
-            .insert_source(crate::screenshot::start(), |event, _, rt: &mut Runtime| {
-                use crate::screenshot::Request;
-                match event {
-                    calloop::channel::Event::Msg(Request::Shot {
-                        filename,
-                        window,
-                        reply,
-                    }) => {
-                        let saved = if window {
-                            rt.capture_window(&filename)
-                        } else {
-                            rt.capture(&filename)
-                        };
-                        let _ = reply.send(saved);
+            .insert_source(
+                crate::screenshot::start(capture_authority.clone()),
+                |event, _, rt: &mut Runtime| {
+                    use crate::screenshot::Request;
+                    match event {
+                        calloop::channel::Event::Msg(Request::Shot {
+                            filename,
+                            window,
+                            reply,
+                        }) => {
+                            let saved = if window {
+                                rt.capture_window(&filename)
+                            } else {
+                                rt.capture(&filename)
+                            };
+                            let _ = reply.send(saved);
+                        }
+                        calloop::channel::Event::Msg(Request::Windows { directory, reply }) => {
+                            let _ = reply.send(rt.capture_selector_windows(&directory));
+                        }
+                        calloop::channel::Event::Closed => {}
                     }
-                    calloop::channel::Event::Msg(Request::Windows { directory, reply }) => {
-                        let _ = reply.send(rt.capture_selector_windows(&directory));
-                    }
-                    calloop::channel::Event::Closed => {}
-                }
-            })
+                },
+            )
             .map_err(|e| RuntimeError::Loop(e.to_string()))?;
 
         // Lock-screen password checks finish here, between frames.
@@ -795,6 +805,8 @@ impl Runtime {
             pipewire: None,
             casts: Vec::new(),
             cast_outputs,
+            capture_authority,
+            cast_grants: Default::default(),
             introspect,
             idle_since: Instant::now(),
             unlock_results,
@@ -885,6 +897,7 @@ impl Runtime {
     fn engage_lock(&mut self) {
         self.lock.lock();
         self.control.set_locked(true);
+        self.capture_authority.publish(true, self.shell.child_pid());
         self.control.set_overview(false);
         self.overlay.show(Vec::new());
     }
@@ -1227,6 +1240,7 @@ impl Runtime {
         let focused = model.focused();
         let doc = serde_json::json!({
             "x11_display": self.x11_display.map(|d| format!(":{d}")),
+            "capture_streams": self.casts.len(),
             "idle_timeout_ms": self.lock.timeout_ms(),
             "idle_blank_alpha": self.blank_alpha(),
             "overview_search": self.overview_search,
@@ -1884,6 +1898,17 @@ impl Runtime {
     /// D-Bus side asked for, and feed every streaming cast a frame.
     fn screencast_tick(&mut self) {
         use crate::mutter::CastTarget;
+        if self.is_locked() {
+            for grant in self.cast_grants.values() {
+                grant.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            for cast in &self.casts {
+                cast.close();
+            }
+            self.casts.clear();
+            self.cast_grants.clear();
+            return;
+        }
         // A cast window that closed ends its session, as in Mutter.
         let manager = &self.manager;
         self.casts.retain(|cast| {
@@ -1892,7 +1917,12 @@ impl Runtime {
             if gone {
                 cast.close();
             }
-            !cast.failed() && !gone
+            !cast.failed()
+                && !gone
+                && !self
+                    .cast_grants
+                    .get(&cast.session_id)
+                    .is_none_or(|grant| grant.load(std::sync::atomic::Ordering::SeqCst))
         });
         // Window casts follow their window's size.
         for index in 0..self.casts.len() {
@@ -1957,9 +1987,16 @@ impl Runtime {
         match request {
             crate::mutter::ToLoop::StartCast {
                 session_id,
+                grant,
                 target,
                 signal,
             } => {
+                if self.is_locked() || grant.load(std::sync::atomic::Ordering::SeqCst) {
+                    grant.store(true, std::sync::atomic::Ordering::SeqCst);
+                    crate::mutter::session_closed(&signal, session_id);
+                    return;
+                }
+                self.cast_grants.insert(session_id, grant);
                 if self.pipewire.is_none() {
                     self.pipewire = crate::screencast::PipeWire::new(&self.loop_handle);
                     if self.pipewire.is_none() {
@@ -1994,6 +2031,7 @@ impl Runtime {
             }
             crate::mutter::ToLoop::StopCast { session_id } => {
                 self.casts.retain(|cast| cast.session_id != session_id);
+                self.cast_grants.remove(&session_id);
             }
             crate::mutter::ToLoop::ApplyMonitors {
                 configs,
@@ -2321,6 +2359,8 @@ impl Runtime {
         }
         // Only the supervised shell may hold a control session (#30):
         // between restarts nobody may.
+        self.capture_authority
+            .publish(self.is_locked(), self.shell.child_pid());
         self.control.set_peer_gate(match self.shell.child_pid() {
             Some(pid) => PeerGate::Pid(pid),
             None => PeerGate::Closed,

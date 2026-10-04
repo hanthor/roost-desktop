@@ -185,6 +185,7 @@ export PIPEWIRE_RUNTIME_DIR
 # GStreamer (casts, recordings) says what goes wrong in the logs.
 GST_DEBUG="${GST_DEBUG:-2}"
 export GST_DEBUG
+PORTAL_PIDS=""
 PW_PIDS=""
 if command -v pipewire >/dev/null 2>&1 && command -v wireplumber >/dev/null 2>&1; then
     pipewire >"$ARTIFACTS/pipewire.log" 2>&1 &
@@ -291,6 +292,7 @@ cleanup() {
     if [ -n "$TRAY_PID" ]; then kill "$TRAY_PID" 2>/dev/null || true; fi
     # shellcheck disable=SC2086
     if [ -n "$PW_PIDS" ]; then kill $PW_PIDS 2>/dev/null || true; fi
+    for portal_pid in $PORTAL_PIDS; do kill "$portal_pid" 2>/dev/null || true; done
     rm -rf "${PIPEWIRE_RUNTIME_DIR:-/nonexistent}"
     if [ -n "$SYSBUS_PID" ]; then kill "$SYSBUS_PID" 2>/dev/null || true; fi
 }
@@ -1944,35 +1946,14 @@ cstate ".active_workspace == $home_ws and .focused == $moved" "home" ||
     fail G-OV-DND "could not return the window home"
 sleep 1
 
-# Screenshots (#61): GNOME Shell's interface, as the portal calls it.
-SHOT="$ARTIFACTS/screenshot.png"
+# Direct callers may not bypass capture consent by calling Shell interfaces.
 reply="$(gdbus call --session --dest org.gnome.Shell.Screenshot \
     --object-path /org/gnome/Shell/Screenshot \
-    --method org.gnome.Shell.Screenshot.Screenshot false false "$SHOT" 2>&1)" ||
-    fail G-SCREENSHOT "Screenshot call failed: $reply"
-case "$reply" in
-    "(true, '$SHOT')") ;;
-    *) fail G-SCREENSHOT "unexpected reply: $reply" ;;
-esac
-dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$SHOT")"
-[ "$dims" = "$WIDTH,$HEIGHT" ] || fail G-SCREENSHOT "screenshot is $dims, not $WIDTH,$HEIGHT"
-# The top bar is black and the desktop below is not: right way up.
-[ "$(px "$SHOT" 300 5)" = "0 0 0" ] || fail G-SCREENSHOT "top of the screenshot is not the black bar (flipped?)"
-[ "$(px "$SHOT" 5 $((HEIGHT - 5)))" != "0 0 0" ] || fail G-SCREENSHOT "bottom of the screenshot is black (flipped?)"
-pass G-SCREENSHOT "org.gnome.Shell.Screenshot saves the screen the right way up"
-
-WSHOT="$ARTIFACTS/screenshot-window.png"
-reply="$(gdbus call --session --dest org.gnome.Shell.Screenshot \
-    --object-path /org/gnome/Shell/Screenshot \
-    --method org.gnome.Shell.Screenshot.ScreenshotWindow true false false "$WSHOT" 2>&1)" ||
-    fail G-SCREENSHOT-WINDOW "ScreenshotWindow call failed: $reply"
-[ "$reply" = "(true, '$WSHOT')" ] || fail G-SCREENSHOT-WINDOW "unexpected reply: $reply"
-dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$WSHOT")"
-want="$(jq -r '.focused as $f | .windows[] | select(.id == $f) | .rect | "\(.[2]),\(.[3])"' "$CSTATE" | head -1)"
-if [ -z "$want" ] || [ "$dims" != "$want" ]; then
-    fail G-SCREENSHOT-WINDOW "window screenshot is $dims, focused window is ${want:-none}"
-fi
-pass G-SCREENSHOT-WINDOW "ScreenshotWindow saves the focused window ($dims)"
+    --method org.gnome.Shell.Screenshot.Screenshot false false "$ARTIFACTS/untrusted.png" 2>&1)" &&
+    fail G-SCREENSHOT-DENY "untrusted Screenshot accepted: $reply"
+case "$reply" in *AccessDenied*) ;; *) fail G-SCREENSHOT-DENY "unexpected denial: $reply" ;; esac
+[ ! -f "$ARTIFACTS/untrusted.png" ] || fail G-SCREENSHOT-DENY "denied capture wrote a file"
+pass G-SCREENSHOT-DENY "direct Screenshot requires trusted desktop identity"
 
 open_qs
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-shot.json" 20 \
@@ -2074,24 +2055,32 @@ sleep 1
 
 # Screen sharing (#61): the portal's calls, a frame over PipeWire.
 if [ -n "$PW_PIDS" ] && command -v gst-launch-1.0 >/dev/null 2>&1; then
-    CAST="$ARTIFACTS/screencast.png"
-    "$PY" "$ROOT/scripts/lib/roost-screencast-client.py" "$CAST" >"$ARTIFACTS/screencast.log" 2>&1 ||
-        fail G-SCREENCAST "cast failed: $(tail -3 "$ARTIFACTS/screencast.log")"
-    dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$CAST")"
-    [ "$dims" = "$WIDTH,$HEIGHT" ] || fail G-SCREENCAST "cast frame is $dims, not $WIDTH,$HEIGHT"
-    [ "$(px "$CAST" 300 5)" = "0 0 0" ] || fail G-SCREENCAST "cast frame does not show the top bar"
-    pass G-SCREENCAST "monitor recorded over Mutter ScreenCast, frame pulled from PipeWire ($(cat "$ARTIFACTS/screencast.log"))"
-    WCAST="$ARTIFACTS/window-cast.png"
-    "$PY" "$ROOT/scripts/lib/roost-screencast-client.py" "$WCAST" --window \
-        >"$ARTIFACTS/window-cast.log" 2>&1 ||
-        fail G-WINDOW-CAST "window cast failed: $(tail -3 "$ARTIFACTS/window-cast.log")"
-    # "node N window ID WxH TITLE": the frame is the window's own size.
-    size="$(awk '{print $5}' "$ARTIFACTS/window-cast.log")"
-    dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$WCAST")"
-    [ "$dims" = "$(echo "$size" | tr x ,)" ] ||
-        fail G-WINDOW-CAST "window frame is $dims, not the window's $size"
-    [ "$dims" != "$WIDTH,$HEIGHT" ] || fail G-WINDOW-CAST "window frame is the whole screen"
-    pass G-WINDOW-CAST "a window shared over Introspect and RecordWindow ($(cat "$ARTIFACTS/window-cast.log"))"
+    "$PY" "$ROOT/scripts/lib/roost-capture-security-client.py" >"$ARTIFACTS/capture-denial.log" 2>&1 ||
+        fail G-CAPTURE-DENY "capture admission failed: $(tail -3 "$ARTIFACTS/capture-denial.log")"
+    pass G-CAPTURE-DENY "untrusted callers and forged portal name denied screenshots, screencasts and shell recorder"
+
+    # Use the installed frontend/backend, with their genuine root-owned
+    # executable identities, on this proof's private session bus.
+    PORTAL_BACKEND=/usr/libexec/xdg-desktop-portal-gnome
+    [ -x "$PORTAL_BACKEND" ] || PORTAL_BACKEND=/usr/lib/xdg-desktop-portal-gnome
+    [ -x "$PORTAL_BACKEND" ] || fail G-PORTAL-CONSENT "installed GNOME backend missing"
+    mkdir -p "$XDG_CONFIG_HOME/xdg-desktop-portal"
+    printf '[preferred]\ndefault=gnome;gtk;\norg.freedesktop.impl.portal.ScreenCast=gnome\n' >"$XDG_CONFIG_HOME/xdg-desktop-portal/portals.conf"
+    XDG_CURRENT_DESKTOP=GNOME "$PORTAL_BACKEND" >"$ARTIFACTS/portal-gnome.log" 2>&1 &
+    PORTAL_PIDS="$!"
+    XDG_CURRENT_DESKTOP=GNOME /usr/libexec/xdg-desktop-portal >"$ARTIFACTS/portal-frontend.log" 2>&1 &
+    PORTAL_PIDS="$PORTAL_PIDS $!"
+    sleep 2
+    for decision in cancel grant; do
+        "$PY" "$ROOT/scripts/lib/roost-portal-capture-client.py" "$ARTIFACTS/portal-$decision.png" "$decision" >"$ARTIFACTS/portal-$decision.log" 2>&1 &
+        PORTAL_CLIENT=$!
+        "$PY" "$ROOT/scripts/lib/roost-portal-consent.py" "$ARTIFACTS/a11y-portal-$decision.json" "$decision" ||
+            fail G-PORTAL-CONSENT "actual picker could not $decision"
+        wait "$PORTAL_CLIENT" || fail G-PORTAL-CONSENT "frontend $decision failed: $(tail -3 "$ARTIFACTS/portal-$decision.log")"
+    done
+    [ -s "$ARTIFACTS/portal-grant.png" ] || fail G-PORTAL-CONSENT "granted frontend returned no consumed frame"
+    [ ! -f "$ARTIFACTS/portal-cancel.png" ] || fail G-PORTAL-CONSENT "cancel produced frame"
+    pass G-PORTAL-CONSENT "actual GNOME picker Cancel denies; Share grants and streams; owner Close removes node"
 
     # GNOME's screen recorder: the screenshot UI's video switch records
     # the selection (GNOME's first one, a centred quarter) as VP8 WebM in
@@ -2114,6 +2103,9 @@ if [ -n "$PW_PIDS" ] && command -v gst-launch-1.0 >/dev/null 2>&1; then
         showing "$ARTIFACTS/a11y-cast-recording.json" "Stop Screencast" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.5; done
     showing "$ARTIFACTS/a11y-cast-recording.json" "Stop Screencast" ||
         fail G-SCREENCAST-UI "no recording indicator in the panel"
+    pw-dump >"$ARTIFACTS/pipewire-granted.json"
+    jq -e 'any(.[]; .type == "PipeWire:Interface:Node" and ((.info.props["node.name"] // "" | contains("roost-screen-cast")) or (.info.props["media.name"] // "" | contains("roost-screen-cast"))))' "$ARTIFACTS/pipewire-granted.json" >/dev/null ||
+        fail G-CAPTURE-GRANT "consented UI recording has no PipeWire capture node"
     sleep 3
     scrot "$ARTIFACTS/24j-recording-indicator.png" >/dev/null
     # The indicator is GNOME's red ($red_4) panel button.
@@ -2130,6 +2122,10 @@ if [ -n "$PW_PIDS" ] && command -v gst-launch-1.0 >/dev/null 2>&1; then
     if showing "$ARTIFACTS/a11y-cast-stopped.json" "Stop Screencast"; then
         fail G-SCREENCAST-UI "the indicator stayed after Stop"
     fi
+    pw-dump >"$ARTIFACTS/pipewire-revoked.json"
+    jq -e 'all(.[]; .type != "PipeWire:Interface:Node" or ((.info.props["node.name"] // "" | contains("roost-screen-cast") | not) and (.info.props["media.name"] // "" | contains("roost-screen-cast") | not)))' "$ARTIFACTS/pipewire-revoked.json" >/dev/null ||
+        fail G-CAPTURE-REVOKE "Stop Screencast left a PipeWire capture node"
+    pass G-CAPTURE-REVOKE "UI grant creates PipeWire node; explicit Stop removes it"
     video="$(find "$XDG_VIDEOS_DIR/Screencasts" -name 'Screencast From *.webm' 2>/dev/null | head -1)"
     [ -n "$video" ] || fail G-SCREENCAST-UI "no Videos/Screencasts/Screencast From *.webm"
     cp "$video" "$ARTIFACTS/screencast-ui.webm"
@@ -2145,23 +2141,14 @@ if [ -n "$PW_PIDS" ] && command -v gst-launch-1.0 >/dev/null 2>&1; then
     [ "${frames:-0}" -ge 2 ] 2>/dev/null || fail G-SCREENCAST-UI "the recording has ${frames:-no} frames"
     pass G-SCREENCAST-UI "the video switch records the selection ($info) to $(basename "$video") with GNOME's indicator"
 
-    # The service's own interface, as other callers use it.
+    # External D-Bus callers cannot borrow the shell's capture identity.
     reply="$(gdbus call --session --dest org.gnome.Shell.Screencast \
         --object-path /org/gnome/Shell/Screencast \
-        --method org.gnome.Shell.Screencast.Screencast "Screencasts/D-Bus %d %t" "@a{sv} {}" 2>&1)" ||
-        fail G-SCREENCAST-DBUS "Screencast call failed: $reply"
-    dvideo="$(echo "$reply" | sed -n "s/^(true, '\(.*\)')$/\1/p")"
-    [ -n "$dvideo" ] || fail G-SCREENCAST-DBUS "unexpected reply: $reply"
-    sleep 3
-    reply="$(gdbus call --session --dest org.gnome.Shell.Screencast \
-        --object-path /org/gnome/Shell/Screencast \
-        --method org.gnome.Shell.Screencast.StopScreencast 2>&1)" ||
-        fail G-SCREENCAST-DBUS "StopScreencast call failed: $reply"
-    [ "$reply" = "(true,)" ] || fail G-SCREENCAST-DBUS "StopScreencast answered $reply"
-    info="$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name,width,height \
-        -of csv=p=0 "$dvideo" 2>&1)"
-    [ "$info" = "vp8,$WIDTH,$HEIGHT" ] || fail G-SCREENCAST-DBUS "the recording is '$info'"
-    pass G-SCREENCAST-DBUS "Screencast and StopScreencast record the screen to $(basename "$dvideo") ($info)"
+        --method org.gnome.Shell.Screencast.Screencast "Screencasts/D-Bus %d %t" "@a{sv} {}" 2>&1)" &&
+        fail G-SCREENCAST-DBUS "untrusted recording unexpectedly accepted: $reply"
+    case "$reply" in *AccessDenied*) ;; *) fail G-SCREENCAST-DBUS "unexpected denial: $reply" ;; esac
+    pass G-SCREENCAST-DBUS "external D-Bus recorder cannot bypass screenshot UI consent"
+
 else
     echo "roost-gtk-shell-proof: G-SCREENCAST skipped (no pipewire, wireplumber or gstreamer)"
 fi
@@ -2304,6 +2291,15 @@ ffmpeg -loglevel error -y -f lavfi -i color=c=0x00ff00:s=64x64 -frames:v 1 -thre
     "$ARTIFACTS/lock-background.png"
 gsettings set org.gnome.desktop.screensaver picture-uri "file://$ARTIFACTS/lock-background.png"
 sleep 1
+# A live, explicitly consented recording must be revoked when lock engages.
+if [ -n "$PW_PIDS" ] && command -v gst-launch-1.0 >/dev/null 2>&1; then
+    xdotool key Print
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-lock-cast-open.json" 20 \
+        --press "Record Screen" || fail G-CAPTURE-LOCK-REVOKE "could not request recording"
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-lock-cast-grant.json" 20 \
+        --press "Capture" || fail G-CAPTURE-LOCK-REVOKE "could not grant recording"
+    cstate '.capture_streams > 0' "consented recording started" 15 || fail G-CAPTURE-LOCK-REVOKE "recording did not start"
+fi
 open_power_menu power-menu-3 || fail G-SUSPEND-LOCK "could not reopen the power menu"
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-suspend.json" 20 \
     --press "Suspend" || fail G-SUSPEND-LOCK "could not press Suspend"
@@ -2311,6 +2307,28 @@ end=$(($(date +%s) + 10))
 until grep -q Suspend "$POWER_LOG" 2>/dev/null || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
 grep -q Suspend "$POWER_LOG" || fail G-SUSPEND-LOCK "logind never got Suspend"
 cstate '.locked' "locked" 10 || fail G-SUSPEND-LOCK "PrepareForSleep did not lock the session"
+"$PY" "$ROOT/scripts/lib/roost-capture-security-client.py" >"$ARTIFACTS/capture-locked-denial.log" 2>&1 ||
+    fail G-CAPTURE-LOCKED "capture accepted while locked"
+pass G-CAPTURE-LOCKED "locked session denies all untrusted and forged portal capture requests"
+if [ -n "$PORTAL_PIDS" ]; then
+    "$PY" "$ROOT/scripts/lib/roost-portal-capture-client.py" "$ARTIFACTS/portal-locked.png" locked >"$ARTIFACTS/portal-locked.log" 2>&1 &
+    PORTAL_CLIENT=$!
+    sleep 2
+    if [ ! -f "$ARTIFACTS/portal-locked.response.json" ]; then
+        "$PY" "$ROOT/scripts/lib/roost-portal-consent.py" "$ARTIFACTS/a11y-portal-locked.json" grant ||
+            fail G-PORTAL-LOCKED "locked portal picker failed"
+    fi
+    wait "$PORTAL_CLIENT" || fail G-PORTAL-LOCKED "locked frontend accepted: $(tail -3 "$ARTIFACTS/portal-locked.log")"
+    [ ! -f "$ARTIFACTS/portal-locked.png" ] || fail G-PORTAL-LOCKED "locked frontend wrote frame"
+    pass G-PORTAL-LOCKED "genuine installed portal cannot grant a locked session"
+fi
+if [ -n "$PW_PIDS" ] && command -v gst-launch-1.0 >/dev/null 2>&1; then
+    cstate '.locked and .capture_streams == 0' "locked capture revoked" 2 || fail G-CAPTURE-LOCK-REVOKE "locked session retained capture stream"
+    pw-dump >"$ARTIFACTS/pipewire-lock-revoked.json"
+    jq -e 'all(.[]; .type != "PipeWire:Interface:Node" or (.info.props["node.name"] // "" | contains("roost-screen-cast") | not))' "$ARTIFACTS/pipewire-lock-revoked.json" >/dev/null ||
+        fail G-CAPTURE-LOCK-REVOKE "locked session left PipeWire capture node"
+    pass G-CAPTURE-LOCK-REVOKE "lock revokes active consented recording and removes PipeWire node"
+fi
 scrot "$ARTIFACTS/23-locked-after-suspend.png" >/dev/null
 # Wait for asynchronous decode and test the unobscured lower-left pixel.
 end=$(($(date +%s) + 15))
