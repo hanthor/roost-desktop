@@ -30,6 +30,7 @@ pub struct ImeBridge {
     next_ms: u64,
     x11_display: Option<u32>,
     xim: Option<Child>,
+    retired_xim: Option<Child>,
     xim_starts: u32,
     xim_next_ms: u64,
 }
@@ -67,6 +68,7 @@ impl ImeBridge {
             next_ms: 0,
             x11_display: None,
             xim: None,
+            retired_xim: None,
             xim_starts: 0,
             xim_next_ms: 0,
         })
@@ -105,12 +107,21 @@ impl ImeBridge {
     /// The XIM helper may connect only after the compositor's XWM is ready.
     /// Advertising reserved sockets alone must not activate XWayland.
     pub fn set_ready_x11_display(&mut self, display: Option<u32>) {
+        // try_wait never waits for an external process. This runs even while
+        // locked, when normal IBus polling is suspended.
+        if self
+            .retired_xim
+            .as_mut()
+            .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))))
+        {
+            self.retired_xim = None;
+        }
         if self.x11_display == display {
             return;
         }
         if let Some(mut child) = self.xim.take() {
             let _ = child.kill();
-            let _ = child.wait();
+            self.retired_xim = Some(child);
         }
         self.x11_display = display;
         self.xim_starts = 0;
@@ -118,6 +129,10 @@ impl ImeBridge {
     }
 
     fn poll_xim(&mut self, now_ms: u64) {
+        // Keep at most one live helper and one killed child awaiting reaping.
+        if self.retired_xim.is_some() {
+            return;
+        }
         let Some(display) = self.x11_display else {
             return;
         };
@@ -176,6 +191,10 @@ impl ImeBridge {
 
 impl Drop for ImeBridge {
     fn drop(&mut self) {
+        if let Some(child) = &mut self.retired_xim {
+            let _ = child.kill();
+            let _ = child.try_wait();
+        }
         if let Some(child) = &mut self.xim {
             let _ = child.kill();
             let _ = child.wait();
@@ -228,6 +247,7 @@ mod tests {
             next_ms: 123,
             x11_display: Some(5),
             xim: Some(child),
+            retired_xim: None,
             xim_starts: MAX_RESTARTS + 1,
             xim_next_ms: 456,
         };
@@ -235,6 +255,15 @@ mod tests {
         assert_eq!(bridge.xim.as_ref().unwrap().id(), pid);
         bridge.set_ready_x11_display(None);
         assert!(bridge.xim.is_none());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while bridge.retired_xim.is_some() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "killed XIM not reaped"
+            );
+            bridge.set_ready_x11_display(None);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
         assert_eq!((bridge.starts, bridge.next_ms), (1, 123));
         bridge.set_ready_x11_display(Some(5));
