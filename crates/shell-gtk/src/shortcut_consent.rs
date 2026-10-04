@@ -122,7 +122,10 @@ impl Consent {
             .into_iter()
             .find(|a| a.app_id == desktop_id);
         let name = desktop.as_ref().map(|a| a.name.clone());
-        let stable = desktop.map(|_| desktop_id);
+        let stem = desktop_id.trim_end_matches(".desktop");
+        let known = !stem.contains('/') && roost_shell_host::apps::desktop_file_exists(stem);
+        let stable = known.then_some(desktop_id.clone());
+        let name = name.or_else(|| known.then_some(desktop_id));
         self.title.set_text(
             &name
                 .map(|n| format!("Allow {n} to inhibit shortcuts?"))
