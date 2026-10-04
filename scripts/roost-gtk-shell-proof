@@ -2322,11 +2322,18 @@ if [ -n "$PAM_ON" ]; then
     gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/ScreenSaver \
         --method org.gnome.ScreenSaver.Lock >/dev/null || fail G-DBUS-LOCK "D-Bus Lock failed"
     cstate '.locked' "D-Bus locked" 5 || fail G-DBUS-LOCK "D-Bus Lock replied without locking"
-    xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT * 3 / 4)) click 1
-    sleep 1
-    xdotool type --delay 30 "$UNLOCK_PASSWORD"
+    # The first printable key lifts the curtain and becomes exactly one
+    # password character. Do not click, clear, or replace the entry here:
+    # PAM acceptance proves the wake key was neither lost nor inserted twice.
+    sleep 0.5
+    first_password_char=${UNLOCK_PASSWORD%"${UNLOCK_PASSWORD#?}"}
+    xdotool type --delay 30 "$first_password_char"
+    sleep 0.3
+    xdotool type --delay 30 "${UNLOCK_PASSWORD#?}"
     xdotool key Return
-    cstate '(.locked | not)' "D-Bus lock unlocked through PAM" 15 || fail G-DBUS-LOCK "D-Bus lock did not unlock"
+    cstate '(.locked | not)' "first-printable lock wake authenticated through PAM" 15 ||
+        fail G-LOCK-FIRST-PRINTABLE "first wake character was lost, duplicated, or could not authenticate"
+    pass G-LOCK-FIRST-PRINTABLE "a printable wake key becomes exactly one password character and PAM unlocks"
     pass G-DBUS-LOCK "org.gnome.Shell exposes the screen-saver object and Lock waits for confirmation"
 else
     echo "roost-gtk-shell-proof: G-UNLOCK skipped (no pam_wrapper)"
