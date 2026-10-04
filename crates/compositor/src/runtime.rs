@@ -1116,6 +1116,9 @@ impl Runtime {
     /// now on get `DISPLAY` (#59).
     pub fn set_x11_display(&mut self, display: u32) {
         self.x11_display = Some(display);
+        if let Some(ime) = &mut self.ime {
+            ime.set_x11_display(display);
+        }
         self.control
             .set_environment(vec![("DISPLAY".to_owned(), format!(":{display}"))]);
     }

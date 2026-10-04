@@ -7,9 +7,9 @@
 //! key to an IBus input context (`ProcessKeyEvent`); IBus's preedit and
 //! commits go to the app, and keys IBus does not take go back through
 //! the virtual keyboard only this client is allowed. Without IBus it
-//! starts `ibus-daemon --panel disable`, as GNOME Shell does (less its
-//! `--xim`: XIM serves X11 apps, but the daemon would reach whatever
-//! `DISPLAY` it inherits, the host's in a nested session). One
+//! starts `ibus-daemon --panel disable`, as GNOME Shell does. The
+//! compositor starts ibus-x11 separately once its own XWayland is ready,
+//! so XIM never connects to the inherited host DISPLAY. One
 //! GLib main loop drives both the Wayland socket and IBus's bus.
 //!
 //! IBus also hears what GNOME Shell tells it about the field: the text
@@ -280,34 +280,6 @@ impl IbusContext {
         {
             eprintln!("roost-ibus-bridge: {method}: {e}");
         }
-    }
-
-    /// Whether IBus's engine composes text: a keyboard layout (`xkb:`)
-    /// or none has nothing to add, so keys then go straight to the app.
-    fn composing(&self) -> bool {
-        let Ok(reply) = self.bus.call_sync(
-            Some(IBUS),
-            IBUS_PATH,
-            "org.freedesktop.DBus.Properties",
-            "Get",
-            Some(&(IBUS, "GlobalEngine").to_variant()),
-            glib::VariantTy::new("(v)").ok(),
-            gio::DBusCallFlags::NONE,
-            CALL_TIMEOUT_MS,
-            None::<&gio::Cancellable>,
-        ) else {
-            return false;
-        };
-        // v holding v holding IBusEngineDesc `(sa{sv}ss...)`: the name is
-        // its third field.
-        let mut desc = reply.child_value(0);
-        while let Some(inner) = desc.as_variant() {
-            desc = inner;
-        }
-        let name = desc
-            .try_child_value(2)
-            .and_then(|n| n.str().map(str::to_owned));
-        name.is_some_and(|name| !name.is_empty() && !name.starts_with("xkb:"))
     }
 
     /// Whether IBus takes this key.
@@ -659,10 +631,8 @@ impl Bridge {
         if let Some(context) = &self.context {
             context.send(if active { "FocusIn" } else { "FocusOut" }, None);
         }
-        // Keys go through IBus only while its engine composes (pinyin,
-        // anthy...); with a plain layout they reach the app untouched.
-        let composing = active && self.context.as_ref().is_some_and(IbusContext::composing);
-        if composing {
+        // Every focused field goes through IBus, including keyboard layouts.
+        if active {
             if self.grab.is_none() {
                 self.grab = self.im.as_ref().map(|im| im.grab_keyboard(qh, ()));
             }

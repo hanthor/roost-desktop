@@ -1655,6 +1655,29 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     [ "$inside" = yes ] ||
         fail G-IME-CURSOR "cursor location ($cursor) is not inside the IME window ($rect)"
     pass G-IME-CURSOR "IBus hears the text cursor at ($cursor), inside the field's window ($rect)"
+    # Moving only the parent must update the global caret, without typing.
+    cursor_before="$cursor"
+    # shellcheck disable=SC2086
+    set -- $rect
+    xdotool mousemove --window "$WID" $(($1 + 200)) $(($2 + 30)) keydown Super_L mousedown 1
+    xdotool mousemove_relative -- 65 45
+    xdotool mouseup 1 keyup Super_L
+    end=$(($(date +%s) + 5))
+    until [ "$(sed -n 's/^roost-ibus-test-engine: cursor //p' "$ENGINE_LOG" | tail -1)" != "$cursor_before" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+    cursor="$(sed -n 's/^roost-ibus-test-engine: cursor //p' "$ENGINE_LOG" | tail -1)"
+    [ "$cursor" != "$cursor_before" ] || fail G-IME-CURSOR-MOVE "moving the window did not update IBus's caret"
+    pass G-IME-CURSOR-MOVE "moving the focused window refreshes IBus's global cursor without typing"
+    # A field inside a real xdg popup keeps the IM keyboard grab active.
+    # Escape must survive the IBus virtual-key return with its keymap intact.
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-ime "$ARTIFACTS/a11y-ime-open.json" 20 --press "IME Popover" || fail G-IME-ESCAPE "could not open field popover"
+    sleep 0.5
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-ime "$ARTIFACTS/a11y-ime-qs-open.json" 20 || fail G-IME-ESCAPE "popover dump failed"
+    showing "$ARTIFACTS/a11y-ime-qs-open.json" "IME Popover Field" || fail G-IME-ESCAPE "field popover did not open"
+    xdotool key Escape
+    sleep 0.5
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-ime "$ARTIFACTS/a11y-ime-qs-closed.json" 20 || fail G-IME-ESCAPE "post-Escape dump failed"
+    if showing "$ARTIFACTS/a11y-ime-qs-closed.json" "IME Popover Field"; then fail G-IME-ESCAPE "Escape did not close the popover with the composing engine enabled"; fi
+    pass G-IME-ESCAPE "Escape closes the GTK popover while the composing engine is enabled"
     # GNOME Shell is IBus's panel and draws its candidates
     # (ibusCandidatePopup.js): the shell owns org.freedesktop.IBus.Panel
     # on IBus's bus, "ni" brings up 你 尼 泥 under the text cursor with
@@ -1724,6 +1747,23 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
         fail G-IME-CANDIDATES "the candidate window stayed after the commit"
     xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT - 40))
     pass G-IME-CANDIDATES "the shell draws IBus's candidates (你 尼 泥) under the cursor, the first highlighted (surface $surface), and clicking 尼 commits it"
+    # XIM talks to the session's XWayland, never the outer Xvfb display.
+    x11_display="$(jq -r .x11_display "$CSTATE")"
+    [ "$x11_display" != null ] || fail G-IME-XIM "XWayland display missing"
+    for _ in $(seq 1 30); do grep -q "XIM started on $x11_display" "$LOG" && break; sleep 0.2; done
+    grep -q "XIM started on $x11_display" "$LOG" || fail G-IME-XIM "private XIM server never started"
+    XIM_OUT="$ARTIFACTS/xim.txt"
+    DISPLAY="$x11_display" GDK_BACKEND=x11 GTK_IM_MODULE=xim XMODIFIERS=@im=ibus "$PY" "$ROOT/scripts/lib/roost-ime-window.py" "$XIM_OUT" >"$ARTIFACTS/xim-window.log" 2>&1 &
+    XIM_WINDOW=$!
+    IME_PIDS="$IME_PIDS $XIM_WINDOW"
+    sleep 1.5
+    xdotool type --delay 100 nihao
+    xdotool key space
+    end=$(($(date +%s) + 10))
+    until [ "$(cat "$XIM_OUT" 2>/dev/null)" = 你好 ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+    [ "$(cat "$XIM_OUT" 2>/dev/null)" = 你好 ] || fail G-IME-XIM "X11 field did not compose through XIM: $(cat "$XIM_OUT" 2>/dev/null)"
+    kill "$XIM_WINDOW" 2>/dev/null || true
+    pass G-IME-XIM "the X11 field composes through XIM on the private XWayland display"
     # shellcheck disable=SC2086 # two pids
     kill $IME_PIDS 2>/dev/null || true
     IME_PIDS=""
