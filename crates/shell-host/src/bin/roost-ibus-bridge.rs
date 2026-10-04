@@ -7,9 +7,9 @@
 //! key to an IBus input context (`ProcessKeyEvent`); IBus's preedit and
 //! commits go to the app, and keys IBus does not take go back through
 //! the virtual keyboard only this client is allowed. Without IBus it
-//! starts `ibus-daemon --panel disable`, as GNOME Shell does (less its
-//! `--xim`: XIM serves X11 apps, but the daemon would reach whatever
-//! `DISPLAY` it inherits, the host's in a nested session). One
+//! starts `ibus-daemon --panel disable`, as GNOME Shell does. The
+//! compositor starts ibus-x11 separately once its own XWayland is ready,
+//! so XIM never connects to the inherited host DISPLAY. One
 //! GLib main loop drives both the Wayland socket and IBus's bus.
 //!
 //! IBus also hears what GNOME Shell tells it about the field: the text
@@ -212,6 +212,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         queue.dispatch_pending(&mut bridge)?;
+        // Popup rectangles also arrive independently of input-method done:
+        // moving a parent must update IBus without another text edit.
+        bridge.sync_cursor();
         bridge.apply_incoming();
         if bridge.gone {
             return Ok(());
@@ -288,34 +291,6 @@ impl IbusContext {
         }
     }
 
-    /// Whether IBus's engine composes text: a keyboard layout (`xkb:`)
-    /// or none has nothing to add, so keys then go straight to the app.
-    fn composing(&self) -> bool {
-        let Ok(reply) = self.bus.call_sync(
-            Some(IBUS),
-            IBUS_PATH,
-            "org.freedesktop.DBus.Properties",
-            "Get",
-            Some(&(IBUS, "GlobalEngine").to_variant()),
-            glib::VariantTy::new("(v)").ok(),
-            gio::DBusCallFlags::NONE,
-            CALL_TIMEOUT_MS,
-            None::<&gio::Cancellable>,
-        ) else {
-            return false;
-        };
-        // v holding v holding IBusEngineDesc `(sa{sv}ss...)`: the name is
-        // its third field.
-        let mut desc = reply.child_value(0);
-        while let Some(inner) = desc.as_variant() {
-            desc = inner;
-        }
-        let name = desc
-            .try_child_value(2)
-            .and_then(|n| n.str().map(str::to_owned));
-        name.is_some_and(|name| !name.is_empty() && !name.starts_with("xkb:"))
-    }
-
     /// Whether IBus takes this key.
     fn process_key(&self, keyval: u32, keycode: u32, state: u32) -> bool {
         match self.bus.call_sync(
@@ -362,7 +337,12 @@ fn ibus_event(member: &str, params: &glib::Variant) -> Option<FromIbus> {
 
 /// The string inside a serialized IBusText (`v` holding `(sa{sv}sv)`).
 fn ibus_text(value: &glib::Variant) -> Option<String> {
-    let inner = value.as_variant().unwrap_or_else(|| value.clone());
+    // as_variant calls g_variant_get_variant directly; its Option result does
+    // not protect ordinary serialized tuples from GLib's type assertion.
+    let mut inner = value.clone();
+    while inner.is_type(glib::VariantTy::VARIANT) {
+        inner = inner.as_variant()?;
+    }
     inner.try_child_value(2)?.str().map(str::to_owned)
 }
 
@@ -452,6 +432,17 @@ fn ibus_content_type(hint: u32, purpose: u32) -> (u32, u32) {
     (purpose, hints)
 }
 
+/// Forward a visible composition update, or exactly one clear after it.
+/// Smithay forwards even an empty input-method string as non-null text-input
+/// preedit; GTK interprets a fresh non-null preedit as a composition start
+/// and deletes the selected text. Redundant IBus hide signals must not start it.
+fn preedit_update(active: &mut bool, text: &str, visible: bool) -> bool {
+    let showing = visible && !text.is_empty();
+    let forward = showing || *active;
+    *active = showing;
+    forward
+}
+
 /// The bridge's Wayland side.
 #[derive(Default)]
 struct Bridge {
@@ -472,6 +463,7 @@ struct Bridge {
     /// Activation pending the next `done`, and the applied one.
     pending_active: Option<bool>,
     active: bool,
+    preedit_active: bool,
     /// Surrounding text and content type pending the next `done`, and
     /// the applied surrounding text.
     pending_surrounding: Option<Surrounding>,
@@ -525,10 +517,11 @@ impl Bridge {
         });
         let state = self.ibus_state() | if pressed { 0 } else { RELEASE };
         let started = Instant::now();
-        let handled = self
-            .context
-            .as_ref()
-            .is_some_and(|context| context.process_key(keyval, key, state));
+        let handled = self.active
+            && self
+                .context
+                .as_ref()
+                .is_some_and(|context| context.process_key(keyval, key, state));
         if std::env::var_os("ROOST_IBUS_DEBUG").is_some() {
             eprintln!(
                 "roost-ibus-bridge: key {key} sym {keyval:#x} pressed {pressed}: IBus took it: {handled} ({:?})",
@@ -565,7 +558,9 @@ impl Bridge {
         }
         match event {
             FromIbus::Commit(text) => {
-                im.set_preedit_string(String::new(), 0, 0);
+                if std::mem::take(&mut self.preedit_active) {
+                    im.set_preedit_string(String::new(), 0, 0);
+                }
                 im.commit_string(text);
                 im.commit(self.serial);
             }
@@ -574,6 +569,9 @@ impl Bridge {
                 cursor,
                 visible,
             } => {
+                if !preedit_update(&mut self.preedit_active, &text, visible) {
+                    return;
+                }
                 let (text, cursor) = if visible {
                     // IBus counts characters; the protocol counts bytes.
                     let byte = byte_offset(&text, cursor as usize) as i32;
@@ -585,6 +583,9 @@ impl Bridge {
                 im.commit(self.serial);
             }
             FromIbus::HidePreedit => {
+                if !preedit_update(&mut self.preedit_active, "", false) {
+                    return;
+                }
                 im.set_preedit_string(String::new(), 0, 0);
                 im.commit(self.serial);
             }
@@ -637,6 +638,18 @@ impl Bridge {
                 self.surrounding = Some(surrounding);
             }
         }
+        self.sync_cursor();
+    }
+
+    /// Forward independent popup placement updates after the event batch
+    /// has applied any pending focus transition.
+    fn sync_cursor(&mut self) {
+        if !self.active {
+            return;
+        }
+        let Some(context) = &self.context else {
+            return;
+        };
         if let Some(rect) = self
             .cursor_rect
             .filter(|r| Some(*r) != self.sent_cursor_rect)
@@ -649,12 +662,16 @@ impl Bridge {
         }
     }
 
-    /// Focus in with a keyboard grab, or focus out and release it.
+    /// Focus the IBus context while retaining one stable keyboard grab.
+    /// A field-to-field Tab transition must not destroy/recreate the grab:
+    /// physical keys can arrive between those requests. Inactive contexts
+    /// forward keys directly instead of sending them through IBus.
     fn activate(&mut self, active: bool, qh: &QueueHandle<Self>) {
         if active == self.active {
             return;
         }
         self.active = active;
+        self.preedit_active = false;
         // A new field: what IBus heard about the last one is stale.
         self.surrounding = None;
         self.sent_cursor_rect = None;
@@ -665,15 +682,12 @@ impl Bridge {
         if let Some(context) = &self.context {
             context.send(if active { "FocusIn" } else { "FocusOut" }, None);
         }
-        // Keys go through IBus only while its engine composes (pinyin,
-        // anthy...); with a plain layout they reach the app untouched.
-        let composing = active && self.context.as_ref().is_some_and(IbusContext::composing);
-        if composing {
-            if self.grab.is_none() {
-                self.grab = self.im.as_ref().map(|im| im.grab_keyboard(qh, ()));
-            }
-        } else if let Some(grab) = self.grab.take() {
-            grab.release();
+        // Every focused field goes through IBus, including keyboard layouts.
+        // Retain the supervised connection's grab across field changes and
+        // periods without a field; key() bypasses IBus while inactive.
+        // Connection teardown releases the grab if the bridge exits.
+        if active && self.grab.is_none() {
+            self.grab = self.im.as_ref().map(|im| im.grab_keyboard(qh, ()));
         }
     }
 }
@@ -870,6 +884,22 @@ mod tests {
     }
 
     #[test]
+    fn hidden_preedit_never_starts_composition_in_a_new_field() {
+        let mut active = false;
+        assert!(!preedit_update(&mut active, "", false));
+        assert!(!preedit_update(&mut active, "", true));
+        assert!(preedit_update(&mut active, "ni", true));
+        assert!(preedit_update(&mut active, "nihao", true));
+        assert!(preedit_update(&mut active, "", false));
+        assert!(!preedit_update(&mut active, "", false));
+        // A focus change resets the applied composition, so a queued
+        // FocusOut hide cannot delete a newly focused field's selection.
+        assert!(preedit_update(&mut active, "ni", true));
+        active = false;
+        assert!(!preedit_update(&mut active, "ni", false));
+    }
+
+    #[test]
     fn surrounding_offsets_count_characters_not_bytes() {
         // 你 and 好 are three bytes each.
         assert_eq!(char_offset("你好", 6), 2);
@@ -913,6 +943,21 @@ mod tests {
         assert_eq!(ibus_text(&packed).as_deref(), Some("你好"));
         let args = glib::Variant::tuple_from_iter([packed, 2u32.to_variant(), 2u32.to_variant()]);
         assert_eq!(args.type_().as_str(), "(vuu)");
+    }
+
+    #[test]
+    fn raw_and_nested_text_variants_decode_without_native_type_assertions() {
+        let boxed = ibus_text_variant("你好");
+        assert_eq!(
+            ibus_text(&boxed.as_variant().unwrap()).as_deref(),
+            Some("你好")
+        );
+        assert_eq!(
+            ibus_text(&glib::Variant::from_variant(&boxed)).as_deref(),
+            Some("你好")
+        );
+        assert_eq!(ibus_text(&"not a container".to_variant()), None);
+        assert_eq!(ibus_text(&42u32.to_variant()), None);
     }
 
     #[test]

@@ -56,6 +56,22 @@ class ProcessFailures(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'changed identity'):
                 soak.sample(os.getuid(), self.root)
 
+    def test_departure_check_handles_proc_disappearing_during_read(self):
+        for error in (FileNotFoundError(), ProcessLookupError()):
+            with patch.object(soak, 'identity', side_effect=error):
+                self.assertTrue(soak.is_departed(self.root / '100'))
+        with patch.object(soak, 'identity', side_effect=PermissionError()):
+            with self.assertRaises(PermissionError):
+                soak.is_departed(self.root / '100')
+        self.assertFalse(soak.is_departed(self.root / '100'))
+
+    def test_departure_during_error_check_still_fails_critical_liveness(self):
+        with patch.object(soak, 'identity', side_effect=[
+            ProcessLookupError(), FileNotFoundError(), ('S', 1234), ('S', 1234),
+        ]):
+            with self.assertRaisesRegex(RuntimeError, 'critical session process'):
+                soak.sample(os.getuid(), self.root)
+
     def test_unreadable_live_process_is_fatal(self):
         with patch.object(soak, 'identity', side_effect=PermissionError('denied')):
             with self.assertRaises(PermissionError):
@@ -84,7 +100,7 @@ class HelperFailures(unittest.TestCase):
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
                 proc = Path('/proc') / str(pid)
-                if not proc.exists() or soak.identity(proc)[0] == 'Z':
+                if soak.is_departed(proc):
                     break
                 time.sleep(0.02)
             else:

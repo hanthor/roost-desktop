@@ -1,6 +1,7 @@
 // GNOME 51 reference capture for Roost's pixel-parity work.
 // Run as: gnome-shell --headless --virtual-monitor WxH --automation-script capture.js
 // Writes OUT/<state>.png and OUT/<state>.json (visible styled actors).
+import Clutter from 'gi://Clutter';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
@@ -14,6 +15,8 @@ import * as BoxPointer from 'resource:///org/gnome/shell/ui/boxpointer.js';
 Gio._promisify(Shell.Screenshot.prototype, 'screenshot');
 Gio._promisify(Shell.Screenshot.prototype, 'screenshot_stage_to_content');
 Gio._promisify(Shell.Screenshot, 'composite_to_stream');
+
+Gio._promisify(Gio.Subprocess.prototype, 'communicate_utf8_async', 'communicate_utf8_finish');
 
 const OUT = GLib.getenv('GREF_OUT') ?? '/out';
 export const METRICS = {};
@@ -63,6 +66,7 @@ async function shotStage(state) {
     const actors = [];
     dump(global.stage, 0, actors);
     GLib.file_set_contents(`${OUT}/${state}.json`, JSON.stringify(actors, null, 1));
+    windowState(state);
     print(`GREF captured ${state}`);
 }
 
@@ -74,6 +78,7 @@ async function shotNow(state) {
     const actors = [];
     dump(global.stage, 0, actors);
     GLib.file_set_contents(`${OUT}/${state}.json`, JSON.stringify(actors, null, 1));
+    windowState(state);
     print(`GREF captured ${state}`);
 }
 
@@ -87,7 +92,52 @@ async function shot(state) {
     const actors = [];
     dump(global.stage, 0, actors);
     GLib.file_set_contents(`${OUT}/${state}.json`, JSON.stringify(actors, null, 1));
+    windowState(state);
     print(`GREF captured ${state}`);
+}
+
+function windowState(state) {
+    const focused = global.display.focus_window;
+    GLib.file_set_contents(`${OUT}/${state}.state.json`, JSON.stringify({
+        active_workspace: global.workspace_manager.get_active_workspace_index(),
+        focused: focused?.get_stable_sequence() ?? null,
+        focused_title: focused?.get_title() ?? null,
+        windows: global.get_window_actors().map(actor => {
+            const win = actor.meta_window;
+            const rect = win.get_frame_rect();
+            return {id: win.get_stable_sequence(), title: win.get_title(),
+                workspace: win.get_workspace().index(), maximized: win.get_maximize_flags(),
+                rect: [rect.x, rect.y, rect.width, rect.height]};
+        }),
+    }, null, 1));
+}
+
+async function a11y(state) {
+    // Await the subprocess without blocking GNOME's main loop: it must
+    // answer the AT-SPI client's requests while the tree is being read.
+    const child = Gio.Subprocess.new(['/usr/bin/python3', '/proof-lib/roost-a11y-dump.py',
+        'gnome-shell', `${OUT}/a11y-${state}.json`, '20'],
+        Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
+    const result = await child.communicate_utf8_async(null, null);
+    const [stdout, stderr] = result.slice(-2);
+    if (!child.get_successful())
+        throw new Error(`GNOME AT-SPI ${state}: ${stderr}`);
+    print(stdout.trim());
+}
+
+let keyboard = null;
+async function chord(keys) {
+    keyboard ??= global.stage.context.get_backend().get_default_seat()
+        .create_virtual_device(Clutter.InputDeviceType.KEYBOARD_DEVICE);
+    for (const key of keys) {
+        keyboard.notify_keyval(GLib.get_monotonic_time(), key, Clutter.KeyState.PRESSED);
+        await Scripting.sleep(80);
+    }
+    for (const key of [...keys].reverse()) {
+        keyboard.notify_keyval(GLib.get_monotonic_time(), key, Clutter.KeyState.RELEASED);
+        await Scripting.sleep(80);
+    }
+    await Scripting.sleep(700);
 }
 
 const NONE = BoxPointer.PopupAnimation.NONE;
@@ -99,6 +149,7 @@ export async function run() {
     Main.overview.hide();
     await Scripting.sleep(1500);
     await shot('01-desktop');
+    await a11y('panel');
 
     Main.panel.statusArea.dateMenu.menu.open(NONE);
     await shot('02-calendar');
@@ -107,6 +158,7 @@ export async function run() {
     const quickSettings = Main.panel.statusArea.quickSettings;
     quickSettings.menu.open(NONE);
     await shot('03-quick-settings');
+    await a11y('quick-settings');
     // The Power Mode toggle's own menu, opened in place.
     const powerMode = quickSettings._powerProfiles.quickSettingsItems[0];
     powerMode.menu.open(false);
@@ -122,6 +174,7 @@ export async function run() {
     Main.overview.show();
     await Scripting.sleep(1500);
     await shot('04-overview-empty');
+    await a11y('overview');
     // What a click on the dash's Show Apps button does.
     Main.overview.dash.showAppsButton.checked = true;
     await Scripting.sleep(1500);
@@ -157,7 +210,7 @@ export async function run() {
     const testWindows = [];
     for (const [title, color] of [['Alpha', '#3584e4'], ['Beta', '#2ec27e'], ['Gamma', '#e66100']]) {
         testWindows.push(Gio.Subprocess.new(
-            ['/usr/bin/python3', '/lib/roost-test-window.py', title, color],
+            ['/usr/bin/python3', '/proof-lib/roost-test-window.py', title, color],
             Gio.SubprocessFlags.NONE));
         // One at a time, as Roost's capture maps them in order.
         for (let t = 0; t < 100 && global.get_window_actors().length < testWindows.length; t++)
@@ -179,9 +232,11 @@ export async function run() {
     else
         switcher.destroy();
     await Scripting.sleep(500);
+    const previousFocus = global.display.focus_window;
     Main.overview.show();
     await Scripting.sleep(1500);
     await shot('07-overview-windows');
+    await a11y('overview');
     // The first preview as hovered: GNOME's own hover path.
     const previews = [];
     const find = a => {
@@ -195,8 +250,23 @@ export async function run() {
     previews[0]?.showOverlay(false);
     await shot('07b-overview-hover');
     previews[0]?.hideOverlay(false);
-    Main.overview.hide();
-    await Scripting.sleep(1500);
+    await chord([Clutter.KEY_Escape]);
+    if (global.display.focus_window !== previousFocus)
+        throw new Error('Escape did not restore the previous focus');
+    await shot('20-overview-dismiss-focus');
+
+    const layoutWindow = global.display.focus_window;
+    await chord([Clutter.KEY_Super_L, Clutter.KEY_Up]);
+    if (layoutWindow.get_maximize_flags() !== Meta.MaximizeFlags.BOTH)
+        throw new Error('Super+Up did not maximize');
+    await shot('21-maximized');
+    await chord([Clutter.KEY_Super_L, Clutter.KEY_Down]);
+    await chord([Clutter.KEY_Super_L, Clutter.KEY_Left]);
+    await shot('22-tiled-left');
+    await chord([Clutter.KEY_Super_L, Clutter.KEY_Down]);
+    await chord([Clutter.KEY_Super_L, Clutter.KEY_Right]);
+    await shot('22b-tiled-right');
+    await chord([Clutter.KEY_Super_L, Clutter.KEY_Down]);
 
     // The same D-Bus notification Roost's capture sends.
     Gio.DBus.session.call('org.freedesktop.Notifications',
@@ -251,8 +321,9 @@ export async function run() {
     // bar at (500, 280) opens it (Roost's capture right-clicks there).
     const focused = global.display.focus_window;
     if (focused) {
+        const frame = focused.get_frame_rect();
         Main.wm._windowMenuManager.showWindowMenuForWindow(focused,
-            Meta.WindowMenuType.WM, {x: 500, y: 280, width: 0, height: 0});
+            Meta.WindowMenuType.WM, {x: frame.x + 60, y: frame.y + 20, width: 0, height: 0});
         await Scripting.sleep(600);
         await shot('13-window-menu');
         Main.wm._windowMenuManager._manager.activeMenu?.close();
@@ -270,6 +341,13 @@ export async function run() {
     await shotNow('15-workspace-popup');
     Main.wm.actionMoveWorkspace(wm.get_workspace_by_index(0));
     await Scripting.sleep(1200);
+    await chord([Clutter.KEY_Super_L, Clutter.KEY_Page_Down]);
+    if (wm.get_active_workspace_index() !== 1)
+        throw new Error('Super+Page_Down did not switch workspace');
+    await shot('23-workspace-switched');
+    await chord([Clutter.KEY_Super_L, Clutter.KEY_Page_Up]);
+    if (wm.get_active_workspace_index() !== 0)
+        throw new Error('Super+Page_Up did not restore workspace');
 
     // The screenshot UI (Print): the frozen screen, dimmed outside the
     // selection, with its panel.
@@ -343,7 +421,7 @@ export async function run() {
         const launcher = new Gio.SubprocessLauncher({flags: Gio.SubprocessFlags.NONE});
         launcher.setenv('ROOST_TEST_POPOVER', '1', true);
         const before = global.get_window_actors().length;
-        const delta = launcher.spawnv(['/usr/bin/python3', '/lib/roost-test-window.py', 'Delta', '#c01c28']);
+        const delta = launcher.spawnv(['/usr/bin/python3', '/proof-lib/roost-test-window.py', 'Delta', '#c01c28']);
         for (let t = 0; t < 100 && global.get_window_actors().length <= before; t++)
             await Scripting.sleep(100);
         await Scripting.sleep(3000);

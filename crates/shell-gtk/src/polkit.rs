@@ -449,6 +449,10 @@ impl PolkitAgent {
             .and_then(|h| h.stdin_pipe());
         if let Some(stdin) = stdin {
             self.awaiting.set(false);
+            // Let GtkText leave focus before making its entry insensitive.
+            if let Some(root) = self.entry.root() {
+                root.set_focus(gtk::Widget::NONE);
+            }
             self.entry.set_sensitive(false);
             self.ok.set_sensitive(false);
             self.error.set_visible(false);
