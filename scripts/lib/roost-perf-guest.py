@@ -51,6 +51,12 @@ def sample(uid, proc=Path("/proc"), observer=None):
                 continue
             rows.append(row)
         except (OSError, ValueError, KeyError) as error:
+            try:
+                read_process(path)
+            except (FileNotFoundError, ProcessLookupError):
+                continue  # Ordinary process exit during a non-atomic sample.
+            except (OSError, ValueError, KeyError, IndexError):
+                pass
             errors.append({"pid": pid, "error": type(error).__name__})
     return {"uid": uid, "processes": rows, "unreadable": errors,
             "pss_kib": sum(row["pss_kib"] for row in rows),
@@ -73,7 +79,7 @@ def main():
         row = sample(uid, observer=os.getpid())
         current = {(p["pid"], p["start_ticks"]): p["cpu_ticks"] for p in row["processes"]}
         delta = sum(max(0, count - previous.get(key, count)) for key, count in current.items())
-        row.update(monotonic_s=start, boottime_s=time.clock_gettime(time.CLOCK_BOOTTIME),
+        row.update(monotonic_s=start, collection_s=time.monotonic()-start, boottime_s=time.clock_gettime(time.CLOCK_BOOTTIME),
                    hz=ticks, cpu_observed_percent=(100 * delta / ticks / (start - previous_at)
                                                   if previous_at is not None else None),
                    departed_processes=len(previous.keys() - current.keys()))
