@@ -219,6 +219,25 @@ Exec=touch $PROBE_MARKER
 Icon=applications-system
 Type=Application
 EOF
+# Default calendar launch probe: its argv records the selected day.
+cat >"$ARTIFACTS/calendar-probe" <<EOF
+#!/bin/sh
+printf '%s\\n' "\$@" >"$ARTIFACTS/calendar-launch"
+EOF
+chmod +x "$ARTIFACTS/calendar-probe"
+cat >"$XDG_DATA_HOME/applications/roost-calendar-probe.desktop" <<EOF
+[Desktop Entry]
+Name=Roost Calendar Probe
+Exec=$ARTIFACTS/calendar-probe %u
+Type=Application
+MimeType=x-scheme-handler/calendar;
+NoDisplay=true
+EOF
+mkdir -p "$ARTIFACTS/config"
+cat >"$ARTIFACTS/config/mimeapps.list" <<EOF
+[Default Applications]
+x-scheme-handler/calendar=roost-calendar-probe.desktop;
+EOF
 # A GNOME Shell search provider owned by the probe app (#57).
 SEARCH_MARKER="$ARTIFACTS/search-marker"
 rm -f "$SEARCH_MARKER"
@@ -255,12 +274,14 @@ STUBS_PID=""
 SYSBUS_PID=""
 ACCEL_PID=""
 CAL_PID=""
+SCREENSAVER_PID=""
 IME_PIDS=""
 cleanup() {
     # shellcheck disable=SC2086
     if [ -n "$IME_PIDS" ]; then kill $IME_PIDS 2>/dev/null || true; fi
     # The bridge daemonized ibus-daemon for this session's display.
     if command -v ibus >/dev/null 2>&1; then ibus exit >/dev/null 2>&1 || true; fi
+    if [ -n "$SCREENSAVER_PID" ]; then kill "$SCREENSAVER_PID" 2>/dev/null || true; fi
     if [ -n "$CAL_PID" ]; then kill "$CAL_PID" 2>/dev/null || true; fi
     if [ -n "$ACCEL_PID" ]; then kill "$ACCEL_PID" 2>/dev/null || true; fi
     if [ -n "$COMPOSITOR_PID" ]; then kill "$COMPOSITOR_PID" 2>/dev/null || true; fi
@@ -438,6 +459,8 @@ fi
 # clicks one), the bridge each key's fate.
 ROOST_IBUS_DEBUG=1
 export ROOST_IBUS_DEBUG
+ROOST_PROOF_SWIPE_INPUT="$ARTIFACTS/swipe-input.json"
+export ROOST_PROOF_SWIPE_INPUT
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk -p roost-shell-host
 if [ -n "$PAM_ON" ]; then
     env LD_PRELOAD="$PAM_WRAPPER_LIB" PAM_WRAPPER=1 \
@@ -504,6 +527,17 @@ if showing "$ARTIFACTS/a11y-calendar.json" "Retro"; then
     fail G-CAL-EVENTS "tomorrow's event shows under today"
 fi
 pass G-CAL-EVENTS "today's calendar-server events list in the events card, timed as GNOME does"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-calendar-launch.json" 20 --press "Open Calendar" ||
+    fail G-CAL-LAUNCH "events card has no accessible launch action"
+sleep 1
+[ "$(cat "$ARTIFACTS/calendar-launch" 2>/dev/null)" = "calendar:///$(date +%F)" ] ||
+    fail G-CAL-LAUNCH "default calendar did not launch at the selected day"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-calendar-closed.json" 20
+if showing "$ARTIFACTS/a11y-calendar-closed.json" "Open Calendar"; then
+    fail G-CAL-LAUNCH "calendar popover stayed open after launch"
+fi
+pass G-CAL-LAUNCH "default calendar launches selected day through Roost and closes the menu"
+
 xdotool key Escape
 sleep 1
 
@@ -1793,7 +1827,21 @@ window_menu
 cstate ".active_workspace == $home_ws and any(.windows[]; .id == $moved and .workspace == $home_ws + 1)" \
     "moved" || fail G-WS-THUMBS "the window did not move one workspace right"
 sleep 1
-xdotool key Super_L
+# Hold a synthetic three-finger swipe at half progress. The event enters the
+# compositor's normal gesture handler; the held frame lets CI sample it.
+printf '{"phase":"begin","sequence":1}\n' >"$ROOST_PROOF_SWIPE_INPUT.tmp"
+mv "$ROOST_PROOF_SWIPE_INPUT.tmp" "$ROOST_PROOF_SWIPE_INPUT"
+sleep 0.2
+printf '{"phase":"update","dy":-150,"sequence":2}\n' >"$ROOST_PROOF_SWIPE_INPUT.tmp"
+mv "$ROOST_PROOF_SWIPE_INPUT.tmp" "$ROOST_PROOF_SWIPE_INPUT"
+cstate '.overview_progress == 0.5 and (.thumbnails | length) == 3 and any(.workspace_cards[]; (.active | not) and .alpha > 0 and .alpha < 1)' "half swipe" ||
+    fail G-SWIPE-PROGRESS "neighbour cards or thumbnails are missing mid-gesture"
+sleep 0.2
+scrot "$ARTIFACTS/24f-mid-swipe-workspaces.png" >/dev/null
+cp "$CSTATE" "$ARTIFACTS/mid-swipe-state.json"
+pass G-SWIPE-PROGRESS "neighbour workspaces and thumbnails slide and fade during a held three-finger swipe"
+printf '{"phase":"end","sequence":3}\n' >"$ROOST_PROOF_SWIPE_INPUT.tmp"
+mv "$ROOST_PROOF_SWIPE_INPUT.tmp" "$ROOST_PROOF_SWIPE_INPUT"
 cstate '.overview_open and (.thumbnails | length) == 3' "strip" ||
     fail G-WS-THUMBS "the overview shows no three-thumbnail strip"
 sleep 1.5
@@ -2200,6 +2248,17 @@ until grep -q PowerOff "$POWER_LOG" 2>/dev/null || [ "$(date +%s)" -gt "$end" ];
 grep -q PowerOff "$POWER_LOG" || fail G-POWER-OFF "logind never got PowerOff"
 pass G-POWER-OFF "confirming the dialog asks logind to power off"
 
+# Monitor confirmed lock transitions over GNOME's public screen-saver API.
+gdbus monitor --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver \
+    >"$ARTIFACTS/screensaver-signals.log" 2>&1 &
+SCREENSAVER_PID=$!
+sleep 1
+screen_active() {
+    gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver \
+        --method org.gnome.ScreenSaver.GetActive
+}
+screen_active | grep -q false || fail G-SCREENSAVER "screen saver started active"
+
 open_power_menu power-menu-3 || fail G-SUSPEND-LOCK "could not reopen the power menu"
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-suspend.json" 20 \
     --press "Suspend" || fail G-SUSPEND-LOCK "could not press Suspend"
@@ -2209,6 +2268,11 @@ grep -q Suspend "$POWER_LOG" || fail G-SUSPEND-LOCK "logind never got Suspend"
 cstate '.locked' "locked" 10 || fail G-SUSPEND-LOCK "PrepareForSleep did not lock the session"
 scrot "$ARTIFACTS/23-locked-after-suspend.png" >/dev/null
 pass G-SUSPEND-LOCK "Suspend asks logind, and PrepareForSleep locks the session"
+screen_active | grep -q true || fail G-SCREENSAVER "GetActive did not reflect the lock"
+gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver \
+    --method org.gnome.ScreenSaver.SetActive false >/dev/null || fail G-SCREENSAVER "SetActive failed"
+cstate '.locked' "still locked after SetActive(false)" 5 || fail G-SCREENSAVER "D-Bus unlocked without authentication"
+pass G-SCREENSAVER "GetActive reports the compositor lock; SetActive(false) cannot bypass PAM"
 
 # GNOME's lock screen (ext-session-lock): a click lifts the curtain, a
 # wrong password is refused and the session stays locked, the right one
@@ -2230,6 +2294,30 @@ if [ -n "$PAM_ON" ]; then
         fail G-UNLOCK "the right password did not unlock the session"
     scrot "$ARTIFACTS/26-unlocked.png" >/dev/null
     pass G-UNLOCK "a wrong password is refused, the right one unlocks through PAM"
+    sleep 0.5
+    screen_active | grep -q false || fail G-LOCK-KEY "GetActive stayed locked after authentication"
+    xdotool key super+l
+    cstate '.locked' "Super+L locked" 10 || fail G-LOCK-KEY "Super+L did not lock"
+    sleep 0.5
+    screen_active | grep -q true || fail G-LOCK-KEY "GetActive missed Super+L"
+    xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT * 3 / 4)) click 1
+    sleep 1
+    xdotool type --delay 30 "$UNLOCK_PASSWORD"
+    xdotool key Return
+    cstate '(.locked | not)' "shortcut lock unlocked through PAM" 15 || fail G-LOCK-KEY "shortcut lock did not unlock"
+    sleep 0.5
+    grep -q 'ActiveChanged.*true' "$ARTIFACTS/screensaver-signals.log" || fail G-LOCK-KEY "no active signal"
+    grep -q 'ActiveChanged.*false' "$ARTIFACTS/screensaver-signals.log" || fail G-LOCK-KEY "no inactive signal"
+    pass G-LOCK-KEY "Super+L locks; PAM unlocks; ActiveChanged publishes both transitions"
+    gdbus call --session --dest org.gnome.Shell --object-path /org/gnome/ScreenSaver \
+        --method org.gnome.ScreenSaver.Lock >/dev/null || fail G-DBUS-LOCK "D-Bus Lock failed"
+    cstate '.locked' "D-Bus locked" 5 || fail G-DBUS-LOCK "D-Bus Lock replied without locking"
+    xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT * 3 / 4)) click 1
+    sleep 1
+    xdotool type --delay 30 "$UNLOCK_PASSWORD"
+    xdotool key Return
+    cstate '(.locked | not)' "D-Bus lock unlocked through PAM" 15 || fail G-DBUS-LOCK "D-Bus lock did not unlock"
+    pass G-DBUS-LOCK "org.gnome.Shell exposes the screen-saver object and Lock waits for confirmation"
 else
     echo "roost-gtk-shell-proof: G-UNLOCK skipped (no pam_wrapper)"
 fi

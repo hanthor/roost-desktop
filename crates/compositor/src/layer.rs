@@ -289,6 +289,7 @@ impl WlrLayerShellHandler for State {
             output_name,
             surface: surface.wl_surface().clone(),
         });
+        self.refresh_initial_surface_scale(surface.wl_surface());
     }
 
     fn ack_configure(&mut self, surface: WlSurface, _configure: LayerSurfaceConfigure) {

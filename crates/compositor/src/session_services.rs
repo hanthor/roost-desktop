@@ -1,0 +1,138 @@
+//! Publish the hardware session's display to D-Bus and systemd activation.
+//! Nested sessions never change the host user's activation environment.
+
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+const TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Run a session utility with a deadline; an absent service cannot stall login.
+fn run(program: &str, args: &[String]) -> bool {
+    let Ok(mut child) = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if start.elapsed() < TIMEOUT => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
+fn activation_args(socket: &str, desktop: &str) -> Vec<String> {
+    vec![
+        "--systemd".into(),
+        format!("WAYLAND_DISPLAY={socket}"),
+        format!("XDG_CURRENT_DESKTOP={desktop}"),
+        "XDG_SESSION_TYPE=wayland".into(),
+        // Clear a previous session's X display. The portal uses Wayland.
+        "DISPLAY=".into(),
+    ]
+}
+
+/// Called only for the actual DRM backend, before its shell is started.
+pub fn publish(socket: &str) {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "Roost:GNOME".into());
+    if !run(
+        "dbus-update-activation-environment",
+        &activation_args(socket, &desktop),
+    ) {
+        eprintln!("roost-compositor: session services: display environment import failed");
+        return;
+    }
+    eprintln!("roost-compositor: session services: display environment imported");
+    // GTK can activate portals before the display is ready. After the shell
+    // owns its bus name, clear any start-limit failure and refresh the portal
+    // frontend so it chooses Roost's backends using the imported desktop.
+    std::thread::spawn(|| {
+        let args: Vec<String> = [
+            "call",
+            "--session",
+            "--dest",
+            "org.freedesktop.DBus",
+            "--object-path",
+            "/org/freedesktop/DBus",
+            "--method",
+            "org.freedesktop.DBus.GetNameOwner",
+            "org.gnome.Shell",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(15) {
+            if run("gdbus", &args) {
+                let reset = [
+                    "--user",
+                    "reset-failed",
+                    "xdg-desktop-portal-gtk.service",
+                    "xdg-desktop-portal-gnome.service",
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+                let _ = run("systemctl", &reset);
+                let restart = [
+                    "--user",
+                    "--no-block",
+                    "restart",
+                    "xdg-desktop-portal.service",
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+                if run("systemctl", &restart) {
+                    eprintln!("roost-compositor: session services: portals refreshed");
+                }
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        eprintln!("roost-compositor: session services: shell bus name not ready");
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn activation_import_names_only_the_hardware_display() {
+        let args = activation_args("wayland-roost", "Roost:GNOME");
+        assert_eq!(
+            args,
+            [
+                "--systemd",
+                "WAYLAND_DISPLAY=wayland-roost",
+                "XDG_CURRENT_DESKTOP=Roost:GNOME",
+                "XDG_SESSION_TYPE=wayland",
+                "DISPLAY="
+            ]
+        );
+        assert!(!args.iter().any(|a| a == "--all"));
+    }
+
+    #[test]
+    fn session_utility_failures_are_reported() {
+        assert!(!run("/definitely/missing/roost-session-tool", &[]));
+        assert!(!run("/bin/false", &[]));
+        assert!(run("/bin/true", &[]));
+    }
+}
