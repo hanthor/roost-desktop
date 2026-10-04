@@ -2,6 +2,8 @@
 """Activate the actual GNOME portal consent picker through AT-SPI."""
 import json
 import sys
+import subprocess
+from pathlib import Path
 import time
 import pyatspi
 out, decision = sys.argv[1:]
@@ -24,6 +26,7 @@ while time.monotonic() < deadline:
         buttons = [a for a in controls if a.getRoleName() in ("push button", "button") and a.name in (("Cancel",) if decision == "cancel" else ("Share", "Allow"))]
         if not buttons: continue
         with open(out, "w") as f: json.dump(nodes, f, indent=2)
+        subprocess.run(["scrot", str(Path(out).with_suffix(".png"))], check=True)
         button = buttons[0]
         if decision != "cancel" and not button.getState().contains(pyatspi.STATE_SENSITIVE):
             for control in controls:
