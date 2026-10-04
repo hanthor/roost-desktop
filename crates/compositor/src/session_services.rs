@@ -2,6 +2,10 @@
 //! Nested sessions never change the host user's activation environment.
 
 use std::process::{Command, Stdio};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -44,8 +48,27 @@ fn activation_args(socket: &str, desktop: &str) -> Vec<String> {
     ]
 }
 
+/// Holds the systemd graphical session open for the DRM runtime's lifetime.
+pub struct SessionServices {
+    alive: Arc<AtomicBool>,
+}
+impl Drop for SessionServices {
+    fn drop(&mut self) {
+        self.alive.store(false, Ordering::Release);
+        let args = ["--user", "--no-block", "stop", "roost-session.target"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let _ = run("systemctl", &args);
+    }
+}
+
 /// Called only for the actual DRM backend, before its shell is started.
-pub fn publish(socket: &str) {
+pub fn publish(socket: &str) -> SessionServices {
+    let alive = Arc::new(AtomicBool::new(true));
+    let guard = SessionServices {
+        alive: alive.clone(),
+    };
     let desktop = std::env::var("XDG_CURRENT_DESKTOP")
         .ok()
         .filter(|value| !value.is_empty())
@@ -55,13 +78,13 @@ pub fn publish(socket: &str) {
         &activation_args(socket, &desktop),
     ) {
         eprintln!("roost-compositor: session services: display environment import failed");
-        return;
+        return guard;
     }
     eprintln!("roost-compositor: session services: display environment imported");
     // GTK can activate portals before the display is ready. After the shell
     // owns its bus name, clear any start-limit failure and refresh the portal
     // frontend so it chooses Roost's backends using the imported desktop.
-    std::thread::spawn(|| {
+    std::thread::spawn(move || {
         let args: Vec<String> = [
             "call",
             "--session",
@@ -77,8 +100,60 @@ pub fn publish(socket: &str) {
         .map(str::to_owned)
         .collect();
         let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(15) {
+        while alive.load(Ordering::Acquire) && start.elapsed() < Duration::from_secs(15) {
             if run("gdbus", &args) {
+                // Tell GDM the session and display are ready rather than
+                // letting its timed non-GNOME fallback hand off plymouth.
+                let mut registration = [
+                    "call",
+                    "--system",
+                    "--dest",
+                    "org.gnome.DisplayManager",
+                    "--object-path",
+                    "/org/gnome/DisplayManager/Manager",
+                    "--method",
+                    "org.gnome.DisplayManager.Manager.RegisterSession",
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+                if run("gdbus", &registration) {
+                    *registration.last_mut().unwrap() =
+                        "org.gnome.DisplayManager.Manager.RegisterDisplay".into();
+                    if run("gdbus", &registration) {
+                        eprintln!("roost-compositor: session services: GDM session and display registered");
+                    } else {
+                        eprintln!(
+                            "roost-compositor: session services: GDM display registration failed"
+                        );
+                    }
+                }
+
+                if !alive.load(Ordering::Acquire) {
+                    return;
+                }
+                // systemd refuses a manual start of graphical-session.target.
+                // Our packaged target pulls it in through BindsTo instead.
+                let start_graphical = ["--user", "start", "roost-session.target"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                if !run("systemctl", &start_graphical) {
+                    eprintln!("roost-compositor: session services: graphical target failed");
+                    return;
+                }
+                // Drop may race the worker's start. Stop again if shutdown
+                // occurred before systemd acknowledged the target.
+                if !alive.load(Ordering::Acquire) {
+                    let stop = ["--user", "--no-block", "stop", "roost-session.target"]
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>();
+                    let _ = run("systemctl", &stop);
+                    return;
+                }
+                eprintln!("roost-compositor: session services: graphical target active");
+
                 let reset = [
                     "--user",
                     "reset-failed",
@@ -107,6 +182,7 @@ pub fn publish(socket: &str) {
         }
         eprintln!("roost-compositor: session services: shell bus name not ready");
     });
+    guard
 }
 
 #[cfg(test)]

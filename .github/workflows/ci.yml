@@ -323,7 +323,7 @@ jobs:
       # through QMP input and records it to tour/roost-tour.webm.
       - name: Boot the disk, assert the Roost hardware session, record the tour
         run: >-
-          scripts/roost-vm-lane --disk /mnt/vm/disk.raw --out vm-lane-artifacts --tour
+          scripts/roost-vm-lane --disk /mnt/vm/disk.raw --out vm-lane-artifacts --boots 5 --tour
           --meta "base_image=ghcr.io/tuna-os/marlin:gnome@$(cat /mnt/vm/base-digest)"
           --meta "test_image_id=$(cat /mnt/vm/image-id)"
           --meta "roost_package=$(basename arch-artifacts/roost-[0-9]*.pkg.tar.zst)"
