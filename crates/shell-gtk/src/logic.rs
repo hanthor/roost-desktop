@@ -698,10 +698,11 @@ pub fn brightness_step(percent: f64, up: bool) -> f64 {
 }
 
 /// Backlight value for a slider percentage. Never zero: a black
-/// screen is not a brightness level (GNOME keeps a floor too).
+/// screen is not a brightness level. GNOME 51's sysfs backlight minimum
+/// is max(1, max_brightness / 100), so zero percent selects that floor.
 pub fn brightness_value(percent: f64, max: u32) -> u32 {
     let raw = (percent.clamp(0.0, 100.0) * max as f64 / 100.0).round() as u32;
-    raw.clamp(1.min(max), max)
+    raw.clamp((max / 100).max(1).min(max), max)
 }
 
 #[cfg(test)]
@@ -739,7 +740,9 @@ mod service_tests {
         assert_eq!(brightness_percent(512, 1024), 50.0);
         assert_eq!(brightness_percent(5, 0), 0.0);
         assert_eq!(brightness_value(50.0, 1024), 512);
-        assert_eq!(brightness_value(0.0, 1024), 1);
+        assert_eq!(brightness_value(0.0, 1024), 10);
+        assert_eq!(brightness_value(0.0, 1000), 10);
+        assert_eq!(brightness_value(0.0, 20), 1);
         assert_eq!(brightness_value(100.0, 1024), 1024);
         assert_eq!(brightness_value(30.0, 0), 0);
     }

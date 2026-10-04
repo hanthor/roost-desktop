@@ -140,9 +140,13 @@ impl ProtocolVersion {
     /// `0.21` appends `enable_animations` to `InputSettings`. Like earlier
     /// positional struct extensions, the postcard body changes and both
     /// sides ship together from this workspace.
+    ///
+    /// `0.22` appends shortcut inhibition consent requests and responses.
+    ///
+    /// `0.23` appends window/cycle switcher actions and pointer output.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 21,
+        minor: 23,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -346,6 +350,13 @@ pub enum CommandKind {
         /// Every bound chord.
         keys: Vec<SwitcherKey>,
     },
+    /// Trusted shell response to a compositor-issued consent request.
+    ShortcutConsent {
+        /// The pending request, never a window id.
+        request: u64,
+        /// Explicit Allow (or a remembered grant), otherwise Deny.
+        allow: bool,
+    },
 }
 
 /// Switcher thumbnails held at once.
@@ -381,6 +392,14 @@ pub enum SwitcherKeyKind {
     Group,
     /// `switch-group-backward`.
     GroupBackward,
+    /// WindowSwitcherPopup: one item for each window.
+    Windows,
+    WindowsBackward,
+    /// Immediate cycling, without showing a popup.
+    CycleWindows,
+    CycleWindowsBackward,
+    CycleGroup,
+    CycleGroupBackward,
 }
 
 /// One switcher thumbnail frame, in global logical pixels.
@@ -644,6 +663,13 @@ pub enum Message {
         /// How many workspaces there are (GNOME's dynamic count).
         count: u32,
     },
+    /// Show consent for this inhibitor; `None` dismisses a stale dialog.
+    ShortcutConsent {
+        /// Request id and stable application id (empty for unknown apps).
+        request: Option<(u64, String)>,
+    },
+    /// The connector under the pointer, used by per-monitor brightness keys.
+    PointerOutput { name: Option<String> },
 }
 
 /// GNOME's dynamic workspace count: one empty workspace always follows
@@ -745,6 +771,10 @@ pub enum SwitcherAction {
         /// The xkb keysym.
         keysym: u32,
     },
+    /// Window switcher: every window is a separate entry.
+    StepAllWindows { forward: bool },
+    /// Cycle immediately without a popup, optionally within the focused app.
+    Cycle { forward: bool, group: bool },
 }
 
 /// Compositor-minted activation Bearer [REDACTED] authorizing one privileged window action.
@@ -999,6 +1029,8 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
         | Message::AcceleratorActivated { .. }
         | Message::WindowMenu { .. }
         | Message::WorkspacePopup { .. }
+        | Message::PointerOutput { .. }
+        | Message::ShortcutConsent { .. }
         | Message::Command { .. }
         | Message::CommandResult { .. }
         | Message::Error { .. }
@@ -1061,8 +1093,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_21() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 21));
+    fn current_version_is_0_23() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 23));
     }
 
     #[test]
@@ -1091,7 +1123,9 @@ mod tests {
         assert!(ProtocolVersion::new(0, 19).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 20).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 21).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 22).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 22).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 23).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 24).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }

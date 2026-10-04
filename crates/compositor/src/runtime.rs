@@ -931,6 +931,7 @@ impl Runtime {
     fn engage_lock(&mut self) {
         self.lock.lock();
         self.control.set_locked(true);
+        self.state.set_shortcut_inhibition_locked(true);
         self.control.set_overview(false);
         self.overlay.show(Vec::new());
     }
@@ -982,6 +983,7 @@ impl Runtime {
         if ok && self.is_locked() {
             self.lock.unlock(self.lock_now_ms());
             self.control.set_locked(false);
+            self.state.set_shortcut_inhibition_locked(false);
             self.overlay.hide();
         }
         self.control.finish_unlock(request, ok);
@@ -2349,9 +2351,31 @@ impl Runtime {
         // short comparison. The inventory is the compositor's tracking
         // handed over as-is — never a parallel database.
         self.control.set_outputs(self.state.output_infos());
+        let pointer = self.manager.pointer_pos();
+        let output = self
+            .state
+            .outputs
+            .iter()
+            .find(|output| {
+                pointer.x >= f64::from(output.loc.0)
+                    && pointer.y >= f64::from(output.loc.1)
+                    && pointer.x < f64::from(output.loc.0 + output.size.w)
+                    && pointer.y < f64::from(output.loc.1 + output.size.h)
+            })
+            .map(|output| output.name.clone());
+        self.control.set_pointer_output(output);
         let outcome = self.control.poll(self.manager.model_mut());
         for id in outcome.activated {
             self.manager.focus(&mut self.state, Some(id));
+        }
+        for (request, allow) in outcome.shortcut_consent {
+            if !self.is_locked() {
+                self.state.answer_shortcut_consent(request, allow);
+            }
+        }
+        if let Some(request) = self.state.take_shortcut_consent_update() {
+            self.control
+                .queue_message(roost_shell_control::Message::ShortcutConsent { request });
         }
         for id in outcome.closed {
             self.manager.close_window(id);
