@@ -800,8 +800,20 @@ sleep 1
 xdotool mousemove --window "$WID" 202 305
 sleep 0.3
 xdotool mousedown 1
+xdotool mousemove --window "$WID" 400 330
+sleep 0.25
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-page-peek.json" 20 || fail G-GRID-PAGE-PEEK "preview dump failed"
+showing "$ARTIFACTS/a11y-grid-page-peek.json" "Next page preview" || fail G-GRID-PAGE-PEEK "next page hint missing during drag"
+jq -e 'any(.[]; .showing and .role == "image" and (.name | startswith("Roost Page App")))' "$ARTIFACTS/a11y-grid-page-peek.json" >/dev/null || fail G-GRID-PAGE-PEEK "neighboring page icons did not enter the hint"
+scrot "$ARTIFACTS/11h-grid-page-peek.png" >/dev/null
+peek_rect="$(jq -r '.[] | select(.showing and .name == "Next page preview") | .bounds | "\(.[0]) \(.[1]) \(.[2]) \(.[3])"' "$ARTIFACTS/a11y-grid-page-peek.json" | head -1)"
+# shellcheck disable=SC2086
+set -- $peek_rect
+ffmpeg -nostdin -loglevel error -y -i "$ARTIFACTS/11h-grid-page-peek.png" -vf "crop=$3:$4:$1:$2,format=gray" -f rawvideo "$ARTIFACTS/grid-page-peek.gray" || fail G-GRID-PAGE-PEEK "could not inspect hint pixels"
+"$PY" -c 'import sys; data=open(sys.argv[1], "rb").read(); sys.exit(0 if sum(pixel > 150 for pixel in data) > 20 else 1)' "$ARTIFACTS/grid-page-peek.gray" || fail G-GRID-PAGE-PEEK "hint contains no visible icon or label pixels"
+pass G-GRID-PAGE-PEEK "neighboring page icons slide into the 10% hint over 150ms and paint real pixels"
 for i in $(seq 1 20); do
-    xdotool mousemove --window "$WID" $((202 + (WIDTH - 6 - 202) * i / 20)) 330
+    xdotool mousemove --window "$WID" $((400 + (WIDTH - 6 - 400) * i / 20)) 330
     sleep 0.03
 done
 sleep 0.8
@@ -886,7 +898,22 @@ cstate '.overview_open and .overview_app_grid' "app grid" || fail G-GRID-REORDER
 sleep 1.5
 # By name the cells read One, Three, Two: Two (third cell) onto the left
 # edge of One (first cell, x 146-259).
-drag 452 305 150 305
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-before-hover.json" 20 || fail G-GRID-HOVER "baseline dump failed"
+layout_before_hover="$(gsettings get org.gnome.shell app-picker-layout)"
+xdotool mousemove --window "$WID" 452 305 mousedown 1
+xdotool mousemove --window "$WID" 430 305
+sleep 0.1
+xdotool mousemove --window "$WID" 150 305
+sleep 0.35
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-live-hover.json" 20 || fail G-GRID-HOVER "hover dump failed"
+before_x="$(jq '[.[] | select(.showing and .role == "push button" and .name == "AAA Move One")][0].bounds[0]' "$ARTIFACTS/a11y-grid-before-hover.json")"
+after_x="$(jq '[.[] | select(.showing and .role == "push button" and .name == "AAA Move One")][0].bounds[0]' "$ARTIFACTS/a11y-grid-live-hover.json")"
+[ "$after_x" -gt "$before_x" ] || fail G-GRID-HOVER "the neighboring tile did not reflow while the button remained down"
+[ "$(gsettings get org.gnome.shell app-picker-layout)" = "$layout_before_hover" ] || fail G-GRID-HOVER "hover persisted an unfinished drag"
+scrot "$ARTIFACTS/11g-grid-live-hover.png" >/dev/null
+xdotool mouseup 1
+sleep 1.5
+pass G-GRID-HOVER "a tile edge reflows after the 200ms delay while dragging, with persistence deferred to drop"
 scrot "$ARTIFACTS/11g-grid-reordered.png" >/dev/null
 layout="$(gsettings get org.gnome.shell app-picker-layout)"
 case "$layout" in
@@ -901,7 +928,39 @@ esac
 pass G-GRID-REORDER "an app dropped on a tile's edge takes its place and the grid is saved as GNOME saves it"
 xdotool key Escape
 cstate '.overview_open | not' "closed" || { xdotool key Escape; cstate '.overview_open | not' "closed" || fail G-GRID-REORDER "overview stayed open"; }
+# Moving an item to another page leaves its old page short; a catalog
+# rebuild must respect those saved page boundaries instead of flattening.
+gsettings set org.gnome.shell app-picker-layout "[{'roost-move-One.desktop': <{'position': <0>}>, 'roost-move-Three.desktop': <{'position': <1>}>}, {'roost-move-Two.desktop': <{'position': <0>}>}]"
+printf '[Desktop Entry]\nName=ZZZ Rebuild Probe\nExec=true\nType=Application\n' >"$XDG_DATA_HOME/applications/roost-grid-rebuild.desktop"
+sleep 1.5
+xdotool key super+a
+cstate '.overview_open and .overview_app_grid' "short page setup" || fail G-GRID-SHORT-PAGES "app grid missing"
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-short-before.json" 20 || fail G-GRID-SHORT-PAGES "setup dump failed"
+showing "$ARTIFACTS/a11y-grid-short-before.json" "AAA Move Three" || fail G-GRID-SHORT-PAGES "source missing from first page"
+if showing "$ARTIFACTS/a11y-grid-short-before.json" "AAA Move Two"; then fail G-GRID-SHORT-PAGES "saved second page was flattened"; fi
+xdotool mousemove --window "$WID" 327 305 mousedown 1
+xdotool mousemove --window "$WID" 350 305
+sleep 0.1
+xdotool mousemove --window "$WID" $((WIDTH - 6)) 330
+sleep 0.6
+xdotool mousemove --window "$WID" 150 305
+sleep 0.35
+xdotool mouseup 1
+sleep 1.5
+"$PY" -c 'from gi.repository import Gio; import json; pages=Gio.Settings.new("org.gnome.shell").get_value("app-picker-layout").unpack(); print(json.dumps([sorted(page, key=lambda key: page[key]["position"]) for page in pages]))' >"$ARTIFACTS/grid-short-pages.json"
+jq -e '.[0] == ["roost-move-One.desktop"] and .[1][0:2] == ["roost-move-Three.desktop", "roost-move-Two.desktop"]' "$ARTIFACTS/grid-short-pages.json" >/dev/null || fail G-GRID-SHORT-PAGES "cross-page move did not leave the source short"
+# Another installed entry forces a complete grid rebuild.
+printf '[Desktop Entry]\nName=ZZZ Rebuild Probe Two\nExec=true\nType=Application\n' >"$XDG_DATA_HOME/applications/roost-grid-rebuild-two.desktop"
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-short-rebuilt.json" 20 || fail G-GRID-SHORT-PAGES "rebuild dump failed"
+showing "$ARTIFACTS/a11y-grid-short-rebuilt.json" "AAA Move One" || fail G-GRID-SHORT-PAGES "short first page lost its item"
+if showing "$ARTIFACTS/a11y-grid-short-rebuilt.json" "AAA Move Two" || showing "$ARTIFACTS/a11y-grid-short-rebuilt.json" "AAA Move Three"; then fail G-GRID-SHORT-PAGES "rebuilding filled the short first page"; fi
+pass G-GRID-SHORT-PAGES "a cross-page drag leaves its source short and the saved boundary survives a catalog rebuild"
+xdotool key Escape
+cstate '.overview_open | not' "short grid closed" || fail G-GRID-SHORT-PAGES "overview stayed open"
 gsettings reset org.gnome.shell app-picker-layout
+rm -f "$XDG_DATA_HOME"/applications/roost-grid-rebuild*.desktop
 rm -f "$XDG_DATA_HOME"/applications/roost-move-*.desktop
 sleep 1.5
 
