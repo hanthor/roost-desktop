@@ -7,12 +7,14 @@
 //! on a private socket when IBus is installed and restarts it a few
 //! times if it exits.
 
+use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
-use std::sync::Arc;
+use std::process::{Child, Command, Stdio};
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
 
 use smithay::reexports::wayland_server::DisplayHandle;
 
@@ -30,6 +32,8 @@ pub struct ImeBridge {
     next_ms: u64,
     x11_display: Option<u32>,
     xim: Option<Child>,
+    retired_xim: Option<Child>,
+    xim_address_probe: Option<mpsc::Receiver<Option<String>>>,
     xim_starts: u32,
     xim_next_ms: u64,
 }
@@ -67,6 +71,8 @@ impl ImeBridge {
             next_ms: 0,
             x11_display: None,
             xim: None,
+            retired_xim: None,
+            xim_address_probe: None,
             xim_starts: 0,
             xim_next_ms: 0,
         })
@@ -105,12 +111,21 @@ impl ImeBridge {
     /// The XIM helper may connect only after the compositor's XWM is ready.
     /// Advertising reserved sockets alone must not activate XWayland.
     pub fn set_ready_x11_display(&mut self, display: Option<u32>) {
+        // try_wait never waits for an external process. This runs even while
+        // locked, when normal IBus polling is suspended.
+        if self
+            .retired_xim
+            .as_mut()
+            .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))))
+        {
+            self.retired_xim = None;
+        }
         if self.x11_display == display {
             return;
         }
         if let Some(mut child) = self.xim.take() {
             let _ = child.kill();
-            let _ = child.wait();
+            self.retired_xim = Some(child);
         }
         self.x11_display = display;
         self.xim_starts = 0;
@@ -118,6 +133,10 @@ impl ImeBridge {
     }
 
     fn poll_xim(&mut self, now_ms: u64) {
+        // Keep at most one live helper and one killed child awaiting reaping.
+        if self.retired_xim.is_some() {
+            return;
+        }
         let Some(display) = self.x11_display else {
             return;
         };
@@ -128,10 +147,11 @@ impl ImeBridge {
             self.xim = None;
             self.xim_next_ms = now_ms + RESTART_DELAY_MS;
         }
-        if now_ms < self.xim_next_ms || self.xim_starts > MAX_RESTARTS {
+        if self.xim_address_probe.is_none()
+            && (now_ms < self.xim_next_ms || self.xim_starts > MAX_RESTARTS)
+        {
             return;
         }
-        self.xim_next_ms = now_ms + RESTART_DELAY_MS;
         let bin = std::env::var_os("PATH")
             .into_iter()
             .flat_map(|path| {
@@ -146,18 +166,38 @@ impl ImeBridge {
             ])
             .find(|path| path.is_file());
         let Some(bin) = bin else { return };
-        // Resolve the bridge's own IBus bus, never the host X display's bus.
-        let address = Command::new("ibus")
-            .arg("address")
-            .env("WAYLAND_DISPLAY", &self.wayland_display)
-            .env_remove("DISPLAY")
-            .output()
-            .ok()
-            .and_then(|out| String::from_utf8(out.stdout).ok())
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty() && s != "(null)");
+        // A single worker owns the private address lookup and its pipe. The
+        // compositor tick only receives a bounded result without waiting.
+        let Some(probe) = &self.xim_address_probe else {
+            let mut command = Command::new("ibus");
+            command
+                .arg("address")
+                .env("WAYLAND_DISPLAY", &self.wayland_display)
+                .env_remove("DISPLAY")
+                .env_remove("IBUS_ADDRESS")
+                .env_remove("WAYLAND_SOCKET");
+            let (send, receive) = mpsc::sync_channel(1);
+            self.xim_starts += 1;
+            self.xim_next_ms = now_ms + RESTART_DELAY_MS;
+            if std::thread::Builder::new()
+                .name("roost-xim-address".into())
+                .stack_size(256 * 1024)
+                .spawn(move || {
+                    let _ = send.send(bounded_address_probe(command));
+                })
+                .is_ok()
+            {
+                self.xim_address_probe = Some(receive);
+            }
+            return;
+        };
+        let address = match probe.try_recv() {
+            Ok(address) => address,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => None,
+        };
+        self.xim_address_probe = None;
         let Some(address) = address else { return };
-        self.xim_starts += 1;
         match Command::new(bin)
             .env("DISPLAY", format!(":{display}"))
             .env("WAYLAND_DISPLAY", &self.wayland_display)
@@ -174,8 +214,62 @@ impl ImeBridge {
     }
 }
 
+/// Runs on the one address worker, never the compositor thread. A deadline and
+/// fixed output cap bound the probe; retaining its receiver until completion
+/// also bounds workers if an external child cannot finish being reaped.
+fn bounded_address_probe(mut command: Command) -> Option<String> {
+    command.stdout(Stdio::piped()).stderr(Stdio::null());
+    let mut child = command.spawn().ok()?;
+    let result = (|| {
+        let mut output = child.stdout.take()?;
+        let flags = rustix::fs::fcntl_getfl(&output).ok()?;
+        rustix::fs::fcntl_setfl(&output, flags | rustix::fs::OFlags::NONBLOCK).ok()?;
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let mut bytes = Vec::with_capacity(4096);
+        let mut buffer = [0u8; 1024];
+        loop {
+            if Instant::now() >= deadline {
+                return None;
+            }
+            match output.read(&mut buffer) {
+                Ok(0) => {
+                    if let Some(status) = child.try_wait().ok()? {
+                        if !status.success() {
+                            return None;
+                        }
+                        return String::from_utf8(bytes)
+                            .ok()
+                            .map(|s| s.trim().to_owned())
+                            .filter(|s| !s.is_empty() && s != "(null)");
+                    }
+                }
+                Ok(n) => {
+                    if bytes.len() + n > 4096 {
+                        return None;
+                    }
+                    bytes.extend_from_slice(&buffer[..n]);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(_) => return None,
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    })();
+    if !matches!(child.try_wait(), Ok(Some(_))) {
+        let _ = child.kill();
+        // This wait is confined to the worker. The tick cannot create another
+        // worker until its result arrives, even if reaping itself stalls.
+        let _ = child.wait();
+    }
+    result
+}
+
 impl Drop for ImeBridge {
     fn drop(&mut self) {
+        if let Some(child) = &mut self.retired_xim {
+            let _ = child.kill();
+            let _ = child.try_wait();
+        }
         if let Some(child) = &mut self.xim {
             let _ = child.kill();
             let _ = child.wait();
@@ -196,7 +290,9 @@ fn spawn(bin: &Path, wayland_display: &str, dh: &mut DisplayHandle) -> std::io::
     command
         .env("WAYLAND_SOCKET", fd.to_string())
         // IBus names its bus after the display.
-        .env("WAYLAND_DISPLAY", wayland_display);
+        .env("WAYLAND_DISPLAY", wayland_display)
+        .env_remove("DISPLAY")
+        .env_remove("IBUS_ADDRESS");
     // SAFETY: one async-signal-safe fcntl between fork and exec, so the
     // socket survives exec (clears FD_CLOEXEC).
     unsafe {
@@ -217,6 +313,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn address_probe_reads_a_bounded_result_and_rejects_oversized_output() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf ' unix:path=/tmp/ibus\\n'"]);
+        assert_eq!(
+            bounded_address_probe(command).as_deref(),
+            Some("unix:path=/tmp/ibus")
+        );
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf '%05000d' 0"]);
+        assert!(bounded_address_probe(command).is_none());
+    }
+
+    #[test]
+    fn address_probe_kills_a_process_that_does_not_finish() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exec sleep 30"]);
+        let started = Instant::now();
+        assert!(bounded_address_probe(command).is_none());
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
     fn losing_xwm_reaps_xim_and_resets_its_restart_budget() {
         let child = Command::new("sleep").arg("30").spawn().unwrap();
         let pid = child.id();
@@ -228,6 +346,8 @@ mod tests {
             next_ms: 123,
             x11_display: Some(5),
             xim: Some(child),
+            retired_xim: None,
+            xim_address_probe: None,
             xim_starts: MAX_RESTARTS + 1,
             xim_next_ms: 456,
         };
@@ -235,6 +355,15 @@ mod tests {
         assert_eq!(bridge.xim.as_ref().unwrap().id(), pid);
         bridge.set_ready_x11_display(None);
         assert!(bridge.xim.is_none());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while bridge.retired_xim.is_some() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "killed XIM not reaped"
+            );
+            bridge.set_ready_x11_display(None);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         assert!(!PathBuf::from(format!("/proc/{pid}")).exists());
         assert_eq!((bridge.starts, bridge.next_ms), (1, 123));
         bridge.set_ready_x11_display(Some(5));
