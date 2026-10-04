@@ -49,7 +49,9 @@ use smithay::{
 pub mod control;
 #[cfg(feature = "drm")]
 pub mod drm;
+pub mod frame_timing;
 pub mod idle_monitor;
+pub mod ime;
 pub mod introspect;
 pub mod layer;
 pub mod lock;
@@ -64,6 +66,8 @@ pub mod runtime;
 pub mod screencast;
 pub mod screenshot;
 pub mod session_lock;
+pub mod session_services;
+pub mod spring;
 pub mod state;
 pub mod supervise;
 pub mod unlock;
@@ -112,6 +116,9 @@ pub struct State {
     /// Clipboard/drag-and-drop manager (toolkit clients such as GTK
     /// and Chromium refuse a display without this global).
     data_device_state: DataDeviceState,
+    /// The icon a client's drag-and-drop carries, drawn at the pointer
+    /// until the drop.
+    dnd_icon: Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>,
     /// Middle-click primary selection beside the clipboard.
     primary_selection_state: PrimarySelectionState,
     pub(crate) panel_surfaces: Vec<layer::PanelSurface>,
@@ -139,11 +146,15 @@ pub struct State {
     /// test) registers the first entry; readers fall back to zero
     /// sizes, which configure zero sizes.
     pub(crate) outputs: Vec<OutputEntry>,
+    /// Target remembered when the first preferred scale is sent, before mapping.
+    pub(crate) initial_outputs: std::collections::HashMap<wl_surface::WlSurface, String>,
     /// Client window-state requests awaiting the manager's next
     /// `reconcile` drain (002 window actions).
     pub(crate) window_requests: Vec<(wl_surface::WlSurface, WindowRequest)>,
     /// dmabuf, activation, viewporter and the other #89 protocols.
     pub(crate) protocols: protocols::Protocols,
+    /// presentation-time, fifo and commit-timing (#89).
+    pub(crate) frame_timing: frame_timing::FrameTiming,
     /// ext-session-lock-v1: the shell's lock screen surfaces.
     pub(crate) lock_protocol: session_lock::LockProtocol,
     /// Running X11 window manager, once the compatibility server is
@@ -164,6 +175,20 @@ pub struct State {
 #[derive(Default)]
 pub(crate) struct ClientState {
     compositor_state: CompositorClientState,
+    /// The IBus bridge the compositor spawned on a private socket: the
+    /// one client allowed a virtual keyboard (to hand back the keys
+    /// IBus does not take).
+    pub(crate) ime_bridge: bool,
+}
+
+impl ClientState {
+    /// State for the compositor's own IBus bridge.
+    pub(crate) fn ime_bridge() -> Self {
+        Self {
+            ime_bridge: true,
+            ..Self::default()
+        }
+    }
 }
 
 /// Client-initiated window state request (002 window actions).
@@ -210,6 +235,10 @@ impl XdgShellHandler for State {
 
     fn new_toplevel(&mut self, _surface: ToplevelSurface) {}
 
+    fn parent_changed(&mut self, surface: ToplevelSurface) {
+        self.refresh_initial_surface_scale(surface.wl_surface());
+    }
+
     /// Track the popup and place it where its positioner asks; the
     /// initial configure goes out on its first commit.
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
@@ -217,9 +246,11 @@ impl XdgShellHandler for State {
             state.geometry = positioner.get_geometry();
             state.positioner = positioner;
         });
+        let wl_surface = surface.wl_surface().clone();
         let _ = self
             .popups
             .track_popup(smithay::desktop::PopupKind::Xdg(surface));
+        self.refresh_initial_surface_scale(&wl_surface);
     }
 
     /// Explicit grab (menus): keyboard focus moves to the popup and an
@@ -347,6 +378,10 @@ impl State {
 }
 
 impl CompositorHandler for State {
+    fn destroyed(&mut self, surface: &wl_surface::WlSurface) {
+        self.initial_outputs.remove(surface);
+    }
+
     fn compositor_state(&mut self) -> &mut CompositorState {
         &mut self.compositor_state
     }
@@ -423,7 +458,35 @@ impl SelectionHandler for State {
     type SelectionUserData = ();
 }
 
-impl ClientDndGrabHandler for State {}
+impl ClientDndGrabHandler for State {
+    fn started(
+        &mut self,
+        _source: Option<smithay::reexports::wayland_server::protocol::wl_data_source::WlDataSource>,
+        icon: Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>,
+        _seat: Seat<Self>,
+    ) {
+        self.dnd_icon = icon;
+    }
+
+    fn dropped(
+        &mut self,
+        _target: Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>,
+        _validated: bool,
+        _seat: Seat<Self>,
+    ) {
+        self.dnd_icon = None;
+    }
+}
+
+impl State {
+    /// The icon of the drag in progress, if any (and still alive).
+    pub fn dnd_icon(
+        &self,
+    ) -> Option<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface> {
+        use smithay::reexports::wayland_server::Resource;
+        self.dnd_icon.clone().filter(|s| s.is_alive())
+    }
+}
 impl ServerDndGrabHandler for State {}
 
 impl DataDeviceHandler for State {
@@ -447,7 +510,14 @@ impl SeatHandler for State {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&wl_surface::WlSurface>) {}
+    /// Keyboard focus moved: a shortcuts inhibitor suspended with
+    /// Super+Escape applies again once its surface is focused anew, as
+    /// in Mutter (#89).
+    fn focus_changed(&mut self, _seat: &Seat<Self>, focused: Option<&wl_surface::WlSurface>) {
+        if let Some(surface) = focused {
+            self.reactivate_inhibitor(surface);
+        }
+    }
 }
 
 /// Wayland seat name shared by the protocol state, the token store's
@@ -595,7 +665,9 @@ impl State {
         let mut seat_state = SeatState::new();
         let seat = seat_state.new_wl_seat(dh, SEAT_NAME);
         State {
-            compositor_state: CompositorState::new::<State>(dh),
+            // v6 (GNOME 51's): preferred buffer scale goes out per surface
+            // (`send_surface_scales` in the runtime).
+            compositor_state: CompositorState::new_v6::<State>(dh),
             shm_state: ShmState::new::<State>(dh, vec![]),
             xdg_shell_state: XdgShellState::new::<State>(dh),
             _output_manager_state: OutputManagerState::new_with_xdg_output::<State>(dh),
@@ -604,6 +676,7 @@ impl State {
             dh: dh.clone(),
             layer_shell_state: WlrLayerShellState::new::<State>(dh),
             data_device_state: DataDeviceState::new::<State>(dh),
+            dnd_icon: None,
             primary_selection_state: PrimarySelectionState::new::<State>(dh),
             panel_surfaces: Vec::new(),
             dead_layer_surfaces: std::collections::HashSet::new(),
@@ -611,9 +684,11 @@ impl State {
             popup_grab: Vec::new(),
             popup_refocus: false,
             window_origins: std::collections::HashMap::new(),
+            initial_outputs: std::collections::HashMap::new(),
             outputs: Vec::new(),
             window_requests: Vec::new(),
             protocols: protocols::Protocols::new(dh),
+            frame_timing: frame_timing::FrameTiming::new(dh),
             lock_protocol: session_lock::LockProtocol::new(dh),
             #[cfg(feature = "xwayland")]
             xwm: None,
@@ -779,6 +854,42 @@ impl State {
     /// Wire records for the shell, primary first: the inventory as the
     /// shell already knows how to paint it — size, primary, handles
     /// implied by the bound surfaces.
+    /// Output chosen for a new window: pointer, keyboard focus, primary.
+    /// Placement and the first fractional-scale event use the same policy.
+    pub(crate) fn new_window_output(&self) -> Option<&OutputEntry> {
+        let pointer = self.seat.get_pointer().map(|p| p.current_location());
+        let focused = self
+            .seat
+            .get_keyboard()
+            .and_then(|k| k.current_focus())
+            .and_then(|s| self.window_origins.get(&s).copied());
+        self.outputs
+            .iter()
+            .find(|entry| {
+                pointer.is_some_and(|p| {
+                    smithay::utils::Rectangle::new(entry.loc.into(), entry.size)
+                        .to_f64()
+                        .contains(p)
+                })
+            })
+            .or_else(|| {
+                self.outputs.iter().find(|entry| {
+                    focused.is_some_and(|p| {
+                        smithay::utils::Rectangle::new(entry.loc.into(), entry.size).contains(p)
+                    })
+                })
+            })
+            .or_else(|| self.outputs.iter().find(|entry| entry.primary))
+    }
+
+    /// First preferred scale before a new window has committed a buffer.
+    pub fn initial_window_scale(&self) -> f64 {
+        self.new_window_output()
+            .and_then(|entry| entry.output.as_ref())
+            .map(|output| output.current_scale().fractional_scale())
+            .unwrap_or(self.protocols.preferred_scale)
+    }
+
     /// Scale of the output a logical rect overlaps most (the primary on
     /// a tie or no overlap), as niri picks it for a window (#59).
     pub fn scale_for(

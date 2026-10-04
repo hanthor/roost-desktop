@@ -8,16 +8,23 @@
 use gtk4::gio;
 use gtk4::prelude::*;
 
-use roost_shell_control::{MODE_LOCK_SCREEN, MODE_NORMAL, MODE_OVERVIEW, MODE_UNLOCK_SCREEN};
+use roost_shell_control::{
+    SwitcherKey, SwitcherKeyKind, KEYSYM_ABOVE_TAB, MODE_LOCK_SCREEN, MODE_NORMAL, MODE_OVERVIEW,
+    MODE_UNLOCK_SCREEN,
+};
 
 pub const SCHEMA: &str = "org.gnome.shell.keybindings";
 /// GNOME's window-manager keys (gsettings-desktop-schemas).
 pub const WM_SCHEMA: &str = "org.gnome.desktop.wm.keybindings";
+/// Mutter's own keys (half tiling).
+pub const MUTTER_SCHEMA: &str = "org.gnome.mutter.keybindings";
+pub const MEDIA_SCHEMA: &str = "org.gnome.settings-daemon.plugins.media-keys";
 
 /// What a binding does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     ToggleOverview,
+    LockScreen,
     ToggleApplicationView,
     ToggleMessageTray,
     ToggleQuickSettings,
@@ -26,6 +33,8 @@ pub enum Action {
     /// Open a new window of the nth dash app.
     OpenNewWindow(u8),
     ShowScreenshotUi,
+    /// The screenshot UI in screencast mode, or the recording stopped.
+    ShowScreenRecordingUi,
     Screenshot,
     ScreenshotWindow,
     BrightnessUp,
@@ -36,6 +45,16 @@ pub enum Action {
     Unmaximize,
     BeginMove,
     BeginResize,
+    /// GNOME's maximize, minimize and close keys on the focused window.
+    Maximize,
+    Minimize,
+    Close,
+    /// Mutter's half tiling (toggles back).
+    TileLeft,
+    TileRight,
+    /// The next or previous keyboard input source.
+    NextInputSource,
+    PreviousInputSource,
     /// Switch to a workspace: first, last, or one step left/right.
     Workspace(Target),
     /// Move the focused window there and follow it.
@@ -79,6 +98,8 @@ impl Target {
 enum Schema {
     Shell,
     Wm,
+    Mutter,
+    Media,
 }
 
 /// One key, its action, GNOME 51's default accelerators, and its modes.
@@ -111,6 +132,13 @@ const NEW_WINDOW_DEFAULTS: [&str; 9] = [
 
 fn specs() -> Vec<Spec> {
     let mut specs = vec![
+        Spec {
+            schema: Schema::Media,
+            key: "screensaver".into(),
+            action: Action::LockScreen,
+            defaults: vec!["<Super>l"],
+            modes: NORMAL_OVERVIEW,
+        },
         Spec {
             schema: Schema::Shell,
             key: "toggle-overview".into(),
@@ -148,6 +176,13 @@ fn specs() -> Vec<Spec> {
         },
         Spec {
             schema: Schema::Shell,
+            key: "show-screen-recording-ui".into(),
+            action: Action::ShowScreenRecordingUi,
+            defaults: vec!["<Ctrl><Shift><Alt>R"],
+            modes: NORMAL_OVERVIEW,
+        },
+        Spec {
+            schema: Schema::Shell,
             key: "screenshot".into(),
             action: Action::Screenshot,
             defaults: vec!["<Shift>Print"],
@@ -175,9 +210,9 @@ fn specs() -> Vec<Spec> {
             modes: ALL,
         },
     ];
-    // GNOME's window-manager keys Roost does not bind itself (Super+
-    // PageUp/PageDown, Super+arrows, Super+H, Alt+F4, Alt+Tab and
-    // Super+Space are the compositor's own).
+    // GNOME's window-manager keys (Super+PageUp/PageDown and Alt+Tab
+    // stay the compositor's own; it drops its defaults for the rest
+    // once these are grabbed, so they rebind).
     let wm = |key: &str, action, defaults: Vec<&'static str>| Spec {
         schema: Schema::Wm,
         key: key.into(),
@@ -196,7 +231,42 @@ fn specs() -> Vec<Spec> {
             Action::ToggleMaximized,
             vec!["<Alt>F10"],
         ),
-        wm("unmaximize", Action::Unmaximize, vec!["<Alt>F5"]),
+        wm(
+            "unmaximize",
+            Action::Unmaximize,
+            vec!["<Super>Down", "<Alt>F5"],
+        ),
+        wm("maximize", Action::Maximize, vec!["<Super>Up"]),
+        wm("minimize", Action::Minimize, vec!["<Super>h"]),
+        wm("close", Action::Close, vec!["<Alt>F4"]),
+        Spec {
+            schema: Schema::Wm,
+            key: "switch-input-source".into(),
+            action: Action::NextInputSource,
+            defaults: vec!["<Super>space", "XF86Keyboard"],
+            modes: ALL,
+        },
+        Spec {
+            schema: Schema::Wm,
+            key: "switch-input-source-backward".into(),
+            action: Action::PreviousInputSource,
+            defaults: vec!["<Shift><Super>space", "<Shift>XF86Keyboard"],
+            modes: ALL,
+        },
+        Spec {
+            schema: Schema::Mutter,
+            key: "toggle-tiled-left".into(),
+            action: Action::TileLeft,
+            defaults: vec!["<Super>Left"],
+            modes: NORMAL_OVERVIEW,
+        },
+        Spec {
+            schema: Schema::Mutter,
+            key: "toggle-tiled-right".into(),
+            action: Action::TileRight,
+            defaults: vec!["<Super>Right"],
+            modes: NORMAL_OVERVIEW,
+        },
         wm("begin-move", Action::BeginMove, vec!["<Alt>F7"]),
         wm("begin-resize", Action::BeginResize, vec!["<Alt>F8"]),
         wm(
@@ -212,12 +282,16 @@ fn specs() -> Vec<Spec> {
         wm(
             "switch-to-workspace-left",
             Action::Workspace(Target::Left),
-            vec!["<Super><Alt>Left", "<Control><Alt>Left"],
+            vec!["<Super>Page_Up", "<Super><Alt>Left", "<Control><Alt>Left"],
         ),
         wm(
             "switch-to-workspace-right",
             Action::Workspace(Target::Right),
-            vec!["<Super><Alt>Right", "<Control><Alt>Right"],
+            vec![
+                "<Super>Page_Down",
+                "<Super><Alt>Right",
+                "<Control><Alt>Right",
+            ],
         ),
         wm(
             "move-to-workspace-1",
@@ -232,12 +306,20 @@ fn specs() -> Vec<Spec> {
         wm(
             "move-to-workspace-left",
             Action::MoveToWorkspace(Target::Left),
-            vec!["<Super><Shift><Alt>Left", "<Control><Shift><Alt>Left"],
+            vec![
+                "<Super><Shift>Page_Up",
+                "<Super><Shift><Alt>Left",
+                "<Control><Shift><Alt>Left",
+            ],
         ),
         wm(
             "move-to-workspace-right",
             Action::MoveToWorkspace(Target::Right),
-            vec!["<Super><Shift><Alt>Right", "<Control><Shift><Alt>Right"],
+            vec![
+                "<Super><Shift>Page_Down",
+                "<Super><Shift><Alt>Right",
+                "<Control><Shift><Alt>Right",
+            ],
         ),
     ]);
     for n in 1..=9u8 {
@@ -268,16 +350,21 @@ pub struct Binding {
 }
 
 /// The current bindings: each key's accelerators from its GNOME schema
-/// (`shell` or `wm`) when installed, else GNOME 51's defaults. Of the
-/// window-manager keys, only the accelerators Roost does not bind itself
-/// are taken.
-pub fn bindings(shell: Option<&gio::Settings>, wm: Option<&gio::Settings>) -> Vec<Binding> {
+/// (`shell`, `wm` or `mutter`) when installed, else GNOME 51's defaults.
+pub fn bindings(
+    shell: Option<&gio::Settings>,
+    wm: Option<&gio::Settings>,
+    mutter: Option<&gio::Settings>,
+    media: Option<&gio::Settings>,
+) -> Vec<Binding> {
     specs()
         .into_iter()
         .flat_map(|spec| {
             let settings = match spec.schema {
                 Schema::Shell => shell,
                 Schema::Wm => wm,
+                Schema::Mutter => mutter,
+                Schema::Media => media,
             };
             let has = settings
                 .and_then(|s| s.settings_schema())
@@ -286,10 +373,6 @@ pub fn bindings(shell: Option<&gio::Settings>, wm: Option<&gio::Settings>) -> Ve
                 Some(s) if has => s.strv(&spec.key).iter().map(|a| a.to_string()).collect(),
                 _ => spec.defaults.iter().map(|a| (*a).to_owned()).collect(),
             };
-            let accels: Vec<String> = accels
-                .into_iter()
-                .filter(|a| spec.schema == Schema::Shell || !compositor_owned(a))
-                .collect();
             accels
                 .into_iter()
                 .filter(|a| !a.is_empty())
@@ -302,14 +385,64 @@ pub fn bindings(shell: Option<&gio::Settings>, wm: Option<&gio::Settings>) -> Ve
         .collect()
 }
 
-/// Keys the compositor binds itself (GNOME's defaults for them):
-/// grabbing them too would never fire.
-fn compositor_owned(accelerator: &str) -> bool {
-    let a = accelerator.to_ascii_lowercase().replace("<shift>", "");
-    matches!(
-        a.as_str(),
-        "<super>page_up" | "<super>page_down" | "<super>kp_prior" | "<super>kp_next"
-    )
+/// The switcher's keys (`switch-applications`, `switch-group` and
+/// their backward keys) from the window-manager schema when installed,
+/// else GNOME 51's defaults. The compositor drives the switcher from
+/// them: it holds the popup open while the chord's modifiers are held.
+pub fn switcher_keys(wm: Option<&gio::Settings>) -> Vec<(String, SwitcherKeyKind)> {
+    use SwitcherKeyKind as K;
+    let keys: [(&str, K, [&str; 2]); 4] = [
+        (
+            "switch-applications",
+            K::Applications,
+            ["<Super>Tab", "<Alt>Tab"],
+        ),
+        (
+            "switch-applications-backward",
+            K::ApplicationsBackward,
+            ["<Shift><Super>Tab", "<Shift><Alt>Tab"],
+        ),
+        (
+            "switch-group",
+            K::Group,
+            ["<Super>Above_Tab", "<Alt>Above_Tab"],
+        ),
+        (
+            "switch-group-backward",
+            K::GroupBackward,
+            ["<Shift><Super>Above_Tab", "<Shift><Alt>Above_Tab"],
+        ),
+    ];
+    keys.into_iter()
+        .flat_map(|(key, kind, defaults)| {
+            let has = wm
+                .and_then(|s| s.settings_schema())
+                .is_some_and(|schema| schema.has_key(key));
+            let accels: Vec<String> = match wm {
+                Some(s) if has => s.strv(key).iter().map(|a| a.to_string()).collect(),
+                _ => defaults.iter().map(|a| (*a).to_owned()).collect(),
+            };
+            accels
+                .into_iter()
+                .filter(|a| !a.is_empty())
+                .map(move |a| (a, kind))
+        })
+        .collect()
+}
+
+/// A switcher accelerator as the compositor matches it: Mutter's
+/// `Above_Tab` becomes [`KEYSYM_ABOVE_TAB`], the key above Tab.
+pub fn parse_switcher_key(accelerator: &str, kind: SwitcherKeyKind) -> Option<SwitcherKey> {
+    let (accelerator, above_tab) = match accelerator.strip_suffix("Above_Tab") {
+        Some(mods) => (format!("{mods}Tab"), true),
+        None => (accelerator.to_owned(), false),
+    };
+    let (keysym, mods) = crate::shell_dbus::parse_accelerator(&accelerator)?;
+    Some(SwitcherKey {
+        keysym: if above_tab { KEYSYM_ABOVE_TAB } else { keysym },
+        mods,
+        kind,
+    })
 }
 
 /// GNOME Shell's keybinding schema, when installed.
@@ -320,6 +453,15 @@ pub fn settings() -> Option<gio::Settings> {
 /// GNOME's window-manager keybinding schema, when installed.
 pub fn wm_settings() -> Option<gio::Settings> {
     schema(WM_SCHEMA)
+}
+
+/// Mutter's keybinding schema, when installed.
+pub fn media_settings() -> Option<gio::Settings> {
+    schema(MEDIA_SCHEMA)
+}
+
+pub fn mutter_settings() -> Option<gio::Settings> {
+    schema(MUTTER_SCHEMA)
 }
 
 fn schema(id: &str) -> Option<gio::Settings> {
@@ -342,19 +484,57 @@ mod tests {
         assert_eq!(Target::Right.resolve(2, &ws, &[0]), Some(3));
         // Everything on the first workspace: Last is the empty one after.
         assert_eq!(Target::Last.resolve(0, &[0], &[0]), Some(1));
-        assert!(compositor_owned("<Super><Shift>Page_Up"));
-        assert!(!compositor_owned("<Super>Home"));
+    }
+
+    #[test]
+    fn switcher_keys_default_and_parse_like_mutter() {
+        use roost_shell_control::{MOD_ALT, MOD_LOGO, MOD_SHIFT};
+        let keys: Vec<SwitcherKey> = switcher_keys(None)
+            .iter()
+            .filter_map(|(a, kind)| parse_switcher_key(a, *kind))
+            .collect();
+        assert_eq!(keys.len(), 8);
+        let tab = 0xff09;
+        assert_eq!(
+            keys[1],
+            SwitcherKey {
+                keysym: tab,
+                mods: MOD_ALT,
+                kind: SwitcherKeyKind::Applications
+            }
+        );
+        assert_eq!(
+            keys[2],
+            SwitcherKey {
+                keysym: tab,
+                mods: MOD_SHIFT | MOD_LOGO,
+                kind: SwitcherKeyKind::ApplicationsBackward
+            }
+        );
+        assert_eq!(
+            keys[4],
+            SwitcherKey {
+                keysym: KEYSYM_ABOVE_TAB,
+                mods: MOD_LOGO,
+                kind: SwitcherKeyKind::Group
+            }
+        );
+        assert_eq!(
+            parse_switcher_key("<Control>grave", SwitcherKeyKind::Group).map(|k| k.keysym),
+            Some(0x60)
+        );
     }
 
     #[test]
     fn gnome_51_defaults_without_the_schema() {
-        let all = bindings(None, None);
+        let all = bindings(None, None, None, None);
         let find = |action| {
             all.iter()
                 .filter(|b| b.action == action)
                 .map(|b| b.accelerator.as_str())
                 .collect::<Vec<_>>()
         };
+        assert_eq!(find(Action::LockScreen), ["<Super>l"]);
         assert_eq!(find(Action::ToggleApplicationView), ["<Super>a"]);
         assert_eq!(find(Action::ToggleMessageTray), ["<Super>v", "<Super>m"]);
         assert_eq!(find(Action::ToggleQuickSettings), ["<Super>s"]);
@@ -363,12 +543,33 @@ mod tests {
         assert_eq!(find(Action::OpenNewWindow(9)), ["<Super><Control>9"]);
         assert_eq!(find(Action::BrightnessUp), ["XF86MonBrightnessUp"]);
         assert_eq!(find(Action::ShowScreenshotUi), ["Print"]);
+        assert_eq!(find(Action::ShowScreenRecordingUi), ["<Ctrl><Shift><Alt>R"]);
         assert_eq!(find(Action::WindowMenu), ["<Alt>space"]);
+        // GNOME 51's defaults for the keys the compositor used to own.
+        assert_eq!(find(Action::Maximize), ["<Super>Up"]);
+        assert_eq!(find(Action::Unmaximize), ["<Super>Down", "<Alt>F5"]);
+        assert_eq!(find(Action::Minimize), ["<Super>h"]);
+        assert_eq!(find(Action::Close), ["<Alt>F4"]);
+        assert_eq!(find(Action::TileLeft), ["<Super>Left"]);
+        assert_eq!(find(Action::TileRight), ["<Super>Right"]);
+        assert_eq!(
+            find(Action::NextInputSource),
+            ["<Super>space", "XF86Keyboard"]
+        );
+        assert_eq!(
+            find(Action::PreviousInputSource),
+            ["<Shift><Super>space", "<Shift>XF86Keyboard"]
+        );
         assert_eq!(find(Action::Workspace(Target::Last)), ["<Super>End"]);
         assert_eq!(
             find(Action::MoveToWorkspace(Target::Right)),
-            ["<Super><Shift><Alt>Right", "<Control><Shift><Alt>Right"]
+            [
+                "<Super><Shift>Page_Down",
+                "<Super><Shift><Alt>Right",
+                "<Control><Shift><Alt>Right"
+            ]
         );
+        assert_eq!(find(Action::Workspace(Target::Left))[0], "<Super>Page_Up");
         let brightness = all
             .iter()
             .find(|b| b.action == Action::BrightnessUp)

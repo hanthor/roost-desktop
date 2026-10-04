@@ -88,6 +88,16 @@ pub fn default_app_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// Whether a desktop file named `<id>.desktop` exists in any
+/// application directory, NoDisplay and Hidden ones included: GNOME's
+/// WindowTracker matches windows to those apps too.
+pub fn desktop_file_exists(id: &str) -> bool {
+    let file = format!("{id}.desktop");
+    default_app_dirs()
+        .iter()
+        .any(|dir| dir.join(&file).is_file())
+}
+
 fn data_dirs() -> Vec<PathBuf> {
     std::env::var_os("XDG_DATA_DIRS")
         .map(|dirs| {

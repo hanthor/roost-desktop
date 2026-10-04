@@ -10,11 +10,14 @@ push button: Lock
 push button: Power Off Menu
 push button: Mute
 slider: Volume
+toggle button: Open sound output menu
 slider: Brightness
 toggle button: Wi-Fi
 toggle button: Wi-Fi Menu
 toggle button: Wired
+toggle button: Wired Menu
 toggle button: Bluetooth
+toggle button: Bluetooth Menu
 toggle button: Power Mode
 toggle button: Power Mode Menu
 toggle button: Dark Style

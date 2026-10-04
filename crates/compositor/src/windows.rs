@@ -245,8 +245,15 @@ pub struct WindowManager {
     menu_requests: Vec<(u64, i32, i32)>,
     /// The active workspace at the last reconcile.
     last_active_workspace: Option<u32>,
-    /// The switcher was opened with Super+Tab (Super's release commits).
-    switcher_by_super: bool,
+    /// The modifiers of the chord that opened the switcher, Shift
+    /// aside: releasing them all commits (GNOME's modifier mask).
+    switcher_opener: u32,
+    /// The shell's switcher chords (GNOME's `switch-applications` and
+    /// `switch-group` keys); `None` until it sends them, and then the
+    /// built-in Alt/Super+Tab and Above_Tab stand aside.
+    switcher_keys: Option<Vec<roost_shell_control::SwitcherKey>>,
+    /// Control held (either side), for switcher chords.
+    ctrl_held: bool,
     /// Workspace-switcher popups `(index, count)` for the shell.
     workspace_popups: Vec<(u32, u32)>,
     /// Super held (either side) for workspace keybindings.
@@ -264,12 +271,24 @@ pub struct WindowManager {
     /// Switcher drive events queued for the hub broadcast, drained by
     /// the runtime after each input event.
     switcher_queue: Vec<SwitcherAction>,
+    /// Keys the open switcher took: their releases stay invisible too.
+    switcher_swallowed: Vec<u32>,
     /// Session window-management mode (scrollable-tiling spec).
     /// Gnome by default; Super+Shift+T flips the whole session.
     mode: SessionMode,
     /// Horizontal strip view offset in logical pixels (scroll mode).
-    /// Zero on entering scroll; clamped to the strip overflow.
+    /// Zero on entering scroll; clamped to the strip overflow. This is
+    /// the view's *target*: layout, configure sizes, input and tests
+    /// all use it, so clients are configured once at the target.
     strip_offset: f64,
+    /// Where the strip view is drawn right now: chases `strip_offset`
+    /// on niri's view-movement spring, stepped once per frame by
+    /// [`step_strip_view`](Self::step_strip_view). Only render
+    /// positions use it.
+    strip_shown: f64,
+    /// The running view spring and its elapsed seconds, while the drawn
+    /// view has not settled on the target.
+    strip_anim: Option<(crate::spring::Spring, f64)>,
     /// Last hub overview flag seen (set by the runtime each tick).
     overview_open: bool,
     /// Window focused before the overview parked keyboard focus.
@@ -318,13 +337,17 @@ impl WindowManager {
             lock_input_active: false,
             menu_requests: Vec::new(),
             last_active_workspace: None,
-            switcher_by_super: false,
+            switcher_opener: 0,
+            switcher_keys: None,
+            ctrl_held: false,
             workspace_popups: Vec::new(),
             swallowed_button: None,
             focus_awaits_surface: None,
             grab: None,
             mode: SessionMode::Gnome,
             strip_offset: 0.0,
+            strip_shown: 0.0,
+            strip_anim: None,
             super_held: false,
             // add_keyboard below: 200 ms delay, 200 keys/s.
             repeat: (200, 200),
@@ -332,6 +355,7 @@ impl WindowManager {
             alt_held: false,
             switcher_open: false,
             switcher_queue: Vec::new(),
+            switcher_swallowed: Vec::new(),
             overview_open: false,
             pre_overview_focus: None,
             overview_activated: None,
@@ -425,6 +449,40 @@ impl WindowManager {
     /// Only the active workspace renders; other workspaces keep their
     /// surfaces mapped but hidden.
     pub fn visible_windows(&self) -> Vec<(Window, Rectangle<i32, Logical>)> {
+        self.visible_entries()
+            .into_iter()
+            .map(|(_, window, geometry)| (window, geometry))
+            .collect()
+    }
+
+    /// [`visible_windows`](Self::visible_windows) where they are drawn
+    /// this frame: strip columns shift by how far the animated view
+    /// still trails its target. Every other use (input, configure,
+    /// output scale) keeps the target geometry.
+    pub fn render_windows(&self) -> Vec<(Window, Rectangle<i32, Logical>)> {
+        self.visible_entries()
+            .into_iter()
+            .map(|(id, window, geometry)| (window, self.shifted(id, geometry)))
+            .collect()
+    }
+
+    /// Where `id` is drawn this frame (see
+    /// [`render_windows`](Self::render_windows)).
+    pub fn render_geometry(&self, id: u64) -> Option<Rectangle<i32, Logical>> {
+        self.geometry(id).map(|geometry| self.shifted(id, geometry))
+    }
+
+    /// `geometry` moved by the strip view's lag when `id` is a strip
+    /// column: drawn x = target x + (target offset - drawn offset).
+    fn shifted(&self, id: u64, mut geometry: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
+        if self.mode == SessionMode::Scroll && self.window_layout(id) == Some(WindowLayout::Strip) {
+            geometry.loc.x += (self.strip_offset - self.strip_shown).round() as i32;
+        }
+        geometry
+    }
+
+    /// Visible windows bottom-to-top with their ids and target geometry.
+    fn visible_entries(&self) -> Vec<(u64, Window, Rectangle<i32, Logical>)> {
         let active = self.model.active_workspace();
         self.stacking
             .iter()
@@ -439,7 +497,7 @@ impl WindowManager {
                 self.windows
                     .get(&id)
                     .filter(|w| !w.minimized)
-                    .map(|w| (w.surface.clone(), w.geometry))
+                    .map(|w| (id, w.surface.clone(), w.geometry))
             })
             .collect()
     }
@@ -539,6 +597,7 @@ impl WindowManager {
         // arrived with a surface's first commits (e.g. initial
         // maximized) applies after the surface is mapped.
         self.drain_window_requests(state);
+        self.drain_pointer_warps(state);
         #[cfg(feature = "xwayland")]
         self.sync_seat_focus(state);
         // Overview focus parks last so newly mapped windows never
@@ -639,7 +698,13 @@ impl WindowManager {
         let window = Window::new_wayland_window(surface.clone());
         let id = self.insert_managed(&title, app_id.as_deref());
         self.surface_index.insert(surface.wl_surface().clone(), id);
-        let geometry = self.placement(state);
+        let target = state
+            .initial_outputs
+            .get(surface.wl_surface())
+            .and_then(|name| state.outputs.iter().find(|entry| &entry.name == name))
+            .or_else(|| state.new_window_output())
+            .map(|entry| Rectangle::new(entry.loc.into(), entry.size));
+        let geometry = self.placement_on(state, None, target);
         // With a real output the client chooses its size first (Mutter's
         // empty initial configure); headless tests keep the cascade.
         let unplaced = Self::work_area(state).size.w > 0;
@@ -665,7 +730,16 @@ impl WindowManager {
     /// Shared tail of every map path (native and X11): stacking slot,
     /// scroll-mode membership, initial configure, and focus.
     fn finish_map(&mut self, state: &mut State, id: u64) {
-        self.stacking.push(id);
+        // niri opens a new column right of the focused one; floating
+        // windows go on top.
+        let after_focused = (self.mode == SessionMode::Scroll)
+            .then(|| self.model.focused())
+            .flatten()
+            .and_then(|focused| self.stacking.iter().position(|other| *other == focused));
+        match after_focused {
+            Some(index) => self.stacking.insert(index + 1, id),
+            None => self.stacking.push(id),
+        }
         // Forced strip membership: windows mapped mid-scroll join the
         // strip as columns. Dialogs keep their after-parent stacking
         // slot, so they land in the adjacent column — the strip is
@@ -689,18 +763,34 @@ impl WindowManager {
     /// the most recent by one step, kept inside the work area (never
     /// under the top bar). Without an output (headless tests) the plain
     /// cascade from the origin stands.
-    fn placement(&mut self, state: &State) -> Rectangle<i32, Logical> {
-        self.placement_sized(state, None)
-    }
-
-    /// [`placement`](Self::placement) for a window that brings its own
+    /// Automatic placement for a window that brings its own
     /// size (X11 clients ask for one at map); `None` uses the default.
+    #[cfg(feature = "xwayland")]
     fn placement_sized(
         &mut self,
         state: &State,
         wanted: Option<Size<i32, Logical>>,
     ) -> Rectangle<i32, Logical> {
-        let work = Self::work_area(state);
+        let target = state
+            .new_window_output()
+            .map(|entry| Rectangle::new(entry.loc.into(), entry.size));
+        self.placement_on(state, wanted, target)
+    }
+
+    fn placement_on(
+        &mut self,
+        state: &State,
+        wanted: Option<Size<i32, Logical>>,
+        target: Option<Rectangle<i32, Logical>>,
+    ) -> Rectangle<i32, Logical> {
+        let work = target
+            .map(|output| {
+                Rectangle::new(
+                    (output.loc.x, output.loc.y + WORK_AREA_TOP).into(),
+                    (output.size.w, (output.size.h - WORK_AREA_TOP).max(0)).into(),
+                )
+            })
+            .unwrap_or_else(|| Self::work_area(state));
         if work.size.w <= 0 || work.size.h <= 0 {
             let mut rect = self.cascade_geometry();
             if let Some(size) = wanted {
@@ -713,26 +803,28 @@ impl WindowManager {
             .unwrap_or((DEFAULT_WIDTH, DEFAULT_HEIGHT));
         let size: Size<i32, Logical> = (w.min(work.size.w), h.min(work.size.h)).into();
         let active = self.model.active_workspace();
-        let last = self.stacking.iter().rev().find_map(|id| {
-            (self.model.window(*id)?.workspace == active
-                && self.windows.get(id).is_some_and(|w| !w.unplaced))
-            .then(|| self.windows.get(id).map(|w| w.geometry.loc))
-            .flatten()
-        });
+        let others: Vec<Point<i32, Logical>> = self
+            .stacking
+            .iter()
+            .filter(|id| {
+                self.model
+                    .window(**id)
+                    .is_some_and(|m| m.workspace == active)
+            })
+            .filter_map(|id| self.windows.get(id))
+            .filter(|w| !w.unplaced && !w.minimized && work.contains(w.geometry.loc))
+            .map(|w| w.geometry.loc)
+            .collect();
         let centered: Point<i32, Logical> = (
             work.loc.x + (work.size.w - size.w) / 2,
             work.loc.y + (work.size.h - size.h) / 2,
         )
             .into();
-        let mut loc = match last {
-            None => centered,
-            Some(prev) => prev + Point::from((CASCADE_STEP, CASCADE_STEP)),
+        let mut loc = if others.is_empty() {
+            centered
+        } else {
+            next_cascade(centered, others, size, work)
         };
-        // Wrap back to the top-left of the work area when the cascade
-        // would push the window off it.
-        if loc.x + size.w > work.loc.x + work.size.w || loc.y + size.h > work.loc.y + work.size.h {
-            loc = work.loc;
-        }
         loc.x = loc.x.max(work.loc.x);
         loc.y = loc.y.max(work.loc.y);
         Rectangle::new(loc, size)
@@ -766,7 +858,19 @@ impl WindowManager {
                 .get(&id)
                 .is_some_and(|w| w.layout == WindowLayout::Floating);
             if floating {
-                let geometry = self.placement_sized(state, Some(size));
+                // Preserve the target selected before the first buffer, even
+                // if the pointer moved while the client was rendering it.
+                let target = self.windows.get(&id).and_then(|window| {
+                    state
+                        .outputs
+                        .iter()
+                        .find(|entry| {
+                            Rectangle::new(entry.loc.into(), entry.size)
+                                .contains(window.geometry.loc)
+                        })
+                        .map(|entry| Rectangle::new(entry.loc.into(), entry.size))
+                });
+                let geometry = self.placement_on(state, Some(size), target);
                 if let Some(window) = self.windows.get_mut(&id) {
                     window.geometry = geometry;
                     window.unplaced = false;
@@ -1086,6 +1190,42 @@ impl WindowManager {
         true
     }
 
+    /// The window focus lands on when `id` is asked for: its mapped
+    /// modal dialog (that dialog's own, in turn), else `id` itself.
+    fn modal_target(&self, mut id: u64) -> u64 {
+        // Bounded: a parent cycle a client builds cannot spin here.
+        for _ in 0..8 {
+            let Some(parent) = self
+                .windows
+                .get(&id)
+                .and_then(|w| w.surface.wl_surface())
+                .map(|s| s.into_owned())
+            else {
+                break;
+            };
+            let dialog = self
+                .windows
+                .iter()
+                .filter(|(child, w)| **child != id && !w.minimized)
+                .find_map(|(child, w)| match w.surface.underlying_surface() {
+                    WindowSurface::Wayland(toplevel)
+                        if read_parent(toplevel).as_ref() == Some(&parent)
+                            && read_modal(toplevel) =>
+                    {
+                        Some(*child)
+                    }
+                    WindowSurface::Wayland(_) => None,
+                    #[cfg(feature = "xwayland")]
+                    _ => None,
+                });
+            match dialog {
+                Some(child) => id = child,
+                None => break,
+            }
+        }
+        id
+    }
+
     /// Focus while the overview holds the keyboard: the window is the
     /// one restored on close, rises, and takes the activated look.
     fn focus_parked(&mut self, id: Option<u64>) {
@@ -1109,8 +1249,16 @@ impl WindowManager {
     }
 
     fn apply_focus(&mut self, state: &mut State, id: Option<u64>) {
+        // GNOME attaches modal dialogs to their parent: the parent
+        // cannot take focus from its dialog (xdg-dialog, #89).
+        let id = id.map(|id| self.modal_target(id));
         let previous = self.model.focused();
         self.model.set_focused(id);
+        // The strip view follows focus (niri), new columns included.
+        if self.mode == SessionMode::Scroll && id.is_some() && previous != id {
+            self.follow_focus(state);
+            self.relayout_strip(state);
+        }
         if let Some(id) = id {
             // Activating a hidden window brings it back (GNOME).
             if let Some(window) = self.windows.get_mut(&id) {
@@ -1210,11 +1358,27 @@ impl WindowManager {
                 xdg_toplevel::State::Fullscreen,
                 xdg_toplevel::State::TiledLeft,
                 xdg_toplevel::State::TiledRight,
+                xdg_toplevel::State::TiledTop,
+                xdg_toplevel::State::TiledBottom,
             ] {
                 pending.states.unset(state);
             }
             match layout {
-                WindowLayout::Floating | WindowLayout::Strip => {}
+                WindowLayout::Floating => {}
+                // niri tells its columns they are tiled on every edge:
+                // client-side decorations drop their shadow and rounded
+                // corners, so columns meet the gaps (and the focus ring)
+                // square.
+                WindowLayout::Strip => {
+                    for state in [
+                        xdg_toplevel::State::TiledLeft,
+                        xdg_toplevel::State::TiledRight,
+                        xdg_toplevel::State::TiledTop,
+                        xdg_toplevel::State::TiledBottom,
+                    ] {
+                        pending.states.set(state);
+                    }
+                }
                 WindowLayout::Maximized => {
                     pending.states.set(xdg_toplevel::State::Maximized);
                 }
@@ -1535,7 +1699,8 @@ impl WindowManager {
     /// Pointer button: deliver to the focused window and focus the
     /// window under the cursor on press (click-to-focus). A press on a
     /// layer-shell surface moves keyboard focus there (unless the
-    /// overview park owns it) so panel menus and banners take keys; the
+    /// overview park owns it, or the surface asked for no keyboard, as
+    /// IBus's candidate window does) so panel menus take keys; the
     /// button itself follows pointer focus from the last motion.
     pub fn pointer_button(&mut self, state: &mut State, button: u32, pressed: bool, time: u32) {
         // Release ends a move/resize grab. It is still delivered (unless
@@ -1590,7 +1755,7 @@ impl WindowManager {
             if let Some((surface, _)) =
                 crate::layer::topmost_layer_at(state, pos.x as i32, pos.y as i32)
             {
-                if !self.overview_open {
+                if !self.overview_open && crate::layer::surface_takes_keyboard_on_press(&surface) {
                     let serial = SERIAL_COUNTER.next_serial();
                     if let Some(keyboard) = self.keyboard.clone() {
                         keyboard.set_focus(state, Some(surface.clone()), serial);
@@ -1765,7 +1930,10 @@ impl WindowManager {
         } else {
             mode
         };
-        let grabs: Vec<roost_shell_control::Accelerator> = if pressed {
+        // A window inhibiting shortcuts (keyboard-shortcuts-inhibit)
+        // gets the keys the shell grabbed too.
+        let inhibited = !self.lock_input_active && state.shortcuts_inhibited();
+        let grabs: Vec<roost_shell_control::Accelerator> = if pressed && !inhibited {
             self.accelerators
                 .iter()
                 .filter(|a| a.modes & mode_mask != 0)
@@ -1904,6 +2072,9 @@ impl WindowManager {
                 true
             }
             WindowAction::Unmaximize => self.set_maximized(state, id, false),
+            WindowAction::Maximize => self.set_maximized(state, id, true),
+            WindowAction::ToggleTiledLeft => self.toggle_tiled(state, id, TileSide::Left),
+            WindowAction::ToggleTiledRight => self.toggle_tiled(state, id, TileSide::Right),
             WindowAction::MoveToWorkspace { workspace } => {
                 self.move_to_workspace(state, id, workspace)
             }
@@ -1967,6 +2138,11 @@ impl WindowManager {
     /// Replace the accelerator grabs (org.gnome.Shell GrabAccelerators).
     pub fn set_accelerators(&mut self, accelerators: Vec<roost_shell_control::Accelerator>) {
         self.accelerators = accelerators;
+    }
+
+    /// Replace the switcher's chords (the shell's GNOME keybindings).
+    pub fn set_switcher_keys(&mut self, keys: Vec<roost_shell_control::SwitcherKey>) {
+        self.switcher_keys = Some(keys);
     }
 
     /// Accelerators fired since the last call: `(action, time, mode)`.
@@ -2161,14 +2337,14 @@ impl WindowManager {
         }
     }
 
-    /// One strip column rectangle for `id`: full work-area height,
-    /// preset-proportion width with gaps between columns (niri
-    /// gaps-twice formula). Columns past the right edge overflow;
-    /// the strip never squeezes to fit.
+    /// One strip column rectangle for `id`: the work area's height less
+    /// a gap above and below, preset-proportion width with gaps between
+    /// columns and at the strip's ends (niri gaps-twice formula).
+    /// Columns past the right edge overflow; the strip never squeezes.
     fn strip_column_area(&self, state: &State, id: u64) -> Rectangle<i32, Logical> {
         let work = Self::work_area(state);
         let columns = self.strip_columns(state, id);
-        let mut x = work.loc.x - self.strip_offset as i32;
+        let mut x = work.loc.x + Self::STRIP_GAP - self.strip_offset as i32;
         let mut width = Self::strip_width(work.size.w, self.strip_proportion(id));
         for (other, w) in &columns {
             if *other == id {
@@ -2178,14 +2354,118 @@ impl WindowManager {
             x += w + Self::STRIP_GAP;
         }
         Rectangle {
-            loc: (x, work.loc.y).into(),
-            size: (width, work.size.h).into(),
+            loc: (x, work.loc.y + Self::STRIP_GAP).into(),
+            size: (width, (work.size.h - 2 * Self::STRIP_GAP).max(1)).into(),
         }
     }
 
-    /// Current strip view offset (scroll mode), for tests.
+    /// The farthest the view scrolls: the strip with its end gaps,
+    /// less the view.
+    fn strip_max_offset(&self, state: &State) -> f64 {
+        let work = Self::work_area(state);
+        let widths: Vec<(u64, i32)> = self
+            .strip_order()
+            .iter()
+            .map(|id| {
+                (
+                    *id,
+                    Self::strip_width(work.size.w, self.strip_proportion(*id)),
+                )
+            })
+            .collect();
+        let total = Self::strip_total(&widths) + 2 * Self::STRIP_GAP;
+        (total - work.size.w).max(0) as f64
+    }
+
+    /// niri's default view motion (`center-focused-column "never"`):
+    /// scroll the least that shows the focused column whole, a gap from
+    /// the edge it was beyond.
+    fn follow_focus(&mut self, state: &mut State) {
+        if self.mode != SessionMode::Scroll {
+            return;
+        }
+        let Some(focused) = self.model.focused() else {
+            return;
+        };
+        let work = Self::work_area(state);
+        let mut start = 0;
+        let mut width = None;
+        for id in self.strip_order() {
+            let w = Self::strip_width(work.size.w, self.strip_proportion(id));
+            if id == focused {
+                width = Some(w);
+                break;
+            }
+            start += w + Self::STRIP_GAP;
+        }
+        let Some(width) = width else { return };
+        // Column `start` sits at gap + start - offset in the view.
+        let left = f64::from(start);
+        let right = f64::from(start + width + 2 * Self::STRIP_GAP - work.size.w);
+        let mut offset = self.strip_offset;
+        if offset > left {
+            offset = left;
+        } else if offset < right {
+            offset = right;
+        }
+        self.strip_offset = offset.clamp(0.0, self.strip_max_offset(state));
+    }
+
+    /// Current strip view offset target (scroll mode): where the view
+    /// is going, which layout and tests use.
     pub fn strip_offset(&self) -> f64 {
         self.strip_offset
+    }
+
+    /// Where the strip view is drawn this frame; equals
+    /// [`strip_offset`](Self::strip_offset) once the spring settles.
+    pub fn strip_view(&self) -> f64 {
+        self.strip_shown
+    }
+
+    /// Whether the strip view is still moving toward its target.
+    pub fn strip_animating(&self) -> bool {
+        self.mode == SessionMode::Scroll && self.strip_shown != self.strip_offset
+    }
+
+    /// Jump the drawn view onto the target (no animation).
+    fn snap_strip_view(&mut self) {
+        self.strip_shown = self.strip_offset;
+        self.strip_anim = None;
+    }
+
+    /// Advance the drawn strip view `dt` seconds toward the target on
+    /// niri's default view-movement spring (critically damped,
+    /// stiffness 800, epsilon 0.0001). A target that moved mid-flight
+    /// restarts the spring from the drawn position with its current
+    /// velocity, as niri does. Called once per frame by the runtime;
+    /// returns whether the view is still moving (frames keep coming
+    /// only while it does).
+    pub fn step_strip_view(&mut self, dt: f64) -> bool {
+        use crate::spring::Spring;
+        if self.mode != SessionMode::Scroll {
+            self.snap_strip_view();
+            return false;
+        }
+        let target = self.strip_offset;
+        let (spring, t) = match self.strip_anim {
+            Some((spring, t)) if spring.to == target => (spring, t + dt.max(0.0)),
+            Some((spring, t)) => (
+                Spring::view_movement(spring.value_at(t), target, spring.velocity_at(t)),
+                0.0,
+            ),
+            None if self.strip_shown != target => {
+                (Spring::view_movement(self.strip_shown, target, 0.0), 0.0)
+            }
+            None => return false,
+        };
+        if spring.done_at(t) {
+            self.snap_strip_view();
+            return false;
+        }
+        self.strip_shown = spring.value_at(t);
+        self.strip_anim = Some((spring, t));
+        true
     }
 
     /// Scroll the strip by axis amounts (positive moves the view
@@ -2207,13 +2487,16 @@ impl WindowManager {
                 )
             })
             .collect();
-        let total = Self::strip_total(&widths);
-        let max = (total - work.size.w).max(0) as f64;
+        let _ = (&widths, work);
+        let max = self.strip_max_offset(state);
         let next = (self.strip_offset + horizontal + vertical).clamp(0.0, max);
         if next == self.strip_offset {
             return true;
         }
         self.strip_offset = next;
+        // Wheel and touchpad scrolling is direct manipulation: the view
+        // follows the fingers without a spring (niri's gesture too).
+        self.snap_strip_view();
         self.relayout_strip(state);
         true
     }
@@ -2241,6 +2524,7 @@ impl WindowManager {
         if let Some(window) = self.windows.get_mut(&focused) {
             window.preset = Some(next);
         }
+        self.follow_focus(state);
         self.relayout_strip(state);
         true
     }
@@ -2318,6 +2602,7 @@ impl WindowManager {
             return true;
         }
         self.stacking.swap(positions[slot], positions[other]);
+        self.follow_focus(state);
         self.relayout_strip(state);
         true
     }
@@ -2338,9 +2623,8 @@ impl WindowManager {
                 )
             })
             .collect();
-        let total = Self::strip_total(&widths);
-        let max = (total - work.size.w).max(0) as f64;
-        self.strip_offset = self.strip_offset.clamp(0.0, max);
+        let _ = (&widths, work);
+        self.strip_offset = self.strip_offset.clamp(0.0, self.strip_max_offset(state));
         let ids: Vec<u64> = self.windows.keys().copied().collect();
         for id in ids {
             if self.window_layout(id) == Some(WindowLayout::Strip) {
@@ -2362,6 +2646,10 @@ impl WindowManager {
         };
         if scroll {
             self.strip_offset = 0.0;
+            self.follow_focus(state);
+            // Entering the strip lays it out in place: nothing to
+            // animate from.
+            self.snap_strip_view();
             let ids: Vec<u64> = self.windows.keys().copied().collect();
             for id in ids {
                 self.apply_layout(state, id, WindowLayout::Strip);
@@ -2743,6 +3031,16 @@ fn read_app_id(surface: &ToplevelSurface) -> Option<String> {
     })
 }
 
+/// Whether the client marked this toplevel a modal dialog (xdg-dialog).
+fn read_modal(surface: &ToplevelSurface) -> bool {
+    with_states(surface.wl_surface(), |states| {
+        states
+            .data_map
+            .get::<XdgToplevelSurfaceData>()
+            .is_some_and(|data| data.lock().unwrap().modal)
+    })
+}
+
 /// Read the client's transient parent from the toplevel role data.
 fn read_parent(surface: &ToplevelSurface) -> Option<WlSurface> {
     with_states(surface.wl_surface(), |states| {
@@ -2889,6 +3187,28 @@ pub const F4_KEYCODE: u32 = 62;
 /// session between floating and strip modes. The press is consumed;
 /// the release still reaches clients.
 pub const T_KEYCODE: u32 = 20;
+/// GNOME's `switch-group` key (Above_Tab: the key above Tab, evdev
+/// KEY_GRAVE) and the keys the open switcher acts on.
+pub const GRAVE_KEYCODE: u32 = 41;
+pub const Q_KEYCODE: u32 = 16;
+pub const W_KEYCODE: u32 = 17;
+pub const CTRL_LEFT_KEYCODE: u32 = 29;
+pub const CTRL_RIGHT_KEYCODE: u32 = 97;
+
+/// The keysym the open switcher hears for an evdev key it acts on
+/// (GNOME's AppSwitcherPopup: arrows, Q, W, F4).
+fn switcher_keysym(keycode: u32) -> Option<u32> {
+    Some(match keycode {
+        ARROW_LEFT_KEYCODE => 0xff51,
+        ARROW_UP_KEYCODE => 0xff52,
+        ARROW_RIGHT_KEYCODE => 0xff53,
+        ARROW_DOWN_KEYCODE => 0xff54,
+        F4_KEYCODE => 0xffc1,
+        Q_KEYCODE => 0x71,
+        W_KEYCODE => 0x77,
+        _ => return None,
+    })
+}
 /// Strip preset-cycle key (evdev): Super+R steps the focused column
 /// forward through the width presets, Super+Shift+R backward. Only
 /// consumed in scroll mode; in gnome mode the press reaches clients
@@ -3037,9 +3357,29 @@ impl WindowManager {
 
     /// The next input source (GNOME's Super+Space).
     fn next_input_source(&mut self, state: &mut State) {
+        self.switch_input_source(state, false);
+    }
+
+    /// The next (or previous) input source, as the shell's rebindable
+    /// `switch-input-source` keys ask.
+    pub fn switch_input_source(&mut self, state: &mut State, backward: bool) {
         if let Some(keyboard) = self.keyboard.clone() {
-            keyboard.with_xkb_state(state, |mut context| context.cycle_next_layout());
+            keyboard.with_xkb_state(state, |mut context| {
+                if backward {
+                    context.cycle_prev_layout();
+                } else {
+                    context.cycle_next_layout();
+                }
+            });
         }
+    }
+
+    /// Whether a shell has taken GNOME's window-manager keys
+    /// (org.gnome.desktop.wm.keybindings) by grabbing accelerators: the
+    /// compositor's built-in defaults for them then stand aside, so
+    /// rebound keys win and unbound ones reach clients.
+    fn shell_owns_wm_keys(&self) -> bool {
+        !self.accelerators.is_empty()
     }
 
     /// Active layout and repeat, for the state file.
@@ -3082,13 +3422,82 @@ impl WindowManager {
             } => {
                 self.track_workspace_modifiers(keycode, pressed);
                 self.track_switcher_modifiers(keycode, pressed);
-                if keycode == SPACE_KEYCODE && self.super_held {
+                if !self.switcher_open && state.shortcuts_inhibited() {
+                    self.inhibited_key(state, keycode, pressed, time);
+                    return;
+                }
+                let modifier = self.is_alt(keycode)
+                    || matches!(
+                        keycode,
+                        SUPER_LEFT_KEYCODE
+                            | SUPER_RIGHT_KEYCODE
+                            | SHIFT_LEFT_KEYCODE
+                            | SHIFT_RIGHT_KEYCODE
+                            | CTRL_LEFT_KEYCODE
+                            | CTRL_RIGHT_KEYCODE
+                    );
+                if !pressed && self.switcher_swallowed.contains(&keycode) {
+                    // The switcher took the press: the release too.
+                    self.switcher_swallowed.retain(|k| *k != keycode);
+                } else if let Some((kind, opener)) = self.switcher_chord(state, keycode, pressed) {
+                    // One of the shell's switcher chords. The press and
+                    // its release stay invisible to apps.
+                    self.switcher_swallowed.push(keycode);
+                    let reopen = !self.switcher_open;
+                    if reopen {
+                        self.switcher_opener = opener;
+                    }
+                    self.switcher_open = true;
+                    use roost_shell_control::SwitcherKeyKind as K;
+                    self.push_switcher(match kind {
+                        K::Applications => SwitcherAction::Step { forward: true },
+                        K::ApplicationsBackward => SwitcherAction::Step { forward: false },
+                        K::Group => SwitcherAction::StepWindow { forward: true },
+                        K::GroupBackward => SwitcherAction::StepWindow { forward: false },
+                    });
+                    if reopen && opener == 0 {
+                        // No modifier to hold it open: GNOME picks at once.
+                        self.switcher_open = false;
+                        self.push_switcher(SwitcherAction::Commit);
+                    }
+                } else if pressed
+                    && keycode == GRAVE_KEYCODE
+                    && self.switcher_keys.is_none()
+                    && (self.switcher_open || self.alt_held || self.super_held)
+                {
+                    // GNOME's switch-group (Alt+Above_Tab): the selected
+                    // app's windows, opening the switcher when closed.
+                    if !self.switcher_open {
+                        self.switcher_opener = self.builtin_opener();
+                    }
+                    self.switcher_open = true;
+                    self.switcher_swallowed.push(keycode);
+                    self.push_switcher(SwitcherAction::StepWindow {
+                        forward: !self.shift_held,
+                    });
+                } else if pressed
+                    && self.switcher_open
+                    && !modifier
+                    && (keycode != TAB_KEYCODE || self.switcher_keys.is_some())
+                    && keycode != ESCAPE_KEYCODE
+                {
+                    // GNOME's switcher holds the keyboard: arrows, Q, W
+                    // and F4 act on it, every other key goes nowhere.
+                    self.switcher_swallowed.push(keycode);
+                    if let Some(keysym) = switcher_keysym(keycode) {
+                        self.push_switcher(SwitcherAction::Key { keysym });
+                    }
+                } else if keycode == SPACE_KEYCODE && self.super_held && !self.shell_owns_wm_keys()
+                {
                     // GNOME's next input source; press and release stay
                     // with the compositor.
                     if pressed {
                         self.next_input_source(state);
                     }
-                } else if keycode == TAB_KEYCODE && (self.alt_held || self.super_held) {
+                } else if keycode == TAB_KEYCODE
+                    && self.switcher_keys.is_none()
+                    && (self.alt_held || self.super_held)
+                {
                     // Alt+Tab and Super+Tab (GNOME's switch-applications
                     // defaults). The whole chord stays invisible to apps:
                     // taps queue steps, releases are swallowed (an app
@@ -3097,14 +3506,14 @@ impl WindowManager {
                     if pressed {
                         if !self.switcher_open {
                             // Released, this modifier commits.
-                            self.switcher_by_super = !self.alt_held;
+                            self.switcher_opener = self.builtin_opener();
                         }
                         self.switcher_open = true;
                         self.push_switcher(SwitcherAction::Step {
                             forward: !self.shift_held,
                         });
                     }
-                } else if keycode == F4_KEYCODE && self.alt_held {
+                } else if keycode == F4_KEYCODE && self.alt_held && !self.shell_owns_wm_keys() {
                     // Alt+F4 closes the focused window politely. An open
                     // switcher cancels with it: committing onto a window
                     // the user just closed would surprise. Press and
@@ -3121,12 +3530,11 @@ impl WindowManager {
                     self.switcher_open = false;
                     self.push_switcher(SwitcherAction::Cancel);
                 } else {
-                    let opener = if self.switcher_by_super {
-                        keycode == SUPER_LEFT_KEYCODE || keycode == SUPER_RIGHT_KEYCODE
-                    } else {
-                        self.is_alt(keycode)
-                    };
-                    if !pressed && self.switcher_open && opener {
+                    if !pressed
+                        && self.switcher_open
+                        && modifier
+                        && self.held_mods() & self.switcher_opener == 0
+                    {
                         self.switcher_open = false;
                         self.push_switcher(SwitcherAction::Commit);
                     }
@@ -3191,6 +3599,56 @@ impl WindowManager {
                     pointer.frame(state);
                 }
             }
+        }
+    }
+
+    /// A key while the focused window inhibits shortcuts
+    /// (keyboard-shortcuts-inhibit): every chord reaches the window,
+    /// except Super+Escape, Mutter's restore-shortcuts, which hands the
+    /// shortcuts back (press and release stay with the compositor).
+    fn inhibited_key(&mut self, state: &mut State, keycode: u32, pressed: bool, time: u32) {
+        if !pressed && self.switcher_swallowed.contains(&keycode) {
+            self.switcher_swallowed.retain(|k| *k != keycode);
+            return;
+        }
+        if pressed && keycode == ESCAPE_KEYCODE && self.super_held && state.restore_shortcuts() {
+            eprintln!("roost-compositor: shortcuts restored");
+            self.switcher_swallowed.push(keycode);
+            return;
+        }
+        self.keyboard_key(state, keycode, pressed, time);
+    }
+
+    /// Pointer warps clients asked for (pointer-warp): honoured when
+    /// the surface still has pointer focus from the enter they name,
+    /// and lands inside a window or layer surface Roost placed.
+    fn drain_pointer_warps(&mut self, state: &mut State) {
+        for (surface, local, serial) in state.take_pointer_warps() {
+            let Some(pointer) = self.pointer.clone() else {
+                continue;
+            };
+            if pointer.current_focus().as_ref() != Some(&surface)
+                || pointer.last_enter().map(u32::from) != Some(serial)
+            {
+                continue;
+            }
+            let origin = self
+                .windows
+                .values()
+                .find(|w| w.surface.wl_surface().is_some_and(|s| *s == surface))
+                .map(|w| crate::popup::surface_origin(&surface, w.geometry.loc))
+                .or_else(|| {
+                    crate::layer::layer_layout(state)
+                        .into_iter()
+                        .find(|(s, _, _)| *s == surface)
+                        .map(|(_, (x, y), _)| Point::from((x, y)))
+                });
+            let Some(origin) = origin else {
+                continue;
+            };
+            let pos = origin.to_f64() + local;
+            let time = (crate::state::system_millis() & u64::from(u32::MAX)) as u32;
+            self.pointer_motion(state, pos, time);
         }
     }
 
@@ -3289,7 +3747,8 @@ impl WindowManager {
     /// that half, repeat toggles back). Those presses are consumed,
     /// everything else — modifiers included — still reaches clients.
     fn on_workspace_key(&mut self, state: &mut State, keycode: u32, pressed: bool, time: u32) {
-        if pressed && self.super_held && !self.shift_held && keycode == H_KEYCODE {
+        let builtin = !self.shell_owns_wm_keys();
+        if builtin && pressed && self.super_held && !self.shift_held && keycode == H_KEYCODE {
             // GNOME's minimize binding: Super+H hides the focused window.
             if let Some(id) = self.model.focused() {
                 self.minimize(state, id);
@@ -3311,7 +3770,8 @@ impl WindowManager {
             } else {
                 self.keyboard_key(state, keycode, pressed, time);
             }
-        } else if pressed
+        } else if builtin
+            && pressed
             && self.super_held
             && (keycode == PAGE_UP_KEYCODE || keycode == PAGE_DOWN_KEYCODE)
         {
@@ -3334,7 +3794,11 @@ impl WindowManager {
                     self.workspace_popups.push(self.workspace_popup());
                 }
             }
-        } else if pressed && self.super_held && Self::is_arrow(keycode) {
+        } else if pressed
+            && self.super_held
+            && Self::is_arrow(keycode)
+            && (builtin || self.mode == SessionMode::Scroll)
+        {
             if self.mode == SessionMode::Scroll
                 && (keycode == ARROW_LEFT_KEYCODE || keycode == ARROW_RIGHT_KEYCODE)
             {
@@ -3404,7 +3868,83 @@ impl WindowManager {
     fn track_switcher_modifiers(&mut self, keycode: u32, pressed: bool) {
         if self.is_alt(keycode) {
             self.alt_held = pressed;
+        } else if keycode == CTRL_LEFT_KEYCODE || keycode == CTRL_RIGHT_KEYCODE {
+            self.ctrl_held = pressed;
         }
+    }
+
+    /// The modifiers held now, as `MOD_*` bits.
+    fn held_mods(&self) -> u32 {
+        use roost_shell_control::{MOD_ALT, MOD_CTRL, MOD_LOGO, MOD_SHIFT};
+        [
+            (self.shift_held, MOD_SHIFT),
+            (self.ctrl_held, MOD_CTRL),
+            (self.alt_held, MOD_ALT),
+            (self.super_held, MOD_LOGO),
+        ]
+        .into_iter()
+        .filter(|(held, _)| *held)
+        .fold(0, |bits, (_, bit)| bits | bit)
+    }
+
+    /// The built-in chords' opener: Alt when held, else Super.
+    fn builtin_opener(&self) -> u32 {
+        if self.alt_held {
+            roost_shell_control::MOD_ALT
+        } else {
+            roost_shell_control::MOD_LOGO
+        }
+    }
+
+    /// The shell's switcher chord this press makes, with the modifiers
+    /// that hold the switcher open. Matched as Mutter matches: the key's
+    /// base-level keysym in the active layout and the exact modifiers;
+    /// Shift on a forward chord steps backward, as in GNOME's popup.
+    fn switcher_chord(
+        &self,
+        state: &mut State,
+        keycode: u32,
+        pressed: bool,
+    ) -> Option<(roost_shell_control::SwitcherKeyKind, u32)> {
+        use roost_shell_control::{SwitcherKeyKind as K, KEYSYM_ABOVE_TAB, MOD_SHIFT};
+        let keys = self
+            .switcher_keys
+            .as_ref()
+            .filter(|k| pressed && !k.is_empty())?;
+        let sym = self.base_keysym(state, keycode);
+        let mods = self.held_mods();
+        let key = keys.iter().find(|k| {
+            let same = if k.keysym == KEYSYM_ABOVE_TAB {
+                keycode == GRAVE_KEYCODE
+            } else {
+                sym == Some(k.keysym)
+            };
+            same && (k.mods == mods || k.mods | MOD_SHIFT == mods)
+        })?;
+        let flip = mods & MOD_SHIFT != 0 && key.mods & MOD_SHIFT == 0;
+        let kind = match (key.kind, flip) {
+            (K::Applications, true) => K::ApplicationsBackward,
+            (K::ApplicationsBackward, true) => K::Applications,
+            (K::Group, true) => K::GroupBackward,
+            (K::GroupBackward, true) => K::Group,
+            (kind, false) => kind,
+        };
+        Some((kind, key.mods & !MOD_SHIFT))
+    }
+
+    /// The keysym `keycode` types at the base level of the active layout.
+    fn base_keysym(&self, state: &mut State, keycode: u32) -> Option<u32> {
+        let keyboard = self.keyboard.clone()?;
+        keyboard.with_xkb_state(state, |context| {
+            let xkb = context.xkb().lock().ok()?;
+            let layout = xkb.active_layout().0;
+            // SAFETY: the keymap is only borrowed while the lock is held.
+            let keymap = unsafe { xkb.keymap() };
+            keymap
+                .key_get_syms_by_level((keycode + XKB_X11_OFFSET).into(), layout, 0)
+                .first()
+                .map(|sym| sym.raw())
+        })
     }
 
     /// Queue one switcher drive event with a greppable trail for the
@@ -3414,6 +3954,49 @@ impl WindowManager {
         eprintln!("roost-compositor: switcher {action:?}");
         self.switcher_queue.push(action);
     }
+}
+
+/// Mutter's `find_next_cascade` (place.c): starting where the window
+/// would go alone, each window whose corner sits within 10px of the
+/// cascade point pushes it one step down the diagonal, the windows taken
+/// north-west first; so a new window takes the first free slot of the
+/// cascade. A cascade running off the work area starts over at its
+/// top-left, 50px further right each time.
+fn next_cascade(
+    start: Point<i32, Logical>,
+    mut others: Vec<Point<i32, Logical>>,
+    size: Size<i32, Logical>,
+    work: Rectangle<i32, Logical>,
+) -> Point<i32, Logical> {
+    const THRESHOLD: i32 = 10;
+    const CASCADE_INTERVAL: i32 = 50;
+    others.sort_by_key(|p| {
+        let (x, y) = (i64::from(p.x), i64::from(p.y));
+        x * x + y * y
+    });
+    let (mut x, mut y) = (start.x, start.y);
+    let mut stage = 0;
+    let mut i = 0;
+    while i < others.len() {
+        let w = others[i];
+        if (w.x - x).abs() < THRESHOLD && (w.y - y).abs() < THRESHOLD {
+            x = w.x + CASCADE_STEP;
+            y = w.y + CASCADE_STEP;
+            if x + size.w > work.loc.x + work.size.w || y + size.h > work.loc.y + work.size.h {
+                stage += 1;
+                x = work.loc.x.max(0) + CASCADE_INTERVAL * stage;
+                y = work.loc.y.max(0);
+                if x + size.w < work.loc.x + work.size.w {
+                    i = 0;
+                    continue;
+                }
+                x = work.loc.x.max(0);
+                break;
+            }
+        }
+        i += 1;
+    }
+    (x, y).into()
 }
 
 /// Translate a winit backend [`InputEvent`] into [`ManagerInput`].
@@ -3530,6 +4113,22 @@ pub fn translate_input<B: InputBackend>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_windows_take_the_first_free_cascade_slot_like_mutter() {
+        let work = Rectangle::new((0, 32).into(), (1280, 768).into());
+        let size: Size<i32, Logical> = (640, 420).into();
+        let c: Point<i32, Logical> = (320, 206).into();
+        let step = |n: i32| c + Point::from((50 * n, 50 * n));
+        // Mapped in order: each cascades from the last.
+        assert_eq!(next_cascade(c, vec![c], size, work), step(1));
+        assert_eq!(next_cascade(c, vec![step(1), c], size, work), step(2));
+        // The middle one gone: its slot is the first free one.
+        assert_eq!(next_cascade(c, vec![step(2), c], size, work), step(1));
+        // Off the work area: a new cascade from the top-left, 50px right.
+        let full = vec![c, step(1), step(2), step(3), step(4), step(5), step(6)];
+        assert_eq!(next_cascade(c, full, size, work), (50, 32).into());
+    }
 
     fn key(keycode: u32, pressed: bool) -> ManagerInput {
         ManagerInput::Key {

@@ -441,6 +441,8 @@ pub struct Runtime {
     manager: WindowManager,
     control: ControlHub,
     shell: ShellDriver,
+    /// The IBus bridge, when IBus is installed.
+    ime: Option<crate::ime::ImeBridge>,
     overlay: Overlay,
     wallpaper: Wallpaper,
     triggers: TriggerState,
@@ -475,6 +477,15 @@ pub struct Runtime {
     introspect: crate::introspect::Handle,
     /// A three-finger swipe in progress: its travel so far (#60).
     shell_swipe: Option<Point<f64, Logical>>,
+    /// The overview transition: 0 the desktop, 1 the overview (linear
+    /// time; drawn eased), moving toward the open state each frame.
+    overview_progress: f64,
+    overview_progress_at: Instant,
+    /// Last strip-view spring step, for the per-frame time delta.
+    strip_view_at: Instant,
+    /// A three-finger vertical swipe driving the transition: the
+    /// progress it started from.
+    overview_swipe_from: Option<f64>,
     /// Overview search is showing results: the workspace card and
     /// previews hide (GNOME). Reset whenever the overview closes.
     overview_search: bool,
@@ -484,6 +495,8 @@ pub struct Runtime {
     /// A press on an overview preview: the window and where it was
     /// grabbed, and whether it has become a drag (GNOME DnD).
     overview_drag: Option<(u64, Point<f64, Logical>, bool)>,
+    /// The Alt+Tab switcher's window thumbnails (frames from the shell).
+    switcher_thumbnails: Vec<roost_shell_control::SwitcherThumbnail>,
     /// X11 display number once XWayland's window manager is up (#59):
     /// published as `DISPLAY` to the shell for the apps it launches.
     x11_display: Option<u32>,
@@ -550,9 +563,13 @@ impl Runtime {
                     })
                     .map_err(|e| RuntimeError::Loop(e.to_string()))?;
                 handle
-                    .insert_source(sources.drm, |event, _, rt: &mut Runtime| {
-                        if let Backend::Drm(drm) = &mut rt.backend {
-                            drm.on_drm_event(event);
+                    .insert_source(sources.drm, |event, metadata, rt: &mut Runtime| {
+                        let flip = match &mut rt.backend {
+                            Backend::Drm(drm) => drm.on_drm_event(event, metadata),
+                            Backend::Winit(_) => None,
+                        };
+                        if let Some(flip) = flip {
+                            rt.page_flipped(flip);
                         }
                     })
                     .map_err(|e| RuntimeError::Loop(e.to_string()))?;
@@ -709,13 +726,24 @@ impl Runtime {
         event_loop
             .handle()
             .insert_source(crate::screenshot::start(), |event, _, rt: &mut Runtime| {
-                if let calloop::channel::Event::Msg(request) = event {
-                    let saved = if request.window {
-                        rt.capture_window(&request.filename)
-                    } else {
-                        rt.capture(&request.filename)
-                    };
-                    let _ = request.reply.send(saved);
+                use crate::screenshot::Request;
+                match event {
+                    calloop::channel::Event::Msg(Request::Shot {
+                        filename,
+                        window,
+                        reply,
+                    }) => {
+                        let saved = if window {
+                            rt.capture_window(&filename)
+                        } else {
+                            rt.capture(&filename)
+                        };
+                        let _ = reply.send(saved);
+                    }
+                    calloop::channel::Event::Msg(Request::Windows { directory, reply }) => {
+                        let _ = reply.send(rt.capture_selector_windows(&directory));
+                    }
+                    calloop::channel::Event::Closed => {}
                 }
             })
             .map_err(|e| RuntimeError::Loop(e.to_string()))?;
@@ -739,6 +767,7 @@ impl Runtime {
             manager,
             control,
             shell,
+            ime: crate::ime::ImeBridge::configured(&session.socket_name),
             overlay,
             wallpaper: Wallpaper::new(),
             triggers: TriggerState::default(),
@@ -751,7 +780,12 @@ impl Runtime {
             overview_search: false,
             overview_app_grid: false,
             overview_drag: None,
+            switcher_thumbnails: Vec::new(),
             shell_swipe: None,
+            overview_progress: 0.0,
+            overview_progress_at: Instant::now(),
+            strip_view_at: Instant::now(),
+            overview_swipe_from: None,
             scale: clamp_scale(session.scale),
             input_settings: Default::default(),
             pipewire: None,
@@ -969,11 +1003,19 @@ impl Runtime {
                     _ => {}
                 }
             }
-            let action = self.triggers.feed(
-                &input,
-                self.control.overview_open(),
-                self.manager.pointer_pos(),
-            );
+            // Super's tap belongs to a window inhibiting shortcuts
+            // (keyboard-shortcuts-inhibit, #89).
+            let inhibited =
+                matches!(input, ManagerInput::Key { .. }) && self.state.shortcuts_inhibited();
+            let action = if inhibited {
+                TriggerAction::None
+            } else {
+                self.triggers.feed(
+                    &input,
+                    self.control.overview_open(),
+                    self.manager.pointer_pos(),
+                )
+            };
             match action {
                 TriggerAction::None => {}
                 TriggerAction::Toggle => self.control.set_overview(!self.control.overview_open()),
@@ -984,6 +1026,14 @@ impl Runtime {
             // the hub broadcast; the next hub poll delivers it to the
             // shell, which owns MRU order and rendering.
             for action in self.manager.take_switcher_queue() {
+                // A closing switcher takes its thumbnails with it.
+                if matches!(
+                    action,
+                    roost_shell_control::SwitcherAction::Commit
+                        | roost_shell_control::SwitcherAction::Cancel
+                ) {
+                    self.switcher_thumbnails.clear();
+                }
                 self.control.queue_switcher(action);
             }
             for (action, time, mode) in self.manager.take_accelerators_fired() {
@@ -1114,7 +1164,10 @@ impl Runtime {
                 .and_then(|w| w.app_id.clone())
         };
         let overview_open = self.control.overview_open();
-        let scene = overview_open.then(|| self.overview_layout());
+        // Previews only once the transition settles: harnesses click
+        // where they say.
+        let scene =
+            (overview_open && self.overview_progress >= 1.0).then(|| self.overview_layout());
         // GNOME's workspace thumbnails strip (three or more workspaces).
         let thumbnails: Vec<serde_json::Value> = scene
             .iter()
@@ -1158,6 +1211,16 @@ impl Runtime {
             "focused_rect": focused
                 .and_then(|id| self.manager.geometry(id))
                 .map(|g| [g.loc.x, g.loc.y, g.size.w, g.size.h]),
+            // Floating ("gnome") or niri's strip ("scroll"), and how far
+            // the strip's view has scrolled.
+            "session_mode": match self.manager.session_mode() {
+                crate::windows::SessionMode::Scroll => "scroll",
+                crate::windows::SessionMode::Gnome => "gnome",
+            },
+            "strip_offset": self.manager.strip_offset(),
+            // Where the strip is drawn this frame: trails the target
+            // on niri's view-movement spring, equal once settled.
+            "strip_view": self.manager.strip_view(),
             "minimized": snapshot
                 .windows
                 .iter()
@@ -1178,6 +1241,8 @@ impl Runtime {
             })).collect::<Vec<_>>(),
             "previews": previews,
             "thumbnails": thumbnails,
+            // The Alt+Tab switcher's window thumbnails being drawn.
+            "switcher_thumbnails": self.switcher_thumbnails.len(),
             // GNOME's tile preview while a dragged window is over a
             // snap edge: the window and the area it would fill.
             "tile_preview": self.manager.tile_preview(&self.state).map(|(id, r)| {
@@ -1234,6 +1299,15 @@ impl Runtime {
             model.active_workspace(),
             &self.manager.overview_windows(),
         );
+        if self.overview_progress < 1.0 {
+            // Part-way through GNOME's transition.
+            return crate::overview::transition(
+                &scene,
+                crate::overview::ease_out_quad(self.overview_progress),
+                output,
+                &self.manager.overview_windows(),
+            );
+        }
         match self.overview_drag {
             Some((id, start, true)) => {
                 crate::overview::drag_preview(&mut scene, id, start, self.manager.pointer_pos());
@@ -1242,6 +1316,38 @@ impl Runtime {
             _ => crate::overview::grow_hovered(&mut scene, self.manager.pointer_pos()),
         }
         scene
+    }
+
+    /// Move the overview transition toward the open state (250 ms each
+    /// way, as GNOME's), unless a swipe holds it. Returns whether the
+    /// overview is drawn at all.
+    fn step_overview_transition(&mut self) -> bool {
+        let now = Instant::now();
+        let dt = now.duration_since(self.overview_progress_at).as_secs_f64() * 1000.0;
+        self.overview_progress_at = now;
+        if self.overview_swipe_from.is_none() {
+            let target = if self.control.overview_open() {
+                1.0
+            } else {
+                0.0
+            };
+            let step = dt / crate::overview::TRANSITION_MS;
+            self.overview_progress = if target > self.overview_progress {
+                (self.overview_progress + step).min(target)
+            } else {
+                (self.overview_progress - step).max(target)
+            };
+        }
+        self.overview_progress > 0.0
+    }
+
+    /// Advance the scroll-mode strip view on its spring by the time
+    /// since the last frame (niri's view-movement animation).
+    fn step_strip_view(&mut self) {
+        let now = Instant::now();
+        let dt = now.duration_since(self.strip_view_at).as_secs_f64();
+        self.strip_view_at = now;
+        self.manager.step_strip_view(dt);
     }
 
     /// A press while the overview is open that no shell surface took:
@@ -1320,6 +1426,16 @@ impl Runtime {
             ManagerInput::SwipeUpdate { delta, .. } => match self.shell_swipe.as_mut() {
                 Some(travel) => {
                     *travel += delta;
+                    let travel = *travel;
+                    // GNOME's overview follows the fingers: a vertical
+                    // swipe moves the transition (up opens) as it goes.
+                    if travel.y.abs() > travel.x.abs() {
+                        let from = *self
+                            .overview_swipe_from
+                            .get_or_insert(self.overview_progress);
+                        self.overview_progress =
+                            (from - travel.y / OVERVIEW_SWIPE_DISTANCE).clamp(0.0, 1.0);
+                    }
                     true
                 }
                 None => false,
@@ -1328,6 +1444,17 @@ impl Runtime {
                 let Some(travel) = self.shell_swipe.take() else {
                     return false;
                 };
+                if let Some(from) = self.overview_swipe_from.take() {
+                    // Released: finish toward whichever side is nearer
+                    // (back where it began when cancelled).
+                    let open = if cancelled {
+                        from >= 0.5
+                    } else {
+                        self.overview_progress >= 0.5
+                    };
+                    self.control.set_overview(open);
+                    return true;
+                }
                 if !cancelled {
                     use crate::windows::SwipeAction;
                     match crate::windows::swipe_action(travel.x, travel.y) {
@@ -1382,6 +1509,73 @@ impl Runtime {
             path.display()
         );
         Some(path)
+    }
+
+    /// GNOME's screenshot window selector (screenshot.js
+    /// `UIWindowSelector.capture`): every window on the active workspace,
+    /// minimized ones left out, each saved at full size into `directory`
+    /// and given its slot in the selector, laid out with GNOME's window
+    /// spread inside the selector's margins. Never while locked.
+    pub fn capture_selector_windows(
+        &mut self,
+        directory: &std::path::Path,
+    ) -> Vec<crate::screenshot::WindowShot> {
+        if self.is_locked() || std::fs::create_dir_all(directory).is_err() {
+            return Vec::new();
+        }
+        let size = self.state.primary_size();
+        let model = self.manager.model();
+        let active = model.active_workspace();
+        let focused = model.focused();
+        let mut windows: Vec<(u64, Rectangle<i32, Logical>)> = self
+            .manager
+            .overview_windows()
+            .into_iter()
+            .filter(|w| w.workspace == active && !self.manager.is_minimized(w.id))
+            .map(|w| (w.id, w.geometry))
+            .collect();
+        // GNOME sorts by stable sequence: creation order (Roost ids rise).
+        windows.sort_by_key(|(id, _)| *id);
+        let top = crate::windows::WORK_AREA_TOP;
+        let workarea = Rectangle::new((0, top).into(), (size.w, (size.h - top).max(1)).into());
+        let (ax, ay, aw, ah) = crate::screenshot::selector_area(size.w, size.h);
+        let area = Rectangle::new((ax, ay).into(), (aw, ah).into());
+        let slots = crate::overview::window_slots_spaced(
+            workarea,
+            size.h,
+            area,
+            &windows,
+            crate::overview::SELECTOR_SPACING,
+        );
+        let mut shots = Vec::new();
+        for (id, rect, _) in slots {
+            let title = self
+                .manager
+                .model()
+                .window(id)
+                .map(|w| w.title.clone())
+                .unwrap_or_default();
+            let Some((w, h, rgba)) =
+                self.render_window_pixels(id, None, smithay::backend::allocator::Fourcc::Abgr8888)
+            else {
+                continue;
+            };
+            let path = directory.join(format!("window-{id}.png"));
+            if crate::screenshot::save_png(&path, w as u32, h as u32, &rgba).is_err() {
+                continue;
+            }
+            shots.push(crate::screenshot::WindowShot {
+                id,
+                title,
+                focused: focused == Some(id),
+                x: rect.loc.x,
+                y: rect.loc.y,
+                width: rect.size.w,
+                height: rect.size.h,
+                path,
+            });
+        }
+        shots
     }
 
     /// Physical size of window `id` at its output's scale, and the scale.
@@ -1494,7 +1688,7 @@ impl Runtime {
         if self.is_locked() {
             return None;
         }
-        let overview = self.control.overview_open().then(|| self.overview_layout());
+        let overview = (self.overview_progress > 0.0).then(|| self.overview_layout());
         let cards = overview.as_ref().filter(|_| !self.overview_search);
         let tile = overview
             .is_none()
@@ -1552,6 +1746,23 @@ impl Runtime {
         if let Some((_, rect)) = tile {
             elements.tile = tile_elements(rect, view, accent);
         }
+        if overview.is_none() {
+            elements
+                .tile
+                .extend(focus_ring_elements(&self.manager, view));
+        }
+        elements.top = previews_to_elements(
+            renderer,
+            &self.manager,
+            view,
+            &switcher_previews(&self.manager, &self.switcher_thumbnails),
+        );
+        elements.top.extend(dnd_icon_elements(
+            renderer,
+            &self.state,
+            view,
+            self.manager.pointer_pos(),
+        ));
         let decor = decor_for_output(&decor_global, view);
         let previews = preview_elements(renderer, &self.manager, view, cards);
         let paper = backdrop(
@@ -1632,6 +1843,25 @@ impl Runtime {
                     };
                     self.render_pixels(output, xrgb)
                 }
+                CastTarget::Area(connector, area) => {
+                    let output = match &self.backend {
+                        Backend::Winit(_) => None,
+                        #[cfg(feature = "drm")]
+                        Backend::Drm(_) => Some(connector.as_str()),
+                    };
+                    #[cfg(not(feature = "drm"))]
+                    let _ = connector;
+                    self.render_pixels(output, xrgb).and_then(|(w, h, pixels)| {
+                        let cropped = crate::screencast::crop(&pixels, (w, h), *area);
+                        if cropped.is_none() {
+                            eprintln!(
+                                "roost-compositor: screen cast area {area:?} is not inside the {w}x{h} frame ({} bytes)",
+                                pixels.len()
+                            );
+                        }
+                        cropped.map(|cropped| (area.2, area.3, cropped))
+                    })
+                }
             };
             let Some((w, h, bgrx)) = frame else {
                 continue;
@@ -1668,6 +1898,7 @@ impl Runtime {
                     crate::mutter::CastTarget::Window(id) => {
                         self.window_pixel_size(*id).map(|(size, _)| size)
                     }
+                    crate::mutter::CastTarget::Area(_, (_, _, w, h)) => Some((*w, *h)),
                 };
                 let Some((width, height)) = size else {
                     crate::mutter::session_closed(&signal, session_id);
@@ -1772,25 +2003,28 @@ impl Runtime {
     /// icon, caption and close button (window picker only, not while
     /// search or the app grid covers it).
     fn publish_overview_previews(&mut self) {
-        let (previews, hovered) =
-            if self.control.overview_open() && !self.overview_search && !self.overview_app_grid {
-                let scene = self.overview_layout();
-                let list: Vec<roost_shell_control::PreviewInfo> = scene
-                    .previews
-                    .iter()
-                    .filter(|p| p.active)
-                    .map(|p| roost_shell_control::PreviewInfo {
-                        window: p.id,
-                        x: p.rect.loc.x,
-                        y: p.rect.loc.y,
-                        width: p.rect.size.w,
-                        height: p.rect.size.h,
-                    })
-                    .collect();
-                (list, scene.hovered)
-            } else {
-                (Vec::new(), None)
-            };
+        let (previews, hovered) = if self.control.overview_open()
+            && self.overview_progress >= 1.0
+            && !self.overview_search
+            && !self.overview_app_grid
+        {
+            let scene = self.overview_layout();
+            let list: Vec<roost_shell_control::PreviewInfo> = scene
+                .previews
+                .iter()
+                .filter(|p| p.active)
+                .map(|p| roost_shell_control::PreviewInfo {
+                    window: p.id,
+                    x: p.rect.loc.x,
+                    y: p.rect.loc.y,
+                    width: p.rect.size.w,
+                    height: p.rect.size.h,
+                })
+                .collect();
+            (list, scene.hovered)
+        } else {
+            (Vec::new(), None)
+        };
         self.control.set_overview_previews(previews, hovered);
     }
 
@@ -1850,6 +2084,12 @@ impl Runtime {
             .flush_clients()
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
         self.manager.reconcile(&mut self.state);
+        // A client's pointer warp moved the manager's pointer: the
+        // drawn cursor follows (#89).
+        #[cfg(feature = "drm")]
+        if let Backend::Drm(drm) = &mut self.backend {
+            drm.set_pointer(self.manager.pointer_pos());
+        }
         // Publish the output inventory every tick (multi-monitor): the
         // hub broadcasts on change only, so the steady state costs one
         // short comparison. The inventory is the compositor's tracking
@@ -1876,6 +2116,15 @@ impl Runtime {
         }
         for (window, action) in outcome.window_actions {
             self.manager.window_action(&mut self.state, window, action);
+        }
+        if let Some(thumbnails) = outcome.switcher_thumbnails {
+            self.switcher_thumbnails = thumbnails;
+        }
+        if let Some(keys) = outcome.switcher_keys {
+            self.manager.set_switcher_keys(keys);
+        }
+        for backward in outcome.input_source_switches {
+            self.manager.switch_input_source(&mut self.state, backward);
         }
         // Header-bar right clicks: GNOME's window menu, drawn by the shell.
         for (window, x, y) in self.manager.take_menu_requests() {
@@ -1970,6 +2219,9 @@ impl Runtime {
                 self.overlay.show(Vec::new());
             }
         } else {
+            if let Some(ime) = &mut self.ime {
+                ime.poll(crate::state::system_millis(), &mut self.display.handle());
+            }
             match self.shell.poll(crate::state::system_millis()) {
                 ShellStatus::Running => {
                     if self.overlay.visible {
@@ -2013,6 +2265,39 @@ impl Runtime {
         Ok(!self.exit)
     }
 
+    /// A page flip completed (hardware): mark what the frame drew
+    /// presented with the kernel's vblank time and sequence, and on the
+    /// primary output advance fifo barriers and commit timers (#89).
+    #[cfg(feature = "drm")]
+    fn page_flipped(&mut self, flip: crate::drm::PageFlip) {
+        use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind;
+        use smithay::utils::{Monotonic, Time};
+        // Mutter's KMS flags: vsync'd, kernel-timestamped, completion
+        // reported by the hardware.
+        let (time, flags): (Time<Monotonic>, Kind) = match flip.time {
+            Some(time) => (
+                Time::from(time),
+                Kind::Vsync | Kind::HwClock | Kind::HwCompletion,
+            ),
+            None => (
+                self.state.presentation_now(),
+                Kind::Vsync | Kind::HwCompletion,
+            ),
+        };
+        if let Some(mut feedback) = flip.feedback {
+            feedback.presented::<_, Monotonic>(
+                time,
+                smithay::wayland::presentation::Refresh::fixed(flip.refresh),
+                flip.sequence,
+                flags,
+            );
+        }
+        if flip.primary {
+            let roots = crate::frame_timing::frame_roots(&self.state, &self.manager);
+            self.state.refresh_cycle(&roots, time, flip.refresh);
+        }
+    }
+
     /// Render all mapped toplevels stacked at the origin, then send frame
     /// callbacks. While the recovery overlay is visible the background
     /// shifts to a deep red (provisional overlay visual; full overlay
@@ -2035,8 +2320,9 @@ impl Runtime {
         } else {
             self.desktop_color()
         };
-        let overview = (show_content && !overlay_visible && self.control.overview_open())
-            .then(|| self.overview_layout());
+        let drawn = self.step_overview_transition();
+        self.step_strip_view();
+        let overview = (show_content && !overlay_visible && drawn).then(|| self.overview_layout());
         // While search shows results, the workspace view steps aside.
         let cards = overview.as_ref().filter(|_| !self.overview_search);
         // GNOME's tile preview while a dragged window is over a snap edge.
@@ -2084,6 +2370,23 @@ impl Runtime {
                     if let Some((_, rect)) = tile {
                         elements.tile = tile_elements(rect, view, accent);
                     }
+                    if overview.is_none() && show_content {
+                        elements
+                            .tile
+                            .extend(focus_ring_elements(&self.manager, view));
+                    }
+                    elements.top = previews_to_elements(
+                        renderer,
+                        &self.manager,
+                        view,
+                        &switcher_previews(&self.manager, &self.switcher_thumbnails),
+                    );
+                    elements.top.extend(dnd_icon_elements(
+                        renderer,
+                        &self.state,
+                        view,
+                        self.manager.pointer_pos(),
+                    ));
                     let decor = decor_for_output(&decor_global, view);
                     let previews = preview_elements(renderer, &self.manager, view, cards);
                     let paper = backdrop(
@@ -2123,6 +2426,14 @@ impl Runtime {
                 backend
                     .submit(Some(&[damage]))
                     .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+                // The host took the frame: presentation feedback,
+                // fifo barriers and commit timers (#89).
+                crate::frame_timing::present_nested_frame(
+                    &mut self.state,
+                    &self.manager,
+                    locked,
+                    self.stats.frames,
+                );
                 self.stats.frames += 1;
             }
             #[cfg(feature = "drm")]
@@ -2134,8 +2445,19 @@ impl Runtime {
                 let crate::drm::DrmBackend {
                     renderer, outputs, ..
                 } = &mut **drm;
+                // What each output's frame draws, for presentation
+                // feedback at its page flip (#89): a surface belongs to
+                // the output under its center, else the primary.
+                let drawn = crate::frame_timing::drawn_roots(&self.state, &self.manager, locked);
+                let rects: Vec<Rectangle<i32, Logical>> = outputs
+                    .iter()
+                    .map(|o| Rectangle::new(o.loc.into(), o.logical_size().into()))
+                    .collect();
+                let owner = |at: &smithay::utils::Point<i32, Logical>| {
+                    rects.iter().position(|r| r.contains(*at)).unwrap_or(0)
+                };
                 let mut queued = false;
-                for out in outputs.iter_mut() {
+                for (index, out) in outputs.iter_mut().enumerate() {
                     // Display-paced: one frame in flight per output.
                     if out.pending {
                         continue;
@@ -2172,6 +2494,23 @@ impl Runtime {
                     if let Some((_, rect)) = tile {
                         elements.tile = tile_elements(rect, view, accent);
                     }
+                    if overview.is_none() && show_content {
+                        elements
+                            .tile
+                            .extend(focus_ring_elements(&self.manager, view));
+                    }
+                    elements.top = previews_to_elements(
+                        renderer,
+                        &self.manager,
+                        view,
+                        &switcher_previews(&self.manager, &self.switcher_thumbnails),
+                    );
+                    elements.top.extend(dnd_icon_elements(
+                        renderer,
+                        &self.state,
+                        view,
+                        self.manager.pointer_pos(),
+                    ));
                     let decor = decor_for_output(&decor_global, view);
                     let previews = preview_elements(renderer, &self.manager, view, cards);
                     let paper = backdrop(
@@ -2229,7 +2568,14 @@ impl Runtime {
                             .finish()
                             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?
                     };
-                    if let Err(e) = out.surface.queue_buffer(Some(sync), None, ()) {
+                    let mine: Vec<_> = drawn
+                        .iter()
+                        .filter(|(_, at)| owner(at) == index)
+                        .map(|(surface, _)| surface.clone())
+                        .chain(lock_surface.clone())
+                        .collect();
+                    let feedback = crate::frame_timing::take_feedback(&mine, &out.output);
+                    if let Err(e) = out.surface.queue_buffer(Some(sync), None, feedback) {
                         eprintln!("roost-compositor: drm: queue_buffer {}: {e}", out.name);
                         continue;
                     }
@@ -2248,6 +2594,10 @@ impl Runtime {
 }
 
 /// Overview backdrop (GNOME 51's `#overviewGroup`, #222226).
+/// Vertical finger travel for a whole overview transition (logical
+/// touchpad units, as libinput reports swipe deltas).
+const OVERVIEW_SWIPE_DISTANCE: f64 = 300.0;
+
 const OVERVIEW_BACKGROUND: Color32F = Color32F::new(34.0 / 255.0, 34.0 / 255.0, 38.0 / 255.0, 1.0);
 
 /// The overview's solid fills (the workspace thumbnails strip) in
@@ -2302,8 +2652,18 @@ fn preview_elements(
     let Some(layout) = overview else {
         return Vec::new();
     };
+    previews_to_elements(renderer, manager, view, &layout.previews)
+}
+
+/// Window surfaces drawn scaled into preview rects, front to back.
+fn previews_to_elements(
+    renderer: &mut GlesRenderer,
+    manager: &WindowManager,
+    view: View,
+    previews: &[crate::overview::Preview],
+) -> Vec<PreviewElement> {
     let mut out = Vec::new();
-    for preview in &layout.previews {
+    for preview in previews {
         let Some(surface) = manager.surface_of(preview.id) else {
             continue;
         };
@@ -2334,6 +2694,76 @@ fn preview_elements(
     crate::layer::front_to_back(out)
 }
 
+/// A drag's icon at the pointer, centred on it (front to back).
+fn dnd_icon_elements(
+    renderer: &mut GlesRenderer,
+    state: &State,
+    view: View,
+    pointer: Point<f64, Logical>,
+) -> Vec<PreviewElement> {
+    let Some(icon) = state.dnd_icon() else {
+        return Vec::new();
+    };
+    let size = smithay::wayland::compositor::with_states(&icon, |states| {
+        states
+            .data_map
+            .get::<smithay::backend::renderer::utils::RendererSurfaceStateUserData>()
+            .and_then(|d| d.lock().ok().and_then(|d| d.surface_size()))
+    })
+    .unwrap_or_default();
+    let origin = view.physical(
+        pointer.x - f64::from(size.w) / 2.0,
+        pointer.y - f64::from(size.h) / 2.0,
+    );
+    let elements = render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(
+        renderer,
+        &icon,
+        origin,
+        view.scale,
+        1.0,
+        Kind::Unspecified,
+    );
+    crate::layer::front_to_back(
+        elements
+            .into_iter()
+            .map(|e| {
+                smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
+                    e, origin, 1.0,
+                )
+            })
+            .collect(),
+    )
+}
+
+/// GNOME's switcher thumbnails (altTab.js `_createWindowClone`): each
+/// window scaled down (never up) to fit its frame, centred in it.
+fn switcher_previews(
+    manager: &WindowManager,
+    thumbnails: &[roost_shell_control::SwitcherThumbnail],
+) -> Vec<crate::overview::Preview> {
+    thumbnails
+        .iter()
+        .filter_map(|t| {
+            let geo = manager.geometry(t.window)?;
+            let (w, h) = (f64::from(geo.size.w.max(1)), f64::from(geo.size.h.max(1)));
+            let scale = (f64::from(t.width) / w)
+                .min(f64::from(t.height) / h)
+                .min(1.0);
+            let (sw, sh) = ((w * scale).round() as i32, (h * scale).round() as i32);
+            Some(crate::overview::Preview {
+                id: t.window,
+                rect: Rectangle::new(
+                    (t.x + (t.width - sw) / 2, t.y + (t.height - sh) / 2).into(),
+                    (sw, sh).into(),
+                ),
+                scale,
+                active: false,
+                alpha: 1.0,
+            })
+        })
+        .collect()
+}
+
 /// One output's surfaces, front to back, with GNOME's tile preview
 /// slotted in: `elements[..above]` draw over the preview (the dragged
 /// window, its popups and the shell's layers), the rest beneath it.
@@ -2341,6 +2771,8 @@ struct Scene {
     elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
     above: usize,
     tile: Vec<smithay::backend::renderer::element::solid::SolidColorRenderElement>,
+    /// Window thumbnails over everything (the Alt+Tab switcher's).
+    top: Vec<PreviewElement>,
 }
 
 impl Scene {
@@ -2351,6 +2783,7 @@ impl Scene {
             elements,
             above,
             tile: Vec::new(),
+            top: Vec::new(),
         }
     }
 }
@@ -2397,6 +2830,60 @@ fn tile_elements(
         .into_iter()
         .zip(ids.iter())
         .map(|((geo, color), id)| {
+            SolidColorRenderElement::new(id.clone(), geo, 0usize, color, Kind::Unspecified)
+        })
+        .collect()
+    })
+}
+
+/// niri's focus ring in scroll mode (its default `focus-ring`): 4px of
+/// #7fc8ff around the focused column, outside its edges, where the
+/// strip's 16px gaps leave room.
+fn focus_ring_elements(
+    manager: &WindowManager,
+    view: View,
+) -> Vec<smithay::backend::renderer::element::solid::SolidColorRenderElement> {
+    use smithay::backend::renderer::element::solid::SolidColorRenderElement;
+    use smithay::backend::renderer::element::Id;
+    const WIDTH: i32 = 4;
+    if manager.session_mode() != crate::windows::SessionMode::Scroll {
+        return Vec::new();
+    }
+    let Some(rect) = manager
+        .model()
+        .focused()
+        .and_then(|id| manager.render_geometry(id))
+    else {
+        return Vec::new();
+    };
+    let outer = view.physical(f64::from(rect.loc.x - WIDTH), f64::from(rect.loc.y - WIDTH));
+    let outer_end = view.physical(
+        f64::from(rect.loc.x + rect.size.w + WIDTH),
+        f64::from(rect.loc.y + rect.size.h + WIDTH),
+    );
+    let r = Rectangle::from_extremities(outer, outer_end);
+    let b = (f64::from(WIDTH) * view.scale).round().max(1.0) as i32;
+    let (w, h) = (r.size.w, r.size.h);
+    if w <= 2 * b || h <= 2 * b {
+        return Vec::new();
+    }
+    let color = Color32F::new(0x7f as f32 / 255.0, 0xc8 as f32 / 255.0, 1.0, 1.0);
+    let at = |x: i32, y: i32, w: i32, h: i32| -> Rectangle<i32, smithay::utils::Physical> {
+        Rectangle::new((r.loc.x + x, r.loc.y + y).into(), (w, h).into())
+    };
+    thread_local! {
+        static IDS: [Id; 4] = std::array::from_fn(|_| Id::new());
+    }
+    IDS.with(|ids| {
+        [
+            at(0, 0, w, b),
+            at(0, h - b, w, b),
+            at(0, b, b, h - 2 * b),
+            at(w - b, b, b, h - 2 * b),
+        ]
+        .into_iter()
+        .zip(ids.iter())
+        .map(|(geo, id)| {
             SolidColorRenderElement::new(id.clone(), geo, 0usize, color, Kind::Unspecified)
         })
         .collect()
@@ -2479,7 +2966,7 @@ fn scene_elements(
             Kind::Unspecified,
         ));
     };
-    for (window, geometry) in manager.visible_windows() {
+    for (window, geometry) in manager.render_windows() {
         // Unassociated X11 windows contribute no surface yet and
         // render nothing this frame.
         if let Some(surface) = window.wl_surface() {
@@ -2510,6 +2997,7 @@ fn scene_elements(
         elements: crate::layer::front_to_back(elements),
         above,
         tile: Vec::new(),
+        top: Vec::new(),
     }
 }
 
@@ -2617,6 +3105,10 @@ fn draw_scene(
     }
     draw_render_elements(frame, scale, over, &[damage])
         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    if !scene.top.is_empty() {
+        draw_render_elements(frame, scale, &scene.top, &[damage])
+            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    }
     Ok(())
 }
 
@@ -2679,6 +3171,12 @@ fn send_frame_callbacks(state: &State, manager: &WindowManager, frames: u64) {
             Some(output.clone())
         });
     }
+    // A drag's icon animates on frame callbacks too.
+    if let Some(icon) = state.dnd_icon() {
+        send_frames_surface_tree(&icon, &output, time, Some(Duration::ZERO), |_, _| {
+            Some(output.clone())
+        });
+    }
     // The lock screen (ext-session-lock) paints on frame callbacks too.
     for surface in state.lock_surfaces() {
         send_frames_surface_tree(&surface, &output, time, Some(Duration::ZERO), |_, _| {
@@ -2730,6 +3228,10 @@ fn send_frame_callbacks(state: &State, manager: &WindowManager, frames: u64) {
 pub fn run(session: &NestedSession) -> Result<RunStats, RuntimeError> {
     let (mut runtime, mut event_loop) = Runtime::launch(session)?;
     let prev_env = apply_nested_env(&session.socket_name);
+    #[cfg(feature = "drm")]
+    if matches!(runtime.backend, Backend::Drm(_)) {
+        crate::session_services::publish(&session.socket_name);
+    }
     // Graceful shutdown on SIGTERM/SIGINT: ending the loop drops the
     // runtime, whose supervisor kills the shell child (ADR 0003 kill
     // on exit). Without this a signal would bypass `Drop` and orphan

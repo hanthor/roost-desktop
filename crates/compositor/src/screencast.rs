@@ -89,7 +89,8 @@ impl PipeWire {
             .add_local_listener_with_user_data(())
             .state_changed({
                 let inner = inner.clone();
-                move |stream, (), _old, new| {
+                move |stream, (), old, new| {
+                    eprintln!("roost-compositor: screen cast {session_id}: {old:?} -> {new:?}");
                     let mut inner = inner.borrow_mut();
                     match new {
                         StreamState::Paused => {
@@ -310,6 +311,30 @@ impl Cast {
     }
 }
 
+/// The `(x, y, width, height)` part of a 4-byte-per-pixel frame of
+/// `size`, rows top-down; `None` when the area leaves the frame.
+pub fn crop(
+    pixels: &[u8],
+    (frame_w, frame_h): (i32, i32),
+    (x, y, w, h): (i32, i32, i32, i32),
+) -> Option<Vec<u8>> {
+    if x < 0 || y < 0 || w <= 0 || h <= 0 || x + w > frame_w || y + h > frame_h {
+        return None;
+    }
+    let bpp = BYTES_PER_PIXEL as usize;
+    let stride = frame_w as usize * bpp;
+    if pixels.len() < stride * frame_h as usize {
+        return None;
+    }
+    let row = w as usize * bpp;
+    let mut out = Vec::with_capacity(row * h as usize);
+    for line in y as usize..(y + h) as usize {
+        let start = line * stride + x as usize * bpp;
+        out.extend_from_slice(&pixels[start..start + row]);
+    }
+    Some(out)
+}
+
 fn video_format(width: u32, height: u32) -> pod::Object {
     pod::object!(
         SpaTypes::ObjectParamFormat,
@@ -346,4 +371,23 @@ fn make_pod(buffer: &mut Vec<u8>, object: pod::Object) -> &Pod {
     )
     .expect("pod serializes");
     Pod::from_bytes(buffer).expect("pod parses")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn areas_crop_out_of_frames() {
+        // A 3x2 frame whose pixels count up.
+        let frame: Vec<u8> = (0u8..6).flat_map(|p| [p, p, p, 255]).collect();
+        let cropped = crop(&frame, (3, 2), (1, 0, 2, 2)).unwrap();
+        let firsts: Vec<u8> = cropped.chunks(4).map(|p| p[0]).collect();
+        assert_eq!(firsts, [1, 2, 4, 5]);
+        assert!(
+            crop(&frame, (3, 2), (2, 0, 2, 1)).is_none(),
+            "past the edge"
+        );
+        assert!(crop(&frame, (3, 2), (0, 0, 0, 1)).is_none(), "empty");
+    }
 }

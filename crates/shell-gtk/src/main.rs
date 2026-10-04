@@ -13,14 +13,17 @@
 //! The compositor runs one supervised shell; select this one with
 //! `ROOST_SHELL_BIN=roost-shell-gtk` while it grows to parity.
 
+mod bt_menu;
 mod calendar;
 mod events;
 mod folder_dialog;
 mod folders;
+mod ibus_panel;
 mod keybindings;
 mod live_apps;
 mod lock;
 mod logic;
+mod network_agent;
 mod notify;
 mod osd;
 mod overview;
@@ -28,6 +31,8 @@ mod polkit;
 mod power;
 mod preview_chrome;
 mod providers;
+mod screencast;
+mod screensaver;
 mod screenshot_ui;
 mod services;
 mod shell_dbus;
@@ -35,6 +40,7 @@ mod switcher;
 mod tray;
 mod wifi;
 mod window_menu;
+mod wired;
 mod ws_popup;
 
 use std::cell::RefCell;
@@ -501,6 +507,7 @@ fn qs_round(icon: &str, label: &str) -> gtk::Button {
 
 /// The panel's status icons that quick-settings services drive.
 struct PanelIcons {
+    mic: gtk::Image,
     network: gtk::Image,
     dnd: gtk::Image,
     volume: gtk::Image,
@@ -620,6 +627,48 @@ fn quick_settings_popover(
     slider.set_hexpand(true);
     slider.update_property(&[gtk::accessible::Property::Label("Volume")]);
     volume_row.append(&slider);
+    // GNOME's sound output menu (volume.js): an arrow beside the slider,
+    // offered with more than one output.
+    let sound_menu_ui = QsMenu::new("audio-headphones-symbolic", "Sound Output");
+    let sound_list = sound_menu_ui.list();
+    sound_menu_ui.separator();
+    let (sound_settings, _) = sound_menu_ui.item(None, "Sound Settings");
+    sound_settings.connect_clicked(|_| {
+        let _ = std::process::Command::new("gnome-control-center")
+            .arg("sound")
+            .spawn();
+    });
+    let sound_arrow = gtk::ToggleButton::new();
+    sound_arrow.set_icon_name("go-next-symbolic");
+    sound_arrow.add_css_class("qs-slider-menu-button");
+    sound_arrow.update_property(&[gtk::accessible::Property::Label("Open sound output menu")]);
+    sound_arrow.set_visible(false);
+    {
+        let revealer = sound_menu_ui.revealer.clone();
+        sound_arrow.connect_toggled(move |a| revealer.set_visible(a.is_active()));
+    }
+    {
+        let arrow = sound_arrow.clone();
+        sound_menu_ui.revealer.connect_visible_notify(move |r| {
+            if arrow.is_active() != r.is_visible() {
+                arrow.set_active(r.is_visible());
+            }
+        });
+    }
+    volume_row.append(&sound_arrow);
+
+    // GNOME's microphone slider (volume.js `InputStreamSlider`): shown
+    // only while an app records; the icon button mutes.
+    let mic_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let mic_mute = gtk::Button::from_icon_name("microphone-sensitivity-medium-symbolic");
+    mic_mute.add_css_class("flat");
+    mic_mute.update_property(&[gtk::accessible::Property::Label("Mute")]);
+    mic_row.append(&mic_mute);
+    let mic = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 100.0, 1.0);
+    mic.set_hexpand(true);
+    mic.update_property(&[gtk::accessible::Property::Label("Microphone")]);
+    mic_row.append(&mic);
+    mic_row.set_visible(false);
 
     // Brightness: hidden without a backlight.
     let brightness_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -651,8 +700,36 @@ fn quick_settings_popover(
     }
     let wifi = qs_menu_tile("network-wireless-symbolic", "Wi-Fi", None, &wifi_menu_ui);
     wifi_menu.set_tile(wifi.clone());
-    let wired = qs_tile("network-wired-symbolic", "Wired", None);
-    let bluetooth = qs_tile("bluetooth-active-symbolic", "Bluetooth", None);
+    // GNOME's wired menu: the devices' profiles, then Wired Settings.
+    let wired_menu_ui = QsMenu::new("network-wired-symbolic", "Wired Connections");
+    let wired_menu = wired::WiredMenu::new(wired_menu_ui.list());
+    wired_menu_ui.separator();
+    let (wired_settings, _) = wired_menu_ui.item(None, "Wired Settings");
+    wired_settings.connect_clicked(|_| {
+        let _ = std::process::Command::new("gnome-control-center")
+            .arg("network")
+            .spawn();
+    });
+    let wired = qs_menu_tile("network-wired-symbolic", "Wired", None, &wired_menu_ui);
+    wired_menu.set_tile(wired.clone());
+    // GNOME's Bluetooth menu: devices, a placeholder, Bluetooth Settings.
+    let bt_menu_ui = QsMenu::new("bluetooth-active-symbolic", "Bluetooth");
+    let bt_list = bt_menu_ui.list();
+    let bt_placeholder = gtk::Label::new(None);
+    bt_placeholder.add_css_class("bt-menu-placeholder");
+    bt_placeholder.set_wrap(true);
+    bt_placeholder.set_justify(gtk::Justification::Center);
+    bt_menu_ui.section.append(&bt_placeholder);
+    let bt_menu = bt_menu::BtMenu::new(bt_list, bt_placeholder);
+    bt_menu_ui.separator();
+    let (bt_settings, _) = bt_menu_ui.item(None, "Bluetooth Settings");
+    bt_settings.connect_clicked(|_| {
+        let _ = std::process::Command::new("gnome-control-center")
+            .arg("bluetooth")
+            .spawn();
+    });
+    let bluetooth = qs_menu_tile("bluetooth-active-symbolic", "Bluetooth", None, &bt_menu_ui);
+    bt_menu.set_tile(bluetooth.clone());
     let power_menu_ui = QsMenu::new("power-profile-balanced-symbolic", "Power Mode");
     let power_items: Vec<(&'static str, gtk::Button, gtk::Image)> = [
         ("performance", "Performance"),
@@ -682,9 +759,8 @@ fn quick_settings_popover(
     let dark = qs_tile("dark-mode-symbolic", "Dark Style", None);
     let dnd_tile = qs_tile("notifications-disabled-symbolic", "Do Not Disturb", None);
     grid.add(&wifi, Some(&wifi_menu_ui));
-    for tile in [&wired, &bluetooth] {
-        grid.add(tile, None);
-    }
+    grid.add(&wired, Some(&wired_menu_ui));
+    grid.add(&bluetooth, Some(&bt_menu_ui));
     grid.add(&power_mode, Some(&power_menu_ui));
     for tile in [&night, &dark, &dnd_tile] {
         grid.add(tile, None);
@@ -723,6 +799,36 @@ fn quick_settings_popover(
         let menu = power_menu_ui.revealer.clone();
         popover.connect_closed(move |_| menu.set_visible(false));
     }
+    // The Wi-Fi and Bluetooth menus dim the panel and reset on close the
+    // same way; their rows close the panel themselves.
+    for menu in [
+        &wifi_menu_ui.revealer,
+        &wired_menu_ui.revealer,
+        &bt_menu_ui.revealer,
+        &sound_menu_ui.revealer,
+    ] {
+        {
+            let popover = popover.clone();
+            menu.connect_visible_notify(move |menu| {
+                if menu.is_visible() {
+                    popover.add_css_class("dimmed");
+                } else {
+                    popover.remove_css_class("dimmed");
+                }
+            });
+        }
+        let menu = menu.clone();
+        popover.connect_closed(move |_| menu.set_visible(false));
+    }
+    for settings in [
+        &all_networks,
+        &wired_settings,
+        &bt_settings,
+        &sound_settings,
+    ] {
+        let popover = popover.clone();
+        settings.connect_clicked(move |_| popover.popdown());
+    }
     let dnd = dnd_tile.button.clone();
 
     if let Some(iface) = settings(INTERFACE_SCHEMA) {
@@ -746,17 +852,25 @@ fn quick_settings_popover(
     services::attach(&Rc::new(services::Widgets {
         wifi,
         wifi_menu,
+        wired_menu,
+        bt_menu,
         wired,
         bluetooth,
         power_mode,
         power_header: power_menu_ui.header_icon.clone(),
         power_items,
+        panel_mic: icons.mic,
+        mic,
+        mic_mute,
+        mic_row: mic_row.clone(),
         panel_network: icons.network,
         panel_volume: icons.volume,
         panel_power_profile: icons.power_profile,
         volume: slider,
         mute,
         brightness_row: brightness_row.clone(),
+        sound_list,
+        sound_arrow,
         brightness,
     }));
     // Do Not Disturb drives the shell's notification store (banners
@@ -791,12 +905,15 @@ fn quick_settings_popover(
     col.append(&top);
     col.append(&power_menu);
     col.append(&volume_row);
+    col.append(&sound_menu_ui.revealer);
+    col.append(&mic_row);
     col.append(&brightness_row);
     col.append(&grid.grid);
     // Everything but an open toggle menu dims with the panel.
     for widget in [
         top.upcast_ref::<gtk::Widget>(),
         volume_row.upcast_ref(),
+        mic_row.upcast_ref(),
         brightness_row.upcast_ref(),
     ] {
         widget.add_css_class("qs-dimmable");
@@ -980,6 +1097,10 @@ fn build(app: &adw::Application) {
         indicators.append(&image);
         image
     };
+    // Privacy indicators lead (the microphone in use, orange unless
+    // muted).
+    let panel_mic = status_icon("microphone-sensitivity-medium-symbolic", false);
+    panel_mic.update_property(&[gtk::accessible::Property::Label("Microphone in use")]);
     let panel_network = status_icon("network-wired-symbolic", false);
     let panel_dnd = status_icon("notifications-disabled-symbolic", false);
     let panel_volume = status_icon("audio-volume-high-symbolic", false);
@@ -1023,6 +1144,7 @@ fn build(app: &adw::Application) {
         &notify,
         &power_ui,
         PanelIcons {
+            mic: panel_mic,
             network: panel_network,
             dnd: panel_dnd,
             volume: panel_volume,
@@ -1031,11 +1153,22 @@ fn build(app: &adw::Application) {
     );
     let system = panel_menu_button(&indicators, "System", &qs);
 
+    // GNOME's screen recorder (org.gnome.Shell.Screencast) and its
+    // indicator, first in the panel's right box as in panel.js.
+    let recorder = {
+        let notify = notify.clone();
+        screencast::Recorder::new(Rc::new(move |summary: &str, body: &str| {
+            notify.post("Screenshot", "screencast-recorded-symbolic", summary, body);
+        }))
+    };
+    screencast::serve(recorder.clone());
+
     let bar = gtk::CenterBox::new();
     bar.set_start_widget(Some(&activities));
     bar.set_center_widget(Some(&clock));
     // AppIndicator items sit left of the system indicators.
     let end = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    end.append(&screencast::indicator(&recorder));
     end.append(&tray::tray());
     end.append(&system);
     bar.set_end_widget(Some(&end));
@@ -1104,6 +1237,29 @@ fn build(app: &adw::Application) {
         Rc::new(ShellActions(shell.clone())),
     );
     let switcher_ui = switcher::SwitcherUi::new(app.upcast_ref(), apps.clone());
+    // GNOME's WindowTracker: a window belongs to the desktop entry its
+    // app id names (as the switcher finds its icon), shown in the grid
+    // or not; a window no desktop file claims is an app of its own.
+    if let Some(control) = shell.borrow_mut().control.as_mut() {
+        let apps = apps.clone();
+        let on_disk: RefCell<std::collections::HashMap<String, bool>> = RefCell::default();
+        control.set_app_resolver(move |app_id| {
+            let id = app_id.trim_end_matches(".desktop");
+            if let Some(entry) = {
+                let apps = apps.get();
+                apps.entry(id)
+                    .or_else(|| apps.entry(app_id))
+                    .map(|e| e.app_id.clone())
+            } {
+                return Some(entry);
+            }
+            let found = *on_disk
+                .borrow_mut()
+                .entry(id.to_owned())
+                .or_insert_with(|| roost_shell_host::apps::desktop_file_exists(id));
+            found.then(|| id.to_owned())
+        });
+    }
     // The folder dialog's shade reaches under the top bar, as GNOME's.
     {
         let panel = window.clone();
@@ -1121,6 +1277,23 @@ fn build(app: &adw::Application) {
     // org.gnome.Shell for the rest of GNOME: the OSD gnome-settings-daemon
     // shows for volume and brightness keys, search and the app grid.
     let osd_ui = osd::OsdUi::new(app.upcast_ref());
+    let screensaver = screensaver::start(
+        {
+            let shell = shell.clone();
+            Rc::new(move || {
+                let mut shell = shell.borrow_mut();
+                let control = shell.control.as_mut().ok_or("compositor disconnected")?;
+                control
+                    .lock()
+                    .map(|_| ())
+                    .map_err(|_| "lock request failed")
+            })
+        },
+        {
+            let shell = shell.clone();
+            Rc::new(move || shell.borrow().control.as_ref().is_some_and(|c| c.locked()))
+        },
+    );
     let gnome_shell = shell_dbus::start(Rc::new(GnomeShellDbus {
         osd: osd_ui.clone(),
         overview: overview_ui.clone(),
@@ -1137,11 +1310,17 @@ fn build(app: &adw::Application) {
             Rc::new(move |summary: &str, body: &str| {
                 notify_post.post("Screenshot", "screenshot-recorded-symbolic", summary, body);
             }),
+            recorder.clone(),
         )
     };
 
     // GNOME Shell is the session's polkit agent.
     polkit::start(app.upcast_ref());
+    // GNOME's NetworkManager secret agent (Wi-Fi passwords).
+    network_agent::start(app.upcast_ref());
+
+    // GNOME Shell is IBus's panel: it draws the candidate window.
+    ibus_panel::start(app.upcast_ref());
 
     // GNOME's workspace switcher popup.
     let workspace_popup = ws_popup::WorkspacePopup::new(app.upcast_ref());
@@ -1178,6 +1357,13 @@ fn build(app: &adw::Application) {
                     apps.get().entry(id).cloned()
                 };
                 match action {
+                    Action::LockScreen => {
+                        if let Some(control) = shell.borrow_mut().control.as_mut() {
+                            if let Err(e) = control.lock() {
+                                eprintln!("roost-shell-gtk: lock failed: {e}");
+                            }
+                        }
+                    }
                     Action::ToggleOverview => {
                         if let Some(control) = shell.borrow_mut().control.as_mut() {
                             let _ = control.toggle_overview();
@@ -1221,11 +1407,36 @@ fn build(app: &adw::Application) {
                         }
                     }
                     Action::ShowScreenshotUi => screenshot_ui.open(),
+                    Action::ShowScreenRecordingUi => screenshot_ui.open_recording(),
                     Action::Screenshot => take_screenshot(false, notify.clone()),
                     Action::ScreenshotWindow => take_screenshot(true, notify.clone()),
+                    Action::NextInputSource | Action::PreviousInputSource => {
+                        if let Some(control) = shell.borrow_mut().control.as_mut() {
+                            let _ =
+                                control.switch_input_source(action == Action::PreviousInputSource);
+                        }
+                    }
+                    Action::Close => {
+                        let mut shell = shell.borrow_mut();
+                        if let Some(control) = shell.control.as_mut() {
+                            let focused = control
+                                .model()
+                                .windows()
+                                .iter()
+                                .find(|w| w.active)
+                                .map(|w| w.id);
+                            if let Some(id) = focused {
+                                let _ = control.close_window(id);
+                            }
+                        }
+                    }
                     Action::WindowMenu
                     | Action::ToggleMaximized
                     | Action::Unmaximize
+                    | Action::Maximize
+                    | Action::Minimize
+                    | Action::TileLeft
+                    | Action::TileRight
                     | Action::BeginMove
                     | Action::BeginResize => {
                         use roost_shell_control::WindowAction as W;
@@ -1233,6 +1444,10 @@ fn build(app: &adw::Application) {
                             Action::WindowMenu => W::ShowMenu,
                             Action::ToggleMaximized => W::ToggleMaximize,
                             Action::Unmaximize => W::Unmaximize,
+                            Action::Maximize => W::Maximize,
+                            Action::Minimize => W::Minimize,
+                            Action::TileLeft => W::ToggleTiledLeft,
+                            Action::TileRight => W::ToggleTiledRight,
                             Action::BeginMove => W::Move,
                             _ => W::Resize,
                         };
@@ -1308,15 +1523,47 @@ fn build(app: &adw::Application) {
         };
         let settings = keybindings::settings();
         let wm_settings = keybindings::wm_settings();
+        let mutter_settings = keybindings::mutter_settings();
+        let media_settings = keybindings::media_settings();
         let apply: Rc<dyn Fn()> = {
-            let (settings, wm_settings, gnome_shell) =
-                (settings.clone(), wm_settings.clone(), gnome_shell.clone());
+            let (settings, wm_settings, mutter_settings, media_settings, gnome_shell) = (
+                settings.clone(),
+                wm_settings.clone(),
+                mutter_settings.clone(),
+                media_settings.clone(),
+                gnome_shell.clone(),
+            );
+            let shell = shell.clone();
             Rc::new(move || {
-                let list = keybindings::bindings(settings.as_ref(), wm_settings.as_ref());
+                // The switcher's chords go to the compositor, which holds
+                // the popup open while their modifiers are held.
+                let switcher: Vec<roost_shell_control::SwitcherKey> =
+                    keybindings::switcher_keys(wm_settings.as_ref())
+                        .iter()
+                        .filter_map(|(a, kind)| keybindings::parse_switcher_key(a, *kind))
+                        .take(roost_shell_control::MAX_SWITCHER_KEYS)
+                        .collect();
+                if let Some(control) = shell.borrow_mut().control.as_mut() {
+                    let _ = control.set_switcher_keys(switcher);
+                }
+                let list = keybindings::bindings(
+                    settings.as_ref(),
+                    wm_settings.as_ref(),
+                    mutter_settings.as_ref(),
+                    media_settings.as_ref(),
+                );
                 let accels: Vec<(String, u32)> = list
                     .iter()
                     .map(|b| (b.accelerator.clone(), b.modes))
                     .collect();
+                eprintln!(
+                    "roost-shell-gtk: keybindings: {} grabs, maximize on {:?}",
+                    accels.len(),
+                    list.iter()
+                        .filter(|b| b.action == keybindings::Action::Maximize)
+                        .map(|b| b.accelerator.as_str())
+                        .collect::<Vec<_>>()
+                );
                 let actions: Vec<keybindings::Action> = list.iter().map(|b| b.action).collect();
                 let run = run.clone();
                 gnome_shell.set_internal(
@@ -1330,7 +1577,10 @@ fn build(app: &adw::Application) {
             })
         };
         apply();
-        for settings in [settings, wm_settings].into_iter().flatten() {
+        for settings in [settings, wm_settings, mutter_settings, media_settings]
+            .into_iter()
+            .flatten()
+        {
             let apply = apply.clone();
             settings.connect_changed(None, move |_, _| apply());
             std::mem::forget(settings);
@@ -1526,6 +1776,7 @@ fn build(app: &adw::Application) {
         let chrome_apps = apps.clone();
         let shell_rc = shell.clone();
         let activities_button = activities.clone();
+        let last_frames: RefCell<Vec<roost_shell_control::SwitcherThumbnail>> = RefCell::default();
         glib::timeout_add_local(Duration::from_millis(16), move || {
             let mut shell = shell.borrow_mut();
             let mut results = Vec::new();
@@ -1563,12 +1814,23 @@ fn build(app: &adw::Application) {
             if let Some(control) = shell.control.as_ref() {
                 switcher_ui.sync(control.model());
             }
+            // The switcher's window thumbnails: the compositor draws the
+            // windows into the frames, sent whenever they move.
+            let frames = switcher_ui.thumbnail_frames();
+            if *last_frames.borrow() != frames {
+                if let Some(control) = shell.control.as_mut() {
+                    if control.set_switcher_thumbnails(frames.clone()).is_ok() {
+                        *last_frames.borrow_mut() = frames;
+                    }
+                }
+            }
             let open = shell
                 .control
                 .as_ref()
                 .is_some_and(|c| c.model().is_overview_open());
             drop(shell);
             lock_ui.sync(locked);
+            screensaver.sync(locked);
             for (action, time, mode) in accelerators {
                 gnome_shell.accelerator_activated(action, time, mode);
             }

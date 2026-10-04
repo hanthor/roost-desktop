@@ -61,6 +61,8 @@ scripts/lib/roost-parity-compare.py target/gnome-reference target/roost-parity t
 | 15-workspace-popup | the workspace switcher popup on Super+Page_Down |
 | 16-overview-workspaces | the overview with three workspaces (a window moved one right): the thumbnails strip, the shrunken card, the focused window still drawn activated |
 | 17-tile-preview | Gamma dragged to the left edge: the tile preview over the left half, above Alpha and below Gamma (GNOME's reference moves Gamma by the drag's offset and opens the preview through its own handler, since headless input is unreliable) |
+| 18-overview-search | "calc" typed in the overview: the app result under the focused entry (external search providers off on both sides, since the host and the image install different ones) |
+| 19-app-popover | a fourth test window opening its header-bar menu by itself (an xdg popup; headless input is not reliable in GNOME's reference), placed by the cascade's first free slot |
 | 11b-unlock-prompt | the unlock prompt, set to what a real session shows: the user's name and GDM's Password question (the stubbed display manager has no PAM conversation or AccountsService) |
 
 Both sides run the same services: the stubs serve power-profiles and
@@ -94,6 +96,7 @@ Share of pixels visibly off (more than 24 levels) in each element crop:
 | Overview, empty (cards, search, dash) | 53.5% | 0.4% |
 | App grid (thumbnails, tiles, folders, dash) | 56.1% | 0.2% |
 | App folder dialog | popover | 0.0% |
+| Overview search results | 0.8% | 0.3% |
 | Overview dash | not comparable | 0.0% |
 | Lock screen background (blurred, dimmed wallpaper) | not built | 1.4% beyond 8 levels |
 | Lock screen curtain (clock, date, hint) | not built | positions within 1px; the digits are the capture time |
@@ -116,6 +119,7 @@ Whole screens, with the same windows on both sides:
 | Workspace switcher popup | not built | 0.1% |
 | Overview with three workspaces (thumbnails strip) | not built | 1.4% |
 | Tile preview at the left edge | not built | 0.5% |
+| An app's popover, on a fourth window | 23.0% (cascade slot) | 0.5% |
 
 Roost's capture shows GNOME's installed apps, not the host's: each host
 entry is hidden by a `Hidden` copy in the user's application directory

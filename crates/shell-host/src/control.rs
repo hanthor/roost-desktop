@@ -263,6 +263,12 @@ impl ControlClient {
         &self.model
     }
 
+    /// Which desktop entry a window's app id belongs to (see
+    /// [`ShellModel::set_app_resolver`]).
+    pub fn set_app_resolver(&mut self, resolve: impl Fn(&str) -> Option<String> + 'static) {
+        self.model.set_app_resolver(resolve);
+    }
+
     /// Revision of the last applied snapshot or delta (`None` before the
     /// first snapshot).
     pub fn revision(&self) -> Option<u64> {
@@ -516,6 +522,43 @@ impl ControlClient {
         Ok(id)
     }
 
+    /// Where the switcher's window thumbnails sit (empty: none).
+    pub fn set_switcher_thumbnails(
+        &mut self,
+        thumbnails: Vec<roost_shell_control::SwitcherThumbnail>,
+    ) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::SetSwitcherThumbnails { thumbnails },
+        })?;
+        Ok(id)
+    }
+
+    /// The switcher's chords (GNOME's rebindable switcher keys).
+    pub fn set_switcher_keys(
+        &mut self,
+        keys: Vec<roost_shell_control::SwitcherKey>,
+    ) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::SetSwitcherKeys { keys },
+        })?;
+        Ok(id)
+    }
+
+    /// Switch to the next (or previous) keyboard input source. Returns
+    /// the request id.
+    pub fn switch_input_source(&mut self, backward: bool) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::SwitchInputSource { backward },
+        })?;
+        Ok(id)
+    }
+
     /// Offer the lock screen's password (ext-session-lock prompt). The
     /// compositor verifies it off its loop (PAM or greetd) and answers
     /// `Applied` once the session is unlocked or `Denied` when the
@@ -701,6 +744,23 @@ impl ControlClient {
                 // overview's Enter path.
                 let selection = match action {
                     SwitcherAction::Step { forward } => self.model.switcher_step(forward),
+                    SwitcherAction::StepWindow { forward } => {
+                        self.model.switcher_step_window(forward)
+                    }
+                    SwitcherAction::Key { keysym } => {
+                        match self.model.switcher_key(keysym) {
+                            crate::model::SwitcherEffect::None => {}
+                            crate::model::SwitcherEffect::CloseWindow(id) => {
+                                self.close_window(id)?;
+                            }
+                            crate::model::SwitcherEffect::QuitApp(ids) => {
+                                for id in ids {
+                                    self.close_window(id)?;
+                                }
+                            }
+                        }
+                        self.model.switcher_selection()
+                    }
                     SwitcherAction::Cancel => {
                         self.model.switcher_cancel();
                         None
