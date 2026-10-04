@@ -1,0 +1,9 @@
+{
+  "candidate_head": "571ff663f1d04e49452e04892589f82ac3e79f81",
+  "merged_as": "27fd8bf90c334ee01af5cc8eb8b96bfe31cc8d2a",
+  "candidate_run": 37177834905,
+  "candidate_artifact": 11294711284,
+  "niri": "26.04-2.fc45",
+  "runtime": "Fedora45 GTK4.24.1 libadwaita1.10",
+  "capture": "local nested package proof; source CI all13green; comparison PR CI pending"
+}
