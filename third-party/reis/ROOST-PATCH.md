@@ -11,3 +11,7 @@ fails the connection; Roost permanently revokes its RemoteDesktop grant.
 Regression tests cover continuous undecoded bytes, unconsumed FDs and
 unread outgoing responses.
 This patch is required until equivalent upstream bounds are available.
+
+This checked-in path dependency is kept under third-party/reis. Package builds
+reserve root vendor/ for the registry closure produced by cargo vendor --locked;
+the source archive must preserve third-party/reis separately from vendor.tar.gz.

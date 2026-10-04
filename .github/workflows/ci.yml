@@ -30,8 +30,8 @@ jobs:
       - run: cargo fmt --all -- --check
       - name: Check bounded EIS transport regression tests
         run: |
-          cargo fmt --manifest-path vendor/reis/Cargo.toml --all -- --check
-          cargo test --manifest-path vendor/reis/Cargo.toml --lib roost_transport_bounds
+          cargo fmt --manifest-path third-party/reis/Cargo.toml --all -- --check
+          cargo test --manifest-path third-party/reis/Cargo.toml --lib roost_transport_bounds
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # pam_wrapper runs the lock screen's PAM path for real (#62); it is
       # required here so the test can never silently skip.

@@ -33,7 +33,7 @@ limited to 32 device generations per connection to bound unacknowledged object
 and outgoing keymap-FD churn. The vendored reis 0.7.1 transport additionally fails
 when undecoded incoming or unread outgoing bytes exceed 2 MiB or FD
 storage exceeds 64; FD-clone failure closes the connection; its upstream
-1 MiB message limit remains. See vendor/reis/ROOST-PATCH.md and regression tests. EIS receiver contexts are
+1 MiB message limit remains. See third-party/reis/ROOST-PATCH.md and regression tests. EIS receiver contexts are
 rejected. No physical input device, GPU or VT acceptance follows from nested
 software-rendered proof.
 
