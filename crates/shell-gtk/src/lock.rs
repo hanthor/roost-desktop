@@ -134,6 +134,9 @@ impl LockUi {
             return;
         }
         self.pending.set(None);
+        if std::env::var_os("ROOST_LOCK_TRACE").is_some() {
+            eprintln!("roost-shell-gtk: lock command result applied={applied}");
+        }
         for screen in self.screens.borrow().iter() {
             screen.entry.set_sensitive(true);
             if !applied {
@@ -202,6 +205,30 @@ impl LockUi {
         entry.set_show_peek_icon(true);
         entry.set_property("placeholder-text", "Password");
         entry.update_property(&[gtk::accessible::Property::Label("Password")]);
+        // Handle Return before the internal text/IM delegate: a password
+        // field must submit even when that delegate consumes activation.
+        // Use the same signal as the arrow, so pending checks and PAM
+        // verification stay in the single handler below. This controller
+        // only sees keys focused within the entry, not other lock controls.
+        let submit_keys = gtk::EventControllerKey::new();
+        submit_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        {
+            let entry = entry.downgrade();
+            submit_keys.connect_key_pressed(move |_, key, _, _| {
+                if matches!(
+                    key,
+                    gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter | gtk::gdk::Key::ISO_Enter
+                ) {
+                    if let Some(entry) = entry.upgrade().filter(|entry| entry.is_sensitive()) {
+                        entry.emit_by_name::<()>("activate", &[]);
+                    }
+                    glib::Propagation::Stop
+                } else {
+                    glib::Propagation::Proceed
+                }
+            });
+        }
+        entry.add_controller(submit_keys);
         // The Submit arrow sits inside the entry's right end.
         let next = gtk::Button::from_icon_name("go-next-symbolic");
         next.add_css_class("next-button");
@@ -319,6 +346,16 @@ impl LockUi {
                     return glib::Propagation::Stop;
                 }
                 if on_prompt {
+                    if matches!(
+                        key,
+                        gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter | gtk::gdk::Key::ISO_Enter
+                    ) && std::env::var_os("ROOST_LOCK_TRACE").is_some()
+                    {
+                        eprintln!(
+                            "roost-shell-gtk: lock Return received sensitive={}",
+                            entry.is_sensitive()
+                        );
+                    }
                     return glib::Propagation::Proceed;
                 }
                 // Shift and Caps Lock alone do not lift the curtain.
@@ -375,6 +412,9 @@ impl LockUi {
                 let Some(ui) = weak.upgrade() else { return };
                 if ui.pending.get().is_some() {
                     return;
+                }
+                if std::env::var_os("ROOST_LOCK_TRACE").is_some() {
+                    eprintln!("roost-shell-gtk: lock password submitted");
                 }
                 let password = entry.text().to_string();
                 message.set_label("");
