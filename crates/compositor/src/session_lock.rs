@@ -10,10 +10,18 @@
 //! flag. Until then the lock surfaces are all that is drawn and all that
 //! takes input.
 
+use smithay::reexports::wayland_protocols::ext::session_lock::v1::server::{
+    ext_session_lock_manager_v1::ExtSessionLockManagerV1,
+    ext_session_lock_surface_v1::ExtSessionLockSurfaceV1,
+    ext_session_lock_v1::{Error, ExtSessionLockV1, Request},
+};
 use smithay::reexports::wayland_server::protocol::{wl_output::WlOutput, wl_surface::WlSurface};
-use smithay::reexports::wayland_server::{backend::ClientId, Resource};
+use smithay::reexports::wayland_server::{
+    backend::ClientId, Client, DataInit, Dispatch, DisplayHandle, Resource,
+};
 use smithay::wayland::session_lock::{
-    LockSurface, SessionLockHandler, SessionLockManagerState, SessionLocker,
+    ExtLockSurfaceUserData, LockSurface, SessionLockHandler, SessionLockManagerGlobalData,
+    SessionLockManagerState, SessionLockState, SessionLocker,
 };
 
 use crate::State;
@@ -26,6 +34,8 @@ pub(crate) struct LockProtocol {
     pub(crate) pending: Option<(SessionLocker, Option<i32>)>,
     /// Only this runtime-approved client may supply visible lock surfaces.
     pub(crate) owner: Option<ClientId>,
+    /// Only the approved lock resource may request release.
+    approved_lock: Option<ExtSessionLockV1>,
     /// Lock surfaces by output name.
     pub(crate) surfaces: Vec<(LockSurface, String)>,
     /// The lock client asked to unlock (unlock_and_destroy).
@@ -38,6 +48,7 @@ impl LockProtocol {
             state: SessionLockManagerState::new::<State, _>(dh, |_client| true),
             pending: None,
             owner: None,
+            approved_lock: None,
             surfaces: Vec::new(),
             client_unlocked: false,
         }
@@ -73,6 +84,7 @@ impl SessionLockHandler for State {
     fn unlock(&mut self) {
         self.lock_protocol.client_unlocked = true;
         self.lock_protocol.owner = None;
+        self.lock_protocol.approved_lock = None;
         self.lock_protocol.surfaces.clear();
     }
 
@@ -126,7 +138,33 @@ impl SessionLockHandler for State {
     }
 }
 
-smithay::delegate_session_lock!(State);
+// Preserve Smithay's manager/surface handling, but gate release before its
+// handler: a protocol error must not invoke the compositor's unlock callback.
+smithay::reexports::wayland_server::delegate_global_dispatch!(State: [ExtSessionLockManagerV1: SessionLockManagerGlobalData] => SessionLockManagerState);
+smithay::reexports::wayland_server::delegate_dispatch!(State: [ExtSessionLockManagerV1: ()] => SessionLockManagerState);
+smithay::reexports::wayland_server::delegate_dispatch!(State: [ExtSessionLockSurfaceV1: ExtLockSurfaceUserData] => SessionLockManagerState);
+
+impl Dispatch<ExtSessionLockV1, SessionLockState> for State {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        lock: &ExtSessionLockV1,
+        request: Request,
+        data: &SessionLockState,
+        dh: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        if matches!(request, Request::UnlockAndDestroy)
+            && state.lock_protocol.approved_lock.as_ref() != Some(lock)
+        {
+            lock.post_error(Error::InvalidUnlock, "Lock resource was not approved");
+            return;
+        }
+        <SessionLockManagerState as Dispatch<ExtSessionLockV1, SessionLockState, Self>>::request(
+            state, client, lock, request, data, dh, data_init,
+        );
+    }
+}
 
 impl State {
     /// A lock request the runtime has not yet decided on, with the
@@ -139,6 +177,7 @@ impl State {
     /// Denial cannot replace the current owner's surfaces or focus targets.
     pub fn resolve_lock_request(&mut self, locker: SessionLocker, approved: bool) {
         if approved {
+            self.lock_protocol.approved_lock = Some(locker.ext_session_lock().clone());
             self.lock_protocol.owner = locker.ext_session_lock().client().map(|c| c.id());
             self.lock_protocol.client_unlocked = false;
         }

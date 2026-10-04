@@ -343,3 +343,32 @@ fn rejected_second_client_preserves_the_approved_output_surface() {
     assert_eq!(comp.state.lock_surfaces(), vec![original]);
     assert!(!comp.state.take_client_unlock());
 }
+
+#[test]
+fn unapproved_release_is_a_protocol_error_without_clearing_the_owner() {
+    let mut comp = compositor();
+    let mut owner = connect(&mut comp);
+    let (_owner_lock, _owner_role, _owner_surface) = pending_surface(&mut comp, &mut owner, 24);
+    let pending = comp.state.take_lock_request().unwrap().0;
+    comp.state.resolve_lock_request(pending, true);
+    pump(&mut comp, &mut owner);
+    let original = comp.state.lock_surface_for("fixture").unwrap();
+    let mut other = connect(&mut comp);
+    let manager: ExtSessionLockManagerV1 = other.bind(1);
+    let unapproved = manager.lock(&other.queue.handle(), 25);
+    pump(&mut comp, &mut other);
+    let pending = comp.state.take_lock_request().unwrap().0;
+    comp.state.resolve_lock_request(pending, false);
+    pump(&mut comp, &mut other);
+    unapproved.unlock_and_destroy();
+    other.queue.flush().unwrap();
+    pump(&mut comp, &mut owner);
+    if let Some(guard) = other.queue.prepare_read() {
+        let _ = guard.read();
+    }
+    let _ = other.queue.dispatch_pending(&mut other.client);
+    assert!(other.conn.protocol_error().is_some());
+    assert_eq!(comp.state.lock_surface_for("fixture").unwrap(), original);
+    assert_eq!(comp.state.lock_surfaces(), vec![original]);
+    assert!(!comp.state.take_client_unlock());
+}
