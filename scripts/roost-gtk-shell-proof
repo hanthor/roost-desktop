@@ -2252,7 +2252,10 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     "$PY" -c "import gi; gi.require_version('IBus', '1.0')" 2>/dev/null; then
     for _ in $(seq 1 40); do grep -q "roost-ibus-bridge: ready" "$LOG" && break; sleep 0.5; done
     grep -q "roost-ibus-bridge: ready" "$LOG" || fail G-IME "the IBus bridge never came up"
-    "$PY" -u "$ROOT/scripts/lib/roost-ibus-test-engine.py" >"$ARTIFACTS/ibus-engine.log" 2>&1 &
+    # The engine belongs to the same private bus as the native bridge,
+    # rather than the outer display used to drive this nested proof.
+    env -u DISPLAY -u IBUS_ADDRESS -u WAYLAND_SOCKET WAYLAND_DISPLAY="$SOCKET_NAME" \
+        "$PY" -u "$ROOT/scripts/lib/roost-ibus-test-engine.py" >"$ARTIFACTS/ibus-engine.log" 2>&1 &
     IME_PIDS="$!"
     for _ in $(seq 1 30); do grep -q ready "$ARTIFACTS/ibus-engine.log" && break; sleep 0.5; done
     grep -q ready "$ARTIFACTS/ibus-engine.log" || fail G-IME "the test engine did not register with IBus"
@@ -2451,7 +2454,8 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     kill $IME_PIDS 2>/dev/null || true
     IME_PIDS=""
     # Back to a plain layout: later stages type straight to the apps.
-    ibus engine xkb:us::eng >/dev/null 2>&1 || true
+    env -u DISPLAY -u IBUS_ADDRESS -u WAYLAND_SOCKET WAYLAND_DISPLAY="$SOCKET_NAME" \
+        ibus engine xkb:us::eng >/dev/null 2>&1 || true
     cstate '.windows | any(.app_id == "roost-ime") | not' "ime window gone" ||
         fail G-IME "the IME window did not close"
 elif [ "${ROOST_REQUIRE_IBUS:-0}" = 1 ]; then
