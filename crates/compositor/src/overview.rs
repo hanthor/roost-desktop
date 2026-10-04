@@ -213,8 +213,10 @@ pub fn insertion_target(layout: &OverviewLayout, pos: Point<f64, Logical>) -> Op
             return Some(pair[1].workspace);
         }
     }
+    // The last shown thumbnail is GNOME's trailing empty workspace;
+    // use its slot for an end drop rather than leaving an extra empty gap.
     let end = f64::from(last.rect.loc.x + last.rect.size.w);
-    (pos.x >= end && pos.x <= end + pad + f64::from(last.rect.size.w)).then_some(last.workspace + 1)
+    (pos.x >= end && pos.x <= end + pad + f64::from(last.rect.size.w)).then_some(last.workspace)
 }
 
 /// Spread the thumbnails around a new-workspace slot, keeping their
@@ -1314,6 +1316,13 @@ mod tests {
             f64::from(first.loc.y + 10),
         ));
         assert_eq!(insertion_target(&l, gap), Some(1));
+        let last = l.thumbnails.last().unwrap();
+        let after = (
+            f64::from(last.rect.loc.x + last.rect.size.w + 3),
+            f64::from(last.rect.loc.y + 10),
+        )
+            .into();
+        assert_eq!(insertion_target(&l, after), Some(last.workspace));
         assert_eq!(
             insertion_target(
                 &l,
