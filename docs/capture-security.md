@@ -10,6 +10,8 @@ The D-Bus service scans grants every 100 ms. Losing the creator connection, the 
 
 The GTK proof records real UI screenshots and an explicit UI recording with decoded video frames, captures the live PipeWire node list, presses Stop, and verifies the node is removed. It also starts another UI recording before session lock and verifies both zero compositor streams and no capture node while locked. Independent untrusted clients test ordinary and forged portal-name denials. These new stages remain pending until their CI artifact passes.
 
+The packaged-candidate `portal-security` lane verifies `xdg-desktop-portal-gnome` 51.0 in Fedora45, records runtime package versions, and runs the same genuine frontend consent lifecycle with the CI-built compositor/GTK shell, without compiling GTK locally. Its artifact ties results to the tested commit. The Ubuntu GTK lane is supplemental coverage with its distro backend version.
+
 The proof additionally launches the root-owned installed GNOME backend and desktop portal frontend on its private bus. A real frontend client exercises CreateSession, SelectSources, Start, Cancel/Share in the actual AT-SPI picker, OpenPipeWireRemote frame consumption and owner Close; another unique caller cannot close its session. The frontend is tested again while locked. These stages are source assertions pending CI evidence.
 
 Issue #61 remains partial until this genuine external portal journey passes and RemoteDesktop implementation/acceptance is complete. No RemoteDesktop interface is advertised by this change. The GTK proof's former raw Python caller pretending to be the portal is no longer accepted or counted as consent evidence.

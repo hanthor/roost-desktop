@@ -195,6 +195,34 @@ jobs:
           path: gtk-shell-artifacts/
           retention-days: 14
 
+  portal-security:
+    needs: arch-package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: roost-arch
+          path: ${{ runner.temp }}/portal-package
+      - run: sudo apt-get -o Acquire::Retries=3 update -qq && sudo apt-get install -y --no-install-recommends podman zstd shellcheck
+      - run: shellcheck scripts/roost-portal-security tests/portal-reference/run.sh
+      - name: Test packaged compositor with actual GNOME 51 portal consent
+        run: |
+          mkdir -p "$RUNNER_TEMP/portal-candidate"
+          package=$(find "$RUNNER_TEMP/portal-package" -name '*.pkg.tar.zst' -print -quit)
+          test -n "$package"
+          tar --zstd -xf "$package" -C "$RUNNER_TEMP/portal-candidate"
+          mkdir -p "$RUNNER_TEMP/portal-security"
+          printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/portal-security/candidate-commit.txt"
+          scripts/roost-portal-security --candidate "$RUNNER_TEMP/portal-candidate" --out "$RUNNER_TEMP/portal-security"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: portal-security
+          path: ${{ runner.temp }}/portal-security
+          retention-days: 90
+
   arch-package:
     # TunaOS Marlin is Arch-based: build, check, and install the Arch
     # package in a clean archlinux container (#69).
