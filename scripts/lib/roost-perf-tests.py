@@ -58,6 +58,17 @@ class Accounting(unittest.TestCase):
             result = guest.sample(1000, root)
             self.assertEqual(result["unreadable"], [{"pid":1,"error":"FileNotFoundError"}])
 
+    def test_zombie_is_departed_even_before_parent_reaps_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = self.process(root, 1, 0, 1000, 10, 55)
+            stat = (path / "stat").read_text().replace(") S ", ") Z ")
+            (path / "stat").write_text(stat)
+            (path / "smaps_rollup").unlink()
+            result = guest.sample(1000, root)
+            self.assertEqual(result["unreadable"], [])
+            self.assertEqual(result["process_count"], 0)
+
     def test_journal_prefix_and_truncated_serial_do_not_corrupt_valid_samples(self):
         result = host.raw_samples('prefix roost-perf-sample: {"pss_kib":7}\nroost-perf-sample: {bad\n')
         self.assertEqual(result, [{"pss_kib":7}])

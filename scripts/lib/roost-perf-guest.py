@@ -13,7 +13,7 @@ def read_process(path):
     # The command field can contain spaces and closing parentheses.
     fields = (path / "stat").read_text().rsplit(")", 1)[1].split()
     return {
-        "pid": int(path.name), "uid": int(status["Uid"].split()[0]),
+        "pid": int(path.name), "uid": int(status["Uid"].split()[0]), "state": fields[0],
         "ppid": int(fields[1]), "start_ticks": int(fields[19]),
         "cpu_ticks": int(fields[11]) + int(fields[12]),
     }
@@ -26,7 +26,7 @@ def sample(uid, proc=Path("/proc"), observer=None):
             continue
         try:
             row = read_process(path)
-            if row["uid"] == uid:
+            if row["uid"] == uid and row["state"] not in ("Z", "X", "x"):
                 processes[row["pid"]] = row
         except (OSError, ValueError, KeyError, IndexError):
             continue  # A process can exit between directory and status reads.
@@ -52,7 +52,9 @@ def sample(uid, proc=Path("/proc"), observer=None):
             rows.append(row)
         except (OSError, ValueError, KeyError) as error:
             try:
-                read_process(path)
+                identity = read_process(path)
+                if identity["state"] in ("Z", "X", "x"):
+                    continue  # Exited processes can retain /proc entries until reaped.
             except (FileNotFoundError, ProcessLookupError):
                 continue  # Ordinary process exit during a non-atomic sample.
             except (OSError, ValueError, KeyError, IndexError):
