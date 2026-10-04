@@ -1,6 +1,6 @@
 # Cutting a Roost release
 
-Supported scope: current Debian stable and Ubuntu LTS, amd64.
+Target: TunaOS Marlin (Arch-based bootc, x86_64), with GNOME 51 as the comparison baseline ([ADR 0007](adr/0007-gnome51-marlin-baseline.md)). The project remains a developer preview until the roadmap release gates pass. Debian stable and Ubuntu LTS packages are developer-host artifacts, not evidence of Marlin or physical hardware readiness.
 
 ## Checklist
 
