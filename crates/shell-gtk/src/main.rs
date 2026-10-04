@@ -1007,7 +1007,42 @@ fn take_screenshot(window: bool, notify: Rc<notify::NotifyUi>) {
 
 fn build(app: &adw::Application) {
     let provider = gtk::CssProvider::new();
-    provider.load_from_string(include_str!("style.css"));
+    // Shell CSS has GNOME's baseline face/size, but follows the user's font live.
+    let apply_font = {
+        let provider = provider.clone();
+        move |iface: Option<&gio::Settings>| {
+            let name = iface
+                .filter(|i| i.settings_schema().is_some_and(|s| s.has_key("font-name")))
+                .map(|i| i.string("font-name").to_string())
+                .unwrap_or_else(|| "Adwaita Sans 11".into());
+            let font = gtk::pango::FontDescription::from_string(&name);
+            let family = font
+                .family()
+                .unwrap_or_else(|| "Adwaita Sans".into())
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"");
+            let size = if font.size() > 0 {
+                f64::from(font.size()) / f64::from(gtk::pango::SCALE)
+            } else {
+                11.0
+            };
+            let unit = if font.is_size_absolute() { "px" } else { "pt" };
+            let css = include_str!("style.css")
+                .replace(
+                    "font-family: \"Adwaita Sans\", \"Cantarell\", sans-serif;",
+                    &format!("font-family: \"{family}\", sans-serif;"),
+                )
+                .replace("font-size: 11pt;", &format!("font-size: {size}{unit};"));
+            provider.load_from_string(&css);
+        }
+    };
+    let iface = settings(INTERFACE_SCHEMA);
+    apply_font(iface.as_ref());
+    if let Some(iface) = iface {
+        iface.connect_changed(Some("font-name"), move |i, _| apply_font(Some(i)));
+        // Keep the live subscription for the shell process lifetime.
+        std::mem::forget(iface);
+    }
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
             &display,

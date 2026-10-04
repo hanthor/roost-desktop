@@ -1468,6 +1468,37 @@ jq -e 'any(.[]; .role == "label" and (.name | test("[0-9]+:[0-9]{2}:[0-9]{2}")))
 gsettings set org.gnome.desktop.interface clock-show-seconds false
 pass G-SETTINGS-CLOCK "GNOME's clock-show-seconds changes the panel clock"
 
+# CSS inherits GNOME's user font; text scale reaches GTK's Wayland settings.
+original_font="$(gsettings get org.gnome.desktop.interface font-name)"
+original_scale="$(gsettings get org.gnome.desktop.interface text-scaling-factor)"
+gsettings set org.gnome.desktop.interface font-name 'Sans 11'
+gsettings set org.gnome.desktop.interface text-scaling-factor 1.0
+sleep 1
+scrot "$ARTIFACTS/settings-font-before.png" >/dev/null
+gsettings set org.gnome.desktop.interface font-name 'Monospace 20'
+sleep 1
+scrot "$ARTIFACTS/settings-font-after.png" >/dev/null
+gsettings set org.gnome.desktop.interface font-name 'Sans 11'
+gsettings set org.gnome.desktop.interface text-scaling-factor 1.75
+sleep 1
+scrot "$ARTIFACTS/settings-scale-after.png" >/dev/null
+"$PY" - "$ARTIFACTS" <<'PYFONT' || fail G-SETTINGS-FONT "font or text scale did not change the live panel"
+from PIL import Image, ImageChops
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+before = Image.open(root / "settings-font-before.png").convert("RGB").crop((500, 0, 780, 32))
+for name in ["settings-font-after.png", "settings-scale-after.png"]:
+    after = Image.open(root / name).convert("RGB").crop((500, 0, 780, 32))
+    hist = ImageChops.difference(before, after).convert("L").histogram()
+    changed = sum(hist[25:]) / (280 * 32)
+    assert changed > 0.03, (name, changed)
+PYFONT
+gsettings set org.gnome.desktop.interface font-name "$original_font"
+gsettings set org.gnome.desktop.interface text-scaling-factor "$original_scale"
+sleep 1
+pass G-SETTINGS-FONT "font-name and text-scaling-factor change the running panel"
+
 # GNOME's input settings (#60).
 gsettings set org.gnome.desktop.input-sources sources "[('xkb', 'us'), ('xkb', 'de')]"
 cstate '.keyboard.layouts == ["English (US)", "German"]' "two sources" ||
