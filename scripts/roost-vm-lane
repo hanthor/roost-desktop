@@ -204,6 +204,11 @@ def run_tour(qmp, out):
         wait(1)
         keys("esc")
         wait(2)
+        # Actual PipeWire sink on the virtual HDA device. Guest health
+        # samples each completed mutation; allow a sample between keys.
+        for media_key in ("volumeup", "volumedown", "audiomute", "audiomute"):
+            keys(media_key)
+            wait(3)
         rec.mark("quick-settings")
         qmp.click(WIDTH - 40, 12)
         wait(4)
@@ -324,6 +329,12 @@ def boot(disk, out, scratch, timeout):
             "-drive", f"file={disk},format=raw,if=virtio,cache=unsafe",
             "-device", f"virtio-vga,xres={WIDTH},yres={HEIGHT}",
             "-device", "qemu-xhci", "-device", "usb-tablet", "-device", "usb-kbd",
+            # The virtio keyboard carries multimedia evdev codes; USB's
+            # boot-protocol keyboard has no consumer-control usages.
+            "-device", "virtio-keyboard-pci",
+            "-audiodev", "none,id=roost-audio",
+            "-device", "ich9-intel-hda",
+            "-device", "hda-duplex,audiodev=roost-audio",
             "-display", "none", "-serial", f"file:{serial}",
             "-qmp", f"unix:{qmp_path},server=on,wait=off",
             "-nic", "user,model=virtio-net-pci"]
@@ -478,6 +489,12 @@ def main():
     for name in ("calendar", "portal", "portal-gnome"):
         record(f"V-{name.upper()}", f"roost-vm-health: {name} ready" in text and (name != "portal" or "roost-vm-health: portal-gnome ready" in text),
                f"guest user bus {name} activation responds")
+    if a.tour:
+        volumes = re.findall(r"roost-vm-health: volume=(0\.[0-9]+)( \[MUTED\])?", text)
+        observed = [(round(float(level), 2), bool(muted)) for level, muted in volumes]
+        expected = [(0.40, False), (0.46, False), (0.40, False), (0.40, True), (0.40, False)]
+        record("V-MEDIA-VOLUME", observed[:5] == expected,
+               f"virtual HDA output: up/down/mute/unmute {observed}")
     if a.tour:
         transitions = re.findall(r"roost-vm-health: lock active=\((true|false),\)", text)
         record("V-LOCK", transitions == ["false", "true", "false"],

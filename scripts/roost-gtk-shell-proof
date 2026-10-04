@@ -343,6 +343,10 @@ ROOST_BACKLIGHT_ROOT="$ARTIFACTS/backlight"
 export ROOST_BACKLIGHT_ROOT
 VOLUME_FILE="$ARTIFACTS/volume"
 echo 0.80 >"$VOLUME_FILE"
+VOLUME_MUTED_FILE="$ARTIFACTS/volume-muted"
+MIC_MUTED_FILE="$ARTIFACTS/mic-muted"
+echo 0 >"$VOLUME_MUTED_FILE"
+echo 0 >"$MIC_MUTED_FILE"
 SINK_FILE="$ARTIFACTS/default-sink"
 echo 48 >"$SINK_FILE"
 # The default source, and an app recording from it while RECORDING_FILE
@@ -353,17 +357,21 @@ RECORDING_FILE="$ARTIFACTS/recording"
 cat >"$ARTIFACTS/bin/wpctl" <<WPCTL
 #!/bin/sh
 mark() { [ "\$(cat "$SINK_FILE")" = "\$1" ] && echo "*" || echo " "; }
+muted() { [ "\$(cat "\$1")" = 1 ] && printf ' [MUTED]' || true; }
 case "\$1" in
     get-volume)
         case "\$2" in
-            *SOURCE*) echo "Volume: \$(cat "$MIC_FILE")" ;;
-            *) echo "Volume: \$(cat "$VOLUME_FILE")" ;;
+            *SOURCE*) echo "Volume: \$(cat "$MIC_FILE")\$(muted "$MIC_MUTED_FILE")" ;;
+            *) echo "Volume: \$(cat "$VOLUME_FILE")\$(muted "$VOLUME_MUTED_FILE")" ;;
         esac ;;
     set-volume)
         case "\$2" in
             *SOURCE*) echo "\$3" >"$MIC_FILE" ;;
             *) echo "\$3" >"$VOLUME_FILE" ;;
         esac ;;
+    set-mute)
+        case "\$2" in *SOURCE*) mute_file="$MIC_MUTED_FILE" ;; *) mute_file="$VOLUME_MUTED_FILE" ;; esac
+        case "\$3" in toggle) echo "\$((1 - \$(cat "\$mute_file")))" >"\$mute_file" ;; *) echo "\$3" >"\$mute_file" ;; esac ;;
     set-default) echo "\$2" >"$SINK_FILE" ;;
     status)
         printf 'Audio\n ├─ Sinks:\n'
@@ -1451,8 +1459,8 @@ ACCEL_PID=$!
 end=$(($(date +%s) + 10))
 until grep -q grabbed "$ACCEL_MARKER" 2>/dev/null || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
 grep -q "grabbed [1-9]" "$ACCEL_MARKER" 2>/dev/null ||
-    fail G-ACCEL "the media-keys stand-in could not grab XF86AudioRaiseVolume"
-xdotool key XF86AudioRaiseVolume
+    fail G-ACCEL "the media-keys stand-in could not grab XF86AudioPlay"
+xdotool key XF86AudioPlay
 end=$(($(date +%s) + 5))
 until grep -q activated "$ACCEL_MARKER" 2>/dev/null || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
 grep -q "activated" "$ACCEL_MARKER" ||
@@ -1460,6 +1468,40 @@ grep -q "activated" "$ACCEL_MARKER" ||
 sleep 0.5
 scrot "$ARTIFACTS/24b-osd.png" >/dev/null
 pass G-ACCEL "gnome-settings-daemon's grab fires on its key and its ShowOSD shows the OSD"
+
+# Native media actions work even without gsd-media-keys. These assert
+# the actual asynchronous backend mutations, including GNOME's unmute rule.
+echo 0.40 >"$VOLUME_FILE"
+echo 0 >"$VOLUME_MUTED_FILE"
+media_volume() {
+    expected=$1
+    for _ in $(seq 1 30); do
+        [ "$(cat "$VOLUME_FILE")" = "$expected" ] && return 0
+        sleep 0.1
+    done
+    return 1
+}
+xdotool key XF86AudioRaiseVolume
+media_volume 0.4600 || fail G-MEDIA-VOLUME "volume up did not apply the 6% step"
+xdotool key XF86AudioLowerVolume
+media_volume 0.4000 || fail G-MEDIA-VOLUME "volume down did not apply the 6% step"
+xdotool key shift+XF86AudioRaiseVolume
+media_volume 0.4200 || fail G-MEDIA-VOLUME "precise volume up did not use 2%"
+xdotool key XF86AudioMute
+for _ in $(seq 1 30); do [ "$(cat "$VOLUME_MUTED_FILE")" = 1 ] && break; sleep 0.1; done
+[ "$(cat "$VOLUME_MUTED_FILE")" = 1 ] || fail G-MEDIA-VOLUME "volume mute did not mute"
+xdotool key XF86AudioRaiseVolume
+for _ in $(seq 1 30); do [ "$(cat "$VOLUME_MUTED_FILE")" = 0 ] && break; sleep 0.1; done
+[ "$(cat "$VOLUME_MUTED_FILE")" = 0 ] && [ "$(cat "$VOLUME_FILE")" = 0.4200 ] ||
+    fail G-MEDIA-VOLUME "unmuting increased or lost the existing volume"
+xdotool key XF86AudioMicMute
+for _ in $(seq 1 30); do [ "$(cat "$MIC_MUTED_FILE")" = 1 ] && break; sleep 0.1; done
+[ "$(cat "$MIC_MUTED_FILE")" = 1 ] || fail G-MEDIA-VOLUME "microphone mute did not mute"
+xdotool key XF86AudioMicMute
+for _ in $(seq 1 30); do [ "$(cat "$MIC_MUTED_FILE")" = 0 ] && break; sleep 0.1; done
+[ "$(cat "$MIC_MUTED_FILE")" = 0 ] || fail G-MEDIA-VOLUME "microphone unmute did not unmute"
+scrot "$ARTIFACTS/media-volume-osd.png" >/dev/null
+pass G-MEDIA-VOLUME "native volume/precise/mute/microphone keys mutate PipeWire state; unmute preserves the level"
 
 # GNOME Shell's own keybindings (org.gnome.shell.keybindings defaults).
 sleep 2
@@ -2223,6 +2265,12 @@ cstate '.locked' "locked" 10 || fail G-SUSPEND-LOCK "PrepareForSleep did not loc
 scrot "$ARTIFACTS/23-locked-after-suspend.png" >/dev/null
 pass G-SUSPEND-LOCK "Suspend asks logind, and PrepareForSleep locks the session"
 screen_active | grep -q true || fail G-SCREENSAVER "GetActive did not reflect the lock"
+xdotool key XF86AudioRaiseVolume
+media_volume 0.4800 || fail G-MEDIA-LOCK "volume up did not work while locked"
+xdotool key XF86AudioLowerVolume
+media_volume 0.4200 || fail G-MEDIA-LOCK "volume down did not work while locked"
+cstate '.locked' "still locked after media keys" 5 || fail G-MEDIA-LOCK "media keys unlocked the session"
+pass G-MEDIA-LOCK "volume keys work on the lock screen without unlocking"
 gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver \
     --method org.gnome.ScreenSaver.SetActive false >/dev/null || fail G-SCREENSAVER "SetActive failed"
 cstate '.locked' "still locked after SetActive(false)" 5 || fail G-SCREENSAVER "D-Bus unlocked without authentication"
