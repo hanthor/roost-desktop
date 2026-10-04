@@ -2904,7 +2904,7 @@ impl Scene {
                 .into_iter()
                 .map(|element| {
                     use smithay::backend::renderer::element::Element;
-                    let origin = element.geometry(1.0.into()).loc.to_f64();
+                    let origin = element.geometry(1.0.into()).loc;
                     smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
                         element, origin, 1.0,
                     )
