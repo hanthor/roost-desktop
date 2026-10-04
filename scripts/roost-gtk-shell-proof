@@ -1969,7 +1969,11 @@ if command -v wayland-info >/dev/null 2>&1; then
     "$PY" "$ROOT/scripts/roost-wayland-info-compare" "$ARTIFACTS/wayland-info.txt" \
         --report "$ARTIFACTS/wayland-info-compare.txt" ||
         fail G-WAYLAND-INFO "globals short of GNOME 51's (see wayland-info-compare.txt)"
-    pass G-WAYLAND-INFO "every expected GNOME 51 global is advertised at its version or newer"
+    "$PY" "$ROOT/scripts/roost-wayland-info-compare" "$ARTIFACTS/wayland-info.txt" \
+        --reference "$ROOT/tests/protocols/marlin-gnome51-globals.tsv" \
+        --report "$ARTIFACTS/wayland-info-marlin-compare.txt" ||
+        fail G-WAYLAND-INFO "globals short of native Marlin GNOME 51's recorded expectations"
+    pass G-WAYLAND-INFO "headless and native Marlin GNOME 51 comparisons satisfy version floors, with gaps recorded"
 elif [ "${ROOST_REQUIRE_WAYLAND_INFO:-0}" = 1 ]; then
     fail G-WAYLAND-INFO "wayland-info is required (ROOST_REQUIRE_WAYLAND_INFO=1) but not installed"
 else
@@ -2777,6 +2781,55 @@ if [ "${1:-0}" -ge 70 ] || [ "${2:-0}" -ge 70 ] || [ "${3:-0}" -ge 75 ]; then
 fi
 pass G-WS-POPUP "a workspace key shows GNOME's workspace switcher popup"
 sleep 1
+
+# Exercise the normal three-finger handler with nested synthetic phases.
+# Physical touchpad/libinput qualification remains a separate hardware gate.
+swipe_sequence=100
+swipe_phase() {
+    swipe_sequence=$((swipe_sequence + 1))
+    printf '{"phase":"%s","dx":%s,"dy":%s,"sequence":%s}\n' \
+        "$1" "$2" "$3" "$swipe_sequence" >"$ROOST_PROOF_SWIPE_INPUT.tmp"
+    mv "$ROOST_PROOF_SWIPE_INPUT.tmp" "$ROOST_PROOF_SWIPE_INPUT"
+    sleep 0.2
+}
+gesture_home="$(jq -r '.active_workspace' "$CSTATE")"
+swipe_phase begin 0 0
+swipe_phase update -180 0
+swipe_phase end 0 0
+cstate ".active_workspace == $gesture_home + 1 and (.overview_open | not)" "left swipe" ||
+    fail G-SWIPE-DIRECTIONS "three-finger left did not select the next workspace"
+cp "$CSTATE" "$ARTIFACTS/swipe-next-workspace.json"
+swipe_phase begin 0 0
+swipe_phase update 180 0
+swipe_phase end 0 0
+cstate ".active_workspace == $gesture_home and (.overview_open | not)" "right swipe" ||
+    fail G-SWIPE-DIRECTIONS "three-finger right did not restore the previous workspace"
+cp "$CSTATE" "$ARTIFACTS/swipe-previous-workspace.json"
+pass G-SWIPE-DIRECTIONS "nested three-finger left/right switch and restore the exact workspace"
+
+gsettings set org.gnome.desktop.interface enable-animations false
+cstate '(.animations_enabled | not) and .overview_progress == 0' "reduced-motion swipe ready" ||
+    fail G-SWIPE-REDUCED-MOTION "live reduced-motion setting did not arrive"
+swipe_phase begin 0 0
+swipe_phase update 0 -180
+cstate '.overview_progress == 1 and (.overview_open | not)' "reduced-motion held up" ||
+    fail G-SWIPE-REDUCED-MOTION "held upward swipe retained an intermediate transition"
+cp "$CSTATE" "$ARTIFACTS/swipe-reduced-motion-held-up.json"
+swipe_phase end 0 0
+cstate '.overview_open and .overview_progress == 1' "reduced-motion up released" ||
+    fail G-SWIPE-REDUCED-MOTION "upward release did not open the overview"
+swipe_phase begin 0 0
+swipe_phase update 0 180
+cstate '.overview_progress == 0 and .overview_open' "reduced-motion held down" ||
+    fail G-SWIPE-REDUCED-MOTION "held downward swipe retained an intermediate transition"
+cp "$CSTATE" "$ARTIFACTS/swipe-reduced-motion-held-down.json"
+swipe_phase end 0 0
+cstate '(.overview_open | not) and .overview_progress == 0' "reduced-motion down released" ||
+    fail G-SWIPE-REDUCED-MOTION "downward release did not close the overview"
+gsettings set org.gnome.desktop.interface enable-animations true
+cstate '.animations_enabled' "gesture animations restored" ||
+    fail G-SWIPE-REDUCED-MOTION "could not restore animation setting"
+pass G-SWIPE-REDUCED-MOTION "up/down gestures snap while held and settle correctly with reduced motion"
 
 # GNOME's workspace thumbnails: a window moved one workspace right makes
 # three (the trailing empty one included), so the overview shows the

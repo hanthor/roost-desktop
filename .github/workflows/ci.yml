@@ -195,8 +195,13 @@ jobs:
           ROOST_REQUIRE_PAM_WRAPPER: "1"
           ROOST_REQUIRE_IBUS: "1"
           ROOST_REQUIRE_WAYLAND_INFO: "1"
-      # Fractional scaling (#59): the same session at GNOME's 150 percent.
-      - run: scripts/roost-scale-proof --artifacts gtk-shell-artifacts/scale
+      # Native/X11 geometry and physical input at all required virtual scales.
+      - run: |
+          for scale in 1 1.25 1.5 2; do
+            scripts/roost-scale-proof --scale "$scale" --artifacts "gtk-shell-artifacts/scale-$scale"
+          done
+          mkdir -p gtk-shell-artifacts/scale
+          cat gtk-shell-artifacts/scale-*/assertions.txt > gtk-shell-artifacts/scale/assertions.txt
       # Keep runnable binaries even when a later live proof assertion fails.
       - if: always()
         run: |
