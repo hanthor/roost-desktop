@@ -565,7 +565,8 @@ impl NotifyUi {
         } else {
             self.expanded.borrow_mut().remove(key);
         }
-        if let Some(group) = self.group_widgets.borrow().get(key) {
+        let group = self.group_widgets.borrow().get(key).cloned();
+        if let Some(group) = group {
             group.set_expanded(on);
             // Prevent the refresh ticker rebuilding the group mid-animation.
             let mut expanded: Vec<_> = self.expanded.borrow().iter().cloned().collect();
