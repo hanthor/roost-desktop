@@ -1256,9 +1256,10 @@ impl Runtime {
             "x11_display": self.x11_display.map(|d| format!(":{d}")),
             "capture_streams": self.casts.len(),
             "remote_input_sessions": self.remote_held.len(),
-            "seat_pressed_keys": self.state.seat.get_keyboard().map(|keyboard| {
-                keyboard.pressed_keys().into_iter().map(|key| key.raw()).collect::<Vec<_>>()
-            }).unwrap_or_default(),
+            // Held-state proof needs only a count, including during lock.
+            // Never emit key identities that could expose credential input.
+            "seat_pressed_key_count": self.state.seat.get_keyboard()
+                .map_or(0, |keyboard| keyboard.pressed_keys().len()),
             "idle_timeout_ms": self.lock.timeout_ms(),
             "idle_blank_alpha": self.blank_alpha(),
             "overview_search": self.overview_search,

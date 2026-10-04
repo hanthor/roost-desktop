@@ -9,7 +9,9 @@ from gi.repository import Gtk, GLib
 state = {'keys': [], 'buttons': []}
 output = Path(sys.argv[1])
 def save():
-    output.write_text(json.dumps(state))
+    temporary = output.with_suffix(".tmp")
+    temporary.write_text(json.dumps(state))
+    temporary.replace(output)
 def key(_controller, keyval, keycode, _mods):
     state['keys'].append({'keyval': keyval, 'keycode': keycode})
     save()

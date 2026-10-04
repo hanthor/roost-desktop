@@ -44,5 +44,12 @@ It requires actual Cancel/Allow, a linked PipeWire frame, foreign input denial,
 legacy and EIS keyboard/button delivery, node removal after Close/client/backend
 loss/EIS disconnect/lock, and new-session lock denial. Candidate commit, runtime
 versions, consent screenshots, input logs and frame evidence accompany the run.
-Until this gate passes on the published candidate, these are pending acceptance
-checks and issue #61 remains open.
+The packaged `8019c16641ebb9e42330306071e8224c31cea620` candidate passed
+this complete GNOME 51 journey. See `remote-desktop-evidence.json` for the exact
+package workflow and runtime versions. The proof requires fresh keyboard and
+button events after each delivery baseline, then checks no new client input and
+an empty seat after backend/lock revocation; a frontend void-method reply alone
+is not an admission oracle. New locked sessions are denied at CreateSession
+with response 2. The final aggregate seat-count telemetry variant requires its
+own exact-head CI pass. Issue #61 remains open for the explicit unsupported
+capabilities and remaining screenshot acceptance.
