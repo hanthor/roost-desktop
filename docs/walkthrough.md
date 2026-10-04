@@ -234,6 +234,18 @@ Do Not Disturb holds banners back but keeps them in the list. (`P-NT-02`)
 
 ![Do Not Disturb](walkthrough/do-not-disturb.png)
 
+### Notification groups
+
+An app's notifications group in the list: collapsed, the newest card shows with the next peeking out beneath it. (`P-NT-02`)
+
+![Notification groups](walkthrough/notification-group.png)
+
+### Expanded group
+
+Pressing a group expands it to every card, under the app's name and a Collapse button. (`P-NT-02`)
+
+![Expanded group](walkthrough/notification-group-expanded.png)
+
 ## System
 
 ### Input methods
@@ -241,6 +253,12 @@ Do Not Disturb holds banners back but keeps them in the list. (`P-NT-02`)
 IBus composes as in GNOME: pinyin waits in the preedit and Space commits the hanzi (a test engine; roost-ibus-bridge is IBus's client). (`P-IN-01`)
 
 ![Input methods](walkthrough/ime.png)
+
+### Candidate window
+
+The shell is IBus's panel, as GNOME Shell is: pinyin with several hanzi brings up GNOME's candidate popup under the text cursor, and a click commits one. (`P-IN-01`)
+
+![Candidate window](walkthrough/ime-candidates.png)
 
 ### Screenshot UI
 

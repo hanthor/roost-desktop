@@ -563,9 +563,13 @@ impl Runtime {
                     })
                     .map_err(|e| RuntimeError::Loop(e.to_string()))?;
                 handle
-                    .insert_source(sources.drm, |event, _, rt: &mut Runtime| {
-                        if let Backend::Drm(drm) = &mut rt.backend {
-                            drm.on_drm_event(event);
+                    .insert_source(sources.drm, |event, metadata, rt: &mut Runtime| {
+                        let flip = match &mut rt.backend {
+                            Backend::Drm(drm) => drm.on_drm_event(event, metadata),
+                            Backend::Winit(_) => None,
+                        };
+                        if let Some(flip) = flip {
+                            rt.page_flipped(flip);
                         }
                     })
                     .map_err(|e| RuntimeError::Loop(e.to_string()))?;
@@ -722,13 +726,24 @@ impl Runtime {
         event_loop
             .handle()
             .insert_source(crate::screenshot::start(), |event, _, rt: &mut Runtime| {
-                if let calloop::channel::Event::Msg(request) = event {
-                    let saved = if request.window {
-                        rt.capture_window(&request.filename)
-                    } else {
-                        rt.capture(&request.filename)
-                    };
-                    let _ = request.reply.send(saved);
+                use crate::screenshot::Request;
+                match event {
+                    calloop::channel::Event::Msg(Request::Shot {
+                        filename,
+                        window,
+                        reply,
+                    }) => {
+                        let saved = if window {
+                            rt.capture_window(&filename)
+                        } else {
+                            rt.capture(&filename)
+                        };
+                        let _ = reply.send(saved);
+                    }
+                    calloop::channel::Event::Msg(Request::Windows { directory, reply }) => {
+                        let _ = reply.send(rt.capture_selector_windows(&directory));
+                    }
+                    calloop::channel::Event::Closed => {}
                 }
             })
             .map_err(|e| RuntimeError::Loop(e.to_string()))?;
@@ -988,11 +1003,19 @@ impl Runtime {
                     _ => {}
                 }
             }
-            let action = self.triggers.feed(
-                &input,
-                self.control.overview_open(),
-                self.manager.pointer_pos(),
-            );
+            // Super's tap belongs to a window inhibiting shortcuts
+            // (keyboard-shortcuts-inhibit, #89).
+            let inhibited =
+                matches!(input, ManagerInput::Key { .. }) && self.state.shortcuts_inhibited();
+            let action = if inhibited {
+                TriggerAction::None
+            } else {
+                self.triggers.feed(
+                    &input,
+                    self.control.overview_open(),
+                    self.manager.pointer_pos(),
+                )
+            };
             match action {
                 TriggerAction::None => {}
                 TriggerAction::Toggle => self.control.set_overview(!self.control.overview_open()),
@@ -1488,6 +1511,73 @@ impl Runtime {
         Some(path)
     }
 
+    /// GNOME's screenshot window selector (screenshot.js
+    /// `UIWindowSelector.capture`): every window on the active workspace,
+    /// minimized ones left out, each saved at full size into `directory`
+    /// and given its slot in the selector, laid out with GNOME's window
+    /// spread inside the selector's margins. Never while locked.
+    pub fn capture_selector_windows(
+        &mut self,
+        directory: &std::path::Path,
+    ) -> Vec<crate::screenshot::WindowShot> {
+        if self.is_locked() || std::fs::create_dir_all(directory).is_err() {
+            return Vec::new();
+        }
+        let size = self.state.primary_size();
+        let model = self.manager.model();
+        let active = model.active_workspace();
+        let focused = model.focused();
+        let mut windows: Vec<(u64, Rectangle<i32, Logical>)> = self
+            .manager
+            .overview_windows()
+            .into_iter()
+            .filter(|w| w.workspace == active && !self.manager.is_minimized(w.id))
+            .map(|w| (w.id, w.geometry))
+            .collect();
+        // GNOME sorts by stable sequence: creation order (Roost ids rise).
+        windows.sort_by_key(|(id, _)| *id);
+        let top = crate::windows::WORK_AREA_TOP;
+        let workarea = Rectangle::new((0, top).into(), (size.w, (size.h - top).max(1)).into());
+        let (ax, ay, aw, ah) = crate::screenshot::selector_area(size.w, size.h);
+        let area = Rectangle::new((ax, ay).into(), (aw, ah).into());
+        let slots = crate::overview::window_slots_spaced(
+            workarea,
+            size.h,
+            area,
+            &windows,
+            crate::overview::SELECTOR_SPACING,
+        );
+        let mut shots = Vec::new();
+        for (id, rect, _) in slots {
+            let title = self
+                .manager
+                .model()
+                .window(id)
+                .map(|w| w.title.clone())
+                .unwrap_or_default();
+            let Some((w, h, rgba)) =
+                self.render_window_pixels(id, None, smithay::backend::allocator::Fourcc::Abgr8888)
+            else {
+                continue;
+            };
+            let path = directory.join(format!("window-{id}.png"));
+            if crate::screenshot::save_png(&path, w as u32, h as u32, &rgba).is_err() {
+                continue;
+            }
+            shots.push(crate::screenshot::WindowShot {
+                id,
+                title,
+                focused: focused == Some(id),
+                x: rect.loc.x,
+                y: rect.loc.y,
+                width: rect.size.w,
+                height: rect.size.h,
+                path,
+            });
+        }
+        shots
+    }
+
     /// Physical size of window `id` at its output's scale, and the scale.
     fn window_pixel_size(&self, id: u64) -> Option<((i32, i32), f64)> {
         let geometry = self.manager.geometry(id)?;
@@ -1753,6 +1843,25 @@ impl Runtime {
                     };
                     self.render_pixels(output, xrgb)
                 }
+                CastTarget::Area(connector, area) => {
+                    let output = match &self.backend {
+                        Backend::Winit(_) => None,
+                        #[cfg(feature = "drm")]
+                        Backend::Drm(_) => Some(connector.as_str()),
+                    };
+                    #[cfg(not(feature = "drm"))]
+                    let _ = connector;
+                    self.render_pixels(output, xrgb).and_then(|(w, h, pixels)| {
+                        let cropped = crate::screencast::crop(&pixels, (w, h), *area);
+                        if cropped.is_none() {
+                            eprintln!(
+                                "roost-compositor: screen cast area {area:?} is not inside the {w}x{h} frame ({} bytes)",
+                                pixels.len()
+                            );
+                        }
+                        cropped.map(|cropped| (area.2, area.3, cropped))
+                    })
+                }
             };
             let Some((w, h, bgrx)) = frame else {
                 continue;
@@ -1789,6 +1898,7 @@ impl Runtime {
                     crate::mutter::CastTarget::Window(id) => {
                         self.window_pixel_size(*id).map(|(size, _)| size)
                     }
+                    crate::mutter::CastTarget::Area(_, (_, _, w, h)) => Some((*w, *h)),
                 };
                 let Some((width, height)) = size else {
                     crate::mutter::session_closed(&signal, session_id);
@@ -1974,6 +2084,12 @@ impl Runtime {
             .flush_clients()
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
         self.manager.reconcile(&mut self.state);
+        // A client's pointer warp moved the manager's pointer: the
+        // drawn cursor follows (#89).
+        #[cfg(feature = "drm")]
+        if let Backend::Drm(drm) = &mut self.backend {
+            drm.set_pointer(self.manager.pointer_pos());
+        }
         // Publish the output inventory every tick (multi-monitor): the
         // hub broadcasts on change only, so the steady state costs one
         // short comparison. The inventory is the compositor's tracking
@@ -2149,6 +2265,39 @@ impl Runtime {
         Ok(!self.exit)
     }
 
+    /// A page flip completed (hardware): mark what the frame drew
+    /// presented with the kernel's vblank time and sequence, and on the
+    /// primary output advance fifo barriers and commit timers (#89).
+    #[cfg(feature = "drm")]
+    fn page_flipped(&mut self, flip: crate::drm::PageFlip) {
+        use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind;
+        use smithay::utils::{Monotonic, Time};
+        // Mutter's KMS flags: vsync'd, kernel-timestamped, completion
+        // reported by the hardware.
+        let (time, flags): (Time<Monotonic>, Kind) = match flip.time {
+            Some(time) => (
+                Time::from(time),
+                Kind::Vsync | Kind::HwClock | Kind::HwCompletion,
+            ),
+            None => (
+                self.state.presentation_now(),
+                Kind::Vsync | Kind::HwCompletion,
+            ),
+        };
+        if let Some(mut feedback) = flip.feedback {
+            feedback.presented::<_, Monotonic>(
+                time,
+                smithay::wayland::presentation::Refresh::fixed(flip.refresh),
+                flip.sequence,
+                flags,
+            );
+        }
+        if flip.primary {
+            let roots = crate::frame_timing::frame_roots(&self.state, &self.manager);
+            self.state.refresh_cycle(&roots, time, flip.refresh);
+        }
+    }
+
     /// Render all mapped toplevels stacked at the origin, then send frame
     /// callbacks. While the recovery overlay is visible the background
     /// shifts to a deep red (provisional overlay visual; full overlay
@@ -2277,6 +2426,14 @@ impl Runtime {
                 backend
                     .submit(Some(&[damage]))
                     .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+                // The host took the frame: presentation feedback,
+                // fifo barriers and commit timers (#89).
+                crate::frame_timing::present_nested_frame(
+                    &mut self.state,
+                    &self.manager,
+                    locked,
+                    self.stats.frames,
+                );
                 self.stats.frames += 1;
             }
             #[cfg(feature = "drm")]
@@ -2288,8 +2445,19 @@ impl Runtime {
                 let crate::drm::DrmBackend {
                     renderer, outputs, ..
                 } = &mut **drm;
+                // What each output's frame draws, for presentation
+                // feedback at its page flip (#89): a surface belongs to
+                // the output under its center, else the primary.
+                let drawn = crate::frame_timing::drawn_roots(&self.state, &self.manager, locked);
+                let rects: Vec<Rectangle<i32, Logical>> = outputs
+                    .iter()
+                    .map(|o| Rectangle::new(o.loc.into(), o.logical_size().into()))
+                    .collect();
+                let owner = |at: &smithay::utils::Point<i32, Logical>| {
+                    rects.iter().position(|r| r.contains(*at)).unwrap_or(0)
+                };
                 let mut queued = false;
-                for out in outputs.iter_mut() {
+                for (index, out) in outputs.iter_mut().enumerate() {
                     // Display-paced: one frame in flight per output.
                     if out.pending {
                         continue;
@@ -2400,7 +2568,14 @@ impl Runtime {
                             .finish()
                             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?
                     };
-                    if let Err(e) = out.surface.queue_buffer(Some(sync), None, ()) {
+                    let mine: Vec<_> = drawn
+                        .iter()
+                        .filter(|(_, at)| owner(at) == index)
+                        .map(|(surface, _)| surface.clone())
+                        .chain(lock_surface.clone())
+                        .collect();
+                    let feedback = crate::frame_timing::take_feedback(&mine, &out.output);
+                    if let Err(e) = out.surface.queue_buffer(Some(sync), None, feedback) {
                         eprintln!("roost-compositor: drm: queue_buffer {}: {e}", out.name);
                         continue;
                     }
