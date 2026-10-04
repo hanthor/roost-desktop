@@ -278,7 +278,7 @@ mod constants_tests {
     #[test]
     fn max_title_length_is_reasonable() {
         assert_eq!(MAX_TITLE_LEN, 512);
-        assert!(MAX_TITLE_LEN > 0);
-        assert!(MAX_TITLE_LEN < MAX_FRAME_BYTES);
+        const { assert!(MAX_TITLE_LEN > 0) };
+        const { assert!(MAX_TITLE_LEN < MAX_FRAME_BYTES) };
     }
 }
