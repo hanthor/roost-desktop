@@ -347,8 +347,13 @@ jq -e ' .active_workspace == 0 ' "$ROOST_COMPOSITOR_STATE" >/dev/null || {
 # The screenshot UI (Print).
 xdotool key Print
 shot 14-screenshot-ui 6
-xdotool key Escape
+# Close through its visible action, matching the native capture’s close().
+# This also ensures the screenshot overlay releases pointer ownership.
+press "Close"
 sleep 1
+jq -e '[.layers[]? | select(.namespace == "roost-screenshot-ui")] | length == 0' "$ROOST_COMPOSITOR_STATE" >/dev/null || {
+    echo "roost-parity-capture: screenshot overlay did not close" >&2; exit 1;
+}
 # Three workspaces (the focused window moved one to the right through
 # its window menu, the view staying put): the overview's thumbnails.
 window_menu
@@ -368,6 +373,9 @@ for step in $(seq 1 12); do
     sleep 0.05
 done
 shot 16b-workspace-insertion-placeholder 1
+jq -e '.workspace_placeholder.workspace == 1' "$ROOST_COMPOSITOR_STATE" >/dev/null || {
+    echo "roost-parity-capture: thumbnail gap has no insertion placeholder" >&2; exit 1;
+}
 # Cancel without a drop so following capture states keep their workspaces.
 xdotool key Escape
 xdotool mouseup 1
