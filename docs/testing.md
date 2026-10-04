@@ -180,6 +180,35 @@ Read `nested.log` in the artifacts directory first (`compositor.log` for
 retry a deterministic test until it passes: the timing rule in the
 [development guide](development.md#writing-a-test) applies.
 
+## Bounded nested stress
+
+`nested stress` runs four concurrent Wayland GTK clients. Each round maps
+and destroys 400 windows; three warmup rounds settle renderer caches.
+After every measured round, Escape and Super must still change the
+compositor's overview state, and every destroyed window must disappear.
+The lane then sends 1,000 notifications and closes each over D-Bus.
+
+The per-change smoke uses ten measured rounds; nightly uses 300. The
+report retains PSS/RSS, file descriptors and descendant process counts
+for the compositor and supervised shell after each round. Final PSS must
+stay within warmup PSS × 1.25 + 64 MiB, and fd count within warmup + 32.
+These diagnostic bounds catch unbounded growth in this workload; they
+are separate from the GNOME performance targets in #73. A panic, lost
+input response, orphaned window or hung worker fails the lane. Logs,
+metrics, final state, assertions and the exact source revision are kept.
+
+Run it on a development host after building the compositor and GTK shell:
+
+```sh
+scripts/roost-stress --rounds 10 --out /tmp/roost-stress-fresh
+```
+
+Use a fresh empty artifact directory for each run. The harness starts its
+own Xvfb, session bus and private user state. It covers client churn and
+notification flood portions of #203; malformed Wayland requests, service
+faults, hotplug, locked-input adversaries and a measured 24-hour VM soak
+remain open.
+
 ## Control decoder fuzzing
 
 The `control decoder fuzz` workflow exercises both arbitrary length-prefixed

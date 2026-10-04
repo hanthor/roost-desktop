@@ -564,14 +564,13 @@ dependencies = [
 
 [[package]]
 name = "calloop"
-version = "0.14.4"
+version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4dbf9978365bac10f54d1d4b04f7ce4427e51f71d61f2fe15e3fed5166474df7"
+checksum = "43b32313e937c8721c9d17ee9bf60699a6402b4b7c2cb6ac1bee0ffcaa4b4e5e"
 dependencies = [
  "bitflags 2.13.2",
  "polling",
  "rustix 1.1.5",
- "slab",
  "tracing",
 ]
 
@@ -659,7 +658,7 @@ checksum = "157a8ba7b480713b56f4c09fd13fc3e0a22a5dfab8097ba61cbc5feef950788a"
 dependencies = [
  "glob",
  "libc",
- "libloading",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -907,7 +906,7 @@ version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
- "libloading",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -2296,6 +2295,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "libloading"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
+
+[[package]]
 name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3475,11 +3484,11 @@ dependencies = [
 name = "roost-compositor"
 version = "0.1.0"
 dependencies = [
- "calloop 0.14.4",
+ "calloop 0.14.5",
  "greetd_ipc",
  "image",
  "libc",
- "libloading",
+ "libloading 0.9.0",
  "pipewire",
  "png",
  "rand 0.10.3",
@@ -3834,7 +3843,7 @@ dependencies = [
  "appendlist",
  "atomic_float",
  "bitflags 2.13.2",
- "calloop 0.14.4",
+ "calloop 0.14.5",
  "cc",
  "cgmath",
  "cursor-icon",
@@ -3849,7 +3858,7 @@ dependencies = [
  "indexmap",
  "input",
  "libc",
- "libloading",
+ "libloading 0.8.9",
  "libseat",
  "pkg-config",
  "profiling",
@@ -4862,7 +4871,7 @@ dependencies = [
  "as-raw-xcb-connection",
  "gethostname",
  "libc",
- "libloading",
+ "libloading 0.8.9",
  "once_cell",
  "rustix 1.1.5",
  "x11rb-protocol",
