@@ -304,6 +304,7 @@ pub struct Session<'a> {
     accelerators: Option<Vec<roost_shell_control::Accelerator>>,
     /// Window-menu actions the shell asked for, until drained.
     window_actions: Vec<(u64, roost_shell_control::WindowAction)>,
+    shortcut_consent: Vec<(u64, bool)>,
     /// Latest `SetOverviewSearch` from the shell, drained by the hub.
     overview_search: Option<bool>,
     /// Latest `SetOverviewAppGrid` from the shell, drained by the hub.
@@ -381,6 +382,7 @@ impl<'a> Session<'a> {
             idle_timeout: None,
             accelerators: None,
             window_actions: Vec::new(),
+            shortcut_consent: Vec::new(),
             overview_search: None,
             overview_app_grid: None,
             unlock_request: None,
@@ -709,6 +711,19 @@ impl<'a> Session<'a> {
             }
             Message::Command {
                 id,
+                kind: CommandKind::ShortcutConsent { request, allow },
+            } => {
+                if !self.locked.get() {
+                    self.shortcut_consent.push((request, allow));
+                }
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: CommandStatus::Applied,
+                })?;
+                Ok(Handled::CommandResult { id, applied: true })
+            }
+            Message::Command {
+                id,
                 kind: CommandKind::WindowAction { window, action },
             } => {
                 // The window manager carries it out (drained by the hub);
@@ -776,6 +791,7 @@ impl<'a> Session<'a> {
             | Message::WindowMenu { .. }
             | Message::WorkspacePopup { .. }
             | Message::PointerOutput { .. }
+            | Message::ShortcutConsent { .. }
             | Message::Error { .. } => {
                 let _ = self.conn.write_frame(&Message::Error {
                     kind: ErrorKind::UnknownCommand,
@@ -818,6 +834,7 @@ fn message_kind(msg: &Message) -> &'static str {
         Message::WindowMenu { .. } => "WindowMenu",
         Message::WorkspacePopup { .. } => "WorkspacePopup",
         Message::PointerOutput { .. } => "PointerOutput",
+        Message::ShortcutConsent { .. } => "ShortcutConsent",
     }
 }
 
@@ -973,6 +990,7 @@ fn apply_command(
         | CommandKind::Unlock { .. }
         | CommandKind::SetAccelerators { .. }
         | CommandKind::WindowAction { .. }
+        | CommandKind::ShortcutConsent { .. }
         | CommandKind::SwitchInputSource { .. }
         | CommandKind::SetSwitcherThumbnails { .. }
         | CommandKind::SetSwitcherKeys { .. }
@@ -1015,6 +1033,8 @@ pub struct PollOutcome {
     pub accelerators: Option<Vec<roost_shell_control::Accelerator>>,
     /// Window-menu actions to carry out.
     pub window_actions: Vec<(u64, roost_shell_control::WindowAction)>,
+    /// Trusted shell decisions for pending inhibitors.
+    pub shortcut_consent: Vec<(u64, bool)>,
     /// Input-source switches to make (`true` backward), in order.
     pub input_source_switches: Vec<bool>,
     /// New switcher thumbnail frames, if the shell sent any.
@@ -1410,6 +1430,9 @@ impl ControlHub {
                         outcome.accelerators = Some(list);
                     }
                     outcome.window_actions.extend(session.take_window_actions());
+                    outcome
+                        .shortcut_consent
+                        .extend(std::mem::take(&mut session.shortcut_consent));
                     outcome
                         .input_source_switches
                         .extend(std::mem::take(&mut session.input_source_switches));

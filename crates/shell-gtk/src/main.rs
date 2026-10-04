@@ -18,6 +18,7 @@ mod calendar;
 mod events;
 mod folder_dialog;
 mod folders;
+mod group_animation;
 mod ibus_panel;
 mod keybindings;
 mod live_apps;
@@ -36,6 +37,7 @@ mod screensaver;
 mod screenshot_ui;
 mod services;
 mod shell_dbus;
+mod shortcut_consent;
 mod switcher;
 mod tray;
 mod wifi;
@@ -1775,6 +1777,15 @@ fn build(app: &adw::Application) {
                 }
                 if let Some(iface) = all[4].as_ref() {
                     out.hot_corners = iface.boolean("enable-hot-corners");
+                    if iface
+                        .settings_schema()
+                        .is_some_and(|schema| schema.has_key("enable-animations"))
+                    {
+                        out.enable_animations = iface.boolean("enable-animations");
+                    }
+                    if let Some(gtk_settings) = gtk::Settings::default() {
+                        gtk_settings.set_gtk_enable_animations(out.enable_animations);
+                    }
                 }
                 if let Some(control) = shell.borrow_mut().control.as_mut() {
                     let _ = control.set_input_settings(out);
@@ -1872,6 +1883,17 @@ fn build(app: &adw::Application) {
         )
     };
 
+    let shortcut_consent = {
+        let shell = shell.clone();
+        shortcut_consent::Consent::new(
+            app.upcast_ref(),
+            Rc::new(move |request, allow| {
+                if let Some(control) = shell.borrow_mut().control.as_mut() {
+                    let _ = control.shortcut_consent(request, allow);
+                }
+            }),
+        )
+    };
     // Compositor state: drain the control socket every frame.
     {
         let shell = shell.clone();
@@ -1899,6 +1921,7 @@ fn build(app: &adw::Application) {
             let mut results = Vec::new();
             let mut accelerators = Vec::new();
             let mut menus = Vec::new();
+            let mut consent = None;
             let mut popups = Vec::new();
             if let Some(control) = shell.control.as_mut() {
                 loop {
@@ -1907,6 +1930,7 @@ fn build(app: &adw::Application) {
                             let _ = control.request_snapshot();
                         }
                         Ok(Handled::WindowMenu(request)) => menus.push(request),
+                        Ok(Handled::ShortcutConsent(request)) => consent = Some(request),
                         Ok(Handled::WorkspacePopup { index, count }) => {
                             popups.push((index, count));
                         }
@@ -1951,6 +1975,11 @@ fn build(app: &adw::Application) {
             }
             lock_ui.sync(locked);
             screensaver.sync(locked);
+            if locked {
+                shortcut_consent.dismiss();
+            } else if let Some(request) = consent {
+                shortcut_consent.sync(request);
+            }
             for (action, time, mode) in accelerators {
                 gnome_shell.accelerator_activated(action, time, mode);
             }

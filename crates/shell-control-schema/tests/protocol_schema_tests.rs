@@ -5,6 +5,13 @@ mod protocol_version_tests {
     use roost_shell_control::{ProtocolVersion, CURRENT_VERSION};
 
     #[test]
+    fn shipped_bindings_minor_accepts_current_and_rejects_future() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 23));
+        assert!(ProtocolVersion::new(0, 23).is_compatible_with(&CURRENT_VERSION));
+        assert!(!ProtocolVersion::new(0, 24).is_compatible_with(&CURRENT_VERSION));
+    }
+
+    #[test]
     fn version_is_compatible_with_same_version() {
         let version = ProtocolVersion { major: 1, minor: 2 };
         assert!(version.is_compatible_with(&version));
@@ -37,8 +44,8 @@ mod protocol_version_tests {
         let major = CURRENT_VERSION.major;
         let minor = CURRENT_VERSION.minor;
         assert!(major > 0 || minor > 0); // At least one should be non-zero
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 22));
-        assert!(!ProtocolVersion::new(0, 23).is_compatible_with(&CURRENT_VERSION));
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 23));
+        assert!(!ProtocolVersion::new(0, 24).is_compatible_with(&CURRENT_VERSION));
     }
 
     #[test]

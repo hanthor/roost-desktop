@@ -286,6 +286,8 @@ pub struct WindowManager {
     /// [`step_strip_view`](Self::step_strip_view). Only render
     /// positions use it.
     strip_shown: f64,
+    animations_enabled: bool,
+    column_animations: HashMap<u64, crate::animation::ColumnSpring>,
     /// The running view spring and its elapsed seconds, while the drawn
     /// view has not settled on the target.
     strip_anim: Option<(crate::spring::Spring, f64)>,
@@ -347,6 +349,8 @@ impl WindowManager {
             mode: SessionMode::Gnome,
             strip_offset: 0.0,
             strip_shown: 0.0,
+            animations_enabled: true,
+            column_animations: HashMap::new(),
             strip_anim: None,
             super_held: false,
             // add_keyboard below: 200 ms delay, 200 keys/s.
@@ -456,8 +460,8 @@ impl WindowManager {
     }
 
     /// [`visible_windows`](Self::visible_windows) where they are drawn
-    /// this frame: strip columns shift by how far the animated view
-    /// still trails its target. Every other use (input, configure,
+    /// this frame: column widths and positions spring to their targets,
+    /// shifted by how far the animated view still trails its target. Every other use (input, configure,
     /// output scale) keeps the target geometry.
     pub fn render_windows(&self) -> Vec<(Window, Rectangle<i32, Logical>)> {
         self.visible_entries()
@@ -476,7 +480,12 @@ impl WindowManager {
     /// column: drawn x = target x + (target offset - drawn offset).
     fn shifted(&self, id: u64, mut geometry: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
         if self.mode == SessionMode::Scroll && self.window_layout(id) == Some(WindowLayout::Strip) {
-            geometry.loc.x += (self.strip_offset - self.strip_shown).round() as i32;
+            if let Some(animation) = self.column_animations.get(&id) {
+                geometry = animation.value();
+                geometry.loc.x -= self.strip_shown.round() as i32;
+            } else {
+                geometry.loc.x += (self.strip_offset - self.strip_shown).round() as i32;
+            }
         }
         geometry
     }
@@ -2434,6 +2443,17 @@ impl WindowManager {
         self.strip_anim = None;
     }
 
+    /// Apply the live animation preference and finish motion already in flight.
+    pub fn set_animations_enabled(&mut self, enabled: bool) {
+        self.animations_enabled = enabled;
+        if !enabled {
+            self.snap_strip_view();
+            for animation in self.column_animations.values_mut() {
+                animation.step(0.0, false);
+            }
+        }
+    }
+
     /// Advance the drawn strip view `dt` seconds toward the target on
     /// niri's default view-movement spring (critically damped,
     /// stiffness 800, epsilon 0.0001). A target that moved mid-flight
@@ -2443,6 +2463,30 @@ impl WindowManager {
     /// only while it does).
     pub fn step_strip_view(&mut self, dt: f64) -> bool {
         use crate::spring::Spring;
+        let columns: Vec<_> = self
+            .visible_entries()
+            .into_iter()
+            .filter(|(id, _, _)| self.window_layout(*id) == Some(WindowLayout::Strip))
+            .map(|(id, _, mut rect)| {
+                rect.loc.x += self.strip_offset.round() as i32;
+                (id, rect)
+            })
+            .collect();
+        self.column_animations
+            .retain(|id, _| columns.iter().any(|(other, _)| id == other));
+        let mut columns_moving = false;
+        for (id, rect) in columns {
+            let animation = self
+                .column_animations
+                .entry(id)
+                .or_insert_with(|| crate::animation::ColumnSpring::new(rect, rect));
+            animation.retarget(rect);
+            columns_moving |= animation.step(dt, self.animations_enabled);
+        }
+        if !self.animations_enabled {
+            self.snap_strip_view();
+            return false;
+        }
         if self.mode != SessionMode::Scroll {
             self.snap_strip_view();
             return false;
@@ -2457,11 +2501,11 @@ impl WindowManager {
             None if self.strip_shown != target => {
                 (Spring::view_movement(self.strip_shown, target, 0.0), 0.0)
             }
-            None => return false,
+            None => return columns_moving,
         };
         if spring.done_at(t) {
             self.snap_strip_view();
-            return false;
+            return columns_moving;
         }
         self.strip_shown = spring.value_at(t);
         self.strip_anim = Some((spring, t));

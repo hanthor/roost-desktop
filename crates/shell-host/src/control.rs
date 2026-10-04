@@ -136,6 +136,8 @@ pub enum Handled {
     WindowMenu(WindowMenuRequest),
     /// Connector under the compositor pointer changed.
     PointerOutput,
+    /// Show or dismiss the shortcut consent dialog.
+    ShortcutConsent(Option<(u64, String)>),
     /// A grabbed accelerator was pressed (org.gnome.Shell).
     Accelerator {
         /// The grab's action id.
@@ -516,6 +518,16 @@ impl ControlClient {
         Ok(id)
     }
 
+    /// Answer the compositor's pending shortcut consent request.
+    pub fn shortcut_consent(&mut self, request: u64, allow: bool) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::ShortcutConsent { request, allow },
+        })?;
+        Ok(id)
+    }
+
     /// Carry out one of GNOME's window-menu actions. Returns the request id.
     pub fn window_action(
         &mut self,
@@ -734,6 +746,7 @@ impl ControlClient {
                 self.pointer_output = name;
                 Ok(Handled::PointerOutput)
             }
+            Message::ShortcutConsent { request } => Ok(Handled::ShortcutConsent(request)),
             Message::WorkspacePopup { index, count } => {
                 Ok(Handled::WorkspacePopup { index, count })
             }
@@ -898,6 +911,7 @@ fn message_label(msg: &Message) -> &'static str {
         Message::WindowMenu { .. } => "WindowMenu",
         Message::WorkspacePopup { .. } => "WorkspacePopup",
         Message::PointerOutput { .. } => "PointerOutput",
+        Message::ShortcutConsent { .. } => "ShortcutConsent",
     }
 }
 
