@@ -759,7 +759,10 @@ pub enum SwitcherAction {
 /// Nonblocking contract (spec R6): `WouldBlock` surfaces immediately when
 /// a socket is not ready; on write backpressure, the connection should be
 /// dropped rather than retried (a partial frame may remain buffered).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Not `Clone`/`PartialEq`: the `Io` variant carries [`std::io::Error`],
+/// which implements neither. Match on `Io(e) if e.kind() == ...` instead of
+/// comparing errors for equality.
+#[derive(Debug)]
 pub enum ControlError {
     /// Underlying socket I/O failure.
     Io(std::io::Error),

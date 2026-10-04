@@ -33,9 +33,8 @@ use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 
 use roost_shell_control::{
-    ActivationToken, CommandKind, CommandStatus, ControlError, DecodeError, ErrorKind,
-    Message, OutputInfo, SwitcherAction, WindowInfo, WorkspaceInfo, CURRENT_VERSION,
-    MAX_FRAME_BYTES,
+    ActivationToken, CommandKind, CommandStatus, ControlError, DecodeError, ErrorKind, Message,
+    OutputInfo, SwitcherAction, WindowInfo, WorkspaceInfo, CURRENT_VERSION, MAX_FRAME_BYTES,
 };
 
 use crate::model::{ShellModel, SnapshotView, WindowEntry};
@@ -326,9 +325,10 @@ impl ControlClient {
     /// every snapshot mints fresh one-use tokens. Returns the request id
     /// for `CommandResult` correlation.
     pub fn activate_selected(&mut self) -> Result<u64, ControlError> {
-        let window = self.model.selected().ok_or_else(|| {
-            ControlError::AppConstraint("no selected window to activate".into())
-        })?;
+        let window = self
+            .model
+            .selected()
+            .ok_or_else(|| ControlError::AppConstraint("no selected window to activate".into()))?;
         let token = self
             .shadow_windows
             .iter()
@@ -540,9 +540,10 @@ impl ControlClient {
     /// selection. Prefer [`activate_selected`](Self::activate_selected),
     /// which sources the token from the latest shadow state.
     pub fn send_activation(&mut self, token: ActivationToken) -> Result<u64, ControlError> {
-        let window = self.model.selected().ok_or_else(|| {
-            ControlError::AppConstraint("no selected window".into())
-        })?;
+        let window = self
+            .model
+            .selected()
+            .ok_or_else(|| ControlError::AppConstraint("no selected window".into()))?;
         let id = self.alloc_request_id();
         self.write_message(&Message::Command {
             id,
