@@ -2056,19 +2056,28 @@ impl Runtime {
         };
         held.grant.store(true, std::sync::atomic::Ordering::SeqCst);
         let time = self.lock_now_ms() as u32;
+        // Cleanup must reach the seat even while the lock shield has no
+        // surface or idle blank would consume a wake event. These are only
+        // releases for presses delivered by this grant, never new input.
         for keycode in held.keys {
-            self.on_manager_input(ManagerInput::Key {
-                keycode,
-                pressed: false,
-                time,
-            });
+            self.manager.on_input(
+                &mut self.state,
+                ManagerInput::Key {
+                    keycode,
+                    pressed: false,
+                    time,
+                },
+            );
         }
         for button in held.buttons {
-            self.on_manager_input(ManagerInput::Button {
-                button,
-                pressed: false,
-                time,
-            });
+            self.manager.on_input(
+                &mut self.state,
+                ManagerInput::Button {
+                    button,
+                    pressed: false,
+                    time,
+                },
+            );
         }
     }
 
