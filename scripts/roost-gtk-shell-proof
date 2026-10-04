@@ -910,8 +910,15 @@ EOF
 xdotool mousemove --window "$WID" "$page_source_x" "$page_source_y"
 sleep 0.3
 xdotool mousedown 1
+sleep 0.1
+# Establish a real held-pointer drag before approaching the page edge.
+# This sequence passed the actual GTK page-peek/page-change gate in #244.
+for step in $(seq 1 6); do
+    xdotool mousemove --window "$WID" $((page_source_x + step * 10)) "$page_source_y"
+    sleep 0.05
+done
 for i in $(seq 1 20); do
-    xdotool mousemove --window "$WID" $((page_source_x + (WIDTH - 6 - page_source_x) * i / 20)) "$page_source_y"
+    xdotool mousemove --window "$WID" $((page_source_x + 60 + (WIDTH - 6 - page_source_x - 60) * i / 20)) "$page_source_y"
     sleep 0.03
 done
 sleep 0.8
