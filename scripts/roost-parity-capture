@@ -36,8 +36,10 @@ PY=/usr/bin/python3
 [ -x "$PY" ] || PY=python3
 PIDS=""
 cleanup() {
-    # shellcheck disable=SC2086
-    [ -n "$PIDS" ] && kill $PIDS 2>/dev/null || true
+    if [ -n "$PIDS" ]; then
+        # shellcheck disable=SC2086
+        kill $PIDS 2>/dev/null || true
+    fi
     rm -rf "$WORK"
 }
 trap cleanup EXIT INT TERM
