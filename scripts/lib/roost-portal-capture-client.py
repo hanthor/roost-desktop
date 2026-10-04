@@ -73,7 +73,7 @@ else:
 revoked_at = time.monotonic()
 deadline = time.monotonic() + 2
 while time.monotonic() < deadline:
-    nodes = json.loads(subprocess.check_output(["pw-dump"]))
+    nodes = json.loads(subprocess.check_output(["pw-dump"], timeout=1))
     if not any(item.get("id") == node and item.get("type") == "PipeWire:Interface:Node" for item in nodes):
         out.with_suffix(".revoked.json").write_text(json.dumps(nodes, indent=2))
         print("grant consumed frame from node " + str(node) + "; " + ("lock" if mode == "revoke" else "backend disconnect" if mode == "backend-disconnect" else "client disconnect" if mode == "disconnect" else "Close") + " removed PipeWire node in " + str(round(time.monotonic() - revoked_at, 3)) + "s")
