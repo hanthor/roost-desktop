@@ -25,6 +25,7 @@ mod keybindings;
 mod live_apps;
 mod lock;
 mod logic;
+mod media_keys;
 mod network_agent;
 mod network_secrets;
 mod notify;
@@ -1384,6 +1385,23 @@ fn build(app: &adw::Application) {
     // org.gnome.Shell for the rest of GNOME: the OSD gnome-settings-daemon
     // shows for volume and brightness keys, search and the app grid.
     let osd_ui = osd::OsdUi::new(app.upcast_ref());
+    let media_keys = media_keys::MediaKeys::new({
+        let osd = osd_ui.clone();
+        Rc::new(move |percent, muted, microphone| {
+            osd.show(&osd::OsdRequest {
+                icon: Some(
+                    if microphone {
+                        logic::mic_icon(percent, muted)
+                    } else {
+                        logic::volume_icon(percent, muted)
+                    }
+                    .into(),
+                ),
+                level: Some(if muted { 0.0 } else { percent / 100.0 }),
+                ..Default::default()
+            });
+        })
+    });
     let screensaver = screensaver::start(
         {
             let shell = shell.clone();
@@ -1621,6 +1639,30 @@ fn build(app: &adw::Application) {
                                 roost_shell_control::dynamic_workspace_count(occupied, workspace),
                             );
                         }
+                    }
+                    Action::VolumeUp { precise } | Action::VolumeDown { precise } => {
+                        let up = matches!(action, Action::VolumeUp { .. });
+                        let step = if precise {
+                            2.0
+                        } else {
+                            keybindings::volume_step(keybindings::media_settings().as_ref())
+                        };
+                        media_keys.change(
+                            if up {
+                                media_keys::VolumeKey::Up
+                            } else {
+                                media_keys::VolumeKey::Down
+                            },
+                            step,
+                            false,
+                        );
+                    }
+                    Action::VolumeMute | Action::MicrophoneMute => {
+                        media_keys.change(
+                            media_keys::VolumeKey::Mute,
+                            0.0,
+                            action == Action::MicrophoneMute,
+                        );
                     }
                     Action::BrightnessUp
                     | Action::BrightnessDown
