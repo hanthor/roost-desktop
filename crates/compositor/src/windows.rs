@@ -460,8 +460,8 @@ impl WindowManager {
     }
 
     /// [`visible_windows`](Self::visible_windows) where they are drawn
-    /// this frame: strip columns shift by how far the animated view
-    /// still trails its target. Every other use (input, configure,
+    /// this frame: column widths and positions spring to their targets,
+    /// shifted by how far the animated view still trails its target. Every other use (input, configure,
     /// output scale) keeps the target geometry.
     pub fn render_windows(&self) -> Vec<(Window, Rectangle<i32, Logical>)> {
         self.visible_entries()
@@ -2443,13 +2443,7 @@ impl WindowManager {
         self.strip_anim = None;
     }
 
-    /// Advance the drawn strip view `dt` seconds toward the target on
-    /// niri's default view-movement spring (critically damped,
-    /// stiffness 800, epsilon 0.0001). A target that moved mid-flight
-    /// restarts the spring from the drawn position with its current
-    /// velocity, as niri does. Called once per frame by the runtime;
-    /// returns whether the view is still moving (frames keep coming
-    /// only while it does).
+    /// Apply the live animation preference and finish motion already in flight.
     pub fn set_animations_enabled(&mut self, enabled: bool) {
         self.animations_enabled = enabled;
         if !enabled {
@@ -2460,6 +2454,13 @@ impl WindowManager {
         }
     }
 
+    /// Advance the drawn strip view `dt` seconds toward the target on
+    /// niri's default view-movement spring (critically damped,
+    /// stiffness 800, epsilon 0.0001). A target that moved mid-flight
+    /// restarts the spring from the drawn position with its current
+    /// velocity, as niri does. Called once per frame by the runtime;
+    /// returns whether the view is still moving (frames keep coming
+    /// only while it does).
     pub fn step_strip_view(&mut self, dt: f64) -> bool {
         use crate::spring::Spring;
         let columns: Vec<_> = self

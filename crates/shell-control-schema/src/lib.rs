@@ -139,7 +139,7 @@ impl ProtocolVersion {
     }
 }
 
-/// Version spoken by this crate (`0.2`).
+/// Version spoken by this crate.
 pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion::CURRENT;
 
 /// Window state owned by the compositor and mirrored to the shell.
