@@ -6,10 +6,15 @@ import json
 import os
 from pathlib import Path
 import pwd
+import re
+import signal
+import tempfile
 import subprocess
 import time
 
-CRITICAL = ('roost-compositor', 'roost-shell-host', 'roost-shell-gtk')
+# The GTK shell is preferred; shell-host is the alternative legacy renderer.
+CRITICAL = ('roost-compositor', 'roost-shell-gtk')
+BINARIES = CRITICAL + ('roost-shell-host', 'roost-session', 'roost-ibus-bridge', 'roostctl')
 
 
 def identity(proc):
@@ -59,23 +64,51 @@ def sample(uid, proc_root=Path('/proc')):
 
 
 def call(command, timeout=10):
-    return subprocess.check_output(command, text=True, timeout=timeout,
-                                   stderr=subprocess.STDOUT).strip()
+    # Kill the whole helper group on timeout, and bound captured output.
+    with tempfile.TemporaryFile() as output:
+        process = subprocess.Popen(command, stdout=output, stderr=output, start_new_session=True)
+        deadline = time.monotonic() + timeout
+        try:
+            while process.poll() is None:
+                if os.fstat(output.fileno()).st_size > 65536:
+                    raise RuntimeError('health helper exceeded 64 KiB output budget')
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('health helper exceeded its deadline')
+                time.sleep(0.05)
+            if os.fstat(output.fileno()).st_size > 65536:
+                raise RuntimeError('health helper exceeded 64 KiB output budget')
+            output.seek(0)
+            value = output.read().decode('utf-8', errors='replace').strip()
+            if process.returncode != 0:
+                raise RuntimeError(f'health helper failed ({process.returncode}): {value}')
+            return value
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
 
 
 def main(args):
     if os.geteuid() != 0:
         raise RuntimeError('run the observer as root to read complete PSS counters')
     uid = pwd.getpwnam(args.user).pw_uid
+    if uid == 0:
+        raise RuntimeError('observe a non-root session UID')
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     if any(out.iterdir()):
         raise RuntimeError('artifact directory must be fresh and empty')
     boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
     binaries = {name: hashlib.sha256(Path('/usr/bin', name).read_bytes()).hexdigest()
-                for name in CRITICAL}
+                for name in BINARIES}
     provenance = {'user': args.user, 'uid': uid, 'source_revision': args.source_revision,
                   'boot_id': boot, 'binaries_sha256': binaries,
+                  'kernel': os.uname().release, 'cpu_count': os.cpu_count(),
+                  'meminfo': Path('/proc/meminfo').read_text(),
+                  'drm_drivers': {card.name: os.path.basename(os.path.realpath(card / 'device/driver'))
+                                  for card in Path('/sys/class/drm').glob('card[0-9]')},
                   'bootc_status': json.loads(call(['bootc', 'status', '--json'], 30)),
                   'started_unix_s': time.time(), 'requested_duration_s': args.seconds,
                   'interval_s': args.interval, 'warmup_s': args.warmup,
@@ -156,6 +189,8 @@ if __name__ == '__main__':
     parser.add_argument('--interval', type=int, default=60)
     parser.add_argument('--warmup', type=int, default=600)
     args = parser.parse_args()
+    if not re.fullmatch('[0-9a-f]{40}', args.source_revision):
+        parser.error('source revision must be the exact 40-digit hexadecimal commit')
     if args.seconds <= args.warmup or args.interval <= 0 or args.warmup < 0:
         parser.error('duration must exceed nonnegative warmup; interval must be positive')
     main(args)

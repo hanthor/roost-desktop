@@ -3,6 +3,8 @@
 import importlib.machinery
 import importlib.util
 import os
+import sys
+import time
 from pathlib import Path
 import tempfile
 import unittest
@@ -31,7 +33,7 @@ class ProcessFailures(unittest.TestCase):
 
     def test_parenthesized_name_does_not_shift_identity(self):
         self.assertEqual(soak.identity(self.root / '100'), ('S', 1234))
-        self.assertEqual(soak.sample(os.getuid(), self.root)['pss_kib'], 300)
+        self.assertEqual(soak.sample(os.getuid(), self.root)['pss_kib'], 200)
 
     def test_missing_counter_fails_instead_of_zero(self):
         (self.root / '100/smaps_rollup').write_text('Rss: 200 kB\n')
@@ -58,6 +60,35 @@ class ProcessFailures(unittest.TestCase):
         with patch.object(soak, 'identity', side_effect=PermissionError('denied')):
             with self.assertRaises(PermissionError):
                 soak.sample(os.getuid(), self.root)
+
+
+class HelperFailures(unittest.TestCase):
+    def test_output_budget_is_enforced_even_after_exit(self):
+        with self.assertRaisesRegex(RuntimeError, 'output budget'):
+            soak.call([sys.executable, '-c', 'print("x" * 65537)'])
+
+    def test_nonzero_exit_is_fatal(self):
+        with self.assertRaisesRegex(RuntimeError, r'failed \(7\)'):
+            soak.call([sys.executable, '-c', 'raise SystemExit(7)'])
+
+    def test_deadline_kills_helper_process_group(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pidfile = Path(directory) / 'pid'
+            code = ('import os,time; from pathlib import Path; '
+                    'pid=os.fork(); '
+                    f'Path({str(pidfile)!r}).write_text(str(pid)) if pid else None; '
+                    'time.sleep(30)')
+            with self.assertRaisesRegex(RuntimeError, 'deadline'):
+                soak.call([sys.executable, '-c', code], timeout=0.3)
+            pid = int(pidfile.read_text())
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                proc = Path('/proc') / str(pid)
+                if not proc.exists() or soak.identity(proc)[0] == 'Z':
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail('helper descendant survived the deadline')
 
 
 if __name__ == '__main__':
