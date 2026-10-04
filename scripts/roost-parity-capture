@@ -172,7 +172,14 @@ xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
     { echo "roost-parity-capture: shell never came up" >&2; exit 1; }
 SOCKET_NAME="$(sed -n 's/.*nested session on \([^ ]*\) .*/\1/p' "$LOG" | head -1)"
 
-shot() { sleep "${2:-1.5}"; scrot -o "$OUT/$1.png" >/dev/null; echo "roost-parity-capture: $1"; }
+shot() {
+    sleep "${2:-1.5}"
+    scrot -o "$OUT/$1.png" >/dev/null
+    if [ -f "$ROOST_COMPOSITOR_STATE" ]; then
+        cp "$ROOST_COMPOSITOR_STATE" "$OUT/$1.json"
+    fi
+    echo "roost-parity-capture: $1"
+}
 press() { "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$WORK/press.json" 20 --press "$1" >/dev/null; }
 # Park the pointer where nothing reacts to it: GNOME's scripted
 # reference has no pointer motion, so nothing there shows hover.
@@ -306,7 +313,7 @@ xdotool key Super_L
 shot 16-overview-workspaces 1.5
 # Hold a preview over the first thumbnail gap, matching GNOME's insertion state.
 read -r sx sy tx ty <<EOF2
-$(jq -r '[.previews[0].rect, .thumbnails[0].rect] | "\(.[0][0] + .[0][2] / 2 | floor) \(.[0][1] + .[0][3] / 2 | floor) \(.[1][0] + .[1][2] + 3) \(.[1][1] + .[1][3] / 2 | floor)"' "$ROOST_COMPOSITOR_STATE")
+$(jq -r '[.previews[0].rect, .thumbnails[0].rect] | "\(.[0][0] + 1) \(.[0][1] + 1) \(.[1][0] + .[1][2] + 3) \(.[1][1] + .[1][3] - 1)"' "$ROOST_COMPOSITOR_STATE")
 EOF2
 xdotool mousemove --window "$WID" "$sx" "$sy" mousedown 1
 for step in $(seq 1 12); do

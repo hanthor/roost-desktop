@@ -60,6 +60,7 @@ scripts/lib/roost-parity-compare.py target/gnome-reference target/roost-parity t
 | 14-screenshot-ui | the screenshot UI on Print |
 | 15-workspace-popup | the workspace switcher popup on Super+Page_Down |
 | 16-overview-workspaces | the overview with three workspaces (a window moved one right): the thumbnails strip, the shrunken card, the focused window still drawn activated |
+| 16b-workspace-insertion-placeholder | a window held over the first thumbnail gap: GNOME’s native insertion marker and the later thumbnails shifted by 24px; compare the thumbnail strip crop at 530,96,220,30 |
 | 17-tile-preview | Gamma dragged to the left edge: the tile preview over the left half, above Alpha and below Gamma (GNOME's reference moves Gamma by the drag's offset and opens the preview through its own handler, since headless input is unreliable) |
 | 18-overview-search | "calc" typed in the overview: the app result under the focused entry (external search providers off on both sides, since the host and the image install different ones) |
 | 19-app-popover | a fourth test window opening its header-bar menu by itself (an xdg popup; headless input is not reliable in GNOME's reference), placed by the cascade's first free slot |

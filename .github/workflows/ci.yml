@@ -179,6 +179,12 @@ jobs:
           ROOST_REQUIRE_WAYLAND_INFO: "1"
       # Fractional scaling (#59): the same session at GNOME's 150 percent.
       - run: scripts/roost-scale-proof --artifacts gtk-shell-artifacts/scale
+      # Workspace insertion parity (#206): reuse the binaries this job
+      # built and publish the thumbnail-placeholder frame and state.
+      - run: sudo apt-get install -y --no-install-recommends gnome-shell-common gsettings-desktop-schemas
+      - run: shellcheck scripts/roost-parity-capture
+      - run: scripts/roost-parity-capture --out gtk-shell-artifacts/parity
+
       # The feature walkthrough from this run's frames: every frame the
       # manifest names must still be taken, and the bundle is what a
       # docs refresh commits (scripts/roost-walkthrough).
