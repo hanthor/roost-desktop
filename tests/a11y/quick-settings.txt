@@ -15,6 +15,7 @@ slider: Brightness
 toggle button: Wi-Fi
 toggle button: Wi-Fi Menu
 toggle button: Wired
+toggle button: Wired Menu
 toggle button: Bluetooth
 toggle button: Bluetooth Menu
 toggle button: Power Mode

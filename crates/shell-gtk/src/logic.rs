@@ -1612,3 +1612,625 @@ mod grid_mode_tests {
         assert_eq!(grid_mode(600, 1600), (3, 8));
     }
 }
+
+/// A saved connection a wired device can use (NM `AvailableConnections`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WiredConnection {
+    pub path: String,
+    /// `connection.id`.
+    pub name: String,
+    /// `connection.timestamp`: when it was last up, 0 if never.
+    pub timestamp: u64,
+}
+
+/// One NetworkManager ethernet device as GNOME's wired toggle sees it
+/// (network.js `NMWiredDeviceItem`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WiredDevice {
+    pub path: String,
+    /// `NMDeviceState`.
+    pub state: u32,
+    /// The device's usable connections, any order.
+    pub connections: Vec<WiredConnection>,
+    /// The connection its active connection runs, and that active
+    /// connection's `NMActiveConnectionState`.
+    pub active: Option<(String, u32)>,
+    /// Its active connection is NetworkManager's primary connection.
+    pub primary: bool,
+}
+
+/// `NMActiveConnectionState` values GNOME's wired item tells apart.
+const AC_ACTIVATING: u32 = 1;
+const AC_ACTIVATED: u32 = 2;
+const AC_DEACTIVATED: u32 = 4;
+/// `NMConnectivityState` FULL.
+const CONNECTIVITY_FULL: u32 = 4;
+
+impl WiredDevice {
+    /// `NMMenuItem.state`: the active connection's, else DEACTIVATED.
+    fn ac_state(&self) -> u32 {
+        self.active.as_ref().map_or(AC_DEACTIVATED, |(_, s)| *s)
+    }
+
+    /// `is_active`: activating or up.
+    pub fn is_active(&self) -> bool {
+        self.ac_state() <= AC_ACTIVATED
+    }
+
+    /// GNOME lists a device only in these states (`_shouldShowDevice`):
+    /// not unmanaged, not unavailable (no cable).
+    pub fn shown(&self) -> bool {
+        matches!(
+            self.state,
+            30 | 40 | 50 | 60 | 70 | 80 | 90 | 100 | 110 | 120
+        )
+    }
+
+    /// `NMWiredDeviceItem.icon_name`, given NetworkManager's
+    /// `Connectivity`.
+    pub fn icon(&self, connectivity: u32) -> &'static str {
+        match self.ac_state() {
+            AC_ACTIVATING => "network-wired-acquiring-symbolic",
+            AC_ACTIVATED if !self.primary || connectivity == CONNECTIVITY_FULL => {
+                "network-wired-symbolic"
+            }
+            AC_ACTIVATED => "network-wired-no-route-symbolic",
+            _ => "network-wired-disconnected-symbolic",
+        }
+    }
+
+    /// The connections by name (`ItemSorter`'s order).
+    fn sorted(&self) -> Vec<&WiredConnection> {
+        let mut c: Vec<&WiredConnection> = self.connections.iter().collect();
+        c.sort_by(|a, b| a.name.cmp(&b.name));
+        c
+    }
+
+    /// `_getActivatableItem`: the most recently used connection, else
+    /// the first by name; `None` means connect automatically.
+    fn activatable(&self) -> Option<&WiredConnection> {
+        self.connections
+            .iter()
+            .filter(|c| c.timestamp > 0)
+            .max_by_key(|c| c.timestamp)
+            .or_else(|| self.sorted().into_iter().next())
+    }
+
+    /// What activating the device does (`NMDeviceItem.activate`).
+    pub fn click(&self) -> WiredAction {
+        if self.active.is_some() {
+            WiredAction::Disconnect
+        } else {
+            match self.activatable() {
+                Some(c) => WiredAction::Activate(c.path.clone()),
+                None => WiredAction::AutoConnect,
+            }
+        }
+    }
+
+    /// The device's menu rows (`NMDeviceItem._sync`): one profile is a
+    /// single row named for the device; several are radio rows plus
+    /// Turn Off while up; none is a Connect row.
+    pub fn menu(&self, device_name: &str) -> Vec<WiredRow> {
+        let active = self.active.as_ref().map(|(c, _)| c.as_str());
+        match self.connections.len() {
+            0 => vec![WiredRow::AutoConnect {
+                label: device_name.to_owned(),
+            }],
+            1 => vec![WiredRow::Single {
+                label: device_name.to_owned(),
+                active: self.is_active(),
+                action: self.click(),
+            }],
+            _ => {
+                let mut rows: Vec<WiredRow> = self
+                    .sorted()
+                    .into_iter()
+                    .map(|c| {
+                        let on = active == Some(c.path.as_str()) && self.is_active();
+                        WiredRow::Radio {
+                            label: c.name.clone(),
+                            active: on,
+                            // Radio mode only activates.
+                            action: (!on).then(|| WiredAction::Activate(c.path.clone())),
+                        }
+                    })
+                    .collect();
+                if self.is_active() {
+                    rows.push(WiredRow::TurnOff);
+                }
+                rows
+            }
+        }
+    }
+}
+
+/// What a wired click asks NetworkManager for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WiredAction {
+    /// `Device.Disconnect`.
+    Disconnect,
+    /// `ActivateConnection` of this saved connection on the device.
+    Activate(String),
+    /// `AddAndActivateConnection` of an empty connection (`_autoConnect`).
+    AutoConnect,
+}
+
+/// One row of GNOME's wired menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WiredRow {
+    /// No profile yet: the device's name, connecting automatically.
+    AutoConnect { label: String },
+    /// One profile: the device's name with a Connect/Disconnect subtitle.
+    Single {
+        label: String,
+        active: bool,
+        action: WiredAction,
+    },
+    /// Several profiles: each by name, a dot on the active one.
+    Radio {
+        label: String,
+        active: bool,
+        action: Option<WiredAction>,
+    },
+    /// Disconnect, under radio rows while up.
+    TurnOff,
+}
+
+/// GNOME's wired toggle (`NMWiredToggle`): shown with any listed
+/// device; checked while one is up; its icon is the primary device's
+/// (the first active one, else the most recently used); its subtitle
+/// is "N connected" with several up, else none (the device's name
+/// equals the title).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WiredToggle {
+    pub visible: bool,
+    pub checked: bool,
+    pub icon: &'static str,
+    pub subtitle: Option<String>,
+}
+
+pub fn wired_toggle(devices: &[WiredDevice], connectivity: u32) -> WiredToggle {
+    let shown: Vec<&WiredDevice> = devices.iter().filter(|d| d.shown()).collect();
+    let active: Vec<&&WiredDevice> = shown.iter().filter(|d| d.is_active()).collect();
+    let primary = wired_primary(devices);
+    WiredToggle {
+        visible: !shown.is_empty(),
+        checked: !active.is_empty(),
+        icon: primary.map_or("network-wired-disconnected-symbolic", |d| {
+            d.icon(connectivity)
+        }),
+        subtitle: (active.len() > 1).then(|| format!("{} connected", active.len())),
+    }
+}
+
+/// `NMToggle._getPrimaryItem`: the first active listed device, else
+/// the most recently used, else the first.
+pub fn wired_primary(devices: &[WiredDevice]) -> Option<&WiredDevice> {
+    let shown: Vec<&WiredDevice> = devices.iter().filter(|d| d.shown()).collect();
+    shown.iter().copied().find(|d| d.is_active()).or_else(|| {
+        shown
+            .iter()
+            .copied()
+            .filter(|d| d.connections.iter().any(|c| c.timestamp > 0))
+            .max_by_key(|d| d.connections.iter().map(|c| c.timestamp).max())
+            .or_else(|| shown.first().copied())
+    })
+}
+
+/// A toggle click (`NMToggle.activate`): every active device goes down;
+/// with none up, the primary device comes up.
+pub fn wired_click(devices: &[WiredDevice]) -> Vec<(String, WiredAction)> {
+    let active: Vec<(String, WiredAction)> = devices
+        .iter()
+        .filter(|d| d.shown() && d.is_active())
+        .map(|d| (d.path.clone(), WiredAction::Disconnect))
+        .collect();
+    if !active.is_empty() {
+        return active;
+    }
+    wired_primary(devices)
+        .map(|d| vec![(d.path.clone(), d.click())])
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod wired_tests {
+    use super::*;
+
+    fn conn(path: &str, name: &str, timestamp: u64) -> WiredConnection {
+        WiredConnection {
+            path: path.into(),
+            name: name.into(),
+            timestamp,
+        }
+    }
+
+    #[test]
+    fn wired_toggle_and_menu_follow_gnome() {
+        // A plugged-in device with no profile: shown, off, Connect row.
+        let mut dev = WiredDevice {
+            path: "/d/1".into(),
+            state: 30,
+            ..Default::default()
+        };
+        let t = wired_toggle(std::slice::from_ref(&dev), 4);
+        assert!(t.visible && !t.checked);
+        assert_eq!(t.icon, "network-wired-disconnected-symbolic");
+        assert_eq!(dev.click(), WiredAction::AutoConnect);
+        assert_eq!(
+            dev.menu("Wired"),
+            [WiredRow::AutoConnect {
+                label: "Wired".into()
+            }]
+        );
+        // No cable (unavailable): hidden.
+        dev.state = 20;
+        assert!(!wired_toggle(std::slice::from_ref(&dev), 4).visible);
+
+        // One profile, up as the primary connection without internet.
+        dev.state = 100;
+        dev.connections = vec![conn("/c/1", "Wired connection 1", 5)];
+        dev.active = Some(("/c/1".into(), 2));
+        dev.primary = true;
+        let t = wired_toggle(std::slice::from_ref(&dev), 3);
+        assert!(t.checked);
+        assert_eq!(t.subtitle, None);
+        assert_eq!(t.icon, "network-wired-no-route-symbolic");
+        assert_eq!(dev.icon(4), "network-wired-symbolic");
+        assert_eq!(dev.click(), WiredAction::Disconnect);
+        assert_eq!(
+            dev.menu("Wired"),
+            [WiredRow::Single {
+                label: "Wired".into(),
+                active: true,
+                action: WiredAction::Disconnect
+            }]
+        );
+
+        // Two profiles, down: the most recently used activates; radio
+        // rows by name, no Turn Off.
+        dev.connections = vec![conn("/c/2", "Office", 9), conn("/c/1", "Home", 5)];
+        dev.active = None;
+        dev.state = 30;
+        assert_eq!(dev.click(), WiredAction::Activate("/c/2".into()));
+        let rows = dev.menu("Wired");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0],
+            WiredRow::Radio {
+                label: "Home".into(),
+                active: false,
+                action: Some(WiredAction::Activate("/c/1".into()))
+            }
+        );
+        // Up on Home: a dot on it, Turn Off last.
+        dev.active = Some(("/c/1".into(), 1));
+        let rows = dev.menu("Wired");
+        assert_eq!(
+            rows[0],
+            WiredRow::Radio {
+                label: "Home".into(),
+                active: true,
+                action: None
+            }
+        );
+        assert_eq!(rows[2], WiredRow::TurnOff);
+        assert_eq!(dev.icon(4), "network-wired-acquiring-symbolic");
+
+        assert_eq!(
+            wired_click(std::slice::from_ref(&dev)),
+            [("/d/1".to_owned(), WiredAction::Disconnect)]
+        );
+        // Two devices up: "2 connected".
+        let mut other = dev.clone();
+        other.path = "/d/2".into();
+        assert_eq!(
+            wired_toggle(&[dev, other], 4).subtitle.as_deref(),
+            Some("2 connected")
+        );
+    }
+}
+
+/// Whether an app is recording, from `wpctl status` (volume.js
+/// `_maybeShowInput`): a stream in the Audio section with an input port
+/// on an active link from a source ("64. input_FL  < Mic:capture_FL
+/// [active]"). GNOME's own level meters are left out: they read the
+/// input without recording it.
+pub fn wpctl_recording(status: &str) -> bool {
+    const SKIPPED: [&str; 3] = [
+        "pavucontrol",
+        "PulseAudio Volume Control",
+        "gnome-volume-control",
+    ];
+    let mut in_audio = false;
+    let mut in_streams = false;
+    let mut stream_skipped = false;
+    let mut stream_indent = usize::MAX;
+    for line in status.lines() {
+        let trimmed = line.trim_end();
+        if !trimmed.starts_with([' ', '│', '├', '└']) && !trimmed.is_empty() {
+            in_audio = trimmed.trim() == "Audio";
+            in_streams = false;
+            continue;
+        }
+        if !in_audio {
+            continue;
+        }
+        let body = trimmed.trim_start_matches([' ', '│', '├', '└', '─']);
+        if trimmed.contains("─ ") && body.ends_with(':') {
+            in_streams = body == "Streams:";
+            stream_indent = usize::MAX;
+            continue;
+        }
+        if !in_streams || body.is_empty() {
+            continue;
+        }
+        let indent = trimmed.chars().count() - body.chars().count();
+        let Some((_, rest)) = body.split_once(". ") else {
+            continue;
+        };
+        if indent <= stream_indent {
+            // A stream: its ports follow, indented further.
+            stream_indent = indent;
+            let name = rest.trim();
+            stream_skipped = SKIPPED.iter().any(|s| name.contains(s));
+        } else if !stream_skipped && rest.contains(" < ") && rest.contains("[active]") {
+            return true;
+        }
+    }
+    false
+}
+
+/// GNOME's microphone icon by level (volume.js `getIcon` with the
+/// input slider's icons).
+pub fn mic_icon(percent: f64, muted: bool) -> &'static str {
+    if muted || percent <= 0.0 {
+        return "microphone-sensitivity-muted-symbolic";
+    }
+    match (3.0 * percent / 100.0).ceil().clamp(1.0, 3.0) as u8 {
+        1 => "microphone-sensitivity-low-symbolic",
+        2 => "microphone-sensitivity-medium-symbolic",
+        _ => "microphone-sensitivity-high-symbolic",
+    }
+}
+
+#[cfg(test)]
+mod mic_tests {
+    use super::*;
+
+    const STATUS: &str = "PipeWire 'pipewire-0' [1.4.2, roost@host, cookie:1]
+ └─ Clients:
+        33. WirePlumber                         [1.4.2, roost@host, pid:10]
+
+Audio
+ ├─ Devices:
+ │      45. Built-in Audio                      [alsa]
+ │
+ ├─ Sinks:
+ │  *   48. Built-in Audio Analog Stereo        [vol: 0.80]
+ │
+ ├─ Sources:
+ │  *   49. Built-in Audio Analog Stereo        [vol: 0.50]
+ │
+ ├─ Filters:
+ │
+ └─ Streams:
+        63. Firefox
+             64. output_FL       > Built-in Audio Analog Stereo:playback_FL\t[active]
+        70. PulseAudio Volume Control
+             71. input_MONO      < Built-in Audio Analog Stereo:capture_FL\t[active]
+
+Video
+ └─ Streams:
+        80. Camera
+             81. input_0         < v4l2:capture_0\t[active]
+";
+
+    #[test]
+    fn recording_shows_like_gnome() {
+        // Playback and a level meter are not recording; neither is video.
+        assert!(!wpctl_recording(STATUS));
+        let recording = STATUS.replace(
+            "        70. PulseAudio Volume Control\n",
+            "        70. Voice Recorder\n",
+        );
+        assert!(wpctl_recording(&recording));
+        // A paused link records nothing.
+        assert!(!wpctl_recording(
+            &recording.replace("capture_FL\t[active]", "capture_FL\t[paused]")
+        ));
+        assert_eq!(
+            mic_icon(50.0, true),
+            "microphone-sensitivity-muted-symbolic"
+        );
+        assert_eq!(mic_icon(20.0, false), "microphone-sensitivity-low-symbolic");
+        assert_eq!(
+            mic_icon(50.0, false),
+            "microphone-sensitivity-medium-symbolic"
+        );
+        assert_eq!(
+            mic_icon(100.0, false),
+            "microphone-sensitivity-high-symbolic"
+        );
+    }
+}
+
+/// Where a drop on an app-grid tile lands (iconGrid.js `DragLocation`):
+/// within 20px of either side it is between tiles, else on the tile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropEdge {
+    Start,
+    OnIcon,
+    End,
+}
+
+/// GNOME's `LEFT_DIVIDER_LEEWAY` and `RIGHT_DIVIDER_LEEWAY`.
+const DIVIDER_LEEWAY: f64 = 20.0;
+
+pub fn drop_edge(x: f64, width: f64) -> DropEdge {
+    if x < DIVIDER_LEEWAY {
+        DropEdge::Start
+    } else if x > width - DIVIDER_LEEWAY {
+        DropEdge::End
+    } else {
+        DropEdge::OnIcon
+    }
+}
+
+/// The grid's order (appDisplay.js `_compareItems`): items the saved
+/// `app-picker-layout` places come first by page and position, the rest
+/// by name. `items` are (id, name); returns indices into it.
+pub fn grid_order(items: &[(&str, &str)], layout: &[Vec<(String, i32)>]) -> Vec<usize> {
+    let place = |id: &str| {
+        layout.iter().enumerate().find_map(|(page, entries)| {
+            entries
+                .iter()
+                .find(|(key, _)| key == id)
+                .map(|(_, pos)| (page, *pos))
+        })
+    };
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    order.sort_by(|&a, &b| match (place(items[a].0), place(items[b].0)) {
+        (None, None) => items[a].1.to_lowercase().cmp(&items[b].1.to_lowercase()),
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (Some(pa), Some(pb)) => pa.cmp(&pb),
+    });
+    order
+}
+
+/// GNOME's drop between tiles (appDisplay.js `_getDropTarget` then
+/// `_moveItem`): the dragged item takes the target's place, the others
+/// reflowing away from where it came from; on an edge the reflow cannot
+/// push, the neighbour in that direction is the target instead (not
+/// past the row's ends). `None` when nothing moves.
+pub fn grid_reorder(
+    order: &[String],
+    source: &str,
+    target: usize,
+    edge: DropEdge,
+    columns: usize,
+) -> Option<Vec<String>> {
+    let from = order.iter().position(|id| id == source)?;
+    if from == target || edge == DropEdge::OnIcon || target >= order.len() {
+        return None;
+    }
+    let forward = from < target; // the reflow runs back toward `from`
+    let column = target % columns.max(1);
+    let mut to = target;
+    if edge == DropEdge::Start && forward && column > 0 {
+        to -= 1;
+    } else if edge == DropEdge::End && !forward && column + 1 < columns {
+        to += 1;
+    }
+    let mut out = order.to_vec();
+    let item = out.remove(from);
+    out.insert(to.min(out.len()), item);
+    (out != order).then_some(out)
+}
+
+/// The order as `app-picker-layout` pages (appDisplay.js `_savePages`):
+/// each item's position on its page.
+pub fn grid_pages(order: &[String], per_page: usize) -> Vec<Vec<(String, i32)>> {
+    order
+        .chunks(per_page.max(1))
+        .map(|page| {
+            page.iter()
+                .enumerate()
+                .map(|(i, id)| (id.clone(), i as i32))
+                .collect()
+        })
+        .collect()
+}
+
+/// A saved layout with `target` replaced by `folder` and `dragged`
+/// gone (renumbered), as GNOME's `_createFolder` places a new folder
+/// where the target was. `None` when there is no saved layout.
+pub fn grid_pages_replace(
+    pages: &[Vec<(String, i32)>],
+    target: &str,
+    folder: &str,
+    dragged: &str,
+) -> Option<Vec<Vec<(String, i32)>>> {
+    if pages.iter().all(|p| p.is_empty()) {
+        return None;
+    }
+    Some(
+        pages
+            .iter()
+            .map(|page| {
+                page.iter()
+                    .filter(|(id, _)| id != dragged)
+                    .map(|(id, _)| {
+                        if id == target {
+                            folder.to_owned()
+                        } else {
+                            id.clone()
+                        }
+                    })
+                    .enumerate()
+                    .map(|(i, id)| (id, i as i32))
+                    .collect()
+            })
+            .collect(),
+    )
+}
+
+#[cfg(test)]
+mod grid_layout_tests {
+    use super::*;
+
+    #[test]
+    fn grid_reorders_and_saves_like_gnome() {
+        // The saved layout first, the rest by name.
+        let items = [
+            ("c", "Cheese"),
+            ("a", "Abacus"),
+            ("z", "Zebra"),
+            ("b", "Boxes"),
+        ];
+        let layout = vec![vec![("z".to_owned(), 0), ("c".to_owned(), 1)]];
+        assert_eq!(grid_order(&items, &layout), [2, 0, 1, 3]);
+        assert_eq!(grid_order(&items, &[]), [1, 3, 0, 2]);
+
+        let ids: Vec<String> = ["a", "b", "c", "d", "e"].map(String::from).to_vec();
+        let ids_of = |v: Vec<String>| v.join("");
+        // Dragged forward onto the start edge of "d": it lands before d.
+        let moved = grid_reorder(&ids, "a", 3, DropEdge::Start, 8).unwrap();
+        assert_eq!(ids_of(moved), "bcade");
+        // Dragged back onto the end edge of "b": it lands after b.
+        let moved = grid_reorder(&ids, "e", 1, DropEdge::End, 8).unwrap();
+        assert_eq!(ids_of(moved), "abecd");
+        // Back onto the start edge: before the target.
+        assert_eq!(
+            ids_of(grid_reorder(&ids, "e", 1, DropEdge::Start, 8).unwrap()),
+            "aebcd"
+        );
+        // On the icon is a folder, not a move; onto itself nothing.
+        assert_eq!(grid_reorder(&ids, "a", 3, DropEdge::OnIcon, 8), None);
+        assert_eq!(grid_reorder(&ids, "c", 2, DropEdge::End, 8), None);
+        // Pages of two.
+        assert_eq!(
+            grid_pages(&ids, 2),
+            [
+                vec![("a".to_owned(), 0), ("b".to_owned(), 1)],
+                vec![("c".to_owned(), 0), ("d".to_owned(), 1)],
+                vec![("e".to_owned(), 0)],
+            ]
+        );
+        let saved = vec![vec![
+            ("a".to_owned(), 0),
+            ("b".to_owned(), 1),
+            ("c".to_owned(), 2),
+        ]];
+        assert_eq!(
+            grid_pages_replace(&saved, "b", "F", "a"),
+            Some(vec![vec![("F".to_owned(), 0), ("c".to_owned(), 1)]])
+        );
+        assert_eq!(grid_pages_replace(&[], "b", "F", "a"), None);
+        assert_eq!(drop_edge(10.0, 113.0), DropEdge::Start);
+        assert_eq!(drop_edge(56.0, 113.0), DropEdge::OnIcon);
+        assert_eq!(drop_edge(100.0, 113.0), DropEdge::End);
+    }
+}

@@ -10,6 +10,7 @@
 # 07-overview-windows, 07b-overview-hover, 08-notification, 09-calendar-with-notification,
 # 10-end-session, 12-osd-volume, 12b-osd-label, 12c-osd-overdrive, 13-window-menu,
 # 14-screenshot-ui, 15-workspace-popup, 16-overview-workspaces, 17-tile-preview,
+# 18-overview-search, 19-app-popover,
 # 11-lock-screen, 11b-unlock-prompt.
 # Run scripts/roost-gnome-reference first: it exports GNOME's wallpapers.
 # Compare with scripts/lib/roost-parity-compare.py.
@@ -137,6 +138,9 @@ gsettings set org.gnome.desktop.interface font-name 'Adwaita Sans 11'
 gsettings set org.gnome.desktop.interface document-font-name 'Adwaita Sans 11'
 gsettings set org.gnome.desktop.interface monospace-font-name 'Adwaita Mono 11'
 gsettings set org.gnome.shell favorite-apps "['org.mozilla.firefox.desktop', 'org.gnome.Calendar.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Software.desktop', 'org.gnome.TextEditor.desktop', 'org.gnome.Calculator.desktop']"
+# Search shows apps only, as in GNOME's reference (the host and the image
+# have different search providers).
+gsettings set org.gnome.desktop.search-providers disable-external true
 gsettings set org.gnome.desktop.background picture-options zoom
 for variant in l d; do
     key=picture-uri
@@ -209,6 +213,16 @@ sleep 0.5
 xdotool key Escape
 sleep 1
 park
+# Typing in the overview: GNOME's search results.
+xdotool key Super_L
+sleep 1.5
+xdotool type --delay 80 calc
+park
+shot 18-overview-search 2
+xdotool key Escape
+sleep 0.5
+xdotool key Escape
+sleep 1
 for spec in Alpha:#3584e4 Beta:#2ec27e Gamma:#e66100; do
     name="${spec%%:*}"
     WAYLAND_DISPLAY="$SOCKET_NAME" "$PY" "$ROOT/scripts/lib/roost-test-window.py" "$name" "${spec#*:}" \
@@ -313,6 +327,15 @@ glide 1 400 600 328 40
 xdotool mouseup 1
 park
 sleep 0.8
+# An app's popover (an xdg popup): a fourth test window opens its
+# header-bar menu by itself, as GNOME's reference does.
+ROOST_TEST_POPOVER=1 WAYLAND_DISPLAY="$SOCKET_NAME" "$PY" "$ROOT/scripts/lib/roost-test-window.py" \
+    Delta "#c01c28" >"$WORK/window-Delta.log" 2>&1 &
+DELTA_PID=$!
+PIDS="$PIDS $DELTA_PID"
+shot 19-app-popover 4.5
+kill "$DELTA_PID" 2>/dev/null || true
+sleep 1
 xdotool mousemove --window "$WID" $((WIDTH - 30)) 16 click 1
 park
 sleep 1

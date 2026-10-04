@@ -1,0 +1,4 @@
+# CI-only (VM lane): home directory and session choice for roost-test.
+d /var/home/roost-test 0700 roost-test roost-test -
+d /var/lib/AccountsService/users 0700 root root -
+f+ /var/lib/AccountsService/users/roost-test 0600 root root - [User]\nSession=roost\nSystemAccount=false\n

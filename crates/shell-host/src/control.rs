@@ -263,6 +263,12 @@ impl ControlClient {
         &self.model
     }
 
+    /// Which desktop entry a window's app id belongs to (see
+    /// [`ShellModel::set_app_resolver`]).
+    pub fn set_app_resolver(&mut self, resolve: impl Fn(&str) -> Option<String> + 'static) {
+        self.model.set_app_resolver(resolve);
+    }
+
     /// Revision of the last applied snapshot or delta (`None` before the
     /// first snapshot).
     pub fn revision(&self) -> Option<u64> {
@@ -525,6 +531,19 @@ impl ControlClient {
         self.write_message(&Message::Command {
             id,
             kind: CommandKind::SetSwitcherThumbnails { thumbnails },
+        })?;
+        Ok(id)
+    }
+
+    /// The switcher's chords (GNOME's rebindable switcher keys).
+    pub fn set_switcher_keys(
+        &mut self,
+        keys: Vec<roost_shell_control::SwitcherKey>,
+    ) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::SetSwitcherKeys { keys },
         })?;
         Ok(id)
     }

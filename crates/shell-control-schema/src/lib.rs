@@ -133,9 +133,12 @@ impl ProtocolVersion {
     /// `0.19` appends `StepWindow` and `Key` to `SwitcherAction` and the
     /// shell-to-compositor `SetSwitcherThumbnails` command (GNOME's
     /// window thumbnails in the Alt+Tab switcher), again last.
+    ///
+    /// `0.20` appends the shell-to-compositor `SetSwitcherKeys` command
+    /// (GNOME's rebindable switcher keys), again last.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 19,
+        minor: 20,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -330,10 +333,51 @@ pub enum CommandKind {
         /// The frames, in order.
         thumbnails: Vec<SwitcherThumbnail>,
     },
+    /// The switcher's keys (GNOME's `switch-applications`,
+    /// `switch-group` and their backward keys), the full set each time
+    /// they change. Once sent they replace the compositor's built-in
+    /// Alt/Super+Tab and Above_Tab; an empty list unbinds the switcher.
+    /// At most [`MAX_SWITCHER_KEYS`].
+    SetSwitcherKeys {
+        /// Every bound chord.
+        keys: Vec<SwitcherKey>,
+    },
 }
 
 /// Switcher thumbnails held at once.
 pub const MAX_SWITCHER_THUMBNAILS: usize = 64;
+
+/// Switcher keys held at once.
+pub const MAX_SWITCHER_KEYS: usize = 64;
+
+/// Mutter's `Above_Tab` in [`SwitcherKey::keysym`]: the key above Tab,
+/// whatever it types in the active layout.
+pub const KEYSYM_ABOVE_TAB: u32 = 0x2000_0000;
+
+/// One switcher chord.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwitcherKey {
+    /// The key's base-level xkb keysym (lower case for letters), or
+    /// [`KEYSYM_ABOVE_TAB`].
+    pub keysym: u32,
+    /// Exact modifiers: a combination of the `MOD_*` bits. Released,
+    /// all but Shift commit the switcher.
+    pub mods: u32,
+    pub kind: SwitcherKeyKind,
+}
+
+/// What a switcher chord does (GNOME's keybinding names).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SwitcherKeyKind {
+    /// `switch-applications`: the next app.
+    Applications,
+    /// `switch-applications-backward`.
+    ApplicationsBackward,
+    /// `switch-group`: the selected app's next window.
+    Group,
+    /// `switch-group-backward`.
+    GroupBackward,
+}
 
 /// One switcher thumbnail frame, in global logical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -924,6 +968,14 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
             ));
         }
         Message::Command {
+            kind: CommandKind::SetSwitcherKeys { keys },
+            ..
+        } if keys.len() > MAX_SWITCHER_KEYS => {
+            return Err(DecodeError::Malformed(
+                postcard::Error::DeserializeBadEncoding,
+            ));
+        }
+        Message::Command {
             kind: CommandKind::SetAccelerators { accelerators },
             ..
         } if accelerators.len() > MAX_ACCELERATORS => {
@@ -997,8 +1049,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_19() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 19));
+    fn current_version_is_0_20() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 20));
     }
 
     #[test]
@@ -1025,7 +1077,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 17).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 18).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 19).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 20).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 20).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 21).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }

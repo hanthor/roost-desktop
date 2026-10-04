@@ -255,6 +255,8 @@ pub struct Widgets {
     pub wifi: Tile,
     /// The Wi-Fi tile's network menu.
     pub wifi_menu: Rc<crate::wifi::WifiMenu>,
+    /// The wired tile's profile menu; it drives the tile too.
+    pub wired_menu: Rc<crate::wired::WiredMenu>,
     /// The Bluetooth tile's device menu.
     pub bt_menu: Rc<crate::bt_menu::BtMenu>,
     pub wired: Tile,
@@ -269,6 +271,11 @@ pub struct Widgets {
     pub panel_network: gtk::Image,
     pub panel_volume: gtk::Image,
     pub panel_power_profile: gtk::Image,
+    /// The microphone: the panel's privacy indicator and the slider row.
+    pub panel_mic: gtk::Image,
+    pub mic: gtk::Scale,
+    pub mic_mute: gtk::Button,
+    pub mic_row: gtk::Box,
     pub volume: gtk::Scale,
     pub mute: gtk::Button,
     pub brightness_row: gtk::Box,
@@ -300,6 +307,7 @@ pub fn attach(w: &Rc<Widgets>) {
         },
     );
     volume(w);
+    microphone(w);
 }
 
 fn network(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
@@ -330,7 +338,6 @@ fn network(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
                 let left = Rc::new(Cell::new(paths.len()));
                 if paths.is_empty() {
                     w.wifi.present(false);
-                    w.wired.present(false);
                 }
                 for path in paths {
                     let dev = Remote::new(&conn, NM_NAME, &path, NM_DEVICE_IFACE);
@@ -364,18 +371,10 @@ fn network(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
                             let (wifi, wired, connected) = *seen.borrow();
                             w.wifi.present(wifi);
                             w.wifi_menu.attach(&conn, wifi_device.borrow().clone());
-                            w.wired.present(wired);
+                            w.wired_menu.attach(&conn);
                             // GNOME's primary network indicator: shown
                             // while the main connection is up.
-                            w.panel_network.set_visible(connected);
-                            w.wired.show_state(
-                                connected,
-                                Some(if connected {
-                                    "Connected"
-                                } else {
-                                    "Disconnected"
-                                }),
-                            );
+                            w.panel_network.set_visible(wired && connected);
                         }
                     });
                 }
@@ -393,7 +392,7 @@ fn network(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
                 refresh();
             } else {
                 w.wifi.present(false);
-                w.wired.present(false);
+                w.wired_menu.detach();
                 w.panel_network.set_visible(false);
             }
         });
@@ -402,16 +401,6 @@ fn network(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
         let nm = nm.clone();
         w.wifi
             .on_user_toggle(move |on| nm.set("WirelessEnabled", on.to_variant()));
-    }
-    // The wired tile mirrors the link; GNOME's own wired tile opens a
-    // menu rather than toggling, so a click only re-asserts the state.
-    {
-        let w2 = w.clone();
-        w.wired.on_user_toggle(move |_| {
-            let connected = w2.wired.subtitle.text() == "Connected";
-            w2.wired
-                .show_state(connected, Some(&w2.wired.subtitle.text()));
-        });
     }
 }
 
@@ -670,6 +659,91 @@ fn wpctl(args: &[&str], done: impl FnOnce(Option<String>) + 'static) {
 }
 
 const SINK: &str = "@DEFAULT_AUDIO_SINK@";
+const SOURCE: &str = "@DEFAULT_AUDIO_SOURCE@";
+/// How often the shell looks for an app recording (GNOME hears it from
+/// PulseAudio; `wpctl` has to be asked).
+const RECORDING_POLL_SECONDS: u32 = 2;
+
+/// GNOME's microphone slider and privacy indicator (volume.js
+/// `InputIndicator`): both show only while an app records, with the
+/// default source's level; the indicator is orange unless muted.
+fn microphone(w: &Rc<Widgets>) {
+    let syncing = Rc::new(Cell::new(false));
+    let level = Rc::new(Cell::new((0.0, false)));
+    let read: Rc<dyn Fn()> = {
+        let (w, syncing, level) = (w.clone(), syncing.clone(), level.clone());
+        Rc::new(move || {
+            let (w, syncing, level) = (w.clone(), syncing.clone(), level.clone());
+            wpctl(&["status"], move |status| {
+                let hide = |w: &Widgets| {
+                    w.mic_row.set_visible(false);
+                    w.panel_mic.set_visible(false);
+                };
+                if !status.as_deref().is_some_and(logic::wpctl_recording) {
+                    return hide(&w);
+                }
+                wpctl(&["get-volume", SOURCE], move |out| {
+                    let Some((percent, muted)) = out.as_deref().and_then(logic::parse_wpctl_volume)
+                    else {
+                        return hide(&w);
+                    };
+                    level.set((percent, muted));
+                    let icon = logic::mic_icon(percent, muted);
+                    w.panel_mic.set_icon_name(Some(icon));
+                    if muted {
+                        w.panel_mic.remove_css_class("privacy-indicator");
+                    } else {
+                        w.panel_mic.add_css_class("privacy-indicator");
+                    }
+                    w.panel_mic.set_visible(true);
+                    w.mic_mute.set_icon_name(icon);
+                    w.mic_mute
+                        .update_property(&[gtk::accessible::Property::Label(if muted {
+                            "Unmute"
+                        } else {
+                            "Mute"
+                        })]);
+                    syncing.set(true);
+                    w.mic.set_value(if muted { 0.0 } else { percent });
+                    syncing.set(false);
+                    w.mic_row.set_visible(true);
+                });
+            });
+        })
+    };
+    read();
+    {
+        let read = read.clone();
+        glib::timeout_add_seconds_local(RECORDING_POLL_SECONDS, move || {
+            read();
+            glib::ControlFlow::Continue
+        });
+    }
+    {
+        let syncing = syncing.clone();
+        w.mic.connect_value_changed(move |s| {
+            if syncing.get() {
+                return;
+            }
+            let arg = logic::wpctl_volume_arg(s.value());
+            wpctl(&["set-volume", SOURCE, &arg], |_| {});
+        });
+    }
+    // volume.js `icon-clicked`: unmuting at zero restores a quarter.
+    w.mic_mute.connect_clicked(move |_| {
+        let (percent, muted) = level.get();
+        let read = read.clone();
+        let toggle = move || {
+            let read = read.clone();
+            wpctl(&["set-mute", SOURCE, "toggle"], move |_| read());
+        };
+        if muted && percent <= 0.0 {
+            wpctl(&["set-volume", SOURCE, "0.25"], move |_| toggle());
+        } else {
+            toggle();
+        }
+    });
+}
 
 fn volume(w: &Rc<Widgets>) {
     let syncing = Rc::new(Cell::new(false));

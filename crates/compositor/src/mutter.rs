@@ -6,7 +6,7 @@
 //! stream. Roost serves both, so browsers and video calls share screens
 //! through the stock GNOME portal. Adapted from niri's
 //! `src/dbus/mutter_screen_cast.rs` and `mutter_display_config.rs`
-//! (GPL-3.0-or-later, like Roost): monitor and window streams. Window
+//! (GPL-3.0-or-later, like Roost): monitor, area and window streams. Window
 //! ids are the ones `org.gnome.Shell.Introspect` lists (`introspect.rs`).
 //!
 //! The D-Bus side runs on its own thread; casts start and stop on the
@@ -49,6 +49,34 @@ pub enum CastTarget {
     Monitor(String),
     /// One window, by its Introspect id.
     Window(u64),
+    /// Part of a monitor (`RecordArea`, what GNOME's screen recorder
+    /// asks for): the monitor's connector and the area in its physical
+    /// pixels, `(x, y, width, height)`.
+    Area(String, (i32, i32, i32, i32)),
+}
+
+/// Where a `RecordArea` rectangle (global logical pixels) lands: the
+/// output holding its top-left corner, and the area in that output's
+/// physical pixels, clipped to it. `None` when no output holds it or
+/// nothing of it is left.
+pub fn area_on_output(
+    outputs: &[OutputSnapshot],
+    (x, y, width, height): (i32, i32, i32, i32),
+) -> Option<(OutputSnapshot, (i32, i32, i32, i32))> {
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    let output = outputs.iter().find(|o| {
+        let w = (f64::from(o.width) / o.scale).round() as i32;
+        let h = (f64::from(o.height) / o.scale).round() as i32;
+        x >= o.x && y >= o.y && x < o.x + w && y < o.y + h
+    })?;
+    let px = |v: i32| (f64::from(v) * output.scale).round() as i32;
+    let (left, top) = (px(x - output.x), px(y - output.y));
+    let right = px(x - output.x + width).min(output.width);
+    let bottom = px(y - output.y + height).min(output.height);
+    (right > left && bottom > top)
+        .then(|| (output.clone(), (left, top, right - left, bottom - top)))
 }
 
 /// A window as the D-Bus side describes it (Introspect, RecordWindow).
@@ -338,6 +366,8 @@ struct Session {
 enum Stream {
     Monitor(OutputSnapshot),
     Window(WindowSnapshot),
+    /// The output, the requested logical area, and its physical pixels.
+    Area(OutputSnapshot, (i32, i32, i32, i32), (i32, i32, i32, i32)),
 }
 
 impl Stream {
@@ -345,6 +375,9 @@ impl Stream {
         match self {
             Stream::Monitor(output) => CastTarget::Monitor(output.connector.clone()),
             Stream::Window(window) => CastTarget::Window(window.id),
+            Stream::Area(output, _, physical) => {
+                CastTarget::Area(output.connector.clone(), *physical)
+            }
         }
     }
 }
@@ -461,6 +494,28 @@ impl Session {
         self.add_stream(server, Stream::Monitor(output)).await
     }
 
+    /// Part of the screen, in global logical pixels: what GNOME's screen
+    /// recorder (screencastService.js) asks for, the whole monitor
+    /// included.
+    async fn record_area(
+        &mut self,
+        #[zbus(object_server)] server: &ObjectServer,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        _properties: RecordMonitorProperties,
+    ) -> fdo::Result<OwnedObjectPath> {
+        let outputs = self.outputs.lock().map(|o| o.clone()).unwrap_or_default();
+        let (output, physical) = area_on_output(&outputs, (x, y, width, height))
+            .ok_or_else(|| fdo::Error::Failed("the area is on no monitor".into()))?;
+        self.add_stream(
+            server,
+            Stream::Area(output, (x, y, width, height), physical),
+        )
+        .await
+    }
+
     /// GNOME's window share: the portal's picker lists windows from
     /// `org.gnome.Shell.Introspect.GetWindows` and passes the chosen id.
     async fn record_window(
@@ -523,6 +578,10 @@ impl Stream {
             Stream::Window(w) => StreamParameters {
                 position: (0, 0),
                 size: (w.width.max(1), w.height.max(1)),
+            },
+            Stream::Area(_, (x, y, w, h), _) => StreamParameters {
+                position: (*x, *y),
+                size: (*w, *h),
             },
         }
     }
@@ -641,6 +700,30 @@ mod tests {
             .monitors
             .push(("HDMI-A-1".into(), String::new(), HashMap::new()));
         assert!(validate(&outputs, &[mirrored]).is_err(), "mirroring");
+    }
+
+    #[test]
+    fn record_areas_land_on_their_monitor() {
+        let mut right = snapshot("HDMI-A-1");
+        right.x = 1920;
+        right.scale = 2.0;
+        let outputs = [snapshot("eDP-1"), right];
+        let (output, area) = area_on_output(&outputs, (480, 300, 320, 200)).unwrap();
+        assert_eq!(
+            (output.connector.as_str(), area),
+            ("eDP-1", (480, 300, 320, 200))
+        );
+        // The second monitor at scale 2 (960x540 logical): physical pixels.
+        let (output, area) = area_on_output(&outputs, (1920 + 10, 20, 100, 50)).unwrap();
+        assert_eq!(
+            (output.connector.as_str(), area),
+            ("HDMI-A-1", (20, 40, 200, 100))
+        );
+        // Clipped to the monitor it starts on.
+        let (_, area) = area_on_output(&outputs, (1800, 1000, 400, 400)).unwrap();
+        assert_eq!(area, (1800, 1000, 120, 80));
+        assert!(area_on_output(&outputs, (-50, 0, 10, 10)).is_none());
+        assert!(area_on_output(&outputs, (0, 0, 0, 10)).is_none());
     }
 
     #[test]
