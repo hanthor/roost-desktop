@@ -239,14 +239,27 @@ pub fn show_placeholder(layout: &mut OverviewLayout, at: u32) {
             t.rect.loc.x + t.rect.size.w + THUMBNAILS_PAD
         });
     let y = first.rect.loc.y;
-    for thumb in &mut layout.thumbnails {
-        let old = thumb.rect;
-        let offset = if thumb.workspace >= at { step } else { 0 };
-        for preview in &mut layout.previews {
-            if !preview.active && old.contains(preview.rect.loc) {
+    // Match each miniature against the original strip once. Moving it
+    // first can otherwise place it inside the next thumbnail's old bounds.
+    let original_thumbnails: Vec<_> = layout
+        .thumbnails
+        .iter()
+        .map(|thumb| {
+            let offset = if thumb.workspace >= at { step } else { 0 };
+            (thumb.rect, offset)
+        })
+        .collect();
+    for preview in &mut layout.previews {
+        if !preview.active {
+            if let Some((_, offset)) = original_thumbnails
+                .iter()
+                .find(|(rect, _)| rect.contains(preview.rect.loc))
+            {
                 preview.rect.loc.x += offset;
             }
         }
+    }
+    for (thumb, (_, offset)) in layout.thumbnails.iter_mut().zip(original_thumbnails) {
         thumb.rect.loc.x += offset;
     }
     layout.placeholder = Some((at, Rectangle::new((x, y).into(), (18, size.h).into())));
@@ -1407,6 +1420,32 @@ mod tests {
         assert_eq!(hit(&l, on_right), OverviewHit::Workspace(1));
         assert_eq!(hit(&l, Point::from((5.0, 790.0))), OverviewHit::Dismiss);
     }
+    #[test]
+    fn insertion_shifts_edge_miniatures_once() {
+        let mut l = layout(output(), 32, &[0, 1, 2], 0, &[]);
+        let first_later = l.thumbnails[1].rect;
+        let second_later = l.thumbnails[2].rect;
+        let original = Point::from((
+            first_later.loc.x + first_later.size.w - 1,
+            first_later.loc.y + 1,
+        ));
+        let step = 18 + THUMBNAILS_PAD;
+        assert!(second_later.contains(Point::from((original.x + step, original.y))));
+        l.previews.push(Preview {
+            id: 99,
+            rect: Rectangle::new(original, (1, 1).into()),
+            scale: 1.0,
+            active: false,
+            alpha: 1.0,
+        });
+
+        show_placeholder(&mut l, 1);
+
+        assert_eq!(l.previews[0].rect.loc.x, original.x + step);
+        assert_eq!(l.thumbnails[1].rect.loc.x, first_later.loc.x + step);
+        assert_eq!(l.thumbnails[2].rect.loc.x, second_later.loc.x + step);
+    }
+
     #[test]
     fn window_drag_insertion_gaps_spread_thumbnails() {
         let mut l = layout(
