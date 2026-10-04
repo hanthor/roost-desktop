@@ -438,6 +438,8 @@ fi
 # clicks one), the bridge each key's fate.
 ROOST_IBUS_DEBUG=1
 export ROOST_IBUS_DEBUG
+ROOST_PROOF_SWIPE_INPUT="$ARTIFACTS/swipe-input.json"
+export ROOST_PROOF_SWIPE_INPUT
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk -p roost-shell-host
 if [ -n "$PAM_ON" ]; then
     env LD_PRELOAD="$PAM_WRAPPER_LIB" PAM_WRAPPER=1 \
@@ -1793,7 +1795,21 @@ window_menu
 cstate ".active_workspace == $home_ws and any(.windows[]; .id == $moved and .workspace == $home_ws + 1)" \
     "moved" || fail G-WS-THUMBS "the window did not move one workspace right"
 sleep 1
-xdotool key Super_L
+# Hold a synthetic three-finger swipe at half progress. The event enters the
+# compositor's normal gesture handler; the held frame lets CI sample it.
+printf '{"phase":"begin","sequence":1}\n' >"$ROOST_PROOF_SWIPE_INPUT.tmp"
+mv "$ROOST_PROOF_SWIPE_INPUT.tmp" "$ROOST_PROOF_SWIPE_INPUT"
+sleep 0.2
+printf '{"phase":"update","dy":-150,"sequence":2}\n' >"$ROOST_PROOF_SWIPE_INPUT.tmp"
+mv "$ROOST_PROOF_SWIPE_INPUT.tmp" "$ROOST_PROOF_SWIPE_INPUT"
+cstate '.overview_progress == 0.5 and (.thumbnails | length) == 3 and any(.workspace_cards[]; (.active | not) and .alpha > 0 and .alpha < 1)' "half swipe" ||
+    fail G-SWIPE-PROGRESS "neighbour cards or thumbnails are missing mid-gesture"
+sleep 0.2
+scrot "$ARTIFACTS/24f-mid-swipe-workspaces.png" >/dev/null
+cp "$CSTATE" "$ARTIFACTS/mid-swipe-state.json"
+pass G-SWIPE-PROGRESS "neighbour workspaces and thumbnails slide and fade during a held three-finger swipe"
+printf '{"phase":"end","sequence":3}\n' >"$ROOST_PROOF_SWIPE_INPUT.tmp"
+mv "$ROOST_PROOF_SWIPE_INPUT.tmp" "$ROOST_PROOF_SWIPE_INPUT"
 cstate '.overview_open and (.thumbnails | length) == 3' "strip" ||
     fail G-WS-THUMBS "the overview shows no three-thumbnail strip"
 sleep 1.5
