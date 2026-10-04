@@ -275,9 +275,17 @@ SYSBUS_PID=""
 ACCEL_PID=""
 CAL_PID=""
 SCREENSAVER_PID=""
+ICON_PID=""
+HINTS_PID=""
+PERMISSIONS_PID=""
+INHIBITOR_PID=""
 SCROLL_PROBE_PID=""
 IME_PIDS=""
 cleanup() {
+    if [ -n "$ICON_PID" ]; then kill "$ICON_PID" 2>/dev/null || true; fi
+    if [ -n "$HINTS_PID" ]; then kill "$HINTS_PID" 2>/dev/null || true; fi
+    if [ -n "$INHIBITOR_PID" ]; then kill "$INHIBITOR_PID" 2>/dev/null || true; fi
+    if [ -n "$PERMISSIONS_PID" ]; then kill "$PERMISSIONS_PID" 2>/dev/null || true; fi
     if [ -n "$SCROLL_PROBE_PID" ]; then kill "$SCROLL_PROBE_PID" 2>/dev/null || true; fi
     # shellcheck disable=SC2086
     if [ -n "$IME_PIDS" ]; then kill $IME_PIDS 2>/dev/null || true; fi
@@ -350,6 +358,15 @@ if ! gsettings list-schemas 2>/dev/null | grep -qx org.gnome.shell; then
   <schema id="org.gnome.shell" path="/org/gnome/shell/">
     <key name="favorite-apps" type="as"><default>[]</default></key>
     <key name="app-picker-layout" type="aa{sv}"><default>[]</default></key>
+  </schema>
+  <schema id="org.gnome.shell.keybindings" path="/org/gnome/shell/keybindings/">
+    <key name="focus-active-notification" type="as"><default>['&lt;Super&gt;n']</default></key>
+    <key name="shift-overview-up" type="as"><default>['&lt;Super&gt;&lt;Alt&gt;Up']</default></key>
+    <key name="shift-overview-down" type="as"><default>['&lt;Super&gt;&lt;Alt&gt;Down']</default></key>
+    <key name="screen-brightness-up-monitor" type="as"><default>['&lt;Shift&gt;XF86MonBrightnessUp']</default></key>
+    <key name="screen-brightness-down-monitor" type="as"><default>['&lt;Shift&gt;XF86MonBrightnessDown']</default></key>
+    <key name="screen-brightness-cycle" type="as"><default>['XF86MonBrightnessCycle']</default></key>
+    <key name="screen-brightness-cycle-monitor" type="as"><default>['&lt;Shift&gt;XF86MonBrightnessCycle']</default></key>
   </schema>
 </schemalist>
 XML
@@ -474,6 +491,11 @@ ROOST_STUB_BT_LOG="$ARTIFACTS/bt-calls"
 export ROOST_STUB_NM_LOG ROOST_STUB_BT_LOG
 "$PY" "$ROOT/scripts/lib/roost-service-stubs.py" "$BACKLIGHT" >"$ARTIFACTS/stubs.log" 2>&1 &
 STUBS_PID=$!
+# Own PermissionStore before portals can auto-activate the real daemon.
+"$PY" "$ROOT/scripts/lib/roost-permission-store-stub.py" "$ARTIFACTS/shortcut-permissions.json" >"$ARTIFACTS/permission-store.log" 2>&1 &
+PERMISSIONS_PID=$!
+for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/permission-store.log" && break; sleep 0.2; done
+grep -q ready "$ARTIFACTS/permission-store.log" || fail G-SHORTCUT-CONSENT "private PermissionStore did not own its bus name"
 for _ in $(seq 1 20); do grep -q ready "$ARTIFACTS/stubs.log" 2>/dev/null && break; sleep 0.5; done
 "$PY" "$ROOT/scripts/lib/roost-search-provider-stub.py" "$SEARCH_MARKER" >"$ARTIFACTS/provider.log" 2>&1 &
 PROVIDER_PID=$!
@@ -523,9 +545,13 @@ fi
 ROOST_IBUS=1
 ROOST_IBUS_DEBUG=1
 export ROOST_IBUS ROOST_IBUS_DEBUG
+ROOST_GRID_TRACE=1
+export ROOST_GRID_TRACE
 ROOST_PROOF_SWIPE_INPUT="$ARTIFACTS/swipe-input.json"
 export ROOST_PROOF_SWIPE_INPUT
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk -p roost-shell-host
+cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor --example icon-probe
+cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor --example shortcut-inhibit-client
 if [ -n "$PAM_ON" ]; then
     env IBUS_ADDRESS="unix:path=$ARTIFACTS/not-the-private-ibus" \
         LD_PRELOAD="$PAM_WRAPPER_LIB" PAM_WRAPPER=1 \
@@ -843,7 +869,61 @@ cstate '[.windows[] | select(.app_id == "roost-test-alpha")] | length == 2' "sec
 cstate '.focused_app_id == "roost-test-alpha"' "alpha focused" ||
     fail G-SWITCHER-GROUP "the new Alpha window did not take the focus"
 sleep 1
-second="$(jq -r .focused "$CSTATE")"
+new_alpha="$(jq -r .focused "$CSTATE")"
+# Rebound window-only and direct-cycle keys (#216), with two windows
+# from Alpha proving that window switching does not group by app.
+gsettings set org.gnome.desktop.wm.keybindings cycle-group "['<Super>F1']"
+gsettings set org.gnome.desktop.wm.keybindings cycle-group-backward "['<Super><Shift>F1']"
+gsettings set org.gnome.desktop.wm.keybindings cycle-windows "['<Super>F2']"
+gsettings set org.gnome.desktop.wm.keybindings cycle-windows-backward "['<Super><Shift>F2']"
+gsettings set org.gnome.desktop.wm.keybindings switch-windows "['<Control>k']"
+gsettings set org.gnome.desktop.wm.keybindings switch-windows-backward "['<Control><Shift>k']"
+sleep 1.5
+original="$(jq -r .focused "$CSTATE")"
+xdotool key super+F1
+cstate ".focused != $original and .focused_app_id == \"roost-test-alpha\"" "cycle group" || fail G-CYCLE-KEYS "cycle-group did not move within Alpha"
+xdotool key super+shift+F1
+cstate ".focused == $original" "cycle group backward" || fail G-CYCLE-KEYS "cycle-group-backward did not return"
+xdotool key super+F2
+cstate ".focused != $original" "cycle windows" || fail G-CYCLE-KEYS "cycle-windows did not move"
+cycled="$(jq -r .focused "$CSTATE")"
+xdotool key super+shift+F2
+cstate ".focused != $cycled" "cycle windows backward" || fail G-CYCLE-KEYS "cycle-windows-backward did not move"
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-cycle-keys.json" 20 || fail G-CYCLE-KEYS "a11y dump failed"
+showing "$ARTIFACTS/a11y-cycle-keys.json" "Switch Windows" && fail G-CYCLE-KEYS "direct cycling opened a popup"
+pass G-CYCLE-KEYS "bound forward/backward window and app-group cycling activate immediately without a popup"
+original="$(jq -r .focused "$CSTATE")"
+xdotool keydown Control_L key k
+cstate '.switcher_thumbnails == 4' "all window thumbnails" || fail G-WINDOW-SWITCHER "window switcher did not draw each window's thumbnail"
+sleep 0.7
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-window-switcher.json" 20 || fail G-WINDOW-SWITCHER "a11y dump failed"
+[ "$(jq '[.[] | select(.showing and .role == "list item" and .name == "Alpha: Alpha")] | length' "$ARTIFACTS/a11y-window-switcher.json")" = 2 ] || fail G-WINDOW-SWITCHER "Alpha windows were grouped instead of two entries"
+xdotool keyup Control_L
+cstate ".focused != $original" "window switcher commit" || fail G-WINDOW-SWITCHER "releasing Control did not activate the window"
+original="$(jq -r .focused "$CSTATE")"
+xdotool keydown Control_L keydown Shift_L key k
+sleep 0.5
+xdotool keyup Shift_L keyup Control_L
+cstate ".focused != $original" "window switcher backward" || fail G-WINDOW-SWITCHER "backward window switching did not move"
+pass G-WINDOW-SWITCHER "bound switch-windows forward/backward show separate window entries and commit on modifier release"
+for key in cycle-group cycle-group-backward cycle-windows cycle-windows-backward switch-windows switch-windows-backward; do
+    gsettings reset org.gnome.desktop.wm.keybindings "$key"
+done
+sleep 1
+# Restore the precise new Alpha fixture before the original group-switch
+# journey. Closing the original Alpha instead changes the legitimate dash
+# creation order and invalidates its existing accessibility golden.
+xdotool key Super_L
+cstate ".overview_open and any(.previews[]; .id == $new_alpha)" "new Alpha preview" ||
+    fail G-SWITCHER-GROUP "the overview has no preview of the second Alpha fixture"
+sleep 1
+read -r ax ay <<EOF2
+$(jq -r ".previews[] | select(.id == $new_alpha) | .rect | \"\(.[0] + .[2] / 2 | floor) \(.[1] + .[3] / 2 | floor)\"" "$CSTATE")
+EOF2
+xdotool mousemove --window "$WID" "$ax" "$ay" click 1
+cstate ".overview_open == false and .focused == $new_alpha" "new Alpha restored" ||
+    fail G-SWITCHER-GROUP "could not restore the second Alpha fixture through its overview preview"
+second="$new_alpha"
 xdotool keydown Alt_L key grave
 cstate '.switcher_thumbnails == 2' "thumbnails" 5 ||
     { xdotool keyup Alt_L; fail G-SWITCHER-GROUP "Alt+Above_Tab drew no window thumbnails"; }
@@ -916,6 +996,17 @@ pass G-APP-INSTALLED "an app installed mid-session shows in search"
 xdotool key Escape
 cstate '.overview_open | not' "closed" || { xdotool key Escape; cstate '.overview_open | not' "closed" || fail G-APP-INSTALLED "overview stayed open"; }
 
+# A long folder label must not enlarge homogeneous grid cells or push
+# the pager outside the compositor's viewport. Keep the original folders
+# so subsequent drag/folder fixtures start with the same catalog.
+grid_original_folders="$(gsettings get org.gnome.desktop.app-folders folder-children)"
+grid_long_folder=org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/ViewportProof/
+grid_long_name='Roost Extremely Long Folder Name For Viewport Regression'
+gsettings set org.gnome.desktop.app-folders folder-children "['ViewportProof']"
+gsettings set "$grid_long_folder" name "$grid_long_name"
+gsettings set "$grid_long_folder" translate false
+gsettings set "$grid_long_folder" apps "['roost-probe.desktop']"
+
 # GNOME's paged app grid: thirty more apps make a second page, with the
 # page indicators and the side arrows; Next Page turns to it.
 for i in $(seq -w 1 30); do
@@ -929,6 +1020,21 @@ sleep 1.5
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-pages.json" 20 ||
     fail G-APP-GRID-PAGES "accessibility dump failed"
 scrot "$ARTIFACTS/11c-app-grid-pages.png" >/dev/null
+showing "$ARTIFACTS/a11y-grid-pages.json" "$grid_long_name" ||
+    fail G-GRID-FOLDER-WIDTH "long folder fixture is missing"
+cstate '.layers | any(.namespace == "roost-shell-appgrid")' "app-grid viewport" ||
+    fail G-GRID-FOLDER-WIDTH "app-grid layer missing"
+grid_viewport="$(jq -c '.layers[] | select(.namespace == "roost-shell-appgrid") | .rect' "$CSTATE")"
+jq -e --argjson viewport "$grid_viewport" '
+    any(.[]; .showing and .role == "frame" and .name == "App Grid"
+        and .bounds[2] > 0 and .bounds[2] <= $viewport[2])
+    and any(.[]; .showing and (.role == "push button" or .role == "button")
+        and .name == "Next Page" and .bounds[2] > 0
+        and .bounds[0] + .bounds[2] / 2 >= 0
+        and .bounds[0] + .bounds[2] / 2 < $viewport[2])
+' "$ARTIFACTS/a11y-grid-pages.json" >/dev/null ||
+    fail G-GRID-FOLDER-WIDTH "long folder widened the frame or pushed the Next Page click center outside the viewport"
+pass G-GRID-FOLDER-WIDTH "a long folder label preserves the grid viewport and visible Next Page button"
 for name in "Next Page" "Page 1" "Page 2"; do
     showing "$ARTIFACTS/a11y-grid-pages.json" "$name" || fail G-APP-GRID-PAGES "no '$name' with two pages"
 done
@@ -957,6 +1063,12 @@ grid_point() {
     jq -er --arg name "$2" --argjson ox "$grid_origin_x" --argjson oy "$grid_origin_y" --argjson edge "${3:--1}" '[.[] | select(.showing and (.role == "push button" or .role == "button") and .name == $name and (.bounds[2] > 0) and (.bounds[3] > 0))][0].bounds | select(length == 4) | "\((.[0] + $ox + (if $edge >= 0 then $edge else .[2] / 2 end)) | floor) \((.[1] + $oy + .[3] / 2) | floor)"' "$1"
 }
 grid_edge() { grid_point "$1" "$2" 4; }
+# Carousel maps neighboring pages, so STATE_SHOWING alone includes tiles
+# outside its clip. Compare their real window bounds with the viewport.
+grid_shown() {
+    jq -e --arg name "$2" --argjson ox "$grid_origin_x" --argjson oy "$grid_origin_y" --argjson width "$WIDTH" --argjson height "$HEIGHT" 'any(.[]; .showing and (.role == "push button" or .role == "button") and .name == $name and .bounds[2] > 0 and .bounds[3] > 0 and .bounds[0] + $ox < $width and .bounds[0] + $ox + .bounds[2] > 0 and .bounds[1] + $oy < $height and .bounds[1] + $oy + .bounds[3] > 0)' "$1" >/dev/null
+}
+
 # GNOME's page switching while dragging: an app held against the grid's
 # edge turns the page (no arrow to press mid-drag).
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-back.json" 20 \
@@ -973,12 +1085,23 @@ xdotool mousemove --window "$WID" "$page_source_x" "$page_source_y"
 sleep 0.3
 xdotool mousedown 1
 sleep 0.1
-# Establish a real held-pointer drag before approaching the page edge.
-# This sequence passed the actual GTK page-peek/page-change gate in #244.
+# Deliver distinct held-pointer samples so GTK recognizes the drag before
+# we inspect its preview; an immediate press/jump can remain a button press.
 for step in $(seq 1 6); do
     xdotool mousemove --window "$WID" $((page_source_x + step * 10)) "$page_source_y"
     sleep 0.05
 done
+sleep 0.25
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-page-peek.json" 20 || fail G-GRID-PAGE-PEEK "preview dump failed"
+scrot "$ARTIFACTS/11h-grid-page-peek.png" >/dev/null
+showing "$ARTIFACTS/a11y-grid-page-peek.json" "Next page preview" || fail G-GRID-PAGE-PEEK "next page hint missing during drag"
+jq -e 'any(.[]; .showing and .role == "image" and (.name | startswith("Roost Page App")))' "$ARTIFACTS/a11y-grid-page-peek.json" >/dev/null || fail G-GRID-PAGE-PEEK "neighboring page icons did not enter the hint"
+peek_rect="$(jq -r --argjson ox "$grid_origin_x" --argjson oy "$grid_origin_y" '.[] | select(.showing and .name == "Next page preview") | .bounds | "\(.[0] + $ox) \(.[1] + $oy) \(.[2]) \(.[3])"' "$ARTIFACTS/a11y-grid-page-peek.json" | head -1)"
+# shellcheck disable=SC2086
+set -- $peek_rect
+ffmpeg -nostdin -loglevel error -y -i "$ARTIFACTS/11h-grid-page-peek.png" -vf "crop=$3:$4:$1:$2,format=gray" -f rawvideo "$ARTIFACTS/grid-page-peek.gray" || fail G-GRID-PAGE-PEEK "could not inspect hint pixels"
+"$PY" -c 'import sys; data=open(sys.argv[1], "rb").read(); sys.exit(0 if sum(pixel > 150 for pixel in data) > 20 else 1)' "$ARTIFACTS/grid-page-peek.gray" || fail G-GRID-PAGE-PEEK "hint contains no visible icon or label pixels"
+pass G-GRID-PAGE-PEEK "neighboring page icons slide into the 10% hint over 150ms and paint real pixels"
 for i in $(seq 1 20); do
     xdotool mousemove --window "$WID" $((page_source_x + 60 + (WIDTH - 6 - page_source_x - 60) * i / 20)) "$page_source_y"
     sleep 0.03
@@ -992,6 +1115,8 @@ sleep 1
 showing "$ARTIFACTS/a11y-grid-drag-page.json" "Previous Page" ||
     fail G-GRID-DRAG-PAGE "holding a dragged app at the edge did not turn the page"
 pass G-GRID-DRAG-PAGE "an app dragged against the grid's edge turns the page, as GNOME's grid does"
+gsettings set org.gnome.desktop.app-folders folder-children "$grid_original_folders"
+sleep 1
 xdotool key Escape
 cstate '.overview_open | not' "closed" || { xdotool key Escape; cstate '.overview_open | not' "closed" || fail G-APP-GRID-PAGES "overview stayed open"; }
 rm -f "$XDG_DATA_HOME"/applications/roost-page-*.desktop
@@ -1055,6 +1180,9 @@ sleep 1.5
 
 # GNOME's grid reorder: an app dropped on another tile's edge takes its
 # place, and the grid is saved to org.gnome.shell app-picker-layout.
+# The earlier folder drop persisted its catalog. Give this reorder proof
+# an explicit starting order before asserting exact positions 0, 1 and 2.
+gsettings set org.gnome.shell app-picker-layout "[{'roost-move-One.desktop': <{'position': <0>}>, 'roost-move-Three.desktop': <{'position': <1>}>, 'roost-move-Two.desktop': <{'position': <2>}>}]"
 for n in One Two Three; do
     printf '[Desktop Entry]\nName=AAA Move %s\nExec=true\nType=Application\n' "$n" \
         >"$XDG_DATA_HOME/applications/roost-move-$n.desktop"
@@ -1065,7 +1193,44 @@ cstate '.overview_open and .overview_app_grid' "app grid" || fail G-GRID-REORDER
 sleep 1.5
 # By name the cells read One, Three, Two: Two (third cell) onto the left
 # edge of One (first cell, x 146-259).
-drag 452 305 150 305
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-before-hover.json" 20 || fail G-GRID-HOVER "baseline dump failed"
+grid_origin
+layout_before_hover="$(gsettings get org.gnome.shell app-picker-layout)"
+grid_coordinates="$(grid_point "$ARTIFACTS/a11y-grid-before-hover.json" "AAA Move Two")" || fail G-GRID-HOVER "source tile bounds missing"
+read -r source_x source_y <<EOF
+$grid_coordinates
+EOF
+grid_coordinates="$(grid_point "$ARTIFACTS/a11y-grid-before-hover.json" "AAA Move One" 4)" || fail G-GRID-HOVER "target edge bounds missing"
+read -r target_x target_y <<EOF
+$grid_coordinates
+EOF
+xdotool mousemove --window "$WID" "$source_x" "$source_y"
+sleep 0.3
+xdotool mousedown 1
+sleep 0.1
+# Recognize the drag before crossing to the target, as in the page proof.
+for step in $(seq 1 6); do
+    xdotool mousemove --window "$WID" $((source_x - step * 10)) "$source_y"
+    sleep 0.05
+done
+sleep 0.25
+xdotool mousemove --window "$WID" "$target_x" "$target_y"
+sleep 0.35
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-live-hover.json" 20 || fail G-GRID-HOVER "hover dump failed"
+before_x="$(jq '[.[] | select(.showing and (.role == "push button" or .role == "button") and .name == "AAA Move One")][0].bounds[0]' "$ARTIFACTS/a11y-grid-before-hover.json")"
+after_x="$(jq '[.[] | select(.showing and (.role == "push button" or .role == "button") and .name == "AAA Move One")][0].bounds[0]' "$ARTIFACTS/a11y-grid-live-hover.json")"
+scrot "$ARTIFACTS/11g-grid-live-hover.png" >/dev/null
+[ "$after_x" -gt "$before_x" ] || fail G-GRID-HOVER "the neighboring tile did not reflow while the button remained down"
+[ "$(gsettings get org.gnome.shell app-picker-layout)" = "$layout_before_hover" ] || fail G-GRID-HOVER "hover persisted an unfinished drag"
+scrot "$ARTIFACTS/11g-grid-live-hover.png" >/dev/null
+# Reflow puts the dragged tile in the vacant slot. Dropping on its own
+# center commits the preview instead of treating it as a cancelled drag.
+release_point="$(grid_point "$ARTIFACTS/a11y-grid-live-hover.json" "AAA Move Two")"
+# shellcheck disable=SC2086
+xdotool mousemove --window "$WID" $release_point
+xdotool mouseup 1
+sleep 1.5
+pass G-GRID-HOVER "a tile edge reflows after the 200ms delay while dragging, with persistence deferred to drop"
 scrot "$ARTIFACTS/11g-grid-reordered.png" >/dev/null
 layout="$(gsettings get org.gnome.shell app-picker-layout)"
 case "$layout" in
@@ -1080,7 +1245,56 @@ esac
 pass G-GRID-REORDER "an app dropped on a tile's edge takes its place and the grid is saved as GNOME saves it"
 xdotool key Escape
 cstate '.overview_open | not' "closed" || { xdotool key Escape; cstate '.overview_open | not' "closed" || fail G-GRID-REORDER "overview stayed open"; }
+# Moving an item to another page leaves its old page short; a catalog
+# rebuild must respect those saved page boundaries instead of flattening.
+gsettings set org.gnome.shell app-picker-layout "[{'roost-move-One.desktop': <{'position': <0>}>, 'roost-move-Three.desktop': <{'position': <1>}>}, {'roost-move-Two.desktop': <{'position': <0>}>}]"
+printf '[Desktop Entry]\nName=ZZZ Rebuild Probe\nExec=true\nType=Application\n' >"$XDG_DATA_HOME/applications/roost-grid-rebuild.desktop"
+sleep 1.5
+xdotool key super+a
+cstate '.overview_open and .overview_app_grid' "short page setup" || fail G-GRID-SHORT-PAGES "app grid missing"
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-short-before.json" 20 || fail G-GRID-SHORT-PAGES "setup dump failed"
+grid_origin
+grid_shown "$ARTIFACTS/a11y-grid-short-before.json" "AAA Move Three" || fail G-GRID-SHORT-PAGES "source missing from first page"
+if grid_shown "$ARTIFACTS/a11y-grid-short-before.json" "AAA Move Two"; then fail G-GRID-SHORT-PAGES "saved second page was flattened"; fi
+grid_origin
+grid_coordinates="$(grid_point "$ARTIFACTS/a11y-grid-short-before.json" "AAA Move Three")" || fail G-GRID-SHORT-PAGES "source tile bounds missing"
+read -r source_x source_y <<EOF
+$grid_coordinates
+EOF
+xdotool mousemove --window "$WID" "$source_x" "$source_y"
+sleep 0.3
+xdotool mousedown 1
+sleep 0.1
+for step in $(seq 1 6); do
+    xdotool mousemove --window "$WID" $((source_x + step * 10)) "$source_y"
+    sleep 0.05
+done
+sleep 0.25
+xdotool mousemove --window "$WID" $((WIDTH - 6)) 330
+sleep 0.6
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-short-target.json" 20 || fail G-GRID-SHORT-PAGES "target page dump failed"
+grid_coordinates="$(grid_point "$ARTIFACTS/a11y-grid-short-target.json" "AAA Move Two" 4)" || fail G-GRID-SHORT-PAGES "target edge bounds missing"
+read -r target_x target_y <<EOF
+$grid_coordinates
+EOF
+xdotool mousemove --window "$WID" "$target_x" "$target_y"
+sleep 0.35
+xdotool mouseup 1
+sleep 1.5
+"$PY" -c 'from gi.repository import Gio; import json; pages=Gio.Settings.new("org.gnome.shell").get_value("app-picker-layout").unpack(); print(json.dumps([sorted(page, key=lambda key: page[key]["position"]) for page in pages]))' >"$ARTIFACTS/grid-short-pages.json"
+jq -e '.[0] == ["roost-move-One.desktop"] and .[1][0:2] == ["roost-move-Three.desktop", "roost-move-Two.desktop"]' "$ARTIFACTS/grid-short-pages.json" >/dev/null || fail G-GRID-SHORT-PAGES "cross-page move did not leave the source short"
+# Another installed entry forces a complete grid rebuild.
+printf '[Desktop Entry]\nName=ZZZ Rebuild Probe Two\nExec=true\nType=Application\n' >"$XDG_DATA_HOME/applications/roost-grid-rebuild-two.desktop"
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-short-rebuilt.json" 20 || fail G-GRID-SHORT-PAGES "rebuild dump failed"
+grid_shown "$ARTIFACTS/a11y-grid-short-rebuilt.json" "AAA Move One" || fail G-GRID-SHORT-PAGES "short first page lost its item"
+if grid_shown "$ARTIFACTS/a11y-grid-short-rebuilt.json" "AAA Move Two" || grid_shown "$ARTIFACTS/a11y-grid-short-rebuilt.json" "AAA Move Three"; then fail G-GRID-SHORT-PAGES "rebuilding filled the short first page"; fi
+pass G-GRID-SHORT-PAGES "a cross-page drag leaves its source short and the saved boundary survives a catalog rebuild"
+xdotool key Escape
+cstate '.overview_open | not' "short grid closed" || fail G-GRID-SHORT-PAGES "overview stayed open"
 gsettings reset org.gnome.shell app-picker-layout
+rm -f "$XDG_DATA_HOME"/applications/roost-grid-rebuild*.desktop
 rm -f "$XDG_DATA_HOME"/applications/roost-move-*.desktop
 sleep 1.5
 
@@ -1769,9 +1983,57 @@ if command -v Xwayland >/dev/null 2>&1 && command -v xeyes >/dev/null 2>&1; then
     cstate '.focused_app_id == "XEyes" and .x11_ready' "reconnected X11 client" 15 || fail G-X11-RESTART "client did not reconnect on the same reserved display"
     pass G-X11-RESTART "server loss removes compatibility windows, preserves native IDs and accepts a new client on the same display"
     pass G-X11-APP "the first X11 app launched from search gets DISPLAY $x11_display and maps"
+    # An app without a matching desktop file supplies its window icon.
+    x11_window="$(DISPLAY="$x11_display" xdotool search --class XEyes | head -1)"
+    DISPLAY="$x11_display" xprop -id "$x11_window" -f _NET_WM_ICON 32c -set _NET_WM_ICON '2,2,4293935280,4280340624,4280340624,4293935280'
+    cstate '.windows[] | select(.app_id == "XEyes") | .icon != null' "X11 icon" || fail G-WINDOW-ICONS "X11 icon never reached model"
+    x11_icon="$(jq -r '.windows[] | select(.app_id == "XEyes") | .icon' "$CSTATE")"
+    [ -s "$x11_icon" ] || fail G-WINDOW-ICONS "X11 icon cache missing"
+    cp "$x11_icon" "$ARTIFACTS/x11-window-icon.png"
+    DISPLAY="$x11_display" "$ROOT/target/debug/examples/icon-probe" --x11-hints >"$ARTIFACTS/hints-probe.log" 2>&1 &
+    HINTS_PID=$!
+    cstate '.windows[] | select(.app_id == "RoostHintsProbe") | .icon != null' "WM_HINTS icon" || fail G-WINDOW-ICONS "legacy pixmap icon never reached model"
+    hints_icon="$(jq -r '.windows[] | select(.app_id == "RoostHintsProbe") | .icon' "$CSTATE")"
+    [ -s "$hints_icon" ] || fail G-WINDOW-ICONS "WM_HINTS icon cache missing"
+    cp "$hints_icon" "$ARTIFACTS/wm-hints-window-icon.png"
 else
     echo "roost-gtk-shell-proof: G-X11-APP skipped (no Xwayland or xeyes)"
 fi
+
+# Raw Wayland SHM icon: GTK versions on the runner need not implement the new protocol.
+WAYLAND_DISPLAY="$SOCKET_NAME" "$ROOT/target/debug/examples/icon-probe" >"$ARTIFACTS/icon-probe.log" 2>&1 &
+ICON_PID=$!
+cstate '.windows[] | select(.app_id == "roost-window-icon-probe") | .icon != null' "Wayland icon" || fail G-WINDOW-ICONS "Wayland icon never reached model"
+native_icon="$(jq -r '.windows[] | select(.app_id == "roost-window-icon-probe") | .icon' "$CSTATE")"
+[ -s "$native_icon" ] || fail G-WINDOW-ICONS "Wayland icon cache missing"
+cp "$native_icon" "$ARTIFACTS/wayland-window-icon.png"
+xdotool key Super_L
+cstate '.overview_open' "icon overview" || fail G-WINDOW-ICONS "overview did not open"
+sleep 1
+scrot "$ARTIFACTS/20a-window-icons-overview.png" >/dev/null
+cp "$CSTATE" "$ARTIFACTS/window-icons-state.json"
+xdotool key Escape
+cstate '.overview_open == false' "icon overview closed" || fail G-WINDOW-ICONS "overview did not close"
+xdotool keydown Alt_L key Tab
+cstate 'any(.layers[]; .namespace == "roost-shell-switcher")' "icon switcher" || fail G-WINDOW-ICONS "switcher did not open"
+sleep 1
+scrot "$ARTIFACTS/20b-window-icons-switcher.png" >/dev/null
+"$PY" - "$ARTIFACTS/20a-window-icons-overview.png" "$ARTIFACTS/20b-window-icons-switcher.png" <<'PYICON'
+from PIL import Image
+import sys
+for path in sys.argv[1:]:
+    pixels = Image.open(path).convert("RGB").getdata()
+    # The native probe has a distinctive magenta quadrant absent from its client.
+    magenta = sum(r > 200 and 35 < g < 110 and 120 < b < 220 for r, g, b in pixels)
+    if magenta < 16:
+        raise SystemExit(path + ": native window icon pixels missing")
+PYICON
+xdotool keyup Alt_L
+kill "$ICON_PID" 2>/dev/null || true
+ICON_PID=""
+if [ -n "$HINTS_PID" ]; then kill "$HINTS_PID" 2>/dev/null || true; fi
+HINTS_PID=""
+pass G-WINDOW-ICONS "native SHM and X11 window icons reach PNG cache, overview chrome/dash and switcher"
 
 # GNOME's clock keys reach the panel clock within its 1 s tick.
 gsettings set org.gnome.desktop.interface clock-show-seconds true
@@ -1996,6 +2258,21 @@ cstate '.overview_open | not' "closed" || fail G-KEYBINDINGS "Super+A again did 
 # The shell hides its overview surfaces on its next frame: let it.
 sleep 1
 pass G-KEYBINDINGS "Super+S, Super+V and Super+A open GNOME's menus and the app grid"
+# Both directions are rebound, then walk every overview state.
+gsettings set org.gnome.shell.keybindings shift-overview-up "['<Super>F8']"
+gsettings set org.gnome.shell.keybindings shift-overview-down "['<Super>F7']"
+sleep 1.5
+xdotool key super+F8
+cstate '.overview_open and (.overview_app_grid | not)' "picker" || fail G-OVERVIEW-STATE-KEYS "up did not open the picker"
+xdotool key super+F8
+cstate '.overview_open and .overview_app_grid' "apps" || fail G-OVERVIEW-STATE-KEYS "up did not show apps"
+xdotool key super+F7
+cstate '.overview_open and (.overview_app_grid | not)' "picker again" || fail G-OVERVIEW-STATE-KEYS "down did not return to picker"
+xdotool key super+F7
+cstate '(.overview_open | not)' "session" || fail G-OVERVIEW-STATE-KEYS "down did not return to session"
+gsettings reset org.gnome.shell.keybindings shift-overview-up
+gsettings reset org.gnome.shell.keybindings shift-overview-down
+pass G-OVERVIEW-STATE-KEYS "rebound up/down keys walk session, picker, apps and back"
 
 # GNOME's window menu on a header bar's right click: Always on Top, then
 # Hide; the hidden window still shows in the overview, and picking it
@@ -2449,6 +2726,55 @@ fi
 pass G-WS-POPUP "a workspace key shows GNOME's workspace switcher popup"
 sleep 1
 
+# Exercise the normal three-finger handler with nested synthetic phases.
+# Physical touchpad/libinput qualification remains a separate hardware gate.
+swipe_sequence=100
+swipe_phase() {
+    swipe_sequence=$((swipe_sequence + 1))
+    printf '{"phase":"%s","dx":%s,"dy":%s,"sequence":%s}\n' \
+        "$1" "$2" "$3" "$swipe_sequence" >"$ROOST_PROOF_SWIPE_INPUT.tmp"
+    mv "$ROOST_PROOF_SWIPE_INPUT.tmp" "$ROOST_PROOF_SWIPE_INPUT"
+    sleep 0.2
+}
+gesture_home="$(jq -r '.active_workspace' "$CSTATE")"
+swipe_phase begin 0 0
+swipe_phase update -180 0
+swipe_phase end 0 0
+cstate ".active_workspace == $gesture_home + 1 and (.overview_open | not)" "left swipe" ||
+    fail G-SWIPE-DIRECTIONS "three-finger left did not select the next workspace"
+cp "$CSTATE" "$ARTIFACTS/swipe-next-workspace.json"
+swipe_phase begin 0 0
+swipe_phase update 180 0
+swipe_phase end 0 0
+cstate ".active_workspace == $gesture_home and (.overview_open | not)" "right swipe" ||
+    fail G-SWIPE-DIRECTIONS "three-finger right did not restore the previous workspace"
+cp "$CSTATE" "$ARTIFACTS/swipe-previous-workspace.json"
+pass G-SWIPE-DIRECTIONS "nested three-finger left/right switch and restore the exact workspace"
+
+gsettings set org.gnome.desktop.interface enable-animations false
+cstate '(.animations_enabled | not) and .overview_progress == 0' "reduced-motion swipe ready" ||
+    fail G-SWIPE-REDUCED-MOTION "live reduced-motion setting did not arrive"
+swipe_phase begin 0 0
+swipe_phase update 0 -180
+cstate '.overview_progress == 1 and (.overview_open | not)' "reduced-motion held up" ||
+    fail G-SWIPE-REDUCED-MOTION "held upward swipe retained an intermediate transition"
+cp "$CSTATE" "$ARTIFACTS/swipe-reduced-motion-held-up.json"
+swipe_phase end 0 0
+cstate '.overview_open and .overview_progress == 1' "reduced-motion up released" ||
+    fail G-SWIPE-REDUCED-MOTION "upward release did not open the overview"
+swipe_phase begin 0 0
+swipe_phase update 0 180
+cstate '.overview_progress == 0 and .overview_open' "reduced-motion held down" ||
+    fail G-SWIPE-REDUCED-MOTION "held downward swipe retained an intermediate transition"
+cp "$CSTATE" "$ARTIFACTS/swipe-reduced-motion-held-down.json"
+swipe_phase end 0 0
+cstate '(.overview_open | not) and .overview_progress == 0' "reduced-motion down released" ||
+    fail G-SWIPE-REDUCED-MOTION "downward release did not close the overview"
+gsettings set org.gnome.desktop.interface enable-animations true
+cstate '.animations_enabled' "gesture animations restored" ||
+    fail G-SWIPE-REDUCED-MOTION "could not restore animation setting"
+pass G-SWIPE-REDUCED-MOTION "up/down gestures snap while held and settle correctly with reduced motion"
+
 # GNOME's workspace thumbnails: a window moved one workspace right makes
 # three (the trailing empty one included), so the overview shows the
 # strip; a thumbnail click switches there with the overview still open.
@@ -2797,6 +3123,64 @@ after="$(cat "$BACKLIGHT/brightness")"
     fail G-KEY-BRIGHTNESS "the brightness key left the backlight at $after (was $before)"
 scrot "$ARTIFACTS/24c-brightness-osd.png" >/dev/null
 pass G-KEY-BRIGHTNESS "the brightness key steps the backlight by a twentieth through logind"
+# Per-monitor keys must identify the pointer's connector, even with a
+# different backlight sorting first. The fake device mirrors sysfs.
+mkdir -p "$ARTIFACTS/devices/card0-roost-0" "$ARTIFACTS/devices/card0-other" "$ARTIFACTS/backlight/aaa-other"
+ln -s "$ARTIFACTS/devices/card0-roost-0" "$BACKLIGHT/device"
+ln -s "$ARTIFACTS/devices/card0-other" "$ARTIFACTS/backlight/aaa-other/device"
+echo 1000 >"$ARTIFACTS/backlight/aaa-other/max_brightness"
+echo 700 >"$ARTIFACTS/backlight/aaa-other/brightness"
+echo 500 >"$BACKLIGHT/brightness"
+gsettings set org.gnome.shell.keybindings screen-brightness-up-monitor "['<Super>F5']"
+gsettings set org.gnome.shell.keybindings screen-brightness-down-monitor "['<Super>F4']"
+gsettings set org.gnome.shell.keybindings screen-brightness-cycle-monitor "['<Super>F3']"
+sleep 1.5
+xdotool mousemove --window "$WID" 600 450
+for spec in 'F5:550' 'F4:500' 'F3:550'; do
+    xdotool key "super+${spec%%:*}"
+    end=$(($(date +%s) + 10))
+    until [ "$(cat "$BACKLIGHT/brightness")" = "${spec#*:}" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+    [ "$(cat "$BACKLIGHT/brightness")" = "${spec#*:}" ] || fail G-MONITOR-BRIGHTNESS-KEYS "${spec%%:*} did not set ${spec#*:} on the pointer's monitor"
+    [ "$(cat "$ARTIFACTS/backlight/aaa-other/brightness")" = 700 ] || fail G-MONITOR-BRIGHTNESS-KEYS "a different monitor's backlight changed"
+done
+echo 1000 >"$BACKLIGHT/brightness"
+xdotool key super+F3
+end=$(($(date +%s) + 10))
+# GNOME normalized zero maps to the hardware minimum, not a powered-off
+# panel: Mutter's sysfs floor is max(1, max_brightness / 100).
+until [ "$(cat "$BACKLIGHT/brightness")" = 10 ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+[ "$(cat "$BACKLIGHT/brightness")" = 10 ] || fail G-MONITOR-BRIGHTNESS-KEYS "cycle did not wrap to the GNOME hardware minimum"
+for key in screen-brightness-up-monitor screen-brightness-down-monitor screen-brightness-cycle-monitor; do
+    gsettings reset org.gnome.shell.keybindings "$key"
+done
+rm -rf "$ARTIFACTS/backlight/aaa-other"
+pass G-MONITOR-BRIGHTNESS-KEYS "bound monitor up/down/cycle change only the connector under the pointer; cycle wraps"
+# A rebound notification key focuses the active banner's real button.
+# The earlier DND proof intentionally leaves banners disabled. Restore
+# them through the actual quick-settings control before testing focus.
+if [ "$(gsettings get org.gnome.desktop.notifications show-banners)" = false ]; then
+    open_qs
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-notification-enable.json" 20 --press "Do Not Disturb" || fail G-NOTIFICATION-FOCUS-KEY "could not turn off Do Not Disturb"
+    xdotool key Escape
+    sleep 0.5
+fi
+[ "$(gsettings get org.gnome.desktop.notifications show-banners)" = true ] || fail G-NOTIFICATION-FOCUS-KEY "banners remain disabled"
+gsettings set org.gnome.shell.keybindings focus-active-notification "['<Super>F6']"
+sleep 1.5
+notify "Focus Proof Banner" "Keyboard focus" || fail G-NOTIFICATION-FOCUS-KEY "Notify failed"
+for _attempt in 1 2 3 4 5 6 7 8 9 10; do
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-notification-focus-before.json" 20 || fail G-NOTIFICATION-FOCUS-KEY "banner baseline dump failed"
+    if showing "$ARTIFACTS/a11y-notification-focus-before.json" "Focus Proof Banner"; then break; fi
+    sleep 0.1
+done
+showing "$ARTIFACTS/a11y-notification-focus-before.json" "Focus Proof Banner" || fail G-NOTIFICATION-FOCUS-KEY "no active banner to focus"
+xdotool key super+F6
+sleep 0.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-notification-focus.json" 20 || fail G-NOTIFICATION-FOCUS-KEY "a11y dump failed"
+jq -e '.[] | select(.showing and .focused and .name == "Close")' "$ARTIFACTS/a11y-notification-focus.json" >/dev/null || fail G-NOTIFICATION-FOCUS-KEY "banner's Close button did not get keyboard focus"
+xdotool key Escape
+gsettings reset org.gnome.shell.keybindings focus-active-notification
+pass G-NOTIFICATION-FOCUS-KEY "the rebound key focuses the active banner; Escape restores client input"
 
 # GNOME Shell as the polkit agent: polkit (the Authority stub, back on
 # the bus) asks the agent to authenticate; a wrong password says so and
@@ -3060,6 +3444,79 @@ cstate "(.thumbnails | length) == $insert_count + 1 and any(.windows[]; .id == $
     fail G-WS-INSERT "placeholder drop did not insert and move the window"
 pass G-WS-INSERT "thumbnail gap shows a placeholder and inserts a dynamic workspace on drop"
 xdotool key Escape
+
+# A real Wayland requester drives the GTK consent UI and PermissionStore,
+# rather than injecting an answer into the compositor's test state.
+for app in allow deny; do
+    cat >"$XDG_DATA_HOME/applications/roost-consent-$app.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=Consent $app
+Exec=true
+NoDisplay=true
+DESKTOP
+done
+for scenario in allow remembered-allow deny remembered-deny unknown; do
+    case "$scenario" in
+        *allow) consent_app=roost-consent-allow ;;
+        *deny) consent_app=roost-consent-deny ;;
+        unknown) consent_app=roost-consent-unknown ;;
+    esac
+    trigger="$ARTIFACTS/consent-$scenario.request"
+    consent_log="$ARTIFACTS/consent-$scenario.log"
+    rm -f "$trigger"
+    WAYLAND_DISPLAY="$SOCKET_NAME" "$ROOT/target/debug/examples/shortcut-inhibit-client" "$consent_app" "$trigger" >"$consent_log" 2>&1 &
+    INHIBITOR_PID=$!
+    cstate ".focused_app_id == \"$consent_app\"" "consent client focused" || fail G-SHORTCUT-CONSENT "requester did not focus"
+    touch "$trigger"
+    end=$(($(date +%s) + 10))
+    until grep -q INACTIVE "$consent_log" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+    grep -q INACTIVE "$consent_log" || fail G-SHORTCUT-CONSENT "request did not start inactive"
+    sleep 0.7
+    case "$scenario" in
+        remembered-allow)
+            end=$(($(date +%s) + 10))
+            until grep -q '^ACTIVE' "$consent_log" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+            grep -q '^ACTIVE' "$consent_log" || fail G-SHORTCUT-CONSENT "remembered grant did not activate"
+            ;;
+        remembered-deny) ;;
+        *)
+            "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-consent-$scenario.json" 20 || fail G-SHORTCUT-CONSENT "dialog dump failed"
+            case "$scenario" in
+                allow) expected_title="Allow Consent allow to inhibit shortcuts?" ;;
+                deny) expected_title="Allow Consent deny to inhibit shortcuts?" ;;
+                unknown) expected_title="Allow this app to inhibit shortcuts?" ;;
+            esac
+            showing "$ARTIFACTS/a11y-consent-$scenario.json" "$expected_title" || fail G-SHORTCUT-CONSENT "application display name missing from consent"
+            showing "$ARTIFACTS/a11y-consent-$scenario.json" Allow || fail G-SHORTCUT-CONSENT "Allow missing"
+            showing "$ARTIFACTS/a11y-consent-$scenario.json" Deny || fail G-SHORTCUT-CONSENT "Deny missing"
+            showing "$ARTIFACTS/a11y-consent-$scenario.json" "You can restore shortcuts by pressing Super+Escape" || fail G-SHORTCUT-CONSENT "escape hint missing"
+            grep -q '^ACTIVE' "$consent_log" && fail G-SHORTCUT-CONSENT "request auto-granted before the user answered"
+            answer=Deny
+            [ "$scenario" = allow ] && answer=Allow
+            "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-consent-answer-$scenario.json" 20 --press "$answer" || fail G-SHORTCUT-CONSENT "could not answer"
+            sleep 0.7
+            ;;
+    esac
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-consent-after-$scenario.json" 20 || fail G-SHORTCUT-CONSENT "post-answer dump failed"
+    showing "$ARTIFACTS/a11y-consent-after-$scenario.json" "Allow inhibiting shortcuts" && fail G-SHORTCUT-CONSENT "dialog remained visible or remembered decision prompted"
+    case "$scenario" in
+        *allow)
+            grep -q '^ACTIVE' "$consent_log" || fail G-SHORTCUT-CONSENT "Allow did not activate"
+            xdotool key super+Escape
+            end=$(($(date +%s) + 5))
+            until [ "$(grep -c '^INACTIVE' "$consent_log" || true)" -ge 2 ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+            [ "$(grep -c '^INACTIVE' "$consent_log" || true)" -ge 2 ] || fail G-SHORTCUT-CONSENT "emergency escape did not restore shortcuts"
+            ;;
+        *) if grep -q '^ACTIVE' "$consent_log"; then fail G-SHORTCUT-CONSENT "Deny granted inhibition"; fi ;;
+    esac
+    kill "$INHIBITOR_PID" 2>/dev/null || true
+    wait "$INHIBITOR_PID" 2>/dev/null || true
+    INHIBITOR_PID=""
+    sleep 0.3
+done
+jq -e '."roost-consent-allow.desktop" == ["GRANTED"] and ."roost-consent-deny.desktop" == ["DENIED"] and (has("roost-consent-unknown.desktop") | not)' "$ARTIFACTS/shortcut-permissions.json" >/dev/null || fail G-SHORTCUT-CONSENT "PermissionStore did not remember exactly the known apps"
+pass G-SHORTCUT-CONSENT "live requests require Allow, Deny stays inactive, known app decisions persist without prompting, unknown apps are not remembered, Super+Escape restores input"
 
 "$ROOT/scripts/roost-a11y-golden" check "$ARTIFACTS" ||
     fail A11Y-GOLDEN "accessible trees differ from tests/a11y/ (see above)"
