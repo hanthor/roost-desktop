@@ -147,3 +147,12 @@ this gate. The resulting checklist is retained with the coverage artifact.
 Registration does not imply every security boundary is covered, nor authenticate
 logs obtained outside trusted CI. Spec-qualified legacy test IDs and broader
 protocol/lifecycle boundary registration remain tracked by #8.
+
+
+The measured coverage artifact also includes `test-strategy-report.md`. This
+combines the same run's crate inventory, measured line/region results, successful
+registered security cases and unresolved spec-qualified ID/boundary gaps.
+Missing executed cases fail its generation. Structural-only reports identify the
+separate measurement lane; they no longer describe already-enforced line floors
+and artifact checks as unimplemented. Branch coverage remains outside the pinned
+stable-toolchain measurement scope.

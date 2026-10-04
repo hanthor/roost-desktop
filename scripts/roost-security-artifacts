@@ -48,6 +48,27 @@ def check(directory, expected_revision):
     return cases
 
 
+def combined_strategy_report(directory, revision, cases):
+    """Join the same run's measured evidence with its current source inventory."""
+    passed = {name.split('::')[-1] for name in
+              re.findall(r'^test (\S+) \.\.\. ok\s*$', (directory / 'test.log').read_text(), re.MULTILINE)}
+    inventory = strategy.inspect(ROOT, passed)
+    if inventory['errors']:
+        raise ValueError('strategy source/execution mismatch: ' + '; '.join(inventory['errors']))
+    lines = ['# Test strategy compliance report', '', f'Source revision: `{revision}`', '',
+             'This report combines source inventory, measured coverage and executed boundary cases from this instrumented CI run.', '',
+             '| Crate | Named #[test] functions | Rust files |', '| --- | ---: | ---: |']
+    lines += [f'| {row["crate"]} | {row["tests"]} | {row["files"]} |' for row in inventory['crates']]
+    lines += ['', '## Stable IDs and remaining gaps', '']
+    lines += [f'- {value}: {", ".join(sorted(paths))}' for value, paths in sorted(inventory['stable_ids'].items())]
+    lines += [f'- {gap}' for gap in inventory['gaps'] if not gap.startswith('Measured line/region')]
+    lines += ['', '## Executed registered security cases', '',
+              '| Boundary | Case kind | Executed test |', '| --- | --- | --- |']
+    lines += [f'| {boundary} | {kind} | {file}::{name} |' for boundary, kind, file, name in cases]
+    lines += ['', '## Measured crate and module coverage', '', (directory / 'coverage-report.md').read_text().strip(), '']
+    return '\n'.join(lines)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path)
@@ -64,6 +85,11 @@ def main():
              'does not establish complete boundary coverage or authenticate arbitrary logs.', '',
              '| Boundary | Case kind | Executed test |', '| --- | --- | --- |']
     lines += [f'| {boundary} | {kind} | {file}::{name} |' for boundary, kind, file, name in cases]
+    try:
+        report = combined_strategy_report(args.directory, revision, cases)
+    except ValueError as error:
+        parser.exit(1, f'roost-security-artifacts: {error}\n')
+    (args.directory / 'test-strategy-report.md').write_text(report)
     (args.directory / 'security-artifacts-report.md').write_text('\n'.join(lines) + '\n')
     print(f'roost-security-artifacts: {len(cases)} registered cases and all required artifacts passed')
 
