@@ -76,7 +76,7 @@ GNOME: 93 visible nodes; 7 named controls. Roost: 24 named nodes in the proof go
 - Activities is a native toggle button and a GTK push button in Roost; both open the overview.
 - GNOME’s date control is an unnamed menu with a clock label child. Roost names its menu controls Date and Time. GNOME’s System menu maps to Roost’s named GTK menu button and its internal toggle.
 - GNOME’s search field is an unnamed text node. Roost exposes a named Search entry. Both scenes retain their search field in the visible tree.
-- Dash app names depend on the installed favorites and window fixtures. Show Apps is a toggle button on both sides; the window scene also exposes close controls.
+- Dash app names depend on the installed favorites and window fixtures. Show Apps is a toggle button on both sides. GNOME’s preview buttons are unnamed in the native tree; Roost’s hovered-preview golden names the Close action.
 - Lock Screen in GNOME maps to Lock in Roost. Open power profiles menu maps to Power Mode Menu. The shared screenshot, settings and power menu actions remain named.
 - GNOME’s Power Mode, Dark Style and Do Not Disturb toggles use visible label children instead of a name on the toggle. Roost names the toggles directly. The native fixture retains those label children.
 - Roost’s network, Bluetooth, volume and brightness controls are present because its live proof supplies those services. The GNOME headless reference has no usable network adapter, audio server or hardware backlight.
