@@ -2132,6 +2132,7 @@ pub fn grid_reorder(
 
 /// The order as `app-picker-layout` pages (appDisplay.js `_savePages`):
 /// each item's position on its page.
+#[cfg(test)]
 pub fn grid_pages(order: &[String], per_page: usize) -> Vec<Vec<(String, i32)>> {
     order
         .chunks(per_page.max(1))
