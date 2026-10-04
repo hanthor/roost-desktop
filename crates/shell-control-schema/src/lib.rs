@@ -664,6 +664,13 @@ pub struct InputSettings {
     pub mouse_speed_milli: i32,
     /// `org.gnome.desktop.interface enable-hot-corners`.
     pub hot_corners: bool,
+    /// `org.gnome.desktop.interface enable-animations`; absent on older peers means enabled.
+    #[serde(default = "animations_default")]
+    pub enable_animations: bool,
+}
+
+fn animations_default() -> bool {
+    true
 }
 
 impl Default for InputSettings {
@@ -683,6 +690,7 @@ impl Default for InputSettings {
             mouse_natural_scroll: false,
             mouse_speed_milli: 0,
             hot_corners: true,
+            enable_animations: true,
         }
     }
 }

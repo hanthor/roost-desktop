@@ -1425,6 +1425,30 @@ cstate '.keyboard.layouts == ["English (US)"]' "one source" ||
     fail G-SETTINGS-INPUT "the keymap did not return to us"
 pass G-SETTINGS-INPUT "input sources, Super+Space, key repeat and the hot corner follow GNOME"
 
+# Disabling animations is live and snaps compositor and GTK transitions.
+gsettings set org.gnome.desktop.interface enable-animations false
+cstate '(.animations_enabled | not)' "animations disabled" ||
+    fail G-ANIMATIONS-OFF "enable-animations false did not reach the compositor"
+xdotool key Super_L
+cstate '.overview_open and .overview_progress == 1' "instant overview" ||
+    fail G-ANIMATIONS-OFF "the disabled overview did not jump to its open state"
+cp "$CSTATE" "$ARTIFACTS/animations-disabled-open.json"
+xdotool key Escape
+cstate '(.overview_open | not) and .overview_progress == 0' "instant desktop" ||
+    fail G-ANIMATIONS-OFF "the disabled overview did not jump to its closed state"
+xdotool key super+shift+t
+cstate '.session_mode == "scroll" and .strip_view == .strip_offset' "instant strip" ||
+    fail G-ANIMATIONS-OFF "the disabled strip view did not match its target"
+xdotool key super+Left
+cstate '.strip_view == .strip_offset' "instant focus" ||
+    fail G-ANIMATIONS-OFF "the disabled strip view lagged after a focus move"
+xdotool key super+shift+t
+cstate '.session_mode == "gnome"' "floating" || fail G-ANIMATIONS-OFF "could not restore floating mode"
+gsettings set org.gnome.desktop.interface enable-animations true
+cstate '.animations_enabled' "animations enabled" ||
+    fail G-ANIMATIONS-OFF "enable-animations true did not restore live animation"
+pass G-ANIMATIONS-OFF "enable-animations is live: overview and strip states jump when disabled"
+
 # GNOME settings (#63): the idle lock follows idle-delay and
 # lock-enabled as they change.
 gsettings set org.gnome.desktop.session idle-delay 600
