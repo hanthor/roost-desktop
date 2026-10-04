@@ -5,7 +5,9 @@ Usage: roost-test-window.py TITLE [COLOR]
 
 Maps one Adw.ApplicationWindow titled TITLE with a header bar, a big
 label, a menu button whose popover proves xdg popups, and a scrollable
-list that proves wheel scrolling. Exits when the window closes.
+list that proves wheel scrolling. Exits when the window closes. With
+ROOST_TEST_POPOVER=1 the popover opens by itself once the window shows
+(parity captures cannot rely on headless input).
 """
 import os
 import sys
@@ -58,6 +60,8 @@ def build(loop):
     box.append(scroller)
     win.set_content(box)
     win.present()
+    if os.environ.get("ROOST_TEST_POPOVER") == "1":
+        GLib.timeout_add(1500, lambda: menu.popup() or False)
 
 
 # Distinct app ids let journeys target each window (xdg_toplevel app_id).

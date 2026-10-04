@@ -73,6 +73,21 @@ window.roost-panel.overview.shaded {
   margin: 0 4px;
 }
 
+/* #panel .screen-recording-indicator: a filled $red_4 button, white
+   text and icon, 6px between the elapsed time and the stop icon. */
+.roost-panel button.panel-button.screen-recording-indicator {
+  background-color: #c01c28;
+  color: #ffffff;
+}
+.roost-panel button.panel-button.screen-recording-indicator:hover {
+  background-color: shade(#c01c28, 1.1);
+}
+
+/* #panel .privacy-indicator: the microphone while an app records. */
+.roost-panel .privacy-indicator {
+  color: #ff7800;
+}
+
 /* Workspace indicator (#panelActivities .workspace-dot): the active
    workspace is an 8px-tall pill (its width set in code, by count), the
    others 8px dots drawn at 6px (GNOME scales them to 0.75) in white at
@@ -550,6 +565,19 @@ window.roost-overview-grid {
   box-shadow: none;
 }
 
+/* .search-entry:focus, shown once typing starts: a 2px ring of the
+   accent mixed 60% with white at 0.8, over the accent mixed 5% into
+   the entry. */
+.roost-overview-search entry.search:not(.idle) {
+  background-color: #43454d;
+  color: #fafafb;
+  box-shadow: inset 0 0 0 2px rgba(134, 181, 239, 0.8);
+}
+
+.roost-overview-search entry.search:not(.idle) image {
+  color: #fafafb;
+}
+
 .roost-overview-search entry.search.idle {
   /* GNOME shows no caret until you type. */
   caret-color: transparent;
@@ -605,10 +633,33 @@ window.roost-overview-grid {
   background-color: rgba(250, 250, 251, 0.1);
 }
 
+/* GNOME 51's app results (.grid-search-results): no card, 145px tiles
+   (.grid-search-result: 12px padding, 24px corners, a 96px icon) 30px
+   apart, 21px under the entry; the first, Enter's target, is
+   highlighted (st-lighten(#222226, 8%)). */
 .overview-results {
-  background-color: alpha(#2a2a2f, 0.92);
+  background: none;
+  padding: 0;
+  margin-top: 6px;
+}
+
+.roost-overview-search .overview-results .overview-app {
+  padding: 12px;
   border-radius: 24px;
-  padding: 8px;
+  background: none;
+  box-shadow: none;
+  color: #fafafb;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
+  font-weight: normal;
+}
+
+.roost-overview-search .overview-results .overview-app:hover {
+  background-color: #323238;
+}
+
+.roost-overview-search .overview-results .overview-app.selected {
+  background-color: #35353b;
 }
 
 .overview-app {
@@ -685,6 +736,69 @@ window.roost-banners {
 
 .message-title {
   font-weight: bold;
+}
+
+/* Notification groups, GNOME 51's NotificationMessageGroup: collapsed,
+   the newest card shows in full and the next two peek out 10px and
+   7px below it, 6px further in per side, in darker greys; expanded, a
+   header of the app name and a round collapse button over every card. */
+.message-view button.message-group {
+  min-width: 0;
+  min-height: 0;
+  margin: 0 0 12px 0;
+  padding: 0;
+  border: none;
+  border-radius: 18px;
+  background: none;
+  box-shadow: none;
+  /* The card's own weights, not the button's bold. */
+  font-weight: normal;
+}
+
+.message-view button.message-group:hover,
+.message-view button.message-group:active {
+  background: none;
+}
+
+.message-view .message-group.collapsed .message {
+  margin-bottom: 0;
+}
+
+.message-stack-card {
+  border-radius: 18px;
+}
+
+.message-stack-card.second-in-stack {
+  background-color: #45454a;
+}
+
+.message-stack-card.lower-in-stack {
+  background-color: #3d3d42;
+}
+
+.message-group-header {
+  padding: 6px;
+}
+
+.message-group-title {
+  margin: 0 4px;
+  color: #ffffff;
+  font-weight: 800;
+  font-size: 1.364em;
+}
+
+.message-collapse-button {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 2px;
+  border-radius: 999px;
+  background-color: rgba(255, 255, 255, 0.2);
+  color: #ffffff;
+  box-shadow: none;
+}
+
+.message-collapse-button:hover {
+  background-color: rgba(255, 255, 255, 0.3);
 }
 
 /* Search providers (#57): GNOME 51 list results under the app row. */
@@ -1135,6 +1249,45 @@ window.roost-screenshot-ui .screenshot-ui-capture-button-circle {
 window.roost-screenshot-ui button.screenshot-ui-capture-button:hover .screenshot-ui-capture-button-circle {
   background-color: #cccccc;
 }
+/* Screencast mode (:cast): the circle turns $red_4. */
+window.roost-screenshot-ui button.screenshot-ui-capture-button.cast .screenshot-ui-capture-button-circle {
+  background-color: #c01c28;
+}
+window.roost-screenshot-ui button.screenshot-ui-capture-button.cast:hover .screenshot-ui-capture-button-circle {
+  background-color: #d81f2d;
+}
+/* The window selector's windows: a 6px border outside each, 12px corners
+   ($modal_radius), the accent color when hovered (darker) and chosen
+   (with a 20% accent wash and the check in an accent circle). */
+window.roost-screenshot-ui button.screenshot-ui-window-selector-window {
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 6px solid transparent;
+  border-radius: 12px;
+  background: none;
+  box-shadow: none;
+  outline: none;
+  transition: border-color 200ms, background-color 200ms;
+}
+window.roost-screenshot-ui button.screenshot-ui-window-selector-window:hover {
+  border-color: shade(@accent_bg_color, 0.85);
+}
+window.roost-screenshot-ui button.screenshot-ui-window-selector-window:checked {
+  border-color: @accent_bg_color;
+  background-color: alpha(@accent_bg_color, 0.2);
+}
+window.roost-screenshot-ui .screenshot-ui-window-selector-check {
+  color: transparent;
+  border-radius: 999px;
+  padding: 12px;
+  -gtk-icon-size: 24px;
+  transition: color 200ms, background-color 200ms;
+}
+window.roost-screenshot-ui button.screenshot-ui-window-selector-window:checked .screenshot-ui-window-selector-check {
+  color: @accent_fg_color;
+  background-color: @accent_bg_color;
+}
 window.roost-screenshot-ui button.screenshot-ui-show-pointer-button {
   min-width: 16px;
   min-height: 16px;
@@ -1350,6 +1503,23 @@ window.roost-folder-dialog button.folder-tile:hover {
   transform: none;
 }
 
+/* .page-navigation-hint: during a drag, a 5% white gradient fading
+   inward, rounded 24px on the grid side; lit to 10% while hovered. */
+.page-navigation-hint.next {
+  background-image: linear-gradient(to right, rgba(255, 255, 255, 0.05), transparent);
+  border-radius: 24px 0 0 24px;
+}
+
+.page-navigation-hint.previous {
+  background-image: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.05));
+  border-radius: 0 24px 24px 0;
+}
+
+.page-navigation-hint.dnd {
+  background-image: none;
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
 .page-navigation-arrow {
   margin: 6px;
   padding: 18px;
@@ -1363,4 +1533,72 @@ window.roost-folder-dialog button.folder-tile:hover {
 
 .page-navigation-arrow:hover {
   background-color: #2f2f34;
+}
+
+/* GNOME 51's IBus candidate popup (gnome-shell 51.0
+   data/theme/gnome-shell-sass/widgets/_ibus-popup.scss, dark variant):
+   .candidate-popup-content extends .popup-menu-content (#36363a, a 1px
+   #424247 edge, 0 2px 4px rgba(0,0,0,0.2)) with 6px padding and
+   spacing and 12px corners; .candidate-box 6px 12px with 8px corners,
+   :selected in the accent, :hover lighten($bg_color, 10%); the index
+   in $insensitive_fg_color, 6px from its text. */
+window.roost-ibus-candidates {
+  background: none;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
+}
+window.roost-ibus-candidates .candidate-popup-content {
+  /* Room for the shadow inside the layer surface. */
+  margin: 6px;
+  padding: 6px;
+  color: #ffffff;
+  background-color: #36363a;
+  border: 1px solid #424247;
+  border-radius: 12px;
+  box-shadow: 0 2px 4px 0 rgba(0, 0, 0, 0.2);
+}
+window.roost-ibus-candidates .candidate-index {
+  padding: 0 6px 0 0;
+  color: #9b9b9d;
+}
+window.roost-ibus-candidates .candidate-box {
+  padding: 6px 12px;
+  border-radius: 8px;
+}
+window.roost-ibus-candidates .candidate-box:selected {
+  background-color: @accent_bg_color;
+  color: @accent_fg_color;
+}
+window.roost-ibus-candidates .candidate-box:hover {
+  background-color: #4f4f54;
+  color: #ffffff;
+}
+window.roost-ibus-candidates .candidate-page-button-box {
+  min-height: 29px; /* 2em */
+}
+window.roost-ibus-candidates .vertical .candidate-page-button-box {
+  padding-top: 12px;
+}
+window.roost-ibus-candidates .horizontal .candidate-page-button-box {
+  padding-left: 12px;
+}
+/* .button: st-mix($fg_color, $bg_color, 9%), 4% lighter hovered. */
+window.roost-ibus-candidates button.candidate-page-button {
+  padding: 6px;
+  min-height: 0;
+  background-color: #48484c;
+  color: #ffffff;
+  box-shadow: none;
+}
+window.roost-ibus-candidates button.candidate-page-button:hover {
+  background-color: #525256;
+}
+window.roost-ibus-candidates button.candidate-page-button image {
+  -gtk-icon-size: 16px;
+}
+window.roost-ibus-candidates button.candidate-page-button-previous {
+  border-radius: 8px 0 0 8px;
+}
+window.roost-ibus-candidates button.candidate-page-button-next {
+  border-radius: 0 8px 8px 0;
 }

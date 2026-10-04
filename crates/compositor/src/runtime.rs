@@ -441,6 +441,8 @@ pub struct Runtime {
     manager: WindowManager,
     control: ControlHub,
     shell: ShellDriver,
+    /// The IBus bridge, when IBus is installed.
+    ime: Option<crate::ime::ImeBridge>,
     overlay: Overlay,
     wallpaper: Wallpaper,
     triggers: TriggerState,
@@ -479,6 +481,8 @@ pub struct Runtime {
     /// time; drawn eased), moving toward the open state each frame.
     overview_progress: f64,
     overview_progress_at: Instant,
+    /// Last strip-view spring step, for the per-frame time delta.
+    strip_view_at: Instant,
     /// A three-finger vertical swipe driving the transition: the
     /// progress it started from.
     overview_swipe_from: Option<f64>,
@@ -512,6 +516,8 @@ pub struct Runtime {
     /// `ROOST_COMPOSITOR_STATE` snapshot path (journeys only).
     state_path: Option<std::path::PathBuf>,
     state_last: String,
+    /// Opt-in synthetic touchpad phases for the nested proof harness.
+    proof_swipe_last: String,
 }
 
 /// Control socket path for a session: alongside the Wayland socket in the
@@ -559,9 +565,13 @@ impl Runtime {
                     })
                     .map_err(|e| RuntimeError::Loop(e.to_string()))?;
                 handle
-                    .insert_source(sources.drm, |event, _, rt: &mut Runtime| {
-                        if let Backend::Drm(drm) = &mut rt.backend {
-                            drm.on_drm_event(event);
+                    .insert_source(sources.drm, |event, metadata, rt: &mut Runtime| {
+                        let flip = match &mut rt.backend {
+                            Backend::Drm(drm) => drm.on_drm_event(event, metadata),
+                            Backend::Winit(_) => None,
+                        };
+                        if let Some(flip) = flip {
+                            rt.page_flipped(flip);
                         }
                     })
                     .map_err(|e| RuntimeError::Loop(e.to_string()))?;
@@ -718,13 +728,24 @@ impl Runtime {
         event_loop
             .handle()
             .insert_source(crate::screenshot::start(), |event, _, rt: &mut Runtime| {
-                if let calloop::channel::Event::Msg(request) = event {
-                    let saved = if request.window {
-                        rt.capture_window(&request.filename)
-                    } else {
-                        rt.capture(&request.filename)
-                    };
-                    let _ = request.reply.send(saved);
+                use crate::screenshot::Request;
+                match event {
+                    calloop::channel::Event::Msg(Request::Shot {
+                        filename,
+                        window,
+                        reply,
+                    }) => {
+                        let saved = if window {
+                            rt.capture_window(&filename)
+                        } else {
+                            rt.capture(&filename)
+                        };
+                        let _ = reply.send(saved);
+                    }
+                    calloop::channel::Event::Msg(Request::Windows { directory, reply }) => {
+                        let _ = reply.send(rt.capture_selector_windows(&directory));
+                    }
+                    calloop::channel::Event::Closed => {}
                 }
             })
             .map_err(|e| RuntimeError::Loop(e.to_string()))?;
@@ -748,6 +769,7 @@ impl Runtime {
             manager,
             control,
             shell,
+            ime: crate::ime::ImeBridge::configured(&session.socket_name),
             overlay,
             wallpaper: Wallpaper::new(),
             triggers: TriggerState::default(),
@@ -764,6 +786,7 @@ impl Runtime {
             shell_swipe: None,
             overview_progress: 0.0,
             overview_progress_at: Instant::now(),
+            strip_view_at: Instant::now(),
             overview_swipe_from: None,
             scale: clamp_scale(session.scale),
             input_settings: Default::default(),
@@ -781,6 +804,7 @@ impl Runtime {
                 .map(std::path::PathBuf::from)
                 .filter(|p| p.is_absolute()),
             state_last: String::new(),
+            proof_swipe_last: String::new(),
         };
         // Session-level X11 opt-in is the recorded first X11 need:
         // the supervisor leaves `Idle` and the next tick may spawn
@@ -982,11 +1006,19 @@ impl Runtime {
                     _ => {}
                 }
             }
-            let action = self.triggers.feed(
-                &input,
-                self.control.overview_open(),
-                self.manager.pointer_pos(),
-            );
+            // Super's tap belongs to a window inhibiting shortcuts
+            // (keyboard-shortcuts-inhibit, #89).
+            let inhibited =
+                matches!(input, ManagerInput::Key { .. }) && self.state.shortcuts_inhibited();
+            let action = if inhibited {
+                TriggerAction::None
+            } else {
+                self.triggers.feed(
+                    &input,
+                    self.control.overview_open(),
+                    self.manager.pointer_pos(),
+                )
+            };
             match action {
                 TriggerAction::None => {}
                 TriggerAction::Toggle => self.control.set_overview(!self.control.overview_open()),
@@ -1139,14 +1171,27 @@ impl Runtime {
         // where they say.
         let scene =
             (overview_open && self.overview_progress >= 1.0).then(|| self.overview_layout());
+        // Record the drawn transition separately from settled click targets.
+        let transition_scene = (self.overview_progress > 0.0).then(|| self.overview_layout());
+        let workspace_cards: Vec<serde_json::Value> = transition_scene
+            .iter()
+            .flat_map(|l| l.cards.iter())
+            .map(|c| {
+                serde_json::json!({
+                    "workspace": c.workspace, "active": c.active, "alpha": c.alpha,
+                    "rect": [c.rect.loc.x, c.rect.loc.y, c.rect.size.w, c.rect.size.h],
+                })
+            })
+            .collect();
         // GNOME's workspace thumbnails strip (three or more workspaces).
-        let thumbnails: Vec<serde_json::Value> = scene
+        let thumbnails: Vec<serde_json::Value> = transition_scene
             .iter()
             .flat_map(|l| l.thumbnails.iter())
             .map(|t| {
                 serde_json::json!({
                     "workspace": t.workspace,
                     "active": t.active,
+                    "alpha": t.alpha,
                     "rect": [t.rect.loc.x, t.rect.loc.y, t.rect.size.w, t.rect.size.h],
                 })
             })
@@ -1182,6 +1227,16 @@ impl Runtime {
             "focused_rect": focused
                 .and_then(|id| self.manager.geometry(id))
                 .map(|g| [g.loc.x, g.loc.y, g.size.w, g.size.h]),
+            // Floating ("gnome") or niri's strip ("scroll"), and how far
+            // the strip's view has scrolled.
+            "session_mode": match self.manager.session_mode() {
+                crate::windows::SessionMode::Scroll => "scroll",
+                crate::windows::SessionMode::Gnome => "gnome",
+            },
+            "strip_offset": self.manager.strip_offset(),
+            // Where the strip is drawn this frame: trails the target
+            // on niri's view-movement spring, equal once settled.
+            "strip_view": self.manager.strip_view(),
             "minimized": snapshot
                 .windows
                 .iter()
@@ -1202,6 +1257,8 @@ impl Runtime {
             })).collect::<Vec<_>>(),
             "previews": previews,
             "thumbnails": thumbnails,
+            "overview_progress": self.overview_progress,
+            "workspace_cards": workspace_cards,
             // The Alt+Tab switcher's window thumbnails being drawn.
             "switcher_thumbnails": self.switcher_thumbnails.len(),
             // GNOME's tile preview while a dragged window is over a
@@ -1302,6 +1359,15 @@ impl Runtime {
         self.overview_progress > 0.0
     }
 
+    /// Advance the scroll-mode strip view on its spring by the time
+    /// since the last frame (niri's view-movement animation).
+    fn step_strip_view(&mut self) {
+        let now = Instant::now();
+        let dt = now.duration_since(self.strip_view_at).as_secs_f64();
+        self.strip_view_at = now;
+        self.manager.step_strip_view(dt);
+    }
+
     /// A press while the overview is open that no shell surface took:
     /// focus the preview's window, switch to a neighbor card's
     /// workspace, or close the overview (GNOME shape). Returns whether
@@ -1362,6 +1428,52 @@ impl Runtime {
         if here != Some(target) {
             self.manager.move_to_workspace(&mut self.state, id, target);
         }
+    }
+
+    /// Feed explicitly opted-in nested proofs through the real gesture handler.
+    /// Each atomically replaced JSON file is consumed once; ordinary sessions
+    /// never read it because state instrumentation is also required.
+    fn proof_swipe_input(&mut self) {
+        if self.state_path.is_none() {
+            return;
+        }
+        let Some(path) = std::env::var_os("ROOST_PROOF_SWIPE_INPUT")
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_absolute())
+        else {
+            return;
+        };
+        if !std::fs::metadata(&path).is_ok_and(|m| m.len() <= 4096) {
+            return;
+        }
+        let Ok(body) = std::fs::read_to_string(path) else {
+            return;
+        };
+        if body == self.proof_swipe_last {
+            return;
+        }
+        self.proof_swipe_last = body.clone();
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
+            return;
+        };
+        let time = crate::state::system_millis() as u32;
+        let input = match value["phase"].as_str() {
+            Some("begin") => ManagerInput::SwipeBegin { fingers: 3, time },
+            Some("update") => ManagerInput::SwipeUpdate {
+                delta: (
+                    value["dx"].as_f64().unwrap_or(0.0),
+                    value["dy"].as_f64().unwrap_or(0.0),
+                )
+                    .into(),
+                time,
+            },
+            Some("end") => ManagerInput::SwipeEnd {
+                cancelled: value["cancelled"].as_bool().unwrap_or(false),
+                time,
+            },
+            _ => return,
+        };
+        self.on_manager_input(input);
     }
 
     /// Track a three-finger swipe; returns whether `input` was one of
@@ -1461,6 +1573,73 @@ impl Runtime {
             path.display()
         );
         Some(path)
+    }
+
+    /// GNOME's screenshot window selector (screenshot.js
+    /// `UIWindowSelector.capture`): every window on the active workspace,
+    /// minimized ones left out, each saved at full size into `directory`
+    /// and given its slot in the selector, laid out with GNOME's window
+    /// spread inside the selector's margins. Never while locked.
+    pub fn capture_selector_windows(
+        &mut self,
+        directory: &std::path::Path,
+    ) -> Vec<crate::screenshot::WindowShot> {
+        if self.is_locked() || std::fs::create_dir_all(directory).is_err() {
+            return Vec::new();
+        }
+        let size = self.state.primary_size();
+        let model = self.manager.model();
+        let active = model.active_workspace();
+        let focused = model.focused();
+        let mut windows: Vec<(u64, Rectangle<i32, Logical>)> = self
+            .manager
+            .overview_windows()
+            .into_iter()
+            .filter(|w| w.workspace == active && !self.manager.is_minimized(w.id))
+            .map(|w| (w.id, w.geometry))
+            .collect();
+        // GNOME sorts by stable sequence: creation order (Roost ids rise).
+        windows.sort_by_key(|(id, _)| *id);
+        let top = crate::windows::WORK_AREA_TOP;
+        let workarea = Rectangle::new((0, top).into(), (size.w, (size.h - top).max(1)).into());
+        let (ax, ay, aw, ah) = crate::screenshot::selector_area(size.w, size.h);
+        let area = Rectangle::new((ax, ay).into(), (aw, ah).into());
+        let slots = crate::overview::window_slots_spaced(
+            workarea,
+            size.h,
+            area,
+            &windows,
+            crate::overview::SELECTOR_SPACING,
+        );
+        let mut shots = Vec::new();
+        for (id, rect, _) in slots {
+            let title = self
+                .manager
+                .model()
+                .window(id)
+                .map(|w| w.title.clone())
+                .unwrap_or_default();
+            let Some((w, h, rgba)) =
+                self.render_window_pixels(id, None, smithay::backend::allocator::Fourcc::Abgr8888)
+            else {
+                continue;
+            };
+            let path = directory.join(format!("window-{id}.png"));
+            if crate::screenshot::save_png(&path, w as u32, h as u32, &rgba).is_err() {
+                continue;
+            }
+            shots.push(crate::screenshot::WindowShot {
+                id,
+                title,
+                focused: focused == Some(id),
+                x: rect.loc.x,
+                y: rect.loc.y,
+                width: rect.size.w,
+                height: rect.size.h,
+                path,
+            });
+        }
+        shots
     }
 
     /// Physical size of window `id` at its output's scale, and the scale.
@@ -1631,6 +1810,11 @@ impl Runtime {
         if let Some((_, rect)) = tile {
             elements.tile = tile_elements(rect, view, accent);
         }
+        if overview.is_none() {
+            elements
+                .tile
+                .extend(focus_ring_elements(&self.manager, view));
+        }
         elements.top = previews_to_elements(
             renderer,
             &self.manager,
@@ -1723,6 +1907,25 @@ impl Runtime {
                     };
                     self.render_pixels(output, xrgb)
                 }
+                CastTarget::Area(connector, area) => {
+                    let output = match &self.backend {
+                        Backend::Winit(_) => None,
+                        #[cfg(feature = "drm")]
+                        Backend::Drm(_) => Some(connector.as_str()),
+                    };
+                    #[cfg(not(feature = "drm"))]
+                    let _ = connector;
+                    self.render_pixels(output, xrgb).and_then(|(w, h, pixels)| {
+                        let cropped = crate::screencast::crop(&pixels, (w, h), *area);
+                        if cropped.is_none() {
+                            eprintln!(
+                                "roost-compositor: screen cast area {area:?} is not inside the {w}x{h} frame ({} bytes)",
+                                pixels.len()
+                            );
+                        }
+                        cropped.map(|cropped| (area.2, area.3, cropped))
+                    })
+                }
             };
             let Some((w, h, bgrx)) = frame else {
                 continue;
@@ -1759,6 +1962,7 @@ impl Runtime {
                     crate::mutter::CastTarget::Window(id) => {
                         self.window_pixel_size(*id).map(|(size, _)| size)
                     }
+                    crate::mutter::CastTarget::Area(_, (_, _, w, h)) => Some((*w, *h)),
                 };
                 let Some((width, height)) = size else {
                     crate::mutter::session_closed(&signal, session_id);
@@ -1944,6 +2148,12 @@ impl Runtime {
             .flush_clients()
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
         self.manager.reconcile(&mut self.state);
+        // A client's pointer warp moved the manager's pointer: the
+        // drawn cursor follows (#89).
+        #[cfg(feature = "drm")]
+        if let Backend::Drm(drm) = &mut self.backend {
+            drm.set_pointer(self.manager.pointer_pos());
+        }
         // Publish the output inventory every tick (multi-monitor): the
         // hub broadcasts on change only, so the steady state costs one
         // short comparison. The inventory is the compositor's tracking
@@ -2073,6 +2283,9 @@ impl Runtime {
                 self.overlay.show(Vec::new());
             }
         } else {
+            if let Some(ime) = &mut self.ime {
+                ime.poll(crate::state::system_millis(), &mut self.display.handle());
+            }
             match self.shell.poll(crate::state::system_millis()) {
                 ShellStatus::Running => {
                     if self.overlay.visible {
@@ -2108,12 +2321,46 @@ impl Runtime {
                 .tick(crate::state::system_millis(), Some(&mut spawner));
         }
         self.stats.shell_restarts = self.shell.restarts_used();
+        self.proof_swipe_input();
         self.publish_state();
         self.publish_cast_outputs();
         self.publish_overview_previews();
         self.render()?;
         self.screencast_tick();
         Ok(!self.exit)
+    }
+
+    /// A page flip completed (hardware): mark what the frame drew
+    /// presented with the kernel's vblank time and sequence, and on the
+    /// primary output advance fifo barriers and commit timers (#89).
+    #[cfg(feature = "drm")]
+    fn page_flipped(&mut self, flip: crate::drm::PageFlip) {
+        use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind;
+        use smithay::utils::{Monotonic, Time};
+        // Mutter's KMS flags: vsync'd, kernel-timestamped, completion
+        // reported by the hardware.
+        let (time, flags): (Time<Monotonic>, Kind) = match flip.time {
+            Some(time) => (
+                Time::from(time),
+                Kind::Vsync | Kind::HwClock | Kind::HwCompletion,
+            ),
+            None => (
+                self.state.presentation_now(),
+                Kind::Vsync | Kind::HwCompletion,
+            ),
+        };
+        if let Some(mut feedback) = flip.feedback {
+            feedback.presented::<_, Monotonic>(
+                time,
+                smithay::wayland::presentation::Refresh::fixed(flip.refresh),
+                flip.sequence,
+                flags,
+            );
+        }
+        if flip.primary {
+            let roots = crate::frame_timing::frame_roots(&self.state, &self.manager);
+            self.state.refresh_cycle(&roots, time, flip.refresh);
+        }
     }
 
     /// Render all mapped toplevels stacked at the origin, then send frame
@@ -2139,6 +2386,7 @@ impl Runtime {
             self.desktop_color()
         };
         let drawn = self.step_overview_transition();
+        self.step_strip_view();
         let overview = (show_content && !overlay_visible && drawn).then(|| self.overview_layout());
         // While search shows results, the workspace view steps aside.
         let cards = overview.as_ref().filter(|_| !self.overview_search);
@@ -2186,6 +2434,11 @@ impl Runtime {
                     );
                     if let Some((_, rect)) = tile {
                         elements.tile = tile_elements(rect, view, accent);
+                    }
+                    if overview.is_none() && show_content {
+                        elements
+                            .tile
+                            .extend(focus_ring_elements(&self.manager, view));
                     }
                     elements.top = previews_to_elements(
                         renderer,
@@ -2238,6 +2491,14 @@ impl Runtime {
                 backend
                     .submit(Some(&[damage]))
                     .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+                // The host took the frame: presentation feedback,
+                // fifo barriers and commit timers (#89).
+                crate::frame_timing::present_nested_frame(
+                    &mut self.state,
+                    &self.manager,
+                    locked,
+                    self.stats.frames,
+                );
                 self.stats.frames += 1;
             }
             #[cfg(feature = "drm")]
@@ -2249,8 +2510,19 @@ impl Runtime {
                 let crate::drm::DrmBackend {
                     renderer, outputs, ..
                 } = &mut **drm;
+                // What each output's frame draws, for presentation
+                // feedback at its page flip (#89): a surface belongs to
+                // the output under its center, else the primary.
+                let drawn = crate::frame_timing::drawn_roots(&self.state, &self.manager, locked);
+                let rects: Vec<Rectangle<i32, Logical>> = outputs
+                    .iter()
+                    .map(|o| Rectangle::new(o.loc.into(), o.logical_size().into()))
+                    .collect();
+                let owner = |at: &smithay::utils::Point<i32, Logical>| {
+                    rects.iter().position(|r| r.contains(*at)).unwrap_or(0)
+                };
                 let mut queued = false;
-                for out in outputs.iter_mut() {
+                for (index, out) in outputs.iter_mut().enumerate() {
                     // Display-paced: one frame in flight per output.
                     if out.pending {
                         continue;
@@ -2286,6 +2558,11 @@ impl Runtime {
                     );
                     if let Some((_, rect)) = tile {
                         elements.tile = tile_elements(rect, view, accent);
+                    }
+                    if overview.is_none() && show_content {
+                        elements
+                            .tile
+                            .extend(focus_ring_elements(&self.manager, view));
                     }
                     elements.top = previews_to_elements(
                         renderer,
@@ -2356,7 +2633,14 @@ impl Runtime {
                             .finish()
                             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?
                     };
-                    if let Err(e) = out.surface.queue_buffer(Some(sync), None, ()) {
+                    let mine: Vec<_> = drawn
+                        .iter()
+                        .filter(|(_, at)| owner(at) == index)
+                        .map(|(surface, _)| surface.clone())
+                        .chain(lock_surface.clone())
+                        .collect();
+                    let feedback = crate::frame_timing::take_feedback(&mine, &out.output);
+                    if let Err(e) = out.surface.queue_buffer(Some(sync), None, feedback) {
                         eprintln!("roost-compositor: drm: queue_buffer {}: {e}", out.name);
                         continue;
                     }
@@ -2617,6 +2901,60 @@ fn tile_elements(
     })
 }
 
+/// niri's focus ring in scroll mode (its default `focus-ring`): 4px of
+/// #7fc8ff around the focused column, outside its edges, where the
+/// strip's 16px gaps leave room.
+fn focus_ring_elements(
+    manager: &WindowManager,
+    view: View,
+) -> Vec<smithay::backend::renderer::element::solid::SolidColorRenderElement> {
+    use smithay::backend::renderer::element::solid::SolidColorRenderElement;
+    use smithay::backend::renderer::element::Id;
+    const WIDTH: i32 = 4;
+    if manager.session_mode() != crate::windows::SessionMode::Scroll {
+        return Vec::new();
+    }
+    let Some(rect) = manager
+        .model()
+        .focused()
+        .and_then(|id| manager.render_geometry(id))
+    else {
+        return Vec::new();
+    };
+    let outer = view.physical(f64::from(rect.loc.x - WIDTH), f64::from(rect.loc.y - WIDTH));
+    let outer_end = view.physical(
+        f64::from(rect.loc.x + rect.size.w + WIDTH),
+        f64::from(rect.loc.y + rect.size.h + WIDTH),
+    );
+    let r = Rectangle::from_extremities(outer, outer_end);
+    let b = (f64::from(WIDTH) * view.scale).round().max(1.0) as i32;
+    let (w, h) = (r.size.w, r.size.h);
+    if w <= 2 * b || h <= 2 * b {
+        return Vec::new();
+    }
+    let color = Color32F::new(0x7f as f32 / 255.0, 0xc8 as f32 / 255.0, 1.0, 1.0);
+    let at = |x: i32, y: i32, w: i32, h: i32| -> Rectangle<i32, smithay::utils::Physical> {
+        Rectangle::new((r.loc.x + x, r.loc.y + y).into(), (w, h).into())
+    };
+    thread_local! {
+        static IDS: [Id; 4] = std::array::from_fn(|_| Id::new());
+    }
+    IDS.with(|ids| {
+        [
+            at(0, 0, w, b),
+            at(0, h - b, w, b),
+            at(0, b, b, h - 2 * b),
+            at(w - b, b, b, h - 2 * b),
+        ]
+        .into_iter()
+        .zip(ids.iter())
+        .map(|(geo, id)| {
+            SolidColorRenderElement::new(id.clone(), geo, 0usize, color, Kind::Unspecified)
+        })
+        .collect()
+    })
+}
+
 /// Window and layer-shell elements for one output whose top-left sits
 /// at `offset` in the global space. Empty while content is hidden
 /// (locked): nothing beneath the lock surface may show. `split` is the
@@ -2693,7 +3031,7 @@ fn scene_elements(
             Kind::Unspecified,
         ));
     };
-    for (window, geometry) in manager.visible_windows() {
+    for (window, geometry) in manager.render_windows() {
         // Unassociated X11 windows contribute no surface yet and
         // render nothing this frame.
         if let Some(surface) = window.wl_surface() {
@@ -2766,7 +3104,7 @@ fn backdrop(
             let loc = view.physical(f64::from(r.loc.x), f64::from(r.loc.y));
             let end = view.physical(f64::from(r.loc.x + r.size.w), f64::from(r.loc.y + r.size.h));
             let rect = Rectangle::new(loc, (end.x - loc.x, end.y - loc.y).into());
-            wallpaper.card_element(renderer, output, work_top, rect)
+            wallpaper.card_element(renderer, output, work_top, rect, card.alpha)
         })
         .collect()
 }
@@ -2955,6 +3293,10 @@ fn send_frame_callbacks(state: &State, manager: &WindowManager, frames: u64) {
 pub fn run(session: &NestedSession) -> Result<RunStats, RuntimeError> {
     let (mut runtime, mut event_loop) = Runtime::launch(session)?;
     let prev_env = apply_nested_env(&session.socket_name);
+    #[cfg(feature = "drm")]
+    if matches!(runtime.backend, Backend::Drm(_)) {
+        crate::session_services::publish(&session.socket_name);
+    }
     // Graceful shutdown on SIGTERM/SIGINT: ending the loop drops the
     // runtime, whose supervisor kills the shell child (ADR 0003 kill
     // on exit). Without this a signal would bypass `Drop` and orphan

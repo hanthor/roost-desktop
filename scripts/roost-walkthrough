@@ -1,0 +1,122 @@
+#!/bin/sh
+# roost-walkthrough — the feature walkthrough (docs/walkthrough.md),
+# built from the GTK shell proof's own frames.
+#
+# Usage:
+#   scripts/roost-walkthrough build ARTIFACTS [--dest DIR]
+#   scripts/roost-walkthrough page [--dest DIR]
+#   scripts/roost-walkthrough check
+#   scripts/roost-walkthrough regen [proof arguments...]
+#
+# docs/walkthrough.tsv lists each feature: an id, the proof frame that
+# shows it, its section, title, caption and parity-ledger row. `build`
+# copies those frames out of a roost-gtk-shell-proof artifact directory
+# into DIR/walkthrough/<id>.png and writes DIR/walkthrough.md (DIR
+# defaults to docs/); a frame the proof no longer takes fails the build,
+# so the walkthrough cannot go stale silently. `page` writes the
+# markdown only; `check` fails when docs/walkthrough.md or its images
+# disagree with the manifest. `regen` runs the proof first.
+set -eu
+
+unset CDPATH
+ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+MANIFEST="$ROOT/docs/walkthrough.tsv"
+DEST="$ROOT/docs"
+
+usage() {
+    sed -n '2,19p' "$0"
+}
+
+# Manifest rows without comments or blank lines.
+rows() {
+    grep -v '^#' "$MANIFEST" | grep -v '^[[:space:]]*$'
+}
+
+page() {
+    {
+        cat <<'HEAD'
+# Walkthrough
+
+Roost's features as they look today. Every frame is taken by the GTK
+shell proof (`scripts/roost-gtk-shell-proof`) in a nested session, the
+same run CI makes on every change, so the windows are the proof's test
+windows and the services are its stubs. Regenerate with
+`scripts/roost-walkthrough regen`; the list of features lives in
+`docs/walkthrough.tsv`. How each feature compares with GNOME 51 is in
+the [parity ledger](parity-ledger.md).
+HEAD
+        rows | awk -F '\t' '
+            {
+                if ($3 != section) { section = $3; printf "\n## %s\n", section }
+                printf "\n### %s\n\n%s", $4, $5
+                if ($6 != "") printf " (`%s`)", $6
+                printf "\n\n![%s](walkthrough/%s.png)\n", $4, $1
+            }'
+    } >"$1"
+}
+
+build() {
+    [ "$#" -ge 1 ] || { usage >&2; exit 1; }
+    ARTIFACTS="$1"
+    mkdir -p "$DEST/walkthrough"
+    rows | while IFS="$(printf '\t')" read -r id frame _rest; do
+        if [ ! -f "$ARTIFACTS/$frame" ]; then
+            echo "roost-walkthrough: the proof took no $frame (for $id)" >&2
+            exit 1
+        fi
+        cp "$ARTIFACTS/$frame" "$DEST/walkthrough/$id.png"
+    done
+    page "$DEST/walkthrough.md"
+    echo "roost-walkthrough: $(rows | wc -l) features in $DEST/walkthrough.md"
+}
+
+check() {
+    tmp="$(mktemp)"
+    page "$tmp"
+    if ! diff -u "$ROOT/docs/walkthrough.md" "$tmp"; then
+        rm -f "$tmp"
+        echo "roost-walkthrough: docs/walkthrough.md is stale; run scripts/roost-walkthrough page" >&2
+        exit 1
+    fi
+    rm -f "$tmp"
+    missing=0
+    for id in $(rows | cut -f1); do
+        if [ ! -f "$ROOT/docs/walkthrough/$id.png" ]; then
+            echo "roost-walkthrough: no docs/walkthrough/$id.png" >&2
+            missing=1
+        fi
+    done
+    [ "$missing" = 0 ] || exit 1
+    echo "roost-walkthrough: docs/walkthrough.md matches the manifest"
+}
+
+cmd="${1:-}"
+[ "$#" -gt 0 ] && shift
+case "$cmd" in
+    build|page)
+        args=""
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --dest) DEST="$2"; shift 2 ;;
+                *) args="$args $1"; shift ;;
+            esac
+        done
+        if [ "$cmd" = page ]; then
+            mkdir -p "$DEST"
+            page "$DEST/walkthrough.md"
+        else
+            # shellcheck disable=SC2086 # one artifact path, no spaces
+            build $args
+        fi
+        ;;
+    check) check ;;
+    regen)
+        ARTIFACTS="$(mktemp -d)"
+        # shellcheck disable=SC2064
+        trap "rm -rf '$ARTIFACTS'" EXIT INT TERM
+        "$ROOT/scripts/roost-gtk-shell-proof" --artifacts "$ARTIFACTS" "$@"
+        build "$ARTIFACTS"
+        ;;
+    -h|--help) usage ;;
+    *) usage >&2; exit 1 ;;
+esac

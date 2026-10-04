@@ -17,8 +17,8 @@ use smithay::{
     wayland::{
         compositor,
         shell::wlr_layer::{
-            Anchor, ExclusiveZone, LayerSurface, LayerSurfaceCachedState, LayerSurfaceConfigure,
-            WlrLayerShellHandler, WlrLayerShellState,
+            Anchor, ExclusiveZone, KeyboardInteractivity, LayerSurface, LayerSurfaceCachedState,
+            LayerSurfaceConfigure, WlrLayerShellHandler, WlrLayerShellState,
         },
     },
 };
@@ -289,6 +289,7 @@ impl WlrLayerShellHandler for State {
             output_name,
             surface: surface.wl_surface().clone(),
         });
+        self.refresh_initial_surface_scale(surface.wl_surface());
     }
 
     fn ack_configure(&mut self, surface: WlSurface, _configure: LayerSurfaceConfigure) {
@@ -370,6 +371,29 @@ pub fn exclusive_keyboard_layer(state: &State) -> Option<WlSurface> {
                     == smithay::wayland::shell::wlr_layer::KeyboardInteractivity::Exclusive
             })
         })
+}
+
+/// Whether a press on a layer surface with this keyboard interactivity
+/// gives it the keyboard. wlr-layer-shell: a surface asking for `none`
+/// "is not interested in keyboard events and the compositor should
+/// never assign it the keyboard focus". IBus's candidate window is one:
+/// clicking a candidate must leave the keyboard (and with it the text
+/// field's input method) where it was, as in GNOME Shell.
+pub fn press_takes_keyboard(interactivity: KeyboardInteractivity) -> bool {
+    interactivity != KeyboardInteractivity::None
+}
+
+/// [`press_takes_keyboard`] for a mapped layer surface.
+pub fn surface_takes_keyboard_on_press(surface: &WlSurface) -> bool {
+    compositor::with_states(surface, |states| {
+        press_takes_keyboard(
+            states
+                .cached_state
+                .get::<LayerSurfaceCachedState>()
+                .current()
+                .keyboard_interactivity,
+        )
+    })
 }
 
 /// Frame draw order from a bottom-to-top stack: Smithay 0.7's
@@ -463,7 +487,14 @@ impl State {
 
 #[cfg(test)]
 mod tests {
-    use super::{front_to_back, hit_layer_rect};
+    use super::{front_to_back, hit_layer_rect, press_takes_keyboard, KeyboardInteractivity};
+
+    #[test]
+    fn a_press_never_gives_the_keyboard_to_a_surface_that_wants_none() {
+        assert!(!press_takes_keyboard(KeyboardInteractivity::None));
+        assert!(press_takes_keyboard(KeyboardInteractivity::OnDemand));
+        assert!(press_takes_keyboard(KeyboardInteractivity::Exclusive));
+    }
 
     #[test]
     fn topmost_rect_wins_and_edges_hold() {

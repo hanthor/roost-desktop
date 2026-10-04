@@ -85,6 +85,26 @@ pub struct ShellModel {
     /// (GNOME's `_currentWindow` with `_thumbnailsFocused`), or `None`
     /// while the app icon itself is selected.
     switcher_window: Option<usize>,
+    /// Which app a window belongs to (GNOME's WindowTracker).
+    app_resolver: AppResolver,
+}
+
+/// Maps a window's app id to the desktop entry it belongs to, or `None`
+/// when no entry claims it: GNOME then makes the window an app of its
+/// own (a window-backed app). Unset, every app id is its own app.
+#[derive(Default)]
+pub struct AppResolver(Option<ResolveFn>);
+
+type ResolveFn = Box<dyn Fn(&str) -> Option<String>>;
+
+impl std::fmt::Debug for AppResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "AppResolver(set)"
+        } else {
+            "AppResolver(unset)"
+        })
+    }
 }
 
 /// What a key in the open switcher asks of the caller (GNOME's
@@ -234,8 +254,8 @@ impl ShellModel {
 
     /// The switcher's items: GNOME's Alt+Tab (`switch-applications`)
     /// shows one item per app, in most-recently-used order, each standing
-    /// for that app's most recent window. Windows with no app id are
-    /// their own app.
+    /// for that app's most recent window. Windows with no app id, or
+    /// none a desktop entry claims, are their own app.
     pub fn switcher_items(&self) -> Vec<u64> {
         let mut seen: Vec<String> = Vec::new();
         self.mru
@@ -263,12 +283,24 @@ impl ShellModel {
             .count()
     }
 
+    /// Resolve app ids to desktop entries from now on (GNOME's
+    /// WindowTracker): windows no entry claims stop grouping by app id.
+    pub fn set_app_resolver(&mut self, resolve: impl Fn(&str) -> Option<String> + 'static) {
+        self.app_resolver = AppResolver(Some(Box::new(resolve)));
+    }
+
     fn app_key(&self, id: u64) -> String {
-        self.windows
+        let app_id = self
+            .windows
             .iter()
             .find(|w| w.id == id)
-            .and_then(|w| w.app_id.clone())
-            .unwrap_or_else(|| format!("window:{id}"))
+            .and_then(|w| w.app_id.as_deref());
+        match (app_id, &self.app_resolver.0) {
+            (Some(app_id), Some(resolve)) => resolve(app_id),
+            (Some(app_id), None) => Some(app_id.to_owned()),
+            (None, _) => None,
+        }
+        .unwrap_or_else(|| format!("window:{id}"))
     }
 
     /// Current switcher selection, if the switcher is open and nonempty:
@@ -523,6 +555,27 @@ mod tests {
             Some(1),
             "wraps over apps, not windows"
         );
+    }
+
+    #[test]
+    fn window_backed_apps_stand_alone_like_gnome() {
+        // Only "editor" has a desktop entry (editor.desktop): the two
+        // "tool" windows have none, so each is its own app.
+        let mut model = ShellModel::new();
+        model.set_app_resolver(|app_id| (app_id == "editor").then(|| "editor.desktop".into()));
+        model.apply_window_list(
+            vec![
+                WindowEntry::new(1, "Doc 1", true).with_app_id(Some("editor".into())),
+                WindowEntry::new(2, "Tool A", false).with_app_id(Some("tool".into())),
+                WindowEntry::new(3, "Doc 2", false).with_app_id(Some("editor".into())),
+                WindowEntry::new(4, "Tool B", false).with_app_id(Some("tool".into())),
+            ],
+            vec![0],
+        );
+        assert_eq!(model.switcher_items().len(), 3);
+        assert_eq!(model.app_window_count(1), 2);
+        assert_eq!(model.app_window_count(2), 1);
+        assert_eq!(model.app_windows(4), vec![4]);
     }
 
     fn editor_and_browser() -> ShellModel {

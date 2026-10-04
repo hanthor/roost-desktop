@@ -141,6 +141,14 @@ export async function run() {
         }
     }
     Main.overview.dash.showAppsButton.checked = false;
+    await Scripting.sleep(1500);
+    // Typing in the overview: the search results (apps only, external
+    // providers off on both sides).
+    Main.overview.searchEntry.grab_key_focus();
+    Main.overview.searchEntry.set_text('calc');
+    await Scripting.sleep(1500);
+    await shot('18-overview-search');
+    Main.overview.searchEntry.set_text('');
     Main.overview.hide();
     await Scripting.sleep(1500);
 
@@ -307,6 +315,21 @@ export async function run() {
             win.move_frame(true, r.x, r.y);
             await Scripting.sleep(800);
         }
+    }
+
+    // An app's popover (an xdg popup): a fourth test window opens its
+    // header-bar menu by itself, as Roost's capture does.
+    {
+        const launcher = new Gio.SubprocessLauncher({flags: Gio.SubprocessFlags.NONE});
+        launcher.setenv('ROOST_TEST_POPOVER', '1', true);
+        const before = global.get_window_actors().length;
+        const delta = launcher.spawnv(['/usr/bin/python3', '/lib/roost-test-window.py', 'Delta', '#c01c28']);
+        for (let t = 0; t < 100 && global.get_window_actors().length <= before; t++)
+            await Scripting.sleep(100);
+        await Scripting.sleep(3000);
+        await shot('19-app-popover');
+        delta.force_exit();
+        await Scripting.sleep(1000);
     }
 
     // The lock screen: the curtain with the clock, then the unlock prompt.

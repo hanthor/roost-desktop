@@ -159,6 +159,62 @@ fn desktop_id(app: &str) -> String {
     }
 }
 
+/// GNOME Shell's settings, when its schema has the grid layout key.
+fn shell_settings() -> Option<gio::Settings> {
+    let source = gio::SettingsSchemaSource::default()?;
+    let schema = source.lookup("org.gnome.shell", true)?;
+    schema
+        .has_key("app-picker-layout")
+        .then(|| gio::Settings::new("org.gnome.shell"))
+}
+
+/// GNOME's saved app-grid order (`app-picker-layout`): per page, each
+/// item's id (desktop id or folder id) and position. Empty when unset.
+pub fn picker_layout() -> Vec<Vec<(String, i32)>> {
+    let Some(settings) = shell_settings() else {
+        return Vec::new();
+    };
+    let value = settings.value("app-picker-layout");
+    value
+        .iter()
+        .map(|page| {
+            let mut entries: Vec<(String, i32)> = page
+                .iter()
+                .filter_map(|entry| {
+                    let id = entry.child_value(0).str()?.to_owned();
+                    let props = entry.child_value(1).as_variant()?;
+                    let position = glib::VariantDict::new(Some(&props))
+                        .lookup_value("position", None)?
+                        .get::<i32>()?;
+                    Some((id, position))
+                })
+                .collect();
+            entries.sort_by_key(|(_, pos)| *pos);
+            entries
+        })
+        .collect()
+}
+
+/// Save the app-grid order as GNOME does (`PageManager.pages`).
+pub fn save_picker_layout(pages: &[Vec<(String, i32)>]) {
+    let Some(settings) = shell_settings() else {
+        return;
+    };
+    let packed: Vec<std::collections::HashMap<String, glib::Variant>> = pages
+        .iter()
+        .map(|page| {
+            page.iter()
+                .map(|(id, pos)| {
+                    let props: std::collections::HashMap<String, glib::Variant> =
+                        [("position".to_owned(), pos.to_variant())].into();
+                    (id.clone(), props.to_variant())
+                })
+                .collect()
+        })
+        .collect();
+    let _ = settings.set_value("app-picker-layout", &packed.to_variant());
+}
+
 fn schemas_present() -> bool {
     gio::SettingsSchemaSource::default().is_some_and(|source| {
         source.lookup(SCHEMA, true).is_some() && source.lookup(FOLDER_SCHEMA, true).is_some()

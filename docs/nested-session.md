@@ -70,3 +70,114 @@ shield; full overlay text rendering (window list pixels) arrives with
 shell workflow parity (002). The panel's 200 Hz control poll loop is
 likewise provisional pacing for the shell binary only — compositor
 input, focus, and frame paths never wait on it.
+
+## Troubleshooting
+
+### Reading `nested.log`
+
+The compositor and its shell child both write to `nested.log`. Compositor
+lines start with `roost-compositor:`; the default shell's fatal errors
+start with `roost-shell-host:`. The lines that matter most:
+
+| Line | Meaning |
+|---|---|
+| `roost-compositor: nested session on <socket> (<w>x<h>)` | Arguments parsed; the compositor is about to open its backend and socket. It prints before any backend error, so it does not prove the session started. |
+| `roost-compositor: nested backend unavailable: ...` | The window/GLES backend could not start: no host display or no EGL. See below. |
+| `roost-compositor: nested socket failed: ...` | The Wayland socket could not be created. See below. |
+| `roost-compositor: shell supervision: ShellExited { code: ... }` | The shell child exited. `code: None` means a signal killed it (for example `kill-shell`). |
+| `roost-compositor: shell supervision: RestartScheduled { delay_ms: N }` | A restart is armed after `N` ms of backoff; budget remains. |
+| `roost-compositor: shell supervision: BudgetExhausted` | The restart budget is spent; the shell stays down until you press R on the overlay. |
+| `roost-compositor: shutdown after N frames, N clients, N shell restarts` | Clean exit, with the session's totals. |
+
+Lines naming a D-Bus service (`serving ...`, `... is taken; ... off`) say
+whether the compositor claimed a GNOME service name on the session bus.
+`is taken` is expected when you run nested inside a GNOME session, which
+already owns those names.
+
+### Build fails on a missing library
+
+`pkg-config` errors naming `libseat`, `libinput`, `libudev`, `gbm`,
+`libdrm`, `xkbcommon`, `gtk4`, `libadwaita-1`, `libpipewire-0.3` or
+`gtk4-layer-shell-0` mean a development package is missing; install the
+list under [Prerequisites](development.md#prerequisites). Ubuntu 24.04 does
+not package gtk4-layer-shell: build it with
+`scripts/ci-install-gtk4-layer-shell`. The `pipewire` crate also needs
+libclang at build time.
+
+### `nested backend unavailable`
+
+The nested backend is winit with GLES over EGL and has no software
+fallback ([ADR 0001](adr/0001-nested-backend-smithay-pin.md)). Check that:
+
+- `DISPLAY` or `WAYLAND_DISPLAY` is set in the shell you launch from.
+  Without either, `--backend auto` (the default) picks the DRM/KMS
+  hardware backend instead of a nested window, which fails without a seat.
+- EGL and libxkbcommon-x11 are installed. Both are loaded when the backend
+  starts, not at build time, so a build can succeed and the run still
+  fail. On Ubuntu: `libxkbcommon-x11-dev`, `libegl1`, `libgl1-mesa-dri`,
+  `libgbm1`. Mesa's llvmpipe software driver is enough; no GPU is needed.
+
+### EGL or DRI3 warnings
+
+Under Xvfb, in a VM, or over a remote X connection, Mesa may print
+`libEGL warning:` lines (for example about DRI3) and fall back to software
+rendering. They come from Mesa, not Roost, and are harmless when no
+`nested backend unavailable` line follows and the session runs. CI's
+proof jobs run under Xvfb this way on every change.
+
+### `nested socket failed`
+
+The compositor creates its socket in `$XDG_RUNTIME_DIR`. Make sure that is
+set (some `su`, `sudo` and container setups leave it unset), and pick
+another name with `--socket` if a previous run left a socket of the same
+name behind.
+
+### The nested window does not appear
+
+1. Look for `nested session on` in `nested.log`. If it is missing, the
+   build or the launch failed; the terminal running `scripts/roost-nested
+   run` shows the cargo error.
+2. If the log ends with `nested backend unavailable` or `nested socket
+   failed`, see the sections above.
+3. On a headless machine there is no window to see. Start a virtual
+   display and capture it instead, as the proof scripts do:
+
+   ```sh
+   Xvfb :98 -screen 0 1280x800x24 &
+   DISPLAY=:98 scripts/roost-nested run
+   ```
+
+### The panel does not appear, or the background turns deep red
+
+Deep red is the recovery overlay: the shell is not running.
+`scripts/roost-nested shell-pid --socket <socket>` prints
+`shell not running (overlay covers the session)` while it is down.
+`nested.log` then shows `ShellExited` lines with the shell's own error
+just before them. A shell started on a compositor without
+`zwlr_layer_shell_v1` reports `compositor offers no zwlr_layer_shell_v1`
+rather than drawing a misplaced surface. After `BudgetExhausted` the
+session stays up without a shell until you press R.
+
+`scripts/roost-nested run` starts `roost-shell-host`. To run the GTK shell
+([ADR 0006](adr/0006-gtk4-libadwaita-shell.md)) instead, build it and pass
+it explicitly:
+
+```sh
+cargo build -p roost-shell-gtk
+scripts/roost-nested run --shell-bin target/debug/roost-shell-gtk
+```
+
+### Filing a bug
+
+Open an issue with:
+
+- the exact command you ran and what you saw;
+- `nested.log` from the artifacts directory. Compositor lines carry codes,
+  revisions and counts only (see the redaction note above), but the shell
+  child's stderr lands in the same file, so read it before attaching;
+- the commit (`git rev-parse HEAD`) and the output of
+  `target/debug/roost-compositor --version`;
+- the host: distro, kernel, whether you ran inside Wayland, X11 or Xvfb,
+  and the GPU driver or Mesa version;
+- for a proof script failure, the whole artifacts directory, which also
+  holds the frames and `assertions.txt`.

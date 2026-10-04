@@ -55,6 +55,8 @@ pub struct WorkspaceCard {
     pub rect: Rectangle<i32, Logical>,
     /// Whether this is the active (center) card.
     pub active: bool,
+    /// Opacity while the card joins the overview transition.
+    pub alpha: f32,
 }
 
 /// One window preview: where to draw the window's surface and at what
@@ -230,8 +232,8 @@ fn lerp_rect(
 /// The overview part-way open (GNOME's transition): at eased progress
 /// `p` (0 the desktop, 1 the overview) the active workspace card grows
 /// out of the whole output and each window on it glides from where it
-/// sits on the desktop into its preview. Neighbouring cards, the
-/// thumbnails and the hover growth join once it is fully open.
+/// sits on the desktop into its preview. Neighbouring cards and the
+/// thumbnails slide and fade in with progress; hover growth waits for completion.
 pub fn transition(
     layout: &OverviewLayout,
     p: f64,
@@ -242,19 +244,81 @@ pub fn transition(
         return layout.clone();
     }
     let p = p.max(0.0);
+    let slide = |card: &WorkspaceCard, thumbnail: bool| {
+        let mut start = card.rect;
+        if thumbnail {
+            start.loc.y = output.loc.y - card.rect.size.h;
+        } else if card.rect.loc.x < output.loc.x + output.size.w / 2 {
+            start.loc.x = output.loc.x - card.rect.size.w;
+        } else {
+            start.loc.x = output.loc.x + output.size.w;
+        }
+        lerp_rect(start, card.rect, p)
+    };
     let mut out = OverviewLayout {
         cards: layout
             .cards
             .iter()
-            .filter(|c| c.active)
+            .filter(|c| c.active || p > 0.0)
             .map(|c| WorkspaceCard {
-                rect: lerp_rect(output, c.rect, p),
+                rect: if c.active {
+                    lerp_rect(output, c.rect, p)
+                } else {
+                    slide(c, false)
+                },
+                alpha: if c.active {
+                    c.alpha
+                } else {
+                    c.alpha * p as f32
+                },
+                ..*c
+            })
+            .collect(),
+        thumbnails: layout
+            .thumbnails
+            .iter()
+            .filter(|_| p > 0.0)
+            .map(|c| WorkspaceCard {
+                rect: slide(c, true),
+                alpha: c.alpha * p as f32,
                 ..*c
             })
             .collect(),
         ..Default::default()
     };
-    for preview in layout.previews.iter().filter(|p| p.active) {
+    for preview in &layout.previews {
+        if !preview.active {
+            if p == 0.0 {
+                continue;
+            }
+            // Thumbnail clones and neighbouring workspace clones travel with
+            // their own card, retaining their scale and stacking order.
+            let center = preview.rect.loc
+                + Point::<i32, Logical>::from((preview.rect.size.w / 2, preview.rect.size.h / 2));
+            let thumbnail = layout.thumbnails.iter().find(|c| c.rect.contains(center));
+            let owner = thumbnail.or_else(|| {
+                layout
+                    .cards
+                    .iter()
+                    .filter(|c| !c.active)
+                    .find(|c| c.rect.contains(center))
+            });
+            let rect = owner
+                .map(|c| {
+                    let translated = slide(c, thumbnail.is_some());
+                    Rectangle::new(
+                        preview.rect.loc + (translated.loc - c.rect.loc),
+                        preview.rect.size,
+                    )
+                })
+                .unwrap_or(preview.rect);
+            out.previews.push(Preview {
+                rect,
+                alpha: preview.alpha * p as f32,
+                ..*preview
+            });
+            continue;
+        }
         let Some(window) = windows.iter().find(|w| w.id == preview.id) else {
             continue;
         };
@@ -363,10 +427,25 @@ pub fn window_slots(
     area: Rectangle<i32, Logical>,
     windows: &[(u64, Rectangle<i32, Logical>)],
 ) -> Vec<(u64, Rectangle<i32, Logical>, f64)> {
+    window_slots_spaced(workarea, monitor_height, area, windows, PREVIEW_SPACING)
+}
+
+/// GNOME's screenshot window selector (screenshot.js
+/// `UIWindowSelectorLayout`): the same spread, its windows carrying no
+/// chrome, so only the 6px selection borders keep them apart.
+pub const SELECTOR_SPACING: f64 = 12.0;
+
+/// [`window_slots`] with `spacing` logical pixels between previews.
+pub fn window_slots_spaced(
+    workarea: Rectangle<i32, Logical>,
+    monitor_height: i32,
+    area: Rectangle<i32, Logical>,
+    windows: &[(u64, Rectangle<i32, Logical>)],
+    spacing: f64,
+) -> Vec<(u64, Rectangle<i32, Logical>, f64)> {
     if windows.is_empty() {
         return Vec::new();
     }
-    let spacing = PREVIEW_SPACING;
     // Small windows grow a little: lerp(1.5, 1, height / monitor height).
     let window_scale = |r: &Rectangle<i32, Logical>| {
         let ratio = f64::from(r.size.h) / f64::from(monitor_height.max(1));
@@ -578,6 +657,7 @@ pub fn layout(
             workspace,
             rect,
             active: false,
+            alpha: 1.0,
         });
         for w in windows.iter().filter(|w| w.workspace == workspace) {
             let x =
@@ -603,6 +683,7 @@ pub fn layout(
             workspace: active,
             rect: active_card,
             active: true,
+            alpha: 1.0,
         },
     );
     // GNOME lays the windows out in the window picker: the card plus
@@ -671,6 +752,7 @@ fn thumbnails(
             workspace,
             rect,
             active: workspace == active,
+            alpha: 1.0,
         });
         for win in windows.iter().filter(|w| w.workspace == workspace) {
             let x =
@@ -758,7 +840,19 @@ pub fn thumbnail_decor(layout: &OverviewLayout, accent: [f32; 3]) -> Vec<DecorFi
         }
         ring.retain(|r| r.size.w > 0);
     }
-    vec![(FILL, fills), (accent, ring)]
+    // Decor is painted with GLES clear, so blend into the overview backdrop
+    // explicitly (clear does not alpha-blend like surface render elements).
+    let alpha = layout.thumbnails[0].alpha;
+    let fade = |color: [f32; 4]| {
+        let background = [34.0 / 255.0, 34.0 / 255.0, 38.0 / 255.0];
+        [
+            background[0] + (color[0] - background[0]) * alpha,
+            background[1] + (color[1] - background[1]) * alpha,
+            background[2] + (color[2] - background[2]) * alpha,
+            1.0,
+        ]
+    };
+    vec![(fade(FILL), fills), (fade(accent), ring)]
 }
 
 /// Thumbnail scale of the work area in the app grid state.
@@ -804,6 +898,7 @@ pub fn app_grid_layout(
             workspace,
             rect,
             active: is_active,
+            alpha: 1.0,
         };
         if is_active {
             out.cards.insert(0, card);
@@ -1082,6 +1177,35 @@ mod tests {
         assert_eq!(transition(&open, 1.0, output(), &windows), open);
         assert!((ease_out_quad(0.5) - 0.75).abs() < 1e-9);
         assert_eq!(ease_out_quad(2.0), 1.0);
+    }
+
+    #[test]
+    fn neighboring_workspaces_and_thumbnails_follow_intermediate_swipe_progress() {
+        let windows = [win(1, 0, 320, 182, 640, 420), win(2, 1, 320, 182, 640, 420)];
+        let open = layout(output(), 32, &[0, 1], 0, &windows);
+        let closed = transition(&open, 0.0, output(), &windows);
+        assert!(closed.thumbnails.is_empty());
+        assert_eq!(closed.cards.len(), 1);
+        let early = transition(&open, 0.25, output(), &windows);
+        let half = transition(&open, 0.5, output(), &windows);
+        assert_eq!(half.cards.len(), open.cards.len());
+        assert_eq!(half.thumbnails.len(), 3);
+        assert_eq!(half.thumbnails[0].alpha, 0.5);
+        assert!(early.thumbnails[0].rect.loc.y < half.thumbnails[0].rect.loc.y);
+        assert!(half.thumbnails[0].rect.loc.y < open.thumbnails[0].rect.loc.y);
+        let neighbor = half.cards.iter().find(|c| !c.active).unwrap();
+        let destination = open.cards.iter().find(|c| !c.active).unwrap();
+        assert_eq!(neighbor.alpha, 0.5);
+        assert!(neighbor.rect.loc.x > destination.rect.loc.x);
+        let neighbor_preview = half
+            .previews
+            .iter()
+            .find(|p| p.id == 2 && p.rect.loc.x > 1000)
+            .unwrap();
+        assert_eq!(neighbor_preview.alpha, 0.5);
+        let fill = thumbnail_decor(&half, BLUE)[0].0;
+        assert!(fill[0] > 34.0 / 255.0 && fill[0] < 70.0 / 255.0);
+        assert_eq!(transition(&open, 1.0, output(), &windows), open);
     }
 
     #[test]

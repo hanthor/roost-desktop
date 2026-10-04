@@ -5,8 +5,16 @@
 //! and the close button. Capturing saves to ~/Pictures/Screenshots, puts
 //! the image on the clipboard and says so, as GNOME does.
 //!
-//! Not yet: screen recording (the video switch is greyed) and GNOME's
-//! window picker (Window takes the focused window).
+//! Window shows GNOME's window selector (`UIWindowSelector`): the active
+//! workspace's windows, pictured when the UI opened and spread out as
+//! the overview spreads them, on the dark system background; the focused
+//! one starts selected, the selection ringed in the accent color with a
+//! check, and Capture saves that window alone at full size. The video
+//! switch records the selection or the screen instead
+//! (`screencast.rs`), with GNOME's recording indicator in the panel.
+//!
+//! Not yet: the pointer in screenshots and recordings, and one window
+//! selector per monitor (the primary one shows them all).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -16,12 +24,19 @@ use gtk4::prelude::*;
 use gtk4::{gdk, gio, glib};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
+use crate::screencast::Recorder;
+
 /// `.screenshot-ui-area-selector-handle`: 24px.
 const HANDLE: f64 = 24.0;
 /// The panel: 329x168, 4em above the bottom.
 const PANEL_W: i32 = 329;
 const PANEL_H: i32 = 168;
 const PANEL_BOTTOM: i32 = 59;
+/// `.screenshot-ui-window-selector-window-border`: 6px, outside the
+/// window.
+const WINDOW_BORDER: i32 = 6;
+/// `.screenshot-ui-window-selector`: `$system_base_color` (dark).
+const SELECTOR_BACKGROUND: (f64, f64, f64) = (34.0 / 255.0, 34.0 / 255.0, 38.0 / 255.0);
 
 /// A rectangle in logical pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -126,6 +141,48 @@ pub fn file_name(now: &jiff::civil::DateTime) -> String {
     format!("Screenshot From {}.png", now.strftime("%Y-%m-%d %H-%M-%S"))
 }
 
+/// One window as the compositor's `ScreenshotWindows` answers it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShotWindow {
+    pub id: u64,
+    pub title: String,
+    pub focused: bool,
+    /// Its slot in the selector (logical pixels).
+    pub slot: Rect,
+    pub path: String,
+}
+
+/// Unpack a `ScreenshotWindows` reply, `(a(tsbiiiis))`.
+pub fn parse_windows(reply: &glib::Variant) -> Vec<ShotWindow> {
+    let Some(list) = reply.try_child_value(0) else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(|w| w.get::<(u64, String, bool, i32, i32, i32, i32, String)>())
+        .map(|(id, title, focused, x, y, w, h, path)| ShotWindow {
+            id,
+            title,
+            focused,
+            slot: Rect {
+                x: f64::from(x),
+                y: f64::from(y),
+                w: f64::from(w),
+                h: f64::from(h),
+            },
+            path,
+        })
+        .collect()
+}
+
+/// Which window starts selected: the focused one, else the first (as
+/// GNOME checks the window with focus).
+pub fn initially_selected(windows: &[ShotWindow]) -> Option<usize> {
+    windows
+        .iter()
+        .position(|w| w.focused)
+        .or((!windows.is_empty()).then_some(0))
+}
+
 /// Says a screenshot was taken: (summary, body).
 pub type Notify = Rc<dyn Fn(&str, &str)>;
 
@@ -136,6 +193,12 @@ enum Mode {
     Window,
 }
 
+/// One window in the selector: its picture and its button.
+struct PickerWindow {
+    texture: gdk::Texture,
+    button: gtk::ToggleButton,
+}
+
 pub struct ScreenshotUi {
     window: gtk::Window,
     canvas: gtk::DrawingArea,
@@ -143,14 +206,20 @@ pub struct ScreenshotUi {
     panel: gtk::Box,
     close: gtk::Button,
     types: Vec<(Mode, gtk::ToggleButton)>,
+    cast: gtk::ToggleButton,
+    capture: gtk::Button,
     pointer: gtk::ToggleButton,
     frozen: RefCell<Option<gdk::Texture>>,
+    /// The window selector's windows, pictured on open.
+    windows: RefCell<Vec<PickerWindow>>,
     selection: Cell<Option<Rect>>,
     mode: Cell<Mode>,
     grab: Cell<Option<(Grab, Rect, f64, f64)>>,
-    /// Takes the focused window's screenshot (Window mode).
+    /// Takes the focused window's screenshot (Window mode, when the
+    /// compositor cannot picture every window).
     shoot_window: Rc<dyn Fn()>,
     notify: Notify,
+    recorder: Rc<Recorder>,
 }
 
 fn icon_label_button(icon: &str, label: &str) -> gtk::ToggleButton {
@@ -168,7 +237,12 @@ fn icon_label_button(icon: &str, label: &str) -> gtk::ToggleButton {
 }
 
 impl ScreenshotUi {
-    pub fn new(app: &gtk::Application, shoot_window: Rc<dyn Fn()>, notify: Notify) -> Rc<Self> {
+    pub fn new(
+        app: &gtk::Application,
+        shoot_window: Rc<dyn Fn()>,
+        notify: Notify,
+        recorder: Rc<Recorder>,
+    ) -> Rc<Self> {
         let window = gtk::Window::new();
         window.set_application(Some(app));
         window.add_css_class("roost-screenshot-ui");
@@ -189,8 +263,6 @@ impl ScreenshotUi {
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&canvas));
         overlay.add_overlay(&fixed);
-        // The canvas takes the drags; the panel stays clickable on top.
-        fixed.set_can_target(true);
         window.set_child(Some(&overlay));
 
         // The panel.
@@ -232,10 +304,11 @@ impl ScreenshotUi {
             .child(&gtk::Image::from_icon_name("camera-web-symbolic"))
             .build();
         cast.add_css_class("screenshot-ui-shot-cast-button");
-        cast.update_property(&[gtk::accessible::Property::Label("Screencast")]);
-        // Screen recording is not built yet.
-        cast.set_sensitive(false);
-        shot.set_can_target(false);
+        cast.update_property(&[gtk::accessible::Property::Label("Record Screen")]);
+        // The photo and video switch: one of the two is always on.
+        cast.set_group(Some(&shot));
+        // GNOME shows the switch only where screencasts work.
+        cast.set_sensitive(crate::screencast::supported());
         shot_cast.append(&shot);
         shot_cast.append(&cast);
         bottom.set_start_widget(Some(&shot_cast));
@@ -272,13 +345,17 @@ impl ScreenshotUi {
             panel,
             close,
             types,
+            cast,
+            capture: capture.clone(),
             pointer,
             frozen: RefCell::new(None),
+            windows: RefCell::new(Vec::new()),
             selection: Cell::new(None),
             mode: Cell::new(Mode::Selection),
             grab: Cell::new(None),
             shoot_window,
             notify,
+            recorder,
         });
 
         {
@@ -299,6 +376,14 @@ impl ScreenshotUi {
         }
         {
             let weak = Rc::downgrade(&ui);
+            ui.cast.connect_toggled(move |_| {
+                if let Some(ui) = weak.upgrade() {
+                    ui.sync_cast();
+                }
+            });
+        }
+        {
+            let weak = Rc::downgrade(&ui);
             capture.connect_clicked(move |_| {
                 if let Some(ui) = weak.upgrade() {
                     ui.capture();
@@ -313,7 +398,9 @@ impl ScreenshotUi {
                 }
             });
         }
-        // Drawing, moving and resizing the selection.
+        // Drawing, moving and resizing the selection. The gesture sits
+        // on the overlay, so presses the panel and window buttons leave
+        // unclaimed reach it wherever they land.
         let drag_gesture = gtk::GestureDrag::new();
         {
             let weak = Rc::downgrade(&ui);
@@ -352,9 +439,10 @@ impl ScreenshotUi {
                 }
             });
         }
-        ui.canvas.add_controller(drag_gesture);
+        overlay.add_controller(drag_gesture);
         // GNOME's keys: Escape closes, Enter/Space captures, S/C/W pick
-        // the mode, P toggles the pointer.
+        // the mode, V switches between screenshot and screencast, P
+        // toggles the pointer.
         let keys = gtk::EventControllerKey::new();
         {
             let weak = Rc::downgrade(&ui);
@@ -367,7 +455,16 @@ impl ScreenshotUi {
                     gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::space => ui.capture(),
                     gdk::Key::s | gdk::Key::S => ui.set_mode(Mode::Selection),
                     gdk::Key::c | gdk::Key::C => ui.set_mode(Mode::Screen),
-                    gdk::Key::w | gdk::Key::W => ui.set_mode(Mode::Window),
+                    gdk::Key::w | gdk::Key::W => {
+                        if !ui.cast.is_active() {
+                            ui.set_mode(Mode::Window);
+                        }
+                    }
+                    gdk::Key::v | gdk::Key::V => {
+                        if ui.cast.is_sensitive() {
+                            ui.set_cast(!ui.cast.is_active());
+                        }
+                    }
                     gdk::Key::p | gdk::Key::P => ui.pointer.set_active(!ui.pointer.is_active()),
                     _ => return glib::Propagation::Proceed,
                 }
@@ -384,17 +481,76 @@ impl ScreenshotUi {
         for (m, button) in &self.types {
             button.set_active(*m == mode);
         }
+        for w in self.windows.borrow().iter() {
+            w.button.set_visible(mode == Mode::Window);
+        }
+        self.canvas.queue_draw();
+    }
+
+    /// Switch between screenshot and screencast.
+    fn set_cast(&self, cast: bool) {
+        if cast {
+            self.cast.set_active(true);
+        } else if let Some(shot) = self.shot_button() {
+            shot.set_active(true);
+        }
+        self.sync_cast();
+    }
+
+    fn shot_button(&self) -> Option<gtk::ToggleButton> {
+        self.cast
+            .prev_sibling()
+            .and_then(|w| w.downcast::<gtk::ToggleButton>().ok())
+    }
+
+    /// GNOME's screencast mode (`_onCastButtonToggled`): the frozen
+    /// screen gives way to the live one, the capture button turns red,
+    /// and Window is off (recording a window is not supported).
+    fn sync_cast(&self) {
+        let cast = self.cast.is_active();
+        if cast {
+            self.capture.add_css_class("cast");
+            if self.mode.get() == Mode::Window {
+                self.set_mode(Mode::Selection);
+            }
+        } else {
+            self.capture.remove_css_class("cast");
+        }
+        for (m, button) in &self.types {
+            if *m == Mode::Window {
+                button.set_sensitive(!cast);
+            }
+        }
         self.canvas.queue_draw();
     }
 
     /// Freeze the screen and show the UI.
     pub fn open(self: &Rc<Self>) {
+        self.open_in(false);
+    }
+
+    /// GNOME's `show-screen-recording-ui`: the UI in screencast mode, or
+    /// the recording stopped when one is running.
+    pub fn open_recording(self: &Rc<Self>) {
+        if self.recorder.in_progress() {
+            self.recorder.stop(|_| {});
+            return;
+        }
+        self.open_in(true);
+    }
+
+    fn open_in(self: &Rc<Self>, cast: bool) {
+        if self.window.is_visible() {
+            return;
+        }
         let dir = glib::user_runtime_dir();
         let path = dir.join("roost-screenshot-ui.png");
+        let windows_dir = dir.join("roost-screenshot-windows");
         let weak = Rc::downgrade(self);
         gio::bus_get(gio::BusType::Session, gio::Cancellable::NONE, move |conn| {
             let Ok(conn) = conn else { return };
             let path2 = path.clone();
+            let conn2 = conn.clone();
             conn.call(
                 Some("org.gnome.Shell.Screenshot"),
                 "/org/gnome/Shell/Screenshot",
@@ -415,13 +571,110 @@ impl ScreenshotUi {
                     let _ = std::fs::remove_file(&path2);
                     let Some(texture) = texture else { return };
                     *ui.frozen.borrow_mut() = Some(texture);
-                    ui.show();
+                    // Every window's picture for the window selector, as
+                    // GNOME takes them when the UI opens.
+                    let weak = Rc::downgrade(&ui);
+                    conn2.call(
+                        Some("org.gnome.Shell.Screenshot"),
+                        "/org/gnome/Shell/Screenshot",
+                        "org.roost.Screenshot",
+                        "ScreenshotWindows",
+                        Some(&(windows_dir.to_string_lossy().as_ref(),).to_variant()),
+                        glib::VariantTy::new("(a(tsbiiiis))").ok(),
+                        gio::DBusCallFlags::NONE,
+                        10_000,
+                        gio::Cancellable::NONE,
+                        move |reply| {
+                            let Some(ui) = weak.upgrade() else { return };
+                            let windows = match reply {
+                                Ok(reply) => parse_windows(&reply),
+                                Err(e) => {
+                                    eprintln!("roost-shell-gtk: no window selector: {e}");
+                                    Vec::new()
+                                }
+                            };
+                            ui.set_windows(windows);
+                            ui.show(cast);
+                        },
+                    );
                 },
             );
         });
     }
 
-    fn show(self: &Rc<Self>) {
+    /// Build the window selector's buttons (screenshot.js
+    /// `UIWindowSelectorWindow`): the picture in its slot, the 6px border
+    /// around it and the check in the middle.
+    fn set_windows(self: &Rc<Self>, shots: Vec<ShotWindow>) {
+        for old in self.windows.borrow_mut().drain(..) {
+            self.fixed.remove(&old.button);
+        }
+        let selected = initially_selected(&shots);
+        let mut group: Option<gtk::ToggleButton> = None;
+        let mut windows = Vec::new();
+        for (index, shot) in shots.into_iter().enumerate() {
+            let texture = gdk::Texture::from_filename(&shot.path).ok();
+            let _ = std::fs::remove_file(&shot.path);
+            let Some(texture) = texture else { continue };
+            let (w, h) = (
+                shot.slot.w.round().max(1.0) as i32,
+                shot.slot.h.round().max(1.0) as i32,
+            );
+            let picture = gtk::DrawingArea::new();
+            picture.set_content_width(w);
+            picture.set_content_height(h);
+            if let Ok(surface) = texture_surface(&texture) {
+                let (tw, th) = (f64::from(texture.width()), f64::from(texture.height()));
+                picture.set_draw_func(move |_, cr, w, h| {
+                    cr.scale(f64::from(w) / tw, f64::from(h) / th);
+                    let _ = cr.set_source_surface(&surface, 0.0, 0.0);
+                    cr.source().set_filter(gtk::cairo::Filter::Good);
+                    let _ = cr.paint();
+                });
+            }
+            let check = gtk::Image::from_icon_name("object-select-symbolic");
+            check.add_css_class("screenshot-ui-window-selector-check");
+            check.set_halign(gtk::Align::Center);
+            check.set_valign(gtk::Align::Center);
+            let content = gtk::Overlay::new();
+            content.set_child(Some(&picture));
+            content.add_overlay(&check);
+            let button = gtk::ToggleButton::builder().child(&content).build();
+            button.add_css_class("screenshot-ui-window-selector-window");
+            let title = if shot.title.is_empty() {
+                "Window".to_owned()
+            } else {
+                shot.title.clone()
+            };
+            button.update_property(&[gtk::accessible::Property::Label(&title)]);
+            button.set_tooltip_text(Some(&title));
+            button.set_size_request(w + 2 * WINDOW_BORDER, h + 2 * WINDOW_BORDER);
+            match &group {
+                Some(first) => button.set_group(Some(first)),
+                None => group = Some(button.clone()),
+            }
+            button.set_active(Some(index) == selected);
+            // Focusing a window selects it, as in GNOME.
+            button.connect_has_focus_notify(|b| {
+                if b.has_focus() {
+                    b.set_active(true);
+                }
+            });
+            button.set_visible(self.mode.get() == Mode::Window);
+            self.fixed.put(
+                &button,
+                shot.slot.x - f64::from(WINDOW_BORDER),
+                shot.slot.y - f64::from(WINDOW_BORDER),
+            );
+            windows.push(PickerWindow { texture, button });
+        }
+        *self.windows.borrow_mut() = windows;
+        // The panel and the close button stay above the windows.
+        self.panel.insert_before(&self.fixed, None::<&gtk::Widget>);
+        self.close.insert_before(&self.fixed, None::<&gtk::Widget>);
+    }
+
+    fn show(self: &Rc<Self>, cast: bool) {
         let (w, h) = self
             .frozen
             .borrow()
@@ -449,6 +702,7 @@ impl ScreenshotUi {
             f64::from(px + PANEL_W - 30),
             f64::from(py - 18),
         );
+        self.set_cast(cast);
         self.set_mode(self.mode.get());
         self.window.present();
     }
@@ -456,22 +710,35 @@ impl ScreenshotUi {
     fn close(&self) {
         self.window.set_visible(false);
         self.frozen.borrow_mut().take();
+        for old in self.windows.borrow_mut().drain(..) {
+            self.fixed.remove(&old.button);
+        }
     }
 
     fn draw(&self, cr: &gtk::cairo::Context, w: f64, h: f64) {
-        let Some(texture) = self.frozen.borrow().clone() else {
-            return;
-        };
-        // The frozen screen, scaled to the output's logical size.
-        let sx = w / f64::from(texture.width());
-        let sy = h / f64::from(texture.height());
-        cr.save().ok();
-        cr.scale(sx, sy);
-        if let Ok(surface) = texture_surface(&texture) {
-            let _ = cr.set_source_surface(&surface, 0.0, 0.0);
+        if self.mode.get() == Mode::Window {
+            // The window selector covers the screen.
+            let (r, g, b) = SELECTOR_BACKGROUND;
+            cr.set_source_rgb(r, g, b);
             let _ = cr.paint();
+            return;
         }
-        cr.restore().ok();
+        // Screencast mode shows the live screen through the UI.
+        if !self.cast.is_active() {
+            let Some(texture) = self.frozen.borrow().clone() else {
+                return;
+            };
+            // The frozen screen, scaled to the output's logical size.
+            let sx = w / f64::from(texture.width());
+            let sy = h / f64::from(texture.height());
+            cr.save().ok();
+            cr.scale(sx, sy);
+            if let Ok(surface) = texture_surface(&texture) {
+                let _ = cr.set_source_surface(&surface, 0.0, 0.0);
+                let _ = cr.paint();
+            }
+            cr.restore().ok();
+        }
         match self.mode.get() {
             Mode::Selection => {
                 let Some(sel) = self.selection.get() else {
@@ -516,33 +783,76 @@ impl ScreenshotUi {
                 cr.rectangle(1.0, 1.0, w - 2.0, h - 2.0);
                 let _ = cr.stroke();
             }
-            Mode::Window => {
-                // GNOME's window picker is not built: the screen dims and
-                // the capture takes the focused window.
-                cr.set_source_rgba(0.0, 0.0, 0.0, 0.5);
-                cr.paint().ok();
-            }
+            Mode::Window => {}
         }
     }
 
     fn capture(self: &Rc<Self>) {
+        let (w, h) = (self.canvas.width().max(1), self.canvas.height().max(1));
+        let full = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: f64::from(w),
+            h: f64::from(h),
+        };
+        if self.cast.is_active() {
+            let area = match self.mode.get() {
+                Mode::Selection => match self.selection.get() {
+                    Some(sel) if sel.w >= 1.0 && sel.h >= 1.0 => sel,
+                    _ => return,
+                },
+                _ => full,
+            };
+            // Close first, so the UI is not recorded.
+            self.close();
+            let recorder = self.recorder.clone();
+            let area = (
+                area.x.round() as i32,
+                area.y.round() as i32,
+                area.w.round() as i32,
+                area.h.round() as i32,
+            );
+            glib::timeout_add_local_once(std::time::Duration::from_millis(150), move || {
+                recorder.start(Some(area), crate::screencast::TEMPLATE, None, |result| {
+                    if let Err(e) = result {
+                        eprintln!("roost-shell-gtk: screencast did not start: {e}");
+                    }
+                });
+            });
+            return;
+        }
         match self.mode.get() {
             Mode::Window => {
+                let chosen = self
+                    .windows
+                    .borrow()
+                    .iter()
+                    .find(|w| w.button.is_active())
+                    .map(|w| w.texture.clone());
                 self.close();
-                (self.shoot_window)();
+                match chosen {
+                    // The window's own picture, at its full size.
+                    Some(texture) => {
+                        let (tw, th) = (f64::from(texture.width()), f64::from(texture.height()));
+                        let whole = Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            w: tw,
+                            h: th,
+                        };
+                        self.saved(save(&texture, whole, tw, th));
+                    }
+                    // No selector (the compositor could not picture the
+                    // windows): the focused window, as before.
+                    None => (self.shoot_window)(),
+                }
             }
             Mode::Screen | Mode::Selection => {
                 let Some(texture) = self.frozen.borrow().clone() else {
                     return;
                 };
-                let (w, h) = (self.canvas.width().max(1), self.canvas.height().max(1));
                 let crop = if self.mode.get() == Mode::Screen {
-                    Rect {
-                        x: 0.0,
-                        y: 0.0,
-                        w: f64::from(w),
-                        h: f64::from(h),
-                    }
+                    full
                 } else {
                     match self.selection.get() {
                         Some(sel) if sel.w >= 1.0 && sel.h >= 1.0 => sel,
@@ -550,19 +860,24 @@ impl ScreenshotUi {
                     }
                 };
                 self.close();
-                match save(&texture, crop, f64::from(w), f64::from(h)) {
-                    Some((_, cropped)) => {
-                        if let Some(display) = gdk::Display::default() {
-                            display.clipboard().set_texture(&cropped);
-                        }
-                        (self.notify)(
-                            "Screenshot captured",
-                            "You can paste the image from the clipboard.",
-                        );
-                    }
-                    None => eprintln!("roost-shell-gtk: screenshot UI could not save"),
-                }
+                self.saved(save(&texture, crop, f64::from(w), f64::from(h)));
             }
+        }
+    }
+
+    /// Put a saved screenshot on the clipboard and say so.
+    fn saved(&self, result: Option<(std::path::PathBuf, gdk::Texture)>) {
+        match result {
+            Some((_, cropped)) => {
+                if let Some(display) = gdk::Display::default() {
+                    display.clipboard().set_texture(&cropped);
+                }
+                (self.notify)(
+                    "Screenshot captured",
+                    "You can paste the image from the clipboard.",
+                );
+            }
+            None => eprintln!("roost-shell-gtk: screenshot UI could not save"),
         }
     }
 }
@@ -707,5 +1022,51 @@ mod tests {
     fn files_are_named_like_gnome() {
         let t = jiff::civil::date(2026, 10, 2).at(3, 18, 0, 0);
         assert_eq!(file_name(&t), "Screenshot From 2026-10-02 03-18-00.png");
+    }
+
+    #[test]
+    fn the_window_selector_reads_the_compositors_answer() {
+        let windows = vec![
+            (
+                3u64,
+                "Alpha".to_owned(),
+                false,
+                100i32,
+                120i32,
+                400i32,
+                300i32,
+                "/run/a.png".to_owned(),
+            ),
+            (
+                5u64,
+                "Beta".to_owned(),
+                true,
+                520,
+                120,
+                400,
+                300,
+                "/run/b.png".to_owned(),
+            ),
+        ];
+        let reply = (windows,).to_variant();
+        assert_eq!(reply.type_().as_str(), "(a(tsbiiiis))");
+        let parsed = parse_windows(&reply);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[1].title, "Beta");
+        assert_eq!(
+            parsed[1].slot,
+            Rect {
+                x: 520.0,
+                y: 120.0,
+                w: 400.0,
+                h: 300.0
+            }
+        );
+        // The focused window starts selected; with none, the first.
+        assert_eq!(initially_selected(&parsed), Some(1));
+        let mut unfocused = parsed.clone();
+        unfocused[1].focused = false;
+        assert_eq!(initially_selected(&unfocused), Some(0));
+        assert_eq!(initially_selected(&[]), None);
     }
 }
