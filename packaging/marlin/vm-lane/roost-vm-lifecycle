@@ -84,6 +84,22 @@ def main():
             raise ValueError("VT outside test range")
         call("chvt", str(target))
         result = {"active_vt": pathlib.Path("/sys/class/tty/tty0/active").read_text().strip()}
+    elif action == "diagnostics":
+        # Names and kernel wait sites only: no argv, environment or input data.
+        processes = []
+        for path in pathlib.Path("/proc").iterdir():
+            if not path.name.isdigit():
+                continue
+            try:
+                stat = (path / "stat").read_text().rsplit(")", 1)[1].split()
+                name = (path / "comm").read_text().strip()
+                if name in {"chvt", "python3", "roost-composito", "systemd-logind", "qemu-ga"}:
+                    processes.append({"pid": int(path.name), "name": name, "state": stat[0],
+                                      "wait_site": (path / "wchan").read_text().strip()})
+            except (FileNotFoundError, PermissionError, ProcessLookupError):
+                continue
+        result = {"active_vt": pathlib.Path("/sys/class/tty/tty0/active").read_text().strip(),
+                  "processes": sorted(processes, key=lambda item: item["pid"])}
     elif action == "lock":
         call("gdbus", "call", "--session", "--dest", "org.gnome.ScreenSaver",
              "--object-path", "/org/gnome/ScreenSaver", "--method", "org.gnome.ScreenSaver.Lock",

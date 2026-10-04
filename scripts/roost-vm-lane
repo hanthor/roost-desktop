@@ -251,16 +251,36 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     if not suspended:
         record("V-SUSPEND", False, "logind suspend never reached QEMU SUSPENDED; no pause substitute")
         raise RuntimeError("real suspend did not occur")
-    frame("suspended")
+    suspended_frame = frame("suspended")
     qmp.cmd("system_wakeup")
     # The first response after wake must already be locked. Waiting for a
     # later transition would hide an exposed desktop during resume.
     resumed = inventory("first-resume")
-    masked = difference(base_frame, frame("resumed-locked")) > 0.25
-    record("V-SUSPEND", resumed["state"]["locked"] and same_apps(before, resumed) and masked,
-           "actual SUSPENDED → system_wakeup, first resume snapshot locked/masked, unchanged app IDs/rectangles and process start times")
+    resumed_frame = frame("first-resume")
     if not resumed["state"]["locked"]:
+        record("V-SUSPEND", False, "first resume snapshot exposed an unlocked session")
         raise RuntimeError("first resume snapshot exposed an unlocked session")
+    # QEMU's inactive-output placeholder differs from the desktop too. Require
+    # the actual varied lock mask to repaint, while every state remains locked.
+    deadline = time.monotonic() + 5
+    repainted = False
+    while True:
+        width, height, pixels = resumed_frame
+        colors = {tuple(value >> 4 for value in pixels[(y * width + x) * 3:(y * width + x) * 3 + 3])
+                  for y in range(64, height, 8) for x in range(0, width, 8)}
+        repainted = (len(colors) >= 8 and difference(base_frame, resumed_frame) > 0.25
+                     and difference(suspended_frame, resumed_frame) < 0.20)
+        if repainted or time.monotonic() >= deadline:
+            break
+        time.sleep(0.1)
+        state = inventory("resume-repaint")
+        if not state["state"]["locked"] or not same_apps(before, state):
+            raise RuntimeError("resume repaint exposed or replaced the session")
+        resumed_frame = frame("resumed-locked")
+    record("V-SUSPEND", same_apps(before, resumed) and repainted,
+           f"actual SUSPENDED → system_wakeup, first state locked, real lock mask repainted={repainted}, unchanged app IDs/rectangles and process start times")
+    if not repainted:
+        raise RuntimeError("actual lock mask did not repaint after resume; inactive output is not a mask")
     qmp.type_text("probe")
     time.sleep(0.5)
     locked_input = agent.run("input-count")
@@ -708,6 +728,16 @@ def main():
                         agent.close()
                 except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e:
                     record("V-LIFECYCLE", False, f"tour/lifecycle failed: {e}")
+                    try:
+                        diagnostic_agent = guest_agent.GuestAgent(agent_path)
+                        try:
+                            diagnostics = diagnostic_agent.run("diagnostics")
+                            with open(os.path.join(out, "lifecycle-failure-diagnostics.json"), "w") as stream:
+                                json.dump(diagnostics, stream, indent=2)
+                        finally:
+                            diagnostic_agent.close()
+                    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                        log(f"bounded lifecycle failure diagnostics unavailable: {error}")
         # Give activation probes a bounded chance to report before shutdown.
         deadline = time.time() + 180
         while drm and shell and time.time() < deadline:
