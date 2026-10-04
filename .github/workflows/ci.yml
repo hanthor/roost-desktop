@@ -34,6 +34,8 @@ jobs:
       - run: cargo test --workspace
         env:
           ROOST_REQUIRE_PAM_WRAPPER: "1"
+      - name: Shortcut inhibition consent proof
+        run: scripts/roost-shortcut-proof
       # Every listed test just passed: the parity-ledger job resolves
       # the ledger's cargo:<name> references against this list.
       - run: cargo test --workspace -q -- --list --format terse > test-list.txt
