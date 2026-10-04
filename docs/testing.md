@@ -208,3 +208,28 @@ own Xvfb, session bus and private user state. It covers client churn and
 notification flood portions of #203; malformed Wayland requests, service
 faults, hotplug, locked-input adversaries and a measured 24-hour VM soak
 remain open.
+
+## Control decoder fuzzing
+
+The `control decoder fuzz` workflow exercises both arbitrary length-prefixed
+frames and mutated postcard bodies with a generated valid length prefix.
+Successful decodes must re-encode into another valid frame. Seed inputs
+include a Hello, a truncated varint, and an oversized declared frame.
+
+Pull requests touching the decoder or fuzz harness run each target for
+60 seconds; the nightly lane runs each for 600 seconds. The address
+sanitizer, five-second per-input timeout and 2 GiB RSS limit turn crashes,
+hangs and runaway allocation into failures. Logs, the resulting corpus,
+and crash artifacts are retained for 14 days. A found crash needs a small
+regression test in the protocol crate before its fix is merged.
+
+To reproduce locally, install the pinned tool and toolchain, then run:
+
+```sh
+rustup toolchain install nightly-2026-08-28
+cargo install cargo-fuzz --version 0.13.2 --locked
+cargo +nightly-2026-08-28 fuzz run control_body -- -max_total_time=60 -max_len=1048580 -timeout=5 -rss_limit_mb=2048
+```
+
+This covers the decoder portion of #203. Wayland misuse, client churn,
+service failures and a measured long soak remain separate stress gates.
