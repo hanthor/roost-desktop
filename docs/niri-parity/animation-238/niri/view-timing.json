@@ -1,0 +1,56 @@
+[
+  {
+    "green_right": 422,
+    "elapsed_ms": 0,
+    "capture_started_ms": 0,
+    "requested_ms": 0
+  },
+  {
+    "green_right": 422,
+    "elapsed_ms": 89.48702696943656,
+    "capture_started_ms": 54.10561099415645,
+    "requested_ms": 50
+  },
+  {
+    "green_right": 493,
+    "elapsed_ms": 152.9555149609223,
+    "capture_started_ms": 103.75930997543037,
+    "requested_ms": 100
+  },
+  {
+    "green_right": 596,
+    "elapsed_ms": 201.08294597594067,
+    "capture_started_ms": 151.40256902668625,
+    "requested_ms": 150
+  },
+  {
+    "green_right": 621,
+    "elapsed_ms": 222.6043990231119,
+    "capture_started_ms": 200.10127604473382,
+    "requested_ms": 200
+  },
+  {
+    "green_right": 630,
+    "elapsed_ms": 536.5164139657281,
+    "capture_started_ms": 300.10294797830284,
+    "requested_ms": 300
+  },
+  {
+    "green_right": 632,
+    "elapsed_ms": 446.4849070063792,
+    "capture_started_ms": 401.19451499776915,
+    "requested_ms": 400
+  },
+  {
+    "green_right": 632,
+    "elapsed_ms": 621.0853740340099,
+    "capture_started_ms": 600.1113530364819,
+    "requested_ms": 600
+  },
+  {
+    "green_right": 632,
+    "elapsed_ms": 818.0890249786898,
+    "capture_started_ms": 800.1053599873558,
+    "requested_ms": 800
+  }
+]

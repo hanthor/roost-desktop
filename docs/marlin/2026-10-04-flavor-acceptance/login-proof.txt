@@ -1,0 +1,13 @@
+ 1000    1249 roost-composito
+ 1000    1295 roost-ibus-brid
+ 1000    1296 roost-shell-gtk
+10    0 root       -     1592 manager-early -    no -
+ 7 1000 roost-soak seat0 1213 user          tty1 no -
+ 8 1000 roost-soak -     1232 manager       -    no -
+ 9    0 root       -     1587 user          -    no -
+Oct 04 08:09:29 archlinux systemd[1]: Started Greeter daemon.
+Oct 04 08:09:29 archlinux greetd[722]: config: Config { file: ConfigFile { terminal: ConfigTerminal { vt: Specific(1), switch: true }, general: ConfigGeneral { source_profile: true, runfile: "/run/greetd.run", service: "greetd" }, default_session: ConfigSession { command: "/usr/libexec/tunaos/greetd-session", user: "greeter", service: "greetd-greeter" }, initial_session: None }, internal: ConfigInternal { session_worker: 0 } }
+Oct 04 08:09:29 archlinux greetd[726]: config: Config { file: ConfigFile { terminal: ConfigTerminal { vt: None, switch: false }, general: ConfigGeneral { source_profile: true, runfile: "/run/greetd.run", service: "greetd" }, default_session: ConfigSession { command: "", user: "", service: "" }, initial_session: None }, internal: ConfigInternal { session_worker: 11 } }
+Oct 04 08:09:29 archlinux greetd[726]: pam_unix(greetd:session): session opened for user greeter(uid=958) by greeter(uid=0)
+Oct 04 08:10:06 roost-soak-20261004 greetd[1213]: config: Config { file: ConfigFile { terminal: ConfigTerminal { vt: None, switch: false }, general: ConfigGeneral { source_profile: true, runfile: "/run/greetd.run", service: "greetd" }, default_session: ConfigSession { command: "", user: "", service: "" }, initial_session: None }, internal: ConfigInternal { session_worker: 12 } }
+Oct 04 08:10:08 roost-soak-20261004 greetd[1213]: pam_unix(greetd:session): session opened for user roost-soak(uid=1000) by roost-soak(uid=0)

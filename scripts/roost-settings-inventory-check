@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+"""Check that every pinned GNOME 51 desktop key has one documented disposition."""
+import json
+import re
+from pathlib import Path
+
+root = Path(__file__).resolve().parent.parent
+source = json.loads((root / "tests/settings/gnome51-desktop-keys.json").read_text())
+expected = {(entry["schema"], entry["key"]) for entry in source["keys"]}
+actual = set()
+schema = None
+for line in (root / "docs/settings-desktop-inventory.md").read_text().splitlines():
+    if line.startswith("## org.gnome.desktop."):
+        schema = line[3:]
+    match = re.match(r"\| ([a-z0-9-]+) \| ([^|]+) \| ([^|]+) \|$", line)
+    if not match:
+        continue
+    key, status, reason = match.groups()
+    assert schema is not None and reason.strip(), line
+    assert status.strip().startswith(("Honored", "Via GTK", "Ignored")), line
+    item = (schema, key)
+    assert item not in actual, f"duplicate disposition: {item}"
+    actual.add(item)
+assert actual == expected, f"missing={sorted(expected - actual)} extra={sorted(actual - expected)}"
+print(f"settings inventory: {len(actual)} GNOME 51 desktop keys classified")

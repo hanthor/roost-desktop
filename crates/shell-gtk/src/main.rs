@@ -25,6 +25,7 @@ mod keybindings;
 mod live_apps;
 mod lock;
 mod logic;
+mod media_keys;
 mod network_agent;
 mod network_secrets;
 mod notify;
@@ -896,15 +897,24 @@ fn quick_settings_popover(
     }));
     // Do Not Disturb drives the shell's notification store (banners
     // held back) and mirrors GNOME's show-banners key.
-    let notes_settings = settings(NOTIFICATIONS_SCHEMA);
+    let notes_settings = settings(NOTIFICATIONS_SCHEMA).filter(|notes| {
+        notes
+            .settings_schema()
+            .is_some_and(|schema| schema.has_key("show-banners"))
+    });
     if let Some(notes) = notes_settings.as_ref() {
         notify.set_dnd(!notes.boolean("show-banners"));
+        let notify = notify.clone();
+        notes.connect_changed(Some("show-banners"), move |notes, _| {
+            notify.set_dnd(!notes.boolean("show-banners"));
+        });
     }
     dnd.set_active(notify.dnd());
     {
         let notify = notify.clone();
         dnd.connect_toggled(move |t| {
             notify.set_dnd(t.is_active());
+            // This closure retains Settings and its external-change subscription.
             if let Some(notes) = notes_settings.as_ref() {
                 let _ = notes.set_boolean("show-banners", !t.is_active());
             }
@@ -1010,7 +1020,67 @@ fn take_screenshot(window: bool, notify: Rc<notify::NotifyUi>) {
 
 fn build(app: &adw::Application) {
     let provider = gtk::CssProvider::new();
-    provider.load_from_string(include_str!("style.css"));
+    // Shell CSS has GNOME's baseline face/size, but follows the user's font live.
+    let apply_font = {
+        let provider = provider.clone();
+        move |iface: Option<&gio::Settings>| {
+            let name = iface
+                .filter(|i| i.settings_schema().is_some_and(|s| s.has_key("font-name")))
+                .map(|i| i.string("font-name").to_string())
+                .unwrap_or_else(|| "Adwaita Sans 11".into());
+            let font = gtk::pango::FontDescription::from_string(&name);
+            let family = font
+                .family()
+                .unwrap_or_else(|| "Adwaita Sans".into())
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"");
+            let size = if font.size() > 0 {
+                f64::from(font.size()) / f64::from(gtk::pango::SCALE)
+            } else {
+                11.0
+            };
+            let unit = if font.is_size_absolute() { "px" } else { "pt" };
+            let weight = gtk::glib::translate::IntoGlib::into_glib(font.weight());
+            let style = match font.style() {
+                gtk::pango::Style::Italic => "italic",
+                gtk::pango::Style::Oblique => "oblique",
+                _ => "normal",
+            };
+            let stretch = match font.stretch() {
+                gtk::pango::Stretch::UltraCondensed => "ultra-condensed",
+                gtk::pango::Stretch::ExtraCondensed => "extra-condensed",
+                gtk::pango::Stretch::Condensed => "condensed",
+                gtk::pango::Stretch::SemiCondensed => "semi-condensed",
+                gtk::pango::Stretch::SemiExpanded => "semi-expanded",
+                gtk::pango::Stretch::Expanded => "expanded",
+                gtk::pango::Stretch::ExtraExpanded => "extra-expanded",
+                gtk::pango::Stretch::UltraExpanded => "ultra-expanded",
+                _ => "normal",
+            };
+            let css = include_str!("style.css")
+                .replace(
+                    "font-family: \"Adwaita Sans\", \"Cantarell\", sans-serif;",
+                    &format!(
+                        "font-family: \"{family}\", sans-serif; font-weight: {weight}; font-style: {style}; font-stretch: {stretch};"
+                    ),
+                )
+                .replace("font-size: 11pt;", &format!("font-size: {size}{unit};"))
+                .replace("font-weight: normal;", &format!("font-weight: {weight};"))
+                .replace("font-weight: 400;", &format!("font-weight: {weight};"))
+                // Preserve semantic emphasis without weakening a heavy user font.
+                .replace("font-weight: bold;", &format!("font-weight: {};", weight.max(700)))
+                .replace("font-weight: 700;", &format!("font-weight: {};", weight.max(700)))
+                .replace("font-weight: 800;", &format!("font-weight: {};", weight.max(800)));
+            provider.load_from_string(&css);
+        }
+    };
+    let iface = settings(INTERFACE_SCHEMA);
+    apply_font(iface.as_ref());
+    if let Some(iface) = iface {
+        iface.connect_changed(Some("font-name"), move |i, _| apply_font(Some(i)));
+        // Keep the live subscription for the shell process lifetime.
+        std::mem::forget(iface);
+    }
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(
             &display,
@@ -1030,6 +1100,8 @@ fn build(app: &adw::Application) {
         iface.connect_changed(Some("icon-theme"), move |i, _| {
             gtk_settings.set_gtk_icon_theme_name(Some(&i.string("icon-theme")));
         });
+        // Keep the live subscription for the shell process lifetime.
+        std::mem::forget(iface);
     }
     // Text renders with GNOME's font hinting and antialiasing keys
     // (slight, grayscale by default), mapped the way
@@ -1061,6 +1133,8 @@ fn build(app: &adw::Application) {
                     apply(Some(i));
                 }
             });
+            // GSettings backend watches do not retain the settings object.
+            std::mem::forget(iface);
         }
     }
     // The shell chrome is always dark, as in GNOME.
@@ -1310,6 +1384,23 @@ fn build(app: &adw::Application) {
     // org.gnome.Shell for the rest of GNOME: the OSD gnome-settings-daemon
     // shows for volume and brightness keys, search and the app grid.
     let osd_ui = osd::OsdUi::new(app.upcast_ref());
+    let media_keys = media_keys::MediaKeys::new({
+        let osd = osd_ui.clone();
+        Rc::new(move |percent, muted, microphone| {
+            osd.show(&osd::OsdRequest {
+                icon: Some(
+                    if microphone {
+                        logic::mic_icon(percent, muted)
+                    } else {
+                        logic::volume_icon(percent, muted)
+                    }
+                    .into(),
+                ),
+                level: Some(if muted { 0.0 } else { percent / 100.0 }),
+                ..Default::default()
+            });
+        })
+    });
     let screensaver = screensaver::start(
         {
             let shell = shell.clone();
@@ -1540,6 +1631,30 @@ fn build(app: &adw::Application) {
                                 roost_shell_control::dynamic_workspace_count(occupied, workspace),
                             );
                         }
+                    }
+                    Action::VolumeUp { precise } | Action::VolumeDown { precise } => {
+                        let up = matches!(action, Action::VolumeUp { .. });
+                        let step = if precise {
+                            2.0
+                        } else {
+                            keybindings::volume_step(keybindings::media_settings().as_ref())
+                        };
+                        media_keys.change(
+                            if up {
+                                media_keys::VolumeKey::Up
+                            } else {
+                                media_keys::VolumeKey::Down
+                            },
+                            step,
+                            false,
+                        );
+                    }
+                    Action::VolumeMute | Action::MicrophoneMute => {
+                        media_keys.change(
+                            media_keys::VolumeKey::Mute,
+                            0.0,
+                            action == Action::MicrophoneMute,
+                        );
                     }
                     Action::BrightnessUp | Action::BrightnessDown => {
                         let up = action == Action::BrightnessUp;

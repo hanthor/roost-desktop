@@ -932,6 +932,9 @@ impl Runtime {
     /// the shell hears the result either way.
     fn finish_unlock(&mut self, request: u64, ok: bool) {
         self.unlock_inflight = false;
+        if std::env::var_os("ROOST_LOCK_TRACE").is_some() {
+            eprintln!("roost-compositor: lock authentication finished accepted={ok}");
+        }
         if ok && self.is_locked() {
             self.lock.unlock(self.lock_now_ms());
             self.control.set_locked(false);
@@ -2349,6 +2352,9 @@ impl Runtime {
                 self.control.finish_unlock(request, unlocked);
             } else {
                 self.unlock_inflight = true;
+                if std::env::var_os("ROOST_LOCK_TRACE").is_some() {
+                    eprintln!("roost-compositor: lock authentication started");
+                }
                 let reply = self.unlock_results.clone();
                 std::thread::spawn(move || {
                     let ok = crate::unlock::session_user()
@@ -2589,7 +2595,7 @@ impl Runtime {
                         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
                 }
                 send_surface_scales(&self.state, &self.manager);
-                send_frame_callbacks(&self.state, &self.manager, self.stats.frames);
+                send_frame_callbacks(&self.state, &self.manager);
                 backend
                     .submit(Some(&[damage]))
                     .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
@@ -2751,8 +2757,11 @@ impl Runtime {
                     queued = true;
                 }
                 send_surface_scales(&self.state, &self.manager);
-                send_frame_callbacks(&self.state, &self.manager, self.stats.frames);
                 if queued {
+                    // A pending page flip is not another rendered frame.
+                    // Granting callbacks on every client dispatch here would
+                    // let redraws outrun the display and keep the loop busy.
+                    send_frame_callbacks(&self.state, &self.manager);
                     self.stats.frames += 1;
                 }
             }
@@ -3368,8 +3377,10 @@ fn send_surface_scales(state: &State, manager: &WindowManager) {
     }
 }
 
-fn send_frame_callbacks(state: &State, manager: &WindowManager, frames: u64) {
-    let time = Duration::from_millis(frames.saturating_mul(16));
+fn send_frame_callbacks(state: &State, manager: &WindowManager) {
+    // Frame callback time measures elapsed time, independently of refresh
+    // rate, idle periods, or how many frames the backend has queued.
+    let time = Duration::from(state.presentation_now());
     let Some(output) = state.primary_output() else {
         return;
     };
