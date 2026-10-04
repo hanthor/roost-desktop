@@ -105,6 +105,27 @@ def main():
              "--object-path", "/org/gnome/ScreenSaver", "--method", "org.gnome.ScreenSaver.Lock",
              user=True)
         result = {"requested": "lock"}
+    elif action == "delay-unlock":
+        service = pathlib.Path("/etc/pam.d/roost-lock")
+        original = service.read_text()
+        service.rename(service.with_suffix(".vm-backup"))
+        # Delay the real PAM stack; neither credentials nor outcomes are faked.
+        service.write_text("auth required pam_exec.so /usr/bin/sleep 12\n" + original)
+        result = {"pam": "real stack delayed"}
+    elif action == "delayed-auth-state":
+        compositor = next(p for p in inventory()["processes"] if p["executable"] == "roost-compositor")
+        waiting = False
+        for path in pathlib.Path("/proc").iterdir():
+            if not path.name.isdigit():
+                continue
+            try:
+                stat = (path / "stat").read_text().rsplit(")", 1)[1].split()
+                if (path.stat().st_uid == OWNER.pw_uid and (path / "comm").read_text().strip() == "sleep"
+                        and int(stat[1]) == compositor["pid"]):
+                    waiting = True
+            except (FileNotFoundError, PermissionError, ProcessLookupError):
+                continue
+        result = {"real_pam_delay_running": waiting}
     elif action == "deny-unlock":
         # Real PAM failure, not a substitute authenticator or fake daemon.
         service = pathlib.Path("/etc/pam.d/roost-lock")

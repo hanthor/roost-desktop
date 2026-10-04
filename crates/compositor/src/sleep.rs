@@ -4,7 +4,7 @@
 //! notify us that the kernel discarded scanout. A retained system-bus proxy
 //! binds signals to logind's actual owner. Two flags bound work and storage.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,14 +21,17 @@ pub struct Monitor {
 }
 
 impl Monitor {
-    pub fn start() -> zbus::Result<Self> {
+    pub fn start(generation: Arc<AtomicU64>) -> zbus::Result<Self> {
         let connection = zbus::blocking::connection::Builder::system()?
             .method_timeout(Duration::from_secs(5))
             .build()?;
-        Self::from_connection(connection)
+        Self::from_connection(connection, generation)
     }
 
-    fn from_connection(connection: zbus::blocking::Connection) -> zbus::Result<Self> {
+    fn from_connection(
+        connection: zbus::blocking::Connection,
+        generation: Arc<AtomicU64>,
+    ) -> zbus::Result<Self> {
         let proxy = zbus::blocking::Proxy::new(
             &connection,
             "org.freedesktop.login1",
@@ -47,6 +50,9 @@ impl Monitor {
                         continue;
                     };
                     if sleeping {
+                        // Invalidate old PAM results on the signal thread,
+                        // before the compositor can dequeue their callbacks.
+                        generation.fetch_add(1, Ordering::AcqRel);
                         prepared = true;
                         worker_pending.lock.store(true, Ordering::Release);
                     } else if prepared {
@@ -118,7 +124,8 @@ mod tests {
         let owner = connect();
         owner.request_name("org.freedesktop.login1").unwrap();
         let attacker = connect();
-        let monitor = Monitor::from_connection(connect()).unwrap();
+        let generation = Arc::new(AtomicU64::new(0));
+        let monitor = Monitor::from_connection(connect(), generation.clone()).unwrap();
         let emit = |connection: &zbus::blocking::Connection, sleeping: bool| {
             connection
                 .emit_signal(
@@ -138,6 +145,7 @@ mod tests {
             (false, false),
             "unowned signal must not change compositor state"
         );
+        assert_eq!(generation.load(Ordering::Acquire), 0);
         emit(&owner, true);
         emit(&owner, false);
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -152,6 +160,11 @@ mod tests {
             received,
             (true, true),
             "trusted logind pair must reach compositor"
+        );
+        assert_eq!(
+            generation.load(Ordering::Acquire),
+            1,
+            "trusted sleep invalidates old PAM generation"
         );
         let start = Instant::now();
         drop(monitor);
