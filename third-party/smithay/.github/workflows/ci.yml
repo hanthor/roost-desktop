@@ -8,7 +8,7 @@ on:
 
 jobs:
   format:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
@@ -27,7 +27,7 @@ jobs:
         run: cargo fmt --all -- --check
   
   clippy-check:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout sources
         uses: actions/checkout@v3
@@ -75,7 +75,7 @@ jobs:
     env:
       RUSTFLAGS: "-D warnings"
 
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs:
       - smithay-check-features
 
@@ -107,7 +107,7 @@ jobs:
     env:
       RUSTFLAGS: "-D warnings"
 
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs:
       - smithay-check-features
 
@@ -140,7 +140,7 @@ jobs:
     env:
       RUSTFLAGS: "-D warnings"
 
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     steps:
       - name: Checkout sources
@@ -180,7 +180,7 @@ jobs:
     env:
       RUSTFLAGS: "-D warnings"
 
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     steps:
       - name: Checkout sources
@@ -217,7 +217,7 @@ jobs:
     env:
       RUSTFLAGS: "-D warnings"
 
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     steps:
       - name: Checkout sources
@@ -254,7 +254,7 @@ jobs:
     env:
       RUSTFLAGS: "-D warnings"
 
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     steps:
       - name: Checkout sources
@@ -314,7 +314,7 @@ jobs:
       RUSTFLAGS: "-D warnings"
       GRCOV_VERSION: "0.8.10"
 
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     steps:
       - name: Checkout sources
@@ -383,7 +383,7 @@ jobs:
 
   doc:
     name: Documentation on Github Pages
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs:
       - smithay-check-features
 

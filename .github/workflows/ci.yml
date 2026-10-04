@@ -230,7 +230,7 @@ jobs:
 
   portal-security:
     needs: arch-package
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -258,7 +258,7 @@ jobs:
 
   remote-security:
     needs: arch-package
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -285,7 +285,7 @@ jobs:
           retention-days: 90
 
   niri-parity:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: [arch-package]
     timeout-minutes: 30
     steps:
