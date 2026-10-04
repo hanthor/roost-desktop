@@ -1062,6 +1062,8 @@ fn build(app: &adw::Application) {
         iface.connect_changed(Some("icon-theme"), move |i, _| {
             gtk_settings.set_gtk_icon_theme_name(Some(&i.string("icon-theme")));
         });
+        // Keep the live subscription for the shell process lifetime.
+        std::mem::forget(iface);
     }
     // Text renders with GNOME's font hinting and antialiasing keys
     // (slight, grayscale by default), mapped the way
@@ -1093,6 +1095,8 @@ fn build(app: &adw::Application) {
                     apply(Some(i));
                 }
             });
+            // GSettings backend watches do not retain the settings object.
+            std::mem::forget(iface);
         }
     }
     // The shell chrome is always dark, as in GNOME.
