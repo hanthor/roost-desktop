@@ -1523,8 +1523,9 @@ for _ in $(seq 1 30); do [ "$(cat "$VOLUME_MUTED_FILE")" = 1 ] && break; sleep 0
 [ "$(cat "$VOLUME_MUTED_FILE")" = 1 ] || fail G-MEDIA-VOLUME "volume mute did not mute"
 xdotool key XF86AudioRaiseVolume
 for _ in $(seq 1 30); do [ "$(cat "$VOLUME_MUTED_FILE")" = 0 ] && break; sleep 0.1; done
-[ "$(cat "$VOLUME_MUTED_FILE")" = 0 ] && [ "$(cat "$VOLUME_FILE")" = 0.4200 ] ||
+if [ "$(cat "$VOLUME_MUTED_FILE")" != 0 ] || [ "$(cat "$VOLUME_FILE")" != 0.4200 ]; then
     fail G-MEDIA-VOLUME "unmuting increased or lost the existing volume"
+fi
 xdotool key XF86AudioMicMute
 for _ in $(seq 1 30); do [ "$(cat "$MIC_MUTED_FILE")" = 1 ] && break; sleep 0.1; done
 [ "$(cat "$MIC_MUTED_FILE")" = 1 ] || fail G-MEDIA-VOLUME "microphone mute did not mute"
