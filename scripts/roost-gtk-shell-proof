@@ -908,7 +908,13 @@ EOF
 xdotool mousemove --window "$WID" "$page_source_x" "$page_source_y"
 sleep 0.3
 xdotool mousedown 1
-xdotool mousemove --window "$WID" $((page_source_x + 25)) "$page_source_y"
+sleep 0.1
+# Deliver distinct held-pointer samples so GTK recognizes the drag before
+# we inspect its preview; an immediate press/jump can remain a button press.
+for step in $(seq 1 6); do
+    xdotool mousemove --window "$WID" $((page_source_x + step * 10)) "$page_source_y"
+    sleep 0.05
+done
 sleep 0.25
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-page-peek.json" 20 || fail G-GRID-PAGE-PEEK "preview dump failed"
 scrot "$ARTIFACTS/11h-grid-page-peek.png" >/dev/null
@@ -921,7 +927,7 @@ ffmpeg -nostdin -loglevel error -y -i "$ARTIFACTS/11h-grid-page-peek.png" -vf "c
 "$PY" -c 'import sys; data=open(sys.argv[1], "rb").read(); sys.exit(0 if sum(pixel > 150 for pixel in data) > 20 else 1)' "$ARTIFACTS/grid-page-peek.gray" || fail G-GRID-PAGE-PEEK "hint contains no visible icon or label pixels"
 pass G-GRID-PAGE-PEEK "neighboring page icons slide into the 10% hint over 150ms and paint real pixels"
 for i in $(seq 1 20); do
-    xdotool mousemove --window "$WID" $((page_source_x + 25 + (WIDTH - 6 - page_source_x - 25) * i / 20)) "$page_source_y"
+    xdotool mousemove --window "$WID" $((page_source_x + 60 + (WIDTH - 6 - page_source_x - 60) * i / 20)) "$page_source_y"
     sleep 0.03
 done
 sleep 0.8
