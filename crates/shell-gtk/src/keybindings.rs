@@ -39,6 +39,13 @@ pub enum Action {
     ScreenshotWindow,
     BrightnessUp,
     BrightnessDown,
+    BrightnessUpMonitor,
+    BrightnessDownMonitor,
+    BrightnessCycle,
+    BrightnessCycleMonitor,
+    FocusActiveNotification,
+    ShiftOverviewUp,
+    ShiftOverviewDown,
     /// Window-manager keys on the focused window or the workspaces.
     WindowMenu,
     ToggleMaximized,
@@ -210,6 +217,58 @@ fn specs() -> Vec<Spec> {
             modes: ALL,
         },
     ];
+    for (key, action, defaults, modes) in [
+        (
+            "focus-active-notification",
+            Action::FocusActiveNotification,
+            vec!["<Super>n"],
+            NORMAL_OVERVIEW,
+        ),
+        (
+            "shift-overview-up",
+            Action::ShiftOverviewUp,
+            vec!["<Super><Alt>Up"],
+            NORMAL_OVERVIEW,
+        ),
+        (
+            "shift-overview-down",
+            Action::ShiftOverviewDown,
+            vec!["<Super><Alt>Down"],
+            NORMAL_OVERVIEW,
+        ),
+        (
+            "screen-brightness-up-monitor",
+            Action::BrightnessUpMonitor,
+            vec!["<Shift>XF86MonBrightnessUp"],
+            ALL,
+        ),
+        (
+            "screen-brightness-down-monitor",
+            Action::BrightnessDownMonitor,
+            vec!["<Shift>XF86MonBrightnessDown"],
+            ALL,
+        ),
+        (
+            "screen-brightness-cycle",
+            Action::BrightnessCycle,
+            vec!["XF86MonBrightnessCycle"],
+            ALL,
+        ),
+        (
+            "screen-brightness-cycle-monitor",
+            Action::BrightnessCycleMonitor,
+            vec!["<Shift>XF86MonBrightnessCycle"],
+            ALL,
+        ),
+    ] {
+        specs.push(Spec {
+            schema: Schema::Shell,
+            key: key.into(),
+            action,
+            defaults,
+            modes,
+        });
+    }
     // GNOME's window-manager keys (Super+PageUp/PageDown and Alt+Tab
     // stay the compositor's own; it drops its defaults for the rest
     // once these are grabbed, so they rebind).
@@ -391,28 +450,44 @@ pub fn bindings(
 /// them: it holds the popup open while the chord's modifiers are held.
 pub fn switcher_keys(wm: Option<&gio::Settings>) -> Vec<(String, SwitcherKeyKind)> {
     use SwitcherKeyKind as K;
-    let keys: [(&str, K, [&str; 2]); 4] = [
+    let mut keys: Vec<(&str, K, Vec<&str>)> = vec![
         (
             "switch-applications",
             K::Applications,
-            ["<Super>Tab", "<Alt>Tab"],
+            vec!["<Super>Tab", "<Alt>Tab"],
         ),
         (
             "switch-applications-backward",
             K::ApplicationsBackward,
-            ["<Shift><Super>Tab", "<Shift><Alt>Tab"],
+            vec!["<Shift><Super>Tab", "<Shift><Alt>Tab"],
         ),
         (
             "switch-group",
             K::Group,
-            ["<Super>Above_Tab", "<Alt>Above_Tab"],
+            vec!["<Super>Above_Tab", "<Alt>Above_Tab"],
         ),
         (
             "switch-group-backward",
             K::GroupBackward,
-            ["<Shift><Super>Above_Tab", "<Shift><Alt>Above_Tab"],
+            vec!["<Shift><Super>Above_Tab", "<Shift><Alt>Above_Tab"],
         ),
     ];
+    keys.extend([
+        ("switch-windows", K::Windows, vec![]),
+        ("switch-windows-backward", K::WindowsBackward, vec![]),
+        ("cycle-windows", K::CycleWindows, vec!["<Alt>Escape"]),
+        (
+            "cycle-windows-backward",
+            K::CycleWindowsBackward,
+            vec!["<Shift><Alt>Escape"],
+        ),
+        ("cycle-group", K::CycleGroup, vec!["<Alt>F6"]),
+        (
+            "cycle-group-backward",
+            K::CycleGroupBackward,
+            vec!["<Shift><Alt>F6"],
+        ),
+    ]);
     keys.into_iter()
         .flat_map(|(key, kind, defaults)| {
             let has = wm
@@ -493,7 +568,7 @@ mod tests {
             .iter()
             .filter_map(|(a, kind)| parse_switcher_key(a, *kind))
             .collect();
-        assert_eq!(keys.len(), 8);
+        assert_eq!(keys.len(), 12);
         let tab = 0xff09;
         assert_eq!(
             keys[1],

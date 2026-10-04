@@ -775,6 +775,7 @@ impl<'a> Session<'a> {
             | Message::AcceleratorActivated { .. }
             | Message::WindowMenu { .. }
             | Message::WorkspacePopup { .. }
+            | Message::PointerOutput { .. }
             | Message::Error { .. } => {
                 let _ = self.conn.write_frame(&Message::Error {
                     kind: ErrorKind::UnknownCommand,
@@ -816,6 +817,7 @@ fn message_kind(msg: &Message) -> &'static str {
         Message::AcceleratorActivated { .. } => "AcceleratorActivated",
         Message::WindowMenu { .. } => "WindowMenu",
         Message::WorkspacePopup { .. } => "WorkspacePopup",
+        Message::PointerOutput { .. } => "PointerOutput",
     }
 }
 
@@ -1136,6 +1138,7 @@ pub struct ControlHub {
     /// compositor's tracking, and [`poll`](Self::poll) broadcasts it
     /// whenever it differs from `outputs_sent`.
     outputs: Vec<OutputInfo>,
+    pointer_output: Option<String>,
     /// Inventory value every live session holds; a mismatch means a
     /// broadcast is still owed (or a newcomer joined mid-state).
     outputs_sent: Vec<OutputInfo>,
@@ -1199,6 +1202,7 @@ impl ControlHub {
             accelerator_queue: Vec::new(),
             menu_queue: Vec::new(),
             outputs: Vec::new(),
+            pointer_output: None,
             outputs_sent: Vec::new(),
             environment: Vec::new(),
             environment_sent: Vec::new(),
@@ -1322,6 +1326,13 @@ impl ControlHub {
 
     /// Send a compositor-to-shell message (window menu, workspace popup)
     /// on the next poll.
+    pub fn set_pointer_output(&mut self, name: Option<String>) {
+        if self.pointer_output != name {
+            self.pointer_output = name.clone();
+            self.queue_message(Message::PointerOutput { name });
+        }
+    }
+
     pub fn queue_message(&mut self, message: Message) {
         self.menu_queue.push(message);
     }
@@ -1560,6 +1571,11 @@ impl ControlHub {
                 if !self.environment.is_empty() {
                     let _ = session.send_environment(&self.environment);
                     let _ = session.send_overview_previews(&self.previews.0, self.previews.1);
+                }
+                if self.pointer_output.is_some() {
+                    let _ = session.send_window_menu(&Message::PointerOutput {
+                        name: self.pointer_output.clone(),
+                    });
                 }
                 self.sessions.push(session);
                 self.session_peers.push(peer);

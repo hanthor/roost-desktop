@@ -558,23 +558,70 @@ fn backlight() -> Option<(String, PathBuf)> {
     let root = std::env::var_os("ROOST_BACKLIGHT_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/sys/class/backlight"));
-    let mut entries: Vec<_> = std::fs::read_dir(&root).ok()?.flatten().collect();
+    backlight_for(&root, None)
+}
+
+/// Kernel backlights associated with a DRM connector have a cardN-CONNECTOR
+/// ancestor (directly or via `device`). Never substitute another monitor.
+fn backlight_for(root: &std::path::Path, output: Option<&str>) -> Option<(String, PathBuf)> {
+    let mut entries: Vec<_> = std::fs::read_dir(root).ok()?.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
-    let entry = entries.into_iter().next()?;
+    let entry = entries.into_iter().find(|entry| {
+        output.is_none_or(|output| {
+            [entry.path(), entry.path().join("device")]
+                .iter()
+                .filter_map(|path| std::fs::canonicalize(path).ok())
+                .any(|path| {
+                    path.ancestors().any(|ancestor| {
+                        ancestor
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .and_then(|name| name.strip_prefix("card"))
+                            .and_then(|name| name.split_once('-'))
+                            .is_some_and(|(card, connector)| {
+                                !card.is_empty()
+                                    && card.chars().all(|c| c.is_ascii_digit())
+                                    && connector == output
+                            })
+                    })
+                })
+        })
+    })?;
     Some((
         entry.file_name().to_string_lossy().into_owned(),
         entry.path(),
     ))
 }
 
+#[derive(Clone, Copy)]
+pub enum BrightnessStep {
+    Up,
+    Down,
+    Cycle,
+}
+
 /// GNOME's brightness keys (brightnessManager.js): step the backlight
 /// by a twentieth through logind and return the new level (0..1) for
 /// the OSD, or `None` without a backlight.
-pub fn step_brightness(up: bool) -> Option<f64> {
-    let (name, dir) = backlight()?;
+pub fn step_brightness_for(step: BrightnessStep, output: Option<&str>) -> Option<f64> {
+    let root = std::env::var_os("ROOST_BACKLIGHT_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/sys/class/backlight"));
+    let (name, dir) = backlight_for(&root, output)?;
     let max = read_u32(&dir.join("max_brightness"))?;
     let now = read_u32(&dir.join("brightness"))?;
-    let percent = logic::brightness_step(logic::brightness_percent(now, max), up);
+    let current = logic::brightness_percent(now, max);
+    let percent = match step {
+        BrightnessStep::Up => logic::brightness_step(current, true),
+        BrightnessStep::Down => logic::brightness_step(current, false),
+        BrightnessStep::Cycle => {
+            if current >= 100.0 {
+                0.0
+            } else {
+                logic::brightness_step(current, true)
+            }
+        }
+    };
     let value = logic::brightness_value(percent, max);
     let conn = gio::bus_get_sync(gio::BusType::System, gio::Cancellable::NONE).ok()?;
     conn.call(
@@ -856,4 +903,32 @@ fn volume(w: &Rc<Widgets>) {
         let read = read.clone();
         wpctl(&["set-mute", SINK, "toggle"], move |_| read());
     });
+}
+
+#[cfg(test)]
+mod monitor_backlight_tests {
+    use super::*;
+    #[test]
+    fn monitor_brightness_never_uses_a_different_connectors_backlight() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("backlight");
+        std::fs::create_dir_all(&root).unwrap();
+        for (name, connector) in [("aaa-external", "HDMI-A-1"), ("intel-backlight", "eDP-1")] {
+            let path = root.join(name);
+            let device = temp.path().join(format!("drm/card0-{connector}"));
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::create_dir_all(&device).unwrap();
+            symlink(device, path.join("device")).unwrap();
+        }
+        assert_eq!(
+            backlight_for(&root, Some("eDP-1")).unwrap().0,
+            "intel-backlight"
+        );
+        assert_eq!(
+            backlight_for(&root, Some("HDMI-A-1")).unwrap().0,
+            "aaa-external"
+        );
+        assert!(backlight_for(&root, Some("DP-2")).is_none());
+    }
 }

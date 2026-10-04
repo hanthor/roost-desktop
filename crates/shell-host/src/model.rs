@@ -85,6 +85,7 @@ pub struct ShellModel {
     /// (GNOME's `_currentWindow` with `_thumbnailsFocused`), or `None`
     /// while the app icon itself is selected.
     switcher_window: Option<usize>,
+    switcher_all_windows: bool,
     /// Which app a window belongs to (GNOME's WindowTracker).
     app_resolver: AppResolver,
 }
@@ -256,7 +257,23 @@ impl ShellModel {
     /// shows one item per app, in most-recently-used order, each standing
     /// for that app's most recent window. Windows with no app id, or
     /// none a desktop entry claims, are their own app.
+    pub fn switcher_all_windows(&self) -> bool {
+        self.switcher_all_windows
+    }
+
     pub fn switcher_items(&self) -> Vec<u64> {
+        if self.switcher_all_windows {
+            return self
+                .mru
+                .iter()
+                .copied()
+                .filter(|id| {
+                    self.windows
+                        .iter()
+                        .any(|w| w.id == *id && w.workspace == self.active_workspace)
+                })
+                .collect();
+        }
         let mut seen: Vec<String> = Vec::new();
         self.mru
             .iter()
@@ -276,6 +293,9 @@ impl ShellModel {
     /// How many windows the app of window `id` has open (GNOME draws an
     /// arrow under switcher items with more than one).
     pub fn app_window_count(&self, id: u64) -> usize {
+        if self.switcher_all_windows {
+            return 1;
+        }
         let key = self.app_key(id);
         self.windows
             .iter()
@@ -311,6 +331,9 @@ impl ShellModel {
             .switcher_open
             .then(|| self.switcher_items().get(self.switcher_index).copied())
             .flatten()?;
+        if self.switcher_all_windows {
+            return Some(app);
+        }
         match self.switcher_window {
             Some(w) => self.app_windows(app).get(w).copied().or(Some(app)),
             None => Some(app),
@@ -345,6 +368,7 @@ impl ShellModel {
     /// with its next window focused (its only one when it has one), or
     /// step through the selected app's windows. Returns the selection.
     pub fn switcher_step_window(&mut self, forward: bool) -> Option<u64> {
+        self.switcher_all_windows = false;
         let items = self.switcher_items();
         let first = *items.first()?;
         if !self.switcher_open {
@@ -381,7 +405,11 @@ impl ShellModel {
         let Some(app) = self.switcher_app() else {
             return SwitcherEffect::None;
         };
-        let windows = self.app_windows(app);
+        let windows = if self.switcher_all_windows {
+            vec![app]
+        } else {
+            self.app_windows(app)
+        };
         let n_apps = items.len();
         match (keysym, self.switcher_window) {
             (Q | Q_UPPER, _) => return SwitcherEffect::QuitApp(windows),
@@ -397,7 +425,7 @@ impl ShellModel {
                 self.switcher_index = (self.switcher_index + n_apps - 1) % n_apps;
             }
             (RIGHT, None) => self.switcher_index = (self.switcher_index + 1) % n_apps,
-            (DOWN, None) => self.switcher_window = Some(0),
+            (DOWN, None) if !self.switcher_all_windows => self.switcher_window = Some(0),
             _ => {}
         }
         SwitcherEffect::None
@@ -448,6 +476,41 @@ impl ShellModel {
     /// steps wrap around. Returns the new selection, or `None` with no
     /// windows (the switcher stays closed).
     pub fn switcher_step(&mut self, forward: bool) -> Option<u64> {
+        self.step_switcher(forward, false)
+    }
+
+    pub fn switcher_step_all_windows(&mut self, forward: bool) -> Option<u64> {
+        self.step_switcher(forward, true)
+    }
+
+    /// Direct cycle keys activate immediately and leave the popup closed.
+    pub fn cycle_window(&mut self, forward: bool, group: bool) -> Option<u64> {
+        let focused = self.selected()?;
+        let items: Vec<u64> = self
+            .mru
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.windows
+                    .iter()
+                    .any(|w| w.id == *id && w.workspace == self.active_workspace)
+                    && (!group || self.app_key(*id) == self.app_key(focused))
+            })
+            .collect();
+        let index = items.iter().position(|id| *id == focused).unwrap_or(0);
+        let next = if forward {
+            (index + 1) % items.len().max(1)
+        } else {
+            (index + items.len().saturating_sub(1)) % items.len().max(1)
+        };
+        items.get(next).copied()
+    }
+
+    fn step_switcher(&mut self, forward: bool, all_windows: bool) -> Option<u64> {
+        if self.switcher_all_windows != all_windows {
+            self.switcher_open = false;
+        }
+        self.switcher_all_windows = all_windows;
         let items = self.switcher_items();
         if items.is_empty() {
             return None;
@@ -456,7 +519,13 @@ impl ShellModel {
         self.switcher_window = None;
         if !self.switcher_open {
             self.switcher_open = true;
-            self.switcher_index = if items.len() >= 2 { 1 } else { 0 };
+            self.switcher_index = if !forward {
+                items.len() - 1
+            } else if items.len() >= 2 {
+                1
+            } else {
+                0
+            };
         } else if forward {
             self.switcher_index = (self.switcher_index + 1) % items.len();
         } else {
@@ -472,6 +541,7 @@ impl ShellModel {
     /// caller to activate. Returns `None` when closed or empty.
     pub fn switcher_commit(&mut self) -> Option<u64> {
         let selection = self.switcher_selection();
+        self.switcher_all_windows = false;
         self.switcher_open = false;
         self.switcher_index = 0;
         self.switcher_window = None;
@@ -480,6 +550,7 @@ impl ShellModel {
 
     /// Cancel the switcher without activating.
     pub fn switcher_cancel(&mut self) {
+        self.switcher_all_windows = false;
         self.switcher_open = false;
         self.switcher_index = 0;
         self.switcher_window = None;
@@ -488,7 +559,8 @@ impl ShellModel {
     /// Mirror another model's switcher overlay (host sync path, after
     /// the window list already matches): open with the same selection
     /// when it names a known window, else close.
-    pub fn apply_switcher_state(&mut self, open: bool, selection: Option<u64>) {
+    pub fn apply_switcher_state(&mut self, open: bool, selection: Option<u64>, all_windows: bool) {
+        self.switcher_all_windows = all_windows;
         match (open, selection) {
             (true, Some(id)) => {
                 if let Some(index) = self.switcher_items().iter().position(|known| *known == id) {
@@ -531,6 +603,31 @@ mod tests {
             WindowEntry::new(1, "Terminal", true),
             WindowEntry::new(2, "Browser", false),
         ]
+    }
+
+    #[test]
+    fn window_switcher_keeps_same_app_windows_and_scopes_the_workspace() {
+        let mut model = ShellModel::new();
+        model.apply_window_list(
+            vec![
+                WindowEntry::new(1, "Editor one", true).with_app_id(Some("editor".into())),
+                WindowEntry::new(2, "Browser", false).with_app_id(Some("browser".into())),
+                WindowEntry::new(3, "Editor two", false).with_app_id(Some("editor".into())),
+                WindowEntry::new(4, "Elsewhere", false).with_workspace(1),
+            ],
+            vec![0, 1],
+        );
+        assert_eq!(model.switcher_step_all_windows(true), Some(2));
+        assert_eq!(model.switcher_items(), vec![1, 2, 3]);
+        assert_eq!(model.switcher_step_all_windows(true), Some(3));
+        assert_eq!(model.app_window_count(1), 1);
+        assert_eq!(model.switcher_commit(), Some(3));
+        assert!(!model.is_switcher_open());
+        assert_eq!(model.cycle_window(true, true), Some(3));
+        assert_eq!(model.cycle_window(true, false), Some(2));
+        assert_eq!(model.cycle_window(false, false), Some(3));
+        assert!(!model.is_switcher_open(), "cycling never opens the popup");
+        assert_eq!(model.switcher_step_all_windows(false), Some(3));
     }
 
     #[test]

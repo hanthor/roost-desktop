@@ -134,6 +134,8 @@ pub enum Handled {
     },
     /// A client asked for GNOME's window menu.
     WindowMenu(WindowMenuRequest),
+    /// Connector under the compositor pointer changed.
+    PointerOutput,
     /// A grabbed accelerator was pressed (org.gnome.Shell).
     Accelerator {
         /// The grab's action id.
@@ -222,6 +224,7 @@ pub struct ControlClient {
     /// Read-only here; the shell reconciles its surfaces against it
     /// and never edits it.
     outputs: Vec<OutputInfo>,
+    pointer_output: Option<String>,
     /// Session environment from the compositor (#59).
     environment: Vec<(String, String)>,
     /// Overview previews and the hovered one, from the compositor.
@@ -253,6 +256,7 @@ impl ControlClient {
             shadow_workspaces: Vec::new(),
             locked: false,
             outputs: Vec::new(),
+            pointer_output: None,
             environment: Vec::new(),
             overview_previews: (Vec::new(), None),
         })
@@ -303,6 +307,10 @@ impl ControlClient {
     /// Output inventory from the latest `Outputs` message (empty
     /// before the first one). The shell reconciles its per-output
     /// surfaces against this and never edits it.
+    pub fn pointer_output(&self) -> Option<&str> {
+        self.pointer_output.as_deref()
+    }
+
     pub fn outputs(&self) -> &[OutputInfo] {
         &self.outputs
     }
@@ -722,6 +730,10 @@ impl ControlClient {
                 workspace_left,
                 workspace_right,
             })),
+            Message::PointerOutput { name } => {
+                self.pointer_output = name;
+                Ok(Handled::PointerOutput)
+            }
             Message::WorkspacePopup { index, count } => {
                 Ok(Handled::WorkspacePopup { index, count })
             }
@@ -744,6 +756,12 @@ impl ControlClient {
                 // overview's Enter path.
                 let selection = match action {
                     SwitcherAction::Step { forward } => self.model.switcher_step(forward),
+                    SwitcherAction::StepAllWindows { forward } => {
+                        self.model.switcher_step_all_windows(forward)
+                    }
+                    SwitcherAction::Cycle { forward, group } => {
+                        self.model.cycle_window(forward, group)
+                    }
                     SwitcherAction::StepWindow { forward } => {
                         self.model.switcher_step_window(forward)
                     }
@@ -767,7 +785,10 @@ impl ControlClient {
                     }
                     SwitcherAction::Commit => self.model.switcher_commit(),
                 };
-                if matches!(action, SwitcherAction::Commit) {
+                if matches!(
+                    action,
+                    SwitcherAction::Commit | SwitcherAction::Cycle { .. }
+                ) {
                     if let Some(id) = selection {
                         self.activate_window(id)?;
                     }
@@ -876,6 +897,7 @@ fn message_label(msg: &Message) -> &'static str {
         Message::AcceleratorActivated { .. } => "AcceleratorActivated",
         Message::WindowMenu { .. } => "WindowMenu",
         Message::WorkspacePopup { .. } => "WorkspacePopup",
+        Message::PointerOutput { .. } => "PointerOutput",
     }
 }
 
