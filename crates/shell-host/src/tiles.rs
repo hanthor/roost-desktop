@@ -428,6 +428,16 @@ impl TileSet {
     /// platform backend on this same tick, degrading to defaults when
     /// the bus or schema is absent.
     pub fn refresh(&mut self) {
+        // The Wayland host has no GLib main loop. Dispatch pending settings
+        // backend notifications so keyfile/dconf caches see external writes.
+        // Bound this pass so a noisy GLib source cannot starve the shell.
+        let context = gio::glib::MainContext::default();
+        for _ in 0..16 {
+            if !context.pending() {
+                break;
+            }
+            context.iteration(false);
+        }
         self.refresh_with(&settings::GioBackend);
     }
 
