@@ -29,6 +29,7 @@ jobs:
       - run: sudo apt-get install -y meson ninja-build libwayland-dev wayland-protocols && scripts/ci-install-gtk4-layer-shell
       - run: scripts/roost-a11y-baseline check
       - run: python3 scripts/lib/roost-soak-tests.py
+      - run: python3 scripts/lib/roost-pipewire-dump-tests.py
       - run: scripts/roost-settings-inventory-check
       - run: cargo fmt --all -- --check
       - name: Check bounded EIS transport regression tests
