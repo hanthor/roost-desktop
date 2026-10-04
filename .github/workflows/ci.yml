@@ -263,7 +263,7 @@ jobs:
     # the Roost hardware session on the DRM/KMS backend. The image is
     # rebuilt rootful here (bootc install reads it from root's storage),
     # in parallel with marlin-image rather than after it.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: [arch-package]
     timeout-minutes: 60
     steps:
