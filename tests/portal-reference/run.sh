@@ -40,8 +40,7 @@ done
 python3 /repo/scripts/lib/roost-portal-capture-client.py /out/lock-grant.png revoke >/out/lock-grant.log 2>&1 & client=$!; pids="$pids $client"
 python3 /repo/scripts/lib/roost-portal-consent.py /out/a11y-lock-grant.json grant
 end=$((SECONDS + 30))
-until [ -s /out/lock-grant.active ]; do [ "$SECONDS" -lt "$end" ] || exit 1; sleep .1; done
-jq -e '.capture_streams > 0 and (.locked | not)' "$ROOST_COMPOSITOR_STATE" >/dev/null
+until [ -s /out/lock-grant.active ] && jq -e '.capture_streams > 0 and (.locked | not)' "$ROOST_COMPOSITOR_STATE" >/dev/null; do [ "$SECONDS" -lt "$end" ] || exit 1; sleep .1; done
 gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver --method org.gnome.ScreenSaver.SetActive true >/out/lock.log
 end=$((SECONDS + 5))
 touch /out/lock-grant.revoke
