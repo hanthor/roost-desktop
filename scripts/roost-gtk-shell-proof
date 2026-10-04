@@ -1765,6 +1765,17 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     if showing "$ARTIFACTS/a11y-ime-qs-closed.json" "IME Popover Field"; then fail G-IME-ESCAPE "Escape did not close the popover with the composing engine enabled"; fi
     pass G-IME-ESCAPE "Escape closes the GTK popover while the composing engine is enabled"
     cstate '.focused_app_id == "roost-ime"' "IME focus after Escape" || fail G-IME-ESCAPE "Escape transferred focus to another application"
+    # Cover the original layer-shell regression too, after the focused
+    # application's keys have passed through the composing engine.
+    open_qs
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-ime-shell-open.json" 20 || fail G-IME-SHELL-ESCAPE "shell popover dump failed"
+    showing "$ARTIFACTS/a11y-ime-shell-open.json" "Dark Style" || fail G-IME-SHELL-ESCAPE "shell quick settings did not open"
+    xdotool key Escape
+    sleep 0.5
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-ime-shell-closed.json" 20 || fail G-IME-SHELL-ESCAPE "post-Escape shell dump failed"
+    if showing "$ARTIFACTS/a11y-ime-shell-closed.json" "Dark Style"; then fail G-IME-SHELL-ESCAPE "Escape did not close the layer-shell popover with the composing engine enabled"; fi
+    cstate '.focused_app_id == "roost-ime"' "IME focus after shell Escape" || fail G-IME-SHELL-ESCAPE "shell Escape did not return to the text field"
+    pass G-IME-SHELL-ESCAPE "Escape closes shell quick settings with the composing engine enabled and returns to the field"
     # GNOME Shell is IBus's panel and draws its candidates
     # (ibusCandidatePopup.js): the shell owns org.freedesktop.IBus.Panel
     # on IBus's bus, "ni" brings up 你 尼 泥 under the text cursor with
