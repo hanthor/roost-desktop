@@ -174,6 +174,7 @@ impl ImeBridge {
                 .arg("address")
                 .env("WAYLAND_DISPLAY", &self.wayland_display)
                 .env_remove("DISPLAY")
+                .env_remove("IBUS_ADDRESS")
                 .env_remove("WAYLAND_SOCKET");
             let (send, receive) = mpsc::sync_channel(1);
             self.xim_starts += 1;
@@ -289,7 +290,9 @@ fn spawn(bin: &Path, wayland_display: &str, dh: &mut DisplayHandle) -> std::io::
     command
         .env("WAYLAND_SOCKET", fd.to_string())
         // IBus names its bus after the display.
-        .env("WAYLAND_DISPLAY", wayland_display);
+        .env("WAYLAND_DISPLAY", wayland_display)
+        .env_remove("DISPLAY")
+        .env_remove("IBUS_ADDRESS");
     // SAFETY: one async-signal-safe fcntl between fork and exec, so the
     // socket survives exec (clears FD_CLOEXEC).
     unsafe {
