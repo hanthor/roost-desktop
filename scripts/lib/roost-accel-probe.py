@@ -4,7 +4,7 @@
 Usage: roost-accel-probe.py MARKER
 
 Owns org.gnome.SettingsDaemon.MediaKeys (so org.gnome.Shell's caller
-allowlist admits it), grabs XF86AudioRaiseVolume through
+allowlist admits it), grabs XF86AudioPlay through
 org.gnome.Shell.GrabAccelerator, and on AcceleratorActivated shows the
 volume OSD through ShowOSD, as gsd-media-keys does. Progress lines go to
 MARKER: "grabbed N", then "activated N".
@@ -48,7 +48,7 @@ def grab():
     global action
     try:
         action = call("GrabAccelerator",
-                      GLib.Variant("(suu)", ("XF86AudioRaiseVolume", 1, 0)), "(u)").unpack()[0]
+                      GLib.Variant("(suu)", ("XF86AudioPlay", 1, 0)), "(u)").unpack()[0]
     except GLib.Error as e:
         note(f"error {e.message}")
         return True

@@ -1,0 +1,48 @@
+#!/bin/bash
+# CI-only service probes on the actual guest user bus.
+set -u
+XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export XDG_RUNTIME_DIR
+export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+probe() {
+    local name=$1
+    shift
+    for ((attempt=0; attempt<60; attempt++)); do
+        if timeout 5 gdbus call --session "$@" >/dev/null 2>&1; then
+            echo "roost-vm-health: $name ready"
+            return 0
+        fi
+        sleep 2
+    done
+    echo "roost-vm-health: $name failed"
+    return 1
+}
+probe calendar --dest org.gnome.Shell.CalendarServer --object-path /org/gnome/Shell/CalendarServer --method org.freedesktop.DBus.Properties.Get org.gnome.Shell.CalendarServer HasCalendars || exit 1
+probe portal --dest org.freedesktop.portal.Desktop --object-path /org/freedesktop/portal/desktop --method org.freedesktop.portal.Settings.Read org.freedesktop.appearance color-scheme || exit 1
+probe portal-gnome --dest org.freedesktop.impl.portal.desktop.gnome --object-path /org/freedesktop/portal/desktop --method org.freedesktop.DBus.Peer.Ping || exit 1
+# The lane provides a real virtual HDA output. Establish a known level
+# only in this CI guest, then observe hardware-key mutations through
+# PipeWire itself, independent of the shell's OSD.
+for ((attempt=0; attempt<60; attempt++)); do
+    if timeout 5 wpctl inspect @DEFAULT_AUDIO_SINK@ 2>/dev/null | grep -q 'node.name.*alsa_output'; then
+        echo "roost-vm-health: audio-hda ready"
+        timeout 5 wpctl set-volume @DEFAULT_AUDIO_SINK@ 0.40
+        timeout 5 wpctl set-mute @DEFAULT_AUDIO_SINK@ 0
+        break
+    fi
+    sleep 2
+done
+previous=""
+previous_volume=""
+while sleep 1; do
+    volume=$(timeout 5 wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null) || volume=""
+    if [[ -n "$volume" && "$volume" != "$previous_volume" ]]; then
+        echo "roost-vm-health: volume=${volume#Volume: }"
+        previous_volume=$volume
+    fi
+    active=$(timeout 5 gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver --method org.gnome.ScreenSaver.GetActive 2>/dev/null) || continue
+    if [[ "$active" != "$previous" ]]; then
+        echo "roost-vm-health: lock active=$active"
+        previous=$active
+    fi
+done

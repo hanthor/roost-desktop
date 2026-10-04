@@ -22,12 +22,17 @@ COPY packaging/marlin/vm-lane/roost-vm-lane.tmpfiles /usr/lib/tmpfiles.d/roost-v
 COPY packaging/marlin/vm-lane/journald.conf /usr/lib/systemd/journald.conf.d/90-roost-vm-lane.conf
 COPY packaging/marlin/vm-lane/kargs.toml /usr/lib/bootc/kargs.d/90-roost-vm-lane.toml
 
+COPY packaging/marlin/vm-lane/roost-vm-health /usr/libexec/roost-vm-health
+COPY packaging/marlin/vm-lane/roost-vm-health.service /usr/lib/systemd/system/roost-vm-health.service
+
 # /home is a symlink to /var/home on bootc systems and /var is only
 # seeded at install time, so the home directory and the AccountsService
 # record come from tmpfiles.d on every boot rather than from this layer.
 RUN useradd -M -d /home/roost-test -s /bin/bash -U roost-test \
     && echo 'roost-test:roost' | chpasswd \
-    && test -f /usr/share/wayland-sessions/roost.desktop
+    && test -f /usr/share/wayland-sessions/roost.desktop \
+    && systemctl enable roost-vm-health.service \
+    && printf '\nROOST_LOCK_TRACE=1\n' >> /etc/environment
 
 LABEL org.opencontainers.image.title="marlin-roost-vm-lane" \
       org.opencontainers.image.description="CI-only Marlin Roost test layer: autologin into Roost, journal on serial"

@@ -482,6 +482,7 @@ pub struct Runtime {
     /// time; drawn eased), moving toward the open state each frame.
     overview_progress: f64,
     overview_progress_at: Instant,
+    tile_animation: Option<(u64, crate::animation::EaseRect, Instant)>,
     /// Last strip-view spring step, for the per-frame time delta.
     strip_view_at: Instant,
     /// A three-finger vertical swipe driving the transition: the
@@ -788,6 +789,7 @@ impl Runtime {
             shell_swipe: None,
             overview_progress: 0.0,
             overview_progress_at: Instant::now(),
+            tile_animation: None,
             strip_view_at: Instant::now(),
             overview_swipe_from: None,
             scale: clamp_scale(session.scale),
@@ -930,6 +932,9 @@ impl Runtime {
     /// the shell hears the result either way.
     fn finish_unlock(&mut self, request: u64, ok: bool) {
         self.unlock_inflight = false;
+        if std::env::var_os("ROOST_LOCK_TRACE").is_some() {
+            eprintln!("roost-compositor: lock authentication finished accepted={ok}");
+        }
         if ok && self.is_locked() {
             self.lock.unlock(self.lock_now_ms());
             self.control.set_locked(false);
@@ -1233,6 +1238,7 @@ impl Runtime {
             "overview_app_grid": self.overview_app_grid,
             "keyboard": keyboard,
             "overview_open": overview_open,
+            "animations_enabled": self.input_settings.enable_animations,
             "locked": self.is_locked(),
             "active_workspace": model.active_workspace(),
             "focused": focused,
@@ -1270,8 +1276,12 @@ impl Runtime {
             })).collect::<Vec<_>>(),
             "previews": previews,
             "thumbnails": thumbnails,
+            "workspace_placeholder": scene.as_ref().and_then(|s| s.placeholder).map(|(at, r)| serde_json::json!({
+                "workspace": at, "rect": [r.loc.x, r.loc.y, r.size.w, r.size.h],
+            })),
             "overview_progress": self.overview_progress,
             "workspace_cards": workspace_cards,
+
             // The Alt+Tab switcher's window thumbnails being drawn.
             "switcher_thumbnails": self.switcher_thumbnails.len(),
             // GNOME's tile preview while a dragged window is over a
@@ -1341,6 +1351,11 @@ impl Runtime {
         }
         match self.overview_drag {
             Some((id, start, true)) => {
+                if let Some(at) =
+                    crate::overview::insertion_target(&scene, self.manager.pointer_pos())
+                {
+                    crate::overview::show_placeholder(&mut scene, at);
+                }
                 crate::overview::drag_preview(&mut scene, id, start, self.manager.pointer_pos());
             }
             // GNOME grows the preview under the pointer by 5px a side.
@@ -1362,7 +1377,11 @@ impl Runtime {
             } else {
                 0.0
             };
-            let step = dt / crate::overview::TRANSITION_MS;
+            let step = if self.input_settings.enable_animations {
+                dt / crate::overview::TRANSITION_MS
+            } else {
+                1.0
+            };
             self.overview_progress = if target > self.overview_progress {
                 (self.overview_progress + step).min(target)
             } else {
@@ -1370,6 +1389,44 @@ impl Runtime {
             };
         }
         self.overview_progress > 0.0
+    }
+
+    fn animated_tile_preview(
+        &mut self,
+        target: Option<(u64, Rectangle<i32, Logical>)>,
+    ) -> Option<(u64, Rectangle<i32, Logical>)> {
+        let Some((id, to)) = target else {
+            self.tile_animation = None;
+            return None;
+        };
+        let now = Instant::now();
+        let unchanged = self
+            .tile_animation
+            .as_ref()
+            .is_some_and(|(old, animation, _)| *old == id && animation.to == to);
+        if !unchanged {
+            let from = self
+                .tile_animation
+                .as_ref()
+                .filter(|(old, _, _)| *old == id)
+                .map(|(_, animation, start)| {
+                    animation.value_at(
+                        now.duration_since(*start).as_secs_f64(),
+                        self.input_settings.enable_animations,
+                    )
+                })
+                .or_else(|| self.manager.render_geometry(id))
+                .unwrap_or(to);
+            self.tile_animation = Some((id, crate::animation::EaseRect { from, to }, now));
+        }
+        let (_, animation, start) = self.tile_animation.as_ref()?;
+        Some((
+            id,
+            animation.value_at(
+                now.duration_since(*start).as_secs_f64(),
+                self.input_settings.enable_animations,
+            ),
+        ))
     }
 
     /// Advance the scroll-mode strip view on its spring by the time
@@ -1434,7 +1491,13 @@ impl Runtime {
             return;
         }
         let pos = self.manager.pointer_pos();
-        let Some(target) = crate::overview::drop_target(&self.overview_layout(), pos) else {
+        let layout = self.overview_layout();
+        if let Some(at) = crate::overview::insertion_target(&layout, pos) {
+            self.manager
+                .insert_workspace_and_move(&mut self.state, id, at);
+            return;
+        }
+        let Some(target) = crate::overview::drop_target(&layout, pos) else {
             return;
         };
         let here = self.manager.model().window(id).map(|w| w.workspace);
@@ -1510,8 +1573,14 @@ impl Runtime {
                         let from = *self
                             .overview_swipe_from
                             .get_or_insert(self.overview_progress);
-                        self.overview_progress =
-                            (from - travel.y / OVERVIEW_SWIPE_DISTANCE).clamp(0.0, 1.0);
+                        let progress = (from - travel.y / OVERVIEW_SWIPE_DISTANCE).clamp(0.0, 1.0);
+                        self.overview_progress = if self.input_settings.enable_animations {
+                            progress
+                        } else if progress >= 0.5 {
+                            1.0
+                        } else {
+                            0.0
+                        };
                     }
                     true
                 }
@@ -1773,6 +1842,7 @@ impl Runtime {
             .is_none()
             .then(|| self.manager.tile_preview(&self.state))
             .flatten();
+        let tile = self.animated_tile_preview(tile);
         let accent = self.wallpaper.accent();
         let decor_global = cards
             .map(|layout| overview_decor(layout, accent))
@@ -2019,6 +2089,15 @@ impl Runtime {
         self.manager
             .apply_keyboard_settings(&mut self.state, &settings);
         self.triggers.set_hot_corner(settings.hot_corners);
+        self.manager
+            .set_animations_enabled(settings.enable_animations);
+        if !settings.enable_animations {
+            self.overview_progress = if self.control.overview_open() {
+                1.0
+            } else {
+                0.0
+            };
+        }
         #[cfg(feature = "drm")]
         if let Backend::Drm(drm) = &mut self.backend {
             drm.apply_input_settings(&settings);
@@ -2273,6 +2352,9 @@ impl Runtime {
                 self.control.finish_unlock(request, unlocked);
             } else {
                 self.unlock_inflight = true;
+                if std::env::var_os("ROOST_LOCK_TRACE").is_some() {
+                    eprintln!("roost-compositor: lock authentication started");
+                }
                 let reply = self.unlock_results.clone();
                 std::thread::spawn(move || {
                     let ok = crate::unlock::session_user()
@@ -2417,6 +2499,7 @@ impl Runtime {
         let tile = (show_content && overview.is_none())
             .then(|| self.manager.tile_preview(&self.state))
             .flatten();
+        let tile = self.animated_tile_preview(tile);
         let accent = self.wallpaper.accent();
         let decor_global = cards
             .map(|layout| overview_decor(layout, accent))
@@ -2674,8 +2757,11 @@ impl Runtime {
                     queued = true;
                 }
                 send_surface_scales(&self.state, &self.manager);
-                send_frame_callbacks(&self.state, &self.manager, self.stats.frames);
                 if queued {
+                    // A pending page flip is not another rendered frame.
+                    // Granting callbacks on every client dispatch here would
+                    // let redraws outrun the display and keep the loop busy.
+                    send_frame_callbacks(&self.state, &self.manager, self.stats.frames);
                     self.stats.frames += 1;
                 }
             }
@@ -2859,7 +2945,7 @@ fn switcher_previews(
 /// slotted in: `elements[..above]` draw over the preview (the dragged
 /// window, its popups and the shell's layers), the rest beneath it.
 struct Scene {
-    elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
+    elements: Vec<PreviewElement>,
     above: usize,
     tile: Vec<smithay::backend::renderer::element::solid::SolidColorRenderElement>,
     /// Window thumbnails over everything (the Alt+Tab switcher's).
@@ -2871,7 +2957,16 @@ impl Scene {
     fn flat(elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>>) -> Self {
         let above = elements.len();
         Self {
-            elements,
+            elements: elements
+                .into_iter()
+                .map(|element| {
+                    use smithay::backend::renderer::element::Element;
+                    let origin = element.geometry(1.0.into()).loc;
+                    smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
+                        element, origin, 1.0,
+                    )
+                })
+                .collect(),
             above,
             tile: Vec::new(),
             top: Vec::new(),
@@ -3041,21 +3136,33 @@ fn scene_elements(
         }
         return Scene::flat(crate::layer::front_to_back(elements));
     }
-    let mut elements: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
+    let mut elements: Vec<PreviewElement> = Vec::new();
     // Bottom-to-top index where the dragged window starts.
     let mut split_from = None;
     let tree = |renderer: &mut GlesRenderer,
-                elements: &mut Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
+                elements: &mut Vec<PreviewElement>,
                 surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
-                at: Point<i32, Logical>| {
-        elements.extend(render_elements_from_surface_tree(
-            renderer,
-            surface,
-            view.physical(f64::from(at.x), f64::from(at.y)),
-            view.scale,
-            1.0,
-            Kind::Unspecified,
-        ));
+                at: Point<i32, Logical>,
+                sx: f64| {
+        let origin = view.physical(f64::from(at.x), f64::from(at.y));
+        elements.extend(
+            render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(
+                renderer,
+                surface,
+                origin,
+                view.scale,
+                1.0,
+                Kind::Unspecified,
+            )
+            .into_iter()
+            .map(|element| {
+                smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
+                    element,
+                    origin,
+                    (sx, 1.0),
+                )
+            }),
+        );
     };
     for (window, geometry) in manager.render_windows() {
         // Unassociated X11 windows contribute no surface yet and
@@ -3065,19 +3172,28 @@ fn scene_elements(
                 split_from = Some(elements.len());
             }
             let origin = crate::popup::surface_origin(&surface, geometry.loc);
-            tree(renderer, &mut elements, &surface, origin);
+            let committed_width = window.geometry().size.w;
+            let sx = if manager.session_mode() == crate::windows::SessionMode::Scroll
+                && committed_width > 0
+            {
+                f64::from(geometry.size.w) / f64::from(committed_width)
+            } else {
+                // An unmapped tree has no committed bounds to scale yet.
+                1.0
+            };
+            tree(renderer, &mut elements, &surface, origin, sx);
             // Popups (#88) right above their window.
             for popup in crate::popup::placed_popups(&surface, origin, true) {
-                tree(renderer, &mut elements, &popup.surface, popup.origin);
+                tree(renderer, &mut elements, &popup.surface, popup.origin, 1.0);
             }
         }
     }
     // Layer shell above windows: panel strip, then overview, each with
     // its popups (toolkit popovers hang off layer surfaces).
     for (surface, (x, y), _) in crate::layer::layer_layout(state) {
-        tree(renderer, &mut elements, &surface, (x, y).into());
+        tree(renderer, &mut elements, &surface, (x, y).into(), 1.0);
         for popup in crate::popup::placed_popups(&surface, (x, y).into(), false) {
-            tree(renderer, &mut elements, &popup.surface, popup.origin);
+            tree(renderer, &mut elements, &popup.surface, popup.origin, 1.0);
         }
     }
     // `elements` accumulates bottom-to-top (windows, then
@@ -3338,9 +3454,11 @@ pub fn run(session: &NestedSession) -> Result<RunStats, RuntimeError> {
     let (mut runtime, mut event_loop) = Runtime::launch(session)?;
     let prev_env = apply_nested_env(&session.socket_name);
     #[cfg(feature = "drm")]
-    if matches!(runtime.backend, Backend::Drm(_)) {
-        crate::session_services::publish(&session.socket_name);
-    }
+    let _session_services = if matches!(runtime.backend, Backend::Drm(_)) {
+        Some(crate::session_services::publish(&session.socket_name))
+    } else {
+        None
+    };
     // Graceful shutdown on SIGTERM/SIGINT: ending the loop drops the
     // runtime, whose supervisor kills the shell child (ADR 0003 kill
     // on exit). Without this a signal would bypass `Drop` and orphan
