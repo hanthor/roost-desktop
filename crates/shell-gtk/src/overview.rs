@@ -1099,6 +1099,9 @@ fn grid_hover(widget: &impl IsA<gtk::Widget>, target: String, reflow: Rc<GridRef
                     if let Some(hover) = weak.upgrade() {
                         hover.timer.borrow_mut().take();
                         hover.applied.set(true);
+                        if std::env::var_os("ROOST_GRID_TRACE").is_some() {
+                            eprintln!("roost-shell-gtk: grid hover timer fired edge={edge:?}");
+                        }
                         hover.reflow.move_item(&source, &hover.target, edge);
                     }
                 },
@@ -1120,6 +1123,12 @@ fn grid_hover(widget: &impl IsA<gtk::Widget>, target: String, reflow: Rc<GridRef
         motion.connect_enter(move |motion, x, _| {
             hover.generation.set(hover.generation.get() + 1);
             let generation = hover.generation.get();
+            if std::env::var_os("ROOST_GRID_TRACE").is_some() {
+                eprintln!(
+                    "roost-shell-gtk: grid hover entered x={x} width={}",
+                    motion.widget().map_or(0, |w| w.width())
+                );
+            }
             let edge =
                 crate::logic::drop_edge(x, f64::from(motion.widget().map_or(0, |w| w.width())));
             hover.motion(edge);
@@ -1135,6 +1144,13 @@ fn grid_hover(widget: &impl IsA<gtk::Widget>, target: String, reflow: Rc<GridRef
                         }
                         *hover.text.borrow_mut() =
                             result.ok().and_then(|value| value.get::<String>().ok());
+                        if std::env::var_os("ROOST_GRID_TRACE").is_some() {
+                            eprintln!(
+                                "roost-shell-gtk: grid hover data ready={} edge={:?}",
+                                hover.text.borrow().is_some(),
+                                hover.edge.get()
+                            );
+                        }
                         hover.motion(hover.edge.get());
                     },
                 );
