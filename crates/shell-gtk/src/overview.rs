@@ -1402,6 +1402,8 @@ impl DragPager {
         } else {
             0
         };
+        let enabled =
+            gtk::Settings::default().is_none_or(|settings| settings.is_gtk_enable_animations());
         let mut actors = Vec::new();
         let mut child = flow.first_child();
         while let Some(tile) = child {
@@ -1428,8 +1430,19 @@ impl DragPager {
             if let Some(name) = widget.tooltip_text() {
                 picture.update_property(&[gtk::accessible::Property::Label(&name)]);
             }
-            hint.put(&picture, x + direction * f64::from(width), y);
+            hint.put(
+                &picture,
+                x + if enabled {
+                    direction * f64::from(width)
+                } else {
+                    0.0
+                },
+                y,
+            );
             actors.push((picture, x, y));
+        }
+        if !enabled {
+            return;
         }
         let hint = hint.clone();
         let started = std::time::Instant::now();
@@ -1437,7 +1450,13 @@ impl DragPager {
             if !hint.is_visible() {
                 return glib::ControlFlow::Break;
             }
-            let progress = (started.elapsed().as_secs_f64() / 0.150).min(1.0);
+            let enabled =
+                gtk::Settings::default().is_none_or(|settings| settings.is_gtk_enable_animations());
+            let progress = if enabled {
+                (started.elapsed().as_secs_f64() / 0.150).min(1.0)
+            } else {
+                1.0
+            };
             let remaining = (1.0 - progress).powi(3);
             for (actor, x, y) in &actors {
                 if actor.parent().as_ref() != Some(hint.upcast_ref()) {
