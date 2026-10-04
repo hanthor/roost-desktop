@@ -397,6 +397,7 @@ impl NetworkAgent {
             self.reply_values();
         } else {
             self.generation.set(self.generation.get() + 1);
+            self.replying.borrow_mut().take();
             if let Some(p) = self.pending.borrow_mut().take() {
                 p.invocation
                     .return_dbus_error(USER_CANCELED, "the user cancelled");

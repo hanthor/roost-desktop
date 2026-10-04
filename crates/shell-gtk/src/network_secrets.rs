@@ -408,6 +408,44 @@ pub async fn vpn(
 mod tests {
     use super::*;
     #[test]
+    fn enterprise_fields_respect_hints_and_secret_ownership() {
+        use std::collections::HashMap;
+        let connection = HashMap::from([(
+            "802-1x".to_owned(),
+            HashMap::from([
+                ("identity".to_owned(), "alice".to_variant()),
+                ("eap".to_owned(), vec!["peap".to_owned()].to_variant()),
+                ("password-flags".to_owned(), 1u32.to_variant()),
+            ]),
+        )])
+        .to_variant();
+        let standard = fields(&connection, "802-1x", &[]).unwrap();
+        assert_eq!(standard[0].key, None);
+        assert_eq!(standard[0].value, "alice");
+        assert_eq!(standard[1].key.as_deref(), Some("password"));
+        let hinted = fields(
+            &connection,
+            "802-1x",
+            &["identity".into(), "private-key-password".into()],
+        )
+        .unwrap();
+        assert_eq!(hinted[0].key.as_deref(), Some("identity"));
+        assert_eq!(hinted[1].key.as_deref(), Some("private-key-password"));
+        assert!(agent_owned(&connection, "802-1x", "password"));
+        assert!(!agent_owned(&connection, "802-1x", "identity"));
+        let pin = Field {
+            key: Some("pin".into()),
+            label: "PIN".into(),
+            value: String::new(),
+            password: true,
+            validator: None,
+        };
+        assert!(pin.valid("1234"));
+        assert!(!pin.valid("123"));
+        assert!(!pin.valid("abcd"));
+    }
+
+    #[test]
     fn vpn_prompt_keeps_supplied_values_and_requests_typed_fields() {
         let prompt = parse_vpn("[VPN Plugin UI]\nVersion=2\nTitle=VPN authentication\nDescription=Connect to office\n[password]\nValue=\nShouldAsk=true\nLabel=Password\nIsSecret=true\n[username]\nValue=alice\nShouldAsk=false\n").unwrap();
         assert_eq!(prompt.fields.len(), 1);
