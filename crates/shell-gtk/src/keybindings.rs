@@ -18,11 +18,13 @@ pub const SCHEMA: &str = "org.gnome.shell.keybindings";
 pub const WM_SCHEMA: &str = "org.gnome.desktop.wm.keybindings";
 /// Mutter's own keys (half tiling).
 pub const MUTTER_SCHEMA: &str = "org.gnome.mutter.keybindings";
+pub const MEDIA_SCHEMA: &str = "org.gnome.settings-daemon.plugins.media-keys";
 
 /// What a binding does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     ToggleOverview,
+    LockScreen,
     ToggleApplicationView,
     ToggleMessageTray,
     ToggleQuickSettings,
@@ -97,6 +99,7 @@ enum Schema {
     Shell,
     Wm,
     Mutter,
+    Media,
 }
 
 /// One key, its action, GNOME 51's default accelerators, and its modes.
@@ -129,6 +132,13 @@ const NEW_WINDOW_DEFAULTS: [&str; 9] = [
 
 fn specs() -> Vec<Spec> {
     let mut specs = vec![
+        Spec {
+            schema: Schema::Media,
+            key: "screensaver".into(),
+            action: Action::LockScreen,
+            defaults: vec!["<Super>l"],
+            modes: NORMAL_OVERVIEW,
+        },
         Spec {
             schema: Schema::Shell,
             key: "toggle-overview".into(),
@@ -345,6 +355,7 @@ pub fn bindings(
     shell: Option<&gio::Settings>,
     wm: Option<&gio::Settings>,
     mutter: Option<&gio::Settings>,
+    media: Option<&gio::Settings>,
 ) -> Vec<Binding> {
     specs()
         .into_iter()
@@ -353,6 +364,7 @@ pub fn bindings(
                 Schema::Shell => shell,
                 Schema::Wm => wm,
                 Schema::Mutter => mutter,
+                Schema::Media => media,
             };
             let has = settings
                 .and_then(|s| s.settings_schema())
@@ -444,6 +456,10 @@ pub fn wm_settings() -> Option<gio::Settings> {
 }
 
 /// Mutter's keybinding schema, when installed.
+pub fn media_settings() -> Option<gio::Settings> {
+    schema(MEDIA_SCHEMA)
+}
+
 pub fn mutter_settings() -> Option<gio::Settings> {
     schema(MUTTER_SCHEMA)
 }
@@ -511,13 +527,14 @@ mod tests {
 
     #[test]
     fn gnome_51_defaults_without_the_schema() {
-        let all = bindings(None, None, None);
+        let all = bindings(None, None, None, None);
         let find = |action| {
             all.iter()
                 .filter(|b| b.action == action)
                 .map(|b| b.accelerator.as_str())
                 .collect::<Vec<_>>()
         };
+        assert_eq!(find(Action::LockScreen), ["<Super>l"]);
         assert_eq!(find(Action::ToggleApplicationView), ["<Super>a"]);
         assert_eq!(find(Action::ToggleMessageTray), ["<Super>v", "<Super>m"]);
         assert_eq!(find(Action::ToggleQuickSettings), ["<Super>s"]);

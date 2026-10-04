@@ -9,7 +9,7 @@
 //!   token minted while the requesting client held keyboard focus,
 //!   used within [`ACTIVATION_TOKEN_TTL`] (Mutter's focus-stealing
 //!   shape). Valid requests focus and raise the window.
-//! - viewporter, fractional-scale v1 (preferred scale 1 until #59),
+//! - viewporter, fractional-scale v1 (preferred scale follows the target output),
 //!   single-pixel-buffer, cursor-shape v1.
 //! - idle-inhibit: a live inhibitor holds off the idle lock (video
 //!   players, presentations).
@@ -536,10 +536,66 @@ delegate_xdg_activation!(State);
 
 delegate_viewporter!(State);
 
+impl State {
+    pub(crate) fn initial_surface_scale(&self, surface: &WlSurface) -> f64 {
+        let mut surface = surface.clone();
+        // Bound traversal also protects against client-supplied parent cycles.
+        for _ in 0..64 {
+            if let Some(layer) = self.panel_surfaces.iter().find(|l| l.surface == surface) {
+                let loc = self.loc_for_output(layer.output_name.as_deref());
+                return self
+                    .scale_for(smithay::utils::Rectangle::new(loc.into(), (1, 1).into()))
+                    .fractional_scale();
+            }
+            if let Some(loc) = self.window_origins.get(&surface) {
+                return self
+                    .scale_for(smithay::utils::Rectangle::new(*loc, (1, 1).into()))
+                    .fractional_scale();
+            }
+            let parent = self
+                .xdg_shell_state
+                .popup_surfaces()
+                .iter()
+                .find(|p| *p.wl_surface() == surface)
+                .and_then(|p| p.get_parent_surface())
+                .or_else(|| {
+                    self.xdg_shell_state
+                        .toplevel_surfaces()
+                        .iter()
+                        .find(|t| *t.wl_surface() == surface)
+                        .and_then(|t| t.parent())
+                });
+            if let Some(parent) = parent {
+                surface = parent;
+                continue;
+            }
+            return self
+                .initial_outputs
+                .get(&surface)
+                .and_then(|name| self.outputs.iter().find(|entry| &entry.name == name))
+                .and_then(|entry| entry.output.as_ref())
+                .map(|output| output.current_scale().fractional_scale())
+                .unwrap_or_else(|| self.initial_window_scale());
+        }
+        self.initial_window_scale()
+    }
+
+    pub(crate) fn refresh_initial_surface_scale(&self, surface: &WlSurface) {
+        let scale = self.initial_surface_scale(surface);
+        with_states(surface, |states| {
+            with_fractional_scale(states, |fractional| fractional.set_preferred_scale(scale));
+        });
+    }
+}
+
 impl FractionalScaleHandler for State {
     fn new_fractional_scale(&mut self, surface: WlSurface) {
-        // Clients render at the output scale (#59).
-        let scale = self.protocols.preferred_scale;
+        // Roles may already exist when the client creates its scale object.
+        // Popups inherit their parent; layer surfaces use their bound output.
+        if let Some(name) = self.new_window_output().map(|entry| entry.name.clone()) {
+            self.initial_outputs.insert(surface.clone(), name);
+        }
+        let scale = self.initial_surface_scale(&surface);
         with_states(&surface, |states| {
             with_fractional_scale(states, |fractional| fractional.set_preferred_scale(scale));
         });
