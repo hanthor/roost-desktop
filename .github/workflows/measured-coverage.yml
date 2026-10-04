@@ -40,13 +40,15 @@ jobs:
           cargo llvm-cov --version > coverage-artifacts/observer-version.txt
           uname -a > coverage-artifacts/kernel.txt
           dpkg-query -W > coverage-artifacts/packages.txt
-          printf '%s\n' 'ROOST_REQUIRE_PAM_WRAPPER=1 cargo llvm-cov --workspace --locked --json --skip-functions --output-path coverage-artifacts/coverage.json' > coverage-artifacts/reproduce.txt
+          printf '%s\n' 'set -o pipefail' 'ROOST_REQUIRE_PAM_WRAPPER=1 cargo llvm-cov --workspace --locked --json --skip-functions --output-path coverage-artifacts/coverage.json 2> coverage-artifacts/test-stderr.log | tee coverage-artifacts/test.log' > coverage-artifacts/reproduce.txt
       - name: Execute instrumented workspace tests
         env:
           ROOST_REQUIRE_PAM_WRAPPER: '1'
         run: |
           set -o pipefail
-          cargo llvm-cov --workspace --locked --json --skip-functions --output-path coverage-artifacts/coverage.json 2>&1 | tee coverage-artifacts/test.log
+          # libwayland writes protocol diagnostics directly to stderr. Keep
+          # them separate from libtest result lines, retaining both streams.
+          cargo llvm-cov --workspace --locked --json --skip-functions --output-path coverage-artifacts/coverage.json 2> coverage-artifacts/test-stderr.log | tee coverage-artifacts/test.log
       - name: Report measured crate and security-module coverage
         run: scripts/roost-coverage-report coverage-artifacts/coverage.json --out coverage-artifacts/coverage-report.md
       - name: Require complete security evidence and executed boundary cases
