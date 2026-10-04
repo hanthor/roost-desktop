@@ -8,30 +8,10 @@ Each ScreenCast session belongs to its unique creator. Only that creator may add
 
 The D-Bus service scans grants every 100 ms. Losing the creator connection, the trusted portal name, the supervised shell PID or unlocked state revokes the grant and queues stream teardown. The normal disconnect teardown latency is the scan interval plus one compositor tick; this is not a hard real-time guarantee under CPU starvation. Explicit Stop revokes immediately before queuing teardown. Closed session/stream objects are removed from the bus and registry.
 
-The GTK proof records real UI screenshots and an explicit UI recording with decoded video frames, captures the live PipeWire node list, presses Stop, and verifies the node is removed. It also starts another UI recording before session lock and verifies both zero compositor streams and no capture node while locked. Independent untrusted clients test ordinary and forged portal-name denials. These new stages remain pending until their CI artifact passes.
+The packaged `portal-security` lane uses the installed GNOME 51 backend and portal frontend with the CI-built compositor and GTK shell. It records package versions and the exact candidate merge commit. Applications exercise real Cancel/Share consent, OpenPipeWireRemote and a decoded frame. Foreign owners, ordinary unknown callers and a forged portal name are denied. Owner Close, frontend/backend disconnect and lock remove the PipeWire node; the accepted journey requires removal within two seconds. The Ubuntu GTK lane additionally proves UI Stop and active recording revocation on lock, with unchanged accessibility goldens.
 
-The packaged-candidate `portal-security` lane verifies `xdg-desktop-portal-gnome` 51.0 in Fedora45, records runtime package versions, and runs the same genuine frontend consent lifecycle with the CI-built compositor/GTK shell, without compiling GTK locally. Its artifact ties results to the tested commit. The Ubuntu GTK lane is supplemental coverage with its distro backend version.
+Remote Desktop shares this authenticated authority and binds keyboard/pointer and linked ScreenCast grants to their original caller. Its independent installed libei client must deliver real GTK key/button events, then prove node withdrawal, no further input and an empty held seat on revocation. See [Remote Desktop](remote-desktop.md) for bounds and unsupported capabilities.
 
-The proof additionally launches the root-owned installed GNOME backend and desktop portal frontend on its private bus. A real frontend client exercises CreateSession, SelectSources, Start, Cancel/Share in the actual AT-SPI picker, OpenPipeWireRemote frame consumption and owner Close; another unique caller cannot close its session. The frontend is tested again while locked. These stages are source assertions pending CI evidence.
+Screenshot uses the installed GTK backend only for its Access consent UI. Deny returns no URI; Allow must yield a readable image. An authenticated locked request returns the documented false/empty result without scheduling capture, and the proof requires an empty frontend URI and unchanged saved-image hashes. Unknown callers retain AccessDenied. See [Screenshot consent](portal-screenshot-consent.md).
 
-Issue #61 remains partial until this genuine external portal journey passes and RemoteDesktop implementation/acceptance is complete. No RemoteDesktop interface is advertised by this change. The GTK proof's former raw Python caller pretending to be the portal is no longer accepted or counted as consent evidence.
-
-On 2026-10-04 the CI-built Arch package at `95f71c0` (run
-37178711148, artifact 11295256952) passed the focused genuine GNOME 51
-proof locally without a Rust/GTK build. Installed versions were GNOME
-portal 51.0, frontend 1.22.1, PipeWire 1.6.9, GTK 4.24.1 and libadwaita
-1.10.0. It exercised actual picker Cancel/Share, FD/frame consumption,
-foreign-owner denial, ordinary/spoofed caller denial, creator disconnect,
-backend disconnect and active lock revocation. Observed node-removal
-latencies after Close/client/backend/lock were 0.045/0.094/0.116/0.036
-seconds; a new locked frontend request returned response 2. These are
-individual observed values, not latency guarantees. The complete CI gate
-remains pending: its first dedicated portal job stopped at ShellCheck
-before runtime, and its broader GTK job failed a drag driven by fixed grid coordinates.
-The held-pointer screenshot does not establish the initial allocation. The
-replacement driver uses WINDOW_COORDS plus the actual grid/folder layer origin
-and accepts both GTK button role names. A focused local GNOME 51 / GTK 4.24
-paging probe using the same 95 package selected the visible tile at 202.5,312.5
-(window bounds 146,24,113,113 plus layer origin 0,232); its real edge drag
-turned the page. The broader CI journey remains required; security assertions
-remain unchanged.
+The [dated qualification manifest](capture-evidence.json) records actual current-head runs, candidate parents, runtime versions and retained artifacts. Issue #61's consent, real-stream, bounded-revocation and locked-denial acceptance is separate from full GNOME parity: touch, keysym/text and clipboard, interactive portal screenshot customization, area/color selection, cursor metadata and dmabuf zero-copy remain explicit limitations. P-SY-05 therefore remains partial.

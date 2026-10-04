@@ -30,6 +30,7 @@ jobs:
       - run: scripts/roost-a11y-baseline check
       - run: python3 scripts/lib/roost-soak-tests.py
       - run: python3 scripts/lib/vm-boot-tests.py
+      - run: python3 scripts/lib/roost-pipewire-dump-tests.py
       - run: scripts/roost-settings-inventory-check
       - run: cargo fmt --all -- --check
       - name: Check bounded EIS transport regression tests

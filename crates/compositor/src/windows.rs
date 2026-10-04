@@ -1169,8 +1169,22 @@ impl WindowManager {
                 WindowRequest::Unfullscreen => {
                     self.set_fullscreen(state, id, false);
                 }
-                WindowRequest::Move => self.begin_move(state, id),
-                WindowRequest::Resize(edges) => self.begin_resize(id, edges),
+                WindowRequest::Move(serial, origin) => {
+                    if self.grab.is_none()
+                        && state.seat.get_pointer().is_some_and(|p| p.has_grab(serial))
+                    {
+                        self.begin_move_from(state, id, origin);
+                        self.grab_motion(self.pointer_pos);
+                    }
+                }
+                WindowRequest::Resize(edges, serial, origin) => {
+                    if self.grab.is_none()
+                        && state.seat.get_pointer().is_some_and(|p| p.has_grab(serial))
+                    {
+                        self.begin_resize_from(id, edges, origin);
+                        self.grab_motion(self.pointer_pos);
+                    }
+                }
                 WindowRequest::Activate => {
                     self.focus(state, Some(id));
                 }
@@ -1442,11 +1456,14 @@ impl WindowManager {
     /// A maximized or tiled window drags off into floating first, keeping
     /// the pointer at the same fraction across its width (GNOME shape).
     fn begin_move(&mut self, state: &mut State, id: u64) {
+        self.begin_move_from(state, id, self.pointer_pos);
+    }
+
+    fn begin_move_from(&mut self, state: &mut State, id: u64, pointer: Point<f64, Logical>) {
         self.settle(id);
         if self.mode == SessionMode::Scroll {
             return;
         }
-        let pointer = self.pointer_pos;
         let Some(window) = self.windows.get(&id) else {
             return;
         };
@@ -1482,6 +1499,10 @@ impl WindowManager {
 
     /// Start resizing `id` from `edges` with the pointer.
     fn begin_resize(&mut self, id: u64, edges: u32) {
+        self.begin_resize_from(id, edges, self.pointer_pos);
+    }
+
+    fn begin_resize_from(&mut self, id: u64, edges: u32, pointer: Point<f64, Logical>) {
         self.settle(id);
         if self.mode == SessionMode::Scroll {
             return;
@@ -1493,7 +1514,7 @@ impl WindowManager {
             self.grab = Some(PointerGrab::Resize {
                 id,
                 edges,
-                pointer_start: self.pointer_pos,
+                pointer_start: pointer,
                 geometry_start: window.geometry,
             });
         }
