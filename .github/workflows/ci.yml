@@ -179,6 +179,11 @@ jobs:
           ROOST_REQUIRE_WAYLAND_INFO: "1"
       # Fractional scaling (#59): the same session at GNOME's 150 percent.
       - run: scripts/roost-scale-proof --artifacts gtk-shell-artifacts/scale
+      # Keep runnable binaries for local captures with the native GNOME assets.
+      - run: |
+          mkdir -p gtk-shell-artifacts/bin
+          cp target/debug/roost-compositor target/debug/roost-shell-gtk gtk-shell-artifacts/bin/
+          cp /usr/local/lib/*/libgtk4-layer-shell.so* gtk-shell-artifacts/bin/ 2>/dev/null || cp /usr/local/lib/libgtk4-layer-shell.so* gtk-shell-artifacts/bin/
       # Workspace insertion parity (#206): reuse the binaries this job
       # built and publish the thumbnail-placeholder frame and state.
       - run: sudo apt-get install -y --no-install-recommends gnome-shell-common gsettings-desktop-schemas

@@ -152,12 +152,15 @@ for variant in l d; do
     fi
 done
 
-cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk
+if [ -z "${ROOST_PARITY_BIN_DIR:-}" ]; then
+    cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk
+fi
+BIN_DIR="${ROOST_PARITY_BIN_DIR:-$ROOT/target/debug}"
 LOG="$OUT/nested.log"
 ROOST_COMPOSITOR_STATE="$OUT/compositor-state.json"
 export ROOST_COMPOSITOR_STATE
-"$ROOT/target/debug/roost-compositor" --backend winit --socket "roost-parity-$$" \
-    --startup-overview --shell-bin "$ROOT/target/debug/roost-shell-gtk" >"$LOG" 2>&1 &
+"$BIN_DIR/roost-compositor" --backend winit --socket "roost-parity-$$" \
+    --startup-overview --shell-bin "$BIN_DIR/roost-shell-gtk" >"$LOG" 2>&1 &
 PIDS="$PIDS $!"
 WID=""
 for _ in $(seq 1 60); do
