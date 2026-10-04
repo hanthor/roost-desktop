@@ -91,7 +91,7 @@ impl Trace {
         let presented_ns = at.as_nanos();
         if inputs
             .iter()
-            .any(|input| input.input_ns > queued_ns || queued_ns > presented_ns)
+            .any(|input| input.input_ns > queued_ns || input.input_ns > presented_ns)
         {
             self.discard(&inputs);
             return Vec::new();
@@ -159,7 +159,17 @@ mod tests {
         assert!(trace.presented(None, 2).is_empty());
         trace.input(ns(60));
         trace.queued(ns(70));
-        assert!(trace.presented(Some(ns(65)), 3).is_empty());
+        assert!(trace.presented(Some(ns(55)), 3).is_empty());
+    }
+
+    #[test]
+    fn kernel_vblank_can_precede_the_userspace_queue_completion_stamp() {
+        let mut trace = Trace::new(true);
+        trace.input(ns(10));
+        trace.queued(ns(40));
+        let rows = trace.presented(Some(ns(30)), 1);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].presented_ns - rows[0].input_ns, 20);
     }
 
     #[test]
