@@ -234,6 +234,10 @@ impl XdgShellHandler for State {
 
     fn new_toplevel(&mut self, _surface: ToplevelSurface) {}
 
+    fn parent_changed(&mut self, surface: ToplevelSurface) {
+        self.refresh_initial_surface_scale(surface.wl_surface());
+    }
+
     /// Track the popup and place it where its positioner asks; the
     /// initial configure goes out on its first commit.
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
