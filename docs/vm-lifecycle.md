@@ -6,6 +6,8 @@ greetd's initial session. Its default greeter is Cage with normal-window
 gtkgreet, matching the measured TunaOS launcher; logout must reach that
 actual greeter. This changes neither the shipped preview image nor the
 number of CI VM profiles.
+The CI session wrapper routes its output through `systemd-cat` so greetd's
+VT output reaches the fixture's journal-to-serial capture.
 
 QEMU's guest agent executes a fixed probe with a root UID, while the
 compositor, shell and application clients must belong to the non-root
@@ -21,7 +23,7 @@ feature tour:
 | V-LIFECYCLE-OWNER | Root probe, non-root greetd session, three application surfaces/processes |
 | V-NORMAL-INPUT / V-NORMAL-INPUT-FAIL-CLOSED | A real GTK client receives ordinary QMP keys while unlocked, then receives none while locked; artifacts contain only counts and PID, never key values |
 | V-VT | VT away/back, DRM pause/activate events, unchanged process identities and app rectangles, body repaint comparison |
-| V-SUSPEND | Real logind suspend reaches QEMU `suspended`; `system_wakeup` resumes locked, with masked pixels and all application identities intact |
+| V-SUSPEND | Real logind suspend reaches QEMU `suspended`; the first guest snapshot after `system_wakeup` must already be locked, with masked pixels and all application identities intact |
 | V-VT-FAIL-CLOSED | VT away/back while locked keeps the mask and original application processes |
 | V-AUTH-FAIL-CLOSED | Real PAM service temporarily uses `pam_deny`; even the correct test password cannot unlock; original service restored afterward |
 | V-CAPTURE-INPUT-FAIL-CLOSED | Reachable real untrusted grim/wtype clients are denied capture/virtual-keyboard interfaces while locked; a successful Wayland connection is required and timeouts do not count as refusal; this does not assert that these interfaces are available while unlocked |

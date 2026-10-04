@@ -224,12 +224,14 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
         raise RuntimeError("real suspend did not occur")
     frame("suspended")
     qmp.cmd("system_wakeup")
-    resumed = await_state(lambda state: state["state"]["locked"])
-    time.sleep(1)
-    resumed = inventory("resumed-locked")
+    # The first response after wake must already be locked. Waiting for a
+    # later transition would hide an exposed desktop during resume.
+    resumed = inventory("first-resume")
     masked = difference(base_frame, frame("resumed-locked")) > 0.25
-    record("V-SUSPEND", same_apps(before, resumed) and masked,
-           "actual SUSPENDED → system_wakeup, locked/masked session, unchanged app IDs/rectangles and process start times")
+    record("V-SUSPEND", resumed["state"]["locked"] and same_apps(before, resumed) and masked,
+           "actual SUSPENDED → system_wakeup, first resume snapshot locked/masked, unchanged app IDs/rectangles and process start times")
+    if not resumed["state"]["locked"]:
+        raise RuntimeError("first resume snapshot exposed an unlocked session")
     qmp.type_text("probe")
     time.sleep(0.5)
     locked_input = agent.run("input-count")
