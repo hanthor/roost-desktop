@@ -1946,12 +1946,9 @@ impl WindowManager {
         } else {
             mode
         };
-        // A window inhibiting shortcuts (keyboard-shortcuts-inhibit)
-        // gets the keys the shell grabbed too. However, system shortcuts
-        // like lock must bypass inhibition to remain functional.
-        // Shell accelerators are system-level and should not be subject
-        // to application-level shortcut inhibition.
-        let inhibited = false;
+        // A window with approved shortcut inhibition receives the shell's
+        // grabbed accelerators too. Lock input always remains compositor-owned.
+        let inhibited = !self.lock_input_active && state.shortcuts_inhibited();
         let grabs: Vec<roost_shell_control::Accelerator> = if pressed && !inhibited {
             self.accelerators
                 .iter()
