@@ -1641,6 +1641,8 @@ pub struct WiredConnection {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WiredDevice {
     pub path: String,
+    /// NetworkManager device Interface, used to distinguish several adapters.
+    pub interface: String,
     /// `NMDeviceState`.
     pub state: u32,
     /// The device's usable connections, any order.

@@ -25,6 +25,7 @@ mod live_apps;
 mod lock;
 mod logic;
 mod network_agent;
+mod network_secrets;
 mod notify;
 mod osd;
 mod overview;

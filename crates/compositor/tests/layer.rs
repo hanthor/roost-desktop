@@ -13,6 +13,7 @@
 use std::os::unix::net::UnixStream;
 
 use roost_compositor::TestCompositor;
+use roost_shell_control::{OVERVIEW_NAMESPACE, PANEL_HEIGHT, PANEL_NAMESPACE};
 use smithay::wayland::{
     compositor::with_states,
     shell::wlr_layer::{
@@ -35,8 +36,6 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 };
 
 const PUMP_ROUNDS: usize = 200;
-const PANEL_NAMESPACE: &str = "roost-shell-panel";
-const PANEL_HEIGHT: u32 = 32;
 
 /// One panel-shaped protocol client.
 #[derive(Default)]
@@ -249,7 +248,7 @@ fn attach_fullscreen(queue: &EventQueue<Client>, client: &mut Client) {
         &surface,
         None,
         ClientLayer::Overlay,
-        "roost-shell-overview".to_owned(),
+        OVERVIEW_NAMESPACE.to_owned(),
         &qh,
         (),
     );
