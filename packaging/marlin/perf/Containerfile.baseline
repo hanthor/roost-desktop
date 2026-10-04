@@ -1,0 +1,9 @@
+# CI-only GNOME 51 baseline derived from the recorded Marlin image.
+# Arch stable currently ships GNOME 50.5; enable both testing repositories
+# together and perform a complete upgrade to avoid a partial Arch upgrade.
+ARG BASE_IMAGE=ghcr.io/tuna-os/marlin:gnome
+FROM ${BASE_IMAGE}
+RUN sed -i '/^\[core\]/i [core-testing]\nInclude = /etc/pacman.d/mirrorlist\n\n[extra-testing]\nInclude = /etc/pacman.d/mirrorlist\n' /etc/pacman.conf && \
+    pacman -Syu --noconfirm gnome-shell mutter gdm && \
+    gnome-shell --version | grep -Eq '^GNOME Shell 51([. ]|$)' && \
+    pacman -Q > /usr/share/roost-perf-baseline-packages.txt
