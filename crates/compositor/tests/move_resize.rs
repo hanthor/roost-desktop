@@ -51,6 +51,7 @@ struct Client {
     pointer_entered: Vec<u32>,
     /// Pointer button presses delivered (any surface).
     presses: u32,
+    press_serial: u32,
     releases: u32,
     /// Surface ids keyboard focus entered, in order.
     keyboard_entered: Vec<u32>,
@@ -187,11 +188,13 @@ impl Dispatch<WlPointer, ()> for Client {
                 state.pointer_entered.push(surface.id().protocol_id())
             }
             PointerEvent::Button {
+                serial,
                 state: wayland_client::WEnum::Value(s),
                 ..
             } => {
                 if s == wayland_client::protocol::wl_pointer::ButtonState::Pressed {
                     state.presses += 1;
+                    state.press_serial = serial;
                 } else {
                     state.releases += 1;
                 }
@@ -362,7 +365,8 @@ fn header_drag_moves_the_window() {
     let mut f = fixture();
     let start = geometry(&f);
     let at = press_inside(&mut f);
-    f.toplevel._move(f.client.seat.as_ref().unwrap(), 1);
+    f.toplevel
+        ._move(f.client.seat.as_ref().unwrap(), f.client.press_serial);
     sync(&mut f);
     assert!(f.manager.grab_active(), "move request starts a grab");
     f.manager
@@ -385,8 +389,11 @@ fn bottom_right_resize_grows_and_configures() {
     let mut f = fixture();
     let start = geometry(&f);
     let at = press_inside(&mut f);
-    f.toplevel
-        .resize(f.client.seat.as_ref().unwrap(), 1, ResizeEdge::BottomRight);
+    f.toplevel.resize(
+        f.client.seat.as_ref().unwrap(),
+        f.client.press_serial,
+        ResizeEdge::BottomRight,
+    );
     sync(&mut f);
     f.manager
         .pointer_motion(&mut f.comp.state, at + Point::from((60.0, 40.0)), 3);
@@ -409,8 +416,11 @@ fn top_left_resize_moves_the_origin_and_respects_the_minimum() {
     let mut f = fixture();
     let start = geometry(&f);
     let at = press_inside(&mut f);
-    f.toplevel
-        .resize(f.client.seat.as_ref().unwrap(), 1, ResizeEdge::TopLeft);
+    f.toplevel.resize(
+        f.client.seat.as_ref().unwrap(),
+        f.client.press_serial,
+        ResizeEdge::TopLeft,
+    );
     sync(&mut f);
     // Drag far past the bottom-right: clamps at the minimum size.
     f.manager
@@ -457,7 +467,8 @@ fn super_drag_moves_without_a_client_request() {
 fn dropping_on_the_top_edge_maximizes() {
     let mut f = fixture();
     let at = press_inside(&mut f);
-    f.toplevel._move(f.client.seat.as_ref().unwrap(), 1);
+    f.toplevel
+        ._move(f.client.seat.as_ref().unwrap(), f.client.press_serial);
     sync(&mut f);
     f.manager
         .pointer_motion(&mut f.comp.state, (at.x, 0.0).into(), 3);
@@ -486,7 +497,8 @@ fn dragging_to_an_edge_shows_gnomes_tile_preview() {
     let mut f = fixture();
     let window = id(&f);
     let at = press_inside(&mut f);
-    f.toplevel._move(f.client.seat.as_ref().unwrap(), 1);
+    f.toplevel
+        ._move(f.client.seat.as_ref().unwrap(), f.client.press_serial);
     sync(&mut f);
     assert_eq!(f.manager.tile_preview(&f.comp.state), None, "no edge yet");
     // The left edge: the left half of the work area, below the bar.
@@ -515,4 +527,138 @@ fn dragging_to_an_edge_shows_gnomes_tile_preview() {
         None,
         "the grab ended"
     );
+}
+
+#[test]
+fn delayed_move_keeps_the_initiating_press_coordinates() {
+    let mut f = fixture();
+    let start = geometry(&f);
+    let at = press_inside(&mut f);
+    f.manager
+        .pointer_motion(&mut f.comp.state, at + Point::from((125.0, 50.0)), 3);
+    f.toplevel
+        ._move(f.client.seat.as_ref().unwrap(), f.client.press_serial);
+    sync(&mut f);
+    assert_eq!(geometry(&f).loc, start.loc + Point::from((125, 50)));
+    f.manager
+        .pointer_motion(&mut f.comp.state, at + Point::from((150.0, 60.0)), 4);
+    assert_eq!(geometry(&f).loc, start.loc + Point::from((150, 60)));
+}
+
+#[test]
+fn invalid_or_released_press_cannot_start_a_move_or_resize() {
+    let mut f = fixture();
+    let start = geometry(&f);
+    press_inside(&mut f);
+    let invalid = f.client.press_serial.wrapping_add(1);
+    f.toplevel._move(f.client.seat.as_ref().unwrap(), invalid);
+    f.toplevel.resize(
+        f.client.seat.as_ref().unwrap(),
+        invalid,
+        ResizeEdge::BottomRight,
+    );
+    sync(&mut f);
+    assert!(!f.manager.grab_active());
+    assert_eq!(geometry(&f), start);
+    f.manager
+        .pointer_button(&mut f.comp.state, BTN_LEFT, false, 3);
+    f.toplevel
+        ._move(f.client.seat.as_ref().unwrap(), f.client.press_serial);
+    f.toplevel.resize(
+        f.client.seat.as_ref().unwrap(),
+        f.client.press_serial,
+        ResizeEdge::BottomRight,
+    );
+    sync(&mut f);
+    assert!(!f.manager.grab_active());
+    assert_eq!(geometry(&f), start);
+}
+
+#[test]
+fn delayed_resize_keeps_the_initiating_press_coordinates() {
+    let mut f = fixture();
+    let start = geometry(&f);
+    let at = press_inside(&mut f);
+    f.manager
+        .pointer_motion(&mut f.comp.state, at + Point::from((60.0, 40.0)), 3);
+    f.toplevel.resize(
+        f.client.seat.as_ref().unwrap(),
+        f.client.press_serial,
+        ResizeEdge::BottomRight,
+    );
+    sync(&mut f);
+    assert_eq!(
+        geometry(&f).size,
+        start.size + smithay::utils::Size::from((60, 40))
+    );
+}
+
+#[test]
+fn queued_move_is_rejected_if_the_press_ends_before_reconcile() {
+    let mut f = fixture();
+    let start = geometry(&f);
+    press_inside(&mut f);
+    f.toplevel
+        ._move(f.client.seat.as_ref().unwrap(), f.client.press_serial);
+    f.queue.flush().unwrap();
+    f.comp.pump();
+    f.manager
+        .pointer_button(&mut f.comp.state, BTN_LEFT, false, 3);
+    sync(&mut f);
+    assert!(!f.manager.grab_active());
+    assert_eq!(geometry(&f), start);
+}
+
+#[test]
+fn another_surface_cannot_reuse_a_live_press_to_move_or_resize() {
+    let mut f = fixture();
+    let qh = f.queue.handle();
+    let surface = f
+        .client
+        .compositor
+        .as_ref()
+        .unwrap()
+        .create_surface(&qh, ());
+    let xdg = f
+        .client
+        .xdg_base
+        .as_ref()
+        .unwrap()
+        .get_xdg_surface(&surface, &qh, surface.clone());
+    let other = xdg.get_toplevel(&qh, ());
+    other.set_title("other-window".into());
+    surface.commit();
+    sync(&mut f);
+    // This point is in the first window's header and outside the cascade
+    // of the second window, so its live press belongs to the first one.
+    press_inside(&mut f);
+    let before = f.manager.visible_windows();
+    other._move(f.client.seat.as_ref().unwrap(), f.client.press_serial);
+    other.resize(
+        f.client.seat.as_ref().unwrap(),
+        f.client.press_serial,
+        ResizeEdge::BottomRight,
+    );
+    sync(&mut f);
+    assert!(!f.manager.grab_active());
+    assert_eq!(f.manager.visible_windows(), before);
+}
+
+#[test]
+fn replaying_the_live_press_does_not_restart_an_active_move() {
+    let mut f = fixture();
+    let start = geometry(&f);
+    let at = press_inside(&mut f);
+    f.toplevel
+        ._move(f.client.seat.as_ref().unwrap(), f.client.press_serial);
+    sync(&mut f);
+    f.manager
+        .pointer_motion(&mut f.comp.state, at + Point::from((100.0, 50.0)), 3);
+    f.toplevel
+        ._move(f.client.seat.as_ref().unwrap(), f.client.press_serial);
+    sync(&mut f);
+    assert_eq!(geometry(&f).loc, start.loc + Point::from((100, 50)));
+    f.manager
+        .pointer_motion(&mut f.comp.state, at + Point::from((125.0, 60.0)), 4);
+    assert_eq!(geometry(&f).loc, start.loc + Point::from((125, 60)));
 }

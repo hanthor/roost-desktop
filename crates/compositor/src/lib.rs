@@ -210,7 +210,7 @@ impl ClientState {
 /// manager drains and applies them once per tick in `reconcile`, so
 /// protocol input and scene mutation stay on one call path for live
 /// events and tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum WindowRequest {
     /// Client asked to be maximized.
     Maximize,
@@ -221,9 +221,13 @@ pub(crate) enum WindowRequest {
     /// Client asked to leave fullscreen.
     Unfullscreen,
     /// Client started an interactive move (header-bar drag, #58).
-    Move,
+    Move(Serial, smithay::utils::Point<f64, smithay::utils::Logical>),
     /// Client started an interactive resize from these xdg edges.
-    Resize(u32),
+    Resize(
+        u32,
+        Serial,
+        smithay::utils::Point<f64, smithay::utils::Logical>,
+    ),
     /// A valid xdg-activation request: focus and raise (#89).
     Activate,
     /// Client asked to be minimized (GNOME's Hide).
@@ -245,6 +249,29 @@ impl ClientData for ClientState {
 impl BufferHandler for State {
     fn buffer_destroyed(&mut self, buffer: &wl_buffer::WlBuffer) {
         self.window_icons.buffer_destroyed(buffer);
+    }
+}
+
+impl State {
+    /// A CSD move/resize must use this seat's live press on this surface.
+    /// Preserve its coordinates through the request queue: client dispatch
+    /// can happen after later pointer motion (GNOME 51 grab semantics).
+    fn interactive_press(
+        &self,
+        surface: &wl_surface::WlSurface,
+        seat: &wl_seat::WlSeat,
+        serial: Serial,
+    ) -> Option<smithay::utils::Point<f64, smithay::utils::Logical>> {
+        if !self.seat.owns(seat) {
+            return None;
+        }
+        let pointer = self.seat.get_pointer()?;
+        if !pointer.has_grab(serial) {
+            return None;
+        }
+        let start = pointer.grab_start_data()?;
+        let (focus, _) = start.focus?;
+        (focus == *surface).then_some(start.location)
     }
 }
 
@@ -311,22 +338,30 @@ impl XdgShellHandler for State {
     }
 
     /// Queue an interactive move (CSD header-bar drag) for the manager.
-    fn move_request(&mut self, surface: ToplevelSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
-        self.window_requests
-            .push((surface.wl_surface().clone(), WindowRequest::Move));
+    fn move_request(&mut self, surface: ToplevelSurface, seat: wl_seat::WlSeat, serial: Serial) {
+        let Some(origin) = self.interactive_press(surface.wl_surface(), &seat, serial) else {
+            return;
+        };
+        self.window_requests.push((
+            surface.wl_surface().clone(),
+            WindowRequest::Move(serial, origin),
+        ));
     }
 
     /// Queue an interactive resize from `edges` for the manager.
     fn resize_request(
         &mut self,
         surface: ToplevelSurface,
-        _seat: wl_seat::WlSeat,
-        _serial: Serial,
+        seat: wl_seat::WlSeat,
+        serial: Serial,
         edges: smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge,
     ) {
+        let Some(origin) = self.interactive_press(surface.wl_surface(), &seat, serial) else {
+            return;
+        };
         self.window_requests.push((
             surface.wl_surface().clone(),
-            WindowRequest::Resize(edges as u32),
+            WindowRequest::Resize(edges as u32, serial, origin),
         ));
     }
 
