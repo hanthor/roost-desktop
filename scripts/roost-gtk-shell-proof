@@ -3256,6 +3256,10 @@ sleep 1
 # A live, explicitly consented recording must be revoked when lock engages.
 if [ -n "$PW_PIDS" ] && command -v gst-launch-1.0 >/dev/null 2>&1; then
     xdotool key Print
+    end=$(($(date +%s) + 20))
+    until "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-lock-cast-ready.json" 5 >/dev/null 2>&1 &&
+        showing "$ARTIFACTS/a11y-lock-cast-ready.json" "Capture" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.5; done
+    showing "$ARTIFACTS/a11y-lock-cast-ready.json" "Capture" || fail G-CAPTURE-LOCK-REVOKE "Print did not open the screenshot UI"
     "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-lock-cast-open.json" 20 \
         --press "Record Screen" || fail G-CAPTURE-LOCK-REVOKE "could not request recording"
     "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-lock-cast-grant.json" 20 \
