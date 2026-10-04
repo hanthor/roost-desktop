@@ -277,10 +277,12 @@ CAL_PID=""
 SCREENSAVER_PID=""
 PERMISSIONS_PID=""
 INHIBITOR_PID=""
+SCROLL_PROBE_PID=""
 IME_PIDS=""
 cleanup() {
     if [ -n "$INHIBITOR_PID" ]; then kill "$INHIBITOR_PID" 2>/dev/null || true; fi
     if [ -n "$PERMISSIONS_PID" ]; then kill "$PERMISSIONS_PID" 2>/dev/null || true; fi
+    if [ -n "$SCROLL_PROBE_PID" ]; then kill "$SCROLL_PROBE_PID" 2>/dev/null || true; fi
     # shellcheck disable=SC2086
     if [ -n "$IME_PIDS" ]; then kill $IME_PIDS 2>/dev/null || true; fi
     # The bridge daemonized ibus-daemon for this session's display.
@@ -2163,6 +2165,7 @@ fi
 # column (whole on screen), niri's focus ring (4px of #7fc8ff) marks it,
 # Super+R steps its width and Super+Left moves focus along the strip.
 strip_whole() {
+    cstate '((.strip_view - .strip_offset) | fabs) < 0.1' "scroll view settled" 5 || return 1
     cstate ".focused_rect[1] == 48 and .focused_rect[3] == $((HEIGHT - 32 - 32)) and
         .focused_rect[0] >= 16 and .focused_rect[0] + .focused_rect[2] <= $((WIDTH - 16))" "$1"
 }
@@ -2188,6 +2191,79 @@ xdotool key super+Left
 cstate ".focused != $before_id" "focus moved" || fail G-SCROLL "Super+Left did not move focus along the strip"
 strip_whole "newly focused column whole" || fail G-SCROLL "the view did not follow focus"
 scrot "$ARTIFACTS/24k-scroll-follow.png" >/dev/null
+# Insert at the focused column, move it, and close it through the GTK client.
+scroll_parent="$(jq -r .focused "$CSTATE")"
+scroll_parent_x="$(jq -r --argjson id "$scroll_parent" '.strip_offset as $v | .windows[] | select(.id == $id) | (.rect[0] + $v | round)' "$CSTATE")"
+scroll_parent_w="$(jq -r '.focused_rect[2]' "$CSTATE")"
+scroll_count="$(jq '.windows | length' "$CSTATE")"
+SCROLL_REQUESTS="$ARTIFACTS/scroll-requests.json"
+rm -f "$SCROLL_REQUESTS" "$SCROLL_REQUESTS.ack"
+WAYLAND_DISPLAY="$SOCKET_NAME" ROOST_TEST_REQUESTS="$SCROLL_REQUESTS" "$PY" "$ROOT/scripts/lib/roost-test-window.py" "Scroll Probe" '#00a040' >"$ARTIFACTS/scroll-probe.log" 2>&1 &
+SCROLL_PROBE_PID=$!
+cstate ".windows | length == $((scroll_count + 1))" "new scroll column" || fail G-SCROLL-COLUMNS "new column did not map"
+scroll_probe="$(jq -r .focused "$CSTATE")"
+sleep 1
+probe_x="$(jq -r --argjson id "$scroll_probe" '.strip_offset as $v | .windows[] | select(.id == $id) | (.rect[0] + $v | round)' "$CSTATE")"
+[ "$probe_x" -eq $((scroll_parent_x + scroll_parent_w + 16)) ] || fail G-SCROLL-COLUMNS "new column not right of focus"
+strip_whole "new column whole" || fail G-SCROLL-COLUMNS "new column outside view"
+# Roost's current policy keeps these client requests in the strip. This
+# differs from niri fullscreen and is recorded explicitly in docs/niri-parity.md.
+scroll_request() {
+    printf '{"generation":%s,"request":"%s"}\n' "$1" "$2" >"$SCROLL_REQUESTS"
+    end=$(($(date +%s) + 5))
+    until [ "$(cat "$SCROLL_REQUESTS.ack" 2>/dev/null)" = "$1" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.1; done
+    [ "$(cat "$SCROLL_REQUESTS.ack" 2>/dev/null)" = "$1" ] || fail G-SCROLL-LAYOUTS "client request not acknowledged"
+    sleep 0.3
+    strip_whole "$2 kept a column" || fail G-SCROLL-LAYOUTS "$2 escaped the strip"
+    cstate '.focused_rect[2] == 616' "request kept width" || fail G-SCROLL-LAYOUTS "$2 changed the preset"
+}
+scroll_request 1 fullscreen
+scroll_request 2 unfullscreen
+scroll_request 3 maximize
+scroll_request 4 unmaximize
+fx="$(jq -r '.focused_rect[0]' "$CSTATE")"
+drag $((fx + 200)) 70 2 100
+strip_whole "edge tiling kept a column" || fail G-SCROLL-LAYOUTS "edge snap escaped strip"
+pass G-SCROLL-LAYOUTS "fullscreen, maximize and edge tiling requests retain Roost's strip membership"
+xdotool key super+shift+Left
+sleep 1
+moved_x="$(jq -r --argjson id "$scroll_probe" '.strip_offset as $v | .windows[] | select(.id == $id) | (.rect[0] + $v | round)' "$CSTATE")"
+[ "$moved_x" -lt "$probe_x" ] || fail G-SCROLL-COLUMNS "Super+Shift+Left did not move the column"
+wheel_before="$(jq .strip_offset "$CSTATE")"
+xdotool mousemove --window "$WID" $((WIDTH - 10)) 400 click 5
+cstate ".strip_offset != $wheel_before" "strip wheel" || fail G-SCROLL-WHEEL "wheel did not move view"
+pass G-SCROLL-WHEEL "wheel moves the strip view without changing membership"
+xdotool key Super_L
+cstate '.overview_open and .session_mode == "scroll" and (.previews | length) > 0' "occupied scroll overview previews" || fail G-SCROLL-OVERVIEW "overview changed mode"
+sleep 1
+scrot "$ARTIFACTS/24l-scroll-overview.png" >/dev/null
+xdotool key Escape
+cstate '.overview_open == false' "scroll overview closed" || fail G-SCROLL-OVERVIEW "overview did not close"
+scroll_workspace="$(jq .active_workspace "$CSTATE")"
+xdotool key ctrl+alt+Right
+cstate ".active_workspace != $scroll_workspace and .session_mode == \"scroll\"" "scroll workspace" || fail G-SCROLL-WORKSPACES "workspace switch failed"
+xdotool key Super_L
+cstate ".overview_open and any(.workspace_cards[]; .active and .workspace != $scroll_workspace) and any(.workspace_cards[]; (.active | not) and .workspace == $scroll_workspace and .rect[2] > 0 and .rect[3] > 0)" "scroll workspace cards" || fail G-SCROLL-WORKSPACES "active and occupied neighbor workspace cards missing"
+sleep 1
+scrot "$ARTIFACTS/24m-scroll-workspaces.png" >/dev/null
+xdotool key Escape
+cstate '.overview_open == false' "scroll thumbnails closed" || fail G-SCROLL-WORKSPACES "overview did not close"
+xdotool key ctrl+alt+Left
+cstate ".active_workspace == $scroll_workspace" "scroll workspace restored" || fail G-SCROLL-WORKSPACES "workspace not restored"
+pass G-SCROLL-WORKSPACES "workspace switching and overview thumbnails preserve scroll mode"
+pass G-SCROLL-OVERVIEW "overview previews coexist with the strip"
+xdotool keydown Alt_L key Tab
+cstate '.session_mode == "scroll" and any(.layers[]; .namespace == "roost-shell-switcher")' "scroll switcher" || fail G-SCROLL-SWITCHER "switcher changed mode"
+sleep 1
+scrot "$ARTIFACTS/24n-scroll-switcher.png" >/dev/null
+xdotool keyup Alt_L
+cstate 'all(.layers[]; .namespace != "roost-shell-switcher")' "scroll switcher closed" || fail G-SCROLL-SWITCHER "switcher did not close"
+strip_whole "switcher selected column whole" || fail G-SCROLL-SWITCHER "switcher did not follow focus"
+pass G-SCROLL-SWITCHER "Alt+Tab selects a column and follows it"
+kill "$SCROLL_PROBE_PID" 2>/dev/null || true
+SCROLL_PROBE_PID=""
+cstate ".windows | length == $scroll_count" "scroll column closed" || fail G-SCROLL-COLUMNS "column did not close"
+pass G-SCROLL-COLUMNS "new columns insert right of focus, move with Super+Shift+Left and close"
 xdotool key super+shift+t
 cstate '.session_mode == "gnome"' "floating again" || fail G-SCROLL "Super+Shift+T did not leave scroll mode"
 pass G-SCROLL "Super+Shift+T makes niri's strip: gaps, the view following focus, the focus ring, presets and focus moves"

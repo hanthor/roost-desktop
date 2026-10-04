@@ -1,0 +1,17 @@
+{
+  "niri": "26.04-2.fc45",
+  "candidate_pr": 233,
+  "candidate_run": 37169850678,
+  "candidate_head": "5b76d44d9e6282b0b33d47e74eb01ed52394689e",
+  "candidate_artifact": "roost-arch",
+  "candidate_stage": "before #238 animation changes",
+  "dimensions": [
+    1280,
+    800
+  ],
+  "gtk": "4.24.1-1.fc45",
+  "libadwaita": "1.10.0-2.fc45",
+  "capture_date_utc": "2026-10-04",
+  "capture": "scripts/lib/roost-scroll-capture.py",
+  "reference_container": "8e6acbddb9993c31c6dc836a2815ec4c85b3977fc07f14c7558deb4238e32bb5"
+}
