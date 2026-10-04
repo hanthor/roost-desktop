@@ -41,6 +41,12 @@ def activate(app):
     window.add_controller(controller)
     window.connect("notify::mapped", lambda *_arguments: publish())
     window.connect("notify::is-active", lambda *_arguments: publish())
+    def allocated(widget, _clock):
+        # Mapping/activation notifications can precede the first allocation.
+        publish()
+        return not (widget.get_mapped() and widget.get_width() > 0
+                    and widget.get_height() > 0)
+    window.add_tick_callback(allocated)
     window.present()
     button.grab_focus()
     publish()
