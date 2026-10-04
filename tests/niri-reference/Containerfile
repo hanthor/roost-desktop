@@ -1,0 +1,4 @@
+# A distro binary, not a source build; version is recorded with the captures.
+FROM quay.io/fedora/fedora:45
+RUN dnf -y install niri-26.04-2.fc45 mesa-dri-drivers xorg-x11-server-Xvfb xdotool scrot python3-gobject gtk4 libadwaita adwaita-fonts-all adwaita-icon-theme jq dbus-daemon && dnf clean all
+RUN dnf -y install gtk4-layer-shell python3-pillow && dnf clean all

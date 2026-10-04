@@ -1,0 +1,101 @@
+[
+  {
+    "id": 3,
+    "title": "Scroll Two",
+    "app_id": "roost-test-scroll two",
+    "pid": 114,
+    "workspace_id": 1,
+    "is_focused": false,
+    "is_floating": false,
+    "is_urgent": false,
+    "layout": {
+      "pos_in_scrolling_layout": [
+        2,
+        1
+      ],
+      "tile_size": [
+        616.0,
+        736.0
+      ],
+      "window_size": [
+        616,
+        736
+      ],
+      "tile_pos_in_workspace_view": null,
+      "window_offset_in_tile": [
+        0.0,
+        0.0
+      ]
+    },
+    "focus_timestamp": {
+      "secs": 467701,
+      "nanos": 219252085
+    }
+  },
+  {
+    "id": 4,
+    "title": "Scroll Three",
+    "app_id": "roost-test-scroll three",
+    "pid": 141,
+    "workspace_id": 1,
+    "is_focused": true,
+    "is_floating": false,
+    "is_urgent": false,
+    "layout": {
+      "pos_in_scrolling_layout": [
+        3,
+        1
+      ],
+      "tile_size": [
+        826.0,
+        736.0
+      ],
+      "window_size": [
+        826,
+        736
+      ],
+      "tile_pos_in_workspace_view": null,
+      "window_offset_in_tile": [
+        0.0,
+        0.0
+      ]
+    },
+    "focus_timestamp": {
+      "secs": 467702,
+      "nanos": 4107717
+    }
+  },
+  {
+    "id": 2,
+    "title": "Scroll One",
+    "app_id": "roost-test-scroll one",
+    "pid": 43,
+    "workspace_id": 1,
+    "is_focused": false,
+    "is_floating": false,
+    "is_urgent": false,
+    "layout": {
+      "pos_in_scrolling_layout": [
+        1,
+        1
+      ],
+      "tile_size": [
+        616.0,
+        736.0
+      ],
+      "window_size": [
+        616,
+        736
+      ],
+      "tile_pos_in_workspace_view": null,
+      "window_offset_in_tile": [
+        0.0,
+        0.0
+      ]
+    },
+    "focus_timestamp": {
+      "secs": 467700,
+      "nanos": 400106588
+    }
+  }
+]
