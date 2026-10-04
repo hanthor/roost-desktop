@@ -356,7 +356,10 @@ impl State {
     pub(crate) fn reactivate_inhibitor(&mut self, surface: &WlSurface) {
         // A shell layer dialog may hold focus during consent. Switching
         // to a different app cancels it, so a late Allow cannot grant it.
-        if self.window_origins.contains_key(surface)
+        if self
+            .toplevels()
+            .iter()
+            .any(|toplevel| toplevel.wl_surface() == surface)
             && self
                 .protocols
                 .shortcut_pending
@@ -423,8 +426,11 @@ impl State {
         {
             return;
         }
-        let (_, inhibitor, _, _) = self.protocols.shortcut_pending.take().unwrap();
+        let (_, inhibitor, _, since) = self.protocols.shortcut_pending.take().unwrap();
         self.protocols.shortcut_changed = true;
+        if since.elapsed() > Duration::from_secs(30) {
+            return;
+        }
         if allow
             && self.window_origins.contains_key(inhibitor.wl_surface())
             && self

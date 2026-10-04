@@ -58,7 +58,7 @@ and this page together.
 | zxdg_exporter_v2, zxdg_importer_v2 | 1 | xdg-foreign: the portal parents its dialogs to the app's window, which centres and attaches them like the app's own |
 | xdg_system_bell_v1 | 1 | plays GNOME's `bell-window-system` sound through `canberra-gtk-play` when installed (Mutter's audible bell); a burst of rings is one sound |
 | xdg_toplevel_tag_manager_v1 | 1 | each window keeps its tag and description |
-| zwp_keyboard_shortcuts_inhibit_manager_v1 | 1 | the focused window gets every key, the shell's grabs, Super and Alt+Tab included; Super+Escape (Mutter's restore-shortcuts) takes them back until the window is focused again |
+| zwp_keyboard_shortcuts_inhibit_manager_v1 | 1 | after Allow, the focused window gets every key, the shell's grabs, Super and Alt+Tab included; Super+Escape (Mutter's restore-shortcuts) takes them back until the window is focused again |
 | wp_pointer_warp_v1 | 1 | honoured while the surface has pointer focus from the enter serial it names; nested, the host pointer stays where it is |
 
 ### xdg-activation policy
