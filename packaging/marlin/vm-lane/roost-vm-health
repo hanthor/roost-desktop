@@ -19,6 +19,7 @@ probe() {
 }
 probe calendar --dest org.gnome.Shell.CalendarServer --object-path /org/gnome/Shell/CalendarServer --method org.freedesktop.DBus.Properties.Get org.gnome.Shell.CalendarServer HasCalendars || exit 1
 probe portal --dest org.freedesktop.portal.Desktop --object-path /org/freedesktop/portal/desktop --method org.freedesktop.portal.Settings.Read org.freedesktop.appearance color-scheme || exit 1
+probe portal-gnome --dest org.freedesktop.impl.portal.desktop.gnome --object-path /org/freedesktop/portal/desktop --method org.freedesktop.DBus.Peer.Ping || exit 1
 previous=""
 while sleep 1; do
     active=$(timeout 5 gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver --method org.gnome.ScreenSaver.GetActive 2>/dev/null) || continue

@@ -245,8 +245,11 @@ def run_tour(qmp, out):
         keys("meta_l", "l")
         wait(5)
         rec.still("lock")
-        keys("shift")
+        # Shift alone intentionally leaves GNOME's curtain in place.
+        # Return reveals the focused prompt without adding a character.
+        keys("ret")
         wait(2)
+        keys("ctrl", "a")
         qmp.type_text("roost")
         wait(1)
         keys("ret")
@@ -445,7 +448,7 @@ def main():
         deadline = time.time() + 180
         while drm and shell and time.time() < deadline:
             text = read_text(serial_path)
-            if all(f"roost-vm-health: {name} ready" in text for name in ("calendar", "portal")):
+            if all(f"roost-vm-health: {name} ready" in text for name in ("calendar", "portal", "portal-gnome")):
                 break
             time.sleep(2)
         qmp.cmd("quit")
@@ -472,8 +475,8 @@ def main():
                               + (" to a GDM greeter session" if greeter else ""))
     record("V-GDM", "session services: GDM session and display registered" in text and not paused,
            "explicit GDM registration and no DRM session pause")
-    for name in ("calendar", "portal"):
-        record(f"V-{name.upper()}", f"roost-vm-health: {name} ready" in text,
+    for name in ("calendar", "portal", "portal-gnome"):
+        record(f"V-{name.upper()}", f"roost-vm-health: {name} ready" in text and (name != "portal" or "roost-vm-health: portal-gnome ready" in text),
                f"guest user bus {name} activation responds")
     if a.tour:
         transitions = re.findall(r"roost-vm-health: lock active=\((true|false),\)", text)
