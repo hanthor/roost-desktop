@@ -338,9 +338,15 @@ export async function run() {
     popup.display(1);
     await Scripting.sleep(350);
     await shotNow('15-workspace-popup');
-    await shot('23-workspace-switched');
     Main.wm.actionMoveWorkspace(wm.get_workspace_by_index(0));
     await Scripting.sleep(1200);
+    await chord([Clutter.KEY_Super_L, Clutter.KEY_Page_Down]);
+    if (wm.get_active_workspace_index() !== 1)
+        throw new Error('Super+Page_Down did not switch workspace');
+    await shot('23-workspace-switched');
+    await chord([Clutter.KEY_Super_L, Clutter.KEY_Page_Up]);
+    if (wm.get_active_workspace_index() !== 0)
+        throw new Error('Super+Page_Up did not restore workspace');
 
     // The screenshot UI (Print): the frozen screen, dimmed outside the
     // selection, with its panel.

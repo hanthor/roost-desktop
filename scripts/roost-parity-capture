@@ -326,8 +326,14 @@ sleep 1
 xdotool key super+Page_Down
 shot 15-workspace-popup 0.35
 shot 23-workspace-switched 1.5
+jq -e ' .active_workspace == 1 and .focused == null ' "$ROOST_COMPOSITOR_STATE" >/dev/null || {
+    echo "roost-parity-capture: Super+Page_Down did not enter the empty workspace" >&2; exit 1;
+}
 xdotool key super+Page_Up
 sleep 1.2
+jq -e ' .active_workspace == 0 ' "$ROOST_COMPOSITOR_STATE" >/dev/null || {
+    echo "roost-parity-capture: Super+Page_Up did not restore the workspace" >&2; exit 1;
+}
 # The screenshot UI (Print).
 xdotool key Print
 shot 14-screenshot-ui 6
