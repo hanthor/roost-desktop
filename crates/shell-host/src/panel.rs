@@ -4176,9 +4176,15 @@ fn pump_wayland(
         &fd,
         rustix::event::PollFlags::IN,
     )];
-    let readable = rustix::event::poll(&mut fds, 0)
-        .map(|n| n > 0)
-        .unwrap_or(false);
+    let readable = rustix::event::poll(
+        &mut fds,
+        Some(&rustix::event::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        }),
+    )
+    .map(|n| n > 0)
+    .unwrap_or(false);
     if readable {
         if let Some(guard) = queue.prepare_read() {
             guard.read().map_err(|e| PanelError::Flush(e.to_string()))?;
