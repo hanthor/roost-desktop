@@ -37,6 +37,14 @@ pub enum Action {
     ShowScreenRecordingUi,
     Screenshot,
     ScreenshotWindow,
+    VolumeUp {
+        precise: bool,
+    },
+    VolumeDown {
+        precise: bool,
+    },
+    VolumeMute,
+    MicrophoneMute,
     BrightnessUp,
     BrightnessDown,
     /// Window-manager keys on the focused window or the workspaces.
@@ -210,6 +218,69 @@ fn specs() -> Vec<Spec> {
             modes: ALL,
         },
     ];
+    // GNOME separates editable bindings from its hardware-key defaults.
+    // Both families remain live, and an explicitly empty array disables it.
+    let media = |key: &str, action, defaults: Vec<&'static str>| Spec {
+        schema: Schema::Media,
+        key: key.into(),
+        action,
+        defaults,
+        modes: ALL,
+    };
+    for (key, action, defaults) in [
+        (
+            "volume-up",
+            Action::VolumeUp { precise: false },
+            vec!["XF86AudioRaiseVolume", "<Ctrl>XF86AudioRaiseVolume"],
+        ),
+        (
+            "volume-down",
+            Action::VolumeDown { precise: false },
+            vec!["XF86AudioLowerVolume", "<Ctrl>XF86AudioLowerVolume"],
+        ),
+        ("volume-mute", Action::VolumeMute, vec!["XF86AudioMute"]),
+        ("mic-mute", Action::MicrophoneMute, vec!["XF86AudioMicMute"]),
+        (
+            "volume-up-quiet",
+            Action::VolumeUp { precise: false },
+            vec![
+                "<Alt>XF86AudioRaiseVolume",
+                "<Alt><Ctrl>XF86AudioRaiseVolume",
+            ],
+        ),
+        (
+            "volume-down-quiet",
+            Action::VolumeDown { precise: false },
+            vec![
+                "<Alt>XF86AudioLowerVolume",
+                "<Alt><Ctrl>XF86AudioLowerVolume",
+            ],
+        ),
+        (
+            "volume-mute-quiet",
+            Action::VolumeMute,
+            vec!["<Alt>XF86AudioMute"],
+        ),
+        (
+            "volume-up-precise",
+            Action::VolumeUp { precise: true },
+            vec![
+                "<Shift>XF86AudioRaiseVolume",
+                "<Ctrl><Shift>XF86AudioRaiseVolume",
+            ],
+        ),
+        (
+            "volume-down-precise",
+            Action::VolumeDown { precise: true },
+            vec![
+                "<Shift>XF86AudioLowerVolume",
+                "<Ctrl><Shift>XF86AudioLowerVolume",
+            ],
+        ),
+    ] {
+        specs.push(media(key, action, vec![]));
+        specs.push(media(&format!("{key}-static"), action, defaults));
+    }
     // GNOME's window-manager keys (Super+PageUp/PageDown and Alt+Tab
     // stay the compositor's own; it drops its defaults for the rest
     // once these are grabbed, so they rebind).
@@ -470,6 +541,16 @@ fn schema(id: &str) -> Option<gio::Settings> {
     Some(gio::Settings::new(id))
 }
 
+/// GNOME's configurable percentage step (precise bindings always use 2%).
+pub fn volume_step(media: Option<&gio::Settings>) -> f64 {
+    media
+        .filter(|s| {
+            s.settings_schema()
+                .is_some_and(|schema| schema.has_key("volume-step"))
+        })
+        .map_or(6.0, |s| f64::from(s.int("volume-step").clamp(1, 20)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,6 +616,21 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(find(Action::LockScreen), ["<Super>l"]);
+        assert_eq!(
+            find(Action::VolumeUp { precise: false }),
+            [
+                "XF86AudioRaiseVolume",
+                "<Ctrl>XF86AudioRaiseVolume",
+                "<Alt>XF86AudioRaiseVolume",
+                "<Alt><Ctrl>XF86AudioRaiseVolume"
+            ]
+        );
+        assert_eq!(
+            find(Action::VolumeMute),
+            ["XF86AudioMute", "<Alt>XF86AudioMute"]
+        );
+        assert_eq!(find(Action::MicrophoneMute), ["XF86AudioMicMute"]);
+        assert_eq!(volume_step(None), 6.0);
         assert_eq!(find(Action::ToggleApplicationView), ["<Super>a"]);
         assert_eq!(find(Action::ToggleMessageTray), ["<Super>v", "<Super>m"]);
         assert_eq!(find(Action::ToggleQuickSettings), ["<Super>s"]);
