@@ -612,6 +612,12 @@ fn queued_move_is_rejected_if_the_press_ends_before_reconcile() {
 #[test]
 fn another_surface_cannot_reuse_a_live_press_to_move_or_resize() {
     let mut f = fixture();
+    press_inside(&mut f);
+    assert_eq!(
+        f.client.pointer_entered.last().copied(),
+        Some(f._toplevel_surface.id().protocol_id()),
+        "the live press belongs to the original surface"
+    );
     let qh = f.queue.handle();
     let surface = f
         .client
@@ -629,9 +635,8 @@ fn another_surface_cannot_reuse_a_live_press_to_move_or_resize() {
     other.set_title("other-window".into());
     surface.commit();
     sync(&mut f);
-    // This point is in the first window's header and outside the cascade
-    // of the second window, so its live press belongs to the first one.
-    press_inside(&mut f);
+    // Mapping another surface changes keyboard focus, but cannot take
+    // ownership of the existing implicit pointer press.
     let before = f.manager.visible_windows();
     other._move(f.client.seat.as_ref().unwrap(), f.client.press_serial);
     other.resize(
