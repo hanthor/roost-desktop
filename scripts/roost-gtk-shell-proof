@@ -480,6 +480,8 @@ fi
 # clicks one), the bridge each key's fate.
 ROOST_IBUS_DEBUG=1
 export ROOST_IBUS_DEBUG
+ROOST_GRID_TRACE=1
+export ROOST_GRID_TRACE
 ROOST_PROOF_SWIPE_INPUT="$ARTIFACTS/swipe-input.json"
 export ROOST_PROOF_SWIPE_INPUT
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk -p roost-shell-host
@@ -917,6 +919,8 @@ for step in $(seq 1 6); do
     xdotool mousemove --window "$WID" $((page_source_x + step * 10)) "$page_source_y"
     sleep 0.05
 done
+sleep 0.25
+scrot "$ARTIFACTS/11h-grid-drag-interior.png" >/dev/null
 for i in $(seq 1 20); do
     xdotool mousemove --window "$WID" $((page_source_x + 60 + (WIDTH - 6 - page_source_x - 60) * i / 20)) "$page_source_y"
     sleep 0.03

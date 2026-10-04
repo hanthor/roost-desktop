@@ -1095,6 +1095,13 @@ impl DragPager {
     }
 
     fn begin(&self, width: i32) {
+        if std::env::var_os("ROOST_GRID_TRACE").is_some() {
+            eprintln!(
+                "roost-grid: pager begin width={width} page={} pages={}",
+                self.page(),
+                self.pages
+            );
+        }
         // A tenth of the grid each (PAGE_PREVIEW_RATIO / 2).
         let w = (f64::from(width) * 0.1) as i32;
         self.previous_hint.set_size_request(w, -1);
@@ -1104,6 +1111,9 @@ impl DragPager {
     }
 
     fn end(&self) {
+        if std::env::var_os("ROOST_GRID_TRACE").is_some() {
+            eprintln!("roost-grid: pager end");
+        }
         self.reset();
         self.dragging.set(false);
         self.previous_hint.remove_css_class("dnd");
@@ -1138,6 +1148,12 @@ impl DragPager {
     }
 
     fn motion(self: &Rc<Self>, x: f64, width: i32) {
+        if std::env::var_os("ROOST_GRID_TRACE").is_some() {
+            eprintln!(
+                "roost-grid: pager motion x={x:.0} width={width} page={}",
+                self.page()
+            );
+        }
         let width = f64::from(width);
         // 1) The edge: at once (_dragMaybeSwitchPageImmediately).
         if x > DRAG_EDGE_PX && x < width - DRAG_EDGE_PX {
@@ -1206,6 +1222,9 @@ fn drag_source(widget: &impl IsA<gtk::Widget>, text: String) {
     )));
     let w = widget.clone().upcast::<gtk::Widget>();
     source.connect_drag_begin(move |source, _| {
+        if std::env::var_os("ROOST_GRID_TRACE").is_some() {
+            eprintln!("roost-grid: source begin");
+        }
         let paintable = gtk::WidgetPaintable::new(Some(&w));
         source.set_icon(Some(&paintable), w.width() / 2, w.height() / 2);
     });
