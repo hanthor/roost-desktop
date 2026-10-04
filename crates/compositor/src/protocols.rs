@@ -116,6 +116,9 @@ pub(crate) struct Protocols {
     _idle_inhibit: IdleInhibitManagerState,
     _text_input: TextInputManagerState,
     _input_method: InputMethodManagerState,
+    /// The bridge uses an unbuffered popup only to receive caret coordinates.
+    /// Track its current parent independently of the rendered popup tree.
+    bridge_cursor_popup: Option<ImPopup>,
     _gestures: PointerGesturesState,
     _relative_pointer: RelativePointerManagerState,
     _pointer_constraints: PointerConstraintsState,
@@ -151,6 +154,7 @@ impl Protocols {
             _text_input: TextInputManagerState::new::<State>(dh),
             // Any client may become the input method, as on GNOME.
             _input_method: InputMethodManagerState::new::<State, _>(dh, |_client| true),
+            bridge_cursor_popup: None,
             _gestures: PointerGesturesState::new::<State>(dh),
             _relative_pointer: RelativePointerManagerState::new::<State>(dh),
             _pointer_constraints: PointerConstraintsState::new::<State>(dh),
@@ -497,12 +501,22 @@ delegate_text_input_manager!(State);
 
 impl InputMethodHandler for State {
     fn new_popup(&mut self, surface: ImPopup) {
+        if surface.wl_surface().client().is_some_and(|client| {
+            client
+                .get_data::<crate::ClientState>()
+                .is_some_and(|data| data.ime_bridge)
+        }) {
+            self.protocols.bridge_cursor_popup = Some(surface.clone());
+        }
         let _ = self
             .popups
             .track_popup(smithay::desktop::PopupKind::from(surface));
     }
 
     fn dismiss_popup(&mut self, surface: ImPopup) {
+        if self.protocols.bridge_cursor_popup.as_ref() == Some(&surface) {
+            self.protocols.bridge_cursor_popup = None;
+        }
         if let Some(parent) = surface.get_parent().map(|p| p.surface.clone()) {
             let _ = smithay::desktop::PopupManager::dismiss_popup(
                 &parent,
@@ -534,6 +548,7 @@ impl InputMethodHandler for State {
         surface.set_text_input_rectangle(global.loc.x, global.loc.y, global.size.w, global.size.h);
         // Placement stays relative to the parent, as smithay set it.
         surface.set_location(local.loc);
+        self.protocols.bridge_cursor_popup = Some(surface);
     }
 
     /// Where the text field's window sits, so the candidate popup
@@ -546,7 +561,100 @@ impl InputMethodHandler for State {
     }
 }
 delegate_input_method_manager!(State);
-smithay::delegate_virtual_keyboard_manager!(State);
+
+impl State {
+    /// A moved parent changes the caret's global position even when the app
+    /// does not send a new text-input rectangle.
+    pub(crate) fn refresh_ime_cursor_origins(&mut self) {
+        let Some(mut surface) = self.protocols.bridge_cursor_popup.clone() else {
+            return;
+        };
+        if !surface.alive() {
+            self.protocols.bridge_cursor_popup = None;
+            return;
+        }
+        let Some(parent) = surface.get_parent().map(|parent| &parent.surface) else {
+            return;
+        };
+        let Some(origin) = self.surface_origin(parent) else {
+            return;
+        };
+        let current = surface.text_input_rectangle();
+        let local = surface.location();
+        let global = global_cursor_rect(origin, Rectangle::new(local, current.size));
+        if current != global {
+            surface.set_text_input_rectangle(
+                global.loc.x,
+                global.loc.y,
+                global.size.w,
+                global.size.h,
+            );
+            surface.set_location(local);
+        }
+    }
+}
+// Keep Smithay's manager/object state, but route the trusted bridge's
+// returned keys through the physical keyboard map. Smithay 0.7's virtual
+// keyboard sends a different KeymapFile before each returned key; GTK then
+// resets its keyboard state while an Escape is closing a layer popup.
+smithay::reexports::wayland_server::delegate_global_dispatch!(State: [
+    smithay::reexports::wayland_protocols_misc::zwp_virtual_keyboard_v1::server::zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1:
+    smithay::wayland::virtual_keyboard::VirtualKeyboardManagerGlobalData
+] => smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState);
+smithay::reexports::wayland_server::delegate_dispatch!(State: [
+    smithay::reexports::wayland_protocols_misc::zwp_virtual_keyboard_v1::server::zwp_virtual_keyboard_manager_v1::ZwpVirtualKeyboardManagerV1: ()
+] => smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState);
+
+impl Dispatch<
+    smithay::reexports::wayland_protocols_misc::zwp_virtual_keyboard_v1::server::zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1,
+    smithay::wayland::virtual_keyboard::VirtualKeyboardUserData<State>,
+> for State {
+    fn request(
+        state: &mut State,
+        client: &Client,
+        resource: &smithay::reexports::wayland_protocols_misc::zwp_virtual_keyboard_v1::server::zwp_virtual_keyboard_v1::ZwpVirtualKeyboardV1,
+        request: smithay::reexports::wayland_protocols_misc::zwp_virtual_keyboard_v1::server::zwp_virtual_keyboard_v1::Request,
+        data: &smithay::wayland::virtual_keyboard::VirtualKeyboardUserData<State>,
+        handle: &DisplayHandle,
+        data_init: &mut DataInit<'_, State>,
+    ) {
+        use smithay::reexports::wayland_protocols_misc::zwp_virtual_keyboard_v1::server::zwp_virtual_keyboard_v1::Request;
+        use smithay::wayland::input_method::InputMethodKeyboardGrab;
+        match request {
+            Request::Key { time, key, state: pressed } => {
+                let Some(keyboard) = state.seat.get_keyboard() else { return };
+                // The physical event has already updated XKB. Do not update
+                // it twice or send it back into the IM grab recursively.
+                let grab = keyboard.with_grab(|serial, grab| {
+                    grab.downcast_ref::<InputMethodKeyboardGrab>().cloned().map(|grab| (serial, grab))
+                }).flatten();
+                if grab.is_some() { keyboard.unset_grab(state); }
+                keyboard.input_forward(state, key.saturating_add(8).into(),
+                    if pressed == 1 { smithay::backend::input::KeyState::Pressed } else { smithay::backend::input::KeyState::Released },
+                    smithay::utils::SERIAL_COUNTER.next_serial(), time, false);
+                if let Some((serial, grab)) = grab { keyboard.set_grab(state, grab, serial); }
+            }
+            // Preserve the bridge's event order: newer physical events may
+            // already have updated the compositor state while IBus replies.
+            Request::Modifiers { mods_depressed, mods_latched, mods_locked, group } => {
+                use smithay::input::keyboard::KeyboardTarget;
+                if let Some(keyboard) = state.seat.get_keyboard() {
+                    if let Some(focus) = keyboard.current_focus() {
+                        let seat = state.seat.clone();
+                        let mut modifiers = keyboard.modifier_state();
+                        modifiers.serialized.depressed = mods_depressed;
+                        modifiers.serialized.latched = mods_latched;
+                        modifiers.serialized.locked = mods_locked;
+                        modifiers.serialized.layout_effective = group;
+                        focus.modifiers(&seat, state, modifiers, smithay::utils::SERIAL_COUNTER.next_serial());
+                    }
+                }
+            },
+            request => <smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState as Dispatch<_, _, State>>::request(
+                state, client, resource, request, data, handle, data_init),
+        }
+    }
+}
 
 delegate_pointer_gestures!(State);
 delegate_relative_pointer!(State);
