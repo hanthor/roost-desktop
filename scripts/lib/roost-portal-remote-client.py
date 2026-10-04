@@ -91,6 +91,14 @@ if mode == 'eis':
     finally: os.close(fd)
     out.with_suffix('.eis-input.json').write_text(json.dumps(delivered(38, 2)))
 elif mode in ('revoke', 'backend-disconnect'):
+    # Leave Shift held so lock/backend-loss must release real seat state.
+    input_call('NotifyKeyboardKeycode', '(oa{sv}iu)', (42, 1))
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        telemetry = json.loads(Path('/out/compositor-state.json').read_text())
+        if 50 in telemetry['seat_pressed_keys']: break
+        time.sleep(.05)
+    else: raise RuntimeError('held remote Shift never reached seat state')
     out.with_suffix('.active').write_text(str(node))
     deadline = time.monotonic() + 30
     while not out.with_suffix('.revoke').exists() and time.monotonic() < deadline: time.sleep(.01)
@@ -104,7 +112,14 @@ deadline = time.monotonic() + 2
 while time.monotonic() < deadline:
     nodes = json.loads(subprocess.check_output(['pw-dump']))
     if not any(item.get('id') == node and item.get('type') == 'PipeWire:Interface:Node' for item in nodes):
-        print('real portal remote keyboard/pointer delivered; revoked node absent')
+        if mode in ('revoke', 'backend-disconnect'):
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                telemetry = json.loads(Path('/out/compositor-state.json').read_text())
+                if 50 not in telemetry['seat_pressed_keys']: break
+                time.sleep(.05)
+            else: raise RuntimeError('revocation left remote Shift held in seat state')
+        print('real portal remote keyboard/pointer delivered; revoked node absent; held seat state cleared')
         break
     time.sleep(.05)
 else: raise RuntimeError('revocation retained linked screen-cast node')
