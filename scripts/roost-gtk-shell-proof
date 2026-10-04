@@ -1719,6 +1719,11 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     [ "$(cat "$IME_OUT" 2>/dev/null)" = "你|你好|2" ] ||
         fail G-IME-SURROUNDING "the field holds '$(cat "$IME_OUT" 2>/dev/null)', not 你|你好|2"
     pass G-IME-SURROUNDING "the engine reads the field's surrounding text and deletes around the cursor"
+    # Wait for the asynchronous edit and its final caret layout before
+    # recording the baseline used by the exact movement gate.
+    for _ in $(seq 1 20); do grep -q "surrounding 你|你好|2 6 6" "$ENGINE_LOG" && break; sleep 0.1; done
+    grep -q "surrounding 你|你好|2 6 6" "$ENGINE_LOG" || fail G-IME-CURSOR "IBus did not hear the edited field"
+    sleep 0.5
     # The candidate window's anchor: SetCursorLocation inside the
     # field's window, in global (screen) coordinates.
     cursor="$(sed -n 's/^roost-ibus-test-engine: cursor //p' "$ENGINE_LOG" | tail -1)"

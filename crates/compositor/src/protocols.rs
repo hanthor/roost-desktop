@@ -116,6 +116,9 @@ pub(crate) struct Protocols {
     _idle_inhibit: IdleInhibitManagerState,
     _text_input: TextInputManagerState,
     _input_method: InputMethodManagerState,
+    /// The bridge uses an unbuffered popup only to receive caret coordinates.
+    /// Track its current parent independently of the rendered popup tree.
+    bridge_cursor_popup: Option<ImPopup>,
     _gestures: PointerGesturesState,
     _relative_pointer: RelativePointerManagerState,
     _pointer_constraints: PointerConstraintsState,
@@ -151,6 +154,7 @@ impl Protocols {
             _text_input: TextInputManagerState::new::<State>(dh),
             // Any client may become the input method, as on GNOME.
             _input_method: InputMethodManagerState::new::<State, _>(dh, |_client| true),
+            bridge_cursor_popup: None,
             _gestures: PointerGesturesState::new::<State>(dh),
             _relative_pointer: RelativePointerManagerState::new::<State>(dh),
             _pointer_constraints: PointerConstraintsState::new::<State>(dh),
@@ -497,12 +501,22 @@ delegate_text_input_manager!(State);
 
 impl InputMethodHandler for State {
     fn new_popup(&mut self, surface: ImPopup) {
+        if surface.wl_surface().client().is_some_and(|client| {
+            client
+                .get_data::<crate::ClientState>()
+                .is_some_and(|data| data.ime_bridge)
+        }) {
+            self.protocols.bridge_cursor_popup = Some(surface.clone());
+        }
         let _ = self
             .popups
             .track_popup(smithay::desktop::PopupKind::from(surface));
     }
 
     fn dismiss_popup(&mut self, surface: ImPopup) {
+        if self.protocols.bridge_cursor_popup.as_ref() == Some(&surface) {
+            self.protocols.bridge_cursor_popup = None;
+        }
         if let Some(parent) = surface.get_parent().map(|p| p.surface.clone()) {
             let _ = smithay::desktop::PopupManager::dismiss_popup(
                 &parent,
@@ -534,6 +548,7 @@ impl InputMethodHandler for State {
         surface.set_text_input_rectangle(global.loc.x, global.loc.y, global.size.w, global.size.h);
         // Placement stays relative to the parent, as smithay set it.
         surface.set_location(local.loc);
+        self.protocols.bridge_cursor_popup = Some(surface);
     }
 
     /// Where the text field's window sits, so the candidate popup
@@ -551,34 +566,30 @@ impl State {
     /// A moved parent changes the caret's global position even when the app
     /// does not send a new text-input rectangle.
     pub(crate) fn refresh_ime_cursor_origins(&mut self) {
-        for parent in self.window_origins.keys() {
-            for (popup, _) in smithay::desktop::PopupManager::popups_for_surface(parent) {
-                let smithay::desktop::PopupKind::InputMethod(mut surface) = popup else {
-                    continue;
-                };
-                if !surface.wl_surface().client().is_some_and(|client| {
-                    client
-                        .get_data::<crate::ClientState>()
-                        .is_some_and(|data| data.ime_bridge)
-                }) {
-                    continue;
-                }
-                let Some(origin) = self.surface_origin(parent) else {
-                    continue;
-                };
-                let current = surface.text_input_rectangle();
-                let local = surface.location();
-                let global = global_cursor_rect(origin, Rectangle::new(local, current.size));
-                if current != global {
-                    surface.set_text_input_rectangle(
-                        global.loc.x,
-                        global.loc.y,
-                        global.size.w,
-                        global.size.h,
-                    );
-                    surface.set_location(local);
-                }
-            }
+        let Some(mut surface) = self.protocols.bridge_cursor_popup.clone() else {
+            return;
+        };
+        if !surface.alive() {
+            self.protocols.bridge_cursor_popup = None;
+            return;
+        }
+        let Some(parent) = surface.get_parent().map(|parent| &parent.surface) else {
+            return;
+        };
+        let Some(origin) = self.surface_origin(parent) else {
+            return;
+        };
+        let current = surface.text_input_rectangle();
+        let local = surface.location();
+        let global = global_cursor_rect(origin, Rectangle::new(local, current.size));
+        if current != global {
+            surface.set_text_input_rectangle(
+                global.loc.x,
+                global.loc.y,
+                global.size.w,
+                global.size.h,
+            );
+            surface.set_location(local);
         }
     }
 }
