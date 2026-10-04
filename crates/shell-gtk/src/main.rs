@@ -1593,8 +1593,10 @@ fn build(app: &adw::Application) {
     {
         let background = settings("org.gnome.desktop.background");
         let interface = settings(INTERFACE_SCHEMA);
+        let screensaver = settings(SCREENSAVER_SCHEMA);
         let publish: Rc<dyn Fn()> = {
-            let (background, interface) = (background.clone(), interface.clone());
+            let (background, interface, screensaver) =
+                (background.clone(), interface.clone(), screensaver.clone());
             Rc::new(move || {
                 let Some(bg) = background.as_ref() else {
                     return;
@@ -1602,7 +1604,7 @@ fn build(app: &adw::Application) {
                 let dark = interface
                     .as_ref()
                     .is_some_and(|i| i.string("color-scheme") == "prefer-dark");
-                let text = logic::wallpaper_drop(
+                let mut text = logic::wallpaper_drop(
                     &bg.string("picture-uri"),
                     &bg.string("picture-uri-dark"),
                     dark,
@@ -1618,6 +1620,28 @@ fn build(app: &adw::Application) {
                         .map(|i| i.string("accent-color").to_string())
                         .unwrap_or_default(),
                 );
+                let lock_uri = screensaver
+                    .as_ref()
+                    .filter(|s| {
+                        s.settings_schema()
+                            .is_some_and(|schema| schema.has_key("picture-uri"))
+                    })
+                    .map(|s| {
+                        let uri = s.string("picture-uri");
+                        if !uri.starts_with("file://") {
+                            return String::new();
+                        }
+                        // GIO decodes escaped path components before the
+                        // compositor's simple local-file drop reader.
+                        gio::File::for_uri(&uri)
+                            .path()
+                            .filter(|path| path.is_absolute())
+                            .map(|path| format!("file://{}", path.display()))
+                            .unwrap_or_default()
+                    })
+                    .unwrap_or_default();
+                text.push_str(&lock_uri);
+                text.push('\n');
                 let dir = std::env::var_os("XDG_RUNTIME_DIR")
                     .map(std::path::PathBuf::from)
                     .unwrap_or_else(std::env::temp_dir);
@@ -1629,7 +1653,7 @@ fn build(app: &adw::Application) {
             })
         };
         publish();
-        for s in [background, interface].into_iter().flatten() {
+        for s in [background, interface, screensaver].into_iter().flatten() {
             let publish = publish.clone();
             // `publish` holds both settings objects, so they live as long
             // as this handler does.
@@ -1702,9 +1726,14 @@ fn build(app: &adw::Application) {
     {
         let session = settings(SESSION_SCHEMA);
         let screensaver = settings(SCREENSAVER_SCHEMA);
+        let interface = settings(INTERFACE_SCHEMA);
         let send: Rc<dyn Fn()> = {
-            let (shell, session, screensaver) =
-                (shell.clone(), session.clone(), screensaver.clone());
+            let (shell, session, screensaver, interface) = (
+                shell.clone(),
+                session.clone(),
+                screensaver.clone(),
+                interface.clone(),
+            );
             Rc::new(move || {
                 let idle = session
                     .as_ref()
@@ -1714,14 +1743,33 @@ fn build(app: &adw::Application) {
                     .as_ref()
                     .map(|s| (s.boolean("lock-enabled"), s.uint("lock-delay")))
                     .unwrap_or((true, 0));
-                let ms = logic::idle_lock_ms(idle, enabled, delay);
+                let animations = interface
+                    .as_ref()
+                    .filter(|s| {
+                        s.settings_schema()
+                            .is_some_and(|schema| schema.has_key("enable-animations"))
+                    })
+                    .is_none_or(|s| s.boolean("enable-animations"));
+                let ms = logic::idle_lock_ms(idle, enabled, delay, animations);
+                if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+                    let dir = std::path::PathBuf::from(dir);
+                    let temporary = dir.join(".roost-idle-blank.tmp");
+                    let policy = format!(
+                        "{}\n{}\n",
+                        u64::from(idle) * 1000,
+                        if animations { 10_000 } else { 0 }
+                    );
+                    if std::fs::write(&temporary, policy).is_ok() {
+                        let _ = std::fs::rename(temporary, dir.join("roost-idle-blank"));
+                    }
+                }
                 if let Some(control) = shell.borrow_mut().control.as_mut() {
                     let _ = control.set_idle_timeout(ms);
                 }
             })
         };
         send();
-        for settings in [session, screensaver].into_iter().flatten() {
+        for settings in [session, screensaver, interface].into_iter().flatten() {
             let send = send.clone();
             settings.connect_changed(None, move |_, _| send());
             // Keep the settings object (and its signal) alive.
