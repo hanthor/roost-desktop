@@ -460,9 +460,9 @@ class Recorder:
         self.stills = {}
         cmd = qmp.cmd
 
-        def locked(name, **args):
+        def locked(command, **args):
             with self.lock:
-                return cmd(name, **args)
+                return cmd(command, **args)
         qmp.cmd = locked
         self.thread = threading.Thread(target=self._run, daemon=True)
 

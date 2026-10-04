@@ -4,6 +4,7 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import tempfile
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -19,7 +20,9 @@ class BootApi(unittest.TestCase):
         qmp = lane.baseline.Qmp.__new__(lane.baseline.Qmp)
         qmp.file = io.StringIO()
         qmp._read = lambda: {"return": {}}
-        qmp.cmd("trace-event-set-state", name="virtio_gpu_cmd_set_scanout", enable=True)
+        with tempfile.TemporaryDirectory() as out:
+            lane.Recorder(qmp, out)
+            qmp.cmd("trace-event-set-state", name="virtio_gpu_cmd_set_scanout", enable=True)
         wire = json.loads(qmp.file.getvalue())
         self.assertEqual(wire, {"execute": "trace-event-set-state", "arguments": {
             "name": "virtio_gpu_cmd_set_scanout", "enable": True}})
