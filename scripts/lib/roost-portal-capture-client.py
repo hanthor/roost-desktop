@@ -80,6 +80,8 @@ while time.monotonic() < deadline:
     raw_dump = subprocess.check_output(["pw-dump", "--no-colors"], timeout=1)
     out.with_suffix(".pw-dump.txt").write_bytes(raw_dump)
     nodes = dump_module.dump_objects(raw_dump)
+    if time.monotonic() >= deadline:
+        raise RuntimeError("PipeWire withdrawal exceeded two seconds")
     if not any(item.get("id") == node and item.get("type") == "PipeWire:Interface:Node" for item in nodes):
         out.with_suffix(".revoked.json").write_text(json.dumps(nodes, indent=2))
         print("grant consumed frame from node " + str(node) + "; " + ("lock" if mode == "revoke" else "backend disconnect" if mode == "backend-disconnect" else "client disconnect" if mode == "disconnect" else "Close") + " removed PipeWire node in " + str(round(time.monotonic() - revoked_at, 3)) + "s")

@@ -124,6 +124,8 @@ while time.monotonic() < deadline:
     raw_dump = subprocess.check_output(["pw-dump", "--no-colors"], timeout=1)
     out.with_suffix(".pw-dump.txt").write_bytes(raw_dump)
     nodes = dump_module.dump_objects(raw_dump)
+    if time.monotonic() >= deadline:
+        raise RuntimeError("PipeWire withdrawal exceeded two seconds")
     if not any(item.get('id') == node and item.get('type') == 'PipeWire:Interface:Node' for item in nodes):
         if mode in ('revoke', 'backend-disconnect'):
             deadline = time.monotonic() + 2
