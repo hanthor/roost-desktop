@@ -148,6 +148,7 @@ impl overview::OverviewActions for ShellActions {
             .find(|w| w.id == id)?
             .icon
             .clone()
+            .filter(|icon| usable_window_icon(icon))
     }
 
     fn running(&self) -> Vec<(u64, Option<String>)> {
@@ -1885,7 +1886,9 @@ fn build(app: &adw::Application) {
                                 .as_deref()
                                 .and_then(|app| providers::provider_app(&apps, app))
                                 .is_none()
-                                .then(|| window.icon.clone())
+                                .then(|| {
+                                    window.icon.clone().filter(|icon| usable_window_icon(icon))
+                                })
                                 .flatten()
                         })
                         .map(|icon| -> gio::Icon {
@@ -1910,6 +1913,14 @@ fn build(app: &adw::Application) {
     }
 
     window.present();
+}
+
+fn usable_window_icon(icon: &str) -> bool {
+    if icon.starts_with('/') {
+        std::path::Path::new(icon).is_file()
+    } else {
+        gtk::gdk::Display::default().is_some_and(|d| gtk::IconTheme::for_display(&d).has_icon(icon))
+    }
 }
 
 fn main() -> glib::ExitCode {

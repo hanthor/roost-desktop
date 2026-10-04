@@ -341,10 +341,16 @@ impl SwitcherUi {
                 apps.entry(a.trim_end_matches(".desktop"))
                     .or_else(|| apps.entry(a))
             });
-            let icon = match entry
-                .and_then(|e| e.icon.clone())
-                .or_else(|| entry.is_none().then(|| window_icon.clone()).flatten())
-            {
+            let icon = match entry.and_then(|e| e.icon.clone()).or_else(|| {
+                entry
+                    .is_none()
+                    .then(|| {
+                        window_icon
+                            .clone()
+                            .filter(|icon| crate::usable_window_icon(icon))
+                    })
+                    .flatten()
+            }) {
                 Some(icon) if icon.starts_with('/') => gtk::Image::from_file(icon),
                 Some(icon) => gtk::Image::from_icon_name(&icon),
                 None => gtk::Image::from_icon_name("application-x-executable"),

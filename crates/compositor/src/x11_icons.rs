@@ -56,7 +56,11 @@ impl Reader {
                             (xid, id, raster)
                         })
                         .collect();
+                    let failed = conn.flush().is_err();
                     let _ = tx.try_send((display, result));
+                    if failed {
+                        connection = None;
+                    }
                 }
             })
             .expect("X11 icon worker");

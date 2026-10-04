@@ -431,8 +431,8 @@ impl OverviewUi {
             .collect();
         let favorites = shown.len();
         // Running windows no installed app claims become window-backed
-        // apps, as GNOME's WindowTracker makes them: one per app id (or
-        // window), with the generic icon.
+        // apps, as GNOME's WindowTracker makes them: one per window,
+        // with the window icon.
         let mut orphans: Vec<(u64, String)> = Vec::new();
         for (window, app) in &running {
             match app
@@ -446,9 +446,7 @@ impl OverviewUi {
                 }
                 None => {
                     let key = app.clone().unwrap_or_else(|| format!("window:{window}"));
-                    if !orphans.iter().any(|(_, k)| *k == key) {
-                        orphans.push((*window, key));
-                    }
+                    orphans.push((*window, key));
                 }
             }
         }

@@ -65,7 +65,7 @@ impl WindowIcons {
         }
         self.serial = self.serial.wrapping_add(1);
         let path = self.directory.path().join(format!("{}.png", self.serial));
-        image::save_buffer_with_format(
+        if image::save_buffer_with_format(
             &path,
             &raster.rgba,
             raster.width,
@@ -73,7 +73,11 @@ impl WindowIcons {
             image::ColorType::Rgba8,
             image::ImageFormat::Png,
         )
-        .ok()?;
+        .is_err()
+        {
+            let _ = std::fs::remove_file(&path);
+            return None;
+        }
         let entry = self
             .files
             .entry(key)
@@ -281,6 +285,13 @@ impl Dispatch<XdgToplevelIconV1, IconData> for State {
                 data.name = name_valid(&icon_name).then_some(icon_name);
             }
             icon::Request::AddBuffer { buffer, scale } => {
+                if buffer.client().map(|c| c.id()) != resource.client().map(|c| c.id()) {
+                    resource.post_error(
+                        icon::Error::InvalidBuffer,
+                        "buffer belongs to another client",
+                    );
+                    return;
+                }
                 if data.buffers.len() >= 32 {
                     resource.post_error(icon::Error::InvalidBuffer, "too many icon buffers");
                     return;
