@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """CI-only fixed guest-clock/notification probes, reached through QGA."""
 import argparse
+import base64
+import hashlib
 import json
 import pwd
 import os
@@ -69,9 +71,47 @@ def frames():
         process.communicate()
 
 
+def gnome_trace(action, index):
+    uid = pwd.getpwnam("roost-test").pw_uid
+    if action in ("start", "stop"):
+        process = subprocess.run([
+            "runuser", "-u", "roost-test", "--", "env", "-i", "PATH=/usr/bin:/bin",
+            f"XDG_RUNTIME_DIR=/run/user/{uid}",
+            f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
+            "/usr/libexec/roost-gnome-profiler", action],
+            text=True, capture_output=True, timeout=12, check=True)
+        provenance = json.loads(process.stdout)
+        if action == "start":
+            return provenance
+        # Stop flushes thread contexts asynchronously. Wait for a stable file,
+        # then retain structural/hash validation on the host as well.
+        time.sleep(.5)
+    path = Path(f"/run/user/{uid}/roost-perf-gnome.syscap")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        if (metadata.st_uid != uid or metadata.st_mode & 0o077
+                or not stat.S_ISREG(metadata.st_mode)
+                or not 256 <= metadata.st_size <= 8 * 1024 * 1024):
+            raise RuntimeError("invalid GNOME Sysprof capture ownership/size")
+        if action == "stop":
+            raw = stream.read(8 * 1024 * 1024 + 1)
+            if len(raw) != metadata.st_size:
+                raise RuntimeError("GNOME capture changed while reading")
+            return dict(provenance, bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+        if type(index) is not int or not 0 <= index < 128:
+            raise ValueError("invalid Sysprof capture chunk index")
+        stream.seek(index * 65536)
+        raw = stream.read(65536)
+        if not raw:
+            raise ValueError("Sysprof capture chunk beyond end")
+        return dict(index=index, data=base64.b64encode(raw).decode("ascii"))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("clock", "notify", "frames"))
+    parser.add_argument("action", choices=("clock", "notify", "frames",
+                                          "gnome-trace-start", "gnome-trace-stop", "gnome-trace-read"))
     parser.add_argument("--index", type=int, default=0)
     args = parser.parse_args()
     result = {}
@@ -79,6 +119,8 @@ def main():
         result["notification_id"] = notify(args.index)
     if args.action == "frames":
         result["presentation"] = frames()
+    if args.action.startswith("gnome-trace-"):
+        result["gnome_trace"] = gnome_trace(args.action.removeprefix("gnome-trace-"), args.index)
     result["boottime_s"] = time.clock_gettime(time.CLOCK_BOOTTIME)
     print(json.dumps(result))
 

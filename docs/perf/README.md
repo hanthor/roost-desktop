@@ -27,3 +27,8 @@ package and observer provenance in that run. This supplies a native Marlin
 protocol reference once a run passes; it does not replace the existing Fedora
 headless reference without retaining and reviewing that actual evidence.
 The comparison requires KVM and fails rather than accepting software emulation.
+
+The GNOME overview phase also retains the installed shell's own
+[Sysprof capture and decoded scope marks](gnome-overview-sysprof.md), with peer
+credentials, capture timestamps and a verified digest. These are raw event,
+dispatch and presentation scopes; causal latency remains a separate analysis.
