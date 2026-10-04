@@ -2,9 +2,12 @@
 //! with NetworkManager's AgentManager as org.gnome.Shell.NetworkAgent,
 //! it asks for a Wi-Fi network's password (WPA/SAE) or WEP key in
 //! GNOME's "Authentication required" dialog when NetworkManager needs
-//! one to connect. 802.1X secrets go to Settings, as before.
+//! one to connect. It also handles 802.1X, mobile PINs and VPN plugin
+//! external-UI prompts, and stores agent-owned secrets through libsecret.
 
-use std::cell::RefCell;
+use crate::network_secrets::{self, Field};
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use gio::prelude::*;
@@ -117,20 +120,25 @@ pub fn wifi_message(ssid: &str) -> String {
 
 struct Pending {
     invocation: gio::DBusMethodInvocation,
+    connection: glib::Variant,
     connection_path: String,
     setting: String,
-    secret: WifiSecret,
+    fields: Vec<Field>,
+    values: BTreeMap<String, String>,
 }
 
-/// The agent and its dialog.
+/// The agent owns one modal request; cancellation also invalidates async work.
 pub struct NetworkAgent {
     window: gtk::Window,
+    title: gtk::Label,
     message: gtk::Label,
-    entry: gtk::PasswordEntry,
+    content: gtk::Box,
+    entries: RefCell<Vec<gtk::Entry>>,
     ok: gtk::Button,
     pending: RefCell<Option<Pending>>,
+    generation: Cell<u64>,
+    replying: RefCell<Option<(String, String)>>,
 }
-
 impl NetworkAgent {
     fn new(app: &gtk::Application) -> Rc<Self> {
         let window = gtk::Window::new();
@@ -146,8 +154,6 @@ impl NetworkAgent {
         }
         window.set_exclusive_zone(-1);
         window.set_keyboard_mode(KeyboardMode::Exclusive);
-        // GNOME's prompt-dialog: title, description, the entry, then
-        // Cancel and Connect.
         let card = gtk::Box::new(gtk::Orientation::Vertical, 18);
         card.add_css_class("modal-dialog");
         card.add_css_class("prompt-dialog");
@@ -166,11 +172,6 @@ impl NetworkAgent {
         message.set_justify(gtk::Justification::Center);
         content.append(&title);
         content.append(&message);
-        let entry = gtk::PasswordEntry::new();
-        entry.add_css_class("prompt-dialog-password-entry");
-        entry.set_halign(gtk::Align::Center);
-        entry.set_show_peek_icon(true);
-        content.append(&entry);
         card.append(&content);
         let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         buttons.add_css_class("modal-dialog-button-box");
@@ -186,169 +187,364 @@ impl NetworkAgent {
         window.set_child(Some(&card));
         let agent = Rc::new(Self {
             window,
+            title,
             message,
-            entry,
+            content,
+            entries: RefCell::default(),
             ok,
-            pending: RefCell::new(None),
+            pending: RefCell::default(),
+            generation: Cell::new(0),
+            replying: RefCell::default(),
         });
-        {
-            let weak = Rc::downgrade(&agent);
-            cancel.connect_clicked(move |_| {
-                if let Some(a) = weak.upgrade() {
-                    a.reply(None);
-                }
-            });
-        }
-        let submit = {
-            let weak = Rc::downgrade(&agent);
-            move || {
-                if let Some(a) = weak.upgrade() {
-                    if a.ok.is_sensitive() {
-                        a.reply(Some(a.entry.text().to_string()));
-                    }
-                }
+        let weak = Rc::downgrade(&agent);
+        cancel.connect_clicked(move |_| {
+            if let Some(a) = weak.upgrade() {
+                a.reply(false);
             }
-        };
-        {
-            let submit = submit.clone();
-            agent.ok.connect_clicked(move |_| submit());
-        }
-        agent.entry.connect_activate(move |_| submit());
-        {
-            let weak = Rc::downgrade(&agent);
-            agent.entry.connect_changed(move |e| {
-                if let Some(a) = weak.upgrade() {
-                    let valid = a
-                        .pending
-                        .borrow()
-                        .as_ref()
-                        .is_some_and(|p| p.secret.valid(&e.text()));
-                    a.ok.set_sensitive(valid);
-                }
-            });
-        }
+        });
+        let weak = Rc::downgrade(&agent);
+        agent.ok.connect_clicked(move |_| {
+            if let Some(a) = weak.upgrade() {
+                a.reply(true);
+            }
+        });
         let keys = gtk::EventControllerKey::new();
-        {
-            let weak = Rc::downgrade(&agent);
-            keys.connect_key_pressed(move |_, key, _, _| {
-                if key == gtk::gdk::Key::Escape {
-                    if let Some(a) = weak.upgrade() {
-                        a.reply(None);
-                    }
-                    return glib::Propagation::Stop;
+        let weak = Rc::downgrade(&agent);
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if key == gtk::gdk::Key::Escape {
+                if let Some(a) = weak.upgrade() {
+                    a.reply(false);
                 }
-                glib::Propagation::Proceed
-            });
-        }
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
         agent.window.add_controller(keys);
         agent
     }
 
-    /// NetworkManager's GetSecrets.
     fn get_secrets(
-        &self,
-        connection: &glib::Variant,
+        self: &Rc<Self>,
+        connection: glib::Variant,
         connection_path: String,
         setting: String,
+        hints: Vec<String>,
         flags: u32,
         invocation: gio::DBusMethodInvocation,
     ) {
-        let section = |name: &str| {
-            connection.iter().find_map(|entry| {
-                (entry.child_value(0).str() == Some(name))
-                    .then(|| glib::VariantDict::new(Some(&entry.child_value(1))))
-            })
-        };
-        let ssid = section("802-11-wireless")
-            .and_then(|w| w.lookup_value("ssid", None))
-            .and_then(|v| v.get::<Vec<u8>>())
-            .map(|b| String::from_utf8_lossy(&b).into_owned());
-        let security = section("802-11-wireless-security");
-        let text = |k: &str| {
-            security
-                .as_ref()
-                .and_then(|s| s.lookup_value(k, None))
-                .and_then(|v| v.get::<String>())
-        };
-        let number = |k: &str| {
-            security
-                .as_ref()
-                .and_then(|s| s.lookup_value(k, None))
-                .and_then(|v| v.get::<u32>())
-                .unwrap_or(0)
-        };
-        let secret = (setting == "802-11-wireless-security")
-            .then(|| {
-                WifiSecret::for_key_mgmt(
-                    &text("key-mgmt").unwrap_or_default(),
-                    number("wep-tx-keyidx"),
-                    number("wep-key-type"),
-                )
-            })
-            .flatten();
-        let (Some(ssid), Some(secret)) = (ssid, secret) else {
-            invocation.return_dbus_error(NO_SECRETS, "only Wi-Fi passwords are asked for here");
-            return;
-        };
-        if flags & ALLOW_INTERACTION == 0 {
-            invocation.return_dbus_error(NO_SECRETS, "no stored secrets, and no prompting allowed");
-            return;
-        }
-        // A newer request replaces an open one.
-        self.reply(None);
-        self.message.set_text(&wifi_message(&ssid));
-        self.entry.set_text("");
-        self.entry.set_property("placeholder-text", secret.label());
-        self.entry
-            .update_property(&[gtk::accessible::Property::Label(secret.label())]);
-        self.ok.set_sensitive(false);
+        self.reply(false);
+        let generation = self.generation.get();
         *self.pending.borrow_mut() = Some(Pending {
             invocation,
+            connection: connection.clone(),
             connection_path,
-            setting,
-            secret,
+            setting: setting.clone(),
+            fields: vec![],
+            values: BTreeMap::new(),
         });
-        self.window.present();
-        self.entry.grab_focus();
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            let prompt = if setting == "vpn" {
+                network_secrets::vpn(&connection, &hints, flags).await
+            } else {
+                network_secrets::fields(&connection, &setting, &hints)
+                    .map(|fields| {
+                        let ssid = network_secrets::section(&connection, "802-11-wireless")
+                            .and_then(|s| s.lookup_value("ssid", None))
+                            .and_then(|v| v.get::<Vec<u8>>())
+                            .map(|s| String::from_utf8_lossy(&s).into_owned());
+                        let conn = network_secrets::section(&connection, "connection");
+                        network_secrets::VpnPrompt {
+                            title: "Authentication required".into(),
+                            message: ssid.map(|s| wifi_message(&s)).unwrap_or_else(|| {
+                                format!(
+                                    "Authentication is required to connect to “{}”",
+                                    network_secrets::text(conn.as_ref(), "id")
+                                )
+                            }),
+                            fields,
+                            values: BTreeMap::new(),
+                        }
+                    })
+                    .ok_or_else(|| "unsupported NetworkManager secret request".to_owned())
+            };
+            let Some(agent) = weak.upgrade() else { return };
+            if agent.generation.get() != generation {
+                return;
+            }
+            let mut prompt = match prompt {
+                Ok(p) => p,
+                Err(error) => {
+                    agent.fail(&error);
+                    return;
+                }
+            };
+            let conn = network_secrets::section(&connection, "connection");
+            let uuid = network_secrets::text(conn.as_ref(), "uuid");
+            for field in &mut prompt.fields {
+                if field.password {
+                    if flags & 2 != 0 {
+                        field.value.clear();
+                    } else if let Some(key) = field.key.as_deref() {
+                        if let Some(stored) = network_secrets::lookup(&uuid, &setting, key).await {
+                            field.value = stored;
+                        }
+                    }
+                }
+            }
+            if agent.generation.get() != generation {
+                return;
+            }
+            let complete = prompt.fields.iter().all(|f| f.valid(&f.value));
+            {
+                let mut request = agent.pending.borrow_mut();
+                let Some(pending) = request.as_mut() else {
+                    return;
+                };
+                pending.fields = prompt.fields;
+                pending.values = prompt.values;
+            }
+            // Interaction requested: show even prefilled fields, as GNOME does.
+            if flags & ALLOW_INTERACTION == 0 {
+                if complete {
+                    agent.reply_values();
+                } else {
+                    agent.fail("no stored secrets, and no prompting allowed");
+                }
+            } else if agent
+                .pending
+                .borrow()
+                .as_ref()
+                .is_some_and(|p| p.fields.is_empty())
+            {
+                agent.reply_values();
+            } else {
+                agent.show(&prompt.title, &prompt.message);
+            }
+        });
     }
-
-    /// Answer the open request: the typed secret, or cancelled.
-    fn reply(&self, value: Option<String>) {
-        let Some(p) = self.pending.borrow_mut().take() else {
+    fn show(self: &Rc<Self>, title: &str, message: &str) {
+        self.title.set_text(title);
+        self.window.set_title(Some(title));
+        self.message.set_text(message);
+        for entry in self.entries.take() {
+            self.content.remove(&entry);
+        }
+        let Some(pending) = self.pending.borrow().as_ref().map(|p| p.fields.clone()) else {
             return;
         };
-        self.window.set_visible(false);
-        self.entry.set_text("");
-        match value {
-            Some(value) => {
-                let inner = glib::VariantDict::new(None);
-                inner.insert_value(&p.secret.key(), &value.to_variant());
-                // a{sa{sv}}: the setting's name over its secrets.
-                let reply = glib::Variant::from_dict_entry(&p.setting.to_variant(), &inner.end());
-                let dict = glib::Variant::array_from_iter_with_type(
-                    glib::VariantTy::new("{sa{sv}}").expect("valid type"),
-                    [reply],
+        let mut entries = vec![];
+        for field in &pending {
+            let entry = gtk::Entry::new();
+            entry.add_css_class("prompt-dialog-password-entry");
+            entry.set_halign(gtk::Align::Center);
+            entry.set_placeholder_text(Some(&field.label));
+            entry.set_text(&field.value);
+            entry.set_visibility(!field.password);
+            entry.set_editable(field.key.is_some());
+            entry.set_can_focus(field.key.is_some());
+            entry.update_property(&[gtk::accessible::Property::Label(&field.label)]);
+            if field.password {
+                entry.set_icon_from_icon_name(
+                    gtk::EntryIconPosition::Secondary,
+                    Some("view-reveal-symbolic"),
                 );
-                p.invocation
-                    .return_value(Some(&glib::Variant::tuple_from_iter([dict])));
+                entry.connect_icon_press(|e, _| {
+                    e.set_visibility(!gtk::prelude::EntryExt::is_visible(e))
+                });
             }
-            None => p
-                .invocation
-                .return_dbus_error(USER_CANCELED, "the user cancelled"),
+            let weak = Rc::downgrade(self);
+            entry.connect_changed(move |_| {
+                if let Some(a) = weak.upgrade() {
+                    a.validate();
+                }
+            });
+            let weak = Rc::downgrade(self);
+            entry.connect_activate(move |_| {
+                if let Some(a) = weak.upgrade() {
+                    a.reply(true);
+                }
+            });
+            self.content.append(&entry);
+            entries.push(entry);
+        }
+        *self.entries.borrow_mut() = entries;
+        self.validate();
+        self.window.present();
+        if let Some(entry) = self.entries.borrow().iter().find(|e| e.is_editable()) {
+            entry.grab_focus();
         }
     }
-
-    /// NetworkManager's CancelGetSecrets: close the dialog.
-    fn cancel(&self, connection_path: &str, setting: &str) {
-        let matches = self
+    fn validate(&self) {
+        let pending = self.pending.borrow();
+        self.ok.set_sensitive(pending.as_ref().is_some_and(|p| {
+            p.fields
+                .iter()
+                .zip(self.entries.borrow().iter())
+                .all(|(f, e)| f.valid(&e.text()))
+        }));
+    }
+    fn reply(self: &Rc<Self>, submit: bool) {
+        if submit {
+            if !self.ok.is_sensitive() {
+                return;
+            }
+            if let Some(pending) = self.pending.borrow_mut().as_mut() {
+                for (field, entry) in pending.fields.iter_mut().zip(self.entries.borrow().iter()) {
+                    field.value = entry.text().to_string();
+                }
+            }
+            self.reply_values();
+        } else {
+            self.generation.set(self.generation.get() + 1);
+            self.replying.borrow_mut().take();
+            if let Some(p) = self.pending.borrow_mut().take() {
+                p.invocation
+                    .return_dbus_error(USER_CANCELED, "the user cancelled");
+            }
+            self.clear();
+        }
+    }
+    fn clear(&self) {
+        self.window.set_visible(false);
+        for entry in self.entries.borrow().iter() {
+            entry.set_text("");
+        }
+    }
+    fn fail(&self, error: &str) {
+        if let Some(p) = self.pending.borrow_mut().take() {
+            p.invocation.return_dbus_error(NO_SECRETS, error);
+        }
+        self.clear();
+    }
+    fn reply_values(self: &Rc<Self>) {
+        let Some(mut p) = self.pending.borrow_mut().take() else {
+            return;
+        };
+        self.clear();
+        for f in p.fields {
+            if let Some(key) = f.key {
+                p.values.insert(key, f.value);
+            }
+        }
+        let generation = self.generation.get();
+        *self.replying.borrow_mut() = Some((p.connection_path.clone(), p.setting.clone()));
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            let conn = network_secrets::section(&p.connection, "connection");
+            let uuid = network_secrets::text(conn.as_ref(), "uuid");
+            let id = network_secrets::text(conn.as_ref(), "id");
+            for (key, value) in &p.values {
+                if network_secrets::agent_owned(&p.connection, &p.setting, key) {
+                    let stored = network_secrets::store(&uuid, &id, &p.setting, key, value).await;
+                    if weak
+                        .upgrade()
+                        .is_none_or(|a| a.generation.get() != generation)
+                    {
+                        p.invocation
+                            .return_dbus_error(USER_CANCELED, "the request was cancelled");
+                        return;
+                    }
+                    if let Err(error) = stored {
+                        if let Some(agent) = weak.upgrade() {
+                            agent.replying.borrow_mut().take();
+                        }
+                        p.invocation.return_dbus_error(NO_SECRETS, &error);
+                        return;
+                    }
+                }
+            }
+            if let Some(agent) = weak.upgrade() {
+                if agent.generation.get() != generation {
+                    p.invocation
+                        .return_dbus_error(USER_CANCELED, "the request was cancelled");
+                    return;
+                }
+                agent.replying.borrow_mut().take();
+            } else {
+                p.invocation
+                    .return_dbus_error(USER_CANCELED, "the agent stopped");
+                return;
+            }
+            let inner = glib::VariantDict::new(None);
+            if p.setting == "vpn" {
+                inner.insert_value("secrets", &p.values.to_variant());
+            } else {
+                for (key, value) in p.values {
+                    inner.insert_value(&key, &value.to_variant());
+                }
+            }
+            let entry = glib::Variant::from_dict_entry(&p.setting.to_variant(), &inner.end());
+            let dict = glib::Variant::array_from_iter_with_type(
+                glib::VariantTy::new("{sa{sv}}").expect("valid type"),
+                [entry],
+            );
+            p.invocation
+                .return_value(Some(&glib::Variant::tuple_from_iter([dict])));
+        });
+    }
+    fn cancel(self: &Rc<Self>, connection_path: &str, setting: &str) {
+        if self
             .pending
             .borrow()
             .as_ref()
-            .is_some_and(|p| p.connection_path == connection_path && p.setting == setting);
-        if matches {
-            self.reply(None);
+            .is_some_and(|p| p.connection_path == connection_path && p.setting == setting)
+            || self
+                .replying
+                .borrow()
+                .as_ref()
+                .is_some_and(|(path, name)| path == connection_path && name == setting)
+        {
+            self.reply(false);
         }
     }
+}
+
+/// Save/DeleteSecrets use the same libsecret attributes as GNOME's agent.
+fn keyring_method(connection: glib::Variant, delete: bool, invocation: gio::DBusMethodInvocation) {
+    glib::MainContext::default().spawn_local(async move {
+        let conn = network_secrets::section(&connection, "connection");
+        let uuid = network_secrets::text(conn.as_ref(), "uuid");
+        let id = network_secrets::text(conn.as_ref(), "id");
+        for entry in connection.iter() {
+            let setting = entry.child_value(0).str().unwrap_or_default().to_owned();
+            if delete {
+                if let Err(error) = network_secrets::delete(&uuid, &setting).await {
+                    invocation.return_dbus_error(NO_SECRETS, &error);
+                    return;
+                }
+                continue;
+            }
+            let values = if setting == "vpn" {
+                glib::VariantDict::new(Some(&entry.child_value(1)))
+                    .lookup_value("secrets", None)
+                    .and_then(|v| v.get::<BTreeMap<String, String>>())
+                    .unwrap_or_default()
+            } else {
+                entry
+                    .child_value(1)
+                    .iter()
+                    .filter_map(|e| {
+                        Some((
+                            e.child_value(0).str()?.to_owned(),
+                            e.child_value(1).as_variant()?.get::<String>()?,
+                        ))
+                    })
+                    .collect()
+            };
+            for (key, value) in values {
+                if network_secrets::agent_owned(&connection, &setting, &key) {
+                    if let Err(error) =
+                        network_secrets::store(&uuid, &id, &setting, &key, &value).await
+                    {
+                        invocation.return_dbus_error(NO_SECRETS, &error);
+                        return;
+                    }
+                }
+            }
+        }
+        invocation.return_value(None);
+    });
 }
 
 /// Serve the agent on the system bus and register it with
@@ -386,7 +582,18 @@ pub fn start(app: &gtk::Application) {
                         let path = params.child_value(1).str().unwrap_or_default().to_owned();
                         let setting = params.child_value(2).str().unwrap_or_default().to_owned();
                         let flags = params.child_value(4).get::<u32>().unwrap_or(0);
-                        calls.get_secrets(&params.child_value(0), path, setting, flags, invocation);
+                        let hints = params
+                            .child_value(3)
+                            .get::<Vec<String>>()
+                            .unwrap_or_default();
+                        calls.get_secrets(
+                            params.child_value(0),
+                            path,
+                            setting,
+                            hints,
+                            flags,
+                            invocation,
+                        );
                     }
                     "CancelGetSecrets" => {
                         let path = params.child_value(0).str().unwrap_or_default().to_owned();
@@ -394,8 +601,9 @@ pub fn start(app: &gtk::Application) {
                         calls.cancel(&path, &setting);
                         invocation.return_value(None);
                     }
-                    // NetworkManager keeps system-owned secrets itself.
-                    "SaveSecrets" | "DeleteSecrets" => invocation.return_value(None),
+                    "SaveSecrets" | "DeleteSecrets" => {
+                        keyring_method(params.child_value(0), method == "DeleteSecrets", invocation)
+                    }
                     _ => invocation
                         .return_dbus_error("org.freedesktop.DBus.Error.UnknownMethod", method),
                 }

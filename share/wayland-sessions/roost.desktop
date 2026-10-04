@@ -5,3 +5,4 @@ Exec=roost-session
 TryExec=roost-session
 Type=Application
 DesktopNames=Roost;GNOME;
+X-GDM-SessionRegisters=true
