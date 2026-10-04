@@ -1,12 +1,16 @@
 #!/usr/bin/python3
 """Exercise the actual installed desktop portal frontend and consent backend."""
 import json
+import importlib.util
 import os
 from pathlib import Path
 import subprocess
 import sys
 import time
 from gi.repository import Gio, GLib
+dump_spec = importlib.util.spec_from_file_location("roost_pipewire_dump", Path(__file__).with_name("roost-pipewire-dump.py"))
+dump_module = importlib.util.module_from_spec(dump_spec)
+dump_spec.loader.exec_module(dump_module)
 out = Path(sys.argv[1])
 mode = sys.argv[2]
 bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
@@ -73,7 +77,9 @@ else:
 revoked_at = time.monotonic()
 deadline = time.monotonic() + 2
 while time.monotonic() < deadline:
-    nodes = json.loads(subprocess.check_output(["pw-dump"], timeout=1))
+    raw_dump = subprocess.check_output(["pw-dump", "--no-colors"], timeout=1)
+    out.with_suffix(".pw-dump.txt").write_bytes(raw_dump)
+    nodes = dump_module.dump_objects(raw_dump)
     if not any(item.get("id") == node and item.get("type") == "PipeWire:Interface:Node" for item in nodes):
         out.with_suffix(".revoked.json").write_text(json.dumps(nodes, indent=2))
         print("grant consumed frame from node " + str(node) + "; " + ("lock" if mode == "revoke" else "backend disconnect" if mode == "backend-disconnect" else "client disconnect" if mode == "disconnect" else "Close") + " removed PipeWire node in " + str(round(time.monotonic() - revoked_at, 3)) + "s")

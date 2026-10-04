@@ -1,12 +1,16 @@
 #!/usr/bin/python3
 """Real GNOME portal consent, linked screen cast, legacy input and libei delivery."""
 import json
+import importlib.util
 import os
 from pathlib import Path
 import subprocess
 import sys
 import time
 from gi.repository import Gio, GLib
+dump_spec = importlib.util.spec_from_file_location("roost_pipewire_dump", Path(__file__).with_name("roost-pipewire-dump.py"))
+dump_module = importlib.util.module_from_spec(dump_spec)
+dump_spec.loader.exec_module(dump_module)
 out = Path(sys.argv[1])
 mode = sys.argv[2]
 interface = 'org.freedesktop.portal.RemoteDesktop'
@@ -117,7 +121,9 @@ elif mode == 'disconnect': bus.close_sync(None)
 else: call('org.freedesktop.portal.Session', 'Close', None, session)
 deadline = time.monotonic() + 2
 while time.monotonic() < deadline:
-    nodes = json.loads(subprocess.check_output(['pw-dump']))
+    raw_dump = subprocess.check_output(["pw-dump", "--no-colors"], timeout=1)
+    out.with_suffix(".pw-dump.txt").write_bytes(raw_dump)
+    nodes = dump_module.dump_objects(raw_dump)
     if not any(item.get('id') == node and item.get('type') == 'PipeWire:Interface:Node' for item in nodes):
         if mode in ('revoke', 'backend-disconnect'):
             deadline = time.monotonic() + 2
