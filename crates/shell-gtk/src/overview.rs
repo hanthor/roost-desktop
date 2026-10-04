@@ -1402,14 +1402,7 @@ impl DragPager {
             return;
         };
         let width = hint.width().max(hint.width_request());
-        let crop = if direction < 0.0 {
-            (flow.width() - width).max(0)
-        } else {
-            0
-        };
-        let enabled =
-            gtk::Settings::default().is_none_or(|settings| settings.is_gtk_enable_animations());
-        let mut actors = Vec::new();
+        let mut tiles = Vec::new();
         let mut child = flow.first_child();
         while let Some(tile) = child {
             child = tile.next_sibling();
@@ -1424,7 +1417,28 @@ impl DragPager {
             else {
                 continue;
             };
-            let x = f64::from(point.x()) - f64::from(crop);
+            tiles.push((widget, point));
+        }
+        // FlowBox centers its columns, leaving a gutter wider than the
+        // 10% hint. Crop from the first/last actual tile, rather than
+        // showing that empty page margin instead of neighboring icons.
+        let crop = if direction < 0.0 {
+            tiles.iter().fold(0.0_f64, |edge, (widget, point)| {
+                edge.max(f64::from(point.x()) + f64::from(widget.width()))
+            }) - f64::from(width)
+        } else {
+            tiles
+                .iter()
+                .map(|(_, point)| f64::from(point.x()))
+                .reduce(f64::min)
+                .unwrap_or(0.0)
+        }
+        .max(0.0);
+        let enabled =
+            gtk::Settings::default().is_none_or(|settings| settings.is_gtk_enable_animations());
+        let mut actors = Vec::new();
+        for (widget, point) in tiles {
+            let x = f64::from(point.x()) - crop;
             let y = f64::from(point.y());
             if x + f64::from(widget.width()) <= 0.0 || x >= f64::from(width) {
                 continue;
