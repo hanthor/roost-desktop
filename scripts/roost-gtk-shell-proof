@@ -1737,7 +1737,7 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     for _ in $(seq 1 20); do grep -q "IBus panel: owns org.freedesktop.IBus.Panel" "$LOG" && break; sleep 0.5; done
     grep -q "IBus panel: owns org.freedesktop.IBus.Panel" "$LOG" ||
         fail G-IME-CANDIDATES "the shell never became IBus's panel"
-    shown_before="$(grep -c 'ibus candidate 1 尼 at' "$LOG")"
+    shown_before="$(grep -c 'ibus candidate 1 尼 at' "$LOG" || true)"
     xdotool type --delay 100 ni
     cstate '.layers | any(.namespace == "roost-ibus-candidates")' "candidate window" 10 ||
         fail G-IME-CANDIDATES "typing 'ni' showed no candidate window"
