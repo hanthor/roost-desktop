@@ -2209,10 +2209,15 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     for _ in $(seq 1 30); do grep -q "XIM started on $x11_display" "$LOG" && break; sleep 0.2; done
     grep -q "XIM started on $x11_display" "$LOG" || fail G-IME-XIM "private XIM server never started"
     XIM_OUT="$ARTIFACTS/xim.txt"
-    DISPLAY="$x11_display" GDK_BACKEND=x11 GTK_IM_MODULE=xim XMODIFIERS=@im=ibus "$PY" "$ROOT/scripts/lib/roost-ime-window.py" "$XIM_OUT" >"$ARTIFACTS/xim-window.log" 2>&1 &
+    DISPLAY="$x11_display" GDK_BACKEND=x11 GTK_IM_MODULE=xim XMODIFIERS=@im=ibus "$PY" "$ROOT/scripts/lib/roost-xim-window.py" "$XIM_OUT" >"$ARTIFACTS/xim-window.log" 2>&1 &
     XIM_WINDOW=$!
     IME_PIDS="$IME_PIDS $XIM_WINDOW"
+    cstate '.focused_app_id == "roost-xim" and .focused_rect[2] >= 300' "XIM client focus" ||
+        fail G-IME-XIM "private X11 field never received focus at its requested size"
     sleep 1.5
+    if grep -q 'No IM module matching GTK_IM_MODULE=xim' "$ARTIFACTS/xim-window.log"; then
+        fail G-IME-XIM "the client has no XIM module"
+    fi
     xdotool type --delay 100 nihao
     xdotool key space
     end=$(($(date +%s) + 10))
