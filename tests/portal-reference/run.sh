@@ -30,14 +30,22 @@ python3 /repo/scripts/lib/roost-capture-security-client.py > /out/untrusted-deni
 /usr/libexec/xdg-desktop-portal-gnome --replace >/out/backend.log 2>&1 & pids="$pids $!"
 /usr/libexec/xdg-desktop-portal --replace >/out/frontend.log 2>&1 & pids="$pids $!"
 sleep 2
-for decision in cancel grant; do
+for decision in cancel grant disconnect; do
     python3 /repo/scripts/lib/roost-portal-capture-client.py "/out/$decision.png" "$decision" >"/out/$decision.log" 2>&1 & client=$!; pids="$pids $client"
     python3 /repo/scripts/lib/roost-portal-consent.py "/out/a11y-$decision.json" "$decision"
     wait "$client"
 done
-[ -s /out/grant.png ] && [ ! -f /out/cancel.png ]
+[ -s /out/grant.png ] && [ -s /out/disconnect.png ] && [ ! -f /out/cancel.png ]
+# Keep a genuine external portal stream active across the lock transition.
+python3 /repo/scripts/lib/roost-portal-capture-client.py /out/lock-grant.png revoke >/out/lock-grant.log 2>&1 & client=$!; pids="$pids $client"
+python3 /repo/scripts/lib/roost-portal-consent.py /out/a11y-lock-grant.json grant
+end=$((SECONDS + 30))
+until [ -s /out/lock-grant.active ]; do [ "$SECONDS" -lt "$end" ] || exit 1; sleep .1; done
+jq -e '.capture_streams > 0 and (.locked | not)' "$ROOST_COMPOSITOR_STATE" >/dev/null
 gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver --method org.gnome.ScreenSaver.SetActive true >/out/lock.log
 end=$((SECONDS + 5))
+touch /out/lock-grant.revoke
+wait "$client"
 until jq -e '.locked and .capture_streams == 0' "$ROOST_COMPOSITOR_STATE" >/dev/null; do [ "$SECONDS" -lt "$end" ] || exit 1; sleep .1; done
 python3 /repo/scripts/lib/roost-capture-security-client.py > /out/locked-denial.log
 python3 /repo/scripts/lib/roost-portal-capture-client.py /out/locked.png locked >/out/locked.log 2>&1 & client=$!; pids="$pids $client"
@@ -47,4 +55,4 @@ wait "$client"
 [ ! -f /out/locked.png ]
 pw-dump > /out/locked-pipewire.json
 jq -e 'all(.[]; .type != "PipeWire:Interface:Node" or (.info.props["node.name"] // "" | contains("roost-screen-cast") | not))' /out/locked-pipewire.json >/dev/null
-printf '%s\n' 'GNOME51 genuine portal: untrusted/spoof denial, picker Cancel, Share/FD/frame, foreign owner rejection, Close/node removal, locked denial' > /out/assertions.txt
+printf '%s\n' 'GNOME51 genuine portal: untrusted/spoof denial, picker Cancel, Share/FD/frame, foreign owner rejection, Close and client-disconnect/node removal, active external stream revoked on lock, locked denial' > /out/assertions.txt
