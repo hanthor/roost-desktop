@@ -20,7 +20,7 @@ podman build -q -t localhost/roost-niri-reference "$ROOT/tests/niri-reference" >
 for kind in reference candidate; do
     case "$kind" in reference) run=/nref/run.sh;; candidate) run=/nref/run-roost.sh;; esac
     podman run --rm --pull=never -v "$ROOT/tests/niri-reference:/nref:ro,Z" \
-        -v "$ROOT/scripts/lib:/lib:ro,Z" -v "$CANDIDATE:/candidate:ro,Z" \
+        -v "$ROOT/scripts/lib:/proof-lib:ro,Z" -v "$CANDIDATE:/candidate:ro,Z" \
         -v "$OUT/$kind:/out:Z" localhost/roost-niri-reference \
         dbus-run-session -- "$run" >"$OUT/$kind/capture.log" 2>&1
  done

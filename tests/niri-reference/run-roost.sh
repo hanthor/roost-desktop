@@ -32,7 +32,7 @@ xdotool windowfocus "$wid"
 sleep 2
 for name in One Two Three; do
     case "$name" in One) color='#3584e4';; Two) color='#00a040';; Three) color='#a03080';; esac
-    WAYLAND_DISPLAY=roost-scroll-compare python3 /lib/roost-test-window.py "Scroll $name" "$color" >/out/"$name.log" 2>&1 &
+    WAYLAND_DISPLAY=roost-scroll-compare python3 /proof-lib/roost-test-window.py "Scroll $name" "$color" >/out/"$name.log" 2>&1 &
     pids="$pids $!"
     sleep 1
 done
@@ -41,4 +41,4 @@ for _ in $(seq 1 40); do [ "$(jq '.windows | length' "$ROOST_COMPOSITOR_STATE")"
 xdotool key super+shift+t
 sleep 1
 [ "$(jq -r .session_mode "$ROOST_COMPOSITOR_STATE")" = scroll ]
-python3 /lib/roost-scroll-capture.py roost /out
+python3 /proof-lib/roost-scroll-capture.py roost /out
