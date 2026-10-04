@@ -239,11 +239,7 @@ pub fn show_placeholder(layout: &mut OverviewLayout, at: u32) {
     let y = first.rect.loc.y;
     for thumb in &mut layout.thumbnails {
         let old = thumb.rect;
-        let offset = if thumb.workspace >= at {
-            step - step / 2
-        } else {
-            -step / 2
-        };
+        let offset = if thumb.workspace >= at { step } else { 0 };
         for preview in &mut layout.previews {
             if !preview.active && old.contains(preview.rect.loc) {
                 preview.rect.loc.x += offset;
@@ -251,10 +247,7 @@ pub fn show_placeholder(layout: &mut OverviewLayout, at: u32) {
         }
         thumb.rect.loc.x += offset;
     }
-    layout.placeholder = Some((
-        at,
-        Rectangle::new((x - step / 2, y).into(), (18, size.h).into()),
-    ));
+    layout.placeholder = Some((at, Rectangle::new((x, y).into(), (18, size.h).into())));
 }
 
 /// The workspace a window dropped at `pos` goes to: a thumbnail, or a
@@ -1337,7 +1330,7 @@ mod tests {
         show_placeholder(&mut l, 1);
         assert_eq!(l.placeholder.unwrap().0, 1);
         assert_eq!(l.placeholder.unwrap().1.size.w, 18);
-        assert!(l.thumbnails[0].rect.loc.x < first.loc.x);
+        assert_eq!(l.thumbnails[0].rect.loc.x, first.loc.x);
         assert!(l.thumbnails[1].rect.loc.x > second.loc.x);
         assert!(thumbnail_decor(&l, [0.2, 0.5, 0.8]).len() > 2);
     }
