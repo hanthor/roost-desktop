@@ -239,13 +239,32 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
            f"actual VT away/back, exact app/process identities, body difference {delta:.2%}, fresh count/client repaint {repaint_pixels} pixels")
 
     def suspend_and_check(label="", test_id="V-SUSPEND"):
+        def gpu_snapshot(phase):
+            # Retain device/console selection alongside guest DRM ownership.
+            # QEMU monitor output contains hardware configuration, not app input.
+            with open(os.path.join(evidence, f"{label}{phase}-gpu.json"), "w") as stream:
+                json.dump({"pci": qmp.cmd("query-pci"),
+                           "device_tree": qmp.cmd("human-monitor-command",
+                                                  **{"command-line": "info qtree"})[:65536],
+                           "guest": agent.run("diagnostics")}, stream, indent=2)
+
+        gpu_snapshot("before-suspend")
+        gpu_events = ("virtio_gpu_cmd_set_scanout", "virtio_gpu_cmd_res_create_2d",
+                      "virtio_gpu_cmd_res_unref", "virtio_gpu_cmd_res_back_attach",
+                      "virtio_gpu_cmd_res_back_detach")
+        for event in gpu_events:
+            qmp.cmd("trace-event-set-state", name=event, enable=True)
+        gpu_log = os.path.join(out, "qemu-gpu-resource.log")
+        with open(os.path.join(evidence, f"{label}gpu-trace-start.json"), "w") as stream:
+            json.dump({"log": os.path.basename(gpu_log), "offset": os.path.getsize(gpu_log)
+                       if os.path.exists(gpu_log) else 0, "events": gpu_events}, stream, indent=2)
         request = agent.run("suspend")
         with open(os.path.join(evidence, f"{label}suspend-request.json"), "w") as stream:
             json.dump(request, stream, indent=2)
         deadline = time.monotonic() + 30
         suspended = False
         while time.monotonic() < deadline:
-            if qmp.cmd("query-status")["status"] == f"{label}suspended":
+            if qmp.cmd("query-status")["status"] == "suspended":
                 suspended = True
                 break
             time.sleep(0.2)
@@ -278,6 +297,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
             if not state["state"]["locked"] or not same_apps(before, state):
                 raise RuntimeError("resume repaint exposed or replaced the session")
             resumed_frame = frame(f"{label}resumed-locked")
+        gpu_snapshot("post-resume")
         record(test_id, same_apps(before, resumed) and repainted,
                f"actual SUSPENDED → system_wakeup, first state locked, real lock mask repainted={repainted}, unchanged app IDs/rectangles and process start times")
         if not repainted:
@@ -660,7 +680,8 @@ def boot(disk, out, scratch, timeout, *, guest_agent=False):
     if guest_agent:
         qemu.extend(["-device", "virtio-serial-pci",
                      "-chardev", f"socket,path={agent_path},server=on,wait=off,id=roost-qga",
-                     "-device", "virtserialport,chardev=roost-qga,name=org.qemu.guest_agent.0"])
+                     "-device", "virtserialport,chardev=roost-qga,name=org.qemu.guest_agent.0",
+                     "-D", os.path.join(out, "qemu-gpu-resource.log")])
     if kvm:
         qemu[1:1] = ["-enable-kvm", "-cpu", "host"]
     log(f"booting {disk} (kvm={kvm})")

@@ -53,12 +53,12 @@ class Qmp:
             if "event" not in msg:
                 return msg
 
-    def cmd(self, name, **args):
-        self.file.write(json.dumps({"execute": name, "arguments": args}) + "\n")
+    def cmd(self, command, **args):
+        self.file.write(json.dumps({"execute": command, "arguments": args}) + "\n")
         self.file.flush()
         reply = self._read()
         if "error" in reply:
-            raise RuntimeError(f"{name}: {reply['error']}")
+            raise RuntimeError(f"{command}: {reply['error']}")
         return reply.get("return")
 
     def keys(self, *names, hold_ms=80):

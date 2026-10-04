@@ -99,6 +99,13 @@ def main():
             except (FileNotFoundError, PermissionError, ProcessLookupError):
                 continue
         result = {"active_vt": pathlib.Path("/sys/class/tty/tty0/active").read_text().strip(),
+                  "kernel_release": os.uname().release,
+                  "gpu_drivers": {path.name: (path / "device/driver").resolve().name
+                                  for path in pathlib.Path("/sys/class/drm").glob("card[0-9]*")
+                                  if (path / "device/driver").exists()},
+                  "kernel_restore": call("journalctl", "--boot", "--dmesg", "--no-pager",
+                                         "-n", "120", "-o", "short-monotonic", "--grep",
+                                         "(virtio|drm|PM:|suspend|resume)", check=False)[-32768:],
                   "processes": sorted(processes, key=lambda item: item["pid"])}
     elif action == "lock":
         call("gdbus", "call", "--session", "--dest", "org.gnome.ScreenSaver",

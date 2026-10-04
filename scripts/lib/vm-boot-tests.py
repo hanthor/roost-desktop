@@ -2,6 +2,8 @@
 """Protect the shared boot API used by the independent performance lane."""
 import importlib.machinery
 import importlib.util
+import io
+import json
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -13,6 +15,15 @@ loader.exec_module(lane)
 
 
 class BootApi(unittest.TestCase):
+    def test_qmp_command_accepts_protocol_name_argument(self):
+        qmp = lane.baseline.Qmp.__new__(lane.baseline.Qmp)
+        qmp.file = io.StringIO()
+        qmp._read = lambda: {"return": {}}
+        qmp.cmd("trace-event-set-state", name="virtio_gpu_cmd_set_scanout", enable=True)
+        wire = json.loads(qmp.file.getvalue())
+        self.assertEqual(wire, {"execute": "trace-event-set-state", "arguments": {
+            "name": "virtio_gpu_cmd_set_scanout", "enable": True}})
+
     def test_existing_four_value_performance_call_keeps_original_devices(self):
         with patch.object(lane.os.path, "exists", return_value=True), patch.object(lane.os, "access", return_value=True), patch.object(lane.subprocess, "Popen") as spawn:
             process, qmp, serial, kvm = lane.boot("disk.raw", "/out", "/scratch", 30)
