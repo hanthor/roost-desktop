@@ -12,6 +12,7 @@ def denied(dest, path, iface, method, args):
         return
     raise RuntimeError(method + " accepted an untrusted caller")
 def checks():
+    denied("org.gnome.Mutter.ServiceChannel", "/org/gnome/Mutter/ServiceChannel", "org.gnome.Mutter.ServiceChannel", "OpenWaylandServiceConnection", GLib.Variant("(u)", (1,)))
     denied("org.gnome.Shell.Introspect", "/org/gnome/Shell/Introspect", "org.gnome.Shell.Introspect", "GetWindows", None)
     denied("org.gnome.Mutter.ScreenCast", "/org/gnome/Mutter/ScreenCast", "org.gnome.Mutter.ScreenCast", "CreateSession", GLib.Variant("(a{sv})", ({},)))
     denied("org.gnome.Shell.Screenshot", "/org/gnome/Shell/Screenshot", "org.gnome.Shell.Screenshot", "Screenshot", GLib.Variant("(bbs)", (False, False, "/tmp/untrusted-capture.png")))

@@ -763,6 +763,7 @@ impl Runtime {
                     cast_outputs.clone(),
                     introspect.windows.clone(),
                     capture_authority.clone(),
+                    display.handle(),
                 ),
                 |event, _, rt: &mut Runtime| {
                     if let calloop::channel::Event::Msg(request) = event {

@@ -12,6 +12,23 @@ pub struct Authority {
     shell_pid: Arc<AtomicU32>,
 }
 impl Authority {
+    /// The portal opens its native display before acquiring its service name.
+    /// This authenticates that bootstrap executable, without granting capture.
+    pub async fn admit_portal_connection(
+        &self,
+        conn: &Connection,
+        header: &Header<'_>,
+    ) -> fdo::Result<String> {
+        let sender = header.sender().ok_or_else(|| denied("missing sender"))?;
+        let dbus = fdo::DBusProxy::new(conn).await?;
+        let pid = dbus
+            .get_connection_unix_process_id(sender.clone().into())
+            .await?;
+        if !installed_portal(pid) {
+            return Err(denied("service connection requires the installed portal"));
+        }
+        Ok(sender.to_string())
+    }
     pub fn publish(&self, locked: bool, shell_pid: Option<u32>) {
         self.locked.store(locked, Ordering::SeqCst);
         self.shell_pid

@@ -134,6 +134,51 @@ pub enum ToLoop {
     },
 }
 
+/// GNOME's backend requests this ordinary Wayland connection before owning
+/// its portal bus name. Capture admission remains a separate interface.
+struct ServiceChannel {
+    display: smithay::reexports::wayland_server::DisplayHandle,
+    authority: crate::capture_security::Authority,
+    clients: HashMap<String, Arc<AtomicBool>>,
+}
+
+#[interface(name = "org.gnome.Mutter.ServiceChannel")]
+impl ServiceChannel {
+    async fn open_wayland_service_connection(
+        &mut self,
+        service_client_type: u32,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> fdo::Result<zbus::zvariant::OwnedFd> {
+        let owner = self
+            .authority
+            .admit_portal_connection(conn, &header)
+            .await?;
+        if service_client_type != 1 {
+            return Err(fdo::Error::InvalidArgs(
+                "unsupported service client type".into(),
+            ));
+        }
+        self.clients.retain(|_, alive| alive.load(Ordering::SeqCst));
+        if self.clients.len() >= 32 || self.clients.contains_key(&owner) {
+            return Err(fdo::Error::LimitsExceeded(
+                "portal service connection limit".into(),
+            ));
+        }
+        let (server, client) = std::os::unix::net::UnixStream::pair()
+            .map_err(|e| fdo::Error::Failed(e.to_string()))?;
+        let alive = Arc::new(AtomicBool::new(true));
+        self.display
+            .insert_client(
+                server,
+                Arc::new(crate::ClientState::portal_service(alive.clone())),
+            )
+            .map_err(|e| fdo::Error::Failed(e.to_string()))?;
+        self.clients.insert(owner, alive);
+        Ok(std::os::fd::OwnedFd::from(client).into())
+    }
+}
+
 // --- DisplayConfig -----------------------------------------------------
 
 #[derive(Serialize, Type)]
@@ -727,6 +772,7 @@ pub fn start(
     outputs: Outputs,
     windows: Windows,
     authority: crate::capture_security::Authority,
+    display: smithay::reexports::wayland_server::DisplayHandle,
 ) -> calloop::channel::Channel<ToLoop> {
     let (to_loop, from_dbus) = calloop::channel::channel();
     let _ = std::thread::Builder::new()
@@ -756,10 +802,16 @@ pub fn start(
                 to_loop: to_loop.clone(),
                 next_id,
             };
+            let service_channel = ServiceChannel {
+                display,
+                authority: authority.clone(),
+                clients: HashMap::new(),
+            };
             let conn = match zbus::blocking::connection::Builder::session()
                 .and_then(|b| b.serve_at("/org/gnome/Mutter/ScreenCast", screencast))
                 .and_then(|b| b.serve_at("/org/gnome/Mutter/DisplayConfig", display_config))
                 .and_then(|b| b.serve_at("/org/gnome/Mutter/RemoteDesktop", remote_desktop))
+                .and_then(|b| b.serve_at("/org/gnome/Mutter/ServiceChannel", service_channel))
                 .and_then(|b| b.build())
             {
                 Ok(conn) => conn,
@@ -773,6 +825,7 @@ pub fn start(
                 "org.gnome.Mutter.DisplayConfig",
                 "org.gnome.Mutter.ScreenCast",
                 "org.gnome.Mutter.RemoteDesktop",
+                "org.gnome.Mutter.ServiceChannel",
             ] {
                 match conn.request_name_with_flags(name, flags) {
                     Ok(zbus::fdo::RequestNameReply::PrimaryOwner) => {
