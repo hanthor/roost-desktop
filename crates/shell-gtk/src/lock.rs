@@ -213,13 +213,13 @@ impl LockUi {
         let submit_keys = gtk::EventControllerKey::new();
         submit_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         {
-            let entry = entry.clone();
+            let entry = entry.downgrade();
             submit_keys.connect_key_pressed(move |_, key, _, _| {
                 if matches!(
                     key,
                     gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter | gtk::gdk::Key::ISO_Enter
                 ) {
-                    if entry.is_sensitive() {
+                    if let Some(entry) = entry.upgrade().filter(|entry| entry.is_sensitive()) {
                         entry.emit_by_name::<()>("activate", &[]);
                     }
                     glib::Propagation::Stop
