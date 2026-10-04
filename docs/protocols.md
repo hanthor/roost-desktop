@@ -89,10 +89,19 @@ presentation-time, fifo and commit-timing follow the frame path
 
 ### Keyboard shortcuts inhibit
 
-GNOME Shell asks before letting an app take the shortcuts ("Allow
-inhibiting shortcuts?") and remembers the answer. Roost has no such
-dialog yet and grants at once; Super+Escape always takes the shortcuts
-back, as in GNOME.
+Roost asks before letting a focused, mapped app take shortcuts. The GTK
+shell shows a modal with Deny and Allow and explains Super+Escape.
+Only Allow activates the inhibitor; Deny cannot be undone by refocusing.
+Known desktop apps use GNOME's PermissionStore (`gnome` table,
+`shortcuts-inhibitor` id, `GRANTED`/`DENIED` values), so remembered grants
+skip the dialog. Unknown apps are never remembered. An unavailable store
+opens the dialog. Background requests, stale responses, destroyed surfaces
+and requests outstanding at lock or a switch to another app fail closed.
+The non-GTK fallback shell has no consent UI and keeps requests inactive.
+Super+Escape always takes granted shortcuts back until the window is
+focused again. GNOME's configurable Xwayland exemption rules are not
+implemented. `scripts/roost-shortcut-proof` exercises Allow, Deny, refocus,
+emergency restore, stale focus and lock through a real Wayland test client.
 
 ## GNOME D-Bus interfaces
 

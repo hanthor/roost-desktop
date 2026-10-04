@@ -116,9 +116,10 @@ impl ProtocolVersion {
     ///
     /// `0.20` appends the shell-to-compositor `SetSwitcherKeys` command
     /// (GNOME's rebindable switcher keys), again last.
+    /// `0.21` appends shortcut inhibition consent requests and responses.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 20,
+        minor: 21,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -321,6 +322,13 @@ pub enum CommandKind {
     SetSwitcherKeys {
         /// Every bound chord.
         keys: Vec<SwitcherKey>,
+    },
+    /// Trusted shell response to a compositor-issued consent request.
+    ShortcutConsent {
+        /// The pending request, never a window id.
+        request: u64,
+        /// Explicit Allow (or a remembered grant), otherwise Deny.
+        allow: bool,
     },
 }
 
@@ -619,6 +627,11 @@ pub enum Message {
         index: u32,
         /// How many workspaces there are (GNOME's dynamic count).
         count: u32,
+    },
+    /// Show consent for this inhibitor; `None` dismisses a stale dialog.
+    ShortcutConsent {
+        /// Request id and stable application id (empty for unknown apps).
+        request: Option<(u64, String)>,
     },
 }
 
@@ -967,6 +980,7 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
         | Message::AcceleratorActivated { .. }
         | Message::WindowMenu { .. }
         | Message::WorkspacePopup { .. }
+        | Message::ShortcutConsent { .. }
         | Message::Command { .. }
         | Message::CommandResult { .. }
         | Message::Error { .. }

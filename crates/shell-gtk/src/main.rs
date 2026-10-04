@@ -35,6 +35,7 @@ mod screencast;
 mod screenshot_ui;
 mod services;
 mod shell_dbus;
+mod shortcut_consent;
 mod switcher;
 mod tray;
 mod wifi;
@@ -1728,6 +1729,17 @@ fn build(app: &adw::Application) {
         )
     };
 
+    let shortcut_consent = {
+        let shell = shell.clone();
+        shortcut_consent::Consent::new(
+            app.upcast_ref(),
+            Rc::new(move |request, allow| {
+                if let Some(control) = shell.borrow_mut().control.as_mut() {
+                    let _ = control.shortcut_consent(request, allow);
+                }
+            }),
+        )
+    };
     // Compositor state: drain the control socket every frame.
     {
         let shell = shell.clone();
@@ -1754,6 +1766,7 @@ fn build(app: &adw::Application) {
             let mut results = Vec::new();
             let mut accelerators = Vec::new();
             let mut menus = Vec::new();
+            let mut consent = None;
             let mut popups = Vec::new();
             if let Some(control) = shell.control.as_mut() {
                 loop {
@@ -1762,6 +1775,7 @@ fn build(app: &adw::Application) {
                             let _ = control.request_snapshot();
                         }
                         Ok(Handled::WindowMenu(request)) => menus.push(request),
+                        Ok(Handled::ShortcutConsent(request)) => consent = Some(request),
                         Ok(Handled::WorkspacePopup { index, count }) => {
                             popups.push((index, count));
                         }
@@ -1802,6 +1816,11 @@ fn build(app: &adw::Application) {
                 .is_some_and(|c| c.model().is_overview_open());
             drop(shell);
             lock_ui.sync(locked);
+            if locked {
+                shortcut_consent.dismiss();
+            } else if let Some(request) = consent {
+                shortcut_consent.sync(request);
+            }
             for (action, time, mode) in accelerators {
                 gnome_shell.accelerator_activated(action, time, mode);
             }
