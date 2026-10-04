@@ -205,6 +205,27 @@ impl LockUi {
         entry.set_show_peek_icon(true);
         entry.set_property("placeholder-text", "Password");
         entry.update_property(&[gtk::accessible::Property::Label("Password")]);
+        // Handle Return before the internal text/IM delegate: a password
+        // field must submit even when that delegate consumes activation.
+        // Use the same signal as the arrow, so pending checks and PAM
+        // verification stay in the single handler below. This controller
+        // only sees keys focused within the entry, not other lock controls.
+        let submit_keys = gtk::EventControllerKey::new();
+        submit_keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        {
+            let entry = entry.clone();
+            submit_keys.connect_key_pressed(move |_, key, _, _| {
+                if matches!(key, gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter) {
+                    if entry.is_sensitive() {
+                        entry.emit_by_name::<()>("activate", &[]);
+                    }
+                    glib::Propagation::Stop
+                } else {
+                    glib::Propagation::Proceed
+                }
+            });
+        }
+        entry.add_controller(submit_keys);
         // The Submit arrow sits inside the entry's right end.
         let next = gtk::Button::from_icon_name("go-next-symbolic");
         next.add_css_class("next-button");
