@@ -1041,8 +1041,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_20() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 20));
+    fn current_version_is_0_21() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 21));
     }
 
     #[test]
