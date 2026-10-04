@@ -21,7 +21,7 @@ lane = importlib.util.module_from_spec(spec)
 loader.exec_module(lane)
 sys.path.insert(0, str(HERE / "lib"))
 from vm_guest_agent import GuestAgent  # noqa: E402
-from gnome_sysprof import decode as decode_gnome_sysprof  # noqa: E402
+from gnome_sysprof import decode as decode_gnome_sysprof, required_scope_counts  # noqa: E402
 
 
 def guest_probe(agent, action, index=None):
@@ -88,13 +88,11 @@ def retain_gnome_trace(agent, out, metadata):
     (out / "gnome-overview.syscap").write_bytes(raw)
     (out / "gnome-overview-source.json").write_text(json.dumps(metadata, indent=2))
     decoded = decode_gnome_sysprof(raw)
-    names = [row["name"] for row in decoded["marks"] if row["pid"] == metadata["pid"]]
-    required = ("Clutter::Stage::process_queued_events#ev",
-                "Clutter::FrameClock::dispatch()", "Clutter::FrameClock::presented()")
-    counts = {prefix: sum(name.startswith(prefix) for name in names) for prefix in required}
+    # Preserve decoded evidence even if a required semantic scope is absent.
+    (out / "gnome-overview-marks.json").write_text(json.dumps(decoded, indent=2))
+    counts = required_scope_counts(decoded, metadata["pid"])
     if not all(counts.values()):
         raise ValueError("GNOME profile lacks actual event/dispatch/presentation scopes")
-    (out / "gnome-overview-marks.json").write_text(json.dumps(decoded, indent=2))
     return {"bytes": size, "sha256": digest, "frame_count": decoded["frame_count"],
             "mark_count": len(decoded["marks"]), "scope_counts": counts,
             "limitation": decoded["limitation"]}

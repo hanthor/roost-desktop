@@ -25,6 +25,18 @@ sysprof = load("sysprof", ROOT / "scripts/lib/gnome_sysprof.py")
 
 
 class SysprofCapture(unittest.TestCase):
+    def test_actual_gnome51_truncated_scope_names_and_owner(self):
+        root = ROOT / "scripts/lib/fixtures"
+        provenance = json.loads((root / "gnome51-overview-marks.json").read_text())
+        raw = (root / "gnome51-overview-marks.syscap").read_bytes()
+        import hashlib
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), provenance["sample_sha256"])
+        decoded = sysprof.decode(raw)
+        counts = sysprof.required_scope_counts(decoded, provenance["pid"])
+        self.assertEqual(sorted(counts.values()), [1, 1, 1])
+        self.assertEqual(max(len(name) for name in counts), 39)
+        self.assertFalse(any(sysprof.required_scope_counts(decoded, provenance["pid"] + 1).values()))
+
     def capture(self):
         # Produced by the real libsysprof-capture writer, not by this decoder.
         return (ROOT / "scripts/lib/fixtures/sysprof-mark.syscap").read_bytes()

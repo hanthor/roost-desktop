@@ -80,7 +80,7 @@ def gnome_trace(action, index):
             f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
             "/usr/libexec/roost-gnome-profiler", action],
             text=True, capture_output=True, timeout=12, check=True)
-        provenance = json.loads(process.stdout)
+        provenance = dict(json.loads(process.stdout), guest_kernel=os.uname().release)
         if action == "start":
             return provenance
         # Stop flushes thread contexts asynchronously. Wait for a stable file,

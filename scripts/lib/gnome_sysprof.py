@@ -8,6 +8,14 @@ import struct
 MAX_CAPTURE = 8 * 1024 * 1024
 
 
+def required_scope_counts(decoded, pid):
+    names = [row["name"] for row in decoded["marks"] if row["pid"] == pid]
+    # Sysprof stores at most 39 name bytes; use the actual ABI truncation.
+    required = ("Clutter::Stage::process_queued_events#event()",
+                "Clutter::FrameClock::dispatch()", "Clutter::FrameClock::presented()")
+    return {name[:39]: sum(item == name[:39] for item in names) for name in required}
+
+
 def decode(raw):
     if not 256 <= len(raw) <= MAX_CAPTURE:
         raise ValueError("invalid Sysprof capture size")
