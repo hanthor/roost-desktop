@@ -358,6 +358,8 @@ pub struct ShellDriver {
     bin: std::path::PathBuf,
     wayland_display: String,
     control_socket: std::path::PathBuf,
+    /// Extra variables for the shell (session kind, for one).
+    env: Vec<(String, String)>,
     events: Vec<SupervisorEvent>,
     /// Whether the current absence was already reported. The
     /// supervisor repeats `Exited` while a restart backoff is pending,
@@ -382,10 +384,17 @@ impl ShellDriver {
             bin,
             wayland_display,
             control_socket,
+            env: Vec::new(),
             events: Vec::new(),
             reported_down: false,
             reported_exhausted: false,
         }
+    }
+
+    /// Set one variable for every shell this driver spawns from now on.
+    pub fn set_env(&mut self, name: &str, value: &str) {
+        self.env.retain(|(k, _)| k != name);
+        self.env.push((name.to_owned(), value.to_owned()));
     }
 
     /// Non-blocking supervision step at `now_ms`. Never blocks the
@@ -397,10 +406,12 @@ impl ShellDriver {
         let bin = &self.bin;
         let wayland_display = &self.wayland_display;
         let control_socket = &self.control_socket;
+        let env = &self.env;
         let mut remake = || {
             let mut command = Command::new(bin);
             command.env("WAYLAND_DISPLAY", wayland_display);
             command.env("ROOST_CONTROL_SOCKET", control_socket);
+            command.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
             command
         };
         match supervisor.poll(&mut remake, now_ms) {

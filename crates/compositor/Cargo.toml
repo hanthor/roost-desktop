@@ -6,6 +6,20 @@ license.workspace = true
 
 [dependencies]
 smithay.workspace = true
+# Lock-screen PAM (unlock under GDM, where no greetd runs): libpam is
+# loaded at run time, so builds need no PAM headers and a system without
+# it fails closed.
+libc = "0.2"
+libloading = "0.8"
+# GNOME's monitors.xml (per-output scale and layout, #59).
+roxmltree = "0.21"
+# org.gnome.Shell.Screenshot (#61): D-Bus service and PNG output.
+zbus = { workspace = true }
+png = "0.18"
+# Screen sharing (#61): org.gnome.Mutter.ScreenCast streams over PipeWire,
+# niri's shape. Needs libpipewire-0.3 (and libclang to build).
+pipewire = { version = "0.10", features = ["v0_3_33"] }
+serde = { version = "1", features = ["derive"] }
 calloop.workspace = true
 signal-hook.workspace = true
 rand.workspace = true
@@ -17,6 +31,7 @@ roost-shell-control = { path = "../shell-control-schema", version = "0.1.0" }
 roost-greeter = { path = "../greeter", version = "0.1.0", default-features = false }
 greetd_ipc.workspace = true
 image.workspace = true
+roost-wallpaper = { path = "../wallpaper" }
 serde_json.workspace = true
 rustix.workspace = true
 
@@ -43,4 +58,5 @@ drm = [
 wayland-client.workspace = true
 wayland-protocols = { workspace = true, features = ["client"] }
 wayland-protocols-wlr = { workspace = true, features = ["client"] }
+wayland-protocols-misc = { version = "=0.3.12", features = ["client"] }
 tempfile = "3"

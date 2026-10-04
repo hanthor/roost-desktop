@@ -550,6 +550,7 @@ mod tests {
             keywords: Vec::new(),
             argv: Vec::new(),
             icon: None,
+            categories: Vec::new(),
         }
     }
 

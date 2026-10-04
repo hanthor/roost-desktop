@@ -88,6 +88,15 @@ pub struct Notification {
     title: String,
     /// Body text.
     body: String,
+    /// Source icon: the sender's `app_icon` (icon name, path or file
+    /// URI), shown when no desktop entry names the app (GNOME's
+    /// notificationDaemon.js). Empty for none.
+    icon: String,
+    /// The `desktop-entry` hint, without `.desktop`; empty for none.
+    desktop_entry: String,
+    /// When it arrived (or was last replaced), in Unix seconds, for
+    /// GNOME's "Just now" / "5 minutes ago" label.
+    received: u64,
     /// Invokable actions.
     actions: Vec<NotificationAction>,
     /// Urgency.
@@ -112,6 +121,21 @@ impl Notification {
     /// Sending application name.
     pub fn app(&self) -> &str {
         &self.app
+    }
+
+    /// Source icon from `Notify` (empty when none was given).
+    pub fn icon(&self) -> &str {
+        &self.icon
+    }
+
+    /// The `desktop-entry` hint (empty when absent).
+    pub fn desktop_entry(&self) -> &str {
+        &self.desktop_entry
+    }
+
+    /// Arrival time in Unix seconds.
+    pub fn received(&self) -> u64 {
+        self.received
     }
 
     /// Every action with its label, in sender order.
@@ -163,6 +187,13 @@ impl std::fmt::Display for NotificationError {
 
 impl std::error::Error for NotificationError {}
 
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+}
+
 /// Decode one queue-file notification; `None` skips a malformed
 /// entry while the rest of the file still loads.
 fn decode_notification(item: &serde_json::Value) -> Option<Notification> {
@@ -193,8 +224,20 @@ fn decode_notification(item: &serde_json::Value) -> Option<Notification> {
                 .collect()
         })
         .unwrap_or_default();
+    let text = |key: &str| {
+        item.get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
     Some(Notification {
         id,
+        icon: text("icon"),
+        desktop_entry: text("desktop_entry"),
+        received: item
+            .get("received")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default(),
         app: item.get("app")?.as_str()?.to_owned(),
         title: item
             .get("title")
@@ -335,6 +378,9 @@ impl NotificationCenter {
                 serde_json::json!({
                     "id": n.id,
                     "app": n.app,
+                    "icon": n.icon,
+                    "desktop_entry": n.desktop_entry,
+                    "received": n.received,
                     "title": n.title,
                     "body": n.body,
                     "actions": n.actions.iter().map(|a| serde_json::json!({
@@ -381,6 +427,17 @@ impl NotificationCenter {
             if let Err(e) = self.save(path) {
                 eprintln!("roost-shell-host: notification queue save failed: {e}");
             }
+        }
+    }
+
+    /// Record where a notification came from: its `app_icon` and
+    /// `desktop-entry` hint, which pick the icon and name its header
+    /// shows. Unknown ids are ignored.
+    pub fn set_source(&mut self, id: u64, icon: &str, desktop_entry: &str) {
+        if let Some(entry) = self.history.iter_mut().find(|n| n.id == id) {
+            entry.icon = icon.to_owned();
+            entry.desktop_entry = desktop_entry.trim_end_matches(".desktop").to_owned();
+            self.persist();
         }
     }
 
@@ -437,6 +494,7 @@ impl NotificationCenter {
                 entry.body = body.to_owned();
                 entry.actions = actions;
                 entry.urgency = urgency;
+                entry.received = now_secs();
                 entry.expanded = false;
                 entry.consumed.clear();
                 self.queue_banner(replaces, urgency);
@@ -464,6 +522,9 @@ impl NotificationCenter {
         let id = self.next_id;
         self.history.push_back(Notification {
             id,
+            icon: String::new(),
+            desktop_entry: String::new(),
+            received: now_secs(),
             app: app.to_owned(),
             title: title.to_owned(),
             body: body.to_owned(),
@@ -533,6 +594,14 @@ impl NotificationCenter {
         self.banners.retain(|b| *b != id);
         self.persist();
         Ok(())
+    }
+
+    /// Forget one notification entirely (its close button in the
+    /// list): history and banner both. Unknown ids are ignored.
+    pub fn remove(&mut self, id: u64) {
+        self.history.retain(|n| n.id != id);
+        self.banners.retain(|b| *b != id);
+        self.persist();
     }
 
     /// Drop all history (and with it, every banner).
@@ -814,6 +883,34 @@ mod tests {
         let again = NotificationCenter::load(&path);
         assert!(again.banners().is_empty(), "dismiss reaches the disk queue");
         assert_eq!(again.history().len(), 1, "history still kept");
+    }
+
+    #[test]
+    fn remove_forgets_one_notification() {
+        let mut c = center();
+        let a = c.notify("app", "a", "", vec![], Urgency::Normal, None);
+        let b = c.notify("app", "b", "", vec![], Urgency::Normal, None);
+        c.remove(a);
+        assert_eq!(
+            c.history().iter().map(|n| n.id).collect::<Vec<_>>(),
+            vec![b]
+        );
+        assert!(c.banners().iter().all(|n| n.id != a), "its banner goes too");
+    }
+
+    #[test]
+    fn source_and_arrival_survive_a_reload() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(QUEUE_FILE);
+        let mut c = center();
+        c.set_queue_path(path.clone());
+        let id = c.notify("Files", "t", "b", vec![], Urgency::Normal, None);
+        c.set_source(id, "folder-symbolic", "org.gnome.Nautilus.desktop");
+        let again = NotificationCenter::load(&path);
+        let n = &again.history()[0];
+        assert_eq!(n.icon(), "folder-symbolic");
+        assert_eq!(n.desktop_entry(), "org.gnome.Nautilus", "suffix dropped");
+        assert!(n.received() > 1_700_000_000, "arrival time recorded");
     }
 
     #[test]

@@ -10,10 +10,18 @@ name = "roost-shell-gtk"
 path = "src/main.rs"
 
 [dependencies]
+xkbcommon.workspace = true
 gtk4 = { workspace = true, features = ["v4_12"] }
 libadwaita.workspace = true
 gtk4-layer-shell.workspace = true
+gtk4-session-lock.workspace = true
 glib.workspace = true
 gio.workspace = true
 jiff.workspace = true
+libc = "0.2"
 roost-shell-host = { path = "../shell-host", version = "0.1.0" }
+roost-shell-control = { path = "../shell-control-schema", version = "0.1.0" }
+
+[build-dependencies]
+# GNOME Shell's own icons, compiled in as a GResource (build.rs).
+glib-build-tools = "0.22"

@@ -382,6 +382,24 @@ mod tests {
     }
 
     #[test]
+    fn desktop_ids_match_with_or_without_the_suffix() {
+        let entry = roost_shell_host::apps::AppEntry {
+            app_id: "org.gnome.Nautilus".to_owned(),
+            name: "Files".to_owned(),
+            generic_name: None,
+            keywords: Vec::new(),
+            argv: Vec::new(),
+            icon: None,
+            categories: Vec::new(),
+        };
+        let apps = roost_shell_host::apps::AppProvider::new(vec![entry]);
+        // GNOME's favorite-apps and DesktopId keys carry ".desktop".
+        assert!(provider_app(&apps, "org.gnome.Nautilus.desktop").is_some());
+        assert!(provider_app(&apps, "org.gnome.Nautilus").is_some());
+        assert!(provider_app(&apps, "org.gnome.Other.desktop").is_none());
+    }
+
+    #[test]
     fn terms_split_and_lowercase() {
         assert_eq!(terms("  Quarterly  REPORT "), ["quarterly", "report"]);
         assert!(terms("   ").is_empty());

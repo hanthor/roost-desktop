@@ -73,7 +73,53 @@ impl ProtocolVersion {
     /// `0.8` appends the compositor-to-shell `Environment` message
     /// (session variables such as `DISPLAY` once XWayland is up), again
     /// last for the same reason.
-    pub const CURRENT: Self = Self { major: 0, minor: 8 };
+    ///
+    /// `0.9` appends the shell-to-compositor `SetIdleTimeout` command
+    /// (GNOME's idle and lock settings, #63), again last.
+    ///
+    /// `0.10` appends the shell-to-compositor `SetOverviewSearch`
+    /// command (search hides the workspace view, as in GNOME), again last.
+    ///
+    /// `0.11` appends the shell-to-compositor `SetInputSettings` command
+    /// (GNOME's keyboard, touchpad and mouse settings), again last.
+    ///
+    /// `0.12` appends the shell-to-compositor `SetOverviewAppGrid`
+    /// command (the app grid shrinks the workspaces to thumbnails along
+    /// the top, as in GNOME), again last.
+    ///
+    /// `0.13` appends the compositor-to-shell `OverviewPreviews` message
+    /// (where each window preview sits, so the shell can draw GNOME's
+    /// app icons, captions and close buttons on them), again last.
+    ///
+    /// `0.14` appends the shell-to-compositor `Unlock` command (the lock
+    /// screen's password, verified by the compositor), again last.
+    ///
+    /// `0.15` appends the shell-to-compositor `SetAccelerators` command
+    /// and the compositor-to-shell `AcceleratorActivated` message
+    /// (org.gnome.Shell's GrabAccelerators for gnome-settings-daemon's
+    /// media keys), again last.
+    ///
+    /// `0.16` appends the compositor-to-shell `WindowMenu` message and
+    /// the shell-to-compositor `WindowAction` command (GNOME's window
+    /// menu), again last.
+    ///
+    /// `0.17` appends the compositor-to-shell `WorkspacePopup` message
+    /// (GNOME's workspace switcher popup), again last.
+    ///
+    /// `0.18` appends `Maximize`, `ToggleTiledLeft` and `ToggleTiledRight`
+    /// to `WindowAction` and the shell-to-compositor `SwitchInputSource`
+    /// command (GNOME's rebindable window-manager keys), again last.
+    ///
+    /// `0.19` appends `StepWindow` and `Key` to `SwitcherAction` and the
+    /// shell-to-compositor `SetSwitcherThumbnails` command (GNOME's
+    /// window thumbnails in the Alt+Tab switcher), again last.
+    ///
+    /// `0.20` appends the shell-to-compositor `SetSwitcherKeys` command
+    /// (GNOME's rebindable switcher keys), again last.
+    pub const CURRENT: Self = Self {
+        major: 0,
+        minor: 20,
+    };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
     pub const fn new(major: u16, minor: u16) -> Self {
@@ -198,8 +244,206 @@ pub enum CommandKind {
     /// Lock the session immediately (manual lock from the shell).
     /// Idempotent and tokenless like `ToggleOverview`: the shell is a
     /// trusted local peer, and locking hides rather than reveals.
-    /// Unlock is never a command: it goes through session auth.
+    /// Unlocking is never granted on request: see `Unlock`, which
+    /// carries a password the compositor verifies through session auth.
     Lock,
+    /// Lock after this much idle time; `0` never locks on idle (#63).
+    /// The shell derives it from GNOME's `idle-delay`, `lock-enabled`
+    /// and `lock-delay` keys and resends it on every change. Tokenless:
+    /// it only changes when the session locks itself, never unlocks.
+    SetIdleTimeout {
+        /// Idle milliseconds before locking, `0` for never.
+        ms: u64,
+    },
+    /// The overview's search is showing results (or not): while it is,
+    /// the compositor hides the workspace card and window previews, as
+    /// GNOME does. UI state; it resets whenever the overview closes.
+    SetOverviewSearch {
+        /// Whether search results are showing.
+        active: bool,
+    },
+    /// GNOME's input settings, as the shell reads them from GSettings
+    /// (#60): keymap, key repeat, pointer devices, hot corner. Sent at
+    /// start and on every change; the compositor applies them live.
+    SetInputSettings(InputSettings),
+    /// The overview shows the app grid (or not): while it does, the
+    /// compositor draws the workspaces as thumbnails along the top, as
+    /// GNOME's app grid state does. UI state; it resets whenever the
+    /// overview closes.
+    SetOverviewAppGrid {
+        /// Whether the app grid is showing.
+        active: bool,
+    },
+    /// The lock screen's password: the compositor verifies it through
+    /// session auth (PAM, or greetd's daemon) off its event loop and
+    /// unlocks only on success. The result comes back as this command's
+    /// `CommandResult` (`Applied` unlocked, `Denied` wrong password).
+    Unlock {
+        /// The typed password; never logged (`Debug` is redacted).
+        password: Secret,
+    },
+    /// Every key combination grabbed through org.gnome.Shell's
+    /// GrabAccelerators, the full set each time it changes. The
+    /// compositor keeps matching presses from clients and reports them
+    /// with `AcceleratorActivated`.
+    SetAccelerators {
+        /// The grabs, at most [`MAX_ACCELERATORS`].
+        accelerators: Vec<Accelerator>,
+    },
+    /// One of GNOME's window-menu actions on a window. Unknown windows
+    /// are denied, like every per-window command.
+    WindowAction {
+        /// The window.
+        window: WindowId,
+        /// What to do.
+        action: WindowAction,
+    },
+    /// Switch to the next (or previous) keyboard input source (GNOME's
+    /// `switch-input-source` keys). Tokenless: it only changes the
+    /// keymap.
+    SwitchInputSource {
+        /// The previous source instead of the next.
+        backward: bool,
+    },
+    /// Where the open switcher shows window thumbnails (GNOME's
+    /// ThumbnailSwitcher): the compositor draws each window, fitted,
+    /// into its frame above everything. Empty when none show. At most
+    /// [`MAX_SWITCHER_THUMBNAILS`].
+    SetSwitcherThumbnails {
+        /// The frames, in order.
+        thumbnails: Vec<SwitcherThumbnail>,
+    },
+    /// The switcher's keys (GNOME's `switch-applications`,
+    /// `switch-group` and their backward keys), the full set each time
+    /// they change. Once sent they replace the compositor's built-in
+    /// Alt/Super+Tab and Above_Tab; an empty list unbinds the switcher.
+    /// At most [`MAX_SWITCHER_KEYS`].
+    SetSwitcherKeys {
+        /// Every bound chord.
+        keys: Vec<SwitcherKey>,
+    },
+}
+
+/// Switcher thumbnails held at once.
+pub const MAX_SWITCHER_THUMBNAILS: usize = 64;
+
+/// Switcher keys held at once.
+pub const MAX_SWITCHER_KEYS: usize = 64;
+
+/// Mutter's `Above_Tab` in [`SwitcherKey::keysym`]: the key above Tab,
+/// whatever it types in the active layout.
+pub const KEYSYM_ABOVE_TAB: u32 = 0x2000_0000;
+
+/// One switcher chord.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwitcherKey {
+    /// The key's base-level xkb keysym (lower case for letters), or
+    /// [`KEYSYM_ABOVE_TAB`].
+    pub keysym: u32,
+    /// Exact modifiers: a combination of the `MOD_*` bits. Released,
+    /// all but Shift commit the switcher.
+    pub mods: u32,
+    pub kind: SwitcherKeyKind,
+}
+
+/// What a switcher chord does (GNOME's keybinding names).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SwitcherKeyKind {
+    /// `switch-applications`: the next app.
+    Applications,
+    /// `switch-applications-backward`.
+    ApplicationsBackward,
+    /// `switch-group`: the selected app's next window.
+    Group,
+    /// `switch-group-backward`.
+    GroupBackward,
+}
+
+/// One switcher thumbnail frame, in global logical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwitcherThumbnail {
+    /// The window drawn in it.
+    pub window: WindowId,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// GNOME's window-menu actions (windowMenu.js) the compositor carries out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WindowAction {
+    /// Hide (minimize).
+    Minimize,
+    /// Maximize, or Restore when maximized.
+    ToggleMaximize,
+    /// Move with the pointer until a click.
+    Move,
+    /// Resize from the bottom-right corner with the pointer until a click.
+    Resize,
+    /// Move to the workspace on the left.
+    MoveToWorkspaceLeft,
+    /// Move to the workspace on the right.
+    MoveToWorkspaceRight,
+    /// Always on Top, on or off.
+    ToggleAbove,
+    /// Always on Visible Workspace (on every workspace), on or off.
+    ToggleSticky,
+    /// Open the window menu at the window's corner (Alt+Space).
+    ShowMenu,
+    /// Leave maximized (Alt+F5).
+    Unmaximize,
+    /// Move to this workspace (GNOME's move-to-workspace keys).
+    MoveToWorkspace {
+        /// The workspace.
+        workspace: u32,
+    },
+    /// Maximize (GNOME's `maximize` key, Super+Up).
+    Maximize,
+    /// Tile the left half, or untile (Mutter's `toggle-tiled-left`).
+    ToggleTiledLeft,
+    /// Tile the right half, or untile (`toggle-tiled-right`).
+    ToggleTiledRight,
+}
+
+/// Grabbed accelerators held at once.
+pub const MAX_ACCELERATORS: usize = 512;
+
+/// Modifier bits in [`Accelerator::mods`] (X11's masks).
+pub const MOD_SHIFT: u32 = 1;
+pub const MOD_CTRL: u32 = 4;
+pub const MOD_ALT: u32 = 8;
+pub const MOD_LOGO: u32 = 64;
+
+/// GNOME Shell's action modes (Shell.ActionMode) in [`Accelerator::modes`]:
+/// where a grab applies.
+pub const MODE_NORMAL: u32 = 1;
+pub const MODE_OVERVIEW: u32 = 2;
+pub const MODE_LOCK_SCREEN: u32 = 4;
+pub const MODE_UNLOCK_SCREEN: u32 = 8;
+
+/// One grabbed key combination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Accelerator {
+    /// The shell's action id, echoed in `AcceleratorActivated`.
+    pub action: u32,
+    /// The xkb keysym (lower case for letters).
+    pub keysym: u32,
+    /// Exact modifiers: a combination of the `MOD_*` bits.
+    pub mods: u32,
+    /// Action modes it applies in: a combination of the `MODE_*` bits.
+    pub modes: u32,
+}
+
+/// A secret on the wire (the lock screen's password). `Debug` never
+/// shows it, so a logged message cannot leak it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Secret(pub String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(<redacted>)")
+    }
 }
 
 /// Outcome of one shell command, matched by request id.
@@ -327,6 +571,120 @@ pub enum Message {
         /// `(name, value)` pairs, sorted by name.
         vars: Vec<(String, String)>,
     },
+    /// Compositor-to-shell overview previews: where each window preview
+    /// on the active workspace sits and which one the pointer is over,
+    /// so the shell draws GNOME's preview chrome (app icon always;
+    /// caption and close button on hover). Empty when the overview is
+    /// closed. Sent whenever it changes. Sits last.
+    OverviewPreviews {
+        /// Previews in drawing order, bottom first.
+        previews: Vec<PreviewInfo>,
+        /// The preview under the pointer, if any.
+        hovered: Option<u64>,
+    },
+    /// Compositor-to-shell: a grabbed accelerator was pressed (the
+    /// press and its release never reached a client). Sits last.
+    AcceleratorActivated {
+        /// The grab's action id.
+        action: u32,
+        /// The key event's time, in milliseconds.
+        time: u32,
+        /// The action mode it fired in (one `MODE_*` bit).
+        mode: u32,
+    },
+    /// Compositor-to-shell: a client asked for its window menu (a header
+    /// bar right click); the shell draws GNOME's menu at `x`, `y`
+    /// (logical pixels of the output). Sits last.
+    WindowMenu {
+        /// The window.
+        window: WindowId,
+        /// Where, in logical output pixels.
+        x: i32,
+        y: i32,
+        /// Whether it is maximized (Restore rather than Maximize).
+        maximized: bool,
+        /// Whether it is kept above other windows (Always on Top).
+        above: bool,
+        /// Whether it shows on every workspace (Always on Visible
+        /// Workspace).
+        sticky: bool,
+        /// Whether there is a workspace to its left, and to its right.
+        workspace_left: bool,
+        workspace_right: bool,
+    },
+    /// Compositor-to-shell: a workspace key switched workspaces outside
+    /// the overview; the shell shows GNOME's switcher popup. Sits last.
+    WorkspacePopup {
+        /// The active workspace's position.
+        index: u32,
+        /// How many workspaces there are (GNOME's dynamic count).
+        count: u32,
+    },
+}
+
+/// GNOME's dynamic workspace count: one empty workspace always follows
+/// the last occupied one, and the active one counts too.
+pub fn dynamic_workspace_count(max_occupied: Option<u32>, active: u32) -> u32 {
+    max_occupied.map_or(1, |m| m + 2).max(active + 1)
+}
+
+/// One window preview in the overview, in output logical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewInfo {
+    /// The window's model id.
+    pub window: u64,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// GNOME's input settings (`org.gnome.desktop.input-sources` and
+/// `org.gnome.desktop.peripherals.*`), flattened for the compositor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputSettings {
+    /// xkb layouts, comma separated, in input-source order (`us,de`).
+    pub xkb_layout: String,
+    /// xkb variants, one per layout (`,nodeadkeys`).
+    pub xkb_variant: String,
+    /// xkb options, comma separated (`compose:ralt`).
+    pub xkb_options: String,
+    /// Key repeat on, its delay and interval in milliseconds.
+    pub repeat: bool,
+    pub repeat_delay_ms: u32,
+    pub repeat_interval_ms: u32,
+    /// Touchpad.
+    pub tap_to_click: bool,
+    pub touchpad_natural_scroll: bool,
+    /// Pointer speed in thousandths, -1000..=1000 (GNOME's -1..1).
+    pub touchpad_speed_milli: i32,
+    pub disable_while_typing: bool,
+    /// Mouse.
+    pub mouse_natural_scroll: bool,
+    pub mouse_speed_milli: i32,
+    /// `org.gnome.desktop.interface enable-hot-corners`.
+    pub hot_corners: bool,
+}
+
+impl Default for InputSettings {
+    /// GNOME 51's defaults.
+    fn default() -> Self {
+        Self {
+            xkb_layout: "us".into(),
+            xkb_variant: String::new(),
+            xkb_options: String::new(),
+            repeat: true,
+            repeat_delay_ms: 500,
+            repeat_interval_ms: 30,
+            tap_to_click: false,
+            touchpad_natural_scroll: true,
+            touchpad_speed_milli: 0,
+            disable_while_typing: true,
+            mouse_natural_scroll: false,
+            mouse_speed_milli: 0,
+            hot_corners: true,
+        }
+    }
 }
 
 /// One Alt-Tab switcher drive event (compositor to shell).
@@ -342,6 +700,19 @@ pub enum SwitcherAction {
     Commit,
     /// Close the switcher without activating.
     Cancel,
+    /// GNOME's `switch-group` (Alt+Above_Tab): step through the selected
+    /// app's windows, showing their thumbnails. Opens the switcher when
+    /// closed.
+    StepWindow {
+        /// True for Above_Tab, false with Shift.
+        forward: bool,
+    },
+    /// Another key pressed while the switcher is open (its keysym): the
+    /// switcher holds the keyboard, as GNOME's does (arrows, Q, W, F4).
+    Key {
+        /// The xkb keysym.
+        keysym: u32,
+    },
 }
 
 /// Compositor-minted activation Bearer [REDACTED] authorizing one privileged window action.
@@ -560,13 +931,49 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
                 }
             }
         }
+        Message::Command {
+            kind: CommandKind::SetInputSettings(settings),
+            ..
+        } => {
+            check_title(&settings.xkb_layout)?;
+            check_title(&settings.xkb_variant)?;
+            check_title(&settings.xkb_options)?;
+        }
+        Message::Command {
+            kind: CommandKind::SetSwitcherThumbnails { thumbnails },
+            ..
+        } if thumbnails.len() > MAX_SWITCHER_THUMBNAILS => {
+            return Err(DecodeError::Malformed(
+                postcard::Error::DeserializeBadEncoding,
+            ));
+        }
+        Message::Command {
+            kind: CommandKind::SetSwitcherKeys { keys },
+            ..
+        } if keys.len() > MAX_SWITCHER_KEYS => {
+            return Err(DecodeError::Malformed(
+                postcard::Error::DeserializeBadEncoding,
+            ));
+        }
+        Message::Command {
+            kind: CommandKind::SetAccelerators { accelerators },
+            ..
+        } if accelerators.len() > MAX_ACCELERATORS => {
+            return Err(DecodeError::Malformed(
+                postcard::Error::DeserializeBadEncoding,
+            ));
+        }
         Message::Hello { .. }
+        | Message::AcceleratorActivated { .. }
+        | Message::WindowMenu { .. }
+        | Message::WorkspacePopup { .. }
         | Message::Command { .. }
         | Message::CommandResult { .. }
         | Message::Error { .. }
         | Message::Overview { .. }
         | Message::Switcher { .. }
-        | Message::Outputs { .. } => {}
+        | Message::Outputs { .. }
+        | Message::OverviewPreviews { .. } => {}
         // Names and values share the title bound: short by nature.
         Message::Environment { vars } => {
             for (name, value) in vars {
@@ -612,8 +1019,18 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_8() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 8));
+    fn secrets_never_reach_debug_output() {
+        let kind = CommandKind::Unlock {
+            password: Secret("hunter2".into()),
+        };
+        let shown = format!("{kind:?}");
+        assert!(!shown.contains("hunter2"), "{shown}");
+        assert!(shown.contains("redacted"));
+    }
+
+    #[test]
+    fn current_version_is_0_20() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 20));
     }
 
     #[test]
@@ -629,9 +1046,29 @@ mod tests {
         assert!(ProtocolVersion::new(0, 6).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 7).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 8).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 9).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 9).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 10).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 11).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 12).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 13).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 14).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 15).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 16).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 17).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 18).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 19).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 20).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 21).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
+    }
+
+    #[test]
+    fn dynamic_workspaces_end_with_one_empty() {
+        assert_eq!(dynamic_workspace_count(None, 0), 1);
+        assert_eq!(dynamic_workspace_count(Some(0), 0), 2);
+        assert_eq!(dynamic_workspace_count(Some(0), 1), 2);
+        assert_eq!(dynamic_workspace_count(Some(2), 0), 4);
     }
 
     #[test]

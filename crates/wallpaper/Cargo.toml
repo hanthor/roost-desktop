@@ -1,0 +1,10 @@
+[package]
+name = "roost-wallpaper"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+description = "Wallpaper decoding for Roost: any image format plus JPEG XL, cover-scaled to an output"
+
+[dependencies]
+image.workspace = true
+jxl-oxide.workspace = true

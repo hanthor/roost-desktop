@@ -6,10 +6,22 @@ window.roost-panel {
   background-color: #000000;
 }
 
+/* In the overview the bar is see-through (#panel:overview). */
+window.roost-panel.overview {
+  background-color: transparent;
+}
+
+/* Under a folder dialog's shade: the overview behind the bar at 20%. */
+window.roost-panel.overview.shaded {
+  background-color: #070708;
+}
+
 .roost-panel {
   font-family: "Adwaita Sans", "Cantarell", sans-serif;
   font-size: 11pt;
   font-weight: bold;
+  /* GNOME's %numeric: tabular figures, so the clock keeps its width. */
+  font-feature-settings: "tnum";
   color: #ffffff;
 }
 
@@ -17,80 +29,469 @@ window.roost-panel {
   min-height: 32px;
 }
 
+/* Panel buttons, measured against GNOME Shell 51 (#panel .panel-button):
+   a 3px transparent border around a pill highlight with 9px of padding
+   inside it (12px for the clock, whose highlight GNOME draws on the
+   label); white at 17% on hover, 28% when open, 32% when open and
+   hovered. */
 .roost-panel button.panel-button,
 .roost-panel menubutton.panel-button > button {
   background: none;
   color: #ffffff;
-  border-radius: 99px;
-  padding: 0 12px;
-  margin: 3px 2px;
+  border-radius: 999px;
+  padding: 0 9px;
+  margin: 3px;
   min-height: 26px;
   box-shadow: none;
   font-weight: bold;
 }
 
 .roost-panel button.panel-button:hover,
-.roost-panel menubutton.panel-button > button:hover,
-.roost-panel menubutton.panel-button > button:checked {
+.roost-panel menubutton.panel-button > button:hover {
   background-color: alpha(#ffffff, 0.17);
 }
 
+.roost-panel button.panel-button:active,
+.roost-panel button.panel-button:checked,
+.roost-panel button.panel-button.checked,
+.roost-panel menubutton.panel-button > button:active,
+.roost-panel menubutton.panel-button > button:checked {
+  background-color: alpha(#ffffff, 0.28);
+}
+
+.roost-panel button.panel-button:checked:hover,
+.roost-panel menubutton.panel-button > button:checked:hover {
+  background-color: alpha(#ffffff, 0.32);
+}
+
+.roost-panel menubutton.panel-button.clock-display > button {
+  padding: 0 12px;
+}
+
+/* Status icons (.system-status-icon): 16px, 4px margins, 4px apart. */
+.roost-panel .system-status-icon {
+  margin: 0 4px;
+}
+
+/* #panel .screen-recording-indicator: a filled $red_4 button, white
+   text and icon, 6px between the elapsed time and the stop icon. */
+.roost-panel button.panel-button.screen-recording-indicator {
+  background-color: #c01c28;
+  color: #ffffff;
+}
+.roost-panel button.panel-button.screen-recording-indicator:hover {
+  background-color: shade(#c01c28, 1.1);
+}
+
+/* #panel .privacy-indicator: the microphone while an app records. */
+.roost-panel .privacy-indicator {
+  color: #ff7800;
+}
+
+/* Workspace indicator (#panelActivities .workspace-dot): the active
+   workspace is an 8px-tall pill (its width set in code, by count), the
+   others 8px dots drawn at 6px (GNOME scales them to 0.75) in white at
+   50%, 5px apart. */
+.roost-panel .ws-pills {
+  margin: 0 3px;
+}
+
 .roost-panel .ws-pill {
-  background-color: alpha(#ffffff, 0.55);
-  border-radius: 99px;
+  background-color: alpha(#ffffff, 0.5);
+  border-radius: 999px;
   min-width: 6px;
   min-height: 6px;
-  margin: 0 2px;
+  margin: 1px;
 }
 
 .roost-panel .ws-pill.active {
   background-color: #ffffff;
-  min-width: 28px;
+  min-height: 8px;
+  margin: 0;
 }
 
+/* Panel menus (.popup-menu-content): GNOME 51's dark surface. */
 popover.roost-shell-popover > contents {
-  background-color: #2a2a2f;
+  background-color: #36363a;
   color: #ffffff;
-  border-radius: 24px;
-  padding: 12px;
+  border: 1px solid #424247;
+  border-radius: 20px;
+  box-shadow: 0 2px 4px 0 rgba(0, 0, 0, 0.2);
+  padding: 6px;
+  /* GNOME keeps menus 6px off the screen edges; the compositor slides
+     the surface flush, so the gap is a transparent margin. */
+  margin: 6px;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
+}
+
+/* Quick settings, measured against GNOME Shell 51 (.quick-settings):
+   18px padding, 36px corners, a 364px grid of 176x48 toggles 12px
+   apart, 38px round system buttons. */
+popover.roost-qs > contents {
+  padding: 18px;
+  border-radius: 36px;
+}
+
+popover.roost-qs.dimmed > contents {
+  /* GNOME dims the panel to 60% brightness under an open toggle menu. */
+  background-color: #202023;
+  border-color: #28282b;
+}
+
+.roost-qs.dimmed .qs-dimmable {
+  filter: brightness(60%);
+}
+
+.roost-qs .qs-round {
+  min-width: 38px;
+  min-height: 38px;
+  padding: 0;
+  border-radius: 999px;
+  background-color: #48484b;
+  color: #ffffff;
+  box-shadow: none;
+}
+
+.roost-qs .qs-round:hover {
+  background-color: #525256;
 }
 
 .roost-qs .qs-toggle {
-  border-radius: 99px;
+  /* GTK's min-width excludes padding: 149 + 15 + 12 = GNOME's 176. */
+  min-width: 149px;
   min-height: 48px;
-  min-width: 170px;
-  background-color: alpha(#ffffff, 0.1);
+  padding: 0 12px 0 15px;
+  border-radius: 999px;
+  background-color: #48484b;
   color: #ffffff;
-  font-weight: bold;
+  box-shadow: none;
+}
+
+.roost-qs .qs-toggle:hover {
+  background-color: #525256;
 }
 
 .roost-qs .qs-toggle:checked {
   background-color: @accent_bg_color;
+  color: @accent_fg_color;
 }
 
-.roost-qs .qs-round {
-  border-radius: 99px;
-  min-width: 40px;
-  min-height: 40px;
-  background-color: alpha(#ffffff, 0.1);
+.roost-qs .qs-toggle:checked:hover {
+  background-color: shade(@accent_bg_color, 1.08);
+}
+
+.roost-qs .qs-title {
+  font-weight: bold;
+}
+
+.roost-qs .qs-subtitle {
+  font-size: 9pt;
+  font-weight: normal;
+}
+
+/* A toggle with a menu: the pill splits into the toggle, a 1px
+   separator and a 36px arrow. */
+.roost-qs .qs-toggle-has-menu {
+  min-width: 176px;
+}
+
+.roost-qs .qs-toggle.has-menu {
+  min-width: 0;
+  padding-right: 9px;
+  border-radius: 999px 0 0 999px;
+}
+
+.roost-qs .qs-separator {
+  min-width: 1px;
+  margin: 0;
+  background-color: rgba(255, 255, 255, 0.25);
+}
+
+.roost-qs .qs-toggle-has-menu.checked .qs-separator {
+  background-color: mix(@accent_fg_color, @accent_bg_color, 0.7);
+}
+
+.roost-qs .qs-menu-button {
+  min-width: 36px;
+  min-height: 48px;
+  padding: 0;
+  border-radius: 0 999px 999px 0;
+  background-color: #5a5a5e;
+  color: #ffffff;
+  box-shadow: none;
+}
+
+.roost-qs .qs-menu-button:hover {
+  background-color: #646468;
+}
+
+.roost-qs .qs-toggle-has-menu.checked .qs-menu-button {
+  background-color: mix(@accent_bg_color, #ffffff, 0.15);
+  color: @accent_fg_color;
+}
+
+/* The toggle's menu (.quick-toggle-menu), in place under its row. */
+.roost-qs .qs-menu {
+  background-color: #48484b;
+  border-radius: 24px;
+  padding: 13px;
+}
+
+.roost-qs .qs-menu-header {
+  padding-bottom: 12px;
+}
+
+.roost-qs .qs-menu-icon {
+  padding: 9px;
+  border-radius: 999px;
+  background-color: rgba(255, 255, 255, 0.2);
+}
+
+.roost-qs .qs-menu-icon.active {
+  background-color: @accent_bg_color;
+  color: @accent_fg_color;
+}
+
+.roost-qs .qs-menu-title {
+  font-size: 15pt;
+  font-weight: bold;
+}
+
+.roost-qs .qs-menu-item {
+  min-height: 37px;
+  padding: 0 12px;
+  border-radius: 12px;
+  background: none;
+  box-shadow: none;
+  color: #ffffff;
+  font-weight: normal;
+}
+
+.roost-qs .qs-menu-item:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.roost-qs .qs-menu-separator {
+  margin: 9px 12px;
+  min-height: 1px;
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+/* Date menu, measured against GNOME Shell 51 (.datemenu-popover): 30px
+   corners; the notification list (29em, a 1px divider) beside the
+   calendar column (today button, month grid of 36px days on a 40px
+   pitch, events card). */
+popover.roost-cal > contents {
+  border-radius: 30px;
+}
+
+.roost-cal .calendar-area {
+  padding: 4px;
+}
+
+.roost-cal .message-list {
+  min-width: 425px;
+  margin-right: 4px;
+  padding-right: 6px;
+  border-right: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.roost-cal .message-view {
+  margin-right: 12px;
+}
+
+.roost-cal .message-list-placeholder {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 15pt;
+  font-weight: bold;
+}
+
+.roost-cal .message-list-placeholder image {
+  margin-bottom: 12px;
+}
+
+.roost-cal .message-list-controls {
+  padding: 12px 12px 9px 12px;
+}
+
+.roost-cal .message-list-clear-button {
+  min-height: 22px;
+  padding: 3px 24px;
+  border-radius: 999px;
+  font-weight: bold;
+  background-color: #47474b;
+  color: #ffffff;
+  box-shadow: none;
+}
+
+.roost-cal .message-list-clear-button:hover {
+  background-color: #515155;
+}
+
+.roost-cal .message-list-clear-button:disabled {
+  /* GNOME's insensitive colours, without libadwaita's extra fade. */
+  filter: none;
+  background-color: #404043;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.roost-cal .datemenu-calendar-column {
+  min-width: 290px;
+  margin-left: 6px;
+}
+
+.roost-cal .datemenu-today-button,
+.roost-cal .calendar,
+.roost-cal .events-button {
+  border-radius: 12px;
+  margin: 4px;
+  border: 1px solid transparent;
+  box-shadow: none;
+}
+
+.roost-cal .datemenu-today-button {
+  padding: 9px;
+  background: none;
   color: #ffffff;
 }
 
-.roost-cal .weekday {
-  color: alpha(#ffffff, 0.6);
+.roost-cal .datemenu-today-button:hover {
+  background-color: #444448;
+}
+
+.roost-cal .datemenu-today-button:disabled {
+  /* GNOME's insensitive colours, without libadwaita's extra fade. */
+  filter: none;
+  background: none;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.roost-cal .datemenu-today-button .day-label {
   font-weight: bold;
 }
 
-.roost-cal .full-date {
+.roost-cal .datemenu-today-button .date-label {
   font-size: 15pt;
   font-weight: 800;
-  color: alpha(#ffffff, 0.6);
 }
 
-.roost-cal .no-notifications {
-  font-size: 15pt;
+.roost-cal .calendar {
+  margin-top: 0;
+  padding: 0;
+}
+
+.roost-cal .calendar-month-header {
+  min-height: 38px;
+}
+
+.roost-cal .pager-button {
+  min-width: 38px;
+  min-height: 38px;
+  padding: 0;
+  border-radius: 999px;
+  background-color: #36363a;
+  color: #ffffff;
+  box-shadow: none;
+}
+
+.roost-cal .pager-button:hover {
+  background-color: #444448;
+}
+
+.roost-cal .calendar-month-label {
   font-weight: bold;
-  color: alpha(#ffffff, 0.45);
+}
+
+.roost-cal .calendar-day-heading {
+  min-width: 20px;
+  margin: 4px;
+  padding: 3px 6px;
+  font-size: 9pt;
+  font-weight: bold;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.roost-cal .calendar-day {
+  min-width: 36px;
+  min-height: 36px;
+  margin: 2px;
+  padding: 0;
+  border-radius: 999px;
+  font-size: 9pt;
+  font-weight: bold;
+  font-feature-settings: "tnum";
+  background-color: #36363a;
+  color: #ffffff;
+  box-shadow: none;
+}
+
+.roost-cal .calendar-day:hover {
+  background-color: #444448;
+}
+
+.roost-cal .calendar-day.selected {
+  background-color: #48484c;
+}
+
+.roost-cal .calendar-day.calendar-weekend {
+  color: #9b9b9d;
+}
+
+.roost-cal .calendar-day.calendar-other-month {
+  color: rgba(255, 255, 255, 0.5);
+  font-weight: normal;
+}
+
+.roost-cal .calendar-day.calendar-today {
+  background-color: @accent_bg_color;
+  color: @accent_fg_color;
+}
+
+.roost-cal .events-button {
+  padding: 12px;
+  background-color: #3f3f44;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.roost-cal .events-title {
+  font-weight: bold;
+  color: #b2b2b4;
+  padding-bottom: 6px;
+}
+
+.roost-cal .event-placeholder {
+  color: #b2b2b4;
+  font-style: italic;
+}
+
+/* GNOME 51's event rows (.events-list .event-box): bold summary over a
+   smaller grey time, 6px apart. */
+.roost-cal .event-box {
+  border-radius: 8px;
+}
+
+.roost-cal .event-summary {
+  font-weight: 700;
+  color: #ffffff;
+}
+
+.roost-cal .event-time {
+  font-weight: 400;
+  font-size: 0.818em;
+  color: #b2b2b4;
+  font-feature-settings: "tnum";
+}
+
+/* Days with events: GNOME's calendar-today.svg, a 2px white dot (86%)
+   centered 28px down a 32px box, scaled to the 36px day button. */
+.roost-cal .calendar-day.calendar-day-with-events {
+  background-image: radial-gradient(circle 2.25px at 50% 87.5%,
+      rgba(255, 255, 255, 0.858) 95%, transparent 100%);
+}
+
+.roost-cal .calendar-day.calendar-today.calendar-day-with-events {
+  background-color: @accent_bg_color;
 }
 
 /* Overview surfaces (#54, #57): transparent windows, GNOME 51 shapes. */
@@ -100,21 +501,165 @@ window.roost-overview-dash {
 }
 
 window.roost-overview-grid {
-  background-color: #242426;
+  /* See-through: the workspace thumbnails show above the grid. */
+  background: none;
 }
 
-.roost-overview-search searchentry {
-  min-height: 36px;
-  border-radius: 99px;
-  background-color: alpha(#ffffff, 0.1);
-  color: #ffffff;
-}
-
-.overview-results,
-.overview-dash {
-  background-color: alpha(#2a2a2f, 0.92);
+/* GNOME's app grid tiles (.overview-tile): 113px, the 89px icon box
+   inset 12px, a 64px icon over its name. */
+.roost-overview-grid .grid-tile {
+  min-width: 89px;
+  min-height: 89px;
+  padding: 12px;
   border-radius: 24px;
-  padding: 8px;
+  background: none;
+  box-shadow: none;
+  color: #fafafb;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
+  font-weight: normal;
+}
+
+.roost-overview-grid .grid-tile:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+/* A folder (.app-folder): the tile tinted st-mix(#fafafb, #222226, 9%);
+   the inner button carries the tile's shape, its label stays regular. */
+.roost-overview-grid .grid-tile.app-folder {
+  background-color: #353539;
+}
+.roost-overview-grid menubutton.grid-tile {
+  padding: 0;
+}
+.roost-overview-grid menubutton.grid-tile > button {
+  min-width: 89px;
+  min-height: 89px;
+  padding: 12px;
+  border-radius: 24px;
+  background: none;
+  box-shadow: none;
+  font-weight: normal;
+}
+
+.roost-overview-search entry.search {
+  /* GNOME's .search-entry: a 24em pill, 9px padding, #404045. */
+  min-height: 19px;
+  padding: 9px;
+  border-radius: 999px;
+  background-color: #404045;
+  color: rgba(250, 250, 251, 0.7);
+  box-shadow: none;
+  outline: none;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
+}
+
+.roost-overview-search entry.search:hover {
+  background-color: #4a4a50;
+  color: #fafafb;
+}
+
+.roost-overview-search entry.search:focus-within {
+  outline: none;
+  box-shadow: none;
+}
+
+/* .search-entry:focus, shown once typing starts: a 2px ring of the
+   accent mixed 60% with white at 0.8, over the accent mixed 5% into
+   the entry. */
+.roost-overview-search entry.search:not(.idle) {
+  background-color: #43454d;
+  color: #fafafb;
+  box-shadow: inset 0 0 0 2px rgba(134, 181, 239, 0.8);
+}
+
+.roost-overview-search entry.search:not(.idle) image {
+  color: #fafafb;
+}
+
+.roost-overview-search entry.search.idle {
+  /* GNOME shows no caret until you type. */
+  caret-color: transparent;
+}
+
+.roost-overview-search entry.search image {
+  min-width: 16px;
+  margin-right: 6px;
+}
+
+.overview-dash {
+  /* GNOME's #dash .dash-background: #38383b, 28px corners. */
+  background-color: #38383b;
+  border-radius: 28px;
+  padding: 12px 10px;
+}
+
+.overview-dash .dash-tile {
+  margin: 0 2px;
+  padding: 0;
+  background: none;
+  box-shadow: none;
+  border-radius: 16px;
+}
+
+.overview-dash .dash-tile .overview-icon {
+  padding: 6px;
+  border-radius: 16px;
+  background-color: #38383b;
+  color: #fafafb;
+}
+
+.overview-dash .dash-tile:hover .overview-icon {
+  background-color: #444447;
+}
+
+.overview-dash .dash-tile:checked .overview-icon {
+  /* Show Apps while the app grid is up. */
+  background-color: #4b4b4f;
+}
+
+.overview-dash .app-grid-running-dot {
+  min-width: 5px;
+  min-height: 5px;
+  border-radius: 999px;
+  background-color: #fafafb;
+}
+
+.overview-dash .dash-separator {
+  min-width: 1px;
+  min-height: 64px;
+  margin: 0 4px;
+  background-color: rgba(250, 250, 251, 0.1);
+}
+
+/* GNOME 51's app results (.grid-search-results): no card, 145px tiles
+   (.grid-search-result: 12px padding, 24px corners, a 96px icon) 30px
+   apart, 21px under the entry; the first, Enter's target, is
+   highlighted (st-lighten(#222226, 8%)). */
+.overview-results {
+  background: none;
+  padding: 0;
+  margin-top: 6px;
+}
+
+.roost-overview-search .overview-results .overview-app {
+  padding: 12px;
+  border-radius: 24px;
+  background: none;
+  box-shadow: none;
+  color: #fafafb;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
+  font-weight: normal;
+}
+
+.roost-overview-search .overview-results .overview-app:hover {
+  background-color: #323238;
+}
+
+.roost-overview-search .overview-results .overview-app.selected {
+  background-color: #35353b;
 }
 
 .overview-app {
@@ -127,37 +672,140 @@ window.roost-overview-grid {
   box-shadow: inset 0 -3px 0 0 alpha(#ffffff, 0.8);
 }
 
-/* Notifications (#56): GNOME 51 banner and list cards. */
+/* Notifications, measured against GNOME Shell 51 (.message): a #54545a
+   card with 6px padding; a 34px header of source icon, app name, time
+   and a 28px close button; then title and body. Banners are 34em wide,
+   4px below the bar, with a shadow; list cards round to 18px. */
 window.roost-banners {
   background: none;
 }
 
-.notification-card {
-  background-color: alpha(#ffffff, 0.08);
+.message {
+  padding: 6px;
+  border: 1px solid transparent;
   border-radius: 16px;
-  padding: 12px;
+  background-color: #54545a;
   color: #ffffff;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
 }
 
-.notification-card.banner {
-  background-color: #2a2a2f;
-  box-shadow: 0 2px 8px alpha(#000000, 0.4);
+.message.banner {
+  min-width: 499px;
+  min-height: 52px;
+  margin: 4px;
+  box-shadow: 0 2px 4px 2px rgba(0, 0, 0, 0.2);
 }
 
-.notification-app {
-  font-size: 9pt;
-  color: alpha(#ffffff, 0.6);
+.message-view .message {
+  border-radius: 18px;
+  margin-bottom: 12px;
 }
 
-.notification-summary {
+.message-header {
+  min-height: 34px;
+  padding: 0 3px 0 6px;
+  color: #b2b2b4;
+}
+
+.message-source-title {
   font-weight: bold;
 }
 
+.message-header .event-time {
+  font-size: 9pt;
+}
+
+.message-close-button {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+  border-radius: 999px;
+  background-color: rgba(255, 255, 255, 0.15);
+  color: #ffffff;
+  box-shadow: none;
+}
+
+.message-close-button:hover {
+  background-color: rgba(255, 255, 255, 0.25);
+}
+
+.message-content {
+  padding: 6px;
+}
+
+.message-title {
+  font-weight: bold;
+}
+
+/* Notification groups, GNOME 51's NotificationMessageGroup: collapsed,
+   the newest card shows in full and the next two peek out 10px and
+   7px below it, 6px further in per side, in darker greys; expanded, a
+   header of the app name and a round collapse button over every card. */
+.message-view button.message-group {
+  min-width: 0;
+  min-height: 0;
+  margin: 0 0 12px 0;
+  padding: 0;
+  border: none;
+  border-radius: 18px;
+  background: none;
+  box-shadow: none;
+  /* The card's own weights, not the button's bold. */
+  font-weight: normal;
+}
+
+.message-view button.message-group:hover,
+.message-view button.message-group:active {
+  background: none;
+}
+
+.message-view .message-group.collapsed .message {
+  margin-bottom: 0;
+}
+
+.message-stack-card {
+  border-radius: 18px;
+}
+
+.message-stack-card.second-in-stack {
+  background-color: #45454a;
+}
+
+.message-stack-card.lower-in-stack {
+  background-color: #3d3d42;
+}
+
+.message-group-header {
+  padding: 6px;
+}
+
+.message-group-title {
+  margin: 0 4px;
+  color: #ffffff;
+  font-weight: 800;
+  font-size: 1.364em;
+}
+
+.message-collapse-button {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 2px;
+  border-radius: 999px;
+  background-color: rgba(255, 255, 255, 0.2);
+  color: #ffffff;
+  box-shadow: none;
+}
+
+.message-collapse-button:hover {
+  background-color: rgba(255, 255, 255, 0.3);
+}
+
 /* Search providers (#57): GNOME 51 list results under the app row. */
-/* Opaque: the compositor keeps drawing previews under search, where
-   GNOME fades them out (ledger P-OV-04). */
+/* The compositor hides the workspace view while search shows results,
+   so results sit on the overview background, as in GNOME. */
 .overview-providers {
-  background-color: #2a2a2f;
+  background-color: alpha(#ffffff, 0.06);
   border-radius: 18px;
   padding: 12px;
 }
@@ -177,27 +825,780 @@ window.roost-banners {
   font-weight: bold;
 }
 
-/* Alt-Tab switcher: GNOME 51's centered icon strip. */
+/* Alt-Tab, GNOME 51's AppSwitcher (.switcher-list): #2e2e33, 28px
+   corners, 12px padding; 12px between tiles; the selected tile at 20%
+   white, 16px corners. */
 window.roost-switcher {
   background: none;
 }
 
-.switcher {
-  background-color: #2a2a2f;
-  border-radius: 24px;
-  padding: 18px;
+.roost-switcher .switcher-list {
+  padding: 12px 12px 0 12px;
+  border-radius: 28px;
+  background-color: #2e2e33;
+  box-shadow: 0 8px 8px 0 rgba(0, 0, 0, 0.2);
   color: #ffffff;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
+  margin: 16px;
 }
 
-.switcher-item {
+.roost-switcher .item-box {
+  padding: 6px;
   border-radius: 16px;
+}
+
+.roost-switcher .item-box.selected {
+  background-color: rgba(255, 255, 255, 0.2);
+}
+
+/* GNOME's ThumbnailSwitcher: the same list, 2px around each frame,
+   6px to the title; frames 256px wide with 8px corners. */
+.roost-switcher .thumbnail-switcher {
   padding: 12px;
 }
 
-.switcher-item.selected {
-  background-color: alpha(#ffffff, 0.16);
+.roost-switcher .thumbnail-box {
+  padding: 2px;
 }
 
-.switcher-title {
+.roost-switcher .thumbnail {
+  border-radius: 8px;
+}
+
+.roost-switcher .switcher-arrow {
+  margin: 4px 0 0 0;
+  min-height: 8px;
+}
+
+/* End-session dialog, GNOME 51's ModalDialog: the screen dimmed with
+   GNOME's vignette,
+   a #36363a card with 18px corners and 24px padding, a 20px heavy
+   title, and 170x43 buttons at 10% white, the focused one ringed. */
+window.roost-end-session {
+  /* Measured off GNOME: brightness 0.5 at the center falling linearly
+     to about 0.15 in the corners (lightbox.js vignette). */
+  background-color: transparent;
+  background-image: radial-gradient(ellipse farthest-corner at center, rgba(0, 0, 0, 0.5) 0%, rgba(0, 0, 0, 0.854) 100%);
+}
+
+.roost-end-session .modal-dialog {
+  background-color: #36363a;
+  border-radius: 18px;
+  padding: 24px;
+  color: #ffffff;
+  box-shadow: 0 12px 8px 12px rgba(0, 0, 0, 0.03);
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
+}
+
+.roost-end-session .modal-dialog-content-box {
+  padding-top: 12px;
+}
+
+.roost-end-session .message-dialog-title {
+  font-size: 15pt;
+  font-weight: 800;
+}
+
+.roost-end-session .modal-dialog-button-box {
+  padding-top: 6px;
+}
+
+.roost-end-session .modal-dialog-button {
+  min-height: 25px;
+  padding: 9px 12px;
+  border-radius: 9px;
+  background-color: rgba(255, 255, 255, 0.1);
+  color: #ffffff;
   font-weight: bold;
+  box-shadow: none;
+}
+
+.roost-end-session .modal-dialog-button:hover {
+  background-color: rgba(255, 255, 255, 0.13);
+}
+
+.roost-end-session .modal-dialog-button:focus {
+  outline: none;
+  box-shadow: inset 0 0 0 2px rgb(121, 160, 208);
+  background-color: rgba(121, 160, 208, 0.12);
+}
+
+/* App-grid folders (GNOME 51): the 2x2 collage sits bare on the tile. */
+.folder-collage {
+  min-width: 64px;
+  min-height: 64px;
+}
+
+/* Window preview chrome in the overview (windowPreview.js): the app
+   icon with its drop shadow; on hover the caption pill and close button. */
+window.roost-overview-chrome {
+  background: none;
+}
+
+.roost-overview-chrome .window-icon {
+  -gtk-icon-shadow: 0 2px 4px rgba(0, 0, 0, 0.4);
+}
+
+.roost-overview-chrome .window-caption {
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background-color: rgba(0, 0, 0, 0.9);
+  color: #ffffff;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
+}
+
+.roost-overview-chrome .window-close {
+  min-width: 26px;
+  min-height: 26px;
+  padding: 3px;
+  border-radius: 999px;
+  background-color: rgba(63, 63, 70, 0.98);
+  color: #fafafb;
+  box-shadow: 0 2px 4px 0 rgba(0, 0, 0, 0.2);
+}
+
+.roost-overview-chrome .window-close image {
+  -gtk-icon-size: 24px;
+}
+
+.roost-overview-chrome .window-close:hover {
+  background-color: rgba(80, 80, 89, 0.98);
+}
+
+/* Lock screen (GNOME 51 unlockDialog, states 11 and 11b): transparent
+   over the compositor's blurred, dimmed wallpaper. */
+window.roost-lock {
+  background: none;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
+  color: #fafafb;
+}
+
+/* #panel.unlock-screen: only the system menu's power icon. */
+window.roost-lock .unlock-screen-panel {
+  min-height: 32px;
+}
+window.roost-lock .unlock-screen-panel .system-status-icon {
+  -gtk-icon-size: 16px;
+  color: #ffffff;
+  margin: 0 16px 0 0;
+}
+
+/* .unlock-dialog-clock: spacing 2em between time and date. */
+window.roost-lock .unlock-dialog-clock-time {
+  font-size: 96px;
+  font-weight: 800;
+  font-feature-settings: "tnum";
+}
+window.roost-lock .unlock-dialog-clock-date {
+  font-size: 26.66px;
+  font-weight: 400;
+  margin-top: 29px;
+}
+/* The hint: 2em of box spacing plus its own 2em margin. */
+window.roost-lock .unlock-dialog-clock-hint {
+  font-weight: bold;
+  margin-top: 58px;
+  padding: 6px 18px;
+  border-radius: 16px;
+}
+
+/* .login-dialog-prompt-layout: 30em wide. */
+window.roost-lock .login-dialog-prompt-layout {
+  min-width: 440px;
+}
+/* .user-icon in the vertical user widget: 160px, a 13% disc. */
+window.roost-lock .user-icon {
+  -gtk-icon-size: 100px;
+  padding: 30px;
+  border-radius: 999px;
+  background-color: rgba(250, 250, 251, 0.13);
+  color: #fafafb;
+}
+window.roost-lock .user-widget-label {
+  font-size: 26.66px;
+  font-weight: 400;
+  margin-top: 24px;
+  margin-bottom: 20px;
+}
+/* .login-dialog-button-box: 4em tall: the (hidden) Back button, the
+   entry area (0.5em by 20px margins), and a spacer as wide as Back. */
+window.roost-lock .login-dialog-button-box {
+  min-height: 59px;
+}
+window.roost-lock button.cancel-button {
+  min-width: 16px;
+  min-height: 16px;
+  padding: 12px;
+  border-radius: 999px;
+  background-color: rgba(250, 250, 251, 0.1);
+  color: rgba(250, 250, 251, 0.5);
+  box-shadow: none;
+  filter: none;
+}
+window.roost-lock .button-box-spacer {
+  min-width: 40px;
+}
+window.roost-lock .login-dialog-prompt-entry-area {
+  margin: 7px 20px;
+}
+/* The entry: 12px corners, white at 11% (GNOME's focused mix) under a
+   2px ring at 20%; right padding puts the peek icon where St puts it,
+   clear of the Submit arrow. */
+window.roost-lock entry.login-dialog-prompt-entry {
+  min-height: 45px;
+  padding: 0 46px 0 17px;
+  border-radius: 12px;
+  background-color: rgba(250, 250, 251, 0.1);
+  color: rgba(250, 250, 251, 0.7);
+  box-shadow: none;
+  outline: none;
+}
+window.roost-lock entry.login-dialog-prompt-entry:focus-within {
+  background-color: rgba(255, 255, 255, 0.11);
+  color: #fafafb;
+  box-shadow: inset 0 0 0 2px rgba(250, 250, 251, 0.2);
+  outline: none;
+}
+window.roost-lock entry.login-dialog-prompt-entry text placeholder {
+  color: rgba(250, 250, 251, 0.7);
+  opacity: 1;
+}
+window.roost-lock entry.login-dialog-prompt-entry image {
+  color: #fafafb;
+  opacity: 1;
+}
+/* .next-button: a bare go-next arrow, no well. */
+window.roost-lock button.next-button {
+  background: none;
+  box-shadow: none;
+  min-width: 16px;
+  min-height: 16px;
+  padding: 0;
+  margin-right: 14px;
+  color: #fafafb;
+  filter: none;
+}
+window.roost-lock .caps-lock-warning-label {
+  color: #cd9309;
+  margin-top: 9px;
+  padding-bottom: 8px;
+}
+/* The message hangs 27px under the entry row (GNOME's 9px well spacing
+   around its caps-lock placeholder), text at the top of 2.75em. */
+window.roost-lock .login-dialog-message {
+  color: #dedee4;
+  min-height: 40px;
+  margin-top: 27px;
+}
+
+/* GNOME 51's OSD (.osd-window): a #2e2e33 pill, 12px by 18px of
+   padding, a 32px icon, bold label, and a 160px level bar. */
+window.roost-osd {
+  background: none;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
+}
+window.roost-osd .osd-window {
+  color: #ffffff;
+  background-color: #2e2e33;
+  border: 1px solid rgba(255, 255, 255, 0.02);
+  border-radius: 999px;
+  padding: 12px 18px;
+  font-weight: bold;
+}
+window.roost-osd .osd-label {
+  margin-right: 6px;
+}
+window.roost-osd .level {
+  margin-right: 6px;
+}
+window.roost-osd .level.after-label {
+  margin-bottom: 4px;
+}
+
+/* GNOME's grid cells are exactly the 113px tiles: no flowbox padding. */
+.roost-overview-grid flowboxchild {
+  padding: 0;
+}
+
+/* GNOME 51's window menu (.popup-menu in the window-menu boxpointer):
+   #36363a, a 1px #424247 edge, 20px corners and 6px of padding; 37px
+   items with 12px corners, focused or hovered at #535359. */
+window.roost-window-menu {
+  background: none;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
+}
+window.roost-window-menu .popup-menu-content {
+  min-width: 220px;
+  padding: 6px;
+  color: #ffffff;
+  background-color: #36363a;
+  border: 1px solid #424247;
+  border-radius: 20px;
+  box-shadow: 0 2px 4px 0 rgba(0, 0, 0, 0.2);
+}
+window.roost-window-menu button.popup-menu-item {
+  min-height: 19px;
+  padding: 9px 12px 9px 6px;
+  border-radius: 12px;
+  background: none;
+  box-shadow: none;
+  color: #ffffff;
+  font-weight: normal;
+  outline: none;
+}
+window.roost-window-menu button.popup-menu-item:hover,
+window.roost-window-menu button.popup-menu-item:focus {
+  background-color: #535359;
+}
+window.roost-window-menu button.popup-menu-item:active {
+  background-color: #58585e;
+}
+window.roost-window-menu button.popup-menu-item:disabled {
+  color: rgba(255, 255, 255, 0.5);
+  filter: none;
+  opacity: 1;
+}
+window.roost-window-menu .popup-separator-menu-item {
+  min-height: 19px;
+  padding: 0 12px;
+}
+window.roost-window-menu .popup-separator-menu-item-separator {
+  min-height: 1px;
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+/* GNOME 51's screenshot UI: the panel (#2e2e33, 32px corners, 18px of
+   padding, 12px at the bottom), mode buttons (89x76, 14px corners,
+   #414148 when chosen), the photo/video switch, the 48px capture ring,
+   the pointer toggle and the close button. */
+window.roost-screenshot-ui {
+  background: none;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
+}
+window.roost-screenshot-ui .screenshot-ui-panel {
+  color: #ffffff;
+  background-color: #2e2e33;
+  border: 1px solid rgba(255, 255, 255, 0.02);
+  border-radius: 32px;
+  padding: 18px 18px 12px 18px;
+}
+window.roost-screenshot-ui button.screenshot-ui-type-button {
+  min-width: 53px;
+  padding: 12px 0;
+  border-radius: 14px;
+  background: none;
+  box-shadow: none;
+  color: #ffffff;
+}
+window.roost-screenshot-ui .screenshot-ui-type-label {
+  font-size: 12px;
+  font-weight: normal;
+}
+window.roost-screenshot-ui button.screenshot-ui-type-button:hover {
+  background-color: #38383d;
+}
+window.roost-screenshot-ui button.screenshot-ui-type-button:checked {
+  background-color: #414148;
+}
+window.roost-screenshot-ui .screenshot-ui-shot-cast-container {
+  background-color: rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  padding: 3px;
+}
+window.roost-screenshot-ui button.screenshot-ui-shot-cast-button {
+  min-width: 16px;
+  min-height: 16px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: none;
+  box-shadow: none;
+  color: #ffffff;
+}
+window.roost-screenshot-ui button.screenshot-ui-shot-cast-button:checked {
+  background-color: #ffffff;
+  color: #2e2e33;
+}
+window.roost-screenshot-ui button.screenshot-ui-shot-cast-button:disabled {
+  color: rgba(255, 255, 255, 0.5);
+  filter: none;
+  opacity: 1;
+}
+window.roost-screenshot-ui button.screenshot-ui-capture-button {
+  min-width: 32px;
+  min-height: 32px;
+  padding: 4px;
+  border: 4px solid #ffffff;
+  border-radius: 999px;
+  background: none;
+  box-shadow: none;
+}
+window.roost-screenshot-ui .screenshot-ui-capture-button-circle {
+  min-width: 32px;
+  min-height: 32px;
+  border-radius: 999px;
+  background-color: #ffffff;
+}
+window.roost-screenshot-ui button.screenshot-ui-capture-button:hover .screenshot-ui-capture-button-circle {
+  background-color: #cccccc;
+}
+/* Screencast mode (:cast): the circle turns $red_4. */
+window.roost-screenshot-ui button.screenshot-ui-capture-button.cast .screenshot-ui-capture-button-circle {
+  background-color: #c01c28;
+}
+window.roost-screenshot-ui button.screenshot-ui-capture-button.cast:hover .screenshot-ui-capture-button-circle {
+  background-color: #d81f2d;
+}
+/* The window selector's windows: a 6px border outside each, 12px corners
+   ($modal_radius), the accent color when hovered (darker) and chosen
+   (with a 20% accent wash and the check in an accent circle). */
+window.roost-screenshot-ui button.screenshot-ui-window-selector-window {
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  border: 6px solid transparent;
+  border-radius: 12px;
+  background: none;
+  box-shadow: none;
+  outline: none;
+  transition: border-color 200ms, background-color 200ms;
+}
+window.roost-screenshot-ui button.screenshot-ui-window-selector-window:hover {
+  border-color: shade(@accent_bg_color, 0.85);
+}
+window.roost-screenshot-ui button.screenshot-ui-window-selector-window:checked {
+  border-color: @accent_bg_color;
+  background-color: alpha(@accent_bg_color, 0.2);
+}
+window.roost-screenshot-ui .screenshot-ui-window-selector-check {
+  color: transparent;
+  border-radius: 999px;
+  padding: 12px;
+  -gtk-icon-size: 24px;
+  transition: color 200ms, background-color 200ms;
+}
+window.roost-screenshot-ui button.screenshot-ui-window-selector-window:checked .screenshot-ui-window-selector-check {
+  color: @accent_fg_color;
+  background-color: @accent_bg_color;
+}
+window.roost-screenshot-ui button.screenshot-ui-show-pointer-button {
+  min-width: 16px;
+  min-height: 16px;
+  padding: 12px;
+  border-radius: 999px;
+  background: none;
+  box-shadow: none;
+  color: #ffffff;
+}
+window.roost-screenshot-ui button.screenshot-ui-show-pointer-button:checked {
+  background-color: #414148;
+}
+window.roost-screenshot-ui button.screenshot-ui-close-button {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 12px;
+  border-radius: 999px;
+  background-color: rgba(63, 63, 70, 0.98);
+  color: #fafafb;
+  box-shadow: 0 2px 4px 0 rgba(0, 0, 0, 0.2);
+}
+window.roost-screenshot-ui button.screenshot-ui-close-button image {
+  -gtk-icon-size: 24px;
+}
+
+/* GNOME 51's workspace switcher popup (.workspace-switcher): an OSD pill,
+   12px by 18px of padding, the dots drawn in 32px slots. */
+window.roost-workspace-popup {
+  background: none;
+}
+window.roost-workspace-popup .workspace-switcher {
+  background-color: #2e2e33;
+  border: 1px solid rgba(255, 255, 255, 0.02);
+  border-radius: 999px;
+  padding: 12px 18px;
+}
+
+/* GNOME 51's app folder dialog: the overview dimmed to 20% under a
+   720px #38383b dialog with 64px corners and a 1px light edge, the name
+   in 26.7px extra bold, the rename button a 40px circle, and the apps
+   as 145px tiles with 96px icons. */
+window.roost-folder-dialog {
+  background: none;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
+}
+window.roost-folder-dialog .folder-dialog-shade {
+  background-color: rgba(0, 0, 0, 0.8);
+}
+window.roost-folder-dialog .app-folder-dialog {
+  border-radius: 64px;
+  background-color: #38383b;
+  color: #fafafb;
+  padding: 0 1px;
+  box-shadow: inset 0 0 0 1px rgba(250, 250, 251, 0.1);
+}
+window.roost-folder-dialog .folder-name-container {
+  padding: 24px 36px 0 36px;
+  min-height: 51px;
+}
+window.roost-folder-dialog .folder-name-label {
+  font-size: 26.66px;
+  font-weight: 800;
+}
+window.roost-folder-dialog entry.folder-name-entry {
+  min-width: 314px;
+  min-height: 33px;
+  padding: 9px;
+  border-radius: 8px;
+  font-size: 26.66px;
+  font-weight: 800;
+  background-color: #404045;
+  color: #fafafb;
+  box-shadow: inset 0 0 0 2px rgba(121, 160, 208, 0.8);
+  outline: none;
+}
+window.roost-folder-dialog button.icon-button {
+  min-width: 16px;
+  min-height: 16px;
+  padding: 12px;
+  border-radius: 999px;
+  background-color: #49494c;
+  color: #fafafb;
+  box-shadow: none;
+  outline: none;
+}
+window.roost-folder-dialog button.icon-button:focus-visible,
+window.roost-folder-dialog button.icon-button:focus {
+  box-shadow: inset 0 0 0 2px rgba(121, 160, 208, 0.8);
+}
+window.roost-folder-dialog button.folder-tile {
+  min-width: 121px;
+  min-height: 121px;
+  padding: 12px;
+  border-radius: 24px;
+  background: none;
+  box-shadow: none;
+  color: #fafafb;
+  font-weight: normal;
+}
+window.roost-folder-dialog button.folder-tile:hover {
+  background-color: #444447;
+}
+
+/* GNOME 51's polkit dialog (.prompt-dialog in the modal style shared
+   with the end-session dialog): a 96px avatar disc, the user's name
+   (Administrator in amber for root), a 20em password entry, and the
+   amber error label. */
+.roost-polkit .polkit-user-icon {
+  -gtk-icon-size: 60px;
+  padding: 18px;
+  border-radius: 999px;
+  background-color: rgba(255, 255, 255, 0.13);
+  color: #ffffff;
+}
+.roost-polkit .polkit-dialog-user-layout {
+  margin-bottom: 6px;
+}
+.roost-polkit .polkit-dialog-user-root-label {
+  color: #cd9309;
+}
+.roost-polkit entry.prompt-dialog-password-entry {
+  min-width: 275px;
+  min-height: 19px;
+  padding: 12px 9px;
+  border-radius: 8px;
+  background-color: #404045;
+  color: rgba(250, 250, 251, 0.7);
+  box-shadow: none;
+  outline: none;
+}
+.roost-polkit entry.prompt-dialog-password-entry:focus-within {
+  color: #fafafb;
+  box-shadow: inset 0 0 0 2px rgba(121, 160, 208, 0.8);
+}
+.roost-polkit .prompt-dialog-error-label,
+.roost-polkit .prompt-dialog-info-label {
+  padding: 9px;
+  border-radius: 8px;
+  margin: 4px 0;
+}
+.roost-polkit .prompt-dialog-error-label {
+  color: #cd9309;
+  background-color: rgba(205, 147, 9, 0.1);
+}
+.roost-polkit .prompt-dialog-info-label {
+  color: #ffffff;
+  background-color: rgba(255, 255, 255, 0.1);
+}
+.roost-polkit .modal-dialog-button:disabled {
+  color: rgba(255, 255, 255, 0.5);
+  filter: none;
+  opacity: 1;
+}
+
+/* GNOME's Bluetooth menu rows and placeholder (bluetooth.js). */
+.roost-qs .device-subtitle {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.roost-qs .bt-menu-placeholder {
+  font-weight: 700;
+  font-size: 1.182em;
+  padding: 2em 4em;
+}
+
+/* The volume slider's output-menu arrow (.quick-slider .icon-button). */
+.roost-qs .qs-slider-menu-button {
+  padding: 6px;
+  min-width: 0;
+  min-height: 0;
+  border-radius: 999px;
+  background: none;
+  box-shadow: none;
+  color: #ffffff;
+}
+
+.roost-qs .qs-slider-menu-button:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.roost-qs .qs-slider-menu-button:checked {
+  background-color: #48484b;
+}
+
+/* GNOME's app grid pages (pageIndicators.js, .page-navigation-arrow):
+   10px white dots 12px apart, the inactive ones at 2/3 size and half
+   opacity; 60px round arrows on #222226 at the sides. */
+.page-indicators {
+  margin-bottom: 12px;
+}
+
+.page-indicator {
+  padding: 6px 12px 0;
+  min-width: 0;
+  min-height: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.page-indicator .page-indicator-icon {
+  min-width: 10px;
+  min-height: 10px;
+  border-radius: 999px;
+  background-color: #fafafb;
+  opacity: 0.5;
+  transform: scale(0.6667);
+  transition: all 400ms;
+}
+
+.page-indicator.active .page-indicator-icon {
+  opacity: 1;
+  transform: none;
+}
+
+/* .page-navigation-hint: during a drag, a 5% white gradient fading
+   inward, rounded 24px on the grid side; lit to 10% while hovered. */
+.page-navigation-hint.next {
+  background-image: linear-gradient(to right, rgba(255, 255, 255, 0.05), transparent);
+  border-radius: 24px 0 0 24px;
+}
+
+.page-navigation-hint.previous {
+  background-image: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.05));
+  border-radius: 0 24px 24px 0;
+}
+
+.page-navigation-hint.dnd {
+  background-image: none;
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.page-navigation-arrow {
+  margin: 6px;
+  padding: 18px;
+  min-width: 24px;
+  min-height: 24px;
+  border-radius: 999px;
+  color: #fafafb;
+  background-color: #222226;
+  box-shadow: none;
+}
+
+.page-navigation-arrow:hover {
+  background-color: #2f2f34;
+}
+
+/* GNOME 51's IBus candidate popup (gnome-shell 51.0
+   data/theme/gnome-shell-sass/widgets/_ibus-popup.scss, dark variant):
+   .candidate-popup-content extends .popup-menu-content (#36363a, a 1px
+   #424247 edge, 0 2px 4px rgba(0,0,0,0.2)) with 6px padding and
+   spacing and 12px corners; .candidate-box 6px 12px with 8px corners,
+   :selected in the accent, :hover lighten($bg_color, 10%); the index
+   in $insensitive_fg_color, 6px from its text. */
+window.roost-ibus-candidates {
+  background: none;
+  font-family: "Adwaita Sans", "Cantarell", sans-serif;
+  font-size: 11pt;
+}
+window.roost-ibus-candidates .candidate-popup-content {
+  /* Room for the shadow inside the layer surface. */
+  margin: 6px;
+  padding: 6px;
+  color: #ffffff;
+  background-color: #36363a;
+  border: 1px solid #424247;
+  border-radius: 12px;
+  box-shadow: 0 2px 4px 0 rgba(0, 0, 0, 0.2);
+}
+window.roost-ibus-candidates .candidate-index {
+  padding: 0 6px 0 0;
+  color: #9b9b9d;
+}
+window.roost-ibus-candidates .candidate-box {
+  padding: 6px 12px;
+  border-radius: 8px;
+}
+window.roost-ibus-candidates .candidate-box:selected {
+  background-color: @accent_bg_color;
+  color: @accent_fg_color;
+}
+window.roost-ibus-candidates .candidate-box:hover {
+  background-color: #4f4f54;
+  color: #ffffff;
+}
+window.roost-ibus-candidates .candidate-page-button-box {
+  min-height: 29px; /* 2em */
+}
+window.roost-ibus-candidates .vertical .candidate-page-button-box {
+  padding-top: 12px;
+}
+window.roost-ibus-candidates .horizontal .candidate-page-button-box {
+  padding-left: 12px;
+}
+/* .button: st-mix($fg_color, $bg_color, 9%), 4% lighter hovered. */
+window.roost-ibus-candidates button.candidate-page-button {
+  padding: 6px;
+  min-height: 0;
+  background-color: #48484c;
+  color: #ffffff;
+  box-shadow: none;
+}
+window.roost-ibus-candidates button.candidate-page-button:hover {
+  background-color: #525256;
+}
+window.roost-ibus-candidates button.candidate-page-button image {
+  -gtk-icon-size: 16px;
+}
+window.roost-ibus-candidates button.candidate-page-button-previous {
+  border-radius: 8px 0 0 8px;
+}
+window.roost-ibus-candidates button.candidate-page-button-next {
+  border-radius: 0 8px 8px 0;
 }

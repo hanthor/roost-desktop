@@ -27,8 +27,10 @@ for path in \
     usr/bin/roost-compositor \
     usr/bin/roost-session \
     usr/bin/roost-shell-host \
+    usr/bin/roost-ibus-bridge \
     usr/bin/roost-greeter \
-    usr/share/wayland-sessions/roost.desktop; do
+    usr/share/wayland-sessions/roost.desktop \
+    etc/pam.d/roost-lock; do
     printf '%s' "$CONTENTS" | grep -q "$path" || fail "missing $path"
 done
 
@@ -41,7 +43,7 @@ VERSION="$(dpkg-deb -f "$PKG" Version)"
 DIR="$(mktemp -d)"
 trap 'rm -rf "$DIR"' EXIT INT TERM
 dpkg-deb -x "$PKG" "$DIR"
-for bin in roost-compositor roost-session roost-shell-host roost-greeter; do
+for bin in roost-compositor roost-session roost-shell-host roost-ibus-bridge roost-greeter; do
     REPORTED="$("$DIR/usr/bin/$bin" --version | awk '{print $NF}')"
     [ "$REPORTED" = "$VERSION" ] || fail "$bin reports $REPORTED, package is $VERSION"
 done

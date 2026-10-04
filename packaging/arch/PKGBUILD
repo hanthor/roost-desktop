@@ -26,16 +26,22 @@ depends=(
     'libxkbcommon'
     'libxkbcommon-x11'
     'mesa'
+    'pipewire'
     'seatd'
     'systemd-libs'
     'wayland'
 )
-makedepends=('cargo' 'git' 'pkgconf')
+makedepends=('cargo' 'clang' 'git' 'pkgconf')
 optdepends=(
+    'xdg-desktop-portal-gnome: screenshots and screen sharing for apps'
     'greetd: login manager driving roost-greeter'
     'xorg-xwayland: X11 application support'
+    'ibus: input methods (roost-ibus-bridge, as GNOME uses IBus)'
+    'gst-plugin-pipewire: screen recording from the screenshot UI'
+    'gst-plugins-good: screen recording (VP8 and WebM)'
 )
 options=('!lto' '!debug')
+backup=('etc/pam.d/roost-lock')
 
 if [[ -n "${ROOST_LOCAL_SRC:-}" ]]; then
     source=()
@@ -70,7 +76,7 @@ build() {
 
 check() {
     local bin
-    for bin in roost-compositor roost-session roost-shell-host roost-shell-gtk roost-greeter; do
+    for bin in roost-compositor roost-session roost-shell-host roost-shell-gtk roost-ibus-bridge roost-greeter; do
         local reported
         reported="$("${CARGO_TARGET_DIR:-$srcdir/target}/release/$bin" --version | awk '{print $NF}')"
         if [[ "$reported" != "$pkgver" ]]; then
@@ -84,11 +90,13 @@ package() {
     local root target bin
     root="$(_srcroot)"
     target="${CARGO_TARGET_DIR:-$srcdir/target}/release"
-    for bin in roost-compositor roost-session roost-shell-host roost-shell-gtk roost-greeter; do
+    for bin in roost-compositor roost-session roost-shell-host roost-shell-gtk roost-ibus-bridge roost-greeter; do
         install -Dm0755 "$target/$bin" "$pkgdir/usr/bin/$bin"
     done
     install -Dm0644 "$root/share/wayland-sessions/roost.desktop" \
         "$pkgdir/usr/share/wayland-sessions/roost.desktop"
+    # Lock-screen PAM service (#62): unlock under GDM, where no greetd runs.
+    install -Dm0644 "$root/share/pam.d/roost-lock" "$pkgdir/etc/pam.d/roost-lock"
     install -Dm0644 "$root/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
     install -Dm0644 "$root/docs/nested-session.md" \
         "$pkgdir/usr/share/doc/$pkgname/nested-session.md"

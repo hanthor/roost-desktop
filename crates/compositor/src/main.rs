@@ -33,6 +33,13 @@ fn main() -> ExitCode {
         std::env::var_os("ROOST_XWAYLAND"),
         std::env::var_os("PATH"),
     );
+    // Output scale (#59): ROOST_SCALE=1.5, or --scale.
+    if let Some(scale) = std::env::var("ROOST_SCALE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        session.scale = scale;
+    }
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -44,6 +51,11 @@ fn main() -> ExitCode {
             "--width" => {
                 if let Some(value) = args.next().and_then(|v| v.parse().ok()) {
                     session.width = value;
+                }
+            }
+            "--scale" => {
+                if let Some(value) = args.next().and_then(|v| v.parse().ok()) {
+                    session.scale = value;
                 }
             }
             "--height" => {
@@ -58,6 +70,9 @@ fn main() -> ExitCode {
             }
             "--xwayland" => {
                 session.xwayland = true;
+            }
+            "--startup-overview" => {
+                session.startup_overview = true;
             }
             "--backend" => match args.next().as_deref().and_then(BackendChoice::parse) {
                 Some(choice) => session.backend = choice,
@@ -74,7 +89,7 @@ fn main() -> ExitCode {
                 println!("roost-compositor: nested Roost session (001 developer preview)");
                 println!();
                 println!(
-                    "Usage: roost-compositor [--backend auto|winit|drm] [--socket NAME] [--width W] [--height H] [--shell-bin PATH] [--xwayland]"
+                    "Usage: roost-compositor [--backend auto|winit|drm] [--socket NAME] [--width W] [--height H] [--shell-bin PATH] [--xwayland] [--startup-overview]"
                 );
                 println!();
                 println!("Starts one isolated nested Wayland session on a private");
@@ -87,6 +102,8 @@ fn main() -> ExitCode {
                 println!("roost-shell-host sibling) is spawned supervised with a");
                 println!("finite restart budget; WAYLAND_DISPLAY is set for this");
                 println!("process only and restored on shutdown.");
+                println!("--startup-overview opens the overview at start, as GNOME");
+                println!("does at login (roost-session passes it).");
                 return ExitCode::SUCCESS;
             }
             other => {

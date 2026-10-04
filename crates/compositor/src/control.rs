@@ -298,6 +298,29 @@ pub struct Session<'a> {
     /// commands the mirror applied). Drained by [`ControlHub::poll`]
     /// so the runtime can send the polite client close.
     closed: Vec<u64>,
+    /// Latest `SetIdleTimeout` from the shell, drained by the hub.
+    idle_timeout: Option<u64>,
+    /// The latest SetAccelerators the shell sent, until drained.
+    accelerators: Option<Vec<roost_shell_control::Accelerator>>,
+    /// Window-menu actions the shell asked for, until drained.
+    window_actions: Vec<(u64, roost_shell_control::WindowAction)>,
+    /// Latest `SetOverviewSearch` from the shell, drained by the hub.
+    overview_search: Option<bool>,
+    /// Latest `SetOverviewAppGrid` from the shell, drained by the hub.
+    overview_app_grid: Option<bool>,
+    /// A lock-screen password awaiting verification, with its request
+    /// id: the reply waits for the result (see `ControlHub::finish_unlock`).
+    unlock_request: Option<(u64, roost_shell_control::Secret)>,
+    /// The request id whose `CommandResult` is still owed.
+    unlock_pending: Option<u64>,
+    /// Latest `SetInputSettings` from the shell, drained by the hub.
+    input_settings: Option<roost_shell_control::InputSettings>,
+    /// Input-source switches the shell asked for (`true` backward).
+    input_source_switches: Vec<bool>,
+    /// The switcher's thumbnail frames, when the shell sent new ones.
+    switcher_thumbnails: Option<Vec<roost_shell_control::SwitcherThumbnail>>,
+    /// The shell's switcher keys, until the runtime drains them.
+    switcher_keys: Option<Vec<roost_shell_control::SwitcherKey>>,
 }
 
 impl std::fmt::Debug for Session<'_> {
@@ -355,6 +378,17 @@ impl<'a> Session<'a> {
             locked,
             locked_sent,
             closed: Vec::new(),
+            idle_timeout: None,
+            accelerators: None,
+            window_actions: Vec::new(),
+            overview_search: None,
+            overview_app_grid: None,
+            unlock_request: None,
+            unlock_pending: None,
+            input_settings: None,
+            input_source_switches: Vec::new(),
+            switcher_thumbnails: None,
+            switcher_keys: None,
         };
         let msg = match session.conn.read_frame() {
             Ok(msg) => msg,
@@ -431,6 +465,49 @@ impl<'a> Session<'a> {
     pub fn send_outputs(&mut self, outputs: &[OutputInfo]) -> Result<(), ControlError> {
         self.conn.write_frame(&Message::Outputs {
             outputs: outputs.to_vec(),
+        })
+    }
+
+    /// The latest `SetIdleTimeout` the shell sent, once (#63).
+    pub fn take_idle_timeout(&mut self) -> Option<u64> {
+        self.idle_timeout.take()
+    }
+
+    /// Window-menu actions the shell sent since the last call.
+    pub fn take_window_actions(&mut self) -> Vec<(u64, roost_shell_control::WindowAction)> {
+        std::mem::take(&mut self.window_actions)
+    }
+
+    /// Ask the shell to draw GNOME's window menu.
+    pub fn send_window_menu(&mut self, menu: &Message) -> Result<(), ControlError> {
+        self.conn.write_frame(menu)
+    }
+
+    /// The latest `SetAccelerators` the shell sent, once.
+    pub fn take_accelerators(&mut self) -> Option<Vec<roost_shell_control::Accelerator>> {
+        self.accelerators.take()
+    }
+
+    /// Report a grabbed accelerator's press.
+    pub fn send_accelerator(
+        &mut self,
+        action: u32,
+        time: u32,
+        mode: u32,
+    ) -> Result<(), ControlError> {
+        self.conn
+            .write_frame(&Message::AcceleratorActivated { action, time, mode })
+    }
+
+    /// Send where the overview's window previews sit.
+    pub fn send_overview_previews(
+        &mut self,
+        previews: &[roost_shell_control::PreviewInfo],
+        hovered: Option<u64>,
+    ) -> Result<(), ControlError> {
+        self.conn.write_frame(&Message::OverviewPreviews {
+            previews: previews.to_vec(),
+            hovered,
         })
     }
 
@@ -551,6 +628,131 @@ impl<'a> Session<'a> {
                 let revision = self.send_snapshot(model)?;
                 Ok(Handled::HelloResync { revision })
             }
+            Message::Command {
+                id,
+                kind: CommandKind::SetInputSettings(settings),
+            } => {
+                // Session-level settings for the runtime (seat, libinput).
+                self.input_settings = Some(settings);
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: CommandStatus::Applied,
+                })?;
+                Ok(Handled::CommandResult { id, applied: true })
+            }
+            Message::Command {
+                id,
+                kind: CommandKind::SetSwitcherThumbnails { thumbnails },
+            } => {
+                self.switcher_thumbnails = Some(thumbnails);
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: CommandStatus::Applied,
+                })?;
+                Ok(Handled::CommandResult { id, applied: true })
+            }
+            Message::Command {
+                id,
+                kind: CommandKind::SetSwitcherKeys { keys },
+            } => {
+                self.switcher_keys = Some(keys);
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: CommandStatus::Applied,
+                })?;
+                Ok(Handled::CommandResult { id, applied: true })
+            }
+            Message::Command {
+                id,
+                kind: CommandKind::SwitchInputSource { backward },
+            } => {
+                self.input_source_switches.push(backward);
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: CommandStatus::Applied,
+                })?;
+                Ok(Handled::CommandResult { id, applied: true })
+            }
+            Message::Command {
+                id,
+                kind: CommandKind::Unlock { password },
+            } => {
+                // Verified off the event loop by the runtime; the result
+                // goes back as this id's CommandResult.
+                self.unlock_request = Some((id, password));
+                self.unlock_pending = Some(id);
+                Ok(Handled::CommandResult { id, applied: true })
+            }
+            Message::Command {
+                id,
+                kind: CommandKind::SetOverviewAppGrid { active },
+            } => {
+                // UI state for the runtime's overview drawing.
+                self.overview_app_grid = Some(active);
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: CommandStatus::Applied,
+                })?;
+                Ok(Handled::CommandResult { id, applied: true })
+            }
+            Message::Command {
+                id,
+                kind: CommandKind::SetOverviewSearch { active },
+            } => {
+                // UI state for the runtime's overview drawing.
+                self.overview_search = Some(active);
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: CommandStatus::Applied,
+                })?;
+                Ok(Handled::CommandResult { id, applied: true })
+            }
+            Message::Command {
+                id,
+                kind: CommandKind::WindowAction { window, action },
+            } => {
+                // The window manager carries it out (drained by the hub);
+                // unknown windows are denied here, like CloseWindow.
+                let known = model.windows().any(|w| w.id == window);
+                let status = if known {
+                    self.window_actions.push((window, action));
+                    CommandStatus::Applied
+                } else {
+                    CommandStatus::Denied {
+                        reason: format!("unknown window {window}"),
+                    }
+                };
+                let applied = matches!(status, CommandStatus::Applied);
+                self.conn
+                    .write_frame(&Message::CommandResult { id, status })?;
+                Ok(Handled::CommandResult { id, applied })
+            }
+            Message::Command {
+                id,
+                kind: CommandKind::SetAccelerators { accelerators },
+            } => {
+                // Session-level grabs, applied by the window manager's
+                // key filter (drained by the hub).
+                self.accelerators = Some(accelerators);
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: CommandStatus::Applied,
+                })?;
+                Ok(Handled::CommandResult { id, applied: true })
+            }
+            Message::Command {
+                id,
+                kind: CommandKind::SetIdleTimeout { ms },
+            } => {
+                // Session-level setting, not model state: the runtime
+                // applies it to the idle lock (drained by the hub).
+                self.idle_timeout = Some(ms);
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: CommandStatus::Applied,
+                })?;
+                Ok(Handled::CommandResult { id, applied: true })
+            }
             Message::Command { id, kind } => {
                 let (status, closed) =
                     apply_command(model, &self.validator, &self.overview, &self.locked, &kind);
@@ -569,6 +771,10 @@ impl<'a> Session<'a> {
             | Message::Switcher { .. }
             | Message::Outputs { .. }
             | Message::Environment { .. }
+            | Message::OverviewPreviews { .. }
+            | Message::AcceleratorActivated { .. }
+            | Message::WindowMenu { .. }
+            | Message::WorkspacePopup { .. }
             | Message::Error { .. } => {
                 let _ = self.conn.write_frame(&Message::Error {
                     kind: ErrorKind::UnknownCommand,
@@ -606,6 +812,10 @@ fn message_kind(msg: &Message) -> &'static str {
         Message::Switcher { .. } => "Switcher",
         Message::Outputs { .. } => "Outputs",
         Message::Environment { .. } => "Environment",
+        Message::OverviewPreviews { .. } => "OverviewPreviews",
+        Message::AcceleratorActivated { .. } => "AcceleratorActivated",
+        Message::WindowMenu { .. } => "WindowMenu",
+        Message::WorkspacePopup { .. } => "WorkspacePopup",
     }
 }
 
@@ -754,6 +964,17 @@ fn apply_command(
             }
             (CommandStatus::Applied, Some(*window))
         }
+        // Intercepted by the session before it gets here.
+        CommandKind::SetIdleTimeout { .. }
+        | CommandKind::SetOverviewSearch { .. }
+        | CommandKind::SetOverviewAppGrid { .. }
+        | CommandKind::Unlock { .. }
+        | CommandKind::SetAccelerators { .. }
+        | CommandKind::WindowAction { .. }
+        | CommandKind::SwitchInputSource { .. }
+        | CommandKind::SetSwitcherThumbnails { .. }
+        | CommandKind::SetSwitcherKeys { .. }
+        | CommandKind::SetInputSettings(_) => (CommandStatus::Applied, None),
         CommandKind::Lock => {
             // Manual lock from the shell (session-lock set path):
             // engage the compositor-owned flag; idempotent, always
@@ -778,6 +999,26 @@ pub struct PollOutcome {
     pub activated: Vec<u64>,
     /// Windows to ask to close.
     pub closed: Vec<u64>,
+    /// Idle-lock timeout the shell asked for (`0` never), if any.
+    pub idle_timeout: Option<u64>,
+    /// Whether overview search is showing results, if the shell said.
+    pub overview_search: Option<bool>,
+    /// Whether the overview shows the app grid, if the shell said.
+    pub overview_app_grid: Option<bool>,
+    /// A lock-screen password to verify, with its request id.
+    pub unlock: Option<(u64, roost_shell_control::Secret)>,
+    /// GNOME input settings the shell sent, if any.
+    pub input_settings: Option<roost_shell_control::InputSettings>,
+    /// Accelerator grabs the shell sent, if they changed.
+    pub accelerators: Option<Vec<roost_shell_control::Accelerator>>,
+    /// Window-menu actions to carry out.
+    pub window_actions: Vec<(u64, roost_shell_control::WindowAction)>,
+    /// Input-source switches to make (`true` backward), in order.
+    pub input_source_switches: Vec<bool>,
+    /// New switcher thumbnail frames, if the shell sent any.
+    pub switcher_thumbnails: Option<Vec<roost_shell_control::SwitcherThumbnail>>,
+    /// The shell's switcher keys, if it sent new ones.
+    pub switcher_keys: Option<Vec<roost_shell_control::SwitcherKey>>,
 }
 
 /// Peers accepted but not yet handshaken are capped so a same-user
@@ -886,6 +1127,10 @@ pub struct ControlHub {
     /// intent (level), steps are discrete events: each one is sent to
     /// every live session exactly once, retained until all sends land.
     switcher_queue: Vec<SwitcherAction>,
+    /// Accelerator presses waiting for the next poll.
+    accelerator_queue: Vec<(u32, u32, u32)>,
+    /// Window-menu requests waiting for the next poll.
+    menu_queue: Vec<Message>,
     /// Output inventory last handed to [`set_outputs`](Self::set_outputs)
     /// (multi-monitor): the runtime refreshes this every tick from the
     /// compositor's tracking, and [`poll`](Self::poll) broadcasts it
@@ -898,6 +1143,10 @@ pub struct ControlHub {
     /// every live session holds.
     environment: Vec<(String, String)>,
     environment_sent: Vec<(String, String)>,
+    /// Overview previews for the shell's chrome, and the last value
+    /// every session holds.
+    previews: (Vec<roost_shell_control::PreviewInfo>, Option<u64>),
+    previews_sent: (Vec<roost_shell_control::PreviewInfo>, Option<u64>),
     /// Peer admission rule (#30); the runtime narrows it to the
     /// supervised shell's pid every tick.
     gate: PeerGate,
@@ -947,10 +1196,14 @@ impl ControlHub {
             overview_sent: false,
             locked: std::rc::Rc::new(std::cell::Cell::new(false)),
             switcher_queue: Vec::new(),
+            accelerator_queue: Vec::new(),
+            menu_queue: Vec::new(),
             outputs: Vec::new(),
             outputs_sent: Vec::new(),
             environment: Vec::new(),
             environment_sent: Vec::new(),
+            previews: (Vec::new(), None),
+            previews_sent: (Vec::new(), None),
             store,
             seat: seat.to_owned(),
             gate: PeerGate::SameUser,
@@ -1017,6 +1270,37 @@ impl ControlHub {
     /// Set the session environment (#59); the next [`poll`](Self::poll)
     /// broadcasts it when it differs from the last broadcast, and every
     /// newcomer gets it right after the handshake.
+    /// Where the overview's previews sit and which one is hovered; sent
+    /// to the shell when it changes (empty while the overview is closed).
+    pub fn set_overview_previews(
+        &mut self,
+        previews: Vec<roost_shell_control::PreviewInfo>,
+        hovered: Option<u64>,
+    ) {
+        self.previews = (previews, hovered);
+    }
+
+    /// Answer a lock-screen password: `Applied` when it unlocked the
+    /// session, `Denied` when it did not.
+    pub fn finish_unlock(&mut self, request: u64, unlocked: bool) {
+        let status = if unlocked {
+            CommandStatus::Applied
+        } else {
+            CommandStatus::Denied {
+                reason: "authentication failed".to_owned(),
+            }
+        };
+        for session in &mut self.sessions {
+            if session.unlock_pending == Some(request) {
+                session.unlock_pending = None;
+                let _ = session.conn.write_frame(&Message::CommandResult {
+                    id: request,
+                    status: status.clone(),
+                });
+            }
+        }
+    }
+
     pub fn set_environment(&mut self, mut vars: Vec<(String, String)>) {
         vars.sort();
         self.environment = vars;
@@ -1034,6 +1318,17 @@ impl ControlHub {
     /// shell.
     pub fn set_locked(&self, locked: bool) {
         self.locked.set(locked);
+    }
+
+    /// Send a compositor-to-shell message (window menu, workspace popup)
+    /// on the next poll.
+    pub fn queue_message(&mut self, message: Message) {
+        self.menu_queue.push(message);
+    }
+
+    /// Report a grabbed accelerator's press to the shell on the next poll.
+    pub fn queue_accelerator(&mut self, action: u32, time: u32, mode: u32) {
+        self.accelerator_queue.push((action, time, mode));
     }
 
     /// Queue one Alt-Tab drive event; the next [`poll`](Self::poll)
@@ -1097,6 +1392,34 @@ impl ControlHub {
                         outcome.activated.extend(model.focused());
                     }
                     outcome.closed.extend(Self::take_closed(session));
+                    if let Some(ms) = session.take_idle_timeout() {
+                        outcome.idle_timeout = Some(ms);
+                    }
+                    if let Some(list) = session.take_accelerators() {
+                        outcome.accelerators = Some(list);
+                    }
+                    outcome.window_actions.extend(session.take_window_actions());
+                    outcome
+                        .input_source_switches
+                        .extend(std::mem::take(&mut session.input_source_switches));
+                    if let Some(thumbnails) = session.switcher_thumbnails.take() {
+                        outcome.switcher_thumbnails = Some(thumbnails);
+                    }
+                    if let Some(keys) = session.switcher_keys.take() {
+                        outcome.switcher_keys = Some(keys);
+                    }
+                    if let Some(active) = session.overview_search.take() {
+                        outcome.overview_search = Some(active);
+                    }
+                    if let Some(active) = session.overview_app_grid.take() {
+                        outcome.overview_app_grid = Some(active);
+                    }
+                    if let Some(request) = session.unlock_request.take() {
+                        outcome.unlock = Some(request);
+                    }
+                    if let Some(settings) = session.input_settings.take() {
+                        outcome.input_settings = Some(settings);
+                    }
                     true
                 } else {
                     false
@@ -1137,6 +1460,20 @@ impl ControlHub {
                 self.environment_sent = self.environment.clone();
             }
         }
+        if self.previews != self.previews_sent {
+            let mut all_sent = true;
+            for session in &mut self.sessions {
+                if session
+                    .send_overview_previews(&self.previews.0, self.previews.1)
+                    .is_err()
+                {
+                    all_sent = false;
+                }
+            }
+            if all_sent {
+                self.previews_sent = self.previews.clone();
+            }
+        }
         if self.outputs != self.outputs_sent {
             let mut all_sent = true;
             for session in &mut self.sessions {
@@ -1166,6 +1503,18 @@ impl ControlHub {
                 }
             }
             self.switcher_queue = unsent;
+        }
+        // Accelerator presses go to every live session once (the shell
+        // signals the grabbing D-Bus caller).
+        for (action, time, mode) in std::mem::take(&mut self.accelerator_queue) {
+            for session in &mut self.sessions {
+                let _ = session.send_accelerator(action, time, mode);
+            }
+        }
+        for menu in std::mem::take(&mut self.menu_queue) {
+            for session in &mut self.sessions {
+                let _ = session.send_window_menu(&menu);
+            }
         }
         outcome
     }
@@ -1210,6 +1559,7 @@ impl ControlHub {
                 }
                 if !self.environment.is_empty() {
                     let _ = session.send_environment(&self.environment);
+                    let _ = session.send_overview_previews(&self.previews.0, self.previews.1);
                 }
                 self.sessions.push(session);
                 self.session_peers.push(peer);

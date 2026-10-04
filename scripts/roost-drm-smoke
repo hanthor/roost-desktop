@@ -11,6 +11,8 @@
 #   D-OUTPUT   the backend lit the vkms connector
 #   D-SHELL    the shell connected over the control socket (introspection)
 #   D-FRAMES   page flips completed (frame count after shutdown)
+#   D-SCALE    a GNOME monitors.xml giving the connector scale 2 is
+#              honored: logical layout at half the mode size, frames flip
 # and captures a scanout screenshot with ffmpeg kmsgrab when possible.
 # Needs root (sudo) for modprobe and seatd. Exits nonzero on any failure.
 set -eu
@@ -121,4 +123,48 @@ fi
 pass D-FRAMES "$frames frames page-flipped"
 if grep -q panicked "$LOG"; then fail D-NOPANIC "panic in compositor log"; fi
 pass D-NOPANIC "no panic"
+# Per-output scale from GNOME's monitors.xml (#59): the same session with
+# the vkms connector set to 200 percent.
+CONNECTOR="$(sed -n 's/.*drm: output \([^ ]*\) .*/\1/p' "$LOG" | head -1)"
+MODE_W="$(sed -n 's/.*drm: output [^ ]* \([0-9]*\)x.*/\1/p' "$LOG" | head -1)"
+mkdir -p "$ARTIFACTS/config"
+cat >"$ARTIFACTS/config/monitors.xml" <<XML
+<monitors version="2">
+  <configuration>
+    <logicalmonitor>
+      <x>0</x><y>0</y><scale>2</scale><primary>yes</primary>
+      <monitor><monitorspec><connector>$CONNECTOR</connector></monitorspec></monitor>
+    </logicalmonitor>
+  </configuration>
+</monitors>
+XML
+SCALED_LOG="$ARTIFACTS/compositor-scaled.log"
+CSTATE="$ARTIFACTS/compositor-state-scaled.json"
+env -u DISPLAY -u WAYLAND_DISPLAY \
+    XDG_RUNTIME_DIR="$RUNTIME" XDG_CONFIG_HOME="$ARTIFACTS/config" \
+    XDG_STATE_HOME="$ARTIFACTS/state" XDG_DATA_HOME="$ARTIFACTS/data" \
+    LIBSEAT_BACKEND=seatd ROOST_DRM_DEVICE="$CARD" ROOST_COMPOSITOR_STATE="$CSTATE" \
+    "$ROOT/target/debug/roost-compositor" --backend drm --socket roost-drm-scaled \
+    --shell-bin "$ROOT/target/debug/roost-shell-host" >"$SCALED_LOG" 2>&1 &
+COMP_PID=$!
+half=$((MODE_W / 2))
+end=$(($(date +%s) + 30))
+until [ -s "$CSTATE" ] && jq -e ".layers | any(.rect[2] == $half)" "$CSTATE" >/dev/null 2>&1; do
+    kill -0 "$COMP_PID" 2>/dev/null || { LOG="$SCALED_LOG"; fail D-SCALE "compositor exited"; }
+    [ "$(date +%s)" -le "$end" ] || { LOG="$SCALED_LOG"; fail D-SCALE "no layer laid out $half logical pixels wide"; }
+    sleep 0.2
+done
+grep -q "drm: output $CONNECTOR .* scale 2" "$SCALED_LOG" ||
+    { LOG="$SCALED_LOG"; fail D-SCALE "the output did not take scale 2 from monitors.xml"; }
+sleep 2
+kill -TERM "$COMP_PID"
+wait "$COMP_PID" || true
+COMP_PID=""
+scaled_frames="$(sed -n 's/.*shutdown after \([0-9]*\) frames.*/\1/p' "$SCALED_LOG" | tail -1)"
+if [ -z "$scaled_frames" ] || [ "$scaled_frames" -lt 10 ]; then
+    LOG="$SCALED_LOG"
+    fail D-SCALE "expected frames at scale 2, got '${scaled_frames:-none}'"
+fi
+pass D-SCALE "monitors.xml scale 2 on $CONNECTOR: $half logical px wide, $scaled_frames frames"
+
 echo "roost-drm-smoke: OK, artifacts in $ARTIFACTS"

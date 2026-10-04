@@ -10,9 +10,14 @@ stage, one "role: name" line each, in tree order. Plain labels are left
 out: they repeat their control's name or carry live values (the clock,
 calendar days). What remains is what a screen-reader user can reach and
 press, so dropping or renaming a control fails the check.
+
+Names that change with the date are normalized so the goldens hold on
+any day: calendar day buttons ("01".."31") read "#", and the today
+button ("Thursday October 1 2026") reads "<date>".
 """
 import json
 import os
+import re
 import sys
 
 STAGES = {
@@ -25,10 +30,23 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GOLDEN = os.path.join(ROOT, "tests", "a11y")
 
 
+DAY = re.compile(r"^\d{1,2}$")
+DATE = re.compile(r"^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday) "
+                  r"[A-Z][a-z]+ \d{1,2} \d{4}$")
+
+
+def stable(name):
+    if DAY.match(name):
+        return "#"
+    if DATE.match(name):
+        return "<date>"
+    return name
+
+
 def normalize(path):
     with open(path, encoding="utf-8") as fh:
         nodes = json.load(fh)
-    return [f"{n['role']}: {n['name']}" for n in nodes
+    return [f"{n['role']}: {stable(n['name'])}" for n in nodes
             if n.get("showing") and n.get("name") and n.get("role") != "label"]
 
 
