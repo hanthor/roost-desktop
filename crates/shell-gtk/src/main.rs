@@ -1797,6 +1797,7 @@ fn build(app: &adw::Application) {
     // Compositor state: drain the control socket every frame.
     {
         let shell = shell.clone();
+        let notify = notify.clone();
         let overview_ui = overview_ui.clone();
         let switcher_ui = switcher_ui.clone();
         let panel_window = window.clone();
@@ -1867,6 +1868,9 @@ fn build(app: &adw::Application) {
                 .as_ref()
                 .is_some_and(|c| c.model().is_overview_open());
             drop(shell);
+            if locked {
+                notify.release_focus();
+            }
             lock_ui.sync(locked);
             screensaver.sync(locked);
             for (action, time, mode) in accelerators {

@@ -415,6 +415,12 @@ impl NotifyUi {
         self.banner_box.child_focus(gtk::DirectionType::TabForward);
     }
 
+    /// A locked session must not keep the banner's exclusive keyboard grab.
+    pub fn release_focus(&self) {
+        self.banner_window.set_keyboard_mode(KeyboardMode::None);
+        self.banner_window.set_focus_visible(false);
+    }
+
     /// Periodic work: claim the bus, expire banners, redraw on change.
     pub fn tick(self: &Rc<Self>) {
         let retry = self
