@@ -27,7 +27,7 @@ python3 /repo/scripts/lib/roost-test-window.py 'Portal Proof' '#3584e4' >/out/wi
 python3 /repo/scripts/lib/roost-a11y-dump.py roost-shell-gtk /out/a11y-shell.json 30
 sleep 1
 python3 /repo/scripts/lib/roost-capture-security-client.py > /out/untrusted-denial.log
-/usr/libexec/xdg-desktop-portal-gnome --replace >/out/backend.log 2>&1 & pids="$pids $!"
+/usr/libexec/xdg-desktop-portal-gnome --replace >/out/backend.log 2>&1 & portal_backend_pid=$!; pids="$pids $portal_backend_pid"
 /usr/libexec/xdg-desktop-portal --replace >/out/frontend.log 2>&1 & pids="$pids $!"
 sleep 2
 for decision in cancel grant disconnect; do
@@ -36,6 +36,17 @@ for decision in cancel grant disconnect; do
     wait "$client"
 done
 [ -s /out/grant.png ] && [ -s /out/disconnect.png ] && [ ! -f /out/cancel.png ]
+# Losing the trusted backend process revokes the compositor grant itself.
+python3 /repo/scripts/lib/roost-portal-capture-client.py /out/backend-disconnect.png backend-disconnect >/out/backend-disconnect.log 2>&1 & client=$!; pids="$pids $client"
+python3 /repo/scripts/lib/roost-portal-consent.py /out/a11y-backend-disconnect.json grant
+end=$((SECONDS + 30))
+until [ -s /out/backend-disconnect.active ]; do [ "$SECONDS" -lt "$end" ] || exit 1; sleep .1; done
+kill "$portal_backend_pid"
+touch /out/backend-disconnect.revoke
+wait "$client"
+/usr/libexec/xdg-desktop-portal-gnome --replace >/out/backend-restarted.log 2>&1 & pids="$pids $!"
+/usr/libexec/xdg-desktop-portal --replace >/out/frontend-restarted.log 2>&1 & pids="$pids $!"
+sleep 2
 # Keep a genuine external portal stream active across the lock transition.
 python3 /repo/scripts/lib/roost-portal-capture-client.py /out/lock-grant.png revoke >/out/lock-grant.log 2>&1 & client=$!; pids="$pids $client"
 python3 /repo/scripts/lib/roost-portal-consent.py /out/a11y-lock-grant.json grant
@@ -54,4 +65,4 @@ wait "$client"
 [ ! -f /out/locked.png ]
 pw-dump > /out/locked-pipewire.json
 jq -e 'all(.[]; .type != "PipeWire:Interface:Node" or (.info.props["node.name"] // "" | contains("roost-screen-cast") | not))' /out/locked-pipewire.json >/dev/null
-printf '%s\n' 'GNOME51 genuine portal: untrusted/spoof denial, picker Cancel, Share/FD/frame, foreign owner rejection, Close and client-disconnect/node removal, active external stream revoked on lock, locked denial' > /out/assertions.txt
+printf '%s\n' 'GNOME51 genuine portal: untrusted/spoof denial, picker Cancel, Share/FD/frame, foreign owner rejection, Close and client/backend-disconnect/node removal, active external stream revoked on lock, locked denial' > /out/assertions.txt
