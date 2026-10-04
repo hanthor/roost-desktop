@@ -464,6 +464,17 @@ pub struct Runtime {
     /// feature only).
     #[cfg(feature = "xwayland")]
     pending_x11_client: Option<smithay::reexports::wayland_server::Client>,
+    #[cfg(feature = "xwayland")]
+    x11_sockets: Option<smithay::xwayland::XWaylandSockets>,
+    #[cfg(feature = "xwayland")]
+    x11_watchers: Vec<calloop::RegistrationToken>,
+    #[cfg(feature = "xwayland")]
+    x11_source: Option<calloop::RegistrationToken>,
+    #[cfg(feature = "xwayland")]
+    active_x11_client: Option<smithay::reexports::wayland_server::Client>,
+    #[cfg(feature = "xwayland")]
+    x11_failed: bool,
+
     /// Output scale (#59), see [`NestedSession::scale`].
     scale: f64,
     /// GNOME's input settings as last applied (#60).
@@ -499,8 +510,8 @@ pub struct Runtime {
     overview_drag: Option<(u64, Point<f64, Logical>, bool)>,
     /// The Alt+Tab switcher's window thumbnails (frames from the shell).
     switcher_thumbnails: Vec<roost_shell_control::SwitcherThumbnail>,
-    /// X11 display number once XWayland's window manager is up (#59):
-    /// published as `DISPLAY` to the shell for the apps it launches.
+    /// Reserved X11 display, advertised before XWayland starts (#219).
+    /// Actual window-manager readiness is independently state.xwm.is_some().
     x11_display: Option<u32>,
     /// Real-time anchor of the last input event. Input stamps live on
     /// the backend event clock while idle is measured here, so each
@@ -533,6 +544,27 @@ pub fn control_socket_path(socket_name: &str) -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
         .filter(|dir| dir.is_absolute())
         .map(|dir| dir.join(format!("roost-{socket_name}.control")))
+}
+
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        #[cfg(feature = "xwayland")]
+        {
+            // Event sources can retain loop handles after dispatch stops.
+            // Release our owned sources explicitly so XWayland's display
+            // lock/socket owner is dropped before the compositor exits.
+            for token in self.x11_watchers.drain(..) {
+                self.loop_handle.remove(token);
+            }
+            if let Some(token) = self.x11_source.take() {
+                self.loop_handle.remove(token);
+            }
+            self.x11_sockets = None;
+            self.state.xwm = None;
+            self.pending_x11_client = None;
+            self.active_x11_client = None;
+        }
+    }
 }
 
 impl Runtime {
@@ -782,6 +814,16 @@ impl Runtime {
             loop_handle,
             #[cfg(feature = "xwayland")]
             pending_x11_client: None,
+            #[cfg(feature = "xwayland")]
+            x11_sockets: None,
+            #[cfg(feature = "xwayland")]
+            x11_watchers: Vec::new(),
+            #[cfg(feature = "xwayland")]
+            x11_source: None,
+            #[cfg(feature = "xwayland")]
+            active_x11_client: None,
+            #[cfg(feature = "xwayland")]
+            x11_failed: false,
             x11_display: None,
             overview_search: false,
             overview_app_grid: false,
@@ -812,11 +854,13 @@ impl Runtime {
             state_last: String::new(),
             proof_swipe_last: String::new(),
         };
-        // Session-level X11 opt-in is the recorded first X11 need:
-        // the supervisor leaves `Idle` and the next tick may spawn
-        // the server. Native sessions never request.
+        // Reserve and advertise sockets, but spawn only when a real X11
+        // client connects. Native clients do not start a compatibility process.
+        #[cfg(feature = "xwayland")]
         if session.xwayland {
-            runtime.request_x11();
+            if let Err(error) = runtime.prepare_x11(None) {
+                eprintln!("roost-compositor: xwayland: socket preparation failed: {error}; native session continues");
+            }
         }
         // GNOME Shell greets a login with the overview.
         if session.startup_overview {
@@ -1138,12 +1182,50 @@ impl Runtime {
         self.xwayland.request();
     }
 
-    /// XWayland's window manager is up on `:display`: apps launched from
-    /// now on get `DISPLAY` (#59).
+    /// Advertise the reserved display to apps, independently of XWM readiness.
     pub fn set_x11_display(&mut self, display: u32) {
         self.x11_display = Some(display);
+        if let Some(ime) = &mut self.ime {
+            ime.set_x11_display(display);
+        }
         self.control
             .set_environment(vec![("DISPLAY".to_owned(), format!(":{display}"))]);
+    }
+
+    #[cfg(feature = "xwayland")]
+    fn prepare_x11(&mut self, display: Option<u32>) -> Result<(), Box<dyn std::error::Error>> {
+        let sockets = smithay::xwayland::XWaylandSockets::prepare(display, true)?;
+        let number = sockets.display_number();
+        let handles = sockets
+            .listen_fds()
+            .map(|fd| fd.try_clone_to_owned())
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut watchers = Vec::new();
+        for owned in handles {
+            match self.loop_handle.insert_source(
+                calloop::generic::Generic::new(
+                    owned,
+                    calloop::Interest::READ,
+                    calloop::Mode::Level,
+                ),
+                |_, _, runtime| {
+                    runtime.request_x11();
+                    Ok(calloop::PostAction::Disable)
+                },
+            ) {
+                Ok(token) => watchers.push(token),
+                Err(error) => {
+                    for token in watchers {
+                        self.loop_handle.remove(token);
+                    }
+                    return Err(Box::new(error));
+                }
+            }
+        }
+        self.x11_watchers = watchers;
+        self.x11_sockets = Some(sockets);
+        self.set_x11_display(number);
+        Ok(())
     }
 
     /// Loop handle for event-source installation (XWayland spawn).
@@ -1163,6 +1245,11 @@ impl Runtime {
         &mut self,
     ) -> Option<smithay::reexports::wayland_server::Client> {
         self.pending_x11_client.take()
+    }
+
+    #[cfg(feature = "xwayland")]
+    pub(crate) fn x11_startup_failed(&mut self) {
+        self.x11_failed = true;
     }
 
     /// Handle one XWayland server event (spawned source callback).
@@ -1239,8 +1326,13 @@ impl Runtime {
             Vec::new()
         };
         let focused = model.focused();
+        #[cfg(feature = "xwayland")]
+        let x11_ready = self.state.xwm.is_some();
+        #[cfg(not(feature = "xwayland"))]
+        let x11_ready = false;
         let doc = serde_json::json!({
             "x11_display": self.x11_display.map(|d| format!(":{d}")),
+            "x11_ready": x11_ready,
             "idle_timeout_ms": self.lock.timeout_ms(),
             "idle_blank_alpha": self.blank_alpha(),
             "overview_search": self.overview_search,
@@ -2343,10 +2435,10 @@ impl Runtime {
                 if !self.is_locked() {
                     self.engage_lock();
                 }
-                locker.lock();
             } else {
                 eprintln!("roost-compositor: session lock refused for pid {pid:?}");
             }
+            self.state.resolve_lock_request(locker, ours);
         }
         // A lock client's unlock_and_destroy never unlocks by itself:
         // only a verified password clears the flag.
@@ -2431,10 +2523,48 @@ impl Runtime {
         {
             let display = self.display.handle();
             let loop_handle = self.loop_handle.clone();
+            let now = crate::state::system_millis();
+            if self.x11_failed
+                || self
+                    .active_x11_client
+                    .as_ref()
+                    .is_some_and(|client| client.get_credentials(&display).is_err())
+            {
+                if let Some(token) = self.x11_source.take() {
+                    loop_handle.remove(token);
+                }
+                self.active_x11_client = None;
+                self.x11_failed = false;
+                self.pending_x11_client = None;
+                self.state.xwm = None;
+                self.manager.clear_x11_windows(&mut self.state);
+                self.xwayland.disconnected(now);
+            }
             let pending = &mut self.pending_x11_client;
-            let mut spawner = || crate::xwayland::spawn_xwayland(&display, &loop_handle, pending);
-            self.xwayland
-                .tick(crate::state::system_millis(), Some(&mut spawner));
+            let reserved = &mut self.x11_sockets;
+            let watchers = &mut self.x11_watchers;
+            let source = &mut self.x11_source;
+            let client = &mut self.active_x11_client;
+            let advertised = self.x11_display;
+            let mut spawner = || {
+                for token in watchers.drain(..) {
+                    loop_handle.remove(token);
+                }
+                let sockets = match reserved.take() {
+                    Some(sockets) => sockets,
+                    None => smithay::xwayland::XWaylandSockets::prepare(advertised, true)
+                        .map_err(|_| crate::xwayland::AbsentReason::SpawnFailed)?,
+                };
+                crate::xwayland::spawn_xwayland(
+                    &display,
+                    &loop_handle,
+                    pending,
+                    sockets,
+                    source,
+                    client,
+                )
+            };
+            self.xwayland.tick(now, Some(&mut spawner));
         }
         self.stats.shell_restarts = self.shell.restarts_used();
         self.proof_swipe_input();
@@ -2607,7 +2737,7 @@ impl Runtime {
                         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
                 }
                 send_surface_scales(&self.state, &self.manager);
-                send_frame_callbacks(&self.state, &self.manager, self.stats.frames);
+                send_frame_callbacks(&self.state, &self.manager);
                 backend
                     .submit(Some(&[damage]))
                     .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
@@ -2773,7 +2903,7 @@ impl Runtime {
                     // A pending page flip is not another rendered frame.
                     // Granting callbacks on every client dispatch here would
                     // let redraws outrun the display and keep the loop busy.
-                    send_frame_callbacks(&self.state, &self.manager, self.stats.frames);
+                    send_frame_callbacks(&self.state, &self.manager);
                     self.stats.frames += 1;
                 }
             }
@@ -3389,8 +3519,10 @@ fn send_surface_scales(state: &State, manager: &WindowManager) {
     }
 }
 
-fn send_frame_callbacks(state: &State, manager: &WindowManager, frames: u64) {
-    let time = Duration::from_millis(frames.saturating_mul(16));
+fn send_frame_callbacks(state: &State, manager: &WindowManager) {
+    // Frame callback time measures elapsed time, independently of refresh
+    // rate, idle periods, or how many frames the backend has queued.
+    let time = Duration::from(state.presentation_now());
     let Some(output) = state.primary_output() else {
         return;
     };

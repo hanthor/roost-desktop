@@ -27,8 +27,12 @@ jobs:
       # The GTK shell (ADR 0006) links gtk4-layer-shell, which Ubuntu
       # 24.04 does not package.
       - run: sudo apt-get install -y meson ninja-build libwayland-dev wayland-protocols && scripts/ci-install-gtk4-layer-shell
+      - run: scripts/roost-a11y-baseline check
+      - run: python3 scripts/lib/roost-soak-tests.py
       - run: scripts/roost-settings-inventory-check
       - run: cargo fmt --all -- --check
+      - run: rustfmt --edition 2021 --check third-party/smithay/src/xwayland/xserver.rs
+      - run: cargo test --locked --manifest-path third-party/smithay/Cargo.toml --no-default-features --features xwayland,wayland_frontend prepared_socket
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # pam_wrapper runs the lock screen's PAM path for real (#62); it is
       # required here so the test can never silently skip.
@@ -173,7 +177,7 @@ jobs:
           toolchain: stable
       # One cache per job: target/ and the registry, keyed by Cargo.lock.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool scrot ffmpeg jq dbus libglib2.0-bin xwayland x11-apps pipewire wireplumber gstreamer1.0-pipewire gstreamer1.0-tools gstreamer1.0-plugins-good at-spi2-core python3-pil python3-pyatspi libsecret-tools gnome-keyring fonts-cantarell shellcheck libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev meson ninja-build libwayland-dev wayland-protocols libpam-wrapper ibus gir1.2-ibus-1.0 wayland-utils
+      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool scrot ffmpeg jq dbus libglib2.0-bin xwayland x11-apps pipewire wireplumber gstreamer1.0-pipewire gstreamer1.0-tools gstreamer1.0-plugins-good at-spi2-core python3-pil python3-pyatspi libsecret-tools gnome-keyring fonts-cantarell shellcheck libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev meson ninja-build libwayland-dev wayland-protocols libpam-wrapper ibus gir1.2-ibus-1.0 gir1.2-gtk-3.0 wayland-utils
       - run: scripts/ci-install-gtk4-layer-shell
       - run: shellcheck scripts/roost-gtk-shell-proof scripts/roost-walkthrough
       # docs/walkthrough.md must match its manifest (docs/walkthrough.tsv).
@@ -212,6 +216,30 @@ jobs:
           name: gtk-shell
           path: gtk-shell-artifacts/
           retention-days: 14
+
+  niri-parity:
+    runs-on: ubuntu-24.04
+    needs: [arch-package]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: roost-arch
+          path: niri-package
+      - run: sudo apt-get -o Acquire::Retries=3 update -qq && sudo apt-get install -y podman python3-pil zstd shellcheck
+      - run: shellcheck scripts/roost-niri-reference scripts/roost-niri-compare tests/niri-reference/run.sh tests/niri-reference/run-roost.sh
+      - run: |
+          mkdir -p niri-candidate
+          tar --zstd -xf niri-package/roost-*.pkg.tar.zst -C niri-candidate
+          scripts/roost-niri-compare --candidate niri-candidate --out niri-parity-artifacts
+          printf '%s\n' "$GITHUB_SHA" >niri-parity-artifacts/candidate-revision.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: niri-parity
+          path: niri-parity-artifacts/
+          retention-days: 90
 
   arch-package:
     # TunaOS Marlin is Arch-based: build, check, and install the Arch

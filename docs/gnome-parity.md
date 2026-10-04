@@ -51,6 +51,10 @@ scripts/lib/roost-parity-compare.py target/gnome-reference target/roost-parity t
 | 06b-switcher | Alt+Tab |
 | 07-overview-windows | the overview with three windows |
 | 07b-overview-hover | a window preview hovered (caption and close button) |
+| 20-overview-dismiss-focus | Escape dismisses the overview and restores the previous focused test window; state JSON asserts the focused identity |
+| 21-maximized | Super+Up maximizes the focused test window |
+| 22-tiled-left, 22b-tiled-right | Super+Left/Right tile the focused test window to each half |
+| 23-workspace-switched | settled workspace after Super+Page_Down |
 | 08-notification | a notification banner |
 | 09-calendar-with-notification | the date menu listing it |
 | 10-end-session | the Log Out dialog (gnome-session's EndSessionDialog) |
@@ -149,6 +153,41 @@ GTK and St differ in a few ways that matter when matching numbers:
 - GNOME's lock screen blurs the wallpaper with a Gaussian of about
   sigma 20 and dims it to 65%; fitted against GNOME's capture.
 
+## Accessibility baseline
+
+The reference also records AT-SPI trees for the panel, quick settings and
+the overview with the three test windows. `scripts/roost-a11y-baseline
+update target/gnome-reference` keeps visible nodes, hierarchy, unnamed
+controls and state flags in `tests/a11y/gnome51/`, with the clock normalized.
+The committed [comparison](../tests/a11y/gnome51/comparison.md) catalogs
+these controls beside Roost's live proof goldens and explains the intended
+role, label and fixture differences. CI checks that this comparison still
+reflects the fixtures and goldens.
+
+The 2026-10-04 native capture asserts focus restoration and maximization,
+and records each window's rectangle, workspace and focused identity in
+`*.state.json`. Roost records equivalent compositor state alongside its
+frames and asserts focus restoration and exact maximize/tile bounds.
+The paired 2026-10-04 captures use GNOME Shell 51.0 and Roost binaries from
+[CI job 111350817693](https://github.com/hanthor/roost-desktop/actions/runs/37172493269/job/111350817693),
+commit `e101d566048986c3c8c78e193cd41a26b44947bd`, with the native fonts,
+icons and wallpaper. The GTK live proof passed; that job's later standalone
+ShellCheck failed on the old cleanup expression, which was corrected.
+The recorded native and Roost window states are committed in
+`tests/gnome-reference/baseline-state.json` and `roost-baseline-state.json`.
+
+| State | Pixels visibly off | Recorded behavior |
+| --- | --- | --- |
+| 20-overview-dismiss-focus | 0.4% | Beta regains focus; its rectangle remains 370,256,640,420 |
+| 21-maximized | 0.3% | Beta occupies 0,32,1280,768 on both sides |
+| 22-tiled-left | 0.5% | Beta occupies 0,32,640,768 on both sides |
+| 22b-tiled-right | 0.3% | Beta occupies 640,32,640,768 on both sides |
+| 23-workspace-switched | 0.0% | Workspace 1 is active; no window is focused; all three windows remain on workspace 0 |
+
+These are full 1280x800 frame comparisons with the same threshold as the
+other measurements above. Each capture asserts the keyboard action's
+focus, workspace or rectangle result before continuing.
+
 Audio state comes from a persistent `pw-dump --monitor --no-colors` stream.
 Recording node creation, removal and state changes update the microphone
 indicator and slider in the GTK event callback, before the next frame; there
@@ -190,3 +229,10 @@ run `37175952333`, checkout merge `49a70b0` (PR 240 head `ad87517` into
 PR 234 head `bd18c76`). The full GTK proof, including `G-WS-INSERT`,
 passed. Capture with `--workspace-insertion-only` isolates this state
 from screenshot-helper startup and fails if the placeholder is absent.
+
+The candidate XWayland activation journey (#219) additionally checks native GTK
+startup without an XWayland process, the first real X11 app launched from search,
+a killed compatibility process followed by same-display reconnect, preserved
+native window IDs, and listening-socket/display-lock cleanup on graceful exit.
+See `xwayland-on-demand.md`. These are runtime/lifecycle gates, separate from
+GNOME screenshot pixel comparisons; their exact-head CI qualification is pending.

@@ -1,0 +1,106 @@
+apiVersion: org.containers.bootc/v1
+kind: BootcHost
+metadata:
+  name: host
+spec:
+  image:
+    image: ghcr.io/tuna-os/marlin@sha256:41d733afd5fd3bd8675c69f2006f89c821aa4262ed2b1c2ed09401d7ba33233b
+    transport: registry
+  bootOrder: default
+status:
+  staged: null
+  booted:
+    image:
+      image:
+        image: ghcr.io/tuna-os/marlin@sha256:41d733afd5fd3bd8675c69f2006f89c821aa4262ed2b1c2ed09401d7ba33233b
+        transport: registry
+      version: null
+      timestamp: 2026-10-04T07:29:48.304200534Z
+      imageDigest: sha256:41d733afd5fd3bd8675c69f2006f89c821aa4262ed2b1c2ed09401d7ba33233b
+      architecture: amd64
+    cachedUpdate: null
+    incompatible: false
+    pinned: false
+    softRebootCapable: false
+    downloadOnly: false
+    store: null
+    ostree: null
+    composefs:
+      verity: 726fecf600e6db727dc945fc00321a9eddb2f7ca54f905775e6c671d627f0adb7735d4c53e9d488b3c16ecd5121eabba886e227926214d7c7b255b4c09f2baca
+      bootType: Bls
+      bootloader: systemd
+      bootDigest: 9ec7b0d79cc62b0e6ce96c5fd330e51ae441ffdf7c2e1a987458aad23916f5a9
+      missingVerityAllowed: false
+  rollback:
+    image:
+      image:
+        image: ghcr.io/tuna-os/marlin@sha256:36dc326935943ef0651e4433307e5eae5c6abef730f082ab18ca072afc5f43e7
+        transport: registry
+      version: null
+      timestamp: 2026-10-04T06:26:34.940655604Z
+      imageDigest: sha256:36dc326935943ef0651e4433307e5eae5c6abef730f082ab18ca072afc5f43e7
+      architecture: amd64
+    cachedUpdate: null
+    incompatible: false
+    pinned: false
+    softRebootCapable: true
+    downloadOnly: false
+    store: null
+    ostree: null
+    composefs:
+      verity: bc787fba96a82f0ded70eb559e166769ce72f52007513566a7558f5a5d19478985e4e17c24dfb0d838127dd27d033300a1cac291f34039b3596b7a91fa0aed57
+      bootType: Bls
+      bootloader: systemd
+      bootDigest: 9ec7b0d79cc62b0e6ce96c5fd330e51ae441ffdf7c2e1a987458aad23916f5a9
+      missingVerityAllowed: false
+  rollbackQueued: false
+  type: null
+  usrOverlay: null
+  readOnly: false
+roost 0.1.0-2
+active
+static
+[terminal]
+vt = 1
+
+[default_session]
+command = "/usr/libexec/tunaos/greetd-session"
+user = "greeter"
+#!/usr/bin/env bash
+# Launch gtkgreet under cage on hardware that may have neither 3D nor a GPU
+# ready yet. Two distinct failures, both measured in the sailfin niri Gate:
+#
+#   1. The DRM device appears LATE. greetd is ordered only after
+#      systemd-user-sessions, not after the GPU, and the boot log shows
+#      virtio_gpu registering at 50.62s — the same instant greetd started.
+#      cage with no /dev/dri/card* exits immediately, greetd restarts it, and
+#      the unit never settles: "Started Greeter daemon" appears, yet
+#      `systemctl is-active display-manager.service` is false a fraction of a
+#      second later, with zero failed units. That is a restart loop, not a
+#      crash, which is why it reads as dm_inactive rather than a failure.
+#   2. There may be no 3D at all: the same log shows
+#      "[drm] features: -virgl", so GL initialisation cannot succeed even once
+#      the device exists. wlroots' pixman renderer draws fine on dumb buffers.
+#
+# Waiting for card* fixes (1). For (2), the root boot detector reads the
+# kernel's `-virgl` report and writes /run/tunaos-software-gl; render-node
+# presence cannot answer this because virtio-gpu can expose one with zero caps.
+for _ in $(seq 1 30); do
+	compgen -G '/dev/dri/card*' >/dev/null 2>&1 && break
+	sleep 0.5
+done
+if [[ -e /run/tunaos-software-gl ]] ||
+	! compgen -G '/dev/dri/renderD*' >/dev/null 2>&1; then
+	export WLR_RENDERER=pixman
+	export LIBGL_ALWAYS_SOFTWARE=1
+fi
+# Cage hosts an xdg-toplevel; its server does not implement layer-shell.
+# Upstream gtkgreet documents `cage gtkgreet` for this path.
+exec cage -s -- gtkgreet -s /etc/greetd/gtkgreet.css
+dec423a2041d4eaa5da14ecf66f044f209080a828e757d3f52696d8725554db8  /usr/bin/roost-compositor
+055b2b9470f9b1aa1e54d6436600d423923422e2238345b8679a5827a8673248  /usr/bin/roost-greeter
+131fb60c7f982637df540e272a6f1703a4c87ca69ebb2b7f0111a1395da2e857  /usr/bin/roost-ibus-bridge
+375174bee36a7824b68cbc3d414cf63ce19b6a0f39f4d30a02cf4fb61767595b  /usr/bin/roost-session
+abbbd99c2c126fec2e17fe93ab86af5fd15f7a1cbc7e3759fda53e779f1b53fc  /usr/bin/roost-shell-gtk
+df1de8a9b66782324025a7a792420ef7ff2ba4cbe038a24bf829826957491dc8  /usr/bin/roost-shell-host
+roost-session

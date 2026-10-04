@@ -543,6 +543,7 @@ impl WindowManager {
             .into_iter()
             .filter_map(|(w, g)| w.wl_surface().map(|s| (s.into_owned(), g.loc)))
             .collect();
+        state.refresh_ime_cursor_origins();
         // Never pull focus out from under a live grab.
         if state.take_popup_refocus() && !state.popup_grab_active() {
             let focused = self.model.focused();
@@ -966,6 +967,17 @@ impl WindowManager {
         id
     }
 
+    /// Remove compatibility windows after the server connection is lost.
+    /// Native windows keep their model IDs and surfaces across a restart.
+    #[cfg(feature = "xwayland")]
+    pub fn clear_x11_windows(&mut self, state: &mut State) {
+        let ids: Vec<_> = self.x11_index.values().copied().collect();
+        for id in ids {
+            self.unmap(state, id);
+        }
+        state.x11_events.clear();
+    }
+
     /// Drain queued X11 manager events: map/unmap/size and identity
     /// updates plus maximize/fullscreen requests, all on the one
     /// manager call path. (xwayland feature only.)
@@ -1270,8 +1282,13 @@ impl WindowManager {
         let id = id.map(|id| self.modal_target(id));
         let previous = self.model.focused();
         self.model.set_focused(id);
-        // The strip view follows focus (niri), new columns included.
-        if self.mode == SessionMode::Scroll && id.is_some() && previous != id {
+        // Shell activation may set model focus before this manager runs.
+        // Compare the last applied activation too, so Alt+Tab follows the
+        // selected column while ordinary reassertion preserves wheel panning.
+        if self.mode == SessionMode::Scroll
+            && id.is_some()
+            && (previous != id || self.activated != id)
+        {
             self.follow_focus(state);
             self.relayout_strip(state);
         }

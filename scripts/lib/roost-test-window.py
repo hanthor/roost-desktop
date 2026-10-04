@@ -11,6 +11,8 @@ ROOST_TEST_POPOVER=1 the popover opens by itself once the window shows
 """
 import os
 import sys
+import json
+from pathlib import Path
 
 # Harness windows must not wait on portals (libadwaita reads the color
 # scheme from the settings portal, which can stall without a desktop
@@ -60,6 +62,22 @@ def build(loop):
     box.append(scroller)
     win.set_content(box)
     win.present()
+    if request_path := os.environ.get("ROOST_TEST_REQUESTS"):
+        handled = [-1]
+        def request():
+            try:
+                data = json.loads(Path(request_path).read_text())
+                generation = data["generation"]
+                if generation != handled[0]:
+                    actions = {"fullscreen": win.fullscreen, "unfullscreen": win.unfullscreen,
+                               "maximize": win.maximize, "unmaximize": win.unmaximize}
+                    actions[data["request"]]()
+                    handled[0] = generation
+                    Path(request_path + ".ack").write_text(str(generation))
+            except (OSError, ValueError, KeyError):
+                pass
+            return True
+        GLib.timeout_add(50, request)
     if os.environ.get("ROOST_TEST_POPOVER") == "1":
         GLib.timeout_add(1500, lambda: menu.popup() or False)
 
