@@ -60,6 +60,7 @@ scripts/lib/roost-parity-compare.py target/gnome-reference target/roost-parity t
 | 14-screenshot-ui | the screenshot UI on Print |
 | 15-workspace-popup | the workspace switcher popup on Super+Page_Down |
 | 16-overview-workspaces | the overview with three workspaces (a window moved one right): the thumbnails strip, the shrunken card, the focused window still drawn activated |
+| 16b-workspace-insertion-placeholder | a window held over the first thumbnail gap: GNOME’s native insertion marker and the later thumbnails shifted by 24px; compare the thumbnail strip crop at 530,96,220,30 |
 | 17-tile-preview | Gamma dragged to the left edge: the tile preview over the left half, above Alpha and below Gamma (GNOME's reference moves Gamma by the drag's offset and opens the preview through its own handler, since headless input is unreliable) |
 | 18-overview-search | "calc" typed in the overview: the app result under the focused entry (external search providers off on both sides, since the host and the image install different ones) |
 | 19-app-popover | a fourth test window opening its header-bar menu by itself (an xdg popup; headless input is not reliable in GNOME's reference), placed by the cascade's first free slot |
@@ -148,6 +149,18 @@ GTK and St differ in a few ways that matter when matching numbers:
 - GNOME's lock screen blurs the wallpaper with a Gaussian of about
   sigma 20 and dims it to 65%; fitted against GNOME's capture.
 
+Audio state comes from a persistent `pw-dump --monitor --no-colors` stream.
+Recording node creation, removal and state changes update the microphone
+indicator and slider in the GTK event callback, before the next frame; there
+is no recording poll or extra volume query. Default-node metadata and node
+Props provide the live volume and mute state. Device EnumRoute and Route
+parameters supply separate output-port rows. Selecting a physical port sets
+its saved device Route before setting the sink default. Sinks without routes
+(such as a virtual output) retain a single row. The event decoder bounds both
+incomplete JSON and retained graph state, clears stale state on disconnect,
+and reconnects to a restarted daemon. The graphical gates use an event-driven
+FIFO fixture with the same JSON objects and route command arguments.
+
 Idle shield behavior follows GNOME's `screenShield.js`: the idle fade takes
 10,000 ms with ease-out-quad, and locking waits for the larger of that animation duration
 and `lock-delay`. With animations disabled the minimum disappears.
@@ -158,3 +171,22 @@ screen-saver URI and checks its dimmed pixels. The parity lock frame sets
 an explicit URI to the exported reference wallpaper and retains it in
 `lock-background-uri.txt`; the custom-color proof is separate from that
 GNOME visual comparison.
+
+## Workspace insertion comparison
+
+State `16b-workspace-insertion-placeholder` compares GNOME 51’s native
+insertion handler with an actual held Roost preview drag. Both place the
+marker at `[619,102,18,26]` and shift later thumbnails to x=643 and x=692.
+The strip crop `530,96,220,30` has mean channel difference 2.41 and 3.6%
+of pixels above the usual 24-level threshold. The marker crop
+`619,102,18,24` has mean difference 0.69 and 0.0% above threshold; its
+bottom two pixels are excluded because the actual Roost drag ghost
+begins there, while the native synthetic handler has no ghost.
+
+[Recorded source and metrics](../tests/gnome-reference/workspace-insertion-comparison.json)
+and the [three-row comparison image](../tests/gnome-reference/workspace-insertion-strip.png)
+retain this evidence. Roost binaries came from GTK job `111359239198`,
+run `37175952333`, checkout merge `49a70b0` (PR 240 head `ad87517` into
+PR 234 head `bd18c76`). The full GTK proof, including `G-WS-INSERT`,
+passed. Capture with `--workspace-insertion-only` isolates this state
+from screenshot-helper startup and fails if the placeholder is absent.

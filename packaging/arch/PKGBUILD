@@ -23,6 +23,7 @@ depends=(
     'libadwaita'
     'libdrm'
     'libinput'
+    'libsecret'
     'libxkbcommon'
     'libxkbcommon-x11'
     'mesa'
@@ -33,6 +34,7 @@ depends=(
 )
 makedepends=('cargo' 'clang' 'git' 'pkgconf')
 optdepends=(
+    'gnome-keyring: user network secret storage'
     'xdg-desktop-portal-gnome: screenshots and screen sharing for apps'
     'greetd: login manager driving roost-greeter'
     'xorg-xwayland: X11 application support'
@@ -95,6 +97,8 @@ package() {
     done
     install -Dm0644 "$root/share/wayland-sessions/roost.desktop" \
         "$pkgdir/usr/share/wayland-sessions/roost.desktop"
+    install -Dm0644 "$root/share/systemd/user/roost-session.target" \
+        "$pkgdir/usr/lib/systemd/user/roost-session.target"
     # Lock-screen PAM service (#62): unlock under GDM, where no greetd runs.
     install -Dm0644 "$root/share/pam.d/roost-lock" "$pkgdir/etc/pam.d/roost-lock"
     install -Dm0644 "$root/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

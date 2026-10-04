@@ -82,6 +82,10 @@ XDG_STATE_HOME="$ARTIFACTS/probe-state"
 rm -rf "$XDG_STATE_HOME"
 mkdir -p "$XDG_STATE_HOME"
 export XDG_STATE_HOME
+GSETTINGS_BACKEND=keyfile
+XDG_CONFIG_HOME="$ARTIFACTS/probe-config"
+mkdir -p "$XDG_CONFIG_HOME"
+export GSETTINGS_BACKEND XDG_CONFIG_HOME
 
 cleanup() {
     if [ -n "$COMPOSITOR_PID" ] && kill -0 "$COMPOSITOR_PID" 2>/dev/null; then
@@ -196,6 +200,15 @@ assert_state J-BASE '.overview.open == false and .locked == false and .notificat
     "session idle: overview closed, unlocked, no stray banners" 30
 keep_state 01-baseline
 shot "01-baseline.png"
+
+# A desktop key changes while the shell runs; assert its consumed snapshot.
+# A private keyfile backend avoids writing the host user's preferences.
+gsettings set org.gnome.desktop.interface clock-format '12h'
+assert_state J-SETTINGS-LIVE '.settings.clock_format == "12h"' "GSettings changes the live shell clock"
+keep_state 01b-settings-live
+shot "01b-settings-live.png"
+gsettings set org.gnome.desktop.interface clock-format '24h'
+assert_state J-SETTINGS-RESTORE '.settings.clock_format == "24h"' "clock setting restored"
 
 # Lone Super tap: overview opens (tap, not hold — no chord).
 xdotool key Super_L

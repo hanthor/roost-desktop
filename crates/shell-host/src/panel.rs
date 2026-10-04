@@ -89,18 +89,18 @@ use crate::watcher::{
     IndicatorIcon, ItemInfo, WatcherBus, INDICATOR_CELL,
 };
 
-/// Namespace advertised for the panel layer surface.
-pub const PANEL_NAMESPACE: &str = "roost-shell-panel";
-/// Layer namespace for the bottom dock surface.
+/// Layer-shell namespace and contract constants.
+///
+/// Shared with the compositor: both sides read these from the same source
+/// to prevent drift in the compositor↔shell interface.
+pub use roost_shell_control::{
+    BANNER_NAMESPACE, OVERVIEW_NAMESPACE, PANEL_HEIGHT, PANEL_NAMESPACE,
+};
+
+/// Layer namespace for the bottom dock surface (shell-local; compositor does not use).
 pub const DOCK_NAMESPACE: &str = "roost-shell-dock";
-/// Namespace advertised for the overview layer surface.
-pub const OVERVIEW_NAMESPACE: &str = "roost-shell-overview";
-/// Namespace advertised for the Alt-Tab switcher layer surface.
+/// Layer namespace for the Alt-Tab switcher surface (shell-local; compositor does not use).
 pub const SWITCHER_NAMESPACE: &str = "roost-shell-switcher";
-/// Namespace advertised for the notification banner layer surface.
-pub const BANNER_NAMESPACE: &str = "roost-shell-banner";
-/// Fixed panel height in logical pixels; also the exclusive zone.
-pub const PANEL_HEIGHT: u32 = 32;
 
 /// Tunables for the panel surface. Defaults give a top-anchored,
 /// full-width strip reserving an exclusive zone.
@@ -3108,6 +3108,12 @@ impl ShellHost {
             },
             "windows": windows,
             "focused_window": self.model.windows().iter().find(|w| w.active).map(|w| w.id),
+            "settings": {
+                "clock_format": match self.tiles.settings.clock_format {
+                    ClockFormat::TwentyFour => "24h",
+                    ClockFormat::Twelve => "12h",
+                },
+            },
             "notifications": {"banners": banners, "unread": unread},
             "dock": dock,
         })

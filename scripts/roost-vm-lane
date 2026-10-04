@@ -240,17 +240,16 @@ def run_tour(qmp, out):
         wait(2.5)
         keys("meta_l", "shift", "t")
         wait(3)
-        # Roost binds no Super+L yet; lock from the quick-settings lock
-        # button as a user would, then unlock with roost-test's password
-        # through GDM's PAM stack (roost-lock).
+        # Exercise the hardware shortcut and the real PAM unlock stack.
         rec.mark("lock")
-        qmp.click(WIDTH - 40, 12)
-        wait(2)
-        qmp.click(1185, 75)
+        keys("meta_l", "l")
         wait(5)
         rec.still("lock")
-        keys("shift")
+        # Shift alone intentionally leaves GNOME's curtain in place.
+        # Return reveals the focused prompt without adding a character.
+        keys("ret")
         wait(2)
+        keys("ctrl", "a")
         qmp.type_text("roost")
         wait(1)
         keys("ret")
@@ -321,7 +320,7 @@ def boot(disk, out, scratch, timeout):
     qmp_path = os.path.join(scratch, "qmp.sock")
     serial = os.path.join(out, "serial.log")
     qemu = ["qemu-system-x86_64", "-machine", "q35", "-m", "6144", "-smp", "4",
-            "-bios", ovmf,
+            "-bios", ovmf, "-snapshot",
             "-drive", f"file={disk},format=raw,if=virtio,cache=unsafe",
             "-device", f"virtio-vga,xres={WIDTH},yres={HEIGHT}",
             "-device", "qemu-xhci", "-device", "usb-tablet", "-device", "usb-kbd",
@@ -334,6 +333,40 @@ def boot(disk, out, scratch, timeout):
     return subprocess.Popen(qemu), qmp_path, serial, kvm
 
 
+def repeat_boots(args):
+    """Keep per-boot evidence and aggregate gates for the parity ledger."""
+    out = os.path.abspath(args.out)
+    os.makedirs(out, exist_ok=True)
+    manifests, combined = [], {}
+    for index in range(1, args.boots + 1):
+        target = out if index == args.boots else os.path.join(out, f"repeat-{index:02d}")
+        command = [sys.executable, __file__, "--disk", args.disk, "--out", target,
+                   "--timeout", str(args.timeout)]
+        if args.tour and index == args.boots:
+            command.append("--tour")
+        for value in args.meta:
+            command.extend(["--meta", value])
+        result = subprocess.run(command, check=False)
+        path = os.path.join(target, "manifest.json")
+        if not os.path.exists(path):
+            sys.exit(f"roost-vm-lane: boot {index} produced no manifest")
+        with open(path) as stream:
+            manifest = json.load(stream)
+        manifests.append(manifest)
+        for name, assertion in manifest["assertions"].items():
+            combined[name] = combined.get(name, True) and assertion["pass"]
+        if result.returncode:
+            break
+    combined["V-REPEAT"] = len(manifests) == args.boots and all(combined.values())
+    with open(os.path.join(out, "repeat-manifest.json"), "w") as stream:
+        json.dump({"requested_boots": args.boots, "boots": manifests}, stream, indent=2)
+    with open(os.path.join(out, "assertions.txt"), "w") as stream:
+        for name, passed in combined.items():
+            stream.write(f"{name} {'pass' if passed else 'fail'} repeated pristine boots ({len(manifests)}/{args.boots})\n")
+    if not all(combined.values()):
+        sys.exit("roost-vm-lane: repeated boot gate failed")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--disk", required=True)
@@ -342,7 +375,14 @@ def main():
     ap.add_argument("--tour", action="store_true",
                     help="after the assertions, record the feature tour video")
     ap.add_argument("--meta", action="append", default=[], metavar="KEY=VALUE")
+    ap.add_argument("--boots", type=int, default=1,
+                    help="repeat pristine snapshot boots; tour only on the last boot")
     a = ap.parse_args()
+    if not 1 <= a.boots <= 10:
+        ap.error("--boots must be between 1 and 10")
+    if a.boots > 1:
+        repeat_boots(a)
+        return
     out = os.path.abspath(a.out)
     scratch = os.path.join(out, ".scratch")
     os.makedirs(scratch, exist_ok=True)
@@ -377,7 +417,7 @@ def main():
         elapsed = time.time() - start
         if drm and shell:
             log(f"session up after {elapsed:.0f}s; letting the shell settle")
-            time.sleep(15)
+            time.sleep(30)
             # roost-session opens on the overview, where the panel is
             # transparent as in GNOME; keep that frame, then Escape to the
             # desktop, where the panel is the solid black strip.
@@ -404,6 +444,13 @@ def main():
                     tour_info = run_tour(qmp, out)
                 except (OSError, RuntimeError, subprocess.CalledProcessError) as e:
                     log(f"tour failed: {e}")
+        # Give activation probes a bounded chance to report before shutdown.
+        deadline = time.time() + 180
+        while drm and shell and time.time() < deadline:
+            text = read_text(serial_path)
+            if all(f"roost-vm-health: {name} ready" in text for name in ("calendar", "portal", "portal-gnome")):
+                break
+            time.sleep(2)
         qmp.cmd("quit")
     finally:
         try:
@@ -426,13 +473,22 @@ def main():
     if paused and not results["V-PANEL"][0]:
         results["V-PANEL"] = (False, results["V-PANEL"][1] + "; Roost lost the display"
                               + (" to a GDM greeter session" if greeter else ""))
+    record("V-GDM", "session services: GDM session and display registered" in text and not paused,
+           "explicit GDM registration and no DRM session pause")
+    for name in ("calendar", "portal", "portal-gnome"):
+        record(f"V-{name.upper()}", f"roost-vm-health: {name} ready" in text and (name != "portal" or "roost-vm-health: portal-gnome ready" in text),
+               f"guest user bus {name} activation responds")
+    if a.tour:
+        transitions = re.findall(r"roost-vm-health: lock active=\((true|false),\)", text)
+        record("V-LOCK", transitions == ["false", "true", "false"],
+               f"Super+L and PAM unlock transitions: {transitions}")
     panics = [ln for ln in text.splitlines() if "panicked" in ln]
     record("V-NOPANIC", not panics, panics[0] if panics else "no panicked in serial log")
 
     with open(os.path.join(out, "roost-lines.log"), "w") as fh:
         fh.writelines(ln + "\n" for ln in text.splitlines() if "roost-" in ln)
     with open(os.path.join(out, "assertions.txt"), "w") as fh:
-        for test_id in ("V-DRM", "V-SHELL", "V-PANEL", "V-NOPANIC"):
+        for test_id in results:
             ok, desc = results[test_id]
             fh.write(f"{test_id} {'pass' if ok else 'fail'} {desc}\n")
     qemu_version = subprocess.run(["qemu-system-x86_64", "--version"], capture_output=True,
