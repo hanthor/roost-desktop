@@ -44,7 +44,7 @@ use crate::{
     state::{StateModel, WindowUpdate},
     State, WindowRequest,
 };
-use roost_shell_control::SwitcherAction;
+use roost_shell_control::{SwitcherAction, PANEL_HEIGHT};
 
 /// Default floating size for a newly mapped window.
 const DEFAULT_WIDTH: i32 = 800;
@@ -3216,15 +3216,14 @@ fn switcher_keysym(keycode: u32) -> Option<u32> {
 pub const R_KEYCODE: u32 = 19;
 /// evdev KEY_H: Super+H hides the focused window (GNOME's minimize).
 pub const H_KEYCODE: u32 = 35;
-/// Top inset of the maximized/tiled work area: the shell panel strip
-/// (matches shell-host `PANEL_HEIGHT` and the Activities-strip
-/// trigger height above).
-pub const WORK_AREA_TOP: i32 = 32;
+/// Top inset of the maximized/tiled work area: the shell panel strip.
+/// Derived from [`PANEL_HEIGHT`] (the compositor↔shell contract).
+pub const WORK_AREA_TOP: i32 = PANEL_HEIGHT as i32;
 /// Hot-corner trigger region in logical pixels from the top-left.
 pub const HOT_CORNER_PX: f64 = 8.0;
-/// Activities-strip trigger height: the top strip the panel owns
-/// (matches shell `PANEL_HEIGHT`).
-pub const ACTIVITIES_STRIP_PX: f64 = 32.0;
+/// Activities-strip trigger height: the top strip the panel owns.
+/// Derived from [`PANEL_HEIGHT`] (the compositor↔shell contract).
+pub const ACTIVITIES_STRIP_PX: f64 = PANEL_HEIGHT as f64;
 /// Activities-strip trigger width: only presses on the Activities
 /// control at the strip's left end toggle the overview, as in GNOME.
 /// Clicks on the clock, indicators, or tray belong to the shell.

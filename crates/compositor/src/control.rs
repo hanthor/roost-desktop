@@ -1071,7 +1071,7 @@ impl PeerGate {
 
 /// Read the kernel credentials of a connected Unix stream peer.
 pub fn peer_cred(stream: &UnixStream) -> Option<PeerCred> {
-    let cred = rustix::net::sockopt::get_socket_peercred(stream).ok()?;
+    let cred = rustix::net::sockopt::socket_peercred(stream).ok()?;
     Some(PeerCred {
         pid: u32::try_from(cred.pid.as_raw_nonzero().get()).ok()?,
         uid: cred.uid.as_raw(),
