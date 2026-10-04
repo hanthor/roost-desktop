@@ -66,6 +66,7 @@ pub mod runtime;
 pub mod screencast;
 pub mod screenshot;
 pub mod session_lock;
+pub mod session_services;
 pub mod spring;
 pub mod state;
 pub mod supervise;
