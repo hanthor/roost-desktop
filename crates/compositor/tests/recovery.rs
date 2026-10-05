@@ -456,6 +456,7 @@ fn stalled_client_gets_backpressure_and_server_still_serves() {
         windows: model
             .windows()
             .map(|w| roost_shell_control::WindowInfo {
+                icon: None,
                 id: w.id,
                 title: w.title.clone(),
                 app_id: None,

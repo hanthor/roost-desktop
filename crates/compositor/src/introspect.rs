@@ -19,14 +19,10 @@ use crate::mutter::{Outputs, WindowSnapshot, Windows};
 
 pub const NAME: &str = "org.gnome.Shell.Introspect";
 pub const PATH: &str = "/org/gnome/Shell/Introspect";
-/// Callers GNOME Shell lets read the window list.
-const ALLOWED_CALLERS: [&str; 2] = [
-    "org.freedesktop.impl.portal.desktop.gnome",
-    "org.freedesktop.impl.portal.desktop.gtk",
-];
 pub const UNRESTRICTED_ENV: &str = "ROOST_INTROSPECT_UNRESTRICTED";
 
 struct Service {
+    authority: crate::capture_security::Authority,
     windows: Windows,
     outputs: Outputs,
     unrestricted: bool,
@@ -87,26 +83,11 @@ pub fn running_apps(windows: &[WindowSnapshot]) -> HashMap<String, HashMap<Strin
 
 impl Service {
     async fn check_caller(&self, conn: &Connection, header: &Header<'_>) -> fdo::Result<()> {
+        self.authority.unlocked()?;
         if self.unrestricted {
             return Ok(());
         }
-        let Some(sender) = header.sender() else {
-            return Err(fdo::Error::AccessDenied("no sender".into()));
-        };
-        let dbus = fdo::DBusProxy::new(conn).await?;
-        for name in ALLOWED_CALLERS {
-            let Ok(name) = zbus::names::BusName::try_from(name) else {
-                continue;
-            };
-            if let Ok(owner) = dbus.get_name_owner(name).await {
-                if owner.as_str() == sender.as_str() {
-                    return Ok(());
-                }
-            }
-        }
-        Err(fdo::Error::AccessDenied(
-            "App introspection not allowed".into(),
-        ))
+        self.authority.admit(conn, header).await.map(|_| ())
     }
 
     fn snapshot(&self) -> Vec<WindowSnapshot> {
@@ -204,9 +185,10 @@ impl Handle {
 
 /// Serve Introspect on the session bus from a thread; quietly off when
 /// there is no bus or a real GNOME Shell owns the name.
-pub fn start(outputs: Outputs) -> Handle {
+pub fn start(outputs: Outputs, authority: crate::capture_security::Authority) -> Handle {
     let handle = Handle::default();
     let service = Service {
+        authority,
         windows: handle.windows.clone(),
         outputs,
         unrestricted: std::env::var(UNRESTRICTED_ENV).is_ok_and(|v| v == "1"),

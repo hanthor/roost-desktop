@@ -2,6 +2,7 @@
 """Resource accounting, process identity, trace parsing and bounded statistics."""
 import importlib.machinery
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -22,6 +23,32 @@ host = load("host", ROOT / "scripts/roost-vm-perf")
 
 
 class Accounting(unittest.TestCase):
+    def globals_serial(self, raw, records=None):
+        records = guest.global_records(raw, "wayland-0") if records is None else records
+        return "\n".join("journal prefix roost-perf-globals: " + json.dumps(row)
+                         for row in records)
+
+    def test_globals_preserve_multichunk_raw_bytes(self):
+        raw = (b"interface: 'wl_compositor', version: 6\n"
+               b"interface: 'xdg_wm_base', version: 6\n" + b"a" * 7000)
+        text, meta = host.raw_globals(self.globals_serial(raw))
+        self.assertEqual(text.encode(), raw)
+        self.assertEqual(meta["socket"], "wayland-0")
+
+    def test_globals_partial_duplicate_and_corrupt_captures_fail(self):
+        raw = (b"interface: 'wl_compositor'\ninterface: 'xdg_wm_base'\n" + b"a" * 7000)
+        rows = guest.global_records(raw, "wayland-0")
+        for broken in (rows[:-1], rows + [rows[0]],
+                       [dict(row, sha256="0" * 64) for row in rows]):
+            with self.subTest(broken=broken[0]["sha256"]), self.assertRaises(ValueError):
+                host.raw_globals(self.globals_serial(raw, broken))
+
+    def test_globals_missing_and_private_socket_are_not_desktop_evidence(self):
+        with self.assertRaises(ValueError):
+            host.raw_globals("")
+        with self.assertRaises(ValueError):
+            host.raw_globals(self.globals_serial(b"interface: 'zwp_input_method_manager_v2'"))
+
     def process(self, root, pid, ppid, uid, pss, start):
         path = root / str(pid)
         path.mkdir()
