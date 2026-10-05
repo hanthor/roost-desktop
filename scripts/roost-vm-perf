@@ -41,6 +41,27 @@ def raw_samples(serial):
     return result
 
 
+def drm_memory_summary(samples):
+    counters, status = {}, {}
+    for sample in samples:
+        gpu = sample.get("drm_memory", {"status": "unavailable", "clients": []})
+        status[gpu["status"]] = status.get(gpu["status"], 0) + 1
+        if gpu["status"] != "available":
+            continue
+        totals = {}
+        for client in gpu["clients"]:
+            for name, value in client["memory_bytes"].items():
+                key = (client["driver"], client["device"], name)
+                totals[key] = totals.get(key, 0) + value
+        for key, value in totals.items():
+            counters.setdefault(key, []).append(value)
+    return {"sample_status_counts": status,
+            "client_accounted_bytes": [dict(driver=key[0], device=key[1], counter=key[2],
+                                            distribution=distribution(values))
+                                       for key, values in sorted(counters.items())],
+            "scope": "Test UID DRM client counters; duplicate handles counted once. Shared buffers across distinct clients may be counted more than once. Unsupported or incomplete samples are not zero."}
+
+
 def raw_globals(serial):
     parts = {}
     for line in serial.splitlines():
@@ -172,12 +193,14 @@ def main():
                   "panel_observed_upper_s":panel_upper_s,"host_phases_boottime_s":phases,
                   "whole_user_pss_kib":distribution([s["pss_kib"] for s in samples]),
                   "whole_user_cpu_observed_percent":distribution([s["cpu_observed_percent"] for s in samples if s["cpu_observed_percent"] is not None]),
+                  "drm_memory": drm_memory_summary(samples),
                   "overview_observed_upper_s":distribution([s["upper_s"] for s in observations]),
                   "limitations":["QMP observations are bounded host-visible response times, not compositor input-to-frame tracing.",
                                  "CPU counts surviving sampled processes; exited processes can consume unobserved CPU.",
                                  "PSS covers the test UID and excludes the observer and its descendants; root/GDM shared services are outside this scope.",
                                  "Raw guest samples include startup, idle and workload; host phases cannot partition guest clocks without synchronization.",
-                                 "GPU memory, frame pacing, notification load, multiple cold/warm boots and 24-hour soak remain open.",
+                                 "DRM memory is optional driver-provided client accounting, not unique physical GPU allocation; unavailable samples are explicit.",
+                                 "Frame pacing, notification load, multiple cold/warm boots and 24-hour soak remain open.",
                                  "No release threshold or claim of within-10-percent parity is introduced."]}
         (out / "report.json").write_text(json.dumps(report, indent=2))
         print(json.dumps({"desktop":args.desktop,"samples":len(samples),"observations":len(observations)}))

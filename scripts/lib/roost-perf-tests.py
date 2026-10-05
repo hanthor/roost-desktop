@@ -85,6 +85,62 @@ class Accounting(unittest.TestCase):
             result = guest.sample(1000, root)
             self.assertEqual(result["unreadable"], [{"pid":1,"error":"FileNotFoundError"}])
 
+    def test_drm_duplicate_handles_and_shared_process_clients_are_counted_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for pid in (1, 2):
+                path = self.process(root, pid, 0, 1000, 10, 55)
+                (path / "fdinfo").mkdir()
+                for fd in (0, 1):
+                    (path / f"fdinfo/{fd}").write_text(
+                        "drm-driver: test\ndrm-pdev: 0000:00:02.0\ndrm-client-id: 7\n"
+                        "drm-resident-vram: 2 MiB\ndrm-shared-vram: 4 KiB\n"
+                        "drm-total-memory: 128\nprivate-text: must not be retained\n")
+            result = guest.sample(1000, root)
+            self.assertEqual(result["drm_memory"]["status"], "available")
+            self.assertEqual(len(result["drm_memory"]["clients"]), 1)
+            client = result["drm_memory"]["clients"][0]
+            self.assertEqual(client["memory_bytes"], {"drm-resident-vram": 2097152,
+                                                     "drm-shared-vram": 4096,
+                                                     "drm-total-memory": 128})
+            self.assertNotIn("private-text", json.dumps(result))
+            summary = host.drm_memory_summary([result])
+            self.assertEqual(summary["sample_status_counts"], {"available": 1})
+            self.assertEqual(next(c for c in summary["client_accounted_bytes"]
+                                  if c["counter"] == "drm-resident-vram")["distribution"]["p50"], 2097152)
+
+    def test_drm_unsupported_and_invalid_counters_are_not_measured_zero(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = self.process(root, 1, 0, 1000, 10, 55)
+            absent = guest.sample(1000, root)
+            self.assertEqual(absent["drm_memory"]["status"], "unavailable")
+            (path / "fdinfo").mkdir()
+            (path / "fdinfo/0").write_text(
+                "drm-driver: test\ndrm-client-id: 1\ndrm-memory-vram: -2 KiB\n")
+            invalid = guest.sample(1000, root)
+            self.assertEqual(invalid["drm_memory"]["status"], "incomplete")
+            summary = host.drm_memory_summary([absent, invalid])
+            self.assertEqual(summary["sample_status_counts"], {"unavailable": 1, "incomplete": 1})
+            self.assertEqual(summary["client_accounted_bytes"], [])
+
+    def test_drm_measured_zero_and_separate_devices_preserve_their_meaning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = self.process(root, 1, 0, 1000, 10, 55)
+            (path / "fdinfo").mkdir()
+            for fd in (0, 1):
+                (path / f"fdinfo/{fd}").write_text(
+                    f"drm-driver: test\ndrm-pdev: 0000:00:0{fd}.0\ndrm-client-id: 1\n"
+                    "drm-memory-vram: 0 KiB\n")
+            result = guest.sample(1000, root)
+            self.assertEqual(result["drm_memory"]["status"], "available")
+            self.assertEqual(len(result["drm_memory"]["clients"]), 2)
+            summary = host.drm_memory_summary([result])
+            self.assertEqual(len(summary["client_accounted_bytes"]), 2)
+            self.assertTrue(all(c["distribution"]["p50"] == 0
+                                for c in summary["client_accounted_bytes"]))
+
     def test_zombie_is_departed_even_before_parent_reaps_it(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

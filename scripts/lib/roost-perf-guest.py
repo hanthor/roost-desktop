@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import pwd
+import re
 import stat
 import subprocess
 import tempfile
@@ -66,6 +67,64 @@ def read_process(path):
     }
 
 
+def drm_clients(path):
+    """Retain documented memory counters only, never arbitrary fdinfo text.
+
+    https://www.kernel.org/doc/html/v6.9/gpu/drm-usage-stats.html
+    Counters describe client accounting, not unique physical GPU allocations.
+    """
+    clients, errors = [], []
+    try:
+        files = list((path / "fdinfo").iterdir())
+    except FileNotFoundError:
+        return clients, errors
+    except OSError as error:
+        return clients, [type(error).__name__]
+    for info in files:
+        try:
+            fields = dict(line.split(":", 1) for line in info.read_text().splitlines() if ":" in line)
+        except FileNotFoundError:
+            continue  # Closed FD during this non-atomic observation.
+        except OSError as error:
+            errors.append(type(error).__name__)
+            continue
+        driver = fields.get("drm-driver", "").strip()
+        if not driver:
+            continue
+        counters = {}
+        for key, value in fields.items():
+            if not re.fullmatch(r"drm-(?:memory|total|shared|resident|purgeable|active)-\S+", key):
+                continue
+            match = re.fullmatch(r"\s*(\d+)\s*(KiB|MiB)?\s*", value)
+            if not match:
+                errors.append("InvalidMemoryCounter")
+                continue
+            counters[key] = int(match[1]) * {None: 1, "KiB": 1024, "MiB": 1024**2}[match[2]]
+        client = fields.get("drm-client-id", "").strip()
+        if not client.isdecimal():
+            errors.append("MissingClientIdentity")
+            continue  # Duplicate handles cannot safely be accounted.
+        clients.append({"driver": driver, "device": fields.get("drm-pdev", "").strip(),
+                        "client_id": client, "memory_bytes": counters})
+    return clients, errors
+
+
+def unique_drm_clients(rows):
+    clients = {}
+    for row in rows:
+        for client in row["drm_clients"]:
+            key = (client["driver"], client["device"], client["client_id"])
+            if key not in clients:
+                clients[key] = dict(client, memory_bytes=dict(client["memory_bytes"]))
+            else:
+                # Shared/duplicated FDs expose one client. Sampling is not
+                # atomic, so preserve the larger observed value per counter.
+                values = clients[key]["memory_bytes"]
+                for name, value in client["memory_bytes"].items():
+                    values[name] = max(value, values.get(name, 0))
+    return list(clients.values())
+
+
 def sample(uid, proc=Path("/proc"), observer=None):
     processes, errors = {}, []
     for path in proc.iterdir():
@@ -92,6 +151,7 @@ def sample(uid, proc=Path("/proc"), observer=None):
             memory = dict(line.split(":", 1) for line in (path / "smaps_rollup").read_text().splitlines() if ":" in line)
             row.update(pss_kib=int(memory["Pss"].split()[0]), rss_kib=int(memory["Rss"].split()[0]),
                        fds=len(list((path / "fd").iterdir())))
+            row["drm_clients"], row["drm_errors"] = drm_clients(path)
             current_identity = read_process(path)
             if current_identity["start_ticks"] != row["start_ticks"] or current_identity["uid"] != uid:
                 errors.append({"pid": pid, "error": "ProcessIdentityChanged"})
@@ -107,7 +167,11 @@ def sample(uid, proc=Path("/proc"), observer=None):
             except (OSError, ValueError, KeyError, IndexError):
                 pass
             errors.append({"pid": pid, "error": type(error).__name__})
-    return {"uid": uid, "processes": rows, "unreadable": errors,
+    drm = unique_drm_clients(rows)
+    drm_errors = [{"pid": row["pid"], "error": error} for row in rows for error in row["drm_errors"]]
+    gpu = {"clients": drm, "errors": drm_errors,
+           "status": "incomplete" if drm_errors else ("available" if any(c["memory_bytes"] for c in drm) else "unavailable")}
+    return {"uid": uid, "processes": rows, "unreadable": errors, "drm_memory": gpu,
             "pss_kib": sum(row["pss_kib"] for row in rows),
             "rss_kib": sum(row["rss_kib"] for row in rows),
             "fds": sum(row["fds"] for row in rows), "process_count": len(rows)}
