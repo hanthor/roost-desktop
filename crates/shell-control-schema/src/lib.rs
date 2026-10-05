@@ -1477,20 +1477,15 @@ mod tests {
 
     #[test]
     fn control_error_from_io_error() {
-        let io_err = std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "permission denied",
-        );
+        let io_err =
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied");
         let err: ControlError = io_err.into();
         assert!(matches!(err, ControlError::Io(_)));
     }
 
     #[test]
     fn control_error_from_would_block_error() {
-        let io_err = std::io::Error::new(
-            std::io::ErrorKind::WouldBlock,
-            "would block",
-        );
+        let io_err = std::io::Error::new(std::io::ErrorKind::WouldBlock, "would block");
         let err: ControlError = io_err.into();
         assert!(matches!(err, ControlError::WouldBlock));
     }
@@ -1508,10 +1503,7 @@ mod tests {
     #[test]
     fn control_error_source_io() {
         use std::error::Error;
-        let io_err = std::io::Error::new(
-            std::io::ErrorKind::BrokenPipe,
-            "broken pipe",
-        );
+        let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken pipe");
         let err = ControlError::Io(io_err);
         assert!(err.source().is_some());
     }
