@@ -1477,8 +1477,7 @@ mod tests {
 
     #[test]
     fn control_error_from_io_error() {
-        let io_err =
-            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied");
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied");
         let err: ControlError = io_err.into();
         assert!(matches!(err, ControlError::Io(_)));
     }
