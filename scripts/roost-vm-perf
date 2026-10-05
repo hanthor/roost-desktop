@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Measure one GNOME or Roost guest using the same VM profile (#73)."""
 import argparse
+import base64
+import hashlib
 import importlib.machinery
 import importlib.util
 import json
@@ -39,6 +41,37 @@ def raw_samples(serial):
     return result
 
 
+def raw_globals(serial):
+    parts = {}
+    for line in serial.splitlines():
+        if "roost-perf-globals: " not in line:
+            continue
+        record = json.loads(line.split("roost-perf-globals: ", 1)[1])
+        if (type(record["count"]) is not int or not 1 <= record["count"] <= 1024
+                or len(record["sha256"]) != 64):
+            raise ValueError("invalid Wayland capture metadata")
+        key = (record["sha256"], record["socket"], record["count"])
+        chunks = parts.setdefault(key, {})
+        index = record["index"]
+        if type(index) is not int or not 0 <= index < record["count"]:
+            raise ValueError("invalid Wayland capture chunk index")
+        if index in chunks:
+            raise ValueError("duplicate Wayland capture chunk")
+        chunks[index] = base64.b64decode(record["data"], validate=True)
+    if len(parts) != 1:
+        raise ValueError("expected one actual-session Wayland globals capture")
+    (digest, socket_name, count), chunks = next(iter(parts.items()))
+    if set(chunks) != set(range(count)):
+        raise ValueError("incomplete Wayland globals capture")
+    raw = b"".join(chunks[index] for index in range(count))
+    if hashlib.sha256(raw).hexdigest() != digest:
+        raise ValueError("Wayland globals capture digest mismatch")
+    text = raw.decode("utf-8")
+    if "interface: 'wl_compositor'" not in text or "interface: 'xdg_wm_base'" not in text:
+        raise ValueError("capture does not describe a desktop Wayland session")
+    return text, {"sha256": digest, "socket": socket_name}
+
+
 def frame(qmp, path):
     qmp.cmd("screendump", filename=str(path), format="ppm")
     return lane.read_ppm(str(path))[2]
@@ -66,6 +99,8 @@ def main():
     started = time.monotonic()
     observations, phases = [], {}
     try:
+        if not kvm:
+            raise RuntimeError("paired performance comparison requires actual KVM")
         qmp = lane.baseline.Qmp(qmp_path)
         ready = False
         while time.monotonic()-started < args.timeout and vm.poll() is None:
@@ -124,6 +159,9 @@ def main():
         samples = raw_samples(serial)
         if not samples or any(s["unreadable"] for s in samples):
             raise RuntimeError("resource samples are missing or incomplete; inspect raw serial")
+        globals_text, globals_meta = raw_globals(serial)
+        (out / "wayland-info.txt").write_text(globals_text)
+        (out / "wayland-info-source.json").write_text(json.dumps(globals_meta, indent=2))
         (out / "samples.json").write_text(json.dumps(samples, indent=2))
         (out / "observations.json").write_text(json.dumps(observations, indent=2))
         # Host and guest boottime clocks are different. Keep host phases as

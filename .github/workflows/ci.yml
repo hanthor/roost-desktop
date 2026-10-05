@@ -29,8 +29,13 @@ jobs:
       - run: sudo apt-get install -y meson ninja-build libwayland-dev wayland-protocols && scripts/ci-install-gtk4-layer-shell
       - run: scripts/roost-a11y-baseline check
       - run: python3 scripts/lib/roost-soak-tests.py
+      - run: python3 scripts/lib/roost-pipewire-dump-tests.py
       - run: scripts/roost-settings-inventory-check
       - run: cargo fmt --all -- --check
+      - name: Check bounded EIS transport regression tests
+        run: |
+          cargo fmt --manifest-path third-party/reis/Cargo.toml --all -- --check
+          cargo test --manifest-path third-party/reis/Cargo.toml --lib roost_transport_bounds
       - run: rustfmt --edition 2021 --check third-party/smithay/src/xwayland/xserver.rs
       - run: cargo test --locked --manifest-path third-party/smithay/Cargo.toml --no-default-features --features xwayland,wayland_frontend prepared_socket
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -39,6 +44,8 @@ jobs:
       - run: cargo test --workspace
         env:
           ROOST_REQUIRE_PAM_WRAPPER: "1"
+      - name: Shortcut inhibition consent proof
+        run: scripts/roost-shortcut-proof
       # Every listed test just passed: the parity-ledger job resolves
       # the ledger's cargo:<name> references against this list.
       - run: cargo test --workspace -q -- --list --format terse > test-list.txt
@@ -177,7 +184,7 @@ jobs:
           toolchain: stable
       # One cache per job: target/ and the registry, keyed by Cargo.lock.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool scrot ffmpeg jq dbus libglib2.0-bin xwayland x11-apps pipewire wireplumber gstreamer1.0-pipewire gstreamer1.0-tools gstreamer1.0-plugins-good at-spi2-core python3-pil python3-pyatspi libsecret-tools gnome-keyring fonts-cantarell shellcheck libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev meson ninja-build libwayland-dev wayland-protocols libpam-wrapper ibus gir1.2-ibus-1.0 gir1.2-gtk-3.0 wayland-utils
+      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool scrot ffmpeg jq dbus libglib2.0-bin xwayland x11-apps x11-utils pipewire wireplumber gstreamer1.0-pipewire gstreamer1.0-tools gstreamer1.0-plugins-good at-spi2-core python3-pyatspi python3-pil libsecret-tools gnome-keyring fonts-cantarell shellcheck libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev meson ninja-build libwayland-dev wayland-protocols libpam-wrapper ibus gir1.2-ibus-1.0 gir1.2-gtk-3.0 wayland-utils xdg-desktop-portal xdg-desktop-portal-gnome xdg-desktop-portal-gtk
       - run: scripts/ci-install-gtk4-layer-shell
       - run: shellcheck scripts/roost-gtk-shell-proof scripts/roost-walkthrough
       # docs/walkthrough.md must match its manifest (docs/walkthrough.tsv).
@@ -189,8 +196,13 @@ jobs:
           ROOST_REQUIRE_PAM_WRAPPER: "1"
           ROOST_REQUIRE_IBUS: "1"
           ROOST_REQUIRE_WAYLAND_INFO: "1"
-      # Fractional scaling (#59): the same session at GNOME's 150 percent.
-      - run: scripts/roost-scale-proof --artifacts gtk-shell-artifacts/scale
+      # Native/X11 geometry and physical input at all required virtual scales.
+      - run: |
+          for scale in 1 1.25 1.5 2; do
+            scripts/roost-scale-proof --scale "$scale" --artifacts "gtk-shell-artifacts/scale-$scale"
+          done
+          mkdir -p gtk-shell-artifacts/scale
+          cat gtk-shell-artifacts/scale-*/assertions.txt > gtk-shell-artifacts/scale/assertions.txt
       # Keep runnable binaries even when a later live proof assertion fails.
       - if: always()
         run: |
@@ -216,6 +228,62 @@ jobs:
           name: gtk-shell
           path: gtk-shell-artifacts/
           retention-days: 14
+
+  portal-security:
+    needs: arch-package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: roost-arch
+          path: ${{ runner.temp }}/portal-package
+      - run: sudo apt-get -o Acquire::Retries=3 update -qq && sudo apt-get install -y --no-install-recommends podman zstd shellcheck
+      - run: shellcheck scripts/roost-portal-security tests/portal-reference/run.sh
+      - name: Test packaged compositor with actual GNOME 51 portal consent
+        run: |
+          mkdir -p "$RUNNER_TEMP/portal-candidate"
+          package=$(find "$RUNNER_TEMP/portal-package" -name '*.pkg.tar.zst' -print -quit)
+          test -n "$package"
+          tar --zstd -xf "$package" -C "$RUNNER_TEMP/portal-candidate"
+          mkdir -p "$RUNNER_TEMP/portal-security"
+          printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/portal-security/candidate-commit.txt"
+          scripts/roost-portal-security --candidate "$RUNNER_TEMP/portal-candidate" --out "$RUNNER_TEMP/portal-security"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: portal-security
+          path: ${{ runner.temp }}/portal-security
+          retention-days: 90
+
+  remote-security:
+    needs: arch-package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: roost-arch
+          path: ${{ runner.temp }}/remote-package
+      - run: sudo apt-get -o Acquire::Retries=3 update -qq && sudo apt-get install -y --no-install-recommends podman zstd shellcheck
+      - run: shellcheck scripts/roost-remote-security tests/remote-desktop-reference/run.sh
+      - name: Test packaged compositor with actual GNOME 51 RemoteDesktop consent and libei input
+        run: |
+          mkdir -p "$RUNNER_TEMP/remote-candidate"
+          package=$(find "$RUNNER_TEMP/remote-package" -name '*.pkg.tar.zst' -print -quit)
+          test -n "$package"
+          tar --zstd -xf "$package" -C "$RUNNER_TEMP/remote-candidate"
+          mkdir -p "$RUNNER_TEMP/remote-security"
+          printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/remote-security/candidate-commit.txt"
+          scripts/roost-remote-security --candidate "$RUNNER_TEMP/remote-candidate" --out "$RUNNER_TEMP/remote-security"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: remote-security
+          path: ${{ runner.temp }}/remote-security
+          retention-days: 90
 
   niri-parity:
     runs-on: ubuntu-24.04

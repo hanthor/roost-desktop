@@ -1,0 +1,13 @@
+{
+  "measurement_run": "https://github.com/hanthor/roost-desktop/actions/runs/37188464108",
+  "measurement_source": "849466b73a3a2a6e65fbd88772f4c1b6fe3a49de",
+  "scope": "Source-file line and region totals include inline unit-test code; no branch or GUI coverage is claimed.",
+  "modules": {
+    "crates/compositor/src/lock.rs": {"lines": 90, "regions": 90},
+    "crates/compositor/src/unlock.rs": {"lines": 75, "regions": 75},
+    "crates/compositor/src/session_lock.rs": {"lines": 60, "regions": 60},
+    "crates/compositor/src/control.rs": {"lines": 60, "regions": 65},
+    "crates/compositor/src/windows.rs": {"lines": 70, "regions": 70},
+    "crates/shell-control-schema/src/lib.rs": {"lines": 85, "regions": 85}
+  }
+}

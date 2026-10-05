@@ -22,6 +22,10 @@ use zbus::object_server::{InterfaceRef, SignalEmitter};
 use zbus::zvariant::{DeserializeDict, OwnedObjectPath, OwnedValue, SerializeDict, Type, Value};
 use zbus::{fdo, interface, ObjectServer};
 
+pub(crate) mod remote_desktop;
+mod remote_eis;
+pub use remote_desktop::Input as RemoteInput;
+
 /// One lit output as the D-Bus side describes it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutputSnapshot {
@@ -101,8 +105,21 @@ pub type Windows = Arc<Mutex<Vec<WindowSnapshot>>>;
 
 /// Requests from D-Bus to the event loop.
 pub enum ToLoop {
+    RemoteInput {
+        session_id: u64,
+        grant: Arc<AtomicBool>,
+        pending: Arc<std::sync::atomic::AtomicU32>,
+        input: RemoteInput,
+    },
+    RemoteStop {
+        session_id: u64,
+    },
+    RemoteKeymap {
+        reply: std::sync::mpsc::Sender<String>,
+    },
     StartCast {
         session_id: u64,
+        grant: Arc<AtomicBool>,
         target: CastTarget,
         signal: SignalEmitter<'static>,
     },
@@ -115,6 +132,51 @@ pub enum ToLoop {
         configs: Vec<crate::monitors::MonitorConfig>,
         persistent: bool,
     },
+}
+
+/// GNOME's backend requests this ordinary Wayland connection before owning
+/// its portal bus name. Capture admission remains a separate interface.
+struct ServiceChannel {
+    display: smithay::reexports::wayland_server::DisplayHandle,
+    authority: crate::capture_security::Authority,
+    clients: HashMap<String, Arc<AtomicBool>>,
+}
+
+#[interface(name = "org.gnome.Mutter.ServiceChannel")]
+impl ServiceChannel {
+    async fn open_wayland_service_connection(
+        &mut self,
+        service_client_type: u32,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> fdo::Result<zbus::zvariant::OwnedFd> {
+        let owner = self
+            .authority
+            .admit_portal_connection(conn, &header)
+            .await?;
+        if service_client_type != 1 {
+            return Err(fdo::Error::InvalidArgs(
+                "unsupported service client type".into(),
+            ));
+        }
+        self.clients.retain(|_, alive| alive.load(Ordering::SeqCst));
+        if self.clients.len() >= 32 || self.clients.contains_key(&owner) {
+            return Err(fdo::Error::LimitsExceeded(
+                "portal service connection limit".into(),
+            ));
+        }
+        let (server, client) = std::os::unix::net::UnixStream::pair()
+            .map_err(|e| fdo::Error::Failed(e.to_string()))?;
+        let alive = Arc::new(AtomicBool::new(true));
+        self.display
+            .insert_client(
+                server,
+                Arc::new(crate::ClientState::portal_service(alive.clone())),
+            )
+            .map_err(|e| fdo::Error::Failed(e.to_string()))?;
+        self.clients.insert(owner, alive);
+        Ok(std::os::fd::OwnedFd::from(client).into())
+    }
 }
 
 // --- DisplayConfig -----------------------------------------------------
@@ -340,8 +402,13 @@ fn validate(
 
 // --- ScreenCast ----------------------------------------------------------
 
+type Sessions = Arc<Mutex<Vec<(Session, OwnedObjectPath)>>>;
+
 #[derive(Clone)]
 struct ScreenCast {
+    remote: remote_desktop::RemoteSessions,
+    authority: crate::capture_security::Authority,
+    sessions: Sessions,
     outputs: Outputs,
     windows: Windows,
     to_loop: calloop::channel::Sender<ToLoop>,
@@ -353,6 +420,8 @@ type SessionStreams = Arc<Mutex<Vec<(Stream, InterfaceRef<Stream>)>>>;
 
 #[derive(Clone)]
 struct Session {
+    owner: String,
+    authority: crate::capture_security::Authority,
     id: u64,
     outputs: Outputs,
     windows: Windows,
@@ -360,6 +429,7 @@ struct Session {
     next_id: Arc<AtomicU64>,
     streams: SessionStreams,
     stopped: Arc<AtomicBool>,
+    started: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -414,24 +484,65 @@ struct StreamParameters {
 #[interface(name = "org.gnome.Mutter.ScreenCast")]
 impl ScreenCast {
     async fn create_session(
-        &self,
+        &mut self,
         #[zbus(object_server)] server: &ObjectServer,
-        _properties: HashMap<String, OwnedValue>,
+        properties: HashMap<String, OwnedValue>,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> fdo::Result<OwnedObjectPath> {
+        let owner = self.authority.admit(conn, &header).await?;
+        if self
+            .sessions
+            .lock()
+            .map_or(true, |sessions| sessions.len() >= 256)
+        {
+            return Err(fdo::Error::LimitsExceeded(
+                "too many capture sessions".into(),
+            ));
+        }
+        let linked = if let Some(value) = properties.get("remote-desktop-session-id") {
+            let remote_id = <&str>::try_from(value)
+                .map_err(|_| fdo::Error::InvalidArgs("invalid remote session id".into()))?;
+            let remote = self
+                .remote
+                .lock()
+                .map_err(|_| fdo::Error::Failed("remote registry unavailable".into()))?;
+            let grant = remote
+                .get(remote_id)
+                .ok_or_else(|| crate::capture_security::denied("unknown remote session"))?;
+            if grant.owner != owner
+                || grant.stopped.load(Ordering::SeqCst)
+                || grant.started.load(Ordering::SeqCst)
+            {
+                return Err(crate::capture_security::denied(
+                    "remote grant cannot accept this stream",
+                ));
+            }
+            Some(grant.stopped.clone())
+        } else {
+            None
+        };
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let path = format!("/org/gnome/Mutter/ScreenCast/Session/u{id}");
         let path =
             OwnedObjectPath::try_from(path).map_err(|e| fdo::Error::Failed(e.to_string()))?;
         let session = Session {
+            owner,
+            authority: self.authority.clone(),
             id,
             outputs: self.outputs.clone(),
             windows: self.windows.clone(),
             to_loop: self.to_loop.clone(),
             next_id: self.next_id.clone(),
             streams: Arc::new(Mutex::new(Vec::new())),
-            stopped: Arc::new(AtomicBool::new(false)),
+            stopped: linked.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
+            started: Arc::new(AtomicBool::new(false)),
         };
-        server.at(&path, session).await?;
+        server.at(&path, session.clone()).await?;
+        self.sessions
+            .lock()
+            .map_err(|_| fdo::Error::Failed("session registry unavailable".into()))?
+            .push((session, path.clone()));
         Ok(path)
     }
 
@@ -441,26 +552,44 @@ impl ScreenCast {
     }
 }
 
-#[interface(name = "org.gnome.Mutter.ScreenCast.Session")]
 impl Session {
-    async fn start(&self) {
+    fn start_streams(&self) -> fdo::Result<()> {
+        self.authority.unlocked()?;
+        if self.stopped.load(Ordering::SeqCst) {
+            return Err(crate::capture_security::denied("session revoked"));
+        }
+        if self.started.swap(true, Ordering::SeqCst) {
+            return Err(fdo::Error::Failed("capture session already started".into()));
+        }
         let streams = self.streams.lock().map(|s| s.clone()).unwrap_or_default();
         for (stream, iface) in streams {
             let _ = self.to_loop.send(ToLoop::StartCast {
                 session_id: self.id,
+                grant: self.stopped.clone(),
                 target: stream.target(),
                 signal: iface.signal_emitter().to_owned(),
             });
         }
+        Ok(())
+    }
+}
+
+#[interface(name = "org.gnome.Mutter.ScreenCast.Session")]
+impl Session {
+    async fn start(&self, #[zbus(header)] header: zbus::message::Header<'_>) -> fdo::Result<()> {
+        self.check_owner(&header)?;
+        self.start_streams()
     }
 
     async fn stop(
         &self,
         #[zbus(object_server)] server: &ObjectServer,
         #[zbus(signal_context)] ctxt: SignalEmitter<'_>,
-    ) {
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> fdo::Result<()> {
+        self.check_owner(&header)?;
         if self.stopped.swap(true, Ordering::SeqCst) {
-            return;
+            return Ok(());
         }
         let _ = Session::closed(&ctxt).await;
         let _ = self.to_loop.send(ToLoop::StopCast {
@@ -477,14 +606,18 @@ impl Session {
                 .await;
         }
         let _ = server.remove::<Session, _>(ctxt.path()).await;
+        Ok(())
     }
 
     async fn record_monitor(
         &mut self,
         #[zbus(object_server)] server: &ObjectServer,
+        #[zbus(header)] header: zbus::message::Header<'_>,
         connector: &str,
         _properties: RecordMonitorProperties,
     ) -> fdo::Result<OwnedObjectPath> {
+        self.check_owner(&header)?;
+        self.authority.unlocked()?;
         let output = self
             .outputs
             .lock()
@@ -497,6 +630,7 @@ impl Session {
     /// Part of the screen, in global logical pixels: what GNOME's screen
     /// recorder (screencastService.js) asks for, the whole monitor
     /// included.
+    #[allow(clippy::too_many_arguments)] // fixed Mutter D-Bus signature plus authenticated caller
     async fn record_area(
         &mut self,
         #[zbus(object_server)] server: &ObjectServer,
@@ -505,7 +639,10 @@ impl Session {
         width: i32,
         height: i32,
         _properties: RecordMonitorProperties,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> fdo::Result<OwnedObjectPath> {
+        self.check_owner(&header)?;
+        self.authority.unlocked()?;
         let outputs = self.outputs.lock().map(|o| o.clone()).unwrap_or_default();
         let (output, physical) = area_on_output(&outputs, (x, y, width, height))
             .ok_or_else(|| fdo::Error::Failed("the area is on no monitor".into()))?;
@@ -522,7 +659,10 @@ impl Session {
         &mut self,
         #[zbus(object_server)] server: &ObjectServer,
         properties: RecordWindowProperties,
+        #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> fdo::Result<OwnedObjectPath> {
+        self.check_owner(&header)?;
+        self.authority.unlocked()?;
         let id = properties
             .window_id
             .ok_or_else(|| fdo::Error::InvalidArgs("window-id is required".into()))?;
@@ -540,11 +680,36 @@ impl Session {
 }
 
 impl Session {
+    fn check_owner(&self, header: &zbus::message::Header<'_>) -> fdo::Result<()> {
+        if crate::capture_security::owns_session(
+            &self.owner,
+            header.sender().map(|sender| sender.as_str()),
+            self.stopped.load(Ordering::SeqCst),
+        ) {
+            Ok(())
+        } else {
+            Err(crate::capture_security::denied(
+                "session belongs to another caller or was revoked",
+            ))
+        }
+    }
     async fn add_stream(
         &self,
         server: &ObjectServer,
         stream: Stream,
     ) -> fdo::Result<OwnedObjectPath> {
+        if self.started.load(Ordering::SeqCst) {
+            return Err(fdo::Error::Failed("capture session already started".into()));
+        }
+        if self
+            .streams
+            .lock()
+            .map_or(true, |streams| streams.len() >= 64)
+        {
+            return Err(fdo::Error::LimitsExceeded(
+                "too many capture streams".into(),
+            ));
+        }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let path = format!("/org/gnome/Mutter/ScreenCast/Stream/u{id}");
         let path =
@@ -603,7 +768,12 @@ pub fn session_closed(stream: &SignalEmitter<'static>, session_id: u64) {
 
 /// Serve DisplayConfig and ScreenCast on the session bus from a thread.
 /// Returns the channel the event loop reads cast requests from.
-pub fn start(outputs: Outputs, windows: Windows) -> calloop::channel::Channel<ToLoop> {
+pub fn start(
+    outputs: Outputs,
+    windows: Windows,
+    authority: crate::capture_security::Authority,
+    display: smithay::reexports::wayland_server::DisplayHandle,
+) -> calloop::channel::Channel<ToLoop> {
     let (to_loop, from_dbus) = calloop::channel::channel();
     let _ = std::thread::Builder::new()
         .name("roost-mutter-dbus".into())
@@ -612,15 +782,36 @@ pub fn start(outputs: Outputs, windows: Windows) -> calloop::channel::Channel<To
                 outputs: outputs.clone(),
                 to_loop: to_loop.clone(),
             };
+            let sessions: Sessions = Default::default();
+            let remote: remote_desktop::RemoteSessions = Default::default();
+            let next_id = Arc::new(AtomicU64::new(1));
             let screencast = ScreenCast {
+                remote: remote.clone(),
+                sessions: sessions.clone(),
+                authority: authority.clone(),
                 outputs: outputs.clone(),
                 windows,
-                to_loop,
-                next_id: Arc::new(AtomicU64::new(1)),
+                to_loop: to_loop.clone(),
+                next_id: next_id.clone(),
+            };
+            let remote_desktop = remote_desktop::RemoteDesktop {
+                authority: authority.clone(),
+                remote: remote.clone(),
+                captures: sessions.clone(),
+                outputs: outputs.clone(),
+                to_loop: to_loop.clone(),
+                next_id,
+            };
+            let service_channel = ServiceChannel {
+                display,
+                authority: authority.clone(),
+                clients: HashMap::new(),
             };
             let conn = match zbus::blocking::connection::Builder::session()
                 .and_then(|b| b.serve_at("/org/gnome/Mutter/ScreenCast", screencast))
                 .and_then(|b| b.serve_at("/org/gnome/Mutter/DisplayConfig", display_config))
+                .and_then(|b| b.serve_at("/org/gnome/Mutter/RemoteDesktop", remote_desktop))
+                .and_then(|b| b.serve_at("/org/gnome/Mutter/ServiceChannel", service_channel))
                 .and_then(|b| b.build())
             {
                 Ok(conn) => conn,
@@ -633,6 +824,8 @@ pub fn start(outputs: Outputs, windows: Windows) -> calloop::channel::Channel<To
             for name in [
                 "org.gnome.Mutter.DisplayConfig",
                 "org.gnome.Mutter.ScreenCast",
+                "org.gnome.Mutter.RemoteDesktop",
+                "org.gnome.Mutter.ServiceChannel",
             ] {
                 match conn.request_name_with_flags(name, flags) {
                     Ok(zbus::fdo::RequestNameReply::PrimaryOwner) => {
@@ -644,8 +837,60 @@ pub fn start(outputs: Outputs, windows: Windows) -> calloop::channel::Channel<To
                     }
                 }
             }
+            // Revoke on lock, unique-name disconnect or loss of the trusted
+            // service identity. 100ms admission scan plus one compositor tick
+            // bounds stream teardown; frames additionally fail closed on lock.
             loop {
-                std::thread::park();
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let remote_snapshot = remote.lock().map(|s| s.clone()).unwrap_or_default();
+                for (remote_id, grant) in remote_snapshot {
+                    let alive = zbus::block_on(authority.owner_alive(conn.inner(), &grant.owner));
+                    if alive && !grant.stopped.load(Ordering::SeqCst) {
+                        continue;
+                    }
+                    grant.stopped.store(true, Ordering::SeqCst);
+                    let _ = to_loop.send(ToLoop::RemoteStop {
+                        session_id: grant.id,
+                    });
+                    let path = format!("/org/gnome/Mutter/RemoteDesktop/Session/u{}", grant.id);
+                    if let Ok(signal) = SignalEmitter::new(conn.inner(), path.clone()) {
+                        let _ = zbus::block_on(remote_desktop::RemoteSession::closed(&signal));
+                    }
+                    let _ = conn
+                        .object_server()
+                        .remove::<remote_desktop::RemoteSession, _>(path.as_str());
+                    if let Ok(mut remote) = remote.lock() {
+                        remote.remove(&remote_id);
+                    }
+                }
+                let snapshot = sessions.lock().map(|s| s.clone()).unwrap_or_default();
+                for (session, path) in snapshot {
+                    let alive = zbus::block_on(authority.owner_alive(conn.inner(), &session.owner));
+                    if alive && !session.stopped.load(Ordering::SeqCst) {
+                        continue;
+                    }
+                    session.stopped.store(true, Ordering::SeqCst);
+                    let _ = to_loop.send(ToLoop::StopCast {
+                        session_id: session.id,
+                    });
+                    if let Ok(signal) = SignalEmitter::new(conn.inner(), path.clone()) {
+                        let _ = zbus::block_on(Session::closed(&signal));
+                    }
+                    let streams = session
+                        .streams
+                        .lock()
+                        .map(|mut s| std::mem::take(&mut *s))
+                        .unwrap_or_default();
+                    for (_, iface) in streams {
+                        let _ = conn
+                            .object_server()
+                            .remove::<Stream, _>(iface.signal_emitter().path());
+                    }
+                    let _ = conn.object_server().remove::<Session, _>(&path);
+                    if let Ok(mut sessions) = sessions.lock() {
+                        sessions.retain(|(s, _)| s.id != session.id);
+                    }
+                }
             }
         });
     from_dbus
