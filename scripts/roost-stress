@@ -247,6 +247,41 @@ def run(args):
         wait_for(lambda: state().get("overview_open") is True)
         assertions["S-POPUP"] = [True, f"{mapped} mapped Wayland popups; depth three; four concurrent clients; input recovered"]
 
+        adversary_dir = out / "adversary-client"
+        subprocess.run([str(ROOT / "scripts/roost-wayland-adversary-build"), str(adversary_dir)],
+                       check=True, stdout=subprocess.DEVNULL)
+        expected = {"malformed-opcode": "connection-rejected", "zero-buffer": "protocol-rejected",
+                    "huge-buffer": "protocol-rejected", "destroy-parent": "protocol-rejected",
+                    "invalid-configure": "protocol-rejected",
+                    "never-ack": "configure-left-unacknowledged",
+                    "die-mid-transaction": "disconnected-before-commit"}
+        for mode, result in expected.items():
+            attacks = [launch([str(adversary_dir / "roost-wayland-adversary"), mode],
+                              f"adversary-{mode}-{index}", client_env) for index in range(4)]
+            healthy = launch([sys.executable, str(Path(__file__).resolve()), "--popup-worker"],
+                             f"healthy-{mode}", client_env)
+            wait_for(lambda: all(process.poll() is not None for process in [*attacks, healthy]),
+                     timeout=10)
+            for index, process in enumerate(attacks):
+                if process.returncode != 0:
+                    raise RuntimeError(f"{mode} attacker {index} did not receive the expected outcome")
+                rows = [json.loads(line) for line in (out / f"adversary-{mode}-{index}.log").read_text().splitlines()
+                        if line.startswith('{"mode":')]
+                if len(rows) != 1 or rows[0].get("mode") != mode or rows[0].get("result") != result:
+                    raise RuntimeError(f"{mode} attacker {index} has no actual outcome evidence")
+                if mode == "never-ack" and rows[0].get("configures", 0) < 1:
+                    raise RuntimeError("unacknowledged client never received a configure")
+            rows = [json.loads(line) for line in (out / f"healthy-{mode}.log").read_text().splitlines()
+                    if line.startswith('{"mapped_wayland_popups":')]
+            if healthy.returncode != 0 or rows != [{"mapped_wayland_popups": 60, "nested_depth": 3}]:
+                raise RuntimeError(f"healthy popup client failed alongside {mode}")
+            wait_for(lambda: state().get("windows") == [])
+            subprocess.run(["xdotool", "key", "--clearmodifiers", "Escape"], env=env, check=True)
+            wait_for(lambda: state().get("overview_open") is False)
+            subprocess.run(["xdotool", "key", "--clearmodifiers", "Super_L"], env=env, check=True)
+            wait_for(lambda: state().get("overview_open") is True)
+            assertions[f"S-PROTOCOL-{mode.upper()}"] = [True, "four actual clients; exact rejection/disconnect evidence; healthy nested popups and input recovered"]
+
         import gi
         from gi.repository import Gio, GLib
         bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
