@@ -33,17 +33,21 @@ use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 
 use roost_shell_control::{
-    ActivationToken, CommandKind, CommandStatus, ControlError, DecodeError, ErrorKind, Message,
-    OutputInfo, SwitcherAction, WindowInfo, WorkspaceInfo, CURRENT_VERSION, MAX_FRAME_BYTES,
+    ActivationToken, CommandKind, CommandStatus, DecodeError, ErrorKind, Message, OutputInfo,
+    SwitcherAction, WindowInfo, WorkspaceInfo, CURRENT_VERSION, MAX_FRAME_BYTES,
 };
+
+/// Transport and protocol failures, shared with the compositor endpoint.
+///
+/// Defined in [`roost_shell_control`] so both endpoints name the same type;
+/// re-exported here because `crate::control::ControlError` is the path the
+/// rest of this crate (and its tests) use.
+pub use roost_shell_control::ControlError;
 
 use crate::model::{ShellModel, SnapshotView, WindowEntry};
 
 /// First shell-chosen command request id.
 pub const INITIAL_REQUEST_ID: u64 = 1;
-
-// ControlError is now defined in roost_shell_control and re-exported above.
-// It unifies error types across compositor and shell-host endpoints.
 
 /// What one handled inbound message meant.
 #[derive(Debug, Clone, PartialEq, Eq)]

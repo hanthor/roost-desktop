@@ -38,15 +38,19 @@ use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 
 use roost_shell_control::{
-    decode_frame, encode_frame, ActivationToken, CommandKind, CommandStatus, ControlError,
-    DecodeError, ErrorKind, Message, OutputInfo, ProtocolVersion, StateOp, SwitcherAction,
-    WorkspaceInfo, CURRENT_VERSION, MAX_FRAME_BYTES,
+    decode_frame, encode_frame, ActivationToken, CommandKind, CommandStatus, DecodeError,
+    ErrorKind, Message, OutputInfo, ProtocolVersion, StateOp, SwitcherAction, WorkspaceInfo,
+    CURRENT_VERSION, MAX_FRAME_BYTES,
 };
 
 use crate::state::{StateChange, StateModel, TokenStore, WindowEntry};
 
-// ControlError is now defined in roost_shell_control and re-exported above.
-// It unifies error types across compositor and shell-host endpoints.
+/// Transport and protocol failures, shared with the shell-host endpoint.
+///
+/// Defined in [`roost_shell_control`] so both endpoints name the same type;
+/// re-exported here because `roost_compositor::control::ControlError` is the
+/// path the rest of this crate (and its tests) use.
+pub use roost_shell_control::ControlError;
 
 /// Bound control socket. Wraps an already-bound [`UnixListener`] (tests pass
 /// a bound socket or use a socketpair directly with [`ControlConn`]).
