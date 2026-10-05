@@ -32,6 +32,7 @@ pub const MAX_TITLE_LEN: usize = 256;
 /// One mapped window as tracked by the compositor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowEntry {
+    pub icon: Option<String>,
     /// Generational id: drawn from a session-monotonic counter, never reused.
     pub id: u64,
     /// Untrusted client-provided title, length-capped on insert/update.
@@ -204,6 +205,7 @@ impl StateModel {
         let id = self.next_id();
         self.register_workspace(workspace);
         let window = WindowEntry {
+            icon: None,
             id,
             title: cap_title(title),
             app_id: app_id.map(str::to_owned),
@@ -367,6 +369,16 @@ impl StateModel {
             .filter(|(r, _)| *r > rev)
             .cloned()
             .collect())
+    }
+
+    pub fn set_icon(&mut self, id: u64, icon: Option<String>) {
+        if let Some(window) = self.windows.get_mut(&id) {
+            if window.icon != icon {
+                window.icon = icon;
+                let window = window.clone();
+                self.commit(StateChange::WindowUpdated { window });
+            }
+        }
     }
 
     fn next_id(&mut self) -> u64 {

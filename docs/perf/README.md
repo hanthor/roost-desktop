@@ -13,3 +13,20 @@ Input timings bound the response observed through QMP captures. Each observation
 Run a fixture disk with `scripts/roost-vm-perf --disk disk.raw --desktop gnome --out /tmp/gnome-perf-fresh`, or select `roost` for the candidate. Each artifact directory must be new. Build `packaging/marlin/perf/Containerfile` with `DESKTOP=gnome` or `DESKTOP=roost` on the same shared preview image; it changes only the test user, autologin, serial logging and observer. The fixture never ships in a desktop image.
 
 The [2026-10-04 paired report](2026-10-04-marlin-gnome51/README.md) records the first successful run, including the higher sampled Roost CPU and slower median observed overview response. Its package predates the latest roadmap work. Issue #73 remains open.
+
+The paired lane also captures `wayland-info` from each actual interactive
+Marlin session. The root observer invokes the tool as the fixture user and
+retains the full output as digest-checked journal chunks; missing, partial,
+duplicate or corrupted captures fail the run. Each desktop's artifact contains
+`wayland-info.txt` and `wayland-info-source.json`, associated with the image,
+package and observer provenance in that run. This supplies a native Marlin
+protocol reference once a run passes; it does not replace the existing Fedora
+headless reference without retaining and reviewing that actual evidence.
+The comparison requires KVM and fails rather than accepting software emulation.
+
+The [native cadence and pure idle report](2026-10-04-native-cadence/README.md)
+retains a later actual paired GNOME 51/Roost run, including all 240 presentation
+records per desktop, guest clock boundaries, ten accepted notifications each,
+and raw resource samples. It identifies high Roost idle CPU and slower median
+presentation cadence in the older trusted package. It does not qualify later
+repaint changes or close the remaining input tracing and soak requirements.

@@ -9,7 +9,7 @@ COPY packaging/marlin/vm-lane/kargs.toml /usr/lib/bootc/kargs.d/90-roost-vm-lane
 COPY scripts/lib/roost-perf-guest.py /usr/libexec/roost-perf-guest
 COPY packaging/marlin/perf/roost-perf.service /usr/lib/systemd/system/roost-perf.service
 RUN case "$DESKTOP" in gnome|roost) ;; *) exit 1 ;; esac && \
-    pacman -S --needed --noconfirm python && \
+    pacman -S --needed --noconfirm python wayland-utils && \
     useradd -M -d /home/roost-test -s /bin/bash -U roost-test && \
     echo 'roost-test:roost' | chpasswd && \
     sed -i "s/DefaultSession=roost.desktop/DefaultSession=${DESKTOP}.desktop/" /etc/gdm/custom.conf && \
