@@ -1,11 +1,58 @@
 #!/usr/bin/env python3
 """CI-only interactive-user resource observer. No release thresholds."""
 import argparse
+import base64
+import hashlib
 import json
 import os
 import pwd
+import stat
+import subprocess
+import tempfile
 from pathlib import Path
 import time
+
+
+def global_records(raw, socket_name):
+    """Journal-sized chunks; a digest lets the host reject partial captures."""
+    if not raw or len(raw) > 2 * 1024 * 1024:
+        raise ValueError("Wayland capture is empty or exceeds 2 MiB")
+    digest = hashlib.sha256(raw).hexdigest()
+    parts = [base64.b64encode(raw[at:at+2048]).decode("ascii")
+             for at in range(0, len(raw), 2048)]
+    return [{"sha256": digest, "index": index, "count": len(parts),
+             "socket": socket_name, "data": part} for index, part in enumerate(parts)]
+
+
+def capture_globals(uid):
+    runtime = Path(f"/run/user/{uid}")
+    if not runtime.is_dir():
+        return False
+    for path in sorted(runtime.iterdir()):
+        if not path.name.startswith(("wayland-", "roost-")):
+            continue
+        try:
+            info = path.stat()
+            if info.st_uid != uid or not stat.S_ISSOCK(info.st_mode):
+                continue
+            with tempfile.TemporaryFile() as output:
+                result = subprocess.run([
+                    "runuser", "-u", pwd.getpwuid(uid).pw_name, "--", "env",
+                    f"XDG_RUNTIME_DIR={runtime}", f"WAYLAND_DISPLAY={path.name}",
+                    "wayland-info"], stdout=output, stderr=subprocess.DEVNULL, timeout=15)
+                output.seek(0)
+                raw = output.read(2 * 1024 * 1024 + 1)
+            if result.returncode != 0:
+                continue
+            if (b"interface: 'wl_compositor'" not in raw
+                    or b"interface: 'xdg_wm_base'" not in raw):
+                continue  # Ignore a private helper socket rather than mislabel it.
+            for record in global_records(raw, path.name):
+                print("roost-perf-globals: " + json.dumps(record), flush=True)
+            return True
+        except (FileNotFoundError, ConnectionError, subprocess.TimeoutExpired):
+            continue  # The graphical session may still be starting.
+    return False
 
 
 def read_process(path):
@@ -75,6 +122,7 @@ def main():
         ap.error("interval must be positive")
     uid = pwd.getpwnam(args.user).pw_uid if args.user else os.getuid()
     previous, previous_at = {}, None
+    globals_captured = False
     ticks = os.sysconf("SC_CLK_TCK")
     while True:
         start = time.monotonic()
@@ -87,6 +135,8 @@ def main():
                    departed_processes=len(previous.keys() - current.keys()))
         print("roost-perf-sample: " + json.dumps(row, separators=(",", ":")), flush=True)
         previous, previous_at = current, start
+        if not globals_captured:
+            globals_captured = capture_globals(uid)
         time.sleep(max(0, args.interval - (time.monotonic() - start)))
 
 
