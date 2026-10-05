@@ -25,6 +25,13 @@ BOUNDARIES = {
         'exhaustion': ('peer_auth.rs', 'connection_flood_is_bounded_and_the_shell_still_gets_in'),
         'process failure': ('recovery.rs', 'hundred_fault_runs_keep_apps_alive_and_resync'),
     },
+    'supervised shell identity': {
+        'positive': ('peer_auth.rs', 'supervised_shell_pid_is_admitted_and_reconnects'),
+        'negative': ('peer_auth.rs', 'closed_gate_admits_nobody'),
+        'spoof/replay': ('peer_auth.rs', 'unauthorized_same_user_client_is_refused_before_handshake'),
+        'exhaustion': ('peer_auth.rs', 'connection_flood_is_bounded_and_the_shell_still_gets_in'),
+        'process failure': ('recovery.rs', 'hundred_fault_runs_keep_apps_alive_and_resync'),
+    },
     'locked session': {
         'positive': ('unlock.rs', 'correct_password_dismisses_lock_intact'),
         'negative': ('unlock.rs', 'triple_wrong_password_stays_locked_without_leak'),

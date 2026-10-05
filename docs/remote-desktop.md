@@ -44,12 +44,6 @@ It requires actual Cancel/Allow, a linked PipeWire frame, foreign input denial,
 legacy and EIS keyboard/button delivery, node removal after Close/client/backend
 loss/EIS disconnect/lock, and new-session lock denial. Candidate commit, runtime
 versions, consent screenshots, input logs and frame evidence accompany the run.
-The packaged `8019c16641ebb9e42330306071e8224c31cea620` candidate passed
-this complete GNOME 51 journey. See `remote-desktop-evidence.json` for the exact
-package workflow and runtime versions. The proof requires fresh keyboard and
-button events after each delivery baseline, then checks no new client input and
-an empty seat after backend/lock revocation; a frontend void-method reply alone
-is not an admission oracle. New locked sessions are denied at CreateSession
-with response 2. The final aggregate seat-count telemetry variant requires its
-own exact-head CI pass. Issue #61 remains open for the explicit unsupported
-capabilities and remaining screenshot acceptance.
+The exact `1f441bb` Remote head passed all sixteen checks in [CI 37214121497](https://github.com/hanthor/roost-desktop/actions/runs/37214121497). The combined Screenshot/Remote candidate `3249f362` passed the same complete GNOME 51 journey in [CI 37214394538](https://github.com/hanthor/roost-desktop/actions/runs/37214394538), including independent installed libei 1.6 keyboard and pointer delivery. See `remote-desktop-evidence.json` for candidate, runtime versions and retained artifacts. The proof requires fresh key/button events after each delivery baseline, then no new client input and an empty held seat after backend/lock revocation; a frontend void-method reply alone is not an admission oracle. New locked sessions are denied at CreateSession with response 2.
+
+Issue #61's stated consent, stream, revoke and locked-denial acceptance is complete. The unsupported capabilities above remain broader GNOME parity limits, and P-SY-05 stays partial.

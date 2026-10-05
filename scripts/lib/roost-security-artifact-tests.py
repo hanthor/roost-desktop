@@ -30,7 +30,18 @@ class Evidence(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             fixture(root)
-            self.assertEqual(len(gate.check(root, REVISION)), 10)
+            self.assertEqual(len(gate.check(root, REVISION)), 15)
+
+    def test_supervised_identity_admission_requires_actual_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixture(root)
+            path = root / 'test.log'
+            path.write_text(path.read_text().replace(
+                'test supervised_shell_pid_is_admitted_and_reconnects ... ok',
+                'supervised_shell_pid_is_admitted_and_reconnects: test'))
+            with self.assertRaisesRegex(ValueError, 'supervised shell identity/positive'):
+                gate.check(root, REVISION)
 
     def test_combined_report_preserves_measurement_and_current_traceability_gaps(self):
         with tempfile.TemporaryDirectory() as directory:
