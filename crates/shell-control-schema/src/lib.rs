@@ -1419,4 +1419,136 @@ mod tests {
         let shown = format!("{:?}", sample_token());
         assert!(!shown.contains("opaque-token-123"), "token leaked: {shown}");
     }
+
+    #[test]
+    fn control_error_display_io() {
+        let err = ControlError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "connection refused",
+        ));
+        let shown = format!("{err}");
+        assert!(shown.contains("control socket I/O"));
+    }
+
+    #[test]
+    fn control_error_display_decode() {
+        let decode_err = DecodeError::Truncated {
+            expected: 100,
+            actual: 50,
+        };
+        let err = ControlError::Decode(decode_err);
+        let shown = format!("{err}");
+        assert!(shown.contains("control decode"));
+    }
+
+    #[test]
+    fn control_error_display_would_block() {
+        let err = ControlError::WouldBlock;
+        let shown = format!("{err}");
+        assert!(shown.contains("control socket not ready"));
+    }
+
+    #[test]
+    fn control_error_display_unexpected() {
+        let err = ControlError::Unexpected("out of order".to_owned());
+        let shown = format!("{err}");
+        assert!(shown.contains("unexpected message or state"));
+        assert!(shown.contains("out of order"));
+    }
+
+    #[test]
+    fn control_error_display_remote() {
+        let err = ControlError::Remote {
+            kind: ErrorKind::RevisionGap,
+            message: "revision 5 needed".to_owned(),
+        };
+        let shown = format!("{err}");
+        assert!(shown.contains("remote error"));
+        assert!(shown.contains("revision 5 needed"));
+    }
+
+    #[test]
+    fn control_error_display_app_constraint() {
+        let err = ControlError::AppConstraint("no active window".to_owned());
+        let shown = format!("{err}");
+        assert!(shown.contains("constraint"));
+        assert!(shown.contains("no active window"));
+    }
+
+    #[test]
+    fn control_error_from_io_error() {
+        let io_err = std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "permission denied",
+        );
+        let err: ControlError = io_err.into();
+        assert!(matches!(err, ControlError::Io(_)));
+    }
+
+    #[test]
+    fn control_error_from_would_block_error() {
+        let io_err = std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "would block",
+        );
+        let err: ControlError = io_err.into();
+        assert!(matches!(err, ControlError::WouldBlock));
+    }
+
+    #[test]
+    fn control_error_from_decode_error() {
+        let decode_err = DecodeError::Oversize {
+            len: 2_000_000,
+            max: MAX_FRAME_BYTES,
+        };
+        let err: ControlError = decode_err.into();
+        assert!(matches!(err, ControlError::Decode(_)));
+    }
+
+    #[test]
+    fn control_error_source_io() {
+        use std::error::Error;
+        let io_err = std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "broken pipe",
+        );
+        let err = ControlError::Io(io_err);
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn control_error_source_decode() {
+        use std::error::Error;
+        let decode_err = DecodeError::Malformed(postcard::Error::DeserializeBadEncoding);
+        let err = ControlError::Decode(decode_err);
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn control_error_source_other_variants() {
+        use std::error::Error;
+        let err = ControlError::WouldBlock;
+        assert!(err.source().is_none());
+        let err = ControlError::Unexpected("test".to_owned());
+        assert!(err.source().is_none());
+        let err = ControlError::AppConstraint("test".to_owned());
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn activation_token_debug_is_redacted() {
+        let token = ActivationToken::new("secret-token-xyz".to_owned());
+        let shown = format!("{:?}", token);
+        assert!(!shown.contains("secret-token-xyz"), "token leaked: {shown}");
+        assert!(shown.contains("redacted"));
+    }
+
+    #[test]
+    fn activation_token_equality() {
+        let token1 = ActivationToken::new("token123".to_owned());
+        let token2 = ActivationToken::new("token123".to_owned());
+        let token3 = ActivationToken::new("other".to_owned());
+        assert_eq!(token1, token2);
+        assert_ne!(token1, token3);
+    }
 }
