@@ -698,10 +698,11 @@ pub fn brightness_step(percent: f64, up: bool) -> f64 {
 }
 
 /// Backlight value for a slider percentage. Never zero: a black
-/// screen is not a brightness level (GNOME keeps a floor too).
+/// screen is not a brightness level. GNOME 51's sysfs backlight minimum
+/// is max(1, max_brightness / 100), so zero percent selects that floor.
 pub fn brightness_value(percent: f64, max: u32) -> u32 {
     let raw = (percent.clamp(0.0, 100.0) * max as f64 / 100.0).round() as u32;
-    raw.clamp(1.min(max), max)
+    raw.clamp((max / 100).max(1).min(max), max)
 }
 
 #[cfg(test)]
@@ -739,7 +740,9 @@ mod service_tests {
         assert_eq!(brightness_percent(512, 1024), 50.0);
         assert_eq!(brightness_percent(5, 0), 0.0);
         assert_eq!(brightness_value(50.0, 1024), 512);
-        assert_eq!(brightness_value(0.0, 1024), 1);
+        assert_eq!(brightness_value(0.0, 1024), 10);
+        assert_eq!(brightness_value(0.0, 1000), 10);
+        assert_eq!(brightness_value(0.0, 20), 1);
         assert_eq!(brightness_value(100.0, 1024), 1024);
         assert_eq!(brightness_value(30.0, 0), 0);
     }
@@ -1929,6 +1932,7 @@ pub fn grid_reorder(
 
 /// The order as `app-picker-layout` pages (appDisplay.js `_savePages`):
 /// each item's position on its page.
+#[cfg(test)]
 pub fn grid_pages(order: &[String], per_page: usize) -> Vec<Vec<(String, i32)>> {
     order
         .chunks(per_page.max(1))
@@ -1936,6 +1940,99 @@ pub fn grid_pages(order: &[String], per_page: usize) -> Vec<Vec<(String, i32)>> 
             page.iter()
                 .enumerate()
                 .map(|(i, id)| (id.clone(), i as i32))
+                .collect()
+        })
+        .collect()
+}
+
+/// Saved pages are boundaries, not merely a global sort order. Keep each
+/// existing page short and append previously unplaced items at the end.
+pub fn grid_layout_pages(
+    items: &[(&str, &str)],
+    layout: &[Vec<(String, i32)>],
+    per_page: usize,
+) -> Vec<Vec<String>> {
+    let capacity = per_page.max(1);
+    let mut pages = Vec::new();
+    let mut placed = std::collections::HashSet::new();
+    for saved in layout {
+        let mut saved = saved.clone();
+        saved.sort_by_key(|(_, position)| *position);
+        let ids: Vec<String> = saved
+            .into_iter()
+            .filter_map(|(id, _)| {
+                (items.iter().any(|(key, _)| *key == id) && placed.insert(id.clone())).then_some(id)
+            })
+            .collect();
+        pages.extend(ids.chunks(capacity).map(|page| page.to_vec()));
+    }
+    if pages.is_empty() {
+        pages.push(Vec::new());
+    }
+    for index in grid_order(items, layout) {
+        let id = items[index].0;
+        if !placed.insert(id.to_owned()) {
+            continue;
+        }
+        if pages.last().is_some_and(|page| page.len() >= capacity) {
+            pages.push(Vec::new());
+        }
+        pages.last_mut().unwrap().push(id.to_owned());
+    }
+    pages
+}
+
+pub fn grid_move_in_pages(
+    pages: &[Vec<String>],
+    source: &str,
+    target: &str,
+    edge: DropEdge,
+    columns: usize,
+    per_page: usize,
+) -> Option<Vec<Vec<String>>> {
+    let (from_page, from) = pages.iter().enumerate().find_map(|(page, ids)| {
+        ids.iter()
+            .position(|id| id == source)
+            .map(|index| (page, index))
+    })?;
+    let (to_page, target_index) = pages.iter().enumerate().find_map(|(page, ids)| {
+        ids.iter()
+            .position(|id| id == target)
+            .map(|index| (page, index))
+    })?;
+    if source == target || edge == DropEdge::OnIcon {
+        return None;
+    }
+    let mut result = pages.to_vec();
+    if from_page == to_page {
+        result[from_page] = grid_reorder(&pages[from_page], source, target_index, edge, columns)?;
+    } else {
+        let item = result[from_page].remove(from);
+        let index = target_index + usize::from(edge == DropEdge::End);
+        result[to_page].insert(index, item);
+        let mut page = to_page;
+        while result[page].len() > per_page.max(1) {
+            let spill = result[page].pop().unwrap();
+            page += 1;
+            if page == result.len() {
+                result.push(Vec::new());
+            }
+            result[page].insert(0, spill);
+        }
+    }
+    // GNOME removes a page when its last icon leaves; non-empty short
+    // pages retain their boundary (iconGrid.js _removeItemData).
+    result.retain(|page| !page.is_empty());
+    (result != pages).then_some(result)
+}
+
+pub fn grid_save_pages(pages: &[Vec<String>]) -> Vec<Vec<(String, i32)>> {
+    pages
+        .iter()
+        .map(|page| {
+            page.iter()
+                .enumerate()
+                .map(|(position, id)| (id.clone(), position as i32))
                 .collect()
         })
         .collect()
@@ -1977,6 +2074,59 @@ pub fn grid_pages_replace(
 #[cfg(test)]
 mod grid_layout_tests {
     use super::*;
+
+    #[test]
+    fn moving_between_pages_preserves_the_short_source_page_on_rebuild() {
+        let items = [("a", "A"), ("b", "B"), ("c", "C"), ("d", "D"), ("e", "E")];
+        let pages = vec![
+            vec!["a".into(), "b".into(), "c".into()],
+            vec!["d".into(), "e".into()],
+        ];
+        let moved = grid_move_in_pages(&pages, "b", "d", DropEdge::Start, 3, 3).unwrap();
+        assert_eq!(moved, vec![vec!["a", "c"], vec!["b", "d", "e"]]);
+        assert_eq!(
+            grid_layout_pages(&items, &grid_save_pages(&moved), 3),
+            moved
+        );
+        let mut more = items.to_vec();
+        more.push(("f", "F"));
+        assert_eq!(
+            grid_layout_pages(&more, &grid_save_pages(&moved), 3),
+            vec![vec!["a", "c"], vec!["b", "d", "e"], vec!["f"]]
+        );
+    }
+
+    #[test]
+    fn page_moves_spill_only_into_following_pages_and_deduplicate_saved_ids() {
+        let pages = vec![vec!["a".into(), "b".into()], vec!["c".into(), "d".into()]];
+        let moved = grid_move_in_pages(&pages, "a", "c", DropEdge::End, 2, 2).unwrap();
+        assert_eq!(moved, vec![vec!["b"], vec!["c", "a"], vec!["d"]]);
+        let saved = vec![
+            vec![("a".into(), 1), ("a".into(), 0), ("missing".into(), 2)],
+            vec![("b".into(), 0)],
+        ];
+        assert_eq!(
+            grid_layout_pages(&[("a", "A"), ("b", "B")], &saved, 2),
+            vec![vec!["a"], vec!["b"]]
+        );
+    }
+
+    #[test]
+    fn moving_the_last_icon_removes_only_the_empty_page() {
+        let pages = vec![vec!["a".into()], vec!["b".into(), "c".into()]];
+        assert_eq!(
+            grid_move_in_pages(&pages, "a", "b", DropEdge::Start, 3, 3).unwrap(),
+            vec![vec!["a", "b", "c"]]
+        );
+        assert_eq!(
+            grid_layout_pages(
+                &[("b", "B")],
+                &[vec![("gone".into(), 0)], vec![("b".into(), 0)]],
+                3
+            ),
+            vec![vec!["b"]]
+        );
+    }
 
     #[test]
     fn grid_reorders_and_saves_like_gnome() {

@@ -1,0 +1,225 @@
+{
+  "source": "GNOME Shell 51.0, Fedora45 headless, virtual keyboard input",
+  "captured": "2026-10-04",
+  "monitor": [
+    1280,
+    800
+  ],
+  "states": {
+    "20-overview-dismiss-focus": {
+      "active_workspace": 0,
+      "focused": 2,
+      "focused_title": "Beta",
+      "windows": [
+        {
+          "id": 1,
+          "title": "Alpha",
+          "workspace": 0,
+          "maximized": 0,
+          "rect": [
+            320,
+            206,
+            640,
+            420
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Gamma",
+          "workspace": 0,
+          "maximized": 0,
+          "rect": [
+            420,
+            306,
+            640,
+            420
+          ]
+        },
+        {
+          "id": 2,
+          "title": "Beta",
+          "workspace": 0,
+          "maximized": 0,
+          "rect": [
+            370,
+            256,
+            640,
+            420
+          ]
+        }
+      ]
+    },
+    "21-maximized": {
+      "active_workspace": 0,
+      "focused": 2,
+      "focused_title": "Beta",
+      "windows": [
+        {
+          "id": 1,
+          "title": "Alpha",
+          "workspace": 0,
+          "maximized": 0,
+          "rect": [
+            320,
+            206,
+            640,
+            420
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Gamma",
+          "workspace": 0,
+          "maximized": 0,
+          "rect": [
+            420,
+            306,
+            640,
+            420
+          ]
+        },
+        {
+          "id": 2,
+          "title": "Beta",
+          "workspace": 0,
+          "maximized": 3,
+          "rect": [
+            0,
+            32,
+            1280,
+            768
+          ]
+        }
+      ]
+    },
+    "22-tiled-left": {
+      "active_workspace": 0,
+      "focused": 2,
+      "focused_title": "Beta",
+      "windows": [
+        {
+          "id": 1,
+          "title": "Alpha",
+          "workspace": 0,
+          "maximized": 0,
+          "rect": [
+            320,
+            206,
+            640,
+            420
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Gamma",
+          "workspace": 0,
+          "maximized": 0,
+          "rect": [
+            420,
+            306,
+            640,
+            420
+          ]
+        },
+        {
+          "id": 2,
+          "title": "Beta",
+          "workspace": 0,
+          "maximized": 2,
+          "rect": [
+            0,
+            32,
+            640,
+            768
+          ]
+        }
+      ]
+    },
+    "22b-tiled-right": {
+      "active_workspace": 0,
+      "focused": 2,
+      "focused_title": "Beta",
+      "windows": [
+        {
+          "id": 1,
+          "title": "Alpha",
+          "workspace": 0,
+          "maximized": 0,
+          "rect": [
+            320,
+            206,
+            640,
+            420
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Gamma",
+          "workspace": 0,
+          "maximized": 0,
+          "rect": [
+            420,
+            306,
+            640,
+            420
+          ]
+        },
+        {
+          "id": 2,
+          "title": "Beta",
+          "workspace": 0,
+          "maximized": 2,
+          "rect": [
+            640,
+            32,
+            640,
+            768
+          ]
+        }
+      ]
+    },
+    "23-workspace-switched": {
+      "active_workspace": 1,
+      "focused": null,
+      "focused_title": null,
+      "windows": [
+        {
+          "id": 1,
+          "title": "Alpha",
+          "workspace": 0,
+          "maximized": 0,
+          "rect": [
+            320,
+            206,
+            640,
+            420
+          ]
+        },
+        {
+          "id": 3,
+          "title": "Gamma",
+          "workspace": 0,
+          "maximized": 0,
+          "rect": [
+            420,
+            306,
+            640,
+            420
+          ]
+        },
+        {
+          "id": 2,
+          "title": "Beta",
+          "workspace": 0,
+          "maximized": 0,
+          "rect": [
+            370,
+            256,
+            640,
+            420
+          ]
+        }
+      ]
+    }
+  }
+}

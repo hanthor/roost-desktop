@@ -9,7 +9,8 @@ showing node named NAME, as a screen-reader user would, then dumps.
 With --set, sets the value of the first showing node named NAME that
 has one (a slider), the way assistive technology moves it.
 
-Each node: role, name, depth, showing. Waits up to TIMEOUT_S for the app
+Each node: role, name, depth, showing, and window-relative bounds.
+Waits up to TIMEOUT_S for the app
 to register on the accessibility bus. Exit 1 if it never appears.
 """
 import json
@@ -17,6 +18,16 @@ import sys
 import time
 
 import pyatspi
+
+
+def bounds(acc):
+    # Wayland cannot expose global surface origins. Window coordinates
+    # retain widget allocation; callers add the compositor-known origin.
+    try:
+        rect = acc.queryComponent().getExtents(pyatspi.WINDOW_COORDS)
+        return [rect.x, rect.y, rect.width, rect.height]
+    except Exception:
+        return None
 
 
 def walk(acc, depth, out):
@@ -29,6 +40,8 @@ def walk(acc, depth, out):
             "checked": acc.getState().contains(pyatspi.STATE_CHECKED)
             or acc.getState().contains(pyatspi.STATE_PRESSED),
             "selected": acc.getState().contains(pyatspi.STATE_SELECTED),
+            "focused": acc.getState().contains(pyatspi.STATE_FOCUSED),
+            "bounds": bounds(acc),
         })
         for i in range(acc.childCount):
             child = acc.getChildAtIndex(i)

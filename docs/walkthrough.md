@@ -112,7 +112,7 @@ Right-clicking a header bar opens GNOME's window menu. (`P-WM-05`)
 
 ### X11 apps
 
-XWayland starts with the session, and X11 apps get GNOME placement and focus. (`P-SY-04`)
+The session advertises DISPLAY without starting XWayland. The first X11 connection starts it on the reserved sockets; X11 apps get GNOME placement and focus. (`P-SY-04`)
 
 ![X11 apps](walkthrough/x11.png)
 
