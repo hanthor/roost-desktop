@@ -28,6 +28,8 @@ BOUNDARIES = {
     'locked session': {
         'positive': ('unlock.rs', 'correct_password_dismisses_lock_intact'),
         'negative': ('unlock.rs', 'triple_wrong_password_stays_locked_without_leak'),
+        'spoof/replay': ('session_lock_protocol.rs', 'unapproved_release_is_a_protocol_error_without_clearing_the_owner'),
+        'exhaustion': ('session_lock_protocol.rs', 'replacing_pending_requests_finishes_old_owners_without_granting_them'),
         'process failure': ('lock.rs', 'reconnect_while_locked_stays_locked'),
     },
 }
@@ -71,7 +73,8 @@ def inspect(root, executed=None):
             errors.append(f'duplicate stable ID {value}: {", ".join(sorted(paths))}')
     if not ids:
         gaps.append('Qualified Roost-<spek>-<requirement>-<case> IDs have not been assigned to legacy tests')
-    gaps.append('Line/branch coverage thresholds and security artifact completeness remain tracked by #8')
+    gaps.append('Measured line/region floors and security artifacts run separately in measured-coverage.yml; this structural inventory does not measure them')
+    gaps.append('Broader protocol/lifecycle boundary registration and spec-qualified IDs remain tracked by #8; current stable-toolchain coverage does not measure branches')
     return {'crates': crates, 'stable_ids': ids, 'errors': errors, 'gaps': gaps}
 
 

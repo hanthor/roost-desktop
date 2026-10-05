@@ -1,0 +1,41 @@
+{
+  "run": 37196669447,
+  "observer_revision": "3bd839339e6a932320391f8b1cc41f90177c10e3",
+  "reference_session": "native GNOME Shell 51.0 / Mutter51.0 on Marlin derived GNOME51 baseline",
+  "package_run": 37189354041,
+  "package_source": "7546647e5967825f522a352ee781e0908f889d1e",
+  "package_sha256": "58cfb1792e028aff6d511156e9292a83296934d550ae223538113d6c6056bcb6",
+  "base_digest": "sha256:3311d7784a0b0e7cd5486d8b69d974f4a34c3436b9812599470d00f80f805f1b",
+  "shared_image_id": "06822f5366c44f6337f701df77179c40e24ebca4f6628f8839887776218e8b33",
+  "profile": {
+    "memory_mib": 6144,
+    "vcpus": 4,
+    "resolution": [
+      1280,
+      800
+    ],
+    "kvm": true
+  },
+  "gnome_packages": [
+    "gnome-shell 1:51.0-1",
+    "mesa 1:26.2.4-1",
+    "mutter 51.0-1",
+    "wayland 1.26.0-1"
+  ],
+  "captures": {
+    "gnome": {
+      "sha256": "2926517d6ae4229d43bed4d20832ec96e8b0adade9d20652f2c627d1d492b038",
+      "socket": "wayland-0"
+    },
+    "roost": {
+      "sha256": "0c037dc2f2c77c1b5c2993cbedcd3a489908054b6bfae3025a41223e6256d138",
+      "socket": "roost-nested-1068"
+    }
+  },
+  "observer_meta": [
+    "base_digest=sha256:3311d7784a0b0e7cd5486d8b69d974f4a34c3436b9812599470d00f80f805f1b",
+    "shared_image_id=06822f5366c44f6337f701df77179c40e24ebca4f6628f8839887776218e8b33",
+    "observer_revision=3bd839339e6a932320391f8b1cc41f90177c10e3"
+  ],
+  "pr_head_revision": "6a0d9b299a3729a351899ebd4ec2b47d3a03e0aa"
+}
