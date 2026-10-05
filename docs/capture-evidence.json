@@ -1,0 +1,48 @@
+{
+  "date": "2026-10-04",
+  "pull_request_head": "5e19b478f184734264e2635d711f11dcf8654a77",
+  "candidate_commit": "3249f362e05d4819ee55759df3d1142789fc8418",
+  "candidate_parents": [
+    "153ee8f809421d011a88d37ac843c613b927fac1",
+    "5e19b478f184734264e2635d711f11dcf8654a77"
+  ],
+  "artifact_workflow_run": 37214394538,
+  "full_current_head_checks": {
+    "passed": 16,
+    "failed": 0
+  },
+  "artifact_ids": {
+    "portal-security": 11308116851,
+    "remote-security": 11307854413,
+    "gtk-shell": 11308177245
+  },
+  "runtime_versions": [
+    "xdg-desktop-portal-gnome-51.0-1.fc45.x86_64",
+    "xdg-desktop-portal-1.22.1-2.fc45.x86_64",
+    "pipewire-1.6.9-1.fc45.x86_64",
+    "gtk4-4.24.1-1.fc45.x86_64",
+    "libadwaita-1.10.0-2.fc45.x86_64",
+    "libei-1.6.0-3.fc45.x86_64"
+  ],
+  "accepted": [
+    "Screenshot real Access Deny/no URI and Allow/readable varied 1280×800 PNG",
+    "Authenticated locked Screenshot completes with empty URI and unchanged saved-image hashes; unknown callers denied",
+    "ScreenCast real Cancel/Share, PipeWire FD/frame, foreign-owner denial",
+    "Close/client/backend/lock node withdrawal within the documented two-second bound",
+    "Remote legacy and independently installed libei keyboard/pointer delivery to actual GTK client",
+    "Remote revoke stops node/input and clears held seat; locked CreateSession denied"
+  ],
+  "observed_node_removal_seconds": {
+    "Close": 0.016,
+    "client_disconnect": 0.015,
+    "backend_disconnect": 0.076,
+    "lock": 0.013
+  },
+  "limitations": [
+    "Software-rendered GNOME51 Fedora45 security reference; no physical GPU or VT claim",
+    "Remote touch, keysym/text and clipboard unsupported",
+    "EIS output/keymap snapshots require new consent after changes",
+    "Interactive portal screenshot customization, area and color selection unsupported",
+    "Cursor metadata and dmabuf zero-copy missing; P-SY-05 remains partial"
+  ]
+}
