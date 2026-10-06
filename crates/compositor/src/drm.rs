@@ -35,9 +35,7 @@ use smithay::backend::session::libseat::{LibSeatSession, LibSeatSessionNotifier}
 use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::desktop::utils::OutputPresentationFeedback;
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
-use smithay::reexports::drm::control::{
-    connector, crtc, Device as ControlDevice, Mode as DrmMode, ModeTypeFlags,
-};
+use smithay::reexports::drm::control::{connector, crtc, Device as ControlDevice, ModeTypeFlags};
 use smithay::reexports::input::Libinput;
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::utils::{DeviceFd, Logical, Physical, Point, Rectangle, Size};
@@ -69,12 +67,6 @@ pub struct DrmOutput {
     pub name: String,
     /// CRTC driving the connector.
     pub crtc: crtc::Handle,
-    /// Connector feeding the CRTC, retained to re-assert it after a
-    /// sleep reset disables every output.
-    pub connector: connector::Handle,
-    /// Preferred hardware mode, retained to force a modeset commit
-    /// (not a page flip onto darkness) after a sleep reset.
-    pub drm_mode: DrmMode,
     /// GBM swapchain bound to the CRTC.
     pub surface: ScanoutSurface,
     /// Protocol output advertised to clients.
@@ -113,8 +105,6 @@ pub struct DrmBackend {
     pub active: bool,
     sleep_reset_pending: bool,
     wake_flip_cutoff: Option<std::time::Duration>,
-    /// WAKE-DBG: post-reset rendered frame count for temporary diagnostics.
-    pub(crate) wake_dbg_frames: u64,
     pointer: Point<f64, Logical>,
     ctrl: bool,
     alt: bool,
@@ -306,8 +296,6 @@ impl DrmBackend {
             outputs.push(DrmOutput {
                 name,
                 crtc,
-                connector: *handle,
-                drm_mode: mode,
                 surface,
                 output,
                 size,
@@ -385,7 +373,6 @@ impl DrmBackend {
                 active: true,
                 sleep_reset_pending: false,
                 wake_flip_cutoff: None,
-                wake_dbg_frames: 0,
                 pointer: (
                     f64::from(first_loc.0) + f64::from(first_w) / 2.0,
                     f64::from(first_loc.1) + f64::from(first_h) / 2.0,
@@ -457,8 +444,6 @@ impl DrmBackend {
         self.wake_flip_cutoff = Some(std::time::Duration::from(
             smithay::utils::Clock::<smithay::utils::Monotonic>::new().now(),
         ));
-        // WAKE-DBG: temporary resume diagnostics.
-        self.wake_dbg_frames = 0;
         eprintln!("roost-compositor: drm: system wake scanout reset");
         // Pending and queued flips can be lost across S3. Drop both without
         // submitting an old queued scene or claiming presentation. Ordinary
@@ -471,33 +456,10 @@ impl DrmBackend {
             out.pending = false;
         }
         // Reset actual connector/plane state too: an active VT does not imply
-        // that the kernel restored its framebuffer.
+        // that the kernel restored its framebuffer. The next locked frame
+        // commits the retained modes and surfaces again.
         if let Err(error) = self.drm.reset_state() {
             eprintln!("roost-compositor: drm: wake KMS reset failed: {error}");
-        }
-        // The reset disables every connector, so the next submit would be
-        // a bare page flip onto darkness with no vblank to complete it.
-        // Re-assert each output's connector and mode: the next queued
-        // frame then performs a modeset commit that re-lights the output
-        // and restarts completions, presenting the locked frame.
-        for out in &mut self.outputs {
-            if let Err(error) = out.surface.set_connectors(&[out.connector]) {
-                eprintln!(
-                    "roost-compositor: drm: wake connector re-assert {}: {error}",
-                    out.name
-                );
-            }
-            if let Err(error) = out.surface.use_mode(out.drm_mode) {
-                eprintln!(
-                    "roost-compositor: drm: wake mode re-assert {}: {error}",
-                    out.name
-                );
-            }
-            // WAKE-DBG: temporary resume diagnostics.
-            eprintln!(
-                "roost-compositor: drm: WAKE-DBG wake re-asserted {}",
-                out.name
-            );
         }
     }
 
@@ -512,17 +474,10 @@ impl DrmBackend {
             DrmEvent::VBlank(crtc) => {
                 // A kernel completion already queued before the reset must
                 // not present feedback belonging to the newly queued frame.
-                // WAKE-DBG: temporary resume diagnostics (post-reset only).
-                let dropped = matches!(
-                    (self.wake_flip_cutoff, metadata.as_ref()),
-                    (Some(cutoff), Some(meta))
-                        if matches!(meta.time, DrmEventTime::Monotonic(time) if time <= cutoff)
-                );
-                if self.wake_flip_cutoff.is_some() {
-                    eprintln!("roost-compositor: drm: WAKE-DBG vblank dropped={dropped}");
-                }
-                if dropped {
-                    return None;
+                if let (Some(cutoff), Some(meta)) = (self.wake_flip_cutoff, metadata.as_ref()) {
+                    if matches!(meta.time, DrmEventTime::Monotonic(time) if time <= cutoff) {
+                        return None;
+                    }
                 }
                 let index = self.outputs.iter().position(|o| o.crtc == crtc)?;
                 let out = &mut self.outputs[index];
