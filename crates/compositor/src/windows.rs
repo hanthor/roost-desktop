@@ -1131,8 +1131,8 @@ impl WindowManager {
         if let Some(parent_geo) = self.geometry(parent_id) {
             if let Some(window) = self.windows.get_mut(&id) {
                 let size = window.geometry.size;
-                let x = (parent_geo.loc.x + (parent_geo.size.w - size.w) / 2).max(0);
-                let y = (parent_geo.loc.y + (parent_geo.size.h - size.h) / 2).max(0);
+                let x = parent_geo.loc.x + (parent_geo.size.w - size.w) / 2;
+                let y = parent_geo.loc.y + (parent_geo.size.h - size.h) / 2;
                 window.geometry.loc = (x, y).into();
             }
         }
