@@ -82,8 +82,12 @@ impl PipeWire {
         signal: SignalEmitter<'static>,
     ) -> Option<Cast> {
         let session_signal = signal.clone();
-        let stream =
-            StreamRc::new(self.core.clone(), "roost-screen-cast", PropertiesBox::new()).ok()?;
+        let stream = StreamRc::new(
+            self.core.clone(),
+            "roost-screen-cast",
+            PropertiesBox::from_iter([("node.name", "roost-screen-cast")]),
+        )
+        .ok()?;
         let inner = Rc::new(RefCell::new(Inner::default()));
         let listener = stream
             .add_local_listener_with_user_data(())

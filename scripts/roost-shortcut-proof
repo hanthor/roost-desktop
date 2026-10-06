@@ -1,0 +1,7 @@
+#!/bin/sh
+# Real Wayland-client proof of Allow, Deny, restore, focus and lock safety.
+set -eu
+cd "$(dirname "$0")/.."
+cargo test -p roost-compositor --test protocol_gaps an_inhibiting_window_gets_the_shortcuts_until_super_escape -- --exact
+cargo test -p roost-compositor --test protocol_gaps denied_shortcut_inhibition_stays_denied_after_refocus -- --exact
+cargo test -p roost-compositor --test protocol_gaps shortcut_consent_cannot_survive_a_lock_or_focus_change -- --exact
