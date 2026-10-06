@@ -1895,6 +1895,9 @@ impl WindowManager {
         };
         let target = self
             .window_at(pos)
+            // An attached modal dialog blocks pointer input to its parent,
+            // even where the parent's content is exposed beside the dialog.
+            .filter(|id| self.modal_target(*id) == *id)
             .and_then(|id| self.windows.get(&id))
             .and_then(|window| {
                 let surface = window.surface.wl_surface()?.into_owned();
@@ -1940,6 +1943,22 @@ impl WindowManager {
         // good, so the panel never saw another click (#97).
         if !pressed && self.grab.is_some() {
             self.end_grab(state);
+        }
+        // A blocked parent click activates its modal dialog and is consumed.
+        // Do this before Super+drag so the parent cannot be moved through it.
+        if pressed && !self.overview_open {
+            let pos = self.pointer_pos;
+            if crate::layer::topmost_layer_at(state, pos.x as i32, pos.y as i32).is_none()
+                && self.popup_at(state, pos).is_none()
+            {
+                if let Some(id) = self.window_at(pos) {
+                    if self.modal_target(id) != id {
+                        self.apply_focus(state, Some(id));
+                        self.swallowed_button = Some(button);
+                        return;
+                    }
+                }
+            }
         }
         // Super+press on a window starts a move (GNOME's Super+drag).
         if pressed && self.super_held && !self.overview_open {

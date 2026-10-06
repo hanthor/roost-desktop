@@ -40,6 +40,9 @@ use wayland_client::{
     },
     Connection, Dispatch, EventQueue, QueueHandle, WEnum,
 };
+use wayland_protocols::xdg::dialog::v1::client::{
+    xdg_dialog_v1::XdgDialogV1, xdg_wm_dialog_v1::XdgWmDialogV1,
+};
 use wayland_protocols::xdg::shell::client::{
     xdg_surface::XdgSurface, xdg_toplevel::XdgToplevel, xdg_wm_base::XdgWmBase,
 };
@@ -61,6 +64,7 @@ struct Client {
     compositor: Option<WlCompositor>,
     seat: Option<WlSeat>,
     xdg_base: Option<XdgWmBase>,
+    dialogs: Option<XdgWmDialogV1>,
     surface: Option<WlSurface>,
     xdg_surface: Option<XdgSurface>,
     toplevel: Option<XdgToplevel>,
@@ -76,6 +80,7 @@ struct Client {
     keyboard_modifiers: Vec<(u32, u32, u32, u32)>,
     pointer_enters: u32,
     pointer_motions: u32,
+    pointer_axes: u32,
     /// (button, pressed) in arrival order.
     pointer_buttons: Vec<(u32, bool)>,
     /// Every advertised toplevel size, in arrival order.
@@ -138,6 +143,9 @@ impl Dispatch<WlRegistry, ()> for Client {
                 "xdg_wm_base" => {
                     state.xdg_base =
                         Some(registry.bind::<XdgWmBase, _, _>(name, version.min(7), qh, ()));
+                }
+                "xdg_wm_dialog_v1" => {
+                    state.dialogs = Some(registry.bind::<XdgWmDialogV1, _, _>(name, 1, qh, ()));
                 }
                 "zwlr_layer_shell_v1" => {
                     state.layer_shell =
@@ -285,6 +293,7 @@ impl Dispatch<WlPointer, ()> for Client {
         match event {
             PointerEvent::Enter { .. } => state.pointer_enters += 1,
             PointerEvent::Motion { .. } => state.pointer_motions += 1,
+            PointerEvent::Axis { .. } => state.pointer_axes += 1,
             PointerEvent::Button {
                 button,
                 state: button_state,
@@ -3244,4 +3253,91 @@ fn consumed_modifier_release_updates_the_next_forwarded_key_without_focus_change
         "the next client event synchronizes the consumed modifier change"
     );
     assert_eq!(f.manager.model().focused(), Some(f.id_a));
+}
+
+wayland_client::delegate_noop!(Client: ignore XdgWmDialogV1);
+wayland_client::delegate_noop!(Client: ignore XdgDialogV1);
+
+#[test]
+fn modal_parent_blocks_pointer_clicks_scroll_and_super_drag_until_unset() {
+    let mut f = two_windows();
+    let qh = f.queue_b.handle();
+    let surface = f
+        .client_b
+        .compositor
+        .as_ref()
+        .unwrap()
+        .create_surface(&qh, ());
+    let xdg = f
+        .client_b
+        .xdg_base
+        .as_ref()
+        .unwrap()
+        .get_xdg_surface(&surface, &qh, ());
+    let top = xdg.get_toplevel(&qh, ());
+    top.set_title("modal-pointer-dialog".into());
+    top.set_parent(f.client_b.toplevel.as_ref());
+    let dialog = f
+        .client_b
+        .dialogs
+        .as_ref()
+        .unwrap()
+        .get_xdg_dialog(&top, &qh, ());
+    dialog.set_modal();
+    surface.commit();
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    f.manager.reconcile(&mut f.comp.state);
+    let child = f
+        .manager
+        .model()
+        .windows()
+        .find(|w| w.title == "modal-pointer-dialog")
+        .unwrap()
+        .id;
+    assert!(f.manager.resize_window(child, 400, 300));
+    assert!(f.manager.move_window(child, 200, 150));
+    let parent_geometry = f.manager.geometry(f.id_b).unwrap();
+    f.client_b.pointer_buttons.clear();
+    f.client_b.pointer_axes = 0;
+    // The exposed right edge belongs to the parent, outside its smaller dialog.
+    f.manager
+        .pointer_motion(&mut f.comp.state, beta_only(), 6000);
+    f.manager
+        .pointer_button(&mut f.comp.state, BTN_LEFT, true, 6001);
+    f.manager
+        .pointer_button(&mut f.comp.state, BTN_LEFT, false, 6002);
+    assert_eq!(f.manager.model().focused(), Some(child));
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert!(f.client_b.pointer_buttons.is_empty());
+    assert_eq!(f.client_b.pointer_axes, 0);
+    // Modifier clicks must not begin moving the blocked parent either.
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    f.manager
+        .pointer_button(&mut f.comp.state, BTN_LEFT, true, 6003);
+    f.manager
+        .pointer_motion(&mut f.comp.state, (900.0, 120.0).into(), 6004);
+    f.manager
+        .pointer_button(&mut f.comp.state, BTN_LEFT, false, 6005);
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    assert_eq!(f.manager.geometry(f.id_b), Some(parent_geometry));
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert!(f.client_b.pointer_buttons.is_empty());
+    // Actual protocol unset restores ordinary parent click delivery.
+    dialog.unset_modal();
+    surface.commit();
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    f.manager.reconcile(&mut f.comp.state);
+    f.manager
+        .pointer_motion(&mut f.comp.state, beta_only(), 6006);
+    f.manager
+        .pointer_button(&mut f.comp.state, BTN_LEFT, true, 6007);
+    f.manager
+        .pointer_button(&mut f.comp.state, BTN_LEFT, false, 6008);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert_eq!(f.manager.model().focused(), Some(f.id_b));
+    assert_eq!(f.client_b.pointer_axes, 1);
+    assert_eq!(
+        f.client_b.pointer_buttons,
+        vec![(BTN_LEFT, true), (BTN_LEFT, false)]
+    );
 }
