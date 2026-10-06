@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Test-only GNOME 51 calendar schema for older CI hosts.
+     https://github.com/GNOME/gsettings-desktop-schemas/tree/51.0 -->
+<schemalist>
+  <enum id="org.gnome.desktop.GDesktopWeekday">
+    <value nick="default" value="0"/>
+    <value nick="monday" value="1"/>
+    <value nick="tuesday" value="2"/>
+    <value nick="wednesday" value="3"/>
+    <value nick="thursday" value="4"/>
+    <value nick="friday" value="5"/>
+    <value nick="saturday" value="6"/>
+    <value nick="sunday" value="7"/>
+  </enum>
+  <schema id="org.gnome.desktop.calendar" path="/org/gnome/desktop/calendar/">
+    <key name="show-weekdate" type="b"><default>false</default></key>
+    <key name="week-start-day" enum="org.gnome.desktop.GDesktopWeekday"><default>'default'</default></key>
+  </schema>
+</schemalist>
