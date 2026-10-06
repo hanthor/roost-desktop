@@ -42,21 +42,20 @@ while time.monotonic() < end:
         out.with_suffix(".a11y.json").write_text(json.dumps(nodes, indent=2))
         subprocess.run(["scrot", str(out.with_suffix(".png"))], check=True)
         if request["method"] == "OpenFile" and request["decision"] == "grant" and not located:
-            # The dialog is the focused new window. Ctrl+L invokes Nautilus's
-            # real location entry; keyboard input selects the fixture file.
-            subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+l"], check=True)
+            # The fixture directory contains one file. Use genuine keyboard
+            # selection and require the actual expected accessible file cell
+            # to be selected before invoking the real acceptance button.
+            subprocess.run(["xdotool", "key", "--clearmodifiers", "ctrl+a"], check=True)
             time.sleep(.2)
             nodes, controls = dialog()
-            editable = []
-            for control in controls:
-                try:
-                    if control.getState().contains(pyatspi.STATE_FOCUSED):
-                        editable.append(control.queryEditableText())
-                except Exception:
-                    pass
-            if len(editable) != 1 or not editable[0].setTextContents(request["path"]):
-                raise RuntimeError("actual focused Nautilus location entry was not editable")
-            subprocess.run(["xdotool", "key", "--clearmodifiers", "Return"], check=True)
+            out.with_suffix(".selection-a11y.json").write_text(json.dumps(nodes, indent=2))
+            selected = [control for control in controls
+                        if control.getRoleName() == "table cell"
+                        and control.getState().contains(pyatspi.STATE_SELECTED)]
+            filename = Path(request["path"]).name
+            if len(selected) != 1 or selected[0].name not in (filename, filename + ". File"):
+                raise RuntimeError("actual Nautilus selection did not identify the fixture file")
+            print("actual Nautilus selected file: " + selected[0].name)
             located = True
             time.sleep(.2)
             continue
@@ -71,7 +70,7 @@ while time.monotonic() < end:
                 print("actual Nautilus FileChooser action: " + name)
                 sys.exit(0)
     elif located and out.with_suffix(".response.json").exists():
-        print("actual Nautilus keyboard location activation completed")
+        print("actual Nautilus selection activation completed")
         sys.exit(0)
     time.sleep(.1)
 nodes, controls = dialog()
