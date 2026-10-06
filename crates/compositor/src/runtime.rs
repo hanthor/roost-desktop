@@ -63,9 +63,84 @@ use roost_greeter::client::GreeterClient;
 use crate::{ClientState, State};
 
 /// Maximum loop rate: dispatch blocks up to this long waiting for events,
-/// so the loop never spins. Unchanged DRM scenes retain their scanout;
-/// client callbacks and timing barriers still advance on the refresh clock.
+/// so the loop never spins, and repaint stays near 60 Hz. Damage-tracked
+/// repaint replaces this provisional pacing in a later slice.
 const FRAME_BUDGET: Duration = Duration::from_millis(16);
+
+/// Wake the native loop for requests on already accepted Wayland clients.
+/// The listening socket only signals new connections. The display owns the
+/// client epoll set; a duplicate keeps calloop's source lifetime independent.
+#[cfg(any(feature = "drm", test))]
+fn display_readiness_source(
+    display: &Display<State>,
+) -> std::io::Result<calloop::generic::Generic<std::os::fd::OwnedFd>> {
+    use std::os::fd::AsFd;
+    Ok(calloop::generic::Generic::new(
+        display.as_fd().try_clone_to_owned()?,
+        calloop::Interest::READ,
+        calloop::Mode::Level,
+    ))
+}
+
+#[cfg(test)]
+mod display_readiness_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn accepted_wayland_requests_wake_the_loop_and_drained_clients_do_not_spin() {
+        let mut compositor = crate::TestCompositor::new();
+        let (server, mut client) = UnixStream::pair().unwrap();
+        client.set_nonblocking(true).unwrap();
+        compositor.add_client(server);
+        let mut event_loop = EventLoop::<usize>::try_new().unwrap();
+        event_loop
+            .handle()
+            .insert_source(
+                display_readiness_source(&compositor.display).unwrap(),
+                |_, _, wakes| {
+                    *wakes += 1;
+                    Ok(calloop::PostAction::Continue)
+                },
+            )
+            .unwrap();
+        let mut wakes = 0;
+        event_loop.dispatch(Duration::ZERO, &mut wakes).unwrap();
+        assert_eq!(wakes, 0, "idle accepted client must not wake the loop");
+        for expected in 1..=2 {
+            // Actual wl_display.sync on object 1, callback object 2. The
+            // server deletes the callback after done, allowing ID reuse.
+            let request: Vec<u8> = [1_u32, 12_u32 << 16, 2_u32]
+                .into_iter()
+                .flat_map(u32::to_ne_bytes)
+                .collect();
+            client.write_all(&request).unwrap();
+            event_loop.dispatch(Duration::ZERO, &mut wakes).unwrap();
+            assert_eq!(wakes, expected, "client request must wake without a timer");
+            compositor
+                .display
+                .dispatch_clients(&mut compositor.state)
+                .unwrap();
+            event_loop.dispatch(Duration::ZERO, &mut wakes).unwrap();
+            assert_eq!(wakes, expected, "draining requests must clear readiness");
+            compositor.display.flush_clients().unwrap();
+            let mut reply = [0_u8; 24];
+            client.read_exact(&mut reply).unwrap();
+            assert_eq!(u32::from_ne_bytes(reply[0..4].try_into().unwrap()), 2);
+            assert_eq!(
+                u32::from_ne_bytes(reply[4..8].try_into().unwrap()),
+                12 << 16
+            );
+            assert_eq!(u32::from_ne_bytes(reply[12..16].try_into().unwrap()), 1);
+            assert_eq!(
+                u32::from_ne_bytes(reply[16..20].try_into().unwrap()),
+                (12 << 16) | 1
+            );
+            assert_eq!(u32::from_ne_bytes(reply[20..24].try_into().unwrap()), 2);
+        }
+    }
+}
 
 /// Default nested output size (physical pixels).
 const DEFAULT_WIDTH: i32 = 1280;
@@ -544,13 +619,6 @@ pub struct Runtime {
     /// Opt-in synthetic touchpad phases for the nested proof harness.
     proof_swipe_last: String,
     #[cfg(feature = "drm")]
-    last_drm_scene: std::collections::HashMap<String, SceneStamp>,
-    #[cfg(feature = "drm")]
-    drm_damage:
-        std::collections::HashMap<String, smithay::backend::renderer::damage::OutputDamageTracker>,
-    #[cfg(feature = "drm")]
-    last_drm_refresh: Instant,
-    #[cfg(feature = "drm")]
     performance_trace: crate::performance_trace::Trace,
 }
 
@@ -720,6 +788,17 @@ impl Runtime {
                 Backend::Winit(Box::new(backend))
             }
         };
+        #[cfg(feature = "drm")]
+        if matches!(backend, Backend::Drm(_)) {
+            event_loop
+                .handle()
+                .insert_source(
+                    display_readiness_source(&display)
+                        .map_err(|e| RuntimeError::Loop(e.to_string()))?,
+                    |_, _, _: &mut Runtime| Ok(calloop::PostAction::Continue),
+                )
+                .map_err(|e| RuntimeError::Loop(e.to_string()))?;
+        }
         let socket = ListeningSocketSource::with_name(&session.socket_name)
             .map_err(|e| RuntimeError::Socket(e.to_string()))?;
         event_loop
@@ -888,12 +967,6 @@ impl Runtime {
             state_last: String::new(),
             proof_swipe_last: String::new(),
             #[cfg(feature = "drm")]
-            last_drm_scene: Default::default(),
-            #[cfg(feature = "drm")]
-            drm_damage: Default::default(),
-            #[cfg(feature = "drm")]
-            last_drm_refresh: Instant::now(),
-            #[cfg(feature = "drm")]
             performance_trace: crate::performance_trace::Trace::from_env(),
         };
         // Reserve and advertise sockets, but spawn only when a real X11
@@ -1055,6 +1128,18 @@ impl Runtime {
     /// breaking Super-combos); only Escape-closes is consumed, so a
     /// closing keypress never double-acts on client UI.
     fn on_manager_input(&mut self, input: ManagerInput) {
+        // A Super+L release can arrive after the lock takes ownership, or
+        // before its surface maps. Consumed input must still clear modifier
+        // holds, otherwise an ordinary post-unlock click becomes Super+drag.
+        self.manager.note_modifiers(&input);
+        // CI-only count markers locate missing pointer delivery without
+        // recording button codes, key values or credential input.
+        if !self.is_locked()
+            && matches!(input, ManagerInput::Button { .. })
+            && std::env::var_os("ROOST_POINTER_TRACE").is_some()
+        {
+            eprintln!("roost-compositor: pointer trace: backend button received");
+        }
         // Every timestamped event feeds the idle accumulator first,
         // including events consumed below: activity is activity.
         let waking_blank = self.blank_alpha() > 0.0;
@@ -1070,6 +1155,8 @@ impl Runtime {
                 .and_then(|name| self.state.lock_surface_for(&name));
             if let Some(surface) = surface {
                 self.manager.lock_input(&mut self.state, &surface, input);
+            } else {
+                self.manager.discard_key_input(&mut self.state, &input);
             }
             // Media keys still work on the lock screen, as in GNOME.
             for (action, time, mode) in self.manager.take_accelerators_fired() {
@@ -1078,6 +1165,7 @@ impl Runtime {
             return;
         }
         if waking_blank {
+            self.manager.discard_key_input(&mut self.state, &input);
             // Activity cancels the idle shield; the wake event belongs to
             // that shield, not the previously focused application.
             return;
@@ -1131,10 +1219,13 @@ impl Runtime {
             // (keyboard-shortcuts-inhibit, #89).
             let inhibited =
                 matches!(input, ManagerInput::Key { .. }) && self.state.shortcuts_inhibited();
-            let action = if inhibited {
+            let popup = crate::layer::exclusive_popup_keyboard_layer(&self.state).is_some();
+            let action = if inhibited || popup {
+                self.triggers.cancel();
                 TriggerAction::None
             } else {
-                self.triggers.feed(
+                self.state.overview_trigger_action(
+                    &mut self.triggers,
                     &input,
                     self.control.overview_open(),
                     self.manager.pointer_pos(),
@@ -1176,6 +1267,7 @@ impl Runtime {
             }
             return;
         }
+        self.manager.discard_key_input(&mut self.state, &input);
         let ManagerInput::Key {
             keycode,
             pressed: true,
@@ -1392,8 +1484,7 @@ impl Runtime {
             "remote_input_sessions": self.remote_held.len(),
             // Held-state proof needs only a count, including during lock.
             // Never emit key identities that could expose credential input.
-            "seat_pressed_key_count": self.state.seat.get_keyboard()
-                .map_or(0, |keyboard| keyboard.pressed_keys().len()),
+            "seat_pressed_key_count": self.state.pressed_key_count(),
             "x11_ready": x11_ready,
             "idle_timeout_ms": self.lock.timeout_ms(),
             "idle_blank_alpha": self.blank_alpha(),
@@ -1402,6 +1493,8 @@ impl Runtime {
             "keyboard": keyboard,
             "overview_open": overview_open,
             "animations_enabled": self.input_settings.enable_animations,
+            "mouse_left_handed": self.input_settings.mouse_left_handed,
+            "touchpad_left_handed": self.input_settings.touchpad_left_handed,
             "locked": self.is_locked(),
             "active_workspace": model.active_workspace(),
             "focused": focused,
@@ -2762,10 +2855,12 @@ impl Runtime {
         // runtime triggers converge here); the next reconcile parks
         // or restores keyboard focus.
         self.manager.set_overview_open(self.control.overview_open());
+        // Reap and restart the supervised lock UI even while locked.
+        // Supervision is nonblocking and cannot clear the lock flag.
+        let shell_status = self.shell.poll(crate::state::system_millis());
         // While locked the overlay stays up with its empty list no
         // matter what the shell does: a shell restart while locked
-        // keeps the lock screen up. Otherwise the shell step never
-        // blocks the tick as before.
+        // keeps the lock screen up.
         if self.is_locked() {
             if !self.overlay.visible {
                 self.overlay.show(Vec::new());
@@ -2774,7 +2869,7 @@ impl Runtime {
             if let Some(ime) = &mut self.ime {
                 ime.poll(crate::state::system_millis(), &mut self.display.handle());
             }
-            match self.shell.poll(crate::state::system_millis()) {
+            match shell_status {
                 ShellStatus::Running => {
                     if self.overlay.visible {
                         self.overlay.hide();
@@ -2858,6 +2953,14 @@ impl Runtime {
         self.publish_overview_previews();
         self.render()?;
         self.screencast_tick();
+        #[cfg(feature = "drm")]
+        if matches!(self.backend, Backend::Drm(_)) {
+            // Rendering queues callbacks only for a submitted scanout. Send
+            // those events now so a redraw need not wait for the next tick.
+            self.display
+                .flush_clients()
+                .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+        }
         Ok(!self.exit)
     }
 
@@ -2890,7 +2993,6 @@ impl Runtime {
         }
         if flip.primary {
             self.performance_trace.presented(flip.time, flip.sequence);
-            self.last_drm_refresh = Instant::now();
             let roots = crate::frame_timing::frame_roots(&self.state, &self.manager);
             self.state.refresh_cycle(&roots, time, flip.refresh);
         }
@@ -2943,6 +3045,8 @@ impl Runtime {
             background
         };
         let show_paper = show_content && !overlay_visible && overview.is_none();
+        #[cfg(feature = "drm")]
+        let timing_roots = crate::frame_timing::frame_roots(&self.state, &self.manager);
         match &mut self.backend {
             Backend::Winit(backend) => {
                 backend.window().set_cursor_visible(blank_alpha < 1.0);
@@ -3044,7 +3148,7 @@ impl Runtime {
             }
             #[cfg(feature = "drm")]
             Backend::Drm(drm) => {
-                if !drm.active {
+                if !drm.scanout_ready() {
                     self.performance_trace.cancel();
                     return Ok(());
                 }
@@ -3121,24 +3225,61 @@ impl Runtime {
                         cards,
                         locked,
                     );
-                    let stamp = SceneStamp::new(
-                        self.state.surface_commits,
-                        size,
-                        view.scale,
-                        view.offset,
-                        background,
-                        accent,
-                        blank_alpha,
+                    use crate::native_repaint::{ElementSignature, FrameSignature};
+                    let signature = FrameSignature {
+                        size: (size.w, size.h),
+                        location: out.loc,
+                        scale: out.scale,
                         locked,
-                        pointer,
-                        &paper,
-                        &elements,
-                        &decor,
-                        &previews,
-                    );
-                    if !out.needs_repaint && self.last_drm_scene.get(&out.name) == Some(&stamp) {
+                        background,
+                        blank_alpha,
+                        accent,
+                        pointer: (!locked && blank_alpha < 1.0).then_some((pointer.x, pointer.y)),
+                        decor: decor.clone(),
+                        above: elements.above,
+                        groups: vec![
+                            paper
+                                .iter()
+                                .map(|e| ElementSignature::capture(e, 1.0))
+                                .collect(),
+                            previews
+                                .iter()
+                                .map(|e| ElementSignature::capture(e, view.scale))
+                                .collect(),
+                            elements
+                                .elements
+                                .iter()
+                                .map(|e| ElementSignature::capture(e, view.scale))
+                                .collect(),
+                            elements
+                                .tile
+                                .iter()
+                                .map(|e| ElementSignature::capture(e, 1.0))
+                                .collect(),
+                            elements
+                                .top
+                                .iter()
+                                .map(|e| ElementSignature::capture(e, view.scale))
+                                .collect(),
+                        ],
+                    };
+                    let mine: Vec<_> = drawn
+                        .iter()
+                        .filter(|(_, at)| owner(at) == index)
+                        .map(|(surface, _)| surface.clone())
+                        .chain(lock_surface.clone())
+                        .collect();
+                    let timing_work =
+                        crate::frame_timing::pending_output_work(&timing_roots, &mine);
+                    if !crate::native_repaint::needs_repaint(
+                        out.last_frame.as_ref(),
+                        &signature,
+                        timing_work,
+                    ) {
                         continue;
                     }
+                    // Account for changes since this particular swapchain buffer
+                    // was submitted, including intervening frames.
                     let (mut dmabuf, age) = match out.surface.next_buffer() {
                         Ok(buffer) => buffer,
                         Err(e) => {
@@ -3146,37 +3287,26 @@ impl Runtime {
                             continue;
                         }
                     };
-                    // Buffer age includes changes since this particular swapchain
-                    // buffer was last submitted, not just the newest client damage.
-                    // Global colors/decor, cursor, lock and output changes conservatively
-                    // reset tracking; a fresh/reset buffer always receives a full paint.
-                    let reset = out.needs_repaint
-                        || self
-                            .last_drm_scene
-                            .get(&out.name)
-                            .is_none_or(|old| !old.same_global_drawing(&stamp));
+                    let reset = out
+                        .last_frame
+                        .as_ref()
+                        .is_none_or(|old| !signature.same_global_drawing(old));
                     if reset {
-                        self.drm_damage.insert(
-                            out.name.clone(),
-                            smithay::backend::renderer::damage::OutputDamageTracker::new(
-                                size,
-                                1.0,
-                                Transform::Normal,
-                            ),
-                        );
+                        out.damage_tracker = None;
                     }
-                    let tracker = self.drm_damage.entry(out.name.clone()).or_insert_with(|| {
+                    let tracker = out.damage_tracker.get_or_insert_with(|| {
                         smithay::backend::renderer::damage::OutputDamageTracker::new(
                             size,
                             1.0,
                             Transform::Normal,
                         )
                     });
-                    let damage = drm_damage_region(
+                    let damage = crate::native_repaint::damage_region(
                         tracker,
                         if reset { 0 } else { usize::from(age) },
-                        &stamp,
-                    )?;
+                        &signature,
+                    )
+                    .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
                     let sync = {
                         let mut target = renderer
                             .bind(&mut dmabuf)
@@ -3224,28 +3354,21 @@ impl Runtime {
                             .finish()
                             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?
                     };
-                    let mine: Vec<_> = drawn
-                        .iter()
-                        .filter(|(_, at)| owner(at) == index)
-                        .map(|(surface, _)| surface.clone())
-                        .chain(lock_surface.clone())
-                        .collect();
                     let feedback = crate::frame_timing::take_feedback(&mine, &out.output);
                     if let Err(e) = out.surface.queue_buffer(Some(sync), None, feedback) {
                         eprintln!("roost-compositor: drm: queue_buffer {}: {e}", out.name);
-                        // The acquired buffer may now contain an unsubmitted partial
-                        // update. Reset before retrying; it cannot reuse cached damage.
-                        out.needs_repaint = true;
-                        self.drm_damage.remove(&out.name);
+                        // Never reuse history after an unsubmitted partial update.
+                        out.last_frame = None;
+                        out.damage_tracker = None;
                         continue;
                     }
+                    out.trace_wake_submission();
                     out.pending = true;
                     if index == 0 {
                         self.performance_trace
                             .queued(Duration::from(self.state.presentation_now()));
                     }
-                    out.needs_repaint = false;
-                    self.last_drm_scene.insert(out.name.clone(), stamp);
+                    out.last_frame = Some(signature);
                     queued = true;
                 }
                 send_surface_scales(&self.state, &self.manager);
@@ -3254,24 +3377,7 @@ impl Runtime {
                     // Granting callbacks on every client dispatch here would
                     // let redraws outrun the display and keep the loop busy.
                     send_frame_callbacks(&self.state, &self.manager);
-                    self.last_drm_refresh = Instant::now();
                     self.stats.frames += 1;
-                } else if !outputs.iter().any(|out| out.pending) {
-                    // Retaining a scanout frame does not stop the refresh clock.
-                    // Throttle callbacks even when client replies wake dispatch
-                    // immediately, and release future/FIFO commits without needing
-                    // another page flip. Presentation feedback is never invented.
-                    let refresh = outputs
-                        .first()
-                        .map(|out| crate::frame_timing::refresh_of(&out.output))
-                        .unwrap_or(crate::frame_timing::DEFAULT_REFRESH);
-                    if self.last_drm_refresh.elapsed() >= refresh {
-                        self.last_drm_refresh = Instant::now();
-                        let roots = crate::frame_timing::frame_roots(&self.state, &self.manager);
-                        let now = self.state.presentation_now();
-                        self.state.refresh_cycle(&roots, now, refresh);
-                        send_frame_callbacks(&self.state, &self.manager);
-                    }
                 }
             }
         }
@@ -3448,179 +3554,6 @@ fn switcher_previews(
             })
         })
         .collect()
-}
-
-/// All inputs to a rendered DRM scene. A surface commit forces a frame even
-/// when pixels are unchanged, so its pending presentation feedback is delivered.
-#[cfg(feature = "drm")]
-#[derive(PartialEq)]
-struct SceneStamp {
-    commits: u64,
-    size: smithay::utils::Size<i32, smithay::utils::Physical>,
-    scale: f64,
-    offset: (i32, i32),
-    background: [f32; 4],
-    accent: [f32; 3],
-    blank_alpha: f32,
-    locked: bool,
-    pointer: (f64, f64),
-    above: usize,
-    elements: Vec<Vec<ElementStamp>>,
-    decor: Vec<DecorStamp>,
-}
-
-#[cfg(feature = "drm")]
-#[derive(PartialEq)]
-struct DecorStamp {
-    color: [f32; 4],
-    rects: Vec<Rectangle<i32, smithay::utils::Physical>>,
-}
-
-#[cfg(feature = "drm")]
-#[derive(Clone, PartialEq)]
-struct ElementStamp {
-    id: smithay::backend::renderer::element::Id,
-    commit: smithay::backend::renderer::utils::CommitCounter,
-    src: Rectangle<f64, smithay::utils::Buffer>,
-    geometry: Rectangle<i32, smithay::utils::Physical>,
-    transform: Transform,
-    alpha: f32,
-    opaque: Vec<Rectangle<i32, smithay::utils::Physical>>,
-}
-
-#[cfg(feature = "drm")]
-impl smithay::backend::renderer::element::Element for ElementStamp {
-    fn id(&self) -> &smithay::backend::renderer::element::Id {
-        &self.id
-    }
-    fn current_commit(&self) -> smithay::backend::renderer::utils::CommitCounter {
-        self.commit
-    }
-    fn src(&self) -> Rectangle<f64, smithay::utils::Buffer> {
-        self.src
-    }
-    fn geometry(
-        &self,
-        _scale: smithay::utils::Scale<f64>,
-    ) -> Rectangle<i32, smithay::utils::Physical> {
-        self.geometry
-    }
-    fn transform(&self) -> Transform {
-        self.transform
-    }
-    fn alpha(&self) -> f32 {
-        self.alpha
-    }
-}
-
-#[cfg(feature = "drm")]
-fn drm_damage_region(
-    tracker: &mut smithay::backend::renderer::damage::OutputDamageTracker,
-    age: usize,
-    stamp: &SceneStamp,
-) -> Result<Rectangle<i32, smithay::utils::Physical>, RuntimeError> {
-    // All stamp geometries use physical pixels; this conservative representation
-    // declares no opacity and never suppresses a damaged element behind another.
-    let elements: Vec<_> = stamp.elements.iter().flatten().cloned().collect();
-    let (damage, _) = tracker
-        .damage_output(age, &elements)
-        .map_err(|error| RuntimeError::Dispatch(error.to_string()))?;
-    // Feedback-only surface commits still submit an actual scanout frame. When
-    // no pixels changed, update one pixel instead of fabricating presentation.
-    Ok(damage
-        .and_then(|rects| rects.iter().copied().reduce(Rectangle::merge))
-        .unwrap_or_else(|| Rectangle::new((0, 0).into(), (1, 1).into())))
-}
-
-#[cfg(feature = "drm")]
-fn element_stamps<E: smithay::backend::renderer::element::Element>(
-    elements: &[E],
-    scale: f64,
-) -> Vec<ElementStamp> {
-    elements
-        .iter()
-        .map(|element| ElementStamp {
-            id: element.id().clone(),
-            commit: element.current_commit(),
-            src: element.src(),
-            geometry: element.geometry(scale.into()),
-            transform: element.transform(),
-            alpha: element.alpha(),
-            opaque: element
-                .opaque_regions(scale.into())
-                .iter()
-                .copied()
-                .collect(),
-        })
-        .collect()
-}
-
-#[cfg(feature = "drm")]
-impl SceneStamp {
-    fn same_global_drawing(&self, old: &Self) -> bool {
-        self.size == old.size
-            && self.scale == old.scale
-            && self.offset == old.offset
-            && self.background == old.background
-            && self.accent == old.accent
-            && self.blank_alpha == old.blank_alpha
-            && self.locked == old.locked
-            && self.pointer == old.pointer
-            && self.above == old.above
-            && self.decor == old.decor
-            // The conservative tracker claims no opacity, but actual drawing
-            // can optimize by these regions. Region changes force a full paint.
-            && self.elements.len() == old.elements.len()
-            && self.elements.iter().zip(&old.elements).all(|(new, old)| {
-                new.len() == old.len() && new.iter().zip(old).all(|(new, old)| new.opaque == old.opaque)
-            })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        commits: u64,
-        size: smithay::utils::Size<i32, smithay::utils::Physical>,
-        scale: f64,
-        offset: (i32, i32),
-        background: Color32F,
-        accent: [f32; 3],
-        blank_alpha: f32,
-        locked: bool,
-        pointer: Point<f64, Logical>,
-        paper: &[smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<
-            GlesRenderer,
-        >],
-        scene: &Scene,
-        decor: &[(Color32F, Vec<Rectangle<i32, smithay::utils::Physical>>)],
-        previews: &[PreviewElement],
-    ) -> Self {
-        Self {
-            commits,
-            size,
-            scale,
-            offset,
-            background: background.components(),
-            accent,
-            blank_alpha,
-            locked,
-            pointer: (pointer.x, pointer.y),
-            above: scene.above,
-            elements: vec![
-                element_stamps(paper, 1.0),
-                element_stamps(&scene.elements, scale),
-                element_stamps(&scene.tile, 1.0),
-                element_stamps(&scene.top, scale),
-                element_stamps(previews, scale),
-            ],
-            decor: decor
-                .iter()
-                .map(|(color, rects)| DecorStamp {
-                    color: color.components(),
-                    rects: rects.clone(),
-                })
-                .collect(),
-        }
-    }
 }
 
 /// One output's surfaces, front to back, with GNOME's tile preview
@@ -4211,83 +4144,5 @@ fn input_time(input: &ManagerInput) -> u64 {
         | ManagerInput::SwipeUpdate { time, .. }
         | ManagerInput::SwipeEnd { time, .. } => u64::from(time),
         ManagerInput::RelativeMotion { utime, .. } => utime / 1000,
-    }
-}
-
-#[cfg(all(test, feature = "drm"))]
-mod retained_buffer_damage_tests {
-    use super::*;
-    use smithay::backend::renderer::{
-        damage::OutputDamageTracker,
-        element::{solid::SolidColorRenderElement, Id},
-    };
-
-    fn stamp(id: &Id, x: i32, commit: usize) -> SceneStamp {
-        let scene = Scene {
-            elements: Vec::new(),
-            above: 0,
-            top: Vec::new(),
-            tile: vec![SolidColorRenderElement::new(
-                id.clone(),
-                Rectangle::new((x, 0).into(), (8, 8).into()),
-                commit,
-                Color32F::new(1.0, 0.0, 0.0, 1.0),
-                Kind::Unspecified,
-            )],
-        };
-        SceneStamp::new(
-            commit as u64,
-            (32, 32).into(),
-            1.0,
-            (0, 0),
-            Color32F::new(0.0, 0.0, 0.0, 1.0),
-            [0.0; 3],
-            0.0,
-            false,
-            (0.0, 0.0).into(),
-            &[],
-            &scene,
-            &[],
-            &[],
-        )
-    }
-
-    #[test]
-    fn recycled_buffer_repaints_damage_from_intervening_frames() {
-        let id = Id::new();
-        let mut tracker = OutputDamageTracker::new((32, 32), 1.0, Transform::Normal);
-        let full = Rectangle::from_size((32, 32).into());
-        assert_eq!(
-            drm_damage_region(&mut tracker, 0, &stamp(&id, 0, 0)).unwrap(),
-            full
-        );
-        drm_damage_region(&mut tracker, 1, &stamp(&id, 8, 1)).unwrap();
-        // This buffer last contained the first frame. Repainting only the
-        // newest B-to-C move would leave A's old pixels in that buffer.
-        let damage = drm_damage_region(&mut tracker, 2, &stamp(&id, 16, 2)).unwrap();
-        assert!(damage.contains((1, 1)));
-        assert!(damage.contains((23, 7)));
-        assert!(damage.size.w < 32 && damage.size.h < 32);
-        // Unknown or out-of-history age must initialize the entire buffer.
-        assert_eq!(
-            drm_damage_region(&mut tracker, 100, &stamp(&id, 16, 2)).unwrap(),
-            full
-        );
-    }
-
-    #[test]
-    fn feedback_only_update_submits_a_frame_without_full_output_damage() {
-        let id = Id::new();
-        let mut tracker = OutputDamageTracker::new((32, 32), 1.0, Transform::Normal);
-        let scene = stamp(&id, 0, 0);
-        drm_damage_region(&mut tracker, 0, &scene).unwrap();
-        let damage = drm_damage_region(&mut tracker, 1, &scene).unwrap();
-        assert_eq!(damage, Rectangle::new((0, 0).into(), (1, 1).into()));
-        // Removing an element must erase its previous pixels, even when no
-        // new render element occupies them.
-        let mut empty = stamp(&id, 0, 0);
-        empty.elements.iter_mut().for_each(Vec::clear);
-        let damage = drm_damage_region(&mut tracker, 1, &empty).unwrap();
-        assert!(damage.contains((7, 7)));
     }
 }

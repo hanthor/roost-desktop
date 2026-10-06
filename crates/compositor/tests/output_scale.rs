@@ -182,3 +182,31 @@ mod first_event {
         );
     }
 }
+
+#[test]
+fn hot_corner_regions_use_logical_pixels_at_fractional_output_scales() {
+    use roost_compositor::windows::{ManagerInput, TriggerAction as A, TriggerState};
+    let mut comp = TestCompositor::new();
+    comp.state
+        .add_output("laptop", Some(output("laptop", 1.5)), 1280, 720);
+    comp.state
+        .add_output("external", Some(output("external", 2.0)), 960, 540);
+    comp.state.set_output_location("external", (-960, 0));
+    let mut triggers = TriggerState::default();
+    for (x, expected) in [
+        (-960.0, A::Open),
+        (-952.5, A::Open),
+        (-952.0, A::None),
+        (-961.0, A::None),
+    ] {
+        let input = ManagerInput::Motion {
+            pos: (x, 2.0).into(),
+            time: 0,
+        };
+        assert_eq!(
+            comp.state
+                .overview_trigger_action(&mut triggers, &input, false, (x, 2.0).into()),
+            expected
+        );
+    }
+}

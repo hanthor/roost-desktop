@@ -3,5 +3,14 @@
   "extends": [
     "config:recommended",
     "helpers:pinGitHubActionDigests"
+  ],
+  "packageRules": [
+    {
+      "description": "Keep pinned third-party source snapshots under explicit upstream review",
+      "matchFileNames": [
+        "third-party/**"
+      ],
+      "enabled": false
+    }
   ]
 }

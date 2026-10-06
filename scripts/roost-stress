@@ -331,7 +331,11 @@ def run(args):
             "scope": "bounded nested churn; frame pacing and 24-hour VM soak are not measured",
         }, indent=2))
     if not assertions or not all(value[0] for value in assertions.values()):
-        raise SystemExit("roost-stress: stress gate failed; see retained artifacts")
+        failures = [f"{name}: {value[1]}" for name, value in assertions.items() if not value[0]]
+        detail = "; ".join(failures) if failures else "no assertions were recorded"
+        raise SystemExit(f"roost-stress: stress gate failed: {detail}; "
+                         f"evidence: {out / 'assertions.txt'}, {out / 'report.json'}, "
+                         f"{out / 'nested.log'}")
     print("roost-stress: window/popup churn, input, notification and growth gates passed")
 
 

@@ -6,8 +6,9 @@ and runs no translating daemon.
 The [exhaustive desktop inventory](settings-desktop-inventory.md) lists
 every one of the 429 GNOME 51 desktop-schema keys. The sections below
 explain common keys and related Shell/Mutter/settings-daemon settings. The Marlin image already carries
-`gsettings-desktop-schemas`, so the keys exist, and GNOME Settings and
-`gsettings` keep working unchanged. Ledger row P-ST-01 tracks this page.
+`gsettings-desktop-schemas`, so the keys exist and GNOME Settings can write them. Schema presence does not
+establish functional compatibility: [the GNOME Settings audit](gnome-settings-audit.md)
+tracks ineffective controls and unqualified service integrations. Ledger row P-ST-01 tracks this page.
 
 This page records that decision for R9 (knowledge entry
 `learnings/dconf-settings-interop.md`).
@@ -34,6 +35,8 @@ This page records that decision for R9 (knowledge entry
 | enable-animations | Honored | Live idle fade, GTK transitions and compositor overview/strip motion; disabled transitions finish immediately. Proof G-ANIMATIONS-OFF |
 | show-battery-percentage | Honored | UPower DisplayDevice panel percentage; updates live |
 
+GNOME 51 `org.gnome.desktop.a11y.interface reduced-motion` is read live. `reduce` disables shell GTK transitions, compositor overview/strip motion and idle fade even when `enable-animations` is true. Resetting it respects an explicit `enable-animations=false`; older schema sets keep the existing animation policy. This controls the desktop shell; application toolkits remain responsible for their own transitions. Proof G-ANIMATIONS-OFF.
+
 ## Session, lock and notifications
 
 | Schema and key | Status | Notes |
@@ -54,7 +57,7 @@ This page records that decision for R9 (knowledge entry
 | File | Status | Notes |
 |---|---|---|
 | ~/.config/monitors.xml | Honored | The arrangement for the lit connectors sets each output's scale, position and primary monitor (hardware sessions). Proof D-SCALE |
-| GNOME Settings' Displays panel | Honored | ApplyMonitorsConfig over org.gnome.Mutter.DisplayConfig changes scale and position live; "keep changes" saves to ~/.config/roost/monitors.xml, which Roost reads before GNOME's file (GNOME's own file is never rewritten). Proof G-DISPLAY-SETTINGS |
+| GNOME Settings' Displays panel | Partial | ApplyMonitorsConfig over org.gnome.Mutter.DisplayConfig changes scale and position live; "keep changes" saves to ~/.config/roost/monitors.xml, which Roost reads before GNOME's file (GNOME's own file is never rewritten). Proof G-DISPLAY-SETTINGS |
 
 ## Window management and input
 
@@ -76,7 +79,7 @@ This page records that decision for R9 (knowledge entry
 | org.gnome.desktop.peripherals.touchpad tap-to-click, natural-scroll, speed, disable-while-typing | Honored | libinput on hardware sessions, live and on hotplug |
 | org.gnome.desktop.peripherals.mouse natural-scroll, speed | Honored | libinput on hardware sessions |
 | org.gnome.desktop.input-sources sources, xkb-options | Honored | xkb sources become one keymap in order; Super+Space switches; IBus sources use the supervised bridge (#60). Proof G-SETTINGS-INPUT |
-| org.gnome.desktop.a11y.* | Via GTK | Where GTK implements them. Compositor features like zoom are missing |
+| org.gnome.desktop.a11y.* | Partial / missing | Some keys reach GTK; zoom, screen keyboard, seat input aids and several modern preferences lack consumers. Spoken screen-reader acceptance remains unqualified; see the control-center audit |
 
 `J-SETTINGS-LIVE` changes `clock-format` with `gsettings set` during the
 nested journey and asserts the shell’s consumed settings snapshot before

@@ -39,6 +39,9 @@ use std::time::{Duration, Instant};
 
 use gio::glib;
 use gio::prelude::*;
+use roost_shell_host::ibus::{
+    address as ibus_address, debug, text as ibus_text, text_variant as ibus_text_variant,
+};
 use wayland_client::protocol::{wl_compositor, wl_registry, wl_seat, wl_surface};
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, WEnum};
 use wayland_protocols_misc::zwp_input_method_v2::client::{
@@ -254,19 +257,6 @@ fn ibus_connection() -> Result<gio::DBusConnection, Box<dyn std::error::Error>> 
     Err("ibus-daemon did not come up".into())
 }
 
-/// `IBUS_ADDRESS`, else what `ibus address` reports for this display.
-fn ibus_address() -> Option<String> {
-    if let Some(address) = std::env::var("IBUS_ADDRESS").ok().filter(|a| !a.is_empty()) {
-        return Some(address);
-    }
-    let out = std::process::Command::new("ibus")
-        .arg("address")
-        .output()
-        .ok()?;
-    let address = String::from_utf8(out.stdout).ok()?.trim().to_owned();
-    (!address.is_empty() && address != "(null)").then_some(address)
-}
-
 /// The bridge's IBus input context.
 struct IbusContext {
     bus: gio::DBusConnection,
@@ -333,38 +323,6 @@ fn ibus_event(member: &str, params: &glib::Variant) -> Option<FromIbus> {
         }),
         _ => None,
     }
-}
-
-/// The string inside a serialized IBusText (`v` holding `(sa{sv}sv)`).
-fn ibus_text(value: &glib::Variant) -> Option<String> {
-    // as_variant calls g_variant_get_variant directly; its Option result does
-    // not protect ordinary serialized tuples from GLib's type assertion.
-    let mut inner = value.clone();
-    while inner.is_type(glib::VariantTy::VARIANT) {
-        inner = inner.as_variant()?;
-    }
-    inner.try_child_value(2)?.str().map(str::to_owned)
-}
-
-/// A serialized IBusText with no attributes, as libibus sends one:
-/// `v` holding `("IBusText", a{sv} {}, s text, v ("IBusAttrList",
-/// a{sv} {}, av []))`.
-fn ibus_text_variant(text: &str) -> glib::Variant {
-    let no_props = || glib::VariantDict::new(None).end();
-    let attrs = glib::Variant::tuple_from_iter([
-        "IBusAttrList".to_variant(),
-        no_props(),
-        glib::Variant::array_from_iter_with_type(
-            glib::VariantTy::VARIANT,
-            std::iter::empty::<glib::Variant>(),
-        ),
-    ]);
-    glib::Variant::from_variant(&glib::Variant::tuple_from_iter([
-        "IBusText".to_variant(),
-        no_props(),
-        text.to_variant(),
-        glib::Variant::from_variant(&attrs),
-    ]))
 }
 
 /// The largest char boundary at or before `byte` (clamped to the text).
@@ -522,7 +480,7 @@ impl Bridge {
                 .context
                 .as_ref()
                 .is_some_and(|context| context.process_key(keyval, key, state));
-        if std::env::var_os("ROOST_IBUS_DEBUG").is_some() {
+        if debug() {
             eprintln!(
                 "roost-ibus-bridge: key {key} sym {keyval:#x} pressed {pressed}: IBus took it: {handled} ({:?})",
                 started.elapsed()
@@ -655,7 +613,7 @@ impl Bridge {
             .filter(|r| Some(*r) != self.sent_cursor_rect)
         {
             context.send("SetCursorLocation", Some(rect.to_variant()));
-            if std::env::var_os("ROOST_IBUS_DEBUG").is_some() {
+            if debug() {
                 eprintln!("roost-ibus-bridge: cursor at {rect:?}");
             }
             self.sent_cursor_rect = Some(rect);
@@ -931,33 +889,8 @@ mod tests {
     #[test]
     fn surrounding_text_is_packed_as_an_ibus_text() {
         let packed = ibus_text_variant("你好");
-        assert_eq!(packed.type_().as_str(), "v");
-        let inner = packed.as_variant().unwrap();
-        assert_eq!(inner.type_().as_str(), "(sa{sv}sv)");
-        assert_eq!(inner.child_value(0).str(), Some("IBusText"));
-        let attrs = inner.child_value(3).as_variant().unwrap();
-        assert_eq!(attrs.type_().as_str(), "(sa{sv}av)");
-        assert_eq!(attrs.child_value(0).str(), Some("IBusAttrList"));
-        assert_eq!(attrs.child_value(2).n_children(), 0);
-        // What the bridge reads back from IBus's own signals.
-        assert_eq!(ibus_text(&packed).as_deref(), Some("你好"));
         let args = glib::Variant::tuple_from_iter([packed, 2u32.to_variant(), 2u32.to_variant()]);
         assert_eq!(args.type_().as_str(), "(vuu)");
-    }
-
-    #[test]
-    fn raw_and_nested_text_variants_decode_without_native_type_assertions() {
-        let boxed = ibus_text_variant("你好");
-        assert_eq!(
-            ibus_text(&boxed.as_variant().unwrap()).as_deref(),
-            Some("你好")
-        );
-        assert_eq!(
-            ibus_text(&glib::Variant::from_variant(&boxed)).as_deref(),
-            Some("你好")
-        );
-        assert_eq!(ibus_text(&"not a container".to_variant()), None);
-        assert_eq!(ibus_text(&42u32.to_variant()), None);
     }
 
     #[test]

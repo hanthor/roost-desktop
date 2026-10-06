@@ -12,6 +12,7 @@
 #               menu's events card, timed as GNOME formats them
 #   G-CAL-OPEN  clicking the clock opens the calendar popover (xdg popup
 #               on the layer surface, #88)
+#   G-CAL-PREFS live first-weekday and ISO-week changes, plus locale reset
 #   G-QS-OPEN   clicking the system indicators opens quick settings
 #   A11Y-QS     quick-settings toggles and the volume slider are exposed
 #   G-WINDOWS   three libadwaita app windows map
@@ -431,6 +432,25 @@ COLOR_SCHEMA
     GSETTINGS_SCHEMA_DIR="$ARTIFACTS/schemas"
     export GSETTINGS_SCHEMA_DIR
 fi
+# Exercise the GNOME 51 enum contract on older CI hosts too. This overlay
+# preserves all four upstream a11y.interface keys and is test-only.
+if ! gsettings range org.gnome.desktop.a11y.interface reduced-motion >/dev/null 2>&1; then
+    mkdir -p "$ARTIFACTS/schemas"
+    cp "$ROOT/tests/settings/gnome51-a11y-interface.gschema.xml" "$ARTIFACTS/schemas/"
+    glib-compile-schemas --strict "$ARTIFACTS/schemas"
+    GSETTINGS_SCHEMA_DIR="$ARTIFACTS/schemas"
+    export GSETTINGS_SCHEMA_DIR
+fi
+gsettings set org.gnome.desktop.a11y.interface reduced-motion 'no-preference'
+if ! gsettings range org.gnome.desktop.calendar week-start-day >/dev/null 2>&1; then
+    mkdir -p "$ARTIFACTS/schemas"
+    cp "$ROOT/tests/settings/gnome51-calendar.gschema.xml" "$ARTIFACTS/schemas/"
+    glib-compile-schemas --strict "$ARTIFACTS/schemas"
+    GSETTINGS_SCHEMA_DIR="$ARTIFACTS/schemas"
+    export GSETTINGS_SCHEMA_DIR
+fi
+gsettings reset org.gnome.desktop.calendar week-start-day
+gsettings reset org.gnome.desktop.calendar show-weekdate
 gsettings set org.gnome.settings-daemon.plugins.color night-light-enabled false
 # Quick-settings daemons: stubs on a private "system" bus (#55), a fake
 # backlight, and a fake wpctl that records the sink volume.
@@ -654,6 +674,31 @@ if showing "$ARTIFACTS/a11y-calendar.json" "Retro"; then
     fail G-CAL-EVENTS "tomorrow's event shows under today"
 fi
 pass G-CAL-EVENTS "today's calendar-server events list in the events card, timed as GNOME does"
+# The open popover must update from real GSettings changes without a restart.
+"$PY" "$ROOT/scripts/lib/roost-calendar-preferences-proof.py" "$ARTIFACTS/a11y-calendar.json" default false ||
+    fail G-CAL-PREFS "initial locale calendar is invalid"
+for first in Monday Thursday Sunday; do
+    gsettings set org.gnome.desktop.calendar week-start-day "$(printf '%s' "$first" | tr '[:upper:]' '[:lower:]')"
+    gsettings set org.gnome.desktop.calendar show-weekdate true
+    sleep 1
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-calendar-$first.json" 20 ||
+        fail G-CAL-PREFS "live calendar tree is unavailable"
+    "$PY" "$ROOT/scripts/lib/roost-calendar-preferences-proof.py" "$ARTIFACTS/a11y-calendar-$first.json" "$first" true ||
+        fail G-CAL-PREFS "weekday order or ISO week numbers did not follow $first"
+done
+gsettings reset org.gnome.desktop.calendar week-start-day
+gsettings reset org.gnome.desktop.calendar show-weekdate
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-calendar-reset.json" 20 ||
+    fail G-CAL-PREFS "reset calendar tree is unavailable"
+"$PY" "$ROOT/scripts/lib/roost-calendar-preferences-proof.py" "$ARTIFACTS/a11y-calendar-reset.json" default false ||
+    fail G-CAL-PREFS "locale reset or hiding week numbers failed"
+jq '[.[] | select(.showing and .role == "label" and (.name | test("^(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)$"))) | .name]' "$ARTIFACTS/a11y-calendar.json" >"$ARTIFACTS/calendar-initial-headings.json"
+jq '[.[] | select(.showing and .role == "label" and (.name | test("^(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)$"))) | .name]' "$ARTIFACTS/a11y-calendar-reset.json" >"$ARTIFACTS/calendar-reset-headings.json"
+cmp "$ARTIFACTS/calendar-initial-headings.json" "$ARTIFACTS/calendar-reset-headings.json" ||
+    fail G-CAL-PREFS "reset did not restore the initial locale headings"
+scrot "$ARTIFACTS/02-calendar-reset.png" >/dev/null
+pass G-CAL-PREFS "live weekday changes, six ISO week labels and locale reset are visible in the same shell"
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-calendar-launch.json" 20 --press "Open Calendar" ||
     fail G-CAL-LAUNCH "events card has no accessible launch action"
 sleep 1
@@ -2165,6 +2210,17 @@ if jq -e '.overview_open' "$CSTATE" >/dev/null; then
 fi
 xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
 gsettings set org.gnome.desktop.interface enable-hot-corners true
+sleep 1
+xdotool mousemove --window "$WID" 1 1
+cstate '.overview_open' "hot corner enabled" ||
+    fail G-HOT-CORNER "enabling GNOME hot corners did not open the actual overview"
+cp "$CSTATE" "$ARTIFACTS/hot-corner-enabled.json"
+scrot "$ARTIFACTS/hot-corner-enabled.png" >/dev/null
+xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
+xdotool key Escape
+cstate '.overview_open | not' "hot corner dismissed" ||
+    fail G-HOT-CORNER "the corner-opened overview did not close"
+pass G-HOT-CORNER "live GNOME disable rejects the corner; enable opens the actual overview"
 gsettings set org.gnome.desktop.peripherals.keyboard repeat-interval 30
 gsettings set org.gnome.desktop.input-sources sources "[('xkb', 'us')]"
 cstate '.keyboard.layouts == ["English (US)"]' "one source" ||
@@ -2193,7 +2249,33 @@ cstate '.session_mode == "gnome"' "floating" || fail G-ANIMATIONS-OFF "could not
 gsettings set org.gnome.desktop.interface enable-animations true
 cstate '.animations_enabled' "animations enabled" ||
     fail G-ANIMATIONS-OFF "enable-animations true did not restore live animation"
-pass G-ANIMATIONS-OFF "enable-animations is live: overview and strip states jump when disabled"
+# Settings' Reduced Motion switch must work even with enable-animations true.
+gsettings set org.gnome.desktop.a11y.interface reduced-motion 'reduce'
+cstate '(.animations_enabled | not)' "reduced motion" ||
+    fail G-ANIMATIONS-OFF "Reduced Motion did not disable compositor animation"
+xdotool key Super_L
+cstate '.overview_open and .overview_progress == 1' "reduced overview" ||
+    fail G-ANIMATIONS-OFF "Reduced Motion overview did not jump to its open state"
+cp "$CSTATE" "$ARTIFACTS/reduced-motion-open.json"
+xdotool key Escape
+cstate '(.overview_open | not) and .overview_progress == 0' "reduced desktop" ||
+    fail G-ANIMATIONS-OFF "Reduced Motion overview did not jump to its closed state"
+# Idle blanking must follow the same policy as compositor and GTK transitions.
+gsettings set org.gnome.desktop.screensaver lock-enabled true
+gsettings set org.gnome.desktop.screensaver lock-delay 0
+gsettings set org.gnome.desktop.session idle-delay 600
+cstate '.idle_timeout_ms == 600000' "reduced idle" ||
+    fail G-ANIMATIONS-OFF "Reduced Motion left the ten-second idle fade in the lock timeout"
+[ "$(sed -n '2p' "$XDG_RUNTIME_DIR/roost-idle-blank")" = 0 ] ||
+    fail G-ANIMATIONS-OFF "Reduced Motion left the screen-blank fade enabled"
+gsettings set org.gnome.desktop.interface enable-animations false
+gsettings reset org.gnome.desktop.a11y.interface reduced-motion
+cstate '(.animations_enabled | not)' "explicit animation disable" ||
+    fail G-ANIMATIONS-OFF "resetting Reduced Motion overrode enable-animations false"
+gsettings set org.gnome.desktop.interface enable-animations true
+cstate '.animations_enabled and .idle_timeout_ms == 610000' "motion restored" ||
+    fail G-ANIMATIONS-OFF "resetting both preferences did not restore motion and idle fade"
+pass G-ANIMATIONS-OFF "enable-animations and GNOME 51 Reduced Motion are live; overview, strip and idle fade follow effective motion policy"
 
 # GNOME settings (#63): the idle lock follows idle-delay and
 # lock-enabled as they change.
@@ -2970,6 +3052,51 @@ dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -
 [ "$dims" = "$WIDTH,$HEIGHT" ] || fail G-SCREENSHOT-UI "the Screen capture is $dims, not $WIDTH,$HEIGHT"
 pass G-SCREENSHOT-UI "Print opens GNOME's screenshot UI; Screen and Capture save the whole screen"
 
+# Drive the real exclusive-keyboard overlay and inspect the saved PNG,
+# rather than treating a preference write or geometry helper as UI proof.
+while IFS='|' read -r shot_keys shot_dims shot_position shot_label; do
+    shot_workspace="$(jq -r '.active_workspace' "$CSTATE")"
+    sleep 1.1 # GNOME filenames have one-second resolution.
+    marker="$ARTIFACTS/shot-keys-$shot_label.marker"
+    touch "$marker"
+    xdotool key Print
+    end=$(($(date +%s) + 20))
+    until "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-shot-keys-$shot_label.json" 5 >/dev/null 2>&1 &&
+        showing "$ARTIFACTS/a11y-shot-keys-$shot_label.json" "Capture" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.5; done
+    showing "$ARTIFACTS/a11y-shot-keys-$shot_label.json" "Capture" ||
+        fail G-SCREENSHOT-KEYS "Print did not open selection for $shot_label"
+    xdotool key --clearmodifiers s r
+    # Intentional word splitting: the fixture is a list of xdotool keys.
+    # shellcheck disable=SC2086
+    xdotool key --clearmodifiers $shot_keys
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-shot-keys-$shot_label-result.json" 10 ||
+        fail G-SCREENSHOT-KEYS "selection accessibility dump failed for $shot_label"
+    showing "$ARTIFACTS/a11y-shot-keys-$shot_label-result.json" \
+        "Selected area at x ${shot_position%,*}, y ${shot_position#*,}, width ${shot_dims%,*}, height ${shot_dims#*,}" ||
+        fail G-SCREENSHOT-KEYS "$shot_label did not move/resize to the expected area"
+    cstate ".active_workspace == $shot_workspace and (.overview_open | not)" "screenshot keeps workspace" ||
+        fail G-SCREENSHOT-KEYS "$shot_label navigation escaped into desktop shortcuts"
+    scrot "$ARTIFACTS/shot-keys-$shot_label-overlay.png" >/dev/null
+    xdotool key --clearmodifiers Return
+    end=$(($(date +%s) + 15))
+    newest=""
+    while [ "$(date +%s)" -le "$end" ]; do
+        newest="$(find "$XDG_PICTURES_DIR/Screenshots" -name 'Screenshot From *.png' -newer "$marker" 2>/dev/null | head -1)"
+        [ -n "$newest" ] && break
+        sleep 0.3
+    done
+    [ -n "$newest" ] || fail G-SCREENSHOT-KEYS "$shot_label captured nothing"
+    dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$newest")"
+    [ "$dims" = "$shot_dims" ] || fail G-SCREENSHOT-KEYS "$shot_label saved $dims, expected $shot_dims"
+    cp "$newest" "$ARTIFACTS/shot-keys-$shot_label.png"
+done <<EOF
+ctrl+Left ctrl+Right Left|$((WIDTH / 4 + 5)),$((HEIGHT / 4))|$((WIDTH * 3 / 8 - 5)),$((HEIGHT * 3 / 8))|resize
+alt+ctrl+Right alt+shift+Down|$((WIDTH / 4)),$((HEIGHT / 4))|$((WIDTH * 3 / 8 + 1)),$((HEIGHT * 3 / 4))|move
+shift+Left|$((WIDTH * 5 / 8)),$((HEIGHT / 4))|0,$((HEIGHT * 3 / 8))|edge
+ctrl+Left r|$((WIDTH / 4)),$((HEIGHT / 4))|$((WIDTH * 3 / 8)),$((HEIGHT * 3 / 8))|reset
+EOF
+pass G-SCREENSHOT-KEYS "arrows, Ctrl, Alt, Shift and R produce actual captures with bounded selection dimensions"
+
 # GNOME's window selector: Window lays the windows out as previews with
 # the focused one chosen; choosing another test window and Capture saves
 # that window alone, at its own size.
@@ -3041,12 +3168,14 @@ if [ -n "$PW_PIDS" ] && command -v gst-launch-1.0 >/dev/null 2>&1; then
     mkdir -p "$XDG_CONFIG_HOME/xdg-desktop-portal"
     printf '[preferred]\ndefault=gnome;gtk;\norg.freedesktop.impl.portal.ScreenCast=gnome\n' >"$XDG_CONFIG_HOME/xdg-desktop-portal/portals.conf"
     XDG_CURRENT_DESKTOP=GNOME WAYLAND_DISPLAY="$SOCKET_NAME" GDK_BACKEND=wayland GTK_A11Y=atspi XDG_SESSION_TYPE=wayland "$PORTAL_BACKEND" --replace >"$ARTIFACTS/portal-gnome.log" 2>&1 &
-    PORTAL_PIDS="$!"
-    "$PY" "$ROOT/scripts/lib/roost-portal-ready.py" org.freedesktop.impl.portal.desktop.gnome org.freedesktop.impl.portal.ScreenCast "$ARTIFACTS/portal-backend-ready.json" ||
+    PORTAL_BACKEND_PID=$!
+    PORTAL_PIDS="$PORTAL_BACKEND_PID"
+    "$PY" "$ROOT/scripts/lib/roost-portal-ready.py" org.freedesktop.impl.portal.desktop.gnome org.freedesktop.impl.portal.ScreenCast "$ARTIFACTS/portal-backend-ready.json" --pid "$PORTAL_BACKEND_PID" ||
         fail G-PORTAL-CONSENT "installed backend capabilities never became ready"
     XDG_CURRENT_DESKTOP=GNOME /usr/libexec/xdg-desktop-portal --replace >"$ARTIFACTS/portal-frontend.log" 2>&1 &
-    PORTAL_PIDS="$PORTAL_PIDS $!"
-    "$PY" "$ROOT/scripts/lib/roost-portal-ready.py" org.freedesktop.portal.Desktop org.freedesktop.portal.ScreenCast "$ARTIFACTS/portal-frontend-ready.json" ||
+    PORTAL_FRONTEND_PID=$!
+    PORTAL_PIDS="$PORTAL_PIDS $PORTAL_FRONTEND_PID"
+    "$PY" "$ROOT/scripts/lib/roost-portal-ready.py" org.freedesktop.portal.Desktop org.freedesktop.portal.ScreenCast "$ARTIFACTS/portal-frontend-ready.json" --pid "$PORTAL_FRONTEND_PID" ||
         fail G-PORTAL-CONSENT "frontend capabilities never became ready"
     for decision in cancel grant; do
         "$PY" "$ROOT/scripts/lib/roost-portal-capture-client.py" "$ARTIFACTS/portal-$decision.png" "$decision" >"$ARTIFACTS/portal-$decision.log" 2>&1 &
