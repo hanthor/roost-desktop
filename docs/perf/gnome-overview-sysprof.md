@@ -47,6 +47,14 @@ inside its presented scope. Recover its kernel timestamp as an interval across
 that scope, with explicit microsecond rounding room. No host/guest clock
 subtraction is involved. QMP image-response bounds remain separate observations.
 
+The separately reported KMS-ready time is userspace feedback, not the kernel
+flip timestamp. Mutter copies it into frame info and emits it in the presented
+notification; it can follow the kernel flip. Validate it within the owned
+frame's dispatch-to-notification lifetime, rather than using the reconstructed
+kernel timestamp as its upper bound. This does not change presentation bounds
+or admit missing owners, swaps, completions or pending end-of-capture slots.
+
+
 The raw Sysprof capture remains authoritative. An unmodified subset of the
 actual paired capture retains all relevant native mark frames with source
 revision, package versions, full-capture and subset hashes. That fixture balances

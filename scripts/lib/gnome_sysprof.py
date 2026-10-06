@@ -126,7 +126,10 @@ def overview_frame_bounds(decoded, pid, expected_inputs=20, output="Virtual-1"):
         if lower < owner["monotonic_ns"] or row["monotonic_ns"] < owner["monotonic_ns"] + owner["duration_ns"]:
             raise ValueError("presentation precedes its owned frame")
         kms_ready = int(match[4]) * 1000
-        if not owner["monotonic_ns"] <= kms_ready <= upper:
+        # KMS feedback readiness is a userspace timestamp, not the kernel flip
+        # timestamp. It can follow that flip; it must precede this notification.
+        completion_end = row["monotonic_ns"] + row["duration_ns"]
+        if not owner["monotonic_ns"] <= kms_ready <= completion_end:
             raise ValueError("KMS readiness is outside its owned frame lifetime")
         presented.append(dict(dispatch_ns=owner["monotonic_ns"],
                               presentation_lower_ns=lower, presentation_upper_ns=upper,

@@ -56,6 +56,27 @@ class SysprofCapture(unittest.TestCase):
         self.assertAlmostEqual(first["latency_upper_ms"], 492.549)
         self.assertTrue(all(row["latency_lower_ms"] <= row["latency_upper_ms"] for row in result["inputs"]))
 
+    def test_kms_feedback_after_kernel_flip_is_bounded_by_notification_not_flip(self):
+        import copy
+        import re
+        decoded, pid = self.ownership_capture()
+        before = sysprof.overview_frame_bounds(decoded, pid)
+        row = next(row for row in decoded["marks"]
+                   if row["name"] == "Clutter::FrameClock::presented()")
+        # Reproduce the real second a60 capture: userspace feedback follows
+        # the kernel flip, while preceding the notification that carries it.
+        ready = row["monotonic_ns"] // 1000 - 1
+        row["message"] = re.sub(r"ready at \d+", f"ready at {ready}", row["message"])
+        after = sysprof.overview_frame_bounds(decoded, pid)
+        self.assertEqual(before["inputs"], after["inputs"], "feedback is not the presentation timestamp")
+        for invalid in (0, (row["monotonic_ns"] + row["duration_ns"]) // 1000 + 10):
+            bad = copy.deepcopy(decoded)
+            changed = next(mark for mark in bad["marks"]
+                           if mark["name"] == "Clutter::FrameClock::presented()")
+            changed["message"] = re.sub(r"ready at \d+", f"ready at {invalid}", changed["message"])
+            with self.subTest(ready=invalid), self.assertRaisesRegex(ValueError, "KMS readiness"):
+                sysprof.overview_frame_bounds(bad, pid)
+
     def test_actual_trace_missing_duplicate_or_wrong_output_completion_fails(self):
         import copy
         for case in ("missing-presented", "missing-ready", "duplicate-presented", "wrong-output", "unknown-description", "missing-swap", "foreign-owner"):
