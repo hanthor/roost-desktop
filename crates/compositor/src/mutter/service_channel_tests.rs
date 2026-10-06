@@ -34,7 +34,11 @@ fn stream(fd: zbus::zvariant::OwnedFd) -> UnixStream {
 fn service_connection_transports_real_sync_and_reclaims_disconnected_slots() {
     let mut comp = crate::TestCompositor::new();
     let mut channel = channel(&comp);
-    let mut socket = stream(channel.open_connection(":1.1".into(), false, None).unwrap());
+    let mut socket = stream(
+        channel
+            .open_connection(":1.1".into(), false, None, None)
+            .unwrap(),
+    );
     socket
         .set_read_timeout(Some(Duration::from_secs(1)))
         .unwrap();
@@ -54,16 +58,20 @@ fn service_connection_transports_real_sync_and_reclaims_disconnected_slots() {
     let mut sockets = vec![socket];
     for _ in 1..32 {
         sockets.push(stream(
-            channel.open_connection(":1.1".into(), false, None).unwrap(),
+            channel
+                .open_connection(":1.1".into(), false, None, None)
+                .unwrap(),
         ));
     }
     assert!(matches!(
-        channel.open_connection(":1.2".into(), false, None),
+        channel.open_connection(":1.2".into(), false, None, None),
         Err(fdo::Error::LimitsExceeded(_))
     ));
     drop(sockets.pop());
     comp.pump();
-    let replacement = channel.open_connection(":1.2".into(), false, None).unwrap();
+    let replacement = channel
+        .open_connection(":1.2".into(), false, None, None)
+        .unwrap();
     assert_eq!(channel.clients.values().map(Vec::len).sum::<usize>(), 32);
     drop(replacement);
 }
@@ -71,13 +79,19 @@ fn service_connection_transports_real_sync_and_reclaims_disconnected_slots() {
 fn typed_service_limit_is_independent_of_ordinary_connections() {
     let comp = crate::TestCompositor::new();
     let mut channel = channel(&comp);
-    let _ordinary = channel.open_connection(":1.1".into(), false, None).unwrap();
-    let _typed = channel.open_connection(":1.1".into(), true, None).unwrap();
+    let _ordinary = channel
+        .open_connection(":1.1".into(), false, None, None)
+        .unwrap();
+    let _typed = channel
+        .open_connection(":1.1".into(), true, None, None)
+        .unwrap();
     assert!(matches!(
-        channel.open_connection(":1.1".into(), true, None),
+        channel.open_connection(":1.1".into(), true, None, None),
         Err(fdo::Error::LimitsExceeded(_))
     ));
-    let _second_ordinary = channel.open_connection(":1.1".into(), false, None).unwrap();
+    let _second_ordinary = channel
+        .open_connection(":1.1".into(), false, None, None)
+        .unwrap();
 }
 #[test]
 fn window_tag_options_follow_mutter_types_and_bound_storage() {
@@ -223,4 +237,53 @@ fn connection_tags_reach_real_windows_and_explicit_tags_take_precedence() {
         assert_eq!(result.tag.as_deref(), Some("explicit"));
         assert_eq!(result.description.as_deref(), Some("Chooser"));
     }
+}
+
+#[test]
+fn service_window_keeps_original_pinned_process_instead_of_socketpair_creator() {
+    let mut child = std::process::Command::new("/bin/sleep")
+        .arg("60")
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let descriptor = rustix::process::pidfd_open(
+        rustix::process::Pid::from_raw(pid as i32).unwrap(),
+        rustix::process::PidfdFlags::empty(),
+    )
+    .unwrap();
+    let credentials = Arc::new(
+        fdo::ConnectionCredentials::default()
+            .set_process_id(pid)
+            .set_process_fd(descriptor.into()),
+    );
+    let mut comp = crate::TestCompositor::new();
+    let (server, socket) = UnixStream::pair().unwrap();
+    let mut data = crate::ClientState::service_connection(Arc::new(AtomicBool::new(true)), None);
+    data.service_credentials = Some(credentials);
+    let client = comp
+        .display
+        .handle()
+        .insert_client(server, Arc::new(data))
+        .unwrap();
+    let conn = Connection::from_socket(socket).unwrap();
+    let mut queue = conn.new_event_queue::<TagPeer>();
+    let registry = conn.display().get_registry(&queue.handle(), ());
+    let mut peer = TagPeer::default();
+    pump(&mut comp, &mut queue, &mut peer);
+    let compositor: WlCompositor =
+        registry.bind(peer.globals["wl_compositor"].0, 6, &queue.handle(), ());
+    let surface = compositor.create_surface(&queue.handle(), ());
+    pump(&mut comp, &mut queue, &mut peer);
+    let server_surface = client.object_from_protocol_id::<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>(&comp.display.handle(), surface.id().protocol_id()).unwrap();
+    let socket_creator = client.get_credentials(&comp.display.handle()).unwrap().pid;
+    let original = comp.state.authenticated_service_client_pid(&server_surface);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(socket_creator, std::process::id() as i32);
+    assert_ne!(pid, std::process::id());
+    assert_eq!(original, Some(pid));
+    assert_eq!(
+        comp.state.authenticated_service_client_pid(&server_surface),
+        None
+    );
 }
