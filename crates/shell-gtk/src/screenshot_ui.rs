@@ -432,6 +432,9 @@ impl ScreenshotUi {
         // toggles the pointer. Arrows resize the current edge; Alt moves,
         // Ctrl adjusts by one pixel, Shift reaches the edge, and R resets.
         let keys = gtk::EventControllerKey::new();
+        // The mode toggle can own focus and consume Return/Space itself.
+        // GNOME's overlay shortcuts precede focused button activation.
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         {
             let weak = Rc::downgrade(&ui);
             keys.connect_key_pressed(move |_, key, _, modifiers| {
