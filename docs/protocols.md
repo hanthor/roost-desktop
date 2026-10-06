@@ -13,12 +13,36 @@ the interfaces built into the same `libmutter-51.so`, marked `source` in
 `tests/protocols/gnome51-globals.tsv`. This is upstream GNOME 51 in a
 Fedora container, not a capture from the Marlin baseline VM.
 
+**Native Marlin reference.** [Run 37196669447](https://github.com/hanthor/roost-desktop/actions/runs/37196669447)
+also captured GNOME Shell/Mutter 51.0 in the derived Marlin GNOME 51
+baseline on the shared four-vCPU, 6 GiB, 1280×800 QEMU/KVM profile.
+`tests/protocols/marlin-gnome-wayland-info.txt` retains its full output;
+`marlin-roost-wayland-info.txt` retains the same run's candidate capture.
+`marlin-gnome51-source.json` records capture digests, image/package identity,
+the trusted package source and the actual observer checkout. The Roost
+package is source `7546647e5967825f522a352ee781e0908f889d1e`, so this retained
+candidate capture does not certify subsequent implementation changes.
+
+This native session exposes 41 globals. Its existing 40 match the headless
+capture's versions; `wp_drm_lease_device_v1` is additionally observed at v1.
+`tests/protocols/marlin-gnome51-globals.tsv` preserves the same explicit
+Roost version floors and deviations, marks the lease as captured, and
+keeps the two still-unobserved syncobj/Xwayland-private entries as
+source-derived floors. Bochs scanout still exposes dmabuf v3, so this
+VM does not establish the dmabuf feedback version of a GPU-capable Mutter
+backend. The headless reference remains a separate regression input.
+
 **Comparison.** The proof stage G-WAYLAND-INFO runs `wayland-info`
 against the nested Roost session (saved as the `wayland-info.txt`
 artifact) and `scripts/roost-wayland-info-compare` checks it against
 `tests/protocols/gnome51-globals.tsv`. Every global marked `match` must
 be present at GNOME's version or newer, and every `min:` global at least
 at the version given. Known gaps are reported and do not fail the stage.
+
+The same stage additionally compares against the native Marlin TSV,
+retaining `wayland-info-marlin-compare.txt`. Every native captured global
+is represented by a match, a version floor or a recorded deviation; a
+source-only floor is never described as a measured native version.
 
 **Golden test.** `crates/compositor/tests/protocols.rs` asserts the exact
 list and versions below. Adding or dropping a protocol updates the test
@@ -58,7 +82,7 @@ and this page together.
 | zxdg_exporter_v2, zxdg_importer_v2 | 1 | xdg-foreign: the portal parents its dialogs to the app's window, which centres and attaches them like the app's own |
 | xdg_system_bell_v1 | 1 | plays GNOME's `bell-window-system` sound through `canberra-gtk-play` when installed (Mutter's audible bell); a burst of rings is one sound |
 | xdg_toplevel_tag_manager_v1 | 1 | each window keeps its tag and description |
-| zwp_keyboard_shortcuts_inhibit_manager_v1 | 1 | the focused window gets every key, the shell's grabs, Super and Alt+Tab included; Super+Escape (Mutter's restore-shortcuts) takes them back until the window is focused again |
+| zwp_keyboard_shortcuts_inhibit_manager_v1 | 1 | after Allow, the focused window gets every key, the shell's grabs, Super and Alt+Tab included; Super+Escape (Mutter's restore-shortcuts) takes them back until the window is focused again |
 | wp_pointer_warp_v1 | 1 | honoured while the surface has pointer focus from the enter serial it names; nested, the host pointer stays where it is |
 
 ### xdg-activation policy
@@ -89,10 +113,19 @@ presentation-time, fifo and commit-timing follow the frame path
 
 ### Keyboard shortcuts inhibit
 
-GNOME Shell asks before letting an app take the shortcuts ("Allow
-inhibiting shortcuts?") and remembers the answer. Roost has no such
-dialog yet and grants at once; Super+Escape always takes the shortcuts
-back, as in GNOME.
+Roost asks before letting a focused, mapped app take shortcuts. The GTK
+shell shows a modal with Deny and Allow and explains Super+Escape.
+Only Allow activates the inhibitor; Deny cannot be undone by refocusing.
+Known desktop apps use GNOME's PermissionStore (`gnome` table,
+`shortcuts-inhibitor` id, `GRANTED`/`DENIED` values), so remembered grants
+skip the dialog. Unknown apps are never remembered. An unavailable store
+opens the dialog. Background requests, stale responses, destroyed surfaces
+and requests outstanding at lock or a switch to another app fail closed.
+The non-GTK fallback shell has no consent UI and keeps requests inactive.
+Super+Escape always takes granted shortcuts back until the window is
+focused again. GNOME's configurable Xwayland exemption rules are not
+implemented. `scripts/roost-shortcut-proof` exercises Allow, Deny, refocus,
+emergency restore, stale focus and lock through a real Wayland test client.
 
 ## GNOME D-Bus interfaces
 
@@ -127,7 +160,8 @@ GNOME's version.
 | wp_color_manager_v1 (v2), wp_color_representation_manager_v1 | 2, 1 | missing | not in Smithay 0.7: needs a colour-managed renderer (ICC/HDR, YUV conversion); the GLES path is sRGB only (#89) |
 | ext_background_effect_manager_v1 | 1 | missing | not in Smithay 0.7: needs a blur pass in the renderer (#89) |
 | wl_fixes | 1 | missing | not in wayland-server 0.31; its `destroy_registry` frees a registry object, which wayland-backend owns (#89) |
-| wp_linux_drm_syncobj_manager_v1, wp_drm_lease_device_v1 (native backend; from source) | — | missing | hardware only: explicit sync needs the DRM backend's syncobj import and the lease needs connectors to hand out (VR headsets); not testable nested (#68, #89) |
+| wp_drm_lease_device_v1 | 1 (native Marlin capture) | missing | lease needs connectors to hand out for VR headsets; recorded deviation, not exercised by the nested session (#68, #89) |
+| wp_linux_drm_syncobj_manager_v1 | source-derived floor 1; absent in this VM capture | missing | explicit sync needs the DRM backend's syncobj import; GPU-capable native acceptance remains open (#68, #89) |
 | zwp_xwayland_keyboard_grab_manager_v1 (Xwayland only; from source) | — | missing | only rootful Xwayland with `-host-grab` uses it, and Mutter allows grabs only per `xwayland-grab-access-rules`; Roost runs rootless Xwayland (#89) |
 | gtk_shell1 | 7 | missing | not planned: GTK4 needs none of it on a GNOME session |
 | zwp_linux_dmabuf_v1 feedback (v4+) | native backend only | version 3 | #89 |
@@ -138,3 +172,5 @@ GNOME's version.
   decorations only, and the golden test asserts the absence.
 - **layer-shell is present,** unlike Mutter. Roost's shell is a separate
   process and draws its panel, overview and banners through it.
+
+`xdg_toplevel_icon_manager_v1` v1 accepts square SHM icons and sanitized theme names, applied on the next surface commit. PNGs live in a private, bounded compositor cache. X11 `_NET_WM_ICON` and legacy square TrueColor `WM_HINTS` pixmaps (24/32-bit color, optional 1-bit transparency mask) are read on a bounded worker for mapped window identities. Palette and unsupported visuals fall back to a generic app icon.

@@ -275,7 +275,10 @@ impl WlrLayerShellHandler for State {
         namespace: String,
     ) {
         // A reused wl_surface gets a live layer role again.
-        self.dead_layer_surfaces.remove(surface.wl_surface());
+        self.dead_layer_surfaces
+            .remove(&smithay::reexports::wayland_server::Resource::id(
+                surface.wl_surface(),
+            ));
         // Bare initial configure (the protocol requires one before
         // the first commit); real geometry follows on commit via
         // `arrange_after_commit`, once the client's size/anchor
@@ -308,9 +311,13 @@ impl WlrLayerShellHandler for State {
     fn layer_destroyed(&mut self, surface: LayerSurface) {
         let gone = surface.wl_surface().clone();
         self.panel_surfaces.retain(|record| record.surface != gone);
+        // Keep only the id (see `dead_layer_surfaces`): holding the
+        // `WlSurface` would pin its last buffer and SHM pool mapping.
+        // A fresh role on the same surface clears the entry in
+        // `new_layer_surface`; stale ids never match a live surface
+        // because object ids are never reused within a client.
         self.dead_layer_surfaces
-            .retain(smithay::reexports::wayland_server::Resource::is_alive);
-        self.dead_layer_surfaces.insert(gone);
+            .insert(smithay::reexports::wayland_server::Resource::id(&gone));
     }
 }
 

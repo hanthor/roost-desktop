@@ -445,6 +445,11 @@ fn an_inhibiting_window_gets_the_shortcuts_until_super_escape() {
 
     let _inhibitor = inhibit.inhibit_shortcuts(&surface, &seat, &peer.qh(), ());
     pump(&mut comp, &mut manager, &mut [&mut peer]);
+    assert_eq!(peer.client.inhibitor_active, Some(false));
+    assert!(!comp.state.shortcuts_inhibited());
+    let request = comp.state.shortcut_consent_request().unwrap().0;
+    comp.state.answer_shortcut_consent(request, true);
+    pump(&mut comp, &mut manager, &mut [&mut peer]);
     assert_eq!(peer.client.inhibitor_active, Some(true));
     assert!(comp.state.shortcuts_inhibited());
 
@@ -452,13 +457,83 @@ fn an_inhibiting_window_gets_the_shortcuts_until_super_escape() {
     chord(&mut manager, &mut comp, PAGE_DOWN_KEYCODE);
     assert_eq!(manager.model().active_workspace(), 0);
 
+    // Registered shell grabs must obey the same consent. This catches a
+    // global accelerator bypass even when built-in workspace keys work.
+    manager.set_accelerators(vec![roost_shell_control::Accelerator {
+        action: 77,
+        keysym: 0xff56, // Page_Down
+        mods: roost_shell_control::MOD_LOGO,
+        modes: roost_shell_control::MODE_NORMAL,
+    }]);
+    chord(&mut manager, &mut comp, PAGE_DOWN_KEYCODE);
+    assert!(manager.take_accelerators_fired().is_empty());
+
     // Super+Escape (Mutter's restore-shortcuts) takes them back.
     chord(&mut manager, &mut comp, ESCAPE_KEYCODE);
     pump(&mut comp, &mut manager, &mut [&mut peer]);
     assert!(!comp.state.shortcuts_inhibited());
     assert_eq!(peer.client.inhibitor_active, Some(false));
     chord(&mut manager, &mut comp, PAGE_DOWN_KEYCODE);
+    assert_eq!(
+        manager.take_accelerators_fired(),
+        [(77, 5000, roost_shell_control::MODE_NORMAL)]
+    );
+    manager.set_accelerators(vec![]);
+    chord(&mut manager, &mut comp, PAGE_DOWN_KEYCODE);
     assert_eq!(manager.model().active_workspace(), 1);
+}
+
+#[test]
+fn denied_shortcut_inhibition_stays_denied_after_refocus() {
+    let (mut comp, mut manager) = compositor();
+    let mut peer = connect(&mut comp, &mut manager);
+    let seat: WlSeat = peer.bind(7);
+    let inhibit: ZwpKeyboardShortcutsInhibitManagerV1 = peer.bind(1);
+    let (surface, _) = window(&mut peer, "denied-vm");
+    pump(&mut comp, &mut manager, &mut [&mut peer]);
+    let _inhibitor = inhibit.inhibit_shortcuts(&surface, &seat, &peer.qh(), ());
+    pump(&mut comp, &mut manager, &mut [&mut peer]);
+    let request = comp.state.shortcut_consent_request().unwrap().0;
+    comp.state.answer_shortcut_consent(request, false);
+    let vm = id_of(&manager, "denied-vm");
+    let _other = window(&mut peer, "other");
+    pump(&mut comp, &mut manager, &mut [&mut peer]);
+    manager.focus(&mut comp.state, Some(vm));
+    pump(&mut comp, &mut manager, &mut [&mut peer]);
+    assert_eq!(peer.client.inhibitor_active, Some(false));
+    assert!(!comp.state.shortcuts_inhibited());
+    chord(&mut manager, &mut comp, PAGE_DOWN_KEYCODE);
+    assert_eq!(manager.model().active_workspace(), 1);
+}
+
+#[test]
+fn shortcut_consent_cannot_survive_a_lock_or_focus_change() {
+    let (mut comp, mut manager) = compositor();
+    let mut peer = connect(&mut comp, &mut manager);
+    let seat: WlSeat = peer.bind(7);
+    let inhibit: ZwpKeyboardShortcutsInhibitManagerV1 = peer.bind(1);
+    let (surface, _) = window(&mut peer, "vm");
+    pump(&mut comp, &mut manager, &mut [&mut peer]);
+    let inhibitor = inhibit.inhibit_shortcuts(&surface, &seat, &peer.qh(), ());
+    pump(&mut comp, &mut manager, &mut [&mut peer]);
+    let request = comp.state.shortcut_consent_request().unwrap().0;
+    let _other = window(&mut peer, "other");
+    pump(&mut comp, &mut manager, &mut [&mut peer]);
+    comp.state.answer_shortcut_consent(request, true);
+    let vm = id_of(&manager, "vm");
+    manager.focus(&mut comp.state, Some(vm));
+    assert!(!comp.state.shortcuts_inhibited());
+    assert!(comp.state.shortcut_consent_request().is_none());
+    inhibitor.destroy();
+    pump(&mut comp, &mut manager, &mut [&mut peer]);
+    let _inhibitor = inhibit.inhibit_shortcuts(&surface, &seat, &peer.qh(), ());
+    pump(&mut comp, &mut manager, &mut [&mut peer]);
+    let request = comp.state.shortcut_consent_request().unwrap().0;
+    comp.state.set_shortcut_inhibition_locked(true);
+    comp.state.answer_shortcut_consent(request, true);
+    comp.state.set_shortcut_inhibition_locked(false);
+    assert!(!comp.state.shortcuts_inhibited());
+    assert!(comp.state.shortcut_consent_request().is_none());
 }
 
 #[test]

@@ -32,3 +32,10 @@ The GNOME overview phase also retains the installed shell's own
 [Sysprof capture and decoded scope marks](gnome-overview-sysprof.md), with peer
 credentials, capture timestamps and a verified digest. These are raw event,
 dispatch and presentation scopes; causal latency remains a separate analysis.
+
+The [native cadence and pure idle report](2026-10-04-native-cadence/README.md)
+retains a later actual paired GNOME 51/Roost run, including all 240 presentation
+records per desktop, guest clock boundaries, ten accepted notifications each,
+and raw resource samples. It identifies high Roost idle CPU and slower median
+presentation cadence in the older trusted package. It does not qualify later
+repaint changes or close the remaining input tracing and soak requirements.

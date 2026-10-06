@@ -1,0 +1,27 @@
+{
+  "candidate_commit": "3249f362e05d4819ee55759df3d1142789fc8418",
+  "artifact_workflow_run": 37214394538,
+  "pull_request_head": "5e19b478f184734264e2635d711f11dcf8654a77",
+  "artifact_id": 11307854413,
+  "runtime_versions": [
+    "xdg-desktop-portal-gnome-51.0-1.fc45.x86_64",
+    "xdg-desktop-portal-1.22.1-2.fc45.x86_64",
+    "pipewire-1.6.9-1.fc45.x86_64",
+    "gtk4-4.24.1-1.fc45.x86_64",
+    "libadwaita-1.10.0-2.fc45.x86_64",
+    "libei-1.6.0-3.fc45.x86_64"
+  ],
+  "result": "GNOME51 genuine RemoteDesktop portal: Cancel, keyboard/pointer grant, linked PipeWire frame, foreign input denial, legacy GTK delivery, libei GTK delivery/FD revocation, Close/client/backend disconnect, active lock revocation and locked denial; touch/clipboard unsupported",
+  "locked_denial": {
+    "mode": "locked",
+    "response": 2,
+    "stage": "CreateSession"
+  },
+  "full_current_head_checks": 16,
+  "limitations": [
+    "Software-rendered GNOME51 Fedora45 security reference; no physical GPU or VT claim",
+    "Remote touch, keysym/text and clipboard unsupported",
+    "EIS output/keymap snapshots require new consent after changes",
+    "Interactive portal screenshot customization, area and color selection unsupported"
+  ]
+}
