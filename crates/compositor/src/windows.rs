@@ -3393,8 +3393,8 @@ impl TriggerState {
                 self.super_armed = false;
                 if !self.hot_corner_off
                     && !overview_open
-                    && pos.x < HOT_CORNER_PX
-                    && pos.y < HOT_CORNER_PX
+                    && (0.0..HOT_CORNER_PX).contains(&pos.x)
+                    && (0.0..HOT_CORNER_PX).contains(&pos.y)
                 {
                     TriggerAction::Open
                 } else {
@@ -3402,8 +3402,9 @@ impl TriggerState {
                 }
             }
             ManagerInput::Button { pressed, .. } => {
-                let strip =
-                    pressed && pointer.y < ACTIVITIES_STRIP_PX && pointer.x < ACTIVITIES_WIDTH_PX;
+                let strip = pressed
+                    && (0.0..ACTIVITIES_STRIP_PX).contains(&pointer.y)
+                    && (0.0..ACTIVITIES_WIDTH_PX).contains(&pointer.x);
                 self.super_armed = false;
                 if strip {
                     TriggerAction::Toggle
@@ -4393,6 +4394,55 @@ mod tests {
         assert_eq!(
             triggers.feed(&motion(400.0, 300.0), false, (0.0, 300.0).into()),
             TriggerAction::None
+        );
+    }
+
+    #[test]
+    fn activities_triggers_reject_outside_and_nonfinite_coordinates() {
+        let mut triggers = TriggerState::default();
+        for outside in [-1.0, f64::NEG_INFINITY, f64::INFINITY, f64::NAN] {
+            for pos in [(outside, 2.0), (2.0, outside)] {
+                assert_eq!(
+                    triggers.feed(&motion(pos.0, pos.1), false, pos.into()),
+                    TriggerAction::None,
+                    "motion outside the corner: {pos:?}"
+                );
+                assert_eq!(
+                    triggers.feed(&button(true), false, pos.into()),
+                    TriggerAction::None,
+                    "click outside the Activities strip: {pos:?}"
+                );
+            }
+        }
+        for pos in [(HOT_CORNER_PX, 0.0), (0.0, HOT_CORNER_PX)] {
+            assert_eq!(
+                triggers.feed(&motion(pos.0, pos.1), false, pos.into()),
+                TriggerAction::None,
+                "corner upper bound is exclusive"
+            );
+        }
+        for pos in [(ACTIVITIES_WIDTH_PX, 0.0), (0.0, ACTIVITIES_STRIP_PX)] {
+            assert_eq!(
+                triggers.feed(&button(true), false, pos.into()),
+                TriggerAction::None,
+                "strip upper bound is exclusive"
+            );
+        }
+        for pos in [(0.0, 0.0), (HOT_CORNER_PX - 0.5, HOT_CORNER_PX - 0.5)] {
+            assert_eq!(
+                triggers.feed(&motion(pos.0, pos.1), false, pos.into()),
+                TriggerAction::Open,
+                "valid corner remains active"
+            );
+        }
+        assert_eq!(
+            triggers.feed(
+                &button(true),
+                false,
+                (ACTIVITIES_WIDTH_PX - 0.5, ACTIVITIES_STRIP_PX - 0.5).into(),
+            ),
+            TriggerAction::Toggle,
+            "valid Activities click remains active"
         );
     }
 
