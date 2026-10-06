@@ -2276,6 +2276,10 @@ gsettings set org.gnome.desktop.interface enable-animations true
 cstate '.animations_enabled and .idle_timeout_ms == 610000' "motion restored" ||
     fail G-ANIMATIONS-OFF "resetting both preferences did not restore motion and idle fade"
 pass G-ANIMATIONS-OFF "enable-animations and GNOME 51 Reduced Motion are live; overview, strip and idle fade follow effective motion policy"
+python3 "$ROOT/scripts/lib/roost-introspect-motion-client.py" "$CSTATE" \
+    "$ARTIFACTS/introspect-motion.json" >"$ARTIFACTS/introspect-motion.log" 2>&1 || \
+    fail G-INTROSPECT-MOTION "live D-Bus motion properties/signals disagree with actual compositor policy"
+pass G-INTROSPECT-MOTION "GNOME clients receive four effective motion changes; property and compositor agree"
 
 # GNOME settings (#63): the idle lock follows idle-delay and
 # lock-enabled as they change.

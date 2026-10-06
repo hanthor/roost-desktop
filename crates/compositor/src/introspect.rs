@@ -9,6 +9,7 @@
 //! mode", for tests and development).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use zbus::message::Header;
@@ -26,6 +27,7 @@ struct Service {
     windows: Windows,
     screen_size: Arc<Mutex<(i32, i32)>>,
     unrestricted: bool,
+    animations_enabled: Arc<AtomicBool>,
 }
 
 /// GNOME's app id for a window: its desktop file id, or `window:N` for
@@ -129,7 +131,7 @@ impl Service {
 
     #[zbus(property)]
     fn animations_enabled(&self) -> bool {
-        true
+        self.animations_enabled.load(Ordering::Acquire)
     }
 
     /// Logical dimensions of the whole desktop, including non-primary outputs.
@@ -145,14 +147,43 @@ impl Service {
 }
 
 /// The event loop's side: publish the window list, signal changes.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Handle {
     pub windows: Windows,
+    animations_enabled: Arc<AtomicBool>,
     screen_size: Arc<Mutex<(i32, i32)>>,
     conn: Arc<OnceLock<zbus::blocking::Connection>>,
 }
 
+impl Default for Handle {
+    fn default() -> Self {
+        Self {
+            windows: Windows::default(),
+            screen_size: Arc::default(),
+            animations_enabled: Arc::new(AtomicBool::new(true)),
+            conn: Arc::default(),
+        }
+    }
+}
+
 impl Handle {
+    /// Publish the same effective motion preference used by the compositor.
+    pub fn publish_animations_enabled(&self, enabled: bool) {
+        if self.animations_enabled.swap(enabled, Ordering::AcqRel) == enabled {
+            return;
+        }
+        if let Some(conn) = self.conn.get() {
+            let changed = HashMap::from([("AnimationsEnabled", Value::from(enabled))]);
+            let _ = conn.emit_signal(
+                None::<()>,
+                PATH,
+                "org.freedesktop.DBus.Properties",
+                "PropertiesChanged",
+                &(NAME, changed, Vec::<String>::new()),
+            );
+        }
+    }
+
     /// Update GNOME clients only when the effective desktop dimensions change.
     pub fn publish_screen_size(&self, size: (i32, i32)) {
         let Ok(mut current) = self.screen_size.lock() else {
@@ -204,6 +235,7 @@ pub fn start(screen_size: (i32, i32), authority: crate::capture_security::Author
         authority,
         windows: handle.windows.clone(),
         screen_size: handle.screen_size.clone(),
+        animations_enabled: handle.animations_enabled.clone(),
         unrestricted: std::env::var(UNRESTRICTED_ENV).is_ok_and(|v| v == "1"),
     };
     let slot = handle.conn.clone();
