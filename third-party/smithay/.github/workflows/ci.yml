@@ -163,7 +163,7 @@ jobs:
         uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
 
       - name: Install cargo-hack
-        uses: taiki-e/install-action@afa7b38618dd4e9305cc59a65757c7623bcb3020 # cargo-hack
+        uses: taiki-e/install-action@3ba07337ea315bc9340c308d30d4d10093baa59e # cargo-hack
 
       - name: System dependencies
         run: sudo apt-get update; sudo apt-get install -y libdrm-dev libudev-dev libgbm-dev libxkbcommon-dev libegl1-mesa-dev libwayland-dev libinput-dev libdbus-1-dev libsystemd-dev libseat-dev
@@ -277,7 +277,7 @@ jobs:
         uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
 
       - name: Install cargo-hack
-        uses: taiki-e/install-action@afa7b38618dd4e9305cc59a65757c7623bcb3020 # cargo-hack
+        uses: taiki-e/install-action@3ba07337ea315bc9340c308d30d4d10093baa59e # cargo-hack
 
       - name: System dependencies
         run: sudo apt-get update; sudo apt-get install -y libdrm-dev libudev-dev libgbm-dev libxkbcommon-dev libegl1-mesa-dev libwayland-dev libinput-dev libdbus-1-dev libsystemd-dev libseat-dev libdisplay-info-dev
