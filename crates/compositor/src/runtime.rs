@@ -2913,9 +2913,7 @@ impl Runtime {
         };
         let show_paper = show_content && !overlay_visible && overview.is_none();
         #[cfg(feature = "drm")]
-        let timing_work = crate::frame_timing::pending_frame_work(
-            &crate::frame_timing::frame_roots(&self.state, &self.manager),
-        );
+        let timing_roots = crate::frame_timing::frame_roots(&self.state, &self.manager);
         match &mut self.backend {
             Backend::Winit(backend) => {
                 backend.window().set_cursor_visible(blank_alpha < 1.0);
@@ -3132,6 +3130,14 @@ impl Runtime {
                                 .collect(),
                         ],
                     };
+                    let mine: Vec<_> = drawn
+                        .iter()
+                        .filter(|(_, at)| owner(at) == index)
+                        .map(|(surface, _)| surface.clone())
+                        .chain(lock_surface.clone())
+                        .collect();
+                    let timing_work =
+                        crate::frame_timing::pending_output_work(&timing_roots, &mine);
                     if !crate::native_repaint::needs_repaint(
                         out.last_frame.as_ref(),
                         &signature,
@@ -3195,12 +3201,6 @@ impl Runtime {
                             .finish()
                             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?
                     };
-                    let mine: Vec<_> = drawn
-                        .iter()
-                        .filter(|(_, at)| owner(at) == index)
-                        .map(|(surface, _)| surface.clone())
-                        .chain(lock_surface.clone())
-                        .collect();
                     let feedback = crate::frame_timing::take_feedback(&mine, &out.output);
                     if let Err(e) = out.surface.queue_buffer(Some(sync), None, feedback) {
                         eprintln!("roost-compositor: drm: queue_buffer {}: {e}", out.name);
