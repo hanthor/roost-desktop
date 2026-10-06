@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Test-only GNOME 51.0 reference subset; never installed by the desktop.
+     https://github.com/GNOME/gsettings-desktop-schemas/tree/51.0
+     Enum values follow headers/gdesktop-enums.h GDesktopReducedMotion. -->
+<schemalist gettext-domain="gsettings-desktop-schemas">
+  <enum id="org.gnome.desktop.GDesktopReducedMotion">
+    <value nick="no-preference" value="0"/>
+    <value nick="reduce" value="1"/>
+  </enum>
+  <schema id="org.gnome.desktop.a11y.interface" path="/org/gnome/desktop/a11y/interface/">
+    <key name="high-contrast" type="b">
+      <default>false</default>
+      <summary>High contrast</summary>
+      <description>
+        Whether to use the high contrast style.
+      </description>
+    </key>
+    <key name="show-status-shapes" type="b">
+      <default>false</default>
+      <summary>Show status shapes</summary>
+      <description>
+        Whether to use shapes to indicate status in addition or instead of color.
+      </description>
+    </key>
+    <key name="reduced-motion" enum="org.gnome.desktop.GDesktopReducedMotion">
+      <default>'no-preference'</default>
+      <summary>Reduced motion</summary>
+      <description>
+        The type of reduced motion.
+      </description>
+    </key>
+    <key name="keyboard-focus-visible-timeout" type="i">
+      <default>-1</default>
+      <summary>Keyboard navigation focus timeout</summary>
+      <description>
+        How many seconds should the navigation focus remains visible when navigating with the keyboard. 0 means "forever", and a negative value
+        means "use the default toolkit value".
+      </description>
+    </key>
+  </schema>
+</schemalist>

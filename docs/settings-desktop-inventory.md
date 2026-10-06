@@ -23,7 +23,7 @@ Source: [GTK Wayland settings translations](https://github.com/GNOME/gtk/blob/4.
 |---|---|---|
 | high-contrast | Via GTK | GTK Wayland settings translation; clients follow the portal or GSettings fallback |
 | keyboard-focus-visible-timeout | Ignored | Roost has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| reduced-motion | Ignored | Roost has no equivalent compositor accessibility feature; toolkit support is listed separately |
+| reduced-motion | Honored | GNOME 51 reduce/no-preference enum combines with enable-animations for shell GTK transitions, compositor motion and idle fade; live proof G-ANIMATIONS-OFF |
 | show-status-shapes | Via GTK | GTK Wayland settings translation; clients follow the portal or GSettings fallback |
 ## org.gnome.desktop.a11y.keyboard
 
