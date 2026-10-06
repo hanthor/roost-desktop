@@ -98,3 +98,12 @@ Qualified reference evidence: #406 at `8ac36e67` passed all four actual installe
 At candidate `8b68365f`, the actual GTK `G-INTROSPECT-TYPES` journey changed all fourteen EWMH types and restored the absent-type default successfully; the complete GTK journey and all four X11 scale/input cases passed. DRM output and 240 ordered presentations also passed. This integrated follow-up needs fresh gates, and the earlier `5eda7c96` D-OUTPUT failure has not been assigned a proven root cause.
 
 At candidate `b68bad53`, actual instrumented coverage passed both typed/ordinary/native registry visibility and the ordinary-client raw blind-bind denial test. The original peer credential snapshot and typed X11 capability are retained separately in the integrated client state. Real X11-parent picker journeys and fresh integrated-head qualification remain pending.
+
+
+## Optional GNOME sandbox identities (#410)
+
+Native and service-channel connections schedule bounded background discovery from their original live process pin. Flatpak identity uses `/proc/PID/root/.flatpak-info` and GLib's actual `GKeyFile` `[Application] name` parser; Snap identity uses the kernel `/proc/PID/attr/current` profile, with GNOME's namespace/binary normalization. No identity is inferred from a client-supplied application ID or X11 class. Missing, malformed, inaccessible or oversized metadata leaves the optional field absent. Four workers and a 32-entry nonblocking queue bound discovery work; peer filesystem access never runs in the compositor loop.
+
+`GetWindows` and eligible running applications expose `sandboxed-app-id` independently of desktop application association. Cached publication still requires the original process pin to be live. X11 windows remain unknown here: their Wayland peer is Xwayland, not the application. Metadata grants no provider, capture, IME or X11 interoperability authority. Tests exercise real GKeyFile parsing, bounded file/FIFO/symlink handling, missing-pin denial, optional D-Bus fields and expiration of cached fixture metadata through a real service surface. Current-head Rust execution, actual Flatpak/Snap process discovery, sandbox document grants and shipped-image qualification remain pending; #410/#395/#397 remain open.
+
+Contracts: [Mutter 51 sandbox discovery](https://github.com/GNOME/mutter/blob/51.0/src/core/window.c) and [GNOME Shell 51 Introspect fields](https://github.com/GNOME/gnome-shell/blob/51.0/js/misc/introspect.js).

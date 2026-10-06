@@ -57,6 +57,9 @@ pub fn window_properties(window: &WindowSnapshot) -> HashMap<String, OwnedValue>
             props.insert(key.to_owned(), value);
         }
     };
+    if let Some(id) = &window.sandboxed_app_id {
+        put("sandboxed-app-id", Value::from(id.clone()));
+    }
     put("title", Value::from(window.title.clone()));
     put("app-id", Value::from(app_id(window)));
     put("client-type", Value::from(u32::from(window.x11)));
@@ -87,16 +90,25 @@ pub fn running_apps(windows: &[WindowSnapshot]) -> HashMap<String, HashMap<Strin
         .filter(|w| w.standalone)
         .map(app_id)
         .collect();
-    let mut apps: HashMap<String, bool> = HashMap::new();
+    let mut apps: HashMap<String, (bool, Option<String>)> = HashMap::new();
     for window in windows {
         let id = app_id(window);
         if standalone.contains(&id) {
-            *apps.entry(id).or_default() |= window.focused;
+            let app = apps.entry(id).or_default();
+            app.0 |= window.focused;
+            if app.1.is_none() {
+                app.1 = window.sandboxed_app_id.clone();
+            }
         }
     }
     apps.into_iter()
-        .map(|(id, focused)| {
+        .map(|(id, (focused, sandboxed_app_id))| {
             let mut props = HashMap::new();
+            if let Some(id) = sandboxed_app_id {
+                if let Ok(value) = OwnedValue::try_from(Value::from(id)) {
+                    props.insert("sandboxed-app-id".to_owned(), value);
+                }
+            }
             if focused {
                 let seats = vec!["seat0".to_owned()];
                 if let Ok(value) = OwnedValue::try_from(Value::from(seats)) {
@@ -298,6 +310,7 @@ mod tests {
             title: format!("w{id}"),
             app_id: app.map(str::to_owned),
             application_id: None,
+            sandboxed_app_id: None,
             width: 640,
             height: 480,
             focused,
@@ -421,6 +434,32 @@ mod tests {
             running_apps(&[dialog]).len(),
             1,
             "detached dialog becomes standalone"
+        );
+    }
+    #[test]
+    fn sandbox_fields_are_optional_and_independent_of_spoofed_app_ids() {
+        let plain = window(1, Some("org.example.Spoofed"), false);
+        assert!(!window_properties(&plain).contains_key("sandboxed-app-id"));
+        assert!(
+            !running_apps(&[plain.clone()])["org.example.Spoofed.desktop"]
+                .contains_key("sandboxed-app-id")
+        );
+        let mut actual = window(2, Some("org.example.Spoofed"), true);
+        actual.sandboxed_app_id = Some("org.gnome.TextEditor".into());
+        let props = window_properties(&actual);
+        assert_eq!(
+            String::try_from(props["sandboxed-app-id"].clone()).unwrap(),
+            "org.gnome.TextEditor"
+        );
+        assert_eq!(
+            String::try_from(props["app-id"].clone()).unwrap(),
+            "org.example.Spoofed.desktop"
+        );
+        let apps = running_apps(&[plain, actual]);
+        assert_eq!(
+            String::try_from(apps["org.example.Spoofed.desktop"]["sandboxed-app-id"].clone())
+                .unwrap(),
+            "org.gnome.TextEditor"
         );
     }
 }

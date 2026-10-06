@@ -95,6 +95,8 @@ pub struct WindowSnapshot {
     /// Desktop application identity inherited from the ultimate transient
     /// parent, independently of this window's raw app ID / X11 class.
     pub application_id: Option<String>,
+    /// Optional sandbox identity from the original live process, not app-id/class.
+    pub sandboxed_app_id: Option<String>,
     /// Logical size of the window's visible geometry.
     pub width: i32,
     pub height: i32,
@@ -196,6 +198,10 @@ impl ServiceChannel {
             .map_err(|e| fdo::Error::Failed(e.to_string()))?;
         let alive = Arc::new(AtomicBool::new(true));
         let mut client_data = crate::ClientState::service_connection(alive.clone(), window_tag);
+        client_data.sandboxed_app_id = credentials
+            .clone()
+            .map(crate::sandbox_identity::discover_async)
+            .unwrap_or_default();
         client_data.original_credentials = credentials;
         client_data.x11_interop = typed;
         self.display
