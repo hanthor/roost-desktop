@@ -3302,6 +3302,7 @@ fn modal_parent_blocks_pointer_clicks_scroll_and_super_drag_until_unset() {
     // The exposed right edge belongs to the parent, outside its smaller dialog.
     f.manager
         .pointer_motion(&mut f.comp.state, beta_only(), 6000);
+    f.manager.pointer_axis(&mut f.comp.state, 0.0, 120.0, 6000);
     f.manager
         .pointer_button(&mut f.comp.state, BTN_LEFT, true, 6001);
     f.manager
@@ -3329,6 +3330,7 @@ fn modal_parent_blocks_pointer_clicks_scroll_and_super_drag_until_unset() {
     f.manager.reconcile(&mut f.comp.state);
     f.manager
         .pointer_motion(&mut f.comp.state, beta_only(), 6006);
+    f.manager.pointer_axis(&mut f.comp.state, 0.0, 120.0, 6006);
     f.manager
         .pointer_button(&mut f.comp.state, BTN_LEFT, true, 6007);
     f.manager
