@@ -200,6 +200,8 @@ pub(crate) struct ClientState {
     pub(crate) connection_window_tag: Option<String>,
     /// Optional liveness marker for an ordinary service-channel connection.
     service_alive: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Original D-Bus peer credentials; a socketpair's peer is the compositor.
+    service_credentials: Option<Arc<zbus::fdo::ConnectionCredentials>>,
 }
 
 impl ClientState {
@@ -270,6 +272,16 @@ impl BufferHandler for State {
 }
 
 impl State {
+    /// Original service-channel caller PID when a live bus-supplied process
+    /// descriptor pins it. Missing pins and exited peers yield no identity;
+    /// this metadata never authorizes input, provider roles or capture.
+    pub fn authenticated_service_client_pid(&self, surface: &wl_surface::WlSurface) -> Option<u32> {
+        let client = surface.client()?;
+        let data = client.get_data::<ClientState>()?;
+        let credentials = data.service_credentials.as_ref()?;
+        crate::capture_security::pinned_process_id(credentials)
+    }
+
     /// A CSD move/resize must use this seat's live press on this surface.
     /// Preserve its coordinates through the request queue: client dispatch
     /// can happen after later pointer motion (GNOME 51 grab semantics).
