@@ -86,7 +86,8 @@ def inventory():
         raise RuntimeError("expected exactly one greetd user session on the configured VT")
     return {"probe_uid": os.geteuid(), "session_uid": OWNER.pw_uid,
             "session": owned[0],
-            "state": {k: state[k] for k in ("locked", "windows", "focused", "active_workspace")},
+            "state": {k: state[k] for k in ("locked", "windows", "focused", "active_workspace")}
+                     | {k: state.get(k) for k in ("mouse_left_handed", "touchpad_left_handed")},
             "processes": sorted(processes, key=lambda item: item["pid"])}
 
 
@@ -208,12 +209,21 @@ def main():
                           "/usr/libexec/roost-vm-input"], stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
         result = {"started": "count-only GTK input probe"}
-    elif action in ("input-count", "input-ready"):
+    elif action == "mouse-handedness":
+        value = sys.argv[2]
+        if value not in ("true", "false"):
+            raise ValueError("mouse handedness must be true or false")
+        call("gsettings", "set", "org.gnome.desktop.peripherals.mouse", "left-handed", value, user=True)
+        result = {"stored": call("gsettings", "get", "org.gnome.desktop.peripherals.mouse", "left-handed", user=True) == value}
+    elif action in ("input-count", "input-ready", "input-buttons"):
         result = json.loads(pathlib.Path(RUNTIME, "roost-vm-input.json").read_text())
         if pathlib.Path(f"/proc/{result['pid']}").stat().st_uid != OWNER.pw_uid:
             raise RuntimeError("input probe has the wrong owner")
         if action == "input-count":
             result = {key: result[key] for key in ("pid", "count")}
+        elif action == "input-buttons":
+            result = {key: result[key] for key in
+                      ("pid", "buttons", "button_releases", "event_count", "motions", "gtk_version")}
     elif action == "logout":
         call("loginctl", "terminate-session", inventory()["session"]["Id"])
         result = {"requested": "terminate session"}

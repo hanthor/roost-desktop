@@ -745,13 +745,31 @@ fn apply_libinput(
 ) {
     let speed = |milli: i32| f64::from(milli.clamp(-1000, 1000)) / 1000.0;
     if device.config_tap_finger_count() > 0 {
+        apply_handedness(device, settings.touchpad_left_handed);
         let _ = device.config_tap_set_enabled(settings.tap_to_click);
         let _ = device.config_scroll_set_natural_scroll_enabled(settings.touchpad_natural_scroll);
         let _ = device.config_dwt_set_enabled(settings.disable_while_typing);
         let _ = device.config_accel_set_speed(speed(settings.touchpad_speed_milli));
     } else if device.has_capability(smithay::reexports::input::DeviceCapability::Pointer) {
+        apply_handedness(device, settings.mouse_left_handed);
         let _ = device.config_scroll_set_natural_scroll_enabled(settings.mouse_natural_scroll);
         let _ = device.config_accel_set_speed(speed(settings.mouse_speed_milli));
+    }
+}
+
+fn apply_handedness(device: &smithay::reexports::input::Device, left_handed: bool) {
+    if device.config_left_handed_is_available() {
+        if let Err(error) = device.config_left_handed_set(left_handed) {
+            eprintln!(
+                "roost-compositor: libinput: primary button setting rejected for {}: {error:?}",
+                device.name()
+            );
+        }
+    } else if left_handed {
+        eprintln!(
+            "roost-compositor: libinput: primary button swapping unsupported for {}",
+            device.name()
+        );
     }
 }
 

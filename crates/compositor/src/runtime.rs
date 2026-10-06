@@ -1036,6 +1036,18 @@ impl Runtime {
     /// breaking Super-combos); only Escape-closes is consumed, so a
     /// closing keypress never double-acts on client UI.
     fn on_manager_input(&mut self, input: ManagerInput) {
+        // A Super+L release can arrive after the lock takes ownership, or
+        // before its surface maps. Consumed input must still clear modifier
+        // holds, otherwise an ordinary post-unlock click becomes Super+drag.
+        self.manager.note_modifiers(&input);
+        // CI-only count markers locate missing pointer delivery without
+        // recording button codes, key values or credential input.
+        if !self.is_locked()
+            && matches!(input, ManagerInput::Button { .. })
+            && std::env::var_os("ROOST_POINTER_TRACE").is_some()
+        {
+            eprintln!("roost-compositor: pointer trace: backend button received");
+        }
         // Every timestamped event feeds the idle accumulator first,
         // including events consumed below: activity is activity.
         let waking_blank = self.blank_alpha() > 0.0;
@@ -1051,6 +1063,8 @@ impl Runtime {
                 .and_then(|name| self.state.lock_surface_for(&name));
             if let Some(surface) = surface {
                 self.manager.lock_input(&mut self.state, &surface, input);
+            } else {
+                self.manager.discard_key_input(&mut self.state, &input);
             }
             // Media keys still work on the lock screen, as in GNOME.
             for (action, time, mode) in self.manager.take_accelerators_fired() {
@@ -1059,6 +1073,7 @@ impl Runtime {
             return;
         }
         if waking_blank {
+            self.manager.discard_key_input(&mut self.state, &input);
             // Activity cancels the idle shield; the wake event belongs to
             // that shield, not the previously focused application.
             return;
@@ -1151,6 +1166,7 @@ impl Runtime {
             }
             return;
         }
+        self.manager.discard_key_input(&mut self.state, &input);
         let ManagerInput::Key {
             keycode,
             pressed: true,
@@ -1367,8 +1383,7 @@ impl Runtime {
             "remote_input_sessions": self.remote_held.len(),
             // Held-state proof needs only a count, including during lock.
             // Never emit key identities that could expose credential input.
-            "seat_pressed_key_count": self.state.seat.get_keyboard()
-                .map_or(0, |keyboard| keyboard.pressed_keys().len()),
+            "seat_pressed_key_count": self.state.pressed_key_count(),
             "x11_ready": x11_ready,
             "idle_timeout_ms": self.lock.timeout_ms(),
             "idle_blank_alpha": self.blank_alpha(),
@@ -1377,6 +1392,8 @@ impl Runtime {
             "keyboard": keyboard,
             "overview_open": overview_open,
             "animations_enabled": self.input_settings.enable_animations,
+            "mouse_left_handed": self.input_settings.mouse_left_handed,
+            "touchpad_left_handed": self.input_settings.touchpad_left_handed,
             "locked": self.is_locked(),
             "active_workspace": model.active_workspace(),
             "focused": focused,

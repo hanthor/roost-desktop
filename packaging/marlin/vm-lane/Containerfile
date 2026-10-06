@@ -43,7 +43,7 @@ RUN pacman -Sy --noconfirm \
     && systemctl disable gdm.service \
     && systemctl enable greetd.service roost-vm-health.service \
     && systemctl add-wants multi-user.target qemu-guest-agent.service \
-    && printf '\nROOST_LOCK_TRACE=1\n' >> /etc/environment
+    && printf '\nROOST_LOCK_TRACE=1\nROOST_POINTER_TRACE=1\n' >> /etc/environment
 
 LABEL org.opencontainers.image.title="marlin-roost-vm-lane" \
       org.opencontainers.image.description="CI-only Marlin Roost test layer: greetd initial session, real lifecycle probes, journal on serial"

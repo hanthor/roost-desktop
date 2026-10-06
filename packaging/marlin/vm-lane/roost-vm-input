@@ -10,12 +10,20 @@ from gi.repository import Gtk
 
 path = pathlib.Path(os.environ["XDG_RUNTIME_DIR"], "roost-vm-input.json")
 count = 0
+buttons = {"1": 0, "2": 0, "3": 0}
+button_releases = {}
+event_count = 0
+motions = 0
 window = None
 
 
 def publish():
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps({"pid": os.getpid(), "count": count,
+    temporary.write_text(json.dumps({"pid": os.getpid(), "count": count, "buttons": buttons,
+                                    "button_releases": button_releases, "event_count": event_count,
+                                    "motions": motions,
+                                    "gtk_version": [Gtk.get_major_version(), Gtk.get_minor_version(),
+                                                    Gtk.get_micro_version()],
                                     "mapped": window.get_mapped(),
                                     "active": window.is_active(),
                                     "width": window.get_width(),
@@ -39,6 +47,41 @@ def activate(app):
         return True
     controller.connect("key-pressed", pressed)
     window.add_controller(controller)
+    clicks = Gtk.GestureClick()
+    clicks.set_button(0)
+    clicks.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+    def pressed_button(gesture, *_arguments):
+        key = str(gesture.get_current_button())
+        if key in buttons:
+            buttons[key] += 1
+        publish()
+    clicks.connect("pressed", pressed_button)
+    window.add_controller(clicks)
+    def released_button(gesture, *_arguments):
+        key = str(gesture.get_current_button())
+        button_releases[key] = button_releases.get(key, 0) + 1
+        publish()
+    clicks.connect("released", released_button)
+    # Count delivered events without inspecting the GdkEvent payload: older
+    # PyGObject versions expose that signal argument as None. No key values.
+    events = Gtk.EventControllerLegacy()
+    events.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+    def delivered(*_arguments):
+        global event_count
+        event_count += 1
+        publish()
+        return False
+    events.connect("event", delivered)
+    window.add_controller(events)
+    motion = Gtk.EventControllerMotion()
+    motion.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+    def moved(*_arguments):
+        global motions
+        motions += 1
+        publish()
+    motion.connect("motion", moved)
+    motion.connect("enter", moved)
+    window.add_controller(motion)
     window.connect("notify::mapped", lambda *_arguments: publish())
     window.connect("notify::is-active", lambda *_arguments: publish())
     def allocated(widget, _clock):
