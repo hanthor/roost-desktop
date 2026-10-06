@@ -36,8 +36,8 @@
 //! - keyboard-shortcuts-inhibit v1: virtual machines and remote desktops
 //!   get every key while focused; Super+Escape (Mutter's
 //!   restore-shortcuts) hands the shortcuts back until the window is
-//!   focused again. Granted at once: Roost has no GNOME Shell
-//!   permission dialog to ask with.
+//!   focused again. A trusted shell consent response is required first;
+//!   unapproved requests remain inactive, even after refocusing.
 //! - pointer-warp v1: a client may move the pointer within its own
 //!   surface while it has pointer focus (the enter serial must match).
 //! - presentation-time, fifo and commit-timing: see [`crate::frame_timing`].
@@ -128,6 +128,11 @@ pub(crate) struct Protocols {
     _toplevel_tag: XdgToplevelTagManager,
     pub(crate) foreign: XdgForeignState,
     pub(crate) shortcuts_inhibit: KeyboardShortcutsInhibitState,
+    shortcut_approved: Vec<KeyboardShortcutsInhibitor>,
+    shortcut_pending: Option<(u64, KeyboardShortcutsInhibitor, String, Instant)>,
+    shortcut_next: u64,
+    shortcut_changed: bool,
+    shortcut_locked: bool,
     _pointer_warp: GlobalId,
     /// Pointer warps clients asked for, drained by the window manager:
     /// surface, surface-local position, enter serial.
@@ -174,6 +179,11 @@ impl Protocols {
             _toplevel_tag: XdgToplevelTagManager::new::<State>(dh),
             foreign: XdgForeignState::new::<State>(dh),
             shortcuts_inhibit: KeyboardShortcutsInhibitState::new::<State>(dh),
+            shortcut_approved: Vec::new(),
+            shortcut_pending: None,
+            shortcut_next: 0,
+            shortcut_changed: false,
+            shortcut_locked: false,
             _pointer_warp: dh.create_global::<State, WpPointerWarpV1, ()>(1, ()),
             pointer_warps: Vec::new(),
             bell: Bell::default(),
@@ -315,6 +325,9 @@ impl State {
     /// Whether the surface holding keyboard focus inhibits the
     /// compositor's shortcuts (keyboard-shortcuts-inhibit).
     pub fn shortcuts_inhibited(&self) -> bool {
+        if self.protocols.shortcut_locked {
+            return false;
+        }
         let Some(focus) = self.seat.get_keyboard().and_then(|k| k.current_focus()) else {
             return false;
         };
@@ -327,6 +340,9 @@ impl State {
     /// inhibitor goes inactive until it is focused again. Returns
     /// whether one was active.
     pub fn restore_shortcuts(&mut self) -> bool {
+        if self.protocols.shortcut_locked {
+            return false;
+        }
         let Some(focus) = self.seat.get_keyboard().and_then(|k| k.current_focus()) else {
             return false;
         };
@@ -341,12 +357,124 @@ impl State {
 
     /// Keyboard focus moved to `surface`: an inhibitor the user
     /// suspended with restore-shortcuts takes effect again.
-    pub(crate) fn reactivate_inhibitor(&self, surface: &WlSurface) {
-        if let Some(inhibitor) = self.seat.keyboard_shortcuts_inhibitor_for_surface(surface) {
-            if !inhibitor.is_active() {
-                inhibitor.activate();
+    pub(crate) fn reactivate_inhibitor(&mut self, surface: &WlSurface) {
+        // A shell layer dialog may hold focus during consent. Switching
+        // to a different app cancels it, so a late Allow cannot grant it.
+        if self
+            .toplevels()
+            .iter()
+            .any(|toplevel| toplevel.wl_surface() == surface)
+            && self
+                .protocols
+                .shortcut_pending
+                .as_ref()
+                .is_some_and(|(_, i, _, _)| i.wl_surface() != surface)
+        {
+            self.cancel_shortcut_consent();
+        }
+        self.protocols.shortcut_approved.retain(|i| {
+            i.wl_surface().is_alive()
+                && self
+                    .seat
+                    .keyboard_shortcuts_inhibitor_for_surface(i.wl_surface())
+                    .as_ref()
+                    == Some(i)
+        });
+        for inhibitor in &self.protocols.shortcut_approved {
+            if inhibitor.wl_surface() == surface && !self.protocols.shortcut_locked {
+                if !inhibitor.is_active() {
+                    inhibitor.activate();
+                }
+            } else if inhibitor.is_active() {
+                inhibitor.inactivate();
             }
         }
+    }
+
+    fn cancel_shortcut_consent(&mut self) {
+        if self.protocols.shortcut_pending.take().is_some() {
+            self.protocols.shortcut_changed = true;
+        }
+    }
+
+    /// Lock transitions fail closed and invalidate outstanding consent.
+    pub fn set_shortcut_inhibition_locked(&mut self, locked: bool) {
+        self.protocols.shortcut_locked = locked;
+        if locked {
+            self.cancel_shortcut_consent();
+            for i in &self.protocols.shortcut_approved {
+                if i.is_active() {
+                    i.inactivate();
+                }
+            }
+        }
+    }
+
+    /// Current request, useful to protocol proofs as well as the shell.
+    pub fn shortcut_consent_request(&self) -> Option<(u64, String)> {
+        self.protocols
+            .shortcut_pending
+            .as_ref()
+            .map(|(id, _, app, _)| (*id, app.clone()))
+    }
+
+    /// Apply a trusted shell answer only to the live, mapped inhibitor
+    /// that issued this request. Denied requests never reactivate on focus.
+    pub fn answer_shortcut_consent(&mut self, request: u64, allow: bool) {
+        if self.protocols.shortcut_locked
+            || !self
+                .protocols
+                .shortcut_pending
+                .as_ref()
+                .is_some_and(|(id, _, _, _)| *id == request)
+        {
+            return;
+        }
+        let (_, inhibitor, _, since) = self.protocols.shortcut_pending.take().unwrap();
+        self.protocols.shortcut_changed = true;
+        if since.elapsed() > Duration::from_secs(30) {
+            return;
+        }
+        if allow
+            && self.window_origins.contains_key(inhibitor.wl_surface())
+            && self
+                .seat
+                .keyboard_shortcuts_inhibitor_for_surface(inhibitor.wl_surface())
+                .as_ref()
+                == Some(&inhibitor)
+        {
+            if self
+                .seat
+                .get_keyboard()
+                .and_then(|k| k.current_focus())
+                .as_ref()
+                == Some(inhibitor.wl_surface())
+            {
+                inhibitor.activate();
+            }
+            self.protocols.shortcut_approved.push(inhibitor);
+        }
+    }
+
+    pub(crate) fn take_shortcut_consent_update(&mut self) -> Option<Option<(u64, String)>> {
+        if self
+            .protocols
+            .shortcut_pending
+            .as_ref()
+            .is_some_and(|(_, i, _, since)| {
+                since.elapsed() > Duration::from_secs(30)
+                    || !self.window_origins.contains_key(i.wl_surface())
+                    || self
+                        .seat
+                        .keyboard_shortcuts_inhibitor_for_surface(i.wl_surface())
+                        .as_ref()
+                        != Some(i)
+            })
+        {
+            self.cancel_shortcut_consent();
+        }
+        std::mem::take(&mut self.protocols.shortcut_changed)
+            .then(|| self.shortcut_consent_request())
     }
 
     /// Drain the pointer warps clients asked for.
@@ -715,10 +843,32 @@ impl KeyboardShortcutsInhibitHandler for State {
         &mut self.protocols.shortcuts_inhibit
     }
 
-    /// Granted at once (GNOME Shell asks first; Roost has no such
-    /// dialog). Super+Escape takes the shortcuts back.
+    /// An unapproved inhibitor never becomes active, including on refocus.
     fn new_inhibitor(&mut self, inhibitor: KeyboardShortcutsInhibitor) {
-        inhibitor.activate();
+        inhibitor.inactivate();
+        if self.protocols.shortcut_locked
+            || self.protocols.shortcut_pending.is_some()
+            || !self.window_origins.contains_key(inhibitor.wl_surface())
+            || self
+                .seat
+                .get_keyboard()
+                .and_then(|k| k.current_focus())
+                .as_ref()
+                != Some(inhibitor.wl_surface())
+        {
+            return;
+        }
+        let app = with_states(inhibitor.wl_surface(), |states| {
+            states
+                .data_map
+                .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+                .and_then(|data| data.lock().unwrap().app_id.clone())
+                .unwrap_or_default()
+        });
+        self.protocols.shortcut_next += 1;
+        self.protocols.shortcut_pending =
+            Some((self.protocols.shortcut_next, inhibitor, app, Instant::now()));
+        self.protocols.shortcut_changed = true;
     }
 }
 smithay::delegate_keyboard_shortcuts_inhibit!(State);
