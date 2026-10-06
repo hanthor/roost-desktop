@@ -2,6 +2,8 @@
 
 All 429 keys from `gsettings-desktop-schemas-51.0-1.fc45.x86_64` in the GNOME 51 reference container. Source re-audit: main `44edb6aca704ef0ada32b8c6111383ea5c3c6afe` (2026-10-06). See [the control-center audit](gnome-settings-audit.md) for open implementation and qualification gaps. “Via GTK” means the GTK Wayland backend translates the key through its settings portal or direct GSettings fallback; it does not imply support by every application or the compositor. “Ignored” records a current limitation, not permission to disregard binding knowledge.
 
+Handedness follow-up: main `c822ab91abbb8c07fdd89ddde5c81a71f7843ff3`, after qualified #379. Mouse and touchpad dispositions below reflect the merged libinput consumers; tablet handedness remains unsupported.
+
 Source: [GTK Wayland settings translations](https://github.com/GNOME/gtk/blob/4.14.5/gdk/wayland/gdkdisplay-wayland.c). Related shell, Mutter and settings-daemon keys are in [settings-map.md](settings-map.md).
 
 ## org.gnome.desktop.a11y
@@ -297,7 +299,7 @@ Source: [GTK Wayland settings translations](https://github.com/GNOME/gtk/blob/4.
 | custom-accel-config | Ignored | No Roost mapping for this libinput/tablet preference; supported subset is listed explicitly |
 | double-click | Via GTK | GTK Wayland settings translation; clients follow the portal or GSettings fallback |
 | drag-threshold | Via GTK | GTK Wayland settings translation; clients follow the portal or GSettings fallback |
-| left-handed | Ignored | No Roost mapping for this libinput/tablet preference; supported subset is listed explicitly |
+| left-handed | Honored | Live GNOME boolean reaches libinput; native VM proof V-MOUSE-HANDEDNESS covers false/true/false on the same compositor |
 | middle-click-emulation | Ignored | No Roost mapping for this libinput/tablet preference; supported subset is listed explicitly |
 | natural-scroll | Honored | Live libinput policy on hardware devices |
 | scroll-wheel-emulation-button | Ignored | No Roost mapping for this libinput/tablet preference; supported subset is listed explicitly |
@@ -358,7 +360,7 @@ Source: [GTK Wayland settings translations](https://github.com/GNOME/gtk/blob/4.
 | disable-while-typing | Honored | Live libinput policy, including hotplug |
 | disable-while-typing-timeout | Ignored | No Roost mapping for this libinput/tablet preference; supported subset is listed explicitly |
 | edge-scrolling-enabled | Ignored | No Roost mapping for this libinput/tablet preference; supported subset is listed explicitly |
-| left-handed | Ignored | No Roost mapping for this libinput/tablet preference; supported subset is listed explicitly |
+| left-handed | Honored | Live left/right/mouse enum reaches libinput, including the hotplug path; physical touchpad and hotplug qualification remain open |
 | middle-click-emulation | Ignored | No Roost mapping for this libinput/tablet preference; supported subset is listed explicitly |
 | natural-scroll | Honored | Live libinput policy, including hotplug |
 | scroll-speed | Ignored | No Roost mapping for this libinput/tablet preference; supported subset is listed explicitly |
