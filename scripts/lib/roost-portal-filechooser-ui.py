@@ -60,7 +60,10 @@ while time.monotonic() < end:
             located = True
             time.sleep(.2)
             continue
-        name = "Cancel" if request["decision"] == "cancel" else "Choose proof file"
+        # GNOME 51 Nautilus cancels through its header-bar Close button.
+        # Invoke that real widget; the client still requires response 1 and
+        # no returned URI, rather than treating dismissal as proof itself.
+        name = "Close" if request["decision"] == "cancel" else "Choose proof file"
         for control in controls:
             if control.getRoleName() in ("push button", "button") and control.name == name and control.getState().contains(pyatspi.STATE_SENSITIVE):
                 if not control.queryAction().doAction(0):
