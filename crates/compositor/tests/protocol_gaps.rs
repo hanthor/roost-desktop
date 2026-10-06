@@ -377,6 +377,10 @@ fn a_frame_request_without_pixel_damage_keeps_native_refresh_work_pending() {
     surface.commit();
     pump(&mut comp, &mut manager, &mut [&mut peer]);
     assert!(roost_compositor::frame_timing::pending_frame_work(&roots));
+    assert!(
+        roost_compositor::frame_timing::pending_output_work(&roots, &[]),
+        "callback-only pacing remains owed even without visible presentation"
+    );
     assert_eq!(peer.client.frames, 0);
     let output = comp.state.primary_output().unwrap();
     for root in &roots {
@@ -442,6 +446,23 @@ fn a_hidden_window_keeps_its_feedback_until_drawn() {
     assert_eq!(peer.client.fates.get(&7), None);
     let roots = roost_compositor::frame_timing::frame_roots(&comp.state, &manager);
     assert!(roost_compositor::frame_timing::pending_frame_work(&roots));
+    assert!(
+        !roost_compositor::frame_timing::pending_output_work(&roots, &[]),
+        "hidden presentation must not keep an unchanged output repainting"
+    );
+    let drawn: Vec<_> = roost_compositor::frame_timing::drawn_roots(&comp.state, &manager, false)
+        .into_iter()
+        .map(|(surface, _)| surface)
+        .collect();
+    assert!(
+        roost_compositor::frame_timing::pending_output_work(&roots, &drawn),
+        "revealing the actual window owes a real submission"
+    );
+    assert_eq!(
+        peer.client.fates.get(&7),
+        None,
+        "visibility check does not resolve feedback"
+    );
 
     roost_compositor::frame_timing::present_nested_frame(&mut comp.state, &manager, false, 2);
     pump(&mut comp, &mut manager, &mut [&mut peer]);
