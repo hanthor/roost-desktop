@@ -1,0 +1,9 @@
+{
+  "id": 37189354041,
+  "head_branch": "main",
+  "head_sha": "7546647e5967825f522a352ee781e0908f889d1e",
+  "event": "push",
+  "status": "completed",
+  "conclusion": "success",
+  "html_url": "https://github.com/hanthor/roost-desktop/actions/runs/37189354041"
+}

@@ -19,7 +19,7 @@ use smithay::{
     input::{Seat, SeatHandler, SeatState},
     output::Output,
     reexports::wayland_server::{
-        backend::{ClientData, ClientId, DisconnectReason, GlobalId},
+        backend::{ClientData, ClientId, DisconnectReason, GlobalId, ObjectId},
         protocol::{wl_buffer, wl_output, wl_seat, wl_surface},
         Client, Display, DisplayHandle, Resource,
     },
@@ -47,6 +47,7 @@ use smithay::{
 };
 
 pub mod animation;
+pub mod capture_security;
 pub mod control;
 #[cfg(feature = "drm")]
 pub mod drm;
@@ -77,7 +78,10 @@ pub mod state;
 pub mod supervise;
 pub mod unlock;
 pub mod wallpaper;
+pub mod window_icons;
 pub mod windows;
+#[cfg(feature = "xwayland")]
+mod x11_icons;
 pub mod xwayland;
 
 /// One compositor-tracked output: protocol handle plus geometry.
@@ -106,6 +110,7 @@ pub(crate) struct OutputEntry {
 pub struct State {
     /// Applied surface commits invalidate retained scanout, including feedback-only updates.
     pub(crate) surface_commits: u64,
+    pub(crate) window_icons: window_icons::WindowIcons,
     compositor_state: CompositorState,
     shm_state: ShmState,
     xdg_shell_state: XdgShellState,
@@ -129,10 +134,14 @@ pub struct State {
     /// Middle-click primary selection beside the clipboard.
     primary_selection_state: PrimarySelectionState,
     pub(crate) panel_surfaces: Vec<layer::PanelSurface>,
-    /// `wl_surface`s whose layer-shell role was destroyed. Smithay 0.7
-    /// keeps validating them on commit against reset (unanchored, zero
-    /// size) state and kills the client; see [`State::new_surface`].
-    pub(crate) dead_layer_surfaces: std::collections::HashSet<wl_surface::WlSurface>,
+    /// Ids of `wl_surface`s whose layer-shell role was destroyed.
+    /// Smithay 0.7 keeps validating them on commit against reset
+    /// (unanchored, zero size) state and kills the client; see
+    /// [`State::new_surface`]. Only the id is kept: retaining the
+    /// `WlSurface` itself would also retain its last committed buffer
+    /// (and through it the SHM pool mapping and fd) for every banner,
+    /// overview toggle and other short-lived layer surface (#307).
+    pub(crate) dead_layer_surfaces: std::collections::HashSet<ObjectId>,
     /// Popup trees per parent surface (#88).
     pub(crate) popups: smithay::desktop::PopupManager,
     /// Popups holding an explicit grab, oldest first: an outside click
@@ -186,9 +195,17 @@ pub(crate) struct ClientState {
     /// one client allowed a virtual keyboard (to hand back the keys
     /// IBus does not take).
     pub(crate) ime_bridge: bool,
+    /// Optional liveness marker for an ordinary portal service connection.
+    service_alive: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl ClientState {
+    pub(crate) fn portal_service(alive: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        Self {
+            service_alive: Some(alive),
+            ..Self::default()
+        }
+    }
     /// State for the compositor's own IBus bridge.
     pub(crate) fn ime_bridge() -> Self {
         Self {
@@ -203,7 +220,7 @@ impl ClientState {
 /// manager drains and applies them once per tick in `reconcile`, so
 /// protocol input and scene mutation stay on one call path for live
 /// events and tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum WindowRequest {
     /// Client asked to be maximized.
     Maximize,
@@ -214,9 +231,13 @@ pub(crate) enum WindowRequest {
     /// Client asked to leave fullscreen.
     Unfullscreen,
     /// Client started an interactive move (header-bar drag, #58).
-    Move,
+    Move(Serial, smithay::utils::Point<f64, smithay::utils::Logical>),
     /// Client started an interactive resize from these xdg edges.
-    Resize(u32),
+    Resize(
+        u32,
+        Serial,
+        smithay::utils::Point<f64, smithay::utils::Logical>,
+    ),
     /// A valid xdg-activation request: focus and raise (#89).
     Activate,
     /// Client asked to be minimized (GNOME's Hide).
@@ -228,11 +249,40 @@ pub(crate) enum WindowRequest {
 
 impl ClientData for ClientState {
     fn initialized(&self, _client_id: ClientId) {}
-    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
+    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {
+        if let Some(alive) = &self.service_alive {
+            alive.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
 }
 
 impl BufferHandler for State {
-    fn buffer_destroyed(&mut self, _buffer: &wl_buffer::WlBuffer) {}
+    fn buffer_destroyed(&mut self, buffer: &wl_buffer::WlBuffer) {
+        self.window_icons.buffer_destroyed(buffer);
+    }
+}
+
+impl State {
+    /// A CSD move/resize must use this seat's live press on this surface.
+    /// Preserve its coordinates through the request queue: client dispatch
+    /// can happen after later pointer motion (GNOME 51 grab semantics).
+    fn interactive_press(
+        &self,
+        surface: &wl_surface::WlSurface,
+        seat: &wl_seat::WlSeat,
+        serial: Serial,
+    ) -> Option<smithay::utils::Point<f64, smithay::utils::Logical>> {
+        if !self.seat.owns(seat) {
+            return None;
+        }
+        let pointer = self.seat.get_pointer()?;
+        if !pointer.has_grab(serial) {
+            return None;
+        }
+        let start = pointer.grab_start_data()?;
+        let (focus, _) = start.focus?;
+        (focus == *surface).then_some(start.location)
+    }
 }
 
 impl XdgShellHandler for State {
@@ -298,22 +348,30 @@ impl XdgShellHandler for State {
     }
 
     /// Queue an interactive move (CSD header-bar drag) for the manager.
-    fn move_request(&mut self, surface: ToplevelSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
-        self.window_requests
-            .push((surface.wl_surface().clone(), WindowRequest::Move));
+    fn move_request(&mut self, surface: ToplevelSurface, seat: wl_seat::WlSeat, serial: Serial) {
+        let Some(origin) = self.interactive_press(surface.wl_surface(), &seat, serial) else {
+            return;
+        };
+        self.window_requests.push((
+            surface.wl_surface().clone(),
+            WindowRequest::Move(serial, origin),
+        ));
     }
 
     /// Queue an interactive resize from `edges` for the manager.
     fn resize_request(
         &mut self,
         surface: ToplevelSurface,
-        _seat: wl_seat::WlSeat,
-        _serial: Serial,
+        seat: wl_seat::WlSeat,
+        serial: Serial,
         edges: smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge,
     ) {
+        let Some(origin) = self.interactive_press(surface.wl_surface(), &seat, serial) else {
+            return;
+        };
         self.window_requests.push((
             surface.wl_surface().clone(),
-            WindowRequest::Resize(edges as u32),
+            WindowRequest::Resize(edges as u32, serial, origin),
         ));
     }
 
@@ -387,6 +445,7 @@ impl State {
 impl CompositorHandler for State {
     fn destroyed(&mut self, surface: &wl_surface::WlSurface) {
         self.initial_outputs.remove(surface);
+        self.window_icons.remove(surface);
     }
 
     fn compositor_state(&mut self) -> &mut CompositorState {
@@ -422,7 +481,7 @@ impl CompositorHandler for State {
         smithay::wayland::compositor::add_pre_commit_hook::<State, _>(
             surface,
             |state, _dh, surface| {
-                if state.dead_layer_surfaces.contains(surface) {
+                if state.dead_layer_surfaces.contains(&surface.id()) {
                     smithay::wayland::compositor::with_states(surface, |states| {
                         let mut cached = states
                             .cached_state
@@ -437,6 +496,7 @@ impl CompositorHandler for State {
     fn commit(&mut self, surface: &wl_surface::WlSurface) {
         self.surface_commits = self.surface_commits.wrapping_add(1);
         on_commit_buffer_handler::<State>(surface);
+        self.window_icons.commit(surface);
         self.popups.commit(surface);
         if let Some(smithay::desktop::PopupKind::Xdg(popup)) = self.popups.find_popup(surface) {
             if !popup.is_initial_configure_sent() {
@@ -673,6 +733,7 @@ impl State {
         let mut seat_state = SeatState::new();
         let seat = seat_state.new_wl_seat(dh, SEAT_NAME);
         State {
+            window_icons: window_icons::WindowIcons::new(dh),
             // v6 (GNOME 51's): preferred buffer scale goes out per surface
             // (`send_surface_scales` in the runtime).
             compositor_state: CompositorState::new_v6::<State>(dh),

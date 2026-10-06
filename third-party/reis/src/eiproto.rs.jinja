@@ -1,0 +1,360 @@
+{# ei-scanner jinja template, for `` #}
+#![allow(
+    unknown_lints,
+    unused_imports,
+    unused_parens,
+    clippy::useless_conversion,
+    clippy::double_parens,
+    clippy::match_single_binding,
+    clippy::unused_unit,
+    clippy::empty_docs,
+    clippy::doc_lazy_continuation,
+
+    // Explicitly set to warn
+    clippy::doc_markdown,
+    clippy::must_use_candidate,
+    clippy::semicolon_if_nothing_returned,
+    clippy::used_underscore_binding,
+    clippy::match_same_arms,
+    clippy::str_to_string,
+    missing_docs,
+)]
+
+// GENERATED FILE
+
+{# TODO More complete handling of nullable types? #}
+
+use crate::wire;
+
+{%- macro interface_type(interface) -%}
+    super::{{interface.plainname}}::{{interface.plainname|camel}}
+{% endmacro -%}
+
+{%- macro arg_type(arg, owned, generic) -%}
+    {%- if arg.enum != None -%} super::{{ arg.enum.interface.plainname }}::{{ arg.enum.name|camel }}
+    {%- elif arg.protocol_type == 'string' and owned and arg.allow_null -%} Option<String>
+    {%- elif arg.protocol_type == 'string' and owned -%} String
+    {%- elif arg.protocol_type == 'string' and arg.allow_null -%} Option<&str>
+    {%- elif arg.protocol_type == 'string' -%} &str
+    {%- elif arg.protocol_type == 'int32' -%} i32
+    {%- elif arg.protocol_type == 'uint32' -%} u32
+    {%- elif arg.protocol_type == 'int64' -%} i64
+    {%- elif arg.protocol_type == 'uint64' -%} u64
+    {%- elif arg.protocol_type == 'object' and owned -%} {{interface_type(arg.interface)}}
+    {%- elif arg.protocol_type == 'object' -%} &{{interface_type(arg.interface)}}
+    {%- elif arg.protocol_type == 'new_id' and arg.interface -%} {{interface_type(arg.interface)}}
+    {%- elif arg.protocol_type == 'new_id' and arg.interface_arg and generic -%} {{arg.interface_arg.name|camel}}
+    {%- elif arg.protocol_type == 'new_id' and arg.interface_arg -%} crate::Object
+    {%- elif arg.protocol_type == 'float' -%} f32
+    {%- elif arg.protocol_type == 'fd' and owned -%} std::os::unix::io::OwnedFd
+    {%- elif arg.protocol_type == 'fd' -%} std::os::unix::io::BorrowedFd
+    {%- else -%} unhandled_arg_type_{{arg.protocol_type}}
+    {%- endif -%}
+{% endmacro -%}
+
+{#- Required because combining /// and /** */ comments doesn't work with indentation -#}
+{%- macro doc_commentize(text) %}
+  {#- lstrip is required because there's an empty line before each description -#}
+  {%- for line in text.lstrip().splitlines() %}
+/// {{line}}
+  {% endfor %}
+{% endmacro -%}
+
+{%- set message_enum_from = {'server': 'Event', 'client': 'Request'} -%}
+{%- set current_actor = 'server' if extra.eis else 'client' -%}
+{%- set opposite_actor = 'client' if extra.eis else 'server' -%}
+{%- set module = 'crate::eis' if extra.eis else 'crate::ei' -%}
+
+{%- set incoming_enum = message_enum_from[opposite_actor] -%}
+
+{%- macro message_doc_comment(message, sender_actor) %}
+    /// {{message.description.summary|capitalize}}.
+    ///
+    {% if message.context_type %}
+    /// **Note:** This {{ message_enum_from[sender_actor] | lower }} may only be used in a {{message.context_type}} [context type]({{module}}::handshake::ContextType).
+    ///
+    {% endif %}
+    {% if message.is_destructor %}
+    /// **Note:** This {{ message_enum_from[sender_actor] | lower }} is a destructor.
+    ///
+    {% endif %}
+    {{- doc_commentize(message.description.text|ei_escape_names) -}}
+{% endmacro -%}
+
+{% for interface in interfaces %}
+/// {{interface.description.summary|capitalize}}.
+///
+/// {{current_actor|capitalize}}-side protocol definition module for interface `{{interface.protocol_name}}`.
+///
+/** {{interface.description.text|ei_escape_names}} */
+pub mod {{interface.plainname}} {
+    use crate::wire;
+
+    /// {{interface.description.summary|capitalize}}.
+    ///
+    /// {{current_actor|capitalize}}-side interface proxy for interface `{{interface.protocol_name}}`.
+    ///
+    /** {{interface.description.text|ei_escape_names}} */
+    #[derive(Clone, Debug, Hash, Eq, PartialEq)]
+    pub struct {{interface.plainname|camel}}(pub(crate) crate::Object);
+
+    impl {{interface.plainname|camel}} {
+        /// Returns the negotiated version of the interface.
+        pub fn version(&self) -> u32 {
+            self.0.version()
+        }
+
+        /// Returns `true` if the backend has this object.
+        pub fn is_alive(&self) -> bool {
+          self.0.is_alive()
+        }
+    }
+
+    impl crate::private::Sealed for {{interface.plainname|camel}} {}
+
+    impl wire::Interface for {{interface.plainname|camel}} {
+        const NAME: &'static str = "{{interface.protocol_name}}";
+        const VERSION: u32 = {{interface.version}};
+        {% if extra.eis %}
+        const CLIENT_SIDE: bool = false;
+        {% else %}
+        const CLIENT_SIDE: bool = true;
+        {% endif %}
+
+        fn new_unchecked(object: crate::Object) -> Self {
+            Self(object)
+        }
+
+        fn as_object(&self) -> &crate::Object {
+          &self.0
+        }
+
+        fn as_arg(&self) -> wire::Arg<'_> {
+            self.0.as_arg()
+        }
+    }
+
+    impl {{module}}::Interface for {{interface.plainname|camel}} {}
+
+    impl {{interface.plainname|camel}} {
+        {% for outgoing in interface.outgoing %}
+        {{ message_doc_comment(outgoing, current_actor) -}}
+        {% if outgoing.arguments %}
+        /// # Parameters
+        ///
+        {% for arg in outgoing.arguments %}
+        {% if arg.protocol_type != 'new_id' and not arg.interface_arg_for %}
+        {% if arg.summary %}
+        /// - `{{arg.name}}`: {{arg.summary|capitalize}}.
+        {% else %}
+        /// - `{{arg.name}}`
+        {% endif %}
+        {% endif %}
+        {% endfor %}
+        ///
+        {% endif %}
+        pub fn {{outgoing.name}}<
+            {%- for arg in outgoing.arguments %}
+            {% if arg.interface_arg_for %}
+            {{arg.name|camel}}: {{module}}::Interface
+            {% endif %}
+            {% endfor -%}
+        >(
+            &self,
+            {%- for arg in outgoing.arguments %}
+            {% if arg.protocol_type != 'new_id' and not arg.interface_arg_for %}
+            {{arg.name}}: {{arg_type(arg, false, false)}},
+            {% endif %}
+            {% endfor -%}
+            ) -> (
+                {%- for arg in outgoing.arguments %}
+                {% if arg.protocol_type == 'new_id' %}
+                {{arg_type(arg, true, true)}}
+                {% endif %}
+                {% endfor -%}
+            ) {
+            {%- for arg in outgoing.arguments %}
+            {% if arg.protocol_type == 'new_id' and arg.interface_arg %}
+            let {{arg.name}} = self.0.backend_weak().new_object({{arg.interface_arg.name|camel}}::NAME.to_string(), {{arg.version_arg.name}});
+            {% elif arg.protocol_type == 'new_id' %}
+            let {{arg.name}} = self.0.backend_weak().new_object("{{arg.interface.protocol_name}}".to_string(), {{arg.version_arg.name}});
+            {% endif -%}
+            {% endfor -%}
+
+            let args = &[
+            {%- for arg in outgoing.arguments %}
+            {% if arg.interface_arg_for %}
+                wire::Arg::{{arg.protocol_type|camel}}(Some({{arg.name|camel}}::NAME)),
+            {% else %}
+                wire::Arg::{{arg.protocol_type|camel}}({{arg.name}}
+                {% if arg.protocol_type == 'new_id' %}
+                .id()
+                {% endif %}
+                .into()),
+            {% endif %}
+            {% endfor -%}
+            ];
+
+            self.0.request({{outgoing.opcode}}, args);
+            {% if outgoing.is_destructor %}
+                self.0.backend_weak().remove_id(self.0.id());
+            {% endif %}
+
+            (
+            {%- for arg in outgoing.arguments %}
+            {% if arg.protocol_type == 'new_id' %}
+            {% if arg.interface %}
+                {{arg_type(arg, true, false)}}({{arg.name}})
+            {% elif arg.interface_arg %}
+                {{arg.name}}.downcast_unchecked()
+            {% else -%}
+                unreachable
+            {% endif -%}
+            {% endif -%}
+            {% endfor -%}
+            )
+        }
+
+        {% endfor %}
+    }
+
+    {% for enum in interface.enums %}
+    pub use crate::eiproto_enum::{{interface.plainname}}::{{enum.camel_name}};
+    {% endfor %}
+
+    /// All {{incoming_enum|lower}}s of interface `{{interface.protocol_name}}`.
+    ///
+    /// {{incoming_enum}}s are messages that come from {{opposite_actor}}s.
+    #[non_exhaustive]
+    #[derive(Debug)]
+    pub enum {{incoming_enum}} {
+        {% for incoming in interface.incoming %}
+            {{ message_doc_comment(incoming, opposite_actor) -}}
+            {{ incoming.name|camel }}
+                {% if incoming.arguments %}
+                { {% for arg in incoming.arguments %}
+                    {% if not (arg.version_arg_for or arg.interface_arg_for) %}
+                    /// {{arg.summary|capitalize}}.
+                    {{arg.name}}: {{arg_type(arg, true, false)}},
+                    {% endif %}
+                {% endfor %} }
+                {% endif %},
+        {% endfor %}
+    }
+
+    impl {{incoming_enum}} {
+        pub(super) fn op_name(operand: u32) -> Option<&'static str> {
+            match operand {
+            {% for incoming in interface.incoming %}
+                {{incoming.opcode}} => Some("{{incoming.name}}"),
+            {% endfor %}
+                _ => None
+            }
+        }
+
+        pub(super) fn parse(operand: u32, _bytes: &mut wire::ByteStream) -> Result<Self, wire::ParseError> {
+            match operand {
+            {% for incoming in interface.incoming %}
+                {{incoming.opcode}} => {
+                    {% for arg in incoming.arguments %}
+                        let {{arg.name}} = _bytes.read_arg()?;
+                    {% endfor %}
+
+                    Ok(Self::{{ incoming.name|camel }}
+                    {% if incoming.arguments %} {
+                    {% for arg in incoming.arguments %}
+                        {% if arg.version_arg_for or arg.interface_arg_for %}
+                        {% elif arg.protocol_type == 'new_id' and arg.interface_arg %}
+                        {{arg.name}}: _bytes.backend().new_peer_object({{arg.name}}, {{arg.interface_arg.name}}, {{arg.version_arg.name}})?,
+                        {% elif arg.protocol_type == 'new_id' %}
+                        {{arg.name}}: _bytes.backend().new_peer_interface({{arg.name}}, {{arg.version_arg.name}})?,
+                        {% else %}
+                        {{arg.name}},
+                        {% endif %}
+                    {% endfor %} }
+                    {% endif %} )
+                }
+            {% endfor %}
+                opcode => Err(wire::ParseError::InvalidOpcode("{{interface.plainname}}", opcode)),
+            }
+        }
+
+        #[allow(unused_imports, unused_mut, unused_variables, unreachable_code, unreachable_patterns)]
+        pub(super) fn args(&self) -> Vec<wire::Arg<'_>> {
+            use crate::{wire::OwnedArg, Interface};
+            let mut args = Vec::new();
+            match self {
+            {% for incoming in interface.incoming %}
+                {% if incoming.arguments %}
+                Self::{{ incoming.name|camel }} {
+                    {% for arg in incoming.arguments %}
+                    {% if not (arg.version_arg_for or arg.interface_arg_for) %}
+                    {{arg.name}},
+                    {% endif %}
+                    {% endfor %}
+                } => {
+                    {% for arg in incoming.arguments %}
+                    {% if not (arg.version_arg_for or arg.interface_arg_for) %}
+                    args.push({{arg.name}}.as_arg());
+                    {% endif %}
+                    {% endfor %}
+                }
+                {% else %}
+                Self::{{ incoming.name|camel }} => {}
+                {% endif %}
+            {% endfor %}
+                _ => unreachable!()
+            }
+            args
+        }
+    }
+}
+
+pub use {{interface.plainname}}::{{interface.plainname|camel}};
+
+{% endfor %}
+
+/// All {{incoming_enum|lower}}s of all interfaces.
+///
+/// {{incoming_enum}}s are messages that come from {{opposite_actor}}s.
+#[non_exhaustive]
+#[derive(Debug)]
+pub enum {{incoming_enum}} {
+    {% for interface in interfaces %}
+        {{interface.plainname|camel}}({{interface.plainname}}::{{interface.plainname|camel}}, {{interface.plainname}}::{{incoming_enum}}),
+    {% endfor %}
+}
+
+impl {{incoming_enum}} {
+    pub(crate) fn op_name(interface: &str, operand: u32) -> Option<&'static str> {
+        match interface {
+            {% for interface in interfaces %}
+                "{{interface.protocol_name}}" =>
+                    {{interface.plainname}}::{{incoming_enum}}::op_name(operand),
+            {% endfor %}
+            _ => None,
+        }
+    }
+
+    pub(crate) fn parse(object: crate::Object, operand: u32, bytes: &mut wire::ByteStream) -> Result<Self, wire::ParseError> {
+        match object.interface() {
+            {% for interface in interfaces %}
+                "{{interface.protocol_name}}" => Ok(Self::{{interface.plainname|camel}}(
+                    object.downcast_unchecked(), 
+                    {{interface.plainname}}::{{incoming_enum}}::parse(operand, bytes)?)
+                ),
+            {% endfor %}
+            intr => Err(wire::ParseError::InvalidInterface(intr.to_owned())),
+        }
+    }
+}
+
+impl wire::MessageEnum for {{incoming_enum}} {
+    fn args(&self) -> Vec<wire::Arg<'_>> {
+        match self {
+            {% for interface in interfaces %}
+            Self::{{interface.plainname|camel}}(_, x) => x.args(),
+            {% endfor %}
+        }
+    }
+}
