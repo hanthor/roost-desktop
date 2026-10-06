@@ -1,0 +1,11 @@
+# CI only: the initial session runs once; logout must reach the real greeter.
+[terminal]
+vt = 1
+
+[initial_session]
+command = "/usr/libexec/roost-vm-session"
+user = "roost-test"
+
+[default_session]
+command = "cage -s -- gtkgreet -s /etc/greetd/gtkgreet.css"
+user = "greeter"
