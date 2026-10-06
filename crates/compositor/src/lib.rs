@@ -196,14 +196,20 @@ pub(crate) struct ClientState {
     /// one client allowed a virtual keyboard (to hand back the keys
     /// IBus does not take).
     pub(crate) ime_bridge: bool,
-    /// Optional liveness marker for an ordinary portal service connection.
+    /// Optional tag applied to windows of a D-Bus-created ordinary client.
+    pub(crate) connection_window_tag: Option<String>,
+    /// Optional liveness marker for an ordinary service-channel connection.
     service_alive: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl ClientState {
-    pub(crate) fn portal_service(alive: Arc<std::sync::atomic::AtomicBool>) -> Self {
+    pub(crate) fn service_connection(
+        alive: Arc<std::sync::atomic::AtomicBool>,
+        window_tag: Option<String>,
+    ) -> Self {
         Self {
             service_alive: Some(alive),
+            connection_window_tag: window_tag,
             ..Self::default()
         }
     }

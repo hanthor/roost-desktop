@@ -24,6 +24,8 @@ use zbus::{fdo, interface, ObjectServer};
 
 pub(crate) mod remote_desktop;
 mod remote_eis;
+#[cfg(test)]
+mod service_channel_tests;
 pub use remote_desktop::Input as RemoteInput;
 
 /// One lit output as the D-Bus side describes it.
@@ -139,7 +141,67 @@ pub enum ToLoop {
 struct ServiceChannel {
     display: smithay::reexports::wayland_server::DisplayHandle,
     authority: crate::capture_security::Authority,
-    clients: HashMap<String, Arc<AtomicBool>>,
+    clients: HashMap<String, Vec<ServiceConnection>>,
+}
+
+struct ServiceConnection {
+    alive: Arc<AtomicBool>,
+    typed: bool,
+}
+
+fn connection_window_tag(options: &HashMap<String, OwnedValue>) -> fdo::Result<Option<String>> {
+    // Mutter ignores unknown options and window-tag values of the wrong type.
+    let tag = options
+        .get("window-tag")
+        .and_then(|value| <&str>::try_from(value).ok());
+    if tag.is_some_and(|tag| tag.len() > 1024) {
+        return Err(fdo::Error::InvalidArgs(
+            "window tag exceeds 1024 bytes".into(),
+        ));
+    }
+    Ok(tag.map(str::to_owned))
+}
+
+impl ServiceChannel {
+    fn open_connection(
+        &mut self,
+        owner: String,
+        typed: bool,
+        window_tag: Option<String>,
+    ) -> fdo::Result<zbus::zvariant::OwnedFd> {
+        self.clients.retain(|_, connections| {
+            connections.retain(|connection| connection.alive.load(Ordering::SeqCst));
+            !connections.is_empty()
+        });
+        let count: usize = self.clients.values().map(Vec::len).sum();
+        let duplicate_provider = typed
+            && self
+                .clients
+                .get(&owner)
+                .is_some_and(|connections| connections.iter().any(|connection| connection.typed));
+        if count >= 32 || duplicate_provider {
+            return Err(fdo::Error::LimitsExceeded(
+                "service connection limit".into(),
+            ));
+        }
+        let (server, client) = std::os::unix::net::UnixStream::pair()
+            .map_err(|e| fdo::Error::Failed(e.to_string()))?;
+        let alive = Arc::new(AtomicBool::new(true));
+        self.display
+            .insert_client(
+                server,
+                Arc::new(crate::ClientState::service_connection(
+                    alive.clone(),
+                    window_tag,
+                )),
+            )
+            .map_err(|e| fdo::Error::Failed(e.to_string()))?;
+        self.clients
+            .entry(owner)
+            .or_default()
+            .push(ServiceConnection { alive, typed });
+        Ok(std::os::fd::OwnedFd::from(client).into())
+    }
 }
 
 #[interface(name = "org.gnome.Mutter.ServiceChannel")]
@@ -155,23 +217,17 @@ impl ServiceChannel {
             .authority
             .admit_service_connection(conn, &header, role)
             .await?;
-        self.clients.retain(|_, alive| alive.load(Ordering::SeqCst));
-        if self.clients.len() >= 32 || self.clients.contains_key(&owner) {
-            return Err(fdo::Error::LimitsExceeded(
-                "service connection limit".into(),
-            ));
-        }
-        let (server, client) = std::os::unix::net::UnixStream::pair()
-            .map_err(|e| fdo::Error::Failed(e.to_string()))?;
-        let alive = Arc::new(AtomicBool::new(true));
-        self.display
-            .insert_client(
-                server,
-                Arc::new(crate::ClientState::portal_service(alive.clone())),
-            )
-            .map_err(|e| fdo::Error::Failed(e.to_string()))?;
-        self.clients.insert(owner, alive);
-        Ok(std::os::fd::OwnedFd::from(client).into())
+        self.open_connection(owner, true, None)
+    }
+    async fn open_wayland_connection(
+        &mut self,
+        options: HashMap<String, OwnedValue>,
+        #[zbus(connection)] conn: &zbus::Connection,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+    ) -> fdo::Result<zbus::zvariant::OwnedFd> {
+        let owner = self.authority.admit_connection(conn, &header).await?;
+        let tag = connection_window_tag(&options)?;
+        self.open_connection(owner, false, tag)
     }
 }
 

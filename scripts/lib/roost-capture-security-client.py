@@ -1,5 +1,7 @@
 #!/usr/bin/python3
 """Real untrusted D-Bus caller, including forged portal well-known name."""
+import socket
+import struct
 from gi.repository import Gio, GLib
 bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
 def denied(dest, path, iface, method, args):
@@ -10,6 +12,36 @@ def denied(dest, path, iface, method, args):
         print(method + ": denied")
         return
     raise RuntimeError(method + " accepted an untrusted caller")
+def ordinary_display_connections():
+    # Two live displays from the same ordinary bus caller are allowed. The tag
+    # is metadata only; the capture checks below still deny this same caller.
+    sockets = []
+    try:
+        for tag in ("untrusted-test", "another-display"):
+            reply, fds = bus.call_with_unix_fd_list_sync(
+                "org.gnome.Mutter.ServiceChannel", "/org/gnome/Mutter/ServiceChannel",
+                "org.gnome.Mutter.ServiceChannel", "OpenWaylandConnection",
+                GLib.Variant("(a{sv})", ({"window-tag": GLib.Variant("s", tag)},)),
+                GLib.VariantType.new("(h)"), Gio.DBusCallFlags.NONE, 10000, None, None)
+            display = socket.socket(fileno=fds.get(reply.unpack()[0]))
+            sockets.append(display)
+            display.settimeout(10)
+            display.sendall(struct.pack("=III", 1, 12 << 16, 2))
+            events = b""
+            while len(events) < 24:
+                data = display.recv(24 - len(events))
+                if not data:
+                    raise RuntimeError("ordinary Wayland display closed before sync")
+                events += data
+            words = struct.unpack("=IIIIII", events)
+            if words[:2] != (2, 12 << 16) or words[3:] != (1, (12 << 16) | 1, 2):
+                raise RuntimeError("ordinary Wayland display did not complete actual sync")
+        print("OpenWaylandConnection: two ordinary tagged displays complete real wl_display.sync")
+    finally:
+        for display in sockets:
+            display.close()
+
+ordinary_display_connections()
 def checks():
     for role in (1, 2, 3):
         denied("org.gnome.Mutter.ServiceChannel", "/org/gnome/Mutter/ServiceChannel", "org.gnome.Mutter.ServiceChannel", "OpenWaylandServiceConnection", GLib.Variant("(u)", (role,)))
