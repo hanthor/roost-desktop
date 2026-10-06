@@ -200,11 +200,17 @@ pub(crate) struct ClientState {
     pub(crate) connection_window_tag: Option<String>,
     /// Optional liveness marker for an ordinary service-channel connection.
     service_alive: Option<Arc<std::sync::atomic::AtomicBool>>,
-    /// Original D-Bus peer credentials; a socketpair's peer is the compositor.
-    service_credentials: Option<Arc<zbus::fdo::ConnectionCredentials>>,
+    /// Original bus or accepted-socket peer credentials, with a process pin.
+    original_credentials: Option<Arc<zbus::fdo::ConnectionCredentials>>,
 }
 
 impl ClientState {
+    pub(crate) fn native_connection(socket: &UnixStream) -> Self {
+        Self {
+            original_credentials: crate::capture_security::socket_credentials(socket),
+            ..Self::default()
+        }
+    }
     pub(crate) fn service_connection(
         alive: Arc<std::sync::atomic::AtomicBool>,
         window_tag: Option<String>,
@@ -272,14 +278,22 @@ impl BufferHandler for State {
 }
 
 impl State {
-    /// Original service-channel caller PID when a live bus-supplied process
+    /// Original caller PID when a live bus- or kernel-supplied process
     /// descriptor pins it. Missing pins and exited peers yield no identity;
     /// this metadata never authorizes input, provider roles or capture.
+    pub fn authenticated_client_pid(&self, surface: &wl_surface::WlSurface) -> Option<u32> {
+        let client = surface.client()?;
+        let data = client.get_data::<ClientState>()?;
+        let credentials = data.original_credentials.as_ref()?;
+        crate::capture_security::pinned_process_id(credentials)
+    }
+
+    /// Service-channel-only form retained for callers that need that origin.
     pub fn authenticated_service_client_pid(&self, surface: &wl_surface::WlSurface) -> Option<u32> {
         let client = surface.client()?;
         let data = client.get_data::<ClientState>()?;
-        let credentials = data.service_credentials.as_ref()?;
-        crate::capture_security::pinned_process_id(credentials)
+        data.service_alive.as_ref()?;
+        self.authenticated_client_pid(surface)
     }
 
     /// A CSD move/resize must use this seat's live press on this surface.

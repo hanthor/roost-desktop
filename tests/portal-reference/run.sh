@@ -1,13 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "$(id -u)" -eq 0 ]; then
+    # Root prepares the bind-mounted evidence directory, then the complete
+    # desktop/portal journey runs as the same ordinary user as Nautilus.
+    chown -R --no-dereference roost-proof:roost-proof /out
+    status=0
+    env -u ROOST_PORTAL_BUS -u DBUS_SESSION_BUS_ADDRESS runuser -u roost-proof -- "$0" || status=$?
+    # Container root maps to the host artifact owner in rootless Podman.
+    # Restore evidence ownership even when a mandatory assertion failed.
+    chown -R --no-dereference 0:0 /out
+    exit "$status"
+fi
 if [ -z "${ROOST_PORTAL_BUS:-}" ]; then ROOST_PORTAL_BUS=1 exec dbus-run-session -- "$0"; fi
+[ "$(id -u)" -eq 1000 ] || { echo 'ordinary fixture UID required' >&2; exit 1; }
+id > /out/session-identity.txt
 export DISPLAY=:99 XDG_RUNTIME_DIR=/out/runtime XDG_CONFIG_HOME=/out/config XDG_DATA_HOME=/out/data XDG_STATE_HOME=/out/state
 export XDG_PICTURES_DIR=/out/pictures
 export XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=GNOME GSETTINGS_BACKEND=memory LIBGL_ALWAYS_SOFTWARE=1 GTK_A11Y=atspi
 mkdir -p "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME/xdg-desktop-portal" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
 chmod 700 "$XDG_RUNTIME_DIR"
 cp /repo/packaging/marlin/roost-portals.conf "$XDG_CONFIG_HOME/xdg-desktop-portal/portals.conf"
-rpm -q xdg-desktop-portal-gnome xdg-desktop-portal pipewire gtk4 libadwaita > /out/runtime-versions.txt
+rpm -q xdg-desktop-portal-gnome xdg-desktop-portal nautilus pipewire gtk4 libadwaita > /out/runtime-versions.txt
 [ "$(rpm -q --qf '%{VERSION}' xdg-desktop-portal-gnome | cut -d. -f1)" = 51 ] || { echo 'GNOME51 backend required' >&2; exit 1; }
 pids=""
 cleanup() { for pid in $pids; do kill "$pid" 2>/dev/null || true; done; }
@@ -33,6 +46,23 @@ python3 /repo/scripts/lib/roost-portal-ready.py org.freedesktop.impl.portal.desk
 /usr/libexec/xdg-desktop-portal-gtk >/out/gtk-backend.log 2>&1 & pids="$pids $!"
 /usr/libexec/xdg-desktop-portal --replace >/out/frontend.log 2>&1 & portal_frontend_pid=$!; pids="$pids $portal_frontend_pid"
 python3 /repo/scripts/lib/roost-portal-ready.py org.freedesktop.portal.Desktop org.freedesktop.portal.ScreenCast /out/frontend-ready.json --pid "$portal_frontend_pid"
+[ "$(rpm -q --qf '%{VERSION}' nautilus | cut -d. -f1)" = 51 ] || { echo 'GNOME51 Nautilus required' >&2; exit 1; }
+nautilus --gapplication-service >/out/nautilus.log 2>&1 & pids="$pids $!"
+for method in OpenFile SaveFile; do
+    for decision in cancel grant; do
+        file_out="/out/filechooser-$method-$decision"
+        python3 /repo/scripts/lib/roost-portal-filechooser-client.py "$file_out" "$method" "$decision" >"$file_out.log" 2>&1 & file_client=$!; pids="$pids $file_client"
+        end=$((SECONDS + 15))
+        until [ -s "$file_out.waiting.json" ]; do [ "$SECONDS" -lt "$end" ] || { cat "$file_out.log"; exit 1; }; sleep .1; done
+        python3 /repo/scripts/lib/roost-portal-filechooser-ui.py "$file_out" >"$file_out-ui.log" 2>&1
+        wait "$file_client"
+    done
+done
+if grep -qE 'Failed to open service channel Wayland connection|Compositor service channel missing' /out/nautilus.log; then
+    cat /out/nautilus.log
+    echo 'Nautilus fell back after native service-channel failure' >&2
+    exit 1
+fi
 for decision in cancel grant; do
     python3 /repo/scripts/lib/roost-portal-screenshot-client.py "/out/screenshot-$decision.png" "$decision" >"/out/screenshot-$decision.log" 2>&1 & shot_client=$!; pids="$pids $shot_client"
     end=$((SECONDS + 15))
