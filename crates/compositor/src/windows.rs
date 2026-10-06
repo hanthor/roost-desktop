@@ -2010,6 +2010,8 @@ impl WindowManager {
         }
         let mode = if self.lock_input_active {
             roost_shell_control::MODE_LOCK_SCREEN
+        } else if crate::layer::exclusive_popup_keyboard_layer(state).is_some() {
+            roost_shell_control::MODE_POPUP
         } else if self.overview_open {
             roost_shell_control::MODE_OVERVIEW
         } else {
@@ -3426,6 +3428,11 @@ pub struct TriggerState {
 }
 
 impl TriggerState {
+    /// Drop a pending Super tap when a modal owner or inhibitor takes input.
+    pub fn cancel(&mut self) {
+        self.super_armed = false;
+    }
+
     /// Follow GNOME's `enable-hot-corners`.
     pub fn set_hot_corner(&mut self, enabled: bool) {
         self.hot_corner_off = !enabled;
@@ -3644,6 +3651,17 @@ impl WindowManager {
             } => {
                 self.track_workspace_modifiers(keycode, pressed);
                 self.track_switcher_modifiers(keycode, pressed);
+                // Exclusive shell overlays own their navigation chords. Normal
+                // workspace/window/switcher shortcuts must not steal Alt arrows.
+                // Explicit popup-mode system accelerators still run below.
+                if crate::layer::exclusive_popup_keyboard_layer(state).is_some() {
+                    if !pressed && self.switcher_swallowed.contains(&keycode) {
+                        self.switcher_swallowed.retain(|k| *k != keycode);
+                    } else {
+                        self.keyboard_key(state, keycode, pressed, time);
+                    }
+                    return;
+                }
                 if !self.switcher_open && state.shortcuts_inhibited() {
                     self.inhibited_key(state, keycode, pressed, time);
                     return;

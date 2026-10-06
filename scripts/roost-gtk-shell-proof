@@ -3052,6 +3052,51 @@ dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -
 [ "$dims" = "$WIDTH,$HEIGHT" ] || fail G-SCREENSHOT-UI "the Screen capture is $dims, not $WIDTH,$HEIGHT"
 pass G-SCREENSHOT-UI "Print opens GNOME's screenshot UI; Screen and Capture save the whole screen"
 
+# Drive the real exclusive-keyboard overlay and inspect the saved PNG,
+# rather than treating a preference write or geometry helper as UI proof.
+while IFS='|' read -r shot_keys shot_dims shot_position shot_label; do
+    shot_workspace="$(jq -r '.active_workspace' "$CSTATE")"
+    sleep 1.1 # GNOME filenames have one-second resolution.
+    marker="$ARTIFACTS/shot-keys-$shot_label.marker"
+    touch "$marker"
+    xdotool key Print
+    end=$(($(date +%s) + 20))
+    until "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-shot-keys-$shot_label.json" 5 >/dev/null 2>&1 &&
+        showing "$ARTIFACTS/a11y-shot-keys-$shot_label.json" "Capture" || [ "$(date +%s)" -gt "$end" ]; do sleep 0.5; done
+    showing "$ARTIFACTS/a11y-shot-keys-$shot_label.json" "Capture" ||
+        fail G-SCREENSHOT-KEYS "Print did not open selection for $shot_label"
+    xdotool key --clearmodifiers s r
+    # Intentional word splitting: the fixture is a list of xdotool keys.
+    # shellcheck disable=SC2086
+    xdotool key --clearmodifiers $shot_keys
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-shot-keys-$shot_label-result.json" 10 ||
+        fail G-SCREENSHOT-KEYS "selection accessibility dump failed for $shot_label"
+    showing "$ARTIFACTS/a11y-shot-keys-$shot_label-result.json" \
+        "Selected area at x ${shot_position%,*}, y ${shot_position#*,}, width ${shot_dims%,*}, height ${shot_dims#*,}" ||
+        fail G-SCREENSHOT-KEYS "$shot_label did not move/resize to the expected area"
+    cstate ".active_workspace == $shot_workspace and (.overview_open | not)" "screenshot keeps workspace" ||
+        fail G-SCREENSHOT-KEYS "$shot_label navigation escaped into desktop shortcuts"
+    scrot "$ARTIFACTS/shot-keys-$shot_label-overlay.png" >/dev/null
+    xdotool key --clearmodifiers Return
+    end=$(($(date +%s) + 15))
+    newest=""
+    while [ "$(date +%s)" -le "$end" ]; do
+        newest="$(find "$XDG_PICTURES_DIR/Screenshots" -name 'Screenshot From *.png' -newer "$marker" 2>/dev/null | head -1)"
+        [ -n "$newest" ] && break
+        sleep 0.3
+    done
+    [ -n "$newest" ] || fail G-SCREENSHOT-KEYS "$shot_label captured nothing"
+    dims="$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$newest")"
+    [ "$dims" = "$shot_dims" ] || fail G-SCREENSHOT-KEYS "$shot_label saved $dims, expected $shot_dims"
+    cp "$newest" "$ARTIFACTS/shot-keys-$shot_label.png"
+done <<EOF
+ctrl+Left ctrl+Right Left|$((WIDTH / 4 + 5)),$((HEIGHT / 4))|$((WIDTH * 3 / 8 - 5)),$((HEIGHT * 3 / 8))|resize
+alt+ctrl+Right alt+shift+Down|$((WIDTH / 4)),$((HEIGHT / 4))|$((WIDTH * 3 / 8 + 1)),$((HEIGHT * 3 / 4))|move
+shift+Left|$((WIDTH * 5 / 8)),$((HEIGHT / 4))|0,$((HEIGHT * 3 / 8))|edge
+ctrl+Left r|$((WIDTH / 4)),$((HEIGHT / 4))|$((WIDTH * 3 / 8)),$((HEIGHT * 3 / 8))|reset
+EOF
+pass G-SCREENSHOT-KEYS "arrows, Ctrl, Alt, Shift and R produce actual captures with bounded selection dimensions"
+
 # GNOME's window selector: Window lays the windows out as previews with
 # the focused one chosen; choosing another test window and Capture saves
 # that window alone, at its own size.

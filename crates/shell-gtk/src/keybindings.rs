@@ -10,7 +10,7 @@ use gtk4::prelude::*;
 
 use roost_shell_control::{
     SwitcherKey, SwitcherKeyKind, KEYSYM_ABOVE_TAB, MODE_LOCK_SCREEN, MODE_NORMAL, MODE_OVERVIEW,
-    MODE_UNLOCK_SCREEN,
+    MODE_POPUP, MODE_UNLOCK_SCREEN,
 };
 
 pub const SCHEMA: &str = "org.gnome.shell.keybindings";
@@ -127,7 +127,7 @@ struct Spec {
 }
 
 const NORMAL_OVERVIEW: u32 = MODE_NORMAL | MODE_OVERVIEW;
-const ALL: u32 = MODE_NORMAL | MODE_OVERVIEW | MODE_LOCK_SCREEN | MODE_UNLOCK_SCREEN;
+const ALL: u32 = MODE_NORMAL | MODE_OVERVIEW | MODE_LOCK_SCREEN | MODE_UNLOCK_SCREEN | MODE_POPUP;
 
 const DIGIT_DEFAULTS: [&str; 9] = [
     "<Super>1", "<Super>2", "<Super>3", "<Super>4", "<Super>5", "<Super>6", "<Super>7", "<Super>8",

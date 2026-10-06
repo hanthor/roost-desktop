@@ -472,6 +472,8 @@ pub const MODE_NORMAL: u32 = 1;
 pub const MODE_OVERVIEW: u32 = 2;
 pub const MODE_LOCK_SCREEN: u32 = 4;
 pub const MODE_UNLOCK_SCREEN: u32 = 8;
+/// GNOME Shell 51 ActionMode.POPUP, used by its screenshot grab.
+pub const MODE_POPUP: u32 = 1 << 7;
 
 /// One grabbed key combination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

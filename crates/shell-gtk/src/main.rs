@@ -37,6 +37,7 @@ mod preview_chrome;
 mod providers;
 mod screencast;
 mod screensaver;
+mod screenshot_selection;
 mod screenshot_ui;
 mod services;
 mod shell_dbus;
