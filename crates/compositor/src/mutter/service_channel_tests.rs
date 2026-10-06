@@ -46,10 +46,9 @@ fn service_connection_transports_real_sync_and_reclaims_disconnected_slots() {
     comp.pump();
     let mut events = [0u8; 24];
     socket.read_exact(&mut events).unwrap();
-    let words: Vec<u32> = events
-        .chunks_exact(4)
-        .map(|b| u32::from_ne_bytes(b.try_into().unwrap()))
-        .collect();
+    let (chunks, remainder) = events.as_chunks::<4>();
+    assert!(remainder.is_empty());
+    let words: Vec<u32> = chunks.iter().copied().map(u32::from_ne_bytes).collect();
     assert_eq!(&words[..2], &[2, 12 << 16]); // wl_callback.done
     assert_eq!(&words[3..], &[1, (12 << 16) | 1, 2]); // wl_display.delete_id
     let mut sockets = vec![socket];
