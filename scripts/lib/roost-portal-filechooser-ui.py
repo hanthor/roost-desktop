@@ -11,8 +11,12 @@ out = Path(sys.argv[1])
 request = json.loads(out.with_suffix(".waiting.json").read_text())
 def walk(acc, nodes, controls):
     try:
-        showing = acc.getState().contains(pyatspi.STATE_SHOWING)
-        nodes.append({"role": acc.getRoleName(), "name": acc.name, "showing": showing})
+        state = acc.getState()
+        showing = state.contains(pyatspi.STATE_SHOWING)
+        nodes.append({"role": acc.getRoleName(), "name": acc.name, "showing": showing,
+                      "selected": state.contains(pyatspi.STATE_SELECTED),
+                      "focused": state.contains(pyatspi.STATE_FOCUSED),
+                      "sensitive": state.contains(pyatspi.STATE_SENSITIVE)})
         if showing:
             controls.append(acc)
         for i in range(acc.childCount):
@@ -69,9 +73,6 @@ while time.monotonic() < end:
                     raise RuntimeError("Nautilus picker action was refused")
                 print("actual Nautilus FileChooser action: " + name)
                 sys.exit(0)
-    elif located and out.with_suffix(".response.json").exists():
-        print("actual Nautilus selection activation completed")
-        sys.exit(0)
     time.sleep(.1)
 nodes, controls = dialog()
 out.with_suffix(".a11y.json").write_text(json.dumps(nodes, indent=2))
