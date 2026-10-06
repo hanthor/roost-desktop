@@ -10,15 +10,21 @@ from gi.repository import Gtk
 
 path = pathlib.Path(os.environ["XDG_RUNTIME_DIR"], "roost-vm-input.json")
 count = 0
+window = None
 
 
 def publish():
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps({"pid": os.getpid(), "count": count}))
+    temporary.write_text(json.dumps({"pid": os.getpid(), "count": count,
+                                    "mapped": window.get_mapped(),
+                                    "active": window.is_active(),
+                                    "width": window.get_width(),
+                                    "height": window.get_height()}))
     temporary.replace(path)
 
 
 def activate(app):
+    global window
     window = Gtk.ApplicationWindow(application=app, title="VM input probe")
     window.set_default_size(400, 240)
     button = Gtk.Button(label="Count-only input probe")
@@ -33,6 +39,14 @@ def activate(app):
         return True
     controller.connect("key-pressed", pressed)
     window.add_controller(controller)
+    window.connect("notify::mapped", lambda *_arguments: publish())
+    window.connect("notify::is-active", lambda *_arguments: publish())
+    def allocated(widget, _clock):
+        # Mapping/activation notifications can precede the first allocation.
+        publish()
+        return not (widget.get_mapped() and widget.get_width() > 0
+                    and widget.get_height() > 0)
+    window.add_tick_callback(allocated)
     window.present()
     button.grab_focus()
     publish()

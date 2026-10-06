@@ -29,7 +29,7 @@ feature tour:
 | V-NORMAL-INPUT / V-NORMAL-INPUT-FAIL-CLOSED | A real GTK client receives ordinary QMP keys while unlocked, then receives none while locked; artifacts contain only counts and PID, never key values |
 | V-VT | VT away/back, DRM pause/activate events, unchanged process identities and app rectangles, matching body plus a fresh visible count update from the real GTK client |
 | V-SUSPEND | Real logind suspend reaches QEMU `suspended`; the first guest snapshot after `system_wakeup` must already be locked, with all application identities intact; the real varied lock mask must repaint within five seconds, matching the pre-suspend mask; QEMU inactive-output placeholders fail |
-| V-SLEEP-AUTH-FAIL-CLOSED / V-SLEEP-FRESH-AUTH | A second real suspend interrupts a correct password attempt delayed by actual pam_exec; the real PAM success from the old generation is refused, then fresh correct authentication succeeds |
+| V-SLEEP-AUTH-FAIL-CLOSED / V-SLEEP-FRESH-AUTH | The single real suspend interrupts a correct password attempt delayed by actual pam_exec; the real PAM success from the old generation is refused, then fresh correct authentication succeeds |
 | V-SLEEP-CLIENT-REPAINT | The same GTK client receives a fresh key and visibly repaints after wake/unlock |
 | V-VT-FAIL-CLOSED | VT away/back while locked keeps the mask and original application processes |
 | V-AUTH-FAIL-CLOSED | Real PAM service temporarily uses `pam_deny`; fresh submitted/refused milestones prove the correct test password was attempted and denied; original service restored afterward |
@@ -46,7 +46,12 @@ requires exact window and process identity preservation.
 
 The compositor also listens to the trusted logind system-bus sleep signal:
 preparation invalidates pending authentication generations and engages its own lock; wake restores KMS connector/plane
-state and retires lost flip buffers without marking them presented. Wake
+state and retires lost flip buffers without marking them presented. After
+the blocking device reset, bounded nonblocking reads drain obsolete kernel
+completions before any new frame is submitted. A valid modeset completion
+can carry the preceding vblank's timestamp, so timestamps alone do not
+identify abandoned frames. A failed reset or drain keeps scanout blocked
+until recovery succeeds. Wake
 recovery does not depend on a VT change; an off-seat wake waits for seat
 activation. This does not establish a delay inhibitor or physical masked
 frame acknowledgement before sleep.
@@ -58,3 +63,41 @@ claim those parts of issue #62 are complete.
 
 Protocol references: [QEMU guest agent](https://www.qemu.org/docs/master/interop/qemu-ga-ref.html)
 and [QEMU wake-up](https://www.qemu.org/docs/master/interop/qemu-qmp-ref.html#command-system-wakeup).
+
+The shared GPU profile `virtio-vga-pcie-pm-preserved-v1` keeps the same
+virtio-vga, resolution, CPU, RAM and workloads. It places that GPU behind
+one PCIe root port and advertises PM no-soft-reset. All native GNOME
+capture and Roost/performance boot callers use the same GPU arguments;
+manifest/report fields record them. Fresh GNOME comparison evidence must
+use this profile; old-profile latency or cadence does not qualify it.
+The actual guest PCI capability chain must include PCIe, PM and the
+no-soft-reset bit, and each real resume must produce fresh host resource
+creation, backing attachment and nonzero scanout commands as well as the
+painted lock mask. A configured flag alone never passes the gate. The
+shipping AWS Bochs GPU is a separate, unmeasured suspend profile.
+
+The diagnosed fixture runs kernel 7.2.8-arch1-2 and QEMU 10.2.1. In
+[Linux 7.2.8 virtio GPU](https://raw.githubusercontent.com/gregkh/linux/v7.2.8/drivers/gpu/drm/virtio/virtgpu_drv.c)
+the driver has no freeze/restore callbacks. The
+[PCI PM path](https://raw.githubusercontent.com/gregkh/linux/v7.2.8/drivers/virtio/virtio_pci_common.c)
+skips reset when the device advertises no-soft-reset; otherwise
+[virtio restore](https://raw.githubusercontent.com/gregkh/linux/v7.2.8/drivers/virtio/virtio.c)
+resets the device. [QEMU 10.2 virtio PCI](https://raw.githubusercontent.com/qemu/qemu/v10.2.0/hw/virtio/virtio-pci.c)
+provides that capability only behind a PCIe port and preserves the device
+in D3hot. A [GPU reset](https://raw.githubusercontent.com/qemu/qemu/v10.2.0/hw/display/virtio-gpu.c)
+destroys its resources and clears the display. The prior actual trial
+37211055978/111464650400 reached real S3, stayed locked with apps intact
+and processed guest pageflips, but showed inactive host output and no
+fresh resource uploads. It remains a failed qualification. The supported
+PM profile requires its own strict actual run; no kernel/package override,
+extra VM matrix cell or physical hardware claim is introduced. QEMU 10.2
+is required, so the existing performance runner uses ubuntu-26.04.
+
+The performance lane keeps the user-authorized single-S3 contract: the session
+is prelocked and a real PAM attempt is pending before sleep. Its fail-closed
+wake and stale-success/fresh-authentication checks share that cycle. Varied
+mask repaint is retained as an observation; fresh host GPU uploads, client
+input/repaint and unchanged application identity remain mandatory. The prior
+native lifecycle qualification (#265) separately demonstrated locking from
+an unlocked session and two real suspend cycles on the preserved-resource VM
+profile; that evidence does not certify a later candidate automatically.
