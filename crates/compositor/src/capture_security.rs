@@ -50,6 +50,46 @@ pub(crate) struct ConnectionCaller {
     pub credentials: Arc<fdo::ConnectionCredentials>,
 }
 
+/// Capture the kernel's original peer identity while accepting a native
+/// socket. SO_PEERPIDFD pins the socket peer; opening a pidfd from a numeric
+/// SO_PEERCRED PID later would instead risk pinning a recycled process.
+pub(crate) fn socket_credentials(
+    socket: &std::os::unix::net::UnixStream,
+) -> Option<Arc<fdo::ConnectionCredentials>> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let peer = rustix::net::sockopt::socket_peercred(socket).ok()?;
+    let pid = u32::try_from(peer.pid.as_raw())
+        .ok()
+        .filter(|pid| *pid != 0)?;
+    let mut descriptor: libc::c_int = -1;
+    let mut length = std::mem::size_of_val(&descriptor) as libc::socklen_t;
+    // SAFETY: socket remains borrowed; both output pointers refer to writable
+    // values of the specified size. On success the kernel returns an owned FD.
+    let result = unsafe {
+        libc::getsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERPIDFD,
+            (&mut descriptor as *mut libc::c_int).cast(),
+            &mut length,
+        )
+    };
+    if result != 0 || descriptor < 0 {
+        return None;
+    }
+    // SAFETY: a successful SO_PEERPIDFD allocated this descriptor for us.
+    let descriptor = unsafe { OwnedFd::from_raw_fd(descriptor) };
+    if length as usize != std::mem::size_of::<libc::c_int>() {
+        return None;
+    }
+    Some(Arc::new(
+        fdo::ConnectionCredentials::default()
+            .set_unix_user_id(peer.uid.as_raw())
+            .set_process_id(pid)
+            .set_process_fd(descriptor.into()),
+    ))
+}
+
 /// A numeric PID alone can be recycled. Only expose live process identity
 /// when the bus supplied a descriptor pinning the original connection peer.
 pub(crate) fn pinned_process_id(credentials: &fdo::ConnectionCredentials) -> Option<u32> {
@@ -218,6 +258,59 @@ fn installed_service(pid: u32, role: ServiceClient) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_socket_identity_pins_the_connecting_process_and_expires_on_exit() {
+        use std::os::unix::net::UnixListener;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("peer.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut child = Command::new("/usr/bin/python3")
+            .args(["-c", "import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); sys.stdin.buffer.read(1)"])
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let end = Instant::now() + Duration::from_secs(5);
+        let socket = loop {
+            match listener.accept() {
+                Ok((socket, _)) => break socket,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < end =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("native peer did not connect: {error}"),
+            }
+        };
+        let credentials = socket_credentials(&socket).unwrap();
+        let original = pinned_process_id(&credentials);
+        let pid = child.id();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_ne!(pid, std::process::id());
+        assert_eq!(original, Some(pid));
+        assert_eq!(
+            credentials.unix_user_id(),
+            Some(rustix::process::geteuid().as_raw())
+        );
+        assert_eq!(pinned_process_id(&credentials), None);
+    }
+
+    #[test]
+    fn native_peer_metadata_does_not_make_the_client_an_ime_or_service() {
+        let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let client = crate::ClientState::native_connection(&socket);
+        assert!(!client.ime_bridge);
+        assert!(client.connection_window_tag.is_none());
+        assert!(client.service_alive.is_none());
+        assert_eq!(
+            pinned_process_id(client.original_credentials.as_ref().unwrap()),
+            Some(std::process::id())
+        );
+    }
     #[test]
     fn process_identity_requires_a_pin_and_does_not_survive_peer_exit() {
         let numeric = fdo::ConnectionCredentials::default().set_process_id(std::process::id());

@@ -259,7 +259,7 @@ fn service_window_keeps_original_pinned_process_instead_of_socketpair_creator() 
     let mut comp = crate::TestCompositor::new();
     let (server, socket) = UnixStream::pair().unwrap();
     let mut data = crate::ClientState::service_connection(Arc::new(AtomicBool::new(true)), None);
-    data.service_credentials = Some(credentials);
+    data.original_credentials = Some(credentials);
     let client = comp
         .display
         .handle()
