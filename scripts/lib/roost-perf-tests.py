@@ -3,6 +3,7 @@
 import importlib.machinery
 import importlib.util
 import json
+import os
 import base64
 from pathlib import Path
 import tempfile
@@ -22,6 +23,7 @@ def load(name, path):
 guest = load("guest", ROOT / "scripts/lib/roost-perf-guest.py")
 host = load("host", ROOT / "scripts/roost-vm-perf")
 sysprof = load("sysprof", ROOT / "scripts/lib/gnome_sysprof.py")
+phase = load("phase", ROOT / "packaging/marlin/perf/roost-perf-phase")
 
 
 class SysprofCapture(unittest.TestCase):
@@ -382,6 +384,22 @@ class Accounting(unittest.TestCase):
             with self.assertRaises(ValueError):
                 host.guest_probe(agent, action, index)
 
+
+
+
+class CaptureAcquisition(unittest.TestCase):
+    def test_real_kernel_writer_handles_exclude_readers_and_other_inodes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "capture"
+            target.write_bytes(b"raw capture fixture")
+            other = Path(directory) / "other"
+            other.write_bytes(b"other writer")
+            with target.open("rb") as reader, target.open("ab") as writer, other.open("ab"):
+                metadata = os.fstat(reader.fileno())
+                observed = phase.capture_writers(os.getpid(), metadata)
+                self.assertEqual([row["fd"] for row in observed], [writer.fileno()])
+                writer.close()
+                self.assertEqual(phase.capture_writers(os.getpid(), metadata), [])
 
 if __name__ == "__main__":
     unittest.main()
