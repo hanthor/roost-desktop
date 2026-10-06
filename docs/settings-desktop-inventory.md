@@ -1,6 +1,6 @@
 # GNOME 51 desktop schema inventory
 
-All 429 keys from `gsettings-desktop-schemas-51.0-1.fc45.x86_64` in the GNOME 51 reference container. This table audits Roost main plus #63 settings changes. “Via GTK” means the GTK Wayland backend translates the key through its settings portal or direct GSettings fallback; it does not imply support by every application or the compositor. “Ignored” records a current limitation, not permission to disregard binding knowledge.
+All 429 keys from `gsettings-desktop-schemas-51.0-1.fc45.x86_64` in the GNOME 51 reference container. Source re-audit: main `44edb6aca704ef0ada32b8c6111383ea5c3c6afe` (2026-10-06). See [the control-center audit](gnome-settings-audit.md) for open implementation and qualification gaps. “Via GTK” means the GTK Wayland backend translates the key through its settings portal or direct GSettings fallback; it does not imply support by every application or the compositor. “Ignored” records a current limitation, not permission to disregard binding knowledge.
 
 Source: [GTK Wayland settings translations](https://github.com/GNOME/gtk/blob/4.14.5/gdk/wayland/gdkdisplay-wayland.c). Related shell, Mutter and settings-daemon keys are in [settings-map.md](settings-map.md).
 
@@ -518,12 +518,12 @@ Source: [GTK Wayland settings translations](https://github.com/GNOME/gtk/blob/4.
 | begin-move | Honored | Live shell accelerator registration and compositor dispatch |
 | begin-resize | Honored | Live shell accelerator registration and compositor dispatch |
 | close | Honored | Live shell accelerator registration and compositor dispatch |
-| cycle-group | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
-| cycle-group-backward | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
+| cycle-group | Honored | Live SetSwitcherKeys registration; window MRU popup or immediate window/group cycling |
+| cycle-group-backward | Honored | Live SetSwitcherKeys registration; window MRU popup or immediate window/group cycling |
 | cycle-panels | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
 | cycle-panels-backward | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
-| cycle-windows | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
-| cycle-windows-backward | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
+| cycle-windows | Honored | Live SetSwitcherKeys registration; window MRU popup or immediate window/group cycling |
+| cycle-windows-backward | Honored | Live SetSwitcherKeys registration; window MRU popup or immediate window/group cycling |
 | lower | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
 | maximize | Honored | Live shell accelerator registration and compositor dispatch |
 | maximize-horizontally | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
@@ -590,8 +590,8 @@ Source: [GTK Wayland settings translations](https://github.com/GNOME/gtk/blob/4.
 | switch-to-workspace-left | Honored | Live shell accelerator registration and compositor dispatch |
 | switch-to-workspace-right | Honored | Live shell accelerator registration and compositor dispatch |
 | switch-to-workspace-up | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
-| switch-windows | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
-| switch-windows-backward | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
+| switch-windows | Honored | Live SetSwitcherKeys registration; window MRU popup or immediate window/group cycling |
+| switch-windows-backward | Honored | Live SetSwitcherKeys registration; window MRU popup or immediate window/group cycling |
 | toggle-above | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
 | toggle-fullscreen | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
 | toggle-maximized | Honored | Live shell accelerator registration and compositor dispatch |
