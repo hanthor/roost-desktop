@@ -2365,6 +2365,45 @@ fn gnome_client_fullscreen_request_applies_on_reconcile() {
     );
 }
 
+#[test]
+fn fullscreen_corner_guard_tracks_real_requests_visibility_and_geometry() {
+    let mut f = layout_windows();
+    let corner = (1.0, 1.0).into();
+    assert!(!f.manager.fullscreen_at(corner));
+    f.client_b
+        .toplevel
+        .as_ref()
+        .unwrap()
+        .set_fullscreen(None::<&wayland_client::protocol::wl_output::WlOutput>);
+    f.queue_b.flush().unwrap();
+    f.comp.pump();
+    f.manager.reconcile(&mut f.comp.state);
+    assert!(f.manager.fullscreen_at(corner));
+    for pos in [(-1.0, 1.0), (1280.0, 1.0), (1.0, 800.0), (f64::NAN, 1.0)] {
+        assert!(!f.manager.fullscreen_at(pos.into()));
+    }
+    f.client_b.toplevel.as_ref().unwrap().unset_fullscreen();
+    f.queue_b.flush().unwrap();
+    f.comp.pump();
+    f.manager.reconcile(&mut f.comp.state);
+    assert!(!f.manager.fullscreen_at(corner));
+    f.client_b
+        .toplevel
+        .as_ref()
+        .unwrap()
+        .set_fullscreen(None::<&wayland_client::protocol::wl_output::WlOutput>);
+    f.queue_b.flush().unwrap();
+    f.comp.pump();
+    f.manager.reconcile(&mut f.comp.state);
+    assert!(f.manager.fullscreen_at(corner));
+    assert!(f.manager.move_to_workspace(&mut f.comp.state, f.id_b, 1));
+    assert!(!f.manager.fullscreen_at(corner));
+    assert!(f.manager.switch_workspace(&mut f.comp.state, 1));
+    assert!(f.manager.fullscreen_at(corner));
+    assert!(f.manager.minimize(&mut f.comp.state, f.id_b));
+    assert!(!f.manager.fullscreen_at(corner));
+}
+
 /// No R press reached any client: preset-cycle presses are consumed
 /// and only releases (plus bare modifiers) are observed.
 fn assert_no_r_press(f: &ThreeFixture) {

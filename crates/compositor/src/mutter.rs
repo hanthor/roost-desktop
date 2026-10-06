@@ -173,6 +173,7 @@ impl ServiceChannel {
         owner: String,
         typed: bool,
         window_tag: Option<String>,
+        credentials: Option<Arc<fdo::ConnectionCredentials>>,
     ) -> fdo::Result<zbus::zvariant::OwnedFd> {
         self.clients.retain(|_, connections| {
             connections.retain(|connection| connection.alive.load(Ordering::SeqCst));
@@ -192,14 +193,10 @@ impl ServiceChannel {
         let (server, client) = std::os::unix::net::UnixStream::pair()
             .map_err(|e| fdo::Error::Failed(e.to_string()))?;
         let alive = Arc::new(AtomicBool::new(true));
+        let mut client_data = crate::ClientState::service_connection(alive.clone(), window_tag);
+        client_data.service_credentials = credentials;
         self.display
-            .insert_client(
-                server,
-                Arc::new(crate::ClientState::service_connection(
-                    alive.clone(),
-                    window_tag,
-                )),
-            )
+            .insert_client(server, Arc::new(client_data))
             .map_err(|e| fdo::Error::Failed(e.to_string()))?;
         self.clients
             .entry(owner)
@@ -218,11 +215,11 @@ impl ServiceChannel {
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> fdo::Result<zbus::zvariant::OwnedFd> {
         let role = crate::capture_security::ServiceClient::from_wire(service_client_type)?;
-        let owner = self
+        let caller = self
             .authority
             .admit_service_connection(conn, &header, role)
             .await?;
-        self.open_connection(owner, true, None)
+        self.open_connection(caller.owner, true, None, Some(caller.credentials))
     }
     async fn open_wayland_connection(
         &mut self,
@@ -230,9 +227,9 @@ impl ServiceChannel {
         #[zbus(connection)] conn: &zbus::Connection,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> fdo::Result<zbus::zvariant::OwnedFd> {
-        let owner = self.authority.admit_connection(conn, &header).await?;
+        let caller = self.authority.admit_connection(conn, &header).await?;
         let tag = connection_window_tag(&options)?;
-        self.open_connection(owner, false, tag)
+        self.open_connection(caller.owner, false, tag, Some(caller.credentials))
     }
 }
 

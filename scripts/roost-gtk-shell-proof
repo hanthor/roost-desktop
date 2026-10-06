@@ -282,6 +282,7 @@ HINTS_PID=""
 PERMISSIONS_PID=""
 INHIBITOR_PID=""
 SCROLL_PROBE_PID=""
+HOT_CORNER_PID=""
 IME_PIDS=""
 cleanup() {
     if [ -n "$ICON_PID" ]; then kill "$ICON_PID" 2>/dev/null || true; fi
@@ -289,6 +290,7 @@ cleanup() {
     if [ -n "$INHIBITOR_PID" ]; then kill "$INHIBITOR_PID" 2>/dev/null || true; fi
     if [ -n "$PERMISSIONS_PID" ]; then kill "$PERMISSIONS_PID" 2>/dev/null || true; fi
     if [ -n "$SCROLL_PROBE_PID" ]; then kill "$SCROLL_PROBE_PID" 2>/dev/null || true; fi
+    if [ -n "$HOT_CORNER_PID" ]; then kill "$HOT_CORNER_PID" 2>/dev/null || true; fi
     # shellcheck disable=SC2086
     if [ -n "$IME_PIDS" ]; then kill $IME_PIDS 2>/dev/null || true; fi
     # The bridge daemonized ibus-daemon for this session's display.
@@ -2221,6 +2223,47 @@ xdotool key Escape
 cstate '.overview_open | not' "hot corner dismissed" ||
     fail G-HOT-CORNER "the corner-opened overview did not close"
 pass G-HOT-CORNER "live GNOME disable rejects the corner; enable opens the actual overview"
+
+# A genuine GTK fullscreen request blocks accidental corner opening, while
+# deliberate Super access remains available and unfullscreen restores it.
+corner_requests="$ARTIFACTS/hot-corner-requests.json"
+rm -f "$corner_requests" "$corner_requests.ack"
+corner_count="$(jq '.windows | length' "$CSTATE")"
+WAYLAND_DISPLAY="$SOCKET_NAME" ROOST_TEST_REQUESTS="$corner_requests" "$PY" "$ROOT/scripts/lib/roost-test-window.py" "Fullscreen Corner Proof" '#804000' >"$ARTIFACTS/hot-corner-fullscreen.log" 2>&1 &
+HOT_CORNER_PID=$!
+cstate ".windows | length == $((corner_count + 1))" "corner proof mapped" ||
+    fail G-HOT-CORNER-FULLSCREEN "genuine GTK proof window did not map"
+printf '{"generation":1,"request":"fullscreen"}\n' >"$corner_requests"
+cstate ".focused_rect == [0, 0, $WIDTH, $HEIGHT]" "corner proof fullscreen" ||
+    fail G-HOT-CORNER-FULLSCREEN "actual GTK fullscreen request did not cover the output"
+xdotool mousemove --window "$WID" 1 1
+sleep 1
+cstate '.overview_open | not' "fullscreen corner blocked" ||
+    fail G-HOT-CORNER-FULLSCREEN "the corner opened over the fullscreen window"
+cp "$CSTATE" "$ARTIFACTS/hot-corner-fullscreen-blocked.json"
+scrot "$ARTIFACTS/hot-corner-fullscreen-blocked.png" >/dev/null
+xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
+xdotool key super
+cstate '.overview_open' "fullscreen deliberate overview" ||
+    fail G-HOT-CORNER-FULLSCREEN "fullscreen blocked deliberate Super access"
+xdotool key Escape
+cstate '.overview_open | not' "fullscreen deliberate overview dismissed" ||
+    fail G-HOT-CORNER-FULLSCREEN "fullscreen overview did not close"
+printf '{"generation":2,"request":"unfullscreen"}\n' >"$corner_requests"
+cstate ".focused_rect != [0, 0, $WIDTH, $HEIGHT]" "corner proof restored" ||
+    fail G-HOT-CORNER-FULLSCREEN "actual GTK unfullscreen request did not restore geometry"
+xdotool mousemove --window "$WID" 1 1
+cstate '.overview_open' "corner restored after fullscreen" ||
+    fail G-HOT-CORNER-FULLSCREEN "unfullscreen did not restore corner opening"
+xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
+xdotool key Escape
+cstate '.overview_open | not' "restored corner overview dismissed" ||
+    fail G-HOT-CORNER-FULLSCREEN "restored corner overview did not close"
+kill "$HOT_CORNER_PID" 2>/dev/null || true
+HOT_CORNER_PID=""
+cstate ".windows | length == $corner_count" "corner proof removed" ||
+    fail G-HOT-CORNER-FULLSCREEN "corner proof window did not unmap"
+pass G-HOT-CORNER-FULLSCREEN "genuine fullscreen blocks corner opening, Super remains available, and unfullscreen restores it"
 gsettings set org.gnome.desktop.peripherals.keyboard repeat-interval 30
 gsettings set org.gnome.desktop.input-sources sources "[('xkb', 'us')]"
 cstate '.keyboard.layouts == ["English (US)"]' "one source" ||
@@ -3073,11 +3116,23 @@ while IFS='|' read -r shot_keys shot_dims shot_position shot_label; do
     # Intentional word splitting: the fixture is a list of xdotool keys.
     # shellcheck disable=SC2086
     xdotool key --clearmodifiers $shot_keys
-    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-shot-keys-$shot_label-result.json" 10 ||
-        fail G-SCREENSHOT-KEYS "selection accessibility dump failed for $shot_label"
-    showing "$ARTIFACTS/a11y-shot-keys-$shot_label-result.json" \
-        "Selected area at x ${shot_position%,*}, y ${shot_position#*,}, width ${shot_dims%,*}, height ${shot_dims#*,}" ||
-        fail G-SCREENSHOT-KEYS "$shot_label did not move/resize to the expected area"
+    # xdotool finishes sending X events before the nested Wayland client
+    # and AT-SPI have necessarily processed the entire chord sequence.
+    # Observe completion without replaying keys or accepting partial geometry.
+    end=$(($(date +%s) + 10))
+    shot_attempt=0
+    while :; do
+        shot_attempt=$((shot_attempt + 1))
+        shot_observation="$ARTIFACTS/a11y-shot-keys-$shot_label-observation-$shot_attempt.json"
+        "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$shot_observation" 5 ||
+            fail G-SCREENSHOT-KEYS "selection accessibility dump failed for $shot_label"
+        cp "$shot_observation" "$ARTIFACTS/a11y-shot-keys-$shot_label-result.json"
+        showing "$shot_observation" \
+            "Selected area at x ${shot_position%,*}, y ${shot_position#*,}, width ${shot_dims%,*}, height ${shot_dims#*,}" && break
+        [ "$(date +%s)" -lt "$end" ] ||
+            fail G-SCREENSHOT-KEYS "$shot_label did not move/resize to the expected area"
+        sleep 0.2
+    done
     cstate ".active_workspace == $shot_workspace and (.overview_open | not)" "screenshot keeps workspace" ||
         fail G-SCREENSHOT-KEYS "$shot_label navigation escaped into desktop shortcuts"
     scrot "$ARTIFACTS/shot-keys-$shot_label-overlay.png" >/dev/null
