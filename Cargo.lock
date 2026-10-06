@@ -3873,7 +3873,7 @@ dependencies = [
  "libseat",
  "pkg-config",
  "profiling",
- "rand 0.9.5",
+ "rand 0.10.3",
  "rustix 1.1.5",
  "scopeguard",
  "sha2",
