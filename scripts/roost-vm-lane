@@ -139,10 +139,10 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
             json.dump(state, stream, indent=2)
         return state
 
-    def await_state(predicate, timeout=15):
+    def await_state(predicate, timeout=15, label=None):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            state = agent.run("inventory")
+            state = inventory(label) if label else agent.run("inventory")
             if predicate(state):
                 return state
             time.sleep(0.2)
@@ -162,6 +162,13 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
         changed = sum(max(abs(a - b) for a, b in zip(left[2][i:i+3], right[2][i:i+3])) > 24
                       for i in range(first, width * height * 3, 3))
         return changed / (width * (height - 64))
+
+    def varied_mask(image):
+        # The inactive QEMU placeholder has only two quantized colors.
+        width, height, pixels = image
+        colors = {tuple(value >> 4 for value in pixels[(y * width + x) * 3:(y * width + x) * 3 + 3])
+                  for y in range(64, height, 8) for x in range(0, width, 8)}
+        return len(colors) >= 8 and difference(base_frame, image) > 0.25
 
     def same_apps(before, after, shell=True):
         names = {"roost-compositor", "gnome-disks", "gnome-system-monitor", "nautilus"}
@@ -185,10 +192,39 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
         return changed
 
     agent.run("start-input-probe")
-    probe = await_state(lambda state: any(w["app_id"] == "org.roost.VmInput" for w in state["state"]["windows"]))
+    probe = await_state(lambda state: any(w["app_id"] == "org.roost.VmInput" for w in state["state"]["windows"]), label="input-created")
     probe_window = next(w for w in probe["state"]["windows"] if w["app_id"] == "org.roost.VmInput")
     x, y, width, height = probe_window["rect"]
-    qmp.click(x + width // 2, y + height // 2)
+    # The compositor model can precede the client's first mapped buffer. Its
+    # proposed size may also exceed GTK's initial 400x240 buffer: click inside
+    # that buffer, then require the real client to observe keyboard activation.
+    for require_active in (False, True):
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            readiness = agent.run("input-ready")
+            with open(os.path.join(evidence, "input-ready.json"), "w") as stream:
+                json.dump(readiness, stream, indent=2)
+            if (readiness["mapped"] and readiness["width"] > 100
+                    and readiness["height"] > 100
+                    and (not require_active or readiness["active"])):
+                break
+            time.sleep(0.1)
+        else:
+            raise RuntimeError("real GTK input probe did not map/activate within its deadline")
+        if not require_active:
+            # Initial model registration precedes place_committed: the first
+            # real buffer can move a floating window from its provisional
+            # rectangle. Click its current placement, never the pre-map origin.
+            probe = inventory("input-mapped")
+            probe_window = next(w for w in probe["state"]["windows"]
+                                if w["app_id"] == "org.roost.VmInput")
+            x, y, width, height = probe_window["rect"]
+            click_x = x + min(100, width // 2, readiness["width"] // 2)
+            click_y = y + min(100, height // 2, readiness["height"] // 2)
+            if not (0 <= click_x < WIDTH and 0 <= click_y < HEIGHT):
+                raise RuntimeError("mapped GTK input probe lies outside the output")
+            qmp.click(click_x, click_y)
+    frame("input-ready")
     initial_input = agent.run("input-count")
     qmp.keys("x")
     time.sleep(0.5)
@@ -239,13 +275,40 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
            f"actual VT away/back, exact app/process identities, body difference {delta:.2%}, fresh count/client repaint {repaint_pixels} pixels")
 
     def suspend_and_check(label="", test_id="V-SUSPEND"):
+        def gpu_snapshot(phase):
+            # Retain device/console selection alongside guest DRM ownership.
+            # QEMU monitor output contains hardware configuration, not app input.
+            with open(os.path.join(evidence, f"{label}{phase}-gpu.json"), "w") as stream:
+                json.dump({"pci": qmp.cmd("query-pci"),
+                           "device_tree": qmp.cmd("human-monitor-command",
+                                                  **{"command-line": "info qtree"})[:65536],
+                           "guest": agent.run("diagnostics")}, stream, indent=2)
+
+        gpu_snapshot("before-suspend")
+        with open(os.path.join(evidence, f"{label}before-suspend-gpu.json")) as stream:
+            caps = json.load(stream)["guest"]["gpu_pci_caps"]
+        pm_ready = (len(caps) == 1 and all(item["pcie_capability"] and item["pm_capability"]
+                                         and item["no_soft_reset"] for item in caps.values()))
+        record(f"{test_id}-GPU-PM", pm_ready,
+               "actual guest PCIe GPU advertises PM no-soft-reset; shared preserved-resource profile")
+        if not pm_ready:
+            raise RuntimeError("guest GPU lacks the required actual PM preservation capability")
+        gpu_events = ("virtio_gpu_cmd_set_scanout", "virtio_gpu_cmd_res_create_2d",
+                      "virtio_gpu_cmd_res_unref", "virtio_gpu_cmd_res_back_attach",
+                      "virtio_gpu_cmd_res_back_detach")
+        for event in gpu_events:
+            qmp.cmd("trace-event-set-state", name=event, enable=True)
+        gpu_log = os.path.join(out, "qemu-gpu-resource.log")
+        with open(os.path.join(evidence, f"{label}gpu-trace-start.json"), "w") as stream:
+            json.dump({"log": os.path.basename(gpu_log), "offset": os.path.getsize(gpu_log)
+                       if os.path.exists(gpu_log) else 0, "events": gpu_events}, stream, indent=2)
         request = agent.run("suspend")
         with open(os.path.join(evidence, f"{label}suspend-request.json"), "w") as stream:
             json.dump(request, stream, indent=2)
         deadline = time.monotonic() + 30
         suspended = False
         while time.monotonic() < deadline:
-            if qmp.cmd("query-status")["status"] == f"{label}suspended":
+            if qmp.cmd("query-status")["status"] == "suspended":
                 suspended = True
                 break
             time.sleep(0.2)
@@ -253,6 +316,9 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
             record(test_id, False, "logind suspend never reached QEMU SUSPENDED; no pause substitute")
             raise RuntimeError("real suspend did not occur")
         suspended_frame = frame(f"{label}suspended")
+        wake_trace_offset = os.path.getsize(gpu_log) if os.path.exists(gpu_log) else 0
+        with open(os.path.join(evidence, f"{label}gpu-trace-wake.json"), "w") as stream:
+            json.dump({"log": os.path.basename(gpu_log), "offset": wake_trace_offset}, stream, indent=2)
         qmp.cmd("system_wakeup")
         # The first response after wake must already be locked. Waiting for a
         # later transition would hide an exposed desktop during resume.
@@ -268,10 +334,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
         deadline = time.monotonic() + 5
         repainted = False
         while True:
-            width, height, pixels = resumed_frame
-            colors = {tuple(value >> 4 for value in pixels[(y * width + x) * 3:(y * width + x) * 3 + 3])
-                      for y in range(64, height, 8) for x in range(0, width, 8)}
-            repainted = (len(colors) >= 8 and difference(base_frame, resumed_frame) > 0.25
+            repainted = (varied_mask(resumed_frame)
                          and difference(suspended_frame, resumed_frame) < 0.20)
             if repainted or time.monotonic() >= deadline:
                 break
@@ -280,21 +343,32 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
             if not state["state"]["locked"] or not same_apps(before, state):
                 raise RuntimeError("resume repaint exposed or replaced the session")
             resumed_frame = frame(f"{label}resumed-locked")
+        gpu_snapshot("post-resume")
+        if os.path.exists(gpu_log):
+            with open(gpu_log, "rb") as stream:
+                stream.seek(wake_trace_offset)
+                uploaded = stream.read().decode("utf-8", errors="replace")
+        else:
+            uploaded = ""
+        queues_alive = ("virtio_gpu_cmd_res_create_2d" in uploaded
+                        and "virtio_gpu_cmd_res_back_attach" in uploaded
+                        and bool(re.search(r"virtio_gpu_cmd_set_scanout id 0, res 0x[1-9a-f]", uploaded)))
+        record(f"{test_id}-GPU-UPLOAD", queues_alive,
+               "host trace receives fresh resource creation, backing attachment and nonzero scanout after actual wake")
         fail_closed = (same_apps(before, resumed)
                        and difference(base_frame, resumed_frame) > 0.25)
         record(test_id, fail_closed,
                f"actual SUSPENDED → system_wakeup, first state locked, fail-closed (differs from desktop), unchanged app IDs/rectangles and process start times")
         log(f"{test_id}-MASK observation (non-gating): real lock mask repainted={repainted}")
-        if not fail_closed:
-            raise RuntimeError("resume exposed or replaced the session")
+        if not fail_closed or not queues_alive:
+            raise RuntimeError("resume exposed/replaced the session or fresh host GPU uploads are missing")
+
         return resumed
 
-    # A single S3 cycle carries both the plain and the stale-auth scenarios:
-    # a second S3 entry hangs in kernel device suspend on this platform
-    # (consistent, freezer clean), so the pre-sleep PAM game runs before the
-    # one real suspend. The session is therefore locked at suspend rather
-    # than unlocked; the fail-closed gate still proves the wake state
-    # (locked first, unchanged apps, differs from desktop).
+    # Preserve the authorized single-S3 contract for this performance lane.
+    # It combines plain and stale-auth wake checks with a prelocked session;
+    # the main lifecycle lane separately qualified prepare-for-sleep locking
+    # from an unlocked desktop. Keep fresh GPU upload and client repaint gates.
     # Submit a correct password to a real delayed PAM stack before sleep.
     # Its later success must not unlock the new sleep-lock generation.
     agent.run("delay-unlock")
@@ -379,7 +453,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     time.sleep(2)
     locked_vt = inventory("locked-vt")
     record("V-VT-FAIL-CLOSED", locked_vt["state"]["locked"] and same_apps(before, locked_vt)
-           and difference(base_frame, frame("locked-vt")) > 0.25,
+           and varied_mask(frame("locked-vt")),
            "VT away/back while locked repaints the mask and preserves app/process identities")
 
     agent.run("deny-unlock")
@@ -402,15 +476,15 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
         agent.run("restore-unlock")
     agent.run("stop-portal")
     agent.run("kill-shell")
-    killed_mask = difference(base_frame, frame("shell-killed")) > 0.25
+    killed_mask = varied_mask(frame("shell-killed"))
     recovered = await_state(lambda state: state["state"]["locked"] and
                             any(p["executable"] == "roost-shell-gtk" and p not in resumed["processes"]
-                                for p in state["processes"]), timeout=30)
+                                for p in state["processes"]), timeout=30, label="shell-recovering")
     time.sleep(2)
     recovered = inventory("shell-recovered")
     record("V-SHELL-FAIL-CLOSED", killed_mask and recovered["state"]["locked"] and same_apps(before, recovered, shell=False)
            and agent.run("input-count") == delivered_input
-           and difference(base_frame, frame("shell-recovered")) > 0.25,
+           and varied_mask(frame("shell-recovered")),
            "portal stopped and lock UI killed; supervisor replacement stays locked/masked with original apps alive")
     qmp.keys("ret")
     time.sleep(1)
@@ -422,17 +496,29 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     agent.run("logout")
     deadline = time.monotonic() + 30
     greeter = {}
+    greeter_visible = False
     while time.monotonic() < deadline:
         greeter = agent.run("greeter")
         if greeter["greetd_active"] and greeter["greeter_pids"] and not greeter["compositor_pids"]:
-            break
+            width, height, pixels = frame("logout-greeter")
+            # The CI greeter stylesheet has a #222226 window background.
+            # Require that painted surface plus visible light controls/text;
+            # process startup, a black scanout or a uniform fill cannot pass.
+            background = sum(all(abs(pixels[i + channel] - value) <= 4
+                                 for channel, value in enumerate((34, 34, 38)))
+                             for i in range(0, len(pixels), 3)) / (width * height)
+            light = sum(min(pixels[i:i + 3]) > 160 for i in range(0, len(pixels), 3))
+            greeter["paint"] = {"background_fraction": background, "light_pixels": light}
+            greeter_visible = background > 0.25 and light >= 100
+            if greeter_visible:
+                break
         time.sleep(0.5)
     with open(os.path.join(evidence, "greeter.json"), "w") as stream:
         json.dump(greeter, stream, indent=2)
-    frame("logout-greeter")
-    record("V-LOGOUT", bool(greeter.get("greetd_active") and greeter.get("greeter_pids")
-                             and not greeter.get("compositor_pids")),
-           "real session termination returns to active greetd with gtkgreet and no original compositor")
+    record("V-LOGOUT", greeter_visible,
+           "real session termination returns to a painted gtkgreet surface under active greetd, with no original compositor")
+    if not greeter_visible:
+        raise RuntimeError("live gtkgreet did not paint its actual visible surface after logout")
     record("V-LIFECYCLE", True, "all lifecycle operations completed; individual assertions remain mandatory")
 
 
@@ -447,9 +533,9 @@ class Recorder:
         self.stills = {}
         cmd = qmp.cmd
 
-        def locked(name, **args):
+        def locked(command, **args):
             with self.lock:
-                return cmd(name, **args)
+                return cmd(command, **args)
         qmp.cmd = locked
         self.thread = threading.Thread(target=self._run, daemon=True)
 
@@ -653,7 +739,7 @@ def boot(disk, out, scratch, timeout, *, guest_agent=False):
     qemu = ["qemu-system-x86_64", "-machine", "q35", "-m", "6144", "-smp", "4",
             "-bios", ovmf, "-snapshot",
             "-drive", f"file={disk},format=raw,if=virtio,cache=unsafe",
-            "-device", f"virtio-vga,xres={WIDTH},yres={HEIGHT}",
+            *baseline.gpu_devices(),
             "-device", "qemu-xhci", "-device", "usb-tablet", "-device", "usb-kbd",
             # The virtio keyboard carries multimedia evdev codes; USB's
             # boot-protocol keyboard has no consumer-control usages.
@@ -667,7 +753,8 @@ def boot(disk, out, scratch, timeout, *, guest_agent=False):
     if guest_agent:
         qemu.extend(["-device", "virtio-serial-pci",
                      "-chardev", f"socket,path={agent_path},server=on,wait=off,id=roost-qga",
-                     "-device", "virtserialport,chardev=roost-qga,name=org.qemu.guest_agent.0"])
+                     "-device", "virtserialport,chardev=roost-qga,name=org.qemu.guest_agent.0",
+                     "-D", os.path.join(out, "qemu-gpu-resource.log")])
     if kvm:
         qemu[1:1] = ["-enable-kvm", "-cpu", "host"]
     log(f"booting {disk} (kvm={kvm})")
@@ -882,6 +969,8 @@ def main():
         "resolution": f"{WIDTH}x{HEIGHT}",
         "kvm": kvm,
         "qemu": qemu_version,
+        "gpu_profile": baseline.GPU_PROFILE,
+        "gpu_devices": baseline.gpu_devices(),
         "session_up_s": round(elapsed) if drm and shell else None,
         "drm_session_paused": paused,
         "captured_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

@@ -28,6 +28,13 @@ ISO_URL = "https://download.tunaos.org/live-isos/marlin-gnome-latest.iso"
 SUM_URL = ISO_URL + ".sha256"
 WIDTH, HEIGHT = 1280, 800
 BOOT_TIMEOUT = 900
+GPU_PROFILE = "virtio-vga-pcie-pm-preserved-v1"
+
+
+def gpu_devices():
+    """One shared GPU topology for native GNOME and every Roost boot caller."""
+    return ["-device", "pcie-root-port,id=roost-gpu-port,chassis=1,slot=1",
+            "-device", f"virtio-vga,bus=roost-gpu-port,x-pcie-pm-no-soft-reset=on,xres={WIDTH},yres={HEIGHT}"]
 
 
 def log(msg):
@@ -53,12 +60,12 @@ class Qmp:
             if "event" not in msg:
                 return msg
 
-    def cmd(self, name, **args):
-        self.file.write(json.dumps({"execute": name, "arguments": args}) + "\n")
+    def cmd(self, command, **args):
+        self.file.write(json.dumps({"execute": command, "arguments": args}) + "\n")
         self.file.flush()
         reply = self._read()
         if "error" in reply:
-            raise RuntimeError(f"{name}: {reply['error']}")
+            raise RuntimeError(f"{command}: {reply['error']}")
         return reply.get("return")
 
     def keys(self, *names, hold_ms=80):
@@ -206,7 +213,7 @@ def main():
             "-bios", ovmf,
             "-drive", f"file={iso},media=cdrom,readonly=on,if=none,id=cd0",
             "-device", "virtio-scsi-pci", "-device", "scsi-cd,drive=cd0,bootindex=0",
-            "-device", f"virtio-vga,xres={WIDTH},yres={HEIGHT}",
+            *gpu_devices(),
             "-device", "qemu-xhci", "-device", "usb-tablet", "-device", "usb-kbd",
             "-display", "none", "-serial", f"file:{os.path.join(out, 'serial.log')}",
             "-qmp", f"unix:{qmp_path},server=on,wait=off",
@@ -266,6 +273,8 @@ def main():
         "resolution": f"{WIDTH}x{HEIGHT}",
         "kvm": kvm,
         "qemu": qemu_version,
+        "gpu_profile": GPU_PROFILE,
+        "gpu_devices": gpu_devices(),
         "captured_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "stages": stages,
     }

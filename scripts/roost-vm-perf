@@ -255,7 +255,8 @@ def main():
         (out / "notifications.json").write_text(json.dumps(notifications, indent=2))
         # Host and guest boottime clocks are different. Keep host phases as
         # provenance, and summarize guest samples only by their guest timestamps.
-        report = {"desktop": args.desktop, "vm_profile": {"memory_mib":6144,"vcpus":4,"resolution":[1280,800],"kvm":kvm},
+        report = {"desktop": args.desktop, "vm_profile": {"memory_mib":6144,"vcpus":4,"resolution":[1280,800],"kvm":kvm,
+                      "gpu_profile":lane.baseline.GPU_PROFILE,"gpu_devices":lane.baseline.gpu_devices()},
                   "meta": args.meta, "host": {"kernel":os.uname().release,"cpu":Path("/proc/cpuinfo").read_text(),
                                               "qemu":subprocess.check_output(["qemu-system-x86_64","--version"],text=True)},
                   "panel_observed_upper_s":panel_upper_s,"host_phases_boottime_s":phases,
