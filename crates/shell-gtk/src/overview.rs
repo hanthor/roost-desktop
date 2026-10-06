@@ -230,15 +230,26 @@ impl OverviewUi {
             );
         }
 
-        // Dash: bottom center.
+        // Dash: bottom center. The strip spans the full output width and
+        // the tiles scroll inside it, so every redraw commits the same
+        // buffer size: GDK reuses same-size SHM pools but never destroys
+        // them, so a content-sized dash leaks one server-side pool (fd
+        // plus mapping) per window change while the overview is open
+        // (S-GROWTH).
         let dash = layer_window(app, "roost-shell-dash", "roost-overview-dash");
         dash.set_anchor(Edge::Bottom, true);
+        dash.set_anchor(Edge::Left, true);
+        dash.set_anchor(Edge::Right, true);
         dash.set_margin(Edge::Bottom, 12);
         dash.set_keyboard_mode(KeyboardMode::None);
         dash.set_title(Some("Dash"));
         let dash_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         dash_row.add_css_class("overview-dash");
-        dash.set_child(Some(&dash_row));
+        dash_row.set_halign(gtk::Align::Center);
+        let dash_scroll = gtk::ScrolledWindow::new();
+        dash_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
+        dash_scroll.set_child(Some(&dash_row));
+        dash.set_child(Some(&dash_scroll));
 
         // App grid: between search and dash, over the previews.
         let grid = layer_window(app, "roost-shell-appgrid", "roost-overview-grid");
