@@ -6,6 +6,39 @@ use std::sync::{
 };
 use zbus::{fdo, message::Header, Connection};
 
+/// GNOME's typed display bootstrap roles. These never confer capture authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ServiceClient {
+    Portal,
+    FileChooser,
+    GlobalShortcuts,
+}
+impl ServiceClient {
+    pub(crate) fn from_wire(value: u32) -> fdo::Result<Self> {
+        match value {
+            1 => Ok(Self::Portal),
+            2 => Ok(Self::FileChooser),
+            3 => Ok(Self::GlobalShortcuts),
+            _ => Err(fdo::Error::InvalidArgs(
+                "unsupported service client type".into(),
+            )),
+        }
+    }
+    fn executables(self) -> &'static [&'static str] {
+        match self {
+            Self::Portal => &[
+                "/usr/libexec/xdg-desktop-portal-gnome",
+                "/usr/lib/xdg-desktop-portal-gnome",
+            ],
+            Self::FileChooser => &["/usr/bin/nautilus"],
+            Self::GlobalShortcuts => &[
+                "/usr/libexec/gnome-control-center-global-shortcuts-provider",
+                "/usr/lib/gnome-control-center-global-shortcuts-provider",
+            ],
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct Authority {
     locked: Arc<AtomicBool>,
@@ -19,13 +52,27 @@ impl Authority {
         conn: &Connection,
         header: &Header<'_>,
     ) -> fdo::Result<String> {
+        self.admit_service_connection(conn, header, ServiceClient::Portal)
+            .await
+    }
+    /// Resolve bootstrap identity from the bus credentials and installed binary,
+    /// independently of provider names acquired after GTK display initialization.
+    pub(crate) async fn admit_service_connection(
+        &self,
+        conn: &Connection,
+        header: &Header<'_>,
+        role: ServiceClient,
+    ) -> fdo::Result<String> {
         let sender = header.sender().ok_or_else(|| denied("missing sender"))?;
         let dbus = fdo::DBusProxy::new(conn).await?;
+        let uid = dbus.get_connection_unix_user(sender.clone().into()).await?;
         let pid = dbus
             .get_connection_unix_process_id(sender.clone().into())
             .await?;
-        if !installed_portal(pid) {
-            return Err(denied("service connection requires the installed portal"));
+        if uid != rustix::process::geteuid().as_raw() || !installed_service(pid, role) {
+            return Err(denied(
+                "service connection requires the installed provider for its type",
+            ));
         }
         Ok(sender.to_string())
     }
@@ -106,14 +153,13 @@ pub fn denied(reason: &str) -> fdo::Error {
     fdo::Error::AccessDenied(reason.into())
 }
 fn installed_portal(pid: u32) -> bool {
+    installed_service(pid, ServiceClient::Portal)
+}
+fn installed_service(pid: u32, role: ServiceClient) -> bool {
     let Ok(exe) = std::fs::read_link(format!("/proc/{pid}/exe")) else {
         return false;
     };
-    let allowed = [
-        "/usr/libexec/xdg-desktop-portal-gnome",
-        "/usr/lib/xdg-desktop-portal-gnome",
-    ];
-    allowed.iter().any(|path| {
+    role.executables().iter().any(|path| {
         let Ok(real) = std::fs::canonicalize(path) else {
             return false;
         };
@@ -149,5 +195,45 @@ mod tests {
     fn arbitrary_process_cannot_be_the_installed_portal() {
         assert!(!installed_portal(std::process::id()));
         assert!(!installed_portal(u32::MAX));
+    }
+    #[test]
+    fn typed_service_roles_do_not_accept_an_arbitrary_process() {
+        for value in 1..=3 {
+            let role = ServiceClient::from_wire(value).unwrap();
+            assert!(!installed_service(std::process::id(), role));
+            assert!(!installed_service(u32::MAX, role));
+        }
+        for value in [0, 4, u32::MAX] {
+            assert!(matches!(
+                ServiceClient::from_wire(value),
+                Err(fdo::Error::InvalidArgs(_))
+            ));
+        }
+        assert_eq!(
+            ServiceClient::from_wire(2).unwrap(),
+            ServiceClient::FileChooser
+        );
+        assert_eq!(
+            ServiceClient::from_wire(3).unwrap(),
+            ServiceClient::GlobalShortcuts
+        );
+        for left in [
+            ServiceClient::Portal,
+            ServiceClient::FileChooser,
+            ServiceClient::GlobalShortcuts,
+        ] {
+            for right in [
+                ServiceClient::Portal,
+                ServiceClient::FileChooser,
+                ServiceClient::GlobalShortcuts,
+            ] {
+                if left != right {
+                    assert!(left
+                        .executables()
+                        .iter()
+                        .all(|path| !right.executables().contains(path)));
+                }
+            }
+        }
     }
 }
