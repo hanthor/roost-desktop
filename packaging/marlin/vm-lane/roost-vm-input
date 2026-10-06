@@ -6,17 +6,24 @@ import pathlib
 
 import gi
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gtk
+from gi.repository import Gtk, Gdk
 
 path = pathlib.Path(os.environ["XDG_RUNTIME_DIR"], "roost-vm-input.json")
 count = 0
 buttons = {"1": 0, "2": 0, "3": 0}
+raw_buttons = {}
+raw_releases = {}
+motions = 0
 window = None
 
 
 def publish():
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps({"pid": os.getpid(), "count": count, "buttons": buttons,
+                                    "raw_buttons": raw_buttons, "raw_releases": raw_releases,
+                                    "motions": motions,
+                                    "gtk_version": [Gtk.get_major_version(), Gtk.get_minor_version(),
+                                                    Gtk.get_micro_version()],
                                     "mapped": window.get_mapped(),
                                     "active": window.is_active(),
                                     "width": window.get_width(),
@@ -50,6 +57,24 @@ def activate(app):
         publish()
     clicks.connect("pressed", pressed_button)
     window.add_controller(clicks)
+    # Retain count-only raw delivery diagnostics separately from gesture
+    # recognition. The nine handedness assertions still use `buttons` above.
+    events = Gtk.EventControllerLegacy()
+    events.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+    def delivered(_controller, event):
+        global motions
+        kind = event.get_event_type()
+        if kind in (Gdk.EventType.BUTTON_PRESS, Gdk.EventType.BUTTON_RELEASE):
+            key = str(event.get_button())
+            counters = raw_buttons if kind == Gdk.EventType.BUTTON_PRESS else raw_releases
+            counters[key] = counters.get(key, 0) + 1
+            publish()
+        elif kind == Gdk.EventType.MOTION_NOTIFY:
+            motions += 1
+            publish()
+        return False
+    events.connect("event", delivered)
+    window.add_controller(events)
     window.connect("notify::mapped", lambda *_arguments: publish())
     window.connect("notify::is-active", lambda *_arguments: publish())
     def allocated(widget, _clock):

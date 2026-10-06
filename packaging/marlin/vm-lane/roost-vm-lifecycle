@@ -222,7 +222,8 @@ def main():
         if action == "input-count":
             result = {key: result[key] for key in ("pid", "count")}
         elif action == "input-buttons":
-            result = {key: result[key] for key in ("pid", "buttons")}
+            result = {key: result[key] for key in
+                      ("pid", "buttons", "raw_buttons", "raw_releases", "motions", "gtk_version")}
     elif action == "logout":
         call("loginctl", "terminate-session", inventory()["session"]["Id"])
         result = {"requested": "terminate session"}
