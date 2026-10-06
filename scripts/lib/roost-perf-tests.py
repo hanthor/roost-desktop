@@ -50,6 +50,41 @@ class Accounting(unittest.TestCase):
         with self.assertRaises(ValueError):
             host.raw_globals(self.globals_serial(b"interface: 'zwp_input_method_manager_v2'"))
 
+    def presentation(self):
+        return {"clock_id": 1, "commits": 242, "discarded": 1, "pending": 1,
+                "frames": [dict(commit=i+1, presented_ns=(i+1)*16000000,
+                                refresh_ns=16000000, sequence=i, flags=1)
+                           for i in range(240)]}
+
+    def test_presentation_requires_complete_monotonic_nonduplicate_feedback(self):
+        for case in ("missing", "duplicate", "backwards", "unbalanced", "boolean"):
+            trace = self.presentation()
+            if case == "missing":
+                trace["frames"].pop()
+            elif case == "duplicate":
+                trace["frames"][1]["commit"] = 1
+            elif case == "backwards":
+                trace["frames"][1]["presented_ns"] = 1
+            elif case == "unbalanced":
+                trace["discarded"] = 0
+            elif case == "boolean":
+                trace["frames"][1]["refresh_ns"] = True
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                host.presentation_summary(trace)
+
+    def test_software_presentation_does_not_fabricate_hardware_or_refresh(self):
+        trace = self.presentation()
+        for row in trace["frames"]:
+            row["refresh_ns"] = 0
+            row["flags"] = 0
+        result = host.presentation_summary(trace)
+        self.assertEqual(result["interval_ms"]["count"], 239)
+        self.assertEqual(result["interval_ms"]["p99"], 16)
+        self.assertEqual(result["reported_refresh_ms"], {"count": 0})
+        self.assertEqual(result["unknown_refresh_count"], 240)
+        self.assertEqual(result["flag_counts"], dict(vsync=0, hw_clock=0, hw_completion=0, zero_copy=0))
+        self.assertEqual(result["discarded_count"], 1)
+
     def process(self, root, pid, ppid, uid, pss, start):
         path = root / str(pid)
         path.mkdir()

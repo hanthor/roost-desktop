@@ -7,10 +7,15 @@ COPY packaging/marlin/vm-lane/roost-vm-lane.tmpfiles /usr/lib/tmpfiles.d/roost-v
 COPY packaging/marlin/vm-lane/journald.conf /usr/lib/systemd/journald.conf.d/90-roost-vm-lane.conf
 COPY packaging/marlin/vm-lane/kargs.toml /usr/lib/bootc/kargs.d/90-roost-vm-lane.toml
 COPY scripts/lib/roost-perf-guest.py /usr/libexec/roost-perf-guest
+COPY scripts/roost-frame-pacer-build /tmp/frame-pacer/scripts/roost-frame-pacer-build
+COPY scripts/lib/roost-frame-pacer.c /tmp/frame-pacer/scripts/lib/roost-frame-pacer.c
 COPY packaging/marlin/perf/roost-perf-phase /usr/libexec/roost-perf-phase
 COPY packaging/marlin/perf/roost-perf.service /usr/lib/systemd/system/roost-perf.service
 RUN case "$DESKTOP" in gnome|roost) ;; *) exit 1 ;; esac && \
-    pacman -S --needed --noconfirm python wayland-utils qemu-guest-agent && \
+    pacman -S --needed --noconfirm python wayland-utils qemu-guest-agent gcc pkgconf wayland-protocols && \
+    bash /tmp/frame-pacer/scripts/roost-frame-pacer-build /tmp/frame-pacer/build && \
+    install -Dm755 /tmp/frame-pacer/build/roost-frame-pacer /usr/libexec/roost-frame-pacer && \
+    rm -rf /tmp/frame-pacer && \
     chmod 0755 /usr/libexec/roost-perf-phase && \
     useradd -M -d /home/roost-test -s /bin/bash -U roost-test && \
     echo 'roost-test:roost' | chpasswd && \
