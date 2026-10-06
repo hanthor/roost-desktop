@@ -29,10 +29,10 @@ python3 /repo/scripts/lib/roost-a11y-dump.py roost-shell-gtk /out/a11y-shell.jso
 sleep 1
 python3 /repo/scripts/lib/roost-capture-security-client.py > /out/untrusted-denial.log
 /usr/libexec/xdg-desktop-portal-gnome --replace >/out/backend.log 2>&1 & portal_backend_pid=$!; pids="$pids $portal_backend_pid"
-python3 /repo/scripts/lib/roost-portal-ready.py org.freedesktop.impl.portal.desktop.gnome org.freedesktop.impl.portal.ScreenCast /out/backend-ready.json
+python3 /repo/scripts/lib/roost-portal-ready.py org.freedesktop.impl.portal.desktop.gnome org.freedesktop.impl.portal.ScreenCast /out/backend-ready.json --pid "$portal_backend_pid"
 /usr/libexec/xdg-desktop-portal-gtk >/out/gtk-backend.log 2>&1 & pids="$pids $!"
-/usr/libexec/xdg-desktop-portal --replace >/out/frontend.log 2>&1 & pids="$pids $!"
-python3 /repo/scripts/lib/roost-portal-ready.py org.freedesktop.portal.Desktop org.freedesktop.portal.ScreenCast /out/frontend-ready.json
+/usr/libexec/xdg-desktop-portal --replace >/out/frontend.log 2>&1 & portal_frontend_pid=$!; pids="$pids $portal_frontend_pid"
+python3 /repo/scripts/lib/roost-portal-ready.py org.freedesktop.portal.Desktop org.freedesktop.portal.ScreenCast /out/frontend-ready.json --pid "$portal_frontend_pid"
 for decision in cancel grant; do
     python3 /repo/scripts/lib/roost-portal-screenshot-client.py "/out/screenshot-$decision.png" "$decision" >"/out/screenshot-$decision.log" 2>&1 & shot_client=$!; pids="$pids $shot_client"
     end=$((SECONDS + 15))
@@ -74,10 +74,10 @@ until [ -s /out/backend-disconnect.active ]; do [ "$SECONDS" -lt "$end" ] || exi
 kill "$portal_backend_pid"
 touch /out/backend-disconnect.revoke
 wait "$client"
-/usr/libexec/xdg-desktop-portal-gnome --replace >/out/backend-restarted.log 2>&1 & pids="$pids $!"
-python3 /repo/scripts/lib/roost-portal-ready.py org.freedesktop.impl.portal.desktop.gnome org.freedesktop.impl.portal.ScreenCast /out/backend-restarted-ready.json
-/usr/libexec/xdg-desktop-portal --replace >/out/frontend-restarted.log 2>&1 & pids="$pids $!"
-python3 /repo/scripts/lib/roost-portal-ready.py org.freedesktop.portal.Desktop org.freedesktop.portal.ScreenCast /out/frontend-restarted-ready.json
+/usr/libexec/xdg-desktop-portal-gnome --replace >/out/backend-restarted.log 2>&1 & portal_backend_pid=$!; pids="$pids $portal_backend_pid"
+python3 /repo/scripts/lib/roost-portal-ready.py org.freedesktop.impl.portal.desktop.gnome org.freedesktop.impl.portal.ScreenCast /out/backend-restarted-ready.json --pid "$portal_backend_pid"
+/usr/libexec/xdg-desktop-portal --replace >/out/frontend-restarted.log 2>&1 & portal_frontend_pid=$!; pids="$pids $portal_frontend_pid"
+python3 /repo/scripts/lib/roost-portal-ready.py org.freedesktop.portal.Desktop org.freedesktop.portal.ScreenCast /out/frontend-restarted-ready.json --pid "$portal_frontend_pid"
 # Keep a genuine external portal stream active across the lock transition.
 python3 /repo/scripts/lib/roost-portal-capture-client.py /out/lock-grant.png revoke >/out/lock-grant.log 2>&1 & client=$!; pids="$pids $client"
 python3 /repo/scripts/lib/roost-portal-consent.py /out/a11y-lock-grant.json grant
