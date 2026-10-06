@@ -461,8 +461,14 @@ mod socket_preparation_tests {
     use super::*;
     use std::io::{Read, Write};
 
+    // Dropping prepared sockets makes their display number immediately
+    // reusable. A parallel fixture must not recreate its paths before
+    // the cleanup test has checked that they were removed.
+    static DISPLAY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn dropping_prepared_sockets_cleans_owned_display_paths() {
+        let _guard = DISPLAY_TEST_LOCK.lock().unwrap();
         let prepared = XWaylandSockets::prepare(None, false).unwrap();
         let number = prepared.display_number();
         let socket = format!("/tmp/.X11-unix/X{number}");
@@ -476,6 +482,7 @@ mod socket_preparation_tests {
 
     #[test]
     fn prepared_socket_handoff_preserves_pending_client_bytes() {
+        let _guard = DISPLAY_TEST_LOCK.lock().unwrap();
         let prepared = XWaylandSockets::prepare(None, false).unwrap();
         let path = format!("/tmp/.X11-unix/X{}", prepared.display_number());
         let mut client = UnixStream::connect(path).unwrap();
