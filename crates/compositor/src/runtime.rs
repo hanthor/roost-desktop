@@ -67,6 +67,81 @@ use crate::{ClientState, State};
 /// repaint replaces this provisional pacing in a later slice.
 const FRAME_BUDGET: Duration = Duration::from_millis(16);
 
+/// Wake the native loop for requests on already accepted Wayland clients.
+/// The listening socket only signals new connections. The display owns the
+/// client epoll set; a duplicate keeps calloop's source lifetime independent.
+#[cfg(any(feature = "drm", test))]
+fn display_readiness_source(
+    display: &Display<State>,
+) -> std::io::Result<calloop::generic::Generic<std::os::fd::OwnedFd>> {
+    use std::os::fd::AsFd;
+    Ok(calloop::generic::Generic::new(
+        display.as_fd().try_clone_to_owned()?,
+        calloop::Interest::READ,
+        calloop::Mode::Level,
+    ))
+}
+
+#[cfg(test)]
+mod display_readiness_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn accepted_wayland_requests_wake_the_loop_and_drained_clients_do_not_spin() {
+        let mut compositor = crate::TestCompositor::new();
+        let (server, mut client) = UnixStream::pair().unwrap();
+        client.set_nonblocking(true).unwrap();
+        compositor.add_client(server);
+        let mut event_loop = EventLoop::<usize>::try_new().unwrap();
+        event_loop
+            .handle()
+            .insert_source(
+                display_readiness_source(&compositor.display).unwrap(),
+                |_, _, wakes| {
+                    *wakes += 1;
+                    Ok(calloop::PostAction::Continue)
+                },
+            )
+            .unwrap();
+        let mut wakes = 0;
+        event_loop.dispatch(Duration::ZERO, &mut wakes).unwrap();
+        assert_eq!(wakes, 0, "idle accepted client must not wake the loop");
+        for expected in 1..=2 {
+            // Actual wl_display.sync on object 1, callback object 2. The
+            // server deletes the callback after done, allowing ID reuse.
+            let request: Vec<u8> = [1_u32, 12_u32 << 16, 2_u32]
+                .into_iter()
+                .flat_map(u32::to_ne_bytes)
+                .collect();
+            client.write_all(&request).unwrap();
+            event_loop.dispatch(Duration::ZERO, &mut wakes).unwrap();
+            assert_eq!(wakes, expected, "client request must wake without a timer");
+            compositor
+                .display
+                .dispatch_clients(&mut compositor.state)
+                .unwrap();
+            event_loop.dispatch(Duration::ZERO, &mut wakes).unwrap();
+            assert_eq!(wakes, expected, "draining requests must clear readiness");
+            compositor.display.flush_clients().unwrap();
+            let mut reply = [0_u8; 24];
+            client.read_exact(&mut reply).unwrap();
+            assert_eq!(u32::from_ne_bytes(reply[0..4].try_into().unwrap()), 2);
+            assert_eq!(
+                u32::from_ne_bytes(reply[4..8].try_into().unwrap()),
+                12 << 16
+            );
+            assert_eq!(u32::from_ne_bytes(reply[12..16].try_into().unwrap()), 1);
+            assert_eq!(
+                u32::from_ne_bytes(reply[16..20].try_into().unwrap()),
+                (12 << 16) | 1
+            );
+            assert_eq!(u32::from_ne_bytes(reply[20..24].try_into().unwrap()), 2);
+        }
+    }
+}
+
 /// Default nested output size (physical pixels).
 const DEFAULT_WIDTH: i32 = 1280;
 const DEFAULT_HEIGHT: i32 = 800;
@@ -711,6 +786,17 @@ impl Runtime {
                 Backend::Winit(Box::new(backend))
             }
         };
+        #[cfg(feature = "drm")]
+        if matches!(backend, Backend::Drm(_)) {
+            event_loop
+                .handle()
+                .insert_source(
+                    display_readiness_source(&display)
+                        .map_err(|e| RuntimeError::Loop(e.to_string()))?,
+                    |_, _, _: &mut Runtime| Ok(calloop::PostAction::Continue),
+                )
+                .map_err(|e| RuntimeError::Loop(e.to_string()))?;
+        }
         let socket = ListeningSocketSource::with_name(&session.socket_name)
             .map_err(|e| RuntimeError::Socket(e.to_string()))?;
         event_loop
@@ -2852,6 +2938,14 @@ impl Runtime {
         self.publish_overview_previews();
         self.render()?;
         self.screencast_tick();
+        #[cfg(feature = "drm")]
+        if matches!(self.backend, Backend::Drm(_)) {
+            // Rendering queues callbacks only for a submitted scanout. Send
+            // those events now so a redraw need not wait for the next tick.
+            self.display
+                .flush_clients()
+                .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+        }
         Ok(!self.exit)
     }
 
