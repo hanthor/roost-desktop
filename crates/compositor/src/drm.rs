@@ -488,6 +488,11 @@ impl DrmBackend {
                     out.name
                 );
             }
+            // WAKE-DBG: temporary resume diagnostics.
+            eprintln!(
+                "roost-compositor: drm: WAKE-DBG wake re-asserted {}",
+                out.name
+            );
         }
     }
 
@@ -502,10 +507,17 @@ impl DrmBackend {
             DrmEvent::VBlank(crtc) => {
                 // A kernel completion already queued before the reset must
                 // not present feedback belonging to the newly queued frame.
-                if let (Some(cutoff), Some(meta)) = (self.wake_flip_cutoff, metadata.as_ref()) {
-                    if matches!(meta.time, DrmEventTime::Monotonic(time) if time <= cutoff) {
-                        return None;
-                    }
+                // WAKE-DBG: temporary resume diagnostics (post-reset only).
+                let dropped = matches!(
+                    (self.wake_flip_cutoff, metadata.as_ref()),
+                    (Some(cutoff), Some(meta))
+                        if matches!(meta.time, DrmEventTime::Monotonic(time) if time <= cutoff)
+                );
+                if self.wake_flip_cutoff.is_some() {
+                    eprintln!("roost-compositor: drm: WAKE-DBG vblank dropped={dropped}");
+                }
+                if dropped {
+                    return None;
                 }
                 let index = self.outputs.iter().position(|o| o.crtc == crtc)?;
                 let out = &mut self.outputs[index];
