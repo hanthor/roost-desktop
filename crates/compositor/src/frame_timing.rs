@@ -94,6 +94,18 @@ pub fn take_feedback(roots: &[WlSurface], output: &Output) -> OutputPresentation
 /// Include callbacks, presentation, FIFO barriers and deferred commit timers.
 #[doc(hidden)]
 pub fn pending_frame_work(roots: &[WlSurface]) -> bool {
+    pending_work(roots, true)
+}
+
+/// Refresh obligations apply to all mapped surfaces, but only presentation
+/// requests belonging to this output's drawn surfaces can require scanout.
+/// A hidden request stays pending until that surface is actually drawn.
+#[doc(hidden)]
+pub fn pending_output_work(roots: &[WlSurface], drawn: &[WlSurface]) -> bool {
+    pending_work(roots, false) || pending_work(drawn, true)
+}
+
+fn pending_work(roots: &[WlSurface], include_presentation: bool) -> bool {
     use smithay::wayland::compositor::SurfaceAttributes;
     use smithay::wayland::presentation::PresentationFeedbackCachedState;
     let mut pending = false;
@@ -109,12 +121,13 @@ pub fn pending_frame_work(roots: &[WlSurface]) -> bool {
                     .current()
                     .frame_callbacks
                     .is_empty()
-                    || !states
-                        .cached_state
-                        .get::<PresentationFeedbackCachedState>()
-                        .current()
-                        .callbacks
-                        .is_empty()
+                    || (include_presentation
+                        && !states
+                            .cached_state
+                            .get::<PresentationFeedbackCachedState>()
+                            .current()
+                            .callbacks
+                            .is_empty())
                     || states
                         .cached_state
                         .get::<FifoBarrierCachedState>()
