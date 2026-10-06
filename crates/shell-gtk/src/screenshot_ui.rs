@@ -25,6 +25,8 @@ use gtk4::{gdk, gio, glib};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 use crate::screencast::Recorder;
+pub use crate::screenshot_selection::{initial_selection, Rect};
+use crate::screenshot_selection::{Direction, SelectionKeys};
 
 /// `.screenshot-ui-area-selector-handle`: 24px.
 const HANDLE: f64 = 24.0;
@@ -37,26 +39,6 @@ const PANEL_BOTTOM: i32 = 59;
 const WINDOW_BORDER: i32 = 6;
 /// `.screenshot-ui-window-selector`: `$system_base_color` (dark).
 const SELECTOR_BACKGROUND: (f64, f64, f64) = (34.0 / 255.0, 34.0 / 255.0, 38.0 / 255.0);
-
-/// A rectangle in logical pixels.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Rect {
-    pub x: f64,
-    pub y: f64,
-    pub w: f64,
-    pub h: f64,
-}
-
-/// GNOME's first selection: a quarter of the screen, centred.
-pub fn initial_selection(width: f64, height: f64) -> Rect {
-    let (w, h) = ((width / 4.0).round(), (height / 4.0).round());
-    Rect {
-        x: ((width - w) / 2.0).round(),
-        y: ((height - h) / 2.0).round(),
-        w,
-        h,
-    }
-}
 
 /// What a press at a point grabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,6 +195,7 @@ pub struct ScreenshotUi {
     /// The window selector's windows, pictured on open.
     windows: RefCell<Vec<PickerWindow>>,
     selection: Cell<Option<Rect>>,
+    selection_keys: Cell<Option<SelectionKeys>>,
     mode: Cell<Mode>,
     grab: Cell<Option<(Grab, Rect, f64, f64)>>,
     /// Takes the focused window's screenshot (Window mode, when the
@@ -257,6 +240,7 @@ impl ScreenshotUi {
         window.set_keyboard_mode(KeyboardMode::Exclusive);
 
         let canvas = gtk::DrawingArea::new();
+        canvas.set_accessible_role(gtk::AccessibleRole::Img);
         canvas.set_hexpand(true);
         canvas.set_vexpand(true);
         let fixed = gtk::Fixed::new();
@@ -351,6 +335,7 @@ impl ScreenshotUi {
             frozen: RefCell::new(None),
             windows: RefCell::new(Vec::new()),
             selection: Cell::new(None),
+            selection_keys: Cell::new(None),
             mode: Cell::new(Mode::Selection),
             grab: Cell::new(None),
             shoot_window,
@@ -428,6 +413,8 @@ impl ScreenshotUi {
                 let (w, h) = (f64::from(ui.canvas.width()), f64::from(ui.canvas.height()));
                 ui.selection
                     .set(Some(drag(grab, start, (px, py), (dx, dy), (w, h))));
+                ui.selection_keys.set(None);
+                ui.describe_selection();
                 ui.canvas.queue_draw();
             });
         }
@@ -442,11 +429,15 @@ impl ScreenshotUi {
         overlay.add_controller(drag_gesture);
         // GNOME's keys: Escape closes, Enter/Space captures, S/C/W pick
         // the mode, V switches between screenshot and screencast, P
-        // toggles the pointer.
+        // toggles the pointer. Arrows resize the current edge; Alt moves,
+        // Ctrl adjusts by one pixel, Shift reaches the edge, and R resets.
         let keys = gtk::EventControllerKey::new();
+        // The mode toggle can own focus and consume Return/Space itself.
+        // GNOME's overlay shortcuts precede focused button activation.
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         {
             let weak = Rc::downgrade(&ui);
-            keys.connect_key_pressed(move |_, key, _, _| {
+            keys.connect_key_pressed(move |_, key, _, modifiers| {
                 let Some(ui) = weak.upgrade() else {
                     return glib::Propagation::Proceed;
                 };
@@ -466,6 +457,59 @@ impl ScreenshotUi {
                         }
                     }
                     gdk::Key::p | gdk::Key::P => ui.pointer.set_active(!ui.pointer.is_active()),
+                    gdk::Key::r | gdk::Key::R => {
+                        ui.selection.set(Some(initial_selection(
+                            f64::from(ui.canvas.width()),
+                            f64::from(ui.canvas.height()),
+                        )));
+                        // GNOME resetArea preserves the currently selected edge.
+                        if let (Some(previous), Some(rect)) =
+                            (ui.selection_keys.get(), ui.selection.get())
+                        {
+                            ui.selection_keys.set(Some(previous.reset_area(rect)));
+                        }
+                        ui.describe_selection();
+                        ui.canvas.queue_draw();
+                    }
+                    gdk::Key::Left | gdk::Key::Right | gdk::Key::Up | gdk::Key::Down => {
+                        let direction = match key {
+                            gdk::Key::Left => Direction::Left,
+                            gdk::Key::Right => Direction::Right,
+                            gdk::Key::Up => Direction::Up,
+                            _ => Direction::Down,
+                        };
+                        if ui.mode.get() == Mode::Selection {
+                            let Some(rect) = ui.selection.get() else {
+                                return glib::Propagation::Proceed;
+                            };
+                            let mut selection = ui
+                                .selection_keys
+                                .get()
+                                .unwrap_or_else(|| SelectionKeys::new(rect));
+                            let rect = selection.adjust(
+                                direction,
+                                modifiers.contains(gdk::ModifierType::ALT_MASK),
+                                modifiers.contains(gdk::ModifierType::CONTROL_MASK),
+                                modifiers.contains(gdk::ModifierType::SHIFT_MASK),
+                                (f64::from(ui.canvas.width()), f64::from(ui.canvas.height())),
+                            );
+                            ui.selection_keys.set(Some(selection));
+                            ui.selection.set(Some(rect));
+                            ui.describe_selection();
+                            ui.canvas.queue_draw();
+                        } else if !modifiers.intersects(
+                            gdk::ModifierType::ALT_MASK
+                                | gdk::ModifierType::CONTROL_MASK
+                                | gdk::ModifierType::SHIFT_MASK,
+                        ) {
+                            ui.window.child_focus(match direction {
+                                Direction::Left => gtk::DirectionType::Left,
+                                Direction::Right => gtk::DirectionType::Right,
+                                Direction::Up => gtk::DirectionType::Up,
+                                Direction::Down => gtk::DirectionType::Down,
+                            });
+                        }
+                    }
                     _ => return glib::Propagation::Proceed,
                 }
                 glib::Propagation::Stop
@@ -474,6 +518,16 @@ impl ScreenshotUi {
         ui.window.add_controller(keys);
         ui.set_mode(Mode::Selection);
         ui
+    }
+
+    fn describe_selection(&self) {
+        if let Some(rect) = self.selection.get() {
+            self.canvas
+                .update_property(&[gtk::accessible::Property::Label(&format!(
+                    "Selected area at x {:.0}, y {:.0}, width {:.0}, height {:.0}",
+                    rect.x, rect.y, rect.w, rect.h,
+                ))]);
+        }
     }
 
     fn set_mode(&self, mode: Mode) {
@@ -688,12 +742,19 @@ impl ScreenshotUi {
             .map(|m| m.geometry())
             .map(|g| (g.width(), g.height()))
             .unwrap_or((w, h));
-        if self.selection.get().is_none() {
+        if self.selection.get().is_none_or(|r| {
+            r.x < 0.0
+                || r.y < 0.0
+                || r.x + r.w > f64::from(monitor.0)
+                || r.y + r.h > f64::from(monitor.1)
+        }) {
             self.selection.set(Some(initial_selection(
                 f64::from(monitor.0),
                 f64::from(monitor.1),
             )));
         }
+        self.selection_keys.set(None);
+        self.describe_selection();
         let px = (monitor.0 - PANEL_W) / 2;
         let py = monitor.1 - PANEL_BOTTOM - PANEL_H;
         self.fixed.move_(&self.panel, f64::from(px), f64::from(py));
