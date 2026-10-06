@@ -90,6 +90,48 @@ pub fn take_feedback(roots: &[WlSurface], output: &Output) -> OutputPresentation
     feedback
 }
 
+/// An identical image can still owe a client a real refresh/presentation.
+/// Include callbacks, presentation, FIFO barriers and deferred commit timers.
+#[doc(hidden)]
+pub fn pending_frame_work(roots: &[WlSurface]) -> bool {
+    use smithay::wayland::compositor::SurfaceAttributes;
+    use smithay::wayland::presentation::PresentationFeedbackCachedState;
+    let mut pending = false;
+    for root in roots {
+        with_surface_tree_downward(
+            root,
+            (),
+            |_, _, _| TraversalAction::DoChildren(()),
+            |_, states, _| {
+                pending |= !states
+                    .cached_state
+                    .get::<SurfaceAttributes>()
+                    .current()
+                    .frame_callbacks
+                    .is_empty()
+                    || !states
+                        .cached_state
+                        .get::<PresentationFeedbackCachedState>()
+                        .current()
+                        .callbacks
+                        .is_empty()
+                    || states
+                        .cached_state
+                        .get::<FifoBarrierCachedState>()
+                        .current()
+                        .barrier
+                        .is_some()
+                    || states
+                        .data_map
+                        .get::<CommitTimerBarrierStateUserData>()
+                        .is_some_and(|timers| timers.lock().unwrap().next_deadline().is_some());
+            },
+            |_, _, _| true,
+        );
+    }
+    pending
+}
+
 /// Every surface tree that receives frame callbacks: mapped windows on
 /// any workspace, layer surfaces, popups, the lock screen, a drag icon
 /// and X11 windows. Fifo barriers and commit timers advance on all of

@@ -2912,6 +2912,10 @@ impl Runtime {
             background
         };
         let show_paper = show_content && !overlay_visible && overview.is_none();
+        #[cfg(feature = "drm")]
+        let timing_work = crate::frame_timing::pending_frame_work(
+            &crate::frame_timing::frame_roots(&self.state, &self.manager),
+        );
         match &mut self.backend {
             Backend::Winit(backend) => {
                 backend.window().set_cursor_visible(blank_alpha < 1.0);
@@ -3037,13 +3041,6 @@ impl Runtime {
                     if out.pending {
                         continue;
                     }
-                    let (mut dmabuf, _age) = match out.surface.next_buffer() {
-                        Ok(buffer) => buffer,
-                        Err(e) => {
-                            eprintln!("roost-compositor: drm: next_buffer {}: {e}", out.name);
-                            continue;
-                        }
-                    };
                     let size = out.size;
                     let damage = Rectangle::from_size(size);
                     // Per-output scale from GNOME's monitors.xml (#59).
@@ -3097,6 +3094,60 @@ impl Runtime {
                         cards,
                         locked,
                     );
+                    use crate::native_repaint::{ElementSignature, FrameSignature};
+                    let signature = FrameSignature {
+                        size: (size.w, size.h),
+                        location: out.loc,
+                        scale: out.scale,
+                        locked,
+                        background,
+                        blank_alpha,
+                        accent,
+                        pointer: (!locked && blank_alpha < 1.0).then_some((pointer.x, pointer.y)),
+                        decor: decor.clone(),
+                        above: elements.above,
+                        groups: vec![
+                            paper
+                                .iter()
+                                .map(|e| ElementSignature::capture(e, 1.0))
+                                .collect(),
+                            previews
+                                .iter()
+                                .map(|e| ElementSignature::capture(e, view.scale))
+                                .collect(),
+                            elements
+                                .elements
+                                .iter()
+                                .map(|e| ElementSignature::capture(e, view.scale))
+                                .collect(),
+                            elements
+                                .tile
+                                .iter()
+                                .map(|e| ElementSignature::capture(e, 1.0))
+                                .collect(),
+                            elements
+                                .top
+                                .iter()
+                                .map(|e| ElementSignature::capture(e, view.scale))
+                                .collect(),
+                        ],
+                    };
+                    if !crate::native_repaint::needs_repaint(
+                        out.last_frame.as_ref(),
+                        &signature,
+                        timing_work,
+                    ) {
+                        continue;
+                    }
+                    // Dirty frames repaint the entire acquired buffer, regardless
+                    // of its age. Only a successful submission establishes a cache.
+                    let (mut dmabuf, _age) = match out.surface.next_buffer() {
+                        Ok(buffer) => buffer,
+                        Err(e) => {
+                            eprintln!("roost-compositor: drm: next_buffer {}: {e}", out.name);
+                            continue;
+                        }
+                    };
                     let sync = {
                         let mut target = renderer
                             .bind(&mut dmabuf)
@@ -3157,6 +3208,7 @@ impl Runtime {
                     }
                     out.trace_wake_submission();
                     out.pending = true;
+                    out.last_frame = Some(signature);
                     queued = true;
                 }
                 send_surface_scales(&self.state, &self.manager);

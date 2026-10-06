@@ -10,7 +10,8 @@
 # takes, minus real hardware. Asserts on state, not pixels:
 #   D-OUTPUT   the backend lit the vkms connector
 #   D-SHELL    the shell connected over the control socket (introspection)
-#   D-FRAMES   page flips completed (frame count after shutdown)
+#   D-IDLE     an unchanged scene stops redundant scanout submissions
+#   D-FRAMES   a real active Wayland client receives 240 page-flip presentations
 #   D-SCALE    a GNOME monitors.xml giving the connector scale 2 is
 #              honored: logical layout at half the mode size, frames flip
 # and captures a scanout screenshot with ffmpeg kmsgrab when possible.
@@ -62,6 +63,7 @@ echo "roost-drm-smoke: vkms at $CARD"
 
 echo "roost-drm-smoke: building"
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-host
+"$ROOT/scripts/roost-frame-pacer-build" "$ARTIFACTS/frame-pacer"
 
 # seatd always serves /run/seatd.sock (and removes a leftover one), so a
 # running system seatd is stopped for the test and restarted on exit.
@@ -117,10 +119,10 @@ kill -TERM "$COMP_PID"
 wait "$COMP_PID" || true
 COMP_PID=""
 frames="$(sed -n 's/.*shutdown after \([0-9]*\) frames.*/\1/p' "$LOG" | tail -1)"
-if [ -z "$frames" ] || [ "$frames" -lt 30 ]; then
-    fail D-FRAMES "expected at least 30 completed frames, got '${frames:-none}'"
+if [ -z "$frames" ] || [ "$frames" -lt 1 ] || [ "$frames" -gt 10 ]; then
+    fail D-IDLE "unchanged shell should submit initial frames then sleep, got '${frames:-none}'"
 fi
-pass D-FRAMES "$frames frames page-flipped"
+pass D-IDLE "$frames initial frames over $SECONDS_UP idle seconds; no continuous repaint"
 if grep -q panicked "$LOG"; then fail D-NOPANIC "panic in compositor log"; fi
 pass D-NOPANIC "no panic"
 # Per-output scale from GNOME's monitors.xml (#59): the same session with
@@ -156,12 +158,33 @@ until [ -s "$CSTATE" ] && jq -e ".layers | any(.rect[2] == $half)" "$CSTATE" >/d
 done
 grep -q "drm: output $CONNECTOR .* scale 2" "$SCALED_LOG" ||
     { LOG="$SCALED_LOG"; fail D-SCALE "the output did not take scale 2 from monitors.xml"; }
+# A callback-paced real client alternates its pixels and requests presentation
+# feedback. Idle suppression must not prevent active rendering or real vblank
+# feedback. The fixture comes from the independently reviewed cadence lane.
+timeout 20s env XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY=roost-drm-scaled \
+    "$ARTIFACTS/frame-pacer/roost-frame-pacer" >"$ARTIFACTS/active-presentations.json" \
+    2>"$ARTIFACTS/frame-pacer.log" ||
+    { LOG="$SCALED_LOG"; fail D-FRAMES "active client did not receive all presentations"; }
+python3 - "$ARTIFACTS/active-presentations.json" <<'PY' ||
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    data = json.load(stream)
+frames = data["frames"]
+assert len(frames) == 240
+assert all(f["flags"] & 1 and f["flags"] & 4 for f in frames), "requires vsync and hardware completion"
+assert all(f["refresh_ns"] > 0 for f in frames)
+assert all(a["presented_ns"] < b["presented_ns"] and a["sequence"] < b["sequence"]
+           and a["commit"] < b["commit"] for a, b in zip(frames, frames[1:]))
+PY
+    { LOG="$SCALED_LOG"; fail D-FRAMES "invalid hardware presentation feedback"; }
+pass D-FRAMES "240 changing client frames received real ordered page-flip feedback"
 sleep 2
 kill -TERM "$COMP_PID"
 wait "$COMP_PID" || true
 COMP_PID=""
 scaled_frames="$(sed -n 's/.*shutdown after \([0-9]*\) frames.*/\1/p' "$SCALED_LOG" | tail -1)"
-if [ -z "$scaled_frames" ] || [ "$scaled_frames" -lt 10 ]; then
+if [ -z "$scaled_frames" ] || [ "$scaled_frames" -lt 240 ]; then
     LOG="$SCALED_LOG"
     fail D-SCALE "expected frames at scale 2, got '${scaled_frames:-none}'"
 fi
