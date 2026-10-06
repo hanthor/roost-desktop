@@ -81,6 +81,7 @@ pub struct DrmOutput {
     /// A frame is queued and its page flip has not completed yet.
     pub pending: bool,
     pub(crate) last_frame: Option<crate::native_repaint::FrameSignature>,
+    pub(crate) damage_tracker: Option<smithay::backend::renderer::damage::OutputDamageTracker>,
     wake_trace: bool,
 }
 
@@ -318,6 +319,7 @@ impl DrmBackend {
                 scale: 1.0,
                 pending: false,
                 last_frame: None,
+                damage_tracker: None,
                 wake_trace: false,
             });
         }
@@ -443,6 +445,7 @@ impl DrmBackend {
                     out.surface.reset_buffers();
                     out.pending = false;
                     out.last_frame = None;
+                    out.damage_tracker = None;
                 }
                 self.active = true;
                 if self.sleep_reset_pending {
@@ -474,6 +477,7 @@ impl DrmBackend {
             out.surface.reset_buffers();
             out.pending = false;
             out.last_frame = None;
+            out.damage_tracker = None;
             out.wake_trace = trace;
         }
         // Reset actual connector/plane state too: an active VT does not imply
