@@ -2092,6 +2092,37 @@ if command -v Xwayland >/dev/null 2>&1 && command -v xeyes >/dev/null 2>&1; then
     x11_icon="$(jq -r '.windows[] | select(.app_id == "XEyes") | .icon' "$CSTATE")"
     [ -s "$x11_icon" ] || fail G-WINDOW-ICONS "X11 icon cache missing"
     cp "$x11_icon" "$ARTIFACTS/x11-window-icon.png"
+    # Change the actual mapped X11 client's EWMH role, rather than testing
+    # only synthetic snapshot flags. The same live policy feeds GetWindows.
+    x11_model_id="$(jq -r '.windows[] | select(.app_id == "XEyes") | .id' "$CSTATE")"
+    while read -r x11_kind x11_pickable; do
+        DISPLAY="$x11_display" xprop -id "$x11_window" -f _NET_WM_WINDOW_TYPE 32a \
+            -set _NET_WM_WINDOW_TYPE "_NET_WM_WINDOW_TYPE_$x11_kind"
+        cstate ".windows[] | select(.id == $x11_model_id) | .introspect_eligible == $x11_pickable" \
+            "X11 $x11_kind picker eligibility" ||
+            fail G-INTROSPECT-TYPES "actual X11 $x11_kind role did not yield $x11_pickable"
+        cp "$CSTATE" "$ARTIFACTS/introspect-type-$x11_kind.json"
+    done <<EOF
+NORMAL true
+DIALOG true
+UTILITY true
+DESKTOP false
+DOCK false
+COMBO false
+DND false
+DROPDOWN_MENU false
+MENU false
+NOTIFICATION false
+POPUP_MENU false
+SPLASH false
+TOOLBAR false
+TOOLTIP false
+EOF
+    DISPLAY="$x11_display" xprop -id "$x11_window" -remove _NET_WM_WINDOW_TYPE
+    cstate ".windows[] | select(.id == $x11_model_id) | .introspect_eligible" \
+        "X11 absent type is normal" || fail G-INTROSPECT-TYPES "absent type did not restore eligibility"
+    cp "$CSTATE" "$ARTIFACTS/introspect-type-absent.json"
+    pass G-INTROSPECT-TYPES "actual mapped X11 role changes follow all fourteen EWMH types and restore the absent-type default"
     DISPLAY="$x11_display" "$ROOT/target/debug/examples/icon-probe" --x11-hints >"$ARTIFACTS/hints-probe.log" 2>&1 &
     HINTS_PID=$!
     cstate '.windows[] | select(.app_id == "RoostHintsProbe") | .icon != null' "WM_HINTS icon" || fail G-WINDOW-ICONS "legacy pixmap icon never reached model"

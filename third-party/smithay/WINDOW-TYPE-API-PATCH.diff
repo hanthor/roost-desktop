@@ -1,0 +1,41 @@
+diff --git a/third-party/smithay/src/xwayland/xwm/mod.rs b/third-party/smithay/src/xwayland/xwm/mod.rs
+index 973660e..e6bbf35 100644
+--- a/third-party/smithay/src/xwayland/xwm/mod.rs
++++ b/third-party/smithay/src/xwayland/xwm/mod.rs
+@@ -174,6 +174,10 @@ mod atoms {
+             _NET_WM_MOVERESIZE,
+             _NET_WM_PID,
+             _NET_WM_WINDOW_TYPE,
++            _NET_WM_WINDOW_TYPE_DESKTOP,
++            _NET_WM_WINDOW_TYPE_DOCK,
++            _NET_WM_WINDOW_TYPE_COMBO,
++            _NET_WM_WINDOW_TYPE_DND,
+             _NET_WM_WINDOW_TYPE_DROPDOWN_MENU,
+             _NET_WM_WINDOW_TYPE_DIALOG,
+             _NET_WM_WINDOW_TYPE_MENU,
+diff --git a/third-party/smithay/src/xwayland/xwm/surface.rs b/third-party/smithay/src/xwayland/xwm/surface.rs
+index c48dde1..8cca78e 100644
+--- a/third-party/smithay/src/xwayland/xwm/surface.rs
++++ b/third-party/smithay/src/xwayland/xwm/surface.rs
+@@ -121,6 +121,10 @@ pub enum X11SurfaceError {
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+ #[allow(missing_docs)]
+ pub enum WmWindowType {
++    Desktop,
++    Dock,
++    Combo,
++    Dnd,
+     DropdownMenu,
+     Dialog,
+     Menu,
+@@ -562,6 +566,10 @@ impl X11Surface {
+             .window_type
+             .iter()
+             .find_map(|atom| match atom {
++                x if *x == self.atoms._NET_WM_WINDOW_TYPE_DESKTOP => Some(WmWindowType::Desktop),
++                x if *x == self.atoms._NET_WM_WINDOW_TYPE_DOCK => Some(WmWindowType::Dock),
++                x if *x == self.atoms._NET_WM_WINDOW_TYPE_COMBO => Some(WmWindowType::Combo),
++                x if *x == self.atoms._NET_WM_WINDOW_TYPE_DND => Some(WmWindowType::Dnd),
+                 x if *x == self.atoms._NET_WM_WINDOW_TYPE_DROPDOWN_MENU => Some(WmWindowType::DropdownMenu),
+                 x if *x == self.atoms._NET_WM_WINDOW_TYPE_DIALOG => Some(WmWindowType::Dialog),
+                 x if *x == self.atoms._NET_WM_WINDOW_TYPE_MENU => Some(WmWindowType::Menu),

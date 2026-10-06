@@ -61,6 +61,16 @@ pub fn window_properties(window: &WindowSnapshot) -> HashMap<String, OwnedValue>
     props
 }
 
+/// GetWindows enumeration has a different eligibility rule from the app
+/// list: a standalone application's auxiliary windows do not become pickable.
+fn pickable_windows(windows: &[WindowSnapshot]) -> HashMap<u64, HashMap<String, OwnedValue>> {
+    windows
+        .iter()
+        .filter(|w| w.introspect_eligible)
+        .map(|w| (w.id, window_properties(w)))
+        .collect()
+}
+
 /// Running apps keyed by app id, each with the seats it has focus on.
 pub fn running_apps(windows: &[WindowSnapshot]) -> HashMap<String, HashMap<String, OwnedValue>> {
     let standalone: HashSet<_> = windows
@@ -111,11 +121,7 @@ impl Service {
         #[zbus(header)] header: Header<'_>,
     ) -> fdo::Result<HashMap<u64, HashMap<String, OwnedValue>>> {
         self.check_caller(conn, &header).await?;
-        Ok(self
-            .snapshot()
-            .iter()
-            .map(|w| (w.id, window_properties(w)))
-            .collect())
+        Ok(pickable_windows(&self.snapshot()))
     }
 
     async fn get_running_applications(
@@ -274,7 +280,30 @@ mod tests {
             hidden: false,
             x11: false,
             standalone: true,
+            introspect_eligible: true,
         }
+    }
+
+    #[test]
+    fn picker_filter_preserves_app_focus_and_eligible_transient_dialogs() {
+        let normal = window(1, Some("org.gnome.Editor"), false);
+        let mut dialog = window(2, Some("org.gnome.Editor"), false);
+        dialog.standalone = false;
+        let mut notification = window(3, Some("org.gnome.Editor"), true);
+        notification.standalone = false;
+        notification.introspect_eligible = false;
+        let windows = vec![normal, dialog, notification];
+        let pickable = pickable_windows(&windows);
+        assert_eq!(pickable.len(), 2);
+        assert!(pickable.contains_key(&1));
+        assert!(pickable.contains_key(&2));
+        assert!(!pickable.contains_key(&3));
+        let apps = running_apps(&windows);
+        assert_eq!(
+            Vec::<String>::try_from(apps["org.gnome.Editor.desktop"]["active-on-seats"].clone())
+                .unwrap(),
+            vec!["seat0"]
+        );
     }
 
     #[test]

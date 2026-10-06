@@ -36,3 +36,15 @@ input are retained until the next forwarded event, so a wake shield cannot
 leave the focused client with a stale modifier mask. Real wl_keyboard tests
 cover consumed releases, focus-enter key arrays, and same-focus modifier
 updates without forwarding the consumed event. The pinned version stays 0.7.0.
+
+Issue #410 additionally completes EWMH window-type recognition in
+src/xwayland/xwm/mod.rs and surface.rs. The four previously unrecognized
+Desktop, Dock, Combo and Dnd atoms now retain their real type instead of
+falling through to no recognized type (which consumers treat as Normal).
+WmWindowType gains those four variants. The cached property's first recognized
+atom still wins in client preference order, and property change handling is
+unchanged. Roost uses this complete type metadata to exclude auxiliary X11
+roles from GNOME GetWindows while preserving Normal/Dialog/Utility. The
+isolated diff is retained in WINDOW-TYPE-API-PATCH.diff. This is a source API
+extension at pinned 0.7.0; no upstream match in the tree is exhaustive over
+these variants. Factory packaging must include the final patched source.

@@ -121,6 +121,10 @@ pub enum X11SurfaceError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(missing_docs)]
 pub enum WmWindowType {
+    Desktop,
+    Dock,
+    Combo,
+    Dnd,
     DropdownMenu,
     Dialog,
     Menu,
@@ -562,6 +566,10 @@ impl X11Surface {
             .window_type
             .iter()
             .find_map(|atom| match atom {
+                x if *x == self.atoms._NET_WM_WINDOW_TYPE_DESKTOP => Some(WmWindowType::Desktop),
+                x if *x == self.atoms._NET_WM_WINDOW_TYPE_DOCK => Some(WmWindowType::Dock),
+                x if *x == self.atoms._NET_WM_WINDOW_TYPE_COMBO => Some(WmWindowType::Combo),
+                x if *x == self.atoms._NET_WM_WINDOW_TYPE_DND => Some(WmWindowType::Dnd),
                 x if *x == self.atoms._NET_WM_WINDOW_TYPE_DROPDOWN_MENU => Some(WmWindowType::DropdownMenu),
                 x if *x == self.atoms._NET_WM_WINDOW_TYPE_DIALOG => Some(WmWindowType::Dialog),
                 x if *x == self.atoms._NET_WM_WINDOW_TYPE_MENU => Some(WmWindowType::Menu),
