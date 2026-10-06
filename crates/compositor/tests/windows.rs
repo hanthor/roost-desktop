@@ -2975,7 +2975,7 @@ fn exclusive_overlay_receives_navigation_and_retains_popup_system_accelerators()
 
 #[test]
 fn exclusive_overview_keeps_overview_accelerators() {
-    use roost_shell_control::{Accelerator, MODE_OVERVIEW, MOD_SUPER, OVERVIEW_NAMESPACE};
+    use roost_shell_control::{Accelerator, MODE_OVERVIEW, MOD_LOGO, OVERVIEW_NAMESPACE};
     let mut f = two_windows();
     let (conn, mut queue, mut client) = connect(&mut f.comp);
     let qh = queue.handle();
@@ -3004,7 +3004,7 @@ fn exclusive_overview_keeps_overview_accelerators() {
     f.manager.set_accelerators(vec![Accelerator {
         action: 17,
         keysym: u32::from(b'a'),
-        mods: MOD_SUPER,
+        mods: MOD_LOGO,
         modes: MODE_OVERVIEW,
     }]);
     press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
