@@ -1766,6 +1766,13 @@ impl WindowManager {
     /// IBus's candidate window does) so panel menus take keys; the
     /// button itself follows pointer focus from the last motion.
     pub fn pointer_button(&mut self, state: &mut State, button: u32, pressed: bool, time: u32) {
+        let trace = std::env::var_os("ROOST_POINTER_TRACE").is_some();
+        if trace {
+            eprintln!(
+                "roost-compositor: pointer trace: manager button received popup_grab={} move_modifier={}",
+                state.popup_grab_active(), self.super_held
+            );
+        }
         // Release ends a move/resize grab. It is still delivered (unless
         // its press was swallowed): the client's press opened smithay's
         // implicit click grab, and only the matching release closes it.
@@ -1828,12 +1835,25 @@ impl WindowManager {
             } else if self.overview_open {
                 // Overview presses are the runtime's (preview hits).
             } else if let Some(id) = self.window_at(pos) {
-                if self.model.focused() != Some(id) {
+                // A lock or on-demand layer can own the keyboard while the
+                // model still names this window. A click must restore actual
+                // seat focus even when the model's focused ID is unchanged.
+                let keyboard_matches = self
+                    .keyboard
+                    .as_ref()
+                    .is_none_or(|keyboard| keyboard.current_focus() == self.surface_of(id));
+                if self.model.focused() != Some(id) || !keyboard_matches {
                     self.apply_focus(state, Some(id));
                 }
             }
         }
         if let Some(pointer) = self.pointer.clone() {
+            if trace {
+                eprintln!(
+                    "roost-compositor: pointer trace: client button dispatched focused={}",
+                    pointer.current_focus().is_some()
+                );
+            }
             pointer.button(
                 state,
                 &ButtonEvent {
@@ -1901,6 +1921,7 @@ impl WindowManager {
         surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
         input: ManagerInput,
     ) {
+        self.note_modifiers(&input);
         if let Some(keyboard) = self.keyboard.clone() {
             if keyboard.current_focus().as_ref() != Some(surface) {
                 keyboard.set_focus(state, Some(surface.clone()), SERIAL_COUNTER.next_serial());
@@ -1978,6 +1999,12 @@ impl WindowManager {
         if !pressed {
             if let Some(i) = self.accel_held.iter().position(|k| *k == keycode) {
                 self.accel_held.remove(i);
+                keyboard.input_intercept(
+                    state,
+                    keycode.saturating_add(XKB_X11_OFFSET).into(),
+                    KeyState::Released,
+                    |_, _, _| (),
+                );
                 return true;
             }
         }
@@ -3084,6 +3111,44 @@ impl WindowManager {
         true
     }
 
+    /// Keep physical modifier holds current even when a lock, blanking shield
+    /// or recovery overlay consumes the event. This never delivers client input.
+    pub fn note_modifiers(&mut self, input: &ManagerInput) {
+        if let ManagerInput::Key {
+            keycode, pressed, ..
+        } = input
+        {
+            self.track_workspace_modifiers(*keycode, *pressed);
+            self.track_switcher_modifiers(*keycode, *pressed);
+        }
+    }
+
+    /// Account for a consumed key without sending it to any client.
+    pub fn discard_key_input(&mut self, state: &mut State, input: &ManagerInput) {
+        self.note_modifiers(input);
+        if let (
+            Some(keyboard),
+            ManagerInput::Key {
+                keycode, pressed, ..
+            },
+        ) = (self.keyboard.clone(), input)
+        {
+            if !*pressed {
+                self.accel_held.retain(|held| held != keycode);
+            }
+            keyboard.input_intercept(
+                state,
+                keycode.saturating_add(XKB_X11_OFFSET).into(),
+                if *pressed {
+                    KeyState::Pressed
+                } else {
+                    KeyState::Released
+                },
+                |_, _, _| (),
+            );
+        }
+    }
+
     /// Track Super/Shift hold state for workspace keybindings. The
     /// modifier events themselves still forward to clients.
     fn track_workspace_modifiers(&mut self, keycode: u32, pressed: bool) {
@@ -3382,6 +3447,63 @@ impl TriggerState {
         overview_open: bool,
         pointer: Point<f64, Logical>,
     ) -> TriggerAction {
+        let corner = matches!(input, ManagerInput::Motion { pos, .. }
+            if (0.0..HOT_CORNER_PX).contains(&pos.x)
+                && (0.0..HOT_CORNER_PX).contains(&pos.y));
+        let strip = (0.0..ACTIVITIES_STRIP_PX).contains(&pointer.y)
+            && (0.0..ACTIVITIES_WIDTH_PX).contains(&pointer.x);
+        self.feed_regions(input, overview_open, corner, strip)
+    }
+
+    /// Decide against the current logical output layout. GNOME 51 always
+    /// offers the primary corner; a secondary corner is eligible only when
+    /// no other output touches its left or top edge. The Activities strip
+    /// belongs to the primary panel. Geometry is borrowed, never cached.
+    pub fn feed_on_outputs(
+        &mut self,
+        input: &ManagerInput,
+        overview_open: bool,
+        pointer: Point<f64, Logical>,
+        outputs: impl Iterator<Item = (Rectangle<i32, Logical>, bool)> + Clone,
+    ) -> TriggerAction {
+        let outputs = outputs.filter(|(rect, _)| rect.size.w > 0 && rect.size.h > 0);
+        let in_region =
+            |pos: Point<f64, Logical>, rect: Rectangle<i32, Logical>, w: f64, h: f64| {
+                let x = pos.x - f64::from(rect.loc.x);
+                let y = pos.y - f64::from(rect.loc.y);
+                (0.0..w.min(f64::from(rect.size.w))).contains(&x)
+                    && (0.0..h.min(f64::from(rect.size.h))).contains(&y)
+            };
+        let corner = if let ManagerInput::Motion { pos, .. } = input {
+            outputs.clone().any(|(rect, primary)| {
+                if !in_region(*pos, rect, HOT_CORNER_PX, HOT_CORNER_PX) {
+                    return false;
+                }
+                let left: Point<f64, Logical> =
+                    (f64::from(rect.loc.x) - 1.0, f64::from(rect.loc.y)).into();
+                let above: Point<f64, Logical> =
+                    (f64::from(rect.loc.x), f64::from(rect.loc.y) - 1.0).into();
+                primary
+                    || !outputs.clone().any(|(other, _)| {
+                        other.to_f64().contains(left) || other.to_f64().contains(above)
+                    })
+            })
+        } else {
+            false
+        };
+        let strip = outputs.clone().any(|(rect, primary)| {
+            primary && in_region(pointer, rect, ACTIVITIES_WIDTH_PX, ACTIVITIES_STRIP_PX)
+        });
+        self.feed_regions(input, overview_open, corner, strip)
+    }
+
+    fn feed_regions(
+        &mut self,
+        input: &ManagerInput,
+        overview_open: bool,
+        corner: bool,
+        strip: bool,
+    ) -> TriggerAction {
         match *input {
             ManagerInput::Key {
                 keycode, pressed, ..
@@ -3396,24 +3518,17 @@ impl TriggerState {
                     TriggerAction::None
                 }
             }
-            ManagerInput::Motion { pos, .. } => {
+            ManagerInput::Motion { .. } => {
                 self.super_armed = false;
-                if !self.hot_corner_off
-                    && !overview_open
-                    && (0.0..HOT_CORNER_PX).contains(&pos.x)
-                    && (0.0..HOT_CORNER_PX).contains(&pos.y)
-                {
+                if !self.hot_corner_off && !overview_open && corner {
                     TriggerAction::Open
                 } else {
                     TriggerAction::None
                 }
             }
             ManagerInput::Button { pressed, .. } => {
-                let strip = pressed
-                    && (0.0..ACTIVITIES_STRIP_PX).contains(&pointer.y)
-                    && (0.0..ACTIVITIES_WIDTH_PX).contains(&pointer.x);
                 self.super_armed = false;
-                if strip {
+                if pressed && strip {
                     TriggerAction::Toggle
                 } else {
                     TriggerAction::None

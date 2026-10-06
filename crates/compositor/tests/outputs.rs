@@ -232,3 +232,104 @@ fn set_output_size_updates_primary_in_place_without_adding_entry() {
     assert_eq!(comp.state.primary_size(), Size::from((0, 0)));
     assert!(!comp.state.set_primary("roost-0"));
 }
+
+#[test]
+fn activities_follow_live_primary_geometry_and_output_disconnect() {
+    use roost_compositor::windows::{ManagerInput, TriggerAction as A, TriggerState};
+    let mut comp = TestCompositor::new();
+    comp.state.add_output("left", None, 1280, 720);
+    comp.state.add_output("right", None, 1280, 720);
+    comp.state.set_output_location("left", (-1280, -200));
+    comp.state.set_output_location("right", (0, 0));
+    let mut triggers = TriggerState::default();
+    let button = ManagerInput::Button {
+        button: 0x110,
+        pressed: true,
+        time: 0,
+    };
+    let click = |comp: &TestCompositor, triggers: &mut TriggerState, x, y| {
+        comp.state
+            .overview_trigger_action(triggers, &button, false, (x, y).into())
+    };
+    assert_eq!(click(&comp, &mut triggers, -1278.0, -190.0), A::Toggle);
+    for (x, y) in [
+        (-1281.0, -190.0),
+        (-1278.0, -201.0),
+        (-1184.0, -190.0),
+        (-1278.0, -168.0),
+        (2.0, 10.0),
+        (f64::NAN, -190.0),
+        (-1278.0, f64::INFINITY),
+    ] {
+        assert_eq!(click(&comp, &mut triggers, x, y), A::None);
+    }
+    assert!(comp.state.set_primary("right"));
+    assert_eq!(click(&comp, &mut triggers, 2.0, 10.0), A::Toggle);
+    assert_eq!(click(&comp, &mut triggers, -1278.0, -190.0), A::None);
+    assert!(comp.state.remove_output("right"));
+    assert_eq!(click(&comp, &mut triggers, -1278.0, -190.0), A::Toggle);
+    assert_eq!(click(&comp, &mut triggers, 2.0, 10.0), A::None);
+    assert!(comp.state.remove_output("left"));
+    assert_eq!(click(&comp, &mut triggers, -1278.0, -190.0), A::None);
+    assert_eq!(click(&comp, &mut triggers, 2.0, 10.0), A::None);
+}
+
+#[test]
+fn hot_corners_use_exposed_secondary_corners_and_live_gnome_policy() {
+    use roost_compositor::windows::{ManagerInput, TriggerAction as A, TriggerState};
+    let mut comp = TestCompositor::new();
+    comp.state.add_output("primary", None, 1280, 720);
+    comp.state.add_output("secondary", None, 1280, 720);
+    let mut triggers = TriggerState::default();
+    let motion = |comp: &TestCompositor, triggers: &mut TriggerState, x, y| {
+        let input = ManagerInput::Motion {
+            pos: (x, y).into(),
+            time: 0,
+        };
+        comp.state
+            .overview_trigger_action(triggers, &input, false, (x, y).into())
+    };
+    assert_eq!(motion(&comp, &mut triggers, 2.0, 2.0), A::Open);
+    assert_eq!(
+        motion(&comp, &mut triggers, 1282.0, 2.0),
+        A::None,
+        "secondary has an output immediately to its left"
+    );
+    comp.state.set_output_location("secondary", (0, 720));
+    assert_eq!(
+        motion(&comp, &mut triggers, 2.0, 722.0),
+        A::None,
+        "secondary has an output immediately above"
+    );
+    comp.state.set_output_location("secondary", (1280, 720));
+    assert_eq!(
+        motion(&comp, &mut triggers, 1282.0, 722.0),
+        A::Open,
+        "diagonal contact leaves both approach points exposed"
+    );
+    comp.state.set_output_location("secondary", (-1280, -200));
+    assert_eq!(motion(&comp, &mut triggers, -1278.0, -198.0), A::Open);
+    for (x, y) in [
+        (-1281.0, -198.0),
+        (-1278.0, -201.0),
+        (-1272.0, -198.0),
+        (-1278.0, -192.0),
+        (f64::NEG_INFINITY, -198.0),
+        (-1278.0, f64::NAN),
+    ] {
+        assert_eq!(motion(&comp, &mut triggers, x, y), A::None);
+    }
+    triggers.set_hot_corner(false);
+    assert_eq!(motion(&comp, &mut triggers, -1278.0, -198.0), A::None);
+    triggers.set_hot_corner(true);
+    assert_eq!(motion(&comp, &mut triggers, -1278.0, -198.0), A::Open);
+    comp.state.set_output_location("secondary", (1280, 0));
+    assert!(comp.state.set_primary("secondary"));
+    assert_eq!(
+        motion(&comp, &mut triggers, 1282.0, 2.0),
+        A::Open,
+        "GNOME keeps the primary corner even beside another output"
+    );
+    assert!(comp.state.remove_output("secondary"));
+    assert_eq!(motion(&comp, &mut triggers, 1282.0, 2.0), A::None);
+}

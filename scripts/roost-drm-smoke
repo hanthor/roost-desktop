@@ -10,7 +10,8 @@
 # takes, minus real hardware. Asserts on state, not pixels:
 #   D-OUTPUT   the backend lit the vkms connector
 #   D-SHELL    the shell connected over the control socket (introspection)
-#   D-FRAMES   page flips completed (frame count after shutdown)
+#   D-IDLE     an unchanged scene stops redundant scanout submissions
+#   D-FRAMES   a real active Wayland client receives 240 page-flip presentations
 #   D-SCALE    a GNOME monitors.xml giving the connector scale 2 is
 #              honored: logical layout at half the mode size, frames flip
 # and captures a scanout screenshot with ffmpeg kmsgrab when possible.
@@ -36,6 +37,7 @@ ASSERTIONS="$ARTIFACTS/assertions.txt"
 SEATD_SOCK="/run/seatd.sock"
 SYSTEM_SEATD=""
 STATE="$ARTIFACTS/shell-state.json"
+CSTATE="$ARTIFACTS/compositor-state.json"
 SEATD_PID=""
 COMP_PID=""
 
@@ -50,6 +52,21 @@ trap cleanup EXIT INT TERM
 pass() { echo "$1 pass $2" >>"$ASSERTIONS"; echo "roost-drm-smoke: $1 pass: $2"; }
 fail() { echo "$1 fail $2" >>"$ASSERTIONS"; echo "roost-drm-smoke: $1 FAIL: $2" >&2; tail -40 "$LOG" >&2 || true; exit 1; }
 
+validate_presentation() {
+python3 - "$1" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    data = json.load(stream)
+frames = data["frames"]
+assert len(frames) == 240
+assert all(f["flags"] & 1 and f["flags"] & 4 for f in frames), "requires vsync and hardware completion"
+assert all(f["refresh_ns"] > 0 for f in frames)
+assert all(a["presented_ns"] < b["presented_ns"] and a["sequence"] < b["sequence"]
+           and a["commit"] < b["commit"] for a, b in zip(frames, frames[1:]))
+PY
+}
+
 sudo modprobe vkms
 CARD=""
 for dev in /sys/class/drm/card*; do
@@ -62,6 +79,7 @@ echo "roost-drm-smoke: vkms at $CARD"
 
 echo "roost-drm-smoke: building"
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-host
+"$ROOT/scripts/roost-frame-pacer-build" "$ARTIFACTS/frame-pacer"
 
 # seatd always serves /run/seatd.sock (and removes a leftover one), so a
 # running system seatd is stopped for the test and restarted on exit.
@@ -83,7 +101,7 @@ env -u DISPLAY -u WAYLAND_DISPLAY \
     XDG_RUNTIME_DIR="$RUNTIME" \
     XDG_STATE_HOME="$ARTIFACTS/state" XDG_DATA_HOME="$ARTIFACTS/data" \
     LIBSEAT_BACKEND=seatd \
-    ROOST_DRM_DEVICE="$CARD" ROOST_INTROSPECT_FILE="$STATE" \
+    ROOST_DRM_DEVICE="$CARD" ROOST_INTROSPECT_FILE="$STATE" ROOST_COMPOSITOR_STATE="$CSTATE" \
     "$ROOT/target/debug/roost-compositor" --backend drm --socket roost-drm-smoke \
     --shell-bin "$ROOT/target/debug/roost-shell-host" >"$LOG" 2>&1 &
 COMP_PID=$!
@@ -104,7 +122,29 @@ until [ -s "$STATE" ] && jq -e '.revision != null' "$STATE" >/dev/null 2>&1; do
 done
 pass D-SHELL "shell connected (revision $(jq .revision "$STATE"))"
 
+sleep 2
+[ -s "$CSTATE" ] || fail D-IDLE "missing compositor frame counter"
+idle_before=$(jq -er '.rendered_frames' "$CSTATE")
+cp "$CSTATE" "$ARTIFACTS/idle-before.json"
+sleep 3
+idle_after=$(jq -er '.rendered_frames' "$CSTATE")
+cp "$CSTATE" "$ARTIFACTS/idle-after.json"
+if [ "$idle_after" -lt "$idle_before" ] || [ "$((idle_after - idle_before))" -gt 1 ]; then
+    fail D-IDLE "stationary scene redrew $((idle_after - idle_before)) times in 3 seconds"
+fi
+pass D-IDLE "retained stationary scanout: $idle_before to $idle_after frames in 3 seconds"
 sleep "$SECONDS_UP"
+initial_frames=$(jq -er '.rendered_frames' "$CSTATE")
+if [ "$initial_frames" -lt 1 ] || [ "$initial_frames" -gt 10 ]; then
+    fail D-IDLE "unchanged shell should submit initial frames then sleep, got $initial_frames"
+fi
+pass D-IDLE "$initial_frames initial frames over $SECONDS_UP additional idle seconds; no continuous repaint"
+# Resume real native presentation at the default scale as well as 200% below.
+timeout 20s env -u WAYLAND_SOCKET XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY=roost-drm-smoke \
+    "$ARTIFACTS/frame-pacer/roost-frame-pacer" >"$ARTIFACTS/presentation.json" \
+    2>"$ARTIFACTS/presentation.stderr" || fail D-FRAMES "native presentation probe failed"
+validate_presentation "$ARTIFACTS/presentation.json" || fail D-FRAMES "invalid native presentation trace"
+pass D-FRAMES "240 changing client frames at default scale received real ordered page-flip feedback"
 if command -v ffmpeg >/dev/null 2>&1; then
     sudo ffmpeg -loglevel error -y -device "$CARD" -f kmsgrab -i - -frames:v 1 \
         -vf 'hwdownload,format=bgr0' "$ARTIFACTS/scanout.png" 2>"$ARTIFACTS/kmsgrab.log" &&
@@ -117,10 +157,9 @@ kill -TERM "$COMP_PID"
 wait "$COMP_PID" || true
 COMP_PID=""
 frames="$(sed -n 's/.*shutdown after \([0-9]*\) frames.*/\1/p' "$LOG" | tail -1)"
-if [ -z "$frames" ] || [ "$frames" -lt 30 ]; then
-    fail D-FRAMES "expected at least 30 completed frames, got '${frames:-none}'"
+if [ -z "$frames" ] || [ "$frames" -lt 240 ]; then
+    fail D-FRAMES "expected at least 240 completed frames, got '${frames:-none}'"
 fi
-pass D-FRAMES "$frames frames page-flipped"
 if grep -q panicked "$LOG"; then fail D-NOPANIC "panic in compositor log"; fi
 pass D-NOPANIC "no panic"
 # Per-output scale from GNOME's monitors.xml (#59): the same session with
@@ -156,12 +195,22 @@ until [ -s "$CSTATE" ] && jq -e ".layers | any(.rect[2] == $half)" "$CSTATE" >/d
 done
 grep -q "drm: output $CONNECTOR .* scale 2" "$SCALED_LOG" ||
     { LOG="$SCALED_LOG"; fail D-SCALE "the output did not take scale 2 from monitors.xml"; }
+# A callback-paced real client alternates its pixels and requests presentation
+# feedback. Idle suppression must not prevent active rendering or real vblank
+# feedback. The fixture comes from the independently reviewed cadence lane.
+timeout 20s env XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY=roost-drm-scaled \
+    "$ARTIFACTS/frame-pacer/roost-frame-pacer" >"$ARTIFACTS/active-presentations.json" \
+    2>"$ARTIFACTS/frame-pacer.log" ||
+    { LOG="$SCALED_LOG"; fail D-FRAMES "active client did not receive all presentations"; }
+validate_presentation "$ARTIFACTS/active-presentations.json" ||
+    { LOG="$SCALED_LOG"; fail D-FRAMES "invalid hardware presentation feedback"; }
+pass D-FRAMES "240 changing client frames received real ordered page-flip feedback"
 sleep 2
 kill -TERM "$COMP_PID"
 wait "$COMP_PID" || true
 COMP_PID=""
 scaled_frames="$(sed -n 's/.*shutdown after \([0-9]*\) frames.*/\1/p' "$SCALED_LOG" | tail -1)"
-if [ -z "$scaled_frames" ] || [ "$scaled_frames" -lt 10 ]; then
+if [ -z "$scaled_frames" ] || [ "$scaled_frames" -lt 240 ]; then
     LOG="$SCALED_LOG"
     fail D-SCALE "expected frames at scale 2, got '${scaled_frames:-none}'"
 fi

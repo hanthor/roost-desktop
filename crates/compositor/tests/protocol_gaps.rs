@@ -13,6 +13,7 @@ use roost_compositor::TestCompositor;
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use wayland_client::{
     protocol::{
+        wl_callback::{self, WlCallback},
         wl_compositor::WlCompositor,
         wl_registry::{self, WlRegistry},
         wl_seat::WlSeat,
@@ -59,11 +60,27 @@ enum Fate {
 
 #[derive(Default)]
 struct Client {
+    frames: usize,
     globals: HashMap<String, (u32, u32)>,
     clock_id: Option<u32>,
     fates: HashMap<u32, Fate>,
     inhibitor_active: Option<bool>,
     handle: Option<String>,
+}
+
+impl Dispatch<WlCallback, ()> for Client {
+    fn event(
+        state: &mut Self,
+        _: &WlCallback,
+        event: wl_callback::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_callback::Event::Done { .. } = event {
+            state.frames += 1;
+        }
+    }
 }
 
 impl Client {
@@ -348,6 +365,39 @@ fn chord(manager: &mut WindowManager, comp: &mut TestCompositor, keycode: u32) {
 }
 
 #[test]
+fn a_frame_request_without_pixel_damage_keeps_native_refresh_work_pending() {
+    let (mut comp, mut manager) = compositor();
+    let mut peer = connect(&mut comp, &mut manager);
+    let (surface, _toplevel) = window(&mut peer, "idle client");
+    pump(&mut comp, &mut manager, &mut [&mut peer]);
+    let roots = roost_compositor::frame_timing::frame_roots(&comp.state, &manager);
+    assert!(!roost_compositor::frame_timing::pending_frame_work(&roots));
+    let _callback = surface.frame(&peer.qh(), ());
+    // No buffer attachment or damage: this is a request for pacing alone.
+    surface.commit();
+    pump(&mut comp, &mut manager, &mut [&mut peer]);
+    assert!(roost_compositor::frame_timing::pending_frame_work(&roots));
+    assert!(
+        roost_compositor::frame_timing::pending_output_work(&roots, &[]),
+        "callback-only pacing remains owed even without visible presentation"
+    );
+    assert_eq!(peer.client.frames, 0);
+    let output = comp.state.primary_output().unwrap();
+    for root in &roots {
+        smithay::desktop::utils::send_frames_surface_tree(
+            root,
+            &output,
+            std::time::Duration::from_millis(20),
+            Some(std::time::Duration::ZERO),
+            |_, _| Some(output.clone()),
+        );
+    }
+    pump(&mut comp, &mut manager, &mut [&mut peer]);
+    assert_eq!(peer.client.frames, 1);
+    assert!(!roost_compositor::frame_timing::pending_frame_work(&roots));
+}
+
+#[test]
 fn presentation_feedback_reports_the_frame_that_drew_the_window() {
     let (mut comp, mut manager) = compositor();
     let mut peer = connect(&mut comp, &mut manager);
@@ -364,6 +414,8 @@ fn presentation_feedback_reports_the_frame_that_drew_the_window() {
     surface.commit();
     pump(&mut comp, &mut manager, &mut [&mut peer]);
     assert!(peer.client.fates.is_empty(), "nothing drawn yet");
+    let roots = roost_compositor::frame_timing::frame_roots(&comp.state, &manager);
+    assert!(roost_compositor::frame_timing::pending_frame_work(&roots));
 
     roost_compositor::frame_timing::present_nested_frame(&mut comp.state, &manager, false, 42);
     pump(&mut comp, &mut manager, &mut [&mut peer]);
@@ -374,6 +426,7 @@ fn presentation_feedback_reports_the_frame_that_drew_the_window() {
             refresh: 16_666_666,
         })
     );
+    assert!(!roost_compositor::frame_timing::pending_frame_work(&roots));
 }
 
 #[test]
@@ -391,6 +444,25 @@ fn a_hidden_window_keeps_its_feedback_until_drawn() {
     roost_compositor::frame_timing::present_nested_frame(&mut comp.state, &manager, true, 1);
     pump(&mut comp, &mut manager, &mut [&mut peer]);
     assert_eq!(peer.client.fates.get(&7), None);
+    let roots = roost_compositor::frame_timing::frame_roots(&comp.state, &manager);
+    assert!(roost_compositor::frame_timing::pending_frame_work(&roots));
+    assert!(
+        !roost_compositor::frame_timing::pending_output_work(&roots, &[]),
+        "hidden presentation must not keep an unchanged output repainting"
+    );
+    let drawn: Vec<_> = roost_compositor::frame_timing::drawn_roots(&comp.state, &manager, false)
+        .into_iter()
+        .map(|(surface, _)| surface)
+        .collect();
+    assert!(
+        roost_compositor::frame_timing::pending_output_work(&roots, &drawn),
+        "revealing the actual window owes a real submission"
+    );
+    assert_eq!(
+        peer.client.fates.get(&7),
+        None,
+        "visibility check does not resolve feedback"
+    );
 
     roost_compositor::frame_timing::present_nested_frame(&mut comp.state, &manager, false, 2);
     pump(&mut comp, &mut manager, &mut [&mut peer]);
@@ -421,6 +493,8 @@ fn fifo_holds_a_waiting_commit_until_the_next_refresh() {
 
     // The first refresh draws what was applied (not the held update),
     // then releases the barrier.
+    let roots = roost_compositor::frame_timing::frame_roots(&comp.state, &manager);
+    assert!(roost_compositor::frame_timing::pending_frame_work(&roots));
     roost_compositor::frame_timing::present_nested_frame(&mut comp.state, &manager, false, 1);
     pump(&mut comp, &mut manager, &mut [&mut peer]);
     assert_eq!(peer.client.fates.get(&2), None, "held behind the barrier");
