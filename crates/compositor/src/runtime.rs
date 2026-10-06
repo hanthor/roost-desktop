@@ -804,10 +804,11 @@ impl Runtime {
         event_loop
             .handle()
             .insert_source(socket, |stream, _, runtime: &mut Runtime| {
+                let client_data = ClientState::native_connection(&stream);
                 if let Ok(client) = runtime
                     .display
                     .handle()
-                    .insert_client(stream, Arc::new(ClientState::default()))
+                    .insert_client(stream, Arc::new(client_data))
                 {
                     let _ = client;
                     runtime.stats.clients += 1;
