@@ -150,19 +150,15 @@ impl ServiceChannel {
         #[zbus(connection)] conn: &zbus::Connection,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> fdo::Result<zbus::zvariant::OwnedFd> {
+        let role = crate::capture_security::ServiceClient::from_wire(service_client_type)?;
         let owner = self
             .authority
-            .admit_portal_connection(conn, &header)
+            .admit_service_connection(conn, &header, role)
             .await?;
-        if service_client_type != 1 {
-            return Err(fdo::Error::InvalidArgs(
-                "unsupported service client type".into(),
-            ));
-        }
         self.clients.retain(|_, alive| alive.load(Ordering::SeqCst));
         if self.clients.len() >= 32 || self.clients.contains_key(&owner) {
             return Err(fdo::Error::LimitsExceeded(
-                "portal service connection limit".into(),
+                "service connection limit".into(),
             ));
         }
         let (server, client) = std::os::unix::net::UnixStream::pair()
