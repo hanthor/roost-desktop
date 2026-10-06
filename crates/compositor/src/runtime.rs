@@ -1112,7 +1112,7 @@ impl Runtime {
             // (keyboard-shortcuts-inhibit, #89).
             let inhibited =
                 matches!(input, ManagerInput::Key { .. }) && self.state.shortcuts_inhibited();
-            let popup = crate::layer::exclusive_keyboard_layer(&self.state).is_some();
+            let popup = crate::layer::exclusive_popup_keyboard_layer(&self.state).is_some();
             let action = if inhibited || popup {
                 self.triggers.cancel();
                 TriggerAction::None

@@ -2901,6 +2901,7 @@ fn exclusive_overlay_receives_navigation_and_retains_popup_system_accelerators()
     client.synced = false;
     conn.display().sync(&qh, ());
     pump(&mut f.comp, &mut queue, &mut client, |c| c.synced);
+    f.manager.set_overview_open(true);
     f.manager.reconcile(&mut f.comp.state);
     assert!(roost_compositor::layer::exclusive_keyboard_layer(&f.comp.state).is_some());
     f.manager.set_accelerators(vec![
@@ -2955,6 +2956,7 @@ fn exclusive_overlay_receives_navigation_and_retains_popup_system_accelerators()
     assert!(!client.keys.iter().any(|(key, _)| *key == R_KEYCODE));
     assert!(f.client_a.keys.is_empty());
     assert!(f.client_b.keys.is_empty());
+    f.manager.set_overview_open(false);
     // Unmapping returns normal desktop accelerators to their original mode.
     layer.destroy();
     surface.destroy();
@@ -2968,5 +2970,49 @@ fn exclusive_overlay_receives_navigation_and_retains_popup_system_accelerators()
     assert_eq!(
         f.manager.take_accelerators_fired(),
         [(1, 5000, MODE_NORMAL)]
+    );
+}
+
+#[test]
+fn exclusive_overview_keeps_overview_accelerators() {
+    use roost_shell_control::{Accelerator, MODE_OVERVIEW, MOD_SUPER, OVERVIEW_NAMESPACE};
+    let mut f = two_windows();
+    let (conn, mut queue, mut client) = connect(&mut f.comp);
+    let qh = queue.handle();
+    let surface = client.compositor.as_ref().unwrap().create_surface(&qh, ());
+    let layer = client.layer_shell.as_ref().unwrap().get_layer_surface(
+        &surface,
+        None,
+        Layer::Overlay,
+        OVERVIEW_NAMESPACE.into(),
+        &qh,
+        (),
+    );
+    layer.set_size(0, 0);
+    layer.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
+    layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+    for _ in 0..2 {
+        surface.commit();
+        client.synced = false;
+        conn.display().sync(&qh, ());
+        pump(&mut f.comp, &mut queue, &mut client, |c| c.synced);
+    }
+    f.manager.set_overview_open(true);
+    f.manager.reconcile(&mut f.comp.state);
+    assert!(roost_compositor::layer::exclusive_keyboard_layer(&f.comp.state).is_some());
+    assert!(roost_compositor::layer::exclusive_popup_keyboard_layer(&f.comp.state).is_none());
+    f.manager.set_accelerators(vec![Accelerator {
+        action: 17,
+        keysym: u32::from(b'a'),
+        mods: MOD_SUPER,
+        modes: MODE_OVERVIEW,
+    }]);
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, 30);
+    release(&mut f.manager, &mut f.comp, 30);
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    assert_eq!(
+        f.manager.take_accelerators_fired(),
+        [(17, 5000, MODE_OVERVIEW)]
     );
 }

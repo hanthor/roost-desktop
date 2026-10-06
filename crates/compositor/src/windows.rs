@@ -1983,7 +1983,7 @@ impl WindowManager {
         }
         let mode = if self.lock_input_active {
             roost_shell_control::MODE_LOCK_SCREEN
-        } else if crate::layer::exclusive_keyboard_layer(state).is_some() {
+        } else if crate::layer::exclusive_popup_keyboard_layer(state).is_some() {
             roost_shell_control::MODE_POPUP
         } else if self.overview_open {
             roost_shell_control::MODE_OVERVIEW
@@ -3539,7 +3539,7 @@ impl WindowManager {
                 // Exclusive shell overlays own their navigation chords. Normal
                 // workspace/window/switcher shortcuts must not steal Alt arrows.
                 // Explicit popup-mode system accelerators still run below.
-                if crate::layer::exclusive_keyboard_layer(state).is_some() {
+                if crate::layer::exclusive_popup_keyboard_layer(state).is_some() {
                     if !pressed && self.switcher_swallowed.contains(&keycode) {
                         self.switcher_swallowed.retain(|k| *k != keycode);
                     } else {
