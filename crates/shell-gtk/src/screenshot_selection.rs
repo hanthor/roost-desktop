@@ -87,7 +87,11 @@ impl SelectionKeys {
         let amount = if control {
             1.0
         } else if shift {
-            if direction.vertical() { height } else { width }
+            if direction.vertical() {
+                height
+            } else {
+                width
+            }
         } else {
             5.0
         };

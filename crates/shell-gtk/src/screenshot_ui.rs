@@ -25,8 +25,8 @@ use gtk4::{gdk, gio, glib};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 use crate::screencast::Recorder;
+pub use crate::screenshot_selection::{initial_selection, Rect};
 use crate::screenshot_selection::{Direction, SelectionKeys};
-pub use crate::screenshot_selection::{Rect, initial_selection};
 
 /// `.screenshot-ui-area-selector-handle`: 24px.
 const HANDLE: f64 = 24.0;
