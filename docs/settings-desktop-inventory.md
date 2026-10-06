@@ -208,8 +208,8 @@ Source: [GTK Wayland settings translations](https://github.com/GNOME/gtk/blob/4.
 | cursor-size | Via GTK | GTK Wayland settings translation; clients follow the portal or GSettings fallback |
 | cursor-theme | Via GTK | GTK Wayland settings translation; clients follow the portal or GSettings fallback |
 | document-font-name | Ignored | No Roost consumer or verified toolkit translation for this preference |
-| enable-animations | Honored | Live idle shield fade duration, GTK transitions and compositor overview/strip motion; proof G-ANIMATIONS-OFF; candidate G-INTROSPECT-MOTION checks live D-Bus clients (qualification pending) |
-| enable-hot-corners | Honored | Live shell CSS/GTK rendering, clock, input policy or UPower percentage |
+| enable-animations | Honored | Live idle shield fade duration, GTK transitions and compositor overview/strip motion; proofs G-ANIMATIONS-OFF and G-INTROSPECT-MOTION verify effective motion through actual GNOME clients |
+| enable-hot-corners | Honored (partial) | Live enable/disable and output-aware LTR corner regions; candidate fullscreen guard has protocol/GTK proofs awaiting execution. Pressure barriers, RTL, retrigger/toggle policy and physical multi-output qualification remain in #336 |
 | font-antialiasing | Honored | Live shell CSS/GTK rendering, clock, input policy or UPower percentage |
 | font-hinting | Honored | Live shell CSS/GTK rendering, clock, input policy or UPower percentage |
 | font-name | Honored | Live shell CSS/GTK rendering, clock, input policy or UPower percentage |

@@ -1242,7 +1242,16 @@ impl Runtime {
                             .input(Duration::from(self.state.presentation_now()));
                     }
                 }
-                TriggerAction::Open => self.control.set_overview(true),
+                TriggerAction::Open => {
+                    // GNOME's corner cannot open over a fullscreen monitor.
+                    // Super and Activities remain deliberate toggles; only
+                    // the motion-driven corner uses this guard.
+                    let blocked = matches!(&input, ManagerInput::Motion { pos, .. }
+                        if self.manager.fullscreen_at(*pos));
+                    if !blocked {
+                        self.control.set_overview(true);
+                    }
+                }
             }
             self.manager.on_input(&mut self.state, input);
             // Alt-Tab drive: forward whatever the manager queued into
