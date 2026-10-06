@@ -511,6 +511,18 @@ impl WindowManager {
             .collect()
     }
 
+    /// Whether the pointer is over a visible fullscreen window. Hidden or
+    /// minimized windows and fullscreen windows on another output do not
+    /// suppress that output's hot corner.
+    pub fn fullscreen_at(&self, pos: Point<f64, Logical>) -> bool {
+        self.visible_entries().iter().any(|(id, _, geometry)| {
+            self.windows
+                .get(id)
+                .is_some_and(|window| window.layout == WindowLayout::Fullscreen)
+                && geometry.to_f64().contains(pos)
+        })
+    }
+
     /// Wayland surfaces of mapped X11 windows, for frame production.
     /// The state's toplevel list only covers native windows, and
     /// Xwayland paces its content commits on frame callbacks, so
