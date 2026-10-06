@@ -470,14 +470,11 @@ impl DrmBackend {
             out.surface.reset_buffers();
             out.pending = false;
         }
-        // WAKE-DBG experiment: skip the disable-all reset. The kernel
-        // preserves virtio-gpu scanout across S3; the reset may be what
-        // strands the output (re-modeset that never re-lights). The
-        // connector/mode re-assert below still forces a modeset commit
-        // for the first post-wake frame either way.
-        // if let Err(error) = self.drm.reset_state() {
-        //     eprintln!("roost-compositor: drm: wake KMS reset failed: {error}");
-        // }
+        // Reset actual connector/plane state too: an active VT does not imply
+        // that the kernel restored its framebuffer.
+        if let Err(error) = self.drm.reset_state() {
+            eprintln!("roost-compositor: drm: wake KMS reset failed: {error}");
+        }
         // The reset disables every connector, so the next submit would be
         // a bare page flip onto darkness with no vblank to complete it.
         // Re-assert each output's connector and mode: the next queued
