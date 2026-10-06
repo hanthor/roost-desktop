@@ -1999,11 +1999,10 @@ impl WindowManager {
         if !pressed {
             if let Some(i) = self.accel_held.iter().position(|k| *k == keycode) {
                 self.accel_held.remove(i);
-                keyboard.input_intercept(
+                keyboard.input_discard(
                     state,
                     keycode.saturating_add(XKB_X11_OFFSET).into(),
                     KeyState::Released,
-                    |_, _, _| (),
                 );
                 return true;
             }
@@ -3136,7 +3135,7 @@ impl WindowManager {
             if !*pressed {
                 self.accel_held.retain(|held| held != keycode);
             }
-            keyboard.input_intercept(
+            keyboard.input_discard(
                 state,
                 keycode.saturating_add(XKB_X11_OFFSET).into(),
                 if *pressed {
@@ -3144,7 +3143,6 @@ impl WindowManager {
                 } else {
                     KeyState::Released
                 },
-                |_, _, _| (),
             );
         }
     }
