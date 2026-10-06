@@ -14,6 +14,13 @@ def check(path, first, show):
          and n.get("name") in weekdays and n.get("bounds")],
         key=lambda n: n["bounds"][0],
     )
+    rows = collections.defaultdict(list)
+    for heading in headings:
+        rows[heading["bounds"][1]].append(heading)
+    # The today heading is also a weekday. Require the actual seven-column row.
+    candidates = [row for row in rows.values() if len(row) == 7]
+    assert len(candidates) == 1, f"expected one weekday grid row, got {dict(rows)}"
+    headings = candidates[0]
     assert len(headings) == 7, f"expected seven visible headings, got {headings}"
     start = weekdays.index(headings[0]["name"])
     if first != "default":
