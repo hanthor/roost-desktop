@@ -26,10 +26,12 @@ if parent_mode == "x11":
         raise RuntimeError("Roost did not reserve a rootless X11 display")
     os.environ["DISPLAY"] = display
     os.environ["GDK_BACKEND"] = "x11"
+    os.environ.setdefault("GSK_RENDERER", "cairo")
     GLib.set_prgname("roost-x11-picker-parent")
     gi.require_version("Gtk", "4.0")
     gi.require_version("GdkX11", "4.0")
     from gi.repository import Gtk, GdkX11
+    Gtk.init()
     parent_window = Gtk.Window(title="Roost X11 picker parent")
     parent_window.set_default_size(640, 400)
     parent_window.set_child(Gtk.Label(label="Actual GTK X11 application parent"))
