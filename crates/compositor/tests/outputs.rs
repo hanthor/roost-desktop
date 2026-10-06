@@ -333,3 +333,45 @@ fn hot_corners_use_exposed_secondary_corners_and_live_gnome_policy() {
     assert!(comp.state.remove_output("secondary"));
     assert_eq!(motion(&comp, &mut triggers, 1282.0, 2.0), A::None);
 }
+
+#[test]
+fn desktop_size_tracks_layout_scale_mirrors_and_disconnects() {
+    let mut comp = TestCompositor::new();
+    assert_eq!(comp.state.desktop_size(), (0, 0));
+    comp.state.add_output("primary", None, 1280, 800);
+    comp.state.add_output("left", None, 1024, 768);
+    comp.state.set_output_location("left", (-1024, -200));
+    assert_eq!(comp.state.desktop_size(), (2304, 1000));
+    assert!(comp.state.set_primary("left"));
+    assert_eq!(comp.state.desktop_size(), (2304, 1000));
+    // The backend publishes its newly scaled logical geometry to this inventory.
+    comp.state.add_output("left", None, 512, 384);
+    assert_eq!(comp.state.desktop_size(), (2304, 1000));
+    comp.state.set_output_location("left", (-512, 0));
+    assert_eq!(comp.state.desktop_size(), (1792, 800));
+    // Mirrored geometry is a union, not the sum of monitor widths.
+    comp.state.set_output_location("left", (0, 0));
+    assert_eq!(comp.state.desktop_size(), (1280, 800));
+    // Translation of the entire layout does not alter its dimensions.
+    comp.state.set_output_location("left", (-700, -500));
+    comp.state.set_output_location("primary", (-700, -500));
+    assert_eq!(comp.state.desktop_size(), (1280, 800));
+    comp.state.remove_output("primary");
+    assert_eq!(comp.state.desktop_size(), (512, 384));
+    comp.state.remove_output("left");
+    assert_eq!(comp.state.desktop_size(), (0, 0));
+}
+
+#[test]
+fn desktop_size_bounds_extreme_coordinates_and_ignores_empty_outputs() {
+    let mut comp = TestCompositor::new();
+    comp.state.add_output("a", None, 1, 1);
+    comp.state.set_output_location("a", (i32::MIN, i32::MIN));
+    comp.state.add_output("b", None, i32::MAX, i32::MAX);
+    comp.state.set_output_location("b", (i32::MAX, i32::MAX));
+    assert_eq!(comp.state.desktop_size(), (i32::MAX, i32::MAX));
+    comp.state.remove_output("a");
+    comp.state.remove_output("b");
+    comp.state.add_output("disabled", None, 0, 800);
+    assert_eq!(comp.state.desktop_size(), (0, 0));
+}
