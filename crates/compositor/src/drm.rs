@@ -35,7 +35,9 @@ use smithay::backend::session::libseat::{LibSeatSession, LibSeatSessionNotifier}
 use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::desktop::utils::OutputPresentationFeedback;
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
-use smithay::reexports::drm::control::{connector, crtc, Device as ControlDevice, ModeTypeFlags};
+use smithay::reexports::drm::control::{
+    connector, crtc, Device as ControlDevice, Mode as DrmMode, ModeTypeFlags,
+};
 use smithay::reexports::input::Libinput;
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::utils::{DeviceFd, Logical, Physical, Point, Rectangle, Size};
@@ -67,6 +69,12 @@ pub struct DrmOutput {
     pub name: String,
     /// CRTC driving the connector.
     pub crtc: crtc::Handle,
+    /// Connector feeding the CRTC, retained to re-assert it after a
+    /// sleep reset disables every output.
+    pub connector: connector::Handle,
+    /// Preferred hardware mode, retained to force a modeset commit
+    /// (not a page flip onto darkness) after a sleep reset.
+    pub drm_mode: DrmMode,
     /// GBM swapchain bound to the CRTC.
     pub surface: ScanoutSurface,
     /// Protocol output advertised to clients.
@@ -296,6 +304,8 @@ impl DrmBackend {
             outputs.push(DrmOutput {
                 name,
                 crtc,
+                connector: *handle,
+                drm_mode: mode,
                 surface,
                 output,
                 size,
@@ -456,10 +466,28 @@ impl DrmBackend {
             out.pending = false;
         }
         // Reset actual connector/plane state too: an active VT does not imply
-        // that the kernel restored its framebuffer. The next locked frame
-        // commits the retained modes and surfaces again.
+        // that the kernel restored its framebuffer.
         if let Err(error) = self.drm.reset_state() {
             eprintln!("roost-compositor: drm: wake KMS reset failed: {error}");
+        }
+        // The reset disables every connector, so the next submit would be
+        // a bare page flip onto darkness with no vblank to complete it.
+        // Re-assert each output's connector and mode: the next queued
+        // frame then performs a modeset commit that re-lights the output
+        // and restarts completions, presenting the locked frame.
+        for out in &mut self.outputs {
+            if let Err(error) = out.surface.set_connectors(&[out.connector]) {
+                eprintln!(
+                    "roost-compositor: drm: wake connector re-assert {}: {error}",
+                    out.name
+                );
+            }
+            if let Err(error) = out.surface.use_mode(out.drm_mode) {
+                eprintln!(
+                    "roost-compositor: drm: wake mode re-assert {}: {error}",
+                    out.name
+                );
+            }
         }
     }
 
