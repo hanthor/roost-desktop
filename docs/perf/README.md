@@ -27,3 +27,10 @@ package and observer provenance in that run. This supplies a native Marlin
 protocol reference once a run passes; it does not replace the existing Fedora
 headless reference without retaining and reviewing that actual evidence.
 The comparison requires KVM and fails rather than accepting software emulation.
+
+The [native cadence and pure idle report](2026-10-04-native-cadence/README.md)
+retains a later actual paired GNOME 51/Roost run, including all 240 presentation
+records per desktop, guest clock boundaries, ten accepted notifications each,
+and raw resource samples. It identifies high Roost idle CPU and slower median
+presentation cadence in the older trusted package. It does not qualify later
+repaint changes or close the remaining input tracing and soak requirements.

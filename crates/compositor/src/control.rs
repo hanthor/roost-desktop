@@ -45,62 +45,12 @@ use roost_shell_control::{
 
 use crate::state::{StateChange, StateModel, TokenStore, WindowEntry};
 
-/// Failure of a control-channel operation.
-#[derive(Debug)]
-pub enum ControlError {
-    /// Underlying socket I/O failure.
-    Io(std::io::Error),
-    /// Frame failed schema validation (oversize, malformed, stale major,
-    /// over-long title). The offending frame is dropped.
-    Decode(DecodeError),
-    /// Nonblocking socket not ready (spec R6). Nothing was consumed from a
-    /// read; a write may be partial, so drop the connection on write
-    /// backpressure (see module docs).
-    WouldBlock,
-    /// Peer closed with no complete frame buffered.
-    Closed,
-    /// Peer violated the session protocol (e.g. first message is not
-    /// `Hello`). A typed `Error` was sent where possible.
-    Protocol(String),
-}
-
-impl std::fmt::Display for ControlError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(e) => write!(f, "control socket I/O: {e}"),
-            Self::Decode(e) => write!(f, "control decode: {e}"),
-            Self::WouldBlock => write!(f, "control socket not ready"),
-            Self::Closed => write!(f, "control peer closed"),
-            Self::Protocol(e) => write!(f, "control protocol: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for ControlError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(e) => Some(e),
-            Self::Decode(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<std::io::Error> for ControlError {
-    fn from(e: std::io::Error) -> Self {
-        if e.kind() == std::io::ErrorKind::WouldBlock {
-            Self::WouldBlock
-        } else {
-            Self::Io(e)
-        }
-    }
-}
-
-impl From<DecodeError> for ControlError {
-    fn from(e: DecodeError) -> Self {
-        Self::Decode(e)
-    }
-}
+/// Transport and protocol failures, shared with the shell-host endpoint.
+///
+/// Defined in [`roost_shell_control`] so both endpoints name the same type;
+/// re-exported here because `roost_compositor::control::ControlError` is the
+/// path the rest of this crate (and its tests) use.
+pub use roost_shell_control::ControlError;
 
 /// Bound control socket. Wraps an already-bound [`UnixListener`] (tests pass
 /// a bound socket or use a socketpair directly with [`ControlConn`]).
@@ -172,7 +122,7 @@ impl ControlConn {
             match self.stream.read(&mut chunk) {
                 Ok(0) => {
                     if self.rbuf.is_empty() {
-                        return Err(ControlError::Closed);
+                        return Err(ControlError::Unexpected("peer closed".into()));
                     }
                     return Err(ControlError::Decode(DecodeError::Truncated {
                         expected: self.rbuf.len(),
@@ -193,7 +143,7 @@ impl ControlConn {
         let mut written = 0;
         while written < frame.len() {
             match self.stream.write(&frame[written..]) {
-                Ok(0) => return Err(ControlError::Closed),
+                Ok(0) => return Err(ControlError::Unexpected("peer closed on write".into())),
                 Ok(n) => written += n,
                 Err(e) => return Err(ControlError::from(e)),
             }
@@ -304,6 +254,7 @@ pub struct Session<'a> {
     accelerators: Option<Vec<roost_shell_control::Accelerator>>,
     /// Window-menu actions the shell asked for, until drained.
     window_actions: Vec<(u64, roost_shell_control::WindowAction)>,
+    shortcut_consent: Vec<(u64, bool)>,
     /// Latest `SetOverviewSearch` from the shell, drained by the hub.
     overview_search: Option<bool>,
     /// Latest `SetOverviewAppGrid` from the shell, drained by the hub.
@@ -381,6 +332,7 @@ impl<'a> Session<'a> {
             idle_timeout: None,
             accelerators: None,
             window_actions: Vec::new(),
+            shortcut_consent: Vec::new(),
             overview_search: None,
             overview_app_grid: None,
             unlock_request: None,
@@ -407,7 +359,7 @@ impl<'a> Session<'a> {
                 kind: ErrorKind::UnknownCommand,
                 message: "expected Hello as first message".to_owned(),
             });
-            return Err(ControlError::Protocol(
+            return Err(ControlError::Unexpected(
                 "first message is not Hello".to_owned(),
             ));
         };
@@ -709,6 +661,19 @@ impl<'a> Session<'a> {
             }
             Message::Command {
                 id,
+                kind: CommandKind::ShortcutConsent { request, allow },
+            } => {
+                if !self.locked.get() {
+                    self.shortcut_consent.push((request, allow));
+                }
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: CommandStatus::Applied,
+                })?;
+                Ok(Handled::CommandResult { id, applied: true })
+            }
+            Message::Command {
+                id,
                 kind: CommandKind::WindowAction { window, action },
             } => {
                 // The window manager carries it out (drained by the hub);
@@ -775,6 +740,8 @@ impl<'a> Session<'a> {
             | Message::AcceleratorActivated { .. }
             | Message::WindowMenu { .. }
             | Message::WorkspacePopup { .. }
+            | Message::PointerOutput { .. }
+            | Message::ShortcutConsent { .. }
             | Message::Error { .. } => {
                 let _ = self.conn.write_frame(&Message::Error {
                     kind: ErrorKind::UnknownCommand,
@@ -816,6 +783,8 @@ fn message_kind(msg: &Message) -> &'static str {
         Message::AcceleratorActivated { .. } => "AcceleratorActivated",
         Message::WindowMenu { .. } => "WindowMenu",
         Message::WorkspacePopup { .. } => "WorkspacePopup",
+        Message::PointerOutput { .. } => "PointerOutput",
+        Message::ShortcutConsent { .. } => "ShortcutConsent",
     }
 }
 
@@ -860,6 +829,7 @@ fn window_to_wire(
     mint: &dyn Fn(Option<&str>) -> String,
 ) -> roost_shell_control::WindowInfo {
     roost_shell_control::WindowInfo {
+        icon: w.icon.clone(),
         id: w.id,
         title: w.title.clone(),
         app_id: w.app_id.clone(),
@@ -971,6 +941,7 @@ fn apply_command(
         | CommandKind::Unlock { .. }
         | CommandKind::SetAccelerators { .. }
         | CommandKind::WindowAction { .. }
+        | CommandKind::ShortcutConsent { .. }
         | CommandKind::SwitchInputSource { .. }
         | CommandKind::SetSwitcherThumbnails { .. }
         | CommandKind::SetSwitcherKeys { .. }
@@ -1013,6 +984,8 @@ pub struct PollOutcome {
     pub accelerators: Option<Vec<roost_shell_control::Accelerator>>,
     /// Window-menu actions to carry out.
     pub window_actions: Vec<(u64, roost_shell_control::WindowAction)>,
+    /// Trusted shell decisions for pending inhibitors.
+    pub shortcut_consent: Vec<(u64, bool)>,
     /// Input-source switches to make (`true` backward), in order.
     pub input_source_switches: Vec<bool>,
     /// New switcher thumbnail frames, if the shell sent any.
@@ -1136,6 +1109,7 @@ pub struct ControlHub {
     /// compositor's tracking, and [`poll`](Self::poll) broadcasts it
     /// whenever it differs from `outputs_sent`.
     outputs: Vec<OutputInfo>,
+    pointer_output: Option<String>,
     /// Inventory value every live session holds; a mismatch means a
     /// broadcast is still owed (or a newcomer joined mid-state).
     outputs_sent: Vec<OutputInfo>,
@@ -1199,6 +1173,7 @@ impl ControlHub {
             accelerator_queue: Vec::new(),
             menu_queue: Vec::new(),
             outputs: Vec::new(),
+            pointer_output: None,
             outputs_sent: Vec::new(),
             environment: Vec::new(),
             environment_sent: Vec::new(),
@@ -1322,6 +1297,13 @@ impl ControlHub {
 
     /// Send a compositor-to-shell message (window menu, workspace popup)
     /// on the next poll.
+    pub fn set_pointer_output(&mut self, name: Option<String>) {
+        if self.pointer_output != name {
+            self.pointer_output = name.clone();
+            self.queue_message(Message::PointerOutput { name });
+        }
+    }
+
     pub fn queue_message(&mut self, message: Message) {
         self.menu_queue.push(message);
     }
@@ -1399,6 +1381,9 @@ impl ControlHub {
                         outcome.accelerators = Some(list);
                     }
                     outcome.window_actions.extend(session.take_window_actions());
+                    outcome
+                        .shortcut_consent
+                        .extend(std::mem::take(&mut session.shortcut_consent));
                     outcome
                         .input_source_switches
                         .extend(std::mem::take(&mut session.input_source_switches));
@@ -1560,6 +1545,11 @@ impl ControlHub {
                 if !self.environment.is_empty() {
                     let _ = session.send_environment(&self.environment);
                     let _ = session.send_overview_previews(&self.previews.0, self.previews.1);
+                }
+                if self.pointer_output.is_some() {
+                    let _ = session.send_window_menu(&Message::PointerOutput {
+                        name: self.pointer_output.clone(),
+                    });
                 }
                 self.sessions.push(session);
                 self.session_peers.push(peer);

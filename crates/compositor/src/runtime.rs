@@ -434,6 +434,12 @@ pub fn restore_env(prev: Option<OsString>) {
 /// Live nested session: display, protocol state, backend, and outputs.
 /// Output handles live in the state's inventory (entry zero is the
 /// primary); the runtime reaches them through [`State`] accessors.
+struct RemoteHeld {
+    grant: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    keys: std::collections::HashSet<u32>,
+    buttons: std::collections::HashSet<u32>,
+}
+
 pub struct Runtime {
     display: Display<State>,
     state: State,
@@ -485,6 +491,9 @@ pub struct Runtime {
     casts: Vec<crate::screencast::Cast>,
     /// Monitor list the Mutter D-Bus side serves.
     cast_outputs: crate::mutter::Outputs,
+    capture_authority: crate::capture_security::Authority,
+    cast_grants: std::collections::HashMap<u64, std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    remote_held: std::collections::HashMap<u64, RemoteHeld>,
     /// Window list org.gnome.Shell.Introspect serves (window sharing).
     introspect: crate::introspect::Handle,
     /// A three-finger swipe in progress: its travel so far (#60).
@@ -513,6 +522,8 @@ pub struct Runtime {
     /// Reserved X11 display, advertised before XWayland starts (#219).
     /// Actual window-manager readiness is independently state.xwm.is_some().
     x11_display: Option<u32>,
+    #[cfg(feature = "xwayland")]
+    x11_icon_reader: crate::x11_icons::Reader,
     /// Real-time anchor of the last input event. Input stamps live on
     /// the backend event clock while idle is measured here, so each
     /// tick evaluates the lock in the input base as
@@ -753,11 +764,17 @@ impl Runtime {
         // sharing through the stock GNOME portal.
         let cast_outputs: crate::mutter::Outputs = Default::default();
         // org.gnome.Shell.Introspect: the portal's window picker.
-        let introspect = crate::introspect::start(cast_outputs.clone());
+        let capture_authority = crate::capture_security::Authority::default();
+        let introspect = crate::introspect::start(cast_outputs.clone(), capture_authority.clone());
         event_loop
             .handle()
             .insert_source(
-                crate::mutter::start(cast_outputs.clone(), introspect.windows.clone()),
+                crate::mutter::start(
+                    cast_outputs.clone(),
+                    introspect.windows.clone(),
+                    capture_authority.clone(),
+                    display.handle(),
+                ),
                 |event, _, rt: &mut Runtime| {
                     if let calloop::channel::Event::Msg(request) = event {
                         rt.on_screencast_request(request);
@@ -769,27 +786,30 @@ impl Runtime {
         // thread are answered between frames.
         event_loop
             .handle()
-            .insert_source(crate::screenshot::start(), |event, _, rt: &mut Runtime| {
-                use crate::screenshot::Request;
-                match event {
-                    calloop::channel::Event::Msg(Request::Shot {
-                        filename,
-                        window,
-                        reply,
-                    }) => {
-                        let saved = if window {
-                            rt.capture_window(&filename)
-                        } else {
-                            rt.capture(&filename)
-                        };
-                        let _ = reply.send(saved);
+            .insert_source(
+                crate::screenshot::start(capture_authority.clone()),
+                |event, _, rt: &mut Runtime| {
+                    use crate::screenshot::Request;
+                    match event {
+                        calloop::channel::Event::Msg(Request::Shot {
+                            filename,
+                            window,
+                            reply,
+                        }) => {
+                            let saved = if window {
+                                rt.capture_window(&filename)
+                            } else {
+                                rt.capture(&filename)
+                            };
+                            let _ = reply.send(saved);
+                        }
+                        calloop::channel::Event::Msg(Request::Windows { directory, reply }) => {
+                            let _ = reply.send(rt.capture_selector_windows(&directory));
+                        }
+                        calloop::channel::Event::Closed => {}
                     }
-                    calloop::channel::Event::Msg(Request::Windows { directory, reply }) => {
-                        let _ = reply.send(rt.capture_selector_windows(&directory));
-                    }
-                    calloop::channel::Event::Closed => {}
-                }
-            })
+                },
+            )
             .map_err(|e| RuntimeError::Loop(e.to_string()))?;
 
         // Lock-screen password checks finish here, between frames.
@@ -832,6 +852,8 @@ impl Runtime {
             #[cfg(feature = "xwayland")]
             x11_failed: false,
             x11_display: None,
+            #[cfg(feature = "xwayland")]
+            x11_icon_reader: crate::x11_icons::Reader::new(),
             overview_search: false,
             overview_app_grid: false,
             overview_drag: None,
@@ -847,6 +869,9 @@ impl Runtime {
             pipewire: None,
             casts: Vec::new(),
             cast_outputs,
+            capture_authority,
+            cast_grants: Default::default(),
+            remote_held: Default::default(),
             introspect,
             idle_since: Instant::now(),
             unlock_results,
@@ -946,6 +971,12 @@ impl Runtime {
     fn engage_lock(&mut self) {
         self.lock.lock();
         self.control.set_locked(true);
+        let remote_ids: Vec<_> = self.remote_held.keys().copied().collect();
+        for id in remote_ids {
+            self.stop_remote_input(id);
+        }
+        self.capture_authority.publish(true, self.shell.child_pid());
+        self.state.set_shortcut_inhibition_locked(true);
         self.control.set_overview(false);
         self.overlay.show(Vec::new());
     }
@@ -1004,6 +1035,7 @@ impl Runtime {
         if applied && self.is_locked() {
             self.lock.unlock(self.lock_now_ms());
             self.control.set_locked(false);
+            self.state.set_shortcut_inhibition_locked(false);
             self.overlay.hide();
         }
         self.control.finish_unlock(request, applied);
@@ -1343,6 +1375,12 @@ impl Runtime {
         let doc = serde_json::json!({
             "rendered_frames": self.stats.frames,
             "x11_display": self.x11_display.map(|d| format!(":{d}")),
+            "capture_streams": self.casts.len(),
+            "remote_input_sessions": self.remote_held.len(),
+            // Held-state proof needs only a count, including during lock.
+            // Never emit key identities that could expose credential input.
+            "seat_pressed_key_count": self.state.seat.get_keyboard()
+                .map_or(0, |keyboard| keyboard.pressed_keys().len()),
             "x11_ready": x11_ready,
             "idle_timeout_ms": self.lock.timeout_ms(),
             "idle_blank_alpha": self.blank_alpha(),
@@ -1383,6 +1421,7 @@ impl Runtime {
             "windows": self.manager.overview_windows().iter().map(|w| serde_json::json!({
                 "id": w.id,
                 "app_id": app_of(w.id),
+                "icon": model.window(w.id).and_then(|w| w.icon.clone()),
                 "workspace": w.workspace,
                 "rect": [w.geometry.loc.x, w.geometry.loc.y, w.geometry.size.w, w.geometry.size.h],
             })).collect::<Vec<_>>(),
@@ -2066,15 +2105,34 @@ impl Runtime {
     /// D-Bus side asked for, and feed every streaming cast a frame.
     fn screencast_tick(&mut self) {
         use crate::mutter::CastTarget;
+        if self.is_locked() {
+            for grant in self.cast_grants.values() {
+                grant.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            for cast in &self.casts {
+                cast.close();
+            }
+            self.casts.clear();
+            self.cast_grants.clear();
+            return;
+        }
         // A cast window that closed ends its session, as in Mutter.
         let manager = &self.manager;
         self.casts.retain(|cast| {
             let gone =
                 matches!(cast.target, CastTarget::Window(id) if manager.geometry(id).is_none());
-            if gone {
+            if gone || cast.failed() {
+                if let Some(grant) = self.cast_grants.get(&cast.session_id) {
+                    grant.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 cast.close();
             }
-            !cast.failed() && !gone
+            !cast.failed()
+                && !gone
+                && !self
+                    .cast_grants
+                    .get(&cast.session_id)
+                    .is_none_or(|grant| grant.load(std::sync::atomic::Ordering::SeqCst))
         });
         // Window casts follow their window's size.
         for index in 0..self.casts.len() {
@@ -2135,13 +2193,166 @@ impl Runtime {
     }
 
     /// One D-Bus screen-cast request.
+    fn stop_remote_input(&mut self, session_id: u64) {
+        let Some(held) = self.remote_held.remove(&session_id) else {
+            return;
+        };
+        held.grant.store(true, std::sync::atomic::Ordering::SeqCst);
+        let time = self.lock_now_ms() as u32;
+        // Cleanup must reach the seat even while the lock shield has no
+        // surface or idle blank would consume a wake event. These are only
+        // releases for presses delivered by this grant, never new input.
+        for keycode in held.keys {
+            self.manager.on_input(
+                &mut self.state,
+                ManagerInput::Key {
+                    keycode,
+                    pressed: false,
+                    time,
+                },
+            );
+        }
+        for button in held.buttons {
+            self.manager.on_input(
+                &mut self.state,
+                ManagerInput::Button {
+                    button,
+                    pressed: false,
+                    time,
+                },
+            );
+        }
+    }
+
+    fn remote_input(
+        &mut self,
+        session_id: u64,
+        grant: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        input: crate::mutter::RemoteInput,
+    ) {
+        if self.is_locked() || grant.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let time = self.lock_now_ms() as u32;
+        let held = self
+            .remote_held
+            .entry(session_id)
+            .or_insert_with(|| RemoteHeld {
+                grant,
+                keys: Default::default(),
+                buttons: Default::default(),
+            });
+        use crate::mutter::RemoteInput;
+        let input = match input {
+            RemoteInput::Key { evdev, pressed } => {
+                // ManagerInput uses evdev; WindowManager adds the XKB offset
+                // when delivering to the seat, exactly as for local input.
+                let keycode = evdev;
+                if (pressed && !held.keys.insert(keycode))
+                    || (!pressed && !held.keys.remove(&keycode))
+                {
+                    return;
+                }
+                ManagerInput::Key {
+                    keycode,
+                    pressed,
+                    time,
+                }
+            }
+            RemoteInput::Button { button, pressed } => {
+                if (pressed && !held.buttons.insert(button))
+                    || (!pressed && !held.buttons.remove(&button))
+                {
+                    return;
+                }
+                ManagerInput::Button {
+                    button,
+                    pressed,
+                    time,
+                }
+            }
+            RemoteInput::Relative { dx, dy } => {
+                let pos = self.manager.pointer_pos();
+                let target = (pos.x + dx, pos.y + dy);
+                let clamped = self
+                    .cast_outputs
+                    .lock()
+                    .ok()
+                    .and_then(|outputs| {
+                        outputs
+                            .iter()
+                            .map(|out| {
+                                let x = target.0.clamp(
+                                    f64::from(out.x),
+                                    f64::from(out.x) + f64::from(out.width) / out.scale - 1.0,
+                                );
+                                let y = target.1.clamp(
+                                    f64::from(out.y),
+                                    f64::from(out.y) + f64::from(out.height) / out.scale - 1.0,
+                                );
+                                (x, y, (target.0 - x).powi(2) + (target.1 - y).powi(2))
+                            })
+                            .min_by(|a, b| a.2.total_cmp(&b.2))
+                            .map(|(x, y, _)| (x, y))
+                    })
+                    .unwrap_or((pos.x, pos.y));
+                ManagerInput::Motion {
+                    pos: clamped.into(),
+                    time,
+                }
+            }
+            RemoteInput::Absolute { x, y } => ManagerInput::Motion {
+                pos: (x, y).into(),
+                time,
+            },
+            RemoteInput::Axis { dx, dy } => ManagerInput::Axis {
+                horizontal: dx,
+                vertical: dy,
+                time,
+            },
+        };
+        self.on_manager_input(input);
+    }
+
     fn on_screencast_request(&mut self, request: crate::mutter::ToLoop) {
         match request {
+            crate::mutter::ToLoop::RemoteInput {
+                session_id,
+                grant,
+                pending,
+                input,
+            } => {
+                pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                self.remote_input(session_id, grant, input);
+            }
+            crate::mutter::ToLoop::RemoteStop { session_id } => self.stop_remote_input(session_id),
+            crate::mutter::ToLoop::RemoteKeymap { reply } => {
+                let keymap = self
+                    .state
+                    .seat
+                    .get_keyboard()
+                    .map(|keyboard| {
+                        keyboard.with_xkb_state(&mut self.state, |context| {
+                            let xkb = context.xkb().lock().unwrap();
+                            // SAFETY: stringify under the Xkb mutex; no keymap reference or clone escapes.
+                            unsafe { xkb.keymap() }.get_as_string(1)
+                        })
+                    })
+                    .unwrap_or_default();
+                let _ = reply.send(keymap);
+            }
             crate::mutter::ToLoop::StartCast {
                 session_id,
+                grant,
                 target,
                 signal,
             } => {
+                if self.is_locked() || grant.load(std::sync::atomic::Ordering::SeqCst) {
+                    grant.store(true, std::sync::atomic::Ordering::SeqCst);
+                    crate::mutter::session_closed(&signal, session_id);
+                    return;
+                }
+                self.cast_grants.insert(session_id, grant);
                 if self.pipewire.is_none() {
                     self.pipewire = crate::screencast::PipeWire::new(&self.loop_handle);
                     if self.pipewire.is_none() {
@@ -2176,6 +2387,7 @@ impl Runtime {
             }
             crate::mutter::ToLoop::StopCast { session_id } => {
                 self.casts.retain(|cast| cast.session_id != session_id);
+                self.cast_grants.remove(&session_id);
             }
             crate::mutter::ToLoop::ApplyMonitors {
                 configs,
@@ -2361,6 +2573,19 @@ impl Runtime {
             .flush_clients()
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
         self.manager.reconcile(&mut self.state);
+        #[cfg(feature = "xwayland")]
+        // DISPLAY may be a reserved idle listener. An icon helper must not
+        // connect and accidentally activate XWayland before a real client.
+        if let Some(display) = self.x11_display.filter(|_| self.state.xwm.is_some()) {
+            let windows = self.manager.x11_icon_identities();
+            for (xid, id, raster) in self.x11_icon_reader.poll(display, windows.clone()) {
+                if windows.contains(&(xid, id)) {
+                    let icon =
+                        raster.and_then(|r| self.state.window_icons.cache(format!("x11:{id}"), r));
+                    self.manager.model_mut().set_icon(id, icon);
+                }
+            }
+        }
         // A client's pointer warp moved the manager's pointer: the
         // drawn cursor follows (#89).
         #[cfg(feature = "drm")]
@@ -2372,9 +2597,31 @@ impl Runtime {
         // short comparison. The inventory is the compositor's tracking
         // handed over as-is — never a parallel database.
         self.control.set_outputs(self.state.output_infos());
+        let pointer = self.manager.pointer_pos();
+        let output = self
+            .state
+            .outputs
+            .iter()
+            .find(|output| {
+                pointer.x >= f64::from(output.loc.0)
+                    && pointer.y >= f64::from(output.loc.1)
+                    && pointer.x < f64::from(output.loc.0 + output.size.w)
+                    && pointer.y < f64::from(output.loc.1 + output.size.h)
+            })
+            .map(|output| output.name.clone());
+        self.control.set_pointer_output(output);
         let outcome = self.control.poll(self.manager.model_mut());
         for id in outcome.activated {
             self.manager.focus(&mut self.state, Some(id));
+        }
+        for (request, allow) in outcome.shortcut_consent {
+            if !self.is_locked() {
+                self.state.answer_shortcut_consent(request, allow);
+            }
+        }
+        if let Some(request) = self.state.take_shortcut_consent_update() {
+            self.control
+                .queue_message(roost_shell_control::Message::ShortcutConsent { request });
         }
         for id in outcome.closed {
             self.manager.close_window(id);
@@ -2527,6 +2774,8 @@ impl Runtime {
         }
         // Only the supervised shell may hold a control session (#30):
         // between restarts nobody may.
+        self.capture_authority
+            .publish(self.is_locked(), self.shell.child_pid());
         self.control.set_peer_gate(match self.shell.child_pid() {
             Some(pid) => PeerGate::Pid(pid),
             None => PeerGate::Closed,
