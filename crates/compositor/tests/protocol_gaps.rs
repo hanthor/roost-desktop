@@ -364,6 +364,8 @@ fn presentation_feedback_reports_the_frame_that_drew_the_window() {
     surface.commit();
     pump(&mut comp, &mut manager, &mut [&mut peer]);
     assert!(peer.client.fates.is_empty(), "nothing drawn yet");
+    let roots = roost_compositor::frame_timing::frame_roots(&comp.state, &manager);
+    assert!(roost_compositor::frame_timing::pending_frame_work(&roots));
 
     roost_compositor::frame_timing::present_nested_frame(&mut comp.state, &manager, false, 42);
     pump(&mut comp, &mut manager, &mut [&mut peer]);
@@ -374,6 +376,7 @@ fn presentation_feedback_reports_the_frame_that_drew_the_window() {
             refresh: 16_666_666,
         })
     );
+    assert!(!roost_compositor::frame_timing::pending_frame_work(&roots));
 }
 
 #[test]
@@ -391,6 +394,8 @@ fn a_hidden_window_keeps_its_feedback_until_drawn() {
     roost_compositor::frame_timing::present_nested_frame(&mut comp.state, &manager, true, 1);
     pump(&mut comp, &mut manager, &mut [&mut peer]);
     assert_eq!(peer.client.fates.get(&7), None);
+    let roots = roost_compositor::frame_timing::frame_roots(&comp.state, &manager);
+    assert!(roost_compositor::frame_timing::pending_frame_work(&roots));
 
     roost_compositor::frame_timing::present_nested_frame(&mut comp.state, &manager, false, 2);
     pump(&mut comp, &mut manager, &mut [&mut peer]);
@@ -421,6 +426,8 @@ fn fifo_holds_a_waiting_commit_until_the_next_refresh() {
 
     // The first refresh draws what was applied (not the held update),
     // then releases the barrier.
+    let roots = roost_compositor::frame_timing::frame_roots(&comp.state, &manager);
+    assert!(roost_compositor::frame_timing::pending_frame_work(&roots));
     roost_compositor::frame_timing::present_nested_frame(&mut comp.state, &manager, false, 1);
     pump(&mut comp, &mut manager, &mut [&mut peer]);
     assert_eq!(peer.client.fates.get(&2), None, "held behind the barrier");
