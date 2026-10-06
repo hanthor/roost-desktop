@@ -1278,9 +1278,9 @@ dependencies = [
 
 [[package]]
 name = "libseat"
-version = "0.2.3"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c23a245bbd5790c690791c4fe6eefafe4c75851226288a71cb657601135aa00c"
+checksum = "6656c69b6e0366ffb83faa232f3e4fda5fc91161722d140f2c95ce2e90b1ef31"
 dependencies = [
  "errno",
  "libseat-sys",
@@ -1289,9 +1289,9 @@ dependencies = [
 
 [[package]]
 name = "libseat-sys"
-version = "0.1.9"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "134621e50557e8698a96ccff3eadbc6f4b449d5d12f8aa48fcef8d40b4b02725"
+checksum = "e8a484fa48be5f62a8d3ffed767779d0ab808cfead91de98ef4362d469097dfb"
 dependencies = [
  "pkg-config",
 ]
