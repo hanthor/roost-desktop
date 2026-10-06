@@ -21,6 +21,60 @@ def load(name, path):
 
 guest = load("guest", ROOT / "scripts/lib/roost-perf-guest.py")
 host = load("host", ROOT / "scripts/roost-vm-perf")
+sysprof = load("sysprof", ROOT / "scripts/lib/gnome_sysprof.py")
+
+
+class SysprofCapture(unittest.TestCase):
+    def test_actual_gnome51_truncated_scope_names_and_owner(self):
+        root = ROOT / "scripts/lib/fixtures"
+        provenance = json.loads((root / "gnome51-overview-marks.json").read_text())
+        raw = (root / "gnome51-overview-marks.syscap").read_bytes()
+        import hashlib
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), provenance["sample_sha256"])
+        decoded = sysprof.decode(raw)
+        counts = sysprof.required_scope_counts(decoded, provenance["pid"])
+        self.assertEqual(sorted(counts.values()), [1, 1, 1])
+        self.assertEqual(max(len(name) for name in counts), 39)
+        self.assertFalse(any(sysprof.required_scope_counts(decoded, provenance["pid"] + 1).values()))
+
+    def capture(self):
+        # Produced by the real libsysprof-capture writer, not by this decoder.
+        return (ROOT / "scripts/lib/fixtures/sysprof-mark.syscap").read_bytes()
+
+    def test_native_writer_mark(self):
+        result = sysprof.decode(self.capture())
+        self.assertEqual(result["frame_count"], 1)
+        self.assertEqual(result["marks"], [dict(cpu=2, pid=4242, monotonic_ns=123456789,
+                                               duration_ns=2000, group="Clutter",
+                                               name="Clutter::FrameClock::presented()",
+                                               message="presentation was 5 µs earlier")])
+
+    def test_partial_headers_frames_and_trailing_bytes_fail(self):
+        raw = self.capture()
+        for length in (0, 255, 256, 260, len(raw) - 1):
+            with self.subTest(length=length), self.assertRaises(ValueError):
+                sysprof.decode(raw[:length])
+        with self.assertRaises(ValueError):
+            sysprof.decode(raw + b"x")
+
+    def test_bad_header_duration_strings_and_lengths_fail(self):
+        import struct
+        for offset, replacement in ((0, b"BAD!"), (4, b"\2"), (5, b"\0"),
+                                    (256, struct.pack("<H", 25)),
+                                    (280, struct.pack("<q", -1)),
+                                    (288, b"x" * 24), (312, b"x" * 40),
+                                    (352, b"\xff\0")):
+            raw = bytearray(self.capture())
+            raw[offset:offset + len(replacement)] = replacement
+            with self.subTest(offset=offset), self.assertRaises(ValueError):
+                sysprof.decode(raw)
+
+    def test_unknown_frame_is_structurally_checked_and_skipped(self):
+        import struct
+        raw = self.capture() + struct.pack("<HhiqII", 24, -1, 4242, 100, 254, 0)
+        result = sysprof.decode(raw)
+        self.assertEqual(result["frame_count"], 2)
+        self.assertEqual(len(result["marks"]), 1)
 
 
 class Accounting(unittest.TestCase):

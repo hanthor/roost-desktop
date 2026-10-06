@@ -28,6 +28,11 @@ protocol reference once a run passes; it does not replace the existing Fedora
 headless reference without retaining and reviewing that actual evidence.
 The comparison requires KVM and fails rather than accepting software emulation.
 
+The GNOME overview phase also retains the installed shell's own
+[Sysprof capture and decoded scope marks](gnome-overview-sysprof.md), with peer
+credentials, capture timestamps and a verified digest. These are raw event,
+dispatch and presentation scopes; causal latency remains a separate analysis.
+
 The [native cadence and pure idle report](2026-10-04-native-cadence/README.md)
 retains a later actual paired GNOME 51/Roost run, including all 240 presentation
 records per desktop, guest clock boundaries, ten accepted notifications each,

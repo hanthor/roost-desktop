@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+"""CI-only Sysprof control for the installed GNOME Shell, as roost-test."""
+import argparse
+import json
+import os
+from pathlib import Path
+import stat
+import time
+
+from gi.repository import Gio, GLib
+
+PEER = "org.gnome.Shell"
+OBJECT = "/org/gnome/Sysprof3/Profiler"
+INTERFACE = "org.gnome.Sysprof3.Profiler"
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=("start", "stop"))
+    args = parser.parse_args()
+    uid = os.getuid()
+    if uid == 0:
+        raise RuntimeError("profiler must run as the ordinary fixture user")
+    runtime = Path(f"/run/user/{uid}")
+    capture = runtime / "roost-perf-gnome.syscap"
+    marker = runtime / "roost-perf-gnome-profiler.json"
+    bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+
+    def credentials(method, signature, argument):
+        return bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus",
+                             "org.freedesktop.DBus", method,
+                             GLib.Variant("(s)", (argument,)),
+                             GLib.VariantType.new(signature),
+                             Gio.DBusCallFlags.NONE, 5000, None).unpack()[0]
+
+    owner = credentials("GetNameOwner", "(s)", PEER)
+    pid = credentials("GetConnectionUnixProcessID", "(u)", owner)
+    peer_uid = credentials("GetConnectionUnixUser", "(u)", owner)
+    executable = Path(f"/proc/{pid}/exe").resolve(strict=True)
+    installed = Path("/usr/bin/gnome-shell").resolve(strict=True)
+    metadata = installed.stat()
+    if (peer_uid != uid or executable != installed or metadata.st_uid != 0
+            or metadata.st_mode & 0o022 or not stat.S_ISREG(metadata.st_mode)):
+        raise RuntimeError("profiler peer is not the installed session GNOME Shell")
+
+    if args.action == "start":
+        descriptor = os.open(capture, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        started = False
+        try:
+            descriptors = Gio.UnixFDList.new()
+            index = descriptors.append(descriptor)
+            bus.call_with_unix_fd_list_sync(
+                owner, OBJECT, INTERFACE, "Start",
+                GLib.Variant("(a{sv}h)", ({}, index)), GLib.VariantType.new("()"),
+                Gio.DBusCallFlags.NONE, 5000, descriptors, None)
+            started = True
+            with marker.open("x") as stream:
+                os.chmod(marker, 0o600)
+                json.dump({"owner": owner, "pid": pid, "uid": uid,
+                           "started_monotonic_ns": time.monotonic_ns()}, stream)
+        except BaseException:
+            # Never stop somebody else's profile when Start itself failed.
+            if started:
+                bus.call_sync(owner, OBJECT, INTERFACE, "Stop", None,
+                              GLib.VariantType.new("()"), Gio.DBusCallFlags.NONE, 5000, None)
+            capture.unlink()
+            raise
+        finally:
+            os.close(descriptor)
+        print(json.dumps({"owner": owner, "pid": pid, "uid": uid}))
+    else:
+        descriptor = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor) as stream:
+            metadata = os.fstat(stream.fileno())
+            if (metadata.st_uid != uid or metadata.st_mode & 0o077
+                    or not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 4096):
+                raise RuntimeError("invalid profiler ownership marker")
+            saved = json.load(stream)
+        if (saved["owner"], saved["pid"], saved["uid"]) != (owner, pid, uid):
+            raise RuntimeError("GNOME profiler owner changed during the workload")
+        bus.call_sync(owner, OBJECT, INTERFACE, "Stop", None,
+                      GLib.VariantType.new("()"), Gio.DBusCallFlags.NONE, 5000, None)
+        marker.unlink()
+        print(json.dumps(dict(saved, stopped_monotonic_ns=time.monotonic_ns())))
+
+
+if __name__ == "__main__":
+    main()
