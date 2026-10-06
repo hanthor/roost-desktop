@@ -2895,6 +2895,12 @@ fn exclusive_overlay_receives_navigation_and_retains_popup_system_accelerators()
     client.synced = false;
     conn.display().sync(&qh, ());
     pump(&mut f.comp, &mut queue, &mut client, |c| c.synced);
+    // Configure acknowledgements are sent while dispatching the first sync.
+    // Commit that acknowledged size before asking the compositor for focus.
+    surface.commit();
+    client.synced = false;
+    conn.display().sync(&qh, ());
+    pump(&mut f.comp, &mut queue, &mut client, |c| c.synced);
     f.manager.reconcile(&mut f.comp.state);
     assert!(roost_compositor::layer::exclusive_keyboard_layer(&f.comp.state).is_some());
     f.manager.set_accelerators(vec![
