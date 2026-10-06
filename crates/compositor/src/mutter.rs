@@ -196,7 +196,7 @@ impl ServiceChannel {
             .map_err(|e| fdo::Error::Failed(e.to_string()))?;
         let alive = Arc::new(AtomicBool::new(true));
         let mut client_data = crate::ClientState::service_connection(alive.clone(), window_tag);
-        client_data.service_credentials = credentials;
+        client_data.original_credentials = credentials;
         client_data.x11_interop = typed;
         self.display
             .insert_client(server, Arc::new(client_data))
