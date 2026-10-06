@@ -1375,6 +1375,8 @@ impl Runtime {
             "keyboard": keyboard,
             "overview_open": overview_open,
             "animations_enabled": self.input_settings.enable_animations,
+            "mouse_left_handed": self.input_settings.mouse_left_handed,
+            "touchpad_left_handed": self.input_settings.touchpad_left_handed,
             "locked": self.is_locked(),
             "active_workspace": model.active_workspace(),
             "focused": focused,

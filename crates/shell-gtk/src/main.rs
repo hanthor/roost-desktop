@@ -1925,7 +1925,16 @@ fn build(app: &adw::Application) {
                 if let Some(mouse) = all[3].as_ref() {
                     out.mouse_natural_scroll = mouse.boolean("natural-scroll");
                     out.mouse_speed_milli = (mouse.double("speed") * 1000.0).round() as i32;
+                    out.mouse_left_handed = mouse.boolean("left-handed");
                 }
+                out.touchpad_left_handed = logic::touchpad_left_handed(
+                    all[2]
+                        .as_ref()
+                        .map(|pad| pad.string("left-handed"))
+                        .as_deref()
+                        .unwrap_or("mouse"),
+                    out.mouse_left_handed,
+                );
                 if let Some(iface) = all[4].as_ref() {
                     out.hot_corners = iface.boolean("enable-hot-corners");
                 }

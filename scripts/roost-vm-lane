@@ -232,6 +232,41 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     record("V-NORMAL-INPUT", delivered_input["pid"] == initial_input["pid"]
            and delivered_input["count"] > initial_input["count"],
            "real non-root GTK application receives ordinary QMP keyboard input while unlocked; count only")
+    # GNOME's primary-button setting must affect real libinput delivery,
+    # including live changes in both directions. Counts contain no input text.
+    handedness = []
+    try:
+        for swapped in (False, True, False):
+            if not agent.run("mouse-handedness", str(swapped).lower())["stored"]:
+                raise RuntimeError("GNOME primary-button setting did not persist")
+            await_state(lambda value: value["state"]["mouse_left_handed"] is swapped,
+                        label=f"mouse-handedness-{str(swapped).lower()}")
+            for physical, logical in (("left", "3" if swapped else "1"),
+                                      ("right", "1" if swapped else "3"),
+                                      ("middle", "2")):
+                before_click = agent.run("input-buttons")
+                qmp.click(click_x, click_y, button=physical)
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    after_click = agent.run("input-buttons")
+                    if after_click["buttons"] != before_click["buttons"]:
+                        break
+                    time.sleep(0.05)
+                expected_buttons = dict(before_click["buttons"])
+                expected_buttons[logical] += 1
+                ok = (after_click["pid"] == before_click["pid"]
+                      and after_click["buttons"] == expected_buttons)
+                handedness.append({"swapped": swapped, "physical": physical,
+                                   "logical": logical, "before": before_click,
+                                   "after": after_click, "ok": ok})
+                if not ok:
+                    raise RuntimeError(f"physical {physical} did not arrive as logical button {logical}")
+        record("V-MOUSE-HANDEDNESS", True,
+               "GNOME primary button changes live false→true→false; GTK sees left/right swap and unchanged middle")
+    finally:
+        agent.run("mouse-handedness", "false")
+        with open(os.path.join(evidence, "mouse-handedness.json"), "w") as stream:
+            json.dump(handedness, stream, indent=2)
     before = inventory("before")
     expected = {"roost-compositor", "roost-shell-gtk", "gnome-disks", "gnome-system-monitor", "nautilus"}
     nonroot = (before["probe_uid"] == 0 and before["session_uid"] != 0
