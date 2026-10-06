@@ -1766,6 +1766,13 @@ impl WindowManager {
     /// IBus's candidate window does) so panel menus take keys; the
     /// button itself follows pointer focus from the last motion.
     pub fn pointer_button(&mut self, state: &mut State, button: u32, pressed: bool, time: u32) {
+        let trace = std::env::var_os("ROOST_POINTER_TRACE").is_some();
+        if trace {
+            eprintln!(
+                "roost-compositor: pointer trace: manager button received popup_grab={} move_modifier={}",
+                state.popup_grab_active(), self.super_held
+            );
+        }
         // Release ends a move/resize grab. It is still delivered (unless
         // its press was swallowed): the client's press opened smithay's
         // implicit click grab, and only the matching release closes it.
@@ -1834,6 +1841,12 @@ impl WindowManager {
             }
         }
         if let Some(pointer) = self.pointer.clone() {
+            if trace {
+                eprintln!(
+                    "roost-compositor: pointer trace: client button dispatched focused={}",
+                    pointer.current_focus().is_some()
+                );
+            }
             pointer.button(
                 state,
                 &ButtonEvent {

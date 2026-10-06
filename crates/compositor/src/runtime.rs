@@ -1036,6 +1036,14 @@ impl Runtime {
     /// breaking Super-combos); only Escape-closes is consumed, so a
     /// closing keypress never double-acts on client UI.
     fn on_manager_input(&mut self, input: ManagerInput) {
+        // CI-only count markers locate missing pointer delivery without
+        // recording button codes, key values or credential input.
+        if !self.is_locked()
+            && matches!(input, ManagerInput::Button { .. })
+            && std::env::var_os("ROOST_POINTER_TRACE").is_some()
+        {
+            eprintln!("roost-compositor: pointer trace: backend button received");
+        }
         // Every timestamped event feeds the idle accumulator first,
         // including events consumed below: activity is activity.
         let waking_blank = self.blank_alpha() > 0.0;
