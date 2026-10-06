@@ -1360,6 +1360,7 @@ impl Runtime {
         #[cfg(not(feature = "xwayland"))]
         let x11_ready = false;
         let doc = serde_json::json!({
+            "rendered_frames": self.stats.frames,
             "x11_display": self.x11_display.map(|d| format!(":{d}")),
             "capture_streams": self.casts.len(),
             "remote_input_sessions": self.remote_held.len(),
