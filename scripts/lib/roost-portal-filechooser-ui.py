@@ -51,7 +51,7 @@ while time.monotonic() < end:
         subprocess.run(["scrot", str(out.with_suffix(".png"))], check=True)
         if request["method"] == "OpenFile" and request["decision"] == "grant" and not located:
             # Click the actual expected file cell once. WINDOW coordinates
-            # plus the compositor's authenticated focused-surface origin avoid
+            # plus the compositor-known focused-surface origin avoid
             # assuming Wayland accessibility exposes global coordinates.
             filename = Path(request["path"]).name
             cells = [control for control in controls

@@ -846,7 +846,7 @@ impl Runtime {
         let cast_outputs: crate::mutter::Outputs = Default::default();
         // org.gnome.Shell.Introspect: the portal's window picker.
         let capture_authority = crate::capture_security::Authority::default();
-        let introspect = crate::introspect::start(cast_outputs.clone(), capture_authority.clone());
+        let introspect = crate::introspect::start(state.desktop_size(), capture_authority.clone());
         event_loop
             .handle()
             .insert_source(
@@ -2516,6 +2516,8 @@ impl Runtime {
         self.manager
             .apply_keyboard_settings(&mut self.state, &settings);
         self.triggers.set_hot_corner(settings.hot_corners);
+        self.introspect
+            .publish_animations_enabled(settings.enable_animations);
         self.manager
             .set_animations_enabled(settings.enable_animations);
         if !settings.enable_animations {
@@ -2615,6 +2617,8 @@ impl Runtime {
     }
 
     fn publish_cast_outputs(&self) {
+        self.introspect
+            .publish_screen_size(self.state.desktop_size());
         let snapshot: Vec<crate::mutter::OutputSnapshot> = self
             .state
             .output_entries()

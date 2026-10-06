@@ -695,3 +695,78 @@ fn windows_keep_their_toplevel_tag() {
     assert_eq!(tag.tag.as_deref(), Some("composer"));
     assert_eq!(tag.description.as_deref(), Some("New message"));
 }
+
+#[test]
+fn parented_dialogs_remain_centered_on_left_and_upper_outputs() {
+    for parent_location in [(-1100, 50), (100, -750)] {
+        for foreign in [false, true] {
+            let (mut comp, mut manager) = compositor();
+            for (name, location) in [("left", (-1280, 0)), ("above", (0, -800))] {
+                let output = Output::new(
+                    name.into(),
+                    PhysicalProperties {
+                        size: (0, 0).into(),
+                        subpixel: Subpixel::Unknown,
+                        make: "Roost".into(),
+                        model: "Dialog topology test".into(),
+                    },
+                );
+                output.change_current_state(
+                    Some(Mode {
+                        size: (1280, 800).into(),
+                        refresh: 60_000,
+                    }),
+                    None,
+                    None,
+                    Some(location.into()),
+                );
+                comp.state.add_output(name, Some(output), 1280, 800);
+                comp.state.set_output_location(name, location);
+            }
+            let mut app = connect(&mut comp, &mut manager);
+            let (parent_surface, parent_toplevel) = window(&mut app, "negative-origin parent");
+            pump(&mut comp, &mut manager, &mut [&mut app]);
+            let parent = id_of(&manager, "negative-origin parent");
+            let initial = manager.geometry(parent).unwrap();
+            assert!(manager.move_window(
+                parent,
+                parent_location.0 - initial.loc.x,
+                parent_location.1 - initial.loc.y
+            ));
+            let parent_geometry = manager.geometry(parent).unwrap();
+            let mut portal_peer = None;
+            if foreign {
+                let exporter: ZxdgExporterV2 = app.bind(1);
+                let _exported = exporter.export_toplevel(&parent_surface, &app.qh(), ());
+                pump(&mut comp, &mut manager, &mut [&mut app]);
+                let mut portal = connect(&mut comp, &mut manager);
+                let importer: ZxdgImporterV2 = portal.bind(1);
+                let imported =
+                    importer.import_toplevel(app.client.handle.clone().unwrap(), &portal.qh(), ());
+                let (surface, _) = window(&mut portal, "negative-origin chooser");
+                imported.set_parent_of(&surface);
+                surface.commit();
+                pump(&mut comp, &mut manager, &mut [&mut app, &mut portal]);
+                portal_peer = Some(portal);
+            } else {
+                let (surface, toplevel) = window(&mut app, "negative-origin chooser");
+                toplevel.set_parent(Some(&parent_toplevel));
+                surface.commit();
+                pump(&mut comp, &mut manager, &mut [&mut app]);
+            }
+            let child = id_of(&manager, "negative-origin chooser");
+            let child_geometry = manager.geometry(child).unwrap();
+            let expected = (
+                parent_geometry.loc.x + (parent_geometry.size.w - child_geometry.size.w) / 2,
+                parent_geometry.loc.y + (parent_geometry.size.h - child_geometry.size.h) / 2,
+            );
+            assert_eq!(
+                (child_geometry.loc.x, child_geometry.loc.y),
+                expected,
+                "foreign={foreign}, parent={parent_location:?}"
+            );
+            assert_eq!(manager.geometry(parent).unwrap(), parent_geometry);
+            drop(portal_peer);
+        }
+    }
+}
