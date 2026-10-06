@@ -19,7 +19,7 @@ use smithay::{
     input::{Seat, SeatHandler, SeatState},
     output::Output,
     reexports::wayland_server::{
-        backend::{ClientData, ClientId, DisconnectReason, GlobalId},
+        backend::{ClientData, ClientId, DisconnectReason, GlobalId, ObjectId},
         protocol::{wl_buffer, wl_output, wl_seat, wl_surface},
         Client, Display, DisplayHandle, Resource,
     },
@@ -128,10 +128,14 @@ pub struct State {
     /// Middle-click primary selection beside the clipboard.
     primary_selection_state: PrimarySelectionState,
     pub(crate) panel_surfaces: Vec<layer::PanelSurface>,
-    /// `wl_surface`s whose layer-shell role was destroyed. Smithay 0.7
-    /// keeps validating them on commit against reset (unanchored, zero
-    /// size) state and kills the client; see [`State::new_surface`].
-    pub(crate) dead_layer_surfaces: std::collections::HashSet<wl_surface::WlSurface>,
+    /// Ids of `wl_surface`s whose layer-shell role was destroyed.
+    /// Smithay 0.7 keeps validating them on commit against reset
+    /// (unanchored, zero size) state and kills the client; see
+    /// [`State::new_surface`]. Only the id is kept: retaining the
+    /// `WlSurface` itself would also retain its last committed buffer
+    /// (and through it the SHM pool mapping and fd) for every banner,
+    /// overview toggle and other short-lived layer surface (#307).
+    pub(crate) dead_layer_surfaces: std::collections::HashSet<ObjectId>,
     /// Popup trees per parent surface (#88).
     pub(crate) popups: smithay::desktop::PopupManager,
     /// Popups holding an explicit grab, oldest first: an outside click
@@ -471,7 +475,7 @@ impl CompositorHandler for State {
         smithay::wayland::compositor::add_pre_commit_hook::<State, _>(
             surface,
             |state, _dh, surface| {
-                if state.dead_layer_surfaces.contains(surface) {
+                if state.dead_layer_surfaces.contains(&surface.id()) {
                     smithay::wayland::compositor::with_states(surface, |states| {
                         let mut cached = states
                             .cached_state

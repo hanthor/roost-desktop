@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Bounded, private nested-session churn; metrics are samples, not a 24h soak."""
+"""Bounded window/popup churn; metrics are samples, not a 24h soak."""
 import argparse
 import json
 import os
@@ -43,6 +43,61 @@ def worker():
         while GLib.MainContext.default().iteration(False):
             pass
         time.sleep(0.01)
+
+
+
+def popup_worker():
+    """Require actual mapped Wayland popups, including three-level nesting."""
+    os.environ.setdefault("GSK_RENDERER", "cairo")
+    import gi
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Gdk", "4.0")
+    from gi.repository import Gdk, GLib, Gtk
+    context = GLib.MainContext.default()
+
+    def dispatch_until(condition):
+        deadline = time.monotonic() + 2
+        while not condition():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("popup worker exceeded its mapping deadline")
+            # Bound every pass even when frame callbacks keep arriving.
+            for _ in range(100):
+                if not context.iteration(False):
+                    break
+            time.sleep(0.005)
+
+    window = Gtk.Window(title=f"Popup stress {os.getpid()}")
+    anchor = Gtk.Button(label="Popup storm anchor")
+    window.set_child(anchor)
+    window.set_default_size(240, 160)
+    window.present()
+    dispatch_until(window.get_mapped)
+    mapped = 0
+    for _ in range(20):
+        popups = []
+        parent = anchor
+        try:
+            for depth in range(3):
+                popup = Gtk.Popover()
+                popup.set_autohide(False)
+                popup.set_parent(parent)
+                child = Gtk.Button(label=f"Nested popup {depth}")
+                popup.set_child(child)
+                popups.append(popup)
+                popup.popup()
+                dispatch_until(lambda: popup.get_mapped()
+                               and isinstance(popup.get_surface(), Gdk.Popup)
+                               and popup.get_surface().get_mapped())
+                mapped += 1
+                parent = child
+        finally:
+            for popup in reversed(popups):
+                popup.popdown()
+                popup.unparent()
+        dispatch_until(lambda: all(not popup.get_mapped() for popup in popups))
+    window.destroy()
+    dispatch_until(lambda: not window.get_mapped())
+    print(json.dumps({"mapped_wayland_popups": mapped, "nested_depth": 3}), flush=True)
 
 
 def wait_for(condition, timeout=30):
@@ -173,6 +228,60 @@ def run(args):
         assertions["S-CHURN"] = [True, f"{(args.rounds + 3) * 400} windows across four concurrent clients"]
         assertions["S-INPUT"] = [True, "overview input responded after every churn round"]
 
+        popup_workers = [launch([sys.executable, str(Path(__file__).resolve()), "--popup-worker"],
+                                f"popup-{index}", client_env) for index in range(4)]
+        wait_for(lambda: all(process.poll() is not None for process in popup_workers), timeout=90)
+        mapped = 0
+        for index, process in enumerate(popup_workers):
+            if process.returncode != 0:
+                raise RuntimeError(f"popup worker {index} failed; see its retained log")
+            rows = [json.loads(line) for line in (out / f"popup-{index}.log").read_text().splitlines()
+                    if line.startswith('{"mapped_wayland_popups":')]
+            if len(rows) != 1 or rows[0] != {"mapped_wayland_popups": 60, "nested_depth": 3}:
+                raise RuntimeError(f"popup worker {index} did not prove its mapped nested surfaces")
+            mapped += rows[0]["mapped_wayland_popups"]
+        wait_for(lambda: state().get("windows") == [])
+        subprocess.run(["xdotool", "key", "--clearmodifiers", "Escape"], env=env, check=True)
+        wait_for(lambda: state().get("overview_open") is False)
+        subprocess.run(["xdotool", "key", "--clearmodifiers", "Super_L"], env=env, check=True)
+        wait_for(lambda: state().get("overview_open") is True)
+        assertions["S-POPUP"] = [True, f"{mapped} mapped Wayland popups; depth three; four concurrent clients; input recovered"]
+
+        adversary_dir = out / "adversary-client"
+        subprocess.run([str(ROOT / "scripts/roost-wayland-adversary-build"), str(adversary_dir)],
+                       check=True, stdout=subprocess.DEVNULL)
+        expected = {"malformed-opcode": "connection-rejected", "zero-buffer": "protocol-rejected",
+                    "huge-buffer": "protocol-rejected", "destroy-parent": "protocol-rejected",
+                    "invalid-configure": "protocol-rejected",
+                    "never-ack": "configure-left-unacknowledged",
+                    "die-mid-transaction": "disconnected-before-commit"}
+        for mode, result in expected.items():
+            attacks = [launch([str(adversary_dir / "roost-wayland-adversary"), mode],
+                              f"adversary-{mode}-{index}", client_env) for index in range(4)]
+            healthy = launch([sys.executable, str(Path(__file__).resolve()), "--popup-worker"],
+                             f"healthy-{mode}", client_env)
+            wait_for(lambda: all(process.poll() is not None for process in [*attacks, healthy]),
+                     timeout=10)
+            for index, process in enumerate(attacks):
+                if process.returncode != 0:
+                    raise RuntimeError(f"{mode} attacker {index} did not receive the expected outcome")
+                rows = [json.loads(line) for line in (out / f"adversary-{mode}-{index}.log").read_text().splitlines()
+                        if line.startswith('{"mode":')]
+                if len(rows) != 1 or rows[0].get("mode") != mode or rows[0].get("result") != result:
+                    raise RuntimeError(f"{mode} attacker {index} has no actual outcome evidence")
+                if mode == "never-ack" and rows[0].get("configures", 0) < 1:
+                    raise RuntimeError("unacknowledged client never received a configure")
+            rows = [json.loads(line) for line in (out / f"healthy-{mode}.log").read_text().splitlines()
+                    if line.startswith('{"mapped_wayland_popups":')]
+            if healthy.returncode != 0 or rows != [{"mapped_wayland_popups": 60, "nested_depth": 3}]:
+                raise RuntimeError(f"healthy popup client failed alongside {mode}")
+            wait_for(lambda: state().get("windows") == [])
+            subprocess.run(["xdotool", "key", "--clearmodifiers", "Escape"], env=env, check=True)
+            wait_for(lambda: state().get("overview_open") is False)
+            subprocess.run(["xdotool", "key", "--clearmodifiers", "Super_L"], env=env, check=True)
+            wait_for(lambda: state().get("overview_open") is True)
+            assertions[f"S-PROTOCOL-{mode.upper()}"] = [True, "four actual clients; exact rejection/disconnect evidence; healthy nested popups and input recovered"]
+
         import gi
         from gi.repository import Gio, GLib
         bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
@@ -223,17 +332,20 @@ def run(args):
         }, indent=2))
     if not assertions or not all(value[0] for value in assertions.values()):
         raise SystemExit("roost-stress: stress gate failed; see retained artifacts")
-    print("roost-stress: bounded churn, input, notification and growth gates passed")
+    print("roost-stress: window/popup churn, input, notification and growth gates passed")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--popup-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--rounds", type=int, default=10)
     parser.add_argument("--out", default="stress-artifacts")
     args = parser.parse_args()
     if args.worker:
         worker()
+    elif args.popup_worker:
+        popup_worker()
     else:
         if not 1 <= args.rounds <= 5000:
             parser.error("--rounds must be between 1 and 5000")
