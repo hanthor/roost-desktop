@@ -92,6 +92,9 @@ pub struct WindowSnapshot {
     pub title: String,
     /// Wayland app id or X11 class, as the client set it.
     pub app_id: Option<String>,
+    /// Desktop application identity inherited from the ultimate transient
+    /// parent, independently of this window's raw app ID / X11 class.
+    pub application_id: Option<String>,
     /// Logical size of the window's visible geometry.
     pub width: i32,
     pub height: i32,

@@ -437,6 +437,38 @@ impl WindowManager {
             })
     }
 
+    /// GNOME assigns a transient window to its ultimate mapped parent app,
+    /// including imported cross-client parents. Cycles fall back to the
+    /// original window; never recurse through untrusted role metadata.
+    pub fn application_window(&self, id: u64) -> Option<u64> {
+        let mut current = id;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            if !seen.insert(current) {
+                return self.windows.contains_key(&id).then_some(id);
+            }
+            let window = self.windows.get(&current)?;
+            let parent = match window.surface.underlying_surface() {
+                WindowSurface::Wayland(toplevel) => read_parent(toplevel)
+                    .filter(|parent| parent.is_alive())
+                    .and_then(|parent| {
+                        self.windows.iter().find_map(|(id, candidate)| {
+                            (candidate.surface.wl_surface().as_deref() == Some(&parent))
+                                .then_some(*id)
+                        })
+                    }),
+                #[cfg(feature = "xwayland")]
+                WindowSurface::X11(surface) => surface
+                    .is_transient_for()
+                    .and_then(|parent| self.x11_index.get(&parent).copied()),
+            };
+            match parent {
+                Some(parent) => current = parent,
+                None => return Some(current),
+            }
+        }
+    }
+
     /// GNOME's GetWindows picker allows ordinary toplevels and dialogs,
     /// but excludes X11 notification/menu/tooltip/splash/toolbar roles.
     /// Read live XWM metadata so a property change updates the next snapshot.
