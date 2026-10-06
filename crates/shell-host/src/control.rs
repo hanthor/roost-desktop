@@ -37,76 +37,17 @@ use roost_shell_control::{
     SwitcherAction, WindowInfo, WorkspaceInfo, CURRENT_VERSION, MAX_FRAME_BYTES,
 };
 
+/// Transport and protocol failures, shared with the compositor endpoint.
+///
+/// Defined in [`roost_shell_control`] so both endpoints name the same type;
+/// re-exported here because `crate::control::ControlError` is the path the
+/// rest of this crate (and its tests) use.
+pub use roost_shell_control::ControlError;
+
 use crate::model::{ShellModel, SnapshotView, WindowEntry};
 
 /// First shell-chosen command request id.
 pub const INITIAL_REQUEST_ID: u64 = 1;
-
-/// Ways the control conversation can fail.
-///
-/// `WouldBlock` arrives here as `Io` with
-/// `kind() == ErrorKind::WouldBlock`: no complete frame is available yet
-/// and the caller should retry once the socket is readable/writable.
-#[derive(Debug)]
-pub enum ControlError {
-    /// Socket I/O failure, including surfaced `WouldBlock`.
-    Io(io::Error),
-    /// Frame failed schema decoding/validation (oversize, malformed,
-    /// over-long title, stale major).
-    Decode(DecodeError),
-    /// The compositor answered with a typed [`Message::Error`] where a
-    /// handshake reply was required.
-    Remote {
-        /// Machine-readable category.
-        kind: ErrorKind,
-        /// Compositor diagnostics (never sensitive content).
-        message: String,
-    },
-    /// The peer closed the connection or sent a message the current step
-    /// cannot use.
-    Unexpected(String),
-    /// [`ControlClient::send_activation`] needs a selected window to name
-    /// as the activation target and the model has none.
-    NoActiveWindow,
-}
-
-impl std::fmt::Display for ControlError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(e) => write!(f, "control socket I/O: {e}"),
-            Self::Decode(e) => write!(f, "control decode: {e}"),
-            Self::Remote { kind, message } => {
-                write!(f, "compositor error {kind:?}: {message}")
-            }
-            Self::Unexpected(detail) => write!(f, "unexpected control message: {detail}"),
-            Self::NoActiveWindow => {
-                write!(f, "no selected window to activate")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ControlError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(e) => Some(e),
-            Self::Decode(e) => Some(e),
-            Self::Remote { .. } | Self::Unexpected(_) | Self::NoActiveWindow => None,
-        }
-    }
-}
-
-impl From<io::Error> for ControlError {
-    fn from(e: io::Error) -> Self {
-        Self::Io(e)
-    }
-}
-
-impl From<DecodeError> for ControlError {
-    fn from(e: DecodeError) -> Self {
-        Self::Decode(e)
-    }
-}
 
 /// What one handled inbound message meant.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +75,10 @@ pub enum Handled {
     },
     /// A client asked for GNOME's window menu.
     WindowMenu(WindowMenuRequest),
+    /// Connector under the compositor pointer changed.
+    PointerOutput,
+    /// Show or dismiss the shortcut consent dialog.
+    ShortcutConsent(Option<(u64, String)>),
     /// A grabbed accelerator was pressed (org.gnome.Shell).
     Accelerator {
         /// The grab's action id.
@@ -222,6 +167,7 @@ pub struct ControlClient {
     /// Read-only here; the shell reconciles its surfaces against it
     /// and never edits it.
     outputs: Vec<OutputInfo>,
+    pointer_output: Option<String>,
     /// Session environment from the compositor (#59).
     environment: Vec<(String, String)>,
     /// Overview previews and the hovered one, from the compositor.
@@ -253,6 +199,7 @@ impl ControlClient {
             shadow_workspaces: Vec::new(),
             locked: false,
             outputs: Vec::new(),
+            pointer_output: None,
             environment: Vec::new(),
             overview_previews: (Vec::new(), None),
         })
@@ -303,6 +250,10 @@ impl ControlClient {
     /// Output inventory from the latest `Outputs` message (empty
     /// before the first one). The shell reconciles its per-output
     /// surfaces against this and never edits it.
+    pub fn pointer_output(&self) -> Option<&str> {
+        self.pointer_output.as_deref()
+    }
+
     pub fn outputs(&self) -> &[OutputInfo] {
         &self.outputs
     }
@@ -388,7 +339,10 @@ impl ControlClient {
     /// every snapshot mints fresh one-use tokens. Returns the request id
     /// for `CommandResult` correlation.
     pub fn activate_selected(&mut self) -> Result<u64, ControlError> {
-        let window = self.model.selected().ok_or(ControlError::NoActiveWindow)?;
+        let window = self
+            .model
+            .selected()
+            .ok_or_else(|| ControlError::AppConstraint("no selected window to activate".into()))?;
         let token = self
             .shadow_windows
             .iter()
@@ -508,6 +462,16 @@ impl ControlClient {
         Ok(id)
     }
 
+    /// Answer the compositor's pending shortcut consent request.
+    pub fn shortcut_consent(&mut self, request: u64, allow: bool) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::ShortcutConsent { request, allow },
+        })?;
+        Ok(id)
+    }
+
     /// Carry out one of GNOME's window-menu actions. Returns the request id.
     pub fn window_action(
         &mut self,
@@ -600,7 +564,10 @@ impl ControlClient {
     /// selection. Prefer [`activate_selected`](Self::activate_selected),
     /// which sources the token from the latest shadow state.
     pub fn send_activation(&mut self, token: ActivationToken) -> Result<u64, ControlError> {
-        let window = self.model.selected().ok_or(ControlError::NoActiveWindow)?;
+        let window = self
+            .model
+            .selected()
+            .ok_or_else(|| ControlError::AppConstraint("no selected window".into()))?;
         let id = self.alloc_request_id();
         self.write_message(&Message::Command {
             id,
@@ -722,6 +689,11 @@ impl ControlClient {
                 workspace_left,
                 workspace_right,
             })),
+            Message::PointerOutput { name } => {
+                self.pointer_output = name;
+                Ok(Handled::PointerOutput)
+            }
+            Message::ShortcutConsent { request } => Ok(Handled::ShortcutConsent(request)),
             Message::WorkspacePopup { index, count } => {
                 Ok(Handled::WorkspacePopup { index, count })
             }
@@ -744,6 +716,12 @@ impl ControlClient {
                 // overview's Enter path.
                 let selection = match action {
                     SwitcherAction::Step { forward } => self.model.switcher_step(forward),
+                    SwitcherAction::StepAllWindows { forward } => {
+                        self.model.switcher_step_all_windows(forward)
+                    }
+                    SwitcherAction::Cycle { forward, group } => {
+                        self.model.cycle_window(forward, group)
+                    }
                     SwitcherAction::StepWindow { forward } => {
                         self.model.switcher_step_window(forward)
                     }
@@ -767,7 +745,10 @@ impl ControlClient {
                     }
                     SwitcherAction::Commit => self.model.switcher_commit(),
                 };
-                if matches!(action, SwitcherAction::Commit) {
+                if matches!(
+                    action,
+                    SwitcherAction::Commit | SwitcherAction::Cycle { .. }
+                ) {
                     if let Some(id) = selection {
                         self.activate_window(id)?;
                     }
@@ -876,6 +857,8 @@ fn message_label(msg: &Message) -> &'static str {
         Message::AcceleratorActivated { .. } => "AcceleratorActivated",
         Message::WindowMenu { .. } => "WindowMenu",
         Message::WorkspacePopup { .. } => "WorkspacePopup",
+        Message::PointerOutput { .. } => "PointerOutput",
+        Message::ShortcutConsent { .. } => "ShortcutConsent",
     }
 }
 
@@ -896,6 +879,7 @@ fn snapshot_view(windows: &[WindowInfo], workspaces: &[WorkspaceInfo]) -> Snapsh
                 WindowEntry::new(w.id, w.title.clone(), w.focused)
                     .with_workspace(u32::try_from(w.workspace).unwrap_or(u32::MAX))
                     .with_app_id(w.app_id.clone())
+                    .with_icon(w.icon.clone())
             })
             .collect(),
         workspaces: workspaces
@@ -992,6 +976,7 @@ mod tests {
 
     fn window(id: WindowId, title: &str, workspace: WorkspaceId, focused: bool) -> WindowInfo {
         WindowInfo {
+            icon: None,
             id,
             title: title.to_owned(),
             app_id: Some("org.example.App".to_owned()),
@@ -1526,8 +1511,8 @@ mod tests {
         let (mut client, _peer) = handshook();
         assert_eq!(client.model().selected(), None);
         match client.send_activation(ActivationToken::new("token".to_owned())) {
-            Err(ControlError::NoActiveWindow) => {}
-            other => panic!("expected NoActiveWindow, got {other:?}"),
+            Err(ControlError::AppConstraint(_)) => {}
+            other => panic!("expected AppConstraint, got {other:?}"),
         }
     }
 

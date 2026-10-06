@@ -40,6 +40,7 @@ mod screensaver;
 mod screenshot_ui;
 mod services;
 mod shell_dbus;
+mod shortcut_consent;
 mod switcher;
 mod tray;
 mod wifi;
@@ -139,6 +140,20 @@ impl overview::OverviewActions for ShellActions {
         if let Some(control) = self.0.borrow_mut().control.as_mut() {
             let _ = control.activate_window(id);
         }
+    }
+
+    fn window_icon(&self, id: u64) -> Option<String> {
+        self.0
+            .borrow()
+            .control
+            .as_ref()?
+            .model()
+            .windows()
+            .iter()
+            .find(|w| w.id == id)?
+            .icon
+            .clone()
+            .filter(|icon| usable_window_icon(icon))
     }
 
     fn running(&self) -> Vec<(u64, Option<String>)> {
@@ -1496,6 +1511,13 @@ fn build(app: &adw::Application) {
                     Action::ToggleApplicationView => {
                         overview::OverviewUi::toggle_apps(&overview_ui);
                     }
+                    Action::FocusActiveNotification => notify.focus_active(),
+                    Action::ShiftOverviewUp | Action::ShiftOverviewDown => {
+                        overview::OverviewUi::shift(
+                            &overview_ui,
+                            action == Action::ShiftOverviewUp,
+                        );
+                    }
                     Action::ToggleMessageTray => toggle(&clock),
                     Action::ToggleQuickSettings => toggle(&system),
                     Action::SwitchToApplication(n) => {
@@ -1656,9 +1678,40 @@ fn build(app: &adw::Application) {
                             action == Action::MicrophoneMute,
                         );
                     }
-                    Action::BrightnessUp | Action::BrightnessDown => {
-                        let up = action == Action::BrightnessUp;
-                        if let Some(level) = services::step_brightness(up) {
+                    Action::BrightnessUp
+                    | Action::BrightnessDown
+                    | Action::BrightnessUpMonitor
+                    | Action::BrightnessDownMonitor
+                    | Action::BrightnessCycle
+                    | Action::BrightnessCycleMonitor => {
+                        let monitor = matches!(
+                            action,
+                            Action::BrightnessUpMonitor
+                                | Action::BrightnessDownMonitor
+                                | Action::BrightnessCycleMonitor
+                        );
+                        let output = shell
+                            .borrow()
+                            .control
+                            .as_ref()
+                            .and_then(|c| c.pointer_output().map(str::to_owned));
+                        // No pointer-output/backlight match means no write to a different screen.
+                        if monitor && output.is_none() {
+                            return;
+                        }
+                        let step = match action {
+                            Action::BrightnessUp | Action::BrightnessUpMonitor => {
+                                services::BrightnessStep::Up
+                            }
+                            Action::BrightnessDown | Action::BrightnessDownMonitor => {
+                                services::BrightnessStep::Down
+                            }
+                            _ => services::BrightnessStep::Cycle,
+                        };
+                        if let Some(level) = services::step_brightness_for(
+                            step,
+                            output.as_deref().filter(|_| monitor),
+                        ) {
                             osd_ui.show(&osd::OsdRequest {
                                 icon: Some("display-brightness-symbolic".into()),
                                 level: Some(level),
@@ -1961,9 +2014,21 @@ fn build(app: &adw::Application) {
         )
     };
 
+    let shortcut_consent = {
+        let shell = shell.clone();
+        shortcut_consent::Consent::new(
+            app.upcast_ref(),
+            Rc::new(move |request, allow| {
+                if let Some(control) = shell.borrow_mut().control.as_mut() {
+                    let _ = control.shortcut_consent(request, allow);
+                }
+            }),
+        )
+    };
     // Compositor state: drain the control socket every frame.
     {
         let shell = shell.clone();
+        let notify = notify.clone();
         let overview_ui = overview_ui.clone();
         let switcher_ui = switcher_ui.clone();
         let panel_window = window.clone();
@@ -1987,6 +2052,7 @@ fn build(app: &adw::Application) {
             let mut results = Vec::new();
             let mut accelerators = Vec::new();
             let mut menus = Vec::new();
+            let mut consent = None;
             let mut popups = Vec::new();
             if let Some(control) = shell.control.as_mut() {
                 loop {
@@ -1995,6 +2061,7 @@ fn build(app: &adw::Application) {
                             let _ = control.request_snapshot();
                         }
                         Ok(Handled::WindowMenu(request)) => menus.push(request),
+                        Ok(Handled::ShortcutConsent(request)) => consent = Some(request),
                         Ok(Handled::WorkspacePopup { index, count }) => {
                             popups.push((index, count));
                         }
@@ -2034,8 +2101,16 @@ fn build(app: &adw::Application) {
                 .as_ref()
                 .is_some_and(|c| c.model().is_overview_open());
             drop(shell);
+            if locked {
+                notify.release_focus();
+            }
             lock_ui.sync(locked);
             screensaver.sync(locked);
+            if locked {
+                shortcut_consent.dismiss();
+            } else if let Some(request) = consent {
+                shortcut_consent.sync(request);
+            }
             for (action, time, mode) in accelerators {
                 gnome_shell.accelerator_activated(action, time, mode);
             }
@@ -2071,6 +2146,17 @@ fn build(app: &adw::Application) {
                         .as_deref()
                         .and_then(|app| providers::provider_app(&apps, app))
                         .and_then(|entry| entry.icon.clone())
+                        .or_else(|| {
+                            window
+                                .app_id
+                                .as_deref()
+                                .and_then(|app| providers::provider_app(&apps, app))
+                                .is_none()
+                                .then(|| {
+                                    window.icon.clone().filter(|icon| usable_window_icon(icon))
+                                })
+                                .flatten()
+                        })
                         .map(|icon| -> gio::Icon {
                             if icon.starts_with('/') {
                                 gio::FileIcon::new(&gio::File::for_path(&icon)).upcast()
@@ -2093,6 +2179,14 @@ fn build(app: &adw::Application) {
     }
 
     window.present();
+}
+
+fn usable_window_icon(icon: &str) -> bool {
+    if icon.starts_with('/') {
+        std::path::Path::new(icon).is_file()
+    } else {
+        gtk::gdk::Display::default().is_some_and(|d| gtk::IconTheme::for_display(&d).has_icon(icon))
+    }
 }
 
 fn main() -> glib::ExitCode {

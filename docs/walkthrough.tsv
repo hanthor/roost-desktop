@@ -15,7 +15,7 @@ windows	04-windows.png	Windows	Windows	libadwaita windows placed by Mutter's cas
 popover	07-app-popover.png	Windows	App popovers	A header-bar menu opens as an xdg popup at the place its positioner asks for.	P-WM-06
 tile-preview	08-tile-preview.png	Windows	Edge tiling	Dragging a window to the left edge shows the tile preview over the left half.	P-WM-02
 window-menu	24d-window-menu.png	Windows	Window menu	Right-clicking a header bar opens GNOME's window menu.	P-WM-05
-x11	20-x11-app.png	Windows	X11 apps	XWayland starts with the session, and X11 apps get GNOME placement and focus.	P-SY-04
+x11	20-x11-app.png	Windows	X11 apps	The session advertises DISPLAY without starting XWayland. The first X11 connection starts it on the reserved sockets; X11 apps get GNOME placement and focus.	P-SY-04
 scroll-strip	24j-scroll-strip.png	Scrollable tiling	The strip	Super+Shift+T turns the windows into niri's strip: columns with 16px gaps, the view on the focused column, niri's focus ring around it.	P-WM-07
 scroll-follow	24k-scroll-follow.png	Scrollable tiling	Following focus	Super+R steps the column's width and Super+Left moves along the strip; the view scrolls the least that shows the focused column whole.	P-WM-07
 scroll-presets	24k-scroll-follow.png	Scrollable tiling	Column widths	Super+R cycles through 1/3, 1/2 and 2/3 widths; a widened column keeps its width as focus moves. The [same-size niri comparison](niri-parity.md) records matching geometry and the remaining pixel differences.	P-WM-07
