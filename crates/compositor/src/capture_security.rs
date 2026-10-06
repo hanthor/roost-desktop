@@ -63,18 +63,39 @@ impl Authority {
         header: &Header<'_>,
         role: ServiceClient,
     ) -> fdo::Result<String> {
+        let (owner, pid) = self.connection_caller(conn, header).await?;
+        if !installed_service(pid, role) {
+            return Err(denied(
+                "service connection requires the installed provider for its type",
+            ));
+        }
+        Ok(owner)
+    }
+    /// An ordinary display connection grants no provider or capture role.
+    pub(crate) async fn admit_connection(
+        &self,
+        conn: &Connection,
+        header: &Header<'_>,
+    ) -> fdo::Result<String> {
+        self.connection_caller(conn, header)
+            .await
+            .map(|(owner, _)| owner)
+    }
+    async fn connection_caller(
+        &self,
+        conn: &Connection,
+        header: &Header<'_>,
+    ) -> fdo::Result<(String, u32)> {
         let sender = header.sender().ok_or_else(|| denied("missing sender"))?;
         let dbus = fdo::DBusProxy::new(conn).await?;
         let uid = dbus.get_connection_unix_user(sender.clone().into()).await?;
         let pid = dbus
             .get_connection_unix_process_id(sender.clone().into())
             .await?;
-        if uid != rustix::process::geteuid().as_raw() || !installed_service(pid, role) {
-            return Err(denied(
-                "service connection requires the installed provider for its type",
-            ));
+        if uid != rustix::process::geteuid().as_raw() || pid == 0 {
+            return Err(denied("display connection requires a same-user process"));
         }
-        Ok(sender.to_string())
+        Ok((sender.to_string(), pid))
     }
     pub fn publish(&self, locked: bool, shell_pid: Option<u32>) {
         self.locked.store(locked, Ordering::SeqCst);

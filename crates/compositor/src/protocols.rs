@@ -249,13 +249,21 @@ pub struct ToplevelTag {
 
 /// The tag and description a window's client gave it.
 pub fn toplevel_tag(surface: &WlSurface) -> ToplevelTag {
-    with_states(surface, |states| {
+    let mut tag = with_states(surface, |states| {
         states
             .data_map
             .get::<std::sync::Mutex<ToplevelTag>>()
             .map(|tag| tag.lock().unwrap().clone())
             .unwrap_or_default()
-    })
+    });
+    if tag.tag.is_none() {
+        tag.tag = surface.client().and_then(|client| {
+            client
+                .get_data::<crate::ClientState>()
+                .and_then(|data| data.connection_window_tag.clone())
+        });
+    }
+    tag
 }
 
 fn update_tag(state: &State, toplevel: &XdgToplevel, update: impl FnOnce(&mut ToplevelTag)) {
