@@ -37,76 +37,17 @@ use roost_shell_control::{
     SwitcherAction, WindowInfo, WorkspaceInfo, CURRENT_VERSION, MAX_FRAME_BYTES,
 };
 
+/// Transport and protocol failures, shared with the compositor endpoint.
+///
+/// Defined in [`roost_shell_control`] so both endpoints name the same type;
+/// re-exported here because `crate::control::ControlError` is the path the
+/// rest of this crate (and its tests) use.
+pub use roost_shell_control::ControlError;
+
 use crate::model::{ShellModel, SnapshotView, WindowEntry};
 
 /// First shell-chosen command request id.
 pub const INITIAL_REQUEST_ID: u64 = 1;
-
-/// Ways the control conversation can fail.
-///
-/// `WouldBlock` arrives here as `Io` with
-/// `kind() == ErrorKind::WouldBlock`: no complete frame is available yet
-/// and the caller should retry once the socket is readable/writable.
-#[derive(Debug)]
-pub enum ControlError {
-    /// Socket I/O failure, including surfaced `WouldBlock`.
-    Io(io::Error),
-    /// Frame failed schema decoding/validation (oversize, malformed,
-    /// over-long title, stale major).
-    Decode(DecodeError),
-    /// The compositor answered with a typed [`Message::Error`] where a
-    /// handshake reply was required.
-    Remote {
-        /// Machine-readable category.
-        kind: ErrorKind,
-        /// Compositor diagnostics (never sensitive content).
-        message: String,
-    },
-    /// The peer closed the connection or sent a message the current step
-    /// cannot use.
-    Unexpected(String),
-    /// [`ControlClient::send_activation`] needs a selected window to name
-    /// as the activation target and the model has none.
-    NoActiveWindow,
-}
-
-impl std::fmt::Display for ControlError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(e) => write!(f, "control socket I/O: {e}"),
-            Self::Decode(e) => write!(f, "control decode: {e}"),
-            Self::Remote { kind, message } => {
-                write!(f, "compositor error {kind:?}: {message}")
-            }
-            Self::Unexpected(detail) => write!(f, "unexpected control message: {detail}"),
-            Self::NoActiveWindow => {
-                write!(f, "no selected window to activate")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ControlError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(e) => Some(e),
-            Self::Decode(e) => Some(e),
-            Self::Remote { .. } | Self::Unexpected(_) | Self::NoActiveWindow => None,
-        }
-    }
-}
-
-impl From<io::Error> for ControlError {
-    fn from(e: io::Error) -> Self {
-        Self::Io(e)
-    }
-}
-
-impl From<DecodeError> for ControlError {
-    fn from(e: DecodeError) -> Self {
-        Self::Decode(e)
-    }
-}
 
 /// What one handled inbound message meant.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -398,7 +339,10 @@ impl ControlClient {
     /// every snapshot mints fresh one-use tokens. Returns the request id
     /// for `CommandResult` correlation.
     pub fn activate_selected(&mut self) -> Result<u64, ControlError> {
-        let window = self.model.selected().ok_or(ControlError::NoActiveWindow)?;
+        let window = self
+            .model
+            .selected()
+            .ok_or_else(|| ControlError::AppConstraint("no selected window to activate".into()))?;
         let token = self
             .shadow_windows
             .iter()
@@ -620,7 +564,10 @@ impl ControlClient {
     /// selection. Prefer [`activate_selected`](Self::activate_selected),
     /// which sources the token from the latest shadow state.
     pub fn send_activation(&mut self, token: ActivationToken) -> Result<u64, ControlError> {
-        let window = self.model.selected().ok_or(ControlError::NoActiveWindow)?;
+        let window = self
+            .model
+            .selected()
+            .ok_or_else(|| ControlError::AppConstraint("no selected window".into()))?;
         let id = self.alloc_request_id();
         self.write_message(&Message::Command {
             id,
@@ -1564,8 +1511,8 @@ mod tests {
         let (mut client, _peer) = handshook();
         assert_eq!(client.model().selected(), None);
         match client.send_activation(ActivationToken::new("token".to_owned())) {
-            Err(ControlError::NoActiveWindow) => {}
-            other => panic!("expected NoActiveWindow, got {other:?}"),
+            Err(ControlError::AppConstraint(_)) => {}
+            other => panic!("expected AppConstraint, got {other:?}"),
         }
     }
 
