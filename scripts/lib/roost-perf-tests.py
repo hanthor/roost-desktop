@@ -3,6 +3,7 @@
 import importlib.machinery
 import importlib.util
 import json
+import base64
 from pathlib import Path
 import tempfile
 import unittest
@@ -49,6 +50,41 @@ class Accounting(unittest.TestCase):
         with self.assertRaises(ValueError):
             host.raw_globals(self.globals_serial(b"interface: 'zwp_input_method_manager_v2'"))
 
+    def presentation(self):
+        return {"clock_id": 1, "commits": 242, "discarded": 1, "pending": 1,
+                "frames": [dict(commit=i+1, presented_ns=(i+1)*16000000,
+                                refresh_ns=16000000, sequence=i, flags=1)
+                           for i in range(240)]}
+
+    def test_presentation_requires_complete_monotonic_nonduplicate_feedback(self):
+        for case in ("missing", "duplicate", "backwards", "unbalanced", "boolean"):
+            trace = self.presentation()
+            if case == "missing":
+                trace["frames"].pop()
+            elif case == "duplicate":
+                trace["frames"][1]["commit"] = 1
+            elif case == "backwards":
+                trace["frames"][1]["presented_ns"] = 1
+            elif case == "unbalanced":
+                trace["discarded"] = 0
+            elif case == "boolean":
+                trace["frames"][1]["refresh_ns"] = True
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                host.presentation_summary(trace)
+
+    def test_software_presentation_does_not_fabricate_hardware_or_refresh(self):
+        trace = self.presentation()
+        for row in trace["frames"]:
+            row["refresh_ns"] = 0
+            row["flags"] = 0
+        result = host.presentation_summary(trace)
+        self.assertEqual(result["interval_ms"]["count"], 239)
+        self.assertEqual(result["interval_ms"]["p99"], 16)
+        self.assertEqual(result["reported_refresh_ms"], {"count": 0})
+        self.assertEqual(result["unknown_refresh_count"], 240)
+        self.assertEqual(result["flag_counts"], dict(vsync=0, hw_clock=0, hw_completion=0, zero_copy=0))
+        self.assertEqual(result["discarded_count"], 1)
+
     def process(self, root, pid, ppid, uid, pss, start):
         path = root / str(pid)
         path.mkdir()
@@ -85,6 +121,62 @@ class Accounting(unittest.TestCase):
             result = guest.sample(1000, root)
             self.assertEqual(result["unreadable"], [{"pid":1,"error":"FileNotFoundError"}])
 
+    def test_drm_duplicate_handles_and_shared_process_clients_are_counted_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for pid in (1, 2):
+                path = self.process(root, pid, 0, 1000, 10, 55)
+                (path / "fdinfo").mkdir()
+                for fd in (0, 1):
+                    (path / f"fdinfo/{fd}").write_text(
+                        "drm-driver: test\ndrm-pdev: 0000:00:02.0\ndrm-client-id: 7\n"
+                        "drm-resident-vram: 2 MiB\ndrm-shared-vram: 4 KiB\n"
+                        "drm-total-memory: 128\nprivate-text: must not be retained\n")
+            result = guest.sample(1000, root)
+            self.assertEqual(result["drm_memory"]["status"], "available")
+            self.assertEqual(len(result["drm_memory"]["clients"]), 1)
+            client = result["drm_memory"]["clients"][0]
+            self.assertEqual(client["memory_bytes"], {"drm-resident-vram": 2097152,
+                                                     "drm-shared-vram": 4096,
+                                                     "drm-total-memory": 128})
+            self.assertNotIn("private-text", json.dumps(result))
+            summary = host.drm_memory_summary([result])
+            self.assertEqual(summary["sample_status_counts"], {"available": 1})
+            self.assertEqual(next(c for c in summary["client_accounted_bytes"]
+                                  if c["counter"] == "drm-resident-vram")["distribution"]["p50"], 2097152)
+
+    def test_drm_unsupported_and_invalid_counters_are_not_measured_zero(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = self.process(root, 1, 0, 1000, 10, 55)
+            absent = guest.sample(1000, root)
+            self.assertEqual(absent["drm_memory"]["status"], "unavailable")
+            (path / "fdinfo").mkdir()
+            (path / "fdinfo/0").write_text(
+                "drm-driver: test\ndrm-client-id: 1\ndrm-memory-vram: -2 KiB\n")
+            invalid = guest.sample(1000, root)
+            self.assertEqual(invalid["drm_memory"]["status"], "incomplete")
+            summary = host.drm_memory_summary([absent, invalid])
+            self.assertEqual(summary["sample_status_counts"], {"unavailable": 1, "incomplete": 1})
+            self.assertEqual(summary["client_accounted_bytes"], [])
+
+    def test_drm_measured_zero_and_separate_devices_preserve_their_meaning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = self.process(root, 1, 0, 1000, 10, 55)
+            (path / "fdinfo").mkdir()
+            for fd in (0, 1):
+                (path / f"fdinfo/{fd}").write_text(
+                    f"drm-driver: test\ndrm-pdev: 0000:00:0{fd}.0\ndrm-client-id: 1\n"
+                    "drm-memory-vram: 0 KiB\n")
+            result = guest.sample(1000, root)
+            self.assertEqual(result["drm_memory"]["status"], "available")
+            self.assertEqual(len(result["drm_memory"]["clients"]), 2)
+            summary = host.drm_memory_summary([result])
+            self.assertEqual(len(summary["client_accounted_bytes"]), 2)
+            self.assertTrue(all(c["distribution"]["p50"] == 0
+                                for c in summary["client_accounted_bytes"]))
+
     def test_zombie_is_departed_even_before_parent_reaps_it(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -106,6 +198,52 @@ class Accounting(unittest.TestCase):
         self.assertEqual(result["p95"], 9)
         self.assertEqual(result["p99"], 9)
         self.assertEqual(host.distribution([]), {"count":0})
+
+    def test_idle_cpu_excludes_intervals_crossing_either_guest_clock_boundary(self):
+        rows = [{"cpu_interval_start_boottime_s": i, "boottime_s": i+1,
+                 "cpu_observed_percent": 2} for i in range(100, 120)]
+        rows += [{"cpu_interval_start_boottime_s": 99, "boottime_s": 101,
+                  "cpu_observed_percent": 999},
+                 {"cpu_interval_start_boottime_s": 119, "boottime_s": 121,
+                  "cpu_observed_percent": 999},
+                 {"cpu_interval_start_boottime_s": None, "boottime_s": 100,
+                  "cpu_observed_percent": None}]
+        result = host.idle_cpu(rows, 100, 120)
+        self.assertEqual(result["count"], 20)
+        self.assertEqual(result["max"], 2)
+        with self.assertRaisesRegex(ValueError, "fewer than 20"):
+            host.idle_cpu(rows, 101, 120)
+        with self.assertRaisesRegex(ValueError, "invalid guest idle"):
+            host.idle_cpu(rows, 120, 100)
+
+    def test_guest_phase_probe_requires_executed_complete_valid_output(self):
+        class Agent:
+            def __init__(self, result, **flags):
+                self.commands = []
+                self.status = {"exited": True, "exitcode": 0,
+                               "out-data": base64.b64encode(json.dumps(result).encode()).decode(),
+                               **flags}
+
+            def command(self, name, **arguments):
+                self.commands.append((name, arguments))
+                return {"pid": 7} if name == "guest-exec" else self.status
+
+        agent = Agent({"boottime_s": 100, "notification_id": 9})
+        self.assertEqual(host.guest_probe(agent, "notify", 3)["notification_id"], 9)
+        self.assertEqual(agent.commands[0][1]["path"], "/usr/libexec/roost-perf-phase")
+        self.assertEqual(agent.commands[0][1]["arg"], ["notify", "--index", "3"])
+        for flags in ({"exitcode": 1}, {"out-truncated": True}, {"err-truncated": True}):
+            with self.subTest(flags=flags), self.assertRaisesRegex(RuntimeError, "failed"):
+                host.guest_probe(Agent({"boottime_s": 100}, **flags), "clock")
+        for clock in (None, True, -1, float("nan")):
+            with self.subTest(clock=clock), self.assertRaisesRegex(ValueError, "invalid guest clock"):
+                host.guest_probe(Agent({"boottime_s": clock}), "clock")
+        for identity in (0, True, None, 0x100000000):
+            with self.subTest(identity=identity), self.assertRaisesRegex(ValueError, "notification ID"):
+                host.guest_probe(Agent({"boottime_s": 100, "notification_id": identity}), "notify", 0)
+        for action, index in (("exec", None), ("notify", -1), ("notify", 10), ("notify", True)):
+            with self.assertRaises(ValueError):
+                host.guest_probe(agent, action, index)
 
 
 if __name__ == "__main__":

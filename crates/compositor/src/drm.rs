@@ -80,6 +80,7 @@ pub struct DrmOutput {
     pub scale: f64,
     /// A frame is queued and its page flip has not completed yet.
     pub pending: bool,
+    pub(crate) last_frame: Option<crate::native_repaint::FrameSignature>,
     wake_trace: bool,
 }
 
@@ -316,6 +317,7 @@ impl DrmBackend {
                 loc: (0, 0),
                 scale: 1.0,
                 pending: false,
+                last_frame: None,
                 wake_trace: false,
             });
         }
@@ -440,6 +442,7 @@ impl DrmBackend {
                 for out in &mut self.outputs {
                     out.surface.reset_buffers();
                     out.pending = false;
+                    out.last_frame = None;
                 }
                 self.active = true;
                 if self.sleep_reset_pending {
@@ -470,6 +473,7 @@ impl DrmBackend {
             }
             out.surface.reset_buffers();
             out.pending = false;
+            out.last_frame = None;
             out.wake_trace = trace;
         }
         // Reset actual connector/plane state too: an active VT does not imply

@@ -30,7 +30,7 @@ feature tour:
 | V-MOUSE-HANDEDNESS | Nine physical QMP clicks pass through native libinput to the same non-root GTK client while the real GNOME mouse setting changes false→true→false; left/right swap, middle stays unchanged, exact before/after counters retained in lifecycle/mouse-handedness.json |
 | V-VT | VT away/back, DRM pause/activate events, unchanged process identities and app rectangles, matching body plus a fresh visible count update from the real GTK client |
 | V-SUSPEND | Real logind suspend reaches QEMU `suspended`; the first guest snapshot after `system_wakeup` must already be locked, with all application identities intact; the real varied lock mask must repaint within five seconds, matching the pre-suspend mask; QEMU inactive-output placeholders fail |
-| V-SLEEP-AUTH-FAIL-CLOSED / V-SLEEP-FRESH-AUTH | A second real suspend interrupts a correct password attempt delayed by actual pam_exec; the real PAM success from the old generation is refused, then fresh correct authentication succeeds |
+| V-SLEEP-AUTH-FAIL-CLOSED / V-SLEEP-FRESH-AUTH | The single real suspend interrupts a correct password attempt delayed by actual pam_exec; the real PAM success from the old generation is refused, then fresh correct authentication succeeds |
 | V-SLEEP-CLIENT-REPAINT | The same GTK client receives a fresh key and visibly repaints after wake/unlock |
 | V-VT-FAIL-CLOSED | VT away/back while locked keeps the mask and original application processes |
 | V-AUTH-FAIL-CLOSED | Real PAM service temporarily uses `pam_deny`; fresh submitted/refused milestones prove the correct test password was attempted and denied; original service restored afterward |
@@ -93,3 +93,12 @@ fresh resource uploads. It remains a failed qualification. The supported
 PM profile requires its own strict actual run; no kernel/package override,
 extra VM matrix cell or physical hardware claim is introduced. QEMU 10.2
 is required, so the existing performance runner uses ubuntu-26.04.
+
+The performance lane keeps the user-authorized single-S3 contract: the session
+is prelocked and a real PAM attempt is pending before sleep. Its fail-closed
+wake and stale-success/fresh-authentication checks share that cycle. Varied
+mask repaint is retained as an observation; fresh host GPU uploads, client
+input/repaint and unchanged application identity remain mandatory. The prior
+native lifecycle qualification (#265) separately demonstrated locking from
+an unlocked session and two real suspend cycles on the preserved-resource VM
+profile; that evidence does not certify a later candidate automatically.

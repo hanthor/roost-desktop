@@ -3433,6 +3433,63 @@ impl TriggerState {
         overview_open: bool,
         pointer: Point<f64, Logical>,
     ) -> TriggerAction {
+        let corner = matches!(input, ManagerInput::Motion { pos, .. }
+            if (0.0..HOT_CORNER_PX).contains(&pos.x)
+                && (0.0..HOT_CORNER_PX).contains(&pos.y));
+        let strip = (0.0..ACTIVITIES_STRIP_PX).contains(&pointer.y)
+            && (0.0..ACTIVITIES_WIDTH_PX).contains(&pointer.x);
+        self.feed_regions(input, overview_open, corner, strip)
+    }
+
+    /// Decide against the current logical output layout. GNOME 51 always
+    /// offers the primary corner; a secondary corner is eligible only when
+    /// no other output touches its left or top edge. The Activities strip
+    /// belongs to the primary panel. Geometry is borrowed, never cached.
+    pub fn feed_on_outputs(
+        &mut self,
+        input: &ManagerInput,
+        overview_open: bool,
+        pointer: Point<f64, Logical>,
+        outputs: impl Iterator<Item = (Rectangle<i32, Logical>, bool)> + Clone,
+    ) -> TriggerAction {
+        let outputs = outputs.filter(|(rect, _)| rect.size.w > 0 && rect.size.h > 0);
+        let in_region =
+            |pos: Point<f64, Logical>, rect: Rectangle<i32, Logical>, w: f64, h: f64| {
+                let x = pos.x - f64::from(rect.loc.x);
+                let y = pos.y - f64::from(rect.loc.y);
+                (0.0..w.min(f64::from(rect.size.w))).contains(&x)
+                    && (0.0..h.min(f64::from(rect.size.h))).contains(&y)
+            };
+        let corner = if let ManagerInput::Motion { pos, .. } = input {
+            outputs.clone().any(|(rect, primary)| {
+                if !in_region(*pos, rect, HOT_CORNER_PX, HOT_CORNER_PX) {
+                    return false;
+                }
+                let left: Point<f64, Logical> =
+                    (f64::from(rect.loc.x) - 1.0, f64::from(rect.loc.y)).into();
+                let above: Point<f64, Logical> =
+                    (f64::from(rect.loc.x), f64::from(rect.loc.y) - 1.0).into();
+                primary
+                    || !outputs.clone().any(|(other, _)| {
+                        other.to_f64().contains(left) || other.to_f64().contains(above)
+                    })
+            })
+        } else {
+            false
+        };
+        let strip = outputs.clone().any(|(rect, primary)| {
+            primary && in_region(pointer, rect, ACTIVITIES_WIDTH_PX, ACTIVITIES_STRIP_PX)
+        });
+        self.feed_regions(input, overview_open, corner, strip)
+    }
+
+    fn feed_regions(
+        &mut self,
+        input: &ManagerInput,
+        overview_open: bool,
+        corner: bool,
+        strip: bool,
+    ) -> TriggerAction {
         match *input {
             ManagerInput::Key {
                 keycode, pressed, ..
@@ -3447,24 +3504,17 @@ impl TriggerState {
                     TriggerAction::None
                 }
             }
-            ManagerInput::Motion { pos, .. } => {
+            ManagerInput::Motion { .. } => {
                 self.super_armed = false;
-                if !self.hot_corner_off
-                    && !overview_open
-                    && (0.0..HOT_CORNER_PX).contains(&pos.x)
-                    && (0.0..HOT_CORNER_PX).contains(&pos.y)
-                {
+                if !self.hot_corner_off && !overview_open && corner {
                     TriggerAction::Open
                 } else {
                     TriggerAction::None
                 }
             }
             ManagerInput::Button { pressed, .. } => {
-                let strip = pressed
-                    && (0.0..ACTIVITIES_STRIP_PX).contains(&pointer.y)
-                    && (0.0..ACTIVITIES_WIDTH_PX).contains(&pointer.x);
                 self.super_armed = false;
-                if strip {
+                if pressed && strip {
                     TriggerAction::Toggle
                 } else {
                     TriggerAction::None

@@ -12,6 +12,7 @@
 #               menu's events card, timed as GNOME formats them
 #   G-CAL-OPEN  clicking the clock opens the calendar popover (xdg popup
 #               on the layer surface, #88)
+#   G-CAL-PREFS live first-weekday and ISO-week changes, plus locale reset
 #   G-QS-OPEN   clicking the system indicators opens quick settings
 #   A11Y-QS     quick-settings toggles and the volume slider are exposed
 #   G-WINDOWS   three libadwaita app windows map
@@ -441,6 +442,15 @@ if ! gsettings range org.gnome.desktop.a11y.interface reduced-motion >/dev/null 
     export GSETTINGS_SCHEMA_DIR
 fi
 gsettings set org.gnome.desktop.a11y.interface reduced-motion 'no-preference'
+if ! gsettings range org.gnome.desktop.calendar week-start-day >/dev/null 2>&1; then
+    mkdir -p "$ARTIFACTS/schemas"
+    cp "$ROOT/tests/settings/gnome51-calendar.gschema.xml" "$ARTIFACTS/schemas/"
+    glib-compile-schemas --strict "$ARTIFACTS/schemas"
+    GSETTINGS_SCHEMA_DIR="$ARTIFACTS/schemas"
+    export GSETTINGS_SCHEMA_DIR
+fi
+gsettings reset org.gnome.desktop.calendar week-start-day
+gsettings reset org.gnome.desktop.calendar show-weekdate
 gsettings set org.gnome.settings-daemon.plugins.color night-light-enabled false
 # Quick-settings daemons: stubs on a private "system" bus (#55), a fake
 # backlight, and a fake wpctl that records the sink volume.
@@ -664,6 +674,31 @@ if showing "$ARTIFACTS/a11y-calendar.json" "Retro"; then
     fail G-CAL-EVENTS "tomorrow's event shows under today"
 fi
 pass G-CAL-EVENTS "today's calendar-server events list in the events card, timed as GNOME does"
+# The open popover must update from real GSettings changes without a restart.
+"$PY" "$ROOT/scripts/lib/roost-calendar-preferences-proof.py" "$ARTIFACTS/a11y-calendar.json" default false ||
+    fail G-CAL-PREFS "initial locale calendar is invalid"
+for first in Monday Thursday Sunday; do
+    gsettings set org.gnome.desktop.calendar week-start-day "$(printf '%s' "$first" | tr '[:upper:]' '[:lower:]')"
+    gsettings set org.gnome.desktop.calendar show-weekdate true
+    sleep 1
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-calendar-$first.json" 20 ||
+        fail G-CAL-PREFS "live calendar tree is unavailable"
+    "$PY" "$ROOT/scripts/lib/roost-calendar-preferences-proof.py" "$ARTIFACTS/a11y-calendar-$first.json" "$first" true ||
+        fail G-CAL-PREFS "weekday order or ISO week numbers did not follow $first"
+done
+gsettings reset org.gnome.desktop.calendar week-start-day
+gsettings reset org.gnome.desktop.calendar show-weekdate
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-calendar-reset.json" 20 ||
+    fail G-CAL-PREFS "reset calendar tree is unavailable"
+"$PY" "$ROOT/scripts/lib/roost-calendar-preferences-proof.py" "$ARTIFACTS/a11y-calendar-reset.json" default false ||
+    fail G-CAL-PREFS "locale reset or hiding week numbers failed"
+jq '[.[] | select(.showing and .role == "label" and (.name | test("^(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)$"))) | .name]' "$ARTIFACTS/a11y-calendar.json" >"$ARTIFACTS/calendar-initial-headings.json"
+jq '[.[] | select(.showing and .role == "label" and (.name | test("^(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)$"))) | .name]' "$ARTIFACTS/a11y-calendar-reset.json" >"$ARTIFACTS/calendar-reset-headings.json"
+cmp "$ARTIFACTS/calendar-initial-headings.json" "$ARTIFACTS/calendar-reset-headings.json" ||
+    fail G-CAL-PREFS "reset did not restore the initial locale headings"
+scrot "$ARTIFACTS/02-calendar-reset.png" >/dev/null
+pass G-CAL-PREFS "live weekday changes, six ISO week labels and locale reset are visible in the same shell"
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-calendar-launch.json" 20 --press "Open Calendar" ||
     fail G-CAL-LAUNCH "events card has no accessible launch action"
 sleep 1
@@ -2175,6 +2210,17 @@ if jq -e '.overview_open' "$CSTATE" >/dev/null; then
 fi
 xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
 gsettings set org.gnome.desktop.interface enable-hot-corners true
+sleep 1
+xdotool mousemove --window "$WID" 1 1
+cstate '.overview_open' "hot corner enabled" ||
+    fail G-HOT-CORNER "enabling GNOME hot corners did not open the actual overview"
+cp "$CSTATE" "$ARTIFACTS/hot-corner-enabled.json"
+scrot "$ARTIFACTS/hot-corner-enabled.png" >/dev/null
+xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
+xdotool key Escape
+cstate '.overview_open | not' "hot corner dismissed" ||
+    fail G-HOT-CORNER "the corner-opened overview did not close"
+pass G-HOT-CORNER "live GNOME disable rejects the corner; enable opens the actual overview"
 gsettings set org.gnome.desktop.peripherals.keyboard repeat-interval 30
 gsettings set org.gnome.desktop.input-sources sources "[('xkb', 'us')]"
 cstate '.keyboard.layouts == ["English (US)"]' "one source" ||

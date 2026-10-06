@@ -59,6 +59,8 @@ pub mod layer;
 pub mod lock;
 pub mod monitors;
 pub mod mutter;
+#[cfg(feature = "drm")]
+mod native_repaint;
 pub mod overlay;
 pub mod overview;
 pub mod pam;
@@ -989,6 +991,28 @@ impl State {
             .iter()
             .filter_map(|e| Some((e.name.clone(), e.output.clone()?, e.loc, e.primary)))
             .collect()
+    }
+
+    /// Overview input uses the compositor's current logical output geometry,
+    /// including primary changes, negative origins, scale changes and hotplug.
+    pub fn overview_trigger_action(
+        &self,
+        triggers: &mut crate::windows::TriggerState,
+        input: &crate::windows::ManagerInput,
+        overview_open: bool,
+        pointer: smithay::utils::Point<f64, smithay::utils::Logical>,
+    ) -> crate::windows::TriggerAction {
+        triggers.feed_on_outputs(
+            input,
+            overview_open,
+            pointer,
+            self.outputs.iter().map(|entry| {
+                (
+                    smithay::utils::Rectangle::new(entry.loc.into(), entry.size),
+                    entry.primary,
+                )
+            }),
+        )
     }
 
     /// Shell-facing output inventory.
