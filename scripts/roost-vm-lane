@@ -192,7 +192,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
         return changed
 
     agent.run("start-input-probe")
-    probe = await_state(lambda state: any(w["app_id"] == "org.roost.VmInput" for w in state["state"]["windows"]))
+    probe = await_state(lambda state: any(w["app_id"] == "org.roost.VmInput" for w in state["state"]["windows"]), label="input-created")
     probe_window = next(w for w in probe["state"]["windows"] if w["app_id"] == "org.roost.VmInput")
     x, y, width, height = probe_window["rect"]
     # The compositor model can precede the client's first mapped buffer. Its
@@ -212,7 +212,18 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
         else:
             raise RuntimeError("real GTK input probe did not map/activate within its deadline")
         if not require_active:
-            qmp.click(x + 100, y + 100)
+            # Initial model registration precedes place_committed: the first
+            # real buffer can move a floating window from its provisional
+            # rectangle. Click its current placement, never the pre-map origin.
+            probe = inventory("input-mapped")
+            probe_window = next(w for w in probe["state"]["windows"]
+                                if w["app_id"] == "org.roost.VmInput")
+            x, y, width, height = probe_window["rect"]
+            click_x = x + min(100, width // 2, readiness["width"] // 2)
+            click_y = y + min(100, height // 2, readiness["height"] // 2)
+            if not (0 <= click_x < WIDTH and 0 <= click_y < HEIGHT):
+                raise RuntimeError("mapped GTK input probe lies outside the output")
+            qmp.click(click_x, click_y)
     frame("input-ready")
     initial_input = agent.run("input-count")
     qmp.keys("x")

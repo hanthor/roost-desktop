@@ -56,6 +56,42 @@ class BootApi(unittest.TestCase):
             self.assertIn("virtserialport,chardev=roost-qga,name=org.qemu.guest_agent.0", command)
 
 
+class InputProbePlacement(unittest.TestCase):
+    def test_click_uses_placement_after_first_buffer(self):
+        class FrameReached(Exception):
+            pass
+
+        clicks = []
+        inventory_calls = []
+        provisional = {"state": {"windows": [
+            {"app_id": "org.roost.VmInput", "rect": [0, 0, 800, 600]}]}}
+        placed = {"state": {"windows": [
+            {"app_id": "org.roost.VmInput", "rect": [500, 250, 400, 240]}]}}
+
+        def run(action):
+            if action == "inventory":
+                inventory_calls.append(action)
+                return provisional if len(inventory_calls) == 1 else placed
+            if action == "input-ready":
+                return {"pid": 42, "count": 0, "mapped": True,
+                        "active": bool(clicks), "width": 400, "height": 240}
+            self.assertEqual(action, "start-input-probe")
+            return {"started": True}
+
+        def frame(_path):
+            raise FrameReached()
+
+        qmp = SimpleNamespace(click=lambda x, y: clicks.append((x, y)), frame=frame)
+        with tempfile.TemporaryDirectory() as out:
+            with self.assertRaises(FrameReached):
+                lane.run_lifecycle(qmp, SimpleNamespace(run=run), out, "/unused", lambda *_: None)
+            self.assertEqual(clicks, [(600, 350)])
+            mapped = json.loads((Path(out) / "lifecycle/input-mapped.json").read_text())
+            self.assertEqual(mapped, placed)
+            ready = json.loads((Path(out) / "lifecycle/input-ready.json").read_text())
+            self.assertTrue(ready["active"])
+
+
 class PciCapabilities(unittest.TestCase):
     def probe(self, pm_control, pcie=True, cycle=False):
         helper = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
