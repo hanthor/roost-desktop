@@ -1766,6 +1766,13 @@ impl WindowManager {
     /// IBus's candidate window does) so panel menus take keys; the
     /// button itself follows pointer focus from the last motion.
     pub fn pointer_button(&mut self, state: &mut State, button: u32, pressed: bool, time: u32) {
+        let trace = std::env::var_os("ROOST_POINTER_TRACE").is_some();
+        if trace {
+            eprintln!(
+                "roost-compositor: pointer trace: manager button received popup_grab={} move_modifier={}",
+                state.popup_grab_active(), self.super_held
+            );
+        }
         // Release ends a move/resize grab. It is still delivered (unless
         // its press was swallowed): the client's press opened smithay's
         // implicit click grab, and only the matching release closes it.
@@ -1828,12 +1835,25 @@ impl WindowManager {
             } else if self.overview_open {
                 // Overview presses are the runtime's (preview hits).
             } else if let Some(id) = self.window_at(pos) {
-                if self.model.focused() != Some(id) {
+                // A lock or on-demand layer can own the keyboard while the
+                // model still names this window. A click must restore actual
+                // seat focus even when the model's focused ID is unchanged.
+                let keyboard_matches = self
+                    .keyboard
+                    .as_ref()
+                    .is_none_or(|keyboard| keyboard.current_focus() == self.surface_of(id));
+                if self.model.focused() != Some(id) || !keyboard_matches {
                     self.apply_focus(state, Some(id));
                 }
             }
         }
         if let Some(pointer) = self.pointer.clone() {
+            if trace {
+                eprintln!(
+                    "roost-compositor: pointer trace: client button dispatched focused={}",
+                    pointer.current_focus().is_some()
+                );
+            }
             pointer.button(
                 state,
                 &ButtonEvent {
@@ -1901,6 +1921,7 @@ impl WindowManager {
         surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
         input: ManagerInput,
     ) {
+        self.note_modifiers(&input);
         if let Some(keyboard) = self.keyboard.clone() {
             if keyboard.current_focus().as_ref() != Some(surface) {
                 keyboard.set_focus(state, Some(surface.clone()), SERIAL_COUNTER.next_serial());
@@ -1978,6 +1999,12 @@ impl WindowManager {
         if !pressed {
             if let Some(i) = self.accel_held.iter().position(|k| *k == keycode) {
                 self.accel_held.remove(i);
+                keyboard.input_intercept(
+                    state,
+                    keycode.saturating_add(XKB_X11_OFFSET).into(),
+                    KeyState::Released,
+                    |_, _, _| (),
+                );
                 return true;
             }
         }
@@ -3080,6 +3107,44 @@ impl WindowManager {
         }
         self.apply_focus(state, Some(id));
         true
+    }
+
+    /// Keep physical modifier holds current even when a lock, blanking shield
+    /// or recovery overlay consumes the event. This never delivers client input.
+    pub fn note_modifiers(&mut self, input: &ManagerInput) {
+        if let ManagerInput::Key {
+            keycode, pressed, ..
+        } = input
+        {
+            self.track_workspace_modifiers(*keycode, *pressed);
+            self.track_switcher_modifiers(*keycode, *pressed);
+        }
+    }
+
+    /// Account for a consumed key without sending it to any client.
+    pub fn discard_key_input(&mut self, state: &mut State, input: &ManagerInput) {
+        self.note_modifiers(input);
+        if let (
+            Some(keyboard),
+            ManagerInput::Key {
+                keycode, pressed, ..
+            },
+        ) = (self.keyboard.clone(), input)
+        {
+            if !*pressed {
+                self.accel_held.retain(|held| held != keycode);
+            }
+            keyboard.input_intercept(
+                state,
+                keycode.saturating_add(XKB_X11_OFFSET).into(),
+                if *pressed {
+                    KeyState::Pressed
+                } else {
+                    KeyState::Released
+                },
+                |_, _, _| (),
+            );
+        }
     }
 
     /// Track Super/Shift hold state for workspace keybindings. The

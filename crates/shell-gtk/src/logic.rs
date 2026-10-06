@@ -833,6 +833,15 @@ mod idle_tests {
     }
 }
 
+/// GNOME touchpad orientation can override or follow the mouse preference.
+pub fn touchpad_left_handed(policy: &str, mouse_left_handed: bool) -> bool {
+    match policy {
+        "left" => true,
+        "right" => false,
+        _ => mouse_left_handed,
+    }
+}
+
 /// GNOME's input sources (`[('xkb', 'us'), ('xkb', 'de+nodeadkeys')]`)
 /// as one xkb keymap: comma-separated layouts and variants in order.
 /// Non-xkb sources (IBus engines) are skipped; none at all means `us`.
@@ -858,6 +867,15 @@ pub fn xkb_from_sources(sources: &[(String, String)]) -> (String, String) {
 #[cfg(test)]
 mod input_tests {
     use super::*;
+
+    #[test]
+    fn touchpad_handedness_overrides_or_tracks_mouse_changes() {
+        for mouse in [false, true] {
+            assert!(touchpad_left_handed("left", mouse));
+            assert!(!touchpad_left_handed("right", mouse));
+            assert_eq!(touchpad_left_handed("mouse", mouse), mouse);
+        }
+    }
 
     fn src(kind: &str, id: &str) -> (String, String) {
         (kind.to_owned(), id.to_owned())

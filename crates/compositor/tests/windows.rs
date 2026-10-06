@@ -2870,3 +2870,96 @@ fn strip_columns_resize_on_primary_output_failover_without_losing_focus() {
     assert_eq!(f.manager.model().focused(), focused);
     assert_eq!(f.manager.model().active_workspace(), workspace);
 }
+
+#[test]
+fn modifier_releases_during_lock_do_not_turn_unlocked_clicks_into_moves() {
+    for mapped_lock in [true, false] {
+        let mut f = two_windows();
+        press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+        let release = ManagerInput::Key {
+            keycode: SUPER_LEFT_KEYCODE,
+            pressed: false,
+            time: 5001,
+        };
+        if mapped_lock {
+            let surface = f.manager.surface_of(f.id_a).unwrap();
+            f.manager.lock_input(&mut f.comp.state, &surface, release);
+        } else {
+            // The runtime observes releases even before a lock surface maps;
+            // no client receives this otherwise-consumed event.
+            f.manager.discard_key_input(&mut f.comp.state, &release);
+        }
+        assert!(f.comp.state.pressed_key_count() == 0);
+        f.manager
+            .pointer_motion(&mut f.comp.state, beta_only(), 5002);
+        f.manager
+            .pointer_button(&mut f.comp.state, BTN_LEFT, true, 5003);
+        f.manager
+            .pointer_button(&mut f.comp.state, BTN_LEFT, false, 5004);
+        pump(&mut f.comp, &mut f.queue_b, &mut f.client_b, |c| {
+            c.pointer_buttons.len() >= 2
+        });
+        assert_eq!(
+            f.client_b.pointer_buttons,
+            vec![(BTN_LEFT, true), (BTN_LEFT, false)]
+        );
+        assert_eq!(f.manager.model().focused(), Some(f.id_b));
+    }
+}
+
+#[test]
+fn swallowed_accelerator_release_clears_physical_pressed_state() {
+    use roost_shell_control::{Accelerator, MODE_NORMAL};
+    let mut f = two_windows();
+    f.manager.set_accelerators(vec![Accelerator {
+        action: 23,
+        keysym: u32::from(b'r'),
+        mods: 0,
+        modes: MODE_NORMAL,
+    }]);
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(
+        f.manager.take_accelerators_fired(),
+        [(23, 5000, MODE_NORMAL)]
+    );
+    assert_eq!(f.comp.state.pressed_key_count(), 1);
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert!(f.comp.state.pressed_key_count() == 0);
+    assert!(f.manager.take_accelerators_fired().is_empty());
+}
+
+#[test]
+fn same_focused_window_click_restores_keyboard_after_lock_ownership() {
+    let mut f = two_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    let lock_surface = f.manager.surface_of(f.id_b).unwrap();
+    f.manager.lock_input(
+        &mut f.comp.state,
+        &lock_surface,
+        ManagerInput::Motion {
+            pos: beta_only(),
+            time: 5001,
+        },
+    );
+    assert_eq!(f.manager.model().focused(), Some(f.id_a));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    f.client_a.keys.clear();
+    f.client_b.keys.clear();
+    f.manager
+        .pointer_motion(&mut f.comp.state, alpha_only(), 5002);
+    f.manager
+        .pointer_button(&mut f.comp.state, BTN_LEFT, true, 5003);
+    f.manager
+        .pointer_button(&mut f.comp.state, BTN_LEFT, false, 5004);
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert_eq!(f.client_a.keys, [(R_KEYCODE, true), (R_KEYCODE, false)]);
+    assert!(
+        f.client_b.keys.is_empty(),
+        "the former lock owner hears no unlocked keys"
+    );
+    assert_eq!(f.manager.model().focused(), Some(f.id_a));
+}
