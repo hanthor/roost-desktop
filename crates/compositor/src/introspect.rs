@@ -33,10 +33,19 @@ struct Service {
 /// GNOME's app id for a window: its desktop file id, or `window:N` for
 /// a window no app claims.
 pub fn app_id(window: &WindowSnapshot) -> String {
-    match window.app_id.as_deref().filter(|id| !id.is_empty()) {
+    window
+        .application_id
+        .clone()
+        .unwrap_or_else(|| desktop_app_id(window.id, window.app_id.as_deref()))
+}
+
+/// Existing desktop-ID normalization, applied to the owning application
+/// window. Unknown parents use their own stable window identity.
+pub fn desktop_app_id(id: u64, app: Option<&str>) -> String {
+    match app.filter(|id| !id.is_empty()) {
         Some(id) if id.ends_with(".desktop") => id.to_owned(),
         Some(id) => format!("{id}.desktop"),
-        None => format!("window:{}", window.id),
+        None => format!("window:{id}"),
     }
 }
 
@@ -282,6 +291,7 @@ mod tests {
             id,
             title: format!("w{id}"),
             app_id: app.map(str::to_owned),
+            application_id: None,
             width: 640,
             height: 480,
             focused,
@@ -289,6 +299,33 @@ mod tests {
             x11: false,
             standalone: true,
         }
+    }
+
+    #[test]
+    fn foreign_dialog_focus_uses_parent_app_without_rewriting_raw_class() {
+        let parent = window(1, Some("org.gnome.TextEditor"), false);
+        let mut picker = window(2, Some("org.gnome.Nautilus"), true);
+        picker.standalone = false;
+        picker.application_id = Some("org.gnome.TextEditor.desktop".into());
+        picker.x11 = true;
+        let props = window_properties(&picker);
+        assert_eq!(
+            String::try_from(props["app-id"].clone()).unwrap(),
+            "org.gnome.TextEditor.desktop"
+        );
+        assert_eq!(
+            String::try_from(props["wm-class"].clone()).unwrap(),
+            "org.gnome.Nautilus"
+        );
+        let apps = running_apps(&[parent, picker]);
+        assert_eq!(apps.len(), 1);
+        assert_eq!(
+            Vec::<String>::try_from(
+                apps["org.gnome.TextEditor.desktop"]["active-on-seats"].clone()
+            )
+            .unwrap(),
+            vec!["seat0"]
+        );
     }
 
     #[test]

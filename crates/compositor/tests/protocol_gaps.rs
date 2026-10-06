@@ -675,6 +675,9 @@ fn running_app_eligibility_follows_real_transient_parent_changes() {
     let (parent_surface, parent) = window(&mut app, "app parent");
     let (_child_surface, child) = window(&mut app, "app dialog");
     let (picker_surface, picker) = window(&mut portal, "portal picker");
+    parent.set_app_id("org.gnome.TextEditor".into());
+    child.set_app_id("org.gnome.EditorDialog".into());
+    picker.set_app_id("org.gnome.Nautilus".into());
     pump(&mut comp, &mut manager, &mut [&mut app, &mut portal]);
     let id = |manager: &WindowManager, title: &str| {
         manager
@@ -684,6 +687,7 @@ fn running_app_eligibility_follows_real_transient_parent_changes() {
             .unwrap()
             .id
     };
+    let parent_id = id(&manager, "app parent");
     let child_id = id(&manager, "app dialog");
     let picker_id = id(&manager, "portal picker");
     assert!(manager.is_standalone(child_id));
@@ -691,6 +695,7 @@ fn running_app_eligibility_follows_real_transient_parent_changes() {
     child.set_parent(Some(&parent));
     pump(&mut comp, &mut manager, &mut [&mut app, &mut portal]);
     assert!(!manager.is_standalone(child_id));
+    assert_eq!(manager.application_window(child_id), Some(parent_id));
     child.set_parent(None);
     pump(&mut comp, &mut manager, &mut [&mut app, &mut portal]);
     assert!(manager.is_standalone(child_id));
@@ -700,12 +705,18 @@ fn running_app_eligibility_follows_real_transient_parent_changes() {
     imported.set_parent_of(&picker_surface);
     pump(&mut comp, &mut manager, &mut [&mut app, &mut portal]);
     assert!(!manager.is_standalone(picker_id));
+    assert_eq!(manager.application_window(picker_id), Some(parent_id));
+    assert_eq!(
+        manager.model().window(picker_id).unwrap().app_id.as_deref(),
+        Some("org.gnome.Nautilus")
+    );
     exported.destroy();
     pump(&mut comp, &mut manager, &mut [&mut app, &mut portal]);
     assert!(
         manager.is_standalone(picker_id),
         "withdrawn foreign parent clears eligibility"
     );
+    assert_eq!(manager.application_window(picker_id), Some(picker_id));
     picker.destroy();
     picker_surface.destroy();
     pump(&mut comp, &mut manager, &mut [&mut app, &mut portal]);
@@ -713,6 +724,7 @@ fn running_app_eligibility_follows_real_transient_parent_changes() {
         !manager.is_standalone(picker_id),
         "unmapped window is not a running app"
     );
+    assert_eq!(manager.application_window(picker_id), None);
 }
 
 #[test]
