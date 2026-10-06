@@ -58,7 +58,7 @@ pub(crate) fn socket_credentials(
 ) -> Option<Arc<fdo::ConnectionCredentials>> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     let peer = rustix::net::sockopt::socket_peercred(socket).ok()?;
-    let pid = u32::try_from(peer.pid.as_raw())
+    let pid = u32::try_from(peer.pid.as_raw_pid())
         .ok()
         .filter(|pid| *pid != 0)?;
     let mut descriptor: libc::c_int = -1;
