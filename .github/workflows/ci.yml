@@ -365,7 +365,7 @@ jobs:
       - if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin
-          img=ghcr.io/hanthor/roost-desktop/marlin-roost-preview
+          img=ghcr.io/tuna-os/tuna-desktop/marlin-roost-preview
           podman tag marlin-roost-preview:ci "$img:latest"
           podman tag marlin-roost-preview:ci "$img:${{ github.sha }}"
           podman push "$img:latest"
