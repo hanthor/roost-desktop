@@ -665,6 +665,13 @@ impl State {
         !self.popup_grab.is_empty()
     }
 
+    /// Number of physically held keys, without exposing their identities.
+    pub fn pressed_key_count(&self) -> usize {
+        self.seat
+            .get_keyboard()
+            .map_or(0, |keyboard| keyboard.pressed_keys().len())
+    }
+
     /// Seat for capability attachment and input routing.
     pub(crate) fn seat_mut(&mut self) -> &mut Seat<State> {
         &mut self.seat

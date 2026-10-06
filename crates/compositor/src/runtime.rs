@@ -1382,8 +1382,7 @@ impl Runtime {
             "remote_input_sessions": self.remote_held.len(),
             // Held-state proof needs only a count, including during lock.
             // Never emit key identities that could expose credential input.
-            "seat_pressed_key_count": self.state.seat.get_keyboard()
-                .map_or(0, |keyboard| keyboard.pressed_keys().len()),
+            "seat_pressed_key_count": self.state.pressed_key_count(),
             "x11_ready": x11_ready,
             "idle_timeout_ms": self.lock.timeout_ms(),
             "idle_blank_alpha": self.blank_alpha(),

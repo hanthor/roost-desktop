@@ -2889,14 +2889,7 @@ fn modifier_releases_during_lock_do_not_turn_unlocked_clicks_into_moves() {
             // no client receives this otherwise-consumed event.
             f.manager.discard_key_input(&mut f.comp.state, &release);
         }
-        assert!(f
-            .comp
-            .state
-            .seat
-            .get_keyboard()
-            .unwrap()
-            .pressed_keys()
-            .is_empty());
+        assert!(f.comp.state.pressed_key_count() == 0);
         f.manager
             .pointer_motion(&mut f.comp.state, beta_only(), 5002);
         f.manager
@@ -2929,24 +2922,8 @@ fn swallowed_accelerator_release_clears_physical_pressed_state() {
         f.manager.take_accelerators_fired(),
         [(23, 5000, MODE_NORMAL)]
     );
-    assert_eq!(
-        f.comp
-            .state
-            .seat
-            .get_keyboard()
-            .unwrap()
-            .pressed_keys()
-            .len(),
-        1
-    );
+    assert_eq!(f.comp.state.pressed_key_count(), 1);
     release(&mut f.manager, &mut f.comp, R_KEYCODE);
-    assert!(f
-        .comp
-        .state
-        .seat
-        .get_keyboard()
-        .unwrap()
-        .pressed_keys()
-        .is_empty());
+    assert!(f.comp.state.pressed_key_count() == 0);
     assert!(f.manager.take_accelerators_fired().is_empty());
 }
