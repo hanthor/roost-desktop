@@ -3059,7 +3059,6 @@ impl Runtime {
                         continue;
                     }
                     let size = out.size;
-                    let damage = Rectangle::from_size(size);
                     // Per-output scale from GNOME's monitors.xml (#59).
                     let view = View {
                         offset: out.loc,
@@ -3164,15 +3163,35 @@ impl Runtime {
                     ) {
                         continue;
                     }
-                    // Dirty frames repaint the entire acquired buffer, regardless
-                    // of its age. Only a successful submission establishes a cache.
-                    let (mut dmabuf, _age) = match out.surface.next_buffer() {
+                    // Account for changes since this particular swapchain buffer
+                    // was submitted, including intervening frames.
+                    let (mut dmabuf, age) = match out.surface.next_buffer() {
                         Ok(buffer) => buffer,
                         Err(e) => {
                             eprintln!("roost-compositor: drm: next_buffer {}: {e}", out.name);
                             continue;
                         }
                     };
+                    let reset = out
+                        .last_frame
+                        .as_ref()
+                        .is_none_or(|old| !signature.same_global_drawing(old));
+                    if reset {
+                        out.damage_tracker = None;
+                    }
+                    let tracker = out.damage_tracker.get_or_insert_with(|| {
+                        smithay::backend::renderer::damage::OutputDamageTracker::new(
+                            size,
+                            1.0,
+                            Transform::Normal,
+                        )
+                    });
+                    let damage = crate::native_repaint::damage_region(
+                        tracker,
+                        if reset { 0 } else { usize::from(age) },
+                        &signature,
+                    )
+                    .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
                     let sync = {
                         let mut target = renderer
                             .bind(&mut dmabuf)
@@ -3223,6 +3242,9 @@ impl Runtime {
                     let feedback = crate::frame_timing::take_feedback(&mine, &out.output);
                     if let Err(e) = out.surface.queue_buffer(Some(sync), None, feedback) {
                         eprintln!("roost-compositor: drm: queue_buffer {}: {e}", out.name);
+                        // Never reuse history after an unsubmitted partial update.
+                        out.last_frame = None;
+                        out.damage_tracker = None;
                         continue;
                     }
                     out.trace_wake_submission();
