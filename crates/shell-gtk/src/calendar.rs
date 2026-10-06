@@ -49,7 +49,9 @@ pub struct CalendarUi {
     events_list: gtk::Box,
     source: std::cell::RefCell<Option<Rc<crate::events::EventSource>>>,
     clock_format: Cell<logic::ClockFormat>,
-    week_start: i8,
+    week_start: Cell<i8>,
+    show_weekdate: Cell<bool>,
+    settings: Option<gio::Settings>,
     today: Cell<Date>,
     shown: Cell<Date>,
     selected: Cell<Date>,
@@ -128,7 +130,9 @@ impl CalendarUi {
             events_list,
             source: Default::default(),
             clock_format: Cell::new(logic::ClockFormat::TwentyFourHour),
-            week_start: week_start(),
+            week_start: Cell::new(week_start()),
+            show_weekdate: Cell::new(false),
+            settings: crate::settings("org.gnome.desktop.calendar"),
             today: Cell::new(today),
             shown: Cell::new(today.first_of_month()),
             selected: Cell::new(today),
@@ -146,8 +150,39 @@ impl CalendarUi {
             ui.today_button
                 .connect_clicked(move |_| ui2.select(ui2.today.get()));
         }
+        if let Some(settings) = &ui.settings {
+            let weak = Rc::downgrade(&ui);
+            settings.connect_changed(None, move |_, key| {
+                if matches!(key, "show-weekdate" | "week-start-day") {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.apply_preferences();
+                    }
+                }
+            });
+        }
+        ui.apply_preferences();
         ui.render();
         ui
+    }
+
+    fn apply_preferences(self: &Rc<Self>) {
+        let Some(settings) = &self.settings else {
+            return;
+        };
+        let Some(schema) = settings.settings_schema() else {
+            return;
+        };
+        let start = if schema.has_key("week-start-day") {
+            logic::calendar_week_start(&settings.string("week-start-day"), week_start())
+        } else {
+            week_start()
+        };
+        let show = schema.has_key("show-weekdate") && settings.boolean("show-weekdate");
+        let changed_start = self.week_start.replace(start) != start;
+        let changed_show = self.show_weekdate.replace(show) != show;
+        if changed_start || changed_show {
+            self.render();
+        }
     }
 
     /// Launch the selected day through the same session-aware path as overview apps.
@@ -224,7 +259,10 @@ impl CalendarUi {
             .set_text(&logic::events_title(selected, today));
         let tz = jiff::tz::TimeZone::system();
         let source = self.source.borrow().clone();
-        let grid_days = logic::month_grid(shown.year(), shown.month(), self.week_start);
+        let week_start = self.week_start.get();
+        let show_weekdate = self.show_weekdate.get();
+        let offset = i32::from(show_weekdate);
+        let grid_days = logic::month_grid(shown.year(), shown.month(), week_start);
         if let (Some(source), Some(first), Some(last)) =
             (&source, grid_days.first(), grid_days.last())
         {
@@ -238,18 +276,24 @@ impl CalendarUi {
         while let Some(child) = self.grid.first_child() {
             self.grid.remove(&child);
         }
-        for (col, initial) in logic::weekday_initials(self.week_start)
-            .into_iter()
-            .enumerate()
-        {
+        for (col, initial) in logic::weekday_initials(week_start).into_iter().enumerate() {
             let heading = gtk::Label::new(Some(initial));
             heading.add_css_class("calendar-day-heading");
-            self.grid.attach(&heading, col as i32, 0, 1, 1);
+            // Full weekday names distinguish duplicate initials for assistive tools.
+            let name = grid_days[col].strftime("%A").to_string();
+            heading.update_property(&[gtk::accessible::Property::Label(&name)]);
+            self.grid.attach(&heading, col as i32 + offset, 0, 1, 1);
         }
-        for (i, day) in logic::month_grid(shown.year(), shown.month(), self.week_start)
-            .into_iter()
-            .enumerate()
-        {
+        for (i, day) in grid_days.into_iter().enumerate() {
+            if show_weekdate && day.weekday().to_sunday_zero_offset() == 4 {
+                // GNOME numbers each row using its Thursday, including year boundaries.
+                let number = gtk::Label::new(Some(&day.strftime("%V").to_string()));
+                number.add_css_class("calendar-week-number");
+                number.update_property(&[gtk::accessible::Property::Label(
+                    &day.strftime("Week %V").to_string(),
+                )]);
+                self.grid.attach(&number, 0, (i / 7) as i32 + 1, 1, 1);
+            }
             let button = gtk::Button::with_label(&day.strftime("%d").to_string());
             button.add_css_class("calendar-day");
             button.add_css_class(if logic::is_weekend(day) {
@@ -277,7 +321,7 @@ impl CalendarUi {
             let ui = self.clone();
             button.connect_clicked(move |_| ui.select(day));
             self.grid
-                .attach(&button, (i % 7) as i32, (i / 7) as i32 + 1, 1, 1);
+                .attach(&button, (i % 7) as i32 + offset, (i / 7) as i32 + 1, 1, 1);
         }
     }
 

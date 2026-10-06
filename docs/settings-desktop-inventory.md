@@ -152,8 +152,8 @@ Source: [GTK Wayland settings translations](https://github.com/GNOME/gtk/blob/4.
 
 | Key | Status | Reason |
 |---|---|---|
-| show-weekdate | Ignored | Roost calendar uses locale layout and does not apply this preference |
-| week-start-day | Ignored | Roost calendar uses locale layout and does not apply this preference |
+| show-weekdate | Honored | Live ISO week labels use each displayed row's Thursday; GTK gate G-CAL-PREFS |
+| week-start-day | Honored | Live first-weekday enum; default and reset follow locale; GTK gate G-CAL-PREFS |
 ## org.gnome.desktop.datetime
 
 | Key | Status | Reason |
