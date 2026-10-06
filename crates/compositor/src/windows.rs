@@ -421,6 +421,22 @@ impl WindowManager {
             .map(|s| s.into_owned())
     }
 
+    /// GNOME considers an application standalone if one of its windows has
+    /// no live transient parent. Read actual role/X11 metadata, not app-id text.
+    pub fn is_standalone(&self, id: u64) -> bool {
+        self.windows
+            .get(&id)
+            .is_some_and(|window| match window.surface.underlying_surface() {
+                WindowSurface::Wayland(toplevel) => {
+                    !read_parent(toplevel).is_some_and(|parent| parent.is_alive())
+                }
+                #[cfg(feature = "xwayland")]
+                WindowSurface::X11(surface) => !surface
+                    .is_transient_for()
+                    .is_some_and(|parent| self.x11_index.contains_key(&parent)),
+            })
+    }
+
     /// Whether window `id` is an X11 window (through Xwayland).
     pub fn is_x11(&self, id: u64) -> bool {
         #[cfg(feature = "xwayland")]

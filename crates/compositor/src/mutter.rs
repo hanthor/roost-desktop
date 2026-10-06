@@ -100,6 +100,8 @@ pub struct WindowSnapshot {
     pub hidden: bool,
     /// X11 (through Xwayland) rather than native Wayland.
     pub x11: bool,
+    /// Has no live transient parent; used for GNOME running-app eligibility.
+    pub standalone: bool,
 }
 
 /// The runtime keeps this current; Introspect and RecordWindow read it.

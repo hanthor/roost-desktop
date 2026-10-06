@@ -8,7 +8,7 @@
 //! may ask, unless `ROOST_INTROSPECT_UNRESTRICTED=1` (GNOME's "unsafe
 //! mode", for tests and development).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 use zbus::message::Header;
@@ -61,20 +61,26 @@ pub fn window_properties(window: &WindowSnapshot) -> HashMap<String, OwnedValue>
 
 /// Running apps keyed by app id, each with the seats it has focus on.
 pub fn running_apps(windows: &[WindowSnapshot]) -> HashMap<String, HashMap<String, OwnedValue>> {
+    let standalone: HashSet<_> = windows
+        .iter()
+        .filter(|w| w.standalone)
+        .map(app_id)
+        .collect();
     let mut apps: HashMap<String, bool> = HashMap::new();
     for window in windows {
-        *apps.entry(app_id(window)).or_default() |= window.focused;
+        let id = app_id(window);
+        if standalone.contains(&id) {
+            *apps.entry(id).or_default() |= window.focused;
+        }
     }
     apps.into_iter()
         .map(|(id, focused)| {
-            let seats: Vec<String> = if focused {
-                vec!["seat0".to_owned()]
-            } else {
-                Vec::new()
-            };
             let mut props = HashMap::new();
-            if let Ok(value) = OwnedValue::try_from(Value::from(seats)) {
-                props.insert("active-on-seats".to_owned(), value);
+            if focused {
+                let seats = vec!["seat0".to_owned()];
+                if let Ok(value) = OwnedValue::try_from(Value::from(seats)) {
+                    props.insert("active-on-seats".to_owned(), value);
+                }
             }
             (id, props)
         })
@@ -236,6 +242,7 @@ mod tests {
             focused,
             hidden: false,
             x11: false,
+            standalone: true,
         }
     }
 
@@ -282,6 +289,27 @@ mod tests {
         let seats =
             |id: &str| Vec::<String>::try_from(apps[id]["active-on-seats"].clone()).unwrap();
         assert_eq!(seats("a.desktop"), vec!["seat0".to_owned()]);
-        assert!(seats("b.desktop").is_empty());
+        assert!(!apps["b.desktop"].contains_key("active-on-seats"));
+    }
+    #[test]
+    fn transient_only_apps_are_excluded_but_dialog_focus_belongs_to_standalone_apps() {
+        let mut dialog = window(2, Some("a"), true);
+        dialog.standalone = false;
+        let mut provider = window(3, Some("provider"), false);
+        provider.standalone = false;
+        let standalone = window(1, Some("a"), false);
+        let apps = running_apps(&[standalone.clone(), dialog.clone(), provider]);
+        assert_eq!(apps.len(), 1);
+        assert_eq!(
+            Vec::<String>::try_from(apps["a.desktop"]["active-on-seats"].clone()).unwrap(),
+            vec!["seat0".to_owned()]
+        );
+        assert!(running_apps(&[dialog.clone()]).is_empty());
+        dialog.standalone = true;
+        assert_eq!(
+            running_apps(&[dialog]).len(),
+            1,
+            "detached dialog becomes standalone"
+        );
     }
 }

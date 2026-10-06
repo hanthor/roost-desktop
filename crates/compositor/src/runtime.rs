@@ -2656,6 +2656,7 @@ impl Runtime {
                     focused: entry.focused,
                     hidden: entry.workspace != active,
                     x11: self.manager.is_x11(entry.id),
+                    standalone: self.manager.is_standalone(entry.id),
                 })
             })
             .collect();
