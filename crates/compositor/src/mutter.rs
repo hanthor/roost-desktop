@@ -92,6 +92,9 @@ pub struct WindowSnapshot {
     pub title: String,
     /// Wayland app id or X11 class, as the client set it.
     pub app_id: Option<String>,
+    /// Desktop application identity inherited from the ultimate transient
+    /// parent, independently of this window's raw app ID / X11 class.
+    pub application_id: Option<String>,
     /// Logical size of the window's visible geometry.
     pub width: i32,
     pub height: i32,
@@ -100,6 +103,8 @@ pub struct WindowSnapshot {
     pub hidden: bool,
     /// X11 (through Xwayland) rather than native Wayland.
     pub x11: bool,
+    /// Has no live transient parent; used for GNOME running-app eligibility.
+    pub standalone: bool,
 }
 
 /// The runtime keeps this current; Introspect and RecordWindow read it.

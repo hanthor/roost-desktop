@@ -2661,15 +2661,22 @@ impl Runtime {
             .windows()
             .filter_map(|entry| {
                 let geometry = self.manager.geometry(entry.id)?;
+                let owner_id = self.manager.application_window(entry.id)?;
+                let owner = model.window(owner_id)?;
                 Some(crate::mutter::WindowSnapshot {
                     id: entry.id,
                     title: entry.title.clone(),
                     app_id: entry.app_id.clone(),
+                    application_id: Some(crate::introspect::desktop_app_id(
+                        owner_id,
+                        owner.app_id.as_deref(),
+                    )),
                     width: geometry.size.w,
                     height: geometry.size.h,
                     focused: entry.focused,
                     hidden: entry.workspace != active,
                     x11: self.manager.is_x11(entry.id),
+                    standalone: self.manager.is_standalone(entry.id),
                 })
             })
             .collect();
