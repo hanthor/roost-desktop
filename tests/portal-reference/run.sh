@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "$(id -u)" -eq 0 ]; then
+    # Root prepares the bind-mounted evidence directory, then the complete
+    # desktop/portal journey runs as the same ordinary user as Nautilus.
+    chown -R --no-dereference roost-proof:roost-proof /out
+    status=0
+    env -u ROOST_PORTAL_BUS -u DBUS_SESSION_BUS_ADDRESS runuser -u roost-proof -- "$0" || status=$?
+    # Container root maps to the host artifact owner in rootless Podman.
+    # Restore evidence ownership even when a mandatory assertion failed.
+    chown -R --no-dereference 0:0 /out
+    exit "$status"
+fi
 if [ -z "${ROOST_PORTAL_BUS:-}" ]; then ROOST_PORTAL_BUS=1 exec dbus-run-session -- "$0"; fi
+[ "$(id -u)" -eq 1000 ] || { echo 'ordinary fixture UID required' >&2; exit 1; }
+id > /out/session-identity.txt
 export DISPLAY=:99 XDG_RUNTIME_DIR=/out/runtime XDG_CONFIG_HOME=/out/config XDG_DATA_HOME=/out/data XDG_STATE_HOME=/out/state
 export XDG_PICTURES_DIR=/out/pictures
 export XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=GNOME GSETTINGS_BACKEND=memory LIBGL_ALWAYS_SOFTWARE=1 GTK_A11Y=atspi
