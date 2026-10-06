@@ -80,11 +80,24 @@ pub struct DrmOutput {
     pub scale: f64,
     /// A frame is queued and its page flip has not completed yet.
     pub pending: bool,
-    /// First scanout or a VT/system-wake reset must repaint even an identical scene.
-    pub needs_repaint: bool,
+    pub(crate) last_frame: Option<crate::native_repaint::FrameSignature>,
+    pub(crate) damage_tracker: Option<smithay::backend::renderer::damage::OutputDamageTracker>,
+    wake_trace: bool,
 }
 
 impl DrmOutput {
+    pub fn trace_wake_submission(&mut self) {
+        if !std::mem::take(&mut self.wake_trace) {
+            return;
+        }
+        let state = self.surface.surface().get_crtc(self.crtc);
+        eprintln!(
+            "roost-compositor: drm: wake frame queued {} commit_pending={} crtc={state:?}",
+            self.name,
+            self.surface.surface().commit_pending(),
+        );
+    }
+
     /// Size in logical pixels (mode size over scale).
     pub fn logical_size(&self) -> (i32, i32) {
         crate::runtime::logical_size(self.size.w, self.size.h, self.scale)
@@ -106,7 +119,8 @@ pub struct DrmBackend {
     /// Whether the session currently owns the VT.
     pub active: bool,
     sleep_reset_pending: bool,
-    wake_flip_cutoff: Option<std::time::Duration>,
+    wake_scanout_blocked: bool,
+    wake_event_traces: u8,
     pointer: Point<f64, Logical>,
     ctrl: bool,
     alt: bool,
@@ -304,7 +318,9 @@ impl DrmBackend {
                 loc: (0, 0),
                 scale: 1.0,
                 pending: false,
-                needs_repaint: true,
+                last_frame: None,
+                damage_tracker: None,
+                wake_trace: false,
             });
         }
         // GNOME's arrangement for exactly these connectors (#59): scale
@@ -375,7 +391,8 @@ impl DrmBackend {
                 libinput,
                 active: true,
                 sleep_reset_pending: false,
-                wake_flip_cutoff: None,
+                wake_scanout_blocked: false,
+                wake_event_traces: 0,
                 pointer: (
                     f64::from(first_loc.0) + f64::from(first_w) / 2.0,
                     f64::from(first_loc.1) + f64::from(first_h) / 2.0,
@@ -427,7 +444,8 @@ impl DrmBackend {
                 for out in &mut self.outputs {
                     out.surface.reset_buffers();
                     out.pending = false;
-                    out.needs_repaint = true;
+                    out.last_frame = None;
+                    out.damage_tracker = None;
                 }
                 self.active = true;
                 if self.sleep_reset_pending {
@@ -439,16 +457,16 @@ impl DrmBackend {
 
     /// Recover scanout after real system sleep, independently of VT events.
     pub fn resume_from_sleep(&mut self) {
+        self.wake_scanout_blocked = true;
         if !self.active {
             // Never program KMS off-seat; retain the wake until activation.
             self.sleep_reset_pending = true;
             return;
         }
         self.sleep_reset_pending = false;
-        self.wake_flip_cutoff = Some(std::time::Duration::from(
-            smithay::utils::Clock::<smithay::utils::Monotonic>::new().now(),
-        ));
         eprintln!("roost-compositor: drm: system wake scanout reset");
+        let trace = std::env::var_os("ROOST_LOCK_TRACE").is_some();
+        self.wake_event_traces = if trace { 2 } else { 0 };
         // Pending and queued flips can be lost across S3. Drop both without
         // submitting an old queued scene or claiming presentation. Ordinary
         // frame_submitted() would submit queued_fb as a side effect.
@@ -458,14 +476,53 @@ impl DrmBackend {
             }
             out.surface.reset_buffers();
             out.pending = false;
-            out.needs_repaint = true;
+            out.last_frame = None;
+            out.damage_tracker = None;
+            out.wake_trace = trace;
         }
         // Reset actual connector/plane state too: an active VT does not imply
         // that the kernel restored its framebuffer. The next locked frame
         // commits the retained modes and surfaces again.
         if let Err(error) = self.drm.reset_state() {
             eprintln!("roost-compositor: drm: wake KMS reset failed: {error}");
+            // An unsuccessful reset cannot retire old kernel completions.
+            // Stay masked without submitting a frame whose feedback could
+            // be attached to an abandoned flip. VT activation can recover.
+            self.sleep_reset_pending = true;
+            return;
         }
+        // The blocking disable commit has retired previous scanout. Drain
+        // its already queued completions before the first new submission.
+        // A valid modeset event can report the last vblank before submission,
+        // so its timestamp cannot identify an abandoned pre-sleep frame.
+        match drain_reset_events(|| self.drm.receive_events().map(|events| events.count())) {
+            Ok(count) if trace => {
+                eprintln!("roost-compositor: drm: wake obsolete events drained={count}");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                eprintln!("roost-compositor: drm: wake event drain failed: {error}");
+                self.sleep_reset_pending = true;
+                return;
+            }
+        }
+        self.wake_scanout_blocked = false;
+        if trace {
+            for out in &self.outputs {
+                eprintln!(
+                    "roost-compositor: drm: wake reset {} atomic={} commit_pending={} crtc={:?}",
+                    out.name,
+                    self.drm.is_atomic(),
+                    out.surface.surface().commit_pending(),
+                    self.drm.get_crtc(out.crtc),
+                );
+            }
+        }
+    }
+
+    /// A failed wake reset/drain must not submit until recovery succeeds.
+    pub fn scanout_ready(&self) -> bool {
+        self.active && !self.wake_scanout_blocked
     }
 
     /// Page flip completion: the output may render again, and what its
@@ -477,12 +534,11 @@ impl DrmBackend {
     ) -> Option<PageFlip> {
         match event {
             DrmEvent::VBlank(crtc) => {
-                // A kernel completion already queued before the reset must
-                // not present feedback belonging to the newly queued frame.
-                if let (Some(cutoff), Some(meta)) = (self.wake_flip_cutoff, metadata.as_ref()) {
-                    if matches!(meta.time, DrmEventTime::Monotonic(time) if time <= cutoff) {
-                        return None;
-                    }
+                if self.wake_event_traces != 0 {
+                    self.wake_event_traces -= 1;
+                    eprintln!(
+                        "roost-compositor: drm: wake pageflip crtc={crtc:?} metadata={metadata:?}",
+                    );
                 }
                 let index = self.outputs.iter().position(|o| o.crtc == crtc)?;
                 let out = &mut self.outputs[index];
@@ -627,6 +683,62 @@ impl DrmBackend {
     }
 }
 
+/// Bound nonblocking 1024-byte DRM event reads after the synchronous reset.
+/// No new frames are submitted until the old queue reaches WouldBlock.
+fn drain_reset_events(
+    mut receive: impl FnMut() -> std::io::Result<usize>,
+) -> std::io::Result<usize> {
+    let mut drained = 0;
+    for _ in 0..32 {
+        match receive() {
+            Ok(0) => return Ok(drained),
+            Ok(count) => drained += count,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(drained),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::other(
+        "DRM event queue did not become empty after reset",
+    ))
+}
+
+#[cfg(test)]
+mod wake_event_tests {
+    use super::drain_reset_events;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn old_completions_are_drained_before_new_submission() {
+        let mut reads = [
+            Ok(2),
+            Err(Error::from(ErrorKind::Interrupted)),
+            Ok(1),
+            Err(Error::from(ErrorKind::WouldBlock)),
+        ]
+        .into_iter();
+        assert_eq!(drain_reset_events(|| reads.next().unwrap()).unwrap(), 3);
+        assert!(reads.next().is_none());
+    }
+
+    #[test]
+    fn unbounded_or_failed_drain_never_qualifies_as_empty() {
+        let mut calls = 0;
+        assert!(drain_reset_events(|| {
+            calls += 1;
+            Ok(1)
+        })
+        .is_err());
+        assert_eq!(calls, 32);
+        assert_eq!(
+            drain_reset_events(|| Err(Error::from(ErrorKind::PermissionDenied)))
+                .unwrap_err()
+                .kind(),
+            ErrorKind::PermissionDenied
+        );
+    }
+}
+
 /// One device's libinput configuration from GNOME's settings, as Mutter
 /// applies them (niri's `apply_libinput_settings` shape): touchpads get
 /// tap-to-click, natural scroll, disable-while-typing and their speed;
@@ -637,13 +749,31 @@ fn apply_libinput(
 ) {
     let speed = |milli: i32| f64::from(milli.clamp(-1000, 1000)) / 1000.0;
     if device.config_tap_finger_count() > 0 {
+        apply_handedness(device, settings.touchpad_left_handed);
         let _ = device.config_tap_set_enabled(settings.tap_to_click);
         let _ = device.config_scroll_set_natural_scroll_enabled(settings.touchpad_natural_scroll);
         let _ = device.config_dwt_set_enabled(settings.disable_while_typing);
         let _ = device.config_accel_set_speed(speed(settings.touchpad_speed_milli));
     } else if device.has_capability(smithay::reexports::input::DeviceCapability::Pointer) {
+        apply_handedness(device, settings.mouse_left_handed);
         let _ = device.config_scroll_set_natural_scroll_enabled(settings.mouse_natural_scroll);
         let _ = device.config_accel_set_speed(speed(settings.mouse_speed_milli));
+    }
+}
+
+fn apply_handedness(device: &smithay::reexports::input::Device, left_handed: bool) {
+    if device.config_left_handed_is_available() {
+        if let Err(error) = device.config_left_handed_set(left_handed) {
+            eprintln!(
+                "roost-compositor: libinput: primary button setting rejected for {}: {error:?}",
+                device.name()
+            );
+        }
+    } else if left_handed {
+        eprintln!(
+            "roost-compositor: libinput: primary button swapping unsupported for {}",
+            device.name()
+        );
     }
 }
 

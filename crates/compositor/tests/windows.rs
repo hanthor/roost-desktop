@@ -45,7 +45,9 @@ use wayland_protocols::xdg::shell::client::{
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
-    zwlr_layer_surface_v1::{Anchor, Event as LayerSurfaceEvent, ZwlrLayerSurfaceV1},
+    zwlr_layer_surface_v1::{
+        Anchor, Event as LayerSurfaceEvent, KeyboardInteractivity, ZwlrLayerSurfaceV1,
+    },
 };
 
 const PUMP_ROUNDS: usize = 200;
@@ -70,6 +72,8 @@ struct Client {
     configured: bool,
     /// (keycode, pressed) in arrival order.
     keys: Vec<(u32, bool)>,
+    keyboard_enters: Vec<Vec<u32>>,
+    keyboard_modifiers: Vec<(u32, u32, u32, u32)>,
     pointer_enters: u32,
     pointer_motions: u32,
     /// (button, pressed) in arrival order.
@@ -231,16 +235,40 @@ impl Dispatch<WlKeyboard, ()> for Client {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let KeyEvent::Key {
-            key,
-            state: key_state,
-            ..
-        } = event
-        {
-            state.keys.push((
+        match event {
+            KeyEvent::Key {
+                key,
+                state: key_state,
+                ..
+            } => state.keys.push((
                 key,
                 matches!(key_state, WEnum::Value(ClientKeyState::Pressed)),
-            ));
+            )),
+            KeyEvent::Enter { keys, .. } => {
+                let (chunks, remainder) = keys.as_chunks::<4>();
+                assert!(
+                    remainder.is_empty(),
+                    "wl_keyboard enter carries whole key codes"
+                );
+                state.keyboard_enters.push(
+                    chunks
+                        .iter()
+                        .map(|bytes| u32::from_ne_bytes(*bytes))
+                        .collect(),
+                );
+            }
+            KeyEvent::Modifiers {
+                mods_depressed,
+                mods_latched,
+                mods_locked,
+                group,
+                ..
+            } => {
+                state
+                    .keyboard_modifiers
+                    .push((mods_depressed, mods_latched, mods_locked, group));
+            }
+            _ => (),
         }
     }
 }
@@ -2869,4 +2897,312 @@ fn strip_columns_resize_on_primary_output_failover_without_losing_focus() {
     }
     assert_eq!(f.manager.model().focused(), focused);
     assert_eq!(f.manager.model().active_workspace(), workspace);
+}
+
+#[test]
+fn exclusive_overlay_receives_navigation_and_retains_popup_system_accelerators() {
+    use roost_shell_control::{Accelerator, MODE_NORMAL, MODE_POPUP, MOD_ALT, MOD_CTRL};
+    let mut f = two_windows();
+    let (conn, mut queue, mut client) = connect(&mut f.comp);
+    let qh = queue.handle();
+    let surface = client.compositor.as_ref().unwrap().create_surface(&qh, ());
+    let layer = client.layer_shell.as_ref().unwrap().get_layer_surface(
+        &surface,
+        None,
+        Layer::Overlay,
+        "roost-screenshot-ui".into(),
+        &qh,
+        (),
+    );
+    layer.set_size(0, 0);
+    layer.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
+    layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+    surface.commit();
+    client.synced = false;
+    conn.display().sync(&qh, ());
+    pump(&mut f.comp, &mut queue, &mut client, |c| c.synced);
+    // Configure acknowledgements are sent while dispatching the first sync.
+    // Commit that acknowledged size before asking the compositor for focus.
+    surface.commit();
+    client.synced = false;
+    conn.display().sync(&qh, ());
+    pump(&mut f.comp, &mut queue, &mut client, |c| c.synced);
+    f.manager.set_overview_open(true);
+    f.manager.reconcile(&mut f.comp.state);
+    assert!(roost_compositor::layer::exclusive_keyboard_layer(&f.comp.state).is_some());
+    f.manager.set_accelerators(vec![
+        Accelerator {
+            action: 1,
+            keysym: 0xff53,
+            mods: MOD_CTRL | MOD_ALT,
+            modes: MODE_NORMAL,
+        },
+        Accelerator {
+            action: 2,
+            keysym: u32::from(b'r'),
+            mods: 0,
+            modes: MODE_NORMAL | MODE_POPUP,
+        },
+    ]);
+    client.keys.clear();
+    f.client_a.keys.clear();
+    f.client_b.keys.clear();
+    let workspace = f.manager.model().active_workspace();
+    for key in [ALT_LEFT_KEYCODE, CTRL_LEFT_KEYCODE, ARROW_RIGHT_KEYCODE] {
+        press(&mut f.manager, &mut f.comp, key);
+    }
+    for key in [ARROW_RIGHT_KEYCODE, CTRL_LEFT_KEYCODE, ALT_LEFT_KEYCODE] {
+        release(&mut f.manager, &mut f.comp, key);
+    }
+    assert!(f.manager.take_accelerators_fired().is_empty());
+    assert_eq!(f.manager.model().active_workspace(), workspace);
+    press(&mut f.manager, &mut f.comp, ALT_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, TAB_KEYCODE);
+    release(&mut f.manager, &mut f.comp, TAB_KEYCODE);
+    release(&mut f.manager, &mut f.comp, ALT_LEFT_KEYCODE);
+    assert!(f.manager.take_switcher_queue().is_empty());
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(f.manager.take_accelerators_fired(), [(2, 5000, MODE_POPUP)]);
+    for _ in 0..3 {
+        drain3(
+            &mut f.comp,
+            &mut f.queue_a,
+            &mut f.client_a,
+            &mut f.queue_b,
+            &mut f.client_b,
+            &mut queue,
+            &mut client,
+        );
+    }
+    assert!(client.keys.contains(&(ARROW_RIGHT_KEYCODE, true)));
+    assert!(client.keys.contains(&(ARROW_RIGHT_KEYCODE, false)));
+    assert!(client.keys.contains(&(TAB_KEYCODE, true)));
+    assert!(client.keys.contains(&(TAB_KEYCODE, false)));
+    assert!(!client.keys.iter().any(|(key, _)| *key == R_KEYCODE));
+    assert!(f.client_a.keys.is_empty());
+    assert!(f.client_b.keys.is_empty());
+    f.manager.set_overview_open(false);
+    // Unmapping returns normal desktop accelerators to their original mode.
+    layer.destroy();
+    surface.destroy();
+    client.synced = false;
+    conn.display().sync(&qh, ());
+    pump(&mut f.comp, &mut queue, &mut client, |c| c.synced);
+    f.manager.reconcile(&mut f.comp.state);
+    press(&mut f.manager, &mut f.comp, ALT_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, CTRL_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, ARROW_RIGHT_KEYCODE);
+    assert_eq!(
+        f.manager.take_accelerators_fired(),
+        [(1, 5000, MODE_NORMAL)]
+    );
+}
+
+#[test]
+fn exclusive_overview_keeps_overview_accelerators() {
+    use roost_shell_control::{Accelerator, MODE_OVERVIEW, MOD_LOGO, OVERVIEW_NAMESPACE};
+    let mut f = two_windows();
+    let (conn, mut queue, mut client) = connect(&mut f.comp);
+    let qh = queue.handle();
+    let surface = client.compositor.as_ref().unwrap().create_surface(&qh, ());
+    let layer = client.layer_shell.as_ref().unwrap().get_layer_surface(
+        &surface,
+        None,
+        Layer::Overlay,
+        OVERVIEW_NAMESPACE.into(),
+        &qh,
+        (),
+    );
+    layer.set_size(0, 0);
+    layer.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
+    layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+    for _ in 0..2 {
+        surface.commit();
+        client.synced = false;
+        conn.display().sync(&qh, ());
+        pump(&mut f.comp, &mut queue, &mut client, |c| c.synced);
+    }
+    f.manager.set_overview_open(true);
+    f.manager.reconcile(&mut f.comp.state);
+    assert!(roost_compositor::layer::exclusive_keyboard_layer(&f.comp.state).is_some());
+    assert!(roost_compositor::layer::exclusive_popup_keyboard_layer(&f.comp.state).is_none());
+    f.manager.set_accelerators(vec![Accelerator {
+        action: 17,
+        keysym: u32::from(b'a'),
+        mods: MOD_LOGO,
+        modes: MODE_OVERVIEW,
+    }]);
+    press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, 30);
+    release(&mut f.manager, &mut f.comp, 30);
+    release(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+    assert_eq!(
+        f.manager.take_accelerators_fired(),
+        [(17, 5000, MODE_OVERVIEW)]
+    );
+}
+
+#[test]
+fn modifier_releases_during_lock_do_not_turn_unlocked_clicks_into_moves() {
+    for mapped_lock in [true, false] {
+        let mut f = two_windows();
+        press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+        let release = ManagerInput::Key {
+            keycode: SUPER_LEFT_KEYCODE,
+            pressed: false,
+            time: 5001,
+        };
+        if mapped_lock {
+            let surface = f.manager.surface_of(f.id_a).unwrap();
+            f.manager.lock_input(&mut f.comp.state, &surface, release);
+        } else {
+            // The runtime observes releases even before a lock surface maps;
+            // no client receives this otherwise-consumed event.
+            f.manager.discard_key_input(&mut f.comp.state, &release);
+        }
+        assert!(f.comp.state.pressed_key_count() == 0);
+        f.manager
+            .pointer_motion(&mut f.comp.state, beta_only(), 5002);
+        f.manager
+            .pointer_button(&mut f.comp.state, BTN_LEFT, true, 5003);
+        f.manager
+            .pointer_button(&mut f.comp.state, BTN_LEFT, false, 5004);
+        pump(&mut f.comp, &mut f.queue_b, &mut f.client_b, |c| {
+            c.pointer_buttons.len() >= 2
+        });
+        assert_eq!(
+            f.client_b.pointer_buttons,
+            vec![(BTN_LEFT, true), (BTN_LEFT, false)]
+        );
+        assert_eq!(f.manager.model().focused(), Some(f.id_b));
+    }
+}
+
+#[test]
+fn swallowed_accelerator_release_clears_physical_pressed_state() {
+    use roost_shell_control::{Accelerator, MODE_NORMAL};
+    let mut f = two_windows();
+    f.manager.set_accelerators(vec![Accelerator {
+        action: 23,
+        keysym: u32::from(b'r'),
+        mods: 0,
+        modes: MODE_NORMAL,
+    }]);
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(
+        f.manager.take_accelerators_fired(),
+        [(23, 5000, MODE_NORMAL)]
+    );
+    assert_eq!(f.comp.state.pressed_key_count(), 1);
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert!(f.comp.state.pressed_key_count() == 0);
+    assert!(f.manager.take_accelerators_fired().is_empty());
+}
+
+#[test]
+fn same_focused_window_click_restores_keyboard_after_lock_ownership() {
+    let mut f = two_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    let lock_surface = f.manager.surface_of(f.id_b).unwrap();
+    f.manager.lock_input(
+        &mut f.comp.state,
+        &lock_surface,
+        ManagerInput::Motion {
+            pos: beta_only(),
+            time: 5001,
+        },
+    );
+    assert_eq!(f.manager.model().focused(), Some(f.id_a));
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    f.client_a.keys.clear();
+    f.client_b.keys.clear();
+    f.manager
+        .pointer_motion(&mut f.comp.state, alpha_only(), 5002);
+    f.manager
+        .pointer_button(&mut f.comp.state, BTN_LEFT, true, 5003);
+    f.manager
+        .pointer_button(&mut f.comp.state, BTN_LEFT, false, 5004);
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert_eq!(f.client_a.keys, [(R_KEYCODE, true), (R_KEYCODE, false)]);
+    assert!(
+        f.client_b.keys.is_empty(),
+        "the former lock owner hears no unlocked keys"
+    );
+    assert_eq!(f.manager.model().focused(), Some(f.id_a));
+}
+
+#[test]
+fn consumed_release_is_absent_from_the_next_keyboard_enter() {
+    let mut f = two_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    assert_eq!(f.client_a.keys, [(R_KEYCODE, true)]);
+    f.manager.discard_key_input(
+        &mut f.comp.state,
+        &ManagerInput::Key {
+            keycode: R_KEYCODE,
+            pressed: false,
+            time: 5001,
+        },
+    );
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    assert_eq!(
+        f.client_a.keys,
+        [(R_KEYCODE, true)],
+        "the shield forwards no release"
+    );
+    assert_eq!(f.comp.state.pressed_key_count(), 0);
+    f.client_b.keyboard_enters.clear();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert_eq!(
+        f.client_b.keyboard_enters,
+        [Vec::<u32>::new()],
+        "a consumed release cannot reappear as a held key"
+    );
+    assert!(f.client_b.keys.is_empty());
+}
+
+#[test]
+fn consumed_modifier_release_updates_the_next_forwarded_key_without_focus_change() {
+    let mut f = two_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    press(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    assert_ne!(f.client_a.keyboard_modifiers.last().unwrap().0, 0);
+    f.client_a.keyboard_modifiers.clear();
+    f.client_a.keys.clear();
+    f.manager.discard_key_input(
+        &mut f.comp.state,
+        &ManagerInput::Key {
+            keycode: SHIFT_LEFT_KEYCODE,
+            pressed: false,
+            time: 5001,
+        },
+    );
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    assert!(
+        f.client_a.keys.is_empty(),
+        "consumed modifier release is not client input"
+    );
+    assert!(
+        f.client_a.keyboard_modifiers.is_empty(),
+        "the shield emits no modifier event"
+    );
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    assert_eq!(f.client_a.keys, [(R_KEYCODE, true), (R_KEYCODE, false)]);
+    assert_eq!(
+        f.client_a.keyboard_modifiers,
+        [(0, 0, 0, 0)],
+        "the next client event synchronizes the consumed modifier change"
+    );
+    assert_eq!(f.manager.model().focused(), Some(f.id_a));
 }

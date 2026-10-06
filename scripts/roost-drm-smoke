@@ -10,8 +10,8 @@
 # takes, minus real hardware. Asserts on state, not pixels:
 #   D-OUTPUT   the backend lit the vkms connector
 #   D-SHELL    the shell connected over the control socket (introspection)
-#   D-IDLE     stationary scanout remains retained for three seconds
-#   D-FRAMES   240 real presentation feedback events after idle
+#   D-IDLE     an unchanged scene stops redundant scanout submissions
+#   D-FRAMES   a real active Wayland client receives 240 page-flip presentations
 #   D-SCALE    a GNOME monitors.xml giving the connector scale 2 is
 #              honored: logical layout at half the mode size, frames flip
 # and captures a scanout screenshot with ffmpeg kmsgrab when possible.
@@ -53,18 +53,18 @@ pass() { echo "$1 pass $2" >>"$ASSERTIONS"; echo "roost-drm-smoke: $1 pass: $2";
 fail() { echo "$1 fail $2" >>"$ASSERTIONS"; echo "roost-drm-smoke: $1 FAIL: $2" >&2; tail -40 "$LOG" >&2 || true; exit 1; }
 
 validate_presentation() {
-python3 - "$ROOT" "$1" <<'PYCODE'
-import importlib.machinery
-import importlib.util
+python3 - "$1" <<'PY'
 import json
 import sys
-loader = importlib.machinery.SourceFileLoader("perf", sys.argv[1] + "/scripts/roost-vm-perf")
-spec = importlib.util.spec_from_loader("perf", loader)
-module = importlib.util.module_from_spec(spec)
-loader.exec_module(module)
-with open(sys.argv[2]) as file:
-    module.presentation_summary(json.load(file))
-PYCODE
+with open(sys.argv[1], encoding="utf-8") as stream:
+    data = json.load(stream)
+frames = data["frames"]
+assert len(frames) == 240
+assert all(f["flags"] & 1 and f["flags"] & 4 for f in frames), "requires vsync and hardware completion"
+assert all(f["refresh_ns"] > 0 for f in frames)
+assert all(a["presented_ns"] < b["presented_ns"] and a["sequence"] < b["sequence"]
+           and a["commit"] < b["commit"] for a, b in zip(frames, frames[1:]))
+PY
 }
 
 sudo modprobe vkms
@@ -132,14 +132,19 @@ cp "$CSTATE" "$ARTIFACTS/idle-after.json"
 if [ "$idle_after" -lt "$idle_before" ] || [ "$((idle_after - idle_before))" -gt 1 ]; then
     fail D-IDLE "stationary scene redrew $((idle_after - idle_before)) times in 3 seconds"
 fi
-pass D-IDLE "retained stationary scanout: $idle_before to $idle_after frames"
-# A native client must restart repainting and receive actual presentation
-# feedback after idle; virtual frame callbacks alone cannot pass this probe.
-env -u WAYLAND_SOCKET XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY=roost-drm-smoke \
-    timeout 18 "$ARTIFACTS/frame-pacer/roost-frame-pacer" >"$ARTIFACTS/presentation.json" \
+pass D-IDLE "retained stationary scanout: $idle_before to $idle_after frames in 3 seconds"
+sleep "$SECONDS_UP"
+initial_frames=$(jq -er '.rendered_frames' "$CSTATE")
+if [ "$initial_frames" -lt 1 ] || [ "$initial_frames" -gt 10 ]; then
+    fail D-IDLE "unchanged shell should submit initial frames then sleep, got $initial_frames"
+fi
+pass D-IDLE "$initial_frames initial frames over $SECONDS_UP additional idle seconds; no continuous repaint"
+# Resume real native presentation at the default scale as well as 200% below.
+timeout 20s env -u WAYLAND_SOCKET XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY=roost-drm-smoke \
+    "$ARTIFACTS/frame-pacer/roost-frame-pacer" >"$ARTIFACTS/presentation.json" \
     2>"$ARTIFACTS/presentation.stderr" || fail D-FRAMES "native presentation probe failed"
 validate_presentation "$ARTIFACTS/presentation.json" || fail D-FRAMES "invalid native presentation trace"
-sleep "$SECONDS_UP"
+pass D-FRAMES "240 changing client frames at default scale received real ordered page-flip feedback"
 if command -v ffmpeg >/dev/null 2>&1; then
     sudo ffmpeg -loglevel error -y -device "$CARD" -f kmsgrab -i - -frames:v 1 \
         -vf 'hwdownload,format=bgr0' "$ARTIFACTS/scanout.png" 2>"$ARTIFACTS/kmsgrab.log" &&
@@ -155,7 +160,6 @@ frames="$(sed -n 's/.*shutdown after \([0-9]*\) frames.*/\1/p' "$LOG" | tail -1)
 if [ -z "$frames" ] || [ "$frames" -lt 240 ]; then
     fail D-FRAMES "expected at least 240 completed frames, got '${frames:-none}'"
 fi
-pass D-FRAMES "$frames frames page-flipped"
 if grep -q panicked "$LOG"; then fail D-NOPANIC "panic in compositor log"; fi
 pass D-NOPANIC "no panic"
 # Per-output scale from GNOME's monitors.xml (#59): the same session with
@@ -191,10 +195,17 @@ until [ -s "$CSTATE" ] && jq -e ".layers | any(.rect[2] == $half)" "$CSTATE" >/d
 done
 grep -q "drm: output $CONNECTOR .* scale 2" "$SCALED_LOG" ||
     { LOG="$SCALED_LOG"; fail D-SCALE "the output did not take scale 2 from monitors.xml"; }
-env -u WAYLAND_SOCKET XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY=roost-drm-scaled \
-    timeout 18 "$ARTIFACTS/frame-pacer/roost-frame-pacer" >"$ARTIFACTS/presentation-scaled.json" \
-    2>"$ARTIFACTS/presentation-scaled.stderr" || fail D-SCALE "scaled native presentation probe failed"
-validate_presentation "$ARTIFACTS/presentation-scaled.json" || fail D-SCALE "invalid scaled presentation trace"
+# A callback-paced real client alternates its pixels and requests presentation
+# feedback. Idle suppression must not prevent active rendering or real vblank
+# feedback. The fixture comes from the independently reviewed cadence lane.
+timeout 20s env XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY=roost-drm-scaled \
+    "$ARTIFACTS/frame-pacer/roost-frame-pacer" >"$ARTIFACTS/active-presentations.json" \
+    2>"$ARTIFACTS/frame-pacer.log" ||
+    { LOG="$SCALED_LOG"; fail D-FRAMES "active client did not receive all presentations"; }
+validate_presentation "$ARTIFACTS/active-presentations.json" ||
+    { LOG="$SCALED_LOG"; fail D-FRAMES "invalid hardware presentation feedback"; }
+pass D-FRAMES "240 changing client frames received real ordered page-flip feedback"
+sleep 2
 kill -TERM "$COMP_PID"
 wait "$COMP_PID" || true
 COMP_PID=""

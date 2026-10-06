@@ -30,6 +30,8 @@ use gtk4 as gtk;
 use gtk4::prelude::*;
 use gtk4::{gdk, gio, glib};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+pub use roost_shell_host::ibus::text as ibus_text;
+use roost_shell_host::ibus::{address as ibus_address, debug};
 
 const PANEL_NAME: &str = "org.freedesktop.IBus.Panel";
 const PANEL_PATH: &str = "/org/freedesktop/IBus/Panel";
@@ -96,18 +98,6 @@ const XML: &str = r#"<node>
     <signal name="CandidateClicked"><arg type="u"/><arg type="u"/><arg type="u"/></signal>
   </interface>
 </node>"#;
-
-/// The string inside a serialized IBusText (`v` holding `(sa{sv}sv)`),
-/// as roost-ibus-bridge reads it.
-pub fn ibus_text(value: &glib::Variant) -> Option<String> {
-    // as_variant calls g_variant_get_variant directly; its Option result does
-    // not protect ordinary serialized tuples from GLib's type assertion.
-    let mut inner = value.clone();
-    while inner.is_type(glib::VariantTy::VARIANT) {
-        inner = inner.as_variant()?;
-    }
-    inner.try_child_value(2)?.str().map(str::to_owned)
-}
 
 /// An IBusLookupTable as the panel receives it.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -219,28 +209,10 @@ pub fn place(
     (x, y)
 }
 
-/// `IBUS_ADDRESS`, else what `ibus address` reports for this display
-/// (as roost-ibus-bridge finds the bus).
-fn ibus_address() -> Option<String> {
-    if let Some(address) = std::env::var("IBUS_ADDRESS").ok().filter(|a| !a.is_empty()) {
-        return Some(address);
-    }
-    let out = std::process::Command::new("ibus")
-        .arg("address")
-        .output()
-        .ok()?;
-    let address = String::from_utf8(out.stdout).ok()?.trim().to_owned();
-    (!address.is_empty() && address != "(null)").then_some(address)
-}
-
 fn ibus_installed() -> bool {
     std::env::var_os("IBUS_ADDRESS").is_some()
         || std::env::var_os("PATH")
             .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("ibus").is_file()))
-}
-
-fn debug() -> bool {
-    std::env::var_os("ROOST_IBUS_DEBUG").is_some()
 }
 
 struct Row {
@@ -739,24 +711,7 @@ pub fn start(app: &gtk::Application) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn text(s: &str) -> glib::Variant {
-        let no_props = || glib::VariantDict::new(None).end();
-        let attrs = glib::Variant::tuple_from_iter([
-            "IBusAttrList".to_variant(),
-            no_props(),
-            glib::Variant::array_from_iter_with_type(
-                glib::VariantTy::VARIANT,
-                std::iter::empty::<glib::Variant>(),
-            ),
-        ]);
-        glib::Variant::from_variant(&glib::Variant::tuple_from_iter([
-            "IBusText".to_variant(),
-            no_props(),
-            s.to_variant(),
-            glib::Variant::from_variant(&attrs),
-        ]))
-    }
+    use roost_shell_host::ibus::text_variant as text;
 
     fn texts(items: &[&str]) -> glib::Variant {
         glib::Variant::array_from_iter_with_type(
@@ -806,22 +761,12 @@ mod tests {
     }
 
     #[test]
-    fn raw_and_nested_ibus_variants_decode_without_native_type_assertions() {
-        let boxed_text = text("你好");
-        let raw_text = boxed_text.as_variant().unwrap();
-        for value in [
-            raw_text,
-            boxed_text.clone(),
-            glib::Variant::from_variant(&boxed_text),
-        ] {
-            assert_eq!(ibus_text(&value).as_deref(), Some("你好"));
-        }
+    fn raw_and_nested_lookup_variants_decode_without_native_type_assertions() {
         let boxed = serialized(5, 1, 2, &["你", "尼"], &[]);
         let expected = lookup_table(&boxed);
         assert_eq!(lookup_table(&boxed.as_variant().unwrap()), expected);
         assert_eq!(lookup_table(&glib::Variant::from_variant(&boxed)), expected);
         for value in ["not a container".to_variant(), 42u32.to_variant()] {
-            assert_eq!(ibus_text(&value), None);
             assert_eq!(lookup_table(&value), None);
         }
     }

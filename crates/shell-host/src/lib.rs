@@ -16,6 +16,7 @@ pub mod control;
 pub mod dock;
 pub mod extensions;
 pub mod favorites;
+pub mod ibus;
 pub mod icons;
 pub mod intake;
 pub mod introspect;

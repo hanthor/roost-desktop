@@ -10,7 +10,8 @@
 #     then the qualified Cage/gtkgreet login screen after logout;
 #   - kernel console on ttyS0 and journald forwarded to it, so the
 #     session's stderr (roost-compositor:, roost-shell-gtk:) reaches the
-#     QEMU serial log the lane asserts on.
+#     QEMU serial log the lane asserts on. The serial login prompt is
+#     masked in this test layer so it cannot overwrite journal evidence.
 #
 # Built and installed to a raw disk by the marlin-vm job in
 # .github/workflows/ci.yml; booted by scripts/roost-vm-lane.
@@ -41,9 +42,10 @@ RUN pacman -Sy --noconfirm \
     && chmod 0755 /usr/libexec/roost-vm-session /usr/libexec/roost-vm-lifecycle /usr/libexec/roost-vm-input \
     && printf 'roost-session\n' > /etc/greetd/environments \
     && systemctl disable gdm.service \
+    && systemctl mask serial-getty@ttyS0.service \
     && systemctl enable greetd.service roost-vm-health.service \
     && systemctl add-wants multi-user.target qemu-guest-agent.service \
-    && printf '\nROOST_LOCK_TRACE=1\n' >> /etc/environment
+    && printf '\nROOST_LOCK_TRACE=1\nROOST_POINTER_TRACE=1\n' >> /etc/environment
 
 LABEL org.opencontainers.image.title="marlin-roost-vm-lane" \
       org.opencontainers.image.description="CI-only Marlin Roost test layer: greetd initial session, real lifecycle probes, journal on serial"

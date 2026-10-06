@@ -150,19 +150,15 @@ impl ServiceChannel {
         #[zbus(connection)] conn: &zbus::Connection,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> fdo::Result<zbus::zvariant::OwnedFd> {
+        let role = crate::capture_security::ServiceClient::from_wire(service_client_type)?;
         let owner = self
             .authority
-            .admit_portal_connection(conn, &header)
+            .admit_service_connection(conn, &header, role)
             .await?;
-        if service_client_type != 1 {
-            return Err(fdo::Error::InvalidArgs(
-                "unsupported service client type".into(),
-            ));
-        }
         self.clients.retain(|_, alive| alive.load(Ordering::SeqCst));
         if self.clients.len() >= 32 || self.clients.contains_key(&owner) {
             return Err(fdo::Error::LimitsExceeded(
-                "portal service connection limit".into(),
+                "service connection limit".into(),
             ));
         }
         let (server, client) = std::os::unix::net::UnixStream::pair()
@@ -267,7 +263,7 @@ impl DisplayConfig {
             monitors.push(Monitor {
                 names: names.clone(),
                 modes: vec![Mode {
-                    id: format!("{}x{}@{refresh:.3}", o.width, o.height),
+                    id: mode_id(o),
                     width: o.width,
                     height: o.height,
                     refresh_rate: refresh,
@@ -358,6 +354,12 @@ impl DisplayConfig {
     }
 }
 
+/// The mode identifier advertised to GNOME Settings for this lit output.
+fn mode_id(output: &OutputSnapshot) -> String {
+    let refresh = f64::from(output.refresh_mhz) / 1000.0;
+    format!("{}x{}@{refresh:.3}", output.width, output.height)
+}
+
 /// Check a requested arrangement against the lit outputs.
 fn validate(
     outputs: &[OutputSnapshot],
@@ -377,10 +379,24 @@ fn validate(
                 logical.scale
             )));
         }
-        for (connector, _mode, _props) in &logical.monitors {
-            if !outputs.iter().any(|o| &o.connector == connector) {
+        for (connector, requested_mode, _props) in &logical.monitors {
+            let output = outputs
+                .iter()
+                .find(|o| &o.connector == connector)
+                .ok_or_else(|| fdo::Error::Failed(format!("connector '{connector}' not found")))?;
+            // Mode changes are not implemented. Only accept the exact mode
+            // we advertised, rather than silently ignoring the requested one.
+            if requested_mode != &mode_id(output) {
                 return Err(fdo::Error::Failed(format!(
-                    "connector '{connector}' not found"
+                    "mode '{requested_mode}' is not supported on '{connector}'"
+                )));
+            }
+            if configs
+                .iter()
+                .any(|config: &crate::monitors::MonitorConfig| &config.connector == connector)
+            {
+                return Err(fdo::Error::Failed(format!(
+                    "connector '{connector}' configured more than once"
                 )));
             }
             configs.push(crate::monitors::MonitorConfig {
@@ -395,6 +411,17 @@ fn validate(
     if configs.is_empty() {
         return Err(fdo::Error::Failed(
             "at least one output must stay on".into(),
+        ));
+    }
+    // The runtime rearranges lit outputs but cannot disable one yet.
+    // GNOME expresses disabling by omitting the output from this list.
+    if outputs.iter().any(|output| {
+        !configs
+            .iter()
+            .any(|config| config.connector == output.connector)
+    }) {
+        return Err(fdo::Error::Failed(
+            "disabling outputs is not supported yet".into(),
         ));
     }
     Ok(configs)
@@ -924,6 +951,37 @@ mod tests {
             is_primary: true,
             monitors: vec![(connector.into(), "1920x1080@60.000".into(), HashMap::new())],
         }
+    }
+
+    #[test]
+    fn display_settings_do_not_acknowledge_ignored_modes_or_disabled_outputs() {
+        let outputs = [snapshot("eDP-1"), snapshot("HDMI-A-1")];
+        let valid = || vec![logical("eDP-1", 1.5), logical("HDMI-A-1", 1.0)];
+        assert_eq!(validate(&outputs, &valid()).unwrap().len(), 2);
+        for mode in ["", "1920x1080@59.940", "1280x720@60.000"] {
+            let mut requested = valid();
+            requested[0].monitors[0].1 = mode.into();
+            assert!(
+                validate(&outputs, &requested).is_err(),
+                "unsupported mode {mode:?}"
+            );
+        }
+        assert!(
+            validate(&outputs, &valid()[..1]).is_err(),
+            "omitting an output requests disabling it"
+        );
+        let mut duplicate = valid();
+        duplicate.push(logical("eDP-1", 2.0));
+        assert!(validate(&outputs, &duplicate).is_err(), "duplicate output");
+
+        let mut fractional_refresh = snapshot("eDP-1");
+        fractional_refresh.refresh_mhz = 59_940;
+        let mut request = logical("eDP-1", 1.0);
+        request.monitors[0].1 = "1920x1080@59.940".into();
+        assert!(
+            validate(&[fractional_refresh], &[request]).is_ok(),
+            "advertised fractional refresh remains valid"
+        );
     }
 
     #[test]

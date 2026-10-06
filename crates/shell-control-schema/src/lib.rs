@@ -147,9 +147,12 @@ impl ProtocolVersion {
     ///
     /// `0.24` appends window-backed icon metadata to WindowInfo.
     /// Postcard positional structs require peers to upgrade together.
+    ///
+    /// `0.25` appends mouse/touchpad handedness to InputSettings.
+    /// Both peers ship together because the postcard body is positional.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 24,
+        minor: 25,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -469,6 +472,8 @@ pub const MODE_NORMAL: u32 = 1;
 pub const MODE_OVERVIEW: u32 = 2;
 pub const MODE_LOCK_SCREEN: u32 = 4;
 pub const MODE_UNLOCK_SCREEN: u32 = 8;
+/// GNOME Shell 51 ActionMode.POPUP, used by its screenshot grab.
+pub const MODE_POPUP: u32 = 1 << 7;
 
 /// One grabbed key combination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -722,6 +727,11 @@ pub struct InputSettings {
     /// `org.gnome.desktop.interface enable-animations` (default enabled).
     #[serde(default = "animations_default")]
     pub enable_animations: bool,
+    /// GNOME mouse primary button and resolved touchpad orientation.
+    #[serde(default)]
+    pub mouse_left_handed: bool,
+    #[serde(default)]
+    pub touchpad_left_handed: bool,
 }
 
 fn animations_default() -> bool {
@@ -746,6 +756,8 @@ impl Default for InputSettings {
             mouse_speed_milli: 0,
             hot_corners: true,
             enable_animations: true,
+            mouse_left_handed: false,
+            touchpad_left_handed: false,
         }
     }
 }
@@ -1181,8 +1193,24 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_24() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 24));
+    fn current_version_is_0_25() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 25));
+    }
+
+    #[test]
+    fn input_handedness_survives_the_positional_control_wire() {
+        for mouse in [false, true] {
+            for touchpad in [false, true] {
+                roundtrip(&Message::Command {
+                    id: 1,
+                    kind: CommandKind::SetInputSettings(InputSettings {
+                        mouse_left_handed: mouse,
+                        touchpad_left_handed: touchpad,
+                        ..InputSettings::default()
+                    }),
+                });
+            }
+        }
     }
 
     #[test]
@@ -1214,7 +1242,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 22).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 23).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 24).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 25).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 25).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 26).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }

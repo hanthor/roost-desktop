@@ -37,6 +37,7 @@ mod preview_chrome;
 mod providers;
 mod screencast;
 mod screensaver;
+mod screenshot_selection;
 mod screenshot_ui;
 mod services;
 mod shell_dbus;
@@ -61,6 +62,7 @@ use roost_shell_host::control::{ControlClient, ControlError, Handled};
 use logic::ClockFormat;
 
 const INTERFACE_SCHEMA: &str = "org.gnome.desktop.interface";
+const A11Y_INTERFACE_SCHEMA: &str = "org.gnome.desktop.a11y.interface";
 const NOTIFICATIONS_SCHEMA: &str = "org.gnome.desktop.notifications";
 const COLOR_SCHEMA: &str = "org.gnome.settings-daemon.plugins.color";
 const SESSION_SCHEMA: &str = "org.gnome.desktop.session";
@@ -80,6 +82,24 @@ fn settings(schema: &str) -> Option<gio::Settings> {
     let source = gio::SettingsSchemaSource::default()?;
     source.lookup(schema, true)?;
     Some(gio::Settings::new(schema))
+}
+
+/// GNOME 51's Reduced Motion is an enum, independent of enable-animations.
+/// Keep older schema sets working without reading a missing key.
+fn animations_enabled(interface: Option<&gio::Settings>, a11y: Option<&gio::Settings>) -> bool {
+    let enabled = interface
+        .filter(|s| {
+            s.settings_schema()
+                .is_some_and(|schema| schema.has_key("enable-animations"))
+        })
+        .is_none_or(|s| s.boolean("enable-animations"));
+    let reduced = a11y
+        .filter(|s| {
+            s.settings_schema()
+                .is_some_and(|schema| schema.has_key("reduced-motion"))
+        })
+        .is_some_and(|s| s.string("reduced-motion") == "reduce");
+    enabled && !reduced
 }
 
 fn is_would_block(e: &ControlError) -> bool {
@@ -1871,6 +1891,7 @@ fn build(app: &adw::Application) {
             "org.gnome.desktop.peripherals.touchpad",
             "org.gnome.desktop.peripherals.mouse",
             INTERFACE_SCHEMA,
+            A11Y_INTERFACE_SCHEMA,
         ];
         let all: Rc<Vec<Option<gio::Settings>>> =
             Rc::new(schemas.iter().map(|s| settings(s)).collect());
@@ -1905,18 +1926,22 @@ fn build(app: &adw::Application) {
                 if let Some(mouse) = all[3].as_ref() {
                     out.mouse_natural_scroll = mouse.boolean("natural-scroll");
                     out.mouse_speed_milli = (mouse.double("speed") * 1000.0).round() as i32;
+                    out.mouse_left_handed = mouse.boolean("left-handed");
                 }
+                out.touchpad_left_handed = logic::touchpad_left_handed(
+                    all[2]
+                        .as_ref()
+                        .map(|pad| pad.string("left-handed"))
+                        .as_deref()
+                        .unwrap_or("mouse"),
+                    out.mouse_left_handed,
+                );
                 if let Some(iface) = all[4].as_ref() {
                     out.hot_corners = iface.boolean("enable-hot-corners");
-                    if iface
-                        .settings_schema()
-                        .is_some_and(|schema| schema.has_key("enable-animations"))
-                    {
-                        out.enable_animations = iface.boolean("enable-animations");
-                    }
-                    if let Some(gtk_settings) = gtk::Settings::default() {
-                        gtk_settings.set_gtk_enable_animations(out.enable_animations);
-                    }
+                }
+                out.enable_animations = animations_enabled(all[4].as_ref(), all[5].as_ref());
+                if let Some(gtk_settings) = gtk::Settings::default() {
+                    gtk_settings.set_gtk_enable_animations(out.enable_animations);
                 }
                 if let Some(control) = shell.borrow_mut().control.as_mut() {
                     let _ = control.set_input_settings(out);
@@ -1937,12 +1962,14 @@ fn build(app: &adw::Application) {
         let session = settings(SESSION_SCHEMA);
         let screensaver = settings(SCREENSAVER_SCHEMA);
         let interface = settings(INTERFACE_SCHEMA);
+        let a11y = settings(A11Y_INTERFACE_SCHEMA);
         let send: Rc<dyn Fn()> = {
-            let (shell, session, screensaver, interface) = (
+            let (shell, session, screensaver, interface, a11y) = (
                 shell.clone(),
                 session.clone(),
                 screensaver.clone(),
                 interface.clone(),
+                a11y.clone(),
             );
             Rc::new(move || {
                 let idle = session
@@ -1953,13 +1980,7 @@ fn build(app: &adw::Application) {
                     .as_ref()
                     .map(|s| (s.boolean("lock-enabled"), s.uint("lock-delay")))
                     .unwrap_or((true, 0));
-                let animations = interface
-                    .as_ref()
-                    .filter(|s| {
-                        s.settings_schema()
-                            .is_some_and(|schema| schema.has_key("enable-animations"))
-                    })
-                    .is_none_or(|s| s.boolean("enable-animations"));
+                let animations = animations_enabled(interface.as_ref(), a11y.as_ref());
                 let ms = logic::idle_lock_ms(idle, enabled, delay, animations);
                 if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
                     let dir = std::path::PathBuf::from(dir);
@@ -1979,7 +2000,10 @@ fn build(app: &adw::Application) {
             })
         };
         send();
-        for settings in [session, screensaver, interface].into_iter().flatten() {
+        for settings in [session, screensaver, interface, a11y]
+            .into_iter()
+            .flatten()
+        {
             let send = send.clone();
             settings.connect_changed(None, move |_, _| send());
             // Keep the settings object (and its signal) alive.
