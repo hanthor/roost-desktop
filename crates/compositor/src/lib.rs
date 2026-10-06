@@ -59,6 +59,8 @@ pub mod layer;
 pub mod lock;
 pub mod monitors;
 pub mod mutter;
+#[cfg(feature = "drm")]
+mod native_repaint;
 pub mod overlay;
 pub mod overview;
 pub mod pam;
@@ -108,8 +110,6 @@ pub(crate) struct OutputEntry {
 
 /// Compositor dispatch state: protocol states plus their handlers.
 pub struct State {
-    /// Applied surface commits invalidate retained scanout, including feedback-only updates.
-    pub(crate) surface_commits: u64,
     pub(crate) window_icons: window_icons::WindowIcons,
     compositor_state: CompositorState,
     shm_state: ShmState,
@@ -494,7 +494,6 @@ impl CompositorHandler for State {
     }
 
     fn commit(&mut self, surface: &wl_surface::WlSurface) {
-        self.surface_commits = self.surface_commits.wrapping_add(1);
         on_commit_buffer_handler::<State>(surface);
         self.window_icons.commit(surface);
         self.popups.commit(surface);
@@ -668,6 +667,13 @@ impl State {
         !self.popup_grab.is_empty()
     }
 
+    /// Number of physically held keys, without exposing their identities.
+    pub fn pressed_key_count(&self) -> usize {
+        self.seat
+            .get_keyboard()
+            .map_or(0, |keyboard| keyboard.pressed_keys().len())
+    }
+
     /// Seat for capability attachment and input routing.
     pub(crate) fn seat_mut(&mut self) -> &mut Seat<State> {
         &mut self.seat
@@ -758,7 +764,6 @@ impl State {
             window_requests: Vec::new(),
             protocols: protocols::Protocols::new(dh),
             frame_timing: frame_timing::FrameTiming::new(dh),
-            surface_commits: 0,
             lock_protocol: session_lock::LockProtocol::new(dh),
             #[cfg(feature = "xwayland")]
             xwm: None,
@@ -995,6 +1000,28 @@ impl State {
             .iter()
             .filter_map(|e| Some((e.name.clone(), e.output.clone()?, e.loc, e.primary)))
             .collect()
+    }
+
+    /// Overview input uses the compositor's current logical output geometry,
+    /// including primary changes, negative origins, scale changes and hotplug.
+    pub fn overview_trigger_action(
+        &self,
+        triggers: &mut crate::windows::TriggerState,
+        input: &crate::windows::ManagerInput,
+        overview_open: bool,
+        pointer: smithay::utils::Point<f64, smithay::utils::Logical>,
+    ) -> crate::windows::TriggerAction {
+        triggers.feed_on_outputs(
+            input,
+            overview_open,
+            pointer,
+            self.outputs.iter().map(|entry| {
+                (
+                    smithay::utils::Rectangle::new(entry.loc.into(), entry.size),
+                    entry.primary,
+                )
+            }),
+        )
     }
 
     /// Shell-facing output inventory.

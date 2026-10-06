@@ -383,6 +383,13 @@ pub fn exclusive_keyboard_layer(state: &State) -> Option<WlSurface> {
         })
 }
 
+/// Exclusive popups use their own accelerator mode. The shell's overview also
+/// owns the keyboard exclusively, but retains overview navigation/accelerators.
+pub fn exclusive_popup_keyboard_layer(state: &State) -> Option<WlSurface> {
+    let surface = exclusive_keyboard_layer(state)?;
+    (state.overview_surface().as_ref() != Some(&surface)).then_some(surface)
+}
+
 /// Whether a press on a layer surface with this keyboard interactivity
 /// gives it the keyboard. wlr-layer-shell: a surface asking for `none`
 /// "is not interested in keyboard events and the compositor should

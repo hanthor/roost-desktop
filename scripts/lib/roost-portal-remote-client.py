@@ -103,8 +103,17 @@ if mode == 'eis':
     out.with_suffix('.eis-input.json').write_text(json.dumps(delivered(38, before_eis)))
 elif mode in ('revoke', 'backend-disconnect'):
     # Require a clean seat baseline; expose only the aggregate count.
-    telemetry = json.loads(Path('/out/compositor-state.json').read_text())
-    if telemetry['seat_pressed_key_count'] != 0: raise RuntimeError('seat baseline is not empty')
+    # Legacy notify calls queue input; GTK's key-down delivery can be
+    # observed before its matching key-up reaches the seat snapshot.
+    # Require the same empty baseline, but wait for actual release.
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        telemetry = json.loads(Path('/out/compositor-state.json').read_text())
+        if telemetry['seat_pressed_key_count'] == 0:
+            break
+        time.sleep(.05)
+    else:
+        raise RuntimeError('seat baseline did not become empty after legacy key release')
     # Leave Shift held so lock/backend-loss must release real seat state.
     input_call('NotifyKeyboardKeycode', '(oa{sv}iu)', (42, 1))
     deadline = time.monotonic() + 5

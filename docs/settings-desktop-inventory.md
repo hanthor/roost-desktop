@@ -1,6 +1,6 @@
 # GNOME 51 desktop schema inventory
 
-All 429 keys from `gsettings-desktop-schemas-51.0-1.fc45.x86_64` in the GNOME 51 reference container. This table audits Roost main plus #63 settings changes. “Via GTK” means the GTK Wayland backend translates the key through its settings portal or direct GSettings fallback; it does not imply support by every application or the compositor. “Ignored” records a current limitation, not permission to disregard binding knowledge.
+All 429 keys from `gsettings-desktop-schemas-51.0-1.fc45.x86_64` in the GNOME 51 reference container. Source re-audit: main `44edb6aca704ef0ada32b8c6111383ea5c3c6afe` (2026-10-06). See [the control-center audit](gnome-settings-audit.md) for open implementation and qualification gaps. “Via GTK” means the GTK Wayland backend translates the key through its settings portal or direct GSettings fallback; it does not imply support by every application or the compositor. “Ignored” records a current limitation, not permission to disregard binding knowledge.
 
 Source: [GTK Wayland settings translations](https://github.com/GNOME/gtk/blob/4.14.5/gdk/wayland/gdkdisplay-wayland.c). Related shell, Mutter and settings-daemon keys are in [settings-map.md](settings-map.md).
 
@@ -23,7 +23,7 @@ Source: [GTK Wayland settings translations](https://github.com/GNOME/gtk/blob/4.
 |---|---|---|
 | high-contrast | Via GTK | GTK Wayland settings translation; clients follow the portal or GSettings fallback |
 | keyboard-focus-visible-timeout | Ignored | Roost has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| reduced-motion | Ignored | Roost has no equivalent compositor accessibility feature; toolkit support is listed separately |
+| reduced-motion | Honored | GNOME 51 reduce/no-preference enum combines with enable-animations for shell GTK transitions, compositor motion and idle fade; live proof G-ANIMATIONS-OFF |
 | show-status-shapes | Via GTK | GTK Wayland settings translation; clients follow the portal or GSettings fallback |
 ## org.gnome.desktop.a11y.keyboard
 
@@ -152,8 +152,8 @@ Source: [GTK Wayland settings translations](https://github.com/GNOME/gtk/blob/4.
 
 | Key | Status | Reason |
 |---|---|---|
-| show-weekdate | Ignored | Roost calendar uses locale layout and does not apply this preference |
-| week-start-day | Ignored | Roost calendar uses locale layout and does not apply this preference |
+| show-weekdate | Honored | Live ISO week labels use each displayed row's Thursday; GTK gate G-CAL-PREFS |
+| week-start-day | Honored | Live first-weekday enum; default and reset follow locale; GTK gate G-CAL-PREFS |
 ## org.gnome.desktop.datetime
 
 | Key | Status | Reason |
@@ -518,12 +518,12 @@ Source: [GTK Wayland settings translations](https://github.com/GNOME/gtk/blob/4.
 | begin-move | Honored | Live shell accelerator registration and compositor dispatch |
 | begin-resize | Honored | Live shell accelerator registration and compositor dispatch |
 | close | Honored | Live shell accelerator registration and compositor dispatch |
-| cycle-group | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
-| cycle-group-backward | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
+| cycle-group | Honored | Live SetSwitcherKeys registration; window MRU popup or immediate window/group cycling |
+| cycle-group-backward | Honored | Live SetSwitcherKeys registration; window MRU popup or immediate window/group cycling |
 | cycle-panels | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
 | cycle-panels-backward | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
-| cycle-windows | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
-| cycle-windows-backward | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
+| cycle-windows | Honored | Live SetSwitcherKeys registration; window MRU popup or immediate window/group cycling |
+| cycle-windows-backward | Honored | Live SetSwitcherKeys registration; window MRU popup or immediate window/group cycling |
 | lower | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
 | maximize | Honored | Live shell accelerator registration and compositor dispatch |
 | maximize-horizontally | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
@@ -590,8 +590,8 @@ Source: [GTK Wayland settings translations](https://github.com/GNOME/gtk/blob/4.
 | switch-to-workspace-left | Honored | Live shell accelerator registration and compositor dispatch |
 | switch-to-workspace-right | Honored | Live shell accelerator registration and compositor dispatch |
 | switch-to-workspace-up | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
-| switch-windows | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
-| switch-windows-backward | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
+| switch-windows | Honored | Live SetSwitcherKeys registration; window MRU popup or immediate window/group cycling |
+| switch-windows-backward | Honored | Live SetSwitcherKeys registration; window MRU popup or immediate window/group cycling |
 | toggle-above | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
 | toggle-fullscreen | Ignored | This accelerator has no Roost action/registration; only the listed live bindings are grabbed |
 | toggle-maximized | Honored | Live shell accelerator registration and compositor dispatch |

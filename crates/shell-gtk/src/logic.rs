@@ -82,12 +82,15 @@ pub fn calendar_heading(time: &jiff::civil::DateTime) -> (String, String) {
 
 /// The 42 days (six weeks) GNOME's calendar grid shows for `month`,
 /// starting on the locale's first weekday (`week_start`, 0 = Sunday),
-/// with the first of the month in the first row (calendar.js
-/// `_buildMonth`).
+/// with one leading week when the month begins on week start
+/// (GNOME 51 calendar.js `_rebuildCalendar`).
 pub fn month_grid(year: i16, month: i8, week_start: i8) -> Vec<jiff::civil::Date> {
     let first = jiff::civil::date(year, month, 1);
     let weekday = first.weekday().to_sunday_zero_offset();
-    let back = (weekday - week_start).rem_euclid(7);
+    let mut back = (weekday - week_start).rem_euclid(7);
+    if back == 0 {
+        back = 7;
+    }
     let start = first
         .checked_sub(jiff::Span::new().days(i64::from(back)))
         .unwrap_or(first);
@@ -98,6 +101,20 @@ pub fn month_grid(year: i16, month: i8, week_start: i8) -> Vec<jiff::civil::Date
                 .unwrap_or(start)
         })
         .collect()
+}
+
+/// GNOME 51's enum nick; `default` follows the locale rather than Sunday.
+pub fn calendar_week_start(setting: &str, locale: i8) -> i8 {
+    match setting {
+        "sunday" => 0,
+        "monday" => 1,
+        "tuesday" => 2,
+        "wednesday" => 3,
+        "thursday" => 4,
+        "friday" => 5,
+        "saturday" => 6,
+        _ => locale.rem_euclid(7),
+    }
 }
 
 /// One-letter weekday headings from `week_start` on, GNOME's English
@@ -386,8 +403,42 @@ mod tests {
         assert_eq!(grid[41], jiff::civil::date(2026, 11, 7));
         // From Monday the first row starts on Monday Sep 28.
         assert_eq!(month_grid(2026, 10, 1)[0], jiff::civil::date(2026, 9, 28));
-        // A month starting on the week start leads with the first.
-        assert_eq!(month_grid(2026, 11, 0)[0], jiff::civil::date(2026, 11, 1));
+        // GNOME pads one preceding week when the month starts on week start.
+        assert_eq!(month_grid(2026, 11, 0)[0], jiff::civil::date(2026, 10, 25));
+        assert_eq!(month_grid(2010, 2, 1)[0], jiff::civil::date(2010, 1, 25));
+    }
+
+    #[test]
+    fn calendar_first_weekday_enum_and_locale_reset() {
+        for (day, value) in [
+            "sunday",
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+        ]
+        .into_iter()
+        .zip(0..7)
+        {
+            assert_eq!(calendar_week_start(day, 4), value);
+        }
+        assert_eq!(calendar_week_start("default", 1), 1);
+        assert_eq!(calendar_week_start("default", 0), 0);
+    }
+
+    #[test]
+    fn calendar_iso_weeks_cross_the_year_for_every_first_weekday() {
+        for start in 0..7 {
+            let grid = month_grid(2021, 1, start);
+            let weeks: Vec<_> = grid
+                .into_iter()
+                .filter(|day| day.weekday().to_sunday_zero_offset() == 4)
+                .map(|day| day.iso_week_date().week())
+                .collect();
+            assert_eq!(weeks, [53, 1, 2, 3, 4, 5]);
+        }
     }
 
     #[test]
@@ -782,6 +833,15 @@ mod idle_tests {
     }
 }
 
+/// GNOME touchpad orientation can override or follow the mouse preference.
+pub fn touchpad_left_handed(policy: &str, mouse_left_handed: bool) -> bool {
+    match policy {
+        "left" => true,
+        "right" => false,
+        _ => mouse_left_handed,
+    }
+}
+
 /// GNOME's input sources (`[('xkb', 'us'), ('xkb', 'de+nodeadkeys')]`)
 /// as one xkb keymap: comma-separated layouts and variants in order.
 /// Non-xkb sources (IBus engines) are skipped; none at all means `us`.
@@ -807,6 +867,15 @@ pub fn xkb_from_sources(sources: &[(String, String)]) -> (String, String) {
 #[cfg(test)]
 mod input_tests {
     use super::*;
+
+    #[test]
+    fn touchpad_handedness_overrides_or_tracks_mouse_changes() {
+        for mouse in [false, true] {
+            assert!(touchpad_left_handed("left", mouse));
+            assert!(!touchpad_left_handed("right", mouse));
+            assert_eq!(touchpad_left_handed("mouse", mouse), mouse);
+        }
+    }
 
     fn src(kind: &str, id: &str) -> (String, String) {
         (kind.to_owned(), id.to_owned())
