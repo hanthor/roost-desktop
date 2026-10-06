@@ -10,13 +10,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use zbus::message::Header;
 use zbus::zvariant::{OwnedValue, Value};
 use zbus::{fdo, interface, Connection};
 
-use crate::mutter::{Outputs, WindowSnapshot, Windows};
+use crate::mutter::{WindowSnapshot, Windows};
 
 pub const NAME: &str = "org.gnome.Shell.Introspect";
 pub const PATH: &str = "/org/gnome/Shell/Introspect";
@@ -25,7 +25,7 @@ pub const UNRESTRICTED_ENV: &str = "ROOST_INTROSPECT_UNRESTRICTED";
 struct Service {
     authority: crate::capture_security::Authority,
     windows: Windows,
-    outputs: Outputs,
+    screen_size: Arc<Mutex<(i32, i32)>>,
     unrestricted: bool,
     animations_enabled: Arc<AtomicBool>,
 }
@@ -140,21 +140,10 @@ impl Service {
         self.animations_enabled.load(Ordering::Acquire)
     }
 
-    /// Logical size of the primary monitor.
+    /// Logical dimensions of the whole desktop, including non-primary outputs.
     #[zbus(property)]
     fn screen_size(&self) -> (i32, i32) {
-        self.outputs
-            .lock()
-            .ok()
-            .and_then(|o| {
-                o.iter().find(|o| o.primary).or_else(|| o.first()).map(|o| {
-                    (
-                        (f64::from(o.width) / o.scale).round() as i32,
-                        (f64::from(o.height) / o.scale).round() as i32,
-                    )
-                })
-            })
-            .unwrap_or((0, 0))
+        self.screen_size.lock().map(|s| *s).unwrap_or((0, 0))
     }
 
     #[zbus(property)]
@@ -168,6 +157,7 @@ impl Service {
 pub struct Handle {
     pub windows: Windows,
     animations_enabled: Arc<AtomicBool>,
+    screen_size: Arc<Mutex<(i32, i32)>>,
     conn: Arc<OnceLock<zbus::blocking::Connection>>,
 }
 
@@ -175,6 +165,7 @@ impl Default for Handle {
     fn default() -> Self {
         Self {
             windows: Windows::default(),
+            screen_size: Arc::default(),
             animations_enabled: Arc::new(AtomicBool::new(true)),
             conn: Arc::default(),
         }
@@ -189,6 +180,28 @@ impl Handle {
         }
         if let Some(conn) = self.conn.get() {
             let changed = HashMap::from([("AnimationsEnabled", Value::from(enabled))]);
+            let _ = conn.emit_signal(
+                None::<()>,
+                PATH,
+                "org.freedesktop.DBus.Properties",
+                "PropertiesChanged",
+                &(NAME, changed, Vec::<String>::new()),
+            );
+        }
+    }
+
+    /// Update GNOME clients only when the effective desktop dimensions change.
+    pub fn publish_screen_size(&self, size: (i32, i32)) {
+        let Ok(mut current) = self.screen_size.lock() else {
+            return;
+        };
+        if *current == size {
+            return;
+        }
+        *current = size;
+        drop(current);
+        if let Some(conn) = self.conn.get() {
+            let changed = HashMap::from([("ScreenSize", Value::from(size))]);
             let _ = conn.emit_signal(
                 None::<()>,
                 PATH,
@@ -221,13 +234,14 @@ impl Handle {
 
 /// Serve Introspect on the session bus from a thread; quietly off when
 /// there is no bus or a real GNOME Shell owns the name.
-pub fn start(outputs: Outputs, authority: crate::capture_security::Authority) -> Handle {
+pub fn start(screen_size: (i32, i32), authority: crate::capture_security::Authority) -> Handle {
     let handle = Handle::default();
+    handle.publish_screen_size(screen_size);
     let service = Service {
         authority,
         windows: handle.windows.clone(),
+        screen_size: handle.screen_size.clone(),
         animations_enabled: handle.animations_enabled.clone(),
-        outputs,
         unrestricted: std::env::var(UNRESTRICTED_ENV).is_ok_and(|v| v == "1"),
     };
     let slot = handle.conn.clone();
