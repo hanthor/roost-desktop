@@ -46,7 +46,7 @@ Status: **live** means a source consumer exists (test scope is given in settings
 | System: Remote Desktop | Sharing/control, hostname/port/user/password/generation/fingerprint, remote login | Portal keyboard/pointer supported; actual RDP daemon and login unqualified, touch/clipboard capability gaps | [#358](https://github.com/tuna-os/tuna-desktop/issues/358) |
 | System: SSH / About / Updates | SSH switch/login command, device name, OS/build/shell/hardware report, software updates | System services and immutable-image integration; require truthful identity and successful update/rollback qualification | [#362](https://github.com/tuna-os/tuna-desktop/issues/362) |
 | Wacom | Pen mode/handedness/aspect/calibration, output mapping, stylus buttons/pressure, pad keystrokes/test | Tablet protocol and event routing missing | [#344](https://github.com/tuna-os/tuna-desktop/issues/344) |
-| Screenshot UI / native protocols | Selection keys, tab dragging, GTK3 portal parents, version floors, color/effects, explicit sync/DRM lease | Screenshot keys and recorded protocol deviations remain | [#363](https://github.com/tuna-os/tuna-desktop/issues/363), [#364](https://github.com/tuna-os/tuna-desktop/issues/364) |
+| Screenshot UI / native protocols | Selection keys, tab dragging, GTK3 portal parents, version floors, color/effects, explicit sync/DRM lease | Selection keys are qualified on the primary output; multi-monitor selection, compositor cursor alignment and recorded protocol deviations remain | [#363](https://github.com/tuna-os/tuna-desktop/issues/363), [#364](https://github.com/tuna-os/tuna-desktop/issues/364) |
 
 ## Filed capability gaps
 
@@ -96,7 +96,8 @@ Qualified evidence retained so far:
 
 - Calendar: [GTK job 112397815115](https://github.com/tuna-os/tuna-desktop/actions/runs/37500118401/job/112397815115) on #381 head `700d7c64dd46c90d4e48b01c6f33c71cc883456d` passed G-CAL-PREFS with visible live changes and reset in the same shell.
 - Handedness and wake recovery: [native VM job 112452858990](https://github.com/tuna-os/tuna-desktop/actions/runs/37515571143/job/112452858990) on #379 head `2f9fbcae00215e9263fdda20ea4276093ae05f96` passed nine guest mouse-button events across false/true/false, then VT/S3, stale-PAM rejection, fresh unlock and fresh keyboard input/client repaint. This uses virtual devices and does not qualify physical touchpads or hotplug.
-- The screenshot keyboard-controls fix (#377), consumed-key-state follow-up (#394), and native Wayland wakeup fix (#399) are still candidates. Their pending validation does not establish shipped behavior.
+- Screenshot selection keys: merged [#377](https://github.com/tuna-os/tuna-desktop/pull/377), head `4469da9ce2cdd38e6b53a77e1d9671ff0f02b346`, passed [GTK job 112463147136](https://github.com/tuna-os/tuna-desktop/actions/runs/37519526982/job/112463147136): arrows, Ctrl, Alt, Shift and R produced actual captures with accessible geometry and bounded PNG dimensions. Multi-monitor selection and compositor cursor alignment remain open in #363/#342.
+- The consumed-key-state follow-up (#394) and native Wayland wakeup fix (#399) are still candidates. Their pending validation does not establish shipped behavior.
 
 ## Existing production acceptance blockers
 
