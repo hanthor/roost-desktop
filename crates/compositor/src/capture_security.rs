@@ -44,6 +44,27 @@ pub struct Authority {
     locked: Arc<AtomicBool>,
     shell_pid: Arc<AtomicU32>,
 }
+
+pub(crate) struct ConnectionCaller {
+    pub owner: String,
+    pub credentials: Arc<fdo::ConnectionCredentials>,
+}
+
+/// A numeric PID alone can be recycled. Only expose live process identity
+/// when the bus supplied a descriptor pinning the original connection peer.
+pub(crate) fn pinned_process_id(credentials: &fdo::ConnectionCredentials) -> Option<u32> {
+    let pid = credentials.process_id().filter(|pid| *pid != 0)?;
+    let descriptor = credentials.process_fd()?;
+    let mut poll = [rustix::event::PollFd::new(
+        descriptor,
+        rustix::event::PollFlags::IN,
+    )];
+    let timeout = rustix::event::Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    (rustix::event::poll(&mut poll, Some(&timeout)).ok()? == 0).then_some(pid)
+}
 impl Authority {
     /// The portal opens its native display before acquiring its service name.
     /// This authenticates that bootstrap executable, without granting capture.
@@ -54,6 +75,7 @@ impl Authority {
     ) -> fdo::Result<String> {
         self.admit_service_connection(conn, header, ServiceClient::Portal)
             .await
+            .map(|caller| caller.owner)
     }
     /// Resolve bootstrap identity from the bus credentials and installed binary,
     /// independently of provider names acquired after GTK display initialization.
@@ -62,40 +84,43 @@ impl Authority {
         conn: &Connection,
         header: &Header<'_>,
         role: ServiceClient,
-    ) -> fdo::Result<String> {
-        let (owner, pid) = self.connection_caller(conn, header).await?;
+    ) -> fdo::Result<ConnectionCaller> {
+        let caller = self.connection_caller(conn, header).await?;
+        let pid = caller.credentials.process_id().unwrap_or(0);
         if !installed_service(pid, role) {
             return Err(denied(
                 "service connection requires the installed provider for its type",
             ));
         }
-        Ok(owner)
+        Ok(caller)
     }
     /// An ordinary display connection grants no provider or capture role.
     pub(crate) async fn admit_connection(
         &self,
         conn: &Connection,
         header: &Header<'_>,
-    ) -> fdo::Result<String> {
-        self.connection_caller(conn, header)
-            .await
-            .map(|(owner, _)| owner)
+    ) -> fdo::Result<ConnectionCaller> {
+        self.connection_caller(conn, header).await
     }
     async fn connection_caller(
         &self,
         conn: &Connection,
         header: &Header<'_>,
-    ) -> fdo::Result<(String, u32)> {
+    ) -> fdo::Result<ConnectionCaller> {
         let sender = header.sender().ok_or_else(|| denied("missing sender"))?;
         let dbus = fdo::DBusProxy::new(conn).await?;
-        let uid = dbus.get_connection_unix_user(sender.clone().into()).await?;
-        let pid = dbus
-            .get_connection_unix_process_id(sender.clone().into())
+        let credentials = dbus
+            .get_connection_credentials(sender.clone().into())
             .await?;
-        if uid != rustix::process::geteuid().as_raw() || pid == 0 {
+        if credentials.unix_user_id() != Some(rustix::process::geteuid().as_raw())
+            || credentials.process_id().is_none_or(|pid| pid == 0)
+        {
             return Err(denied("display connection requires a same-user process"));
         }
-        Ok((sender.to_string(), pid))
+        Ok(ConnectionCaller {
+            owner: sender.to_string(),
+            credentials: Arc::new(credentials),
+        })
     }
     pub fn publish(&self, locked: bool, shell_pid: Option<u32>) {
         self.locked.store(locked, Ordering::SeqCst);
@@ -193,6 +218,32 @@ fn installed_service(pid: u32, role: ServiceClient) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn process_identity_requires_a_pin_and_does_not_survive_peer_exit() {
+        let numeric = fdo::ConnectionCredentials::default().set_process_id(std::process::id());
+        assert_eq!(pinned_process_id(&numeric), None);
+        let mut child = std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let descriptor = rustix::process::pidfd_open(
+            rustix::process::Pid::from_raw(pid as i32).unwrap(),
+            rustix::process::PidfdFlags::empty(),
+        )
+        .unwrap();
+        let pinned = fdo::ConnectionCredentials::default()
+            .set_process_id(pid)
+            .set_process_fd(descriptor.into());
+        let live = pinned_process_id(&pinned);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(live, Some(pid));
+        assert_eq!(pinned_process_id(&pinned), None);
+        // A recycled/replaced numeric value cannot revive the old descriptor.
+        let replaced = pinned.set_process_id(std::process::id());
+        assert_eq!(pinned_process_id(&replaced), None);
+    }
     #[test]
     fn lock_admission_fails_closed_and_updates() {
         let authority = Authority::default();
