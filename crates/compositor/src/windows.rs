@@ -82,6 +82,8 @@ struct ManagedWindow {
     above: bool,
     /// Always on Visible Workspace: shown on every workspace.
     sticky: bool,
+    /// Trusted cross-backend modal parent, pinned to a managed generation.
+    x11_parent: Option<u64>,
 }
 
 /// Compositor-side presentation layout (002 window actions).
@@ -424,6 +426,14 @@ impl WindowManager {
     /// GNOME considers an application standalone if one of its windows has
     /// no live transient parent. Read actual role/X11 metadata, not app-id text.
     pub fn is_standalone(&self, id: u64) -> bool {
+        if self
+            .windows
+            .get(&id)
+            .and_then(|w| w.x11_parent)
+            .is_some_and(|parent| self.windows.contains_key(&parent))
+        {
+            return false;
+        }
         self.windows
             .get(&id)
             .is_some_and(|window| match window.surface.underlying_surface() {
@@ -447,26 +457,90 @@ impl WindowManager {
             if !seen.insert(current) {
                 return self.windows.contains_key(&id).then_some(id);
             }
-            let window = self.windows.get(&current)?;
-            let parent = match window.surface.underlying_surface() {
-                WindowSurface::Wayland(toplevel) => read_parent(toplevel)
-                    .filter(|parent| parent.is_alive())
-                    .and_then(|parent| {
-                        self.windows.iter().find_map(|(id, candidate)| {
-                            (candidate.surface.wl_surface().as_deref() == Some(&parent))
-                                .then_some(*id)
-                        })
-                    }),
-                #[cfg(feature = "xwayland")]
-                WindowSurface::X11(surface) => surface
-                    .is_transient_for()
-                    .and_then(|parent| self.x11_index.get(&parent).copied()),
-            };
+            self.windows.get(&current)?;
+            let parent = self.transient_parent(current);
             match parent {
                 Some(parent) => current = parent,
                 None => return Some(current),
             }
         }
+    }
+
+    /// Shared parent lookup for placement, modality and app association.
+    /// External relationships retain model IDs rather than reusable XIDs.
+    pub fn transient_parent(&self, id: u64) -> Option<u64> {
+        let window = self.windows.get(&id)?;
+        if let Some(parent) = window.x11_parent.filter(|p| self.windows.contains_key(p)) {
+            return Some(parent);
+        }
+        match window.surface.underlying_surface() {
+            WindowSurface::Wayland(toplevel) => read_parent(toplevel)
+                .filter(|p| p.is_alive())
+                .and_then(|p| {
+                    self.windows.iter().find_map(|(id, w)| {
+                        (w.surface.wl_surface().as_deref() == Some(&p)).then_some(*id)
+                    })
+                }),
+            #[cfg(feature = "xwayland")]
+            WindowSurface::X11(surface) => surface
+                .is_transient_for()
+                .and_then(|xid| self.x11_index.get(&xid).copied()),
+        }
+    }
+
+    #[cfg(feature = "xwayland")]
+    fn reconcile_x11_parents(&mut self, state: &mut State) {
+        let requests = std::mem::take(&mut state.protocols.x11_interop.requests);
+        for (surface, parent) in requests {
+            if state.protocols.shortcut_locked || !surface.is_alive() {
+                continue;
+            }
+            let Some(child) = self.surface_index.get(&surface).copied() else {
+                continue;
+            };
+            if child == parent || !self.is_x11(parent) {
+                continue;
+            }
+            let parent_live = self
+                .windows
+                .get(&parent)
+                .is_some_and(|window| window.surface.alive());
+            if !parent_live {
+                continue;
+            }
+            if let Some(window) = self.windows.get_mut(&child) {
+                window.x11_parent = Some(parent);
+            }
+            self.place_above(parent, child);
+            if let Some(geometry) = self.geometry(child) {
+                state.window_origins.insert(surface.clone(), geometry.loc);
+                state.refresh_initial_surface_scale(&surface);
+            }
+            if let Some(workspace) = self.model.window(parent).map(|w| w.workspace) {
+                self.move_to_workspace(state, child, workspace);
+            }
+            if self.model.focused() == Some(parent) {
+                self.apply_focus(state, Some(parent));
+            }
+        }
+        // Publish the original X11 objects, including managed parents whose
+        // Wayland buffer has not yet associated. The request path checks life
+        // and captures the model generation before deferred scene mutation.
+        state.protocols.x11_interop.parents = self
+            .x11_index
+            .iter()
+            .filter_map(|(xid, id)| {
+                let window = self.windows.get(id)?;
+                match window.surface.underlying_surface() {
+                    WindowSurface::X11(surface)
+                        if surface.alive() && !surface.is_override_redirect() =>
+                    {
+                        Some((*xid, (*id, surface.clone())))
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
     }
 
     /// GNOME's GetWindows picker allows ordinary toplevels and dialogs,
@@ -482,6 +556,18 @@ impl WindowManager {
                     !surface.is_override_redirect() && introspect_x11_type(surface.window_type())
                 }
             })
+    }
+
+    /// Actual X11 resource identity for diagnostic journeys, never authority.
+    pub fn x11_window_id(&self, id: u64) -> Option<u32> {
+        #[cfg(feature = "xwayland")]
+        if let Some(window) = self.windows.get(&id) {
+            if let WindowSurface::X11(surface) = window.surface.underlying_surface() {
+                return Some(surface.window_id());
+            }
+        }
+        let _ = id;
+        None
     }
 
     /// Whether window `id` is an X11 window (through Xwayland).
@@ -668,6 +754,8 @@ impl WindowManager {
         }
         #[cfg(feature = "xwayland")]
         self.drain_x11_events(state);
+        #[cfg(feature = "xwayland")]
+        self.reconcile_x11_parents(state);
         // Smithay's Window geometry uses a cached surface-tree bounding box.
         // Refresh it after dispatched commits (including unsynchronized
         // subsurfaces) before render-time width scaling reads the geometry.
@@ -820,6 +908,7 @@ impl WindowManager {
                 minimized: false,
                 above: false,
                 sticky: false,
+                x11_parent: None,
             },
         );
         self.place_transient(surface, id);
@@ -975,15 +1064,7 @@ impl WindowManager {
                     window.geometry = geometry;
                     window.unplaced = false;
                 }
-                let parent = self
-                    .windows
-                    .get(&id)
-                    .and_then(|w| match w.surface.underlying_surface() {
-                        WindowSurface::Wayland(toplevel) => read_parent(toplevel),
-                        #[cfg(feature = "xwayland")]
-                        _ => None,
-                    })
-                    .and_then(|wl| self.surface_index.get(&wl).copied());
+                let parent = self.transient_parent(id);
                 if let Some(parent) = parent {
                     self.place_above(parent, id);
                 }
@@ -1038,6 +1119,7 @@ impl WindowManager {
                 minimized: false,
                 above: false,
                 sticky: false,
+                x11_parent: None,
             },
         );
         if let Some(parent) = surface
@@ -1162,10 +1244,8 @@ impl WindowManager {
     /// that spawned them. Parentless windows and orphans keep their
     /// cascaded geometry and stacking slot.
     fn place_transient(&mut self, surface: &ToplevelSurface, id: u64) {
-        let Some(parent_wl) = read_parent(surface) else {
-            return;
-        };
-        let Some(parent_id) = self.surface_index.get(&parent_wl).copied() else {
+        let _ = surface;
+        let Some(parent_id) = self.transient_parent(id) else {
             return;
         };
         self.place_above(parent_id, id);
@@ -1201,6 +1281,11 @@ impl WindowManager {
     /// to the topmost remaining window, if any. In scroll mode the
     /// remaining columns close ranks behind it.
     fn unmap(&mut self, state: &mut State, id: u64) {
+        let return_parent = self
+            .windows
+            .get(&id)
+            .and_then(|w| w.x11_parent)
+            .filter(|parent| self.model.focused() == Some(id) && self.windows.contains_key(parent));
         if let Some(window) = self.windows.remove(&id) {
             eprintln!("roost-compositor: window {id} unmapped");
             match window.surface.underlying_surface() {
@@ -1216,7 +1301,12 @@ impl WindowManager {
         }
         self.stacking.retain(|other| *other != id);
         self.model.remove(id);
-        let fallback = self.stacking.last().copied();
+        for window in self.windows.values_mut() {
+            if window.x11_parent == Some(id) {
+                window.x11_parent = None;
+            }
+        }
+        let fallback = return_parent.or_else(|| self.stacking.last().copied());
         self.apply_focus(state, fallback);
         if self.mode == SessionMode::Scroll {
             self.relayout_strip(state);
@@ -1321,29 +1411,24 @@ impl WindowManager {
     fn modal_target(&self, mut id: u64) -> u64 {
         // Bounded: a parent cycle a client builds cannot spin here.
         for _ in 0..8 {
-            let Some(parent) = self
-                .windows
-                .get(&id)
-                .and_then(|w| w.surface.wl_surface())
-                .map(|s| s.into_owned())
-            else {
+            if !self.windows.contains_key(&id) {
                 break;
-            };
-            let dialog = self
-                .windows
-                .iter()
-                .filter(|(child, w)| **child != id && !w.minimized)
-                .find_map(|(child, w)| match w.surface.underlying_surface() {
-                    WindowSurface::Wayland(toplevel)
-                        if read_parent(toplevel).as_ref() == Some(&parent)
-                            && read_modal(toplevel) =>
-                    {
-                        Some(*child)
-                    }
-                    WindowSurface::Wayland(_) => None,
-                    #[cfg(feature = "xwayland")]
-                    _ => None,
-                });
+            }
+            let dialog = self.stacking.iter().rev().copied().find(|child| {
+                if *child == id {
+                    return false;
+                }
+                let Some(w) = self.windows.get(child) else {
+                    return false;
+                };
+                let modal = w.x11_parent.is_some()
+                    || match w.surface.underlying_surface() {
+                        WindowSurface::Wayland(toplevel) => read_modal(toplevel),
+                        #[cfg(feature = "xwayland")]
+                        WindowSurface::X11(_) => false,
+                    };
+                !w.minimized && modal && self.transient_parent(*child) == Some(id)
+            });
             match dialog {
                 Some(child) => id = child,
                 None => break,

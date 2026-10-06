@@ -287,3 +287,31 @@ fn service_window_keeps_original_pinned_process_instead_of_socketpair_creator() 
         None
     );
 }
+
+#[cfg(feature = "xwayland")]
+#[test]
+fn x11_interop_registry_requires_typed_admission_not_service_liveness() {
+    let mut comp = crate::TestCompositor::new();
+    let mut service = channel(&comp);
+    for typed in [false, true] {
+        let fd = service
+            .open_connection(format!(":1.{}", typed as u8), typed, None, None)
+            .unwrap();
+        let conn = Connection::from_socket(stream(fd)).unwrap();
+        let mut queue = conn.new_event_queue::<TagPeer>();
+        conn.display().get_registry(&queue.handle(), ());
+        let mut peer = TagPeer::default();
+        pump(&mut comp, &mut queue, &mut peer);
+        assert_eq!(peer.globals.contains_key("mutter_x11_interop"), typed);
+        // Both connections are service-tracked: only the admitted typed one
+        // gets the interop capability, without IME or capture roles.
+    }
+    let (server, socket) = UnixStream::pair().unwrap();
+    comp.add_client(server);
+    let conn = Connection::from_socket(socket).unwrap();
+    let mut queue = conn.new_event_queue::<TagPeer>();
+    conn.display().get_registry(&queue.handle(), ());
+    let mut peer = TagPeer::default();
+    pump(&mut comp, &mut queue, &mut peer);
+    assert!(!peer.globals.contains_key("mutter_x11_interop"));
+}

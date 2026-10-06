@@ -44,9 +44,30 @@ def dialog():
     return nodes, controls
 end = time.monotonic() + 30
 located = False
+parent_checked = request.get("parent") is None
 while time.monotonic() < end:
     nodes, controls = dialog()
     if controls:
+        if not parent_checked:
+            relationship_end = min(end, time.monotonic() + 5)
+            while time.monotonic() < relationship_end:
+                current = json.loads(Path("/out/compositor-state.json").read_text())
+                parent_id = request["parent"]["id"]
+                parents = [w for w in current["windows"] if w["id"] == parent_id]
+                children = [w for w in current["windows"] if w.get("parent_window_id") == parent_id
+                            and w.get("app_id") == "org.gnome.Nautilus"]
+                if len(parents) == len(children) == 1:
+                    child, parent = children[0], parents[0]
+                    if child.get("application_window_id") == parent_id and current["focused"] == child["id"]:
+                        cx, cy, cw, ch = child["rect"]
+                        px, py, pw, ph = parent["rect"]
+                        if abs(2*cx + cw - (2*px + pw)) <= 1 and abs(2*cy + ch - (2*py + ph)) <= 1:
+                            out.with_suffix(".x11-parent.json").write_text(json.dumps(current, indent=2))
+                            parent_checked = True
+                            break
+                time.sleep(.05)
+            else:
+                raise RuntimeError("Actual Nautilus dialog did not inherit its live X11 parent, centered placement and focus")
         out.with_suffix(".a11y.json").write_text(json.dumps(nodes, indent=2))
         subprocess.run(["scrot", str(out.with_suffix(".png"))], check=True)
         if request["method"] == "OpenFile" and request["decision"] == "grant" and not located:

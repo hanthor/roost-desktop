@@ -106,6 +106,8 @@ pub const ACTIVATION_TOKEN_TTL: Duration = Duration::from_secs(10);
 
 /// Protocol states held for the lifetime of the display.
 pub(crate) struct Protocols {
+    #[cfg(feature = "xwayland")]
+    pub(crate) x11_interop: crate::x11_interop::Interop,
     pub(crate) dmabuf_state: DmabufState,
     pub(crate) dmabuf_global: Option<DmabufGlobal>,
     pub(crate) activation_state: XdgActivationState,
@@ -132,7 +134,7 @@ pub(crate) struct Protocols {
     shortcut_pending: Option<(u64, KeyboardShortcutsInhibitor, String, Instant)>,
     shortcut_next: u64,
     shortcut_changed: bool,
-    shortcut_locked: bool,
+    pub(crate) shortcut_locked: bool,
     _pointer_warp: GlobalId,
     /// Pointer warps clients asked for, drained by the window manager:
     /// surface, surface-local position, enter serial.
@@ -184,6 +186,8 @@ impl Protocols {
             shortcut_next: 0,
             shortcut_changed: false,
             shortcut_locked: false,
+            #[cfg(feature = "xwayland")]
+            x11_interop: crate::x11_interop::Interop::new(dh),
             _pointer_warp: dh.create_global::<State, WpPointerWarpV1, ()>(1, ()),
             pointer_warps: Vec::new(),
             bell: Bell::default(),
