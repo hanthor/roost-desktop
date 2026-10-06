@@ -1835,7 +1835,14 @@ impl WindowManager {
             } else if self.overview_open {
                 // Overview presses are the runtime's (preview hits).
             } else if let Some(id) = self.window_at(pos) {
-                if self.model.focused() != Some(id) {
+                // A lock or on-demand layer can own the keyboard while the
+                // model still names this window. A click must restore actual
+                // seat focus even when the model's focused ID is unchanged.
+                let keyboard_matches = self
+                    .keyboard
+                    .as_ref()
+                    .is_none_or(|keyboard| keyboard.current_focus() == self.surface_of(id));
+                if self.model.focused() != Some(id) || !keyboard_matches {
                     self.apply_focus(state, Some(id));
                 }
             }
