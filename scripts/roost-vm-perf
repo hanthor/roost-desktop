@@ -21,16 +21,22 @@ lane = importlib.util.module_from_spec(spec)
 loader.exec_module(lane)
 sys.path.insert(0, str(HERE / "lib"))
 from vm_guest_agent import GuestAgent  # noqa: E402
+from gnome_sysprof import decode as decode_gnome_sysprof, required_scope_counts  # noqa: E402
 
 
 def guest_probe(agent, action, index=None):
     """Only this immutable CI helper is executed; no command/path input."""
-    if action not in ("clock", "notify", "frames"):
+    if action not in ("clock", "notify", "frames", "gnome-trace-start",
+                      "gnome-trace-stop", "gnome-trace-read"):
         raise ValueError("unsupported performance probe")
     arguments = [action]
     if action == "notify":
         if type(index) is not int or not 0 <= index < 10:
             raise ValueError("notification index outside the fixed workload")
+        arguments += ["--index", str(index)]
+    if action == "gnome-trace-read":
+        if type(index) is not int or not 0 <= index < 128:
+            raise ValueError("capture chunk index outside the bounded file")
         arguments += ["--index", str(index)]
     pid = agent.command("guest-exec", path="/usr/libexec/roost-perf-phase",
                         arg=arguments, **{"capture-output": True})["pid"]
@@ -62,6 +68,34 @@ def distribution(values):
     return {"count": len(values), "p50": percentile(.50), "p95": percentile(.95),
             "p99": percentile(.99), "min": values[0], "max": values[-1],
             "mean": statistics.mean(values)}
+
+
+def retain_gnome_trace(agent, out, metadata):
+    size = metadata.get("bytes")
+    digest = metadata.get("sha256")
+    if type(size) is not int or not 256 <= size <= 8 * 1024 * 1024:
+        raise ValueError("invalid GNOME Sysprof capture size")
+    chunks = []
+    for index in range((size + 65535) // 65536):
+        row = guest_probe(agent, "gnome-trace-read", index)["gnome_trace"]
+        chunk = base64.b64decode(row["data"], validate=True)
+        if row["index"] != index or len(chunk) != min(65536, size - index * 65536):
+            raise ValueError("incomplete GNOME Sysprof capture chunk")
+        chunks.append(chunk)
+    raw = b"".join(chunks)
+    if hashlib.sha256(raw).hexdigest() != digest:
+        raise ValueError("GNOME Sysprof capture checksum changed")
+    (out / "gnome-overview.syscap").write_bytes(raw)
+    (out / "gnome-overview-source.json").write_text(json.dumps(metadata, indent=2))
+    decoded = decode_gnome_sysprof(raw)
+    # Preserve decoded evidence even if a required semantic scope is absent.
+    (out / "gnome-overview-marks.json").write_text(json.dumps(decoded, indent=2))
+    counts = required_scope_counts(decoded, metadata["pid"])
+    if not all(counts.values()):
+        raise ValueError("GNOME profile lacks actual event/dispatch/presentation scopes")
+    return {"bytes": size, "sha256": digest, "frame_count": decoded["frame_count"],
+            "mark_count": len(decoded["marks"]), "scope_counts": counts,
+            "limitation": decoded["limitation"]}
 
 
 def presentation_summary(trace):
@@ -209,6 +243,8 @@ def main():
     started = time.monotonic()
     observations, phases, guest_phases, notifications = [], {}, {}, []
     agent = None
+    gnome_trace_active = False
+    gnome_trace_summary = None
     try:
         if not kvm:
             raise RuntimeError("paired performance comparison requires actual KVM")
@@ -246,6 +282,10 @@ def main():
             qmp.keys("ret")
             time.sleep(8)
         phases["workload_start"] = time.clock_gettime(time.CLOCK_BOOTTIME)
+        if args.desktop == "gnome":
+            guest_probe(agent, "gnome-trace-start")
+            gnome_trace_active = True
+            time.sleep(1)  # Retain pre-input scopes, including any outstanding frame.
         for index in range(20):
             before = frame(qmp, scratch / "before.ppm")
             start = time.monotonic()
@@ -266,6 +306,10 @@ def main():
             else:
                 raise RuntimeError(f"overview input {index} produced no broad visible response")
             time.sleep(1)
+        if gnome_trace_active:
+            metadata = guest_probe(agent, "gnome-trace-stop")["gnome_trace"]
+            gnome_trace_active = False
+            gnome_trace_summary = retain_gnome_trace(agent, out, metadata)
         for _ in range(10):
             qmp.keys("meta_l", "pgdn")
             time.sleep(1)
@@ -310,6 +354,7 @@ def main():
                   "accepted_notification_count": len(notifications),
                   "drm_memory": drm_memory_summary(samples),
                   "presentation_cadence": pacing,
+                  "gnome_overview_sysprof": gnome_trace_summary,
                   "overview_observed_upper_s":distribution([s["upper_s"] for s in observations]),
                   "limitations":["QMP observations are bounded host-visible response times, not compositor input-to-frame tracing.",
                                  "CPU counts surviving sampled processes; exited processes can consume unobserved CPU.",
@@ -321,6 +366,11 @@ def main():
         (out / "report.json").write_text(json.dumps(report, indent=2))
         print(json.dumps({"desktop":args.desktop,"samples":len(samples),"observations":len(observations)}))
     finally:
+        if gnome_trace_active and agent is not None:
+            try:
+                guest_probe(agent, "gnome-trace-stop")
+            except Exception as error:
+                print(f"GNOME profile cleanup failed: {error}", file=sys.stderr)
         if agent is not None:
             agent.close()
         vm.terminate()

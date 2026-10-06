@@ -1,0 +1,8 @@
+{
+  "source_run": 37207549145,
+  "observer_revision": "2712841dc9d186243b42e0180c756898216cda9e",
+  "full_capture_sha256": "8ed1ab4a8d5058a32a75e13a194519b3c832630a7ef2271f0df4035fddec4245",
+  "extraction": "Unmodified 256-byte header plus the first complete mark frame of each required scope name; no payload bytes synthesized.",
+  "sample_sha256": "84596aba792581ee1f10298ba28da7e1c94327a5523b5799f620bc0cc40f8fcd",
+  "pid": 1115
+}

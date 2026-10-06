@@ -7,6 +7,9 @@ on:
       - scripts/roost-frame-pacer-build
       - scripts/lib/roost-frame-pacer.c
       - scripts/lib/roost-perf-*.py
+      - scripts/lib/gnome_sysprof.py
+      - scripts/lib/fixtures/sysprof-mark.*
+      - scripts/lib/fixtures/gnome51-overview-marks.*
       - packaging/marlin/perf/**
   workflow_dispatch:
     inputs:
