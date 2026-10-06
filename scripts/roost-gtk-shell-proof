@@ -431,6 +431,16 @@ COLOR_SCHEMA
     GSETTINGS_SCHEMA_DIR="$ARTIFACTS/schemas"
     export GSETTINGS_SCHEMA_DIR
 fi
+# Exercise the GNOME 51 enum contract on older CI hosts too. This overlay
+# preserves all four upstream a11y.interface keys and is test-only.
+if ! gsettings range org.gnome.desktop.a11y.interface reduced-motion >/dev/null 2>&1; then
+    mkdir -p "$ARTIFACTS/schemas"
+    cp "$ROOT/tests/settings/gnome51-a11y-interface.gschema.xml" "$ARTIFACTS/schemas/"
+    glib-compile-schemas --strict "$ARTIFACTS/schemas"
+    GSETTINGS_SCHEMA_DIR="$ARTIFACTS/schemas"
+    export GSETTINGS_SCHEMA_DIR
+fi
+gsettings set org.gnome.desktop.a11y.interface reduced-motion 'no-preference'
 gsettings set org.gnome.settings-daemon.plugins.color night-light-enabled false
 # Quick-settings daemons: stubs on a private "system" bus (#55), a fake
 # backlight, and a fake wpctl that records the sink volume.
@@ -2193,7 +2203,33 @@ cstate '.session_mode == "gnome"' "floating" || fail G-ANIMATIONS-OFF "could not
 gsettings set org.gnome.desktop.interface enable-animations true
 cstate '.animations_enabled' "animations enabled" ||
     fail G-ANIMATIONS-OFF "enable-animations true did not restore live animation"
-pass G-ANIMATIONS-OFF "enable-animations is live: overview and strip states jump when disabled"
+# Settings' Reduced Motion switch must work even with enable-animations true.
+gsettings set org.gnome.desktop.a11y.interface reduced-motion 'reduce'
+cstate '(.animations_enabled | not)' "reduced motion" ||
+    fail G-ANIMATIONS-OFF "Reduced Motion did not disable compositor animation"
+xdotool key Super_L
+cstate '.overview_open and .overview_progress == 1' "reduced overview" ||
+    fail G-ANIMATIONS-OFF "Reduced Motion overview did not jump to its open state"
+cp "$CSTATE" "$ARTIFACTS/reduced-motion-open.json"
+xdotool key Escape
+cstate '(.overview_open | not) and .overview_progress == 0' "reduced desktop" ||
+    fail G-ANIMATIONS-OFF "Reduced Motion overview did not jump to its closed state"
+# Idle blanking must follow the same policy as compositor and GTK transitions.
+gsettings set org.gnome.desktop.screensaver lock-enabled true
+gsettings set org.gnome.desktop.screensaver lock-delay 0
+gsettings set org.gnome.desktop.session idle-delay 600
+cstate '.idle_timeout_ms == 600000' "reduced idle" ||
+    fail G-ANIMATIONS-OFF "Reduced Motion left the ten-second idle fade in the lock timeout"
+[ "$(sed -n '2p' "$XDG_RUNTIME_DIR/roost-idle-blank")" = 0 ] ||
+    fail G-ANIMATIONS-OFF "Reduced Motion left the screen-blank fade enabled"
+gsettings set org.gnome.desktop.interface enable-animations false
+gsettings reset org.gnome.desktop.a11y.interface reduced-motion
+cstate '(.animations_enabled | not)' "explicit animation disable" ||
+    fail G-ANIMATIONS-OFF "resetting Reduced Motion overrode enable-animations false"
+gsettings set org.gnome.desktop.interface enable-animations true
+cstate '.animations_enabled and .idle_timeout_ms == 610000' "motion restored" ||
+    fail G-ANIMATIONS-OFF "resetting both preferences did not restore motion and idle fade"
+pass G-ANIMATIONS-OFF "enable-animations and GNOME 51 Reduced Motion are live; overview, strip and idle fade follow effective motion policy"
 
 # GNOME settings (#63): the idle lock follows idle-delay and
 # lock-enabled as they change.

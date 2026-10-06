@@ -34,6 +34,8 @@ This page records that decision for R9 (knowledge entry
 | enable-animations | Honored | Live idle fade, GTK transitions and compositor overview/strip motion; disabled transitions finish immediately. Proof G-ANIMATIONS-OFF |
 | show-battery-percentage | Honored | UPower DisplayDevice panel percentage; updates live |
 
+GNOME 51 `org.gnome.desktop.a11y.interface reduced-motion` is read live. `reduce` disables shell GTK transitions, compositor overview/strip motion and idle fade even when `enable-animations` is true. Resetting it respects an explicit `enable-animations=false`; older schema sets keep the existing animation policy. This controls the desktop shell; application toolkits remain responsible for their own transitions. Proof G-ANIMATIONS-OFF.
+
 ## Session, lock and notifications
 
 | Schema and key | Status | Notes |
