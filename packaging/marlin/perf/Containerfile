@@ -7,12 +7,14 @@ COPY packaging/marlin/vm-lane/roost-vm-lane.tmpfiles /usr/lib/tmpfiles.d/roost-v
 COPY packaging/marlin/vm-lane/journald.conf /usr/lib/systemd/journald.conf.d/90-roost-vm-lane.conf
 COPY packaging/marlin/vm-lane/kargs.toml /usr/lib/bootc/kargs.d/90-roost-vm-lane.toml
 COPY scripts/lib/roost-perf-guest.py /usr/libexec/roost-perf-guest
+COPY packaging/marlin/perf/roost-perf-phase /usr/libexec/roost-perf-phase
 COPY packaging/marlin/perf/roost-perf.service /usr/lib/systemd/system/roost-perf.service
 RUN case "$DESKTOP" in gnome|roost) ;; *) exit 1 ;; esac && \
-    pacman -S --needed --noconfirm python wayland-utils && \
+    pacman -S --needed --noconfirm python wayland-utils qemu-guest-agent && \
+    chmod 0755 /usr/libexec/roost-perf-phase && \
     useradd -M -d /home/roost-test -s /bin/bash -U roost-test && \
     echo 'roost-test:roost' | chpasswd && \
     sed -i "s/DefaultSession=roost.desktop/DefaultSession=${DESKTOP}.desktop/" /etc/gdm/custom.conf && \
     sed -i "s/Session=roost/Session=${DESKTOP}/" /usr/lib/tmpfiles.d/roost-vm-lane.conf && \
     test -f "/usr/share/wayland-sessions/${DESKTOP}.desktop" && \
-    systemctl enable roost-perf.service
+    systemctl enable roost-perf.service qemu-guest-agent.service
