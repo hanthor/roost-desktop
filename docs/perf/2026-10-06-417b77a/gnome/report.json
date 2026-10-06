@@ -1,0 +1,128 @@
+{
+  "desktop": "gnome",
+  "vm_profile": {
+    "memory_mib": 6144,
+    "vcpus": 4,
+    "resolution": [
+      1280,
+      800
+    ],
+    "kvm": true,
+    "gpu_profile": "virtio-vga-pcie-pm-preserved-v1",
+    "gpu_devices": [
+      "-device",
+      "pcie-root-port,id=roost-gpu-port,chassis=1,slot=1",
+      "-device",
+      "virtio-vga,bus=roost-gpu-port,x-pcie-pm-no-soft-reset=on,xres=1280,yres=800"
+    ]
+  },
+  "meta": [
+    "base_digest=sha256:c8c6dfac778f2af1a4d058645b2e43f113661a68318c079c886a94566e31f801",
+    "shared_image_id=206d8f76300290af5a0f66e0df7e0e1f79095033921689b1f3cfe44764c266a1",
+    "observer_revision=417b77a9a0602491a853c60f618e0f4720ba9e1a"
+  ],
+  "host": {
+    "kernel": "7.0.0-1012-azure",
+    "cpu": "processor\t: 0\nvendor_id\t: AuthenticAMD\ncpu family\t: 26\nmodel\t\t: 2\nmodel name\t: AMD EPYC 9V45 96-Core Processor\nstepping\t: 1\nmicrocode\t: 0xffffffff\ncpu MHz\t\t: 4106.761\ncache size\t: 1024 KB\nphysical id\t: 0\nsiblings\t: 4\ncore id\t\t: 0\ncpu cores\t: 2\napicid\t\t: 0\ninitial apicid\t: 0\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 28\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid extd_apicid aperfmperf tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves user_shstk avx_vnni avx512_bf16 clzero xsaveerptr rdpru arat npt nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold v_vmsave_vmload avx512vbmi umip avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid fsrm avx512_vp2intersect\nbugs\t\t: sysret_ss_attrs null_seg spectre_v1 spectre_v2 spec_store_bypass srso spectre_v2_user\nbogomips\t: 5192.24\nTLB size\t: 192 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management:\n\nprocessor\t: 1\nvendor_id\t: AuthenticAMD\ncpu family\t: 26\nmodel\t\t: 2\nmodel name\t: AMD EPYC 9V45 96-Core Processor\nstepping\t: 1\nmicrocode\t: 0xffffffff\ncpu MHz\t\t: 4111.315\ncache size\t: 1024 KB\nphysical id\t: 0\nsiblings\t: 4\ncore id\t\t: 0\ncpu cores\t: 2\napicid\t\t: 1\ninitial apicid\t: 1\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 28\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid extd_apicid aperfmperf tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves user_shstk avx_vnni avx512_bf16 clzero xsaveerptr rdpru arat npt nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold v_vmsave_vmload avx512vbmi umip avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid fsrm avx512_vp2intersect\nbugs\t\t: sysret_ss_attrs null_seg spectre_v1 spectre_v2 spec_store_bypass srso spectre_v2_user\nbogomips\t: 5192.24\nTLB size\t: 192 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management:\n\nprocessor\t: 2\nvendor_id\t: AuthenticAMD\ncpu family\t: 26\nmodel\t\t: 2\nmodel name\t: AMD EPYC 9V45 96-Core Processor\nstepping\t: 1\nmicrocode\t: 0xffffffff\ncpu MHz\t\t: 4111.846\ncache size\t: 1024 KB\nphysical id\t: 0\nsiblings\t: 4\ncore id\t\t: 1\ncpu cores\t: 2\napicid\t\t: 2\ninitial apicid\t: 2\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 28\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid extd_apicid aperfmperf tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves user_shstk avx_vnni avx512_bf16 clzero xsaveerptr rdpru arat npt nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold v_vmsave_vmload avx512vbmi umip avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid fsrm avx512_vp2intersect\nbugs\t\t: sysret_ss_attrs null_seg spectre_v1 spectre_v2 spec_store_bypass srso spectre_v2_user\nbogomips\t: 5192.24\nTLB size\t: 192 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management:\n\nprocessor\t: 3\nvendor_id\t: AuthenticAMD\ncpu family\t: 26\nmodel\t\t: 2\nmodel name\t: AMD EPYC 9V45 96-Core Processor\nstepping\t: 1\nmicrocode\t: 0xffffffff\ncpu MHz\t\t: 4112.856\ncache size\t: 1024 KB\nphysical id\t: 0\nsiblings\t: 4\ncore id\t\t: 1\ncpu cores\t: 2\napicid\t\t: 3\ninitial apicid\t: 3\nfpu\t\t: yes\nfpu_exception\t: yes\ncpuid level\t: 28\nwp\t\t: yes\nflags\t\t: fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid extd_apicid aperfmperf tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves user_shstk avx_vnni avx512_bf16 clzero xsaveerptr rdpru arat npt nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold v_vmsave_vmload avx512vbmi umip avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid fsrm avx512_vp2intersect\nbugs\t\t: sysret_ss_attrs null_seg spectre_v1 spectre_v2 spec_store_bypass srso spectre_v2_user\nbogomips\t: 5192.24\nTLB size\t: 192 4K pages\nclflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management:\n\n",
+    "qemu": "QEMU emulator version 10.2.1 (Debian 1:10.2.1+ds-1ubuntu3.2)\nCopyright (c) 2003-2025 Fabrice Bellard and the QEMU Project developers\n"
+  },
+  "panel_observed_upper_s": 22.559586986,
+  "host_phases_boottime_s": {
+    "idle_start": 488.769884812,
+    "idle_end": 518.978765495,
+    "workload_start": 557.685754665,
+    "workload_end": 608.585777991
+  },
+  "whole_user_pss_kib": {
+    "count": 199,
+    "p50": 923027,
+    "p95": 958407,
+    "p99": 958927,
+    "min": 0,
+    "max": 958927,
+    "mean": 757009.1708542714
+  },
+  "whole_user_cpu_observed_percent": {
+    "count": 198,
+    "p50": 8.99917180621876,
+    "p95": 53.99484662384857,
+    "p99": 107.98617139887668,
+    "min": 0.0,
+    "max": 124.9855320497661,
+    "mean": 16.023344195023256
+  },
+  "idle_user_cpu_observed_percent": {
+    "count": 29,
+    "p50": 0.0,
+    "p95": 2.9996916017064246,
+    "p99": 4.99953805268301,
+    "min": 0.0,
+    "max": 4.99953805268301,
+    "mean": 0.31031508358264437
+  },
+  "guest_phases_boottime_s": {
+    "idle_start": 51.182085217,
+    "idle_end": 81.281512857,
+    "notifications_start": 171.004689797,
+    "notifications_end": 182.971065129
+  },
+  "accepted_notification_count": 10,
+  "drm_memory": {
+    "sample_status_counts": {
+      "unavailable": 199
+    },
+    "client_accounted_bytes": [],
+    "scope": "Test UID DRM client counters; duplicate handles counted once. Shared buffers across distinct clients may be counted more than once. Unsupported or incomplete samples are not zero."
+  },
+  "presentation_cadence": {
+    "presented_count": 240,
+    "commits": 242,
+    "discarded_count": 0,
+    "pending_count": 2,
+    "clock_id": 1,
+    "interval_ms": {
+      "count": 239,
+      "p50": 13.334,
+      "p95": 26.669,
+      "p99": 133.344,
+      "min": 13.334,
+      "max": 173.347,
+      "mean": 16.51460251046025
+    },
+    "reported_refresh_ms": {
+      "count": 240,
+      "p50": 13.334427,
+      "p95": 13.334427,
+      "p99": 13.334427,
+      "min": 13.334427,
+      "max": 13.334427,
+      "mean": 13.334427
+    },
+    "unknown_refresh_count": 0,
+    "flag_counts": {
+      "vsync": 240,
+      "hw_clock": 240,
+      "hw_completion": 240,
+      "zero_copy": 0
+    },
+    "scope": "Native SHM xdg-toplevel with alternating damage, paced by wl_surface.frame. wp_presentation timestamps measure this client's presentation cadence, not compositor input-to-frame tracing. Hardware flags and unknown refresh are explicit."
+  },
+  "overview_observed_upper_s": {
+    "count": 20,
+    "p50": 0.16098331600005622,
+    "p95": 0.4126914199999874,
+    "p99": 0.48876189999998587,
+    "min": 0.1566090039999608,
+    "max": 0.48876189999998587,
+    "mean": 0.23180254284998797
+  },
+  "limitations": [
+    "QMP observations are bounded host-visible response times, not compositor input-to-frame tracing.",
+    "CPU counts surviving sampled processes; exited processes can consume unobserved CPU.",
+    "PSS covers the test UID and excludes the observer and its descendants; root/GDM shared services are outside this scope.",
+    "Whole-run summaries include startup and workload. Idle CPU uses guest-clock markers and only intervals wholly within the idle phase.",
+    "DRM memory is optional driver-provided client accounting, not unique physical GPU allocation; unavailable samples are explicit.",
+    "Notification IDs prove service acceptance, not notification input-to-frame latency. Presentation cadence is a native client workload; compositor input tracing, multiple cold/warm boots and 24-hour soak remain open.",
+    "No release threshold or claim of within-10-percent parity is introduced."
+  ]
+}
