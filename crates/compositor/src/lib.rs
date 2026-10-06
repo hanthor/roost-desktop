@@ -69,6 +69,7 @@ mod performance_trace;
 pub mod popup;
 pub mod protocols;
 pub mod runtime;
+mod runtime_signal;
 pub mod screencast;
 pub mod screenshot;
 pub mod session_lock;

@@ -1776,10 +1776,7 @@ impl Runtime {
         else {
             return;
         };
-        if !std::fs::metadata(&path).is_ok_and(|m| m.len() <= 4096) {
-            return;
-        }
-        let Ok(body) = std::fs::read_to_string(path) else {
+        let Ok(body) = crate::runtime_signal::read(&path) else {
             return;
         };
         if body == self.proof_swipe_last {
@@ -2667,9 +2664,10 @@ impl Runtime {
 
     fn tick(&mut self) -> Result<bool, RuntimeError> {
         if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
-            let text =
-                std::fs::read_to_string(std::path::PathBuf::from(dir).join("roost-idle-blank"))
-                    .unwrap_or_default();
+            let text = crate::runtime_signal::read(
+                &std::path::PathBuf::from(dir).join("roost-idle-blank"),
+            )
+            .unwrap_or_default();
             self.blank = crate::lock::IdleBlank::parse(&text);
         }
         self.display
