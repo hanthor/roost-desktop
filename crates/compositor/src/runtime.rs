@@ -1115,7 +1115,8 @@ impl Runtime {
             let action = if inhibited {
                 TriggerAction::None
             } else {
-                self.triggers.feed(
+                self.state.overview_trigger_action(
+                    &mut self.triggers,
                     &input,
                     self.control.overview_open(),
                     self.manager.pointer_pos(),
