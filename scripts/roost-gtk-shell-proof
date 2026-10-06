@@ -2175,6 +2175,17 @@ if jq -e '.overview_open' "$CSTATE" >/dev/null; then
 fi
 xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
 gsettings set org.gnome.desktop.interface enable-hot-corners true
+sleep 1
+xdotool mousemove --window "$WID" 1 1
+cstate '.overview_open' "hot corner enabled" ||
+    fail G-HOT-CORNER "enabling GNOME hot corners did not open the actual overview"
+cp "$CSTATE" "$ARTIFACTS/hot-corner-enabled.json"
+scrot "$ARTIFACTS/hot-corner-enabled.png" >/dev/null
+xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
+xdotool key Escape
+cstate '.overview_open | not' "hot corner dismissed" ||
+    fail G-HOT-CORNER "the corner-opened overview did not close"
+pass G-HOT-CORNER "live GNOME disable rejects the corner; enable opens the actual overview"
 gsettings set org.gnome.desktop.peripherals.keyboard repeat-interval 30
 gsettings set org.gnome.desktop.input-sources sources "[('xkb', 'us')]"
 cstate '.keyboard.layouts == ["English (US)"]' "one source" ||
