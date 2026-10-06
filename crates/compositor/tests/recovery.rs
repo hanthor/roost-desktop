@@ -480,7 +480,7 @@ fn stalled_client_gets_backpressure_and_server_still_serves() {
     for _ in 0..500 {
         match stalled.write_frame(&snap) {
             Ok(()) => continue,
-            Err(ControlError::WouldBlock) | Err(ControlError::Closed) => {
+            Err(ControlError::WouldBlock) | Err(ControlError::Unexpected(_)) => {
                 pressured = true;
                 break;
             }

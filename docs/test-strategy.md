@@ -108,16 +108,17 @@ No implementation or test is considered complete because a test command exits su
 `validate-test-strategy.yml` runs `scripts/roost-test-strategy` for crate,
 strategy and validator changes. It rejects crates with no named executable
 test functions, invalid or duplicated stable test IDs, and removal of the
-registered IPC/security/recovery cases. The main CI check supplies its test
+registered control, supervised-shell identity and locked-session cases. The main CI check supplies its test
 list after the workspace tests pass, so registered cases must also appear
 in that executed inventory. Both jobs retain a source-stamped compliance
 report, including the remaining traceability and boundary-case gaps.
 
 This inventory is a structural regression gate. It does not measure line
 or branch coverage, certify a security boundary, or satisfy the release
-artifact checklist. Qualified legacy test IDs, coverage thresholds and
-complete boundary/artifact enforcement remain tracked by issue #8; the
-report keeps those gaps visible rather than treating them as a pass.
+artifact checklist. Qualified legacy test IDs and wider protocol/lifecycle
+boundary registration remain tracked by issue #8; the report keeps those
+gaps visible. The separate measured lane below enforces current module
+floors and artifact completeness for the registered cases.
 
 `measured-coverage.yml` separately runs instrumented workspace tests with
 Rust 1.94.1, LLVM tools, and cargo-llvm-cov 0.9.1. Its artifact contains raw
@@ -140,9 +141,15 @@ run: exact source revision, compiler and observer versions, kernel and installed
 packages, a reproduction command requiring PAM wrapper support, executed test
 logs, LLVM coverage JSON and its measured report. `roost-security-artifacts`
 checks these files and requires successful execution of the registered positive,
-negative, spoof/replay, exhaustion and process-failure cases for the control and
-locked-session boundaries. Failed, ignored or merely listed tests do not satisfy
+negative, spoof/replay, exhaustion and process-failure cases for the control,
+supervised-shell identity and locked-session boundaries. Failed, ignored or merely listed tests do not satisfy
 this gate. The resulting checklist is retained with the coverage artifact.
+
+The supervised-shell identity cases verify live socket credential admission,
+closed-gate denial, same-user impersonation denial, bounded connection floods,
+and the supervised-child fault loop with application-model resynchronization.
+Some cases cover both control and identity: the report lists 15 registrations
+of 13 distinct executed tests, rather than claiming 15 distinct executions.
 
 Registration does not imply every security boundary is covered, nor authenticate
 logs obtained outside trusted CI. Spec-qualified legacy test IDs and broader

@@ -81,7 +81,7 @@ def main():
     except (OSError, ValueError, KeyError, TypeError) as error:
         parser.exit(1, f'roost-security-artifacts: {error}\n')
     lines = ['# Security evidence completeness', '', f'Source: `{revision}`', '',
-             'The registered control and lock cases executed successfully. This checklist',
+             'The registered control, supervised-shell identity and lock cases executed successfully. This checklist',
              'does not establish complete boundary coverage or authenticate arbitrary logs.', '',
              '| Boundary | Case kind | Executed test |', '| --- | --- | --- |']
     lines += [f'| {boundary} | {kind} | {file}::{name} |' for boundary, kind, file, name in cases]
