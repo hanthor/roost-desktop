@@ -209,6 +209,7 @@ pub(crate) struct KbdInternal<D: SeatHandler> {
     pub(crate) pressed_keys: HashSet<Keycode>,
     pub(crate) forwarded_pressed_keys: HashSet<Keycode>,
     pub(crate) mods_state: ModifiersState,
+    pending_modifiers: bool,
     xkb: Arc<Mutex<Xkb>>,
     pub(crate) repeat_rate: i32,
     pub(crate) repeat_delay: i32,
@@ -256,6 +257,7 @@ impl<D: SeatHandler + 'static> KbdInternal<D> {
             pressed_keys: HashSet::new(),
             forwarded_pressed_keys: HashSet::new(),
             mods_state: ModifiersState::default(),
+            pending_modifiers: false,
             xkb: Arc::new(Mutex::new(Xkb {
                 context,
                 keymap,
@@ -989,6 +991,7 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
 
         let mut guard = self.arc.internal.lock().unwrap();
         let (mods_changed, leds_changed) = guard.key_input(keycode, state);
+        guard.pending_modifiers |= mods_changed;
         let led_state = guard.led_state;
         let mods_state = guard.mods_state;
         let xkb = guard.xkb.clone();
@@ -1005,6 +1008,23 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
         }
 
         (filter_result, mods_changed)
+    }
+
+    /// Consume a key event without delivering it to any client or grab.
+    ///
+    /// Physical/XKB state still advances. A consumed release must also remove
+    /// a previously forwarded hold, so a later focus enter cannot advertise it.
+    /// Modifier changes are retained for the next forwarded input.
+    pub fn input_discard(&self, data: &mut D, keycode: Keycode, state: KeyState) {
+        self.input_intercept(data, keycode, state, |_, _, _| ());
+        if state == KeyState::Released {
+            self.arc
+                .internal
+                .lock()
+                .unwrap()
+                .forwarded_pressed_keys
+                .remove(&keycode);
+        }
     }
 
     /// Forward a key event to the focused client
@@ -1031,7 +1051,8 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
 
         // forward to client if no keybinding is triggered
         let seat = self.get_seat(data);
-        let modifiers = mods_changed.then_some(guard.mods_state);
+        let modifiers = (mods_changed || guard.pending_modifiers).then_some(guard.mods_state);
+        guard.pending_modifiers = false;
         guard.with_grab(data, &seat, |data, handle, grab| {
             grab.input(data, handle, keycode, state, modifiers, serial, time);
         });

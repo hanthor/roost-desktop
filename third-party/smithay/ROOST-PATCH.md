@@ -27,3 +27,12 @@ avoids frame_submitted's implicit queued-frame submission during S3 recovery;
 Roost resets the buffer pool and KMS state, then drains obsolete queued DRM
 vblank completions before queuing the locked scene. Existing APIs and the
 pinned 0.7.0 version remain unchanged.
+
+Issue #346 additionally changes src/input/keyboard/mod.rs. The additive
+KeyboardHandle::input_discard API advances physical/XKB state without
+calling client or grab input, and removes consumed releases from the held
+keys advertised on subsequent focus enter. Modifier changes from intercepted
+input are retained until the next forwarded event, so a wake shield cannot
+leave the focused client with a stale modifier mask. Real wl_keyboard tests
+cover consumed releases, focus-enter key arrays, and same-focus modifier
+updates without forwarding the consumed event. The pinned version stays 0.7.0.

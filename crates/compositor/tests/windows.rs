@@ -70,6 +70,8 @@ struct Client {
     configured: bool,
     /// (keycode, pressed) in arrival order.
     keys: Vec<(u32, bool)>,
+    keyboard_enters: Vec<Vec<u32>>,
+    keyboard_modifiers: Vec<(u32, u32, u32, u32)>,
     pointer_enters: u32,
     pointer_motions: u32,
     /// (button, pressed) in arrival order.
@@ -231,16 +233,32 @@ impl Dispatch<WlKeyboard, ()> for Client {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let KeyEvent::Key {
-            key,
-            state: key_state,
-            ..
-        } = event
-        {
-            state.keys.push((
+        match event {
+            KeyEvent::Key {
+                key,
+                state: key_state,
+                ..
+            } => state.keys.push((
                 key,
                 matches!(key_state, WEnum::Value(ClientKeyState::Pressed)),
-            ));
+            )),
+            KeyEvent::Enter { keys, .. } => state.keyboard_enters.push(
+                keys.chunks_exact(4)
+                    .map(|bytes| u32::from_ne_bytes(bytes.try_into().unwrap()))
+                    .collect(),
+            ),
+            KeyEvent::Modifiers {
+                mods_depressed,
+                mods_latched,
+                mods_locked,
+                group,
+                ..
+            } => {
+                state
+                    .keyboard_modifiers
+                    .push((mods_depressed, mods_latched, mods_locked, group));
+            }
+            _ => (),
         }
     }
 }
@@ -2960,6 +2978,77 @@ fn same_focused_window_click_restores_keyboard_after_lock_ownership() {
     assert!(
         f.client_b.keys.is_empty(),
         "the former lock owner hears no unlocked keys"
+    );
+    assert_eq!(f.manager.model().focused(), Some(f.id_a));
+}
+
+#[test]
+fn consumed_release_is_absent_from_the_next_keyboard_enter() {
+    let mut f = two_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    assert_eq!(f.client_a.keys, [(R_KEYCODE, true)]);
+    f.manager.discard_key_input(
+        &mut f.comp.state,
+        &ManagerInput::Key {
+            keycode: R_KEYCODE,
+            pressed: false,
+            time: 5001,
+        },
+    );
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    assert_eq!(
+        f.client_a.keys,
+        [(R_KEYCODE, true)],
+        "the shield forwards no release"
+    );
+    assert_eq!(f.comp.state.pressed_key_count(), 0);
+    f.client_b.keyboard_enters.clear();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    assert_eq!(
+        f.client_b.keyboard_enters,
+        [Vec::<u32>::new()],
+        "a consumed release cannot reappear as a held key"
+    );
+    assert!(f.client_b.keys.is_empty());
+}
+
+#[test]
+fn consumed_modifier_release_updates_the_next_forwarded_key_without_focus_change() {
+    let mut f = two_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_a)));
+    press(&mut f.manager, &mut f.comp, SHIFT_LEFT_KEYCODE);
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    assert_ne!(f.client_a.keyboard_modifiers.last().unwrap().0, 0);
+    f.client_a.keyboard_modifiers.clear();
+    f.client_a.keys.clear();
+    f.manager.discard_key_input(
+        &mut f.comp.state,
+        &ManagerInput::Key {
+            keycode: SHIFT_LEFT_KEYCODE,
+            pressed: false,
+            time: 5001,
+        },
+    );
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    assert!(
+        f.client_a.keys.is_empty(),
+        "consumed modifier release is not client input"
+    );
+    assert!(
+        f.client_a.keyboard_modifiers.is_empty(),
+        "the shield emits no modifier event"
+    );
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    assert_eq!(f.client_a.keys, [(R_KEYCODE, true), (R_KEYCODE, false)]);
+    assert_eq!(
+        f.client_a.keyboard_modifiers,
+        [(0, 0, 0, 0)],
+        "the next client event synchronizes the consumed modifier change"
     );
     assert_eq!(f.manager.model().focused(), Some(f.id_a));
 }
