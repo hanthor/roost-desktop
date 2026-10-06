@@ -1355,6 +1355,38 @@ fn paged_grid(pages: Vec<gtk::FlowBox>, reflow: Rc<GridReflow>) -> gtk::Widget {
         repeat: RefCell::new(None),
         overshoot: Cell::new(-1.0),
     });
+    // A drag begun inside a tile does not necessarily cross the overlay's
+    // drop controller before its preview is needed. Own local hint lifetime
+    // from the actual DragSource signals; motion still handles external drops.
+    for page in &pages {
+        let mut pending = vec![page.clone().upcast::<gtk::Widget>()];
+        while let Some(widget) = pending.pop() {
+            let mut child = widget.first_child();
+            while let Some(next) = child {
+                child = next.next_sibling();
+                pending.push(next);
+            }
+            let controllers = widget.observe_controllers();
+            for index in 0..controllers.n_items() {
+                let Some(source) = controllers.item(index).and_downcast::<gtk::DragSource>() else {
+                    continue;
+                };
+                let weak = Rc::downgrade(&pager);
+                let area = overlay.downgrade();
+                source.connect_drag_begin(move |_, _| {
+                    if let (Some(pager), Some(area)) = (weak.upgrade(), area.upgrade()) {
+                        pager.begin(area.width());
+                    }
+                });
+                let weak = Rc::downgrade(&pager);
+                source.connect_drag_end(move |_, _, _| {
+                    if let Some(pager) = weak.upgrade() {
+                        pager.end();
+                    }
+                });
+            }
+        }
+    }
     let sync = {
         // Carousel owns this callback. Indicator click callbacks and the
         // pager reference Carousel, so strong captures would retain the grid.
