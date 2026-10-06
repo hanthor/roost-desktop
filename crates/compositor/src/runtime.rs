@@ -1036,6 +1036,10 @@ impl Runtime {
     /// breaking Super-combos); only Escape-closes is consumed, so a
     /// closing keypress never double-acts on client UI.
     fn on_manager_input(&mut self, input: ManagerInput) {
+        // A Super+L release can arrive after the lock takes ownership, or
+        // before its surface maps. Consumed input must still clear modifier
+        // holds, otherwise an ordinary post-unlock click becomes Super+drag.
+        self.manager.note_modifiers(&input);
         // CI-only count markers locate missing pointer delivery without
         // recording button codes, key values or credential input.
         if !self.is_locked()
@@ -1059,6 +1063,8 @@ impl Runtime {
                 .and_then(|name| self.state.lock_surface_for(&name));
             if let Some(surface) = surface {
                 self.manager.lock_input(&mut self.state, &surface, input);
+            } else {
+                self.manager.discard_key_input(&mut self.state, &input);
             }
             // Media keys still work on the lock screen, as in GNOME.
             for (action, time, mode) in self.manager.take_accelerators_fired() {
@@ -1067,6 +1073,7 @@ impl Runtime {
             return;
         }
         if waking_blank {
+            self.manager.discard_key_input(&mut self.state, &input);
             // Activity cancels the idle shield; the wake event belongs to
             // that shield, not the previously focused application.
             return;
@@ -1158,6 +1165,7 @@ impl Runtime {
             }
             return;
         }
+        self.manager.discard_key_input(&mut self.state, &input);
         let ManagerInput::Key {
             keycode,
             pressed: true,

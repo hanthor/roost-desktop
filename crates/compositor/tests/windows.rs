@@ -2870,3 +2870,83 @@ fn strip_columns_resize_on_primary_output_failover_without_losing_focus() {
     assert_eq!(f.manager.model().focused(), focused);
     assert_eq!(f.manager.model().active_workspace(), workspace);
 }
+
+#[test]
+fn modifier_releases_during_lock_do_not_turn_unlocked_clicks_into_moves() {
+    for mapped_lock in [true, false] {
+        let mut f = two_windows();
+        press(&mut f.manager, &mut f.comp, SUPER_LEFT_KEYCODE);
+        let release = ManagerInput::Key {
+            keycode: SUPER_LEFT_KEYCODE,
+            pressed: false,
+            time: 5001,
+        };
+        if mapped_lock {
+            let surface = f.manager.surface_of(f.id_a).unwrap();
+            f.manager.lock_input(&mut f.comp.state, &surface, release);
+        } else {
+            // The runtime observes releases even before a lock surface maps;
+            // no client receives this otherwise-consumed event.
+            f.manager.discard_key_input(&mut f.comp.state, &release);
+        }
+        assert!(f
+            .comp
+            .state
+            .seat
+            .get_keyboard()
+            .unwrap()
+            .pressed_keys()
+            .is_empty());
+        f.manager
+            .pointer_motion(&mut f.comp.state, beta_only(), 5002);
+        f.manager
+            .pointer_button(&mut f.comp.state, BTN_LEFT, true, 5003);
+        f.manager
+            .pointer_button(&mut f.comp.state, BTN_LEFT, false, 5004);
+        pump(&mut f.comp, &mut f.queue_b, &mut f.client_b, |c| {
+            c.pointer_buttons.len() >= 2
+        });
+        assert_eq!(
+            f.client_b.pointer_buttons,
+            vec![(BTN_LEFT, true), (BTN_LEFT, false)]
+        );
+        assert_eq!(f.manager.model().focused(), Some(f.id_b));
+    }
+}
+
+#[test]
+fn swallowed_accelerator_release_clears_physical_pressed_state() {
+    use roost_shell_control::{Accelerator, MODE_NORMAL};
+    let mut f = two_windows();
+    f.manager.set_accelerators(vec![Accelerator {
+        action: 23,
+        keysym: u32::from(b'r'),
+        mods: 0,
+        modes: MODE_NORMAL,
+    }]);
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(
+        f.manager.take_accelerators_fired(),
+        [(23, 5000, MODE_NORMAL)]
+    );
+    assert_eq!(
+        f.comp
+            .state
+            .seat
+            .get_keyboard()
+            .unwrap()
+            .pressed_keys()
+            .len(),
+        1
+    );
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert!(f
+        .comp
+        .state
+        .seat
+        .get_keyboard()
+        .unwrap()
+        .pressed_keys()
+        .is_empty());
+    assert!(f.manager.take_accelerators_fired().is_empty());
+}
