@@ -113,6 +113,8 @@ pub struct DrmBackend {
     pub active: bool,
     sleep_reset_pending: bool,
     wake_flip_cutoff: Option<std::time::Duration>,
+    /// WAKE-DBG: post-reset rendered frame count for temporary diagnostics.
+    pub(crate) wake_dbg_frames: u64,
     pointer: Point<f64, Logical>,
     ctrl: bool,
     alt: bool,
@@ -383,6 +385,7 @@ impl DrmBackend {
                 active: true,
                 sleep_reset_pending: false,
                 wake_flip_cutoff: None,
+                wake_dbg_frames: 0,
                 pointer: (
                     f64::from(first_loc.0) + f64::from(first_w) / 2.0,
                     f64::from(first_loc.1) + f64::from(first_h) / 2.0,
@@ -454,6 +457,8 @@ impl DrmBackend {
         self.wake_flip_cutoff = Some(std::time::Duration::from(
             smithay::utils::Clock::<smithay::utils::Monotonic>::new().now(),
         ));
+        // WAKE-DBG: temporary resume diagnostics.
+        self.wake_dbg_frames = 0;
         eprintln!("roost-compositor: drm: system wake scanout reset");
         // Pending and queued flips can be lost across S3. Drop both without
         // submitting an old queued scene or claiming presentation. Ordinary

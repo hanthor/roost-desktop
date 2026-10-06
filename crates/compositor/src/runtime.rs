@@ -3016,7 +3016,10 @@ impl Runtime {
                 }
                 let pointer = drm.pointer();
                 let crate::drm::DrmBackend {
-                    renderer, outputs, ..
+                    renderer,
+                    outputs,
+                    wake_dbg_frames,
+                    ..
                 } = &mut **drm;
                 // What each output's frame draws, for presentation
                 // feedback at its page flip (#89): a surface belongs to
@@ -3031,6 +3034,20 @@ impl Runtime {
                 };
                 let mut queued = false;
                 for (index, out) in outputs.iter_mut().enumerate() {
+                    // WAKE-DBG: temporary resume diagnostics (first frames).
+                    if *wake_dbg_frames < 30 {
+                        *wake_dbg_frames += 1;
+                        eprintln!(
+                            "roost-compositor: drm: WAKE-DBG scene {} locked={} blank_alpha={:.2} bg=({:.2},{:.2},{:.2}) pending={}",
+                            out.name,
+                            locked,
+                            blank_alpha,
+                            background.r(),
+                            background.g(),
+                            background.b(),
+                            out.pending,
+                        );
+                    }
                     // Display-paced: one frame in flight per output.
                     if out.pending {
                         continue;
@@ -3052,6 +3069,14 @@ impl Runtime {
                     let lock_surface = locked
                         .then(|| self.state.lock_surface_for(&out.name))
                         .flatten();
+                    // WAKE-DBG: temporary resume diagnostics.
+                    if *wake_dbg_frames <= 30 {
+                        eprintln!(
+                            "roost-compositor: drm: WAKE-DBG lock_surface {} present={}",
+                            out.name,
+                            lock_surface.is_some(),
+                        );
+                    }
                     let mut elements = scene_elements(
                         renderer,
                         &self.manager,
