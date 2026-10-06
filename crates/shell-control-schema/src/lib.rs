@@ -782,6 +782,88 @@ pub enum SwitcherAction {
     Cycle { forward: bool, group: bool },
 }
 
+/// Unified error type for the control protocol, spoken by both compositor
+/// and shell-host endpoints.
+///
+/// This type spans wire-level failures (Io, Decode, Unexpected), semantic
+/// protocol violations (Remote, WouldBlock), and application-level failures
+/// (NoActiveWindow). Both peers use this type so errors are consistently
+/// named across the channel boundary and callers can handle either side's
+/// failures uniformly.
+///
+/// Nonblocking contract (spec R6): `WouldBlock` surfaces immediately when
+/// a socket is not ready; on write backpressure, the connection should be
+/// dropped rather than retried (a partial frame may remain buffered).
+/// Not `Clone`/`PartialEq`: the `Io` variant carries [`std::io::Error`],
+/// which implements neither. Match on `Io(e) if e.kind() == ...` instead of
+/// comparing errors for equality.
+#[derive(Debug)]
+pub enum ControlError {
+    /// Underlying socket I/O failure.
+    Io(std::io::Error),
+    /// Frame failed schema validation (oversize, malformed, stale major,
+    /// over-long title). The offending frame is dropped.
+    Decode(DecodeError),
+    /// Nonblocking socket not ready (spec R6). On a write that returns
+    /// this, the connection holds a partial frame and must be dropped.
+    WouldBlock,
+    /// Peer closed the connection or sent a message the current step
+    /// cannot use (unexpected or out-of-order).
+    Unexpected(String),
+    /// The peer (compositor when called from shell-host) answered with a
+    /// typed [`Message::Error`] where a response was required.
+    Remote {
+        /// Machine-readable category.
+        kind: ErrorKind,
+        /// Compositor diagnostics (never sensitive content).
+        message: String,
+    },
+    /// Application-level constraint violated: e.g., a shell-host command
+    /// like `send_activation` needs a selected window but none exists.
+    AppConstraint(String),
+}
+
+impl std::fmt::Display for ControlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "control socket I/O: {e}"),
+            Self::Decode(e) => write!(f, "control decode: {e}"),
+            Self::WouldBlock => write!(f, "control socket not ready"),
+            Self::Unexpected(e) => write!(f, "unexpected message or state: {e}"),
+            Self::Remote { kind, message } => {
+                write!(f, "remote error ({kind:?}): {message}")
+            }
+            Self::AppConstraint(e) => write!(f, "constraint: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ControlError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            Self::Decode(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for ControlError {
+    fn from(e: std::io::Error) -> Self {
+        if e.kind() == std::io::ErrorKind::WouldBlock {
+            Self::WouldBlock
+        } else {
+            Self::Io(e)
+        }
+    }
+}
+
+impl From<DecodeError> for ControlError {
+    fn from(e: DecodeError) -> Self {
+        Self::Decode(e)
+    }
+}
+
 /// Compositor-minted activation Bearer [REDACTED] authorizing one privileged window action.
 ///
 /// Opaque to the shell: minting, expiry (30 s), one-use removal, seat
@@ -1377,5 +1459,128 @@ mod tests {
     fn token_debug_is_redacted() {
         let shown = format!("{:?}", sample_token());
         assert!(!shown.contains("opaque-token-123"), "token leaked: {shown}");
+    }
+
+    #[test]
+    fn control_error_display_io() {
+        let err = ControlError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "connection refused",
+        ));
+        let shown = format!("{err}");
+        assert!(shown.contains("control socket I/O"));
+    }
+
+    #[test]
+    fn control_error_display_decode() {
+        let decode_err = DecodeError::Truncated {
+            expected: 100,
+            actual: 50,
+        };
+        let err = ControlError::Decode(decode_err);
+        let shown = format!("{err}");
+        assert!(shown.contains("control decode"));
+    }
+
+    #[test]
+    fn control_error_display_would_block() {
+        let err = ControlError::WouldBlock;
+        let shown = format!("{err}");
+        assert!(shown.contains("control socket not ready"));
+    }
+
+    #[test]
+    fn control_error_display_unexpected() {
+        let err = ControlError::Unexpected("out of order".to_owned());
+        let shown = format!("{err}");
+        assert!(shown.contains("unexpected message or state"));
+        assert!(shown.contains("out of order"));
+    }
+
+    #[test]
+    fn control_error_display_remote() {
+        let err = ControlError::Remote {
+            kind: ErrorKind::RevisionGap,
+            message: "revision 5 needed".to_owned(),
+        };
+        let shown = format!("{err}");
+        assert!(shown.contains("remote error"));
+        assert!(shown.contains("revision 5 needed"));
+    }
+
+    #[test]
+    fn control_error_display_app_constraint() {
+        let err = ControlError::AppConstraint("no active window".to_owned());
+        let shown = format!("{err}");
+        assert!(shown.contains("constraint"));
+        assert!(shown.contains("no active window"));
+    }
+
+    #[test]
+    fn control_error_from_io_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied");
+        let err: ControlError = io_err.into();
+        assert!(matches!(err, ControlError::Io(_)));
+    }
+
+    #[test]
+    fn control_error_from_would_block_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::WouldBlock, "would block");
+        let err: ControlError = io_err.into();
+        assert!(matches!(err, ControlError::WouldBlock));
+    }
+
+    #[test]
+    fn control_error_from_decode_error() {
+        let decode_err = DecodeError::Oversize {
+            len: 2_000_000,
+            max: MAX_FRAME_BYTES,
+        };
+        let err: ControlError = decode_err.into();
+        assert!(matches!(err, ControlError::Decode(_)));
+    }
+
+    #[test]
+    fn control_error_source_io() {
+        use std::error::Error;
+        let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken pipe");
+        let err = ControlError::Io(io_err);
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn control_error_source_decode() {
+        use std::error::Error;
+        let decode_err = DecodeError::Malformed(postcard::Error::DeserializeBadEncoding);
+        let err = ControlError::Decode(decode_err);
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn control_error_source_other_variants() {
+        use std::error::Error;
+        let err = ControlError::WouldBlock;
+        assert!(err.source().is_none());
+        let err = ControlError::Unexpected("test".to_owned());
+        assert!(err.source().is_none());
+        let err = ControlError::AppConstraint("test".to_owned());
+        assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn activation_token_debug_is_redacted() {
+        let token = ActivationToken::new("secret-token-xyz".to_owned());
+        let shown = format!("{:?}", token);
+        assert!(!shown.contains("secret-token-xyz"), "token leaked: {shown}");
+        assert!(shown.contains("redacted"));
+    }
+
+    #[test]
+    fn activation_token_equality() {
+        let token1 = ActivationToken::new("token123".to_owned());
+        let token2 = ActivationToken::new("token123".to_owned());
+        let token3 = ActivationToken::new("other".to_owned());
+        assert_eq!(token1, token2);
+        assert_ne!(token1, token3);
     }
 }
