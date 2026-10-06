@@ -32,6 +32,15 @@ use wayland_protocols::xdg::{
     },
 };
 
+use wayland_protocols::xdg::toplevel_icon::v1::client::{
+    xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1, xdg_toplevel_icon_v1::XdgToplevelIconV1,
+};
+wayland_client::delegate_noop!(Client: ignore XdgToplevelIconManagerV1);
+wayland_client::delegate_noop!(Client: ignore XdgToplevelIconV1);
+wayland_client::delegate_noop!(Client: ignore wayland_client::protocol::wl_shm::WlShm);
+wayland_client::delegate_noop!(Client: ignore wayland_client::protocol::wl_shm_pool::WlShmPool);
+wayland_client::delegate_noop!(Client: ignore wayland_client::protocol::wl_buffer::WlBuffer);
+
 const ROUNDS: usize = 200;
 
 /// Every global a client sees on a headless compositor, by version.
@@ -54,6 +63,7 @@ const EXPECTED: &[(&str, u32)] = &[
     ("wp_viewporter", 1),
     ("xdg_activation_v1", 1),
     ("xdg_system_bell_v1", 1),
+    ("xdg_toplevel_icon_manager_v1", 1),
     ("xdg_toplevel_tag_manager_v1", 1),
     ("xdg_wm_base", 6),
     ("xdg_wm_dialog_v1", 1),
@@ -78,6 +88,8 @@ struct Client {
     seat: Option<WlSeat>,
     wm: Option<XdgWmBase>,
     activation: Option<XdgActivationV1>,
+    icons: Option<XdgToplevelIconManagerV1>,
+    shm: Option<wayland_client::protocol::wl_shm::WlShm>,
     keyboard_serial: Option<u32>,
     token: Option<String>,
 }
@@ -101,7 +113,11 @@ impl Dispatch<WlRegistry, ()> for Client {
                 "wl_compositor" => {
                     state.compositor = Some(registry.bind(name, version.min(6), qh, ()))
                 }
+                "wl_shm" => state.shm = Some(registry.bind(name, 1, qh, ())),
                 "wl_seat" => state.seat = Some(registry.bind(name, version.min(7), qh, ())),
+                "xdg_toplevel_icon_manager_v1" => {
+                    state.icons = Some(registry.bind(name, 1, qh, ()))
+                }
                 "xdg_wm_base" => state.wm = Some(registry.bind(name, 1, qh, ())),
                 "xdg_activation_v1" => state.activation = Some(registry.bind(name, 1, qh, ())),
                 _ => {}
@@ -411,4 +427,78 @@ fn background_clients_and_serial_less_tokens_cannot_steal_focus() {
         .activate(token, &back_window);
     pump(&mut comp, &mut manager, &mut [&mut back, &mut front]);
     assert_eq!(focused_title(&manager).as_deref(), Some("front"));
+}
+
+#[test]
+fn toplevel_icon_assignment_is_double_buffered_and_survives_resource_destroy() {
+    let mut comp = TestCompositor::new();
+    let mut manager = comp.window_manager();
+    let mut peer = connect(&mut comp);
+    pump(&mut comp, &mut manager, &mut [&mut peer]);
+    let qh = peer.queue.handle();
+    let surface = peer
+        .client
+        .compositor
+        .as_ref()
+        .unwrap()
+        .create_surface(&qh, ());
+    let xdg = peer
+        .client
+        .wm
+        .as_ref()
+        .unwrap()
+        .get_xdg_surface(&surface, &qh, ());
+    let top = xdg.get_toplevel(&qh, ());
+    surface.commit();
+    pump(&mut comp, &mut manager, &mut [&mut peer]);
+    let icons = peer.client.icons.as_ref().unwrap();
+    let icon = icons.create_icon(&qh, ());
+    icon.set_name("utilities-terminal".into());
+    use std::io::Write;
+    use std::os::fd::AsFd;
+    let mut file = tempfile::tempfile().unwrap();
+    file.write_all(&0xff123456u32.to_ne_bytes()).unwrap();
+    let pool = peer
+        .client
+        .shm
+        .as_ref()
+        .unwrap()
+        .create_pool(file.as_fd(), 4, &qh, ());
+    let buffer = pool.create_buffer(
+        0,
+        1,
+        1,
+        4,
+        wayland_client::protocol::wl_shm::Format::Argb8888,
+        &qh,
+        (),
+    );
+    icon.add_buffer(&buffer, 1);
+    icons.set_icon(&top, Some(&icon));
+    icon.destroy();
+    pump(&mut comp, &mut manager, &mut [&mut peer]);
+    assert!(manager.model().windows().next().unwrap().icon.is_none());
+    surface.commit();
+    pump(&mut comp, &mut manager, &mut [&mut peer]);
+    let path = manager
+        .model()
+        .windows()
+        .next()
+        .unwrap()
+        .icon
+        .clone()
+        .unwrap();
+    assert!(path.starts_with('/'));
+    assert_eq!(
+        image::open(path).unwrap().to_rgba8().as_raw(),
+        &[0x12, 0x34, 0x56, 255]
+    );
+    buffer.destroy();
+    pump(&mut comp, &mut manager, &mut [&mut peer]);
+    peer.client.icons.as_ref().unwrap().set_icon(&top, None);
+    pump(&mut comp, &mut manager, &mut [&mut peer]);
+    assert!(manager.model().windows().next().unwrap().icon.is_some());
+    surface.commit();
+    pump(&mut comp, &mut manager, &mut [&mut peer]);
+    assert!(manager.model().windows().next().unwrap().icon.is_none());
 }

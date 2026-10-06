@@ -47,7 +47,11 @@ PY=/usr/bin/python3
 
 OWNED_XVFB=""
 COMPOSITOR_PID=""
+NATIVE_PID=""
+X11_PID=""
 cleanup() {
+    if [ -n "$X11_PID" ]; then kill "$X11_PID" 2>/dev/null || true; fi
+    if [ -n "$NATIVE_PID" ]; then kill "$NATIVE_PID" 2>/dev/null || true; fi
     if [ -n "$COMPOSITOR_PID" ]; then kill "$COMPOSITOR_PID" 2>/dev/null || true; fi
     if [ -n "$OWNED_XVFB" ]; then kill "$OWNED_XVFB" 2>/dev/null || true; fi
 }
@@ -82,10 +86,13 @@ if [ -x /usr/libexec/at-spi-bus-launcher ]; then
 fi
 [ -n "$DISPLAY_ARG" ] && DISPLAY="$DISPLAY_ARG" && export DISPLAY
 if ! xdotool getdisplaygeometry >/dev/null 2>&1; then
-    DISPLAY=":95"
-    export DISPLAY
-    Xvfb "$DISPLAY" -screen 0 "${WIDTH}x${HEIGHT}x24" >"$ARTIFACTS/xvfb.log" 2>&1 &
+    Xvfb -displayfd 3 -screen 0 "${WIDTH}x${HEIGHT}x24" \
+        3>"$ARTIFACTS/xvfb-display" >"$ARTIFACTS/xvfb.log" 2>&1 &
     OWNED_XVFB=$!
+    for _ in $(seq 1 30); do [ -s "$ARTIFACTS/xvfb-display" ] && break; sleep 1; done
+    [ -s "$ARTIFACTS/xvfb-display" ] || fail S-LOGICAL "Xvfb did not allocate a display"
+    DISPLAY=":$(cat "$ARTIFACTS/xvfb-display")"
+    export DISPLAY
     for _ in $(seq 1 30); do xdotool getdisplaygeometry >/dev/null 2>&1 && break; sleep 1; done
 fi
 
@@ -121,6 +128,7 @@ pass S-PANEL "the top bar is $bar physical pixels tall at scale $SCALE"
 SOCKET_NAME="$(sed -n 's/.*nested session on \([^ ]*\) .*/\1/p' "$LOG" | head -1)"
 WAYLAND_DISPLAY="$SOCKET_NAME" "$PY" "$ROOT/scripts/lib/roost-test-window.py" Alpha "#3584e4" \
     >"$ARTIFACTS/window-Alpha.log" 2>&1 &
+NATIVE_PID=$!
 cstate '.windows | any(.app_id == "roost-test-alpha")' "window" ||
     fail S-WINDOW "the test window never mapped"
 sleep 2
@@ -149,6 +157,43 @@ scrot "$ARTIFACTS/03-menu.png" >/dev/null
 jq -e 'any(.[]; .name == "Popover content" and .showing)' "$ARTIFACTS/a11y-alpha.json" >/dev/null ||
     fail S-INPUT "a click at the menu button's physical position did not open it"
 pass S-INPUT "a click at a control's physical position reaches it"
+
+# The same output must map an actual X11 buffer and its pointer coordinates.
+# A delivered GTK button click, rather than a synthetic accessibility action,
+# is the only path that increments the private count file.
+xdotool key Escape
+xdisplay="$(jq -r '.x11_display // empty' "$CSTATE")"
+[ -n "$xdisplay" ] || fail S-X11-WINDOW "default build did not advertise XWayland"
+DISPLAY="$xdisplay" "$PY" "$ROOT/scripts/lib/roost-scale-x11-window.py" \
+    "$ARTIFACTS/x11-clicks.txt" >"$ARTIFACTS/window-X11.log" 2>&1 &
+X11_PID=$!
+cstate '.x11_ready and any(.windows[]; .app_id == "roost-scale-x11")' "X11 mapped" ||
+    fail S-X11-WINDOW "the genuine X11 client did not map"
+sleep 2
+scrot "$ARTIFACTS/04-x11.png" >/dev/null
+rect="$(jq -r '.windows[] | select(.app_id == "roost-scale-x11") | .rect | "\(.[0]) \(.[1]) \(.[2]) \(.[3])"' "$CSTATE")"
+# shellcheck disable=SC2086
+set -- $rect
+wx=$1 wy=$2 ww=$3 wh=$4
+cx="$(phys "$((wx + ww / 3))")"
+cy="$(phys "$((wy + wh / 3))")"
+rgb="$(px "$ARTIFACTS/04-x11.png" "$cx" "$cy")"
+# shellcheck disable=SC2086
+set -- $rgb
+if [ "$1" -lt 150 ] || [ "$2" -gt 130 ] || [ "$3" -lt 150 ]; then
+    fail S-X11-WINDOW "X11 body at scaled position ($cx,$cy) is $rgb, not magenta"
+fi
+pass S-X11-WINDOW "genuine X11 buffer paints at scale $SCALE"
+xdotool mousemove --window "$WID" "$cx" "$cy" click 1
+end=$(($(date +%s) + 10))
+while [ "$(cat "$ARTIFACTS/x11-clicks.txt" 2>/dev/null || true)" != 1 ]; do
+    [ "$(date +%s)" -le "$end" ] || fail S-X11-INPUT "physical click missed the X11 control"
+    sleep 0.2
+done
+sleep 0.5
+scrot "$ARTIFACTS/05-x11-click.png" >/dev/null
+cp "$CSTATE" "$ARTIFACTS/scaled-native-x11-state.json"
+pass S-X11-INPUT "physical pointer coordinates reached the X11 button at scale $SCALE"
 
 grep -q panicked "$LOG" && fail S-NOPANIC "panic in nested log"
 echo "roost-scale-proof: OK, artifacts in $ARTIFACTS"

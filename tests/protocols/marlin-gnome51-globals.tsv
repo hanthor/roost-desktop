@@ -1,0 +1,50 @@
+# GNOME Shell/Mutter 51.0 on native Marlin QEMU/KVM, run37196669447.
+# Raw capture: tests/protocols/marlin-gnome-wayland-info.txt.
+# Captured versions replace assumptions only when actually observed.
+# Source-only rows retain the original headless reference floors; absent
+# syncobj and Xwayland-private globals have not been measured here.
+# Policy is inherited from gnome51-globals.tsv; known gaps are explicit.
+# interface\tGNOME version\tsource\troost expectation
+wl_compositor	6	capture	match
+wl_shm	2	capture	match
+wl_output	4	capture	match
+zxdg_output_manager_v1	3	capture	match
+wl_data_device_manager	3	capture	match
+xdg_toplevel_drag_manager_v1	1	capture	gap:#89
+zwp_primary_selection_device_manager_v1	1	capture	match
+wl_subcompositor	1	capture	match
+xdg_wm_base	7	capture	min:6
+gtk_shell1	7	capture	absent:not planned, GTK4 needs none of it
+wp_viewporter	1	capture	match
+wp_fractional_scale_manager_v1	1	capture	match
+zwp_pointer_gestures_v1	3	capture	match
+zwp_tablet_manager_v2	2	capture	gap:#89
+wp_pointer_warp_v1	1	capture	match
+wl_seat	10	capture	min:9
+zwp_relative_pointer_manager_v1	1	capture	match
+zwp_pointer_constraints_v1	1	capture	match
+zxdg_exporter_v2	1	capture	match
+zxdg_importer_v2	1	capture	match
+zxdg_exporter_v1	1	capture	gap:#61
+zxdg_importer_v1	1	capture	gap:#61
+zwp_linux_dmabuf_v1	3	capture	match
+wp_single_pixel_buffer_manager_v1	1	capture	match
+zwp_keyboard_shortcuts_inhibit_manager_v1	1	capture	match
+zwp_text_input_manager_v3	2	capture	min:1
+wp_presentation	2	capture	match
+xdg_activation_v1	1	capture	match
+zwp_idle_inhibit_manager_v1	1	capture	match
+xdg_wm_dialog_v1	1	capture	match
+wp_color_manager_v1	2	capture	gap:#89
+xdg_session_manager_v1	1	capture	gap:#89
+xdg_system_bell_v1	1	capture	match
+xdg_toplevel_tag_manager_v1	1	capture	match
+wp_commit_timing_manager_v1	1	capture	match
+wp_fifo_manager_v1	1	capture	match
+wp_cursor_shape_manager_v1	2	capture	match
+wp_color_representation_manager_v1	1	capture	gap:#89
+ext_background_effect_manager_v1	1	capture	gap:#89
+wl_fixes	1	capture	gap:#89
+wp_drm_lease_device_v1	1	capture	gap:#89
+wp_linux_drm_syncobj_manager_v1	1	source	gap:#89
+zwp_xwayland_keyboard_grab_manager_v1	1	source	gap:#89
