@@ -242,11 +242,19 @@ impl Dispatch<WlKeyboard, ()> for Client {
                 key,
                 matches!(key_state, WEnum::Value(ClientKeyState::Pressed)),
             )),
-            KeyEvent::Enter { keys, .. } => state.keyboard_enters.push(
-                keys.chunks_exact(4)
-                    .map(|bytes| u32::from_ne_bytes(bytes.try_into().unwrap()))
-                    .collect(),
-            ),
+            KeyEvent::Enter { keys, .. } => {
+                let (chunks, remainder) = keys.as_chunks::<4>();
+                assert!(
+                    remainder.is_empty(),
+                    "wl_keyboard enter carries whole key codes"
+                );
+                state.keyboard_enters.push(
+                    chunks
+                        .iter()
+                        .map(|bytes| u32::from_ne_bytes(*bytes))
+                        .collect(),
+                );
+            }
             KeyEvent::Modifiers {
                 mods_depressed,
                 mods_latched,
