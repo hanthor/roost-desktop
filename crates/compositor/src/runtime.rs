@@ -543,6 +543,8 @@ pub struct Runtime {
     state_last: String,
     /// Opt-in synthetic touchpad phases for the nested proof harness.
     proof_swipe_last: String,
+    #[cfg(feature = "drm")]
+    performance_trace: crate::performance_trace::Trace,
 }
 
 /// Control socket path for a session: alongside the Wayland socket in the
@@ -878,6 +880,8 @@ impl Runtime {
                 .filter(|p| p.is_absolute()),
             state_last: String::new(),
             proof_swipe_last: String::new(),
+            #[cfg(feature = "drm")]
+            performance_trace: crate::performance_trace::Trace::from_env(),
         };
         // Reserve and advertise sockets, but spawn only when a real X11
         // client connects. Native clients do not start a compatibility process.
@@ -956,6 +960,8 @@ impl Runtime {
     /// snapshots), overview dismissed, and the exclusive lock surface
     /// up with an empty list — no window titles while locked.
     fn engage_lock(&mut self) {
+        #[cfg(feature = "drm")]
+        self.performance_trace.cancel();
         self.lock.lock();
         self.control.set_locked(true);
         let remote_ids: Vec<_> = self.remote_held.keys().copied().collect();
@@ -1141,7 +1147,14 @@ impl Runtime {
             };
             match action {
                 TriggerAction::None => {}
-                TriggerAction::Toggle => self.control.set_overview(!self.control.overview_open()),
+                TriggerAction::Toggle => {
+                    self.control.set_overview(!self.control.overview_open());
+                    #[cfg(feature = "drm")]
+                    if matches!(self.backend, Backend::Drm(_)) {
+                        self.performance_trace
+                            .input(Duration::from(self.state.presentation_now()));
+                    }
+                }
                 TriggerAction::Open => self.control.set_overview(true),
             }
             self.manager.on_input(&mut self.state, input);
@@ -2885,6 +2898,7 @@ impl Runtime {
             );
         }
         if flip.primary {
+            self.performance_trace.presented(flip.time, flip.sequence);
             let roots = crate::frame_timing::frame_roots(&self.state, &self.manager);
             self.state.refresh_cycle(&roots, time, flip.refresh);
         }
@@ -2899,6 +2913,10 @@ impl Runtime {
     /// no wallpaper — over a dark lock background.
     fn render(&mut self) -> Result<(), RuntimeError> {
         let locked = self.is_locked();
+        #[cfg(feature = "drm")]
+        if locked {
+            self.performance_trace.cancel();
+        }
         let blank_alpha = self.blank_alpha();
         let show_content = content_visible(locked);
         let overlay_visible = self.overlay.visible;
@@ -3037,6 +3055,7 @@ impl Runtime {
             #[cfg(feature = "drm")]
             Backend::Drm(drm) => {
                 if !drm.scanout_ready() {
+                    self.performance_trace.cancel();
                     return Ok(());
                 }
                 let pointer = drm.pointer();
@@ -3251,6 +3270,10 @@ impl Runtime {
                     }
                     out.trace_wake_submission();
                     out.pending = true;
+                    if index == 0 {
+                        self.performance_trace
+                            .queued(Duration::from(self.state.presentation_now()));
+                    }
                     out.last_frame = Some(signature);
                     queued = true;
                 }
