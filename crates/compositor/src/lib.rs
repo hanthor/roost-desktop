@@ -1031,6 +1031,29 @@ impl State {
         )
     }
 
+    /// Bounding logical desktop dimensions, independent of the primary output.
+    /// Negative origins are translated to the desktop bounding box for size.
+    pub fn desktop_size(&self) -> (i32, i32) {
+        let bounds = self
+            .outputs
+            .iter()
+            .filter(|e| e.size.w > 0 && e.size.h > 0)
+            .map(|e| {
+                let x = i64::from(e.loc.0);
+                let y = i64::from(e.loc.1);
+                (x, y, x + i64::from(e.size.w), y + i64::from(e.size.h))
+            })
+            .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)));
+        bounds
+            .map(|(left, top, right, bottom)| {
+                (
+                    (right - left).min(i64::from(i32::MAX)) as i32,
+                    (bottom - top).min(i64::from(i32::MAX)) as i32,
+                )
+            })
+            .unwrap_or((0, 0))
+    }
+
     /// Shell-facing output inventory.
     pub fn output_infos(&self) -> Vec<roost_shell_control::OutputInfo> {
         let mut entries: Vec<&OutputEntry> = self.outputs.iter().collect();

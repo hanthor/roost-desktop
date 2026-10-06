@@ -3267,16 +3267,33 @@ apply_display() {
         -- 0 "$1" "[(0, 0, $2, uint32 0, true, [('roost-0', '${WIDTH}x${HEIGHT}@60.000', @a{sv} {})])]" \
         "@a{sv} {}" >>"$ARTIFACTS/display-settings.log" 2>&1
 }
+# The observer must subscribe before the actual display configuration changes.
+python3 "$ROOT/scripts/lib/roost-introspect-size-client.py" \
+    "$ARTIFACTS/introspect-size.json" "$WIDTH" "$HEIGHT" \
+    >"$ARTIFACTS/introspect-size.log" 2>&1 &
+SIZE_CLIENT=$!
+wait_size_marker() {
+    for _ in $(seq 1 100); do
+        [ ! -f "$ARTIFACTS/introspect-size.json.$1" ] || return 0
+        kill -0 "$SIZE_CLIENT" 2>/dev/null || return 1
+        sleep 0.1
+    done
+    return 1
+}
+wait_size_marker ready || fail G-INTROSPECT-SIZE "D-Bus desktop-size observer did not subscribe"
 apply_display 2 1.25 || fail G-DISPLAY-SETTINGS "ApplyMonitorsConfig failed: $(tail -2 "$ARTIFACTS/display-settings.log")"
 cstate '.layers | any(.namespace == "roost-panel" and .rect[2] == 1024)' "125 percent" ||
     fail G-DISPLAY-SETTINGS "the layout did not follow scale 1.25"
 grep -q '<scale>1.25</scale>' "$XDG_CONFIG_HOME/roost/monitors.xml" 2>/dev/null ||
     fail G-DISPLAY-SETTINGS "the arrangement was not saved to roost/monitors.xml"
 scrot "$ARTIFACTS/24-scale-125.png" >/dev/null
+wait_size_marker scaled || fail G-INTROSPECT-SIZE "scaled property and notification did not reach the real client"
 apply_display 1 1 || fail G-DISPLAY-SETTINGS "restoring scale 1 failed"
 cstate ".layers | any(.namespace == \"roost-panel\" and .rect[2] == $WIDTH)" "100 percent" ||
     fail G-DISPLAY-SETTINGS "the layout did not return to scale 1"
 pass G-DISPLAY-SETTINGS "ApplyMonitorsConfig changes the scale live and saves it"
+wait "$SIZE_CLIENT" || fail G-INTROSPECT-SIZE "restored desktop size did not reach the D-Bus client"
+pass G-INTROSPECT-SIZE "initial desktop size and two actual scale-change notifications agree"
 
 # Power (#62), against the logind stub (restarted: G-QS-ABSENT stopped
 # it). The proof runs the shell as a hardware session for the full menu.
