@@ -3009,6 +3009,7 @@ pass G-SCREENSHOT-UI "Print opens GNOME's screenshot UI; Screen and Capture save
 # Drive the real exclusive-keyboard overlay and inspect the saved PNG,
 # rather than treating a preference write or geometry helper as UI proof.
 while IFS='|' read -r shot_keys shot_dims shot_position shot_label; do
+    shot_workspace="$(jq -r '.active_workspace' "$CSTATE")"
     sleep 1.1 # GNOME filenames have one-second resolution.
     marker="$ARTIFACTS/shot-keys-$shot_label.marker"
     touch "$marker"
@@ -3027,6 +3028,8 @@ while IFS='|' read -r shot_keys shot_dims shot_position shot_label; do
     showing "$ARTIFACTS/a11y-shot-keys-$shot_label-result.json" \
         "Selected area at x ${shot_position%,*}, y ${shot_position#*,}, width ${shot_dims%,*}, height ${shot_dims#*,}" ||
         fail G-SCREENSHOT-KEYS "$shot_label did not move/resize to the expected area"
+    cstate ".active_workspace == $shot_workspace and (.overview_open | not)" "screenshot keeps workspace" ||
+        fail G-SCREENSHOT-KEYS "$shot_label navigation escaped into desktop shortcuts"
     scrot "$ARTIFACTS/shot-keys-$shot_label-overlay.png" >/dev/null
     xdotool key --clearmodifiers Return
     end=$(($(date +%s) + 15))

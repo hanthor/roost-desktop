@@ -45,7 +45,9 @@ use wayland_protocols::xdg::shell::client::{
 };
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
-    zwlr_layer_surface_v1::{Anchor, Event as LayerSurfaceEvent, ZwlrLayerSurfaceV1},
+    zwlr_layer_surface_v1::{
+        Anchor, Event as LayerSurfaceEvent, KeyboardInteractivity, ZwlrLayerSurfaceV1,
+    },
 };
 
 const PUMP_ROUNDS: usize = 200;
@@ -2869,4 +2871,96 @@ fn strip_columns_resize_on_primary_output_failover_without_losing_focus() {
     }
     assert_eq!(f.manager.model().focused(), focused);
     assert_eq!(f.manager.model().active_workspace(), workspace);
+}
+
+#[test]
+fn exclusive_overlay_receives_navigation_and_retains_popup_system_accelerators() {
+    use roost_shell_control::{Accelerator, MODE_NORMAL, MODE_POPUP, MOD_ALT, MOD_CTRL};
+    let mut f = two_windows();
+    let (conn, mut queue, mut client) = connect(&mut f.comp);
+    let qh = queue.handle();
+    let surface = client.compositor.as_ref().unwrap().create_surface(&qh, ());
+    let layer = client.layer_shell.as_ref().unwrap().get_layer_surface(
+        &surface,
+        None,
+        Layer::Overlay,
+        "roost-screenshot-ui".into(),
+        &qh,
+        (),
+    );
+    layer.set_size(0, 0);
+    layer.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
+    layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+    surface.commit();
+    client.synced = false;
+    conn.display().sync(&qh, ());
+    pump(&mut f.comp, &mut queue, &mut client, |c| c.synced);
+    f.manager.reconcile(&mut f.comp.state);
+    assert!(roost_compositor::layer::exclusive_keyboard_layer(&f.comp.state).is_some());
+    f.manager.set_accelerators(vec![
+        Accelerator {
+            action: 1,
+            keysym: 0xff53,
+            mods: MOD_CTRL | MOD_ALT,
+            modes: MODE_NORMAL,
+        },
+        Accelerator {
+            action: 2,
+            keysym: u32::from(b'r'),
+            mods: 0,
+            modes: MODE_NORMAL | MODE_POPUP,
+        },
+    ]);
+    client.keys.clear();
+    f.client_a.keys.clear();
+    f.client_b.keys.clear();
+    let workspace = f.manager.model().active_workspace();
+    for key in [ALT_LEFT_KEYCODE, CTRL_LEFT_KEYCODE, ARROW_RIGHT_KEYCODE] {
+        press(&mut f.manager, &mut f.comp, key);
+    }
+    for key in [ARROW_RIGHT_KEYCODE, CTRL_LEFT_KEYCODE, ALT_LEFT_KEYCODE] {
+        release(&mut f.manager, &mut f.comp, key);
+    }
+    assert!(f.manager.take_accelerators_fired().is_empty());
+    assert_eq!(f.manager.model().active_workspace(), workspace);
+    press(&mut f.manager, &mut f.comp, ALT_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, TAB_KEYCODE);
+    release(&mut f.manager, &mut f.comp, TAB_KEYCODE);
+    release(&mut f.manager, &mut f.comp, ALT_LEFT_KEYCODE);
+    assert!(f.manager.take_switcher_queue().is_empty());
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(f.manager.take_accelerators_fired(), [(2, 5000, MODE_POPUP)]);
+    for _ in 0..3 {
+        drain3(
+            &mut f.comp,
+            &mut f.queue_a,
+            &mut f.client_a,
+            &mut f.queue_b,
+            &mut f.client_b,
+            &mut queue,
+            &mut client,
+        );
+    }
+    assert!(client.keys.contains(&(ARROW_RIGHT_KEYCODE, true)));
+    assert!(client.keys.contains(&(ARROW_RIGHT_KEYCODE, false)));
+    assert!(client.keys.contains(&(TAB_KEYCODE, true)));
+    assert!(client.keys.contains(&(TAB_KEYCODE, false)));
+    assert!(!client.keys.iter().any(|(key, _)| *key == R_KEYCODE));
+    assert!(f.client_a.keys.is_empty());
+    assert!(f.client_b.keys.is_empty());
+    // Unmapping returns normal desktop accelerators to their original mode.
+    layer.destroy();
+    surface.destroy();
+    client.synced = false;
+    conn.display().sync(&qh, ());
+    pump(&mut f.comp, &mut queue, &mut client, |c| c.synced);
+    f.manager.reconcile(&mut f.comp.state);
+    press(&mut f.manager, &mut f.comp, ALT_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, CTRL_LEFT_KEYCODE);
+    press(&mut f.manager, &mut f.comp, ARROW_RIGHT_KEYCODE);
+    assert_eq!(
+        f.manager.take_accelerators_fired(),
+        [(1, 5000, MODE_NORMAL)]
+    );
 }
