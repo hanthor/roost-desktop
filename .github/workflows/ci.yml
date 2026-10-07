@@ -397,6 +397,11 @@ jobs:
     # the Roost hardware session on the DRM/KMS backend. The image is
     # rebuilt rootful here (bootc install reads it from root's storage),
     # in parallel with marlin-image rather than after it.
+    name: marlin-vm (${{ matrix.orca }})
+    strategy:
+      fail-fast: false
+      matrix:
+        orca: [distribution, upstream51]
     runs-on: ubuntu-26.04
     needs: [arch-package]
     timeout-minutes: 60
@@ -425,6 +430,16 @@ jobs:
             --build-arg ROOST_PKG=roost.pkg.tar.zst -t localhost/marlin-roost-preview:ci .
           sudo podman build -f packaging/marlin/vm-lane/Containerfile \
             -t localhost/marlin-roost-vm:ci .
+          if [[ '${{ matrix.orca }}' == upstream51 ]]; then
+            sudo podman build -f packaging/marlin/vm-lane/orca51/Containerfile \
+              -t localhost/marlin-roost-vm-orca51:ci .
+            sudo podman tag localhost/marlin-roost-vm-orca51:ci localhost/marlin-roost-vm:ci
+            mkdir -p orca51-package-provenance
+            probe_container=$(sudo podman create localhost/marlin-roost-vm:ci)
+            sudo podman cp "$probe_container:/usr/share/roost-vm-orca51/." orca51-package-provenance/
+            sudo podman rm "$probe_container"
+            sudo chown -R "$(id -u):$(id -g)" orca51-package-provenance
+          fi
           sudo podman image inspect ghcr.io/tuna-os/marlin:gnome --format '{{.Digest}}' | tee /mnt/vm/base-digest
           sudo podman image inspect localhost/marlin-roost-vm:ci --format '{{.Id}}' | tee /mnt/vm/image-id
           sudo podman run --rm localhost/marlin-roost-vm:ci sh -c 'bootc --version; ls -ld /home; ls /usr/lib/bootc/install/ && cat /usr/lib/bootc/install/*' || true
@@ -457,7 +472,7 @@ jobs:
       # through QMP input and records it to tour/roost-tour.webm.
       - name: Boot the disk, assert the Roost hardware session, record the tour
         run: >-
-          scripts/roost-vm-lane --disk /mnt/vm/disk.raw --out vm-lane-artifacts --boots 5 --tour
+          scripts/roost-vm-lane --disk /mnt/vm/disk.raw --out vm-lane-artifacts --boots 5 --tour --orca-contract ${{ matrix.orca }}
           --meta "base_image=ghcr.io/tuna-os/marlin:gnome@$(cat /mnt/vm/base-digest)"
           --meta "test_image_id=$(cat /mnt/vm/image-id)"
           --meta "roost_package=$(basename arch-artifacts/roost-[0-9]*.pkg.tar.zst)"
@@ -465,7 +480,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: marlin-vm
+          name: ${{ matrix.orca == 'distribution' && 'marlin-vm' || 'marlin-vm-orca51' }}
           path: |
             vm-lane-artifacts/
             !vm-lane-artifacts/tour/
@@ -473,10 +488,18 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: roost-tour
+          name: ${{ matrix.orca == 'distribution' && 'roost-tour' || 'roost-tour-orca51' }}
           path: vm-lane-artifacts/tour/
           if-no-files-found: ignore
           retention-days: 30
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always() && matrix.orca == 'upstream51'
+        with:
+          name: orca51-package-provenance
+          path: orca51-package-provenance/
+          if-no-files-found: error
+          retention-days: 14
 
   parity-ledger:
     # GNOME 51 parity ledger gate (#66): every row marked pass must cite

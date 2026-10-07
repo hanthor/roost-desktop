@@ -220,7 +220,7 @@ impl Monitor {
             }
             inner.revoked.insert(old.to_owned());
         }
-        if ours && (new.is_empty() || name == MONITOR_NAME || ORCA_NAMES.contains(&name.as_str())) {
+        if ours && (new.is_empty() || name == MONITOR_NAME || ORCA_NAMES.contains(&name)) {
             inner.invalidate();
         }
     }

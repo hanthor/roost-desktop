@@ -1,0 +1,13 @@
+# Genuine upstream Orca 51 is packaged only in CI, in a separate test variant.
+ARG BASE_IMAGE=localhost/marlin-roost-vm:ci
+FROM ${BASE_IMAGE} AS packages
+COPY packaging/marlin/vm-lane/orca51 /recipes
+RUN bash /recipes/build
+
+FROM ${BASE_IMAGE}
+COPY --from=packages /orca51-artifacts /usr/share/roost-vm-orca51
+RUN pacman -U --noconfirm /usr/share/roost-vm-orca51/*.pkg.tar.zst \
+    && pacman -Qi orca at-spi2-core > /usr/share/roost-vm-orca51/installed-packages.txt \
+    && sha256sum /usr/bin/orca > /usr/share/roost-vm-orca51/launcher-sha256.txt \
+    && python -c 'import gi; gi.require_version("Atspi", "2.0"); from gi.repository import Atspi; assert Atspi.Accessible.__hash__.__module__ == "gi.overrides.Atspi"' \
+    && rm /usr/share/roost-vm-orca51/*.pkg.tar.zst

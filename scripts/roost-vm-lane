@@ -128,7 +128,7 @@ def check_panel(path):
     return ok, f"{w}x{h}, y=5 row {black:.0%} black, {len(body)} body colors"
 
 
-def run_lifecycle(qmp, agent, out, serial_path, record):
+def run_lifecycle(qmp, agent, out, serial_path, record, orca_contract="distribution"):
     """Actual DRM/logind lifecycle on the final boot, with unchanged app identities."""
     evidence = os.path.join(out, "lifecycle")
     os.makedirs(evidence, exist_ok=True)
@@ -327,38 +327,44 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
             json.dump(negative, stream, indent=2)
         if not negative["denied"] or negative["before"] != negative["after"]:
             raise RuntimeError("same-user non-reader obtained or changed native keyboard authority")
-        start_speech = agent.run("orca-speech-start")
-        time.sleep(0.4)
-        qmp.keys("insert-h")
-        time.sleep(1.2)
-        learn = agent.run("orca-read")
-        if not learn["keyboard"]["grab_all"]:
-            raise RuntimeError("real Orca modifier command did not enter learned keyboard grab")
-        qmp.keys("shift-f4")
-        time.sleep(1.4)
-        qmp.keys("esc")
-        time.sleep(1.1)
-        speech = agent.run("orca-speech-end")
-        import base64
-        import array
-        import wave
-        pcm = base64.b64decode(speech.pop("pcm"), validate=True)
-        with wave.open(os.path.join(evidence, "orca-native-command.wav"), "wb") as stream:
-            stream.setnchannels(1)
-            stream.setsampwidth(2)
-            stream.setframerate(24000)
-            stream.writeframes(pcm)
-        with open(os.path.join(evidence, "orca-native-command.json"), "w") as stream:
-            json.dump({"start": start_speech, "learn": learn, "end": speech}, stream, indent=2)
-        values = array.array("h")
-        values.frombytes(pcm)
-        spoken = " ".join(entry.get("text", "") for entry in speech["speech"] if entry.get("kind") == "speech").lower()
-        if len(values) < 24000 or max((abs(v) for v in values), default=0) <= 32 or "learn mode" not in spoken or speech["orca"]["keyboard"]["grab_all"]:
-            raise RuntimeError("native Orca command lacked paired genuine presenter/PCM evidence or failed to ungrab")
-        if not any("speech" in stream.get("application.process.binary", "") or "sd_" in stream.get("application.process.binary", "") for stream in speech["streams"]):
-            raise RuntimeError("no genuine Speech Dispatcher output stream accompanied Orca command")
-        record("V-ORCA-NATIVE-KEYBOARD", True,
-               "genuine Insert+h enters learn mode, shifted key is consumed, Escape ungrabs; upstream JSONL paired with real Speech Dispatcher/PipeWire PCM")
+        if orca_contract == "upstream51":
+            provenance = agent.run("orca-provenance")
+            with open(os.path.join(evidence, "orca51-runtime-provenance.json"), "w") as stream:
+                json.dump(provenance, stream, indent=2)
+            if not provenance["qualified"]:
+                raise RuntimeError("upstream51 lane lacks actual packaged 51/AT-SPI override/version provenance")
+            start_speech = agent.run("orca-speech-start")
+            time.sleep(0.4)
+            qmp.keys("insert-h")
+            time.sleep(1.2)
+            learn = agent.run("orca-read")
+            if not learn["keyboard"]["grab_all"]:
+                raise RuntimeError("real Orca modifier command did not enter learned keyboard grab")
+            qmp.keys("shift-f4")
+            time.sleep(1.4)
+            qmp.keys("esc")
+            time.sleep(1.1)
+            speech = agent.run("orca-speech-end")
+            import base64
+            import array
+            import wave
+            pcm = base64.b64decode(speech.pop("pcm"), validate=True)
+            with wave.open(os.path.join(evidence, "orca-native-command.wav"), "wb") as stream:
+                stream.setnchannels(1)
+                stream.setsampwidth(2)
+                stream.setframerate(24000)
+                stream.writeframes(pcm)
+            with open(os.path.join(evidence, "orca-native-command.json"), "w") as stream:
+                json.dump({"start": start_speech, "learn": learn, "end": speech}, stream, indent=2)
+            values = array.array("h")
+            values.frombytes(pcm)
+            spoken = " ".join(entry.get("text", "") for entry in speech["speech"] if entry.get("kind") == "speech").lower()
+            if len(values) < 24000 or max((abs(v) for v in values), default=0) <= 32 or "learn mode" not in spoken or speech["orca"]["keyboard"]["grab_all"]:
+                raise RuntimeError("native Orca command lacked paired genuine presenter/PCM evidence or failed to ungrab")
+            if not any("speech" in stream.get("application.process.binary", "") or "sd_" in stream.get("application.process.binary", "") for stream in speech["streams"]):
+                raise RuntimeError("no genuine Speech Dispatcher output stream accompanied Orca command")
+            record("V-ORCA-NATIVE-KEYBOARD", True,
+                   "genuine Insert+h enters learn mode, shifted key is consumed, Escape ungrabs; upstream JSONL paired with real Speech Dispatcher/PipeWire PCM")
         agent.run("orca-off")
         await_orca(False)
         record("V-ORCA-ACTIVATION", True,
@@ -939,6 +945,7 @@ def repeat_boots(args):
                    "--timeout", str(args.timeout)]
         if args.tour and index == args.boots:
             command.append("--tour")
+        command.extend(["--orca-contract", args.orca_contract])
         for value in args.meta:
             command.extend(["--meta", value])
         result = subprocess.run(command, check=False)
@@ -970,6 +977,8 @@ def main():
     ap.add_argument("--tour", action="store_true",
                     help="after the assertions, record the feature tour video")
     ap.add_argument("--meta", action="append", default=[], metavar="KEY=VALUE")
+    ap.add_argument("--orca-contract", choices=("distribution", "upstream51"), default="distribution",
+                    help="required reader qualification variant; upstream51 requires genuine packaged 51 principal/speech proof")
     ap.add_argument("--boots", type=int, default=1,
                     help="repeat pristine snapshot boots; tour only on the last boot")
     a = ap.parse_args()
@@ -1058,7 +1067,7 @@ def main():
                     tour_serial_end = len(read_text(serial_path))
                     agent = guest_agent.GuestAgent(agent_path)
                     try:
-                        run_lifecycle(qmp, agent, out, serial_path, record)
+                        run_lifecycle(qmp, agent, out, serial_path, record, a.orca_contract)
                     finally:
                         agent.close()
                 except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e:
@@ -1130,6 +1139,7 @@ def main():
                                   text=True).stdout.splitlines()[0]
     manifest = {
         "lane": "marlin-vm",
+        "orca_contract": a.orca_contract,
         "session": "Roost (preview) via CI-only greetd initial session, DRM/KMS backend",
         "disk": os.path.basename(a.disk),
         "resolution": f"{WIDTH}x{HEIGHT}",
