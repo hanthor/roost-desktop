@@ -2530,6 +2530,7 @@ impl Runtime {
         self.manager
             .apply_keyboard_settings(&mut self.state, &settings);
         self.triggers.set_hot_corner(settings.hot_corners);
+        self.triggers.set_right_to_left(settings.right_to_left);
         self.introspect
             .publish_animations_enabled(settings.enable_animations);
         self.manager
