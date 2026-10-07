@@ -4,7 +4,7 @@
 # Usage:
 #   scripts/roost-release [--out DIR] [--allow-dirty] [--help]
 #
-# Builds the four release binaries with the version stamped from the git tag,
+# Builds the six release binaries with the version stamped from the git tag,
 # stages the documented install layout (binaries side by side plus the
 # login-screen session entry), generates the package metadata from the same
 # stamp, and produces roost_<version>_amd64.deb via dpkg-deb.
@@ -72,13 +72,13 @@ if [ -z "$VERSION" ]; then
 fi
 
 export ROOST_VERSION="$VERSION"
-cargo build --release -p roost-compositor -p roost-shell-host -p roost-greeter
+cargo build --locked --release -p roost-compositor -p roost-shell-gtk -p roost-shell-host -p roost-greeter
 
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT INT TERM
 mkdir -p "$STAGE/DEBIAN" "$STAGE/usr/bin" "$STAGE/usr/share/wayland-sessions" "$STAGE/etc/pam.d"
 
-for bin in roost-compositor roost-session roost-shell-host roost-ibus-bridge roost-greeter; do
+for bin in roost-compositor roost-session roost-shell-gtk roost-shell-host roost-ibus-bridge roost-greeter; do
     install -m0755 "target/release/$bin" "$STAGE/usr/bin/$bin"
 done
 install -m0644 share/wayland-sessions/roost.desktop \
@@ -90,31 +90,45 @@ install -m0644 share/pam.d/roost-lock "$STAGE/etc/pam.d/roost-lock"
 echo /etc/pam.d/roost-lock >"$STAGE/DEBIAN/conffiles"
 
 # Agreement check: the stamped binaries must report the stamped version.
-for bin in roost-compositor roost-session roost-shell-host roost-ibus-bridge roost-greeter; do
-    REPORTED="$("$STAGE/usr/bin/$bin" --version | awk '{print $NF}')"
-    if [ -n "$VERSION" ] && [ "$REPORTED" != "$VERSION" ]; then
+for bin in roost-compositor roost-session roost-shell-gtk roost-shell-host roost-ibus-bridge roost-greeter; do
+    (ulimit -f 8; timeout 10 "$STAGE/usr/bin/$bin" --version) >"$STAGE/version-output" || { echo "roost-release: version command failed" >&2; exit 1; }
+    [ "$(wc -c <"$STAGE/version-output")" -le 256 ] || exit 1
+    LINE="$(cat "$STAGE/version-output")"
+    REPORTED="${LINE#"$bin "}"
+    [ "$LINE" = "$bin $REPORTED" ] && [ -n "$REPORTED" ] && [ "$REPORTED" = "$(printf '%s' "$REPORTED" | tr -d '[:space:]')" ] || { echo "roost-release: malformed version line" >&2; exit 1; }
+    printf '%s\n' "$bin $REPORTED" >"$STAGE/version-expected"
+    cmp -s "$STAGE/version-output" "$STAGE/version-expected" || exit 1
+    [ -n "$VERSION" ] || VERSION="$REPORTED"
+    if [ "$REPORTED" != "$VERSION" ]; then
         echo "roost-release: $bin reports $REPORTED, expected $VERSION" >&2
         exit 1
     fi
 done
-if [ -z "$VERSION" ]; then
-    VERSION="$("$STAGE/usr/bin/roost-session" --version | awk '{print $NF}')"
-fi
 
+rm "$STAGE/version-output" "$STAGE/version-expected"
+
+# Resolve the real selected-distribution ELF ABI closure; never ignore missing
+# shlibs/symbols information. Explicit dependencies below cover dlopen/tools.
+mkdir "$STAGE/debian"
+printf 'Source: roost\nSection: x11\nPriority: optional\nMaintainer: Roost Developers <roost@example.invalid>\n\nPackage: roost\nArchitecture: any\nDescription: Roost desktop\n' >"$STAGE/debian/control"
+SHLIBS="$(cd "$STAGE" && dpkg-shlibdeps -O -eusr/bin/roost-compositor -eusr/bin/roost-session -eusr/bin/roost-shell-gtk -eusr/bin/roost-shell-host -eusr/bin/roost-ibus-bridge -eusr/bin/roost-greeter)" || exit 1
+case "$SHLIBS" in shlibs:Depends=*) SHLIBS="${SHLIBS#shlibs:Depends=}" ;; *) echo "roost-release: missing ELF dependency closure" >&2; exit 1 ;; esac
+[ -n "$SHLIBS" ] || exit 1
+rm -r "$STAGE/debian"
 cat >"$STAGE/DEBIAN/control" <<EOF
 Package: roost
 Version: $VERSION
 Section: x11
 Priority: optional
 Architecture: amd64
-Depends: libsecret-tools, libxkbcommon0, libxkbcommon-x11-0, libegl1, libgl1, libgbm1, libseat1, libinput10, libudev1, libdrm2, libgtk-4-1, libadwaita-1-0, libpipewire-0.3-0t64 | libpipewire-0.3-0, libglib2.0-0t64 | libglib2.0-0
+Depends: $SHLIBS, libgtk4-layer-shell0 (>= 1.1), libgtk-4-1 (>= 4.12), libadwaita-1-0 (>= 1.0), libpam0, gsettings-desktop-schemas, libsecret-tools, libxkbcommon0, libxkbcommon-x11-0, libegl1, libgl1, libgbm1, libseat1, libinput10, libudev1, libdrm2, libgtk-4-1, libadwaita-1-0, libpipewire-0.3-0t64 | libpipewire-0.3-0, libglib2.0-0t64 | libglib2.0-0
 Recommends: ibus, gstreamer1.0-tools, gstreamer1.0-pipewire, gstreamer1.0-plugins-good
 Maintainer: Roost Developers <roost@example.invalid>
 Description: Roost Wayland desktop session
  A GNOME-style Wayland desktop with an optional scrollable tiling shell,
- pixel-painted with no GTK in the shell itself.
+ with the preferred GTK shell and a supervised compositor.
  .
- Installs the compositor, shell host, session launcher, and greeter plus
+ Installs the compositor, GTK and legacy shell hosts, session launcher, IBus bridge, and greeter plus
  the login-screen session entry.
 EOF
 
