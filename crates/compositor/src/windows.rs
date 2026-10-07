@@ -1161,14 +1161,26 @@ impl WindowManager {
                         self.unmap(state, model);
                     }
                 }
-                X11ManagerEvent::ConfigureRequest { id, size } => {
+                X11ManagerEvent::ConfigureRequest {
+                    id,
+                    surface,
+                    width,
+                    height,
+                } => {
                     let Some(model) = self.x11_index.get(&id).copied() else {
+                        // A toolkit can request its real size before MapRequest.
+                        // Dropping it leaves the initial X geometry unchanged;
+                        // map_x11 would then advertise that placeholder back.
+                        let mut geometry = surface.geometry();
+                        geometry.size = requested_x11_size(geometry.size, width, height);
+                        if surface.configure(Some(geometry)).is_err() {
+                            eprintln!("roost-compositor: pre-map X11 configure refused id={id}");
+                        }
                         continue;
                     };
-                    if let (Some((w, h)), Some(window)) = (size, self.windows.get_mut(&model)) {
-                        if w > 0 && h > 0 {
-                            window.geometry.size = (w as i32, h as i32).into();
-                        }
+                    if let Some(window) = self.windows.get_mut(&model) {
+                        window.geometry.size =
+                            requested_x11_size(window.geometry.size, width, height);
                     }
                     self.configure(model, self.model.focused() == Some(model));
                 }
@@ -4926,4 +4938,42 @@ mod introspect_type_tests {
             assert!(!introspect_x11_type(Some(kind)), "auxiliary type {kind:?}");
         }
     }
+}
+
+/// Preserve dimensions absent from X11's ConfigureRequest value mask.
+#[cfg(feature = "xwayland")]
+fn requested_x11_size(
+    current: Size<i32, Logical>,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> Size<i32, Logical> {
+    let dimension = |value: Option<u32>, fallback| {
+        value
+            .and_then(|value| i32::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(fallback)
+    };
+    (dimension(width, current.w), dimension(height, current.h)).into()
+}
+
+#[cfg(all(test, feature = "xwayland"))]
+#[test]
+fn x11_size_requests_preserve_unspecified_and_invalid_dimensions() {
+    let current = (640, 420).into();
+    assert_eq!(
+        requested_x11_size(current, Some(1100), None),
+        (1100, 420).into()
+    );
+    assert_eq!(
+        requested_x11_size(current, None, Some(700)),
+        (640, 700).into()
+    );
+    assert_eq!(
+        requested_x11_size(current, Some(0), Some(u32::MAX)),
+        current
+    );
+    assert_eq!(
+        requested_x11_size((1, 1).into(), Some(1100), Some(700)),
+        (1100, 700).into()
+    );
 }

@@ -32,6 +32,13 @@ def pump_parent_until(predicate, message):
         if predicate():
             return
         time.sleep(.01)
+    if parent_window is not None:
+        out.with_suffix(".parent-failure.json").write_text(json.dumps({
+            "failure": message, "parent": parent_identity, "scene": scene(),
+            "window_size": [parent_window.get_width(), parent_window.get_height()],
+            "button_size": [parent_button.get_width(), parent_button.get_height()],
+            "button_mapped": parent_button.get_mapped(),
+        }, indent=2))
     raise RuntimeError(message)
 def click_parent_content():
     current = scene()
