@@ -151,9 +151,13 @@ def orca_observation():
                    "unit_sha256": hashlib.sha256(unit.read_bytes()).hexdigest(),
                    "unit": str(unit), "bus_pid": credentials["GetConnectionUnixProcessID"],
                    "bus_uid": credentials["GetConnectionUnixUser"]})
+    compositor = next(item for item in inventory()["processes"]
+                      if item["executable"] == "roost-compositor")
+    expected_display = f"roost-nested-{compositor['pid']}"
+    result["compositor_pid"] = compositor["pid"]
     result["ready"] = (stable and uid == OWNER.pw_uid == credentials["GetConnectionUnixUser"]
                        and pid == credentials["GetConnectionUnixProcessID"]
-                       and displays == ["wayland-roost"] and launcher_owner == unit_owner == "orca"
+                       and displays == [expected_display] and launcher_owner == unit_owner == "orca"
                        and len(version) == 2 and version[0] == "s" and version[1].startswith("51."))
     return result
 
