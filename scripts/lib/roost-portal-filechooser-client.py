@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 """Exercise the installed GNOME/Nautilus FileChooser, retaining actual responses."""
+import atexit
 import hashlib
 import json
 import os
@@ -22,6 +23,9 @@ parent_handle = ""
 parent_identity = None
 host_display = os.environ.get("DISPLAY")
 parent_clicks = 0
+parent_keys = 0
+unrelated_process = None
+unrelated_before = None
 parent_sequence = 0
 state_path = Path(os.environ.get("ROOST_COMPOSITOR_STATE", "/out/compositor-state.json"))
 def scene():
@@ -70,7 +74,7 @@ if parent_mode != "none":
     os.environ.setdefault("GSK_RENDERER", "cairo")
     GLib.set_prgname("roost-" + parent_mode + "-picker-parent")
     gi.require_version("Gtk", "4.0")
-    from gi.repository import Gtk
+    from gi.repository import Gtk, Gdk
     if parent_mode == "x11":
         gi.require_version("GdkX11", "4.0")
         from gi.repository import GdkX11
@@ -87,12 +91,22 @@ if parent_mode != "none":
         parent_clicks += 1
     parent_button.connect("clicked", clicked)
     parent_window.set_child(parent_button)
+    key_controller = Gtk.EventControllerKey()
+    key_controller.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+    def parent_key_pressed(_controller, keyval, _keycode, _state):
+        global parent_keys
+        if keyval == Gdk.KEY_F8:
+            parent_keys += 1
+            return True
+        return False
+    key_controller.connect("key-pressed", parent_key_pressed)
+    parent_window.add_controller(key_controller)
     input_path = out.with_suffix(".parent-input.json")
     def record_parent_input():
         global parent_sequence
         parent_sequence += 1
         temporary = input_path.with_suffix(".tmp")
-        temporary.write_text(json.dumps({"clicks": parent_clicks, "sequence": parent_sequence, "pid": os.getpid()}))
+        temporary.write_text(json.dumps({"clicks": parent_clicks, "keys": parent_keys, "sequence": parent_sequence, "pid": os.getpid()}))
         temporary.replace(input_path)
         return True
     GLib.timeout_add(50, record_parent_input)
@@ -140,8 +154,72 @@ if parent_mode != "none":
     # Real host pointer input must reach the GTK button before requesting a dialog.
     click_parent_content()
     pump_parent_until(lambda: parent_clicks == 1, "Initial real pointer click did not reach the parent button")
+    def send_focus_key():
+        subprocess.run(["xdotool", "key", "F8"], env=dict(os.environ, DISPLAY=host_display), check=True)
+    send_focus_key()
+    pump_parent_until(lambda: parent_keys == 1, "Initial actual keyboard input did not reach caller")
     record_parent_input()
     out.with_suffix(".parent-before.json").write_text(input_path.read_text())
+    # B is a separate ordinary Wayland process, mapped and focused after caller
+    # A. The original exported handle must still parent Nautilus C to A.
+    unrelated_path = out.with_suffix(".unrelated-input.json")
+    unrelated_env = dict(os.environ, DISPLAY=host_display, GDK_BACKEND="wayland")
+    unrelated_log = out.with_suffix(".unrelated.log").open("w")
+    unrelated_process = subprocess.Popen([sys.executable,
+        str(Path(__file__).with_name("roost-picker-unrelated-app.py")), str(unrelated_path)],
+        env=unrelated_env, stdout=unrelated_log, stderr=subprocess.STDOUT)
+    unrelated_log.close()
+    def stop_unrelated():
+        if unrelated_process.poll() is None:
+            unrelated_process.terminate()
+            try:
+                unrelated_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                unrelated_process.kill()
+                unrelated_process.wait(timeout=5)
+    atexit.register(stop_unrelated)
+    def unrelated_state():
+        if unrelated_process.poll() is not None:
+            raise RuntimeError("Independent application exited during picker journey")
+        record = json.loads(unrelated_path.read_text())
+        start = Path(f"/proc/{unrelated_process.pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+        if (record["pid"] != unrelated_process.pid or record["uid"] != os.getuid()
+                or record["start_time"] != start):
+            raise RuntimeError("Independent application identity changed")
+        return record
+    def unrelated_ready():
+        if not unrelated_path.exists():
+            return False
+        record = unrelated_state()
+        windows = [w for w in scene()["windows"] if w.get("app_id") == record["app_id"]]
+        return (record["mapped"] and len(windows) == 1
+                and windows[0]["id"] != parent_identity["id"]
+                and scene()["focused"] == windows[0]["id"])
+    pump_parent_until(unrelated_ready, "Independent application did not map and receive focus", timeout=10)
+    unrelated_window, = [w for w in scene()["windows"]
+                        if w.get("app_id") == unrelated_state()["app_id"]]
+    ux, uy, uw, uh = unrelated_window["rect"]
+    if uw < 100 or uh < 150:
+        raise RuntimeError("Independent application content has no usable input target")
+    host_windows = subprocess.check_output(["xdotool", "search", "--onlyvisible", "--name", "^Smithay"],
+        env=unrelated_env, text=True).split()
+    if len(host_windows) != 1:
+        raise RuntimeError("Expected one nested host for independent input control")
+    geometry = dict(line.split("=", 1) for line in subprocess.check_output(
+        ["xdotool", "getwindowgeometry", "--shell", host_windows[0]], env=unrelated_env, text=True).splitlines())
+    if not (0 <= ux + 50 < int(geometry["WIDTH"]) and 0 <= uy + 100 < int(geometry["HEIGHT"])):
+        raise RuntimeError("Independent input control lies outside nested host")
+    subprocess.run(["xdotool", "mousemove", "--window", host_windows[0], str(ux + 50), str(uy + 100),
+        "click", "1"], env=unrelated_env, check=True)
+    send_focus_key()
+    pump_parent_until(lambda: unrelated_state()["clicks"] == 1 and unrelated_state()["keys"] == 1,
+                      "Independent application did not receive real pointer and keyboard input")
+    unrelated_before = unrelated_state()
+    if parent_clicks != 1 or parent_keys != 1 or scene()["focused"] != unrelated_window["id"]:
+        raise RuntimeError("Independent input leaked to caller or failed to leave B focused")
+    out.with_suffix(".multiple-apps-before.json").write_text(json.dumps({
+        "parent": parent_identity, "unrelated": unrelated_before,
+        "unrelated_window_id": unrelated_window["id"], "scene": scene()}, indent=2))
 fixture = out.parent / "filechooser-fixtures"
 fixture.mkdir(exist_ok=True)
 payload = b"Roost genuine GNOME FileChooser application data\n"
@@ -263,8 +341,22 @@ if parent_identity is not None:
         raise RuntimeError("Modal picker leaked pointer activation to its parent")
     click_parent_content()
     pump_parent_until(lambda: parent_clicks == 2, "Parent pointer input did not resume after closing the actual picker")
+    unrelated_return_sequence = unrelated_state()["sequence"]
+    send_focus_key()
+    pump_parent_until(lambda: parent_keys == 2, "Keyboard input did not return to actual caller A")
+    pump_parent_until(lambda: unrelated_state()["sequence"] >= unrelated_return_sequence + 10,
+                      "Independent client stopped processing events during picker journey")
+    unrelated_after = unrelated_state()
+    if (unrelated_after["clicks"] != 1 or unrelated_after["keys"] != 1
+            or parent_clicks != 2 or parent_keys != 2):
+        raise RuntimeError("Picker teardown leaked input or restored unrelated application B")
+    out.with_suffix(".multiple-apps-after.json").write_text(json.dumps({
+        "parent": parent_identity, "parent_clicks": parent_clicks, "parent_keys": parent_keys,
+        "unrelated_before": unrelated_before, "unrelated_after": unrelated_after,
+        "scene": scene()}, indent=2))
     record_parent_input()
     out.with_suffix(".parent-after.json").write_text(input_path.read_text())
+    print("G-FILECHOOSER-MULTIPLE-APPS: original caller pointer/keyboard restored; independent client unchanged")
     if parent_mode == "wayland":
         GdkWayland.WaylandToplevel.drop_exported_handle(native, exported_handles[0])
 if decision == "close":
