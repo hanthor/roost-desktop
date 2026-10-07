@@ -1601,17 +1601,11 @@ impl Runtime {
                 })
                 .collect::<Vec<_>>(),
         });
-        // Fixture diagnostics distinguish a missing backend motion from a
-        // rejected corner. Suppress coordinates during credential input.
-        // These stay outside the large scene macro so its expansion remains
-        // below the compiler's default recursion limit.
-        doc["pointer_position"] = serde_json::json!((!self.is_locked()).then(|| {
-            let pos = self.manager.pointer_pos();
-            [pos.x, pos.y]
-        }));
-        doc["pointer_fullscreen_blocked"] = serde_json::json!(
-            (!self.is_locked()).then(|| self.manager.fullscreen_at(self.manager.pointer_pos()))
-        );
+        doc["wallpaper_diagnostics"] = if self.is_locked() {
+            serde_json::Value::Null
+        } else {
+            self.wallpaper.diagnostics()
+        };
         doc["screen_reader_pid"] = serde_json::json!(self.orca.pid());
         doc["screen_reader_state"] = serde_json::json!(self.orca.state());
         // Keep backend-specific observations outside the large scene macro so
