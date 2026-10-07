@@ -128,6 +128,34 @@ def check_panel(path):
     return ok, f"{w}x{h}, y=5 row {black:.0%} black, {len(body)} body colors"
 
 
+def require_speech_trigger_window(start, before, after, samples):
+    """Prove only the original command trigger lies in original captured PCM."""
+    import math
+    times = (start["receipt"]["started_monotonic"], start["receipt"]["ready_monotonic"],
+             before["guest_monotonic"], after["guest_monotonic"])
+    if any(type(value) not in (int, float) or not math.isfinite(value) or value < 0 for value in times):
+        raise RuntimeError("original speech timing receipt is malformed")
+    if type(samples) is not int or not 0 <= samples <= 96000:
+        raise RuntimeError("original speech PCM exceeds the bounded recorder sample count")
+    started, ready, trigger_before, trigger_after = times
+    if not (started <= ready <= trigger_before <= trigger_after < started + samples / 24000):
+        raise RuntimeError("native command trigger is outside the original fresh recorder sample window")
+
+
+def public_speech_tokens(entries):
+    # Preserve only fixed public fixture labels, never arbitrary presenter text.
+    labels = {"search", "disks", "take screenshot", "volume"}
+    import re
+    found = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise RuntimeError("actual presenter entry is malformed")
+        if entry.get("kind") == "speech" and isinstance(entry.get("text"), str):
+            text = entry["text"].casefold()
+            found.update(label for label in labels if re.search(r"(?<!\w)" + re.escape(label) + r"(?!\w)", text))
+    return sorted(found)
+
+
 def await_orca_keyboard(reader, read, observations, timeout=20):
     """Wait for actual grants without accepting a replacement reader/connection."""
     fields = ("pid", "start_ticks", "owner", "uid", "bus_pid", "bus_uid",
@@ -372,17 +400,35 @@ def run_lifecycle(qmp, agent, out, serial_path, record, orca_contract="distribut
 
             def native_command(label, test_id, min_normal=None):
                 start_speech = agent.run("orca-speech-start")
-                time.sleep(0.4)
-                qmp.keys("insert", "h")
-                time.sleep(1.2)
-                learn = agent.run("orca-read")
-                if not learn["keyboard"]["grab_all"]:
-                    raise RuntimeError("real Orca modifier command did not enter learned keyboard grab")
-                qmp.keys("shift", "f4")
-                time.sleep(1.4)
-                qmp.keys("esc")
-                time.sleep(1.1)
-                speech = agent.run("orca-speech-end")
+                primary = None
+                cleanup_error = None
+                try:
+                    time.sleep(0.4)
+                    trigger_before = agent.run("orca-speech-trigger")
+                    qmp.keys("insert", "h")
+                    trigger_after = agent.run("orca-speech-trigger")
+                    time.sleep(1.2)
+                    learn = agent.run("orca-read")
+                    if not learn["keyboard"]["grab_all"]:
+                        raise RuntimeError("real Orca modifier command did not enter learned keyboard grab")
+                    qmp.keys("shift", "f4")
+                    time.sleep(1.4)
+                    qmp.keys("esc")
+                    time.sleep(1.1)
+                except Exception as error:
+                    primary = error
+                finally:
+                    try:
+                        speech = agent.run("orca-speech-end")
+                    except Exception as error:
+                        cleanup_error = error
+                if primary is not None or cleanup_error is not None:
+                    # Preserve the original failed command and finite secondary
+                    # cleanup status; never retain arbitrary exception payloads.
+                    with open(os.path.join(evidence, label + "-failure.json"), "w") as stream:
+                        json.dump({"primary_error_type": type(primary).__name__ if primary else None,
+                                   "cleanup_error_type": type(cleanup_error).__name__ if cleanup_error else None}, stream)
+                    raise primary or cleanup_error
                 import base64
                 import array
                 import wave
@@ -393,24 +439,201 @@ def run_lifecycle(qmp, agent, out, serial_path, record, orca_contract="distribut
                     stream.setframerate(24000)
                     stream.writeframes(pcm)
                 with open(os.path.join(evidence, f"{label}.json"), "w") as stream:
-                    json.dump({"start": start_speech, "learn": learn, "end": speech}, stream, indent=2)
+                    json.dump({"start": start_speech, "trigger_before": trigger_before,
+                               "trigger_after": trigger_after, "learn": learn, "end": speech}, stream, indent=2)
                 values = array.array("h")
                 values.frombytes(pcm)
+                require_speech_trigger_window(start_speech, trigger_before, trigger_after, len(values))
                 spoken = " ".join(entry.get("text", "") for entry in speech["speech"] if entry.get("kind") == "speech").lower()
                 if len(values) < 24000 or max((abs(v) for v in values), default=0) <= 32 or "learn mode" not in spoken or speech["orca"]["keyboard"]["grab_all"]:
                     raise RuntimeError("native Orca command lacked paired genuine presenter/PCM evidence or failed to ungrab")
-                if not any("speech" in stream.get("application.process.binary", "") or "sd_" in stream.get("application.process.binary", "") for stream in speech["streams"]):
-                    raise RuntimeError("no genuine Speech Dispatcher output stream accompanied Orca command")
+                if not any(stream.get("node.name") == "speech-dispatcher-espeak-ng"
+                           and stream.get("application.process.binary") == "speech-dispatcher"
+                           for stream in speech["streams"]):
+                    raise RuntimeError("no actual real espeak-ng output stream accompanied Orca command")
                 if (not same_reader(start_speech["orca"]) or not same_reader(learn)
-                        or not same_reader(speech["orca"])):
+                        or not same_reader(speech["orca"])
+                        or not same_reader(trigger_before["selection"]["orca"])
+                        or not same_reader(trigger_after["selection"]["orca"])):
                     raise RuntimeError("native command changed the original genuine reader identity")
                 if min_normal is not None and speech["orca"]["keyboard"]["normal_events"] <= min_normal:
                     raise RuntimeError("fresh physical command did not resume native delivery")
                 record(test_id, True,
-                       "genuine Insert+h enters learn mode, shifted key is consumed, Escape ungrabs; upstream JSONL paired with real Speech Dispatcher/PipeWire PCM")
+                       "genuine Insert+h/shifted key/Escape command; owned reader selects real espeak-ng, presenter paired with fresh mixed-sink PCM; exclusive audio origin unproven")
                 return speech["orca"]
 
             native_command("orca-native-command", "V-ORCA-NATIVE-KEYBOARD")
+
+            # Real shell navigation: physical keys, original GTK accessibility
+            # peers and actual Orca presenter/selected-real-module receipts.
+            # A tree or nonzero mixed-sink PCM alone never qualifies speech.
+            shell_base = agent.run("orca-shell-focus")
+            shell_identity = shell_base["focus"]["principal"]
+            shell_owner = shell_base["focus"]["atspi_owner"]
+            input_base = agent.run("input-count")
+            input_window = agent.run("inventory")["state"]["focused"]
+            disks = [process for process in agent.run("inventory")["processes"]
+                     if process["executable"] == "gnome-disks" and process["uid"] == original["uid"]]
+            if len(disks) != 1:
+                raise RuntimeError("one original genuine Disks frontend is required before navigation")
+            disks_principal = disks[0]
+            disks_base = agent.run("orca-disks-focus", disks_principal["pid"], disks_principal["start_ticks"])
+            navigation = []
+
+            def public_focus(label=None):
+                deadline = time.monotonic() + 8
+                while time.monotonic() < deadline:
+                    actual = agent.run("orca-shell-focus")
+                    focus = actual["focus"]
+                    navigation.append(actual)
+                    if (not same_reader(actual["orca"]) or focus["principal"] != shell_identity
+                            or focus["atspi_owner"] != shell_owner):
+                        raise RuntimeError("public navigation changed the original reader/shell authority")
+                    roles = {"Search": {"entry", "text"}, "Disks": {"push button"},
+                             "Take Screenshot": {"push button"}, "Volume": {"slider"}}
+                    if label is None or any(node["label"] == label and node["role"] in roles[label] and node["focused"]
+                                            for node in focus["public_controls"]):
+                        return actual
+                    time.sleep(0.1)
+                raise RuntimeError("original public shell control did not receive physical keyboard focus")
+
+            def public_capture(label, expected, action):
+                start = agent.run("orca-speech-start")
+                before_trigger = None
+                after_trigger = None
+                action_receipt = None
+                primary = None
+                cleanup_error = None
+                try:
+                    before_trigger = agent.run("orca-speech-trigger")
+                    action_receipt = action()
+                    after_trigger = agent.run("orca-speech-trigger")
+                    time.sleep(0.8)
+                except Exception as error:
+                    primary = error
+                finally:
+                    try:
+                        end = agent.run("orca-speech-end")
+                    except Exception as error:
+                        cleanup_error = error
+                if primary is not None or cleanup_error is not None:
+                    with open(os.path.join(evidence, label + "-failure.json"), "w") as stream:
+                        json.dump({"primary_error_type": type(primary).__name__ if primary else None,
+                                   "cleanup_error_type": type(cleanup_error).__name__ if cleanup_error else None}, stream)
+                    raise primary or cleanup_error
+                import base64, array, wave
+                pcm = base64.b64decode(end.pop("pcm"), validate=True)
+                tokens = public_speech_tokens(end.pop("speech"))
+                with wave.open(os.path.join(evidence, label + ".wav"), "wb") as stream:
+                    stream.setnchannels(1); stream.setsampwidth(2); stream.setframerate(24000); stream.writeframes(pcm)
+                with open(os.path.join(evidence, label + ".json"), "w") as stream:
+                    json.dump({"start": start, "trigger_before": before_trigger, "action": action_receipt,
+                               "trigger_after": after_trigger, "end": end, "public_speech_tokens": tokens,
+                               "mixed_sink": True, "exclusive_pcm": False}, stream, indent=2)
+                samples = array.array("h"); samples.frombytes(pcm)
+                window_start = start["receipt"]["ready_monotonic"]
+                conservative_end = start["receipt"]["started_monotonic"] + len(samples) / 24000
+                if not (window_start <= before_trigger["guest_monotonic"] <= after_trigger["guest_monotonic"] < conservative_end):
+                    raise RuntimeError("public physical trigger is outside the fresh recorder sample window")
+                if (expected not in tokens or len(samples) < 24000
+                        or max((abs(value) for value in samples), default=0) <= 32):
+                    raise RuntimeError("public focus lacked actual presenter label and fresh mixed-sink PCM")
+                for actual in (start["orca"], end["orca"], before_trigger["selection"]["orca"], after_trigger["selection"]["orca"]):
+                    if not same_reader(actual):
+                        raise RuntimeError("public speech capture changed the original genuine reader")
+                return action_receipt
+
+            def restore_input():
+                for _ in range(8):
+                    if agent.run("inventory")["state"]["focused"] == input_window:
+                        break
+                    qmp.keys("alt", "tab")
+                    time.sleep(0.2)
+                else:
+                    raise RuntimeError("physical window switching did not restore original input focus")
+                before = agent.run("input-count")
+                qmp.keys("f9")
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    after = agent.run("input-count")
+                    if after["pid"] == input_base["pid"] and after["count"] > before["count"]:
+                        focused = agent.run("inventory")["state"]["focused"]
+                        if focused != input_window:
+                            raise RuntimeError("fresh input delivery changed the original focused client")
+                        return {"pid": after["pid"], "before_count": before["count"], "after_count": after["count"],
+                                "focused_window": focused}
+                    time.sleep(0.1)
+                raise RuntimeError("original client did not receive fresh public input after shell navigation")
+
+            try:
+                def open_search():
+                    qmp.keys("meta_l")
+                    await_state(lambda value: value["state"]["overview_open"])
+                    return public_focus("Search")
+                public_capture("orca-overview-search", "search", open_search)
+                qmp.type_text("disks")
+                public_focus("Search")
+                def focus_result():
+                    qmp.keys("tab")
+                    return public_focus("Disks")
+                public_capture("orca-overview-result", "disks", focus_result)
+                qmp.keys("ret")
+                await_state(lambda value: not value["state"]["overview_open"])
+                deadline = time.monotonic() + 8
+                while time.monotonic() < deadline:
+                    launched = agent.run("orca-disks-focus", disks_principal["pid"], disks_principal["start_ticks"])
+                    navigation.append(launched)
+                    if (not same_reader(launched["orca"]) or launched["focus"]["principal"] != disks_base["focus"]["principal"]
+                            or launched["focus"]["atspi_owner"] != disks_base["focus"]["atspi_owner"]):
+                        raise RuntimeError("actual Disks launch changed the original reader/application authority")
+                    if launched["launch_focus_ready"]:
+                        break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError("actual original Disks frontend did not receive launch input focus")
+                restored = restore_input()
+                record("V-ORCA-SHELL-SEARCH", True,
+                       "physical Super/search/Tab/Enter: original shell focus labels spoken, actual packaged Disks frontend receives input, original client input restored; mixed-sink audio origin unproven")
+
+                def open_quick():
+                    qmp.keys("meta_l", "s")
+                    return public_focus("Take Screenshot")
+                public_capture("orca-quick-settings-open", "take screenshot", open_quick)
+                # Discover the actual tab route before starting the fixed
+                # four-second capture; the final single Tab is the recorded
+                # trigger. No guessed service-dependent button ordering.
+                for _ in range(16):
+                    qmp.keys("tab")
+                    actual = public_focus()
+                    if any(node["label"] == "Volume" and node["role"] == "slider" and node["focused"]
+                           for node in actual["focus"]["public_controls"]):
+                        break
+                else:
+                    raise RuntimeError("bounded physical Tab cycle did not reach the original Volume slider")
+                qmp.keys("shift", "tab")
+                previous = public_focus()
+                if any(node["label"] == "Volume" and node["focused"] for node in previous["focus"]["public_controls"]):
+                    raise RuntimeError("physical reverse Tab did not leave the original Volume slider")
+                def focus_volume():
+                    qmp.keys("tab")
+                    return public_focus("Volume")
+                public_capture("orca-quick-settings-volume", "volume", focus_volume)
+                qmp.keys("esc")
+                closed = public_focus()
+                if any(node["label"] == "Volume" for node in closed["focus"]["public_controls"]):
+                    raise RuntimeError("physical Escape did not close actual quick settings")
+                restored_quick = restore_input()
+                with open(os.path.join(evidence, "orca-shell-navigation.json"), "w") as stream:
+                    json.dump({"shell": shell_identity, "shell_owner": shell_owner, "observations": navigation,
+                               "launched": launched, "restored_input": restored, "restored_quick_input": restored_quick,
+                               "broader_spoken_navigation_qualified": False}, stream, indent=2)
+                record("V-ORCA-SHELL-QUICK-SETTINGS", True,
+                       "physical Super+s/Tab/Escape reaches original public GTK buttons/Volume slider, paired original Orca presenter and fresh mixed-sink PCM, then restores actual client input")
+            finally:
+                with open(os.path.join(evidence, "orca-shell-navigation-observations.json"), "w") as stream:
+                    json.dump({"shell": shell_identity, "shell_owner": shell_owner, "observations": navigation}, stream, indent=2)
+                qmp.keys("esc")
+
             privacy = []
 
             def await_keyboard(stage, predicate):

@@ -5,12 +5,13 @@ mkdir -p /orca51-artifacts
 pacman -Q at-spi2-core > /orca51-artifacts/base-atspi.txt
 pacman -Q orca > /orca51-artifacts/base-orca.txt
 # Record the real base before installing build tools or replacing any package.
-base_atspi=$(pacman -Q at-spi2-core | awk '{print $2}')
-pacman -Sy --noconfirm
-pacman -S --needed --noconfirm base-devel meson gettext itstool libxslt docbook-xsl pkgconf gobject-introspection glib2-devel python-gobject libx11 libxtst libxi libxml2
+pacman -Syu --needed --noconfirm base-devel meson gettext itstool libxslt docbook-xsl pkgconf gobject-introspection glib2-devel python-gobject libx11 libxtst libxi libxml2
+# Decide against the coherently upgraded package, not the earlier base receipt.
+current_atspi=$(pacman -Q at-spi2-core | awk '{print $2}')
+pacman -Q at-spi2-core > /orca51-artifacts/coherent-atspi.txt
 useradd -m -U orca-builder
 install -d -o orca-builder -g orca-builder /build/atspi /build/orca
-if [[ $(vercmp "$base_atspi" 2.58.6) -lt 0 ]]; then
+if [[ $(vercmp "$current_atspi" 2.58.6) -lt 0 ]]; then
     install -m0644 /recipes/atspi.PKGBUILD /build/atspi/PKGBUILD
     chown orca-builder:orca-builder /build/atspi/PKGBUILD
     runuser -u orca-builder -- sh -c 'cd /build/atspi && makepkg --noconfirm'

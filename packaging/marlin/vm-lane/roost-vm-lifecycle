@@ -13,6 +13,11 @@ import shlex
 import time
 import uuid
 import base64
+import stat
+import contextlib
+
+RECORDING_DIR = pathlib.Path("/run/roost-vm-orca-recordings")
+RECORDING_STATE = RECORDING_DIR / "current.json"
 
 
 
@@ -202,6 +207,8 @@ def constraint_client(action):
                 raise RuntimeError("actual original constraint client did not terminate")
             time.sleep(0.05)
     return {"principal": record, "client": snapshot}
+
+
 def orca_observation():
     state = json.loads(STATE.read_text())
     pid = int(state.get("screen_reader_pid") or 0)
@@ -284,6 +291,296 @@ def orca_observation():
     return result
 
 
+def speech_selection(actual):
+    """Read live SSIP-backed properties on the original genuine 51 connection."""
+    if not actual["ready"] or actual["state"] != "active" or actual["version"] != ["s", "51.0"]:
+        raise RuntimeError("original genuine Orca 51 is required for speech selection")
+    values = {}
+    for name in ("CurrentServer", "CurrentSynthesizer"):
+        value = shlex.split(call("busctl", "--user", "get-property", actual["owner"],
+            "/org/gnome/Orca1/Service/SpeechManager", "org.gnome.Orca1.SpeechManager", name, user=True))
+        if len(value) != 2 or value[0] != "s":
+            raise RuntimeError("invalid actual Orca speech selection property")
+        values[name] = value[1]
+    after = orca_observation()
+    fields = ("pid", "start_ticks", "owner", "uid", "bus_pid", "bus_uid", "version",
+              "display", "parent_pid", "compositor_pid", "bus_name")
+    if not after["ready"] or after["state"] != "active" or any(after.get(k) != actual[k] for k in fields):
+        raise RuntimeError("original Orca identity changed during speech selection")
+    if values != {"CurrentServer": "Speech Dispatcher", "CurrentSynthesizer": "espeak-ng"}:
+        raise RuntimeError("original Orca did not select the real espeak-ng Speech Dispatcher module")
+    return {"selection": values, "orca": after, "guest_monotonic": time.monotonic()}
+
+
+def process_receipt(pid):
+    """Kernel process identity; PipeWire app properties remain hints only."""
+    path = pathlib.Path(f"/proc/{int(pid)}")
+    stat = (path / "stat").read_text().rsplit(")", 1)[1].split()
+    uid, ticks = path.stat().st_uid, int(stat[19])
+    exe = pathlib.Path(os.readlink(path / "exe"))
+    with exe.open("rb") as stream:
+        image = stream.read(16 * 1024 * 1024 + 1)
+    if uid != OWNER.pw_uid or len(image) > 16 * 1024 * 1024:
+        raise RuntimeError("speech process identity exceeds user/size authority")
+    result = {"pid": int(pid), "uid": uid, "start_ticks": ticks, "exe": str(exe),
+              "exe_sha256": hashlib.sha256(image).hexdigest(), "package": call("pacman", "-Qqo", str(exe))}
+    stable = (path / "stat").read_text().rsplit(")", 1)[1].split()
+    if int(stable[19]) != ticks or path.stat().st_uid != uid or os.readlink(path / "exe") != str(exe):
+        raise RuntimeError("speech process identity changed during receipt")
+    return result
+
+
+def speech_graph():
+    # Bound the producer's bytes before Python captures/decodes JSON. The fixed
+    # pipeline has no interpolated arguments or private data.
+    raw = call("bash", "-o", "pipefail", "-c", "pw-dump | head -c 2097153", user=True)
+    if len(raw.encode()) > 2 * 1024 * 1024:
+        raise RuntimeError("speech graph exceeds evidence bound")
+    objects = json.loads(raw)
+    keys = {"object.serial", "client.id", "node.id", "node.name", "media.class", "audio.channel",
+            "application.process.id", "application.process.binary", "pipewire.sec.pid", "pipewire.sec.uid",
+            "pipewire.sec.gid", "protocol.name"}
+    receipt = []
+    for obj in objects:
+        if obj.get("type") not in {"PipeWire:Interface:Node", "PipeWire:Interface:Port",
+                                  "PipeWire:Interface:Link", "PipeWire:Interface:Client"}:
+            continue
+        info = obj.get("info", {})
+        receipt.append({"id": obj["id"], "type": obj["type"],
+            "info": {k: info[k] for k in ("state", "direction", "output-node-id", "output-port-id",
+                     "input-node-id", "input-port-id") if k in info},
+            "props": {k: v for k, v in info.get("props", {}).items() if k in keys}})
+    if len(receipt) > 512 or len(json.dumps(receipt).encode()) > 128 * 1024:
+        raise RuntimeError("speech graph receipt exceeds evidence bound")
+    return {"guest_monotonic": time.monotonic(), "objects": receipt,
+            "process_properties_are_hints": True, "client_credentials_verified": False,
+            "mixed_sink": True, "exclusive_pcm": False}
+
+
+def file_identity(info):
+    if not stat.S_ISREG(info.st_mode):
+        raise RuntimeError("recording evidence must be a regular file")
+    return {"dev": info.st_dev, "ino": info.st_ino, "uid": info.st_uid,
+            "gid": info.st_gid, "mode": stat.S_IMODE(info.st_mode)}
+
+
+def create_evidence(path, uid, gid):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.fchown(fd, uid, gid)
+        return file_identity(os.fstat(fd))
+    finally:
+        os.close(fd)
+
+
+def read_evidence(path, identity, limit):
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if file_identity(before) != identity or file_identity(os.lstat(path)) != identity:
+            raise RuntimeError("original recording file identity changed")
+        data = stream.read(limit + 1)
+        after = os.fstat(stream.fileno())
+        if (file_identity(after) != identity or file_identity(os.lstat(path)) != identity
+                or (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns)
+                or len(data) != before.st_size or len(data) > limit):
+            raise RuntimeError("original recording file changed or exceeded its bound")
+        return data
+
+
+def reserve_recording():
+    with contextlib.suppress(FileExistsError):
+        RECORDING_DIR.mkdir(mode=0o700)
+    directory = RECORDING_DIR.lstat()
+    if not stat.S_ISDIR(directory.st_mode) or directory.st_uid != 0 or stat.S_IMODE(directory.st_mode) != 0o700:
+        raise RuntimeError("recording state directory lacks root authority")
+    # O_EXCL reserves authority before any presenter mutation. A second start
+    # cannot close or overwrite another original capture through a late race.
+    fd = os.open(RECORDING_STATE, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    return fd, file_identity(os.fstat(fd))
+
+
+def save_recording(recording, reservation):
+    fd, identity = reservation
+    if file_identity(os.fstat(fd)) != identity or file_identity(RECORDING_STATE.lstat()) != identity:
+        raise RuntimeError("original recording reservation changed")
+    recording["state_identity"] = identity
+    payload = json.dumps(recording).encode()
+    if len(payload) > 512 * 1024:
+        raise RuntimeError("recording state exceeds bound")
+    os.lseek(fd, 0, os.SEEK_SET)
+    with os.fdopen(os.dup(fd), "wb") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.ftruncate(fd, len(payload))
+
+
+def load_recording():
+    directory = RECORDING_DIR.lstat()
+    if not stat.S_ISDIR(directory.st_mode) or directory.st_uid != 0 or stat.S_IMODE(directory.st_mode) != 0o700:
+        raise RuntimeError("recording state directory lacks root authority")
+    info = RECORDING_STATE.lstat()
+    identity = file_identity(info)
+    if identity["uid"] != 0 or identity["mode"] != 0o600:
+        raise RuntimeError("recording state lacks root authority")
+    recording = json.loads(read_evidence(RECORDING_STATE, identity, 512 * 1024))
+    if recording.get("capture_state") != "ready":
+        raise RuntimeError("original recording setup has not completed")
+    if recording["state_identity"] != identity:
+        raise RuntimeError("original root recording state changed")
+    return recording
+
+
+def require_sink_graph(graph, sink, synth, recorder=None):
+    objects = {obj["id"]: obj for obj in graph["objects"]}
+    if len(objects) != len(graph["objects"]):
+        raise RuntimeError("speech graph contains duplicate object IDs")
+    for original in (sink, synth):
+        actual = objects.get(original["id"], {})
+        serial = original["props"].get("object.serial")
+        if serial is None or actual.get("props", {}).get("object.serial") != serial:
+            raise RuntimeError("original speech/sink graph identity changed")
+    pairs = [(synth["id"], sink["id"])]
+    if recorder is not None:
+        pairs.append((sink["id"], recorder["id"]))
+    for source, target in pairs:
+        links = [o for o in graph["objects"] if o["type"] == "PipeWire:Interface:Link"
+                 and o["info"].get("output-node-id") == source and o["info"].get("input-node-id") == target]
+        if not links:
+            raise RuntimeError("actual speech capture graph link is missing")
+        for link in links:
+            for direction, node in (("output", source), ("input", target)):
+                port = objects.get(link["info"].get(direction + "-port-id"), {})
+                if (port.get("type") != "PipeWire:Interface:Port" or port["info"].get("direction") != direction
+                        or int(port["props"].get("node.id", -1)) != node):
+                    raise RuntimeError("actual speech graph port/direction disagrees")
+
+
+def recorder_owns_file(pid, identity):
+    for index, entry in enumerate(pathlib.Path(f"/proc/{pid}/fd").iterdir()):
+        if index >= 64:
+            raise RuntimeError("recorder file descriptors exceed bound")
+        with contextlib.suppress(FileNotFoundError):
+            info = entry.stat()
+            if stat.S_ISREG(info.st_mode) and file_identity(info) == identity:
+                return True
+    return False
+
+
+def speech_error_type(error):
+    value = type(error).__name__
+    allowed = {"RuntimeError", "CalledProcessError", "FileNotFoundError", "ProcessLookupError",
+               "PermissionError", "ValueError", "JSONDecodeError", "OSError", "TimeoutExpired"}
+    return value if value in allowed else "OtherError"
+
+
+def original_recorder_departed(original):
+    path = pathlib.Path(f"/proc/{original['pid']}")
+    try:
+        before = int((path / "stat").read_text().rsplit(")", 1)[1].split()[19])
+        after = int((path / "stat").read_text().rsplit(")", 1)[1].split()[19])
+    except (FileNotFoundError, ProcessLookupError):
+        return True
+    if before != after:
+        raise RuntimeError("recorder process identity changed during departure observation")
+    return before != original["start_ticks"]
+
+
+def recorder_unit_departure(stop_returncode, show_returncode, output, original_departed):
+    # Only fixed public systemd properties are retained. Failed/empty/malformed
+    # output cannot establish collection or departure of the original recorder.
+    if any(type(value) is not int or not -255 <= value <= 255 for value in (stop_returncode, show_returncode)):
+        raise RuntimeError("recording unit returncode receipt is invalid")
+    if not isinstance(output, str) or len(output) > 256:
+        raise RuntimeError("recording unit property receipt exceeds bound")
+    rows = output.splitlines()
+    props = {}
+    for row in rows:
+        key, separator, value = row.partition("=")
+        if not separator or key not in {"LoadState", "ActiveState", "MainPID"} or key in props:
+            raise RuntimeError("recording unit property receipt is not exact")
+        props[key] = value
+    if set(props) != {"LoadState", "ActiveState", "MainPID"} or props["MainPID"] != "0" or props["ActiveState"] != "inactive":
+        raise RuntimeError("recording unit departure properties disagree")
+    if props["LoadState"] == "not-found":
+        if show_returncode not in (0, 4) or original_departed is not True:
+            raise RuntimeError("collected unit lacks original recorder departure proof")
+    elif props["LoadState"] == "loaded":
+        if stop_returncode != 0 or show_returncode != 0 or original_departed is False:
+            raise RuntimeError("loaded recording unit stop did not qualify")
+    else:
+        raise RuntimeError("recording unit load state does not qualify")
+    return {"stop_returncode": stop_returncode, "show_returncode": show_returncode,
+            "properties": props, "original_recorder_departed": original_departed}
+
+
+def stop_recording_unit(recording):
+    command = ["runuser", "-u", OWNER.pw_name, "--", "env", f"XDG_RUNTIME_DIR={RUNTIME}",
+               f"DBUS_SESSION_BUS_ADDRESS=unix:path={RUNTIME}/bus", "systemctl", "--user"]
+    stop = subprocess.run([*command, "stop", recording["unit"]], capture_output=True, text=True, timeout=15)
+    show = subprocess.run([*command, "show", recording["unit"], "--property=LoadState",
+                           "--property=ActiveState", "--property=MainPID"], capture_output=True, text=True, timeout=15)
+    try:
+        original = recording.get("recorder")
+        departed = original_recorder_departed(original) if original else None
+        return recorder_unit_departure(stop.returncode, show.returncode, show.stdout, departed)
+    except Exception as error:
+        error.stop_returncode = stop.returncode
+        error.show_returncode = show.returncode
+        raise
+
+
+def cleanup_speech(recording, token, unit_started=True, presenter_started=True):
+    receipt = {"unit_departed": not unit_started, "presenter_closed": not presenter_started, "errors": []}
+    def failure(stage, error):
+        item = {"stage": stage, "exception_type": speech_error_type(error)}
+        if isinstance(error, subprocess.CalledProcessError) and type(error.returncode) is int and -255 <= error.returncode <= 255:
+            item["returncode"] = error.returncode
+        for key in ("stop_returncode", "show_returncode"):
+            value = getattr(error, key, None)
+            if stage == "owned_unit_stop" and type(value) is int and -255 <= value <= 255:
+                item[key] = value
+        receipt["errors"].append(item)
+    if unit_started:
+        try:
+            receipt["unit_stop"] = stop_recording_unit(recording)
+            receipt["unit_departed"] = True
+        except Exception as error:
+            failure("owned_unit_stop", error)
+    if presenter_started:
+        try:
+            if token is None:
+                raise RuntimeError("original presenter token unavailable for close")
+            reply = call("busctl", "--user", "call", recording["owner"],
+                         "/org/gnome/Orca1/Service/SpeechPresenter", "org.gnome.Orca1.SpeechPresenter",
+                         "SetLogFileForTesting", "ss", token, "", user=True)
+            if reply != "b true":
+                raise RuntimeError("original presenter refused close")
+            original = recording["selection"]["orca"]
+            actual = orca_observation()
+            fields = ("pid", "start_ticks", "owner", "uid", "bus_pid", "bus_uid", "version")
+            if any(actual.get(k) != original.get(k) for k in fields):
+                raise RuntimeError("original presenter identity changed during close")
+            if recorder_owns_file(original["pid"], recording["log_identity"]):
+                raise RuntimeError("original presenter retains the original log file")
+            after = orca_observation()
+            if any(after.get(k) != original.get(k) for k in fields):
+                raise RuntimeError("original presenter identity changed after FD close proof")
+            receipt["presenter_closed"] = True
+        except Exception as error:
+            failure("owned_presenter_close", error)
+    return receipt
+
+
+def fail_speech(error, cleanup):
+    diagnostic = {"exception_type": speech_error_type(error), "cleanup": cleanup}
+    if isinstance(error, subprocess.CalledProcessError) and type(error.returncode) is int and -255 <= error.returncode <= 255:
+        diagnostic["returncode"] = error.returncode
+    print(json.dumps({"orca_speech_error": diagnostic}))
+    # The original exception may contain token-bearing argv. Preserve only its
+    # fixed public type/code and the failed exit, never an exception traceback.
+    raise SystemExit(1) from None
+
+
 def mutate_orca_setting(action):
     schema, key = "org.gnome.desktop.a11y.applications", "screen-reader-enabled"
     if action == "orca-reset":
@@ -297,6 +594,51 @@ def mutate_orca_setting(action):
         raise RuntimeError("screen reader setting readback disagrees with mutation")
     # Acknowledgment only. The host separately awaits strict owned process/bus lifecycle evidence.
     return {"requested_enabled": requested, "readback_enabled": value == "true"}
+
+
+def shell_navigation_focus(kind, original_pid=None, original_ticks=None):
+    actual = orca_observation()
+    state = json.loads(STATE.read_text())
+    if state["locked"] or not actual["ready"] or actual["state"] != "active":
+        raise RuntimeError("public navigation requires an unlocked original genuine reader")
+    executable = "roost-shell-gtk" if kind == "shell" else "gnome-disks"
+    candidates = [p for p in inventory()["processes"] if p["executable"] == executable and p["uid"] == OWNER.pw_uid]
+    if kind == "disks":
+        candidates = [p for p in candidates if p["pid"] == original_pid and p["start_ticks"] == original_ticks]
+    if len(candidates) != 1:
+        raise RuntimeError("one original navigation application principal is required")
+    process = candidates[0]
+    receipt = json.loads(call("/usr/libexec/roost-vm-shell-focus", str(process["pid"]), str(process["start_ticks"]),
+                              executable, actual["display"][0], user=True))
+    after = orca_observation()
+    if any(actual[k] != after.get(k) for k in ("pid", "uid", "start_ticks", "owner", "bus_pid", "bus_uid", "version")) or not after["ready"]:
+        raise RuntimeError("original genuine reader changed during navigation observation")
+    state = json.loads(STATE.read_text())
+    if state["locked"]:
+        raise RuntimeError("public navigation observation crossed lock")
+    result = {"orca": after, "focus": receipt, "overview_open": state["overview_open"], "focused_window": state["focused"]}
+    if kind == "disks":
+        desktop = pathlib.Path("/usr/share/applications/org.gnome.DiskUtility.desktop")
+        info = desktop.lstat()
+        metadata = read_evidence(desktop, file_identity(info), 65536)
+        if info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o022 or len(metadata) > 65536:
+            raise RuntimeError("installed Disks desktop entry lacks bounded distribution authority")
+        commands = [line[5:] for line in metadata.decode().splitlines() if line.startswith("Exec=")]
+        if not commands or pathlib.Path(shlex.split(commands[0])[0]).name != "gnome-disks":
+            raise RuntimeError("installed Disks desktop entry does not launch the actual frontend")
+        exe = os.readlink(f"/proc/{process['pid']}/exe")
+        package = call("pacman", "-Qqo", exe)
+        if package != "gnome-disk-utility" or call("pacman", "-Qqo", str(desktop)) != package:
+            raise RuntimeError("actual Disks frontend/desktop entry lack matching distribution package ownership")
+        window = next((w for w in state["windows"] if w["id"] == state["focused"]), None)
+        active = any(n["label"] == "Disks" and n["role"] == "frame" and n["active"] for n in receipt["public_controls"])
+        result["launch_focus_ready"] = (window is not None and window["app_id"] == "org.gnome.DiskUtility"
+                                         and active and not state["overview_open"])
+        remaining = [p for p in inventory()["processes"] if p == process]
+        if len(remaining) != 1 or json.loads(STATE.read_text())["locked"]:
+            raise RuntimeError("original Disks frontend changed or locked during package observation")
+        result["desktop"] = {"path": str(desktop), "uid": info.st_uid, "sha256": hashlib.sha256(metadata).hexdigest(), "package": package}
+    return result
 
 
 def main():
@@ -378,59 +720,155 @@ print(json.dumps(result))
                              and actor["caller_pid"] != before["pid"]),
                   "actor": actor,
                   "manager_pid": compositor["pid"], "before": before["keyboard"], "after": after["keyboard"]}
+    elif action in {"orca-shell-focus", "orca-disks-focus"}:
+        result = (shell_navigation_focus("shell") if action == "orca-shell-focus"
+                  else shell_navigation_focus("disks", int(sys.argv[2]), int(sys.argv[3])))
     elif action == "orca-speech-start":
         actual = orca_observation()
         if not actual["ready"] or actual["state"] != "active":
             raise RuntimeError("genuine owned Orca is required for speech capture")
+        selection = speech_selection(actual)
+        graph = speech_graph()
+        synth = [o for o in graph["objects"] if o["type"] == "PipeWire:Interface:Node"
+                 and o["props"].get("node.name") == "speech-dispatcher-espeak-ng"
+                 and o["props"].get("media.class") == "Stream/Output/Audio"]
+        if len(synth) != 1:
+            raise RuntimeError("one actual real espeak-ng stream is required")
+        speech_process = process_receipt(synth[0]["props"]["application.process.id"])
+        if speech_process["package"] != "speech-dispatcher":
+            raise RuntimeError("real speech process is not distribution package owned")
         token = pathlib.Path(RUNTIME, "roost-vm-orca-token").read_text()
         capture = uuid.uuid4().hex
         log = str(pathlib.Path(RUNTIME, "roost-vm-orca-speech-" + capture + ".jsonl"))
+        pcm = str(pathlib.Path(RUNTIME, "roost-vm-orca-speech-" + capture + ".pcm"))
+        pcm_identity = None
+        log_identity = None
+        unit = "roost-vm-orca-pcm-" + uuid.uuid4().hex
+        presenter_started = False
+        unit_started = False
+        recorder = None
+        reservation = None
         try:
+            reservation = reserve_recording()
+            pcm_identity = create_evidence(pcm, OWNER.pw_uid, OWNER.pw_gid)
+            log_identity = create_evidence(log, OWNER.pw_uid, OWNER.pw_gid)
+            presenter_started = True
             reply = call("busctl", "--user", "call", actual["owner"],
                          "/org/gnome/Orca1/Service/SpeechPresenter", "org.gnome.Orca1.SpeechPresenter",
                          "SetLogFileForTesting", "ss", token, log, user=True)
-        except subprocess.CalledProcessError:
-            raise RuntimeError("upstream presenter recording setup failed") from None
-        if reply != "b true":
-            raise RuntimeError("upstream presenter refused recording")
-        objects = json.loads(call("pw-dump", user=True))
-        defaults = [entry for obj in objects if obj.get("props", {}).get("metadata.name") == "default"
-                    for entry in obj.get("metadata", []) if entry.get("subject") == 0
-                    and entry.get("key") == "default.audio.sink"]
-        if len(defaults) != 1:
-            raise RuntimeError("one genuine default audio sink is required")
-        value = defaults[0]["value"]
-        target = (json.loads(value) if isinstance(value, str) else value)["name"]
-        unit = "roost-vm-orca-pcm-" + uuid.uuid4().hex
-        pcm = str(pathlib.Path(RUNTIME, "roost-vm-orca-speech-" + capture + ".pcm"))
-        call("systemd-run", "--user", "--quiet", "--collect", "--unit=" + unit,
-             "--service-type=exec", "--property=RuntimeMaxSec=8s", "/usr/bin/pw-record",
-             "--target=" + target, "--properties={\"stream.capture.sink\":true}",
-             "--raw", "--format=s16", "--rate=24000", "--channels=1", "--sample-count=96000", pcm, user=True)
-        pathlib.Path(RUNTIME, "roost-vm-orca-recording.json").write_text(
-            json.dumps({"unit": unit, "pcm": pcm, "log": log, "owner": actual["owner"], "sink": target}))
-        result = {"orca": actual, "sink": target, "recording": "genuine PipeWire sink s16 PCM; normal Orca speech backend retained"}
+            if reply != "b true":
+                raise RuntimeError("upstream presenter refused recording")
+            raw = call("bash", "-o", "pipefail", "-c", "pw-dump | head -c 2097153", user=True)
+            if len(raw.encode()) > 2 * 1024 * 1024:
+                raise RuntimeError("speech metadata exceeds evidence bound")
+            objects = json.loads(raw)
+            defaults = [entry for obj in objects if obj.get("props", {}).get("metadata.name") == "default"
+                        for entry in obj.get("metadata", []) if entry.get("subject") == 0
+                        and entry.get("key") == "default.audio.sink"]
+            if len(defaults) != 1:
+                raise RuntimeError("one genuine default audio sink is required")
+            value = defaults[0]["value"]
+            target = (json.loads(value) if isinstance(value, str) else value)["name"]
+            sinks = [o for o in graph["objects"] if o["type"] == "PipeWire:Interface:Node"
+                     and o["props"].get("node.name") == target and o["props"].get("media.class") == "Audio/Sink"]
+            if len(sinks) != 1:
+                raise RuntimeError("actual real espeak stream was not linked to the selected recording sink")
+            require_sink_graph(graph, sinks[0], synth[0])
+            started = time.monotonic()
+            unit_started = True
+            call("systemd-run", "--user", "--quiet", "--collect", "--unit=" + unit,
+                 "--service-type=exec", "--property=RuntimeMaxSec=8s", "--property=UMask=0077", "/usr/bin/pw-record",
+                 "--target=" + target, "--properties=" + json.dumps({"stream.capture.sink": True, "node.name": unit}),
+                 "--raw", "--format=s16", "--rate=24000", "--channels=1", "--sample-count=96000", pcm, user=True)
+            main_pid = int(call("systemctl", "--user", "show", unit, "--property=MainPID", "--value", user=True))
+            recorder = process_receipt(main_pid)
+            if pathlib.Path(recorder["exe"]).name not in {"pw-cat", "pw-record"}:
+                raise RuntimeError("owned recording unit did not launch the actual recorder")
+            deadline = time.monotonic() + 1
+            while True:
+                graph_ready = speech_graph()
+                nodes = [o for o in graph_ready["objects"] if o["type"] == "PipeWire:Interface:Node"
+                         and o["props"].get("node.name") == unit]
+                if len(nodes) == 1 and any(o["type"] == "PipeWire:Interface:Link"
+                                          and o["info"].get("input-node-id") == nodes[0]["id"]
+                                          and o["info"].get("output-node-id") == sinks[0]["id"]
+                                          for o in graph_ready["objects"]):
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("owned recorder did not establish actual graph input")
+                time.sleep(0.05)
+            require_sink_graph(graph_ready, sinks[0], synth[0], nodes[0])
+            if not recorder_owns_file(main_pid, pcm_identity):
+                raise RuntimeError("actual recorder did not retain the original PCM file")
+            recorder_after = process_receipt(main_pid)
+            current_main = int(call("systemctl", "--user", "show", unit, "--property=MainPID", "--value", user=True))
+            if current_main != main_pid or any(recorder_after[key] != recorder[key]
+                    for key in ("pid", "uid", "start_ticks", "exe")):
+                raise RuntimeError("original recording process changed during file readiness")
+            if file_identity(os.lstat(log)) != log_identity:
+                raise RuntimeError("original presenter file identity changed")
+            recording = {"capture_state": "ready", "unit": unit, "pcm": pcm, "log": log, "owner": actual["owner"], "sink": target,
+                         "pcm_identity": pcm_identity, "log_identity": log_identity, "sink_node": sinks[0],
+                         "selection": selection, "graph_before": graph, "graph_ready": graph_ready,
+                         "speech_process": speech_process, "synth_node": synth[0], "recorder": recorder,
+                         "node_process_association": "unverified PipeWire property hint; proc identity is authoritative only for the process",
+                         "started_monotonic": started, "ready_monotonic": time.monotonic()}
+            save_recording(recording, reservation)
+        except Exception as error:
+            cleanup = cleanup_speech({"unit": unit, "owner": actual["owner"], "selection": selection,
+                                      "log_identity": log_identity, "recorder": recorder}, token, unit_started, presenter_started)
+            if reservation is not None:
+                try:
+                    if cleanup["unit_departed"] and cleanup["presenter_closed"]:
+                        if file_identity(RECORDING_STATE.lstat()) != reservation[1]:
+                            raise RuntimeError("original recording reservation changed during cleanup")
+                        RECORDING_STATE.unlink()
+                except Exception as release_error:
+                    cleanup["errors"].append({"stage": "owned_state_release", "exception_type": speech_error_type(release_error)})
+            fail_speech(error, cleanup)
+        finally:
+            if reservation is not None:
+                os.close(reservation[0])
+        result = {"orca": actual, "sink": target, "receipt": recording,
+                  "recording": "fresh mixed-sink PCM; selected real espeak-ng, exclusive PCM origin unproven"}
+    elif action == "orca-speech-trigger":
+        result = {"selection": speech_selection(orca_observation()), "guest_monotonic": time.monotonic()}
     elif action == "orca-speech-end":
-        recording = json.loads(pathlib.Path(RUNTIME, "roost-vm-orca-recording.json").read_text())
+        recording = load_recording()
         if not recording["unit"].startswith("roost-vm-orca-pcm-"):
             raise RuntimeError("invalid recording unit")
-        call("systemctl", "--user", "stop", recording["unit"], user=True, check=False)
-        token = pathlib.Path(RUNTIME, "roost-vm-orca-token").read_text()
+        token = None
+        primary = None
         try:
-            call("busctl", "--user", "call", recording["owner"],
-                 "/org/gnome/Orca1/Service/SpeechPresenter", "org.gnome.Orca1.SpeechPresenter",
-                 "SetLogFileForTesting", "ss", token, "", user=True)
-        except subprocess.CalledProcessError:
-            raise RuntimeError("upstream presenter recording close failed") from None
-        pcm = pathlib.Path(recording["pcm"]).read_bytes()
-        log = pathlib.Path(recording["log"]).read_text()
-        if len(pcm) > 192000 or len(log.encode()) > 64 * 1024:
-            raise RuntimeError("speech capture exceeded evidence bounds")
-        objects = json.loads(call("pw-dump", user=True))
-        streams = [{k: p[k] for k in ("node.name", "application.process.binary", "application.process.id") if k in p}
-                   for obj in objects if (p := obj.get("info", {}).get("props", {})).get("media.class") == "Stream/Output/Audio"]
-        result = {"pcm": base64.b64encode(pcm).decode(), "speech": [json.loads(line) for line in log.splitlines()],
-                  "sink": recording["sink"], "streams": streams, "orca": orca_observation()}
+            token = pathlib.Path(RUNTIME, "roost-vm-orca-token").read_text()
+            selection = speech_selection(orca_observation())
+            graph_end = speech_graph()
+            require_sink_graph(graph_end, recording["sink_node"], recording["synth_node"])
+            ended = time.monotonic()
+        except Exception as error:
+            primary = error
+        finally:
+            cleanup = cleanup_speech(recording, token)
+        if primary is not None or cleanup["errors"]:
+            fail_speech(primary or RuntimeError("speech recording cleanup failed"), cleanup)
+        try:
+            pcm = read_evidence(recording["pcm"], recording["pcm_identity"], 192000)
+            log = read_evidence(recording["log"], recording["log_identity"], 64 * 1024).decode("utf-8")
+            if file_identity(RECORDING_STATE.lstat()) != recording["state_identity"]:
+                raise RuntimeError("original root recording state changed before completion")
+            RECORDING_STATE.unlink()
+            streams = [{k: p[k] for k in ("node.name", "application.process.binary", "application.process.id") if k in p}
+                       for obj in graph_end["objects"] if (p := obj["props"]).get("media.class") == "Stream/Output/Audio"]
+            result = {"pcm": base64.b64encode(pcm).decode(), "speech": [json.loads(line) for line in log.splitlines()],
+                      "sink": recording["sink"], "streams": streams, "orca": orca_observation(),
+                      "receipt": {"selection": selection, "graph_end": graph_end, "ended_monotonic": ended,
+                                  "pcm_identity": recording["pcm_identity"], "log_identity": recording["log_identity"],
+                                  "state_identity": recording["state_identity"],
+                                  "pcm_bytes": len(pcm), "pcm_sha256": hashlib.sha256(pcm).hexdigest(),
+                                  "cleanup": cleanup, "capture_route_observed": "readiness only; continuous route not proven",
+                                  "mixed_sink": True, "exclusive_pcm": False}}
+        except Exception as error:
+            fail_speech(error, cleanup)
     elif action == "orca-departed":
         pid, ticks = int(sys.argv[2]), int(sys.argv[3])
         try:

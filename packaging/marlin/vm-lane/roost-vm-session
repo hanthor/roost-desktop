@@ -1,5 +1,10 @@
 #!/bin/bash
 set -eu
+# CI receipts use fixed allowlisted English labels. Keep this locale confined
+# to the fixture session; production sessions retain the user's locale.
+export LC_ALL=C.UTF-8
+export LANG=C.UTF-8
+export LANGUAGE=C
 export XDG_SESSION_TYPE=wayland
 # CI-only anonymous overview action-to-scanout trace, capped at 64 actions.
 export ROOST_PERF_TRACE=1

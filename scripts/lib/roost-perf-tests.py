@@ -5,6 +5,11 @@ import importlib.util
 import json
 import os
 import base64
+import io
+import subprocess
+import sys
+from contextlib import redirect_stdout
+from types import SimpleNamespace
 from pathlib import Path
 import tempfile
 import unittest
@@ -26,6 +31,172 @@ host = load("host", ROOT / "scripts/roost-vm-perf")
 sysprof = load("sysprof", ROOT / "scripts/lib/gnome_sysprof.py")
 phase = load("phase", ROOT / "packaging/marlin/perf/roost-perf-phase")
 profiler = load("profiler", ROOT / "packaging/marlin/perf/roost-gnome-profiler")
+diag = load("diagnostics", ROOT / "scripts/lib/perf_trace_diagnostics.py")
+
+
+class TraceFailureDiagnostics(unittest.TestCase):
+    def receipt(self):
+        return {'trace_failure':{'schema':1,'action':'start','stage':'start-call','error_class':'RuntimeError'}}
+    def test_profiler_run_redacts_exception_body_and_preserves_failure(self):
+        def failed(context):
+            context.stage='start-call'
+            raise RuntimeError('PRIVATE arbitrary user session text')
+        output=io.StringIO()
+        with patch.object(profiler,'main',failed),patch.object(sys,'argv',['profiler','start']),redirect_stdout(output):
+            self.assertEqual(profiler.run(),1)
+        self.assertEqual(diag.decode(output.getvalue(),'start'),self.receipt())
+        self.assertNotIn('PRIVATE',output.getvalue())
+    def test_unknown_glib_domain_and_remote_body_are_replaced_by_fixed_other(self):
+        class Error(Exception):
+            domain='PRIVATE-domain'
+            code=37
+        context=diag.Context('start');context.stage='start-call'
+        value=context.failure(Error('PRIVATE body'),Error,lambda _: 'org.private.UserPayload.secret')
+        raw=diag.encode(value,'start')
+        self.assertNotIn(b'PRIVATE',raw);self.assertNotIn(b'secret',raw)
+        self.assertEqual(value['trace_failure']['glib'],{'domain':'other','code':37,'remote_name':'other'})
+    def test_exact_pinned_drained_messages_classify_without_transporting_text(self):
+        class Error(Exception):
+            domain='g-dbus-error-quark'
+            code=0
+        context=diag.Context('start');context.stage='start-call'
+        remote=lambda _: 'org.freedesktop.DBus.Error.Failed'
+        source=(ROOT/'packaging/marlin/perf/mutter-profiler/drained-capture-start.patch').read_text()
+        for message,label in diag.DRAINED_FAILURES.items():
+            self.assertIn('"'+message+'"',source)
+            for prefix in ('','GDBus.Error:org.freedesktop.DBus.Error.Failed: '):
+                error=Error('PRIVATE body');error.message=prefix+message
+                receipt=context.failure(error,Error,remote)
+                raw=diag.encode(receipt,'start')
+                self.assertEqual(diag.decode(raw,'start')['trace_failure']['drained_failure'],label)
+                self.assertNotIn(message.encode(),raw);self.assertNotIn(b'PRIVATE',raw)
+    def test_unknown_partial_private_or_oversized_message_never_classifies(self):
+        class Error(Exception):
+            domain='g-dbus-error-quark'
+            code=0
+        context=diag.Context('start');context.stage='start-call'
+        remote=lambda _: 'org.freedesktop.DBus.Error.Failed'
+        known=next(iter(diag.DRAINED_FAILURES))
+        for message in (None,{},known+' PRIVATE',known[:-1],'PRIVATE '+known,'x'*513,
+                        'GDBus.Error:org.private.Error: '+known):
+            error=Error('PRIVATE body');error.message=message
+            receipt=context.failure(error,Error,remote)
+            self.assertNotIn('drained_failure',receipt['trace_failure'])
+            self.assertNotIn(b'PRIVATE',diag.encode(receipt,'start'))
+    def test_classification_requires_original_start_failure_controls(self):
+        valid={'trace_failure':{'schema':1,'action':'start','stage':'start-call','error_class':'GLibError',
+               'glib':{'domain':'g-dbus-error-quark','code':0,'remote_name':'org.freedesktop.DBus.Error.Failed'},
+               'drained_failure':'owned-view'}}
+        self.assertEqual(diag.decode(diag.encode(valid,'start'),'start'),valid)
+        for field,value in [('drained_failure','PRIVATE'),('drained_failure',[]),('stage','stop-call'),('error_class','RuntimeError')]:
+            row=json.loads(json.dumps(valid));row['trace_failure'][field]=value
+            with self.assertRaises(ValueError):diag.encode(row,'start')
+        for field,value in [('domain','g-io-error-quark'),('remote_name','org.freedesktop.DBus.Error.NoReply')]:
+            row=json.loads(json.dumps(valid));row['trace_failure']['glib'][field]=value
+            with self.assertRaises(ValueError):diag.encode(row,'start')
+        row=json.loads(json.dumps(valid));row['trace_failure']['action']='stop'
+        with self.assertRaises(ValueError):diag.encode(row,'stop')
+    def test_phase_transports_valid_failure_and_observed_nonzero_only(self):
+        raw=diag.encode(self.receipt(),'start').decode()
+        error=subprocess.CalledProcessError(7,['fixed'],output=raw,stderr='PRIVATE STDERR')
+        output=io.StringIO()
+        with patch.object(phase.pwd,'getpwnam',return_value=SimpleNamespace(pw_uid=1000)),patch.object(phase.subprocess,'run',side_effect=error),redirect_stdout(output):
+            with self.assertRaises(SystemExit) as failed:phase.gnome_trace('start',0)
+        self.assertEqual(failed.exception.code,7)
+        self.assertEqual(diag.decode(output.getvalue(),'start'),self.receipt())
+        self.assertNotIn('PRIVATE',output.getvalue())
+    def test_host_retains_receipt_before_original_guest_failure(self):
+        raw=diag.encode(self.receipt(),'start')
+        class Agent:
+            def command(self,name,**kwargs):
+                return {'pid':1} if name=='guest-exec' else {'exited':True,'exitcode':7,'out-data':base64.b64encode(raw).decode(),'err-data':base64.b64encode(b'PRIVATE STDERR').decode()}
+        with tempfile.TemporaryDirectory() as directory:
+            out=Path(directory)
+            with self.assertRaisesRegex(RuntimeError,'guest performance gnome-trace-start failed'):
+                host.guest_probe(Agent(),'gnome-trace-start',out=out)
+            retained=(out/'gnome-trace-start-failure.json').read_text()
+            self.assertNotIn('PRIVATE',retained)
+            self.assertEqual(json.loads(retained)['diagnostic'],self.receipt())
+            self.assertEqual(json.loads(retained)['guest_exitcode'],7)
+    def test_malformed_unknown_oversized_duplicate_and_boolean_fields_rejected(self):
+        cases=[b'PRIVATE-not-json',b'x'*4097,b'['*1500+b']'*1500, b'{"trace_failure":{},"trace_failure":{}}']
+        for field,value in [('message','PRIVATE'),('stage','PRIVATE'),('schema',True),
+                            ('principal',{'uid':True,'pid':3,'owner':':1.4'}),('stage',[]),('error_class',{}),('component',[]),
+                            ('glib',{'domain':'g-io-error-quark','code':True,'remote_name':'other'}),
+                            ('glib',{'domain':[],'code':1,'remote_name':'other'})]:
+            row=self.receipt();row['trace_failure'][field]=value;cases.append(json.dumps(row).encode())
+        for raw in cases:
+            with self.subTest(raw=raw[:40]),self.assertRaises((ValueError,TypeError)):diag.decode(raw,'start')
+            output=io.StringIO()
+            error=subprocess.CalledProcessError(9,['fixed'],output=raw.decode(),stderr='PRIVATE STDERR')
+            with patch.object(phase.pwd,'getpwnam',return_value=SimpleNamespace(pw_uid=1000)),patch.object(phase.subprocess,'run',side_effect=error),redirect_stdout(output):
+                with self.assertRaises(SystemExit) as phase_failure:phase.gnome_trace('start',0)
+            self.assertEqual(phase_failure.exception.code,9)
+            rejected=diag.decode(output.getvalue(),'start')['trace_failure']
+            self.assertTrue(rejected['payload_rejected'])
+            self.assertEqual(rejected['subprocess_returncode'],9)
+            self.assertEqual(rejected['stage'],'diagnostic-transport')
+            self.assertNotIn('PRIVATE',output.getvalue())
+            with tempfile.TemporaryDirectory() as directory:
+                out=Path(directory)
+                host.retain_trace_failure({'exitcode':9,'out-data':base64.b64encode(raw).decode()},'gnome-trace-start',out)
+                retained=(out/'gnome-trace-start-failure.json').read_text()
+                self.assertNotIn('PRIVATE',retained)
+                self.assertTrue(json.loads(retained)['diagnostic_rejected'])
+    def test_mapped_library_failure_reports_fixed_component_and_actual_bound_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'library';path.write_bytes(b'known')
+            original=path.stat()
+            context=diag.Context('start');context.public['component']='cogl'
+            with self.assertRaises(RuntimeError):
+                profiler.mapped_library_digest(path,original.st_dev,original.st_ino+1,context=context)
+            self.assertEqual(context.stage,'mutter-library-validation')
+            value=context.failure(RuntimeError('PRIVATE path/error'))
+            self.assertEqual(value['trace_failure']['component'],'cogl')
+            self.assertNotIn('PRIVATE',diag.encode(value,'start').decode())
+    def test_zero_exit_cannot_turn_structured_failure_into_acquisition_success(self):
+        raw=diag.encode(self.receipt(),'start').decode()
+        with patch.object(phase.pwd,'getpwnam',return_value=SimpleNamespace(pw_uid=1000)),patch.object(phase.subprocess,'run',return_value=SimpleNamespace(stdout=raw,returncode=0)):
+            with self.assertRaisesRegex(ValueError,'cannot qualify'):phase.gnome_trace('start',0)
+        row=dict(self.receipt(),boottime_s=100)
+        class Agent:
+            def command(self,name,**kwargs):
+                return {'pid':1} if name=='guest-exec' else {'exited':True,'exitcode':0,'out-data':base64.b64encode(json.dumps(row).encode()).decode()}
+        with tempfile.TemporaryDirectory() as directory:
+            out=Path(directory)
+            with self.assertRaisesRegex(RuntimeError,'failed'):host.guest_probe(Agent(),'gnome-trace-start',out=out)
+            retained=json.loads((out/'gnome-trace-start-failure.json').read_text())
+            self.assertEqual(retained['guest_exitcode'],0)
+            self.assertTrue(retained['diagnostic_rejected'])
+    def test_malformed_inner_exit9_reaches_host_as_safe_rejection_not_success(self):
+        output=io.StringIO()
+        failure=subprocess.CalledProcessError(9,['fixed'],output='PRIVATE raw body',stderr='PRIVATE stderr')
+        with patch.object(phase.pwd,'getpwnam',return_value=SimpleNamespace(pw_uid=1000)),patch.object(phase.subprocess,'run',side_effect=failure),redirect_stdout(output):
+            with self.assertRaises(SystemExit) as exit_status:phase.gnome_trace('start',0)
+        raw=output.getvalue().encode()
+        class Agent:
+            def command(self,name,**kwargs):
+                return {'pid':1} if name=='guest-exec' else {'exited':True,'exitcode':exit_status.exception.code,'out-data':base64.b64encode(raw).decode()}
+        with tempfile.TemporaryDirectory() as directory:
+            out=Path(directory)
+            with self.assertRaisesRegex(RuntimeError,'failed'):host.guest_probe(Agent(),'gnome-trace-start',out=out)
+            value=json.loads((out/'gnome-trace-start-failure.json').read_text())
+            self.assertEqual(value['guest_exitcode'],9)
+            self.assertTrue(value['diagnostic']['trace_failure']['payload_rejected'])
+            self.assertNotIn('PRIVATE',json.dumps(value))
+    def test_rejected_payload_transport_fields_are_exact_and_cannot_claim_success(self):
+        for code in (True,0,256,-256):
+            row=self.receipt();row['trace_failure'].update(stage='diagnostic-transport',error_class='CalledProcessError',payload_rejected=True,subprocess_returncode=code)
+            with self.assertRaises(ValueError):diag.decode(json.dumps(row),'start')
+        row=self.receipt();row['trace_failure']['payload_rejected']=False
+        with self.assertRaises(ValueError):diag.decode(json.dumps(row),'start')
+    def test_trace_read_and_wrong_action_cannot_accept_failure_as_success(self):
+        with self.assertRaises(ValueError):diag.decode(diag.encode(self.receipt(),'start'),'stop')
+        with self.assertRaises(ValueError):diag.decode(diag.encode(self.receipt(),'start'),'read')
+    def test_cancellation_is_not_converted_to_a_diagnostic_failure(self):
+        with patch.object(profiler,'main',side_effect=KeyboardInterrupt),patch.object(sys,'argv',['profiler','start']),redirect_stdout(io.StringIO()) as output:
+            with self.assertRaises(KeyboardInterrupt):profiler.run()
+            self.assertEqual(output.getvalue(),'')
 
 
 class MutterLibraryIdentity(unittest.TestCase):
@@ -60,7 +231,7 @@ class MutterLibraryIdentity(unittest.TestCase):
         maps = "".join(f"1000-2000 r-xp 0 08:01 {42 + i} /usr/lib/{name}.so.0.0.0\n"
                        for i, name in enumerate(profiler.MUTTER_MODULES.values()))
 
-        def fingerprint(path, device, inode):
+        def fingerprint(path, device, inode, context=None):
             return dict(path=path, device=device, inode=inode, uid=0, bytes=100,
                         sha256="a" * 64)
 
@@ -77,7 +248,7 @@ class MutterLibraryIdentity(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "different package"):
                     profiler.mutter_libraries_provenance(123)
             with patch.object(profiler, "mapped_library_digest",
-                              side_effect=lambda *args: dict(fingerprint(*args), uid=1000)):
+                              side_effect=lambda *args, **kwargs: dict(fingerprint(*args, **kwargs), uid=1000)):
                 with self.assertRaisesRegex(RuntimeError, "not owned by root"):
                     profiler.mutter_libraries_provenance(123)
             with patch.object(profiler.Path, "open", side_effect=[io.StringIO(maps),

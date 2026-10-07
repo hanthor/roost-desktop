@@ -5,8 +5,18 @@ COPY packaging/marlin/vm-lane/orca51 /recipes
 RUN bash /recipes/build
 
 FROM ${BASE_IMAGE}
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 COPY --from=packages /orca51-artifacts /usr/share/roost-vm-orca51
-RUN pacman -U --noconfirm /usr/share/roost-vm-orca51/*.pkg.tar.zst \
+# Upgrade this separate runtime stage coherently too; builder libraries are
+# not copied into it. Revalidate the actual installed kernel after upgrading.
+RUN set -eu; pacman -Syu --needed --noconfirm \
+    && current_atspi=$(pacman -Q at-spi2-core | awk '{print $2}') \
+    && set -- /usr/share/roost-vm-orca51/orca-*.pkg.tar.zst \
+    && if test "$(vercmp "$current_atspi" 2.58.6)" -lt 0; then \
+        set -- "$@" /usr/share/roost-vm-orca51/at-spi2-core-*.pkg.tar.zst; \
+    fi \
+    && pacman -U --noconfirm "$@" \
+    && /usr/libexec/roost-image-kernels vm \
     && pacman -Qi orca at-spi2-core > /usr/share/roost-vm-orca51/installed-packages.txt \
     && sha256sum /usr/bin/orca > /usr/share/roost-vm-orca51/launcher-sha256.txt \
     && python -c 'import gi; gi.require_version("Atspi", "2.0"); from gi.repository import Atspi; assert Atspi.Accessible.__hash__.__module__ == "gi.overrides.Atspi"' \

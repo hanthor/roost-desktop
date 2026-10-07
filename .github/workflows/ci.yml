@@ -23,13 +23,16 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # smithay links system libxkbcommon via the xkbcommon crate;
       # the greeter UI needs GTK4/libadwaita dev files.
-      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev pkg-config libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev libpam-wrapper
+      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev pkg-config libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev libpam-wrapper zstd
       # The GTK shell (ADR 0006) links gtk4-layer-shell, which Ubuntu
       # 24.04 does not package.
       - run: sudo apt-get install -y meson ninja-build libwayland-dev wayland-protocols && scripts/ci-install-gtk4-layer-shell
       - run: scripts/roost-a11y-baseline check
       - run: python3 scripts/lib/roost-soak-tests.py
       - run: python3 scripts/lib/vm-boot-tests.py
+      - run: python3 scripts/lib/marlin-kernel-tests.py
+      - run: python3 scripts/lib/gnome-drained-tests.py
+      - run: python3 scripts/lib/roost-perf-payload-tests.py
       - run: python3 scripts/lib/native-constraint-tests.py
       - run: python3 scripts/lib/roost-pipewire-dump-tests.py
       - run: scripts/roost-settings-inventory-check
@@ -383,6 +386,16 @@ jobs:
             -t marlin-roost-preview:ci .
           podman run --rm marlin-roost-preview:ci roost-compositor --version
           podman run --rm marlin-roost-preview:ci test -f /usr/share/applications/roost-nested-preview.desktop
+          mkdir -p marlin-image-kernels
+          kernel_container=$(podman create marlin-roost-preview:ci /usr/bin/true)
+          trap 'podman rm "$kernel_container"' EXIT
+          podman cp "$kernel_container:/usr/share/roost-image-kernels/." marlin-image-kernels/
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: marlin-image-kernels
+          path: marlin-image-kernels/
+          retention-days: 14
       - if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin
@@ -437,13 +450,18 @@ jobs:
               -t localhost/marlin-roost-vm-orca51:ci .
             sudo podman tag localhost/marlin-roost-vm-orca51:ci localhost/marlin-roost-vm:ci
             mkdir -p orca51-package-provenance
-            probe_container=$(sudo podman create localhost/marlin-roost-vm:ci)
+            probe_container=$(sudo podman create localhost/marlin-roost-vm:ci /usr/bin/true)
             sudo podman cp "$probe_container:/usr/share/roost-vm-orca51/." orca51-package-provenance/
             sudo podman rm "$probe_container"
             sudo chown -R "$(id -u):$(id -g)" orca51-package-provenance
           fi
           sudo podman image inspect ghcr.io/tuna-os/marlin:gnome --format '{{.Digest}}' | tee /mnt/vm/base-digest
           sudo podman image inspect localhost/marlin-roost-vm:ci --format '{{.Id}}' | tee /mnt/vm/image-id
+          mkdir -p vm-lane-artifacts/image-kernels
+          kernel_container=$(sudo podman create localhost/marlin-roost-vm:ci /usr/bin/true)
+          trap 'sudo podman rm "$kernel_container"' EXIT
+          sudo podman cp "$kernel_container:/usr/share/roost-image-kernels/." vm-lane-artifacts/image-kernels/
+          sudo chown -R "$(id -u):$(id -g)" vm-lane-artifacts/image-kernels
           sudo podman run --rm localhost/marlin-roost-vm:ci sh -c 'bootc --version; ls -ld /home; ls /usr/lib/bootc/install/ && cat /usr/lib/bootc/install/*' || true
           df -h / /mnt
       - name: Install the image to a raw disk with bootc
