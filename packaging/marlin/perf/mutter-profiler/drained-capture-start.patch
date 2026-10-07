@@ -228,7 +228,7 @@
 +                                  state.output, gate->clock, state.next_counter,
 +                                  state.pending, state.depth, state.dispatched, state.state,
 +                                  gate->requested_us, g_get_monotonic_time (), gate->samples);
-+  COGL_TRACE_MESSAGE ("Roost::CaptureBoundary", description);
++  COGL_TRACE_MESSAGE ("Roost::CaptureBoundary", "%s", description);
 +}
 +
 +static gboolean
