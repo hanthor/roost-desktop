@@ -15,7 +15,7 @@ STAGES={'gi-import','session-bus','owner-name','owner-pid','owner-uid','peer-exe
         'stop-version-validation','stop-call','stop-marker-remove','stop-provenance-validation',
         'mutter-map-read','mutter-map-selection','mutter-package-query','mutter-package-validation',
         'mutter-library-open','mutter-library-validation','mutter-library-read','mutter-owner-query',
-        'mutter-owner-validation','mutter-map-recheck','diagnostic-transport'}
+        'mutter-owner-validation','mutter-map-recheck','diagnostic-transport','failed-capture-acquisition'}
 CLASSES={'GLibError','RuntimeError','ValueError','OSError','FileNotFoundError','PermissionError',
          'TimeoutExpired','CalledProcessError','ImportError','ModuleNotFoundError','OtherError'}
 DOMAINS={'g-io-error-quark','g-dbus-error-quark','g-file-error-quark','g-spawn-error-quark','other'}
@@ -33,6 +33,20 @@ DRAINED_FAILURES={
     'Capture requires one actual Virtual-1 frame clock':'virtual-clock',
     'Main-thread capture tracing failed to enable':'trace-enable',
 }
+
+STOP_DRAINED_FAILURES={
+    'Owned Stop capture stage/view/clock or tracing changed':'stop-owned-state',
+    'Stop capture requires original Virtual-1 frame clock':'stop-clock',
+    'No actual Stop drain in 5s':'stop-timeout',
+}
+
+
+def drained_stop_failure(message):
+    if type(message) is not str or len(message)>512:return None
+    for name in ('Failed','TimedOut'):
+        prefix='GDBus.Error:org.freedesktop.DBus.Error.'+name+': '
+        if message.startswith(prefix):message=message[len(prefix):];break
+    return STOP_DRAINED_FAILURES.get(message)
 
 
 def drained_failure(message):
@@ -64,10 +78,14 @@ def validate(value, action):
         if not isinstance(item,dict) or set(item)!={'domain','code','remote_name'} or type(item['domain']) is not str or item['domain'] not in DOMAINS or type(item['remote_name']) is not str or item['remote_name'] not in REMOTE or type(item['code']) is not int or not -(2**31)<=item['code']<2**31:
             raise ValueError('invalid public GLib diagnostic')
     if 'drained_failure' in row:
-        if (type(row['drained_failure']) is not str or row['drained_failure'] not in DRAINED_FAILURES.values()
-                or action!='start' or row['stage']!='start-call' or row['error_class']!='GLibError'
-                or row.get('glib',{}).get('domain')!='g-dbus-error-quark'
-                or row.get('glib',{}).get('remote_name')!='org.freedesktop.DBus.Error.Failed'):
+        label=row['drained_failure']
+        start_valid=(action=='start' and row['stage']=='start-call' and label in DRAINED_FAILURES.values()
+                     and row.get('glib',{}).get('remote_name')=='org.freedesktop.DBus.Error.Failed')
+        stop_valid=(action=='stop' and row['stage']=='stop-call' and label in STOP_DRAINED_FAILURES.values()
+                    and row.get('glib',{}).get('remote_name')==
+                    ('org.freedesktop.DBus.Error.TimedOut' if label=='stop-timeout' else 'org.freedesktop.DBus.Error.Failed'))
+        if (type(label) is not str or row['error_class']!='GLibError'
+                or row.get('glib',{}).get('domain')!='g-dbus-error-quark' or not(start_valid or stop_valid)):
             raise ValueError('invalid fixed drained failure classification')
     if 'shell_version' in row and row['shell_version']!='GNOME Shell 51.0':
         raise ValueError('unknown public shell version')
@@ -83,7 +101,7 @@ def validate(value, action):
             if (not isinstance(item,dict) or set(item)!={'sha256','bytes','package'}
                     or not isinstance(item['sha256'],str) or re.fullmatch(r'[0-9a-f]{64}',item['sha256']) is None
                     or type(item['bytes']) is not int or not 0<item['bytes']<=16*1024*1024
-                    or item['package']!='mutter 51.0-1.5'):
+                    or item['package']!='mutter 51.0-1.6'):
                 raise ValueError('invalid validated public module receipt')
     return value
 
@@ -134,4 +152,9 @@ class Context:
                         and row['glib']['remote_name']=='org.freedesktop.DBus.Error.Failed'):
                     known=drained_failure(getattr(error,'message',None))
                     if known is not None:row['drained_failure']=known
+                if (self.action=='stop' and self.stage=='stop-call'
+                        and row['glib']['domain']=='g-dbus-error-quark'):
+                    known=drained_stop_failure(getattr(error,'message',None))
+                    expected='org.freedesktop.DBus.Error.TimedOut' if known=='stop-timeout' else 'org.freedesktop.DBus.Error.Failed'
+                    if known is not None and row['glib']['remote_name']==expected:row['drained_failure']=known
         return {'trace_failure':row}
