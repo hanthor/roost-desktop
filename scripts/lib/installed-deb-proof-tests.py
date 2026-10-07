@@ -106,6 +106,25 @@ class InstalledPolicy(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'receipt-limit'):
                 M.bounded_json(path)
 
+    def test_distro_scale_library_hashes_within_file_bound(self):
+        # libLLVM.so.20.1 is 143,545,784 root-owned bytes and is mapped by the
+        # GTK shell via Mesa; the bound must admit current distro LLVM scale.
+        size = 143545784
+        status = SimpleNamespace(st_dev=1, st_ino=99, st_uid=0, st_mode=0o100644,
+                                 st_size=size, st_mtime_ns=10, st_ctime_ns=11)
+        remaining = [size]
+        def fake_read(fd, count):
+            chunk = min(count, remaining[0], 65536)
+            if chunk <= 0:
+                return b''
+            remaining[0] -= chunk
+            return b'\0' * chunk
+        with patch.object(os, 'open', return_value=50), patch.object(os, 'fstat', return_value=status), \
+             patch.object(os, 'stat', return_value=status), patch.object(os, 'read', side_effect=fake_read), \
+             patch.object(os, 'close'):
+            result = M.digest('/usr/lib/x86_64-linux-gnu/libLLVM.so.21.1')
+        self.assertEqual(result['size'], size)
+
     def test_mapped_inode_mismatch_rejected_before_hashing(self):
         maps = '1-2 r-xp 0 01:01 3 /usr/lib/libgtk-4.so.1\n'
         with patch('builtins.open', return_value=io.BytesIO(maps.encode())), patch.object(Path, 'resolve', lambda p, **_: p), patch.object(os, 'stat', return_value=SimpleNamespace(st_dev=257, st_ino=4)), patch.object(M, 'digest') as digest:

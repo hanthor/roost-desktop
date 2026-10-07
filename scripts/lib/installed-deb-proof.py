@@ -12,7 +12,10 @@ import sys
 import tempfile
 
 BINS = ('roost-compositor', 'roost-session', 'roost-shell-gtk', 'roost-shell-host', 'roost-ibus-bridge', 'roost-greeter')
-MAX_FILE = 128 * 1024 * 1024
+# Distro LLVM exceeds 128 MiB (libLLVM.so.20.1 is 143,545,784 bytes and is
+# mapped by the GTK shell via Mesa); hashing streams in 64 KiB blocks so the
+# cap bounds proof time, not memory.
+MAX_FILE = 256 * 1024 * 1024
 
 
 def run(args):
