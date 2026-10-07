@@ -385,6 +385,22 @@ pub const MAX_SWITCHER_THUMBNAILS: usize = 64;
 /// Switcher keys held at once.
 pub const MAX_SWITCHER_KEYS: usize = 64;
 
+/// Keysyms carried by [`SwitcherAction::Key`] and consumed by both shell
+/// switcher frontends. These are XKB keysyms, not evdev keycodes.
+///
+/// Preserve the numeric values and the legacy shell-host public re-export.
+pub mod switcher_keys {
+    pub const LEFT: u32 = 0xff51;
+    pub const UP: u32 = 0xff52;
+    pub const RIGHT: u32 = 0xff53;
+    pub const DOWN: u32 = 0xff54;
+    pub const F4: u32 = 0xffc1;
+    pub const Q: u32 = 0x71;
+    pub const Q_UPPER: u32 = 0x51;
+    pub const W: u32 = 0x77;
+    pub const W_UPPER: u32 = 0x57;
+}
+
 /// Mutter's `Above_Tab` in [`SwitcherKey::keysym`]: the key above Tab,
 /// whatever it types in the active layout.
 pub const KEYSYM_ABOVE_TAB: u32 = 0x2000_0000;
