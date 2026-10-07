@@ -1,0 +1,15 @@
+{
+  "source_run": 37208499252,
+  "observer_revision": "230c8b04170a6a663f22974bbcb0fb24ebbde56e",
+  "full_capture_sha256": "9cff3b5a549488d2a90146ae070fad23665a55ce7de7b23b7d8ba0ebf8e9d2c5",
+  "sample_sha256": "603770e95f018696c4ede0e9a24500992190d61a6ed6ad4c59a9d65216f0398a",
+  "pid": 1147,
+  "guest_kernel": "7.2.9-arch1-1",
+  "gnome_shell": "1:51.0-1",
+  "mutter": "51.0-1",
+  "extraction": "Unmodified 256-byte header and every complete mark frame from the authenticated Shell PID for dispatch, presented, ready, swap_framebuffer and handle_event; no payload bytes synthesized.",
+  "dispatch_count": 354,
+  "presented_count": 337,
+  "aborted_count": 17,
+  "input_count": 20
+}

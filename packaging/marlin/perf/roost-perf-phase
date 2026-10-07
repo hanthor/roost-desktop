@@ -71,6 +71,26 @@ def frames():
         process.communicate()
 
 
+def capture_writers(pid, metadata):
+    """Observe original GNOME writer handles; file quietness is not a flush fence."""
+    writers = []
+    root = Path(f"/proc/{pid}")
+    for descriptor in (root / "fd").iterdir():
+        try:
+            target = descriptor.stat()
+            if (target.st_dev, target.st_ino) != (metadata.st_dev, metadata.st_ino):
+                continue
+            info = (root / "fdinfo" / descriptor.name).read_text()
+        except FileNotFoundError:
+            # A descriptor may close while its process remains alive.
+            continue
+        flags = next(int(line.split()[1], 8) for line in info.splitlines()
+                     if line.startswith("flags:"))
+        if flags & os.O_ACCMODE in (os.O_WRONLY, os.O_RDWR):
+            writers.append({"fd": int(descriptor.name), "flags": flags})
+    return sorted(writers, key=lambda row: row["fd"])
+
+
 def gnome_trace(action, index):
     uid = pwd.getpwnam("roost-test").pw_uid
     if action in ("start", "stop"):
@@ -83,8 +103,9 @@ def gnome_trace(action, index):
         provenance = dict(json.loads(process.stdout), guest_kernel=os.uname().release)
         if action == "start":
             return provenance
-        # Stop flushes thread contexts asynchronously. Wait for a stable file,
-        # then retain structural/hash validation on the host as well.
+        # Allow queued shutdown work to run, but do not label this delay a
+        # flush fence. Record live writer handles; strict host ownership and
+        # whole-capture structural/hash checks still decide acceptance.
         time.sleep(.5)
     path = Path(f"/run/user/{uid}/roost-perf-gnome.syscap")
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -95,10 +116,16 @@ def gnome_trace(action, index):
                 or not 256 <= metadata.st_size <= 8 * 1024 * 1024):
             raise RuntimeError("invalid GNOME Sysprof capture ownership/size")
         if action == "stop":
+            writers = capture_writers(provenance["pid"], metadata)
             raw = stream.read(8 * 1024 * 1024 + 1)
-            if len(raw) != metadata.st_size:
+            after = os.fstat(stream.fileno())
+            if (len(raw) != metadata.st_size or
+                    (after.st_size, after.st_mtime_ns, after.st_ctime_ns) !=
+                    (metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns)):
                 raise RuntimeError("GNOME capture changed while reading")
-            return dict(provenance, bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+            return dict(provenance, bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest(),
+                        capture_writers_after_stop=writers,
+                        capture_mtime_ns=after.st_mtime_ns)
         if type(index) is not int or not 0 <= index < 128:
             raise ValueError("invalid Sysprof capture chunk index")
         stream.seek(index * 65536)
