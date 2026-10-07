@@ -1,0 +1,30 @@
+{
+  "owner": ":1.10",
+  "pid": 1103,
+  "uid": 1000,
+  "gnome_shell_version": "GNOME Shell 51.0",
+  "mutter_cogl_library": {
+    "path": "/usr/lib/mutter-51/libmutter-cogl-51.so.0.0.0",
+    "device": 36,
+    "inode": 143295,
+    "uid": 0,
+    "bytes": 879200,
+    "sha256": "394eaf4a27f36eb8cadcae1a2cb5d4bc748ab576341b6eaafff05834772700b7",
+    "package": "mutter 51.0-1.1"
+  },
+  "started_monotonic_ns": 123132711660,
+  "stopped_monotonic_ns": 156026356723,
+  "guest_kernel": "7.2.9-arch1-1",
+  "bytes": 1313432,
+  "sha256": "42fdb5b34d3b9062a1b97f6e3d4ba5aef80e19e8a916cab1fbd2e2ffa56d10d3",
+  "capture_writers_at_stop": [],
+  "capture_writers_after_stop": [],
+  "capture_writer_close_wait_ns": 1822,
+  "capture_mtime_ns": 1791335791560774116,
+  "source_run": 37554162135,
+  "source_job": 112576389653,
+  "source_artifact": 11455021454,
+  "source_head": "35e6f3abac1dab7f035a535589028f0a7f110c4d",
+  "artifact_member": "repeat-2/gnome/gnome-overview.syscap",
+  "limitation": "Complete rejected capture; root cause unproven. Reconstructed dispatch order is not an independently recorded frame identifier."
+}

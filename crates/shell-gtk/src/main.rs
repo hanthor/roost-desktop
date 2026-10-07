@@ -1421,6 +1421,7 @@ fn build(app: &adw::Application) {
     let osd_ui = osd::OsdUi::new(app.upcast_ref());
     let media_keys = media_keys::MediaKeys::new({
         let osd = osd_ui.clone();
+        let sound = media_keys::sound_settings();
         Rc::new(move |percent, muted, microphone| {
             osd.show(&osd::OsdRequest {
                 icon: Some(
@@ -1432,6 +1433,11 @@ fn build(app: &adw::Application) {
                     .into(),
                 ),
                 level: Some(if muted { 0.0 } else { percent / 100.0 }),
+                max_level: Some(if microphone {
+                    1.0
+                } else {
+                    media_keys::output_limit(sound.as_ref()) / 100.0
+                }),
                 ..Default::default()
             });
         })
@@ -1852,12 +1858,13 @@ fn build(app: &adw::Application) {
                         if !uri.starts_with("file://") {
                             return String::new();
                         }
-                        // GIO decodes escaped path components before the
-                        // compositor's simple local-file drop reader.
+                        // Validate a local native path, then keep a canonical
+                        // escaped URI across the line-based drop. The compositor
+                        // decodes once; literal percent signs remain filename bytes.
                         gio::File::for_uri(&uri)
                             .path()
                             .filter(|path| path.is_absolute())
-                            .map(|path| format!("file://{}", path.display()))
+                            .map(|path| gio::File::for_path(path).uri().to_string())
                             .unwrap_or_default()
                     })
                     .unwrap_or_default();
@@ -1939,6 +1946,7 @@ fn build(app: &adw::Application) {
                 if let Some(iface) = all[4].as_ref() {
                     out.hot_corners = iface.boolean("enable-hot-corners");
                 }
+                out.right_to_left = gtk::Widget::default_direction() == gtk::TextDirection::Rtl;
                 out.enable_animations = animations_enabled(all[4].as_ref(), all[5].as_ref());
                 if let Some(gtk_settings) = gtk::Settings::default() {
                     gtk_settings.set_gtk_enable_animations(out.enable_animations);

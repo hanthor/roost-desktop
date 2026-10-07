@@ -97,6 +97,37 @@ def main():
     action = sys.argv[1]
     if action == "inventory":
         result = inventory()
+    elif action in ("audio-amplification-off", "audio-amplification-on",
+                    "audio-amplification-high", "audio-amplification-read",
+                    "audio-amplification-reset"):
+        schema, key = "org.gnome.desktop.sound", "allow-volume-above-100-percent"
+        if action != "audio-amplification-read":
+            if action == "audio-amplification-reset":
+                call("gsettings", "reset", schema, key, user=True)
+                level = "0.40"
+            else:
+                enabled = action != "audio-amplification-off"
+                call("gsettings", "set", schema, key, str(enabled).lower(), user=True)
+                level = "1.50" if action == "audio-amplification-high" else "0.98"
+            call("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", level, user=True)
+            call("wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "0", user=True)
+        objects = json.loads(call("pw-dump", user=True))
+        defaults = [entry for obj in objects if obj.get("props", {}).get("metadata.name") == "default"
+                    for entry in obj.get("metadata", []) if entry.get("subject") == 0
+                    and entry.get("key") == "default.audio.sink"]
+        if len(defaults) != 1:
+            raise RuntimeError("expected one real default audio sink")
+        value = defaults[0]["value"]
+        name = (json.loads(value) if isinstance(value, str) else value)["name"]
+        sinks = [obj for obj in objects if obj.get("info", {}).get("props", {}).get("node.name") == name
+                 and obj.get("info", {}).get("props", {}).get("media.class") == "Audio/Sink"]
+        if len(sinks) != 1:
+            raise RuntimeError("default audio sink is missing or ambiguous")
+        props = sinks[0]["info"]["params"]["Props"][0]
+        result = {"sink_id": sinks[0]["id"], "sink_name": name,
+                  "percent": float(props["channelVolumes"][0]) ** (1 / 3) * 100,
+                  "muted": bool(props.get("mute", False)),
+                  "amplified": call("gsettings", "get", schema, key, user=True) == "true"}
     elif action == "suspend":
         # Queue real logind suspend, so QGA can reply before the guest sleeps.
         policy = {name: pathlib.Path(f"/sys/power/{name}").read_text().strip()

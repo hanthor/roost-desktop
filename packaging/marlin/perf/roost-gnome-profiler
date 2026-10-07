@@ -16,23 +16,34 @@ OBJECT = "/org/gnome/Sysprof3/Profiler"
 INTERFACE = "org.gnome.Sysprof3.Profiler"
 
 
-def mapped_cogl_library(maps):
-    """Identify the actual ABI-51 Cogl mapping, including its kernel identity."""
+MUTTER_MODULES = {"cogl": "libmutter-cogl-51", "clutter": "libmutter-clutter-51",
+                  "core": "libmutter-51"}
+
+
+def mapped_mutter_library(maps, component):
+    """Identify a mapped ABI-51 module by its actual kernel file identity."""
+    if component not in MUTTER_MODULES:
+        raise ValueError("unknown Mutter module")
+    name = re.escape(MUTTER_MODULES[component])
     libraries = set()
     for line in maps.splitlines():
         fields = line.split(None, 5)
         if len(fields) != 6:
             continue
         path = fields[5]
-        if not re.fullmatch(r"libmutter-cogl-51\.so(?:\.[0-9]+)*(?: \(deleted\))?", Path(path).name):
+        if not re.fullmatch(name + r"\.so(?:\.[0-9]+)*(?: \(deleted\))?", Path(path).name):
             continue
         if path.endswith(" (deleted)") or not path.startswith("/"):
-            raise RuntimeError("mapped Mutter Cogl library is deleted or unnamed")
+            raise RuntimeError("mapped Mutter library is deleted or unnamed")
         major, minor = fields[3].split(":")
         libraries.add((path, os.makedev(int(major, 16), int(minor, 16)), int(fields[4])))
     if len(libraries) != 1:
-        raise RuntimeError("expected one mapped Mutter ABI-51 Cogl library")
+        raise RuntimeError(f"expected one mapped Mutter ABI-51 {component} library")
     return next(iter(libraries))
+
+
+def mapped_cogl_library(maps):
+    return mapped_mutter_library(maps, "cogl")
 
 
 def mapped_library_digest(path, device, inode):
@@ -55,27 +66,36 @@ def mapped_library_digest(path, device, inode):
                 "sha256": hashlib.sha256(raw).hexdigest()}
 
 
-def mutter_library_provenance(pid):
+def mutter_libraries_provenance(pid):
     maps = Path(f"/proc/{pid}/maps")
 
-    def mapping_identity():
+    def mapping_identities():
         with maps.open() as stream:
             contents = stream.read(1024 * 1024 + 1)
         if len(contents) > 1024 * 1024:
             raise RuntimeError("GNOME mapping list exceeds provenance bound")
-        return mapped_cogl_library(contents)
+        return {component: mapped_mutter_library(contents, component)
+                for component in MUTTER_MODULES}
 
-    identity = mapping_identity()
-    result = mapped_library_digest(*identity)
-    if result["uid"] != 0:
-        raise RuntimeError("mapped Mutter library is not owned by root")
-    if mapping_identity() != identity:
-        raise RuntimeError("GNOME Mutter mapping changed while hashing")
-    result["package"] = subprocess.check_output(
+    identities = mapping_identities()
+    package = subprocess.check_output(
         ["/usr/bin/pacman", "-Q", "mutter"], text=True, timeout=5).strip()
-    if not re.fullmatch(r"mutter 51\.0-[A-Za-z0-9.+_]+", result["package"]):
+    if not re.fullmatch(r"mutter 51\.0-[A-Za-z0-9.+_]+", package):
         raise RuntimeError("mapped Mutter provenance requires the pinned ABI-51 package")
-    return result
+    modules = {}
+    for component, identity in identities.items():
+        result = mapped_library_digest(*identity)
+        if result["uid"] != 0:
+            raise RuntimeError("mapped Mutter library is not owned by root")
+        owner = subprocess.check_output(
+            ["/usr/bin/pacman", "-Qqo", result["path"]], text=True, timeout=5).strip()
+        if owner != "mutter":
+            raise RuntimeError("mapped Mutter library belongs to a different package")
+        result["package"] = package
+        modules[component] = result
+    if mapping_identities() != identities:
+        raise RuntimeError("GNOME Mutter mappings changed while hashing")
+    return modules
 
 
 def main():
@@ -114,7 +134,7 @@ def main():
         raise RuntimeError("frame ownership analysis requires the pinned GNOME Shell 51.0")
 
     if args.action == "start":
-        library = mutter_library_provenance(pid)
+        libraries = mutter_libraries_provenance(pid)
         descriptor = os.open(capture, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         started = False
         try:
@@ -129,7 +149,8 @@ def main():
                 os.chmod(marker, 0o600)
                 json.dump({"owner": owner, "pid": pid, "uid": uid,
                            "gnome_shell_version": version,
-                           "mutter_cogl_library": library,
+                           "mutter_cogl_library": libraries["cogl"],
+                           "mutter_mapped_libraries": libraries,
                            "started_monotonic_ns": time.monotonic_ns()}, stream)
         except BaseException:
             # Never stop somebody else's profile when Start itself failed.
@@ -158,8 +179,9 @@ def main():
         stopped = time.monotonic_ns()
         marker.unlink()
         # Stop the original authenticated owner before diagnostics can fail.
-        library = mutter_library_provenance(pid)
-        if saved.get("mutter_cogl_library") != library:
+        libraries = mutter_libraries_provenance(pid)
+        if (saved.get("mutter_cogl_library") != libraries["cogl"] or
+                saved.get("mutter_mapped_libraries") != libraries):
             raise RuntimeError("mapped Mutter library changed during profiling")
         print(json.dumps(dict(saved, stopped_monotonic_ns=stopped)))
 

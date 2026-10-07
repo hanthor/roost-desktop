@@ -390,7 +390,10 @@ mod tests {
         assert_eq!(volume_icon(33.0, false), "audio-volume-low-symbolic");
         assert_eq!(volume_icon(50.0, false), "audio-volume-medium-symbolic");
         assert_eq!(volume_icon(100.0, false), "audio-volume-high-symbolic");
-        assert_eq!(volume_icon(150.0, false), "audio-volume-high-symbolic");
+        assert_eq!(
+            volume_icon(150.0, false),
+            "audio-volume-overamplified-symbolic"
+        );
     }
 
     #[test]
@@ -666,6 +669,9 @@ pub fn volume_icon(percent: f64, muted: bool) -> &'static str {
     if muted || percent <= 0.0 {
         return "audio-volume-muted-symbolic";
     }
+    if percent > 100.0 {
+        return "audio-volume-overamplified-symbolic";
+    }
     match (3.0 * percent / 100.0).ceil().clamp(1.0, 3.0) as u8 {
         1 => "audio-volume-low-symbolic",
         2 => "audio-volume-medium-symbolic",
@@ -728,7 +734,27 @@ pub fn power_mode_label(profile: &str) -> &'static str {
 
 /// `wpctl set-volume` argument for a 0..=100 slider value.
 pub fn wpctl_volume_arg(percent: f64) -> String {
-    format!("{:.2}", percent.clamp(0.0, 100.0) / 100.0)
+    wpctl_volume_arg_with_limit(percent, 100.0)
+}
+
+/// GNOME Gvc's PA_VOLUME_UI_MAX: +11dB on PulseAudio's cubic scale,
+/// rounded to an integer PA volume (99957 / PA_VOLUME_NORM=65536).
+pub fn volume_limit(amplified: bool) -> f64 {
+    if amplified {
+        99957.0 / 65536.0 * 100.0
+    } else {
+        100.0
+    }
+}
+
+pub fn wpctl_volume_arg_with_limit(percent: f64, limit: f64) -> String {
+    let percent = percent.clamp(0.0, limit);
+    if percent <= 100.0 {
+        format!("{:.2}", percent / 100.0)
+    } else {
+        // Four decimals keep the amplified ceiling below PA_VOLUME_UI_MAX.
+        format!("{:.4}", percent / 100.0)
+    }
 }
 
 /// Slider percentage for a backlight reading.
@@ -778,6 +804,18 @@ mod service_tests {
         assert_eq!(power_mode_after_click("performance"), "balanced");
         assert_eq!(power_mode_label("power-saver"), "Power Saver");
         assert_eq!(power_mode_label("unknown"), "Balanced");
+    }
+
+    #[test]
+    fn amplified_slider_ceiling_matches_gnome_without_rounding_above_it() {
+        let max = volume_limit(true);
+        assert_eq!(volume_limit(false), 100.0);
+        assert_eq!(wpctl_volume_arg_with_limit(104.0, max), "1.0400");
+        let capped = wpctl_volume_arg_with_limit(250.0, max)
+            .parse::<f64>()
+            .unwrap();
+        assert!(capped > 1.52 && capped <= max / 100.0);
+        assert_eq!(wpctl_volume_arg_with_limit(104.0, 100.0), "1.00");
     }
 
     #[test]

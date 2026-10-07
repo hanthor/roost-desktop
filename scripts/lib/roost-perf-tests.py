@@ -8,7 +8,7 @@ import base64
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, mock_open
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -38,6 +38,52 @@ class MutterLibraryIdentity(unittest.TestCase):
                     maps.replace(".so.0.0.0", ".so.0.0.0 (deleted)")):
             with self.subTest(maps=bad), self.assertRaises(RuntimeError):
                 profiler.mapped_cogl_library(bad)
+
+    def test_all_diagnostic_modules_require_unique_live_mapping_identities(self):
+        maps = "".join(f"1000-2000 r-xp 0 08:01 {42 + i} /usr/lib/{name}.so.0.0.0\n"
+                       for i, name in enumerate(profiler.MUTTER_MODULES.values()))
+        for i, (component, name) in enumerate(profiler.MUTTER_MODULES.items()):
+            with self.subTest(component=component):
+                expected = (f"/usr/lib/{name}.so.0.0.0", os.makedev(8, 1), 42 + i)
+                self.assertEqual(profiler.mapped_mutter_library(maps, component), expected)
+                segment = next(row for row in maps.splitlines() if f"/{name}.so" in row)
+                for bad in (maps.replace(segment, ""),
+                            maps.replace(segment, segment + " (deleted)"),
+                            maps + segment.replace(f" {42 + i} ", " 99 ") + "\n"):
+                    with self.assertRaises(RuntimeError):
+                        profiler.mapped_mutter_library(bad, component)
+        with self.assertRaises(ValueError):
+            profiler.mapped_mutter_library(maps, "unknown")
+
+    def test_mapped_module_collection_rejects_foreign_ownership_and_remapping(self):
+        import io
+        maps = "".join(f"1000-2000 r-xp 0 08:01 {42 + i} /usr/lib/{name}.so.0.0.0\n"
+                       for i, name in enumerate(profiler.MUTTER_MODULES.values()))
+
+        def fingerprint(path, device, inode):
+            return dict(path=path, device=device, inode=inode, uid=0, bytes=100,
+                        sha256="a" * 64)
+
+        def package(arguments, **unused):
+            return "mutter 51.0-1.2\n" if arguments[1:3] == ["-Q", "mutter"] else "mutter\n"
+
+        with patch.object(profiler.Path, "open", mock_open(read_data=maps)), \
+                patch.object(profiler, "mapped_library_digest", side_effect=fingerprint), \
+                patch.object(profiler.subprocess, "check_output", side_effect=package):
+            self.assertEqual(set(profiler.mutter_libraries_provenance(123)), {"core", "clutter", "cogl"})
+            with patch.object(profiler.subprocess, "check_output",
+                              side_effect=lambda arguments, **unused:
+                                  package(arguments) if arguments[1:3] == ["-Q", "mutter"] else "foreign\n"):
+                with self.assertRaisesRegex(RuntimeError, "different package"):
+                    profiler.mutter_libraries_provenance(123)
+            with patch.object(profiler, "mapped_library_digest",
+                              side_effect=lambda *args: dict(fingerprint(*args), uid=1000)):
+                with self.assertRaisesRegex(RuntimeError, "not owned by root"):
+                    profiler.mutter_libraries_provenance(123)
+            with patch.object(profiler.Path, "open", side_effect=[io.StringIO(maps),
+                              io.StringIO(maps.replace(" 44 ", " 99 "))]):
+                with self.assertRaisesRegex(RuntimeError, "mappings changed"):
+                    profiler.mutter_libraries_provenance(123)
 
     def test_replaced_mapped_path_is_rejected_even_with_identical_bytes(self):
         import hashlib
@@ -86,6 +132,87 @@ class CaptureClosure(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "lacks actual event"):
                 host.retain_gnome_trace(None, out,
                         dict(metadata, capture_writers_after_stop=[]))
+
+
+class DiagnosticSourceEvidence(unittest.TestCase):
+    def marks(self):
+        # Parser-only synthetic records; real package emission is a CI/VM gate.
+        return {"marks": [dict(pid=123, monotonic_ns=10, name=name, message=message)
+                for name, message in (
+                    ("Clutter::FrameClock::dispatch()", ""),
+                    ("Clutter::FrameClock::presented()", ""),
+                    ("Roost::FrameClock::dispatch-id", "output=Virtual-1 frame=42 dispatch_us=100"),
+                    ("Roost::FrameClock::presented-id", "output=Virtual-1 view_frame=42 global_frame=45 presentation_us=90 sequence=98 flags=4 kms_ready_us=101"),
+                    ("Roost::KMS::raw-page-flip", "crtc=55 sequence=98 seconds=0 microseconds=90 device=/dev/dri/card1"))]}
+
+    def test_raw_kernel_time_is_retained_without_replacing_early_presentation(self):
+        result = sysprof.frame_source_evidence(self.marks(), 123)
+        self.assertEqual(result["dispatches"][0]["frame_counter"], 42)
+        self.assertEqual(result["presentations"][0]["source_time_us"], 90)
+        self.assertEqual(result["kernel_events"][0]["microseconds"], 90)
+        self.assertNotIn("latency", result)
+
+    def test_missing_duplicate_foreign_or_malformed_diagnostic_records_fail(self):
+        import copy
+        for case in ("missing", "duplicate", "foreign", "bad-time", "wrong-output"):
+            marks = self.marks()
+            if case == "missing":
+                marks["marks"].pop()
+            elif case == "duplicate":
+                marks["marks"].append(copy.deepcopy(marks["marks"][2]))
+            elif case == "foreign":
+                marks["marks"][2]["pid"] = 124
+            elif case == "bad-time":
+                marks["marks"][-1]["message"] = marks["marks"][-1]["message"].replace("microseconds=90", "microseconds=1000000")
+            else:
+                marks["marks"][2]["message"] = marks["marks"][2]["message"].replace("Virtual-1", "Virtual-2")
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                sysprof.frame_source_evidence(marks, 123)
+
+
+class RejectedPresentationCapture(unittest.TestCase):
+    def capture(self):
+        import gzip
+        import hashlib
+        root = ROOT / "scripts/lib/fixtures"
+        metadata = json.loads((root / "gnome51-presentation-before-dispatch.json").read_text())
+        raw = gzip.decompress((root / "gnome51-presentation-before-dispatch.syscap.gz").read_bytes())
+        self.assertEqual(len(raw), metadata["bytes"])
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), metadata["sha256"])
+        self.assertEqual(metadata["capture_writers_after_stop"], [])
+        return raw, metadata
+
+    def test_complete_closed_actual_capture_still_rejects_early_presentation(self):
+        raw, metadata = self.capture()
+        with self.assertRaisesRegex(sysprof.FrameOwnershipError, "presentation precedes") as result:
+            sysprof.overview_frame_bounds(sysprof.decode(raw), metadata["pid"])
+        evidence = result.exception.evidence
+        self.assertEqual(evidence["dispatch"]["monotonic_ns"], 123682891000)
+        self.assertEqual(evidence["presentation_lower_ns"], 123677782000)
+        self.assertEqual(evidence["presentation_upper_ns"], 123677789000)
+        self.assertLess(evidence["presentation_upper_ns"], evidence["dispatch"]["monotonic_ns"])
+        self.assertEqual(evidence["kms_ready_ns"], 123684532000)
+        self.assertEqual(evidence["swap_count"], 1)
+
+    def test_rejection_retains_whole_capture_and_bounds_without_qualified_result(self):
+        raw, metadata = self.capture()
+
+        def chunk(agent, action, index):
+            self.assertEqual(action, "gnome-trace-read")
+            return {"gnome_trace": {"index": index,
+                    "data": base64.b64encode(raw[index * 65536:(index + 1) * 65536]).decode()}}
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(host, "guest_probe", chunk):
+            out = Path(directory)
+            with self.assertRaisesRegex(ValueError, "presentation precedes"):
+                host.retain_gnome_trace(None, out, metadata)
+            self.assertEqual((out / "gnome-overview.syscap").read_bytes(), raw)
+            self.assertEqual(json.loads((out / "gnome-overview-source.json").read_text()), metadata)
+            self.assertTrue((out / "gnome-overview-marks.json").exists())
+            rejected = json.loads((out / "gnome-overview-frame-rejection.json").read_text())
+            self.assertEqual(rejected["capture_sha256"], metadata["sha256"])
+            self.assertEqual(rejected["evidence"]["presentation_upper_ns"], 123677789000)
+            self.assertFalse((out / "gnome-overview-frame-ownership.json").exists())
 
 
 class SysprofCapture(unittest.TestCase):

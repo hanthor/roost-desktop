@@ -9,6 +9,8 @@
 //! failure — missing file, unparsable URI, undecodable image,
 //! oversized output — degrades to the solid clear, never an error.
 
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
 
 use smithay::backend::allocator::Fourcc;
@@ -38,18 +40,46 @@ pub fn wallpaper_drop_path() -> PathBuf {
 /// else (http, resource, empty) is not a file the compositor can
 /// open and reads as absent.
 pub fn wallpaper_uri_to_path(uri: &str) -> Option<PathBuf> {
-    let uri = uri.trim();
-    if uri.is_empty() {
-        return None;
-    }
-    if let Some(path) = uri.strip_prefix("file://") {
-        let path = PathBuf::from(path);
-        if path.is_absolute() {
-            return Some(path);
+    let rest = uri.trim().strip_prefix("file://")?;
+    let encoded = if rest.starts_with('/') {
+        rest
+    } else {
+        let slash = rest.find('/')?;
+        if !rest[..slash].eq_ignore_ascii_case("localhost") {
+            return None;
         }
-        return None;
+        &rest[slash..]
+    };
+    // URI delimiters are distinct from escaped filename bytes. Decode once:
+    // %2520 names a literal "%20", not a space. Native filenames need not be
+    // UTF-8, so preserve their bytes rather than using a lossy display string.
+    let encoded = encoded.split(['?', '#']).next()?.as_bytes();
+    let mut bytes = Vec::with_capacity(encoded.len());
+    let mut index = 0;
+    while index < encoded.len() {
+        let value = if encoded[index] == b'%' {
+            let digit = |byte: u8| (byte as char).to_digit(16).map(|d| d as u8);
+            let high = digit(*encoded.get(index + 1)?)?;
+            let low = digit(*encoded.get(index + 2)?)?;
+            index += 3;
+            let value = high * 16 + low;
+            // GIO's local file URI conversion rejects escaped separators.
+            if value == b'/' {
+                return None;
+            }
+            value
+        } else {
+            let value = encoded[index];
+            index += 1;
+            value
+        };
+        if value == 0 {
+            return None;
+        }
+        bytes.push(value);
     }
-    None
+    let path = PathBuf::from(OsString::from_vec(bytes));
+    path.is_absolute().then_some(path)
 }
 
 /// Cached wallpaper image, re-scaled to the output that showed it.
@@ -539,6 +569,43 @@ mod tests {
     }
 
     #[test]
+    fn file_uris_decode_filename_bytes_once() {
+        assert_eq!(
+            wallpaper_uri_to_path("file:///tmp/my%20caf%C3%A9%20%2520.png"),
+            Some(PathBuf::from("/tmp/my café %20.png"))
+        );
+        assert_eq!(
+            wallpaper_uri_to_path("file://localhost/tmp/my%23photo%3F.png"),
+            Some(PathBuf::from("/tmp/my#photo?.png"))
+        );
+        assert_eq!(
+            wallpaper_uri_to_path("file:///tmp/image.png?query#fragment"),
+            Some(PathBuf::from("/tmp/image.png"))
+        );
+        assert_eq!(
+            wallpaper_uri_to_path("file:///tmp/image%FF.png"),
+            Some(PathBuf::from(OsString::from_vec(
+                b"/tmp/image\xff.png".to_vec()
+            )))
+        );
+    }
+
+    #[test]
+    fn file_uris_reject_invalid_escapes_and_foreign_authorities() {
+        for uri in [
+            "file:///tmp/invalid%.png",
+            "file:///tmp/invalid%2.png",
+            "file:///tmp/invalid%GG.png",
+            "file:///tmp/null%00.png",
+            "file:///tmp/escaped%2fseparator.png",
+            "file://remote/tmp/image.png",
+            "file://user@localhost/tmp/image.png",
+        ] {
+            assert_eq!(wallpaper_uri_to_path(uri), None, "{uri}");
+        }
+    }
+
+    #[test]
     fn uri_to_path_rejects_non_file_uris() {
         for uri in [
             "",
@@ -633,6 +700,28 @@ mod tests {
         assert!(
             distinct.len() > 1,
             "decoded pixels vary with the source checker"
+        );
+    }
+
+    #[test]
+    fn escaped_wallpaper_selects_real_pixels_without_double_decoding() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let picture = dir.path().join("my café %20.png");
+        checker_png(&picture, 32, 32);
+        image::RgbaImage::from_pixel(32, 32, image::Rgba([0, 255, 0, 255]))
+            .save(dir.path().join("my café  .png"))
+            .expect("write double-decode decoy");
+        let uri = format!("file://{}/my%20caf%C3%A9%20%2520.png", dir.path().display());
+        let pixels = load_wallpaper(&uri, (32, 32).into()).expect("escaped real image decodes");
+        assert_eq!(
+            &pixels[..4],
+            &[0, 0, 255, 255],
+            "first checker pixel is red, not decoy green"
+        );
+        assert_eq!(
+            &pixels[8 * 4..9 * 4],
+            &[255, 0, 0, 255],
+            "second checker tile is blue"
         );
     }
 

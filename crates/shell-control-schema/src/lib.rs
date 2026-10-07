@@ -150,9 +150,11 @@ impl ProtocolVersion {
     ///
     /// `0.25` appends mouse/touchpad handedness to InputSettings.
     /// Both peers ship together because the postcard body is positional.
+    /// `0.26` appends the shell text direction to InputSettings.
+    /// Both positional postcard peers ship together.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 25,
+        minor: 26,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -732,6 +734,9 @@ pub struct InputSettings {
     pub mouse_left_handed: bool,
     #[serde(default)]
     pub touchpad_left_handed: bool,
+    /// GTK shell default text direction; corners and Activities follow it.
+    #[serde(default)]
+    pub right_to_left: bool,
 }
 
 fn animations_default() -> bool {
@@ -758,6 +763,7 @@ impl Default for InputSettings {
             enable_animations: true,
             mouse_left_handed: false,
             touchpad_left_handed: false,
+            right_to_left: false,
         }
     }
 }
@@ -1193,8 +1199,21 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_25() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 25));
+    fn current_version_is_0_26() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 26));
+    }
+
+    #[test]
+    fn shell_text_direction_survives_the_positional_control_wire() {
+        for right_to_left in [false, true] {
+            roundtrip(&Message::Command {
+                id: 1,
+                kind: CommandKind::SetInputSettings(InputSettings {
+                    right_to_left,
+                    ..InputSettings::default()
+                }),
+            });
+        }
     }
 
     #[test]
@@ -1243,7 +1262,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 23).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 24).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 25).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 26).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 26).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 27).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }
