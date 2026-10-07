@@ -4,8 +4,11 @@ set -euo pipefail
 [[ ${ROOST_CI_ONLY:-} == 1 ]] || { echo "constraint client build is CI-only" >&2; exit 1; }
 build_dir=$(mktemp -d)
 trap 'rm -rf "$build_dir"' EXIT
-for item in pointer-constraints relative-pointer layer-shell; do
+# Layer-shell's protocol interface table references xdg_popup_interface even
+# though this ordinary layer client never binds xdg-shell or creates a popup.
+for item in xdg-shell pointer-constraints relative-pointer layer-shell; do
   case "$item" in
+    xdg-shell) xml=/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml ;;
     pointer-constraints) xml=/usr/share/wayland-protocols/unstable/pointer-constraints/pointer-constraints-unstable-v1.xml ;;
     relative-pointer) xml=/usr/share/wayland-protocols/unstable/relative-pointer/relative-pointer-unstable-v1.xml ;;
     layer-shell) xml=/usr/share/wlr-protocols/unstable/wlr-layer-shell-unstable-v1.xml ;;

@@ -440,6 +440,23 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
                 raise RuntimeError("actual native client did not receive requested relative axis direction")
         return actual
     def enter_original(label):
+        unconstrained = constraint_snapshot(label + "-before-absolute-setup")
+        if ((unconstrained["mode"] == 1 and unconstrained["locked"] > unconstrained["unlocked"])
+                or (unconstrained["mode"] == 2 and unconstrained["confined"] > unconstrained["unconfined"])):
+            raise RuntimeError("absolute principal setup cannot escape an active constraint")
+        before = agent.run("inventory")["state"]["native_relative_motion_count"]
+        # A distinct real tablet position forces a new absolute device event
+        # even when it remembers an earlier corner position after relative
+        # motion. This is focus setup, never pressure or native rearm proof.
+        corner_move(64, 64)
+        await_state(lambda value: value["state"]["pointer_position"] is not None
+                    and 63 < value["state"]["pointer_position"][0] < 65
+                    and 63 < value["state"]["pointer_position"][1] < 65
+                    and value["state"]["native_relative_motion_count"] == before,
+                    label=label + "-distinct-tablet-position-delivered")
+        await_client(lambda value: value["entered"] == 1 and 63 < value["local"][0] < 65
+                     and 63 < value["local"][1] < 65,
+                     label + "-distinct-original-principal")
         corner_move(0, 10)
         await_state(lambda value: value["state"]["pointer_position"] is not None
                     and value["state"]["pointer_position"][0] == 0
