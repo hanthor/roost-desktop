@@ -9,6 +9,8 @@
 //! followed by a postcard body. Frames larger than [`MAX_FRAME_BYTES`] are
 //! rejected before any postcard decoding happens.
 
+pub mod background;
+
 use serde::{Deserialize, Serialize};
 
 /// Maximum accepted frame body size in bytes (1 MiB, per ADR 0002).

@@ -9,8 +9,12 @@
 //! failure — missing file, unparsable URI, undecodable image,
 //! oversized output — degrades to the solid clear, never an error.
 
+use roost_shell_control::background::{BackgroundMetadata, PictureSettings};
+use roost_wallpaper::background::Geometry;
 use std::ffi::OsString;
+use std::io::Read;
 use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::PathBuf;
 
 use smithay::backend::allocator::Fourcc;
@@ -169,14 +173,28 @@ impl Wallpaper {
     }
 
     /// Start (or collect) the background decode of `uri` at `output`.
-    fn poll_decode(&mut self, uri: &str, output: Size<i32, Logical>) {
+    fn poll_decode(
+        &mut self,
+        key: &str,
+        uri: &str,
+        output: Size<i32, Logical>,
+        settings: PictureSettings,
+        geometry: Geometry,
+        identity: Option<FileIdentity>,
+    ) {
         let index = self
             .pending
             .iter()
-            .position(|p| p.uri == uri && p.size == output);
+            .position(|p| p.uri == key && p.size == output);
         let Some(index) = index else {
-            // Forget decodes for pictures no longer wanted.
-            self.pending.retain(|p| p.uri == uri);
+            // Keep running jobs counted until they finish; dropping old receivers
+            // would allow rapid settings changes to spawn unbounded workers.
+            self.pending.retain(|p| {
+                !matches!(
+                    p.result.try_recv(),
+                    Ok(_) | Err(std::sync::mpsc::TryRecvError::Disconnected)
+                )
+            });
             if self.pending.len() >= MAX_WALLPAPER_SLOTS {
                 return;
             }
@@ -186,7 +204,7 @@ impl Wallpaper {
                 .name("roost-wallpaper".into())
                 .spawn(move || {
                     let started = std::time::Instant::now();
-                    let pixels = load_wallpaper(&job, output);
+                    let pixels = load_static_wallpaper(&job, settings, geometry, identity);
                     eprintln!(
                         "roost-compositor: wallpaper {} for {}x{} in {} ms",
                         if pixels.is_some() {
@@ -202,7 +220,7 @@ impl Wallpaper {
                 });
             if spawned.is_ok() {
                 self.pending.push(Pending {
-                    uri: uri.to_owned(),
+                    uri: key.to_owned(),
                     size: output,
                     result,
                 });
@@ -229,7 +247,7 @@ impl Wallpaper {
             )
         });
         self.loaded.push(Loaded {
-            uri: uri.to_owned(),
+            uri: key.to_owned(),
             size: Some(output),
             pixels,
             buffer,
@@ -259,9 +277,10 @@ impl Wallpaper {
         renderer: &mut GlesRenderer,
         w: i32,
         h: i32,
+        geometry: Geometry,
     ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
         let output = Size::<i32, Logical>::from((w, h));
-        let uri = self.refresh(output)?;
+        let uri = self.refresh(output, geometry)?;
         let loaded = self
             .loaded
             .iter()
@@ -290,9 +309,10 @@ impl Wallpaper {
         renderer: &mut GlesRenderer,
         w: i32,
         h: i32,
+        geometry: Geometry,
     ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
         let output = Size::<i32, Logical>::from((w, h));
-        let uri = self.refresh_picture(output, true)?;
+        let uri = self.refresh_picture(output, true, geometry)?;
         if !self
             .locked
             .iter()
@@ -344,37 +364,79 @@ impl Wallpaper {
 
     /// Re-read the drop file and start or collect the decode for
     /// `output`; the current URI when there is a picture to show.
-    fn refresh(&mut self, output: Size<i32, Logical>) -> Option<String> {
-        self.refresh_picture(output, false)
+    fn refresh(&mut self, output: Size<i32, Logical>, geometry: Geometry) -> Option<String> {
+        self.refresh_picture(output, false, geometry)
     }
 
-    fn refresh_picture(&mut self, output: Size<i32, Logical>, lock: bool) -> Option<String> {
+    fn refresh_picture(
+        &mut self,
+        output: Size<i32, Logical>,
+        lock: bool,
+        geometry: Geometry,
+    ) -> Option<String> {
         let area = output.w.max(0) as u64 * output.h.max(0) as u64;
         if area == 0 || area > MAX_WALLPAPER_AREA {
             return None;
         }
-        let text = std::fs::read_to_string(wallpaper_drop_path()).unwrap_or_default();
+        let mut drop_file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(wallpaper_drop_path())
+            .ok()?;
+        let meta = drop_file.metadata().ok()?;
+        if !meta.is_file() || meta.len() > 16 * 1024 {
+            return None;
+        }
+        let mut text = String::new();
+        drop_file
+            .by_ref()
+            .take(16 * 1024 + 1)
+            .read_to_string(&mut text)
+            .ok()?;
+        if text.len() > 16 * 1024 {
+            return None;
+        }
         let mut lines = text.lines();
         let mut uri = lines.next().unwrap_or_default().trim().to_owned();
         self.color = lines.next().and_then(parse_color);
         self.accent = lines.next().and_then(parse_color);
-        if lock {
-            let screensaver = lines.next().unwrap_or_default().trim();
-            if wallpaper_uri_to_path(screensaver).is_some_and(|path| path.is_file()) {
-                uri = screensaver.to_owned();
+        let lock_uri = lines.next().unwrap_or_default().trim();
+        let settings = if let Some(line) = lines.next() {
+            // Present but malformed/version-mismatched metadata is an error,
+            // never an apparent successful legacy zoom rendering.
+            let metadata: BackgroundMetadata = serde_json::from_str(line).ok()?;
+            if metadata.version != 1 || lines.next().is_some() {
+                return None;
             }
+            if lock {
+                metadata.lock
+            } else {
+                metadata.desktop
+            }
+        } else {
+            let primary = self
+                .color
+                .map(|rgb| rgb.map(|v| (v * 255.0).round() as u8))
+                .unwrap_or([2, 60, 136]);
+            PictureSettings {
+                primary,
+                ..PictureSettings::default()
+            }
+        };
+        if lock && !lock_uri.is_empty() {
+            uri = lock_uri.to_owned();
         }
-        if uri.is_empty() {
-            return None;
-        }
+        let identity = FileIdentity::for_uri(&uri);
+        // A missing picture still paints its configured color/gradient.
+        let key = format!("{uri}\n{settings:?}\n{geometry:?}\n{identity:?}");
         if !self
             .loaded
             .iter()
-            .any(|loaded| loaded.uri == uri && loaded.size == Some(output))
+            .any(|loaded| loaded.uri == key && loaded.size == Some(output))
         {
-            self.poll_decode(&uri, output);
+            self.poll_decode(&key, &uri, output, settings, geometry, identity);
         }
-        Some(uri)
+        Some(key)
     }
 
     /// GNOME's overview workspace card (`.workspace-background`): the
@@ -389,11 +451,12 @@ impl Wallpaper {
         work_top: i32,
         card: Rectangle<i32, Physical>,
         alpha: f32,
+        geometry: Geometry,
     ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
         if card.size.w <= 0 || card.size.h <= 0 {
             return None;
         }
-        let uri = self.refresh(output).unwrap_or_default();
+        let uri = self.refresh(output, geometry).unwrap_or_default();
         let color = self.color.map(|[r, g, b]| {
             [
                 (r * 255.0).round() as u8,
@@ -463,9 +526,148 @@ impl Wallpaper {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FileIdentity {
+    path: PathBuf,
+    dev: u64,
+    ino: u64,
+    bytes: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+impl FileIdentity {
+    fn from_metadata(path: PathBuf, m: &std::fs::Metadata) -> Option<Self> {
+        if !m.is_file() || m.len() > 64 * 1024 * 1024 {
+            return None;
+        }
+        Some(Self {
+            path,
+            dev: m.dev(),
+            ino: m.ino(),
+            bytes: m.len(),
+            modified: (m.mtime(), m.mtime_nsec()),
+            changed: (m.ctime(), m.ctime_nsec()),
+        })
+    }
+    fn for_uri(uri: &str) -> Option<Self> {
+        let path = wallpaper_uri_to_path(uri)?.canonicalize().ok()?;
+        Self::from_metadata(path.clone(), &std::fs::metadata(path).ok()?)
+    }
+}
+fn load_static_wallpaper(
+    uri: &str,
+    settings: PictureSettings,
+    geometry: Geometry,
+    expected: Option<FileIdentity>,
+) -> Option<Vec<u8>> {
+    if !geometry.valid() {
+        return None;
+    }
+    if FileIdentity::for_uri(uri) != expected {
+        return None;
+    }
+    let original_identity = expected.clone();
+    let cache = static_cache_path(uri, settings, geometry, expected.as_ref());
+    let want = geometry.physical[0] as usize * geometry.physical[1] as usize * 4;
+    if let Some(path) = cache.as_ref() {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+        {
+            if file
+                .metadata()
+                .is_ok_and(|m| m.is_file() && m.len() == want as u64)
+            {
+                let mut bytes = Vec::new();
+                if file
+                    .by_ref()
+                    .take(want as u64 + 1)
+                    .read_to_end(&mut bytes)
+                    .is_ok()
+                    && bytes.len() == want
+                    && FileIdentity::for_uri(uri) == original_identity
+                {
+                    return Some(bytes);
+                }
+            }
+        }
+    }
+    let image = if settings.placement == roost_shell_control::background::Placement::None {
+        None
+    } else if let Some(expected) = expected {
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&expected.path)
+            .ok()?;
+        if FileIdentity::from_metadata(expected.path.clone(), &file.metadata().ok()?)
+            != Some(expected.clone())
+        {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        file.by_ref()
+            .take(64 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() as u64 != expected.bytes
+            || FileIdentity::from_metadata(expected.path.clone(), &file.metadata().ok()?)
+                != Some(expected.clone())
+            || FileIdentity::for_uri(uri) != Some(expected)
+        {
+            return None;
+        }
+        roost_wallpaper::decode(&bytes).map(|im| im.to_rgba8())
+    } else {
+        None
+    };
+    let pixels = roost_wallpaper::background::render(image.as_ref(), settings, geometry)?;
+    if FileIdentity::for_uri(uri) != original_identity {
+        return None;
+    }
+    if let Some(path) = cache {
+        let tmp = path.with_extension("tmp");
+        if path
+            .parent()
+            .is_some_and(|d| std::fs::create_dir_all(d).is_ok())
+            && std::fs::write(&tmp, &pixels).is_ok()
+        {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+    Some(pixels)
+}
+
+fn static_cache_path(
+    uri: &str,
+    settings: PictureSettings,
+    geometry: Geometry,
+    identity: Option<&FileIdentity>,
+) -> Option<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    if cfg!(test) {
+        return None;
+    }
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    3u32.hash(&mut hash);
+    uri.hash(&mut hash);
+    settings.hash(&mut hash);
+    geometry.hash(&mut hash);
+    identity.hash(&mut hash);
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
+    Some(
+        base.join("roost/wallpaper")
+            .join(format!("static-{:016x}.argb", hash.finish())),
+    )
+}
+
 /// Decode `uri` and scale it to cover `output` exactly (center-crop),
 /// returning ARGB8888 pixels. `None` on any failure: the caller
 /// keeps the solid clear.
+#[cfg(test)]
 fn load_wallpaper(uri: &str, output: Size<i32, Logical>) -> Option<Vec<u8>> {
     let path = wallpaper_uri_to_path(uri)?;
     let bytes = std::fs::read(&path).ok()?;
@@ -499,6 +701,7 @@ fn load_wallpaper(uri: &str, output: Size<i32, Logical>) -> Option<Vec<u8>> {
 /// 4K JPEG XL defaults take seconds to decode, so only the first
 /// session after a wallpaper or output change pays for it. Keyed by
 /// path, size, modification time and output size.
+#[cfg(test)]
 fn cache_path(path: &std::path::Path, w: u32, h: u32) -> Option<PathBuf> {
     use std::hash::{Hash, Hasher};
     if cfg!(test) {
@@ -754,5 +957,85 @@ mod tests {
                 "decoded pixels vary with the source checker at {w}x{h}"
             );
         }
+    }
+    fn test_geometry() -> Geometry {
+        Geometry {
+            physical: [8, 8],
+            origin: [0, 0],
+            desktop: [0, 0, 8, 8],
+            scale_bits: 1.0f64.to_bits(),
+        }
+    }
+    #[test]
+    fn invalid_metadata_never_selects_the_legacy_zoom_path() {
+        let _lock = RUNTIME_DIR_LOCK.lock().expect("runtime lock");
+        let dir = tempfile::TempDir::new().unwrap();
+        let _runtime = RuntimeDirGuard::point_at(dir.path());
+        for metadata in [
+            "{}",
+            "{not-json}",
+            "{\"version\":2,\"desktop\":{},\"lock\":{}}",
+        ] {
+            std::fs::write(
+                wallpaper_drop_path(),
+                format!("file:///tmp/image.png\n#023c88\n#3584e4\n\n{metadata}\n"),
+            )
+            .unwrap();
+            assert!(Wallpaper::new()
+                .refresh((8, 8).into(), test_geometry())
+                .is_none());
+        }
+    }
+    #[test]
+    fn static_metadata_and_file_replacement_change_all_render_keys() {
+        let _lock = RUNTIME_DIR_LOCK.lock().expect("runtime lock");
+        let dir = tempfile::TempDir::new().unwrap();
+        let _runtime = RuntimeDirGuard::point_at(dir.path());
+        let path = dir.path().join("source.png");
+        checker_png(&path, 16, 16);
+        let uri = format!("file://{}", path.display());
+        let mut m = BackgroundMetadata {
+            version: 1,
+            desktop: PictureSettings::default(),
+            lock: PictureSettings {
+                placement: roost_shell_control::background::Placement::Centered,
+                ..PictureSettings::default()
+            },
+        };
+        let publish = |m: &BackgroundMetadata| {
+            std::fs::write(
+                wallpaper_drop_path(),
+                format!(
+                    "{uri}\n#023c88\n#3584e4\n{uri}\n{}\n",
+                    serde_json::to_string(m).unwrap()
+                ),
+            )
+            .unwrap()
+        };
+        publish(&m);
+        let mut wallpaper = Wallpaper::new();
+        let initial = wallpaper.refresh((8, 8).into(), test_geometry()).unwrap();
+        let locked = wallpaper
+            .refresh_picture((8, 8).into(), true, test_geometry())
+            .unwrap();
+        assert_ne!(
+            initial, locked,
+            "independent lock placement must not reuse desktop pixels"
+        );
+        m.desktop.shading = roost_shell_control::background::Shading::Horizontal;
+        publish(&m);
+        let changed = wallpaper.refresh((8, 8).into(), test_geometry()).unwrap();
+        assert_ne!(
+            initial, changed,
+            "same URI and dimensions cannot mask metadata changes"
+        );
+        let replacement = dir.path().join("replacement.png");
+        checker_png(&replacement, 16, 16);
+        std::fs::rename(replacement, &path).unwrap();
+        assert_ne!(
+            changed,
+            wallpaper.refresh((8, 8).into(), test_geometry()).unwrap(),
+            "replacement inode must invalidate cached pixels even for same dimensions/content"
+        );
     }
 }

@@ -6,6 +6,8 @@
 //! instantiated, unoptimised, inside the compositor. GNOME 51's default
 //! wallpapers are 4096x4096 JPEG XL files.
 
+pub mod background;
+
 use image::GenericImageView;
 
 /// Decode `bytes` and cover-scale them to exactly `w` x `h`, returning

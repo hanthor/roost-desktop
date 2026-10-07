@@ -1872,6 +1872,46 @@ fn build(app: &adw::Application) {
                     .unwrap_or_default();
                 text.push_str(&lock_uri);
                 text.push('\n');
+                let picture_settings = |s: &gio::Settings| -> Option<
+                    roost_shell_control::background::PictureSettings,
+                > {
+                    use roost_shell_control::background::{PictureSettings, Placement, Shading};
+                    let color = |key: &str| -> Option<[u8; 3]> {
+                        let rgb = gtk::gdk::RGBA::parse(s.string(key).as_str()).ok()?;
+                        Some(
+                            [rgb.red(), rgb.green(), rgb.blue()]
+                                .map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8),
+                        )
+                    };
+                    Some(PictureSettings {
+                        placement: Placement::from_key(s.string("picture-options").as_str())?,
+                        shading: Shading::from_key(s.string("color-shading-type").as_str())?,
+                        primary: color("primary-color")?,
+                        secondary: color("secondary-color")?,
+                    })
+                };
+                let Some(desktop) = picture_settings(bg) else {
+                    return;
+                };
+                let lock = if let Some(settings) = screensaver.as_ref() {
+                    let Some(lock) = picture_settings(settings) else {
+                        return;
+                    };
+                    lock
+                } else {
+                    desktop
+                };
+                let metadata = roost_shell_control::background::BackgroundMetadata {
+                    version: 1,
+                    desktop,
+                    lock,
+                };
+                let Ok(encoded) = serde_json::to_string(&metadata) else {
+                    return;
+                };
+                text.push_str(&encoded);
+                text.push('\n');
+
                 let dir = std::env::var_os("XDG_RUNTIME_DIR")
                     .map(std::path::PathBuf::from)
                     .unwrap_or_else(std::env::temp_dir);
