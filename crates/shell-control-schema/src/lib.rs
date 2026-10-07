@@ -23,18 +23,14 @@ pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 /// [`decode_frame`] with [`DecodeError::TitleTooLong`].
 pub const MAX_TITLE_LEN: usize = 512;
 
-/// Layer-shell namespace for the overview surface (compositor ↔ shell contract).
-/// The compositor matches on this to identify the overview; the shell advertises it
-/// when creating the overview layer.
-pub const OVERVIEW_NAMESPACE: &str = "roost-shell-overview";
-
-/// Layer-shell namespace for the panel surface (compositor ↔ shell contract).
-/// The shell advertises this when creating the main panel layer.
-pub const PANEL_NAMESPACE: &str = "roost-shell-panel";
-
-/// Layer-shell namespace for the banner/notifications surface (compositor ↔ shell contract).
-/// The shell advertises this when creating the banner/notification layer.
-pub const BANNER_NAMESPACE: &str = "roost-shell-banner";
+pub mod layer_namespaces;
+pub use layer_namespaces::{
+    BANNER_NAMESPACE, DOCK_NAMESPACE, END_SESSION_NAMESPACE, FOLDER_DIALOG_NAMESPACE,
+    GTK_BANNERS_NAMESPACE, GTK_PANEL_NAMESPACE, IBUS_CANDIDATES_NAMESPACE, NETWORK_AGENT_NAMESPACE,
+    OSD_NAMESPACE, OVERVIEW_NAMESPACE, PANEL_NAMESPACE, POLKIT_NAMESPACE, PREVIEW_CHROME_NAMESPACE,
+    SCREENSHOT_NAMESPACE, SHORTCUT_CONSENT_NAMESPACE, SWITCHER_NAMESPACE,
+    SWITCHER_THUMBNAILS_NAMESPACE, WINDOW_MENU_NAMESPACE, WORKSPACE_POPUP_NAMESPACE,
+};
 
 /// Panel height in pixels (compositor ↔ shell contract).
 ///

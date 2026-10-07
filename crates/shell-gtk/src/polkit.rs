@@ -169,7 +169,7 @@ impl PolkitAgent {
         window.set_title(Some("Authentication Required"));
         window.init_layer_shell();
         window.set_layer(Layer::Overlay);
-        window.set_namespace(Some("roost-polkit"));
+        window.set_namespace(Some(roost_shell_control::POLKIT_NAMESPACE));
         for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
             window.set_anchor(edge, true);
         }

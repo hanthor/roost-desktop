@@ -39,7 +39,7 @@ impl PreviewChrome {
         window.add_css_class("roost-overview-chrome");
         window.init_layer_shell();
         window.set_layer(Layer::Top);
-        window.set_namespace(Some("roost-shell-preview-chrome"));
+        window.set_namespace(Some(roost_shell_control::PREVIEW_CHROME_NAMESPACE));
         for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
             window.set_anchor(edge, true);
         }
