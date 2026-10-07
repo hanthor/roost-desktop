@@ -333,7 +333,7 @@ def static_guard():
         raise RuntimeError('original static process command changed')
     layers=[row for row in scene()['layers'] if row['namespace']=='roost-night-light-static-probes']
     if len(layers)!=1 or layers[0]['rect'] != [0,0,120,800]:
-        raise RuntimeError('original static source layer geometry changed')
+        raise RuntimeError('original static source layer geometry changed: '+json.dumps(layers)[:512])
 
 
 def host_identity():
@@ -488,6 +488,10 @@ try:
     STATIC_ID = identity('org.roost.NightLight.StaticProbes',Path('/usr/bin/python3'),int(os.environ['ROOST_NIGHT_LIGHT_STATIC_PID']))
     wait(lambda:any(row['namespace']=='roost-night-light-static-probes' for row in scene()['layers']),
          'actual static GTK layer source never mapped')
+    # The first mapped commit can precede the compositor configure; only the
+    # settled original geometry proves the genuine static source is in place.
+    wait(lambda:[row['rect'] for row in scene()['layers'] if row['namespace']=='roost-night-light-static-probes']==[[0,0,120,800]],
+         'actual static GTK layer source never settled to original geometry')
     static_guard()
     (OUT/'static-source-identity.json').write_text(json.dumps({'process':STATIC_ID,
         'script_sha256':hashlib.sha256(bounded(Path('/repo/scripts/lib/roost-night-light-static-client.py'))).hexdigest(),
