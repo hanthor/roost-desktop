@@ -30,7 +30,7 @@ COPY packaging/marlin/roost-portals.conf /usr/share/xdg-desktop-portal/roost-por
 # Refresh package metadata without upgrading the baseline desktop.
 RUN set -eux; \
     pacman -Sy --noconfirm \
-    && pacman -S --needed --noconfirm evolution-data-server gnome-keyring xdg-desktop-portal-gnome xdg-desktop-portal-gtk gst-plugin-pipewire gst-plugins-good \
+    && pacman -S --needed --noconfirm evolution-data-server gnome-keyring xdg-desktop-portal-gnome xdg-desktop-portal-gtk gst-plugin-pipewire gst-plugins-good orca speech-dispatcher \
     && pacman -U --noconfirm /tmp/roost.pkg.tar.zst \
     && sed -i 's/^Name=Roost$/Name=Roost (preview)/' /usr/share/wayland-sessions/roost.desktop \
     && install -Dm0644 /tmp/roost-nested-preview.desktop \

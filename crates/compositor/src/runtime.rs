@@ -522,6 +522,7 @@ pub struct Runtime {
     manager: WindowManager,
     control: ControlHub,
     shell: ShellDriver,
+    orca: crate::orca::Reader,
     /// The IBus bridge, when IBus is installed.
     ime: Option<crate::ime::ImeBridge>,
     overlay: Overlay,
@@ -957,6 +958,7 @@ impl Runtime {
             overview_swipe_from: None,
             scale: clamp_scale(session.scale),
             input_settings: Default::default(),
+            orca: crate::orca::Reader::new(&session.socket_name),
             pipewire: None,
             casts: Vec::new(),
             cast_outputs,
@@ -1599,6 +1601,8 @@ impl Runtime {
                 })
                 .collect::<Vec<_>>(),
         });
+        doc["screen_reader_pid"] = serde_json::json!(self.orca.pid());
+        doc["screen_reader_state"] = serde_json::json!(self.orca.state());
         // Keep backend-specific observations outside the large scene macro so
         // its expansion remains below the compiler's default recursion limit.
         // These values keep the same flat JSON fields and suppress lock input.
@@ -2805,6 +2809,20 @@ impl Runtime {
         }
         if let Some(settings) = outcome.input_settings {
             self.apply_input_settings(settings);
+        }
+        if let Some(enabled) = outcome.screen_reader {
+            #[cfg(feature = "drm")]
+            let hardware = matches!(self.backend, Backend::Drm(_));
+            #[cfg(not(feature = "drm"))]
+            let hardware = false;
+            self.orca.set_enabled(enabled && hardware);
+        }
+        let reader_changed = self.orca.poll().is_some();
+        if reader_changed || outcome.screen_reader.is_some() {
+            self.control
+                .queue_message(roost_shell_control::Message::ScreenReader {
+                    state: self.orca.status(),
+                });
         }
         if let Some(list) = outcome.accelerators {
             self.manager.set_accelerators(list);

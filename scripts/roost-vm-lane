@@ -277,6 +277,38 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     record("V-LIFECYCLE-OWNER", nonroot and intact, "root probe, non-root greetd session and three real app processes/surfaces")
     if not nonroot or not intact or before["state"]["locked"]:
         raise RuntimeError("lifecycle preconditions failed")
+    # Real distribution Orca owns a credential-verified bus name under the ordinary
+    # session user. Settings writes trigger Roost's consumer, not test start/stop.
+    orca_observations = []
+    def await_orca(enabled):
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            actual = agent.run("orca-read")
+            orca_observations.append(actual)
+            if (actual["enabled"] is enabled
+                    and ((enabled and actual["ready"] and actual["state"] == "active")
+                         or (not enabled and actual["pid"] == 0 and actual["owner"] is None
+                             and actual["state"] == "disabled"))):
+                return actual
+            time.sleep(0.2)
+        raise RuntimeError("GNOME Screen Reader preference did not control genuine distribution Orca")
+    try:
+        first_orca = None
+        for enabled in (False, True, False, True, False):
+            agent.run("orca-on" if enabled else "orca-off")
+            actual = await_orca(enabled)
+            if enabled:
+                identity = (actual["pid"], actual["start_ticks"])
+                if first_orca == identity:
+                    raise RuntimeError("Orca retained the stopped process identity")
+                first_orca = identity
+        record("V-ORCA-ACTIVATION", True,
+               "live GNOME key starts/stops genuine distribution Orca; bus PID/UID, package hash, compositor parent and display verified")
+    finally:
+        agent.run("orca-reset")
+        with open(os.path.join(evidence, "orca-activation.json"), "w") as stream:
+            json.dump(orca_observations, stream, indent=2)
+
     # Real GNOME sound preference and virtual HDA/PipeWire data, not OSD state.
     amplified_observations = []
     try:
@@ -825,6 +857,10 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     qmp.keys("ret")
     await_state(lambda state: not state["state"]["locked"])
     inventory("authenticated")
+    agent.run("orca-on")
+    departing_orca = await_orca(True)
+    with open(os.path.join(evidence, "orca-before-logout.json"), "w") as stream:
+        json.dump(departing_orca, stream, indent=2)
     agent.run("logout")
     deadline = time.monotonic() + 30
     greeter = {}
@@ -849,6 +885,13 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
         json.dump(greeter, stream, indent=2)
     record("V-LOGOUT", greeter_visible,
            "real session termination returns to a painted gtkgreet surface under active greetd, with no original compositor")
+    closed_orca = agent.run("orca-departed", departing_orca["pid"], departing_orca["start_ticks"])
+    with open(os.path.join(evidence, "orca-after-logout.json"), "w") as stream:
+        json.dump(closed_orca, stream, indent=2)
+    record("V-ORCA-LOGOUT", closed_orca["owner"] is None and not closed_orca["original_alive"],
+           "hardware logout stops only session-owned Orca; no original child/bus owner survives")
+    if closed_orca["owner"] is not None or closed_orca["original_alive"]:
+        raise RuntimeError("Orca survived the hardware session logout")
     if not greeter_visible:
         raise RuntimeError("live gtkgreet did not paint its actual visible surface after logout")
     record("V-LIFECYCLE", True, "all lifecycle operations completed; individual assertions remain mandatory")

@@ -8,6 +8,10 @@ import subprocess
 import sys
 import time
 import hashlib
+import hashlib
+import shlex
+
+
 
 OWNER = pwd.getpwnam("roost-test")
 RUNTIME = f"/run/user/{OWNER.pw_uid}"
@@ -156,6 +160,87 @@ def constraint_client(action):
                 raise RuntimeError("actual original constraint client did not terminate")
             time.sleep(0.05)
     return {"principal": record, "client": snapshot}
+def orca_observation():
+    state = json.loads(STATE.read_text())
+    pid = int(state.get("screen_reader_pid") or 0)
+    contracts = []
+    for name, path, prefix in (("org.gnome.Orca1.Service", "/org/gnome/Orca1/Service", "51."),
+                               ("org.gnome.Orca.Service", "/org/gnome/Orca/Service", "50.3")):
+        reply = call("busctl", "--user", "call", "org.freedesktop.DBus",
+                     "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetNameOwner",
+                     "s", name, user=True, check=False)
+        parts = shlex.split(reply)
+        if len(parts) == 2 and parts[0] == "s":
+            contracts.append((name, path, prefix, parts[1], reply))
+    owner = contracts[0][3] if contracts else None
+    result = {"enabled": call("gsettings", "get", "org.gnome.desktop.a11y.applications",
+                              "screen-reader-enabled", user=True) == "true",
+              "state": state.get("screen_reader_state"), "pid": pid, "owner": owner,
+              "package": call("pacman", "-Q", "orca"), "ready": False}
+    if pid == 0 or not owner:
+        return result
+    name, path, version_prefix, owner, owner_reply = contracts[0]
+    # Two supported names may only coexist for the same original owned child.
+    for contract in contracts:
+        for method, expected in (("GetConnectionUnixProcessID", pid),
+                                 ("GetConnectionUnixUser", OWNER.pw_uid)):
+            reply = call("busctl", "--user", "call", "org.freedesktop.DBus",
+                         "/org/freedesktop/DBus", "org.freedesktop.DBus", method,
+                         "s", contract[3], user=True).split()
+            if reply != ["u", str(expected)]:
+                result["foreign_owner"] = True
+                return result
+    credentials = {}
+    for method in ("GetConnectionUnixProcessID", "GetConnectionUnixUser"):
+        reply = call("busctl", "--user", "call", "org.freedesktop.DBus",
+                     "/org/freedesktop/DBus", "org.freedesktop.DBus", method,
+                     "s", owner, user=True).split()
+        if len(reply) != 2 or reply[0] != "u":
+            raise RuntimeError("invalid Orca bus credentials")
+        credentials[method] = int(reply[1])
+    process = pathlib.Path(f"/proc/{pid}")
+    if (credentials["GetConnectionUnixProcessID"] != pid
+            or credentials["GetConnectionUnixUser"] != OWNER.pw_uid):
+        return result
+    try:
+        uid = process.stat().st_uid
+        with (process / "environ").open("rb") as stream:
+            environment = stream.read(128 * 1024 + 1)
+        process_stat = (process / "stat").read_text().rsplit(")", 1)[1].split()
+        ticks, parent_pid = int(process_stat[19]), int(process_stat[1])
+    except (FileNotFoundError, ProcessLookupError):
+        return result
+    if len(environment) > 128 * 1024:
+        raise RuntimeError("Orca environment exceeds bound")
+    displays = [entry.split(b"=", 1)[1].decode() for entry in environment.split(b"\0")
+                if entry.startswith(b"WAYLAND_DISPLAY=")]
+    launcher = pathlib.Path("/usr/bin/orca")
+    if launcher.stat().st_uid != 0:
+        raise RuntimeError("Orca launcher not distribution-owned")
+    launcher_owner = call("pacman", "-Qqo", str(launcher))
+    version = shlex.split(call("busctl", "--user", "call", owner,
+                              path, name, "GetVersion", user=True))
+    stable = call("busctl", "--user", "call", "org.freedesktop.DBus",
+                  "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetNameOwner",
+                  "s", name, user=True) == owner_reply
+    compositor = next(item for item in inventory()["processes"]
+                      if item["executable"] == "roost-compositor")
+    expected_display = f"roost-nested-{compositor['pid']}"
+    result.update({"uid": uid, "start_ticks": ticks, "display": displays,
+                   "parent_pid": parent_pid, "compositor_pid": compositor["pid"],
+                   "executable": os.readlink(process / "exe"), "version": version,
+                   "bus_name": name, "bus_path": path,
+                   "launcher_sha256": hashlib.sha256(launcher.read_bytes()).hexdigest(),
+                   "bus_pid": credentials["GetConnectionUnixProcessID"],
+                   "bus_uid": credentials["GetConnectionUnixUser"]})
+    result["ready"] = (stable and uid == OWNER.pw_uid == credentials["GetConnectionUnixUser"]
+                       and pid == credentials["GetConnectionUnixProcessID"]
+                       and parent_pid == compositor["pid"]
+                       and displays == [expected_display] and launcher_owner == "orca"
+                       and len(version) == 2 and version[0] == "s" and version[1].startswith(version_prefix))
+    return result
+
+
 
 
 def main():
@@ -164,6 +249,23 @@ def main():
     action = sys.argv[1]
     if action == "inventory":
         result = inventory()
+    elif action == "orca-departed":
+        pid, ticks = int(sys.argv[2]), int(sys.argv[3])
+        try:
+            process = pathlib.Path(f"/proc/{pid}")
+            alive = (process.stat().st_uid == OWNER.pw_uid
+                     and int((process / "stat").read_text().rsplit(")", 1)[1].split()[19]) == ticks)
+        except (FileNotFoundError, ProcessLookupError):
+            alive = False
+        result = {"original_alive": alive, **orca_observation()}
+    elif action in ("orca-off", "orca-on", "orca-read", "orca-reset"):
+        if action == "orca-reset":
+            call("gsettings", "reset", "org.gnome.desktop.a11y.applications",
+                 "screen-reader-enabled", user=True)
+        elif action != "orca-read":
+            call("gsettings", "set", "org.gnome.desktop.a11y.applications",
+                 "screen-reader-enabled", str(action == "orca-on").lower(), user=True)
+        result = orca_observation()
     elif action in ("audio-amplification-off", "audio-amplification-on",
                     "audio-amplification-high", "audio-amplification-read",
                     "audio-amplification-reset"):

@@ -63,6 +63,7 @@ pub mod monitors;
 pub mod mutter;
 #[cfg(feature = "drm")]
 mod native_repaint;
+pub mod orca;
 pub mod overlay;
 pub mod overview;
 pub mod pam;
