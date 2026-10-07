@@ -9,6 +9,29 @@ import socket
 import time
 
 
+def valid_focus_error(value):
+    types = {"RuntimeError", "ValueError", "OSError", "FileNotFoundError", "ProcessLookupError",
+             "PermissionError", "KeyError", "JSONDecodeError", "UnicodeDecodeError", "RecursionError"}
+    if not isinstance(value, dict) or set(value) != {"focus_error_type"}:
+        return False
+    return isinstance(value["focus_error_type"], str) and value["focus_error_type"] in types
+
+
+def focus_failure_diagnostic(encoded):
+    if not isinstance(encoded, str) or len(encoded) > 5464:
+        return None
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+        if len(raw) > 4096:
+            return None
+        root = json.loads(raw)
+        if valid_focus_error(root):
+            return root
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        pass
+    return None
+
+
 def valid_orca_read_error(value):
     types = {"RuntimeError", "CalledProcessError", "FileNotFoundError", "ProcessLookupError",
              "PermissionError", "OSError", "ValueError", "JSONDecodeError", "UnicodeDecodeError",
@@ -136,6 +159,10 @@ class GuestAgent:
                         diagnostic = speech_failure_diagnostic(status.get("out-data", ""))
                         if diagnostic is not None:
                             raise RuntimeError(f"guest lifecycle {action} failed: {json.dumps(diagnostic)}")
+                    if action in {"orca-shell-focus", "orca-disks-focus"} and not status.get("out-truncated"):
+                        diagnostic = focus_failure_diagnostic(status.get("out-data", ""))
+                        if diagnostic is not None:
+                            raise RuntimeError(f"guest lifecycle {action} failed (exit={status.get('exitcode')}): {json.dumps(diagnostic)}")
                     if action == "orca-read" and not status.get("out-truncated"):
                         try:
                             encoded = status.get("out-data", "")
