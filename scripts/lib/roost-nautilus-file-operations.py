@@ -68,7 +68,12 @@ def controls():
     desktop = pyatspi.Registry.getDesktop(0)
     for index in range(desktop.childCount):
         app = desktop.getChildAtIndex(index)
-        if identity is not None and app.get_process_id() == identity['pid']:
+        try:
+            app_pid = app.get_process_id()
+        except Exception:
+            # Earlier picker callers may disappear between accessibility reads.
+            continue
+        if identity is not None and app_pid == identity['pid']:
             walk(app)
     return result
 
