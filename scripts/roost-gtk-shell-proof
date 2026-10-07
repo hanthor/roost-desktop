@@ -1152,6 +1152,56 @@ grid_shown() {
     jq -e --arg name "$2" --argjson ox "$grid_origin_x" --argjson oy "$grid_origin_y" --argjson width "$WIDTH" --argjson height "$HEIGHT" 'any(.[]; .showing and (.role == "push button" or .role == "button") and .name == $name and .bounds[2] > 0 and .bounds[3] > 0 and .bounds[0] + $ox < $width and .bounds[0] + $ox + .bounds[2] > 0 and .bounds[1] + $oy < $height and .bounds[1] + $oy + .bounds[3] > 0)' "$1" >/dev/null
 }
 
+# A local folder source must initialize hints too. Cancel the real drag
+# before dropping and require normal arrows with no preview or stale timer.
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-folder-page-back.json" 20 \
+    --press "Previous Page" || fail G-GRID-DRAG-CANCEL "could not return to page one"
+sleep 1
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-folder-page-source.json" 20 || fail G-GRID-DRAG-CANCEL "folder source dump failed"
+grid_origin roost-shell-appgrid
+folder_coordinates="$(grid_point "$ARTIFACTS/a11y-folder-page-source.json" "$grid_long_name")" || fail G-GRID-DRAG-CANCEL "real folder source has no bounds"
+read -r folder_source_x folder_source_y <<EOF
+$folder_coordinates
+EOF
+folder_layout_before="$(gsettings get org.gnome.shell app-picker-layout)"
+xdotool mousemove --window "$WID" "$folder_source_x" "$folder_source_y"
+sleep 0.3
+xdotool mousedown 1
+sleep 0.1
+for step in $(seq 1 6); do
+    xdotool mousemove --window "$WID" $((folder_source_x + step * 10)) "$folder_source_y"
+    sleep 0.05
+done
+sleep 0.25
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-folder-page-peek.json" 20 || fail G-GRID-DRAG-CANCEL "folder preview dump failed"
+scrot "$ARTIFACTS/11h-folder-page-peek.png" >/dev/null
+showing "$ARTIFACTS/a11y-folder-page-peek.json" "Next page preview" || fail G-GRID-DRAG-CANCEL "real local folder drag has no neighboring-page hint"
+xdotool key Escape
+xdotool mouseup 1
+sleep 1
+# Escape may cancel DnD or close the overview; either route must release
+# the old pager, and reopening must show a clean first page.
+if ! jq -e '.overview_open and .overview_app_grid' "$CSTATE" >/dev/null; then
+    xdotool key super+a
+    cstate '.overview_open and .overview_app_grid' "app grid" || fail G-GRID-DRAG-CANCEL "grid did not reopen after cancellation"
+    sleep 1
+fi
+xdotool mousemove --window "$WID" $((WIDTH - 6)) "$folder_source_y"
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-folder-page-cancelled.json" 20 || fail G-GRID-DRAG-CANCEL "cancelled dump failed"
+showing "$ARTIFACTS/a11y-folder-page-cancelled.json" "Next Page" || fail G-GRID-DRAG-CANCEL "normal Next Page arrow did not return"
+for name in "Previous Page" "Next page preview" "Previous page preview"; do
+    if showing "$ARTIFACTS/a11y-folder-page-cancelled.json" "$name"; then
+        fail G-GRID-DRAG-CANCEL "cancelled drag left '$name' visible or a timer turned the page"
+    fi
+done
+[ "$(gsettings get org.gnome.shell app-picker-layout)" = "$folder_layout_before" ] || fail G-GRID-DRAG-CANCEL "cancelled folder drag changed the saved layout"
+pass G-GRID-DRAG-CANCEL "real local folder drag shows hints; Escape restores arrows, stops edge paging and preserves layout"
+# Restore page two for the existing app-drag proof's Previous Page action.
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-folder-page-next.json" 20 \
+    --press "Next Page" || fail G-GRID-DRAG-CANCEL "could not return to page two"
+sleep 1
+
 # GNOME's page switching while dragging: an app held against the grid's
 # edge turns the page (no arrow to press mid-drag).
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-back.json" 20 \
@@ -1198,6 +1248,22 @@ sleep 1
 showing "$ARTIFACTS/a11y-grid-drag-page.json" "Previous Page" ||
     fail G-GRID-DRAG-PAGE "holding a dragged app at the edge did not turn the page"
 pass G-GRID-DRAG-PAGE "an app dragged against the grid's edge turns the page, as GNOME's grid does"
+for name in "Next page preview" "Previous page preview"; do
+    if showing "$ARTIFACTS/a11y-grid-drag-page.json" "$name"; then
+        fail G-GRID-DRAG-END "completed app drag left '$name' visible"
+    fi
+done
+# Keep the pointer at the edge beyond the dwell period after releasing it.
+# A stale timer must not take us back to page one or resume preview mode.
+sleep 1.5
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-drag-ended.json" 20 || fail G-GRID-DRAG-END "ended dump failed"
+showing "$ARTIFACTS/a11y-grid-drag-ended.json" "Previous Page" || fail G-GRID-DRAG-END "completed drag kept paging after release"
+for name in "Next page preview" "Previous page preview"; do
+    if showing "$ARTIFACTS/a11y-grid-drag-ended.json" "$name"; then
+        fail G-GRID-DRAG-END "completed drag restored '$name' after release"
+    fi
+done
+pass G-GRID-DRAG-END "real app drag completion restores arrows and leaves no delayed preview or edge timer"
 gsettings set org.gnome.desktop.app-folders folder-children "$grid_original_folders"
 sleep 1
 xdotool key Escape
