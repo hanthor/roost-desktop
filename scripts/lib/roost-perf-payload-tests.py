@@ -222,10 +222,14 @@ class PayloadTests(unittest.TestCase):
         digest = hashlib.sha256(package.read_bytes()).hexdigest()
         for supplied, pinned, allowed in ((digest, "true", True), ("0" * 64, "true", False),
                 ("", "true", False), ("z" * 64, "true", False), ("a", "true", False),
-                ("", "false", True)):
+                ("", "false", True), (None, "false", True), (None, "true", False)):
             marker = self.root / "mutation"
             marker.unlink(missing_ok=True)
-            env = dict(os.environ, ROOST_PKG_SHA256=supplied, PERF_PINNED_BASELINE=pinned)
+            env = dict(os.environ, PERF_PINNED_BASELINE=pinned)
+            if supplied is None:
+                env.pop("ROOST_PKG_SHA256", None)
+            else:
+                env["ROOST_PKG_SHA256"] = supplied
             result = subprocess.run(["sh", "-c", 'set -eu; ' + guard + ' && touch "' + str(marker) + '"'],
                                     env=env, capture_output=True)
             with self.subTest(supplied=supplied, pinned=pinned):
