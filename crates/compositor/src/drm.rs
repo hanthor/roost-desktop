@@ -124,6 +124,7 @@ pub struct DrmBackend {
     pointer: Point<f64, Logical>,
     corner_pressure: crate::corner_pressure::CornerPressure,
     hot_corner_active: bool,
+    relative_motion_events: u64,
     ctrl: bool,
     alt: bool,
     /// libinput devices, for GNOME's touchpad and mouse settings (#60).
@@ -406,6 +407,7 @@ impl DrmBackend {
                 input_settings: Default::default(),
                 corner_pressure: Default::default(),
                 hot_corner_active: true,
+                relative_motion_events: 0,
             },
             DrmSources {
                 session: session_notifier,
@@ -590,6 +592,7 @@ impl DrmBackend {
     ) -> Vec<ManagerInput> {
         match event {
             InputEvent::PointerMotion { event } => {
+                self.relative_motion_events = self.relative_motion_events.saturating_add(1);
                 let delta = event.delta();
                 let rects = self.output_rects();
                 let (attempt, corner) = self.corner_pressure.motion(
@@ -678,7 +681,7 @@ impl DrmBackend {
                 let inputs = crate::windows::translate_input(other, self.primary_size());
                 for input in &inputs {
                     if let ManagerInput::Motion { pos, .. } = input {
-                        self.corner_pressure.reset();
+                        self.corner_pressure.observe_position(*pos);
                         self.pointer = *pos;
                     }
                 }
@@ -689,6 +692,11 @@ impl DrmBackend {
 
     /// GNOME's touchpad and mouse settings on every device, now and as
     /// devices arrive (#60).
+    /// Count native relative delivery without recording movement or input text.
+    pub fn relative_motion_events(&self) -> u64 {
+        self.relative_motion_events
+    }
+
     pub fn set_hot_corner_active(&mut self, active: bool) {
         self.hot_corner_active = active;
         if !active {
@@ -711,7 +719,7 @@ impl DrmBackend {
     /// Move the drawn cursor to where the window manager put the pointer.
     pub fn set_pointer(&mut self, pos: Point<f64, Logical>) {
         if pos != self.pointer {
-            self.corner_pressure.reset();
+            self.corner_pressure.observe_position(pos);
         }
         self.pointer = pos;
     }

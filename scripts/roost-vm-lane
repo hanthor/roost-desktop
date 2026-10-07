@@ -306,22 +306,42 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     # Native pressure uses QMP relative mouse events delivered through real
     # libinput. Tablet/absolute positioning supplies no pressure.
     corner_observations = []
+    corner_inputs = []
+    mice = qmp.cmd("query-mice")
+    with open(os.path.join(evidence, "hot-corner-input-devices.json"), "w") as stream:
+        json.dump(mice, stream, indent=2)
+    if not isinstance(mice, list) or not any(mouse.get("absolute") is False for mouse in mice):
+        raise RuntimeError("no actual QMP relative mouse input device exists")
     def corner_move(x, y, relative=False):
         kind = "rel" if relative else "abs"
         values = (x, y) if relative else (int(x * 32767 / WIDTH), int(y * 32767 / HEIGHT))
+        before_count = agent.run("inventory")["state"]["native_relative_motion_count"] if relative else None
         qmp.cmd("input-send-event", events=[
             {"type": kind, "data": {"axis": "x", "value": values[0]}},
             {"type": kind, "data": {"axis": "y", "value": values[1]}}])
+        if relative:
+            if not isinstance(before_count, int):
+                raise RuntimeError("native relative input observation is unavailable")
+            delivered = await_state(lambda value: value["state"]["native_relative_motion_count"] > before_count,
+                                    label=f"corner-relative-delivered-{len(corner_inputs)}")
+            corner_inputs.append({"requested": [x, y], "before_count": before_count,
+                                  "after_count": delivered["state"]["native_relative_motion_count"],
+                                  "pointer_position": delivered["state"]["pointer_position"]})
     def observe_corner(label, expected):
         value = await_state(lambda value: value["state"]["overview_open"] is expected, label=label)
         corner_observations.append({"label": label, "overview_open": expected,
-                                    "processes": value["processes"]})
+                                    "processes": value["processes"],
+                                    "pointer_position": value["state"]["pointer_position"]})
         frame(label)
     try:
         if not agent.run("hot-corners", "true")["stored"]:
             raise RuntimeError("GNOME hot corner policy did not persist")
         await_state(lambda value: value["state"]["hot_corners"] is True, label="corner-policy-enabled")
         corner_move(0, 10)
+        await_state(lambda value: value["state"]["pointer_position"] is not None
+                    and value["state"]["pointer_position"][0] == 0
+                    and 1 < value["state"]["pointer_position"][1] < 32,
+                    label="corner-absolute-delivered")
         for index in range(10):
             value = agent.run("inventory")
             if value["state"]["overview_open"]:
@@ -338,14 +358,32 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
             time.sleep(0.05)
         observe_corner("corner-held-negative", True)
         corner_move(100, 100, relative=True)
-        corner_move(0, 10)
-        corner_move(-200, 0, relative=True)
+        await_state(lambda value: value["state"]["pointer_position"] is not None
+                    and value["state"]["pointer_position"][0] > 32
+                    and value["state"]["pointer_position"][1] > 32,
+                    label="corner-relative-left-both")
+        # Return with actual relative motion. No absolute warp may manufacture
+        # leave/rearm between the held-barrier negative and this closing hit.
+        corner_move(-1000, 0, relative=True)
+        await_state(lambda value: value["state"]["pointer_position"] is not None
+                    and value["state"]["pointer_position"][0] == 0
+                    and value["state"]["pointer_position"][1] > 32,
+                    label="corner-relative-left-edge")
+        corner_move(0, -1000, relative=True)
         observe_corner("corner-rearmed-close", False)
         if not agent.run("hot-corners", "false")["stored"]:
             raise RuntimeError("GNOME hot corner disable did not persist")
         await_state(lambda value: value["state"]["hot_corners"] is False, label="corner-policy-disabled")
         corner_move(100, 100, relative=True)
+        await_state(lambda value: value["state"]["pointer_position"] is not None
+                    and value["state"]["pointer_position"][0] > 32
+                    and value["state"]["pointer_position"][1] > 32,
+                    label="corner-disabled-left-both")
         corner_move(0, 10)
+        await_state(lambda value: value["state"]["pointer_position"] is not None
+                    and value["state"]["pointer_position"][0] == 0
+                    and 1 < value["state"]["pointer_position"][1] < 32,
+                    label="corner-disabled-absolute-delivered")
         corner_move(-200, 0, relative=True)
         for index in range(10):
             if agent.run("inventory")["state"]["overview_open"]:
@@ -357,7 +395,8 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     finally:
         agent.run("hot-corners", "true")
         with open(os.path.join(evidence, "hot-corner-pressure.json"), "w") as stream:
-            json.dump(corner_observations, stream, indent=2)
+            json.dump({"observations": corner_observations, "relative_inputs": corner_inputs,
+                       "devices": mice}, stream, indent=2)
 
     # Capture the stable desktop after the final key OSD has disappeared.
     time.sleep(2)

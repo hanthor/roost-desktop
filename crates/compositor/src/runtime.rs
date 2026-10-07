@@ -1518,6 +1518,17 @@ impl Runtime {
             "animations_enabled": self.input_settings.enable_animations,
             "mouse_left_handed": self.input_settings.mouse_left_handed,
             "hot_corners": self.input_settings.hot_corners,
+            "native_relative_motion_count": (!self.is_locked()).then(|| {
+                match &self.backend {
+                    #[cfg(feature = "drm")]
+                    Backend::Drm(drm) => Some(drm.relative_motion_events()),
+                    Backend::Winit(_) => None,
+                }
+            }).flatten(),
+            "pointer_position": (!self.is_locked()).then(|| {
+                let pos = self.manager.pointer_pos();
+                [pos.x, pos.y]
+            }),
             "touchpad_left_handed": self.input_settings.touchpad_left_handed,
             "locked": self.is_locked(),
             "active_workspace": model.active_workspace(),

@@ -25,6 +25,33 @@ impl CornerPressure {
         self.corners.clear();
     }
 
+    /// Absolute devices and protocol warps can leave a barrier, but never
+    /// add pressure. Repeating the same absolute edge position does not rearm.
+    pub fn observe_position(&mut self, pos: Point<f64, Logical>) {
+        for corner in &mut self.corners {
+            let left = f64::from(corner.rect.loc.x);
+            let top = f64::from(corner.rect.loc.y);
+            let edge = if self.rtl {
+                left + f64::from(corner.rect.size.w) - 1.0
+            } else {
+                left
+            };
+            let extent = crate::windows::ACTIVITIES_STRIP_PX;
+            let along_horizontal = if self.rtl {
+                (edge - extent..=edge).contains(&pos.x)
+            } else {
+                (edge..=edge + extent).contains(&pos.x)
+            };
+            let on_vertical = pos.x == edge && (top..=top + extent).contains(&pos.y);
+            let on_horizontal = pos.y == top && along_horizontal;
+            if !on_vertical && !on_horizontal {
+                corner.events.clear();
+                corner.pressure = 0.0;
+                corner.triggered = false;
+            }
+        }
+    }
+
     /// Intercept an attempted relative crossing before desktop-union clamping.
     /// Return the constrained pointer and a genuine pressure trigger position.
     pub fn motion(
@@ -198,6 +225,81 @@ mod tests {
             )
             .1
             .is_some()
+    }
+    #[test]
+    fn absolute_samples_cannot_rearm_a_held_barrier() {
+        let mut pressure = CornerPressure::default();
+        assert!(hit(&mut pressure, 100.0, 0));
+        pressure.observe_position((0.0, 10.0).into());
+        assert!(!hit(&mut pressure, 100.0, 1));
+        pressure.observe_position((100.0, 100.0).into());
+        assert!(hit(&mut pressure, 100.0, 2));
+    }
+    #[test]
+    fn timeout_boundary_is_inclusive_as_in_gnome_51() {
+        let mut pressure = CornerPressure::default();
+        for _ in 0..6 {
+            assert!(!hit(&mut pressure, 15.0, 0));
+        }
+        assert!(hit(&mut pressure, 15.0, 1000));
+        let mut pressure = CornerPressure::default();
+        for _ in 0..6 {
+            assert!(!hit(&mut pressure, 15.0, 0));
+        }
+        assert!(!hit(&mut pressure, 15.0, 1001));
+    }
+    #[test]
+    fn leaving_one_barrier_keeps_triggered_until_both_are_left() {
+        let mut pressure = CornerPressure::default();
+        assert!(hit(&mut pressure, 100.0, 0));
+        pressure.motion(
+            (0.0, 10.0).into(),
+            (10.0, -10.0).into(),
+            1,
+            &layout(),
+            false,
+            true,
+        );
+        assert!(pressure
+            .motion(
+                (10.0, 0.0).into(),
+                (0.0, -100.0).into(),
+                2,
+                &layout(),
+                false,
+                true
+            )
+            .1
+            .is_none());
+        pressure.motion(
+            (10.0, 0.0).into(),
+            (10.0, 10.0).into(),
+            3,
+            &layout(),
+            false,
+            true,
+        );
+        assert!(hit(&mut pressure, 100.0, 4));
+    }
+    #[test]
+    fn rtl_secondary_uses_gnome_51s_exact_beside_probe() {
+        let mut pressure = CornerPressure::default();
+        let outputs = vec![
+            (Rectangle::new((0, 0).into(), (1000, 700).into()), false),
+            (Rectangle::new((1000, 0).into(), (1000, 700).into()), true),
+        ];
+        // GNOME51 uses monitor.x+1 as the RTL beside probe, not
+        // corner.x+1. This left secondary therefore remains eligible.
+        let (position, trigger) = pressure.motion(
+            (998.0, 10.0).into(),
+            (100.0, 0.0).into(),
+            0,
+            &outputs,
+            true,
+            true,
+        );
+        assert_eq!(position, (999.0, 10.0).into());
+        assert!(trigger.is_some());
     }
     #[test]
     fn native_pressure_requires_real_across_motion_and_caps_ordinary_hits() {
