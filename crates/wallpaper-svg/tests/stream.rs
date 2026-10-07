@@ -35,7 +35,11 @@ fn actual_svg_loader_intrinsic_viewbox_css_internal_use_and_alpha() {
     for size in ["width='20' height='10'", "viewBox='0 0 20 10'"] {
         let svg = format!("<svg xmlns='http://www.w3.org/2000/svg' {size}><style>.paint {{ fill:rgb(25,87,200) }}</style><defs><rect id='r' width='20' height='10' class='paint'/></defs><use href='#r'/></svg>");
         let pixels = rgba(svg.as_bytes(), 20, 10);
-        assert!(pixels.chunks_exact(4).all(|p| p == [25, 87, 200, 255]));
+        assert!(pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|p| p == [25, 87, 200, 255]));
     }
     let pixels = rgba(b"<svg xmlns='http://www.w3.org/2000/svg' width='2' height='1'><rect width='1' height='1' fill='#c80a14' fill-opacity='0.5'/></svg>",2,1);
     assert_eq!(&pixels[4..], &[0, 0, 0, 0]);
@@ -50,7 +54,15 @@ fn actual_svg_loader_intrinsic_viewbox_css_internal_use_and_alpha() {
 #[test]
 fn actual_svg_loader_text_uses_native_fonts_and_stream_has_no_base_uri() {
     let pixels = rgba(b"<svg xmlns='http://www.w3.org/2000/svg' width='120' height='32'><text x='2' y='24' font-family='sans-serif' font-size='22'>Roost</text></svg>",120,32);
-    assert!(pixels.chunks_exact(4).filter(|p| p[3] != 0).count() > 100);
+    assert!(
+        pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[3] != 0)
+            .count()
+            > 100
+    );
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_roost-wallpaper-svg"))
         .arg("--identity")
         .output()
@@ -84,7 +96,9 @@ fn actual_svg_stream_accepts_embedded_image_but_has_no_file_base() {
     }
     let svg=b"<svg xmlns='http://www.w3.org/2000/svg' width='2' height='2'><image href='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGM4wSVygkuEAUIBABwGA5kbp+jhAAAAAElFTkSuQmCC' width='2' height='2'/></svg>";
     assert!(rgba(svg, 2, 2)
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .all(|p| p == [200, 10, 20, 255]));
 }
 

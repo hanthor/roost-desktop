@@ -60,7 +60,7 @@ fn parse_output(output: &[u8]) -> Option<image::DynamicImage> {
     image::RgbaImage::from_raw(w, h, output[16..].to_vec()).map(image::DynamicImage::ImageRgba8)
 }
 
-fn nonblocking(fd: impl AsRawFd) -> Option<()> {
+fn nonblocking(fd: &impl AsRawFd) -> Option<()> {
     // SAFETY: live owned pipe descriptor, flags queried before modification.
     unsafe {
         let flags = libc::fcntl(fd.as_raw_fd(), libc::F_GETFL);

@@ -136,7 +136,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         if channels == 4 {
             output.write_all(row)?;
         } else {
-            for pixel in row.chunks_exact(3) {
+            for pixel in row.as_chunks::<3>().0 {
                 output.write_all(&[pixel[0], pixel[1], pixel[2], 255])?;
             }
         }
