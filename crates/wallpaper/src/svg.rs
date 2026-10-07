@@ -94,6 +94,7 @@ fn exchange(argument: Option<&str>, bytes: &[u8], maximum: usize) -> Option<Vec<
     // On every exit (including pipe/setup errors), kill and reap the helper.
     // Nonblocking pipes enforce the wall timeout during BOTH input and output,
     // without accumulating extra blocking transport threads behind old jobs.
+    let mut reaped = false;
     let result = (|| {
         let mut input = Some(child.stdin.take()?);
         let mut output = child.stdout.take()?;
@@ -142,6 +143,7 @@ fn exchange(argument: Option<&str>, bytes: &[u8], maximum: usize) -> Option<Vec<
                 }
             }
             if let Some(status) = child.try_wait().ok()? {
+                reaped = true;
                 if !status.success() {
                     eprintln!("roost-wallpaper: GNOME SVG helper rejected input ({status})");
                     return None;
@@ -155,10 +157,15 @@ fn exchange(argument: Option<&str>, bytes: &[u8], maximum: usize) -> Option<Vec<
     })();
     // This owned group supplements actual Glycin/bwrap's parent-death chain
     // and PID-namespace cleanup. Never kill unrelated processes by UID.
-    unsafe {
-        libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+    // A reaped PID/group number may be reused: only signal while this owned
+    // child still reserves its identity. Normal exit uses the native parent-
+    // death chain for descendants, whose actual cleanup the receipt checks.
+    if !reaped {
+        unsafe {
+            libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+        }
+        let _ = child.kill();
     }
-    let _ = child.kill();
     let _ = child.wait();
     result
 }
