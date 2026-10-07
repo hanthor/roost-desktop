@@ -1601,6 +1601,11 @@ impl Runtime {
                 })
                 .collect::<Vec<_>>(),
         });
+        doc["wallpaper_diagnostics"] = if self.is_locked() {
+            serde_json::Value::Null
+        } else {
+            self.wallpaper.diagnostics()
+        };
         doc["screen_reader_pid"] = serde_json::json!(self.orca.pid());
         doc["screen_reader_state"] = serde_json::json!(self.orca.state());
         // Keep backend-specific observations outside the large scene macro so
