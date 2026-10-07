@@ -7,3 +7,6 @@ license.workspace = true
 [dependencies]
 libc = "0.2"
 roost-shell-control = { path = "../shell-control-schema", version = "0.1.0" }
+
+[dev-dependencies]
+tempfile = "3"

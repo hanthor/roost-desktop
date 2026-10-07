@@ -1,7 +1,5 @@
 //! GNOME51 brightness policy; hardware reads use the unchanged shared implementation.
 use roost_backlight::owner_current;
-#[cfg(test)]
-use roost_backlight::scalar;
 pub use roost_backlight::{inventory, readback, BacklightKind, Device};
 use roost_shell_control::NativeOutputInfo;
 use std::collections::BTreeMap;
@@ -414,43 +412,6 @@ mod tests {
         }
     }
     #[test]
-    fn raw_small_floor_follows_actual_type_and_exact_99_boundary() {
-        let mut d = device("a", "eDP-1", 0);
-        d.kind = BacklightKind::Raw;
-        for (max, min) in [(1, 0), (2, 0), (98, 0), (99, 1), (100, 1), (1000, 10)] {
-            d.max = max;
-            assert_eq!(d.minimum(), min);
-            assert_eq!(d.absolute(0.0), min);
-        }
-        for kind in [BacklightKind::Firmware, BacklightKind::Platform] {
-            d.kind = kind;
-            d.max = 2;
-            assert_eq!(d.minimum(), 1);
-        }
-    }
-    #[test]
-    fn backlight_type_missing_malformed_oversized_symlink_and_fifo_refuse() {
-        use std::os::unix::fs::symlink;
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("type");
-        assert!(BacklightKind::read(&path).is_err());
-        for value in ["raw\n", "firmware\n", "platform\n"] {
-            std::fs::write(&path, value).unwrap();
-            assert!(BacklightKind::read(&path).is_ok());
-        }
-        for value in ["unknown", "raw platform", "", "rawxxxxxxxxxxxxxxxxx"] {
-            std::fs::write(&path, value).unwrap();
-            assert!(BacklightKind::read(&path).is_err());
-        }
-        let link = tmp.path().join("link");
-        symlink(&path, &link).unwrap();
-        assert!(BacklightKind::read(&link).is_err());
-        let fifo = tmp.path().join("fifo");
-        let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
-        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
-        assert!(BacklightKind::read(&fifo).is_err());
-    }
-    #[test]
     fn same_connector_name_on_other_gpu_never_acquires_or_receives_target() {
         use std::os::unix::fs::symlink;
         let tmp = tempfile::tempdir().unwrap();
@@ -498,74 +459,6 @@ mod tests {
         )
         .unwrap();
         assert!(readback(&selected_devices[0]).is_err());
-    }
-    #[test]
-    fn duplicate_interfaces_on_one_owned_connector_withhold_capability() {
-        use std::os::unix::fs::symlink;
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("backlight");
-        std::fs::create_dir(&root).unwrap();
-        let owner = owner_fixture(&tmp.path().join("drm/card0/card0-eDP-1"), "eDP-1", 39);
-        for name in ["a", "b"] {
-            let panel = Path::new(&owner.connector_sysfs).join(name);
-            std::fs::create_dir(&panel).unwrap();
-            for (attr, value) in [
-                ("max_brightness", "1000"),
-                ("brightness", "505"),
-                ("type", "raw"),
-            ] {
-                std::fs::write(panel.join(attr), value).unwrap();
-            }
-            symlink(&panel, root.join(name)).unwrap();
-        }
-        assert!(inventory(&root, &[owner]).unwrap().is_empty());
-    }
-    #[test]
-    fn scalar_rejects_fifo_symlink_nonregular_and_out_of_range_without_blocking() {
-        use std::os::unix::fs::symlink;
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("value");
-        std::fs::write(&path, "4294967295\n").unwrap();
-        assert_eq!(scalar(&path).unwrap(), u32::MAX);
-        for value in ["4294967296", "-1", "NaN", "", "1 2"] {
-            std::fs::write(&path, value).unwrap();
-            assert!(scalar(&path).is_err());
-        }
-        let link = tmp.path().join("link");
-        symlink(&path, &link).unwrap();
-        assert!(scalar(&link).is_err());
-        assert!(scalar(tmp.path()).is_err());
-        let fifo = tmp.path().join("fifo");
-        let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
-        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
-        assert!(scalar(&fifo).is_err());
-    }
-    #[test]
-    fn oversized_inventory_rejects_whole_capability_even_if_devices_unassociated() {
-        let tmp = tempfile::tempdir().unwrap();
-        for n in 0..65 {
-            std::fs::create_dir(tmp.path().join(n.to_string())).unwrap();
-        }
-        assert!(inventory(tmp.path(), &[]).is_err());
-    }
-    #[test]
-    fn actual_range_change_removal_and_scalar_replacement_refuse_readback() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut d = device("a", "eDP-1", 505);
-        d.path = tmp.path().to_owned();
-        d.owner = None;
-        std::fs::write(d.path.join("type"), "firmware").unwrap();
-        let md = std::fs::metadata(&d.path).unwrap();
-        d.dev = md.dev();
-        d.inode = md.ino();
-        std::fs::write(d.path.join("max_brightness"), "1000").unwrap();
-        std::fs::write(d.path.join("brightness"), "505").unwrap();
-        assert_eq!(readback(&d).unwrap(), 505);
-        std::fs::write(d.path.join("max_brightness"), "1010").unwrap();
-        assert!(readback(&d).is_err());
-        std::fs::write(d.path.join("max_brightness"), "1000").unwrap();
-        std::fs::remove_file(d.path.join("brightness")).unwrap();
-        assert!(readback(&d).is_err());
     }
     #[test]
     fn live_idle_policy_changes_physical_target_without_replacing_user_intent() {

@@ -1382,37 +1382,6 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
                 check_title(&output.connector_sysfs)?;
             }
         }
-        Message::MonitorIdentityInventory { outputs } => {
-            if outputs.len() > 64 {
-                return Err(DecodeError::CollectionTooLong {
-                    len: outputs.len(),
-                    max: 64,
-                });
-            }
-            for output in outputs {
-                check_title(&output.owner.name)?;
-                check_title(&output.owner.connector_sysfs)?;
-                if let Some(edid) = &output.edid {
-                    if edid.vendor.len() != 3
-                        || !edid.vendor.bytes().all(|v| v.is_ascii_uppercase())
-                        || edid.product.is_empty()
-                        || edid.product.len() > 13
-                        || edid.serial.is_empty()
-                        || edid.serial.len() > 13
-                        || !(1..=256).contains(&edid.blocks)
-                        || !edid
-                            .product
-                            .bytes()
-                            .chain(edid.serial.bytes())
-                            .all(|v| (32..=126).contains(&v))
-                    {
-                        return Err(DecodeError::Malformed(
-                            postcard::Error::DeserializeBadEncoding,
-                        ));
-                    }
-                }
-            }
-        }
         Message::Environment { vars } => {
             for (name, value) in vars {
                 check_title(name)?;
@@ -2329,7 +2298,8 @@ mod integrated_append_order_tests {
             (16, CommandKind::SetScreenReader { enabled: false }),
             (17, CommandKind::SetAcceleratorGrabs { grabs: Vec::new() }),
         ] {
-            let body = postcard::to_allocvec(&command).unwrap();
+            let mut buffer = [0_u8; 64];
+            let body = postcard::to_slice(&command, &mut buffer).unwrap();
             assert_eq!(
                 body[0], original_index,
                 "append-only postcard command position changed"

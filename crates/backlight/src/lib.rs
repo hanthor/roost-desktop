@@ -261,3 +261,216 @@ pub fn readback(device: &Device) -> Result<u32, String> {
     }
     Ok(actual)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn device(name: &str, output: &str, current: u32) -> Device {
+        Device {
+            name: name.into(),
+            output: output.into(),
+            owner: Some(NativeOutputInfo {
+                name: output.into(),
+                drm_device: 1,
+                connector_id: 1,
+                connector_sysfs: output.into(),
+                connector_device: 1,
+                connector_inode: 1,
+            }),
+            kind: BacklightKind::Firmware,
+            path: PathBuf::from(name),
+            max: 1000,
+            current,
+            dev: 1,
+            inode: 1,
+        }
+    }
+    fn owner_fixture(path: &Path, name: &str, id: u32) -> NativeOutputInfo {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::write(path.join("connector_id"), id.to_string()).unwrap();
+        std::fs::write(path.join("status"), "connected").unwrap();
+        std::fs::write(path.join("enabled"), "enabled").unwrap();
+        let metadata = std::fs::metadata(path).unwrap();
+        NativeOutputInfo {
+            name: name.into(),
+            drm_device: 1,
+            connector_id: id,
+            connector_sysfs: std::fs::canonicalize(path)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .into(),
+            connector_device: metadata.dev(),
+            connector_inode: metadata.ino(),
+        }
+    }
+    #[test]
+    fn raw_small_floor_follows_actual_type_and_exact_99_boundary() {
+        let mut d = device("a", "eDP-1", 0);
+        d.kind = BacklightKind::Raw;
+        for (max, min) in [(1, 0), (2, 0), (98, 0), (99, 1), (100, 1), (1000, 10)] {
+            d.max = max;
+            assert_eq!(d.minimum(), min);
+            assert_eq!(d.absolute(0.0), min);
+        }
+        for kind in [BacklightKind::Firmware, BacklightKind::Platform] {
+            d.kind = kind;
+            d.max = 2;
+            assert_eq!(d.minimum(), 1);
+        }
+    }
+
+    #[test]
+    fn backlight_type_missing_malformed_oversized_symlink_and_fifo_refuse() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("type");
+        assert!(BacklightKind::read(&path).is_err());
+        for value in ["raw\n", "firmware\n", "platform\n"] {
+            std::fs::write(&path, value).unwrap();
+            assert!(BacklightKind::read(&path).is_ok());
+        }
+        for value in ["unknown", "raw platform", "", "rawxxxxxxxxxxxxxxxxx"] {
+            std::fs::write(&path, value).unwrap();
+            assert!(BacklightKind::read(&path).is_err());
+        }
+        let link = tmp.path().join("link");
+        symlink(&path, &link).unwrap();
+        assert!(BacklightKind::read(&link).is_err());
+        let fifo = tmp.path().join("fifo");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(BacklightKind::read(&fifo).is_err());
+    }
+
+    #[test]
+    fn duplicate_interfaces_on_one_owned_connector_withhold_capability() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("backlight");
+        std::fs::create_dir(&root).unwrap();
+        let owner = owner_fixture(&tmp.path().join("drm/card0/card0-eDP-1"), "eDP-1", 39);
+        for name in ["a", "b"] {
+            let panel = Path::new(&owner.connector_sysfs).join(name);
+            std::fs::create_dir(&panel).unwrap();
+            for (attr, value) in [
+                ("max_brightness", "1000"),
+                ("brightness", "505"),
+                ("type", "raw"),
+            ] {
+                std::fs::write(panel.join(attr), value).unwrap();
+            }
+            symlink(&panel, root.join(name)).unwrap();
+        }
+        assert!(inventory(&root, &[owner]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn scalar_rejects_fifo_symlink_nonregular_and_out_of_range_without_blocking() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("value");
+        std::fs::write(&path, "4294967295\n").unwrap();
+        assert_eq!(scalar(&path).unwrap(), u32::MAX);
+        for value in ["4294967296", "-1", "NaN", "", "1 2"] {
+            std::fs::write(&path, value).unwrap();
+            assert!(scalar(&path).is_err());
+        }
+        std::fs::write(&path, [0xff]).unwrap();
+        assert!(scalar(&path).is_err());
+        std::fs::write(&path, "0".repeat(65)).unwrap();
+        assert!(scalar(&path).is_err());
+        std::fs::write(&path, "505").unwrap();
+        let link = tmp.path().join("link");
+        symlink(&path, &link).unwrap();
+        assert!(scalar(&link).is_err());
+        assert!(scalar(tmp.path()).is_err());
+        let fifo = tmp.path().join("fifo");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(scalar(&fifo).is_err());
+    }
+
+    #[test]
+    fn oversized_inventory_rejects_whole_capability_even_if_devices_unassociated() {
+        let tmp = tempfile::tempdir().unwrap();
+        for n in 0..65 {
+            std::fs::create_dir(tmp.path().join(n.to_string())).unwrap();
+        }
+        assert!(inventory(tmp.path(), &[]).is_err());
+    }
+
+    #[test]
+    fn actual_range_change_removal_and_scalar_replacement_refuse_readback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut d = device("a", "eDP-1", 505);
+        d.path = tmp.path().to_owned();
+        d.owner = None;
+        std::fs::write(d.path.join("type"), "firmware").unwrap();
+        let md = std::fs::metadata(&d.path).unwrap();
+        d.dev = md.dev();
+        d.inode = md.ino();
+        std::fs::write(d.path.join("max_brightness"), "1000").unwrap();
+        std::fs::write(d.path.join("brightness"), "505").unwrap();
+        assert_eq!(readback(&d).unwrap(), 505);
+        std::fs::write(d.path.join("max_brightness"), "1010").unwrap();
+        assert!(readback(&d).is_err());
+        std::fs::write(d.path.join("max_brightness"), "1000").unwrap();
+        std::fs::remove_file(d.path.join("brightness")).unwrap();
+        assert!(readback(&d).is_err());
+    }
+    #[test]
+    fn selected_gpu_inventory_and_original_connector_replacement_revoke_readback() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("backlight");
+        std::fs::create_dir(&root).unwrap();
+        let selected_path = tmp.path().join("drm/card0/card0-eDP-1");
+        let selected = owner_fixture(&selected_path, "eDP-1", 39);
+        let other = owner_fixture(&tmp.path().join("drm/card1/card1-eDP-1"), "eDP-1", 51);
+        for (name, owner) in [("a-other", &other), ("z-selected", &selected)] {
+            let panel = Path::new(&owner.connector_sysfs).join("panel");
+            std::fs::create_dir(&panel).unwrap();
+            for (attribute, value) in [
+                ("max_brightness", "1000"),
+                ("brightness", "505"),
+                ("type", "raw"),
+            ] {
+                std::fs::write(panel.join(attribute), value).unwrap();
+            }
+            symlink(&panel, root.join(name)).unwrap();
+        }
+        assert!(inventory(&root, &[]).unwrap().is_empty());
+        let devices = inventory(&root, std::slice::from_ref(&selected)).unwrap();
+        assert_eq!(devices.len(), 1);
+        let device = &devices[0];
+        assert_eq!(device.name, "z-selected");
+        assert_eq!(device.owner.as_ref(), Some(&selected));
+        assert_eq!(readback(device).unwrap(), 505);
+        std::fs::write(selected_path.join("connector_id"), "40").unwrap();
+        assert!(owner_current(&selected).is_err());
+        assert!(readback(device).is_err());
+        std::fs::write(selected_path.join("connector_id"), "39").unwrap();
+        assert_eq!(readback(device).unwrap(), 505);
+        // Same path/name/id after replacement cannot renew the original inode.
+        std::fs::rename(&selected_path, selected_path.with_file_name("retired")).unwrap();
+        let replacement = owner_fixture(&selected_path, "eDP-1", 39);
+        assert_ne!(replacement.connector_inode, selected.connector_inode);
+        let panel = selected_path.join("panel");
+        std::fs::create_dir(&panel).unwrap();
+        for (attribute, value) in [
+            ("max_brightness", "1000"),
+            ("brightness", "505"),
+            ("type", "raw"),
+        ] {
+            std::fs::write(panel.join(attribute), value).unwrap();
+        }
+        assert!(owner_current(&selected).is_err());
+        assert!(readback(device).is_err());
+        assert!(inventory(&root, std::slice::from_ref(&selected)).is_err());
+        let fresh = inventory(&root, &[replacement]).unwrap();
+        assert_eq!(fresh.len(), 1);
+        assert_eq!(readback(&fresh[0]).unwrap(), 505);
+        // A newly supplied owner is a separate raw observation, not restoration authority.
+    }
+}
