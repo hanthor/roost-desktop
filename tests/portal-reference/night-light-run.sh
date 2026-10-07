@@ -111,12 +111,12 @@ end=$((SECONDS+30))
 until [ -S "$XDG_RUNTIME_DIR/night-light-proof" ] && [ -s "$ROOST_COMPOSITOR_STATE" ]; do [ "$SECONDS" -lt "$end" ] || exit 1; sleep .1; done
 # The exact original compositor socket/state exists before color policy starts.
 /usr/libexec/gsd-color >/out/daemon.log 2>&1 & export ROOST_NIGHT_LIGHT_DAEMON_PID=$!; register "$ROOST_NIGHT_LIGHT_DAEMON_PID"
-python3 /repo/scripts/lib/roost-portal-ready.py org.gnome.SettingsDaemon.Color org.gnome.SettingsDaemon.Color /out/color-ready.json --pid "$ROOST_NIGHT_LIGHT_DAEMON_PID"
+python3 /repo/scripts/lib/roost-night-light-ready.py color /out/color-ready.json --pid "$ROOST_NIGHT_LIGHT_DAEMON_PID" --start "${starts[-1]}"
 /usr/libexec/xdg-desktop-portal-gnome --replace >/out/backend.log 2>&1 & backend=$!; register "$backend"
-python3 /repo/scripts/lib/roost-portal-ready.py org.freedesktop.impl.portal.desktop.gnome org.freedesktop.impl.portal.Screenshot /out/backend-ready.json --pid "$backend"
+python3 /repo/scripts/lib/roost-night-light-ready.py backend /out/backend-ready.json --pid "$backend" --start "${starts[-1]}"
 /usr/libexec/xdg-desktop-portal-gtk >/out/gtk-backend.log 2>&1 & register "$!"
 /usr/libexec/xdg-desktop-portal --replace >/out/frontend.log 2>&1 & frontend=$!; register "$frontend"
-python3 /repo/scripts/lib/roost-portal-ready.py org.freedesktop.portal.Desktop org.freedesktop.portal.Screenshot /out/frontend-ready.json --pid "$frontend"
+python3 /repo/scripts/lib/roost-night-light-ready.py frontend /out/frontend-ready.json --pid "$frontend" --start "${starts[-1]}"
 python3 /repo/scripts/lib/roost-capture-security-client.py > /out/untrusted-denial.txt
 python3 /repo/scripts/lib/roost-night-light-static-client.py > /out/static-client.log 2>&1 & export ROOST_NIGHT_LIGHT_STATIC_PID=$!; register "$ROOST_NIGHT_LIGHT_STATIC_PID"
 python3 /repo/scripts/lib/roost-night-light-proof.py "$@" > /out/journey.log 2>&1

@@ -301,8 +301,7 @@ jobs:
           name: roost-night-light-fixture
           path: ${{ runner.temp }}/feature-artifact
       - run: sudo apt-get -o Acquire::Retries=3 update -qq && sudo apt-get install -y --no-install-recommends podman zstd shellcheck
-      - run: shellcheck tests/portal-reference/night-light-run.sh tests/portal-reference/night-light-fixture-install.sh
-      - run: python3 scripts/lib/night-light-fault-tests.py
+      - run: shellcheck tests/portal-reference/night-light-run.sh tests/portal-reference/night-light-fixture-install.sh tests/portal-reference/night-light-fault-policy.sh
       - name: Genuine installed fixture RPM controlled final-pass failure
         run: |
           mkdir -p "$RUNNER_TEMP/normal-candidate" "$RUNNER_TEMP/night-light-negative"
@@ -311,6 +310,12 @@ jobs:
           tar --zstd -xf "$package" -C "$RUNNER_TEMP/normal-candidate"
           printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/night-light-negative/candidate-commit.txt"
           podman build --tag localhost/roost-night-light-reference --file tests/portal-reference/Containerfile tests/portal-reference
+          # This image already contains the exact ordinary UID1000 fixture user.
+          # Copy only protected bounded public source; never relax helper UID checks.
+          podman run --rm --network=none --security-opt label=disable \
+            --volume "$GITHUB_WORKSPACE:/repo:ro" \
+            --volume "$RUNNER_TEMP/night-light-negative:/out" \
+            localhost/roost-night-light-reference /repo/tests/portal-reference/night-light-fault-policy.sh
           podman run --rm --network=none --security-opt label=disable \
             --volume "$GITHUB_WORKSPACE:/repo:ro" \
             --volume "$RUNNER_TEMP/normal-candidate:/candidate:ro" \
