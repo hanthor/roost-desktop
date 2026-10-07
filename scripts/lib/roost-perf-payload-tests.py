@@ -69,6 +69,77 @@ class PayloadTests(unittest.TestCase):
     def inspect(self, **kwargs):
         return payload.inspect_tar(io.BytesIO(self.archive(**kwargs)))
 
+    def candidate(self, run_id=12, created="2026-10-07T06:13:11Z", **updates):
+        return {**self.run, "id": run_id, "created_at": created, "status": "completed",
+                "path": ".github/workflows/ci.yml", "repository": {"full_name": "tuna-os/tuna-desktop"},
+                "head_repository": {"full_name": "tuna-os/tuna-desktop"}, **updates}
+
+    def candidates(self, *runs):
+        return {"total_count": len(runs), "workflow_runs": list(runs)}
+
+    def test_newest_main_selection_is_independent_of_response_order(self):
+        import itertools
+        runs = [self.candidate(371, "2026-10-03T14:01:27Z"),
+                self.candidate(375, "2026-10-07T06:13:11Z"),
+                self.candidate(376, "2026-10-06T22:26:47Z")]
+        for order in itertools.permutations(runs):
+            selected = payload.latest_run(self.candidates(*order), "tuna-os/tuna-desktop")
+            self.assertEqual(selected["run_id"], 375)
+            self.assertEqual(selected["candidate_count"], 3)
+            self.assertEqual([v["run_id"] for v in selected["candidates"]], [v["id"] for v in order])
+
+    def test_same_creation_time_tie_selects_highest_original_id(self):
+        selected = payload.latest_run(self.candidates(self.candidate(12), self.candidate(13)),
+                                      "tuna-os/tuna-desktop")
+        self.assertEqual(selected["run_id"], 13)
+
+    def test_wrong_candidate_identity_or_trust_refuses_entire_page(self):
+        invalid = [{"head_branch": "pull"}, {"event": "pull_request"},
+                   {"status": "in_progress"}, {"conclusion": "failure"},
+                   {"path": ".github/workflows/other.yml"}, {"repository": None},
+                   {"repository": {"full_name": "other/repo"}},
+                   {"head_repository": {"full_name": "fork/repo"}},
+                   {"id": True}, {"id": 0}, {"head_sha": "bad"},
+                   {"created_at": "2026-02-30T06:13:11Z"},
+                   {"created_at": "2026-10-07T06:13:11+00:00"}]
+        for update in invalid:
+            with self.subTest(update=update), self.assertRaises(payload.Refusal):
+                payload.latest_run(self.candidates(self.candidate(11), self.candidate(**update)),
+                                   "tuna-os/tuna-desktop")
+
+    def test_candidate_page_bounds_duplicates_and_repository_refused(self):
+        for response in (None, [], {}, self.candidates(),
+                         {"total_count": True, "workflow_runs": [self.candidate()]},
+                         {"total_count": 0, "workflow_runs": [self.candidate()]},
+                         self.candidates(self.candidate(), self.candidate()),
+                         self.candidates(*(self.candidate(i+1) for i in range(payload.MAX_RUN_CANDIDATES+1)))):
+            with self.subTest(response=response), self.assertRaises(payload.Refusal):
+                payload.latest_run(response, "tuna-os/tuna-desktop")
+        for repository in (None, "", "repo", "owner/repo/extra"):
+            with self.subTest(repository=repository), self.assertRaises(payload.Refusal):
+                payload.latest_run(self.candidates(self.candidate()), repository)
+
+    def test_latest_run_cli_retains_original_candidates_and_failure_receipt(self):
+        import sys
+        original = self.root / "runs.json"
+        output = self.root / "selection.json"
+        command = [sys.executable, str(Path(payload.__file__)), "latest-run", "--runs", str(original),
+                   "--repository", "tuna-os/tuna-desktop", "--out", str(output)]
+        original.write_text(json.dumps(self.candidates(self.candidate(11, "2026-10-03T14:01:27Z"),
+                                                      self.candidate(12))))
+        result = subprocess.run(command, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "12\n")
+        receipt = json.loads(output.read_text())
+        self.assertTrue(receipt["qualified"])
+        self.assertEqual(receipt["candidate_count"], 2)
+        original.write_text(json.dumps(self.candidates(self.candidate(head_repository=None))))
+        result = subprocess.run(command, text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr.strip(), "payload provenance refused")
+        self.assertFalse(json.loads(output.read_text())["qualified"])
+
     def test_original_run_and_artifact_metadata(self):
         self.assertEqual(payload.metadata(self.run, self.artifact, 12)["head_sha"], "a" * 40)
 

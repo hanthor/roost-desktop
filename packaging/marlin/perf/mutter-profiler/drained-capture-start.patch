@@ -1,7 +1,7 @@
 --- a/clutter/clutter/clutter-frame-clock.c
 +++ b/clutter/clutter/clutter-frame-clock.c
 @@ -125,6 +125,7 @@
- 
+
    Frame frame_pool[3];
    Frame *prev_dispatch;
 +  guint capture_depth;
@@ -27,7 +27,7 @@
 +  scope->clock->capture_depth--;
 +}
 +G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (CaptureScope, capture_scope_clear)
- 
+
  static const char *
  clutter_frame_clock_state_to_string (ClutterFrameClockState state)
 @@ -623,6 +639,7 @@
@@ -38,15 +38,15 @@
    Frame *presented_frame;
    const char *frr_or_vrr =
      frame_clock->mode == CLUTTER_FRAME_CLOCK_MODE_VARIABLE ? "VRR" : "FRR";
-@@ -932,6 +949,7 @@
+@@ -944,6 +961,7 @@
  void
  clutter_frame_clock_notify_ready (ClutterFrameClock *frame_clock)
  {
 +  g_auto (CaptureScope) capture_scope G_GNUC_UNUSED = capture_scope_enter (frame_clock);
    COGL_TRACE_BEGIN_SCOPED (ClutterFrameClockNotifyReady, "Clutter::FrameClock::ready()");
    COGL_TRACE_DESCRIBE (ClutterFrameClockNotifyReady, frame_clock->output_name);
- 
-@@ -1816,6 +1834,7 @@
+
+@@ -1828,6 +1846,7 @@
  clutter_frame_clock_dispatch (ClutterFrameClock *frame_clock,
                                int64_t            time_us)
  {
@@ -54,8 +54,8 @@
    const ClutterFrameListenerIface *iface = frame_clock->listener.iface;
    g_autoptr (ClutterFrame) frame = NULL;
    int64_t frame_count;
-@@ -2289,3 +2308,16 @@
- 
+@@ -2306,3 +2325,16 @@
+
    clear_source (frame_clock);
  }
 +
@@ -95,54 +95,60 @@
 +++ b/src/core/meta-context.c
 @@ -380,7 +380,7 @@
      }
- 
+
  #ifdef HAVE_PROFILER
 -  priv->profiler = meta_profiler_new (priv->trace_file);
 +  priv->profiler = meta_profiler_new (context, priv->trace_file);
  #endif
- 
+
    priv->state = META_CONTEXT_STATE_CONFIGURED;
 --- a/src/core/meta-profiler.c
 +++ b/src/core/meta-profiler.c
 @@ -20,10 +20,14 @@
  #include "src/core/meta-profiler.h"
- 
+
  #include <glib-unix.h>
 +#include <unistd.h>
  #include <glib/gi18n.h>
  #include <gio/gunixfdlist.h>
- 
+
  #include "cogl/cogl.h"
 +#include "clutter/clutter-mutter.h"
 +#include "clutter/clutter-frame-clock.h"
 +#include "meta/meta-backend.h"
- 
+
  #define META_SYSPROF_PROFILER_DBUS_PATH "/org/gnome/Sysprof3/Profiler"
- 
-@@ -33,6 +37,8 @@
+
+@@ -33,6 +37,9 @@
    char *name;
  } ThreadInfo;
- 
+
 +typedef struct _CaptureGate CaptureGate;
++typedef struct _StopGate StopGate;
 +
  struct _MetaProfiler
  {
    MetaDBusSysprof3ProfilerSkeleton parent_instance;
-@@ -40,6 +46,9 @@
+@@ -40,6 +47,13 @@
    GMainContext *main_thread_context;
    GDBusConnection *connection;
    GCancellable *cancellable;
 +
 +  GWeakRef context;
 +  CaptureGate *capture_gate;
- 
++  StopGate *stop_gate;
++  ClutterStage *capture_stage;
++  ClutterStageView *capture_view;
++  ClutterFrameClock *capture_clock;
+
    gboolean persistent;
    gboolean running;
-@@ -77,8 +86,10 @@
+@@ -77,8 +91,11 @@
    return thread_info;
  }
- 
+
 +static void emit_capture_boundary (MetaProfiler *profiler);
++static void retain_capture_objects (MetaProfiler *profiler);
 +
  static gboolean
 -handle_start (MetaDBusSysprof3Profiler *dbus_profiler,
@@ -150,10 +156,10 @@
                GDBusMethodInvocation    *invocation,
                GUnixFDList              *fd_list,
                GVariant                 *options,
-@@ -136,6 +147,17 @@
+@@ -136,6 +153,17 @@
    cogl_set_tracing_enabled_on_thread (profiler->main_thread_context,
                                        group_name);
- 
+
 +  if (profiler->capture_gate && !cogl_is_tracing_enabled ())
 +    {
 +      /* No worker enable has been queued yet. Release the new writer and
@@ -168,19 +174,23 @@
    g_mutex_lock (&profiler->mutex);
    for (l = profiler->threads; l; l = l->next)
      {
-@@ -151,10 +173,180 @@
+@@ -151,6 +179,12 @@
    g_mutex_unlock (&profiler->mutex);
- 
+
    profiler->running = TRUE;
 +  if (profiler->capture_gate)
-+    emit_capture_boundary (profiler);
- 
++    {
++      emit_capture_boundary (profiler);
++      /* Original acquired objects, retained until this exact run stops. */
++      retain_capture_objects (profiler);
++    }
+
    g_debug ("Profiler running");
- 
-   meta_dbus_sysprof3_profiler_complete_start (dbus_profiler, invocation, NULL);
-+  return TRUE;
-+}
-+
+
+@@ -158,49 +192,326 @@
+   return TRUE;
+ }
+
 +struct _CaptureGate
 +{
 +  MetaProfiler *profiler;
@@ -194,6 +204,14 @@
 +  gint64 requested_us;
 +  guint samples;
 +};
++
++static void
++retain_capture_objects (MetaProfiler *profiler)
++{
++  profiler->capture_stage = g_object_ref (profiler->capture_gate->stage);
++  profiler->capture_view = g_object_ref (profiler->capture_gate->view);
++  profiler->capture_clock = g_object_ref (profiler->capture_gate->clock);
++}
 +
 +static void
 +capture_gate_free (gpointer data)
@@ -296,7 +314,7 @@
 +  g_autoptr (GError) fd_error = NULL;
 +  int position;
 +  int checked_fd;
-+  if (profiler->capture_gate)
++  if (profiler->capture_gate || profiler->stop_gate)
 +    {
 +      g_dbus_method_invocation_return_error (invocation, G_DBUS_ERROR,
 +                                             G_DBUS_ERROR_FAILED, "Capture Start already pending");
@@ -346,68 +364,254 @@
 +  g_source_set_callback (source, capture_gate_tick, gate, capture_gate_free);
 +  g_source_attach (source, profiler->main_thread_context);
 +  g_source_unref (source);
++  return TRUE;
++}
++
++static void
++stop_tracing_now (MetaProfiler *profiler)
++{
++  GList *l;
++  cogl_set_tracing_disabled_on_thread (profiler->main_thread_context);
++
++  g_mutex_lock (&profiler->mutex);
++  for (l = profiler->threads; l; l = l->next)
++    {
++      ThreadInfo *thread_info = l->data;
++
++      cogl_set_tracing_disabled_on_thread (thread_info->main_context);
++    }
++  g_mutex_unlock (&profiler->mutex);
++
++  cogl_stop_tracing ();
++
++  profiler->running = FALSE;
++  g_clear_object (&profiler->capture_stage);
++  g_clear_object (&profiler->capture_view);
++  g_clear_object (&profiler->capture_clock);
++
++  g_debug ("Stopping profiler");
++
++}
++
++struct _StopGate
++{
++  MetaProfiler *profiler;
++  GDBusMethodInvocation *invocation;
++  gint64 requested_us;
++  guint samples;
++};
++
++static void
++stop_gate_free (gpointer data)
++{
++  StopGate *gate = data;
++  gate->profiler->stop_gate = NULL;
++  g_clear_object (&gate->invocation);
++  g_object_unref (gate->profiler);
++  g_free (gate);
++}
++
++static gboolean
++stop_gate_tick (gpointer data)
++{
++  StopGate *gate = data;
++  MetaProfiler *profiler = gate->profiler;
++  g_autoptr (MetaContext) context = g_weak_ref_get (&profiler->context);
++  MetaBackend *backend = context ? meta_context_get_backend (context) : NULL;
++  ClutterActor *actor = backend ? meta_backend_get_stage (backend) : NULL;
++  GList *views = actor ? clutter_stage_peek_stage_views (CLUTTER_STAGE (actor)) : NULL;
++  ClutterFrameClockCaptureState state;
++  gint64 now = g_get_monotonic_time ();
++  const char *failure = NULL;
++  GDBusError failure_code = G_DBUS_ERROR_FAILED;
++  gate->samples++;
++  if (!g_main_context_is_owner (profiler->main_thread_context) || !profiler->running ||
++      !cogl_is_tracing_enabled () || !actor || CLUTTER_STAGE (actor) != profiler->capture_stage ||
++      !views || views->next || views->data != profiler->capture_view ||
++      clutter_stage_view_get_frame_clock (profiler->capture_view) != profiler->capture_clock)
++    failure = "Owned Stop capture stage/view/clock or tracing changed";
++  if (!failure)
++    {
++      clutter_frame_clock_get_capture_state (profiler->capture_clock, &state);
++      if (!state.output || strcmp (state.output, "Virtual-1") || state.next_counter < 0)
++        failure = "Stop capture requires original Virtual-1 frame clock";
++      else if (now - gate->requested_us >= 5 * G_USEC_PER_SEC || gate->samples > 5000)
++        {
++          failure = "No actual Stop drain in 5s";
++          failure_code = G_DBUS_ERROR_TIMED_OUT;
++        }
++      else if (state.pending || state.depth || state.dispatched)
++        return G_SOURCE_CONTINUE;
++    }
++  if (failure)
++    {
++      /* Owned cleanup is not a successful drain or a qualified boundary. */
++      stop_tracing_now (profiler);
++      g_dbus_method_invocation_return_error (gate->invocation, G_DBUS_ERROR,
++                                             failure_code, "%s", failure);
++      return G_SOURCE_REMOVE;
++    }
++  /* The final owned clock observation and disable share one main callback;
++   * no dispatch can intervene. Normal scheduling is never inhibited/reset. */
++  COGL_TRACE_MESSAGE ("Roost::CaptureStopBoundary",
++                      "output=%s clock=%p next=%" G_GINT64_FORMAT
++                      " pending=%u depth=%u dispatched=%d state=%s"
++                      " requested_us=%" G_GINT64_FORMAT " closing_us=%" G_GINT64_FORMAT
++                      " samples=%u",
++                      state.output, profiler->capture_clock, state.next_counter,
++                      state.pending, state.depth, state.dispatched, state.state,
++                      gate->requested_us, g_get_monotonic_time (), gate->samples);
++  stop_tracing_now (profiler);
++  meta_dbus_sysprof3_profiler_complete_stop (META_DBUS_SYSPROF3_PROFILER (profiler),
++                                            gate->invocation);
++  return G_SOURCE_REMOVE;
++}
++
+ static gboolean
+ handle_stop (MetaDBusSysprof3Profiler *dbus_profiler,
+-             GDBusMethodInvocation    *invocation)
++              GDBusMethodInvocation *invocation)
+ {
+   MetaProfiler *profiler = META_PROFILER (dbus_profiler);
+-  GList *l;
+-
++  StopGate *gate;
++  GSource *source;
+   if (profiler->persistent)
+     {
+-      g_dbus_method_invocation_return_error (invocation,
+-                                             G_DBUS_ERROR,
++      g_dbus_method_invocation_return_error (invocation, G_DBUS_ERROR,
+                                              G_DBUS_ERROR_FAILED,
+                                              "Can't stop persistent profiling");
+       return TRUE;
+     }
+-
+   if (!profiler->running)
+     {
+-      g_dbus_method_invocation_return_error (invocation,
+-                                             G_DBUS_ERROR,
++      g_dbus_method_invocation_return_error (invocation, G_DBUS_ERROR,
+                                              G_DBUS_ERROR_FAILED,
+                                              "Profiler not running");
+       return TRUE;
+     }
+-
+-  cogl_set_tracing_disabled_on_thread (profiler->main_thread_context);
+-
+-  g_mutex_lock (&profiler->mutex);
+-  for (l = profiler->threads; l; l = l->next)
+-    {
+-      ThreadInfo *thread_info = l->data;
+-
+-      cogl_set_tracing_disabled_on_thread (thread_info->main_context);
+-    }
+-  g_mutex_unlock (&profiler->mutex);
+-
+-  cogl_stop_tracing ();
+-
+-  profiler->running = FALSE;
+-
+-  g_debug ("Stopping profiler");
+-
+-  meta_dbus_sysprof3_profiler_complete_stop (dbus_profiler, invocation);
++  if (profiler->stop_gate)
++    {
++      g_dbus_method_invocation_return_error (invocation, G_DBUS_ERROR,
++                                             G_DBUS_ERROR_FAILED,
++                                             "Capture Stop already pending");
++      return TRUE;
++    }
++  if (!profiler->capture_clock)
++    {
++      /* Ordinary Start/Stop retains its original immediate contract. */
++      stop_tracing_now (profiler);
++      meta_dbus_sysprof3_profiler_complete_stop (dbus_profiler, invocation);
++      return TRUE;
++    }
++  gate = g_new0 (StopGate, 1);
++  gate->profiler = g_object_ref (profiler);
++  gate->invocation = g_object_ref (invocation);
++  gate->requested_us = g_get_monotonic_time ();
++  profiler->stop_gate = gate;
++  source = g_timeout_source_new (1);
++  g_source_set_callback (source, stop_gate_tick, gate, stop_gate_free);
++  g_source_attach (source, profiler->main_thread_context);
++  g_source_unref (source);
    return TRUE;
  }
- 
-@@ -258,6 +450,7 @@
+
+@@ -258,6 +569,10 @@
    g_clear_object (&self->cancellable);
    g_clear_object (&self->connection);
    g_mutex_clear (&self->mutex);
 +  g_weak_ref_clear (&self->context);
++  g_clear_object (&self->capture_stage);
++  g_clear_object (&self->capture_view);
++  g_clear_object (&self->capture_clock);
    g_list_free_full (self->threads, (GDestroyNotify) thread_info_free);
    g_clear_pointer (&self->main_thread_context, g_main_context_unref);
- 
-@@ -276,6 +469,7 @@
+
+@@ -276,6 +591,7 @@
  meta_profiler_init (MetaProfiler *self)
  {
    g_mutex_init (&self->mutex);
 +  g_weak_ref_init (&self->context, NULL);
    self->cancellable = g_cancellable_new ();
- 
+
    g_bus_get (G_BUS_TYPE_SESSION,
-@@ -285,11 +479,12 @@
+@@ -285,11 +601,12 @@
  }
- 
+
  MetaProfiler *
 -meta_profiler_new (const char *trace_file)
 +meta_profiler_new (MetaContext *context, const char *trace_file)
  {
    MetaProfiler *profiler;
- 
+
    profiler = g_object_new (META_TYPE_PROFILER, NULL);
 +  g_weak_ref_set (&profiler->context, context);
- 
+
    profiler->main_thread_context =
      g_main_context_ref_thread_default ();
 --- a/src/core/meta-profiler.h
 +++ b/src/core/meta-profiler.h
 @@ -18,6 +18,7 @@
  #pragma once
- 
+
  #include <glib-object.h>
 +#include "meta/meta-context.h"
- 
+
  #include "meta-dbus-sysprof3-profiler.h"
- 
+
 @@ -31,7 +32,7 @@
                        PROFILER,
                        MetaDBusSysprof3ProfilerSkeleton)
- 
+
 -MetaProfiler * meta_profiler_new (const char *trace_file);
 +MetaProfiler * meta_profiler_new (MetaContext *context, const char *trace_file);
- 
+
  void meta_profiler_register_thread (MetaProfiler *profiler,
                                      GMainContext *main_context,
 --- a/cogl/cogl/cogl-trace.c
 +++ b/cogl/cogl/cogl-trace.c
-@@ -264,2 +264,3 @@
+@@ -262,7 +262,8 @@
+   data->group = group ? strdup (group) : NULL;
+   data->trace_context = cogl_trace_context_ref (cogl_trace_context);
+
 -  if (main_context == g_main_context_get_thread_default ())
 +  if (main_context == g_main_context_get_thread_default () ||
 +      g_main_context_is_owner (main_context))
      {
-@@ -286,3 +287,4 @@
+       enable_tracing_idle_callback (data);
+       trace_data_free (data);
+@@ -285,7 +286,8 @@
+ void
+ cogl_set_tracing_disabled_on_thread (GMainContext *main_context)
  {
 -  if (g_main_context_get_thread_default () == main_context)
 +  if (g_main_context_get_thread_default () == main_context ||
 +      g_main_context_is_owner (main_context))
      {
+       disable_tracing_idle_callback (NULL);
+     }

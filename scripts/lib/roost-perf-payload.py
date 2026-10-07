@@ -5,6 +5,7 @@ This validates acquisition and installed bytes, not source reproducibility or
 performance. Receipts remain useful when a subsequent image build rejects.
 """
 import argparse
+import datetime
 import hashlib
 import io
 import json
@@ -56,6 +57,57 @@ def regular(path, limit):
                       "sha256": hashlib.sha256(data).hexdigest()}
     finally:
         os.close(fd)
+
+
+MAX_RUN_CANDIDATES = 20
+
+
+def latest_run(response, repository):
+    """Choose newest creation time from one retained, bounded API page.
+
+    Do not silently fall back to an older package if the chosen payload later
+    fails validation. This selection is provenance only, not merge qualification.
+    """
+    require(isinstance(repository, str)
+            and re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository),
+            "expected repository identity invalid")
+    require(isinstance(response, dict), "workflow run API response must be an object")
+    runs = response.get("workflow_runs")
+    count = response.get("total_count")
+    require(isinstance(runs, list) and 0 < len(runs) <= MAX_RUN_CANDIDATES
+            and type(count) is int and count >= len(runs),
+            "workflow run candidate page is empty, malformed or exceeds bound")
+    candidates = []
+    ids = set()
+    for run in runs:
+        require(isinstance(run, dict), "workflow run candidate must be an object")
+        run_id = run.get("id")
+        created = run.get("created_at")
+        head = run.get("head_sha")
+        repo = run.get("repository")
+        head_repo = run.get("head_repository")
+        require(type(run_id) is int and run_id > 0 and run_id not in ids
+                and isinstance(head, str) and re.fullmatch(r"[0-9a-f]{40}", head)
+                and isinstance(created, str)
+                and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", created),
+                "workflow run candidate identity or creation time invalid")
+        # Reject invalid calendar/time values; canonical UTC strings then sort
+        # chronologically, independently of CLI/API response ordering.
+        try:
+            datetime.datetime.strptime(created, "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            raise Refusal("workflow run candidate creation time invalid") from None
+        require(run.get("head_branch") == "main" and run.get("event") == "push"
+                and run.get("status") == "completed" and run.get("conclusion") == "success"
+                and run.get("path") == ".github/workflows/ci.yml"
+                and isinstance(repo, dict) and repo.get("full_name") == repository
+                and isinstance(head_repo, dict) and head_repo.get("full_name") == repository,
+                "candidate is not completed successful original repository MAIN ci push")
+        ids.add(run_id)
+        candidates.append({"run_id": run_id, "head_sha": head, "created_at": created})
+    newest = max(candidates, key=lambda candidate: (candidate["created_at"], candidate["run_id"]))
+    return {**newest, "candidate_count": len(candidates), "candidates": candidates,
+            "scope": "newest creation time in original bounded workflow API page"}
 
 
 def metadata(run, artifact, selected_run):
@@ -288,8 +340,10 @@ def runtime(directory, report):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("select", "archive", "copy", "installed", "runtime"))
+    parser.add_argument("action", choices=("latest-run", "select", "archive", "copy", "installed", "runtime"))
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--runs", type=Path)
+    parser.add_argument("--repository")
     parser.add_argument("--run", type=Path)
     parser.add_argument("--artifact", type=Path)
     parser.add_argument("--run-id", type=int)
@@ -304,7 +358,9 @@ def main():
     result = {"qualified": False, "action": args.action}
     try:
         load = lambda path: json.loads(regular(path, 1024 * 1024)[0])
-        if args.action == "select":
+        if args.action == "latest-run":
+            result.update(latest_run(load(args.runs), args.repository))
+        elif args.action == "select":
             result.update(metadata(load(args.run), load(args.artifact), args.run_id))
         elif args.action == "archive":
             result["artifact"] = regular(args.zip, MAX_PACKAGE)[1]
@@ -325,7 +381,9 @@ def main():
         raise SystemExit("payload provenance refused") from None
     finally:
         args.out.write_text(json.dumps(result, indent=2) + "\n")
-    if args.action == "select":
+    if args.action == "latest-run":
+        print(result["run_id"])
+    elif args.action == "select":
         print(result["artifact_id"])
 
 
