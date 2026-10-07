@@ -3,6 +3,9 @@ packaged compositor/GTK shell with an ordinary user and shared private keyfile
 backend. It selects eight genuine wallpaper-list descriptor items through the
 stock chooser's accessible controls: all six picture placements plus horizontal
 and vertical gradients with no picture. It never sets the tested keys itself.
+Focus reaches each tile through genuine Tab key events, since the chooser
+accessibles do not honor programmatic focus grabs; one genuine Return then
+activates the focused tile.
 
 Each selection must change the independently observed desktop AND screensaver
 metadata, expose the real checked chooser item, and paint specified fixture colors

@@ -131,17 +131,32 @@ def activate_chooser(find, process, original, label):
     # GNOME's chooser is GtkFlowBoxChild with an overridden accessible role.
     # Its generic Action indices enumerate muxer actions, not child::activate.
     # Retain that real inventory and activate the documented Enter keybinding.
-    # The thumbnail panel rebuilds chooser children asynchronously while
-    # artwork loads, which can defunct a resolved accessible between lookup
-    # and focus: AT-SPI then raises GError even for a previously showing
-    # object. Resolve the live target inside a bounded wait, scrolling it
-    # into view as before; still exactly one genuine focus plus one Enter.
+    # These chooser accessibles do not honor programmatic focus grabs, so
+    # focus is acquired with genuine Tab key events through the verified
+    # keyboard host instead. Traversal sends only real Tabs, activation is
+    # exactly one genuine Return, and every resolved accessible is re-read
+    # live because the thumbnail panel rebuilds children asynchronously.
+    hosts = subprocess.check_output(['xdotool', 'search', '--onlyvisible', '--name', '^Smithay'], text=True).split()
+    if len(hosts) != 1:
+        raise RuntimeError('expected exactly one actual Smithay keyboard host')
+    host = hosts[0]
+    pid = int(subprocess.check_output(['xdotool', 'getwindowpid', host], text=True))
+    executable = Path(f'/proc/{pid}/exe').resolve(strict=True)
+    start = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[19]
+    actual = {'pid': pid, 'executable': str(executable), 'start_ticks': start,
+              'sha256': hashlib.sha256(executable.read_bytes()).hexdigest()}
+    if actual != ORIGINAL_HOST:
+        raise RuntimeError('keyboard host identity changed from the original candidate compositor')
+    subprocess.run(['xdotool', 'windowfocus', '--sync', host], check=True, timeout=5)
     control = None
     actions = None
     seen_showing = False
-    end = time.monotonic() + 30
+    tabs = 0
+    end = time.monotonic() + 120
     while True:
         guard(process, original)
+        if scene().get('focused_app_id') != NAME:
+            raise RuntimeError('actual compositor focus left Settings during traversal')
         try:
             candidate = find()
         except GLib.GError:
@@ -157,35 +172,31 @@ def activate_chooser(find, process, original, label):
                     seen_showing = True
                     action = candidate.queryAction()
                     names = [action.getName(i) for i in range(action.nActions)]
-                    if candidate.queryComponent().grabFocus():
+                    candidate.clear_cache()
+                    if candidate.getState().contains(pyatspi.STATE_FOCUSED):
                         control, actions = candidate, names
                         break
             except GLib.GError:
                 pass
-        if time.monotonic() >= end:
+        tabs += 1
+        if tabs > 150 or time.monotonic() >= end:
             if not seen_showing:
                 raise RuntimeError('actual chooser item not showing after scroll')
-            raise RuntimeError('actual chooser target refused focus')
+            raise RuntimeError('actual chooser target did not acquire focus')
+        subprocess.run(['xdotool', 'key', 'Tab'], check=True, timeout=5)
+        guard(process, original)
         drain()
-        time.sleep(.1)
+        time.sleep(.2)
     def focused():
         guard(process, original)
-        control.clear_cache()
-        return (control.getState().contains(pyatspi.STATE_FOCUSED)
+        try:
+            control.clear_cache()
+            state = control.getState()
+        except GLib.GError:
+            return False
+        return (state.contains(pyatspi.STATE_FOCUSED)
                 and scene().get('focused_app_id') == NAME)
     wait_for(focused, 'actual chooser target did not acquire focus')
-    hosts = subprocess.check_output(['xdotool', 'search', '--onlyvisible', '--name', '^Smithay'], text=True).split()
-    if len(hosts) != 1:
-        raise RuntimeError('expected exactly one actual Smithay keyboard host')
-    host = hosts[0]
-    pid = int(subprocess.check_output(['xdotool', 'getwindowpid', host], text=True))
-    executable = Path(f'/proc/{pid}/exe').resolve(strict=True)
-    start = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[19]
-    actual = {'pid': pid, 'executable': str(executable), 'start_ticks': start,
-              'sha256': hashlib.sha256(executable.read_bytes()).hexdigest()}
-    if actual != ORIGINAL_HOST:
-        raise RuntimeError('keyboard host identity changed from the original candidate compositor')
-    subprocess.run(['xdotool', 'windowfocus', '--sync', host], check=True, timeout=5)
     actual_focus = int(subprocess.check_output(['xdotool', 'getwindowfocus'], text=True))
     if actual_focus != int(host) or not focused():
         raise RuntimeError('actual host/chooser focus changed before the key')
@@ -193,7 +204,8 @@ def activate_chooser(find, process, original, label):
         'host': actual, 'window': int(host), 'actual_x_focus': actual_focus,
         'target': control.name, 'actions': actions, 'target_focused': True,
         'scene_before_key': scene(), 'settings_identity': original}, indent=2))
-    # One genuine event, without SendEvent, direct setters, retries or replay.
+    # Traversal used only genuine Tabs; activation is one genuine Return,
+    # without SendEvent, direct setters, retries or replay.
     subprocess.run(['xdotool', 'key', 'Return'], check=True)
     guard(process, original)
     if Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[19] != start:
@@ -220,8 +232,8 @@ def select(case):
             except GLib.GError:
                 return False
         wait_for(present,'stock chooser fixture item missing',30)
-        # Stock Background appears below Style/Accent: scroll the actual item
-        # into view, then focus it and send one genuine Enter, never set a key.
+        # Stock Background appears below Style/Accent: traverse to the actual
+        # item with genuine Tabs, then send one genuine Enter, never set a key.
         activate_chooser(find, process, original, PHASE+'-'+case)
         def saved():
             observed={}
@@ -237,8 +249,19 @@ def select(case):
                        and values['picture-uri']==repr(PICTURE.as_uri()) for values in observed.values())
         wait_for(saved,'actual chooser did not persist full desktop+lock metadata')
         guard(process,original)
-        selected=find()
-        if not selected.getState().contains(pyatspi.STATE_CHECKED): raise RuntimeError('actual selected chooser item unchecked')
+        def checked():
+            try:
+                current = find()
+            except GLib.GError:
+                return False
+            if current is None:
+                return False
+            try:
+                current.clear_cache()
+                return current.getState().contains(pyatspi.STATE_CHECKED)
+            except GLib.GError:
+                return False
+        wait_for(checked,'actual selected chooser item unchecked')
         subprocess.run(['scrot','-o',str(OUT/f'{PHASE}-{case}-settings.png')],check=True)
     finally:
         process.terminate();process.wait(timeout=10);log.close()
