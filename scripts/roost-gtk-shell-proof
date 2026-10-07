@@ -654,6 +654,37 @@ for label in "Activities" "Date and Time" "System"; do
 done
 pass A11Y-PANEL "Activities, Date and Time, System exposed"
 
+# GNOME Settings uses escaped GFile URIs. Observe actual compositor pixels,
+# including a literal %20 filename whose double-decoded neighbour is red.
+wallpaper_before_uri=$(gsettings get org.gnome.desktop.background picture-uri)
+wallpaper_before_dark=$(gsettings get org.gnome.desktop.background picture-uri-dark)
+wallpaper_before_options=$(gsettings get org.gnome.desktop.background picture-options)
+wallpaper_fixture="$ARTIFACTS/wallpaper café %20.png"
+wallpaper_decoy="$ARTIFACTS/wallpaper café  .png"
+ffmpeg -loglevel error -y -f lavfi -i color=c=0x0000ff:s=64x64 -frames:v 1 -threads 1 "$wallpaper_fixture"
+ffmpeg -loglevel error -y -f lavfi -i color=c=0xff0000:s=64x64 -frames:v 1 -threads 1 "$wallpaper_decoy"
+wallpaper_uri=$("$PY" -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve().as_uri())' "$wallpaper_fixture")
+printf '%s\n' "$wallpaper_uri" > "$ARTIFACTS/wallpaper-file-uri.txt"
+gsettings set org.gnome.desktop.background picture-options zoom
+gsettings set org.gnome.desktop.background picture-uri "$wallpaper_uri"
+gsettings set org.gnome.desktop.background picture-uri-dark "$wallpaper_uri"
+end=$(($(date +%s) + 15))
+while :; do
+    scrot "$ARTIFACTS/01b-wallpaper-file-uri.png" >/dev/null
+    rgb=$(px "$ARTIFACTS/01b-wallpaper-file-uri.png" 10 $((HEIGHT - 10)))
+    # px emits exactly three decimal RGB fields; split them intentionally.
+    # shellcheck disable=SC2086
+    set -- $rgb
+    if [ "${1:-255}" -lt 20 ] && [ "${2:-255}" -lt 20 ] && [ "${3:-0}" -gt 220 ]; then break; fi
+    [ "$(date +%s)" -ge "$end" ] && fail G-WALLPAPER-URI "escaped filename did not paint blue (double-decode decoy is red): $rgb"
+    sleep 0.3
+done
+gsettings set org.gnome.desktop.background picture-uri "$wallpaper_before_uri"
+gsettings set org.gnome.desktop.background picture-uri-dark "$wallpaper_before_dark"
+gsettings set org.gnome.desktop.background picture-options "$wallpaper_before_options"
+sleep 1
+pass G-WALLPAPER-URI "spaces, Unicode and literal percent escapes identify the actual selected wallpaper pixels"
+
 # A popover counts as open only when its contents are showing in the
 # accessible tree: a pixel diff passes on a mere hover highlight.
 showing() {
@@ -3631,8 +3662,10 @@ screen_active | grep -q false || fail G-SCREENSAVER "screen saver started active
 
 # A distinct solid background makes the screen-saver URI observable.
 ffmpeg -loglevel error -y -f lavfi -i color=c=0x00ff00:s=64x64 -frames:v 1 -threads 1 \
-    "$ARTIFACTS/lock-background.png"
-gsettings set org.gnome.desktop.screensaver picture-uri "file://$ARTIFACTS/lock-background.png"
+    "$ARTIFACTS/lock café %20.png"
+lock_background_uri=$("$PY" -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve().as_uri())' "$ARTIFACTS/lock café %20.png")
+printf '%s\n' "$lock_background_uri" > "$ARTIFACTS/lock-background-file-uri.txt"
+gsettings set org.gnome.desktop.screensaver picture-uri "$lock_background_uri"
 sleep 1
 # A live, explicitly consented recording must be revoked when lock engages.
 if [ -n "$PW_PIDS" ] && command -v gst-launch-1.0 >/dev/null 2>&1; then
