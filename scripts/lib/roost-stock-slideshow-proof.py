@@ -137,6 +137,48 @@ def fixture():
     ET.ElementTree(root).write(directory/'roost-dynamic.xml',encoding='utf-8',xml_declaration=True)
 
 
+def activate_chooser(control, process, original, label):
+    # GNOME's chooser is GtkFlowBoxChild with an overridden accessible role.
+    # Its generic Action indices enumerate muxer actions, not child::activate.
+    # Retain that real inventory and activate the documented Enter keybinding.
+    action = control.queryAction()
+    actions = [action.getName(i) for i in range(action.nActions)]
+    control.clear_cache()
+    if not control.getState().contains(pyatspi.STATE_SHOWING):
+        raise RuntimeError('actual chooser target is not showing')
+    if not control.queryComponent().grabFocus():
+        raise RuntimeError('actual chooser target refused focus')
+    def focused():
+        guard(process, original)
+        control.clear_cache()
+        return (control.getState().contains(pyatspi.STATE_FOCUSED)
+                and scene().get('focused_app_id') == NAME)
+    wait_for(focused, 'actual chooser target did not acquire focus')
+    hosts = subprocess.check_output(['xdotool', 'search', '--onlyvisible', '--name', '^Smithay'], text=True).split()
+    if len(hosts) != 1:
+        raise RuntimeError('expected exactly one actual Smithay keyboard host')
+    host = hosts[0]
+    pid = int(subprocess.check_output(['xdotool', 'getwindowpid', host], text=True))
+    executable = Path(f'/proc/{pid}/exe').resolve(strict=True)
+    start = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[19]
+    actual = {'pid': pid, 'executable': str(executable), 'start_ticks': start,
+              'sha256': hashlib.sha256(executable.read_bytes()).hexdigest()}
+    if actual != ORIGINAL_HOST:
+        raise RuntimeError('keyboard host identity changed from the original candidate compositor')
+    subprocess.run(['xdotool', 'windowfocus', '--sync', host], check=True, timeout=5)
+    actual_focus = int(subprocess.check_output(['xdotool', 'getwindowfocus'], text=True))
+    if actual_focus != int(host) or not focused():
+        raise RuntimeError('actual host/chooser focus changed before the key')
+    (OUT/f'{label}-keyboard-host.json').write_text(json.dumps({
+        'host': actual, 'window': int(host), 'actual_x_focus': actual_focus,
+        'target': control.name, 'actions': actions, 'target_focused': True,
+        'scene_before_key': scene(), 'settings_identity': original}, indent=2))
+    # One genuine event, without SendEvent, direct setters, retries or replay.
+    subprocess.run(['xdotool', 'key', 'Return'], check=True)
+    guard(process, original)
+    if Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[19] != start:
+        raise RuntimeError('keyboard host changed during the key')
+
 def select(style,choose=False):
     log=(OUT/f'{PHASE}-{style}-settings.log').open('w')
     process=subprocess.Popen([str(EXE),'background'],stdout=log,stderr=log)
@@ -156,8 +198,11 @@ def select(style,choose=False):
             if not control.getState().contains(pyatspi.STATE_SHOWING):
                 control.queryComponent().scrollTo(pyatspi.SCROLL_ANYWHERE);drain();control.clear_cache()
             if not control.getState().contains(pyatspi.STATE_SHOWING):raise RuntimeError('actual control not showing')
-            action=control.queryAction()
-            if action.nActions<1 or not action.doAction(0):raise RuntimeError('actual control action failed')
+            if target=='Roost dynamic proof':
+                activate_chooser(control,process,original,PHASE+'-'+style)
+            else:
+                action=control.queryAction()
+                if action.nActions<1 or not action.doAction(0):raise RuntimeError('actual control action failed')
         if choose:activate('Roost dynamic proof')
         activate('Dark' if style=='dark' else 'Default')
         def saved():
@@ -249,6 +294,13 @@ def observe(style,label,required=None):
 
 wait_for(lambda:bus_call('NameHasOwner','(s)',('org.gnome.Shell',)),'actual GTK shell missing',30)
 current=session_identity()
+compositor_pid=current['compositor_pid']
+compositor_exe=Path(f'/proc/{compositor_pid}/exe').resolve(strict=True)
+if compositor_exe != Path('/candidate/usr/bin/roost-compositor').resolve(strict=True):
+    raise RuntimeError('original host is not the actual candidate compositor')
+ORIGINAL_HOST={'pid':compositor_pid,'executable':str(compositor_exe),
+               'start_ticks':Path(f'/proc/{compositor_pid}/stat').read_text().rsplit(')',1)[1].split()[19],
+               'sha256':hashlib.sha256(compositor_exe.read_bytes()).hexdigest()}
 if PHASE=='initial':
     fixture()
     select('light',True)
