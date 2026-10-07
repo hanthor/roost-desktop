@@ -199,7 +199,7 @@ impl Monitor {
             };
             if self.events.try_send(event).is_err() {
                 // Losing a press/release can strand Orca modifiers. Fail closed
-                // until Orca explicitly establishes a fresh monitor connection.
+                // until the genuine owner explicitly reestablishes its grants.
                 inner.invalidate();
             }
         }
@@ -292,6 +292,9 @@ impl Monitor {
                 if !self.inner.lock().unwrap().valid(event.epoch, &event.owner) {
                     continue;
                 }
+                // Sending runs off the seat thread. A prelock event that has
+                // passed this epoch check may already be in flight at lock;
+                // raw lock/PAM keys never enter this queue in the first place.
                 if let Err(error) = conn.emit_signal(
                     Some(event.owner.as_str()),
                     PATH,
