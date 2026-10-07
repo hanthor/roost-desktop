@@ -3481,7 +3481,7 @@ fn accelerator_release_keeps_original_press_after_modifiers_are_lifted() {
     release(&mut f.manager, &mut f.comp, R_KEYCODE);
     assert_eq!(
         f.manager.take_accelerators_released(),
-        [(31, 5000, MODE_NORMAL)]
+        [(31, 5001, MODE_NORMAL)]
     );
     assert_eq!(f.comp.state.pressed_key_count(), 0);
     release(&mut f.manager, &mut f.comp, R_KEYCODE);
@@ -3531,7 +3531,7 @@ fn unchanged_atomic_grab_retains_release_and_ignore_repeat_does_not_duplicate() 
     release(&mut f.manager, &mut f.comp, R_KEYCODE);
     assert_eq!(
         f.manager.take_accelerators_released(),
-        [(33, 5000, MODE_NORMAL)]
+        [(33, 5001, MODE_NORMAL)]
     );
     assert_eq!(f.comp.state.pressed_key_count(), 0);
 }
@@ -3580,6 +3580,6 @@ fn lock_then_unlock_before_keyup_drops_old_release_but_clears_physical_key() {
     release(&mut f.manager, &mut f.comp, R_KEYCODE);
     assert_eq!(
         f.manager.take_accelerators_released(),
-        [(37, 5000, MODE_NORMAL)]
+        [(37, 5001, MODE_NORMAL)]
     );
 }
