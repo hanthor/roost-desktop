@@ -14,7 +14,7 @@
 //! session owns these names (the nested preview), the service stays off.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -49,6 +49,66 @@ pub struct OutputSnapshot {
 
 /// The runtime keeps this current; D-Bus calls read it.
 pub type Outputs = Arc<Mutex<Vec<OutputSnapshot>>>;
+
+/// Serial and change notification are published under the SAME snapshot lock.
+/// Capture consumers keep the existing Outputs type; display readers never
+/// observe a new serial paired with an older (or merely requested) inventory.
+#[derive(Clone)]
+pub struct DisplayPublication {
+    outputs: Outputs,
+    serial: Arc<AtomicU32>,
+    changed: Arc<AtomicBool>,
+}
+impl DisplayPublication {
+    pub fn new(outputs: Outputs) -> Self {
+        Self {
+            outputs,
+            serial: Arc::new(AtomicU32::new(1)),
+            changed: Arc::new(AtomicBool::new(false)),
+        }
+    }
+    pub fn current(&self) -> fdo::Result<(u32, Vec<OutputSnapshot>)> {
+        let outputs = self
+            .outputs
+            .lock()
+            .map_err(|_| fdo::Error::Failed("display snapshot unavailable".into()))?;
+        let serial = self.serial.load(Ordering::SeqCst);
+        if serial == 0 {
+            return Err(fdo::Error::Failed("display serial exhausted".into()));
+        }
+        Ok((serial, outputs.clone()))
+    }
+    pub fn publish(&self, snapshot: Vec<OutputSnapshot>) -> Result<bool, &'static str> {
+        let mut outputs = self
+            .outputs
+            .lock()
+            .map_err(|_| "display snapshot unavailable")?;
+        if *outputs == snapshot {
+            return Ok(false);
+        }
+        *outputs = snapshot;
+        let previous = self.serial.load(Ordering::SeqCst);
+        let next = previous.checked_add(1).filter(|_| previous != 0);
+        self.serial.store(next.unwrap_or(0), Ordering::SeqCst);
+        self.changed.store(true, Ordering::SeqCst);
+        next.map(|_| true).ok_or("display serial exhausted")
+    }
+    pub fn requested_current(&self, serial: u32) -> bool {
+        self.current().is_ok_and(|(current, _)| current == serial)
+    }
+    pub fn completion_admitted(
+        &self,
+        serial: u32,
+        deadline: std::time::Instant,
+        now: std::time::Instant,
+        reply: &async_channel::Sender<Result<(), &'static str>>,
+    ) -> bool {
+        !reply.is_closed() && now <= deadline && self.requested_current(serial)
+    }
+    fn take_changed(&self) -> bool {
+        self.changed.swap(false, Ordering::SeqCst)
+    }
+}
 
 /// What one stream shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +204,9 @@ pub enum ToLoop {
     ApplyMonitors {
         configs: Vec<crate::monitors::MonitorConfig>,
         persistent: bool,
+        serial: u32,
+        deadline: std::time::Instant,
+        reply: async_channel::Sender<Result<(), &'static str>>,
     },
 }
 
@@ -293,7 +356,7 @@ struct LogicalMonitorConfiguration {
 }
 
 struct DisplayConfig {
-    outputs: Outputs,
+    publication: DisplayPublication,
     to_loop: calloop::channel::Sender<ToLoop>,
 }
 
@@ -308,10 +371,7 @@ impl DisplayConfig {
         Vec<LogicalMonitor>,
         HashMap<String, OwnedValue>,
     )> {
-        let outputs = self
-            .outputs
-            .lock()
-            .map_err(|_| fdo::Error::Failed("poisoned".into()))?;
+        let (serial, outputs) = self.publication.current()?;
         let mut monitors = Vec::new();
         let mut logical = Vec::new();
         for o in outputs.iter() {
@@ -365,37 +425,58 @@ impl DisplayConfig {
             // 1: logical layout (GNOME's default).
             OwnedValue::from(1u32),
         )]);
-        Ok((0, monitors, logical, properties))
+        Ok((serial, monitors, logical, properties))
     }
 
     /// GNOME Settings' Displays panel: 0 verifies, 1 applies, 2 applies
     /// and keeps (niri's checks: no mirroring, known connectors only).
     async fn apply_monitors_config(
         &self,
-        #[zbus(signal_context)] ctxt: SignalEmitter<'_>,
-        _serial: u32,
+        serial: u32,
         method: u32,
         logical_monitor_configs: Vec<LogicalMonitorConfiguration>,
         _properties: HashMap<String, OwnedValue>,
     ) -> fdo::Result<()> {
-        let configs = {
-            let outputs = self
-                .outputs
-                .lock()
-                .map_err(|_| fdo::Error::Failed("poisoned".into()))?;
-            validate(&outputs, &logical_monitor_configs)?
-        };
+        if method > 2 {
+            return Err(fdo::Error::InvalidArgs(
+                "invalid configuration method".into(),
+            ));
+        }
+        let (current, outputs) = self.publication.current()?;
+        if serial != current {
+            return Err(fdo::Error::AccessDenied(
+                "The requested configuration is based on stale information".into(),
+            ));
+        }
+        let configs = validate(&outputs, &logical_monitor_configs)?;
         if method == 0 {
             return Ok(());
         }
+        let (reply, receive) = async_channel::bounded(1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         self.to_loop
             .send(ToLoop::ApplyMonitors {
                 configs,
                 persistent: method == 2,
+                serial,
+                deadline,
+                reply,
             })
             .map_err(|_| fdo::Error::Failed("compositor gone".into()))?;
-        let _ = DisplayConfig::monitors_changed(&ctxt).await;
-        Ok(())
+        futures_lite::future::race(
+            async {
+                receive
+                    .recv()
+                    .await
+                    .map_err(|_| "compositor completion unavailable")?
+            },
+            async {
+                async_io::Timer::at(deadline).await;
+                Err("compositor configuration deadline expired")
+            },
+        )
+        .await
+        .map_err(|message| fdo::Error::Failed(message.into()))
     }
 
     #[zbus(signal)]
@@ -434,6 +515,9 @@ fn validate(
     requested: &[LogicalMonitorConfiguration],
 ) -> fdo::Result<Vec<crate::monitors::MonitorConfig>> {
     let mut configs = Vec::new();
+    if requested.len() > 64 {
+        return Err(fdo::Error::InvalidArgs("too many logical monitors".into()));
+    }
     for logical in requested {
         if logical.monitors.len() > 1 {
             return Err(fdo::Error::Failed("mirroring is not supported yet".into()));
@@ -467,6 +551,15 @@ fn validate(
                     "connector '{connector}' configured more than once"
                 )));
             }
+            let width = (f64::from(output.width) / logical.scale).round() as i32;
+            let height = (f64::from(output.height) / logical.scale).round() as i32;
+            if width <= 0
+                || height <= 0
+                || logical.x.checked_add(width).is_none()
+                || logical.y.checked_add(height).is_none()
+            {
+                return Err(fdo::Error::InvalidArgs("monitor geometry overflow".into()));
+            }
             configs.push(crate::monitors::MonitorConfig {
                 connector: connector.clone(),
                 scale: logical.scale,
@@ -492,6 +585,8 @@ fn validate(
             "disabling outputs is not supported yet".into(),
         ));
     }
+    crate::monitors::requested_primary(&configs)
+        .map_err(|message| fdo::Error::InvalidArgs(message.into()))?;
     Ok(configs)
 }
 
@@ -865,6 +960,7 @@ pub fn session_closed(stream: &SignalEmitter<'static>, session_id: u64) {
 /// Returns the channel the event loop reads cast requests from.
 pub fn start(
     outputs: Outputs,
+    publication: DisplayPublication,
     windows: Windows,
     authority: crate::capture_security::Authority,
     display: smithay::reexports::wayland_server::DisplayHandle,
@@ -874,7 +970,7 @@ pub fn start(
         .name("roost-mutter-dbus".into())
         .spawn(move || {
             let display_config = DisplayConfig {
-                outputs: outputs.clone(),
+                publication: publication.clone(),
                 to_loop: to_loop.clone(),
             };
             let sessions: Sessions = Default::default();
@@ -937,6 +1033,15 @@ pub fn start(
             // bounds stream teardown; frames additionally fail closed on lock.
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(100));
+                if publication.take_changed() {
+                    if let Ok(signal) =
+                        SignalEmitter::new(conn.inner(), "/org/gnome/Mutter/DisplayConfig")
+                    {
+                        if zbus::block_on(DisplayConfig::monitors_changed(&signal)).is_err() {
+                            publication.changed.store(true, Ordering::SeqCst);
+                        }
+                    }
+                }
                 let remote_snapshot = remote.lock().map(|s| s.clone()).unwrap_or_default();
                 for (remote_id, grant) in remote_snapshot {
                     let alive = zbus::block_on(authority.owner_alive(conn.inner(), &grant.owner));
@@ -1020,7 +1125,7 @@ mod tests {
         let outputs = Arc::new(Mutex::new(vec![output]));
         let (to_loop, _receiver) = calloop::channel::channel();
         let config = DisplayConfig {
-            outputs: outputs.clone(),
+            publication: DisplayPublication::new(outputs.clone()),
             to_loop,
         };
         let (_, monitors, _, _) = config.get_current_state().unwrap();
@@ -1039,7 +1144,7 @@ mod tests {
             y: 0,
             scale,
             transform: 0,
-            is_primary: true,
+            is_primary: connector == "eDP-1",
             monitors: vec![(connector.into(), "1920x1080@60.000".into(), HashMap::new())],
         }
     }
@@ -1126,5 +1231,95 @@ mod tests {
         assert!(is_laptop_panel("LVDS-1"));
         assert!(!is_laptop_panel("HDMI-A-1"));
         assert!(!is_laptop_panel("roost-0"));
+    }
+}
+
+#[cfg(test)]
+mod display_publication_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+    fn snapshot() -> OutputSnapshot {
+        OutputSnapshot {
+            connector: "DP-1".into(),
+            make: "DEL".into(),
+            model: "Panel".into(),
+            serial: "S-1".into(),
+            width: 1920,
+            height: 1080,
+            refresh_mhz: 60000,
+            x: 0,
+            y: 0,
+            scale: 1.0,
+            primary: true,
+        }
+    }
+    #[test]
+    fn serial_snapshot_changed_and_unchanged_publications_are_coherent() {
+        let outputs: Outputs = Default::default();
+        let publication = DisplayPublication::new(outputs.clone());
+        assert_eq!(publication.current().unwrap(), (1, vec![]));
+        assert!(!publication.take_changed());
+        let output = snapshot();
+        assert!(publication.publish(vec![output.clone()]).unwrap());
+        assert_eq!(publication.current().unwrap(), (2, vec![output.clone()]));
+        assert!(!publication.requested_current(1));
+        assert!(publication.requested_current(2));
+        assert_eq!(*outputs.lock().unwrap(), vec![output.clone()]);
+        assert!(publication.take_changed());
+        assert!(!publication.publish(vec![output]).unwrap());
+        assert!(!publication.take_changed());
+        assert_eq!(publication.current().unwrap().0, 2);
+        // A real failed/unavailable backend publishes empty, never old active
+        // outputs under a success serial, and still notifies actual change.
+        assert!(publication.publish(vec![]).unwrap());
+        assert_eq!(publication.current().unwrap(), (3, vec![]));
+        assert!(publication.take_changed());
+    }
+    #[test]
+    fn serial_never_wraps_and_actual_failure_snapshot_remains_retained() {
+        let outputs: Outputs = Default::default();
+        let publication = DisplayPublication::new(outputs.clone());
+        publication.serial.store(u32::MAX, Ordering::SeqCst);
+        assert!(publication.publish(vec![snapshot()]).is_err());
+        assert_eq!(outputs.lock().unwrap().len(), 1);
+        assert!(publication.current().is_err());
+        assert!(!publication.requested_current(0));
+        assert!(!publication.requested_current(u32::MAX));
+        assert!(publication.take_changed());
+        assert!(publication.publish(vec![]).is_err());
+        assert!(outputs.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn original_completion_gate_refuses_stale_expired_and_gone_receiver() {
+        let publication = DisplayPublication::new(Default::default());
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(2);
+        let (reply, receive) = async_channel::bounded(1);
+        assert!(publication.completion_admitted(1, deadline, deadline, &reply));
+        assert!(!publication.completion_admitted(
+            1,
+            deadline,
+            deadline + Duration::from_nanos(1),
+            &reply
+        ));
+        publication.publish(vec![snapshot()]).unwrap();
+        assert!(!publication.completion_admitted(1, deadline, now, &reply));
+        assert!(publication.completion_admitted(2, deadline, now, &reply));
+        drop(receive);
+        assert!(!publication.completion_admitted(2, deadline, now, &reply));
+    }
+    #[test]
+    fn real_snapshot_poison_never_qualifies_original_serial_or_change() {
+        let outputs: Outputs = Default::default();
+        let original = outputs.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = original.lock().unwrap();
+            panic!("controlled poison");
+        })
+        .join();
+        let publication = DisplayPublication::new(outputs);
+        assert!(publication.current().is_err());
+        assert!(publication.publish(vec![snapshot()]).is_err());
+        assert!(!publication.requested_current(1));
     }
 }

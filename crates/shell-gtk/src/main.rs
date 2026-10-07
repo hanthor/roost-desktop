@@ -15,6 +15,7 @@
 
 mod audio_state;
 mod brightness;
+mod brightness_journal_client;
 mod brightness_service;
 mod bt_menu;
 mod calendar;
@@ -243,9 +244,9 @@ impl shell_dbus::ShellActions for GnomeShellDbus {
             .is_some_and(|c| c.model().is_overview_open())
     }
 
-    fn set_accelerators(&self, accelerators: Vec<roost_shell_control::Accelerator>) {
+    fn set_accelerator_grabs(&self, grabs: Vec<roost_shell_control::AcceleratorGrab>) {
         if let Some(control) = self.shell.borrow_mut().control.as_mut() {
-            let _ = control.set_accelerators(accelerators);
+            let _ = control.set_accelerator_grabs(grabs);
         }
     }
 }
@@ -1289,7 +1290,51 @@ fn build(app: &adw::Application) {
             s.settings_schema()
                 .is_some_and(|schema| schema.has_key("idle-brightness"))
         });
+    let brightness_bridge = brightness_journal_client::Bridge {
+        snapshot: {
+            let weak = Rc::downgrade(&shell);
+            Rc::new(move || {
+                let shell = weak.upgrade()?;
+                let shell = shell.try_borrow().ok()?;
+                shell.control.as_ref()?.brightness_state().cloned()
+            })
+        },
+        send: {
+            let weak = Rc::downgrade(&shell);
+            Rc::new(move |command| {
+                let shell = weak.upgrade().ok_or("brightness shell unavailable")?;
+                let mut shell = shell
+                    .try_borrow_mut()
+                    .map_err(|_| "brightness control busy")?;
+                let result = {
+                    let control = shell
+                        .control
+                        .as_mut()
+                        .ok_or("brightness control unavailable")?;
+                    match command {
+                        brightness_journal_client::Command::Initialize { readings, idle } => {
+                            control.initialize_brightness(readings, idle)
+                        }
+                        brightness_journal_client::Command::Begin { source, targets } => {
+                            control.begin_brightness(source, targets)
+                        }
+                        brightness_journal_client::Command::Complete {
+                            grant,
+                            observations,
+                        } => control.complete_brightness(grant, observations),
+                    }
+                };
+                if result.is_err() {
+                    // A nonblocking write may have emitted only a frame prefix;
+                    // never continue/replay that original connection as a grant.
+                    shell.control = None;
+                }
+                result.map_err(|_| "brightness original control send failed".into())
+            })
+        },
+    };
     let brightness_controller = brightness_service::start(
+        brightness_bridge,
         {
             let weak = Rc::downgrade(&shell);
             Rc::new(move || {
@@ -2123,13 +2168,16 @@ fn build(app: &adw::Application) {
         let shell_rc = shell.clone();
         let activities_button = activities.clone();
         let last_frames: RefCell<Vec<roost_shell_control::SwitcherThumbnail>> = RefCell::default();
+        let brightness_journal = brightness_controller.clone();
         glib::timeout_add_local(Duration::from_millis(16), move || {
             let mut shell = shell.borrow_mut();
             let mut results = Vec::new();
+            let mut brightness_replies = Vec::new();
             let mut accelerators = Vec::new();
             let mut menus = Vec::new();
             let mut consent = None;
             let mut popups = Vec::new();
+            let mut control_failed = false;
             if let Some(control) = shell.control.as_mut() {
                 loop {
                     match control.poll() {
@@ -2138,6 +2186,11 @@ fn build(app: &adw::Application) {
                         }
                         Ok(Handled::WindowMenu(request)) => menus.push(request),
                         Ok(Handled::ShortcutConsent(request)) => consent = Some(request),
+                        Ok(Handled::BrightnessJournal { .. }) => {
+                            while let Some(reply) = control.take_brightness_reply() {
+                                brightness_replies.push(reply);
+                            }
+                        }
                         Ok(Handled::ScreenReader(state)) => {
                             if matches!(
                                 state,
@@ -2150,8 +2203,11 @@ fn build(app: &adw::Application) {
                         Ok(Handled::WorkspacePopup { index, count }) => {
                             popups.push((index, count));
                         }
+                        Ok(Handled::AcceleratorDeactivated { action, time, mode }) => {
+                            accelerators.push((action, time, mode, true));
+                        }
                         Ok(Handled::Accelerator { action, time, mode }) => {
-                            accelerators.push((action, time, mode));
+                            accelerators.push((action, time, mode, false));
                         }
                         Ok(Handled::CommandResult { id, status }) => results.push((
                             id,
@@ -2161,10 +2217,17 @@ fn build(app: &adw::Application) {
                         Err(e) if is_would_block(&e) => break,
                         Err(e) => {
                             eprintln!("roost-shell-gtk: control error: {e}");
+                            control_failed = true;
                             break;
                         }
                     }
                 }
+            }
+            if control_failed {
+                // Observed termination/protocol failure revokes cached grants;
+                // a replacement connection must acquire its own authority.
+                shell.control = None;
+                brightness_replies.clear();
             }
             let locked = shell.control.as_ref().is_some_and(|c| c.locked());
             render_pills(&mut shell);
@@ -2186,6 +2249,9 @@ fn build(app: &adw::Application) {
                 .as_ref()
                 .is_some_and(|c| c.model().is_overview_open());
             drop(shell);
+            for reply in brightness_replies {
+                brightness_journal.journal_reply(reply);
+            }
             if locked {
                 notify.release_focus();
             }
@@ -2196,8 +2262,12 @@ fn build(app: &adw::Application) {
             } else if let Some(request) = consent {
                 shortcut_consent.sync(request);
             }
-            for (action, time, mode) in accelerators {
-                gnome_shell.accelerator_activated(action, time, mode);
+            for (action, time, mode, released) in accelerators {
+                if released {
+                    gnome_shell.accelerator_deactivated(action, time, mode);
+                } else {
+                    gnome_shell.accelerator_activated(action, time, mode);
+                }
             }
             for request in menus {
                 window_menu.open(&request);

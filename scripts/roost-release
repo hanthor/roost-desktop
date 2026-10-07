@@ -88,6 +88,12 @@ install -Dm0644 share/systemd/user/roost-session.target \
 # Lock-screen PAM service (#62); a conffile, so local edits survive.
 install -m0644 share/pam.d/roost-lock "$STAGE/etc/pam.d/roost-lock"
 echo /etc/pam.d/roost-lock >"$STAGE/DEBIAN/conffiles"
+# Original root and vendored MIT notices are part of the installed payload.
+install -Dm0644 LICENSE "$STAGE/usr/share/licenses/roost/LICENSE"
+for dependency in drm drm-ffi; do
+    install -Dm0644 "third-party/$dependency/LICENSE" \
+        "$STAGE/usr/share/licenses/roost/$dependency/LICENSE"
+done
 
 # Agreement check: the stamped binaries must report the stamped version.
 for bin in roost-compositor roost-session roost-shell-host roost-ibus-bridge roost-greeter; do

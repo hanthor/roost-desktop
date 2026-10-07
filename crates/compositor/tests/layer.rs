@@ -429,3 +429,83 @@ fn bound_panel_arranges_at_its_output_size_and_offset() {
         "strip sits at the tiled second-output origin"
     );
 }
+
+#[test]
+fn retired_bound_layer_never_falls_back_while_original_client_keeps_it_alive() {
+    use roost_compositor::State;
+    use smithay::output::{Output, PhysicalProperties, Subpixel};
+    let mut comp = TestCompositor::new();
+    comp.state.add_output("survivor", None, 1280, 800);
+    let output = Output::new(
+        "retired".into(),
+        PhysicalProperties {
+            size: (0, 0).into(),
+            subpixel: Subpixel::Unknown,
+            make: "test".into(),
+            model: "test".into(),
+        },
+    );
+    let global = output.create_global::<State>(&comp.display.handle());
+    comp.state.add_output("retired", Some(output), 640, 480);
+    comp.state.note_output_global("retired", global);
+    let (_conn, mut queue, mut client) = connect(&mut comp);
+    let bound = client.outputs.first().cloned().unwrap();
+    attach_panel_on(&queue, &mut client, Some(&bound));
+    pump(&mut comp, &mut queue, &mut client, |comp, client| {
+        client.configured
+            && comp
+                .state
+                .panel_surfaces()
+                .first()
+                .is_some_and(|panel| panel.configured)
+    });
+    assert_eq!(roost_compositor::layer::layer_layout(&comp.state).len(), 1);
+    assert!(comp.state.remove_output("retired"));
+    pump(&mut comp, &mut queue, &mut client, |_, client| {
+        client.closed
+    });
+    assert!(
+        client.layer_surface.is_some(),
+        "original role deliberately stays alive"
+    );
+    assert!(comp.state.panel_surfaces().is_empty());
+    assert!(roost_compositor::layer::layer_layout(&comp.state).is_empty());
+    assert!(roost_compositor::layer::exclusive_keyboard_layer(&comp.state).is_none());
+    // Original client can still issue a genuine request; it cannot re-enter
+    // placement/input merely by delaying destruction or committing again.
+    client.surface.as_ref().unwrap().commit();
+    client.synced = false;
+    _conn.display().sync(&queue.handle(), ());
+    pump(&mut comp, &mut queue, &mut client, |_, client| {
+        client.synced
+    });
+    assert!(roost_compositor::layer::layer_layout(&comp.state).is_empty());
+    assert!(comp.state.overview_surface().is_none());
+    // Even a new role on the original retired wl_output cannot use its old
+    // resource to obtain the survivor's geometry or a same-name replacement.
+    let original_role = client.layer_surface.clone().unwrap();
+    let original_surface = client.surface.clone().unwrap();
+    // Advertise a genuine replacement with exactly the retired connector name.
+    // Name-only admission would wrongly accept the original bound resource.
+    let replacement = Output::new(
+        "retired".into(),
+        PhysicalProperties {
+            size: (0, 0).into(),
+            subpixel: Subpixel::Unknown,
+            make: "test".into(),
+            model: "replacement".into(),
+        },
+    );
+    let global = replacement.create_global::<State>(&comp.display.handle());
+    comp.state
+        .add_output("retired", Some(replacement), 800, 600);
+    comp.state.note_output_global("retired", global);
+    client.closed = false;
+    attach_panel_on(&queue, &mut client, Some(&bound));
+    pump(&mut comp, &mut queue, &mut client, |_, client| {
+        client.closed
+    });
+    assert!(comp.state.panel_surfaces().is_empty());
+    assert!(roost_compositor::layer::layer_layout(&comp.state).is_empty());
+    drop((original_role, original_surface));
+}

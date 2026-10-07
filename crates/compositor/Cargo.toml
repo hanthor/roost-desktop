@@ -5,6 +5,7 @@ edition = "2021"
 license.workspace = true
 
 [dependencies]
+roost-backlight = { path = "../backlight", version = "0.1.0" }
 smithay.workspace = true
 # Lock-screen PAM (unlock under GDM, where no greetd runs): libpam is
 # loaded at run time, so builds need no PAM headers and a system without
@@ -22,6 +23,10 @@ png = "0.18"
 # niri's shape. Needs libpipewire-0.3 (and libclang to build).
 pipewire = { version = "0.10", features = ["v0_3_33"] }
 serde = { version = "1", features = ["derive"] }
+# Actual compositor completion without blocking the D-Bus executor.
+async-channel = "=2.5.0"
+async-io = "=2.6.0"
+futures-lite = "=2.6.1"
 calloop.workspace = true
 signal-hook.workspace = true
 rand.workspace = true

@@ -56,6 +56,9 @@ const XML: &str = r#"<node>
       <arg name="action" type="u"/>
       <arg name="parameters" type="a{sv}"/>
     </signal>
+    <signal name="AcceleratorDeactivated">
+      <arg name="action" type="u"/><arg name="parameters" type="a{sv}"/>
+    </signal>
     <property name="Mode" type="s" access="read"/>
     <property name="OverviewActive" type="b" access="read"/>
     <property name="ShellVersion" type="s" access="read"/>
@@ -69,7 +72,7 @@ pub trait ShellActions {
     fn show_applications(&self);
     fn overview_active(&self) -> bool;
     /// Hand the compositor the full set of grabs.
-    fn set_accelerators(&self, accelerators: Vec<roost_shell_control::Accelerator>);
+    fn set_accelerator_grabs(&self, grabs: Vec<roost_shell_control::AcceleratorGrab>);
 }
 
 /// Parse a GNOME accelerator string (`<Super>p`, `XF86AudioRaiseVolume`)
@@ -115,6 +118,7 @@ struct Grab {
     keysym: u32,
     mods: u32,
     modes: u32,
+    flags: u32,
 }
 
 /// Every grab by action id (Mutter's keybinding actions).
@@ -129,7 +133,15 @@ struct Grabs {
 impl Grabs {
     /// Grab `accelerator` for `sender`: the new action id, or 0 when it
     /// does not parse or is grabbed already (as Mutter answers).
+    #[cfg(test)]
     fn grab(&mut self, sender: &str, accelerator: &str, modes: u32) -> u32 {
+        self.grab_with_flags(sender, accelerator, modes, 0)
+    }
+
+    fn grab_with_flags(&mut self, sender: &str, accelerator: &str, modes: u32, flags: u32) -> u32 {
+        if flags & !roost_shell_control::SUPPORTED_GRAB_FLAGS != 0 {
+            return 0;
+        }
         let Some((keysym, mods)) = parse_accelerator(accelerator) else {
             return 0;
         };
@@ -142,7 +154,14 @@ impl Grabs {
         {
             return 0;
         }
-        self.next = self.next.wrapping_add(1).max(1);
+        let Some(next) = self
+            .next
+            .checked_add(1)
+            .filter(|next| *next < INTERNAL_BASE)
+        else {
+            return 0;
+        };
+        self.next = next;
         // GNOME's modes; none given means the normal session.
         let modes = if modes == 0 {
             roost_shell_control::MODE_NORMAL
@@ -156,6 +175,7 @@ impl Grabs {
                 keysym,
                 mods,
                 modes,
+                flags,
             },
         );
         self.next
@@ -215,8 +235,21 @@ impl Service {
     /// Hand the compositor every grab: callers' and the shell's own.
     fn push(&self) {
         let mut list = self.grabs.borrow().list();
-        list.extend(self.internal.borrow().iter().copied());
-        self.actions.set_accelerators(list);
+        let grabs = self.grabs.borrow();
+        let mut typed: Vec<_> = list
+            .drain(..)
+            .map(|accelerator| roost_shell_control::AcceleratorGrab {
+                flags: grabs.by_action[&accelerator.action].flags,
+                accelerator,
+            })
+            .collect();
+        typed.extend(self.internal.borrow().iter().copied().map(|accelerator| {
+            roost_shell_control::AcceleratorGrab {
+                accelerator,
+                flags: 0,
+            }
+        }));
+        self.actions.set_accelerator_grabs(typed);
     }
 
     /// Bind the shell's own keys: `accelerators[i]` with its modes runs
@@ -245,7 +278,18 @@ impl Service {
     /// a caller's is signalled to that caller, as GNOME does (unicast
     /// AcceleratorActivated).
     pub fn accelerator_activated(&self, action: u32, time: u32, mode: u32) {
+        self.accelerator_event(action, time, mode, false);
+    }
+
+    pub fn accelerator_deactivated(&self, action: u32, time: u32, mode: u32) {
+        self.accelerator_event(action, time, mode, true);
+    }
+
+    fn accelerator_event(&self, action: u32, time: u32, mode: u32, released: bool) {
         if action >= INTERNAL_BASE {
+            if released {
+                return;
+            }
             let run = self.on_internal.borrow().clone();
             if let Some(run) = run {
                 run((action - INTERNAL_BASE) as usize);
@@ -273,7 +317,11 @@ impl Service {
             Some(&sender),
             PATH,
             "org.gnome.Shell",
-            "AcceleratorActivated",
+            if released {
+                "AcceleratorDeactivated"
+            } else {
+                "AcceleratorActivated"
+            },
             Some(&(action, params.end()).to_variant()),
         );
     }
@@ -376,7 +424,7 @@ pub fn start(actions: Rc<dyn ShellActions>) -> Rc<Service> {
                             None
                         }
                         "GrabAccelerator" => {
-                            let Some((accel, modes, _flags)) = params.get::<(String, u32, u32)>()
+                            let Some((accel, modes, flags)) = params.get::<(String, u32, u32)>()
                             else {
                                 invocation.return_dbus_error(
                                     "org.freedesktop.DBus.Error.InvalidArgs",
@@ -384,7 +432,10 @@ pub fn start(actions: Rc<dyn ShellActions>) -> Rc<Service> {
                                 );
                                 return;
                             };
-                            let action = grabs_svc.grabs.borrow_mut().grab(&sender, &accel, modes);
+                            let action = grabs_svc
+                                .grabs
+                                .borrow_mut()
+                                .grab_with_flags(&sender, &accel, modes, flags);
                             grabs_svc.push();
                             Some((action,).to_variant())
                         }
@@ -399,7 +450,9 @@ pub fn start(actions: Rc<dyn ShellActions>) -> Rc<Service> {
                             let actions: Vec<u32> = {
                                 let mut grabs = grabs_svc.grabs.borrow_mut();
                                 list.iter()
-                                    .map(|(accel, modes, _)| grabs.grab(&sender, accel, *modes))
+                                    .map(|(accel, modes, flags)| {
+                                        grabs.grab_with_flags(&sender, accel, *modes, *flags)
+                                    })
                                     .collect()
                             };
                             grabs_svc.push();
@@ -538,5 +591,38 @@ mod tests {
         assert_eq!(list[0].modes, roost_shell_control::MODE_NORMAL);
         assert!(grabs.forget(":1.5"));
         assert!(grabs.list().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod grab_flag_tests {
+    use super::*;
+    #[test]
+    fn unsupported_flags_return_zero_without_installing_and_reply_indexes_remain_stable() {
+        let mut grabs = Grabs::default();
+        let requests = [("r", 128), ("s", 8), ("t", 16), ("r", 128), ("u", 0)];
+        let actions: Vec<_> = requests
+            .iter()
+            .map(|(key, flags)| grabs.grab_with_flags(":1.70", key, 1, *flags))
+            .collect();
+        assert_eq!(actions, [1, 0, 2, 0, 3]);
+        assert_eq!(grabs.by_action.len(), 3);
+        assert!(!grabs
+            .by_action
+            .values()
+            .any(|grab| grab.keysym == u32::from(b's')));
+        assert_eq!(grabs.by_action[&1].flags, 128);
+        for flags in [1, 2, 4, 8, 32, 64, 256, u32::MAX] {
+            assert_eq!(grabs.grab_with_flags(":1.71", "v", 1, flags), 0);
+        }
+    }
+    #[test]
+    fn exhausted_action_ids_do_not_recycle_into_old_or_internal_owners() {
+        let mut grabs = Grabs {
+            next: INTERNAL_BASE - 1,
+            ..Default::default()
+        };
+        assert_eq!(grabs.grab_with_flags(":1.72", "r", 1, 128), 0);
+        assert!(grabs.by_action.is_empty());
     }
 }

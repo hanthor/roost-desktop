@@ -38,8 +38,46 @@ jobs:
         run: |
           cargo fmt --manifest-path third-party/reis/Cargo.toml --all -- --check
           cargo test --manifest-path third-party/reis/Cargo.toml --lib roost_transport_bounds
-      - run: rustfmt --edition 2021 --check third-party/smithay/src/xwayland/xserver.rs third-party/smithay/src/backend/drm/surface/gbm.rs
-      - run: cargo test --locked --manifest-path third-party/smithay/Cargo.toml --no-default-features --features xwayland,wayland_frontend prepared_socket
+      - name: Check all modified vendored DRM source formatting
+        run: >-
+          rustfmt --edition 2021 --check
+          third-party/drm/src/control/mod.rs third-party/drm-ffi/src/mode.rs
+          third-party/smithay/src/xwayland/xserver.rs
+          third-party/smithay/src/backend/drm/device/mod.rs
+          third-party/smithay/src/backend/drm/mod.rs
+          third-party/smithay/src/backend/drm/surface/mod.rs
+          third-party/smithay/src/backend/drm/surface/atomic.rs
+          third-party/smithay/src/backend/drm/surface/legacy.rs
+          third-party/smithay/src/backend/drm/surface/gbm.rs
+      - name: Verify pinned DRM source and shipping dependency closure
+        run: |
+          scripts/roost-drm-cookie-source-check
+          python3 scripts/lib/drm-cookie-source-tests.py
+          cargo metadata --locked --format-version 1 > drm-root-graph.json
+          scripts/roost-drm-cookie-source-check --metadata drm-root-graph.json > drm-root-closure.json
+      # This excluded upstream crate had no tracked lock. Resolve its own
+      # explicit local dual patch in CI, retain the graph, then test locked.
+      - name: Verify standalone Smithay DRM closure and regression tests
+        run: |
+          cargo generate-lockfile --manifest-path third-party/smithay/Cargo.toml
+          cargo metadata --locked --manifest-path third-party/smithay/Cargo.toml --no-default-features --features backend_drm,backend_gbm,xwayland,wayland_frontend --format-version 1 > drm-smithay-graph.json
+          scripts/roost-drm-cookie-source-check --metadata drm-smithay-graph.json > drm-smithay-closure.json
+          cargo test --locked --manifest-path third-party/smithay/Cargo.toml --no-default-features --features backend_drm,backend_gbm,xwayland,wayland_frontend prepared_socket
+          cargo test --locked --manifest-path third-party/smithay/Cargo.toml --no-default-features --features backend_drm,backend_gbm roost_
+      # Uses drm-ffi's unchanged published standalone lock. These argument and
+      # failed-ioctl tests are source regressions, not shipping graph/runtime proof.
+      - run: cargo test --locked --manifest-path third-party/drm-ffi/Cargo.toml --lib roost_cookie_tests
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: drm-cookie-dependency-closure
+          path: |
+            drm-root-graph.json
+            drm-root-closure.json
+            drm-smithay-graph.json
+            drm-smithay-closure.json
+            third-party/smithay/Cargo.lock
+          retention-days: 14
       - run: cargo clippy --workspace --all-targets -- -D warnings
       # pam_wrapper runs the lock screen's PAM path for real (#62); it is
       # required here so the test can never silently skip.
@@ -262,7 +300,7 @@ jobs:
           name: roost-arch
           path: ${{ runner.temp }}/portal-package
       - run: sudo apt-get -o Acquire::Retries=3 update -qq && sudo apt-get install -y --no-install-recommends podman zstd shellcheck
-      - run: shellcheck scripts/roost-portal-security tests/portal-reference/run.sh tests/portal-reference/settings-run.sh
+      - run: shellcheck scripts/roost-portal-security tests/portal-reference/run.sh tests/portal-reference/settings-run.sh tests/portal-reference/global-shortcuts-run.sh
       - run: python3 scripts/lib/roost-portal-artifact-tests.py
       - name: Test packaged compositor with actual GNOME 51 portal consent
         run: |

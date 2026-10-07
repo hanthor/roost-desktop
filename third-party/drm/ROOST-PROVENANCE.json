@@ -1,0 +1,27 @@
+{
+  "name": "drm",
+  "version": "0.14.1",
+  "license": "MIT",
+  "original_archive_url": "https://static.crates.io/crates/drm/drm-0.14.1.crate",
+  "original_archive_sha256": "80bc8c5c6c2941f70a55c15f8d9f00f9710ebda3ffda98075f996a0e6c92756f",
+  "original_vcs": "b65efbc210db58aa5d8b2878006dbc82335fdda3",
+  "license_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+  "modified_original_files": [
+    {
+      "path": "Cargo.toml",
+      "original_sha256": "68ef0ded30971014ba4b8f1efbbe792a5f7c20c7f8fb457de943e292a733ca60",
+      "modified_sha256": "b741eb0fac7cb93ac63600009088a8d9e374a36aed438152e6a88ea3333cdc6d"
+    },
+    {
+      "path": "src/control/mod.rs",
+      "original_sha256": "25a6f6d540642354cf420a9abde4561fc8751ea7902cf1fd76ceb185de94d56e",
+      "modified_sha256": "666ede4abd06fe2abd7251956f28249903bd03a1ec8be95125c4df935f6a78c2"
+    }
+  ],
+  "unmodified_originals_retained": true,
+  "patch_format": {
+    "context_lines": 0,
+    "sha256": "e79775915746394eb4b2c26e8188125ec3b5792d7b8875ae7ae92925c9188c96",
+    "gnu_patch_forward_fuzz0_reproduced_all_original_files": true
+  }
+}

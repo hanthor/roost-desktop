@@ -739,6 +739,22 @@ impl AtomicDrmSurface {
         planes: impl IntoIterator<Item = PlaneState<'a>>,
         event: bool,
     ) -> Result<(), Error> {
+        self.commit_with_data(planes, event, None)
+    }
+    /// Submit an event-generating actual commit with a nonzero opaque cookie.
+    pub fn commit_with_cookie<'a>(
+        &self,
+        planes: impl IntoIterator<Item = PlaneState<'a>>,
+        cookie: std::num::NonZeroU64,
+    ) -> Result<(), Error> {
+        self.commit_with_data(planes, true, Some(cookie))
+    }
+    fn commit_with_data<'a>(
+        &self,
+        planes: impl IntoIterator<Item = PlaneState<'a>>,
+        event: bool,
+        cookie: Option<std::num::NonZeroU64>,
+    ) -> Result<(), Error> {
         if !self.active.load(Ordering::SeqCst) {
             return Err(Error::DeviceInactive);
         }
@@ -812,7 +828,7 @@ impl AtomicDrmSurface {
         debug!("Setting screen: {:?}", req);
         let result = self
             .fd
-            .atomic_commit(
+            .atomic_commit_with_user_data(
                 if event {
                     // on the atomic api we can modeset and trigger a page_flip event on the same call!
                     AtomicCommitFlags::PAGE_FLIP_EVENT | AtomicCommitFlags::ALLOW_MODESET
@@ -828,6 +844,7 @@ impl AtomicDrmSurface {
                     AtomicCommitFlags::ALLOW_MODESET
                 },
                 req.build()?,
+                cookie.map_or(0, std::num::NonZeroU64::get),
             )
             .map_err(|source| {
                 Error::Access(AccessError {
@@ -858,6 +875,22 @@ impl AtomicDrmSurface {
         planes: impl IntoIterator<Item = PlaneState<'a>>,
         event: bool,
     ) -> Result<(), Error> {
+        self.page_flip_with_data(planes, event, None)
+    }
+    /// Submit an event-generating actual commit with a nonzero opaque cookie.
+    pub fn page_flip_with_cookie<'a>(
+        &self,
+        planes: impl IntoIterator<Item = PlaneState<'a>>,
+        cookie: std::num::NonZeroU64,
+    ) -> Result<(), Error> {
+        self.page_flip_with_data(planes, true, Some(cookie))
+    }
+    fn page_flip_with_data<'a>(
+        &self,
+        planes: impl IntoIterator<Item = PlaneState<'a>>,
+        event: bool,
+        cookie: Option<std::num::NonZeroU64>,
+    ) -> Result<(), Error> {
         if !self.active.load(Ordering::SeqCst) {
             return Err(Error::DeviceInactive);
         }
@@ -883,13 +916,14 @@ impl AtomicDrmSurface {
         trace!(?planes, "Queueing page flip: {:?}", req);
         let res = self
             .fd
-            .atomic_commit(
+            .atomic_commit_with_user_data(
                 if event {
                     AtomicCommitFlags::PAGE_FLIP_EVENT | AtomicCommitFlags::NONBLOCK
                 } else {
                     AtomicCommitFlags::NONBLOCK
                 },
                 req.build()?,
+                cookie.map_or(0, std::num::NonZeroU64::get),
             )
             .map_err(|source| {
                 Error::Access(AccessError {

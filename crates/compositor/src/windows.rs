@@ -209,6 +209,14 @@ pub fn resized(
     Rectangle::new((x, y).into(), (w, h).into())
 }
 
+#[derive(Clone, Copy)]
+struct HeldAccelerator {
+    keycode: u32,
+    grab: roost_shell_control::AcceleratorGrab,
+    generation: u64,
+    mode: u32,
+}
+
 pub struct WindowManager {
     /// Active interactive move/resize, if any (#58).
     grab: Option<PointerGrab>,
@@ -237,7 +245,10 @@ pub struct WindowManager {
     accelerators: Vec<roost_shell_control::Accelerator>,
     /// Keycodes whose press fired an accelerator: their release is
     /// swallowed too.
-    accel_held: Vec<u32>,
+    accel_held: Vec<HeldAccelerator>,
+    accelerator_grabs: Vec<(roost_shell_control::AcceleratorGrab, u64)>,
+    accelerator_generation: u64,
+    accel_released: Vec<(u32, u32, u32)>,
     /// Fired accelerators `(action, time, mode)`, drained by the runtime.
     accel_fired: Vec<(u32, u32, u32)>,
     /// Input is going to the session-lock surface.
@@ -318,6 +329,57 @@ impl WindowManager {
         self.pointer_pos
     }
 
+    /// Rebase only a point retired by the actual output union. This is an
+    /// internal seat location hint, not client motion, focus, relative input
+    /// or a borrowed cursor warp; it also applies while the session is locked.
+    pub fn rebase_pointer_for_topology(
+        &mut self,
+        state: &State,
+        original_outputs: &[Rectangle<i32, Logical>],
+        position: Point<f64, Logical>,
+    ) -> bool {
+        use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint};
+        let outputs = state.hot_corner_outputs();
+        let contains = |point| {
+            outputs
+                .iter()
+                .any(|(rect, _)| rect.to_f64().contains(point))
+        };
+        if contains(self.pointer_pos) || !contains(position) {
+            return false;
+        }
+        let retired_point = original_outputs
+            .iter()
+            .any(|rect| rect.to_f64().contains(self.pointer_pos));
+        if let Some(pointer) = self.pointer.as_ref() {
+            if let Some(surface) = pointer.current_focus().filter(|_| retired_point) {
+                // Snapshot actual migrated geometry/input before entering the
+                // constraint mutex. Never broaden unresolved or over-budget
+                // geometry, and never deactivate an eligible pending constraint.
+                let snapshot = self.effective_constraint_region(state, &surface);
+                with_pointer_constraint(&surface, pointer, |constraint| {
+                    let Some(constraint) = constraint else { return };
+                    if constraint.is_active()
+                        && (matches!(&*constraint, PointerConstraint::Locked(_))
+                            || snapshot.is_none_or(|(origin, region)| {
+                                let region = region.with_constraint(constraint.region());
+                                !region.contains(self.pointer_pos - origin)
+                                    || !region.contains(position - origin)
+                            }))
+                    {
+                        // The original fixed point/region became unusable on
+                        // real topology loss. Preserve Smithay's one-shot and
+                        // persistent semantics and its protocol notification.
+                        constraint.deactivate();
+                    }
+                });
+            }
+            pointer.set_location(position);
+        }
+        self.pointer_pos = position;
+        true
+    }
+
     /// Empty manager; attaches keyboard and pointer capabilities to the
     /// state's seat and keeps their handles for input routing.
     pub fn new(state: &mut State) -> Self {
@@ -337,6 +399,9 @@ impl WindowManager {
             pointer_pos: (0.0, 0.0).into(),
             accelerators: Vec::new(),
             accel_held: Vec::new(),
+            accelerator_grabs: Vec::new(),
+            accelerator_generation: 0,
+            accel_released: Vec::new(),
             accel_fired: Vec::new(),
             lock_input_active: false,
             menu_requests: Vec::new(),
@@ -2210,8 +2275,35 @@ impl WindowManager {
         };
         // A grabbed accelerator's release follows its press: swallowed.
         if !pressed {
-            if let Some(i) = self.accel_held.iter().position(|k| *k == keycode) {
-                self.accel_held.remove(i);
+            if let Some(i) = self
+                .accel_held
+                .iter()
+                .position(|held| held.keycode == keycode)
+            {
+                let held = self.accel_held.remove(i);
+                // Always clear the original physical key, even after rebind or lock.
+                // No modifiers are re-resolved on release: they may be lifted first.
+                let mode = if self.lock_input_active {
+                    roost_shell_control::MODE_LOCK_SCREEN
+                } else if crate::layer::exclusive_popup_keyboard_layer(state).is_some() {
+                    roost_shell_control::MODE_POPUP
+                } else if self.overview_open {
+                    roost_shell_control::MODE_OVERVIEW
+                } else {
+                    roost_shell_control::MODE_NORMAL
+                };
+                let still_admitted = self
+                    .accelerator_grabs
+                    .iter()
+                    .any(|(grab, generation)| *grab == held.grab && *generation == held.generation);
+                if still_admitted
+                    && held.mode == mode
+                    && held.grab.flags & roost_shell_control::GRAB_TRIGGER_RELEASE != 0
+                    && !state.shortcuts_inhibited()
+                {
+                    self.accel_released
+                        .push((held.grab.accelerator.action, time, mode));
+                }
                 keyboard.input_discard(
                     state,
                     keycode.saturating_add(XKB_X11_OFFSET).into(),
@@ -2237,10 +2329,37 @@ impl WindowManager {
         // A window with approved shortcut inhibition receives the shell's
         // grabbed accelerators too. Lock input always remains compositor-owned.
         let inhibited = !self.lock_input_active && state.shortcuts_inhibited();
-        let grabs: Vec<roost_shell_control::Accelerator> = if pressed && !inhibited {
-            self.accelerators
+        // An already intercepted physical press retains its original identity.
+        // Ignore-autorepeat consumes duplicate downs without another activation.
+        // Other duplicates may activate again, but cannot create a second release.
+        let held = self
+            .accel_held
+            .iter()
+            .find(|held| held.keycode == keycode)
+            .copied();
+        if let Some(held) = held.filter(|_| pressed) {
+            keyboard.input_discard(
+                state,
+                keycode.saturating_add(XKB_X11_OFFSET).into(),
+                KeyState::Pressed,
+            );
+            if held.grab.flags & roost_shell_control::GRAB_IGNORE_AUTOREPEAT == 0
+                && held.mode == mode
+                && !inhibited
+                && self
+                    .accelerator_grabs
+                    .iter()
+                    .any(|(grab, generation)| *grab == held.grab && *generation == held.generation)
+            {
+                self.accel_fired
+                    .push((held.grab.accelerator.action, time, mode));
+            }
+            return true;
+        }
+        let grabs: Vec<(roost_shell_control::AcceleratorGrab, u64)> = if pressed && !inhibited {
+            self.accelerator_grabs
                 .iter()
-                .filter(|a| a.modes & mode_mask != 0)
+                .filter(|(g, _)| g.accelerator.modes & mode_mask != 0)
                 .copied()
                 .collect()
         } else {
@@ -2251,7 +2370,7 @@ impl WindowManager {
         // `raw - 8` on the wire, so passing our evdev tables through
         // unchanged would mistranslate every key and panic on codes
         // below 8 (Escape, digits) once a client holds keyboard focus.
-        let intercepted = keyboard.input::<u32, _>(
+        let intercepted = keyboard.input::<(roost_shell_control::AcceleratorGrab, u64), _>(
             state,
             keycode.saturating_add(XKB_X11_OFFSET).into(),
             if pressed {
@@ -2272,18 +2391,22 @@ impl WindowManager {
                     .map(|k| k.raw())
                     .chain(std::iter::once(handle.modified_sym().raw()))
                     .collect();
-                match grabs
-                    .iter()
-                    .find(|a| a.mods == mods && syms.contains(&a.keysym))
-                {
-                    Some(a) => FilterResult::Intercept(a.action),
+                match grabs.iter().find(|(g, _)| {
+                    g.accelerator.mods == mods && syms.contains(&g.accelerator.keysym)
+                }) {
+                    Some((grab, generation)) => FilterResult::Intercept((*grab, *generation)),
                     None => FilterResult::Forward,
                 }
             },
         );
-        if let Some(action) = intercepted {
-            self.accel_held.push(keycode);
-            self.accel_fired.push((action, time, mode));
+        if let Some((grab, generation)) = intercepted {
+            self.accel_held.push(HeldAccelerator {
+                keycode,
+                grab,
+                generation,
+                mode,
+            });
+            self.accel_fired.push((grab.accelerator.action, time, mode));
         }
         true
     }
@@ -2441,7 +2564,59 @@ impl WindowManager {
 
     /// Replace the accelerator grabs (org.gnome.Shell GrabAccelerators).
     pub fn set_accelerators(&mut self, accelerators: Vec<roost_shell_control::Accelerator>) {
-        self.accelerators = accelerators;
+        self.set_accelerator_grabs(
+            accelerators
+                .into_iter()
+                .map(|accelerator| roost_shell_control::AcceleratorGrab {
+                    accelerator,
+                    flags: 0,
+                })
+                .collect(),
+        );
+    }
+
+    /// Crossing the lock boundary invalidates pre-lock releases while retaining
+    /// physical key ownership until each real release clears seat state.
+    pub fn invalidate_held_accelerators(&mut self) {
+        for held in &mut self.accel_held {
+            held.generation = 0;
+        }
+        self.accel_released.clear();
+        self.accel_fired.clear();
+    }
+
+    /// Atomic replacement. Unchanged grabs retain their generation; removed and
+    /// recreated grabs cannot receive a release from an earlier physical press.
+    pub fn set_accelerator_grabs(&mut self, grabs: Vec<roost_shell_control::AcceleratorGrab>) {
+        let previous = std::mem::take(&mut self.accelerator_grabs);
+        self.accelerator_grabs = grabs
+            .into_iter()
+            .take(roost_shell_control::MAX_ACCELERATORS)
+            .filter(|g| g.flags & !roost_shell_control::SUPPORTED_GRAB_FLAGS == 0)
+            .map(|grab| {
+                let generation = previous
+                    .iter()
+                    .find(|(old, _)| *old == grab)
+                    .map(|(_, generation)| *generation)
+                    .unwrap_or_else(|| {
+                        self.accelerator_generation = self
+                            .accelerator_generation
+                            .checked_add(1)
+                            .expect("accelerator generation exhausted");
+                        self.accelerator_generation
+                    });
+                (grab, generation)
+            })
+            .collect();
+        self.accelerators = self
+            .accelerator_grabs
+            .iter()
+            .map(|(g, _)| g.accelerator)
+            .collect();
+    }
+
+    pub fn take_accelerators_released(&mut self) -> Vec<(u32, u32, u32)> {
+        std::mem::take(&mut self.accel_released)
     }
 
     /// Replace the switcher's chords (the shell's GNOME keybindings).
@@ -3346,7 +3521,7 @@ impl WindowManager {
         ) = (self.keyboard.clone(), input)
         {
             if !*pressed {
-                self.accel_held.retain(|held| held != keycode);
+                self.accel_held.retain(|held| held.keycode != *keycode);
             }
             keyboard.input_discard(
                 state,

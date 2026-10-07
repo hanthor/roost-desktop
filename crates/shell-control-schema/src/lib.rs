@@ -9,6 +9,9 @@
 //! followed by a postcard body. Frames larger than [`MAX_FRAME_BYTES`] are
 //! rejected before any postcard decoding happens.
 
+mod brightness;
+pub use brightness::*;
+
 use serde::{Deserialize, Serialize};
 
 /// Maximum accepted frame body size in bytes (1 MiB, per ADR 0002).
@@ -153,14 +156,14 @@ impl ProtocolVersion {
     /// `0.26` appends the shell text direction to InputSettings.
     /// Both positional postcard peers ship together.
     /// `0.27` appends hardware Screen Reader preference/status messages.
+    /// `0.28` appends typed accelerator grabs and release notifications.
+    /// Existing Accelerator positional bodies and message indexes are unchanged.
     /// `0.29` appends NativeOutputInventory without altering OutputInfo.
-    /// 0.28 is reserved for the independently prepared GlobalShortcuts change;
-    /// integration must preserve both append-only additions and their order.
-    /// `0.30` appends optional owned monitor EDID metadata. Integration must
-    /// place the real0.28 addition before29, then30 before future journal31.
+    /// `0.30` appends MonitorIdentityInventory.
+    /// `0.31` appends five session-only brightness journal variants.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 30,
+        minor: 31,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -409,6 +412,8 @@ pub enum CommandKind {
     /// Preference from the authenticated supervised shell. Nested runtimes
     /// ignore it; the hardware compositor owns the actual Orca child.
     SetScreenReader { enabled: bool },
+    /// Atomic full accelerator replacement, with supported GNOME grab flags.
+    SetAcceleratorGrabs { grabs: Vec<AcceleratorGrab> },
 }
 
 /// Screen Reader process lifecycle, not proof of spoken usability.
@@ -542,6 +547,18 @@ pub struct Accelerator {
     pub modes: u32,
 }
 
+/// GNOME MetaKeyBindingFlags supported for external accelerator grabs.
+pub const GRAB_IGNORE_AUTOREPEAT: u32 = 1 << 4;
+pub const GRAB_TRIGGER_RELEASE: u32 = 1 << 7;
+pub const SUPPORTED_GRAB_FLAGS: u32 = GRAB_IGNORE_AUTOREPEAT | GRAB_TRIGGER_RELEASE;
+
+/// Append-only replacement type; the legacy Accelerator wire body is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcceleratorGrab {
+    pub accelerator: Accelerator,
+    pub flags: u32,
+}
+
 /// A secret on the wire (the lock screen's password). `Debug` never
 /// shows it, so a logged message cannot leak it.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -584,7 +601,7 @@ pub enum ErrorKind {
 }
 
 /// Top-level protocol message. This enum is the postcard body of one frame.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Message {
     /// Version handshake; the first message in both directions.
     Hello {
@@ -733,14 +750,56 @@ pub enum Message {
         request: Option<(u64, String)>,
     },
     /// The connector under the pointer, used by per-monitor brightness keys.
-    PointerOutput { name: Option<String> },
+    PointerOutput {
+        name: Option<String>,
+    },
     /// Actual compositor-owned Screen Reader child status.
-    ScreenReader { state: ScreenReaderState },
+    ScreenReader {
+        state: ScreenReaderState,
+    },
+    /// Release of an originally admitted accelerator press.
+    AcceleratorDeactivated {
+        action: u32,
+        time: u32,
+        mode: u32,
+    },
     /// Full actual native authority; empty explicitly revokes prior authority.
     /// Append-only, sent only to peers advertising minor >=29.
-    NativeOutputInventory { outputs: Vec<NativeOutputInfo> },
-    /// Since0.30: optional EDID identity alongside an unchanged0.29 owner body.
-    MonitorIdentityInventory { outputs: Vec<MonitorIdentityInfo> },
+    NativeOutputInventory {
+        outputs: Vec<NativeOutputInfo>,
+    },
+    /// Since0.30: approved optional EDID metadata, unchanged original owner.
+    MonitorIdentityInventory {
+        outputs: Vec<MonitorIdentityInfo>,
+    },
+    /// Since0.31: original kernel snapshot; admission never overwrites a
+    /// surviving journal's committed user intent with dimmed physical levels.
+    BrightnessJournalInit {
+        request: u64,
+        readings: Vec<BrightnessReading>,
+        idle: f64,
+    },
+    /// Grant must arrive AFTER pending is recorded and BEFORE any helper call.
+    BrightnessJournalBegin {
+        request: u64,
+        source: BrightnessSource,
+        targets: Vec<BrightnessTarget>,
+    },
+    /// Actual original helper callback plus independent original readback facts.
+    BrightnessJournalComplete {
+        request: u64,
+        grant: BrightnessGrant,
+        observations: Vec<BrightnessObservation>,
+    },
+    BrightnessJournalState {
+        state: BrightnessJournalSnapshot,
+    },
+    BrightnessJournalReply {
+        request: u64,
+        grant: Option<BrightnessGrant>,
+        error: Option<BrightnessJournalError>,
+        state: Option<BrightnessJournalSnapshot>,
+    },
 }
 
 /// GNOME's dynamic workspace count: one empty workspace always follows
@@ -1134,17 +1193,56 @@ pub fn decode_frame(bytes: &[u8]) -> Result<Message, DecodeError> {
 }
 
 /// Reject messages carrying titles over [`MAX_TITLE_LEN`] bytes.
-fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
-    fn check_title(title: &str) -> Result<(), DecodeError> {
-        if title.len() > MAX_TITLE_LEN {
-            return Err(DecodeError::TitleTooLong {
-                len: title.len(),
-                max: MAX_TITLE_LEN,
-            });
-        }
+fn check_title(title: &str) -> Result<(), DecodeError> {
+    if title.len() > MAX_TITLE_LEN {
+        return Err(DecodeError::TitleTooLong {
+            len: title.len(),
+            max: MAX_TITLE_LEN,
+        });
+    }
+    Ok(())
+}
+
+fn check_brightness_count(len: usize) -> Result<(), DecodeError> {
+    if len > 64 {
+        Err(DecodeError::CollectionTooLong { len, max: 64 })
+    } else {
         Ok(())
     }
+}
+fn validate_brightness_binding(binding: &BrightnessBinding) -> Result<(), DecodeError> {
+    check_title(&binding.output.name)?;
+    check_title(&binding.output.connector_sysfs)?;
+    check_title(&binding.backlight)
+}
+fn validate_brightness_readings(readings: &[BrightnessReading]) -> Result<(), DecodeError> {
+    check_brightness_count(readings.len())?;
+    for row in readings {
+        validate_brightness_binding(&row.binding)?;
+    }
+    Ok(())
+}
+fn validate_brightness_targets(targets: &[BrightnessTarget]) -> Result<(), DecodeError> {
+    check_brightness_count(targets.len())?;
+    for row in targets {
+        validate_brightness_binding(&row.binding)?;
+    }
+    Ok(())
+}
+fn validate_brightness_state(state: &BrightnessJournalSnapshot) -> Result<(), DecodeError> {
+    if let Some(provider) = &state.provider {
+        check_title(&provider.unique)?;
+        check_title(&provider.start)?;
+    }
+    validate_brightness_readings(&state.readings)?;
+    validate_brightness_readings(&state.retired_readings)?;
+    if let Some(pending) = &state.pending {
+        validate_brightness_targets(&pending.targets)?;
+    }
+    Ok(())
+}
 
+fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
     fn check_window(w: &WindowInfo) -> Result<(), DecodeError> {
         check_title(&w.title)
     }
@@ -1194,7 +1292,18 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
                 postcard::Error::DeserializeBadEncoding,
             ));
         }
+        Message::Command {
+            kind: CommandKind::SetAcceleratorGrabs { grabs },
+            ..
+        } if grabs.len() > MAX_ACCELERATORS
+            || grabs.iter().any(|g| g.flags & !SUPPORTED_GRAB_FLAGS != 0) =>
+        {
+            return Err(DecodeError::Malformed(
+                postcard::Error::DeserializeBadEncoding,
+            ));
+        }
         Message::Hello { .. }
+        | Message::AcceleratorDeactivated { .. }
         | Message::AcceleratorActivated { .. }
         | Message::WindowMenu { .. }
         | Message::WorkspacePopup { .. }
@@ -1209,6 +1318,58 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
         | Message::Outputs { .. }
         | Message::OverviewPreviews { .. } => {}
         // Names and values share the title bound: short by nature.
+        Message::MonitorIdentityInventory { outputs } => {
+            if outputs.len() > 64 {
+                return Err(DecodeError::CollectionTooLong {
+                    len: outputs.len(),
+                    max: 64,
+                });
+            }
+            for row in outputs {
+                check_title(&row.owner.name)?;
+                check_title(&row.owner.connector_sysfs)?;
+                if let Some(edid) = &row.edid {
+                    if edid.vendor.len() != 3
+                        || !edid.vendor.bytes().all(|v| v.is_ascii_uppercase())
+                        || edid.product.is_empty()
+                        || edid.product.len() > 13
+                        || edid.serial.is_empty()
+                        || edid.serial.len() > 13
+                        || !(1..=256).contains(&edid.blocks)
+                        || !edid
+                            .product
+                            .bytes()
+                            .chain(edid.serial.bytes())
+                            .all(|v| (32..=126).contains(&v))
+                    {
+                        return Err(DecodeError::Malformed(
+                            postcard::Error::DeserializeBadEncoding,
+                        ));
+                    }
+                }
+            }
+        }
+        Message::BrightnessJournalInit { readings, .. } => validate_brightness_readings(readings)?,
+        Message::BrightnessJournalBegin {
+            source, targets, ..
+        } => {
+            if let BrightnessSource::Power { sender, .. } = source {
+                check_title(sender)?;
+            }
+            validate_brightness_targets(targets)?;
+        }
+        Message::BrightnessJournalComplete { observations, .. } => {
+            check_brightness_count(observations.len())?;
+            for row in observations {
+                validate_brightness_binding(&row.binding)?;
+            }
+        }
+        Message::BrightnessJournalState { state } => validate_brightness_state(state)?,
+        Message::BrightnessJournalReply { state, .. } => {
+            if let Some(state) = state {
+                validate_brightness_state(state)?;
+            }
+        }
         Message::NativeOutputInventory { outputs } => {
             if outputs.len() > 64 {
                 return Err(DecodeError::CollectionTooLong {
@@ -1410,8 +1571,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_30() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 30));
+    fn current_version_is_0_31() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 31));
     }
 
     #[test]
@@ -1494,7 +1655,11 @@ mod tests {
         assert!(ProtocolVersion::new(0, 25).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 26).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 27).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 28).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 28).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 29).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 30).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 31).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 32).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }
@@ -1862,5 +2027,314 @@ mod tests {
         let token3 = ActivationToken::new("other".to_owned());
         assert_eq!(token1, token2);
         assert_ne!(token1, token3);
+    }
+}
+
+#[cfg(test)]
+mod brightness_wire_tests {
+    use super::*;
+    fn binding(id: u32) -> BrightnessBinding {
+        BrightnessBinding {
+            output: NativeOutputInfo {
+                name: "n".repeat(512),
+                drm_device: u64::MAX,
+                connector_id: id,
+                connector_sysfs: "s".repeat(512),
+                connector_device: u64::MAX,
+                connector_inode: u64::MAX,
+            },
+            ownership_generation: u64::MAX,
+            backlight: "b".repeat(128),
+            device: u64::MAX,
+            inode: u64::MAX,
+            minimum: 0,
+            maximum: u32::MAX,
+        }
+    }
+    #[test]
+    fn maximum_full_journal_snapshot_fits_actual_one_mib_frame() {
+        let readings: Vec<BrightnessReading> = (1..=64)
+            .map(|id| BrightnessReading {
+                binding: binding(id),
+                user: u32::MAX,
+                user_known: true,
+                measured_candidate: Some(BrightnessMeasuredCandidate {
+                    level: u32::MAX,
+                    sampled_revision: u64::MAX,
+                    provider_epoch: Some(u64::MAX),
+                }),
+                measured_restoration: Some(BrightnessMeasuredRestoration {
+                    level: u32::MAX,
+                    sampled_revision: u64::MAX,
+                    provider_epoch: u64::MAX,
+                    establishing_grant: BrightnessGrant {
+                        transaction: u64::MAX,
+                        revision: u64::MAX,
+                    },
+                }),
+                applied: u32::MAX,
+                ratio: 1.0,
+            })
+            .collect();
+        let targets = (1..=64)
+            .map(|id| BrightnessTarget {
+                binding: binding(id),
+                effective: u32::MAX,
+                user: Some(u32::MAX),
+                ratio: Some(1.0),
+            })
+            .collect();
+        let message = Message::BrightnessJournalReply {
+            request: u64::MAX,
+            grant: Some(BrightnessGrant {
+                transaction: u64::MAX,
+                revision: u64::MAX,
+            }),
+            error: None,
+            state: Some(BrightnessJournalSnapshot {
+                revision: u64::MAX,
+                native_generation: Some(u64::MAX),
+                authority: Some(BrightnessAuthority {
+                    child_generation: u64::MAX,
+                    connection_generation: u64::MAX,
+                }),
+                provider: Some(BrightnessProvider {
+                    unique: "u".repeat(512),
+                    epoch: u64::MAX,
+                    uid: u32::MAX,
+                    pid: u32::MAX,
+                    start: "s".repeat(512),
+                }),
+                retired_readings: readings.clone(),
+                readings,
+                policy: BrightnessPolicy {
+                    dimming: None,
+                    automatic: None,
+                    idle: 0.3,
+                },
+                pending: Some(BrightnessPending {
+                    grant: BrightnessGrant {
+                        transaction: u64::MAX,
+                        revision: u64::MAX,
+                    },
+                    targets,
+                    interrupted: true,
+                }),
+            }),
+        };
+        let frame = encode_frame(&message);
+        assert!(frame.len() - 4 < MAX_FRAME_BYTES);
+        assert!(
+            frame.len() < 256 * 1024,
+            "full bounded bindings need no artificial 4096-byte chunking"
+        );
+        assert_eq!(decode_frame(&frame).unwrap(), message);
+        let Message::BrightnessJournalReply {
+            state: Some(state), ..
+        } = message
+        else {
+            panic!("maximum reply lost state");
+        };
+        let state_message = Message::BrightnessJournalState { state };
+        let state_frame = encode_frame(&state_message);
+        assert!(state_frame.len() - 4 < MAX_FRAME_BYTES);
+        assert_eq!(decode_frame(&state_frame).unwrap(), state_message);
+    }
+    #[test]
+    fn journal_target_and_string_bounds_are_enforced_on_decode() {
+        let target = BrightnessTarget {
+            binding: binding(1),
+            effective: 0,
+            user: None,
+            ratio: None,
+        };
+        let message = Message::BrightnessJournalBegin {
+            request: 1,
+            source: BrightnessSource::User,
+            targets: vec![target; 65],
+        };
+        assert!(matches!(
+            decode_frame(&encode_frame(&message)),
+            Err(DecodeError::CollectionTooLong { len: 65, max: 64 })
+        ));
+        let mut bad = binding(1);
+        bad.output.connector_sysfs.push('s');
+        let message = Message::BrightnessJournalInit {
+            request: 1,
+            idle: 0.3,
+            readings: vec![BrightnessReading {
+                binding: bad,
+                user: 0,
+                user_known: false,
+                measured_candidate: None,
+                measured_restoration: None,
+                applied: 0,
+                ratio: 1.0,
+            }],
+        };
+        assert!(decode_frame(&encode_frame(&message)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod accelerator_release_wire_tests {
+    use super::*;
+    fn grab(flags: u32) -> AcceleratorGrab {
+        AcceleratorGrab {
+            accelerator: Accelerator {
+                action: 7,
+                keysym: 114,
+                mods: 0,
+                modes: MODE_NORMAL,
+            },
+            flags,
+        }
+    }
+    #[test]
+    fn typed_grab_and_release_roundtrip_without_changing_legacy() {
+        for message in [
+            Message::Command {
+                id: 9,
+                kind: CommandKind::SetAcceleratorGrabs {
+                    grabs: vec![grab(GRAB_TRIGGER_RELEASE | GRAB_IGNORE_AUTOREPEAT)],
+                },
+            },
+            Message::AcceleratorDeactivated {
+                action: 7,
+                time: 200,
+                mode: MODE_NORMAL,
+            },
+            Message::Command {
+                id: 10,
+                kind: CommandKind::SetAccelerators {
+                    accelerators: vec![grab(0).accelerator],
+                },
+            },
+        ] {
+            assert_eq!(decode_frame(&encode_frame(&message)).unwrap(), message);
+        }
+    }
+    #[test]
+    fn typed_grab_decode_rejects_unknown_flags_and_oversized_lists() {
+        for grabs in [vec![grab(1 << 3)], vec![grab(0); MAX_ACCELERATORS + 1]] {
+            assert!(decode_frame(&encode_frame(&Message::Command {
+                id: 11,
+                kind: CommandKind::SetAcceleratorGrabs { grabs }
+            }))
+            .is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod integrated_append_order_tests {
+    use super::*;
+
+    #[test]
+    fn minor_28_through_31_preserve_original_postcard_variant_positions() {
+        let state = BrightnessJournalSnapshot {
+            revision: 0,
+            native_generation: None,
+            authority: None,
+            provider: None,
+            readings: Vec::new(),
+            retired_readings: Vec::new(),
+            policy: BrightnessPolicy {
+                dimming: None,
+                automatic: None,
+                idle: 0.3,
+            },
+            pending: None,
+        };
+        let grant = BrightnessGrant {
+            transaction: 1,
+            revision: 1,
+        };
+        let messages = [
+            (
+                16,
+                Message::ScreenReader {
+                    state: ScreenReaderState::Disabled,
+                },
+            ),
+            (
+                17,
+                Message::AcceleratorDeactivated {
+                    action: 7,
+                    time: 200,
+                    mode: MODE_NORMAL,
+                },
+            ),
+            (
+                18,
+                Message::NativeOutputInventory {
+                    outputs: Vec::new(),
+                },
+            ),
+            (
+                19,
+                Message::MonitorIdentityInventory {
+                    outputs: Vec::new(),
+                },
+            ),
+            (
+                20,
+                Message::BrightnessJournalInit {
+                    request: 1,
+                    readings: Vec::new(),
+                    idle: 0.3,
+                },
+            ),
+            (
+                21,
+                Message::BrightnessJournalBegin {
+                    request: 2,
+                    source: BrightnessSource::User,
+                    targets: Vec::new(),
+                },
+            ),
+            (
+                22,
+                Message::BrightnessJournalComplete {
+                    request: 3,
+                    grant,
+                    observations: Vec::new(),
+                },
+            ),
+            (
+                23,
+                Message::BrightnessJournalState {
+                    state: state.clone(),
+                },
+            ),
+            (
+                24,
+                Message::BrightnessJournalReply {
+                    request: 4,
+                    grant: None,
+                    error: None,
+                    state: Some(state),
+                },
+            ),
+        ];
+        for (original_index, message) in messages {
+            let frame = encode_frame(&message);
+            assert_eq!(
+                frame[4], original_index,
+                "append-only postcard message position changed"
+            );
+            assert_eq!(decode_frame(&frame).unwrap(), message);
+        }
+        for (original_index, command) in [
+            (16, CommandKind::SetScreenReader { enabled: false }),
+            (17, CommandKind::SetAcceleratorGrabs { grabs: Vec::new() }),
+        ] {
+            let body = postcard::to_allocvec(&command).unwrap();
+            assert_eq!(
+                body[0], original_index,
+                "append-only postcard command position changed"
+            );
+        }
+        assert_eq!(CURRENT_VERSION.minor, 31);
     }
 }

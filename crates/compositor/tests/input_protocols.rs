@@ -71,6 +71,8 @@ struct Client {
     relative: Vec<(f64, f64)>,
     pointer_entered: bool,
     pointer_local: Option<(f64, f64)>,
+    pointer_events: usize,
+    keyboard_input_events: usize,
     layer_shell: Option<ZwlrLayerShellV1>,
     layer_surface: Option<WlSurface>,
     locked_events: usize,
@@ -148,6 +150,7 @@ impl Dispatch<WlPointer, ()> for Client {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        state.pointer_events += 1;
         match event {
             wl_pointer::Event::Enter {
                 surface_x,
@@ -272,7 +275,23 @@ impl Dispatch<ZwpRelativePointerV1, ()> for Client {
 
 wayland_client::delegate_noop!(Client: ignore WlCompositor);
 wayland_client::delegate_noop!(Client: ignore WlSurface);
-wayland_client::delegate_noop!(Client: ignore WlKeyboard);
+impl Dispatch<WlKeyboard, ()> for Client {
+    fn event(
+        state: &mut Self,
+        _: &WlKeyboard,
+        event: wayland_client::protocol::wl_keyboard::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if matches!(
+            event,
+            wayland_client::protocol::wl_keyboard::Event::Key { .. }
+        ) {
+            state.keyboard_input_events += 1;
+        }
+    }
+}
 wayland_client::delegate_noop!(Client: ignore XdgToplevel);
 wayland_client::delegate_noop!(Client: ignore ZwpTextInputManagerV3);
 wayland_client::delegate_noop!(Client: ignore ZwpInputMethodManagerV2);
@@ -329,6 +348,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for Client {
 }
 
 struct Peer {
+    principal: wayland_server::Client,
     _conn: Connection,
     queue: EventQueue<Client>,
     client: Client,
@@ -336,11 +356,12 @@ struct Peer {
 
 fn connect(comp: &mut TestCompositor) -> Peer {
     let (server, stream) = UnixStream::pair().unwrap();
-    comp.add_client(server);
+    let principal = comp.add_client(server);
     let conn = Connection::from_socket(stream).unwrap();
     let queue = conn.new_event_queue();
     conn.display().get_registry(&queue.handle(), ());
     Peer {
+        principal,
         _conn: conn,
         queue,
         client: Client::default(),
@@ -868,5 +889,213 @@ fn layer_constraints_use_actual_origin_and_commit_regions_before_activation() {
             surface.destroy();
             pump(&mut comp, &mut manager, &mut [&mut app]);
         }
+    }
+}
+
+#[test]
+fn retired_output_rebases_original_locked_pointer_without_input_or_focus_change() {
+    use smithay::output::{Output, PhysicalProperties, Subpixel};
+    use wayland_client::Proxy;
+    for (lifetime, active) in [
+        (Lifetime::Persistent, true),
+        (Lifetime::Oneshot, true),
+        (Lifetime::Persistent, false),
+        (Lifetime::Oneshot, false),
+    ] {
+        let mut comp = TestCompositor::new();
+        for (name, x) in [("left", 0), ("right", 1280)] {
+            let output = Output::new(
+                name.into(),
+                PhysicalProperties {
+                    size: (0, 0).into(),
+                    subpixel: Subpixel::Unknown,
+                    make: "test".into(),
+                    model: name.into(),
+                },
+            );
+            let global = output.create_global::<roost_compositor::State>(&comp.display.handle());
+            comp.state.add_output(name, Some(output), 1280, 800);
+            comp.state.note_output_global(name, global);
+            comp.state.set_output_location(name, (x, 0));
+        }
+        let mut manager = comp.window_manager();
+        let mut game = connect(&mut comp);
+        pump(&mut comp, &mut manager, &mut [&mut game]);
+        let surface = window(&mut game);
+        pump(&mut comp, &mut manager, &mut [&mut game]);
+        let (_, geometry) = manager.visible_windows()[0].clone();
+        let original = (geometry.loc + Point::from((50, 50))).to_f64();
+        manager.on_input(
+            &mut comp.state,
+            ManagerInput::Motion {
+                pos: original,
+                time: 1,
+            },
+        );
+        pump(&mut comp, &mut manager, &mut [&mut game]);
+        let qh = game.queue.handle();
+        let pointer = game.client.pointer.clone().unwrap();
+        let _relative = game
+            .client
+            .relative_manager
+            .as_ref()
+            .unwrap()
+            .get_relative_pointer(&pointer, &qh, ());
+        let _lock = game.client.constraints.as_ref().unwrap().lock_pointer(
+            &surface,
+            &pointer,
+            None,
+            lifetime,
+            &qh,
+            (),
+        );
+        surface.commit();
+        pump(&mut comp, &mut manager, &mut [&mut game]);
+        if active {
+            manager.on_input(
+                &mut comp.state,
+                ManagerInput::Motion {
+                    pos: original,
+                    time: 2,
+                },
+            );
+        }
+        pump(&mut comp, &mut manager, &mut [&mut game]);
+        assert_eq!(game.client.locked_events, usize::from(active));
+        let seat_resource = game
+            .principal
+            .object_from_protocol_id::<wayland_server::protocol::wl_seat::WlSeat>(
+                &comp.display.handle(),
+                game.client.seat.as_ref().unwrap().id().protocol_id(),
+            )
+            .unwrap();
+        let seat =
+            smithay::input::Seat::<roost_compositor::State>::from_resource(&seat_resource).unwrap();
+        let server_pointer = seat.get_pointer().unwrap();
+        let original_focus = server_pointer.current_focus();
+        let original_outputs: Vec<_> = comp
+            .state
+            .hot_corner_outputs()
+            .into_iter()
+            .map(|(rect, _)| rect)
+            .collect();
+        let events = game.client.pointer_events;
+        let key_events = game.client.keyboard_input_events;
+        let relative_events = game.client.relative_raw.len();
+        // Even a requested different point must not override an eligible
+        // constraint while the original point remains in the true union.
+        assert!(!manager.rebase_pointer_for_topology(
+            &comp.state,
+            &original_outputs,
+            (1280.0, original.y).into()
+        ));
+        pump(&mut comp, &mut manager, &mut [&mut game]);
+        assert_eq!(manager.pointer_pos(), original);
+        assert_eq!(server_pointer.current_location(), original);
+        assert_eq!(game.client.unlocked_events, 0);
+        assert_eq!(game.client.pointer_events, events);
+
+        // Same production helper is unconditional under session-lock state:
+        // it never delivers input behind the lock, only topology receipts.
+        comp.state.set_shortcut_inhibition_locked(true);
+        assert!(comp.state.select_reconciled_primary(&["right".into()]));
+        manager.migrate_output_windows(&mut comp.state, "left");
+        assert!(comp.state.remove_output("left"));
+        let clamped = Point::from((1280.0, original.y));
+        assert!(manager.rebase_pointer_for_topology(&comp.state, &original_outputs, clamped));
+        pump(&mut comp, &mut manager, &mut [&mut game]);
+        assert_eq!(manager.pointer_pos(), clamped);
+        assert_eq!(server_pointer.current_location(), clamped);
+        assert_eq!(server_pointer.current_focus(), original_focus);
+        assert_eq!(game.client.unlocked_events, usize::from(active));
+        assert_eq!(game.client.pointer_events, events);
+        assert_eq!(game.client.keyboard_input_events, key_events);
+        assert_eq!(game.client.relative_raw.len(), relative_events);
+        assert!(!manager.rebase_pointer_for_topology(&comp.state, &original_outputs, clamped));
+        pump(&mut comp, &mut manager, &mut [&mut game]);
+        assert_eq!(
+            game.client.unlocked_events,
+            usize::from(active),
+            "one-shot/persistent retirement notification is not replayed"
+        );
+    }
+}
+
+#[test]
+fn topology_rebase_uses_actual_output_union_not_bounding_box() {
+    use smithay::output::{Output, PhysicalProperties, Subpixel};
+    let mut comp = TestCompositor::new();
+    for (name, x) in [("left", 0), ("middle", 1280), ("right", 2560)] {
+        let output = Output::new(
+            name.into(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "test".into(),
+                model: name.into(),
+            },
+        );
+        let global = output.create_global::<roost_compositor::State>(&comp.display.handle());
+        comp.state.add_output(name, Some(output), 1280, 800);
+        comp.state.note_output_global(name, global);
+        comp.state.set_output_location(name, (x, 0));
+    }
+    let mut manager = comp.window_manager();
+    manager.on_input(
+        &mut comp.state,
+        ManagerInput::Motion {
+            pos: (1500.0, 50.0).into(),
+            time: 1,
+        },
+    );
+    let originals: Vec<_> = comp
+        .state
+        .hot_corner_outputs()
+        .into_iter()
+        .map(|(rect, _)| rect)
+        .collect();
+    assert!(comp.state.remove_output("middle"));
+    // Still inside the surviving bounding box, but in the actual union's hole.
+    assert!(!manager.rebase_pointer_for_topology(&comp.state, &originals, (1600.0, 50.0).into()));
+    assert_eq!(manager.pointer_pos(), Point::from((1500.0, 50.0)));
+    assert!(manager.rebase_pointer_for_topology(&comp.state, &originals, (1279.0, 50.0).into()));
+    assert_eq!(manager.pointer_pos(), Point::from((1279.0, 50.0)));
+    assert!(!manager.rebase_pointer_for_topology(&comp.state, &originals, (2560.0, 50.0).into()));
+}
+
+#[test]
+fn topology_rebase_recovers_empty_inventory_and_initial_nonzero_origin() {
+    use smithay::output::{Output, PhysicalProperties, Subpixel};
+    for initially_empty in [true, false] {
+        let mut comp = TestCompositor::new();
+        let mut manager = comp.window_manager();
+        assert_eq!(manager.pointer_pos(), Point::from((0.0, 0.0)));
+        let original_outputs = if initially_empty {
+            vec![]
+        } else {
+            vec![smithay::utils::Rectangle::new(
+                (1000, 0).into(),
+                (1280, 800).into(),
+            )]
+        };
+        let output = Output::new(
+            "returned".into(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "test".into(),
+                model: "returned".into(),
+            },
+        );
+        let global = output.create_global::<roost_compositor::State>(&comp.display.handle());
+        comp.state.add_output("returned", Some(output), 1280, 800);
+        comp.state.note_output_global("returned", global);
+        comp.state.set_output_location("returned", (1000, 0));
+        assert!(manager.rebase_pointer_for_topology(
+            &comp.state,
+            &original_outputs,
+            (1000.0, 0.0).into()
+        ));
+        assert_eq!(manager.pointer_pos(), Point::from((1000.0, 0.0)));
     }
 }

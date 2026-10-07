@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""Check pinned local DRM source closure; full Cargo graphs are supplied by CI."""
+import argparse
+import json
+import hashlib
+from pathlib import Path
+import tomllib
+
+ROOT = Path(__file__).resolve().parents[1]
+EXPECTED = {"drm": "0.14.1", "drm-ffi": "0.9.1"}
+
+def check_source(root):
+    for parent, prefix in [(root, "third-party/"), (root/"third-party/smithay", "../")]:
+        manifest = tomllib.loads((parent/"Cargo.toml").read_text())
+        patches = manifest["patch"]["crates-io"]
+        for name in EXPECTED:
+            if patches[name] != {"path": prefix+name}:
+                raise ValueError("missing exact local DRM path override")
+    lock = tomllib.loads((root/"Cargo.lock").read_text())
+    for name, version in EXPECTED.items():
+        packages = [p for p in lock["package"] if p["name"] == name]
+        if len(packages) != 1 or packages[0]["version"] != version or "source" in packages[0] or "checksum" in packages[0]:
+            raise ValueError("shipping DRM lock closure mismatch")
+        crate = root/"third-party"/name
+        manifest = tomllib.loads((crate/"Cargo.toml").read_text())
+        if manifest["package"]["name"] != name or manifest["package"]["version"] != version:
+            raise ValueError("vendored version mismatch")
+        if not (crate/"LICENSE").is_file() or hashlib.sha256((crate/"LICENSE").read_bytes()).hexdigest() != "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3":
+            raise ValueError("missing original MIT license")
+    smithay = tomllib.loads((root/"third-party/smithay/Cargo.toml").read_text())
+    for name, version in EXPECTED.items():
+        if smithay["dependencies"][name]["version"] != "="+version:
+            raise ValueError("Smithay DRM version not exact")
+    if tomllib.loads((root/"third-party/drm/Cargo.toml").read_text())["dependencies"]["drm-ffi"]["version"] != "=0.9.1":
+        raise ValueError("drm ffi version not exact")
+
+def check_graph(root, graph):
+    if not isinstance(graph.get("resolve"), dict):
+        raise ValueError("full Cargo resolve graph required")
+    resolved = {node["id"] for node in graph["resolve"]["nodes"]}
+    receipt = {}
+    for name, version in EXPECTED.items():
+        packages = [p for p in graph["packages"] if p["name"] == name]
+        if len(packages) != 1:
+            raise ValueError("duplicated or absent DRM package")
+        package = packages[0]
+        expected = (root/"third-party"/name/"Cargo.toml").resolve()
+        if package["version"] != version or package["source"] is not None or Path(package["manifest_path"]).resolve() != expected or package["id"] not in resolved:
+            raise ValueError("resolved DRM package is not original local pinned source")
+        receipt[name] = {"version": version, "manifest_path": str(expected), "id": package["id"], "source": None}
+    return receipt
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--metadata", type=Path)
+    args = parser.parse_args()
+    check_source(ROOT)
+    receipt = {"source_closure": True, "full_graph": False}
+    if args.metadata:
+        receipt.update(full_graph=True, packages=check_graph(ROOT, json.loads(args.metadata.read_text())))
+    print(json.dumps(receipt, sort_keys=True))
+
+if __name__ == "__main__":
+    main()

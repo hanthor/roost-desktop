@@ -52,6 +52,9 @@ pub const INITIAL_REQUEST_ID: u64 = 1;
 /// What one handled inbound message meant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Handled {
+    BrightnessJournal {
+        request: Option<u64>,
+    },
     ScreenReader(roost_shell_control::ScreenReaderState),
     /// Compositor greeted back (e.g. after a resnapshot re-hello); the
     /// awaited full snapshot still follows.
@@ -87,6 +90,12 @@ pub enum Handled {
         /// The key event's time in milliseconds.
         time: u32,
         /// The action mode it fired in.
+        mode: u32,
+    },
+    /// Release of a grabbed accelerator.
+    AcceleratorDeactivated {
+        action: u32,
+        time: u32,
         mode: u32,
     },
     /// Compositor answered one command; match `id` against the value
@@ -150,7 +159,19 @@ pub enum Handled {
 }
 
 /// Shell-side control client over a connected Unix socket.
+#[derive(Clone, Debug)]
+pub struct BrightnessReply {
+    pub request: u64,
+    pub grant: Option<roost_shell_control::BrightnessGrant>,
+    pub error: Option<roost_shell_control::BrightnessJournalError>,
+    pub state: Option<roost_shell_control::BrightnessJournalSnapshot>,
+}
+
 pub struct ControlClient {
+    brightness_request_id: u64,
+    brightness_state: Option<roost_shell_control::BrightnessJournalSnapshot>,
+    brightness_replies: std::collections::VecDeque<BrightnessReply>,
+    monitor_identities: Vec<roost_shell_control::MonitorIdentityInfo>,
     stream: UnixStream,
     read_buf: Vec<u8>,
     model: ShellModel,
@@ -193,6 +214,10 @@ impl ControlClient {
         stream.set_nonblocking(true)?;
         Ok(Self {
             stream,
+            brightness_request_id: 0,
+            brightness_state: None,
+            brightness_replies: std::collections::VecDeque::new(),
+            monitor_identities: Vec::new(),
             read_buf: Vec::new(),
             model: ShellModel::new(),
             revision: None,
@@ -472,6 +497,18 @@ impl ControlClient {
         Ok(id)
     }
 
+    pub fn set_accelerator_grabs(
+        &mut self,
+        grabs: Vec<roost_shell_control::AcceleratorGrab>,
+    ) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::SetAcceleratorGrabs { grabs },
+        })?;
+        Ok(id)
+    }
+
     /// Make `workspace` active (GNOME's workspace keys). Returns the
     /// request id.
     pub fn focus_workspace(&mut self, workspace: u32) -> Result<u64, ControlError> {
@@ -601,6 +638,61 @@ impl ControlClient {
 
     /// Read one frame and apply it, surfacing `WouldBlock` when no
     /// complete frame is available yet.
+    fn brightness_request(&mut self) -> Result<u64, ControlError> {
+        self.brightness_request_id =
+            self.brightness_request_id.checked_add(1).ok_or_else(|| {
+                ControlError::Unexpected("brightness request generation exhausted".into())
+            })?;
+        Ok(self.brightness_request_id)
+    }
+    pub fn brightness_state(&self) -> Option<&roost_shell_control::BrightnessJournalSnapshot> {
+        self.brightness_state.as_ref()
+    }
+    pub fn take_brightness_reply(&mut self) -> Option<BrightnessReply> {
+        self.brightness_replies.pop_front()
+    }
+    pub fn initialize_brightness(
+        &mut self,
+        readings: Vec<roost_shell_control::BrightnessReading>,
+        idle: f64,
+    ) -> Result<u64, ControlError> {
+        let request = self.brightness_request()?;
+        self.write_message(&Message::BrightnessJournalInit {
+            request,
+            readings,
+            idle,
+        })?;
+        Ok(request)
+    }
+    /// This submits intent only. Callers MUST wait for the original matching
+    /// successful grant reply before invoking a hardware helper.
+    pub fn begin_brightness(
+        &mut self,
+        source: roost_shell_control::BrightnessSource,
+        targets: Vec<roost_shell_control::BrightnessTarget>,
+    ) -> Result<u64, ControlError> {
+        let request = self.brightness_request()?;
+        self.write_message(&Message::BrightnessJournalBegin {
+            request,
+            source,
+            targets,
+        })?;
+        Ok(request)
+    }
+    pub fn complete_brightness(
+        &mut self,
+        grant: roost_shell_control::BrightnessGrant,
+        observations: Vec<roost_shell_control::BrightnessObservation>,
+    ) -> Result<u64, ControlError> {
+        let request = self.brightness_request()?;
+        self.write_message(&Message::BrightnessJournalComplete {
+            request,
+            grant,
+            observations,
+        })?;
+        Ok(request)
+    }
+
     pub fn poll(&mut self) -> Result<Handled, ControlError> {
         let msg = self.read_frame()?;
         self.handle_message(msg)
@@ -667,6 +759,34 @@ impl ControlClient {
                 Ok(Handled::Changes { to_revision })
             }
             Message::CommandResult { id, status } => Ok(Handled::CommandResult { id, status }),
+            Message::BrightnessJournalState { state } => {
+                self.brightness_state = Some(state);
+                Ok(Handled::BrightnessJournal { request: None })
+            }
+            Message::BrightnessJournalReply {
+                request,
+                grant,
+                error,
+                state,
+            } => {
+                if self.brightness_replies.len() >= 8 {
+                    return Err(ControlError::Unexpected(
+                        "brightness reply queue full".into(),
+                    ));
+                }
+                if let Some(state) = state.as_ref() {
+                    self.brightness_state = Some(state.clone());
+                }
+                self.brightness_replies.push_back(BrightnessReply {
+                    request,
+                    grant,
+                    error,
+                    state,
+                });
+                Ok(Handled::BrightnessJournal {
+                    request: Some(request),
+                })
+            }
             Message::MonitorIdentityInventory { outputs } => {
                 self.monitor_identities = outputs;
                 Ok(Handled::Outputs {
@@ -732,6 +852,9 @@ impl ControlClient {
             Message::ScreenReader { state } => Ok(Handled::ScreenReader(state)),
             Message::WorkspacePopup { index, count } => {
                 Ok(Handled::WorkspacePopup { index, count })
+            }
+            Message::AcceleratorDeactivated { action, time, mode } => {
+                Ok(Handled::AcceleratorDeactivated { action, time, mode })
             }
             Message::AcceleratorActivated { action, time, mode } => {
                 // A grabbed key combination: the shell signals its D-Bus
@@ -803,6 +926,11 @@ impl ControlClient {
                     Ok(Handled::ServerError { kind, message })
                 }
             }
+            Message::BrightnessJournalInit { .. }
+            | Message::BrightnessJournalBegin { .. }
+            | Message::BrightnessJournalComplete { .. } => Err(ControlError::Unexpected(
+                "compositor sent shell-side brightness request".into(),
+            )),
             Message::Command { id, .. } => Err(ControlError::Unexpected(format!(
                 "compositor sent shell-side Command id {id}"
             ))),
@@ -889,9 +1017,15 @@ fn message_label(msg: &Message) -> &'static str {
         Message::Switcher { .. } => "Switcher",
         Message::NativeOutputInventory { .. } => "NativeOutputInventory",
         Message::MonitorIdentityInventory { .. } => "MonitorIdentityInventory",
+        Message::BrightnessJournalInit { .. } => "BrightnessJournalInit",
+        Message::BrightnessJournalBegin { .. } => "BrightnessJournalBegin",
+        Message::BrightnessJournalComplete { .. } => "BrightnessJournalComplete",
+        Message::BrightnessJournalState { .. } => "BrightnessJournalState",
+        Message::BrightnessJournalReply { .. } => "BrightnessJournalReply",
         Message::Outputs { .. } => "Outputs",
         Message::Environment { .. } => "Environment",
         Message::OverviewPreviews { .. } => "OverviewPreviews",
+        Message::AcceleratorDeactivated { .. } => "AcceleratorDeactivated",
         Message::AcceleratorActivated { .. } => "AcceleratorActivated",
         Message::WindowMenu { .. } => "WindowMenu",
         Message::WorkspacePopup { .. } => "WorkspacePopup",

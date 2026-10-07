@@ -1,0 +1,22 @@
+{
+  "name": "drm-ffi",
+  "version": "0.9.1",
+  "license": "MIT",
+  "original_archive_url": "https://static.crates.io/crates/drm-ffi/drm-ffi-0.9.1.crate",
+  "original_archive_sha256": "51a91c9b32ac4e8105dec255e849e0d66e27d7c34d184364fb93e469db08f690",
+  "original_vcs": "08dee22f0dcfa4a73a18ca3a954d4f7c2c749c03",
+  "license_sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+  "modified_original_files": [
+    {
+      "path": "src/mode.rs",
+      "original_sha256": "d6e12a30a18082e49f005f528d9fd0e0acf52ab4afdd5a1446787d292e1b2d06",
+      "modified_sha256": "356127d823cd518ec3fe9d5d7cfd97a4bf84c8d54fc1e2f7c57dac93c3ba6112"
+    }
+  ],
+  "unmodified_originals_retained": true,
+  "patch_format": {
+    "context_lines": 0,
+    "sha256": "46fa7414bdf0379221e3828907e2503e10bcec8fb78228e2e968ad51170231ed",
+    "gnu_patch_forward_fuzz0_reproduced_all_original_files": true
+  }
+}

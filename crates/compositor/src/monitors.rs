@@ -238,3 +238,40 @@ mod tests {
         assert!(choose(&configs, &["DP-3".to_owned()]).is_empty());
     }
 }
+
+/// Exactly one explicitly requested primary; never silently choose the first
+/// row when GNOME requested another or an ambiguous configuration.
+pub fn requested_primary(configs: &[MonitorConfig]) -> Result<&str, &'static str> {
+    let mut primary = configs.iter().filter(|config| config.primary);
+    let selected = primary.next().ok_or("one primary output is required")?;
+    if primary.next().is_some() {
+        return Err("multiple primary outputs are not supported");
+    }
+    Ok(&selected.connector)
+}
+
+#[cfg(test)]
+mod primary_request_tests {
+    use super::*;
+    fn config(name: &str, primary: bool) -> MonitorConfig {
+        MonitorConfig {
+            connector: name.into(),
+            scale: 1.0,
+            x: 0,
+            y: 0,
+            primary,
+        }
+    }
+    #[test]
+    fn actual_explicit_primary_survives_request_order_and_ambiguity_refuses() {
+        let configs = [config("left", false), config("right", true)];
+        assert_eq!(requested_primary(&configs), Ok("right"));
+        assert_eq!(
+            requested_primary(&[configs[1].clone(), configs[0].clone()]),
+            Ok("right")
+        );
+        assert!(requested_primary(&[]).is_err());
+        assert!(requested_primary(&[config("left", false)]).is_err());
+        assert!(requested_primary(&[config("left", true), config("right", true)]).is_err());
+    }
+}

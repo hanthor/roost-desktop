@@ -1,7 +1,8 @@
 [workspace]
 resolver = "2"
-exclude = ["third-party/reis", "third-party/smithay"]
+exclude = ["third-party/reis", "third-party/smithay", "third-party/drm", "third-party/drm-ffi"]
 members = [
+    "crates/backlight",
     "crates/compositor",
     "crates/shell-control-schema",
     "crates/shell-host",
@@ -81,3 +82,6 @@ opt-level = 3
 reis = { path = "third-party/reis" }
 
 smithay = { path = "third-party/smithay" }
+
+drm = { path = "third-party/drm" }
+drm-ffi = { path = "third-party/drm-ffi" }

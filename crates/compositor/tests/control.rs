@@ -677,3 +677,56 @@ fn optional_monitor_identity_is_minor30_gated_and_empty_revocation_is_real_wire(
         assert_eq!(client_read(&mut client), Message::Overview { open: true });
     }
 }
+
+#[test]
+fn pending_accelerator_press_and_release_are_cancelled_before_locked_poll() {
+    use roost_shell_control::MODE_NORMAL;
+    let dir = private_tempdir();
+    let path = dir.path().join("control.sock");
+    let mut hub =
+        ControlHub::bind(path.clone(), std::rc::Rc::new(TokenStore::new()), SEAT_NAME).unwrap();
+    let mut model = StateModel::new();
+    let window = model.insert("private-window", None, 1);
+    let mut client = hub_client(&path);
+    hub_handshake(&mut hub, &mut model, &mut client);
+    hub.queue_accelerator(13, 5000, MODE_NORMAL);
+    hub.queue_accelerator_deactivated(13, 5001, MODE_NORMAL);
+    hub.cancel_pending_accelerators();
+    hub.set_locked(true);
+    hub.poll(&mut model);
+    let Message::Snapshot {
+        locked, windows, ..
+    } = client_read(&mut client)
+    else {
+        panic!("lock transition must send the legitimate privacy snapshot");
+    };
+    assert!(locked);
+    assert!(
+        windows.is_empty(),
+        "locked snapshot cannot disclose original window metadata"
+    );
+    client.set_nonblocking(true).unwrap();
+    let mut prefix = [0u8; 4];
+    assert_eq!(
+        client.read_exact(&mut prefix).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    // Unlock cannot resurrect a queued pre-lock event either.
+    hub.set_locked(false);
+    hub.poll(&mut model);
+    client.set_nonblocking(false).unwrap();
+    let Message::Snapshot {
+        locked, windows, ..
+    } = client_read(&mut client)
+    else {
+        panic!("unlock transition must send a fresh legitimate snapshot");
+    };
+    assert!(!locked);
+    assert_eq!(windows.len(), 1);
+    assert_eq!(windows[0].id, window);
+    client.set_nonblocking(true).unwrap();
+    assert_eq!(
+        client.read_exact(&mut prefix).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}

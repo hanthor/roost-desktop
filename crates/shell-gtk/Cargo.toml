@@ -10,6 +10,7 @@ name = "roost-shell-gtk"
 path = "src/main.rs"
 
 [dependencies]
+roost-backlight = { path = "../backlight", version = "0.1.0" }
 xkbcommon.workspace = true
 gtk4 = { workspace = true, features = ["v4_12"] }
 libadwaita.workspace = true

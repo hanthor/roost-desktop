@@ -93,7 +93,7 @@ def inventory():
     return {"probe_uid": os.geteuid(), "session_uid": OWNER.pw_uid,
             "session": owned[0],
             "state": {k: state[k] for k in ("locked", "windows", "focused", "active_workspace", "overview_open", "pointer_position", "native_relative_motion_count")}
-                     | {k: state.get(k) for k in ("mouse_left_handed", "touchpad_left_handed", "hot_corners")},
+                     | {k: state.get(k) for k in ("mouse_left_handed", "touchpad_left_handed", "hot_corners", "native_kernel_commits")},
             "processes": sorted(processes, key=lambda item: item["pid"])}
 
 

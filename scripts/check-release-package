@@ -31,7 +31,10 @@ for path in \
     usr/bin/roost-greeter \
     usr/share/wayland-sessions/roost.desktop \
     usr/lib/systemd/user/roost-session.target \
-    etc/pam.d/roost-lock; do
+    etc/pam.d/roost-lock \
+    usr/share/licenses/roost/LICENSE \
+    usr/share/licenses/roost/drm/LICENSE \
+    usr/share/licenses/roost/drm-ffi/LICENSE; do
     printf '%s' "$CONTENTS" | grep -q "$path" || fail "missing $path"
 done
 
@@ -44,6 +47,14 @@ VERSION="$(dpkg-deb -f "$PKG" Version)"
 DIR="$(mktemp -d)"
 trap 'rm -rf "$DIR"' EXIT INT TERM
 dpkg-deb -x "$PKG" "$DIR"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cmp -s "$ROOT/LICENSE" "$DIR/usr/share/licenses/roost/LICENSE" \
+    || fail "root LICENSE differs from original source"
+for dependency in drm drm-ffi; do
+    cmp -s "$ROOT/third-party/$dependency/LICENSE" \
+        "$DIR/usr/share/licenses/roost/$dependency/LICENSE" \
+        || fail "$dependency LICENSE differs from original source"
+done
 for bin in roost-compositor roost-session roost-shell-host roost-ibus-bridge roost-greeter; do
     REPORTED="$("$DIR/usr/bin/$bin" --version | awk '{print $NF}')"
     [ "$REPORTED" = "$VERSION" ] || fail "$bin reports $REPORTED, package is $VERSION"

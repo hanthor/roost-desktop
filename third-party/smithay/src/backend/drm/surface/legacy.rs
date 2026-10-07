@@ -229,6 +229,22 @@ impl LegacyDrmSurface {
     #[instrument(level = "trace", parent = &self.span, skip(self))]
     #[profiling::function]
     pub fn commit(&self, framebuffer: framebuffer::Handle, event: bool) -> Result<(), Error> {
+        self.commit_with_data(framebuffer, event, None)
+    }
+    /// Event cookie belongs to the actual successful page-flip, including after modeset.
+    pub fn commit_with_cookie(
+        &self,
+        framebuffer: framebuffer::Handle,
+        cookie: std::num::NonZeroU64,
+    ) -> Result<(), Error> {
+        self.commit_with_data(framebuffer, true, Some(cookie))
+    }
+    fn commit_with_data(
+        &self,
+        framebuffer: framebuffer::Handle,
+        event: bool,
+        cookie: Option<std::num::NonZeroU64>,
+    ) -> Result<(), Error> {
         if !self.active.load(Ordering::SeqCst) {
             return Err(Error::DeviceInactive);
         }
@@ -317,15 +333,21 @@ impl LegacyDrmSurface {
             // this will result in wasting a frame, because this flip will need to wait
             // for `set_crtc`, but is necessary to drive the event loop and thus provide
             // a more consistent api.
-            ControlDevice::page_flip(&*self.fd, self.crtc, framebuffer, PageFlipFlags::EVENT, None).map_err(
-                |source| {
-                    Error::Access(AccessError {
-                        errmsg: "Failed to queue page flip",
-                        dev: self.fd.dev_path(),
-                        source,
-                    })
-                },
-            )?;
+            ControlDevice::page_flip_with_user_data(
+                &*self.fd,
+                self.crtc,
+                framebuffer,
+                PageFlipFlags::EVENT,
+                None,
+                cookie.map_or(u64::from(u32::from(self.crtc)), std::num::NonZeroU64::get),
+            )
+            .map_err(|source| {
+                Error::Access(AccessError {
+                    errmsg: "Failed to queue page flip",
+                    dev: self.fd.dev_path(),
+                    source,
+                })
+            })?;
         }
 
         Ok(())
@@ -334,6 +356,22 @@ impl LegacyDrmSurface {
     #[instrument(level = "trace", parent = &self.span, skip(self))]
     #[profiling::function]
     pub fn page_flip(&self, framebuffer: framebuffer::Handle, event: bool) -> Result<(), Error> {
+        self.page_flip_with_data(framebuffer, event, None)
+    }
+    /// Event cookie belongs to the actual successful page-flip, including after modeset.
+    pub fn page_flip_with_cookie(
+        &self,
+        framebuffer: framebuffer::Handle,
+        cookie: std::num::NonZeroU64,
+    ) -> Result<(), Error> {
+        self.page_flip_with_data(framebuffer, true, Some(cookie))
+    }
+    fn page_flip_with_data(
+        &self,
+        framebuffer: framebuffer::Handle,
+        event: bool,
+        cookie: Option<std::num::NonZeroU64>,
+    ) -> Result<(), Error> {
         trace!("Queueing Page flip");
 
         if !self.active.load(Ordering::SeqCst) {
@@ -347,7 +385,7 @@ impl LegacyDrmSurface {
             *dpms = true;
         }
 
-        ControlDevice::page_flip(
+        ControlDevice::page_flip_with_user_data(
             &*self.fd,
             self.crtc,
             framebuffer,
@@ -357,6 +395,7 @@ impl LegacyDrmSurface {
                 PageFlipFlags::empty()
             },
             None,
+            cookie.map_or(u64::from(u32::from(self.crtc)), std::num::NonZeroU64::get),
         )
         .map_err(|source| {
             Error::Access(AccessError {

@@ -3451,3 +3451,135 @@ fn native_modal_close_with_destroyed_parent_focuses_live_window() {
 fn unfocused_native_modal_close_does_not_steal_focus_from_another_app() {
     close_native_modal(false, false, true);
 }
+
+fn release_grab(action: u32, mods: u32, flags: u32) -> roost_shell_control::AcceleratorGrab {
+    roost_shell_control::AcceleratorGrab {
+        accelerator: roost_shell_control::Accelerator {
+            action,
+            keysym: u32::from(b'r'),
+            mods,
+            modes: roost_shell_control::MODE_NORMAL,
+        },
+        flags,
+    }
+}
+
+#[test]
+fn accelerator_release_keeps_original_press_after_modifiers_are_lifted() {
+    use roost_shell_control::{GRAB_TRIGGER_RELEASE, MODE_NORMAL, MOD_CTRL};
+    let mut f = two_windows();
+    f.manager
+        .set_accelerator_grabs(vec![release_grab(31, MOD_CTRL, GRAB_TRIGGER_RELEASE)]);
+    press(&mut f.manager, &mut f.comp, 29); // actual evdev left Control
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(
+        f.manager.take_accelerators_fired(),
+        [(31, 5000, MODE_NORMAL)]
+    );
+    assert!(f.manager.take_accelerators_released().is_empty());
+    release(&mut f.manager, &mut f.comp, 29);
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(
+        f.manager.take_accelerators_released(),
+        [(31, 5000, MODE_NORMAL)]
+    );
+    assert_eq!(f.comp.state.pressed_key_count(), 0);
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert!(f.manager.take_accelerators_released().is_empty());
+}
+
+#[test]
+fn removed_recreated_and_lock_invalidated_grabs_cannot_receive_old_release() {
+    use roost_shell_control::GRAB_TRIGGER_RELEASE;
+    for invalidate in [0, 1, 2] {
+        let mut f = two_windows();
+        let grab = release_grab(32, 0, GRAB_TRIGGER_RELEASE);
+        f.manager.set_accelerator_grabs(vec![grab]);
+        press(&mut f.manager, &mut f.comp, R_KEYCODE);
+        assert_eq!(f.manager.take_accelerators_fired().len(), 1);
+        match invalidate {
+            0 => f.manager.set_accelerator_grabs(vec![]),
+            1 => {
+                f.manager.set_accelerator_grabs(vec![]);
+                f.manager.set_accelerator_grabs(vec![grab]);
+            }
+            _ => f.manager.invalidate_held_accelerators(),
+        }
+        release(&mut f.manager, &mut f.comp, R_KEYCODE);
+        assert!(f.manager.take_accelerators_released().is_empty());
+        assert_eq!(f.comp.state.pressed_key_count(), 0);
+    }
+}
+
+#[test]
+fn unchanged_atomic_grab_retains_release_and_ignore_repeat_does_not_duplicate() {
+    use roost_shell_control::{GRAB_IGNORE_AUTOREPEAT, GRAB_TRIGGER_RELEASE, MODE_NORMAL};
+    let mut f = two_windows();
+    let grab = release_grab(33, 0, GRAB_TRIGGER_RELEASE | GRAB_IGNORE_AUTOREPEAT);
+    f.manager.set_accelerator_grabs(vec![grab]);
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(
+        f.manager.take_accelerators_fired(),
+        [(33, 5000, MODE_NORMAL)]
+    );
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert!(f.manager.take_accelerators_fired().is_empty());
+    // An unrelated full-list update must not cancel this original live grab.
+    let mut another = release_grab(34, 0, 0);
+    another.accelerator.keysym = u32::from(b't');
+    f.manager.set_accelerator_grabs(vec![another, grab]);
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(
+        f.manager.take_accelerators_released(),
+        [(33, 5000, MODE_NORMAL)]
+    );
+    assert_eq!(f.comp.state.pressed_key_count(), 0);
+}
+
+#[test]
+fn legacy_grabs_remain_press_only_and_unsupported_flags_do_not_install() {
+    let mut f = two_windows();
+    f.manager
+        .set_accelerators(vec![release_grab(35, 0, 0).accelerator]);
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(f.manager.take_accelerators_fired().len(), 1);
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert!(f.manager.take_accelerators_released().is_empty());
+    f.manager
+        .set_accelerator_grabs(vec![release_grab(36, 0, 1 << 3)]);
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert!(f.manager.take_accelerators_fired().is_empty());
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(f.comp.state.pressed_key_count(), 0);
+}
+
+#[test]
+fn lock_then_unlock_before_keyup_drops_old_release_but_clears_physical_key() {
+    use roost_shell_control::{GRAB_TRIGGER_RELEASE, MODE_NORMAL};
+    let mut f = two_windows();
+    f.manager
+        .set_accelerator_grabs(vec![release_grab(37, 0, GRAB_TRIGGER_RELEASE)]);
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(
+        f.manager.take_accelerators_fired(),
+        [(37, 5000, MODE_NORMAL)]
+    );
+    assert_eq!(f.comp.state.pressed_key_count(), 1);
+    f.manager.invalidate_held_accelerators(); // actual engage_lock boundary
+    f.comp.state.set_shortcut_inhibition_locked(true);
+    f.comp.state.set_shortcut_inhibition_locked(false); // actual unlocked normal input
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(f.comp.state.pressed_key_count(), 0);
+    assert!(f.manager.take_accelerators_fired().is_empty());
+    assert!(f.manager.take_accelerators_released().is_empty());
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(
+        f.manager.take_accelerators_fired(),
+        [(37, 5000, MODE_NORMAL)]
+    );
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    assert_eq!(
+        f.manager.take_accelerators_released(),
+        [(37, 5000, MODE_NORMAL)]
+    );
+}

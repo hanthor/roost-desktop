@@ -1,0 +1,9 @@
+[package]
+name = "roost-backlight"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+[dependencies]
+libc = "0.2"
+roost-shell-control = { path = "../shell-control-schema", version = "0.1.0" }

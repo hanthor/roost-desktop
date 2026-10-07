@@ -108,6 +108,15 @@ impl SessionLockHandler for State {
             return;
         };
         let name = output.name();
+        // A still-live wl_output resource from a retired global must never
+        // authorize a lock surface for a new connector with the same name.
+        if !self
+            .output_entries()
+            .iter()
+            .any(|(entry, current, _, _)| entry == &name && current == &output)
+        {
+            return;
+        }
         let size = self
             .output_entries()
             .into_iter()
@@ -203,6 +212,15 @@ impl State {
                 .map(|c| c.id())
                 .as_ref()
                 .is_some_and(|id| Some(id) == self.lock_protocol.owner.as_ref())
+    }
+
+    /// Retire only this output's surfaces while preserving the original lock
+    /// owner/resource. Until the original client supplies a new current-output
+    /// surface the runtime's neutral locked backdrop remains authoritative.
+    pub(crate) fn retire_lock_output(&mut self, output: &str) {
+        self.lock_protocol
+            .surfaces
+            .retain(|(_, name)| name != output);
     }
 
     /// The lock surface for `output`, if the approved client made one.

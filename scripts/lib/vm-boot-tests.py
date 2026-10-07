@@ -290,5 +290,66 @@ class PciCapabilities(unittest.TestCase):
         self.assertTrue(self.probe(8, cycle=True)["no_soft_reset"])
 
 
+class KernelCommitPolicy(unittest.TestCase):
+    def sample(self, generation=3, cookie=90, count=4):
+        return {"session_uid":1000,"processes":[{"executable":"roost-compositor","pid":30,"uid":1000,"start_ticks":12}],
+                "state":{"native_kernel_commits":{"current_native_generation":generation,"current_layout_generation":4,"commit_api":"atomic","outputs":[{
+                    "crtc":39,"completion_count":count,"rejected_cookie_count":0,"queue_error_count":0,"accepted_pending_cookie":None,
+                    "last_completed":{"cookie":cookie,"crtc":39,"device":226,"commit_epoch":generation,"layout_generation":4,"sequence":100,"timestamp_clock":"monotonic","timestamp_secs":9,"timestamp_subsec_ns":10}}]}}}
+    def test_original_initial_and_fresh_actual_transition_receipts(self):
+        old=lane.kernel_commit_receipt(self.sample())
+        new=lane.kernel_commit_receipt(self.sample(4,91,5),old,True)
+        self.assertEqual(new["observation"]["current_native_generation"],4)
+    def test_historical_generation_or_layout_is_not_current_authority(self):
+        for field in ("commit_epoch","layout_generation"):
+            value=self.sample();value["state"]["native_kernel_commits"]["outputs"][0]["last_completed"][field]-=1
+            with self.assertRaises(ValueError):lane.kernel_commit_receipt(value)
+    def test_recycled_pid_or_other_uid_does_not_qualify_original_compositor(self):
+        old=lane.kernel_commit_receipt(self.sample())
+        for field in ("pid","uid","start_ticks"):
+            value=self.sample(4,91,5);value["processes"][0][field]+=1
+            with self.assertRaises(ValueError):lane.kernel_commit_receipt(value,old,True)
+    def test_new_epoch_needs_new_cookie_and_completion_count(self):
+        old=lane.kernel_commit_receipt(self.sample())
+        for generation,cookie,count in [(3,91,5),(4,90,5),(4,91,4)]:
+            with self.assertRaises(ValueError):lane.kernel_commit_receipt(self.sample(generation,cookie,count),old,True)
+    def test_pending_old_cookie_duplicate_crtc_and_foreign_device_rejected(self):
+        import copy
+        for mutation in ("pending","duplicate","device"):
+            value=self.sample();outputs=value["state"]["native_kernel_commits"]["outputs"]
+            if mutation=="pending":outputs[0]["accepted_pending_cookie"]=90
+            elif mutation=="duplicate":outputs.append(copy.deepcopy(outputs[0]))
+            else:
+                old=lane.kernel_commit_receipt(value);value=self.sample(4,91,5)
+                value["state"]["native_kernel_commits"]["outputs"][0]["last_completed"]["device"]=227
+            with self.assertRaises(ValueError):lane.kernel_commit_receipt(value,old if mutation=="device" else None,mutation=="device")
+    def test_missing_private_and_bool_payloads_rejected_without_echo(self):
+        for mutation in ("private","absent","bool","timestamp"):
+            value=self.sample();observation=value["state"]["native_kernel_commits"]
+            if mutation=="private":observation["private"]="must-not-retain"
+            elif mutation=="absent":observation["current_native_generation"]=None
+            elif mutation=="bool":observation["outputs"][0]["last_completed"]["commit_epoch"]=True
+            else:observation["outputs"][0]["last_completed"]["timestamp_subsec_ns"]=1_000_000_000
+            with self.assertRaises(ValueError) as caught:lane.kernel_commit_receipt(value)
+            self.assertNotIn("must-not-retain",str(caught.exception))
+    def test_replacement_between_lifecycle_before_and_initial_is_rejected(self):
+        expected=lane.kernel_compositor_principal(self.sample())
+        value=self.sample();value["processes"][0]["start_ticks"]+=1
+        with self.assertRaises(ValueError):lane.kernel_commit_receipt(value,expected_principal=expected)
+        self.assertEqual(lane.kernel_commit_receipt(self.sample(),expected_principal=expected)["principal"],expected)
+    def test_actual_nonroot_uids_are_real_positive_bounded_integers(self):
+        for uid in (True,False,0,-1,1 << 32,"1000"):
+            value=self.sample();value["session_uid"]=uid;value["processes"][0]["uid"]=uid
+            with self.assertRaises(ValueError):lane.kernel_commit_receipt(value)
+        for uid in (True,-1,1 << 32):
+            value=self.sample();value["processes"][0]["uid"]=uid
+            with self.assertRaises(ValueError):lane.kernel_commit_receipt(value)
+
+    def test_sequence_wrap_is_not_mistaken_for_cookie_identity(self):
+        old=lane.kernel_commit_receipt(self.sample())
+        value=self.sample(4,91,5);value["state"]["native_kernel_commits"]["outputs"][0]["last_completed"]["sequence"]=0
+        self.assertEqual(lane.kernel_commit_receipt(value,old,True)["observation"]["outputs"][0]["last_completed"]["sequence"],0)
+
+
 if __name__ == "__main__":
     unittest.main()

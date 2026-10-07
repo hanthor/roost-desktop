@@ -47,12 +47,17 @@ use smithay::{
 };
 
 pub mod animation;
+pub mod brightness_hardware;
+pub mod brightness_journal;
+pub mod brightness_provider;
 pub mod capture_security;
 mod constraint_motion;
 pub mod control;
 pub mod corner_pressure;
 #[cfg(feature = "drm")]
 pub mod drm;
+#[cfg(feature = "drm")]
+pub mod drm_commit;
 pub mod frame_timing;
 pub mod idle_monitor;
 pub mod ime;
@@ -61,6 +66,12 @@ pub mod layer;
 pub mod lock;
 #[cfg(feature = "drm")]
 pub mod monitor_edid;
+#[cfg(feature = "drm")]
+pub mod monitor_refresh;
+#[cfg(feature = "drm")]
+pub mod monitor_scanout;
+#[cfg(feature = "drm")]
+pub mod monitor_worker;
 pub mod monitors;
 pub mod mutter;
 pub mod native_output;
@@ -122,6 +133,8 @@ pub(crate) struct OutputEntry {
 pub struct State {
     pub(crate) window_icons: window_icons::WindowIcons,
     compositor_state: CompositorState,
+    surface_outputs:
+        std::cell::RefCell<std::collections::HashMap<wl_surface::WlSurface, Vec<Output>>>,
     shm_state: ShmState,
     xdg_shell_state: XdgShellState,
     // Held alive for the output globals; never read directly.
@@ -526,6 +539,11 @@ impl State {
 
 impl CompositorHandler for State {
     fn destroyed(&mut self, surface: &wl_surface::WlSurface) {
+        if let Some(outputs) = self.surface_outputs.get_mut().remove(surface) {
+            for output in outputs {
+                output.leave(surface);
+            }
+        }
         self.initial_outputs.remove(surface);
         self.window_icons.remove(surface);
     }
@@ -560,6 +578,9 @@ impl CompositorHandler for State {
     /// role is gone it marks the meaningless pending state as anchored on
     /// every edge, which the validator accepts.
     fn new_surface(&mut self, surface: &wl_surface::WlSurface) {
+        self.surface_outputs
+            .get_mut()
+            .insert(surface.clone(), Vec::new());
         smithay::wayland::compositor::add_pre_commit_hook::<State, _>(
             surface,
             |state, _dh, surface| {
@@ -825,6 +846,7 @@ impl State {
             // v6 (GNOME 51's): preferred buffer scale goes out per surface
             // (`send_surface_scales` in the runtime).
             compositor_state: CompositorState::new_v6::<State>(dh),
+            surface_outputs: Default::default(),
             shm_state: ShmState::new::<State>(dh, vec![]),
             xdg_shell_state: XdgShellState::new::<State>(dh),
             _output_manager_state: OutputManagerState::new_with_xdg_output::<State>(dh),
@@ -924,6 +946,68 @@ impl State {
         }
     }
 
+    /// Publish actual successful frame scene membership for one output. IDs
+    /// come from clipped Wayland render elements, including subsurfaces/previews,
+    /// never from preferred-scale hints or a requested display arrangement.
+    pub fn presented_surface_membership(
+        &self,
+        output: &Output,
+        ids: &[smithay::backend::renderer::element::Id],
+    ) {
+        let ids: std::collections::HashSet<_> = ids.iter().collect();
+        for (surface, outputs) in self.surface_outputs.borrow_mut().iter_mut() {
+            let id = smithay::backend::renderer::element::Id::from_wayland_resource(surface);
+            let was = outputs.contains(output);
+            let is = ids.contains(&id);
+            if is && !was {
+                output.enter(surface);
+                outputs.push(output.clone());
+            }
+            if was && !is {
+                output.leave(surface);
+                outputs.retain(|old| old != output);
+            }
+        }
+    }
+
+    fn withdraw_surface_output(&self, output: &Output) {
+        for (surface, outputs) in self.surface_outputs.borrow_mut().iter_mut() {
+            if outputs.contains(output) {
+                output.leave(surface);
+                outputs.retain(|old| old != output);
+            }
+        }
+    }
+
+    /// Replace only the protocol object while preserving the real inventory's
+    /// position/primary identity. Leave precedes withdrawing the old global;
+    /// new enters await an actual successful scene/frame completion.
+    pub fn replace_output_protocol(
+        &mut self,
+        name: &str,
+        output: Output,
+        width: i32,
+        height: i32,
+    ) -> bool {
+        let Some(index) = self.outputs.iter().position(|entry| entry.name == name) else {
+            return false;
+        };
+        self.retire_layer_output(name);
+        if let Some(old) = self.outputs[index].output.as_ref() {
+            self.withdraw_surface_output(old);
+        }
+        if let Some(global) = self.outputs[index].global.take() {
+            self.dh.disable_global::<State>(global.clone());
+            self.dh.remove_global::<State>(global);
+        }
+        let global = output.create_global::<State>(&self.dh);
+        let entry = &mut self.outputs[index];
+        entry.output = Some(output);
+        entry.global = Some(global);
+        entry.size = (width, height).into();
+        true
+    }
+
     /// Drop an output from the inventory; a surviving first entry
     /// takes over primary. Callers migrate windows first (see
     /// [`WindowManager::migrate_output_windows`](crate::windows::WindowManager::migrate_output_windows)),
@@ -937,6 +1021,10 @@ impl State {
         let Some(index) = self.outputs.iter().position(|entry| entry.name == name) else {
             return false;
         };
+        self.retire_layer_output(name);
+        if let Some(output) = self.outputs[index].output.as_ref() {
+            self.withdraw_surface_output(output);
+        }
         let was_primary = self.outputs[index].primary;
         let global = self.outputs[index].global.take();
         if let Some(id) = global {
@@ -962,6 +1050,13 @@ impl State {
             entry.primary = entry.name == name;
         }
         true
+    }
+
+    /// Select the actual backend's surviving primary before migrating or
+    /// removing old entries. Storage order can differ after GNOME reordered
+    /// the backend repeatedly; it must not select the migration destination.
+    pub fn select_reconciled_primary(&mut self, surviving: &[String]) -> bool {
+        surviving.first().is_some_and(|name| self.set_primary(name))
     }
 
     /// Geometry readers arrange against: the primary entry's size,

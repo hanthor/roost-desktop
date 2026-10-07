@@ -198,6 +198,15 @@ type OutputGroup = (Option<String>, Vec<(WlSurface, LayerRequest, Layer)>);
 fn output_requests(state: &State) -> Vec<OutputGroup> {
     let mut groups: Vec<OutputGroup> = Vec::new();
     for record in &state.panel_surfaces {
+        // Explicit output bindings never fall back to another output merely
+        // because a retired client has not destroyed its closed role yet.
+        if record
+            .output_name
+            .as_ref()
+            .is_some_and(|name| !state.outputs.iter().any(|output| &output.name == name))
+        {
+            continue;
+        }
         let live = state
             .layer_shell_state
             .layer_surfaces()
@@ -279,15 +288,31 @@ impl WlrLayerShellHandler for State {
             .remove(&smithay::reexports::wayland_server::Resource::id(
                 surface.wl_surface(),
             ));
+        let output_name = match output {
+            Some(resource) => {
+                let Some(bound) = Output::from_resource(&resource) else {
+                    surface.send_close();
+                    return;
+                };
+                // An old resource survives withdrawing its global. Connector
+                // name reuse cannot authorize a new role on a replacement.
+                if !self
+                    .outputs
+                    .iter()
+                    .any(|entry| entry.output.as_ref() == Some(&bound))
+                {
+                    surface.send_close();
+                    return;
+                }
+                Some(bound.name())
+            }
+            None => None,
+        };
         // Bare initial configure (the protocol requires one before
         // the first commit); real geometry follows on commit via
         // `arrange_after_commit`, once the client's size/anchor
         // requests have arrived.
         surface.send_configure();
-        let output_name = output
-            .as_ref()
-            .and_then(Output::from_resource)
-            .map(|bound| bound.name());
         self.panel_surfaces.push(PanelSurface {
             namespace,
             layer,
@@ -480,6 +505,29 @@ pub fn topmost_layer_at(state: &State, x: i32, y: i32) -> Option<(WlSurface, (i3
 }
 
 impl State {
+    /// Send real closed once and immediately revoke placement/input/overview
+    /// membership. The client may stay alive indefinitely after receiving it;
+    /// waiting for role destruction would remap it at a fallback output origin.
+    pub fn retire_layer_output(&mut self, output: &str) {
+        let surfaces: Vec<_> = self
+            .panel_surfaces
+            .iter()
+            .filter(|record| record.output_name.as_deref() == Some(output))
+            .map(|record| record.surface.clone())
+            .collect();
+        for surface in &surfaces {
+            if let Some(layer) = self
+                .layer_shell_state
+                .layer_surfaces()
+                .find(|layer| layer.wl_surface() == surface)
+            {
+                layer.send_close();
+            }
+        }
+        self.panel_surfaces
+            .retain(|record| record.output_name.as_deref() != Some(output));
+    }
+
     /// Layer surfaces the server currently tracks (the slice-1 panel).
     pub fn panel_surfaces(&self) -> Vec<PanelSurface> {
         self.panel_surfaces.clone()

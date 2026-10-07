@@ -174,6 +174,7 @@ pub struct Supervisor {
     child: Option<Child>,
     started: bool,
     restarts_used: u32,
+    child_generation: u64,
     next_allowed_ms: u64,
     last_exit: Option<Option<i32>>,
 }
@@ -186,6 +187,7 @@ impl Supervisor {
             child: None,
             started: false,
             restarts_used: 0,
+            child_generation: 0,
             next_allowed_ms: 0,
             last_exit: None,
         }
@@ -196,8 +198,13 @@ impl Supervisor {
     /// [`Supervisor::reset_budget`] afterwards if this is an operator-
     /// requested relaunch rather than the initial start.
     pub fn spawn(&mut self, command: &mut Command) -> io::Result<()> {
+        let generation = self
+            .child_generation
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("shell generation exhausted"))?;
         self.kill_child();
         self.child = Some(command.spawn()?);
+        self.child_generation = generation;
         self.started = true;
         self.next_allowed_ms = 0;
         Ok(())
@@ -233,9 +240,13 @@ impl Supervisor {
         if now_ms < self.next_allowed_ms {
             return Ok(ChildEvent::Exited(self.last_exit.unwrap_or(None)));
         }
+        let generation = self.child_generation.checked_add(1).ok_or_else(|| {
+            SuperviseError::SpawnFailed(io::Error::other("shell generation exhausted"))
+        })?;
         match remake().spawn() {
             Ok(child) => {
                 self.child = Some(child);
+                self.child_generation = generation;
                 if self.started {
                     self.restarts_used = self.restarts_used.saturating_add(1);
                 }
@@ -288,6 +299,11 @@ impl Supervisor {
     /// Pid of the held child, if any.
     pub fn child_pid(&self) -> Option<u32> {
         self.child.as_ref().map(std::process::Child::id)
+    }
+
+    /// Original owned-child lifetime; PID reuse cannot restore a stale grant.
+    pub fn child_generation(&self) -> Option<u64> {
+        self.child.as_ref().map(|_| self.child_generation)
     }
 
     pub fn has_child(&self) -> bool {
@@ -479,6 +495,10 @@ impl ShellDriver {
     /// control socket admits once supervision runs (#30).
     pub fn child_pid(&self) -> Option<u32> {
         self.supervisor.child_pid()
+    }
+
+    pub fn child_generation(&self) -> Option<u64> {
+        self.supervisor.child_generation()
     }
 
     /// Policy this driver enforces.
@@ -926,5 +946,21 @@ mod tests {
         ));
         assert_eq!(sup.restarts_used(), 2);
         assert!(start.elapsed() < Duration::from_secs(5));
+    }
+    #[test]
+    fn owned_spawn_generation_never_reuses_or_wraps() {
+        let mut supervisor = Supervisor::new(RestartPolicy::new(1, 1, 1));
+        let mut command = Command::new("/bin/sleep");
+        command.arg("10");
+        supervisor.spawn(&mut command).unwrap();
+        assert_eq!(supervisor.child_generation(), Some(1));
+        assert!(supervisor.child_pid().is_some());
+        supervisor.spawn(&mut command).unwrap();
+        assert_eq!(supervisor.child_generation(), Some(2));
+        assert!(supervisor.child_pid().is_some());
+        supervisor.kill_child();
+        supervisor.child_generation = u64::MAX;
+        assert!(supervisor.spawn(&mut command).is_err());
+        assert!(supervisor.child_generation().is_none());
     }
 }
