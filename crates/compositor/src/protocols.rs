@@ -79,9 +79,7 @@ use smithay::{
             KeyboardShortcutsInhibitHandler, KeyboardShortcutsInhibitState,
             KeyboardShortcutsInhibitor, KeyboardShortcutsInhibitorSeat,
         },
-        pointer_constraints::{
-            with_pointer_constraint, PointerConstraintsHandler, PointerConstraintsState,
-        },
+        pointer_constraints::{PointerConstraintsHandler, PointerConstraintsState},
         pointer_gestures::PointerGesturesState,
         relative_pointer::RelativePointerManagerState,
         shell::xdg::dialog::{XdgDialogHandler, XdgDialogState},
@@ -106,6 +104,8 @@ pub const ACTIVATION_TOKEN_TTL: Duration = Duration::from_secs(10);
 
 /// Protocol states held for the lifetime of the display.
 pub(crate) struct Protocols {
+    #[cfg(feature = "xwayland")]
+    pub(crate) x11_interop: crate::x11_interop::Interop,
     pub(crate) dmabuf_state: DmabufState,
     pub(crate) dmabuf_global: Option<DmabufGlobal>,
     pub(crate) activation_state: XdgActivationState,
@@ -132,7 +132,7 @@ pub(crate) struct Protocols {
     shortcut_pending: Option<(u64, KeyboardShortcutsInhibitor, String, Instant)>,
     shortcut_next: u64,
     shortcut_changed: bool,
-    shortcut_locked: bool,
+    pub(crate) shortcut_locked: bool,
     _pointer_warp: GlobalId,
     /// Pointer warps clients asked for, drained by the window manager:
     /// surface, surface-local position, enter serial.
@@ -184,6 +184,8 @@ impl Protocols {
             shortcut_next: 0,
             shortcut_changed: false,
             shortcut_locked: false,
+            #[cfg(feature = "xwayland")]
+            x11_interop: crate::x11_interop::Interop::new(dh),
             _pointer_warp: dh.create_global::<State, WpPointerWarpV1, ()>(1, ()),
             pointer_warps: Vec::new(),
             bell: Bell::default(),
@@ -796,17 +798,11 @@ delegate_pointer_gestures!(State);
 delegate_relative_pointer!(State);
 
 impl PointerConstraintsHandler for State {
-    /// Lock or confine at once when the surface already has the
-    /// pointer; otherwise the window manager activates it on enter.
-    fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
-        if pointer.current_focus().as_ref() == Some(surface) {
-            with_pointer_constraint(surface, pointer, |constraint| {
-                if let Some(constraint) = constraint {
-                    constraint.activate();
-                }
-            });
-        }
-    }
+    /// Registration alone cannot establish region eligibility. The window
+    /// manager activates on actual motion using placed geometry and the
+    /// committed input/constraint intersection; eligible pending constraints
+    /// already own that motion before native pressure barriers.
+    fn new_constraint(&mut self, _surface: &WlSurface, _pointer: &PointerHandle<Self>) {}
 
     fn cursor_position_hint(
         &mut self,

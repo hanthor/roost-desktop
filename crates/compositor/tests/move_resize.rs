@@ -667,3 +667,60 @@ fn replaying_the_live_press_does_not_restart_an_active_move() {
         .pointer_motion(&mut f.comp.state, at + Point::from((125.0, 60.0)), 4);
     assert_eq!(geometry(&f).loc, start.loc + Point::from((125, 60)));
 }
+
+#[test]
+fn stationary_pointer_press_enters_a_newly_mapped_window_before_delivery() {
+    let mut f = fixture();
+    let at = (geometry(&f).loc + Point::from((100, 100))).to_f64();
+    f.manager.pointer_motion(&mut f.comp.state, at, 1);
+    sync(&mut f);
+    assert_eq!(
+        f.client.pointer_entered.last().copied(),
+        Some(f._toplevel_surface.id().protocol_id())
+    );
+
+    let qh = f.queue.handle();
+    let surface = f
+        .client
+        .compositor
+        .as_ref()
+        .unwrap()
+        .create_surface(&qh, ());
+    let xdg = f
+        .client
+        .xdg_base
+        .as_ref()
+        .unwrap()
+        .get_xdg_surface(&surface, &qh, surface.clone());
+    let toplevel = xdg.get_toplevel(&qh, ());
+    toplevel.set_title("mapped-under-stationary-pointer".into());
+    surface.commit();
+    sync(&mut f);
+    sync(&mut f);
+    let new_id = f
+        .manager
+        .model()
+        .windows()
+        .map(|window| window.id)
+        .max()
+        .unwrap();
+    assert!(f.manager.geometry(new_id).unwrap().to_f64().contains(at));
+    let entered = f.client.pointer_entered.len();
+    // No new motion: the unchanged pointer must enter the new topmost surface.
+    f.manager
+        .pointer_button(&mut f.comp.state, BTN_LEFT, true, 2);
+    sync(&mut f);
+    assert!(f.client.pointer_entered.len() > entered);
+    assert_eq!(
+        f.client.pointer_entered.last().copied(),
+        Some(surface.id().protocol_id())
+    );
+    assert_eq!(f.client.presses, 1);
+    f.manager
+        .pointer_button(&mut f.comp.state, BTN_LEFT, false, 3);
+    sync(&mut f);
+    assert_eq!(
+        f.client.releases, 1,
+        "release remains paired with its delivered press"
+    );
+}

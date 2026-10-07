@@ -29,6 +29,7 @@ mod media_keys;
 mod network_agent;
 mod network_secrets;
 mod notify;
+mod orca;
 mod osd;
 mod overview;
 mod polkit;
@@ -1196,6 +1197,7 @@ fn build(app: &adw::Application) {
         pill_state: Vec::new(),
     }));
     render_pills(&mut shell.borrow_mut());
+    orca::start(shell.clone());
 
     // The compositor toggles the overview on presses over the
     // Activities control (ACTIVITIES_WIDTH_PX); sending a toggle here
@@ -1421,6 +1423,7 @@ fn build(app: &adw::Application) {
     let osd_ui = osd::OsdUi::new(app.upcast_ref());
     let media_keys = media_keys::MediaKeys::new({
         let osd = osd_ui.clone();
+        let sound = media_keys::sound_settings();
         Rc::new(move |percent, muted, microphone| {
             osd.show(&osd::OsdRequest {
                 icon: Some(
@@ -1432,6 +1435,11 @@ fn build(app: &adw::Application) {
                     .into(),
                 ),
                 level: Some(if muted { 0.0 } else { percent / 100.0 }),
+                max_level: Some(if microphone {
+                    1.0
+                } else {
+                    media_keys::output_limit(sound.as_ref()) / 100.0
+                }),
                 ..Default::default()
             });
         })
@@ -1852,12 +1860,13 @@ fn build(app: &adw::Application) {
                         if !uri.starts_with("file://") {
                             return String::new();
                         }
-                        // GIO decodes escaped path components before the
-                        // compositor's simple local-file drop reader.
+                        // Validate a local native path, then keep a canonical
+                        // escaped URI across the line-based drop. The compositor
+                        // decodes once; literal percent signs remain filename bytes.
                         gio::File::for_uri(&uri)
                             .path()
                             .filter(|path| path.is_absolute())
-                            .map(|path| format!("file://{}", path.display()))
+                            .map(|path| gio::File::for_path(path).uri().to_string())
                             .unwrap_or_default()
                     })
                     .unwrap_or_default();
@@ -1939,6 +1948,7 @@ fn build(app: &adw::Application) {
                 if let Some(iface) = all[4].as_ref() {
                     out.hot_corners = iface.boolean("enable-hot-corners");
                 }
+                out.right_to_left = gtk::Widget::default_direction() == gtk::TextDirection::Rtl;
                 out.enable_animations = animations_enabled(all[4].as_ref(), all[5].as_ref());
                 if let Some(gtk_settings) = gtk::Settings::default() {
                     gtk_settings.set_gtk_enable_animations(out.enable_animations);
@@ -2086,6 +2096,15 @@ fn build(app: &adw::Application) {
                         }
                         Ok(Handled::WindowMenu(request)) => menus.push(request),
                         Ok(Handled::ShortcutConsent(request)) => consent = Some(request),
+                        Ok(Handled::ScreenReader(state)) => {
+                            if matches!(
+                                state,
+                                roost_shell_control::ScreenReaderState::Unavailable
+                                    | roost_shell_control::ScreenReaderState::Conflict
+                            ) {
+                                notify.post("Screen Reader", "preferences-desktop-accessibility-symbolic", "Screen Reader unavailable", "Orca could not start for this session. Check its installation and other active sessions.");
+                            }
+                        }
                         Ok(Handled::WorkspacePopup { index, count }) => {
                             popups.push((index, count));
                         }

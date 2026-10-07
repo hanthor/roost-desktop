@@ -21,23 +21,47 @@ ARG BASE_IMAGE=ghcr.io/tuna-os/marlin:gnome
 FROM ${BASE_IMAGE}
 
 ARG ROOST_PKG
+ARG PERF_PINNED_BASELINE=false
+ARG ROOST_PKG_SHA256
 COPY ${ROOST_PKG} /tmp/roost.pkg.tar.zst
 COPY packaging/marlin/roost-nested-preview.desktop /tmp/roost-nested-preview.desktop
 COPY packaging/marlin/roost-portals.conf /usr/share/xdg-desktop-portal/roost-portals.conf
+COPY --chmod=0755 packaging/marlin/roost-image-kernels /usr/libexec/roost-image-kernels
+COPY --chmod=0755 packaging/marlin/roost-pinned-baseline /usr/libexec/roost-pinned-baseline
 
 # Install the shell integrations explicitly: the base can omit calendar
 # libraries, portal backends and the optional screen-recording plugins.
-# Refresh package metadata without upgrading the baseline desktop.
+# Refresh, upgrade, and install dependencies in one coherent transaction.
+# Both desktop sessions share the resulting image's packages and kernel.
 RUN set -eux; \
-    pacman -Sy --noconfirm \
-    && pacman -S --needed --noconfirm evolution-data-server gnome-keyring xdg-desktop-portal-gnome xdg-desktop-portal-gtk gst-plugin-pipewire gst-plugins-good \
+    if test -n "${ROOST_PKG_SHA256:-}"; then \
+        test "${#ROOST_PKG_SHA256}" = 64 && \
+        case "$ROOST_PKG_SHA256" in *[!0-9a-f]*) exit 1 ;; esac && \
+        sha256sum /tmp/roost.pkg.tar.zst && \
+        printf '%s  /tmp/roost.pkg.tar.zst\n' "$ROOST_PKG_SHA256" | sha256sum -c -; \
+    else test "$PERF_PINNED_BASELINE" = false; fi \
+    && case "$PERF_PINNED_BASELINE" in \
+        false) pacman -Syu --needed --noconfirm evolution-data-server gnome-keyring xdg-desktop-portal-gnome xdg-desktop-portal-gtk gst-plugin-pipewire gst-plugins-good orca speech-dispatcher ;; \
+        true) /usr/libexec/roost-pinned-baseline && \
+            pacman -S --needed --noconfirm evolution-data-server gnome-keyring xdg-desktop-portal-gnome xdg-desktop-portal-gtk gst-plugin-pipewire gst-plugins-good orca speech-dispatcher ;; \
+        *) exit 1 ;; \
+    esac \
     && pacman -U --noconfirm /tmp/roost.pkg.tar.zst \
+    && if test "$PERF_PINNED_BASELINE" = false; then \
+        /usr/libexec/roost-image-kernels preview; \
+    else /usr/libexec/roost-pinned-baseline; fi \
     && sed -i 's/^Name=Roost$/Name=Roost (preview)/' /usr/share/wayland-sessions/roost.desktop \
     && install -Dm0644 /tmp/roost-nested-preview.desktop \
         /usr/share/applications/roost-nested-preview.desktop \
     && rm -f /tmp/roost.pkg.tar.zst /tmp/roost-nested-preview.desktop \
-    && roost-compositor --version \
-    && roost-shell-gtk --version \
+    && pacman -Q roost \
+    && pacman -Ql roost \
+    && ls -l /usr/bin/roost-compositor /usr/bin/roost-shell-gtk \
+    && for bin in roost-compositor roost-shell-gtk; do \
+        printf 'Roost installed executable diagnostic: %s\n' "$bin"; \
+        command -v "$bin" && test -f "/usr/bin/$bin" && test -x "/usr/bin/$bin" && \
+        sha256sum "/usr/bin/$bin" && ldd "/usr/bin/$bin" && "$bin" --version || exit 1; \
+    done \
     && grep -qx 'Name=Roost (preview)' /usr/share/wayland-sessions/roost.desktop \
     && test -f /usr/lib/systemd/user/roost-session.target \
     && test -f /etc/pam.d/roost-lock \

@@ -22,6 +22,10 @@ while time.monotonic() < deadline:
     desktop = pyatspi.Registry.getDesktop(0)
     for i in range(desktop.childCount):
         app = desktop.getChildAtIndex(i)
+        # Backend restart can remove an application after childCount was read.
+        # Keep observing within the existing deadline; absence is not consent.
+        if app is None:
+            continue
         if "portal" not in (app.name or "").lower(): continue
         nodes, controls = [], []
         walk(app, nodes, controls)

@@ -277,6 +277,348 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     record("V-LIFECYCLE-OWNER", nonroot and intact, "root probe, non-root greetd session and three real app processes/surfaces")
     if not nonroot or not intact or before["state"]["locked"]:
         raise RuntimeError("lifecycle preconditions failed")
+    # Real distribution Orca owns a credential-verified bus name under the ordinary
+    # session user. Settings writes trigger Roost's consumer, not test start/stop.
+    orca_observations = []
+    def await_orca(enabled):
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            actual = agent.run("orca-read")
+            orca_observations.append(actual)
+            if (actual["enabled"] is enabled
+                    and ((enabled and actual["ready"] and actual["state"] == "active")
+                         or (not enabled and actual["pid"] == 0 and actual["owner"] is None
+                             and actual["state"] == "disabled"))):
+                return actual
+            time.sleep(0.2)
+        raise RuntimeError("GNOME Screen Reader preference did not control genuine distribution Orca")
+    try:
+        first_orca = None
+        for enabled in (False, True, False, True, False):
+            agent.run("orca-on" if enabled else "orca-off")
+            actual = await_orca(enabled)
+            if enabled:
+                identity = (actual["pid"], actual["start_ticks"])
+                if first_orca == identity:
+                    raise RuntimeError("Orca retained the stopped process identity")
+                first_orca = identity
+        record("V-ORCA-ACTIVATION", True,
+               "live GNOME key starts/stops genuine distribution Orca; bus PID/UID, package hash, compositor parent and display verified")
+    finally:
+        agent.run("orca-reset")
+        with open(os.path.join(evidence, "orca-activation.json"), "w") as stream:
+            json.dump(orca_observations, stream, indent=2)
+
+    # Real GNOME sound preference and virtual HDA/PipeWire data, not OSD state.
+    amplified_observations = []
+    try:
+        for mode, expected in (("off", 100.0), ("on", 104.0), ("high", 152.52), ("off", 100.0)):
+            initial = agent.run("audio-amplification-" + mode)
+            time.sleep(0.3)
+            qmp.keys("volumeup")
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                actual = agent.run("audio-amplification-read")
+                if (abs(actual["percent"] - expected) < 0.001 and not actual["muted"]
+                        and actual["amplified"] == (mode != "off")
+                        and actual["sink_id"] == initial["sink_id"]
+                        and actual["sink_name"].startswith("alsa_output")):
+                    break
+                time.sleep(0.2)
+            else:
+                raise RuntimeError("live GNOME overamplification did not update the real PipeWire sink")
+            amplified_observations.append(actual)
+        with open(os.path.join(evidence, "audio-amplification.json"), "w") as stream:
+            json.dump(amplified_observations, stream, indent=2)
+        record("V-AUDIO-AMPLIFICATION", True,
+               "real HDA/PipeWire output obeys live disable/enable, GNOME +11dB ceiling and disable reset")
+    finally:
+        agent.run("audio-amplification-reset")
+
+    # Native pressure uses QMP relative mouse events delivered through real
+    # libinput. Tablet/absolute positioning supplies no pressure.
+    corner_observations = []
+    corner_inputs = []
+    mice = qmp.cmd("query-mice")
+    with open(os.path.join(evidence, "hot-corner-input-devices.json"), "w") as stream:
+        json.dump(mice, stream, indent=2)
+    original = [mouse for mouse in mice if mouse.get("current") is True] if isinstance(mice, list) else []
+    if len(original) != 1 or type(original[0].get("index")) is not int:
+        raise RuntimeError("actual original QMP mouse handler is unavailable")
+    original_mouse = original[0]
+    restoration = None
+    def corner_move(x, y, relative=False):
+        kind = "rel" if relative else "abs"
+        values = (x, y) if relative else (int(x * 32767 / WIDTH), int(y * 32767 / HEIGHT))
+        selected = select_corner_mouse(qmp, relative)
+        before_count = agent.run("inventory")["state"]["native_relative_motion_count"] if relative else None
+        observation = {"requested": [x, y], "kind": kind, "wire_values": list(values),
+                       "device_selection": selected, "before_count": before_count}
+        corner_inputs.append(observation)
+        qmp.cmd("input-send-event", events=[
+            {"type": kind, "data": {"axis": "x", "value": values[0]}},
+            {"type": kind, "data": {"axis": "y", "value": values[1]}}])
+        if relative:
+            if not isinstance(before_count, int):
+                raise RuntimeError("native relative input observation is unavailable")
+            delivered = await_state(lambda value: value["state"]["native_relative_motion_count"] > before_count,
+                                    label=f"corner-relative-delivered-{len(corner_inputs)}")
+            observation.update(after_count=delivered["state"]["native_relative_motion_count"],
+                               pointer_position=delivered["state"]["pointer_position"])
+    def observe_corner(label, expected):
+        value = await_state(lambda value: value["state"]["overview_open"] is expected, label=label)
+        corner_observations.append({"label": label, "overview_open": expected,
+                                    "processes": value["processes"],
+                                    "pointer_position": value["state"]["pointer_position"]})
+        frame(label)
+    try:
+        if not agent.run("hot-corners", "true")["stored"]:
+            raise RuntimeError("GNOME hot corner policy did not persist")
+        await_state(lambda value: value["state"]["hot_corners"] is True, label="corner-policy-enabled")
+        corner_move(0, 10)
+        await_state(lambda value: value["state"]["pointer_position"] is not None
+                    and value["state"]["pointer_position"][0] == 0
+                    and 1 < value["state"]["pointer_position"][1] < 32,
+                    label="corner-absolute-delivered")
+        for index in range(10):
+            value = agent.run("inventory")
+            if value["state"]["overview_open"]:
+                raise RuntimeError("absolute corner hover incorrectly supplied native pressure")
+            time.sleep(0.05)
+        observe_corner("corner-absolute-negative", False)
+        corner_move(-200, 0, relative=True)
+        observe_corner("corner-relative-open", True)
+        corner_move(-200, 0, relative=True)
+        for index in range(10):
+            value = agent.run("inventory")
+            if not value["state"]["overview_open"]:
+                raise RuntimeError("native pressure retriggered without leaving the barriers")
+            time.sleep(0.05)
+        observe_corner("corner-held-negative", True)
+        corner_move(100, 100, relative=True)
+        await_state(lambda value: value["state"]["pointer_position"] is not None
+                    and value["state"]["pointer_position"][0] > 32
+                    and value["state"]["pointer_position"][1] > 32,
+                    label="corner-relative-left-both")
+        # Return with actual relative motion. No absolute warp may manufacture
+        # leave/rearm between the held-barrier negative and this closing hit.
+        corner_move(-1000, 0, relative=True)
+        await_state(lambda value: value["state"]["pointer_position"] is not None
+                    and value["state"]["pointer_position"][0] == 0
+                    and value["state"]["pointer_position"][1] > 32,
+                    label="corner-relative-left-edge")
+        corner_move(0, -1000, relative=True)
+        observe_corner("corner-rearmed-close", False)
+        if not agent.run("hot-corners", "false")["stored"]:
+            raise RuntimeError("GNOME hot corner disable did not persist")
+        await_state(lambda value: value["state"]["hot_corners"] is False, label="corner-policy-disabled")
+        corner_move(100, 100, relative=True)
+        await_state(lambda value: value["state"]["pointer_position"] is not None
+                    and value["state"]["pointer_position"][0] > 32
+                    and value["state"]["pointer_position"][1] > 32,
+                    label="corner-disabled-left-both")
+        # Return through actual relative approach/crossing. The tablet still
+        # remembers the earlier absolute hover coordinates; repeating them
+        # after relative movement need not produce a new absolute event.
+        corner_move(-1000, 0, relative=True)
+        await_state(lambda value: value["state"]["pointer_position"] is not None
+                    and value["state"]["pointer_position"][0] == 0
+                    and value["state"]["pointer_position"][1] > 32,
+                    label="corner-disabled-left-edge")
+        corner_move(0, -1000, relative=True)
+        await_state(lambda value: value["state"]["pointer_position"] == [0, 0],
+                    label="corner-disabled-relative-cross-delivered")
+        corner_move(-200, 0, relative=True)
+        for index in range(10):
+            if agent.run("inventory")["state"]["overview_open"]:
+                raise RuntimeError("disabled native corner opened the overview")
+            time.sleep(0.05)
+        observe_corner("corner-disabled-negative", False)
+        record("V-HOT-CORNER-PRESSURE", True,
+               "real libinput relative mouse pressure opens and rearms to close; absolute hover, held barrier and disabled policy are negative controls")
+    finally:
+        try:
+            restoration = restore_corner_mouse(qmp, original_mouse)
+        finally:
+            agent.run("hot-corners", "true")
+            with open(os.path.join(evidence, "hot-corner-pressure.json"), "w") as stream:
+                json.dump({"observations": corner_observations, "relative_inputs": corner_inputs,
+                           "devices": mice, "original_handler": original_mouse,
+                           "restoration": restoration}, stream, indent=2)
+
+    # Same ordinary nonfullscreen Wayland principal must demonstrate the
+    # barrier before and after real persistent constraint ownership.
+    constraint_observations = []
+    principal = None
+    constraint_primary_error = None
+    def constraint_snapshot(label, action="status"):
+        value = agent.run("constraint-" + action)
+        if principal is not None and value["principal"] != principal:
+            raise RuntimeError("original native constraint principal changed")
+        state = agent.run("inventory")
+        constraint_observations.append({"label": label, **value, "state": state})
+        return value["client"]
+    def await_client(predicate, label):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            value = constraint_snapshot(label)
+            if predicate(value):
+                return value
+            time.sleep(0.05)
+        raise RuntimeError("actual constraint client condition not observed: " + label)
+    def relative_receipt(x, y, label):
+        before_client = constraint_snapshot(label + "-before")
+        count = len(before_client["relative"])
+        corner_move(x, y, relative=True)
+        actual = await_client(lambda value: len(value["relative"]) > count, label + "-delivered")
+        payloads = actual["relative"][count:]
+        if any(event["utime"] <= 0 for event in payloads):
+            raise RuntimeError("native client relative receipt lacks actual timestamp")
+        for axis, requested in (("dx_unaccel", x), ("dy_unaccel", y)):
+            if requested and not any(event[axis] * requested > 0 for event in payloads):
+                raise RuntimeError("actual native client did not receive requested relative axis direction")
+        return actual
+    def enter_original(label):
+        unconstrained = constraint_snapshot(label + "-before-absolute-setup")
+        if ((unconstrained["mode"] == 1 and unconstrained["locked"] > unconstrained["unlocked"])
+                or (unconstrained["mode"] == 2 and unconstrained["confined"] > unconstrained["unconfined"])):
+            raise RuntimeError("absolute principal setup cannot escape an active constraint")
+        before = agent.run("inventory")["state"]["native_relative_motion_count"]
+        # A distinct real tablet position forces a new absolute device event
+        # even when it remembers an earlier corner position after relative
+        # motion. This is focus setup, never pressure or native rearm proof.
+        corner_move(64, 64)
+        await_state(lambda value: value["state"]["pointer_position"] is not None
+                    and 63 < value["state"]["pointer_position"][0] < 65
+                    and 63 < value["state"]["pointer_position"][1] < 65
+                    and value["state"]["native_relative_motion_count"] == before,
+                    label=label + "-distinct-tablet-position-delivered")
+        local = await_client(lambda value: value["entered"] == 1 and 63 < value["local"][0] < 65
+                             and 63 < value["local"][1] < 65,
+                             label + "-distinct-original-principal")
+        global_state = agent.run("inventory")
+        position = global_state["state"]["pointer_position"]
+        if (position is None or not all(63 < coordinate < 65 for coordinate in position)
+                or local["buffer_size"] != [128, 128] or not local["configure_events"]):
+            raise RuntimeError("actual original layer origin/configuration receipt unavailable")
+        # Retain both actual coordinate spaces, including wire quantization;
+        # this precedes pressure and every real constraint creation.
+        origin_receipt = {"global": position, "local": local["local"],
+                          "global_minus_local": [position[i] - local["local"][i] for i in range(2)],
+                          "client": local, "state": global_state}
+        constraint_observations.append({"label": label + "-actual-layer-origin", **origin_receipt})
+        with open(os.path.join(evidence, label + "-actual-layer-origin.json"), "w") as stream:
+            json.dump(origin_receipt, stream, indent=2)
+        corner_move(0, 10)
+        await_state(lambda value: value["state"]["pointer_position"] is not None
+                    and value["state"]["pointer_position"][0] == 0
+                    and 1 < value["state"]["pointer_position"][1] < 32, label=label + "-pointer")
+        return await_client(lambda value: value["entered"] == 1 and value["local"][0] == 0
+                            and 1 < value["local"][1] < 32, label + "-actual-enter")
+    def leave_original(label):
+        # Actual observed approach within the same 128x128 surface. Large
+        # acceleration must not silently turn this into another principal.
+        for step in range(4):
+            relative_receipt(20, 20, label + "-step-" + str(step))
+            position = agent.run("inventory")["state"]["pointer_position"]
+            if not position or not 0 <= position[0] < 128 or not 0 <= position[1] < 128:
+                raise RuntimeError("native leave lost original principal geometry")
+            if position[0] > 32 and position[1] > 32:
+                constraint_snapshot(label + "-left-both")
+                return
+        raise RuntimeError("genuine native motion did not leave both barriers")
+    def genuine_positive(label):
+        enter_original(label)
+        relative_receipt(-200, 0, label)
+        observe_corner(label, True)
+        qmp.keys("esc")
+        observe_corner(label + "-escape-close", False)
+        # Genuine native leaving resets both held barriers. No absolute
+        # warp can serve as the rearm evidence after destruction.
+        leave_original(label + "-leave")
+    try:
+        started = agent.run("constraint-start")
+        principal = started["principal"]
+        constraint_observations.append({"label":"original-start", **started})
+        await_client(lambda value: value["configured"] > 0 and all(value["globals"].values())
+                     and value["buffer_size"] == [128, 128] and value["configure_events"]
+                     and all(event["chosen"] == [128, 128]
+                             and all(dimension in (0, 128) for dimension in event["raw"])
+                             for event in value["configure_events"]), "actual-layer-admission")
+        genuine_positive("constraint-original-unconstrained-positive")
+        for mode in ("lock", "confine"):
+            original = enter_original(mode + "-principal")
+            start_position = agent.run("inventory")["state"]["pointer_position"]
+            before_events = original["locked" if mode == "lock" else "confined"]
+            pending = constraint_snapshot(mode + "-request-roundtrip", mode)
+            if pending["constraint_id"] <= 0 or pending["mode"] != (1 if mode == "lock" else 2):
+                raise RuntimeError("actual constraint object was not admitted")
+            # Snapshot records whether activation occurred already; no
+            # race is inferred solely from request completion.
+            activated = relative_receipt(-200, 0, mode + "-first-motion")
+            activated = await_client(lambda value: value["locked" if mode == "lock" else "confined"] > before_events,
+                                     mode + "-actual-activation")
+            relative_receipt(-200, 0, mode + "-active-motion")
+            for sample in range(10):
+                actual = constraint_snapshot(mode + "-active-negative")
+                value = agent.run("inventory")
+                position = value["state"]["pointer_position"]
+                if value["state"]["overview_open"] or not actual["entered"]:
+                    raise RuntimeError("constraint ownership lost focus or opened overview")
+                if mode == "lock" and position != start_position:
+                    raise RuntimeError("real locked pointer moved")
+                if mode == "confine" and (not position or not 0 <= position[0] < 64 or not 0 <= position[1] < 64
+                                         or not 0 <= actual["local"][0] < 64 or not 0 <= actual["local"][1] < 64):
+                    raise RuntimeError("real confined pointer escaped its committed layer region")
+                time.sleep(0.05)
+            frame(mode + "-actual-constrained-negative")
+            # Real committed empty region causes observed deactivation;
+            # restore proves persistent reactivation on the same object.
+            deactivated_count = actual["unlocked" if mode == "lock" else "unconfined"]
+            constraint_snapshot(mode + "-empty-region-commit", "empty")
+            relative_receipt(-200, 0, mode + "-empty-region-motion")
+            await_client(lambda value: value["unlocked" if mode == "lock" else "unconfined"] > deactivated_count,
+                         mode + "-actual-deactivation")
+            # Empty regions no longer own motion. Preserve any actual
+            # unconstrained activation, close it with balanced real input,
+            # and observe the same original surface before restoring.
+            empty_state = agent.run("inventory")
+            constraint_snapshot(mode + "-deactivated-desktop")
+            if empty_state["state"]["overview_open"]:
+                qmp.keys("esc")
+                observe_corner(mode + "-empty-overview-close", False)
+            enter_original(mode + "-persistent-original-reenter")
+            active_count = activated["locked" if mode == "lock" else "confined"]
+            constraint_snapshot(mode + "-restore-region-commit", "restore")
+            relative_receipt(-200, 0, mode + "-restore-motion")
+            await_client(lambda value: value["locked" if mode == "lock" else "confined"] > active_count,
+                         mode + "-actual-persistent-reactivation")
+            destroyed = constraint_snapshot(mode + "-destroy-roundtrip", "destroy")
+            if destroyed["constraint_id"] or destroyed["mode"]:
+                raise RuntimeError("original constraint survived real destruction")
+            # Entirely relative leave, approach and crossing: unchanged
+            # original surface receives genuine native payloads again.
+            leave_original(mode + "-destroyed-leave")
+            relative_receipt(-2000, 0, mode + "-relative-left-edge")
+            relative_receipt(0, -2000, mode + "-relative-cross-positive")
+            observe_corner(mode + "-destroyed-original-positive", True)
+            qmp.keys("esc")
+            observe_corner(mode + "-destroyed-escape-close", False)
+            leave_original(mode + "-post-positive-leave")
+        record("V-HOT-CORNER-CONSTRAINTS", True,
+               "same actual session layer principal receives relative payloads; real persistent lock/confine activates, suppresses pressure, deactivates/reactivates on committed region updates, and destruction restores actual native pressure")
+    except Exception as error:
+        constraint_primary_error = {"type": type(error).__name__, "message": str(error)}
+        raise
+    finally:
+        finish_constraint_proof(agent, qmp, original_mouse, evidence,
+            {"principal": principal, "observations": constraint_observations,
+             "devices": mice, "relative_inputs": corner_inputs,
+             "primary_error": constraint_primary_error})
+
+    # Capture the stable desktop after the final key OSD has disappeared.
+    time.sleep(2)
+
     base_frame = frame("before-vt")
     vt = int(before["session"]["VTNr"])
     away = 2 if vt != 2 else 3
@@ -528,6 +870,10 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     qmp.keys("ret")
     await_state(lambda state: not state["state"]["locked"])
     inventory("authenticated")
+    agent.run("orca-on")
+    departing_orca = await_orca(True)
+    with open(os.path.join(evidence, "orca-before-logout.json"), "w") as stream:
+        json.dump(departing_orca, stream, indent=2)
     agent.run("logout")
     deadline = time.monotonic() + 30
     greeter = {}
@@ -552,6 +898,13 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
         json.dump(greeter, stream, indent=2)
     record("V-LOGOUT", greeter_visible,
            "real session termination returns to a painted gtkgreet surface under active greetd, with no original compositor")
+    closed_orca = agent.run("orca-departed", departing_orca["pid"], departing_orca["start_ticks"])
+    with open(os.path.join(evidence, "orca-after-logout.json"), "w") as stream:
+        json.dump(closed_orca, stream, indent=2)
+    record("V-ORCA-LOGOUT", closed_orca["owner"] is None and not closed_orca["original_alive"],
+           "hardware logout stops only session-owned Orca; no original child/bus owner survives")
+    if closed_orca["owner"] is not None or closed_orca["original_alive"]:
+        raise RuntimeError("Orca survived the hardware session logout")
     if not greeter_visible:
         raise RuntimeError("live gtkgreet did not paint its actual visible surface after logout")
     record("V-LIFECYCLE", True, "all lifecycle operations completed; individual assertions remain mandatory")
@@ -763,7 +1116,70 @@ def run_tour(qmp, out, serial_path):
             "playback_fps": PLAY_FPS}
 
 
-def boot(disk, out, scratch, timeout, *, guest_agent=False):
+def select_corner_mouse(qmp, relative):
+    """Select a real, uniquely identified handler before one native input."""
+    name = "QEMU Virtio Mouse" if relative else "QEMU HID Tablet"
+    absolute = not relative
+    before = qmp.cmd("query-mice")
+    if not isinstance(before, list):
+        raise RuntimeError("actual QMP mouse inventory is unavailable")
+    candidates = [mouse for mouse in before if mouse.get("name") == name]
+    if len(candidates) != 1:
+        raise RuntimeError("actual intended mouse is absent or ambiguous")
+    selected = candidates[0]
+    index = selected.get("index")
+    if selected.get("absolute") is not absolute or type(index) is not int or not 0 < index <= 0x7fffffff:
+        raise RuntimeError("actual intended mouse has invalid mode/index")
+    response = qmp.cmd("human-monitor-command", **{"command-line": f"mouse_set {index}"})
+    if response != "":
+        raise RuntimeError("actual QEMU mouse_set was rejected")
+    after = qmp.cmd("query-mice")
+    current = [mouse for mouse in after if mouse.get("current") is True] if isinstance(after, list) else []
+    if len(current) != 1 or current[0].get("name") != name or current[0].get("index") != index or current[0].get("absolute") is not absolute:
+        raise RuntimeError("actual QMP current mouse differs from intended handler")
+    return {"requested_name": name, "requested_index": index, "requested_absolute": absolute,
+            "before": before, "after": after}
+
+
+def restore_corner_mouse(qmp, original):
+    before = qmp.cmd("query-mice")
+    actual = [mouse for mouse in before if mouse.get("index") == original["index"]] if isinstance(before, list) else []
+    if len(actual) != 1 or actual[0].get("name") != original["name"] or actual[0].get("absolute") is not original["absolute"]:
+        raise RuntimeError("original QMP mouse handler disappeared or changed")
+    response = qmp.cmd("human-monitor-command", **{"command-line": f"mouse_set {original['index']}"})
+    after = qmp.cmd("query-mice")
+    current = [mouse for mouse in after if mouse.get("current") is True] if isinstance(after, list) else []
+    if response != "" or len(current) != 1 or any(current[0].get(key) != original[key] for key in ("name", "index", "absolute")):
+        raise RuntimeError("original QMP mouse handler was not restored")
+    return {"original": original, "before": before, "after": after}
+
+
+def finish_constraint_proof(agent, qmp, original_mouse, evidence, report):
+    """Retain all cleanup outcomes without replacing an original proof error."""
+    cleanup_errors = []
+    try:
+        agent.run("constraint-quit")
+    except Exception as error:
+        cleanup_errors.append({"action": "constraint-quit", "message": str(error)})
+    try:
+        restored = restore_corner_mouse(qmp, original_mouse)
+        with open(os.path.join(evidence, "hot-corner-constraint-mouse-restoration.json"), "w") as stream:
+            json.dump(restored, stream, indent=2)
+    except Exception as error:
+        cleanup_errors.append({"action": "original-mouse-restoration", "message": str(error)})
+    try:
+        with open(os.path.join(evidence, "hot-corner-constraint-stderr.json"), "w") as stream:
+            json.dump(agent.run("constraint-log"), stream, indent=2)
+    except Exception as error:
+        cleanup_errors.append({"action": "constraint-log-retention", "message": str(error)})
+    report["cleanup_errors"] = cleanup_errors
+    with open(os.path.join(evidence, "hot-corner-constraints.json"), "w") as stream:
+        json.dump(report, stream, indent=2)
+    if report["primary_error"] is None and cleanup_errors:
+        raise RuntimeError("actual constraint cleanup failed: " + json.dumps(cleanup_errors))
+
+
+def boot(disk, out, scratch, timeout, *, guest_agent=False, native_relative_mouse=False):
     ovmf = next((p for p in OVMF if os.path.exists(p)), None)
     if not ovmf:
         sys.exit("roost-vm-lane: OVMF firmware not found (install ovmf)")
@@ -785,6 +1201,8 @@ def boot(disk, out, scratch, timeout, *, guest_agent=False):
             "-display", "none", "-serial", f"file:{serial}",
             "-qmp", f"unix:{qmp_path},server=on,wait=off",
             "-nic", "user,model=virtio-net-pci"]
+    if native_relative_mouse:
+        qemu.extend(["-device", "virtio-mouse-pci,id=roost-relative-mouse"])
     if guest_agent:
         qemu.extend(["-device", "virtio-serial-pci",
                      "-chardev", f"socket,path={agent_path},server=on,wait=off,id=roost-qga",
@@ -801,7 +1219,7 @@ def repeat_boots(args):
     """Keep per-boot evidence and aggregate gates for the parity ledger."""
     out = os.path.abspath(args.out)
     os.makedirs(out, exist_ok=True)
-    manifests, combined = [], {}
+    manifests, combined, coverage, boot_results = [], {}, {}, []
     for index in range(1, args.boots + 1):
         target = out if index == args.boots else os.path.join(out, f"repeat-{index:02d}")
         command = [sys.executable, __file__, "--disk", args.disk, "--out", target,
@@ -811,6 +1229,7 @@ def repeat_boots(args):
         for value in args.meta:
             command.extend(["--meta", value])
         result = subprocess.run(command, check=False)
+        boot_results.append({"boot": index, "returncode": result.returncode})
         path = os.path.join(target, "manifest.json")
         if not os.path.exists(path):
             sys.exit(f"roost-vm-lane: boot {index} produced no manifest")
@@ -819,14 +1238,37 @@ def repeat_boots(args):
         manifests.append(manifest)
         for name, assertion in manifest["assertions"].items():
             combined[name] = combined.get(name, True) and assertion["pass"]
+            observed = coverage.setdefault(name, {"observed_boots": [], "passed_boots": [],
+                                                  "missing_boots": []})
+            observed["observed_boots"].append(index)
+            if assertion["pass"]:
+                observed["passed_boots"].append(index)
+        # Startup checks from the first pristine boot must remain present.
+        # Additional final-tour checks are reported only where actually run.
+        for name in manifests[0]["assertions"]:
+            if name not in manifest["assertions"]:
+                combined[name] = False
+                coverage[name]["missing_boots"].append(index)
         if result.returncode:
             break
-    combined["V-REPEAT"] = len(manifests) == args.boots and all(combined.values())
+    successful_boots = sum(result["returncode"] == 0 for result in boot_results)
+    combined["V-REPEAT"] = successful_boots == args.boots and all(combined.values())
     with open(os.path.join(out, "repeat-manifest.json"), "w") as stream:
-        json.dump({"requested_boots": args.boots, "boots": manifests}, stream, indent=2)
+        json.dump({"requested_boots": args.boots, "boots": manifests,
+                   "assertion_coverage": coverage, "boot_results": boot_results}, stream, indent=2)
     with open(os.path.join(out, "assertions.txt"), "w") as stream:
         for name, passed in combined.items():
-            stream.write(f"{name} {'pass' if passed else 'fail'} repeated pristine boots ({len(manifests)}/{args.boots})\n")
+            if name == "V-REPEAT":
+                detail = f"successful pristine boot processes ({successful_boots}/{args.boots})"
+            else:
+                case = coverage[name]
+                observed = len(case["observed_boots"])
+                successful = len(case["passed_boots"])
+                detail = (f"observed on {observed}/{args.boots} pristine boots; "
+                          f"passed {successful}/{observed} observations; "
+                          f"boot indices {case['observed_boots']}; "
+                          f"missing baseline indices {case['missing_boots']}")
+            stream.write(f"{name} {'pass' if passed else 'fail'} {detail}\n")
     if not all(combined.values()):
         sys.exit("roost-vm-lane: repeated boot gate failed")
 
@@ -856,7 +1298,7 @@ def main():
         results[test_id] = (ok, desc)
         log(f"{test_id} {'pass' if ok else 'FAIL'}: {desc}")
 
-    vm, qmp_path, serial_path, kvm, agent_path = boot(os.path.abspath(a.disk), out, scratch, a.timeout, guest_agent=True)
+    vm, qmp_path, serial_path, kvm, agent_path = boot(os.path.abspath(a.disk), out, scratch, a.timeout, guest_agent=True, native_relative_mouse=True)
     start = time.time()
     drm = shell = None
     elapsed = 0.0

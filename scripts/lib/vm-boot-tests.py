@@ -4,6 +4,7 @@ import importlib.machinery
 import importlib.util
 import io
 import ast
+import base64
 import json
 import tempfile
 from pathlib import Path
@@ -15,6 +16,160 @@ loader = importlib.machinery.SourceFileLoader("vm_boot_lane", str(Path(__file__)
 spec = importlib.util.spec_from_loader(loader.name, loader)
 lane = importlib.util.module_from_spec(spec)
 loader.exec_module(lane)
+
+
+class OrcaReadFailure(unittest.TestCase):
+    def test_failed_observation_emits_safe_receipt_and_keeps_exit_one(self):
+        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
+        tree = ast.parse(source.read_text())
+        main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+        branch = next(n for n in ast.walk(main) if isinstance(n, ast.If)
+                      and isinstance(n.test, ast.Compare) and any(isinstance(v, ast.Constant) and v.value == "orca-read"
+                          for v in n.test.comparators))
+        def observe(): raise RuntimeError("private-error-text")
+        scope = {"orca_observation": observe, "orca_read_error": lambda error: {"exception_type": type(error).__name__}, "json": json}
+        with patch("sys.stdout", new_callable=io.StringIO) as out:
+            with self.assertRaises(SystemExit) as caught:
+                exec(compile(ast.Module(body=branch.body, type_ignores=[]), str(source), "exec"), scope)
+        self.assertEqual(caught.exception.code, 1)
+        self.assertTrue(caught.exception.__suppress_context__)
+        self.assertEqual(json.loads(out.getvalue()), {"orca_read_error": {"exception_type": "RuntimeError"}})
+        self.assertNotIn("private-error-text", out.getvalue())
+
+    def test_failed_read_rejects_arbitrary_private_or_invalid_schema(self):
+        actor = lane.guest_agent.GuestAgent.__new__(lane.guest_agent.GuestAgent)
+        invalid = [{"exception_type": "private-token"},
+                   {"exception_type": "CalledProcessError", "argv": "private-token"},
+                   {"exception_type": "CalledProcessError", "returncode": True},
+                   {"exception_type": "CalledProcessError", "returncode": 256},
+                   {"exception_type": "RuntimeError", "returncode": 1},
+                   {"exception_type": "RuntimeError", "errno": 1},
+                   {"exception_type": "CalledProcessError", "returncode": 1,
+                    "dbus_method": "SetLogFileForTesting", "stderr": "private-token"},
+                   {"exception_type": "CalledProcessError", "returncode": 1,
+                    "dbus_method": "GetVersion", "stderr": "x" * 513},
+                   {"exception_type": "CalledProcessError", "returncode": 1,
+                    "dbus_method": "GetVersion", "stderr": "\x00private-token"}]
+        for value in invalid:
+            output = base64.b64encode(json.dumps({"orca_read_error": value}).encode()).decode()
+            failure = {"exited": True, "exitcode": 1, "out-data": output}
+            with patch.object(actor, "command", side_effect=[{"pid": 10}, failure]):
+                with self.assertRaisesRegex(RuntimeError, r"guest lifecycle orca-read failed \(exit=1\)") as caught:
+                    actor.run("orca-read")
+            self.assertNotIn("private-token", str(caught.exception))
+        # Schema/privacy policy only; the retained real VM failure remains unexplained.
+
+    def test_read_diagnostics_preserve_only_fixed_public_dbus_failure(self):
+        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
+        tree = ast.parse(source.read_text())
+        helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                      and node.name == "orca_read_error")
+        scope = {"subprocess": lane.subprocess}
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), str(source), "exec"), scope)
+        diagnose = scope["orca_read_error"]
+        command = ["runuser", "-u", "roost-test", "--", "env", "PRIVATE_ENV=do-not-copy",
+                   "busctl", "--user", "call", "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                   "org.freedesktop.DBus", "GetConnectionUnixProcessID", "s", ":1.527"]
+        error = lane.subprocess.CalledProcessError(1, command, stderr="Call failed: owner vanished\n" + "x" * 1024)
+        result = diagnose(error)
+        self.assertEqual(result["dbus_method"], "GetConnectionUnixProcessID")
+        self.assertEqual(result["returncode"], 1)
+        self.assertEqual(len(result["stderr"]), 512)
+        self.assertNotIn("PRIVATE_ENV", json.dumps(result))
+        for unsafe in (["orca", "--testing-token=do-not-copy"],
+                       [*command[:-3], "SetLogFileForTesting", "ss", "do-not-copy"]):
+            result = diagnose(lane.subprocess.CalledProcessError(1, unsafe, stderr="do-not-copy"))
+            self.assertNotIn("stderr", result)
+            self.assertNotIn("do-not-copy", json.dumps(result))
+        self.assertEqual(diagnose(FileNotFoundError(2, "do-not-copy")),
+                         {"exception_type": "FileNotFoundError", "errno": 2})
+    def test_guest_transport_keeps_read_failure_and_other_action_output_private(self):
+        diagnostic = {"orca_read_error": {"exception_type": "CalledProcessError",
+                      "returncode": 1, "dbus_method": "GetVersion", "stderr": "Call failed: owner vanished"}}
+        failed = {"exited": True, "exitcode": 1,
+                  "out-data": base64.b64encode(json.dumps(diagnostic).encode()).decode(),
+                  "err-data": base64.b64encode(b"private arbitrary traceback").decode()}
+        actor = lane.guest_agent.GuestAgent.__new__(lane.guest_agent.GuestAgent)
+        for action in ("orca-read", "orca-speech-start"):
+            with patch.object(actor, "command", side_effect=[{"pid": 10}, failed]):
+                with self.assertRaises(RuntimeError) as caught:
+                    actor.run(action)
+            message = str(caught.exception)
+            self.assertNotIn("private arbitrary traceback", message)
+            if action == "orca-read":
+                self.assertIn("owner vanished", message)
+                self.assertIn("failed (exit=1)", message)
+            else:
+                self.assertNotIn("owner vanished", message)
+        malformed = ["!", base64.b64encode(b"\xff").decode(),
+                     base64.b64encode(b"[").decode(), base64.b64encode(b"[]").decode(),
+                     base64.b64encode(b"x" * 4097).decode(), "A" * 5465, None, ["not text"]]
+        for output in malformed:
+            with patch.object(actor, "command", side_effect=[{"pid": 10}, {**failed, "out-data": output}]):
+                with self.assertRaisesRegex(RuntimeError, r"guest lifecycle orca-read failed \(exit=1\)"):
+                    actor.run("orca-read")
+
+
+class ConstraintProofCleanup(unittest.TestCase):
+    def test_original_error_survives_all_independent_cleanup_failures(self):
+        calls = []
+        def run(action):
+            calls.append(action)
+            raise RuntimeError("failed " + action)
+        def restore(*arguments):
+            calls.append("restore")
+            raise RuntimeError("failed restoration")
+        original = RuntimeError("original admission failure")
+        with tempfile.TemporaryDirectory() as out, patch.object(lane, "restore_corner_mouse", side_effect=restore):
+            with self.assertRaises(RuntimeError) as caught:
+                try:
+                    raise original
+                finally:
+                    lane.finish_constraint_proof(SimpleNamespace(run=run), object(), {}, out,
+                        {"principal": None, "primary_error": {"message": str(original)}})
+            self.assertIs(caught.exception, original)
+            self.assertEqual(calls, ["constraint-quit", "restore", "constraint-log"])
+            actual = json.loads((Path(out) / "hot-corner-constraints.json").read_text())
+            self.assertIsNone(actual["principal"])
+            self.assertEqual(actual["primary_error"]["message"], str(original))
+            self.assertEqual([error["action"] for error in actual["cleanup_errors"]],
+                             ["constraint-quit", "original-mouse-restoration", "constraint-log-retention"])
+
+    def test_cleanup_only_failure_rejects_instead_of_qualifying(self):
+        def run(action):
+            if action == "constraint-quit":
+                raise RuntimeError("original principal quit failed")
+            return {"stderr": "original client log", "truncated": False}
+        with tempfile.TemporaryDirectory() as out, patch.object(lane, "restore_corner_mouse", return_value={"verified": True}):
+            with self.assertRaisesRegex(RuntimeError, "actual constraint cleanup failed"):
+                lane.finish_constraint_proof(SimpleNamespace(run=run), object(), {}, out,
+                    {"principal": {"pid": 42}, "primary_error": None})
+            actual = json.loads((Path(out) / "hot-corner-constraints.json").read_text())
+            self.assertIsNone(actual["primary_error"])
+            self.assertEqual(actual["cleanup_errors"][0]["action"], "constraint-quit")
+            self.assertTrue((Path(out) / "hot-corner-constraint-mouse-restoration.json").exists())
+            self.assertTrue((Path(out) / "hot-corner-constraint-stderr.json").exists())
+class OrcaLifecycleAuthority(unittest.TestCase):
+    def test_compositor_authority_comes_from_actual_backend(self):
+        source = (Path(__file__).resolve().parents[2] / "crates/compositor/src/runtime.rs").read_text()
+        self.assertIn("let hardware = matches!(self.backend, Backend::Drm(_));", source)
+        self.assertIn("self.orca.set_enabled(enabled && hardware);", source)
+        self.assertIn("let hardware = false;", source)
+        self.assertTrue('doc["screen_reader_pid"] = serde_json::json!(self.orca.pid());' in source)
+
+    def test_no_global_orca_service_control_or_replace(self):
+        root = Path(__file__).resolve().parents[2]
+        compositor = (root / "crates/compositor/src/orca.rs").read_text()
+        shell = (root / "crates/shell-gtk/src/orca.rs").read_text()
+        self.assertNotIn('"--replace"', compositor)
+        self.assertNotIn('"orca.service"', compositor)
+        self.assertIn('Command::new("/usr/bin/orca")', compositor)
+        self.assertIn('libc::PR_SET_PDEATHSIG, libc::SIGTERM', compositor)
+        self.assertIn('libc::getppid() != parent', compositor)
+        self.assertNotIn('gio::bus_get_future', shell)
+        self.assertIn('control.set_screen_reader(enabled)', shell)
+
+
 
 
 class BootApi(unittest.TestCase):
@@ -56,6 +211,48 @@ class BootApi(unittest.TestCase):
             self.assertIn("virtserialport,chardev=roost-qga,name=org.qemu.guest_agent.0", command)
 
 
+class NativeMouseSelection(unittest.TestCase):
+    def mouse(self, name="QEMU Virtio Mouse", absolute=False, current=False, index=8):
+        return {"name":name,"absolute":absolute,"current":current,"index":index}
+    def test_native_device_is_opt_in_and_preserves_performance_default(self):
+        with patch.object(lane.os.path,"exists",return_value=True), patch.object(lane.os,"access",return_value=True), patch.object(lane.subprocess,"Popen") as spawn:
+            lane.boot("disk.raw","/out","/scratch",30,guest_agent=True)
+            self.assertNotIn("virtio-mouse-pci,id=roost-relative-mouse",spawn.call_args.args[0])
+            lane.boot("disk.raw","/out","/scratch",30,guest_agent=True,native_relative_mouse=True)
+            self.assertIn("virtio-mouse-pci,id=roost-relative-mouse",spawn.call_args.args[0])
+    def test_actual_selected_name_index_and_mode_are_observed(self):
+        class Qmp:
+            def __init__(self):self.calls=[]
+            def cmd(qmp,command,**arguments):
+                qmp.calls.append((command,arguments))
+                if command=='human-monitor-command':return ''
+                return [self.mouse(current=len(qmp.calls)>1)]
+        qmp=Qmp();proof=lane.select_corner_mouse(qmp,True)
+        self.assertEqual(qmp.calls,[('query-mice',{}),('human-monitor-command',{'command-line':'mouse_set 8'}),('query-mice',{})])
+        self.assertTrue(proof['after'][0]['current'])
+        self.assertFalse(proof['requested_absolute'])
+    def test_wrong_name_duplicate_mode_or_index_cannot_be_selected(self):
+        bad=[[self.mouse(name='QEMU PS/2 Mouse')],[self.mouse(),self.mouse(index=9)],
+             [self.mouse(absolute=True)],[self.mouse(index=True)],[self.mouse(index=-1)]]
+        for inventory in bad:
+            with self.subTest(inventory=inventory):
+                qmp=SimpleNamespace(cmd=lambda *args,**kwargs:inventory)
+                with self.assertRaises(RuntimeError):lane.select_corner_mouse(qmp,True)
+    def test_failed_or_wrong_current_handler_cannot_prove_selection(self):
+        for result in ([self.mouse(current=False)],[self.mouse(name='vmmouse',absolute=True,current=True)],
+                       [self.mouse(current=True,index=9)]):
+            replies=iter([[self.mouse()],'',result])
+            with self.subTest(result=result),self.assertRaises(RuntimeError):
+                lane.select_corner_mouse(SimpleNamespace(cmd=lambda *args,**kwargs:next(replies)),True)
+    def test_original_handler_must_exist_and_restore_its_exact_identity(self):
+        original=self.mouse(name='vmmouse',absolute=True,current=True,index=7)
+        replies=iter([[original,self.mouse()],'',[original,self.mouse()]])
+        proof=lane.restore_corner_mouse(SimpleNamespace(cmd=lambda *args,**kwargs:next(replies)),original)
+        self.assertEqual(proof['after'][0],original)
+        with self.assertRaisesRegex(RuntimeError,'disappeared'):
+            lane.restore_corner_mouse(SimpleNamespace(cmd=lambda *args,**kwargs:[self.mouse()]),original)
+
+
 class InputProbePlacement(unittest.TestCase):
     def test_click_uses_placement_after_first_buffer(self):
         class FrameReached(Exception):
@@ -90,6 +287,55 @@ class InputProbePlacement(unittest.TestCase):
             self.assertEqual(mapped, placed)
             ready = json.loads((Path(out) / "lifecycle/input-ready.json").read_text())
             self.assertTrue(ready["active"])
+
+
+class RepeatedCoverage(unittest.TestCase):
+    def run_boots(self, root, manifests, returncodes=None):
+        next_boot = iter(zip(manifests, returncodes or [0] * len(manifests)))
+
+        def boot(command, check):
+            self.assertFalse(check)
+            manifest, code = next(next_boot)
+            destination = Path(command[command.index("--out") + 1])
+            destination.mkdir(parents=True, exist_ok=True)
+            (destination / "manifest.json").write_text(json.dumps({"assertions": manifest}))
+            return SimpleNamespace(returncode=code)
+
+        args = SimpleNamespace(out=str(root), boots=5, disk="disk.raw", timeout=30,
+                               tour=True, meta=[])
+        with patch.object(lane.subprocess, "run", side_effect=boot):
+            lane.repeat_boots(args)
+
+    def test_final_lifecycle_check_does_not_claim_five_observations(self):
+        startup = {"V-DRM": {"pass": True}}
+        full = {**startup, "V-SUSPEND": {"pass": True}}
+        with tempfile.TemporaryDirectory() as root:
+            self.run_boots(root, [startup] * 4 + [full])
+            proof = json.loads((Path(root) / "repeat-manifest.json").read_text())
+            self.assertEqual(proof["assertion_coverage"]["V-DRM"]["passed_boots"], [1, 2, 3, 4, 5])
+            self.assertEqual(proof["assertion_coverage"]["V-SUSPEND"]["observed_boots"], [5])
+            lines = (Path(root) / "assertions.txt").read_text().splitlines()
+            self.assertTrue(any(line.startswith("V-SUSPEND pass observed on 1/5") for line in lines))
+
+    def test_missing_baseline_check_is_fatal_and_retained(self):
+        startup = {"V-DRM": {"pass": True}}
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(SystemExit, "repeated boot gate failed"):
+                self.run_boots(root, [startup, {}, startup, startup, startup])
+            proof = json.loads((Path(root) / "repeat-manifest.json").read_text())
+            self.assertEqual(proof["assertion_coverage"]["V-DRM"]["missing_boots"], [2])
+            self.assertIn("V-DRM fail observed on 4/5", (Path(root) / "assertions.txt").read_text())
+
+    def test_observed_failure_and_failed_process_each_remain_fatal(self):
+        startup = {"V-DRM": {"pass": True}}
+        for last, codes in [({"V-DRM": {"pass": False}}, [0] * 5),
+                            (startup, [0, 0, 0, 0, 1])]:
+            with self.subTest(last=last, codes=codes), tempfile.TemporaryDirectory() as root:
+                with self.assertRaisesRegex(SystemExit, "repeated boot gate failed"):
+                    self.run_boots(root, [startup] * 4 + [last], codes)
+                proof = json.loads((Path(root) / "repeat-manifest.json").read_text())
+                self.assertEqual(proof["boot_results"][-1]["returncode"], codes[-1])
+                self.assertIn("V-REPEAT fail", (Path(root) / "assertions.txt").read_text())
 
 
 class PciCapabilities(unittest.TestCase):

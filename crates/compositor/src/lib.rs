@@ -48,7 +48,9 @@ use smithay::{
 
 pub mod animation;
 pub mod capture_security;
+mod constraint_motion;
 pub mod control;
+pub mod corner_pressure;
 #[cfg(feature = "drm")]
 pub mod drm;
 pub mod frame_timing;
@@ -61,6 +63,7 @@ pub mod monitors;
 pub mod mutter;
 #[cfg(feature = "drm")]
 mod native_repaint;
+pub mod orca;
 pub mod overlay;
 pub mod overview;
 pub mod pam;
@@ -70,6 +73,7 @@ pub mod popup;
 pub mod protocols;
 pub mod runtime;
 mod runtime_signal;
+mod sandbox_identity;
 pub mod screencast;
 pub mod screenshot;
 pub mod session_lock;
@@ -85,6 +89,8 @@ pub mod window_icons;
 pub mod windows;
 #[cfg(feature = "xwayland")]
 mod x11_icons;
+#[cfg(feature = "xwayland")]
+pub mod x11_interop;
 pub mod xwayland;
 
 /// One compositor-tracked output: protocol handle plus geometry.
@@ -168,6 +174,10 @@ pub struct State {
     /// Client window-state requests awaiting the manager's next
     /// `reconcile` drain (002 window actions).
     pub(crate) window_requests: Vec<(wl_surface::WlSurface, WindowRequest)>,
+    /// Exact native parent at role destruction, consumed on the next reconcile.
+    /// Smithay clears role data immediately after `toplevel_destroyed` returns.
+    pub(crate) closed_toplevel_parents:
+        std::collections::HashMap<wl_surface::WlSurface, wl_surface::WlSurface>,
     /// dmabuf, activation, viewporter and the other #89 protocols.
     pub(crate) protocols: protocols::Protocols,
     /// presentation-time, fifo and commit-timing (#89).
@@ -200,14 +210,22 @@ pub(crate) struct ClientState {
     pub(crate) connection_window_tag: Option<String>,
     /// Optional liveness marker for an ordinary service-channel connection.
     service_alive: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Granted only by authenticated typed service admission, never ordinary clients.
+    pub(crate) x11_interop: bool,
     /// Original bus or accepted-socket peer credentials, with a process pin.
     original_credentials: Option<Arc<zbus::fdo::ConnectionCredentials>>,
+    sandboxed_app_id: Arc<std::sync::OnceLock<Option<String>>>,
 }
 
 impl ClientState {
     pub(crate) fn native_connection(socket: &UnixStream) -> Self {
+        let credentials = crate::capture_security::socket_credentials(socket);
         Self {
-            original_credentials: crate::capture_security::socket_credentials(socket),
+            sandboxed_app_id: credentials
+                .clone()
+                .map(crate::sandbox_identity::discover_async)
+                .unwrap_or_default(),
+            original_credentials: credentials,
             ..Self::default()
         }
     }
@@ -288,6 +306,21 @@ impl State {
         crate::capture_security::pinned_process_id(credentials)
     }
 
+    /// Optional sandbox metadata captured from the original connecting peer.
+    /// Cached once at admission; publication still requires the same live pin.
+    pub fn authenticated_sandboxed_app_id(
+        &self,
+        surface: &wl_surface::WlSurface,
+    ) -> Option<String> {
+        self.authenticated_client_pid(surface)?;
+        surface
+            .client()?
+            .get_data::<ClientState>()?
+            .sandboxed_app_id
+            .get()?
+            .clone()
+    }
+
     /// Service-channel-only form retained for callers that need that origin.
     pub fn authenticated_service_client_pid(&self, surface: &wl_surface::WlSurface) -> Option<u32> {
         let client = surface.client()?;
@@ -324,6 +357,19 @@ impl XdgShellHandler for State {
     }
 
     fn new_toplevel(&mut self, _surface: ToplevelSurface) {}
+
+    fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        let parent = smithay::wayland::compositor::with_states(surface.wl_surface(), |states| {
+            states
+                .data_map
+                .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+                .and_then(|data| data.lock().unwrap().parent.clone())
+        });
+        if let Some(parent) = parent {
+            self.closed_toplevel_parents
+                .insert(surface.wl_surface().clone(), parent);
+        }
+    }
 
     fn parent_changed(&mut self, surface: ToplevelSurface) {
         self.refresh_initial_surface_scale(surface.wl_surface());
@@ -795,6 +841,7 @@ impl State {
             initial_outputs: std::collections::HashMap::new(),
             outputs: Vec::new(),
             window_requests: Vec::new(),
+            closed_toplevel_parents: std::collections::HashMap::new(),
             protocols: protocols::Protocols::new(dh),
             frame_timing: frame_timing::FrameTiming::new(dh),
             lock_protocol: session_lock::LockProtocol::new(dh),
@@ -1032,6 +1079,24 @@ impl State {
         self.outputs
             .iter()
             .filter_map(|e| Some((e.name.clone(), e.output.clone()?, e.loc, e.primary)))
+            .collect()
+    }
+
+    /// Native barrier geometry shares the live primary and logical output inventory.
+    pub fn hot_corner_outputs(
+        &self,
+    ) -> Vec<(
+        smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+        bool,
+    )> {
+        self.outputs
+            .iter()
+            .map(|entry| {
+                (
+                    smithay::utils::Rectangle::new(entry.loc.into(), entry.size),
+                    entry.primary,
+                )
+            })
             .collect()
     }
 

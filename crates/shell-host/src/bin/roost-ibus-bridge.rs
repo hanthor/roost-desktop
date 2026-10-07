@@ -481,8 +481,10 @@ impl Bridge {
                 .as_ref()
                 .is_some_and(|context| context.process_key(keyval, key, state));
         if debug() {
+            // This grab also forwards password/PIN keys. Diagnostics must
+            // never make their values recoverable, even with tracing enabled.
             eprintln!(
-                "roost-ibus-bridge: key {key} sym {keyval:#x} pressed {pressed}: IBus took it: {handled} ({:?})",
+                "roost-ibus-bridge: key pressed {pressed}: IBus took it: {handled} ({:?})",
                 started.elapsed()
             );
         }

@@ -210,3 +210,68 @@ fn hot_corner_regions_use_logical_pixels_at_fractional_output_scales() {
         );
     }
 }
+
+#[test]
+fn rtl_hot_corner_width_remains_logical_at_fractional_scale() {
+    use roost_compositor::windows::{ManagerInput, TriggerAction as A, TriggerState};
+    let mut comp = TestCompositor::new();
+    comp.state
+        .add_output("laptop", Some(output("laptop", 1.5)), 1280, 720);
+    comp.state.set_output_location("laptop", (-1280, 0));
+    let mut triggers = TriggerState::default();
+    triggers.set_right_to_left(true);
+    for (x, expected) in [
+        (-8.0, A::Open),
+        (-0.5, A::Open),
+        (-8.5, A::None),
+        (0.0, A::None),
+    ] {
+        assert_eq!(
+            comp.state.overview_trigger_action(
+                &mut triggers,
+                &ManagerInput::Motion {
+                    pos: (x, 2.0).into(),
+                    time: 0
+                },
+                false,
+                (x, 2.0).into()
+            ),
+            expected
+        );
+    }
+}
+
+#[test]
+fn native_pressure_barrier_uses_live_logical_scale_geometry() {
+    let mut comp = TestCompositor::new();
+    comp.state
+        .add_output("laptop", Some(output("laptop", 2.0)), 640, 400);
+    comp.state.set_output_location("laptop", (-640, -200));
+    let mut pressure = roost_compositor::corner_pressure::CornerPressure::default();
+    let layout = comp.state.hot_corner_outputs();
+    let (position, triggered) = pressure.motion(
+        (-638.0, -190.0).into(),
+        (-100.0, 0.0).into(),
+        0,
+        &layout,
+        false,
+        true,
+    );
+    assert_eq!(position, (-640.0, -190.0).into());
+    assert!(triggered.is_some());
+    pressure.reset();
+    let (position, triggered) = pressure.motion(
+        (-638.0, -150.0).into(),
+        (-100.0, 0.0).into(),
+        1,
+        &layout,
+        false,
+        true,
+    );
+    assert_eq!(
+        position,
+        (-738.0, -150.0).into(),
+        "barrier height must not double at scale two"
+    );
+    assert!(triggered.is_none());
+}

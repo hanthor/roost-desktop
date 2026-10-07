@@ -522,6 +522,7 @@ pub struct Runtime {
     manager: WindowManager,
     control: ControlHub,
     shell: ShellDriver,
+    orca: crate::orca::Reader,
     /// The IBus bridge, when IBus is installed.
     ime: Option<crate::ime::ImeBridge>,
     overlay: Overlay,
@@ -700,8 +701,17 @@ impl Runtime {
                     .map_err(|e| RuntimeError::Loop(e.to_string()))?;
                 handle
                     .insert_source(sources.input, |event, _, rt: &mut Runtime| {
+                        let corners_active = !rt.is_locked()
+                            && !rt.manager.pointer_constraint_owns_motion(&rt.state)
+                            && !rt.overlay.visible
+                            && crate::layer::exclusive_popup_keyboard_layer(&rt.state).is_none();
+                        let corner_layout = rt.state.hot_corner_outputs();
+                        rt.triggers.set_pressure_only(true);
                         let inputs = match &mut rt.backend {
-                            Backend::Drm(drm) => drm.translate(event),
+                            Backend::Drm(drm) => {
+                                drm.set_hot_corner_active(corners_active);
+                                drm.translate(event, &corner_layout)
+                            }
                             Backend::Winit(_) => Vec::new(),
                         };
                         for input in inputs {
@@ -948,6 +958,7 @@ impl Runtime {
             overview_swipe_from: None,
             scale: clamp_scale(session.scale),
             input_settings: Default::default(),
+            orca: crate::orca::Reader::new(&session.socket_name),
             pipewire: None,
             casts: Vec::new(),
             cast_outputs,
@@ -1235,6 +1246,11 @@ impl Runtime {
             match action {
                 TriggerAction::None => {}
                 TriggerAction::Toggle => {
+                    if let ManagerInput::CornerPressure { pos, .. } = input {
+                        if !self.control.overview_open() && self.manager.fullscreen_at(pos) {
+                            return;
+                        }
+                    }
                     self.control.set_overview(!self.control.overview_open());
                     #[cfg(feature = "drm")]
                     if matches!(self.backend, Backend::Drm(_)) {
@@ -1487,7 +1503,7 @@ impl Runtime {
         let x11_ready = self.state.xwm.is_some();
         #[cfg(not(feature = "xwayland"))]
         let x11_ready = false;
-        let doc = serde_json::json!({
+        let mut doc = serde_json::json!({
             "rendered_frames": self.stats.frames,
             "x11_display": self.x11_display.map(|d| format!(":{d}")),
             "capture_streams": self.casts.len(),
@@ -1504,6 +1520,7 @@ impl Runtime {
             "overview_open": overview_open,
             "animations_enabled": self.input_settings.enable_animations,
             "mouse_left_handed": self.input_settings.mouse_left_handed,
+            "hot_corners": self.input_settings.hot_corners,
             "touchpad_left_handed": self.input_settings.touchpad_left_handed,
             "locked": self.is_locked(),
             "active_workspace": model.active_workspace(),
@@ -1538,6 +1555,9 @@ impl Runtime {
                 "id": w.id,
                 "app_id": app_of(w.id),
                 "introspect_eligible": self.manager.is_introspect_eligible(w.id),
+                "x11_window_id": self.manager.x11_window_id(w.id),
+                "parent_window_id": self.manager.transient_parent(w.id),
+                "application_window_id": self.manager.application_window(w.id),
                 "icon": model.window(w.id).and_then(|w| w.icon.clone()),
                 "workspace": w.workspace,
                 "rect": [w.geometry.loc.x, w.geometry.loc.y, w.geometry.size.w, w.geometry.size.h],
@@ -1580,8 +1600,27 @@ impl Runtime {
                     }))
                 })
                 .collect::<Vec<_>>(),
-        })
-        .to_string();
+        });
+        doc["screen_reader_pid"] = serde_json::json!(self.orca.pid());
+        doc["screen_reader_state"] = serde_json::json!(self.orca.state());
+        // Keep backend-specific observations outside the large scene macro so
+        // its expansion remains below the compiler's default recursion limit.
+        // These values keep the same flat JSON fields and suppress lock input.
+        doc["native_relative_motion_count"] = serde_json::json!((!self.is_locked())
+            .then(|| match &self.backend {
+                #[cfg(feature = "drm")]
+                Backend::Drm(drm) => Some(drm.relative_motion_events()),
+                Backend::Winit(_) => None,
+            })
+            .flatten());
+        doc["pointer_position"] = serde_json::json!((!self.is_locked()).then(|| {
+            let pos = self.manager.pointer_pos();
+            [pos.x, pos.y]
+        }));
+        doc["pointer_fullscreen_blocked"] = serde_json::json!(
+            (!self.is_locked()).then(|| self.manager.fullscreen_at(self.manager.pointer_pos()))
+        );
+        let doc = doc.to_string();
         if doc == self.state_last {
             return;
         }
@@ -2527,6 +2566,7 @@ impl Runtime {
         self.manager
             .apply_keyboard_settings(&mut self.state, &settings);
         self.triggers.set_hot_corner(settings.hot_corners);
+        self.triggers.set_right_to_left(settings.right_to_left);
         self.introspect
             .publish_animations_enabled(settings.enable_animations);
         self.manager
@@ -2672,6 +2712,14 @@ impl Runtime {
                         owner_id,
                         owner.app_id.as_deref(),
                     )),
+                    sandboxed_app_id: if self.manager.is_x11(entry.id) {
+                        // The Wayland peer here is Xwayland, not the X11 application.
+                        None
+                    } else {
+                        self.manager
+                            .surface_of(entry.id)
+                            .and_then(|surface| self.state.authenticated_sandboxed_app_id(&surface))
+                    },
                     width: geometry.size.w,
                     height: geometry.size.h,
                     focused: entry.focused,
@@ -2761,6 +2809,20 @@ impl Runtime {
         }
         if let Some(settings) = outcome.input_settings {
             self.apply_input_settings(settings);
+        }
+        if let Some(enabled) = outcome.screen_reader {
+            #[cfg(feature = "drm")]
+            let hardware = matches!(self.backend, Backend::Drm(_));
+            #[cfg(not(feature = "drm"))]
+            let hardware = false;
+            self.orca.set_enabled(enabled && hardware);
+        }
+        let reader_changed = self.orca.poll().is_some();
+        if reader_changed || outcome.screen_reader.is_some() {
+            self.control
+                .queue_message(roost_shell_control::Message::ScreenReader {
+                    state: self.orca.status(),
+                });
         }
         if let Some(list) = outcome.accelerators {
             self.manager.set_accelerators(list);
@@ -4159,6 +4221,7 @@ fn input_time(input: &ManagerInput) -> u64 {
     match *input {
         ManagerInput::Key { time, .. }
         | ManagerInput::Motion { time, .. }
+        | ManagerInput::CornerPressure { time, .. }
         | ManagerInput::Button { time, .. }
         | ManagerInput::Axis { time, .. }
         | ManagerInput::SwipeBegin { time, .. }

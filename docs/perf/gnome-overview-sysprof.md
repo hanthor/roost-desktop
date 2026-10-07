@@ -91,14 +91,76 @@ decoded marks are retained even when the writer does not close; such a capture
 cannot qualify. Actual closure still does not bypass whole-file integrity,
 required scopes, strict frame ownership, repeated measurements or release gates.
 
+## Rejected presentation evidence
 
-The comparison runs three complete GNOME/Roost pairs on the same host and
-shared source/image. Each desktop boots from a newly installed guest disk.
-The first pair keeps the original artifact paths; the next pairs are retained
-under `repeat-2/` and `repeat-3/`, with `acquisition_repeat` in each report.
-Every acquisition must pass the actual writer-closure and unchanged integrity,
-scope and frame-ownership checks. The workflow stops on a failure and uploads
-all retained evidence; it never retries a rejected capture to select a pass.
-These are repeated fresh-guest acquisitions, not physical cold-host or warm
-session measurements, and they still cannot qualify a newer desktop package
-than the trusted main payload named in the manifest.
+A complete capture with closed writer descriptors can still fail timing
+qualification. The second GNOME capture in job 112576389653 (run 37554162135,
+artifact 11455021454) reconstructed a presentation at
+123677782000–123677789000 ns for a dispatch beginning at 123682891000 ns.
+The strict qualifier rejects this frame; it cannot become a latency sample.
+
+For this failure, `gnome-overview-frame-rejection.json` retains the reason,
+whole-capture digest, original dispatch and notification marks, reconstructed
+presentation bounds, KMS feedback readiness, swap count, and remaining pending
+dispatches. The whole raw capture, source provenance and decoded marks remain
+authoritative; no qualified ownership result is emitted. These scope-order
+associations are not independent source frame identifiers or raw kernel flip
+events, so the report does not establish whether the cause is ownership or the
+presentation provider. Issue #434 tracks that unresolved distinction.
+
+The gzip fixture `gnome51-presentation-before-dispatch.syscap.gz` contains the
+entire unmodified rejected capture, with its original provenance and artifact
+coordinates in the adjacent JSON. Tests verify the whole checksum, continued
+strict rejection, exact observed bounds, and preservation of rejection evidence
+without producing a qualified result.
+
+
+## Instrumented source-frame diagnostic variant
+
+The reference package `mutter 51.0-1.2` additionally applies
+`frame-source-evidence.patch` to the pinned 51.0 source. It records actual
+Clutter dispatch counters, the presentation's view/global-frame counters,
+supplied presentation time, sequence, flags and KMS readiness, and the raw
+atomic KMS callback's CRTC, sequence, seconds,
+microseconds and device path. Original scheduling, timestamp handling and the
+strict ownership qualifier remain unchanged. This variant is diagnostic: extra
+trace marks have measurement overhead, and these measurements are not final
+performance parity evidence.
+
+`gnome-overview-source-frames.json` retains these independently observed values
+before timing qualification. Missing, duplicate, foreign-PID or malformed
+source records fail validation; early presentation times are retained exactly,
+not repaired. The original complete capture/provenance remains authoritative.
+No pairing between a kernel event and a view-frame counter is inferred merely
+because their times are close. A rejected ownership result remains rejected.
+The recipe, both patches and package checksum manifest are retained with each
+run, and the original mapped library's installed package identity selects this
+additional diagnostic requirement.
+
+
+## Three fresh-guest acquisitions per desktop
+
+The repeatability lane runs three complete GNOME/Roost pairs on the same host
+and shared image/package baseline. Each desktop uses a newly installed guest
+disk. Pair one keeps the original artifact paths; subsequent pairs use
+`repeat-2/` and `repeat-3/`. Each report records `acquisition_repeat`,
+`acquisition_order=gnome-first-fixed`, and
+`reference_kind=instrumented-gnome51`.
+
+Every acquisition must pass the original writer-closure, whole-capture integrity,
+actual Start/Stop boundary, source identity, and strict ownership checks. A failure
+stops the workflow and uploads the evidence already retained. It does not rerun a
+rejected capture, replace timestamps, trim frames or select only successful pairs.
+These are fresh-guest repeatability measurements, not physical cold-host or warm
+session measurements. The trusted original main package and pinned shared image
+remain explicit; no newer feature candidate is inferred from the observer branch.
+
+GNOME runs first in every pair. Fixed order, shared host contention and warmed
+host/container caches can confound a comparison. Three pairs do not resolve
+those effects or establish a release threshold. The current reference uses
+instrumented `mutter 51.0-1.6`, including diagnostic marks and bounded drained
+capture gates; its overhead is not measured here. Results must be labeled as
+comparisons with an instrumented GNOME 51 reference, not an unmodified stock
+GNOME benchmark. Stock-reference resource/cadence measurements require a
+separately identified unmodified lane; unavailable stock frame-ownership timing
+must remain unavailable rather than become zero.

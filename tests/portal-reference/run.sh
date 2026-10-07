@@ -8,15 +8,19 @@ if [ "$(id -u)" -eq 0 ]; then
     env -u ROOST_PORTAL_BUS -u DBUS_SESSION_BUS_ADDRESS runuser -u roost-proof -- "$0" || status=$?
     # Container root maps to the host artifact owner in rootless Podman.
     # Restore evidence ownership even when a mandatory assertion failed.
-    chown -R --no-dereference 0:0 /out
-    exit "$status"
+    finalization=0
+    python3 /repo/scripts/lib/roost-portal-artifact-finalize.py /out --proof-status "$status" || finalization=$?
+    [ "$status" -eq 0 ] || exit "$status"
+    exit "$finalization"
 fi
 if [ -z "${ROOST_PORTAL_BUS:-}" ]; then ROOST_PORTAL_BUS=1 exec dbus-run-session -- "$0"; fi
 [ "$(id -u)" -eq 1000 ] || { echo 'ordinary fixture UID required' >&2; exit 1; }
 id > /out/session-identity.txt
-export DISPLAY=:99 XDG_RUNTIME_DIR=/out/runtime XDG_CONFIG_HOME=/out/config XDG_DATA_HOME=/out/data XDG_STATE_HOME=/out/state
+export DISPLAY=:99 XDG_RUNTIME_DIR=/out/runtime XDG_CONFIG_HOME=/out/config XDG_DATA_HOME="$HOME/.local/share" XDG_STATE_HOME=/out/state
 export XDG_PICTURES_DIR=/out/pictures
 export XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=GNOME GSETTINGS_BACKEND=memory LIBGL_ALWAYS_SOFTWARE=1 GTK_A11Y=atspi
+# Keep home files and their real home Trash on the same filesystem.
+# /out is a separate bind mount used only for retained evidence.
 mkdir -p "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME/xdg-desktop-portal" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
 chmod 700 "$XDG_RUNTIME_DIR"
 cp /repo/packaging/marlin/roost-portals.conf "$XDG_CONFIG_HOME/xdg-desktop-portal/portals.conf"
@@ -48,16 +52,24 @@ python3 /repo/scripts/lib/roost-portal-ready.py org.freedesktop.impl.portal.desk
 python3 /repo/scripts/lib/roost-portal-ready.py org.freedesktop.portal.Desktop org.freedesktop.portal.ScreenCast /out/frontend-ready.json --pid "$portal_frontend_pid"
 [ "$(rpm -q --qf '%{VERSION}' nautilus | cut -d. -f1)" = 51 ] || { echo 'GNOME51 Nautilus required' >&2; exit 1; }
 nautilus --gapplication-service >/out/nautilus.log 2>&1 & pids="$pids $!"
-for method in OpenFile SaveFile; do
-    for decision in cancel grant; do
-        file_out="/out/filechooser-$method-$decision"
-        python3 /repo/scripts/lib/roost-portal-filechooser-client.py "$file_out" "$method" "$decision" >"$file_out.log" 2>&1 & file_client=$!; pids="$pids $file_client"
-        end=$((SECONDS + 15))
-        until [ -s "$file_out.waiting.json" ]; do [ "$SECONDS" -lt "$end" ] || { cat "$file_out.log"; exit 1; }; sleep .1; done
-        python3 /repo/scripts/lib/roost-portal-filechooser-ui.py "$file_out" >"$file_out-ui.log" 2>&1
-        wait "$file_client"
+# Parented cases additionally map/focus an independent ordinary Wayland app B
+# after caller A, and verify actual input returns to A after Nautilus C closes.
+for parent_mode in none x11 wayland; do
+    for method in OpenFile SaveFile; do
+        for decision in cancel grant close; do
+            file_out="/out/filechooser-$method-$decision"
+            [ "$parent_mode" = none ] || file_out="$file_out-$parent_mode"
+            python3 /repo/scripts/lib/roost-portal-filechooser-client.py "$file_out" "$method" "$decision" "$parent_mode" >"$file_out.log" 2>&1 & file_client=$!; pids="$pids $file_client"
+            ready_seconds=15
+            [ "$parent_mode" = none ] || ready_seconds=30
+            end=$((SECONDS + ready_seconds))
+            until [ -s "$file_out.waiting.json" ]; do [ "$SECONDS" -lt "$end" ] || { cat "$file_out.log"; exit 1; }; sleep .1; done
+            python3 /repo/scripts/lib/roost-portal-filechooser-ui.py "$file_out" >"$file_out-ui.log" 2>&1
+            wait "$file_client"
+        done
     done
 done
+python3 /repo/scripts/lib/roost-nautilus-file-operations.py > /out/nautilus-operations.log 2>&1
 if grep -qE 'Failed to open service channel Wayland connection|Compositor service channel missing' /out/nautilus.log; then
     cat /out/nautilus.log
     echo 'Nautilus fell back after native service-channel failure' >&2

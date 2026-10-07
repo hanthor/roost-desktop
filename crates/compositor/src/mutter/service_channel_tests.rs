@@ -260,6 +260,12 @@ fn service_window_keeps_original_pinned_process_instead_of_socketpair_creator() 
     let (server, socket) = UnixStream::pair().unwrap();
     let mut data = crate::ClientState::service_connection(Arc::new(AtomicBool::new(true)), None);
     data.original_credentials = Some(credentials);
+    // Cached fixture metadata tests live-pin expiration, not real Flatpak discovery.
+    data.sandboxed_app_id
+        .set(Some("org.example.CachedFixture".into()))
+        .unwrap();
+    assert!(!data.ime_bridge);
+    assert!(!data.x11_interop);
     let client = comp
         .display
         .handle()
@@ -277,13 +283,94 @@ fn service_window_keeps_original_pinned_process_instead_of_socketpair_creator() 
     let server_surface = client.object_from_protocol_id::<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>(&comp.display.handle(), surface.id().protocol_id()).unwrap();
     let socket_creator = client.get_credentials(&comp.display.handle()).unwrap().pid;
     let original = comp.state.authenticated_service_client_pid(&server_surface);
+    let sandbox = comp.state.authenticated_sandboxed_app_id(&server_surface);
     child.kill().unwrap();
     child.wait().unwrap();
     assert_eq!(socket_creator, std::process::id() as i32);
     assert_ne!(pid, std::process::id());
     assert_eq!(original, Some(pid));
+    assert_eq!(sandbox.as_deref(), Some("org.example.CachedFixture"));
+    assert_eq!(
+        comp.state.authenticated_sandboxed_app_id(&server_surface),
+        None
+    );
     assert_eq!(
         comp.state.authenticated_service_client_pid(&server_surface),
         None
+    );
+}
+
+#[cfg(feature = "xwayland")]
+#[test]
+fn x11_interop_registry_requires_typed_admission_not_service_liveness() {
+    let mut comp = crate::TestCompositor::new();
+    let mut service = channel(&comp);
+    for typed in [false, true] {
+        let fd = service
+            .open_connection(format!(":1.{}", typed as u8), typed, None, None)
+            .unwrap();
+        let conn = Connection::from_socket(stream(fd)).unwrap();
+        let mut queue = conn.new_event_queue::<TagPeer>();
+        conn.display().get_registry(&queue.handle(), ());
+        let mut peer = TagPeer::default();
+        pump(&mut comp, &mut queue, &mut peer);
+        assert_eq!(peer.globals.contains_key("mutter_x11_interop"), typed);
+        // Both connections are service-tracked: only the admitted typed one
+        // gets the interop capability, without IME or capture roles.
+    }
+    let (server, socket) = UnixStream::pair().unwrap();
+    comp.add_client(server);
+    let conn = Connection::from_socket(socket).unwrap();
+    let mut queue = conn.new_event_queue::<TagPeer>();
+    conn.display().get_registry(&queue.handle(), ());
+    let mut peer = TagPeer::default();
+    pump(&mut comp, &mut queue, &mut peer);
+    assert!(!peer.globals.contains_key("mutter_x11_interop"));
+}
+
+#[cfg(feature = "xwayland")]
+#[test]
+fn ordinary_service_client_cannot_blind_bind_the_trusted_x11_global() {
+    let mut comp = crate::TestCompositor::new();
+    let mut service = channel(&comp);
+    let typed = service
+        .open_connection(":1.trusted".into(), true, None, None)
+        .unwrap();
+    let conn = Connection::from_socket(stream(typed)).unwrap();
+    let mut queue = conn.new_event_queue::<TagPeer>();
+    conn.display().get_registry(&queue.handle(), ());
+    let mut peer = TagPeer::default();
+    pump(&mut comp, &mut queue, &mut peer);
+    let global = peer.globals["mutter_x11_interop"].0;
+    let mut socket = stream(
+        service
+            .open_connection(":1.blind".into(), false, None, None)
+            .unwrap(),
+    );
+    assert!(service.clients[":1.blind"][0].alive.load(Ordering::SeqCst));
+    // Real wl_display.get_registry(new_id=2), then wl_registry.bind of
+    // the privileged global even though this client was never told its ID.
+    let registry: Vec<u8> = [1u32, (12 << 16) | 1, 2]
+        .into_iter()
+        .flat_map(u32::to_ne_bytes)
+        .collect();
+    socket.write_all(&registry).unwrap();
+    comp.pump();
+    let name = b"mutter_x11_interop\0";
+    let padded = (name.len() + 3) & !3;
+    let size = 8 + 4 + 4 + padded + 4 + 4;
+    let mut bind: Vec<u8> = [2u32, (size as u32) << 16, global, name.len() as u32]
+        .into_iter()
+        .flat_map(u32::to_ne_bytes)
+        .collect();
+    bind.extend_from_slice(name);
+    bind.resize(16 + padded, 0);
+    bind.extend_from_slice(&1u32.to_ne_bytes());
+    bind.extend_from_slice(&3u32.to_ne_bytes());
+    socket.write_all(&bind).unwrap();
+    comp.pump();
+    assert!(
+        !service.clients[":1.blind"][0].alive.load(Ordering::SeqCst),
+        "blind binding must reject the ordinary connection, not merely hide a registry entry"
     );
 }

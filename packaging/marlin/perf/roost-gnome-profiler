@@ -9,41 +9,59 @@ from pathlib import Path
 import stat
 import subprocess
 import time
+import sys
+from perf_trace_diagnostics import Context, encode
+from gnome_failed_capture import identity, process_start, read_marker, write_marker, failed_source
 
 
 PEER = "org.gnome.Shell"
 OBJECT = "/org/gnome/Sysprof3/Profiler"
 INTERFACE = "org.gnome.Sysprof3.Profiler"
+DIAGNOSTIC_PACKAGE = "mutter 51.0-1.6"
 
 
-def mapped_cogl_library(maps):
-    """Identify the actual ABI-51 Cogl mapping, including its kernel identity."""
+MUTTER_MODULES = {"cogl": "libmutter-cogl-51", "clutter": "libmutter-clutter-51",
+                  "core": "libmutter-51"}
+
+
+def mapped_mutter_library(maps, component):
+    """Identify a mapped ABI-51 module by its actual kernel file identity."""
+    if component not in MUTTER_MODULES:
+        raise ValueError("unknown Mutter module")
+    name = re.escape(MUTTER_MODULES[component])
     libraries = set()
     for line in maps.splitlines():
         fields = line.split(None, 5)
         if len(fields) != 6:
             continue
         path = fields[5]
-        if not re.fullmatch(r"libmutter-cogl-51\.so(?:\.[0-9]+)*(?: \(deleted\))?", Path(path).name):
+        if not re.fullmatch(name + r"\.so(?:\.[0-9]+)*(?: \(deleted\))?", Path(path).name):
             continue
         if path.endswith(" (deleted)") or not path.startswith("/"):
-            raise RuntimeError("mapped Mutter Cogl library is deleted or unnamed")
+            raise RuntimeError("mapped Mutter library is deleted or unnamed")
         major, minor = fields[3].split(":")
         libraries.add((path, os.makedev(int(major, 16), int(minor, 16)), int(fields[4])))
     if len(libraries) != 1:
-        raise RuntimeError("expected one mapped Mutter ABI-51 Cogl library")
+        raise RuntimeError(f"expected one mapped Mutter ABI-51 {component} library")
     return next(iter(libraries))
 
 
-def mapped_library_digest(path, device, inode):
+def mapped_cogl_library(maps):
+    return mapped_mutter_library(maps, "cogl")
+
+
+def mapped_library_digest(path, device, inode, context=None):
     """Hash the mapped inode, refusing path replacement or concurrent writes."""
+    if context is not None:context.stage="mutter-library-open"
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor, "rb") as stream:
+        if context is not None:context.stage="mutter-library-validation"
         before = os.fstat(stream.fileno())
         if (not stat.S_ISREG(before.st_mode) or before.st_mode & 0o022
                 or (before.st_dev, before.st_ino) != (device, inode)
                 or not 0 < before.st_size <= 16 * 1024 * 1024):
             raise RuntimeError("mapped Mutter library ownership/type/identity changed")
+        if context is not None:context.stage="mutter-library-read"
         raw = stream.read(16 * 1024 * 1024 + 1)
         after = os.fstat(stream.fileno())
         if (len(raw) != before.st_size or
@@ -55,34 +73,59 @@ def mapped_library_digest(path, device, inode):
                 "sha256": hashlib.sha256(raw).hexdigest()}
 
 
-def mutter_library_provenance(pid):
+def mutter_libraries_provenance(pid, context=None):
     maps = Path(f"/proc/{pid}/maps")
 
-    def mapping_identity():
+    def mapping_identities():
+        if context is not None:context.stage="mutter-map-read"
         with maps.open() as stream:
             contents = stream.read(1024 * 1024 + 1)
         if len(contents) > 1024 * 1024:
             raise RuntimeError("GNOME mapping list exceeds provenance bound")
-        return mapped_cogl_library(contents)
+        result={}
+        for component in MUTTER_MODULES:
+            if context is not None:
+                context.stage="mutter-map-selection"
+                context.public["component"]=component
+            result[component]=mapped_mutter_library(contents,component)
+        return result
 
-    identity = mapping_identity()
-    result = mapped_library_digest(*identity)
-    if result["uid"] != 0:
-        raise RuntimeError("mapped Mutter library is not owned by root")
-    if mapping_identity() != identity:
-        raise RuntimeError("GNOME Mutter mapping changed while hashing")
-    result["package"] = subprocess.check_output(
+    identities = mapping_identities()
+    if context is not None:context.stage="mutter-package-query"
+    package = subprocess.check_output(
         ["/usr/bin/pacman", "-Q", "mutter"], text=True, timeout=5).strip()
-    if not re.fullmatch(r"mutter 51\.0-[A-Za-z0-9.+_]+", result["package"]):
+    if context is not None:context.stage="mutter-package-validation"
+    if not re.fullmatch(r"mutter 51\.0-[A-Za-z0-9.+_]+", package):
         raise RuntimeError("mapped Mutter provenance requires the pinned ABI-51 package")
-    return result
+    modules = {}
+    for component, identity in identities.items():
+        if context is not None:context.public["component"]=component
+        result = mapped_library_digest(*identity,context=context)
+        if context is not None:context.stage="mutter-owner-validation"
+        if result["uid"] != 0:
+            raise RuntimeError("mapped Mutter library is not owned by root")
+        if context is not None:context.stage="mutter-owner-query"
+        owner = subprocess.check_output(
+            ["/usr/bin/pacman", "-Qqo", result["path"]], text=True, timeout=5).strip()
+        if context is not None:context.stage="mutter-owner-validation"
+        if owner != "mutter":
+            raise RuntimeError("mapped Mutter library belongs to a different package")
+        result["package"] = package
+        modules[component] = result
+        if context is not None and package==DIAGNOSTIC_PACKAGE:
+            context.public.setdefault("modules",{})[component]={key:result[key] for key in ("sha256","bytes","package")}
+    repeated=mapping_identities()
+    if context is not None:context.stage="mutter-map-recheck"
+    if repeated != identities:
+        raise RuntimeError("GNOME Mutter mappings changed while hashing")
+    return modules
 
 
-def main():
+def main(context):
     from gi.repository import Gio, GLib
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("start", "stop"))
+    parser.add_argument("action", choices=("start", "stop", "failed-stop"))
     args = parser.parse_args()
     uid = os.getuid()
     if uid == 0:
@@ -90,6 +133,8 @@ def main():
     runtime = Path(f"/run/user/{uid}")
     capture = runtime / "roost-perf-gnome.syscap"
     marker = runtime / "roost-perf-gnome-profiler.json"
+    failure_marker = runtime / "roost-perf-gnome-stop-failed.json"
+    context.stage="session-bus"
     bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
 
     def credentials(method, signature, argument):
@@ -99,70 +144,155 @@ def main():
                              GLib.VariantType.new(signature),
                              Gio.DBusCallFlags.NONE, 5000, None).unpack()[0]
 
+    context.stage="owner-name"
     owner = credentials("GetNameOwner", "(s)", PEER)
+    context.stage="owner-pid"
     pid = credentials("GetConnectionUnixProcessID", "(u)", owner)
+    context.stage="owner-uid"
     peer_uid = credentials("GetConnectionUnixUser", "(u)", owner)
+    context.stage="peer-executable"
     executable = Path(f"/proc/{pid}/exe").resolve(strict=True)
     installed = Path("/usr/bin/gnome-shell").resolve(strict=True)
     metadata = installed.stat()
+    context.stage="peer-validation"
     if (peer_uid != uid or executable != installed or metadata.st_uid != 0
             or metadata.st_mode & 0o022 or not stat.S_ISREG(metadata.st_mode)):
         raise RuntimeError("profiler peer is not the installed session GNOME Shell")
 
+    context.public["principal"]={"uid":uid,"pid":pid,"owner":owner}
+    context.stage="shell-version"
     version = subprocess.check_output([str(installed), "--version"], text=True, timeout=5).strip()
     if version != "GNOME Shell 51.0":
         raise RuntimeError("frame ownership analysis requires the pinned GNOME Shell 51.0")
 
+    context.public["shell_version"]=version
     if args.action == "start":
-        library = mutter_library_provenance(pid)
+        context.stage="mutter-provenance"
+        libraries = mutter_libraries_provenance(pid,context=context)
+        context.stage="diagnostic-package"
+        if any(value["package"] != DIAGNOSTIC_PACKAGE for value in libraries.values()):
+            raise RuntimeError("drained acquisition requires the exact CI diagnostic package")
+        context.public["modules"]={component:{key:value[key] for key in ("sha256","bytes","package")} for component,value in libraries.items()}
+        context.stage="capture-open"
         descriptor = os.open(capture, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         started = False
         try:
+            context.stage="start-fds"
             descriptors = Gio.UnixFDList.new()
             index = descriptors.append(descriptor)
+            requested = time.monotonic_ns()
+            context.stage="start-call"
             bus.call_with_unix_fd_list_sync(
                 owner, OBJECT, INTERFACE, "Start",
-                GLib.Variant("(a{sv}h)", ({}, index)), GLib.VariantType.new("()"),
-                Gio.DBusCallFlags.NONE, 5000, descriptors, None)
+                GLib.Variant("(a{sv}h)", ({"roost-require-drained": GLib.Variant("b", True)}, index)), GLib.VariantType.new("()"),
+                Gio.DBusCallFlags.NONE, 10000, descriptors, None)
             started = True
+            context.stage="ownership-marker"
             with marker.open("x") as stream:
                 os.chmod(marker, 0o600)
                 json.dump({"owner": owner, "pid": pid, "uid": uid,
                            "gnome_shell_version": version,
-                           "mutter_cogl_library": library,
+                           "process_start": process_start(pid),
+                           "capture_identity": identity(os.fstat(descriptor)),
+                           "mutter_cogl_library": libraries["cogl"],
+                           "mutter_mapped_libraries": libraries,
+                           "start_requested_monotonic_ns": requested,
+                           "drained_start_required": True,
+                           "drained_stop_required": True,
                            "started_monotonic_ns": time.monotonic_ns()}, stream)
         except BaseException:
+            original_stage=context.stage
             # Never stop somebody else's profile when Start itself failed.
             if started:
+                context.stage="cleanup-stop"
                 bus.call_sync(owner, OBJECT, INTERFACE, "Stop", None,
                               GLib.VariantType.new("()"), Gio.DBusCallFlags.NONE, 5000, None)
+            context.stage="cleanup-capture"
             capture.unlink()
+            context.stage=original_stage
             raise
         finally:
             os.close(descriptor)
         print(json.dumps({"owner": owner, "pid": pid, "uid": uid}))
+    elif args.action == "failed-stop":
+        context.stage="stop-marker-open"
+        saved = read_marker(failure_marker, uid)
+        context.stage="mutter-provenance"
+        libraries = mutter_libraries_provenance(pid, context=context)
+        source = failed_source(saved,uid,owner,pid,libraries,process_start(pid))
+        if credentials("GetNameOwner", "(s)", PEER) != owner:
+            raise RuntimeError("failed Stop original owner changed")
+        print(json.dumps(dict(source, qualified=False, failure=saved["failure"],
+                              stop_requested_monotonic_ns=saved["stop_requested_monotonic_ns"],
+                              failed_stop_observed_monotonic_ns=time.monotonic_ns())))
     else:
+        context.stage="stop-marker-open"
         descriptor = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW)
         with os.fdopen(descriptor) as stream:
             metadata = os.fstat(stream.fileno())
+            context.stage="stop-marker-validation"
             if (metadata.st_uid != uid or metadata.st_mode & 0o077
                     or not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 4096):
                 raise RuntimeError("invalid profiler ownership marker")
             saved = json.load(stream)
+        context.stage="stop-owner-validation"
         if (saved["owner"], saved["pid"], saved["uid"]) != (owner, pid, uid):
             raise RuntimeError("GNOME profiler owner changed during the workload")
+        context.stage="stop-version-validation"
         if saved.get("gnome_shell_version") != version:
             raise RuntimeError("GNOME Shell version changed during profiling")
-        bus.call_sync(owner, OBJECT, INTERFACE, "Stop", None,
-                      GLib.VariantType.new("()"), Gio.DBusCallFlags.NONE, 5000, None)
+        context.stage="stop-call"
+        stop_requested = time.monotonic_ns()
+        try:
+            bus.call_sync(owner, OBJECT, INTERFACE, "Stop", None,
+                          GLib.VariantType.new("()"), Gio.DBusCallFlags.NONE, 10000, None)
+        except GLib.Error as error:
+            # Only exact pinned cleanup failures admit later read-only raw
+            # acquisition. Unknown failures cannot borrow an old marker.
+            failure = context.failure(error, GLib.Error, Gio.DBusError.get_remote_error)
+            if failure["trace_failure"].get("drained_failure") in ("stop-owned-state", "stop-clock", "stop-timeout"):
+                try:
+                    write_marker(failure_marker,{"source":saved,"failure":failure,
+                                 "stop_requested_monotonic_ns":stop_requested},uid)
+                except (OSError,ValueError):
+                    pass  # Original nonzero GLib failure remains authoritative.
+            raise
         stopped = time.monotonic_ns()
+        context.stage="stop-marker-remove"
         marker.unlink()
         # Stop the original authenticated owner before diagnostics can fail.
-        library = mutter_library_provenance(pid)
-        if saved.get("mutter_cogl_library") != library:
+        context.stage="mutter-provenance"
+        libraries = mutter_libraries_provenance(pid,context=context)
+        context.stage="stop-provenance-validation"
+        if (saved.get("mutter_cogl_library") != libraries["cogl"] or
+                saved.get("mutter_mapped_libraries") != libraries):
             raise RuntimeError("mapped Mutter library changed during profiling")
-        print(json.dumps(dict(saved, stopped_monotonic_ns=stopped)))
+        print(json.dumps(dict(saved, stop_requested_monotonic_ns=stop_requested,
+                              stopped_monotonic_ns=stopped)))
+
+
+def run():
+    action=sys.argv[1] if len(sys.argv)==2 and sys.argv[1] in ("start","stop") else None
+    if len(sys.argv)==2 and sys.argv[1]=="failed-stop":action="stop"
+    if action is None:
+        # Original argparse refusal, no diagnostics for arbitrary commands.
+        main(Context("start"))
+        return
+    context=Context(action)
+    try:
+        main(context)
+    except Exception as error:
+        glib_type=remote=None
+        try:
+            from gi.repository import GLib, Gio
+            glib_type=GLib.Error
+            remote=Gio.DBusError.get_remote_error
+        except ImportError:
+            pass
+        print(encode(context.failure(error,glib_type,remote),action).decode())
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(run())

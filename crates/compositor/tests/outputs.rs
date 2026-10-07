@@ -375,3 +375,91 @@ fn desktop_size_bounds_extreme_coordinates_and_ignores_empty_outputs() {
     comp.state.add_output("disabled", None, 0, 800);
     assert_eq!(comp.state.desktop_size(), (0, 0));
 }
+
+#[test]
+fn rtl_corners_and_activities_follow_live_direction_and_output_bounds() {
+    use roost_compositor::windows::{ManagerInput, TriggerAction as A, TriggerState};
+    let mut comp = TestCompositor::new();
+    comp.state.add_output("primary", None, 1280, 720);
+    comp.state.set_output_location("primary", (-1280, -200));
+    let mut triggers = TriggerState::default();
+    let motion = |triggers: &mut TriggerState, x, y| {
+        comp.state.overview_trigger_action(
+            triggers,
+            &ManagerInput::Motion {
+                pos: (x, y).into(),
+                time: 0,
+            },
+            false,
+            (x, y).into(),
+        )
+    };
+    assert_eq!(motion(&mut triggers, -1278.0, -198.0), A::Open);
+    triggers.set_right_to_left(true);
+    assert_eq!(motion(&mut triggers, -1278.0, -198.0), A::None);
+    for x in [-8.0, -0.5] {
+        assert_eq!(motion(&mut triggers, x, -198.0), A::Open);
+    }
+    for (x, y) in [
+        (-8.5, -198.0),
+        (0.0, -198.0),
+        (-0.5, -201.0),
+        (-0.5, -192.0),
+        (f64::INFINITY, -198.0),
+        (-0.5, f64::NAN),
+    ] {
+        assert_eq!(motion(&mut triggers, x, y), A::None);
+    }
+    let button = ManagerInput::Button {
+        button: 272,
+        pressed: true,
+        time: 0,
+    };
+    assert_eq!(
+        comp.state
+            .overview_trigger_action(&mut triggers, &button, false, (-0.5, -190.0).into()),
+        A::Toggle
+    );
+    assert_eq!(
+        comp.state
+            .overview_trigger_action(&mut triggers, &button, false, (-1278.0, -190.0).into()),
+        A::None
+    );
+    triggers.set_hot_corner(false);
+    assert_eq!(motion(&mut triggers, -0.5, -198.0), A::None);
+    triggers.set_hot_corner(true);
+    assert_eq!(motion(&mut triggers, -0.5, -198.0), A::Open);
+    triggers.set_right_to_left(false);
+    assert_eq!(motion(&mut triggers, -0.5, -198.0), A::None);
+    assert_eq!(motion(&mut triggers, -1278.0, -198.0), A::Open);
+}
+
+#[test]
+fn rtl_secondary_corner_uses_gnome51_approach_probes_and_primary_override() {
+    use roost_compositor::windows::{ManagerInput, TriggerAction as A, TriggerState};
+    let mut comp = TestCompositor::new();
+    comp.state.add_output("primary", None, 1280, 720);
+    comp.state.add_output("secondary", None, 1280, 720);
+    comp.state.set_output_location("secondary", (0, 720));
+    let mut triggers = TriggerState::default();
+    triggers.set_right_to_left(true);
+    let motion = |comp: &TestCompositor, triggers: &mut TriggerState| {
+        comp.state.overview_trigger_action(
+            triggers,
+            &ManagerInput::Motion {
+                pos: (1279.5, 722.0).into(),
+                time: 0,
+            },
+            false,
+            (1279.5, 722.0).into(),
+        )
+    };
+    // GNOME probes above at the right boundary itself, rather than right-1.
+    assert_eq!(motion(&comp, &mut triggers), A::Open);
+    comp.state.set_output_location("primary", (1, 0));
+    assert_eq!(motion(&comp, &mut triggers), A::None);
+    assert!(comp.state.set_primary("secondary"));
+    assert_eq!(motion(&comp, &mut triggers), A::Open);
+    assert!(comp.state.remove_output("secondary"));
+    assert_eq!(motion(&comp, &mut triggers), A::None);
+}

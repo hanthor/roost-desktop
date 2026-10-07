@@ -53,6 +53,14 @@ def decode(raw):
             "limitation": "Raw GNOME scope marks; no input-to-presentation association inferred."}
 
 
+class FrameOwnershipError(ValueError):
+    """Rejected frame evidence; these bounds never become qualified latency."""
+
+    def __init__(self, reason, evidence):
+        super().__init__(reason)
+        self.evidence = evidence
+
+
 def overview_frame_bounds(decoded, pid, expected_inputs=20, output="Virtual-1"):
     """Reconstruct Mutter 51's two presentation slots, including newest aborts.
 
@@ -124,7 +132,14 @@ def overview_frame_bounds(decoded, pid, expected_inputs=20, output="Virtual-1"):
         lower = row["monotonic_ns"] + delta - 1000
         upper = row["monotonic_ns"] + row["duration_ns"] + delta + 1000
         if lower < owner["monotonic_ns"] or row["monotonic_ns"] < owner["monotonic_ns"] + owner["duration_ns"]:
-            raise ValueError("presentation precedes its owned frame")
+            raise FrameOwnershipError("presentation precedes its owned frame", {
+                "pid": pid, "output": output,
+                "dispatch": owner, "notification": row,
+                "presentation_lower_ns": lower, "presentation_upper_ns": upper,
+                "kms_ready_ns": int(match[4]) * 1000,
+                "swap_count": swap_counts[owner["monotonic_ns"]],
+                "remaining_pending_dispatches": pending,
+                "limitation": "Dispatch ownership reconstructed from scope order; no independent source frame identifier or raw kernel flip event."})
         kms_ready = int(match[4]) * 1000
         # KMS feedback readiness is a userspace timestamp, not the kernel flip
         # timestamp. It can follow that flip; it must precede this notification.
@@ -160,3 +175,90 @@ def overview_frame_bounds(decoded, pid, expected_inputs=20, output="Virtual-1"):
     return dict(inputs=rows, dispatch_count=len(dispatches), presented_count=len(presented),
                 aborted_count=aborted, pending_count=0,
                 limitation="Controlled Super-release handler bounds to first later owned frame; not device arrival or an exact accepted-toggle timestamp.")
+
+
+def frame_source_evidence(decoded, pid):
+    """Validate recorded source identifiers without replacing timing ownership."""
+    import re
+    formats = {
+        "Roost::FrameClock::dispatch-id": ("dispatches",
+            r"output=(\S+) frame=(\d+) dispatch_us=(\d+)"),
+        "Roost::FrameClock::presented-id": ("presentations",
+            r"output=(\S+) view_frame=(\d+) global_frame=(\d+) presentation_us=(\d+) sequence=(\d+) flags=(\d+) kms_ready_us=(\d+)"),
+        "Roost::KMS::raw-page-flip": ("kernel_events",
+            r"crtc=(\d+) sequence=(\d+) seconds=(\d+) microseconds=(\d+) device=(/dev/dri/card\d+)"),
+    }
+    result = {kind: [] for kind, _ in formats.values()}
+    for row in decoded["marks"]:
+        if row["pid"] != pid or row["name"] not in formats:
+            continue
+        kind, pattern = formats[row["name"]]
+        match = re.fullmatch(pattern, row["message"])
+        if not match:
+            raise ValueError("malformed diagnostic source frame mark")
+        values = match.groups()
+        if kind == "kernel_events":
+            crtc, sequence, seconds, microseconds = map(int, values[:4])
+            if microseconds >= 1000000 or any(v > 0xffffffff for v in (crtc, sequence, seconds)):
+                raise ValueError("invalid diagnostic raw kernel event")
+            item = dict(crtc=crtc, sequence=sequence, seconds=seconds,
+                        microseconds=microseconds, device=values[4])
+        elif kind == "presentations":
+            if values[0] != "Virtual-1" or int(values[4]) > 0xffffffff or int(values[5]) > 0xffffffff:
+                raise ValueError("invalid diagnostic presentation identity")
+            item = dict(output=values[0], frame_counter=int(values[1]),
+                        global_frame_counter=int(values[2]), source_time_us=int(values[3]),
+                        sequence=int(values[4]), flags=int(values[5]), kms_ready_us=int(values[6]))
+        else:
+            if values[0] != "Virtual-1":
+                raise ValueError("unexpected diagnostic output")
+            item = dict(output=values[0], frame_counter=int(values[1]), source_time_us=int(values[2]))
+        result[kind].append(dict(mark_monotonic_ns=row["monotonic_ns"], **item))
+    for kind, scope in (("dispatches", "Clutter::FrameClock::dispatch()"),
+                        ("presentations", "Clutter::FrameClock::presented()")):
+        expected = sum(row["pid"] == pid and row["name"] == scope for row in decoded["marks"])
+        counters = [row["frame_counter"] for row in result[kind]]
+        if not expected or len(counters) != expected or len(set(counters)) != expected:
+            raise ValueError("missing or duplicate diagnostic source frame identifiers")
+    if not result["kernel_events"]:
+        raise ValueError("missing diagnostic raw kernel events")
+    result["limitation"] = ("Instrumented Mutter 51.0 diagnostic capture; source counters and raw kernel event fields are retained independently. "
+                            "No inferred frame-to-kernel pairing, timestamp substitution or final performance parity claim.")
+    return result
+
+
+def capture_boundary_evidence(decoded, metadata, output="Virtual-1"):
+    """Validate the actual diagnostic source gate; never repair ownership."""
+    import re
+    pid = metadata["pid"]
+    marks = [row for row in decoded["marks"] if row["pid"] == pid]
+    rows = [row for row in marks if row["name"] == "Roost::CaptureBoundary"]
+    if len(rows) != 1 or metadata.get("drained_start_required") is not True:
+        raise ValueError("missing or ambiguous actual drained capture boundary")
+    row = rows[0]
+    match = re.fullmatch(r"output=([^ ]+) clock=(0x[0-9a-f]+) next=(\d+) pending=(\d+) depth=(\d+) "
+                         r"dispatched=(\d+) state=([^ ]+) requested_us=(\d+) enabled_us=(\d+) samples=(\d+)", row["message"])
+    if not match:
+        raise ValueError("malformed actual drained capture boundary")
+    name, clock, counter, pending, depth, dispatched, state, requested, enabled, samples = match.groups()
+    counter, pending, depth, dispatched, requested, enabled, samples = map(int, (counter,pending,depth,dispatched,requested,enabled,samples))
+    if (name != output or int(clock,16) == 0 or pending or depth or dispatched
+            or state not in ("init","idle","scheduled","scheduled-now","scheduled-later")
+            or not 1 <= samples <= 5000 or not 0 <= enabled-requested < 5_000_000
+            or not metadata["start_requested_monotonic_ns"] // 1000 <= requested <= enabled <= row["monotonic_ns"] // 1000
+            or row["monotonic_ns"] > metadata["started_monotonic_ns"]):
+        raise ValueError("actual frame clock was not drained before capture acknowledgement")
+    frames = sorted((item for item in marks if item["name"] in
+                     ("Clutter::FrameClock::dispatch()","Clutter::FrameClock::presented()","Clutter::FrameClock::ready()")),
+                    key=lambda item:(item["monotonic_ns"],-item["duration_ns"]))
+    sources = frame_source_evidence(decoded,pid)
+    if (not frames or frames[0]["name"] != "Clutter::FrameClock::dispatch()"
+            or frames[0]["monotonic_ns"] < row["monotonic_ns"]
+            or not sources["dispatches"] or sources["dispatches"][0]["output"] != output
+            or sources["dispatches"][0]["frame_counter"] != counter
+            or sources["dispatches"][0]["mark_monotonic_ns"] < row["monotonic_ns"]):
+        raise ValueError("first actual captured frame lacks the gate's dispatch owner")
+    return {"boundary_mark":row,"output":name,"clock":clock,"next_counter":counter,
+            "requested_us":requested,"enabled_us":enabled,"samples":samples,
+            "first_source_dispatch":sources["dispatches"][0],
+            "limitation":"Actual CI acquisition gate only; no timestamp substitution or kernel causal join."}

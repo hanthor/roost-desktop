@@ -82,6 +82,61 @@ A transient dialog belongs to its ultimate mapped parent application, including 
 
 This metadata association grants no input, capture or provider role. The new regression drives genuinely different parent/dialog/provider app IDs through real Wayland parent assignment, foreign import/withdrawal and unmapping; map tests verify app focus and preserved X11 class. These regressions executed successfully at candidate `aabb55e`; the integrated main-based source must pass its own CI gates. Full registered desktop-file/StartupWMClass, startup/PID and authenticated sandbox identity resolution, admitted portal app/window selection and final shipped-image qualification remain required under #410/#397. Reference: [GNOME Shell 51 WindowTracker](https://github.com/GNOME/gnome-shell/blob/51.0/src/shell-window-tracker.c).
 
+
+## Trusted Wayland dialogs for X11 parents
+
+Candidate source implements the pinned libgxdp `mutter_x11_interop` version 1 contract. Only connections admitted through the authenticated typed service method can see/bind it; ordinary native, ordinary options-based service and IME connections do not gain this capability. This is separate from provider/capture/input permission. Owned live xdg surfaces can request an existing managed X11 parent while unlocked. Invalid or destroyed parents are ignored, and deferred requests retain the original managed window generation rather than resolving a reusable XID later.
+
+The unified parent lookup is used by placement, stacking, modal focus, standalone eligibility and inherited application identity. A dialog shares its parent's workspace and centers over it after the initial buffer determines its size. Parent unmap clears the association; closing a focused dialog returns focus to the surviving parent. Managed parents need not already have an associated Wayland buffer. Preferred scale follows the placed dialog geometry.
+
+A registry regression distinguishes typed service admission from ordinary service liveness and native clients. The reference image adds rootless Xwayland and repeats real Nautilus Open/Save cancel/accept with an actual GTK X11 caller: it retains the XID and managed parent identity, requires centered placement, dialog focus and inherited app association, and requires focus returning to the still-live parent. Earlier four parentless reference outcomes remain part of the suite. All new execution remains pending; these source/tests do not close #404. Multiple simultaneous parents, parent/provider teardown and restart races, locked-session interactions, sandbox document grants and final shipped-image/multiple-output qualification remain required.
+
+Upstream behavior and wire provenance: [Mutter 51 interop capability filter](https://github.com/GNOME/mutter/blob/51.0/src/wayland/meta-wayland-x11-interop.c), [typed service capability](https://github.com/GNOME/mutter/blob/51.0/src/core/meta-service-channel.c), [pinned libgxdp XML](https://github.com/GNOME/libgxdp/blob/df896e3412b749947bc6f62a91a1aac8e6b6d19b/data/mutter-x11-interop.xml).
+
 Qualified reference evidence: #406 at `8ac36e67` passed all four actual installed Nautilus Open/Save acceptance/cancellation journeys in [portal-security](https://github.com/tuna-os/tuna-desktop/actions/runs/37543720545/job/112547244016) and merged after all fourteen required gates. #416 at `c7648e5d` passed original native process-identity coverage plus GTK and native VM lifecycle/security gates and merged. These results establish those tested foundations; full sandbox publication, application tracking, dialog parenting and final shipped-image acceptance remain open. Parent-association regressions at `161c2e69` also executed successfully; this newly integrated source requires its own qualification.
 
 At candidate `8b68365f`, the actual GTK `G-INTROSPECT-TYPES` journey changed all fourteen EWMH types and restored the absent-type default successfully; the complete GTK journey and all four X11 scale/input cases passed. DRM output and 240 ordered presentations also passed. This integrated follow-up needs fresh gates, and the earlier `5eda7c96` D-OUTPUT failure has not been assigned a proven root cause.
+
+At candidate `b68bad53`, actual instrumented coverage passed both typed/ordinary/native registry visibility and the ordinary-client raw blind-bind denial test. The original peer credential snapshot and typed X11 capability are retained separately in the integrated client state. Real X11-parent picker journeys and fresh integrated-head qualification remain pending.
+
+
+## Optional GNOME sandbox identities (#410)
+
+Native and service-channel connections schedule bounded background discovery from their original live process pin. Flatpak identity uses `/proc/PID/root/.flatpak-info` and GLib's actual `GKeyFile` `[Application] name` parser; Snap identity uses the kernel `/proc/PID/attr/current` profile, with GNOME's namespace/binary normalization. No identity is inferred from a client-supplied application ID or X11 class. Missing, malformed, inaccessible or oversized metadata leaves the optional field absent. Four workers and a 32-entry nonblocking queue bound discovery work; peer filesystem access never runs in the compositor loop.
+
+`GetWindows` and eligible running applications expose `sandboxed-app-id` independently of desktop application association. Cached publication still requires the original process pin to be live. X11 windows remain unknown here: their Wayland peer is Xwayland, not the application. Metadata grants no provider, capture, IME or X11 interoperability authority. Tests exercise real GKeyFile parsing, bounded file/FIFO/symlink handling, missing-pin denial, optional D-Bus fields and expiration of cached fixture metadata through a real service surface. Current-head Rust execution, actual Flatpak/Snap process discovery, sandbox document grants and shipped-image qualification remain pending; #410/#395/#397 remain open.
+
+Contracts: [Mutter 51 sandbox discovery](https://github.com/GNOME/mutter/blob/51.0/src/core/window.c) and [GNOME Shell 51 Introspect fields](https://github.com/GNOME/gnome-shell/blob/51.0/js/misc/introspect.js).
+
+## Native Wayland caller reference coverage (#404)
+
+The reference driver additionally creates an actual native GTK caller, exports its live toplevel through GdkWayland's asynchronous `export_handle`, and passes that returned `wayland:` handle to the real portal. Its ordinary socket connection is independent of the typed Nautilus provider connection. The caller uses a distinct raw app ID only to locate its own mapped debug window; that label grants no authority. Open/Save cancel/accept retain the exported handle, actual provider identity, parent association/centered geometry, positive parent input before the dialog, blocked exposed-parent input while modal and restored focus/input after the response. The caller releases its exported handle through `drop_exported_handle`.
+
+The existing four parentless and four X11-parent outcomes remain required. These new native Wayland journeys are candidate coverage awaiting actual execution, not a claim of full picker, lifecycle, sandbox grant or final shipping-image qualification. API contract: [GTK Wayland toplevel export](https://docs.gtk.org/gdk4-wayland/method.WaylandToplevel.export_handle.html).
+
+
+The reference-container Files journey also launches the genuine installed
+Nautilus browser on a fresh directory owned by the ordinary session user.
+Actual desktop input creates a folder, copies a selected file through the
+clipboard, renames it, moves it, sends it to Trash, restores it through Undo
+and closes the browser. Exact file bytes and source/destination paths are
+verified independently; Trash is enumerated through its actual GIO backend
+with original-path and contents checks. Accessibility and painted screenshots
+are retained at each stage, including failures. This supplements picker proofs
+without establishing final-image, Flatpak, network-volume, scaling or
+lock-recovery acceptance for the full Files application. The shortcuts follow
+[GNOME copy/move](https://help.gnome.org/gnome-help/files-copy.html),
+[rename](https://help.gnome.org/gnome-help/files-rename.html) and
+[Trash](https://help.gnome.org/gnome-help/files-delete.html) documentation.
+
+The reference file-picker journey also covers caller-initiated `Request.Close`
+for Open and Save with parentless, X11 and native Wayland callers. It first
+observes the actual focused Nautilus dialog (and the modal parent input block
+when parented), then closes the request from the original caller connection.
+The original dialog must disappear, ten fresh GLib timer observations must
+remain free of a response signal, and Save must leave no destination. Parented
+cases must restore focus and actual pointer delivery. This follows the
+[public Request contract](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Request.html),
+which distinguishes caller abort from a user cancellation response. Retained
+reference-container evidence remains separate from shipped-image, Flatpak,
+provider-restart and physical-hardware qualification.

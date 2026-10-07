@@ -82,6 +82,8 @@ struct ManagedWindow {
     above: bool,
     /// Always on Visible Workspace: shown on every workspace.
     sticky: bool,
+    /// Trusted cross-backend modal parent, pinned to a managed generation.
+    x11_parent: Option<u64>,
 }
 
 /// Compositor-side presentation layout (002 window actions).
@@ -424,6 +426,14 @@ impl WindowManager {
     /// GNOME considers an application standalone if one of its windows has
     /// no live transient parent. Read actual role/X11 metadata, not app-id text.
     pub fn is_standalone(&self, id: u64) -> bool {
+        if self
+            .windows
+            .get(&id)
+            .and_then(|w| w.x11_parent)
+            .is_some_and(|parent| self.windows.contains_key(&parent))
+        {
+            return false;
+        }
         self.windows
             .get(&id)
             .is_some_and(|window| match window.surface.underlying_surface() {
@@ -447,26 +457,90 @@ impl WindowManager {
             if !seen.insert(current) {
                 return self.windows.contains_key(&id).then_some(id);
             }
-            let window = self.windows.get(&current)?;
-            let parent = match window.surface.underlying_surface() {
-                WindowSurface::Wayland(toplevel) => read_parent(toplevel)
-                    .filter(|parent| parent.is_alive())
-                    .and_then(|parent| {
-                        self.windows.iter().find_map(|(id, candidate)| {
-                            (candidate.surface.wl_surface().as_deref() == Some(&parent))
-                                .then_some(*id)
-                        })
-                    }),
-                #[cfg(feature = "xwayland")]
-                WindowSurface::X11(surface) => surface
-                    .is_transient_for()
-                    .and_then(|parent| self.x11_index.get(&parent).copied()),
-            };
+            self.windows.get(&current)?;
+            let parent = self.transient_parent(current);
             match parent {
                 Some(parent) => current = parent,
                 None => return Some(current),
             }
         }
+    }
+
+    /// Shared parent lookup for placement, modality and app association.
+    /// External relationships retain model IDs rather than reusable XIDs.
+    pub fn transient_parent(&self, id: u64) -> Option<u64> {
+        let window = self.windows.get(&id)?;
+        if let Some(parent) = window.x11_parent.filter(|p| self.windows.contains_key(p)) {
+            return Some(parent);
+        }
+        match window.surface.underlying_surface() {
+            WindowSurface::Wayland(toplevel) => read_parent(toplevel)
+                .filter(|p| p.is_alive())
+                .and_then(|p| {
+                    self.windows.iter().find_map(|(id, w)| {
+                        (w.surface.wl_surface().as_deref() == Some(&p)).then_some(*id)
+                    })
+                }),
+            #[cfg(feature = "xwayland")]
+            WindowSurface::X11(surface) => surface
+                .is_transient_for()
+                .and_then(|xid| self.x11_index.get(&xid).copied()),
+        }
+    }
+
+    #[cfg(feature = "xwayland")]
+    fn reconcile_x11_parents(&mut self, state: &mut State) {
+        let requests = std::mem::take(&mut state.protocols.x11_interop.requests);
+        for (surface, parent) in requests {
+            if state.protocols.shortcut_locked || !surface.is_alive() {
+                continue;
+            }
+            let Some(child) = self.surface_index.get(&surface).copied() else {
+                continue;
+            };
+            if child == parent || !self.is_x11(parent) {
+                continue;
+            }
+            let parent_live = self
+                .windows
+                .get(&parent)
+                .is_some_and(|window| window.surface.alive());
+            if !parent_live {
+                continue;
+            }
+            if let Some(window) = self.windows.get_mut(&child) {
+                window.x11_parent = Some(parent);
+            }
+            self.place_above(parent, child);
+            if let Some(geometry) = self.geometry(child) {
+                state.window_origins.insert(surface.clone(), geometry.loc);
+                state.refresh_initial_surface_scale(&surface);
+            }
+            if let Some(workspace) = self.model.window(parent).map(|w| w.workspace) {
+                self.move_to_workspace(state, child, workspace);
+            }
+            if self.model.focused() == Some(parent) {
+                self.apply_focus(state, Some(parent));
+            }
+        }
+        // Publish the original X11 objects, including managed parents whose
+        // Wayland buffer has not yet associated. The request path checks life
+        // and captures the model generation before deferred scene mutation.
+        state.protocols.x11_interop.parents = self
+            .x11_index
+            .iter()
+            .filter_map(|(xid, id)| {
+                let window = self.windows.get(id)?;
+                match window.surface.underlying_surface() {
+                    WindowSurface::X11(surface)
+                        if surface.alive() && !surface.is_override_redirect() =>
+                    {
+                        Some((*xid, (*id, surface.clone())))
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
     }
 
     /// GNOME's GetWindows picker allows ordinary toplevels and dialogs,
@@ -482,6 +556,18 @@ impl WindowManager {
                     !surface.is_override_redirect() && introspect_x11_type(surface.window_type())
                 }
             })
+    }
+
+    /// Actual X11 resource identity for diagnostic journeys, never authority.
+    pub fn x11_window_id(&self, id: u64) -> Option<u32> {
+        #[cfg(feature = "xwayland")]
+        if let Some(window) = self.windows.get(&id) {
+            if let WindowSurface::X11(surface) = window.surface.underlying_surface() {
+                return Some(surface.window_id());
+            }
+        }
+        let _ = id;
+        None
     }
 
     /// Whether window `id` is an X11 window (through Xwayland).
@@ -666,8 +752,12 @@ impl WindowManager {
         for id in gone {
             self.unmap(state, id);
         }
+        // Discard destruction records for roles that never entered the model.
+        state.closed_toplevel_parents.clear();
         #[cfg(feature = "xwayland")]
         self.drain_x11_events(state);
+        #[cfg(feature = "xwayland")]
+        self.reconcile_x11_parents(state);
         // Smithay's Window geometry uses a cached surface-tree bounding box.
         // Refresh it after dispatched commits (including unsynchronized
         // subsurfaces) before render-time width scaling reads the geometry.
@@ -820,6 +910,7 @@ impl WindowManager {
                 minimized: false,
                 above: false,
                 sticky: false,
+                x11_parent: None,
             },
         );
         self.place_transient(surface, id);
@@ -975,15 +1066,7 @@ impl WindowManager {
                     window.geometry = geometry;
                     window.unplaced = false;
                 }
-                let parent = self
-                    .windows
-                    .get(&id)
-                    .and_then(|w| match w.surface.underlying_surface() {
-                        WindowSurface::Wayland(toplevel) => read_parent(toplevel),
-                        #[cfg(feature = "xwayland")]
-                        _ => None,
-                    })
-                    .and_then(|wl| self.surface_index.get(&wl).copied());
+                let parent = self.transient_parent(id);
                 if let Some(parent) = parent {
                     self.place_above(parent, id);
                 }
@@ -1038,6 +1121,7 @@ impl WindowManager {
                 minimized: false,
                 above: false,
                 sticky: false,
+                x11_parent: None,
             },
         );
         if let Some(parent) = surface
@@ -1079,14 +1163,26 @@ impl WindowManager {
                         self.unmap(state, model);
                     }
                 }
-                X11ManagerEvent::ConfigureRequest { id, size } => {
+                X11ManagerEvent::ConfigureRequest {
+                    id,
+                    surface,
+                    width,
+                    height,
+                } => {
                     let Some(model) = self.x11_index.get(&id).copied() else {
+                        // A toolkit can request its real size before MapRequest.
+                        // Dropping it leaves the initial X geometry unchanged;
+                        // map_x11 would then advertise that placeholder back.
+                        let mut geometry = surface.geometry();
+                        geometry.size = requested_x11_size(geometry.size, width, height);
+                        if surface.configure(Some(geometry)).is_err() {
+                            eprintln!("roost-compositor: pre-map X11 configure refused id={id}");
+                        }
                         continue;
                     };
-                    if let (Some((w, h)), Some(window)) = (size, self.windows.get_mut(&model)) {
-                        if w > 0 && h > 0 {
-                            window.geometry.size = (w as i32, h as i32).into();
-                        }
+                    if let Some(window) = self.windows.get_mut(&model) {
+                        window.geometry.size =
+                            requested_x11_size(window.geometry.size, width, height);
                     }
                     self.configure(model, self.model.focused() == Some(model));
                 }
@@ -1162,10 +1258,8 @@ impl WindowManager {
     /// that spawned them. Parentless windows and orphans keep their
     /// cascaded geometry and stacking slot.
     fn place_transient(&mut self, surface: &ToplevelSurface, id: u64) {
-        let Some(parent_wl) = read_parent(surface) else {
-            return;
-        };
-        let Some(parent_id) = self.surface_index.get(&parent_wl).copied() else {
+        let _ = surface;
+        let Some(parent_id) = self.transient_parent(id) else {
             return;
         };
         self.place_above(parent_id, id);
@@ -1201,6 +1295,23 @@ impl WindowManager {
     /// to the topmost remaining window, if any. In scroll mode the
     /// remaining columns close ranks behind it.
     fn unmap(&mut self, state: &mut State, id: u64) {
+        let return_parent = self
+            .windows
+            .get(&id)
+            .and_then(|w| {
+                w.x11_parent.or_else(|| {
+                    let surface = w.surface.wl_surface()?;
+                    let parent = state.closed_toplevel_parents.get(surface.as_ref())?;
+                    self.surface_index.get(parent).copied()
+                })
+            })
+            .filter(|parent| {
+                self.model.focused() == Some(id)
+                    && self
+                        .windows
+                        .get(parent)
+                        .is_some_and(|window| window.surface.alive())
+            });
         if let Some(window) = self.windows.remove(&id) {
             eprintln!("roost-compositor: window {id} unmapped");
             match window.surface.underlying_surface() {
@@ -1216,7 +1327,12 @@ impl WindowManager {
         }
         self.stacking.retain(|other| *other != id);
         self.model.remove(id);
-        let fallback = self.stacking.last().copied();
+        for window in self.windows.values_mut() {
+            if window.x11_parent == Some(id) {
+                window.x11_parent = None;
+            }
+        }
+        let fallback = return_parent.or_else(|| self.stacking.last().copied());
         self.apply_focus(state, fallback);
         if self.mode == SessionMode::Scroll {
             self.relayout_strip(state);
@@ -1321,29 +1437,24 @@ impl WindowManager {
     fn modal_target(&self, mut id: u64) -> u64 {
         // Bounded: a parent cycle a client builds cannot spin here.
         for _ in 0..8 {
-            let Some(parent) = self
-                .windows
-                .get(&id)
-                .and_then(|w| w.surface.wl_surface())
-                .map(|s| s.into_owned())
-            else {
+            if !self.windows.contains_key(&id) {
                 break;
-            };
-            let dialog = self
-                .windows
-                .iter()
-                .filter(|(child, w)| **child != id && !w.minimized)
-                .find_map(|(child, w)| match w.surface.underlying_surface() {
-                    WindowSurface::Wayland(toplevel)
-                        if read_parent(toplevel).as_ref() == Some(&parent)
-                            && read_modal(toplevel) =>
-                    {
-                        Some(*child)
-                    }
-                    WindowSurface::Wayland(_) => None,
-                    #[cfg(feature = "xwayland")]
-                    _ => None,
-                });
+            }
+            let dialog = self.stacking.iter().rev().copied().find(|child| {
+                if *child == id {
+                    return false;
+                }
+                let Some(w) = self.windows.get(child) else {
+                    return false;
+                };
+                let modal = w.x11_parent.is_some()
+                    || match w.surface.underlying_surface() {
+                        WindowSurface::Wayland(toplevel) => read_modal(toplevel),
+                        #[cfg(feature = "xwayland")]
+                        WindowSurface::X11(_) => false,
+                    };
+                !w.minimized && modal && self.transient_parent(*child) == Some(id)
+            });
             match dialog {
                 Some(child) => id = child,
                 None => break,
@@ -1704,7 +1815,7 @@ impl WindowManager {
     /// The surface a press at `pos` would land on (layer or window).
     fn surface_for_click(&self, state: &State, pos: Point<f64, Logical>) -> Option<WlSurface> {
         if let Some((surface, _)) =
-            crate::layer::topmost_layer_at(state, pos.x as i32, pos.y as i32)
+            crate::layer::topmost_layer_at(state, pos.x.floor() as i32, pos.y.floor() as i32)
         {
             return Some(surface);
         }
@@ -1738,7 +1849,7 @@ impl WindowManager {
     pub fn pointer_motion(&mut self, state: &mut State, pos: Point<f64, Logical>, time: u32) {
         // A locked pointer stays where it is (relative motion still
         // flows); a confined one stays inside its window.
-        let Some(pos) = self.constrain(pos) else {
+        let Some(pos) = self.constrain(state, pos) else {
             return;
         };
         self.pointer_pos = pos;
@@ -1765,7 +1876,7 @@ impl WindowManager {
             return;
         }
         if let Some((surface, (ox, oy))) =
-            crate::layer::topmost_layer_at(state, pos.x as i32, pos.y as i32)
+            crate::layer::topmost_layer_at(state, pos.x.floor() as i32, pos.y.floor() as i32)
         {
             if let Some(pointer) = self.pointer.clone() {
                 // Focus point is the surface origin: smithay reports
@@ -1810,6 +1921,9 @@ impl WindowManager {
         };
         let target = self
             .window_at(pos)
+            // An attached modal dialog blocks pointer input to its parent,
+            // even where the parent's content is exposed beside the dialog.
+            .filter(|id| self.modal_target(*id) == *id)
             .and_then(|id| self.windows.get(&id))
             .and_then(|window| {
                 let surface = window.surface.wl_surface()?.into_owned();
@@ -1856,10 +1970,28 @@ impl WindowManager {
         if !pressed && self.grab.is_some() {
             self.end_grab(state);
         }
+        // A blocked parent click activates its modal dialog and is consumed.
+        // Do this before Super+drag so the parent cannot be moved through it.
+        if pressed && !self.overview_open {
+            let pos = self.pointer_pos;
+            if crate::layer::topmost_layer_at(state, pos.x.floor() as i32, pos.y.floor() as i32)
+                .is_none()
+                && self.popup_at(state, pos).is_none()
+            {
+                if let Some(id) = self.window_at(pos) {
+                    if self.modal_target(id) != id {
+                        self.apply_focus(state, Some(id));
+                        self.swallowed_button = Some(button);
+                        return;
+                    }
+                }
+            }
+        }
         // Super+press on a window starts a move (GNOME's Super+drag).
         if pressed && self.super_held && !self.overview_open {
             let pos = self.pointer_pos;
-            if crate::layer::topmost_layer_at(state, pos.x as i32, pos.y as i32).is_none()
+            if crate::layer::topmost_layer_at(state, pos.x.floor() as i32, pos.y.floor() as i32)
+                .is_none()
                 && self.popup_at(state, pos).is_none()
             {
                 if let Some(id) = self.window_at(pos) {
@@ -1898,7 +2030,7 @@ impl WindowManager {
         if pressed && !on_popup {
             let pos = self.pointer_pos;
             if let Some((surface, _)) =
-                crate::layer::topmost_layer_at(state, pos.x as i32, pos.y as i32)
+                crate::layer::topmost_layer_at(state, pos.x.floor() as i32, pos.y.floor() as i32)
             {
                 if !self.overview_open && crate::layer::surface_takes_keyboard_on_press(&surface) {
                     let serial = SERIAL_COUNTER.next_serial();
@@ -1921,6 +2053,12 @@ impl WindowManager {
                     self.apply_focus(state, Some(id));
                 }
             }
+        }
+        // Mapping, closing or restacking a surface can change what lies
+        // under a stationary pointer. Refresh enter/focus before the press;
+        // releases still follow Smithay's implicit grab to their original owner.
+        if pressed {
+            self.pointer_motion(state, self.pointer_pos, time);
         }
         if let Some(pointer) = self.pointer.clone() {
             if trace {
@@ -3324,6 +3462,12 @@ pub enum ManagerInput {
         pressed: bool,
         time: u32,
     },
+    /// A native relative device crossed the pressure threshold. Never
+    /// constructed from absolute motion or accepted from remote clients.
+    CornerPressure {
+        pos: Point<f64, Logical>,
+        time: u32,
+    },
     /// Pointer axis (wheel / scroll) motion, in backend units (v120
     /// for wheels, pixels for continuous devices). Only scroll mode
     /// consumes it; everywhere else it is dropped as before.
@@ -3498,6 +3642,8 @@ pub struct TriggerState {
     super_armed: bool,
     /// GNOME's `enable-hot-corners` off (default on, as in GNOME).
     hot_corner_off: bool,
+    right_to_left: bool,
+    pressure_only: bool,
 }
 
 impl TriggerState {
@@ -3506,9 +3652,19 @@ impl TriggerState {
         self.super_armed = false;
     }
 
+    /// Native seats use physical relative barrier pressure, not hover.
+    pub fn set_pressure_only(&mut self, enabled: bool) {
+        self.pressure_only = enabled;
+    }
+
     /// Follow GNOME's `enable-hot-corners`.
     pub fn set_hot_corner(&mut self, enabled: bool) {
         self.hot_corner_off = !enabled;
+    }
+
+    /// Follow the shell's default text direction, including live updates.
+    pub fn set_right_to_left(&mut self, right_to_left: bool) {
+        self.right_to_left = right_to_left;
     }
 
     /// Decide the overview action for one input event. `overview_open`
@@ -3530,8 +3686,8 @@ impl TriggerState {
 
     /// Decide against the current logical output layout. GNOME 51 always
     /// offers the primary corner; a secondary corner is eligible only when
-    /// no other output touches its left or top edge. The Activities strip
-    /// belongs to the primary panel. Geometry is borrowed, never cached.
+    /// no other output contains GNOME's direction-dependent approach probes.
+    /// The Activities strip belongs to the primary panel. Geometry is borrowed, never cached.
     pub fn feed_on_outputs(
         &mut self,
         input: &ManagerInput,
@@ -3539,32 +3695,49 @@ impl TriggerState {
         pointer: Point<f64, Logical>,
         outputs: impl Iterator<Item = (Rectangle<i32, Logical>, bool)> + Clone,
     ) -> TriggerAction {
-        let outputs = outputs.filter(|(rect, _)| rect.size.w > 0 && rect.size.h > 0);
+        let outputs = outputs
+            .filter(|(rect, _)| rect.size.w > 0 && rect.size.h > 0)
+            .enumerate();
         let in_region =
             |pos: Point<f64, Logical>, rect: Rectangle<i32, Logical>, w: f64, h: f64| {
-                let x = pos.x - f64::from(rect.loc.x);
+                let x = if self.right_to_left {
+                    f64::from(rect.loc.x) + f64::from(rect.size.w) - pos.x
+                } else {
+                    pos.x - f64::from(rect.loc.x)
+                };
                 let y = pos.y - f64::from(rect.loc.y);
-                (0.0..w.min(f64::from(rect.size.w))).contains(&x)
-                    && (0.0..h.min(f64::from(rect.size.h))).contains(&y)
+                let within_x = if self.right_to_left {
+                    x > 0.0 && x <= w.min(f64::from(rect.size.w))
+                } else {
+                    (0.0..w.min(f64::from(rect.size.w))).contains(&x)
+                };
+                within_x && (0.0..h.min(f64::from(rect.size.h))).contains(&y)
             };
         let corner = if let ManagerInput::Motion { pos, .. } = input {
-            outputs.clone().any(|(rect, primary)| {
+            outputs.clone().any(|(index, (rect, primary))| {
                 if !in_region(*pos, rect, HOT_CORNER_PX, HOT_CORNER_PX) {
                     return false;
                 }
-                let left: Point<f64, Logical> =
-                    (f64::from(rect.loc.x) - 1.0, f64::from(rect.loc.y)).into();
-                let above: Point<f64, Logical> =
-                    (f64::from(rect.loc.x), f64::from(rect.loc.y) - 1.0).into();
+                // GNOME Shell 51 layout.js's exact secondary approach probes.
+                let corner_x = f64::from(rect.loc.x)
+                    + if self.right_to_left {
+                        f64::from(rect.size.w)
+                    } else {
+                        0.0
+                    };
+                let beside_x = f64::from(rect.loc.x) + if self.right_to_left { 1.0 } else { -1.0 };
+                let beside: Point<f64, Logical> = (beside_x, f64::from(rect.loc.y)).into();
+                let above: Point<f64, Logical> = (corner_x, f64::from(rect.loc.y) - 1.0).into();
                 primary
-                    || !outputs.clone().any(|(other, _)| {
-                        other.to_f64().contains(left) || other.to_f64().contains(above)
+                    || !outputs.clone().any(|(other_index, (other, _))| {
+                        other_index != index
+                            && (other.to_f64().contains(beside) || other.to_f64().contains(above))
                     })
             })
         } else {
             false
         };
-        let strip = outputs.clone().any(|(rect, primary)| {
+        let strip = outputs.clone().any(|(_, (rect, primary))| {
             primary && in_region(pointer, rect, ACTIVITIES_WIDTH_PX, ACTIVITIES_STRIP_PX)
         });
         self.feed_regions(input, overview_open, corner, strip)
@@ -3593,7 +3766,7 @@ impl TriggerState {
             }
             ManagerInput::Motion { .. } => {
                 self.super_armed = false;
-                if !self.hot_corner_off && !overview_open && corner {
+                if !self.pressure_only && !self.hot_corner_off && !overview_open && corner {
                     TriggerAction::Open
                 } else {
                     TriggerAction::None
@@ -3614,6 +3787,14 @@ impl TriggerState {
             ManagerInput::Axis { .. } => {
                 self.super_armed = false;
                 TriggerAction::None
+            }
+            ManagerInput::CornerPressure { .. } => {
+                self.super_armed = false;
+                if !self.hot_corner_off {
+                    TriggerAction::Toggle
+                } else {
+                    TriggerAction::None
+                }
             }
             ManagerInput::RelativeMotion { .. }
             | ManagerInput::SwipeBegin { .. }
@@ -3892,6 +4073,7 @@ impl WindowManager {
                     self.pointer_axis(state, horizontal, vertical, time);
                 }
             }
+            ManagerInput::CornerPressure { .. } => {}
             ManagerInput::RelativeMotion {
                 delta,
                 delta_unaccel,
@@ -3997,7 +4179,7 @@ impl WindowManager {
             return;
         };
         let focus = pointer.current_focus().map(|surface| {
-            let origin = self.surface_origin_of(&surface);
+            let origin = self.surface_origin_of(state, &surface);
             (surface, origin)
         });
         pointer.relative_motion(
@@ -4012,59 +4194,170 @@ impl WindowManager {
         pointer.frame(state);
     }
 
-    /// Global origin of a surface's coordinates (window surfaces;
-    /// anything else reports the origin).
-    fn surface_origin_of(&self, surface: &WlSurface) -> Point<f64, Logical> {
-        self.windows
+    /// Resolve the compositor's actual placed geometry, including layers
+    /// on outputs whose logical origin is not the global origin.
+    fn constrained_surface_geometry(
+        &self,
+        state: &State,
+        surface: &WlSurface,
+    ) -> Option<(Point<f64, Logical>, Rectangle<i32, Logical>)> {
+        if let Some(window) = self
+            .windows
             .values()
-            .find(|w| w.surface.wl_surface().as_deref() == Some(surface))
-            .map(|w| crate::popup::surface_origin(surface, w.geometry.loc).to_f64())
+            .find(|window| window.surface.wl_surface().as_deref() == Some(surface))
+        {
+            let origin = crate::popup::surface_origin(surface, window.geometry.loc);
+            return Some((
+                origin.to_f64(),
+                Rectangle::new(window.geometry.loc - origin, window.geometry.size),
+            ));
+        }
+        if let Some((_, (x, y), _)) = crate::layer::layer_layout(state)
+            .into_iter()
+            .find(|(placed, _, _)| placed == surface)
+        {
+            let size = state
+                .layer_shell_state
+                .layer_surfaces()
+                .find(|layer| layer.wl_surface() == surface)
+                .and_then(|layer| layer.current_state().size)?;
+            return Some((
+                (f64::from(x), f64::from(y)).into(),
+                Rectangle::from_size(size),
+            ));
+        }
+        self.placed_popups(state)
+            .into_iter()
+            .find(|popup| &popup.surface == surface)
+            .map(|popup| {
+                (
+                    popup.origin.to_f64(),
+                    Rectangle::new(popup.rect.loc - popup.origin, popup.rect.size),
+                )
+            })
+    }
+
+    fn surface_origin_of(&self, state: &State, surface: &WlSurface) -> Point<f64, Logical> {
+        self.constrained_surface_geometry(state, surface)
+            .map(|(origin, _)| origin)
             .unwrap_or_default()
     }
 
-    /// Pointer-constraints (#89): a locked pointer stays put; a confined
-    /// one stays inside the focused window. Activates a pending
-    /// constraint on the surface under the pointer. Returns the position
-    /// motion may move to, or `None` when the pointer is locked.
-    fn constrain(&self, pos: Point<f64, Logical>) -> Option<Point<f64, Logical>> {
+    fn effective_constraint_region(
+        &self,
+        state: &State,
+        surface: &WlSurface,
+    ) -> Option<(
+        Point<f64, Logical>,
+        crate::constraint_motion::EffectiveRegion,
+    )> {
+        let (origin, extent) = self.constrained_surface_geometry(state, surface)?;
+        let (input, over_budget) = smithay::wayland::compositor::with_states(surface, |states| {
+            let mut attributes = states
+                .cached_state
+                .get::<smithay::wayland::compositor::SurfaceAttributes>();
+            let current = attributes.current();
+            let total = 1usize.saturating_add(
+                current
+                    .input_region
+                    .as_ref()
+                    .map_or(0, |region| region.rects.len()),
+            );
+            let over_budget = total > crate::constraint_motion::MAX_RECTANGLES;
+            (
+                if over_budget {
+                    None
+                } else {
+                    current.input_region.clone()
+                },
+                over_budget,
+            )
+        });
+        Some((
+            origin,
+            crate::constraint_motion::EffectiveRegion {
+                extent,
+                input,
+                over_budget,
+                constraint: None,
+            },
+        ))
+    }
+
+    /// Active constraints and eligible pending constraints own the next
+    /// motion before native barriers. Ineligible persistent registrations
+    /// can later reactivate; they do not permanently swallow corner input.
+    pub fn pointer_constraint_owns_motion(&self, state: &State) -> bool {
+        use smithay::wayland::pointer_constraints::with_pointer_constraint;
+        let Some(pointer) = self.pointer.as_ref() else {
+            return false;
+        };
+        let Some(surface) = pointer.current_focus() else {
+            return false;
+        };
+        if !with_pointer_constraint(&surface, pointer, |constraint| constraint.is_some()) {
+            return false;
+        }
+        let mut owns_motion = false;
+        // with_pointer_constraint also holds the surface-state mutex. Take
+        // geometry/input snapshots first; its closure must not re-enter it.
+        let snapshot = self.effective_constraint_region(state, &surface);
+        with_pointer_constraint(&surface, pointer, |constraint| {
+            if let Some(constraint) = constraint {
+                owns_motion = constraint.is_active()
+                    || snapshot.is_none_or(|(origin, region)| {
+                        let region = region.with_constraint(constraint.region());
+                        !region.bounded() || region.contains(self.pointer_pos - origin)
+                    });
+            }
+        });
+        owns_motion
+    }
+
+    /// Apply actual committed constraint/input regions in surface-local
+    /// space. Region changes may explicitly deactivate rather than warp;
+    /// no synthetic relative motion is introduced.
+    fn constrain(&self, state: &State, pos: Point<f64, Logical>) -> Option<Point<f64, Logical>> {
         use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint};
         let pointer = self.pointer.as_ref()?;
         let Some(surface) = pointer.current_focus() else {
             return Some(pos);
         };
-        let mut locked = false;
-        let mut confined = false;
+        if !with_pointer_constraint(&surface, pointer, |constraint| constraint.is_some()) {
+            return Some(pos);
+        }
+        let mut position = Some(pos);
+        let snapshot = self.effective_constraint_region(state, &surface);
         with_pointer_constraint(&surface, pointer, |constraint| {
-            if let Some(constraint) = constraint {
-                if !constraint.is_active() {
-                    constraint.activate();
-                }
-                match &*constraint {
-                    PointerConstraint::Locked(_) => locked = true,
-                    PointerConstraint::Confined(_) => confined = true,
-                }
+            let Some(constraint) = constraint else { return };
+            let Some((origin, region)) = snapshot else {
+                // A constraint on unresolved geometry cannot broaden motion.
+                position = None;
+                return;
+            };
+            let region = region.with_constraint(constraint.region());
+            if !region.bounded() {
+                position = None;
+                return;
             }
+            let current = self.pointer_pos - origin;
+            if !region.contains(current) {
+                if constraint.is_active() {
+                    constraint.deactivate();
+                }
+                return;
+            }
+            if !constraint.is_active() {
+                constraint.activate();
+            }
+            position = match &*constraint {
+                PointerConstraint::Locked(_) => None,
+                PointerConstraint::Confined(_) => {
+                    Some(region.confine_global(origin, self.pointer_pos, pos))
+                }
+            };
         });
-        if locked {
-            return None;
-        }
-        if confined {
-            if let Some(window) = self
-                .windows
-                .values()
-                .find(|w| w.surface.wl_surface().as_deref() == Some(&surface))
-            {
-                let g = window.geometry;
-                return Some(
-                    (
-                        pos.x.clamp(g.loc.x as f64, (g.loc.x + g.size.w - 1) as f64),
-                        pos.y.clamp(g.loc.y as f64, (g.loc.y + g.size.h - 1) as f64),
-                    )
-                        .into(),
-                );
-            }
-        }
-        Some(pos)
+        position
     }
 
     /// Queued switcher drive events, drained by the runtime into the
@@ -4822,4 +5115,42 @@ mod introspect_type_tests {
             assert!(!introspect_x11_type(Some(kind)), "auxiliary type {kind:?}");
         }
     }
+}
+
+/// Preserve dimensions absent from X11's ConfigureRequest value mask.
+#[cfg(feature = "xwayland")]
+fn requested_x11_size(
+    current: Size<i32, Logical>,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> Size<i32, Logical> {
+    let dimension = |value: Option<u32>, fallback| {
+        value
+            .and_then(|value| i32::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(fallback)
+    };
+    (dimension(width, current.w), dimension(height, current.h)).into()
+}
+
+#[cfg(all(test, feature = "xwayland"))]
+#[test]
+fn x11_size_requests_preserve_unspecified_and_invalid_dimensions() {
+    let current = (640, 420).into();
+    assert_eq!(
+        requested_x11_size(current, Some(1100), None),
+        (1100, 420).into()
+    );
+    assert_eq!(
+        requested_x11_size(current, None, Some(700)),
+        (640, 700).into()
+    );
+    assert_eq!(
+        requested_x11_size(current, Some(0), Some(u32::MAX)),
+        current
+    );
+    assert_eq!(
+        requested_x11_size((1, 1).into(), Some(1100), Some(700)),
+        (1100, 700).into()
+    );
 }

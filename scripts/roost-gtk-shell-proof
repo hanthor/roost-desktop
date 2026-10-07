@@ -654,6 +654,37 @@ for label in "Activities" "Date and Time" "System"; do
 done
 pass A11Y-PANEL "Activities, Date and Time, System exposed"
 
+# GNOME Settings uses escaped GFile URIs. Observe actual compositor pixels,
+# including a literal %20 filename whose double-decoded neighbour is red.
+wallpaper_before_uri=$(gsettings get org.gnome.desktop.background picture-uri)
+wallpaper_before_dark=$(gsettings get org.gnome.desktop.background picture-uri-dark)
+wallpaper_before_options=$(gsettings get org.gnome.desktop.background picture-options)
+wallpaper_fixture="$ARTIFACTS/wallpaper café %20.png"
+wallpaper_decoy="$ARTIFACTS/wallpaper café  .png"
+ffmpeg -loglevel error -y -f lavfi -i color=c=0x0000ff:s=64x64 -frames:v 1 -threads 1 "$wallpaper_fixture"
+ffmpeg -loglevel error -y -f lavfi -i color=c=0xff0000:s=64x64 -frames:v 1 -threads 1 "$wallpaper_decoy"
+wallpaper_uri=$("$PY" -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve().as_uri())' "$wallpaper_fixture")
+printf '%s\n' "$wallpaper_uri" > "$ARTIFACTS/wallpaper-file-uri.txt"
+gsettings set org.gnome.desktop.background picture-options zoom
+gsettings set org.gnome.desktop.background picture-uri "$wallpaper_uri"
+gsettings set org.gnome.desktop.background picture-uri-dark "$wallpaper_uri"
+end=$(($(date +%s) + 15))
+while :; do
+    scrot -o "$ARTIFACTS/01b-wallpaper-file-uri.png" >/dev/null
+    rgb=$(px "$ARTIFACTS/01b-wallpaper-file-uri.png" 10 $((HEIGHT - 10)))
+    # px emits exactly three decimal RGB fields; split them intentionally.
+    # shellcheck disable=SC2086
+    set -- $rgb
+    if [ "${1:-255}" -lt 20 ] && [ "${2:-255}" -lt 20 ] && [ "${3:-0}" -gt 220 ]; then break; fi
+    [ "$(date +%s)" -ge "$end" ] && fail G-WALLPAPER-URI "escaped filename did not paint blue (double-decode decoy is red): $rgb"
+    sleep 0.3
+done
+gsettings set org.gnome.desktop.background picture-uri "$wallpaper_before_uri"
+gsettings set org.gnome.desktop.background picture-uri-dark "$wallpaper_before_dark"
+gsettings set org.gnome.desktop.background picture-options "$wallpaper_before_options"
+sleep 1
+pass G-WALLPAPER-URI "spaces, Unicode and literal percent escapes identify the actual selected wallpaper pixels"
+
 # A popover counts as open only when its contents are showing in the
 # accessible tree: a pixel diff passes on a mere hover highlight.
 showing() {
@@ -2335,6 +2366,8 @@ cstate ".focused_rect == [0, 0, $WIDTH, $HEIGHT]" "corner proof fullscreen" ||
     fail G-HOT-CORNER-FULLSCREEN "actual GTK fullscreen request did not cover the output"
 xdotool mousemove --window "$WID" 1 1
 sleep 1
+cstate '.pointer_position == [1, 1] and .pointer_fullscreen_blocked' "fullscreen corner motion delivered" ||
+    fail G-HOT-CORNER-FULLSCREEN "actual corner coordinates or fullscreen guard were not observed"
 cstate '.overview_open | not' "fullscreen corner blocked" ||
     fail G-HOT-CORNER-FULLSCREEN "the corner opened over the fullscreen window"
 cp "$CSTATE" "$ARTIFACTS/hot-corner-fullscreen-blocked.json"
@@ -2346,10 +2379,23 @@ cstate '.overview_open' "fullscreen deliberate overview" ||
 xdotool key Escape
 cstate '.overview_open | not' "fullscreen deliberate overview dismissed" ||
     fail G-HOT-CORNER-FULLSCREEN "fullscreen overview did not close"
+# Observe a real corner exit after overview teardown before the one fresh
+# entry after unfullscreen.
+xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
+cstate ".pointer_position == [$((WIDTH / 2)), $((HEIGHT / 2))]" "fullscreen corner exit delivered" ||
+    fail G-HOT-CORNER-FULLSCREEN "backend did not deliver the requested corner exit"
+cp "$CSTATE" "$ARTIFACTS/hot-corner-fullscreen-before-unfullscreen.json"
 printf '{"generation":2,"request":"unfullscreen"}\n' >"$corner_requests"
 cstate ".focused_rect != [0, 0, $WIDTH, $HEIGHT]" "corner proof restored" ||
     fail G-HOT-CORNER-FULLSCREEN "actual GTK unfullscreen request did not restore geometry"
+cp "$CSTATE" "$ARTIFACTS/hot-corner-unfullscreen-before-entry.json"
 xdotool mousemove --window "$WID" 1 1
+xdotool getmouselocation --shell >"$ARTIFACTS/hot-corner-unfullscreen-host-pointer.txt"
+cstate '.pointer_position == [1, 1]' "unfullscreen corner entry delivered" ||
+    fail G-HOT-CORNER-FULLSCREEN "backend did not deliver the requested corner entry"
+cp "$CSTATE" "$ARTIFACTS/hot-corner-unfullscreen-entry.json"
+cstate '.pointer_fullscreen_blocked | not' "unfullscreen corner guard removed" ||
+    fail G-HOT-CORNER-FULLSCREEN "actual fullscreen guard remained after restoring geometry"
 cstate '.overview_open' "corner restored after fullscreen" ||
     fail G-HOT-CORNER-FULLSCREEN "unfullscreen did not restore corner opening"
 xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
@@ -2491,6 +2537,31 @@ for _ in $(seq 1 30); do [ "$(cat "$MIC_MUTED_FILE")" = 1 ] && break; sleep 0.1;
 xdotool key XF86AudioMicMute
 for _ in $(seq 1 30); do [ "$(cat "$MIC_MUTED_FILE")" = 0 ] && break; sleep 0.1; done
 [ "$(cat "$MIC_MUTED_FILE")" = 0 ] || fail G-MEDIA-VOLUME "microphone unmute did not unmute"
+# This headed fixture uses a wpctl stand-in; the native VM separately checks
+# actual HDA/PipeWire channel volume. Same live shell and real hardware keys.
+SOUND_SCHEMA=org.gnome.desktop.sound
+gsettings set "$SOUND_SCHEMA" allow-volume-above-100-percent false
+sleep 0.3
+echo 0.98 >"$VOLUME_FILE"
+xdotool key XF86AudioRaiseVolume
+media_volume 1.0000 || fail G-MEDIA-AMPLIFICATION "disabled amplification did not cap at 100%"
+gsettings set "$SOUND_SCHEMA" allow-volume-above-100-percent true
+sleep 0.3
+echo 0.98 >"$VOLUME_FILE"
+xdotool key XF86AudioRaiseVolume
+media_volume 1.0400 || fail G-MEDIA-AMPLIFICATION "live enabled amplification did not cross 100%"
+echo 1.50 >"$VOLUME_FILE"
+xdotool key XF86AudioRaiseVolume
+media_volume 1.5252 || fail G-MEDIA-AMPLIFICATION "amplified key did not obey GNOME's +11dB limit"
+gsettings set "$SOUND_SCHEMA" allow-volume-above-100-percent false
+sleep 0.3
+echo 0.98 >"$VOLUME_FILE"
+xdotool key XF86AudioRaiseVolume
+media_volume 1.0000 || fail G-MEDIA-AMPLIFICATION "live disable did not restore the ordinary limit"
+gsettings reset "$SOUND_SCHEMA" allow-volume-above-100-percent
+echo 0.4200 >"$VOLUME_FILE"
+pass G-MEDIA-AMPLIFICATION "same shell follows live opt-in and reset; native VM qualifies real PipeWire separately"
+
 # Live rebinding and an empty static array must take effect without restart.
 MEDIA_SCHEMA=org.gnome.settings-daemon.plugins.media-keys
 gsettings set "$MEDIA_SCHEMA" volume-up-static '[]'
@@ -3631,8 +3702,10 @@ screen_active | grep -q false || fail G-SCREENSAVER "screen saver started active
 
 # A distinct solid background makes the screen-saver URI observable.
 ffmpeg -loglevel error -y -f lavfi -i color=c=0x00ff00:s=64x64 -frames:v 1 -threads 1 \
-    "$ARTIFACTS/lock-background.png"
-gsettings set org.gnome.desktop.screensaver picture-uri "file://$ARTIFACTS/lock-background.png"
+    "$ARTIFACTS/lock café %20.png"
+lock_background_uri=$("$PY" -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve().as_uri())' "$ARTIFACTS/lock café %20.png")
+printf '%s\n' "$lock_background_uri" > "$ARTIFACTS/lock-background-file-uri.txt"
+gsettings set org.gnome.desktop.screensaver picture-uri "$lock_background_uri"
 sleep 1
 # A live, explicitly consented recording must be revoked when lock engages.
 if [ -n "$PW_PIDS" ] && command -v gst-launch-1.0 >/dev/null 2>&1; then
@@ -3656,6 +3729,9 @@ end=$(($(date +%s) + 10))
 until grep -q Suspend "$POWER_LOG" 2>/dev/null || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
 grep -q Suspend "$POWER_LOG" || fail G-SUSPEND-LOCK "logind never got Suspend"
 cstate '.locked' "locked" 10 || fail G-SUSPEND-LOCK "PrepareForSleep did not lock the session"
+cstate 'has("pointer_position") and has("pointer_fullscreen_blocked") and .pointer_position == null and .pointer_fullscreen_blocked == null' "locked pointer diagnostics redacted" ||
+    fail G-POINTER-TRACE-PRIVATE "credential input retained pointer diagnostics"
+pass G-POINTER-TRACE-PRIVATE "actual locked scene omits pointer coordinates and fullscreen observations"
 "$PY" "$ROOT/scripts/lib/roost-capture-security-client.py" >"$ARTIFACTS/capture-locked-denial.log" 2>&1 ||
     fail G-CAPTURE-LOCKED "capture accepted while locked"
 pass G-CAPTURE-LOCKED "locked session denies all untrusted and forged portal capture requests"
@@ -3682,7 +3758,7 @@ scrot "$ARTIFACTS/23-locked-after-suspend.png" >/dev/null
 # Wait for asynchronous decode and test the unobscured lower-left pixel.
 end=$(($(date +%s) + 15))
 while :; do
-    scrot "$ARTIFACTS/23b-lock-background.png" >/dev/null
+    scrot -o "$ARTIFACTS/23b-lock-background.png" >/dev/null
     rgb=$(px "$ARTIFACTS/23b-lock-background.png" 10 $((HEIGHT - 10)))
     # shellcheck disable=SC2086 # three RGB channels
     set -- $rgb
@@ -3916,6 +3992,20 @@ if grep -q 'g_variant_get_variant: assertion' "$LOG"; then
     fail G-IME-VARIANT-TYPES "IBus focus/composition emitted a native variant type critical"
 fi
 pass G-IME-VARIANT-TYPES "IBus focus/composition decoded variants without native type criticals"
+
+# ROOST_IBUS_DEBUG is enabled throughout this actual IME and PAM journey.
+# Require real bridge observations, then reject value-bearing records even
+# when the input context was inactive while forwarding password keys.
+if grep -q 'roost-ibus-bridge: ready' "$LOG"; then
+    grep -Eq 'roost-ibus-bridge: key pressed (true|false): IBus took it: (true|false)' "$LOG" ||
+        fail G-IME-TRACE-PRIVATE "the real bridge did not retain redacted key diagnostics"
+    if grep -Eq 'roost-ibus-bridge: key [0-9]+|roost-ibus-bridge:.*sym 0x' "$LOG"; then
+        fail G-IME-TRACE-PRIVATE "IBus diagnostics disclosed an actual key value"
+    fi
+    pass G-IME-TRACE-PRIVATE "real IME and PAM keyboard diagnostics omit keycodes and key symbols"
+elif [ "${ROOST_REQUIRE_IBUS:-0}" = 1 ]; then
+    fail G-IME-TRACE-PRIVATE "the required real IBus bridge did not run"
+fi
 
 
 

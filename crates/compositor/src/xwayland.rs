@@ -215,8 +215,11 @@ pub enum X11ManagerEvent {
     ConfigureRequest {
         /// X11 window id.
         id: u32,
-        /// Requested size, if the client named one.
-        size: Option<(u32, u32)>,
+        /// The real surface is retained so pre-map requests can be acknowledged.
+        surface: Box<smithay::xwayland::X11Surface>,
+        /// Each requested dimension is independent in X11's value mask.
+        width: Option<u32>,
+        height: Option<u32>,
     },
     /// An X11 window property changed; the manager re-reads identity.
     Property(u32),
@@ -367,15 +370,13 @@ mod handlers {
     /// manager-owned (x/y ignored); the requested size flows to the
     /// manager, which advertises its geometry back via configure.
     fn on_configure_request(state: &mut State, window: X11Surface, w: Option<u32>, h: Option<u32>) {
-        let size = match (w, h) {
-            (Some(w), Some(h)) => Some((w, h)),
-            _ => None,
-        };
         push(
             state,
             X11ManagerEvent::ConfigureRequest {
                 id: window.window_id(),
-                size,
+                surface: Box::new(window),
+                width: w,
+                height: h,
             },
         );
     }
