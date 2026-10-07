@@ -11,10 +11,10 @@
    meta_kms_page_flip_data_add_listener (page_flip_data,
                                          listener->vtable,
                                          listener->main_context,
-@@ -1042,6 +1046,10 @@
-                                GUINT_TO_POINTER (crtc_id),
-                                NULL,
-                                (gpointer *) &page_flip_data);
+@@ -1047,6 +1051,10 @@
+                       "crtc=%u sequence=%u seconds=%u microseconds=%u device=%s",
+                       crtc_id, sequence, tv_sec, tv_usec,
+                       meta_kms_impl_device_get_path (impl_device));
 +
 +  COGL_TRACE_MESSAGE ("Roost::KMS::raw-page-flip-identity",
 +                      "crtc=%u sequence=%u user_data=%p page_flip_data=%p",
@@ -22,7 +22,7 @@
  
    COGL_TRACE_MESSAGE ("atomic_page_flip_handler()",
                        "[atomic] Page flip callback for CRTC (%u, %s)",
-@@ -1285,7 +1293,13 @@
+@@ -1290,7 +1298,13 @@
                commit_flags_string (commit_flags));
  
    fd = meta_kms_impl_device_get_fd (impl_device);
