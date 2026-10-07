@@ -695,6 +695,10 @@ fn running_app_eligibility_follows_real_transient_parent_changes() {
     child.set_parent(Some(&parent));
     pump(&mut comp, &mut manager, &mut [&mut app, &mut portal]);
     assert!(!manager.is_standalone(child_id));
+    assert!(
+        manager.is_introspect_eligible(child_id),
+        "native dialogs remain selectable"
+    );
     assert_eq!(manager.application_window(child_id), Some(parent_id));
     child.set_parent(None);
     pump(&mut comp, &mut manager, &mut [&mut app, &mut portal]);
@@ -705,6 +709,10 @@ fn running_app_eligibility_follows_real_transient_parent_changes() {
     imported.set_parent_of(&picker_surface);
     pump(&mut comp, &mut manager, &mut [&mut app, &mut portal]);
     assert!(!manager.is_standalone(picker_id));
+    assert!(
+        manager.is_introspect_eligible(picker_id),
+        "foreign-parented pickers remain selectable"
+    );
     assert_eq!(manager.application_window(picker_id), Some(parent_id));
     assert_eq!(
         manager.model().window(picker_id).unwrap().app_id.as_deref(),
@@ -725,6 +733,8 @@ fn running_app_eligibility_follows_real_transient_parent_changes() {
         "unmapped window is not a running app"
     );
     assert_eq!(manager.application_window(picker_id), None);
+    assert!(!manager.is_introspect_eligible(picker_id));
+    assert!(!manager.is_introspect_eligible(u64::MAX));
 }
 
 #[test]

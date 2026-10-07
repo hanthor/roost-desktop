@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use crate::xwayland::{map_x11_identity, X11ManagerEvent};
 use smithay::reexports::wayland_server::Resource as _;
 #[cfg(feature = "xwayland")]
-use smithay::xwayland::X11Surface;
+use smithay::xwayland::{xwm::WmWindowType, X11Surface};
 use smithay::{
     backend::input::{
         AbsolutePositionEvent, Axis, ButtonState, Event as BackendEvent, InputBackend, InputEvent,
@@ -467,6 +467,21 @@ impl WindowManager {
                 None => return Some(current),
             }
         }
+    }
+
+    /// GNOME's GetWindows picker allows ordinary toplevels and dialogs,
+    /// but excludes X11 notification/menu/tooltip/splash/toolbar roles.
+    /// Read live XWM metadata so a property change updates the next snapshot.
+    pub fn is_introspect_eligible(&self, id: u64) -> bool {
+        self.windows
+            .get(&id)
+            .is_some_and(|window| match window.surface.underlying_surface() {
+                WindowSurface::Wayland(toplevel) => toplevel.wl_surface().is_alive(),
+                #[cfg(feature = "xwayland")]
+                WindowSurface::X11(surface) => {
+                    !surface.is_override_redirect() && introspect_x11_type(surface.window_type())
+                }
+            })
     }
 
     /// Whether window `id` is an X11 window (through Xwayland).
@@ -4765,4 +4780,46 @@ fn accelerator_mods(m: &smithay::input::keyboard::ModifiersState) -> u32 {
         bits |= roost_shell_control::MOD_LOGO;
     }
     bits
+}
+
+/// GNOME normal/dialog/modal-dialog/utility eligibility. X11 modal dialogs
+/// retain the Dialog window type; missing type defaults to Normal per EWMH.
+#[cfg(feature = "xwayland")]
+fn introspect_x11_type(kind: Option<WmWindowType>) -> bool {
+    matches!(
+        kind,
+        None | Some(WmWindowType::Normal | WmWindowType::Dialog | WmWindowType::Utility)
+    )
+}
+
+#[cfg(all(test, feature = "xwayland"))]
+mod introspect_type_tests {
+    use super::*;
+
+    #[test]
+    fn gnome_picker_excludes_auxiliary_x11_roles_but_keeps_dialogs() {
+        for kind in [
+            None,
+            Some(WmWindowType::Normal),
+            Some(WmWindowType::Dialog),
+            Some(WmWindowType::Utility),
+        ] {
+            assert!(introspect_x11_type(kind), "eligible type {kind:?}");
+        }
+        for kind in [
+            WmWindowType::Desktop,
+            WmWindowType::Dock,
+            WmWindowType::Combo,
+            WmWindowType::Dnd,
+            WmWindowType::DropdownMenu,
+            WmWindowType::Menu,
+            WmWindowType::Notification,
+            WmWindowType::PopupMenu,
+            WmWindowType::Splash,
+            WmWindowType::Toolbar,
+            WmWindowType::Tooltip,
+        ] {
+            assert!(!introspect_x11_type(Some(kind)), "auxiliary type {kind:?}");
+        }
+    }
 }

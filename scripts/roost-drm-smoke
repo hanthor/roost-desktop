@@ -50,7 +50,50 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 pass() { echo "$1 pass $2" >>"$ASSERTIONS"; echo "roost-drm-smoke: $1 pass: $2"; }
-fail() { echo "$1 fail $2" >>"$ASSERTIONS"; echo "roost-drm-smoke: $1 FAIL: $2" >&2; tail -40 "$LOG" >&2 || true; exit 1; }
+# Capture the failed process before cleanup kills it. In particular, a live
+# startup stall needs thread wait/syscall information, not a longer deadline.
+# Diagnostics are best effort and never alter the assertion's failure status.
+capture_failure() {
+    {
+        date -u
+        if [ -n "$COMP_PID" ] && [ -d "/proc/$COMP_PID" ]; then
+            ps -L -p "$COMP_PID" -o pid,tid,stat,wchan:40,comm || true
+            for task in /proc/"$COMP_PID"/task/*; do
+                [ -d "$task" ] || continue
+                echo "thread ${task##*/}"
+                for detail in status wchan syscall stack; do
+                    echo "$detail"
+                    timeout 2s sudo -n cat "$task/$detail" || true
+                done
+            done
+        fi
+        for connector in /sys/class/drm/card*-*; do
+            [ -d "$connector" ] || continue
+            echo "$connector"
+            for detail in status enabled modes; do
+                [ -r "$connector/$detail" ] || continue
+                echo "$detail"
+                cat "$connector/$detail" || true
+            done
+        done
+    } >"$ARTIFACTS/failure-diagnostics.txt" 2>&1
+}
+
+fail() {
+    echo "$1 fail $2" >>"$ASSERTIONS"
+    echo "roost-drm-smoke: $1 FAIL: $2" >&2
+    # Bound total collection too: many renderer threads must not hold up a
+    # terminal failure or the cleanup trap indefinitely.
+    (capture_failure) &
+    diagnostic_pid=$!
+    (sleep 10; kill "$diagnostic_pid" 2>/dev/null || true) &
+    diagnostic_watchdog=$!
+    wait "$diagnostic_pid" || true
+    kill "$diagnostic_watchdog" 2>/dev/null || true
+    wait "$diagnostic_watchdog" 2>/dev/null || true
+    tail -40 "$LOG" >&2 || true
+    exit 1
+}
 
 validate_presentation() {
 python3 - "$1" <<'PY'

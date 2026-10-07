@@ -105,6 +105,8 @@ pub struct WindowSnapshot {
     pub x11: bool,
     /// Has no live transient parent; used for GNOME running-app eligibility.
     pub standalone: bool,
+    /// Eligible for GNOME GetWindows enumeration, independently of app eligibility.
+    pub introspect_eligible: bool,
 }
 
 /// The runtime keeps this current; Introspect and RecordWindow read it.

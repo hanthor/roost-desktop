@@ -1537,6 +1537,7 @@ impl Runtime {
             "windows": self.manager.overview_windows().iter().map(|w| serde_json::json!({
                 "id": w.id,
                 "app_id": app_of(w.id),
+                "introspect_eligible": self.manager.is_introspect_eligible(w.id),
                 "icon": model.window(w.id).and_then(|w| w.icon.clone()),
                 "workspace": w.workspace,
                 "rect": [w.geometry.loc.x, w.geometry.loc.y, w.geometry.size.w, w.geometry.size.h],
@@ -2677,6 +2678,7 @@ impl Runtime {
                     hidden: entry.workspace != active,
                     x11: self.manager.is_x11(entry.id),
                     standalone: self.manager.is_standalone(entry.id),
+                    introspect_eligible: self.manager.is_introspect_eligible(entry.id),
                 })
             })
             .collect();
