@@ -18,6 +18,29 @@ loader.exec_module(lane)
 
 
 class OrcaLifecycleAuthority(unittest.TestCase):
+    def test_negative_control_requires_exact_remote_denial_and_distinct_same_uid(self):
+        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
+        tree = ast.parse(source.read_text())
+        result = next(node for node in ast.walk(tree) if isinstance(node, ast.Dict)
+                      and any(isinstance(key, ast.Constant) and key.value == "denied" for key in node.keys))
+        expression = next(value for key, value in zip(result.keys, result.values)
+                          if isinstance(key, ast.Constant) and key.value == "denied")
+        compiled = compile(ast.Expression(expression), str(source), "eval")
+        actor = {"accepted": False, "access_denied": True,
+                 "error_name": "org.freedesktop.DBus.Error.AccessDenied",
+                 "caller_uid": 1000, "caller_pid": 7200}
+        def qualifies(actual):
+            return eval(compiled, {"actor": actual, "OWNER": SimpleNamespace(pw_uid=1000),
+                                   "before": {"pid": 6874}})
+        self.assertTrue(qualifies(actor))
+        for invalid in ({**actor, "accepted": True}, {**actor, "access_denied": False},
+                        {**actor, "error_name": "org.freedesktop.DBus.Error.NoReply"},
+                        {**actor, "error_name": None}, {**actor, "caller_uid": 0},
+                        {**actor, "caller_pid": 6874}):
+            self.assertFalse(qualifies(invalid))
+        # Parsing/refusal policy only. The VM still has to obtain the error from
+        # the actual compositor, and preserve its genuine reader's authority.
+
     def test_native_grabs_wait_for_same_actual_reader_and_retain_samples(self):
         reader = {"pid": 6914, "start_ticks": 21798, "owner": ":1.685",
                   "uid": 1000, "bus_pid": 6914, "bus_uid": 1000,

@@ -240,12 +240,31 @@ def main():
         compositor = owned_compositor(inventory()["processes"])
         if pid != ["u", str(compositor["pid"])]:
             raise RuntimeError("native keyboard manager is not the actual compositor")
-        command = ["runuser", "-u", OWNER.pw_name, "--", "env", f"XDG_RUNTIME_DIR={RUNTIME}",
-                   f"DBUS_SESSION_BUS_ADDRESS=unix:path={RUNTIME}/bus", "busctl", "--user", "call",
-                   owner[1], "/org/freedesktop/a11y/Manager", "org.freedesktop.a11y.KeyboardMonitor", "WatchKeyboard"]
-        denied = subprocess.run(command, capture_output=True, text=True, timeout=15)
+        # GIO preserves the remote error name; busctl's translated human error
+        # message is not a stable security assertion. This is a genuine separate
+        # same-user process calling the original actual compositor connection.
+        actor = json.loads(call("python3", "-c", '''
+import json,os,sys
+from gi.repository import Gio,GLib
+result = {"caller_pid": os.getpid(), "caller_uid": os.getuid(), "accepted": False}
+bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+try:
+    bus.call_sync(sys.argv[1], "/org/freedesktop/a11y/Manager",
+                  "org.freedesktop.a11y.KeyboardMonitor", "WatchKeyboard",
+                  None, None, Gio.DBusCallFlags.NONE, 10000, None)
+    result["accepted"] = True
+except GLib.Error as error:
+    result.update(error_name=Gio.DBusError.get_remote_error(error),
+                  error_domain=error.domain, error_code=error.code,
+                  access_denied=error.matches(Gio.dbus_error_quark(), Gio.DBusError.ACCESS_DENIED))
+print(json.dumps(result))
+''', owner[1], user=True))
         after = orca_observation()
-        result = {"denied": denied.returncode != 0 and "owned reader credentials required" in denied.stderr,
+        result = {"denied": (not actor["accepted"] and actor.get("access_denied") is True
+                             and actor.get("error_name") == "org.freedesktop.DBus.Error.AccessDenied"
+                             and actor["caller_uid"] == OWNER.pw_uid
+                             and actor["caller_pid"] != before["pid"]),
+                  "actor": actor,
                   "manager_pid": compositor["pid"], "before": before["keyboard"], "after": after["keyboard"]}
     elif action == "orca-speech-start":
         actual = orca_observation()
