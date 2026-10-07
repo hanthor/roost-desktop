@@ -155,9 +155,11 @@ jobs:
   drm-smoke:
     # Hardware session (#52) on vkms, the kernel's virtual KMS device:
     # libseat (seatd), GBM/EGL scanout, page-flip pacing, shell attach.
+    # Needs headroom: the DRM/apt install (incl. linux-modules-extra for
+    # vkms) alone can take ~20 min on a cold runner cache.
     runs-on: ubuntu-latest
     needs: [check]
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
