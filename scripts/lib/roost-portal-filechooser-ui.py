@@ -44,9 +44,64 @@ def dialog():
     return nodes, controls
 end = time.monotonic() + 30
 located = False
+parent_checked = request.get("parent") is None
 while time.monotonic() < end:
     nodes, controls = dialog()
     if controls:
+        if not parent_checked:
+            relationship_end = min(end, time.monotonic() + 5)
+            while time.monotonic() < relationship_end:
+                current = json.loads(Path("/out/compositor-state.json").read_text())
+                parent_id = request["parent"]["id"]
+                parents = [w for w in current["windows"] if w["id"] == parent_id]
+                children = [w for w in current["windows"] if w.get("parent_window_id") == parent_id
+                            and w.get("app_id") == "org.gnome.Nautilus"]
+                if len(parents) == len(children) == 1:
+                    child, parent = children[0], parents[0]
+                    if child.get("application_window_id") == parent_id and current["focused"] == child["id"]:
+                        cx, cy, cw, ch = child["rect"]
+                        px, py, pw, ph = parent["rect"]
+                        if abs(2*cx + cw - (2*px + pw)) <= 1 and abs(2*cy + ch - (2*py + ph)) <= 1:
+                            out.with_suffix(".x11-parent.json").write_text(json.dumps(current, indent=2))
+                            # Probe actual exposed GTK content, not a decoration or
+                            # synthetic activation. Positive controls run in the caller.
+                            points = [(px + 50, py + 100), (px + pw - 50, py + 100),
+                                      (px + 50, py + ph - 50), (px + pw - 50, py + ph - 50)]
+                            exposed = [(x, y) for x, y in points
+                                       if not (cx <= x < cx + cw and cy <= y < cy + ch)]
+                            if not exposed:
+                                raise RuntimeError("No exposed X11 parent content for modal input proof")
+                            windows = subprocess.check_output(["xdotool", "search", "--onlyvisible", "--name", "^Smithay"], text=True).split()
+                            if len(windows) != 1:
+                                raise RuntimeError("Expected one nested host for modal parent click")
+                            geometry = dict(line.split("=", 1) for line in subprocess.check_output(
+                                ["xdotool", "getwindowgeometry", "--shell", windows[0]], text=True).splitlines())
+                            x, y = exposed[0]
+                            if not (0 <= x < int(geometry["WIDTH"]) and 0 <= y < int(geometry["HEIGHT"])):
+                                raise RuntimeError("Modal parent probe is outside the nested host")
+                            input_path = Path(request["parent"]["input_path"])
+                            before = json.loads(input_path.read_text())
+                            if before["clicks"] != 1 or before["pid"] != request["parent"]["pid"]:
+                                raise RuntimeError("Missing actual X11 parent positive input control")
+                            subprocess.run(["xdotool", "mousemove", "--window", windows[0], str(x), str(y), "click", "1"], check=True)
+                            probe_end = time.monotonic() + 2
+                            while time.monotonic() < probe_end:
+                                after = json.loads(input_path.read_text())
+                                fresh = json.loads(Path("/out/compositor-state.json").read_text())
+                                if after["clicks"] != 1 or fresh["focused"] != child["id"]:
+                                    raise RuntimeError("Actual modal parent click leaked input or stole dialog focus")
+                                if after["sequence"] >= before["sequence"] + 10:
+                                    out.with_suffix(".parent-blocked.json").write_text(json.dumps(
+                                        {"before": before, "after": after, "click": [x, y], "scene": fresh}, indent=2))
+                                    break
+                                time.sleep(.05)
+                            else:
+                                raise RuntimeError("Actual parent did not process fresh events after the modal probe")
+                            parent_checked = True
+                            break
+                time.sleep(.05)
+            else:
+                raise RuntimeError("Actual Nautilus dialog did not inherit its live X11 parent, centered placement and focus")
         out.with_suffix(".a11y.json").write_text(json.dumps(nodes, indent=2))
         subprocess.run(["scrot", str(out.with_suffix(".png"))], check=True)
         if request["method"] == "OpenFile" and request["decision"] == "grant" and not located:

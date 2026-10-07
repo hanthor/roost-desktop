@@ -85,6 +85,8 @@ pub mod window_icons;
 pub mod windows;
 #[cfg(feature = "xwayland")]
 mod x11_icons;
+#[cfg(feature = "xwayland")]
+pub mod x11_interop;
 pub mod xwayland;
 
 /// One compositor-tracked output: protocol handle plus geometry.
@@ -200,6 +202,8 @@ pub(crate) struct ClientState {
     pub(crate) connection_window_tag: Option<String>,
     /// Optional liveness marker for an ordinary service-channel connection.
     service_alive: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Granted only by authenticated typed service admission, never ordinary clients.
+    pub(crate) x11_interop: bool,
     /// Original bus or accepted-socket peer credentials, with a process pin.
     original_credentials: Option<Arc<zbus::fdo::ConnectionCredentials>>,
 }
