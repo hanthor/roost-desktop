@@ -303,6 +303,24 @@ class KernelBuildEvidence(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 phase.kernel_file_digest(root)
 
+    def test_hyphenated_module_filename_is_accepted_inside_running_kernel_tree(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tree = root / "kernel/drivers/gpu/drm/virtio"
+            tree.mkdir(parents=True)
+            for name in ("virtio-gpu.ko.zst", "virtio-gpu.ko", "virtio_gpu.ko.xz"):
+                path = tree / name
+                path.write_bytes(b"module path fixture")
+                self.assertEqual(phase.virtio_module_path(str(path), root), path)
+            outside = root / "virtio-gpu.ko.zst"
+            outside.write_bytes(b"wrong tree")
+            foreign = tree / "different-gpu.ko.zst"
+            foreign.write_bytes(b"wrong module")
+            (tree / "escape").symlink_to(outside)
+            for path in (outside, foreign, tree / "escape"):
+                with self.subTest(path=path), self.assertRaises(RuntimeError):
+                    phase.virtio_module_path(str(path), root)
+
     def test_missing_and_changed_kernel_evidence_preserves_complete_capture(self):
         import hashlib
         fixture = ROOT / "scripts/lib/fixtures/gnome51-frame-ownership.syscap"
@@ -783,6 +801,18 @@ class Accounting(unittest.TestCase):
         self.assertEqual(host.guest_probe(agent, "notify", 3)["notification_id"], 9)
         self.assertEqual(agent.commands[0][1]["path"], "/usr/libexec/roost-perf-phase")
         self.assertEqual(agent.commands[0][1]["arg"], ["notify", "--index", "3"])
+        error_agent = Agent({}, exitcode=1,
+                            **{"err-data": base64.b64encode(b"module filename rejected: virtio-gpu.ko.zst").decode()})
+        with self.assertRaisesRegex(RuntimeError, "virtio-gpu.ko.zst"):
+            host.guest_probe(error_agent, "gnome-trace-start")
+        oversized = Agent({}, exitcode=1,
+                          **{"err-data": base64.b64encode(b"x" * 100000).decode()})
+        with self.assertRaises(RuntimeError) as error:
+            host.guest_probe(oversized, "gnome-trace-start")
+        self.assertLess(len(str(error.exception)), 4500)
+        invalid = Agent({}, exitcode=1, **{"err-data": "not base64!"})
+        with self.assertRaisesRegex(RuntimeError, "invalid guest stderr encoding"):
+            host.guest_probe(invalid, "gnome-trace-start")
         for flags in ({"exitcode": 1}, {"out-truncated": True}, {"err-truncated": True}):
             with self.subTest(flags=flags), self.assertRaisesRegex(RuntimeError, "failed"):
                 host.guest_probe(Agent({"boottime_s": 100}, **flags), "clock")

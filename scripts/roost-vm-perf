@@ -49,10 +49,23 @@ def guest_probe(agent, action, index=None, out=None):
         status = agent.command("guest-exec-status", pid=pid)
         if status["exited"]:
             if status.get("exitcode") != 0 or status.get("out-truncated") or status.get("err-truncated"):
+                # Fixed observer actions do not accept application text. Keep
+                # bounded QGA stderr so an acquisition failure is diagnosable.
+                encoded = status.get("err-data", "")
+                try:
+                    if not isinstance(encoded, str):
+                        raise ValueError("invalid stderr type")
+                    stderr = base64.b64decode(encoded[:8192], validate=True)[:4096].decode(
+                        "utf-8", errors="replace")
+                except ValueError:
+                    stderr = "<invalid guest stderr encoding>"
+                details = {"exitcode": status.get("exitcode"),
+                           "stdout_truncated": bool(status.get("out-truncated")),
+                           "stderr_truncated": bool(status.get("err-truncated")), "stderr": stderr}
                 if action in ("gnome-trace-start","gnome-trace-stop","gnome-trace-failed-stop") and out is not None:
                     retain_trace_failure(status,action,out)
                     if action=="gnome-trace-stop":retain_failed_gnome_capture(agent,out)
-                raise RuntimeError(f"guest performance {action} failed")
+                raise RuntimeError(f"guest performance {action} failed: {json.dumps(details)}")
             result = json.loads(base64.b64decode(status.get("out-data", ""), validate=True))
             if action in ("gnome-trace-start","gnome-trace-stop","gnome-trace-failed-stop") and isinstance(result,dict) and "trace_failure" in result:
                 if out is not None:

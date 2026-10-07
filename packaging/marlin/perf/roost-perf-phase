@@ -183,6 +183,14 @@ def kernel_file_digest(path):
             "bytes": size, "sha256": digest.hexdigest(), "package": package}
 
 
+def virtio_module_path(filename, directory):
+    path = Path(filename).resolve(strict=True)
+    if not path.is_relative_to(directory / "kernel") or not re.fullmatch(
+            r"virtio[-_]gpu\.ko(?:\.(?:zst|xz|gz))?", path.name):
+        raise RuntimeError("virtio GPU module is not in the running kernel package tree")
+    return path
+
+
 def guest_kernel_provenance():
     running = os.uname()
     release = running.release
@@ -194,10 +202,7 @@ def guest_kernel_provenance():
     filename = subprocess.check_output(
         ["/usr/bin/modinfo", "-k", release, "-F", "filename", "virtio_gpu"],
         text=True, timeout=5).strip()
-    path = Path(filename).resolve(strict=True)
-    if not path.is_relative_to(directory / "kernel") or not re.fullmatch(
-            r"virtio_gpu\.ko(?:\.(?:zst|xz|gz))?", path.name):
-        raise RuntimeError("virtio GPU module is not in the running kernel package tree")
+    path = virtio_module_path(filename, directory)
     vermagic = subprocess.check_output(["/usr/bin/modinfo", "-F", "vermagic", str(path)],
                                        text=True, timeout=5).strip()
     if not vermagic.startswith(release + " "):
