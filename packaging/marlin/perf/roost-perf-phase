@@ -11,6 +11,9 @@ import signal
 import stat
 import re
 import subprocess
+import sys
+from gnome_failed_capture import read_marker, write_marker, read_raw, identity, process_start, checked_file, validate_receipt
+from perf_trace_diagnostics import decode, encode, Context
 import time
 
 
@@ -75,35 +78,65 @@ def capture_writers(pid, metadata):
     """Observe original GNOME writer handles; file quietness is not a flush fence."""
     writers = []
     root = Path(f"/proc/{pid}")
-    for descriptor in (root / "fd").iterdir():
-        try:
-            target = descriptor.stat()
-            if (target.st_dev, target.st_ino) != (metadata.st_dev, metadata.st_ino):
+    with os.scandir(root / "fd") as descriptors:
+        for index,entry in enumerate(descriptors):
+            if index>=4096 or not entry.name.isdecimal() or len(entry.name)>10:
+                raise ValueError("original capture descriptor inventory bound")
+            descriptor=Path(entry.path)
+            try:
+                target = descriptor.stat()
+                if (target.st_dev, target.st_ino) != (metadata.st_dev, metadata.st_ino):
+                    continue
+                with (root / "fdinfo" / descriptor.name).open() as stream:
+                    info=stream.read(4097)
+                if len(info)>4096:raise ValueError("original capture fdinfo bound")
+            except FileNotFoundError:
+                # A descriptor may close while its process remains alive.
                 continue
-            info = (root / "fdinfo" / descriptor.name).read_text()
-        except FileNotFoundError:
-            # A descriptor may close while its process remains alive.
-            continue
-        flags = next(int(line.split()[1], 8) for line in info.splitlines()
-                     if line.startswith("flags:"))
-        if flags & os.O_ACCMODE in (os.O_WRONLY, os.O_RDWR):
-            writers.append({"fd": int(descriptor.name), "flags": flags})
+            rows=[line for line in info.splitlines() if line.startswith("flags:")]
+            if len(rows)!=1:raise ValueError("original capture fd flags refused")
+            flags=int(rows[0].split()[1],8)
+            if flags & os.O_ACCMODE in (os.O_WRONLY, os.O_RDWR):
+                writers.append({"fd":int(descriptor.name),"flags":flags})
+                if len(writers)>64:raise ValueError("original capture writer count bound")
     return sorted(writers, key=lambda row: row["fd"])
 
 
 def gnome_trace(action, index):
     uid = pwd.getpwnam("roost-test").pw_uid
-    if action in ("start", "stop"):
-        process = subprocess.run([
-            "runuser", "-u", "roost-test", "--", "env", "-i", "PATH=/usr/bin:/bin",
-            f"XDG_RUNTIME_DIR=/run/user/{uid}",
-            f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
-            "/usr/libexec/roost-gnome-profiler", action],
-            text=True, capture_output=True, timeout=12, check=True)
-        provenance = dict(json.loads(process.stdout), guest_kernel=os.uname().release)
+    if action in ("start", "stop", "failed-stop"):
+        try:
+            process = subprocess.run([
+                "runuser", "-u", "roost-test", "--", "env", "-i", "PATH=/usr/bin:/bin",
+                f"XDG_RUNTIME_DIR=/run/user/{uid}",
+                f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
+                "/usr/libexec/roost-gnome-profiler", action],
+                text=True, capture_output=True, timeout=20 if action in ("stop","failed-stop") else 12, check=True)
+        except subprocess.CalledProcessError as error:
+            # Forward only the strict public receipt. Unknown/raw error output
+            # is never transported, and the observed nonzero result survives.
+            observed=error.returncode if type(error.returncode) is int and -255 <= error.returncode <= 255 and error.returncode!=0 else 1
+            try:
+                receipt=decode(error.stdout,"stop" if action=="failed-stop" else action)
+            except (ValueError,TypeError,RecursionError):
+                context=Context("stop" if action=="failed-stop" else action);context.stage="diagnostic-transport"
+                receipt=context.failure(error)
+                receipt["trace_failure"].update(payload_rejected=True,subprocess_returncode=observed)
+            print(encode(receipt,"stop" if action=="failed-stop" else action).decode())
+            exit_status=observed if observed>0 else 128-observed
+            raise SystemExit(exit_status if 1 <= exit_status <= 255 else 1) from None
+        payload=json.loads(process.stdout)
+        if isinstance(payload,dict) and "trace_failure" in payload:
+            raise ValueError("trace failure cannot qualify a successful subprocess")
+        provenance = payload if action == "failed-stop" else dict(payload, guest_kernel=os.uname().release)
         if action == "start":
             return provenance
     path = Path(f"/run/user/{uid}/roost-perf-gnome.syscap")
+    failed_receipt = Path("/run/roost-perf-gnome-failed-capture.json")
+    if action == "failed-stop-read":
+        if type(index) is not int or not 0 <= index < 128:
+            raise ValueError("invalid failed capture chunk index")
+        provenance = validate_receipt(read_marker(failed_receipt, 0))
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(descriptor, "rb") as stream:
         metadata = os.fstat(stream.fileno())
@@ -111,6 +144,56 @@ def gnome_trace(action, index):
                 or not stat.S_ISREG(metadata.st_mode)
                 or not 256 <= metadata.st_size <= 8 * 1024 * 1024):
             raise RuntimeError("invalid GNOME Sysprof capture ownership/size")
+        if action == "failed-stop":
+            if provenance.get("qualified") is not False or process_start(provenance["pid"])!=provenance["process_start"]:
+                raise RuntimeError("failed capture original process refused")
+            initial_writers = capture_writers(provenance["pid"], metadata)
+            writers = initial_writers
+            waiting_since = time.monotonic_ns()
+            deadline = time.monotonic() + 5
+            while writers and time.monotonic() < deadline:
+                time.sleep(.05)
+                if process_start(provenance["pid"])!=provenance["process_start"]:
+                    raise RuntimeError("failed capture original process changed")
+                writers = capture_writers(provenance["pid"],metadata)
+            if writers:
+                raise RuntimeError("original failed capture writer did not close")
+            raw_receipt = read_raw(stream.fileno(),path,provenance["capture_identity"],uid)
+            if capture_writers(provenance["pid"],os.fstat(stream.fileno())):
+                raise RuntimeError("original failed capture writer reopened")
+            if process_start(provenance["pid"])!=provenance["process_start"]:
+                raise RuntimeError("failed capture original process changed")
+            receipt = dict(provenance,**raw_receipt,
+                           capture_writers_at_failure=initial_writers,
+                           capture_writers_after_failure=writers,
+                           capture_writer_close_wait_ns=time.monotonic_ns()-waiting_since,
+                           writer_closure_observed=writers==[],qualified=False)
+            validate_receipt(receipt)
+            write_marker(failed_receipt,receipt,0)
+            return receipt
+        if action == "failed-stop-read":
+            before=os.fstat(stream.fileno())
+            if (provenance.get("qualified") is not False
+                    or provenance.get("writer_closure_observed") is not True
+                    or provenance.get("capture_writers_after_failure") != []
+                    or capture_writers(provenance["pid"],before)
+                    or identity(before)!=provenance["capture_identity"]
+                    or before.st_size!=provenance["bytes"]
+                    or before.st_mtime_ns!=provenance["capture_mtime_ns"]
+                    or process_start(provenance["pid"])!=provenance["process_start"]):
+                raise RuntimeError("failed capture original chunk binding refused")
+            stream.seek(index*65536);raw=stream.read(65536)
+            after=os.fstat(stream.fileno());named=os.stat(path,follow_symlinks=False)
+            checked_file(after,uid);checked_file(named,uid)
+            if (identity(after)!=identity(before) or identity(named)!=identity(before)
+                    or (after.st_size,after.st_mtime_ns,after.st_ctime_ns)!=
+                       (before.st_size,before.st_mtime_ns,before.st_ctime_ns)
+                    or process_start(provenance["pid"])!=provenance["process_start"]
+                    or capture_writers(provenance["pid"],after)
+                    or len(raw)!=min(65536,provenance["bytes"]-index*65536) or not raw):
+                raise RuntimeError("failed capture original chunk changed")
+            return dict(index=index,data=base64.b64encode(raw).decode("ascii"),
+                        capture_identity=identity(after))
         if action == "stop":
             initial_writers = capture_writers(provenance["pid"], metadata)
             writers = initial_writers
@@ -146,7 +229,8 @@ def gnome_trace(action, index):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("clock", "notify", "frames",
-                                          "gnome-trace-start", "gnome-trace-stop", "gnome-trace-read"))
+                                          "gnome-trace-start", "gnome-trace-stop", "gnome-trace-read",
+                                          "gnome-trace-failed-stop", "gnome-trace-failed-stop-read"))
     parser.add_argument("--index", type=int, default=0)
     args = parser.parse_args()
     result = {}
@@ -155,7 +239,14 @@ def main():
     if args.action == "frames":
         result["presentation"] = frames()
     if args.action.startswith("gnome-trace-"):
-        result["gnome_trace"] = gnome_trace(args.action.removeprefix("gnome-trace-"), args.index)
+        try:
+            result["gnome_trace"] = gnome_trace(args.action.removeprefix("gnome-trace-"), args.index)
+        except Exception as error:
+            if args.action != "gnome-trace-failed-stop":
+                raise
+            context=Context("stop");context.stage="failed-capture-acquisition"
+            print(encode(context.failure(error),"stop").decode())
+            raise SystemExit(1) from None
     result["boottime_s"] = time.clock_gettime(time.CLOCK_BOOTTIME)
     print(json.dumps(result))
 

@@ -4,6 +4,7 @@ import importlib.machinery
 import importlib.util
 import io
 import ast
+import base64
 import json
 import tempfile
 from pathlib import Path
@@ -15,6 +16,98 @@ loader = importlib.machinery.SourceFileLoader("vm_boot_lane", str(Path(__file__)
 spec = importlib.util.spec_from_loader(loader.name, loader)
 lane = importlib.util.module_from_spec(spec)
 loader.exec_module(lane)
+
+
+class OrcaReadFailure(unittest.TestCase):
+    def test_failed_observation_emits_safe_receipt_and_keeps_exit_one(self):
+        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
+        tree = ast.parse(source.read_text())
+        main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+        branch = next(n for n in ast.walk(main) if isinstance(n, ast.If)
+                      and isinstance(n.test, ast.Compare) and any(isinstance(v, ast.Constant) and v.value == "orca-read"
+                          for v in n.test.comparators))
+        def observe(): raise RuntimeError("private-error-text")
+        scope = {"orca_observation": observe, "orca_read_error": lambda error: {"exception_type": type(error).__name__}, "json": json}
+        with patch("sys.stdout", new_callable=io.StringIO) as out:
+            with self.assertRaises(SystemExit) as caught:
+                exec(compile(ast.Module(body=branch.body, type_ignores=[]), str(source), "exec"), scope)
+        self.assertEqual(caught.exception.code, 1)
+        self.assertTrue(caught.exception.__suppress_context__)
+        self.assertEqual(json.loads(out.getvalue()), {"orca_read_error": {"exception_type": "RuntimeError"}})
+        self.assertNotIn("private-error-text", out.getvalue())
+
+    def test_failed_read_rejects_arbitrary_private_or_invalid_schema(self):
+        actor = lane.guest_agent.GuestAgent.__new__(lane.guest_agent.GuestAgent)
+        invalid = [{"exception_type": "private-token"},
+                   {"exception_type": "CalledProcessError", "argv": "private-token"},
+                   {"exception_type": "CalledProcessError", "returncode": True},
+                   {"exception_type": "CalledProcessError", "returncode": 256},
+                   {"exception_type": "RuntimeError", "returncode": 1},
+                   {"exception_type": "RuntimeError", "errno": 1},
+                   {"exception_type": "CalledProcessError", "returncode": 1,
+                    "dbus_method": "SetLogFileForTesting", "stderr": "private-token"},
+                   {"exception_type": "CalledProcessError", "returncode": 1,
+                    "dbus_method": "GetVersion", "stderr": "x" * 513},
+                   {"exception_type": "CalledProcessError", "returncode": 1,
+                    "dbus_method": "GetVersion", "stderr": "\x00private-token"}]
+        for value in invalid:
+            output = base64.b64encode(json.dumps({"orca_read_error": value}).encode()).decode()
+            failure = {"exited": True, "exitcode": 1, "out-data": output}
+            with patch.object(actor, "command", side_effect=[{"pid": 10}, failure]):
+                with self.assertRaisesRegex(RuntimeError, r"guest lifecycle orca-read failed \(exit=1\)") as caught:
+                    actor.run("orca-read")
+            self.assertNotIn("private-token", str(caught.exception))
+        # Schema/privacy policy only; the retained real VM failure remains unexplained.
+
+    def test_read_diagnostics_preserve_only_fixed_public_dbus_failure(self):
+        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
+        tree = ast.parse(source.read_text())
+        helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                      and node.name == "orca_read_error")
+        scope = {"subprocess": lane.subprocess}
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), str(source), "exec"), scope)
+        diagnose = scope["orca_read_error"]
+        command = ["runuser", "-u", "roost-test", "--", "env", "PRIVATE_ENV=do-not-copy",
+                   "busctl", "--user", "call", "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                   "org.freedesktop.DBus", "GetConnectionUnixProcessID", "s", ":1.527"]
+        error = lane.subprocess.CalledProcessError(1, command, stderr="Call failed: owner vanished\n" + "x" * 1024)
+        result = diagnose(error)
+        self.assertEqual(result["dbus_method"], "GetConnectionUnixProcessID")
+        self.assertEqual(result["returncode"], 1)
+        self.assertEqual(len(result["stderr"]), 512)
+        self.assertNotIn("PRIVATE_ENV", json.dumps(result))
+        for unsafe in (["orca", "--testing-token=do-not-copy"],
+                       [*command[:-3], "SetLogFileForTesting", "ss", "do-not-copy"]):
+            result = diagnose(lane.subprocess.CalledProcessError(1, unsafe, stderr="do-not-copy"))
+            self.assertNotIn("stderr", result)
+            self.assertNotIn("do-not-copy", json.dumps(result))
+        self.assertEqual(diagnose(FileNotFoundError(2, "do-not-copy")),
+                         {"exception_type": "FileNotFoundError", "errno": 2})
+    def test_guest_transport_keeps_read_failure_and_other_action_output_private(self):
+        diagnostic = {"orca_read_error": {"exception_type": "CalledProcessError",
+                      "returncode": 1, "dbus_method": "GetVersion", "stderr": "Call failed: owner vanished"}}
+        failed = {"exited": True, "exitcode": 1,
+                  "out-data": base64.b64encode(json.dumps(diagnostic).encode()).decode(),
+                  "err-data": base64.b64encode(b"private arbitrary traceback").decode()}
+        actor = lane.guest_agent.GuestAgent.__new__(lane.guest_agent.GuestAgent)
+        for action in ("orca-read", "orca-speech-start"):
+            with patch.object(actor, "command", side_effect=[{"pid": 10}, failed]):
+                with self.assertRaises(RuntimeError) as caught:
+                    actor.run(action)
+            message = str(caught.exception)
+            self.assertNotIn("private arbitrary traceback", message)
+            if action == "orca-read":
+                self.assertIn("owner vanished", message)
+                self.assertIn("failed (exit=1)", message)
+            else:
+                self.assertNotIn("owner vanished", message)
+        malformed = ["!", base64.b64encode(b"\xff").decode(),
+                     base64.b64encode(b"[").decode(), base64.b64encode(b"[]").decode(),
+                     base64.b64encode(b"x" * 4097).decode(), "A" * 5465, None, ["not text"]]
+        for output in malformed:
+            with patch.object(actor, "command", side_effect=[{"pid": 10}, {**failed, "out-data": output}]):
+                with self.assertRaisesRegex(RuntimeError, r"guest lifecycle orca-read failed \(exit=1\)"):
+                    actor.run("orca-read")
 
 
 class ConstraintProofCleanup(unittest.TestCase):
