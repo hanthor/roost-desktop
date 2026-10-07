@@ -20,6 +20,11 @@ import tempfile
 import time
 
 ACTIONS={'start','mapped','dialog','created','create-typed','cancel-typed','cancelled','closed'}
+# Bounded fresh-traversal attempts for one probe: the live tree mutates
+# mid-walk (compositor scene republishes, Nautilus rebuilds accessibles),
+# so a single tree-walk pass can hit a transient inconsistency. Only the
+# tree-walk stage is retried; persistent failures keep the exact diagnostic.
+TREE_WALK_ATTEMPTS=6
 APP='org.gnome.Nautilus'
 DISPLAY='org.gnome.Mutter.DisplayConfig'
 SERVICE='org.gnome.Mutter.ServiceChannel'
@@ -717,7 +722,16 @@ def main():
                 result=start()
             else:
                 original=context()
-                result=inspect(original,phase)
+                attempts=0
+                while True:
+                    try:
+                        result=inspect(original,phase)
+                        break
+                    except RuntimeError:
+                        attempts+=1
+                        if ERROR_STAGE!='tree-walk' or attempts>=TREE_WALK_ATTEMPTS:
+                            raise
+                        QUERY_CONTEXT=None
         except ReadyLater:
             error_stage('context')
             original=context();guard(original)

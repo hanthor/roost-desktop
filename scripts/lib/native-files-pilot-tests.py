@@ -160,6 +160,47 @@ class Policy(unittest.TestCase):
                  patch.object(G,'walk_tree',side_effect=RuntimeError('fixed walk')):
                 with self.assertRaises(RuntimeError):G.accessibility(value)
                 self.assertEqual(G.ERROR_STAGE,'tree-walk')
+    def test_tree_walk_transient_retried_then_succeeds(self):
+        calls=[]
+        def flaky(_original,_phase):
+            calls.append(True)
+            if len(calls)==1:
+                G.error_stage('tree-walk')
+                raise RuntimeError('transient mid-walk inconsistency')
+            return {'phase':'mapped'}
+        stream=io.StringIO()
+        with patch.object(G.sys,'argv',['fixed-probe','mapped']),patch.object(G,'context',return_value={}), \
+             patch.object(G,'inspect',side_effect=flaky),redirect_stdout(stream):
+            self.assertEqual(G.main(),0)
+        self.assertEqual(len(calls),2)
+        self.assertEqual(json.loads(stream.getvalue()),{'phase':'mapped'})
+    def test_tree_walk_persistent_failure_keeps_finite_diagnostic(self):
+        calls=[]
+        def broken(_original,_phase):
+            calls.append(True)
+            G.error_stage('tree-walk')
+            raise RuntimeError('private mid-walk body must never survive')
+        stream=io.StringIO()
+        with patch.object(G.sys,'argv',['fixed-probe','mapped']),patch.object(G,'context',return_value={}), \
+             patch.object(G,'inspect',side_effect=broken),redirect_stdout(stream):
+            self.assertEqual(G.main(),1)
+        self.assertEqual(len(calls),G.TREE_WALK_ATTEMPTS)
+        diagnostic=json.loads(stream.getvalue())
+        self.assertEqual(diagnostic,{'native_files_error':{'phase':'mapped','stage':'tree-walk','exception_type':'RuntimeError'}})
+        self.assertTrue(T.valid_native_files_error(diagnostic['native_files_error']))
+        self.assertNotIn('private',stream.getvalue())
+    def test_non_tree_walk_failure_never_retried(self):
+        calls=[]
+        def broken(_original,_phase):
+            calls.append(True)
+            G.error_stage('window')
+            raise RuntimeError('private window body')
+        stream=io.StringIO()
+        with patch.object(G.sys,'argv',['fixed-probe','mapped']),patch.object(G,'context',return_value={}), \
+             patch.object(G,'inspect',side_effect=broken),redirect_stdout(stream):
+            self.assertEqual(G.main(),1)
+        self.assertEqual(len(calls),1)
+        self.assertEqual(json.loads(stream.getvalue()),{'native_files_error':{'phase':'mapped','stage':'window','exception_type':'RuntimeError'}})
     def test_original_files_route_not_private_env(self):
         value={'nautilus':{'pid':12},'compositor':{'pid':34}}
         with patch.object(G,'bounded',return_value=b'PRIVATE=never retained\0WAYLAND_DISPLAY=roost-nested-34\0'):
