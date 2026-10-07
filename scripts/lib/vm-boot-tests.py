@@ -77,6 +77,48 @@ class BootApi(unittest.TestCase):
             self.assertIn("virtserialport,chardev=roost-qga,name=org.qemu.guest_agent.0", command)
 
 
+class NativeMouseSelection(unittest.TestCase):
+    def mouse(self, name="QEMU Virtio Mouse", absolute=False, current=False, index=8):
+        return {"name":name,"absolute":absolute,"current":current,"index":index}
+    def test_native_device_is_opt_in_and_preserves_performance_default(self):
+        with patch.object(lane.os.path,"exists",return_value=True), patch.object(lane.os,"access",return_value=True), patch.object(lane.subprocess,"Popen") as spawn:
+            lane.boot("disk.raw","/out","/scratch",30,guest_agent=True)
+            self.assertNotIn("virtio-mouse-pci,id=roost-relative-mouse",spawn.call_args.args[0])
+            lane.boot("disk.raw","/out","/scratch",30,guest_agent=True,native_relative_mouse=True)
+            self.assertIn("virtio-mouse-pci,id=roost-relative-mouse",spawn.call_args.args[0])
+    def test_actual_selected_name_index_and_mode_are_observed(self):
+        class Qmp:
+            def __init__(self):self.calls=[]
+            def cmd(qmp,command,**arguments):
+                qmp.calls.append((command,arguments))
+                if command=='human-monitor-command':return ''
+                return [self.mouse(current=len(qmp.calls)>1)]
+        qmp=Qmp();proof=lane.select_corner_mouse(qmp,True)
+        self.assertEqual(qmp.calls,[('query-mice',{}),('human-monitor-command',{'command-line':'mouse_set 8'}),('query-mice',{})])
+        self.assertTrue(proof['after'][0]['current'])
+        self.assertFalse(proof['requested_absolute'])
+    def test_wrong_name_duplicate_mode_or_index_cannot_be_selected(self):
+        bad=[[self.mouse(name='QEMU PS/2 Mouse')],[self.mouse(),self.mouse(index=9)],
+             [self.mouse(absolute=True)],[self.mouse(index=True)],[self.mouse(index=-1)]]
+        for inventory in bad:
+            with self.subTest(inventory=inventory):
+                qmp=SimpleNamespace(cmd=lambda *args,**kwargs:inventory)
+                with self.assertRaises(RuntimeError):lane.select_corner_mouse(qmp,True)
+    def test_failed_or_wrong_current_handler_cannot_prove_selection(self):
+        for result in ([self.mouse(current=False)],[self.mouse(name='vmmouse',absolute=True,current=True)],
+                       [self.mouse(current=True,index=9)]):
+            replies=iter([[self.mouse()],'',result])
+            with self.subTest(result=result),self.assertRaises(RuntimeError):
+                lane.select_corner_mouse(SimpleNamespace(cmd=lambda *args,**kwargs:next(replies)),True)
+    def test_original_handler_must_exist_and_restore_its_exact_identity(self):
+        original=self.mouse(name='vmmouse',absolute=True,current=True,index=7)
+        replies=iter([[original,self.mouse()],'',[original,self.mouse()]])
+        proof=lane.restore_corner_mouse(SimpleNamespace(cmd=lambda *args,**kwargs:next(replies)),original)
+        self.assertEqual(proof['after'][0],original)
+        with self.assertRaisesRegex(RuntimeError,'disappeared'):
+            lane.restore_corner_mouse(SimpleNamespace(cmd=lambda *args,**kwargs:[self.mouse()]),original)
+
+
 class InputProbePlacement(unittest.TestCase):
     def test_click_uses_placement_after_first_buffer(self):
         class FrameReached(Exception):
@@ -111,6 +153,55 @@ class InputProbePlacement(unittest.TestCase):
             self.assertEqual(mapped, placed)
             ready = json.loads((Path(out) / "lifecycle/input-ready.json").read_text())
             self.assertTrue(ready["active"])
+
+
+class RepeatedCoverage(unittest.TestCase):
+    def run_boots(self, root, manifests, returncodes=None):
+        next_boot = iter(zip(manifests, returncodes or [0] * len(manifests)))
+
+        def boot(command, check):
+            self.assertFalse(check)
+            manifest, code = next(next_boot)
+            destination = Path(command[command.index("--out") + 1])
+            destination.mkdir(parents=True, exist_ok=True)
+            (destination / "manifest.json").write_text(json.dumps({"assertions": manifest}))
+            return SimpleNamespace(returncode=code)
+
+        args = SimpleNamespace(out=str(root), boots=5, disk="disk.raw", timeout=30,
+                               tour=True, meta=[])
+        with patch.object(lane.subprocess, "run", side_effect=boot):
+            lane.repeat_boots(args)
+
+    def test_final_lifecycle_check_does_not_claim_five_observations(self):
+        startup = {"V-DRM": {"pass": True}}
+        full = {**startup, "V-SUSPEND": {"pass": True}}
+        with tempfile.TemporaryDirectory() as root:
+            self.run_boots(root, [startup] * 4 + [full])
+            proof = json.loads((Path(root) / "repeat-manifest.json").read_text())
+            self.assertEqual(proof["assertion_coverage"]["V-DRM"]["passed_boots"], [1, 2, 3, 4, 5])
+            self.assertEqual(proof["assertion_coverage"]["V-SUSPEND"]["observed_boots"], [5])
+            lines = (Path(root) / "assertions.txt").read_text().splitlines()
+            self.assertTrue(any(line.startswith("V-SUSPEND pass observed on 1/5") for line in lines))
+
+    def test_missing_baseline_check_is_fatal_and_retained(self):
+        startup = {"V-DRM": {"pass": True}}
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(SystemExit, "repeated boot gate failed"):
+                self.run_boots(root, [startup, {}, startup, startup, startup])
+            proof = json.loads((Path(root) / "repeat-manifest.json").read_text())
+            self.assertEqual(proof["assertion_coverage"]["V-DRM"]["missing_boots"], [2])
+            self.assertIn("V-DRM fail observed on 4/5", (Path(root) / "assertions.txt").read_text())
+
+    def test_observed_failure_and_failed_process_each_remain_fatal(self):
+        startup = {"V-DRM": {"pass": True}}
+        for last, codes in [({"V-DRM": {"pass": False}}, [0] * 5),
+                            (startup, [0, 0, 0, 0, 1])]:
+            with self.subTest(last=last, codes=codes), tempfile.TemporaryDirectory() as root:
+                with self.assertRaisesRegex(SystemExit, "repeated boot gate failed"):
+                    self.run_boots(root, [startup] * 4 + [last], codes)
+                proof = json.loads((Path(root) / "repeat-manifest.json").read_text())
+                self.assertEqual(proof["boot_results"][-1]["returncode"], codes[-1])
+                self.assertIn("V-REPEAT fail", (Path(root) / "assertions.txt").read_text())
 
 
 class PciCapabilities(unittest.TestCase):

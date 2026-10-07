@@ -88,8 +88,8 @@ def inventory():
         raise RuntimeError("expected exactly one greetd user session on the configured VT")
     return {"probe_uid": os.geteuid(), "session_uid": OWNER.pw_uid,
             "session": owned[0],
-            "state": {k: state[k] for k in ("locked", "windows", "focused", "active_workspace")}
-                     | {k: state.get(k) for k in ("mouse_left_handed", "touchpad_left_handed")},
+            "state": {k: state[k] for k in ("locked", "windows", "focused", "active_workspace", "overview_open", "pointer_position", "native_relative_motion_count")}
+                     | {k: state.get(k) for k in ("mouse_left_handed", "touchpad_left_handed", "hot_corners")},
             "processes": sorted(processes, key=lambda item: item["pid"])}
 
 
@@ -340,6 +340,12 @@ def main():
                           "/usr/libexec/roost-vm-input"], stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
         result = {"started": "count-only GTK input probe"}
+    elif action == "hot-corners":
+        value = sys.argv[2]
+        if value not in ("true", "false"):
+            raise ValueError("hot corners must be true or false")
+        call("gsettings", "set", "org.gnome.desktop.interface", "enable-hot-corners", value, user=True)
+        result = {"stored": call("gsettings", "get", "org.gnome.desktop.interface", "enable-hot-corners", user=True) == value}
     elif action == "mouse-handedness":
         value = sys.argv[2]
         if value not in ("true", "false"):

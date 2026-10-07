@@ -240,3 +240,38 @@ fn rtl_hot_corner_width_remains_logical_at_fractional_scale() {
         );
     }
 }
+
+#[test]
+fn native_pressure_barrier_uses_live_logical_scale_geometry() {
+    let mut comp = TestCompositor::new();
+    comp.state
+        .add_output("laptop", Some(output("laptop", 2.0)), 640, 400);
+    comp.state.set_output_location("laptop", (-640, -200));
+    let mut pressure = roost_compositor::corner_pressure::CornerPressure::default();
+    let layout = comp.state.hot_corner_outputs();
+    let (position, triggered) = pressure.motion(
+        (-638.0, -190.0).into(),
+        (-100.0, 0.0).into(),
+        0,
+        &layout,
+        false,
+        true,
+    );
+    assert_eq!(position, (-640.0, -190.0).into());
+    assert!(triggered.is_some());
+    pressure.reset();
+    let (position, triggered) = pressure.motion(
+        (-638.0, -150.0).into(),
+        (-100.0, 0.0).into(),
+        1,
+        &layout,
+        false,
+        true,
+    );
+    assert_eq!(
+        position,
+        (-738.0, -150.0).into(),
+        "barrier height must not double at scale two"
+    );
+    assert!(triggered.is_none());
+}
