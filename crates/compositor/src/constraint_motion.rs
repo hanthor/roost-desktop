@@ -115,9 +115,9 @@ impl EffectiveRegion {
             if *work > MAX_MEMBERSHIP_WORK {
                 return None;
             }
-            let midpoint = start + delta * (interval[0] + (interval[1] - interval[0]) / 2.0);
+            let midpoint = start + delta.upscale(interval[0] + (interval[1] - interval[0]) / 2.0);
             if !self.contains(midpoint) {
-                let edge = start + delta * interval[0];
+                let edge = start + delta.upscale(interval[0]);
                 if self.contains(edge) {
                     return Some(edge);
                 }
