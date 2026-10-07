@@ -2038,6 +2038,12 @@ impl WindowManager {
                 }
             }
         }
+        // Mapping, closing or restacking a surface can change what lies
+        // under a stationary pointer. Refresh enter/focus before the press;
+        // releases still follow Smithay's implicit grab to their original owner.
+        if pressed {
+            self.pointer_motion(state, self.pointer_pos, time);
+        }
         if let Some(pointer) = self.pointer.clone() {
             if trace {
                 eprintln!(
