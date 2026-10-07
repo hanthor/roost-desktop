@@ -606,7 +606,7 @@ ROOST_GRID_TRACE=1
 export ROOST_GRID_TRACE
 ROOST_PROOF_SWIPE_INPUT="$ARTIFACTS/swipe-input.json"
 export ROOST_PROOF_SWIPE_INPUT
-cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk -p roost-shell-host
+cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-wallpaper-svg -p roost-shell-gtk -p roost-shell-host
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor --example icon-probe
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor --example shortcut-inhibit-client
 if [ -n "$PAM_ON" ]; then

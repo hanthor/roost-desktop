@@ -833,6 +833,8 @@ struct FileIdentity {
     bytes: u64,
     modified: (i64, i64),
     changed: (i64, i64),
+    // Native loader/font identity observed only by existing background workers.
+    decoder: Option<String>,
 }
 impl FileIdentity {
     fn from_metadata(path: PathBuf, m: &std::fs::Metadata) -> Option<Self> {
@@ -846,6 +848,7 @@ impl FileIdentity {
             bytes: m.len(),
             modified: (m.mtime(), m.mtime_nsec()),
             changed: (m.ctime(), m.ctime_nsec()),
+            decoder: roost_wallpaper::svg::backend_identity(),
         })
     }
     fn for_uri(uri: &str) -> Option<Self> {
@@ -1160,7 +1163,7 @@ fn static_cache_path(
         return None;
     }
     let mut hash = std::collections::hash_map::DefaultHasher::new();
-    4u32.hash(&mut hash);
+    5u32.hash(&mut hash);
     uri.hash(&mut hash);
     settings.hash(&mut hash);
     geometry.hash(&mut hash);
