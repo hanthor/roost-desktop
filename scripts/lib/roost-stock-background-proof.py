@@ -78,7 +78,7 @@ def guard(process, original):
 FIXTURE = OUT / 'data/gnome-background-properties'
 PICTURE = OUT / 'static-bands.png'
 COLORS = [(240,0,0),(0,0,240),(240,240,0),(120,0,160)]
-POINTS = [(10,780),(300,780),(640,400),(1270,780),(10,34)]
+POINTS = [(10,780),(300,780),(660,400),(1270,780),(10,34)]
 CASES = ['centered','scaled','stretched','zoom','spanned','wallpaper','horizontal','vertical']
 
 
