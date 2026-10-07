@@ -1,8 +1,6 @@
 //! Publish the hardware session's display to D-Bus and systemd activation.
 //! Nested sessions never change the host user's activation environment.
 
-use std::io::Read;
-use std::os::unix::fs::MetadataExt;
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -50,116 +48,9 @@ fn activation_args(socket: &str, desktop: &str) -> Vec<String> {
     ]
 }
 
-/// Read only numeric/state unit metadata, with the same bounded deadline as
-/// other session utilities. No environment contents or process argv are logged.
-fn orca_state() -> Option<(u32, String)> {
-    let mut child = Command::new("systemctl")
-        .args([
-            "--user",
-            "show",
-            "--property=MainPID",
-            "--property=ActiveState",
-            "orca.service",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => {
-                let mut bytes = Vec::new();
-                child
-                    .stdout
-                    .take()?
-                    .take(1025)
-                    .read_to_end(&mut bytes)
-                    .ok()?;
-                if bytes.len() > 1024 {
-                    return None;
-                }
-                let text = std::str::from_utf8(&bytes).ok()?;
-                let pid = text
-                    .lines()
-                    .find_map(|line| line.strip_prefix("MainPID="))?
-                    .parse()
-                    .ok()?;
-                let state = text
-                    .lines()
-                    .find_map(|line| line.strip_prefix("ActiveState="))?
-                    .to_owned();
-                return Some((pid, state));
-            }
-            Ok(None) if start.elapsed() < TIMEOUT => std::thread::sleep(Duration::from_millis(25)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    }
-}
-
-fn stop_owned_orca(display: &str) {
-    let start = Instant::now();
-    loop {
-        let Some((pid, state)) = orca_state() else {
-            return;
-        };
-        // A request accepted just before the shell was reaped can still be
-        // activating. Wait for its actual process instead of stopping another
-        // user's session unit without establishing display ownership.
-        if state == "activating" && pid == 0 && start.elapsed() < TIMEOUT {
-            std::thread::sleep(Duration::from_millis(50));
-            continue;
-        }
-        if pid == 0 {
-            return;
-        }
-        let Ok(mut file) = std::fs::File::open(format!("/proc/{pid}/environ")) else {
-            return;
-        };
-        let Ok(metadata) = file.metadata() else {
-            return;
-        };
-        if metadata.uid() != unsafe { libc::geteuid() } {
-            return;
-        }
-        let mut environment = Vec::new();
-        if (&mut file)
-            .take(128 * 1024 + 1)
-            .read_to_end(&mut environment)
-            .is_err()
-            || environment.len() > 128 * 1024
-        {
-            return;
-        }
-        let mut entries = environment
-            .split(|byte| *byte == 0)
-            .filter_map(|entry| entry.strip_prefix(b"WAYLAND_DISPLAY="));
-        if entries.next() != Some(display.as_bytes()) || entries.next().is_some() {
-            eprintln!("roost-compositor: session services: foreign Orca left untouched");
-            return;
-        }
-        let args = ["--user", "stop", "orca.service"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        if run("systemctl", &args) {
-            eprintln!("roost-compositor: session services: owned Orca stopped");
-        } else {
-            eprintln!("roost-compositor: session services: owned Orca stop failed");
-        }
-        return;
-    }
-}
-
 /// Holds the systemd graphical session open for the DRM runtime's lifetime.
 pub struct SessionServices {
     alive: Arc<AtomicBool>,
-    display: String,
 }
 impl Drop for SessionServices {
     fn drop(&mut self) {
@@ -169,7 +60,6 @@ impl Drop for SessionServices {
             .map(str::to_owned)
             .collect::<Vec<_>>();
         let _ = run("systemctl", &args);
-        stop_owned_orca(&self.display);
     }
 }
 
@@ -178,7 +68,6 @@ pub fn publish(socket: &str) -> SessionServices {
     let alive = Arc::new(AtomicBool::new(true));
     let guard = SessionServices {
         alive: alive.clone(),
-        display: socket.to_owned(),
     };
     let desktop = std::env::var("XDG_CURRENT_DESKTOP")
         .ok()

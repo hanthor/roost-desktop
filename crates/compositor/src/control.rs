@@ -266,6 +266,7 @@ pub struct Session<'a> {
     unlock_pending: Option<u64>,
     /// Latest `SetInputSettings` from the shell, drained by the hub.
     input_settings: Option<roost_shell_control::InputSettings>,
+    screen_reader: Option<bool>,
     /// Input-source switches the shell asked for (`true` backward).
     input_source_switches: Vec<bool>,
     /// The switcher's thumbnail frames, when the shell sent new ones.
@@ -338,6 +339,7 @@ impl<'a> Session<'a> {
             unlock_request: None,
             unlock_pending: None,
             input_settings: None,
+            screen_reader: None,
             input_source_switches: Vec::new(),
             switcher_thumbnails: None,
             switcher_keys: None,
@@ -582,6 +584,17 @@ impl<'a> Session<'a> {
             }
             Message::Command {
                 id,
+                kind: CommandKind::SetScreenReader { enabled },
+            } => {
+                self.screen_reader = Some(enabled);
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: CommandStatus::Applied,
+                })?;
+                Ok(Handled::CommandResult { id, applied: true })
+            }
+            Message::Command {
+                id,
                 kind: CommandKind::SetInputSettings(settings),
             } => {
                 // Session-level settings for the runtime (seat, libinput).
@@ -785,6 +798,7 @@ fn message_kind(msg: &Message) -> &'static str {
         Message::WorkspacePopup { .. } => "WorkspacePopup",
         Message::PointerOutput { .. } => "PointerOutput",
         Message::ShortcutConsent { .. } => "ShortcutConsent",
+        Message::ScreenReader { .. } => "ScreenReader",
     }
 }
 
@@ -945,6 +959,7 @@ fn apply_command(
         | CommandKind::SwitchInputSource { .. }
         | CommandKind::SetSwitcherThumbnails { .. }
         | CommandKind::SetSwitcherKeys { .. }
+        | CommandKind::SetScreenReader { .. }
         | CommandKind::SetInputSettings(_) => (CommandStatus::Applied, None),
         CommandKind::Lock => {
             // Manual lock from the shell (session-lock set path):
@@ -980,6 +995,7 @@ pub struct PollOutcome {
     pub unlock: Option<(u64, roost_shell_control::Secret)>,
     /// GNOME input settings the shell sent, if any.
     pub input_settings: Option<roost_shell_control::InputSettings>,
+    pub screen_reader: Option<bool>,
     /// Accelerator grabs the shell sent, if they changed.
     pub accelerators: Option<Vec<roost_shell_control::Accelerator>>,
     /// Window-menu actions to carry out.
@@ -1404,6 +1420,9 @@ impl ControlHub {
                     }
                     if let Some(settings) = session.input_settings.take() {
                         outcome.input_settings = Some(settings);
+                    }
+                    if let Some(enabled) = session.screen_reader.take() {
+                        outcome.screen_reader = Some(enabled);
                     }
                     true
                 } else {

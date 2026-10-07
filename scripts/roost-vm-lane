@@ -288,7 +288,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
             if (actual["enabled"] is enabled
                     and ((enabled and actual["ready"] and actual["state"] == "active")
                          or (not enabled and actual["pid"] == 0 and actual["owner"] is None
-                             and actual["state"] in ("inactive", "failed")))):
+                             and actual["state"] == "disabled"))):
                 return actual
             time.sleep(0.2)
         raise RuntimeError("GNOME Screen Reader preference did not control genuine Orca51")
@@ -303,7 +303,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
                     raise RuntimeError("Orca retained the stopped process identity")
                 first_orca = identity
         record("V-ORCA-ACTIVATION", True,
-               "live GNOME key starts/stops genuine Orca51; bus PID/UID, package hashes and display verified")
+               "live GNOME key starts/stops genuine Orca51; bus PID/UID, package hash, compositor parent and display verified")
     finally:
         agent.run("orca-reset")
         with open(os.path.join(evidence, "orca-activation.json"), "w") as stream:
@@ -620,9 +620,9 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     closed_orca = agent.run("orca-departed", departing_orca["pid"], departing_orca["start_ticks"])
     with open(os.path.join(evidence, "orca-after-logout.json"), "w") as stream:
         json.dump(closed_orca, stream, indent=2)
-    record("V-ORCA-LOGOUT", closed_orca["pid"] == 0 and closed_orca["owner"] is None and not closed_orca["original_alive"],
-           "hardware logout stops only session-owned Orca; no original service/bus owner survives")
-    if closed_orca["pid"] != 0 or closed_orca["owner"] is not None or closed_orca["original_alive"]:
+    record("V-ORCA-LOGOUT", closed_orca["owner"] is None and not closed_orca["original_alive"],
+           "hardware logout stops only session-owned Orca; no original child/bus owner survives")
+    if closed_orca["owner"] is not None or closed_orca["original_alive"]:
         raise RuntimeError("Orca survived the hardware session logout")
     if not greeter_visible:
         raise RuntimeError("live gtkgreet did not paint its actual visible surface after logout")

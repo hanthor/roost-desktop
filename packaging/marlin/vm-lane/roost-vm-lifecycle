@@ -94,11 +94,8 @@ def inventory():
 
 
 def orca_observation():
-    properties = dict(line.split("=", 1) for line in call(
-        "systemctl", "--user", "show", "orca.service", "--property=MainPID",
-        "--property=ActiveState", "--property=FragmentPath", user=True,
-        check=False).splitlines() if "=" in line)
-    pid = int(properties.get("MainPID", "0"))
+    state = json.loads(STATE.read_text())
+    pid = int(state.get("screen_reader_pid") or 0)
     owner_reply = call("busctl", "--user", "call", "org.freedesktop.DBus",
                        "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetNameOwner",
                        "s", "org.gnome.Orca1.Service", user=True, check=False)
@@ -106,7 +103,7 @@ def orca_observation():
     owner = owner_parts[1] if len(owner_parts) == 2 and owner_parts[0] == "s" else None
     result = {"enabled": call("gsettings", "get", "org.gnome.desktop.a11y.applications",
                               "screen-reader-enabled", user=True) == "true",
-              "state": properties.get("ActiveState"), "pid": pid, "owner": owner,
+              "state": state.get("screen_reader_state"), "pid": pid, "owner": owner,
               "package": call("pacman", "-Q", "orca"), "ready": False}
     if pid == 0 or not owner:
         return result
@@ -126,7 +123,8 @@ def orca_observation():
         uid = process.stat().st_uid
         with (process / "environ").open("rb") as stream:
             environment = stream.read(128 * 1024 + 1)
-        ticks = int((process / "stat").read_text().rsplit(")", 1)[1].split()[19])
+        process_stat = (process / "stat").read_text().rsplit(")", 1)[1].split()
+        ticks, parent_pid = int(process_stat[19]), int(process_stat[1])
     except (FileNotFoundError, ProcessLookupError):
         return result
     if len(environment) > 128 * 1024:
@@ -134,30 +132,28 @@ def orca_observation():
     displays = [entry.split(b"=", 1)[1].decode() for entry in environment.split(b"\0")
                 if entry.startswith(b"WAYLAND_DISPLAY=")]
     launcher = pathlib.Path("/usr/bin/orca")
-    unit = pathlib.Path(properties["FragmentPath"])
-    if launcher.stat().st_uid != 0 or unit.stat().st_uid != 0:
-        raise RuntimeError("Orca launcher/unit not distribution-owned")
+    if launcher.stat().st_uid != 0:
+        raise RuntimeError("Orca launcher not distribution-owned")
     launcher_owner = call("pacman", "-Qqo", str(launcher))
-    unit_owner = call("pacman", "-Qqo", str(unit))
     version = shlex.split(call("busctl", "--user", "call", owner,
                               "/org/gnome/Orca1/Service", "org.gnome.Orca1.Service",
                               "GetVersion", user=True))
     stable = call("busctl", "--user", "call", "org.freedesktop.DBus",
                   "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetNameOwner",
                   "s", "org.gnome.Orca1.Service", user=True) == owner_reply
-    result.update({"uid": uid, "start_ticks": ticks, "display": displays,
-                   "executable": os.readlink(process / "exe"), "version": version,
-                   "launcher_sha256": hashlib.sha256(launcher.read_bytes()).hexdigest(),
-                   "unit_sha256": hashlib.sha256(unit.read_bytes()).hexdigest(),
-                   "unit": str(unit), "bus_pid": credentials["GetConnectionUnixProcessID"],
-                   "bus_uid": credentials["GetConnectionUnixUser"]})
     compositor = next(item for item in inventory()["processes"]
                       if item["executable"] == "roost-compositor")
     expected_display = f"roost-nested-{compositor['pid']}"
-    result["compositor_pid"] = compositor["pid"]
+    result.update({"uid": uid, "start_ticks": ticks, "display": displays,
+                   "parent_pid": parent_pid, "compositor_pid": compositor["pid"],
+                   "executable": os.readlink(process / "exe"), "version": version,
+                   "launcher_sha256": hashlib.sha256(launcher.read_bytes()).hexdigest(),
+                   "bus_pid": credentials["GetConnectionUnixProcessID"],
+                   "bus_uid": credentials["GetConnectionUnixUser"]})
     result["ready"] = (stable and uid == OWNER.pw_uid == credentials["GetConnectionUnixUser"]
                        and pid == credentials["GetConnectionUnixProcessID"]
-                       and displays == [expected_display] and launcher_owner == unit_owner == "orca"
+                       and parent_pid == compositor["pid"]
+                       and displays == [expected_display] and launcher_owner == "orca"
                        and len(version) == 2 and version[0] == "s" and version[1].startswith("51."))
     return result
 

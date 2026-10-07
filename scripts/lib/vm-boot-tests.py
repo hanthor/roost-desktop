@@ -18,18 +18,24 @@ loader.exec_module(lane)
 
 
 class OrcaLifecycleAuthority(unittest.TestCase):
-    def test_hardware_service_guard_outlives_reaped_runtime(self):
+    def test_compositor_authority_comes_from_actual_backend(self):
         source = (Path(__file__).resolve().parents[2] / "crates/compositor/src/runtime.rs").read_text()
-        run = source[source.index("pub fn run(session:"):]
-        self.assertLess(run.index("let _session_services;"), run.index("Runtime::launch(session)?"))
-        self.assertLess(run.index("Runtime::launch(session)?"), run.index("_session_services = if matches!(runtime.backend, Backend::Drm(_))"))
-        self.assertIn('shell.set_env(\n            "ROOST_SESSION_SERVICES",\n            match backend', source)
-        self.assertIn('Backend::Winit(_) => "nested"', source)
+        self.assertIn("let hardware = matches!(self.backend, Backend::Drm(_));", source)
+        self.assertIn("self.orca.set_enabled(enabled && hardware);", source)
+        self.assertIn("let hardware = false;", source)
+        self.assertTrue('doc["screen_reader_pid"] = serde_json::json!(self.orca.pid());' in source)
 
-    def test_nested_shell_checks_authority_before_session_bus(self):
-        source = (Path(__file__).resolve().parents[2] / "crates/shell-gtk/src/orca.rs").read_text()
-        self.assertLess(source.index('if !hardware('), source.index('gio::bus_get_future('))
-        self.assertNotIn('Command::new', source)
+    def test_no_global_orca_service_control_or_replace(self):
+        root = Path(__file__).resolve().parents[2]
+        compositor = (root / "crates/compositor/src/orca.rs").read_text()
+        shell = (root / "crates/shell-gtk/src/orca.rs").read_text()
+        self.assertNotIn('"--replace"', compositor)
+        self.assertNotIn('"orca.service"', compositor)
+        self.assertIn('Command::new("/usr/bin/orca")', compositor)
+        self.assertIn('libc::PR_SET_PDEATHSIG, libc::SIGTERM', compositor)
+        self.assertIn('libc::getppid() != parent', compositor)
+        self.assertNotIn('gio::bus_get_future', shell)
+        self.assertIn('control.set_screen_reader(enabled)', shell)
 
 
 class BootApi(unittest.TestCase):

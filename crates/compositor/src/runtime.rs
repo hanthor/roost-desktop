@@ -522,6 +522,7 @@ pub struct Runtime {
     manager: WindowManager,
     control: ControlHub,
     shell: ShellDriver,
+    orca: crate::orca::Reader,
     /// The IBus bridge, when IBus is installed.
     ime: Option<crate::ime::ImeBridge>,
     overlay: Overlay,
@@ -830,17 +831,6 @@ impl Runtime {
             );
         }
 
-        // Service control is actual-backend authority, not the overridable
-        // preview UI/session-kind preference above. Always replace inherited
-        // values so a nested compositor cannot control host Orca.
-        shell.set_env(
-            "ROOST_SESSION_SERVICES",
-            match backend {
-                Backend::Winit(_) => "nested",
-                Backend::Drm(_) => "hardware",
-            },
-        );
-
         // linux-dmabuf lists exactly what this renderer imports (#89).
         let mut backend = backend;
         let mut state = state;
@@ -959,6 +949,7 @@ impl Runtime {
             overview_swipe_from: None,
             scale: clamp_scale(session.scale),
             input_settings: Default::default(),
+            orca: crate::orca::Reader::new(&session.socket_name),
             pipewire: None,
             casts: Vec::new(),
             cast_outputs,
@@ -1498,7 +1489,7 @@ impl Runtime {
         let x11_ready = self.state.xwm.is_some();
         #[cfg(not(feature = "xwayland"))]
         let x11_ready = false;
-        let doc = serde_json::json!({
+        let mut doc = serde_json::json!({
             "rendered_frames": self.stats.frames,
             "x11_display": self.x11_display.map(|d| format!(":{d}")),
             "capture_streams": self.casts.len(),
@@ -1594,8 +1585,10 @@ impl Runtime {
                     }))
                 })
                 .collect::<Vec<_>>(),
-        })
-        .to_string();
+        });
+        doc["screen_reader_pid"] = serde_json::json!(self.orca.pid());
+        doc["screen_reader_state"] = serde_json::json!(self.orca.state());
+        let doc = doc.to_string();
         if doc == self.state_last {
             return;
         }
@@ -2784,6 +2777,20 @@ impl Runtime {
         }
         if let Some(settings) = outcome.input_settings {
             self.apply_input_settings(settings);
+        }
+        if let Some(enabled) = outcome.screen_reader {
+            #[cfg(feature = "drm")]
+            let hardware = matches!(self.backend, Backend::Drm(_));
+            #[cfg(not(feature = "drm"))]
+            let hardware = false;
+            self.orca.set_enabled(enabled && hardware);
+        }
+        let reader_changed = self.orca.poll().is_some();
+        if reader_changed || outcome.screen_reader.is_some() {
+            self.control
+                .queue_message(roost_shell_control::Message::ScreenReader {
+                    state: self.orca.status(),
+                });
         }
         if let Some(list) = outcome.accelerators {
             self.manager.set_accelerators(list);
@@ -4112,14 +4119,10 @@ fn send_frame_callbacks(state: &State, manager: &WindowManager) {
 /// `WAYLAND_DISPLAY` is set, so setting it first would point winit at our
 /// own not-yet-existing socket.
 pub fn run(session: &NestedSession) -> Result<RunStats, RuntimeError> {
-    // Drop/reap the runtime's supervised shell before service cleanup, so it
-    // cannot issue another screen-reader start while this session is ending.
-    #[cfg(feature = "drm")]
-    let _session_services;
     let (mut runtime, mut event_loop) = Runtime::launch(session)?;
     let prev_env = apply_nested_env(&session.socket_name);
     #[cfg(feature = "drm")]
-    _session_services = if matches!(runtime.backend, Backend::Drm(_)) {
+    let _session_services = if matches!(runtime.backend, Backend::Drm(_)) {
         Some(crate::session_services::publish(&session.socket_name))
     } else {
         None
