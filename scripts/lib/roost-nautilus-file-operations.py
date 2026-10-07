@@ -97,14 +97,28 @@ def fixture_files():
 
 
 def snapshot(label):
-    nodes = [{'name': node.name, 'role': node.getRoleName(),
-              'selected': node.getState().contains(pyatspi.STATE_SELECTED),
-              'focused': node.getState().contains(pyatspi.STATE_FOCUSED),
-              'text': node.queryText().getText(0, -1)
-              if node.getRoleName() in ('text', 'entry') else None}
-             for node in controls()]
+    before = focused()
+    nodes = []
+    disappeared = 0
+    for node in controls():
+        try:
+            nodes.append({'name': node.name, 'role': node.getRoleName(),
+                          'selected': node.getState().contains(pyatspi.STATE_SELECTED),
+                          'focused': node.getState().contains(pyatspi.STATE_FOCUSED),
+                          'text': node.queryText().getText(0, -1)
+                          if node.getRoleName() in ('text', 'entry') else None})
+        except GLib.Error as error:
+            # A removed file cell can disappear after the accessibility walk.
+            # Keep this specific observation explicit; other errors still fail.
+            if error.domain != 'atspi_error' or 'Object does not exist at path' not in error.message:
+                raise
+            disappeared += 1
+    after = focused()
+    if before['focused'] != after['focused'] or not any(node['role'] == 'frame' for node in nodes):
+        raise RuntimeError('Files snapshot lost its original focused window or live accessible frame')
     (OUT / ('nautilus-' + label + '.json')).write_text(
-        json.dumps({'scene': scene(), 'a11y': nodes, 'fixture_files': fixture_files()}, indent=2))
+        json.dumps({'scene': after, 'a11y': nodes, 'fixture_files': fixture_files(),
+                    'disappeared_accessible_objects': disappeared}, indent=2))
     subprocess.run(['scrot', str(OUT / ('nautilus-' + label + '.png'))], check=True)
 
 
