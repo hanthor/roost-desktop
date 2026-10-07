@@ -157,6 +157,7 @@ impl Dispatch<WlPointer, ()> for Client {
                 state.pointer_entered = true;
                 state.pointer_local = Some((surface_x, surface_y));
             }
+            wl_pointer::Event::Leave { .. } => state.pointer_entered = false,
             wl_pointer::Event::Motion {
                 surface_x,
                 surface_y,
@@ -726,6 +727,10 @@ fn layer_constraints_use_actual_origin_and_commit_regions_before_activation() {
                 manager.pointer_constraint_owns_motion(&comp.state),
                 "eligible pending constraint gates the next native motion"
             );
+            // The actual committed input region is narrower than the layer.
+            surface.set_input_region(Some(&region));
+            surface.commit();
+            pump(&mut comp, &mut manager, &mut [&mut app]);
             manager.on_input(
                 &mut comp.state,
                 ManagerInput::Motion {
@@ -753,6 +758,35 @@ fn layer_constraints_use_actual_origin_and_commit_regions_before_activation() {
                 app.client.relative_raw,
                 [(-630.0, -1130.0, -600.0, -1100.0, 0x1_0000_1234)]
             );
+            if !locked {
+                manager.on_input(
+                    &mut comp.state,
+                    ManagerInput::Motion {
+                        pos: (1000.0, 135.0).into(),
+                        time: 4,
+                    },
+                );
+                pump(&mut comp, &mut manager, &mut [&mut app]);
+                assert!(manager.pointer_pos().x < -340.0 && manager.pointer_pos().x > -341.0);
+                assert!(
+                    app.client.pointer_entered,
+                    "a valid negative-origin subpixel edge must retain actual layer focus"
+                );
+                assert!(manager.pointer_constraint_owns_motion(&comp.state));
+                manager.on_input(
+                    &mut comp.state,
+                    ManagerInput::RelativeMotion {
+                        delta: (1370.0, 0.0).into(),
+                        delta_unaccel: (1300.0, 0.0).into(),
+                        utime: 0x1_0000_5678,
+                    },
+                );
+                pump(&mut comp, &mut manager, &mut [&mut app]);
+                assert_eq!(
+                    app.client.relative_raw.last(),
+                    Some(&(1370.0, 0.0, 1300.0, 0.0, 0x1_0000_5678))
+                );
+            }
             let empty = app
                 .client
                 .compositor

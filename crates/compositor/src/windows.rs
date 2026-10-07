@@ -1815,7 +1815,7 @@ impl WindowManager {
     /// The surface a press at `pos` would land on (layer or window).
     fn surface_for_click(&self, state: &State, pos: Point<f64, Logical>) -> Option<WlSurface> {
         if let Some((surface, _)) =
-            crate::layer::topmost_layer_at(state, pos.x as i32, pos.y as i32)
+            crate::layer::topmost_layer_at(state, pos.x.floor() as i32, pos.y.floor() as i32)
         {
             return Some(surface);
         }
@@ -1876,7 +1876,7 @@ impl WindowManager {
             return;
         }
         if let Some((surface, (ox, oy))) =
-            crate::layer::topmost_layer_at(state, pos.x as i32, pos.y as i32)
+            crate::layer::topmost_layer_at(state, pos.x.floor() as i32, pos.y.floor() as i32)
         {
             if let Some(pointer) = self.pointer.clone() {
                 // Focus point is the surface origin: smithay reports
@@ -1974,7 +1974,8 @@ impl WindowManager {
         // Do this before Super+drag so the parent cannot be moved through it.
         if pressed && !self.overview_open {
             let pos = self.pointer_pos;
-            if crate::layer::topmost_layer_at(state, pos.x as i32, pos.y as i32).is_none()
+            if crate::layer::topmost_layer_at(state, pos.x.floor() as i32, pos.y.floor() as i32)
+                .is_none()
                 && self.popup_at(state, pos).is_none()
             {
                 if let Some(id) = self.window_at(pos) {
@@ -1989,7 +1990,8 @@ impl WindowManager {
         // Super+press on a window starts a move (GNOME's Super+drag).
         if pressed && self.super_held && !self.overview_open {
             let pos = self.pointer_pos;
-            if crate::layer::topmost_layer_at(state, pos.x as i32, pos.y as i32).is_none()
+            if crate::layer::topmost_layer_at(state, pos.x.floor() as i32, pos.y.floor() as i32)
+                .is_none()
                 && self.popup_at(state, pos).is_none()
             {
                 if let Some(id) = self.window_at(pos) {
@@ -2028,7 +2030,7 @@ impl WindowManager {
         if pressed && !on_popup {
             let pos = self.pointer_pos;
             if let Some((surface, _)) =
-                crate::layer::topmost_layer_at(state, pos.x as i32, pos.y as i32)
+                crate::layer::topmost_layer_at(state, pos.x.floor() as i32, pos.y.floor() as i32)
             {
                 if !self.overview_open && crate::layer::surface_takes_keyboard_on_press(&surface) {
                     let serial = SERIAL_COUNTER.next_serial();
