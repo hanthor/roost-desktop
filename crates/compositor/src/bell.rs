@@ -60,6 +60,10 @@ pub(crate) struct Bell {
 }
 
 impl Bell {
+    pub fn preferences(&self) -> &BellPreferences {
+        &self.policy
+    }
+
     pub fn set_policy(&mut self, mut policy: BellPreferences) {
         // Bound wire-controlled allocation; an invalid theme fails closed.
         if policy.theme.len() > 256 || policy.theme.contains('\0') {

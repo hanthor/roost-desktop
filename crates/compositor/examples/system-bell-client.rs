@@ -98,7 +98,24 @@ wayland_client::delegate_noop!(Client: ignore WlBuffer);
 wayland_client::delegate_noop!(Client: ignore XdgToplevel);
 wayland_client::delegate_noop!(Client: ignore XdgSystemBellV1);
 
+fn monotonic_ns() -> u128 {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: a valid writable timespec and the system monotonic clock.
+    assert_eq!(
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) },
+        0
+    );
+    u128::try_from(time.tv_sec).unwrap() * 1_000_000_000 + u128::try_from(time.tv_nsec).unwrap()
+}
+
 fn main() {
+    let owner = rustix::process::getppid().expect("original proof controller");
+    rustix::process::set_parent_process_death_signal(Some(rustix::process::Signal::KILL))
+        .expect("proof client parent-death guard");
+    assert_eq!(rustix::process::getppid(), Some(owner));
     let app = std::env::args().nth(1).expect("desktop app id");
     let conn = Connection::connect_to_env().unwrap();
     let mut queue = conn.new_event_queue();
@@ -148,11 +165,13 @@ fn main() {
                 _ => None,
             };
             if let Some((sequence, target)) = parsed {
+                let before_ns = monotonic_ns();
                 bell.ring((target == "window").then_some(&surface));
                 queue.roundtrip(&mut client).unwrap();
+                let after_ns = monotonic_ns();
                 previous = sequence;
                 println!(
-                    "RING seq={sequence} target={target} elapsed_us={}",
+                    "RING seq={sequence} target={target} before_ns={before_ns} after_ns={after_ns} elapsed_us={}",
                     started.elapsed().as_micros()
                 );
                 std::io::stdout().flush().unwrap();

@@ -609,6 +609,7 @@ export ROOST_PROOF_SWIPE_INPUT
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk -p roost-shell-host
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor --example icon-probe
 cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor --example shortcut-inhibit-client
+cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor --example system-bell-client
 if [ -n "$PAM_ON" ]; then
     env IBUS_ADDRESS="unix:path=$ARTIFACTS/not-the-private-ibus" \
         LD_PRELOAD="$PAM_WRAPPER_LIB" PAM_WRAPPER=1 \
@@ -4009,6 +4010,13 @@ fi
 
 
 
+
+# Observe the original bell client's pixels before intentionally crashing
+# the shell. The policy snapshot confirms delivery; it is not pixel proof.
+"$PY" "$ROOT/scripts/lib/roost-bell-pixels.py" --root "$ROOT" --state "$CSTATE" \
+    --socket "$SOCKET_NAME" --host "$WID" --compositor "$COMPOSITOR_PID" \
+    --out "$ARTIFACTS/bell" || fail G-BELL-VISUAL "real bell policy/pixel qualification failed"
+pass G-BELL-VISUAL "original Wayland bells obey live visual/audible preferences, frame/stage scope and expiry in actual host pixels"
 
 # A hard shell crash must not leave a persistent monitor behind. Do this
 # after the normal journey's stability assertion, then require supervision

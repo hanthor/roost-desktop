@@ -1607,6 +1607,12 @@ impl Runtime {
         // Keep backend-specific observations outside the large scene macro so
         // its expansion remains below the compiler's default recursion limit.
         // These values keep the same flat JSON fields and suppress lock input.
+        doc["bell_policy"] =
+            serde_json::json!((!self.is_locked()).then(|| self.state.protocols.bell.preferences()));
+        // A wire count confirms admission; actual host pixels remain the
+        // independent visual-bell acceptance evidence.
+        doc["bell_requests"] =
+            serde_json::json!((!self.is_locked()).then_some(self.state.protocols.bell.rings));
         doc["native_relative_motion_count"] = serde_json::json!((!self.is_locked())
             .then(|| match &self.backend {
                 #[cfg(feature = "drm")]
