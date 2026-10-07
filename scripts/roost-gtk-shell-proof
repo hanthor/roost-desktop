@@ -670,7 +670,7 @@ gsettings set org.gnome.desktop.background picture-uri "$wallpaper_uri"
 gsettings set org.gnome.desktop.background picture-uri-dark "$wallpaper_uri"
 end=$(($(date +%s) + 15))
 while :; do
-    scrot "$ARTIFACTS/01b-wallpaper-file-uri.png" >/dev/null
+    scrot -o "$ARTIFACTS/01b-wallpaper-file-uri.png" >/dev/null
     rgb=$(px "$ARTIFACTS/01b-wallpaper-file-uri.png" 10 $((HEIGHT - 10)))
     # px emits exactly three decimal RGB fields; split them intentionally.
     # shellcheck disable=SC2086
@@ -3715,7 +3715,7 @@ scrot "$ARTIFACTS/23-locked-after-suspend.png" >/dev/null
 # Wait for asynchronous decode and test the unobscured lower-left pixel.
 end=$(($(date +%s) + 15))
 while :; do
-    scrot "$ARTIFACTS/23b-lock-background.png" >/dev/null
+    scrot -o "$ARTIFACTS/23b-lock-background.png" >/dev/null
     rgb=$(px "$ARTIFACTS/23b-lock-background.png" 10 $((HEIGHT - 10)))
     # shellcheck disable=SC2086 # three RGB channels
     set -- $rgb
