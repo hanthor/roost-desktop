@@ -122,6 +122,8 @@ const MAX_CARDS: usize = 4;
 #[derive(Debug, Default)]
 pub struct Wallpaper {
     loaded: Vec<Loaded>,
+    /// Journey-only observation of the last attempted refresh, not a paint claim.
+    refresh_stage: Option<&'static str>,
     identities: Vec<IdentitySnapshot>,
     identity_pending: Vec<(
         String,
@@ -234,6 +236,37 @@ impl Wallpaper {
     /// Empty wallpaper (solid clear until a drop file appears).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Bounded in-memory observations only. Never inspect an arbitrary source
+    /// path from the frame/snapshot thread and never equate decoded pixels
+    /// with a successfully painted desktop frame.
+    pub fn diagnostics(&self) -> serde_json::Value {
+        fn text(value: &str) -> serde_json::Value {
+            let prefix: String = value.chars().take(1024).collect();
+            serde_json::json!({"truncated": prefix.len() < value.len(), "bytes": value.len(), "prefix": prefix})
+        }
+        serde_json::json!({
+            "last_refresh_stage": self.refresh_stage,
+            "list_limit": MAX_WALLPAPER_SLOTS,
+            "identity_count": self.identities.len(),
+            "identities": self.identities.iter().take(MAX_WALLPAPER_SLOTS).map(|item| serde_json::json!({
+                "uri": text(&item.uri), "identity": text(&format!("{:?}", item.value.identity)),
+                "age_ms": item.observed.elapsed().as_millis(),
+            })).collect::<Vec<_>>(),
+            "identity_pending_count": self.identity_pending.len(),
+            "identity_pending": self.identity_pending.iter().take(MAX_WALLPAPER_SLOTS).map(|item| text(&item.0)).collect::<Vec<_>>(),
+            "decode_pending_count": self.pending.len(),
+            "decode_pending": self.pending.iter().take(MAX_WALLPAPER_SLOTS).map(|item| serde_json::json!({
+                "request_key": text(&item.uri), "size": [item.size.w, item.size.h],
+            })).collect::<Vec<_>>(),
+            "decode_result_count": self.loaded.len(),
+            "decode_results": self.loaded.iter().take(MAX_WALLPAPER_SLOTS).map(|item| serde_json::json!({
+                "request_key": text(&item.uri), "size": item.size.map(|s| [s.w, s.h]),
+                "pixel_bytes": item.pixels.as_ref().map(Vec::len),
+                "buffer_available": item.buffer.is_some(),
+            })).collect::<Vec<_>>(),
+        })
     }
 
     /// Arbitrary configured paths can reside on slow network/FUSE mounts.
@@ -528,19 +561,23 @@ impl Wallpaper {
         lock: bool,
         geometry: Geometry,
     ) -> Option<String> {
+        self.refresh_stage = Some("output-area");
         let area = output.w.max(0) as u64 * output.h.max(0) as u64;
         if area == 0 || area > MAX_WALLPAPER_AREA {
             return None;
         }
+        self.refresh_stage = Some("drop-open");
         let mut drop_file = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(wallpaper_drop_path())
             .ok()?;
+        self.refresh_stage = Some("drop-metadata");
         let meta = drop_file.metadata().ok()?;
         if !meta.is_file() || meta.len() > 16 * 1024 {
             return None;
         }
+        self.refresh_stage = Some("drop-read-bounded-utf8");
         let mut text = String::new();
         drop_file
             .by_ref()
@@ -550,6 +587,7 @@ impl Wallpaper {
         if text.len() > 16 * 1024 {
             return None;
         }
+        self.refresh_stage = Some("drop-parse-metadata");
         let mut lines = text.lines();
         let mut uri = lines.next().unwrap_or_default().trim().to_owned();
         self.color = lines.next().and_then(parse_color);
@@ -580,6 +618,7 @@ impl Wallpaper {
         if lock && !lock_uri.is_empty() {
             uri = lock_uri.to_owned();
         }
+        self.refresh_stage = Some("source-identity-pending");
         let observation = self.poll_source(&uri)?;
         let identity = observation.identity.clone();
         let epoch = observation.timeline.as_ref().map(|_| {
@@ -652,6 +691,7 @@ impl Wallpaper {
         // participate in the cache key. Old results cannot satisfy a new key.
         let key =
             format!("{uri}\n{settings:?}\n{geometry:?}\n{identity:?}\n{epoch:?}\n{animation:?}");
+
         if !self
             .loaded
             .iter()
@@ -694,6 +734,7 @@ impl Wallpaper {
                 return Some(previous.uri.clone());
             }
         }
+        self.refresh_stage = Some("request-accepted");
         Some(key)
     }
 
