@@ -8,8 +8,10 @@ if [ "$(id -u)" -eq 0 ]; then
     env -u ROOST_PORTAL_BUS -u DBUS_SESSION_BUS_ADDRESS runuser -u roost-proof -- "$0" || status=$?
     # Container root maps to the host artifact owner in rootless Podman.
     # Restore evidence ownership even when a mandatory assertion failed.
-    chown -R --no-dereference 0:0 /out
-    exit "$status"
+    finalization=0
+    python3 /repo/scripts/lib/roost-portal-artifact-finalize.py /out --proof-status "$status" || finalization=$?
+    [ "$status" -eq 0 ] || exit "$status"
+    exit "$finalization"
 fi
 if [ -z "${ROOST_PORTAL_BUS:-}" ]; then ROOST_PORTAL_BUS=1 exec dbus-run-session -- "$0"; fi
 [ "$(id -u)" -eq 1000 ] || { echo 'ordinary fixture UID required' >&2; exit 1; }

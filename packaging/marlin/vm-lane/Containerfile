@@ -17,7 +17,15 @@
 # .github/workflows/ci.yml; booted by scripts/roost-vm-lane.
 
 ARG BASE_IMAGE=localhost/marlin-roost-preview:ci
+FROM ${BASE_IMAGE} AS constraint-builder
+COPY packaging/marlin/vm-lane/roost-vm-constraints.c /build/roost-vm-constraints.c
+COPY packaging/marlin/vm-lane/roost-vm-constraints-build /build/roost-vm-constraints-build
+RUN pacman -S --needed --noconfirm gcc pkgconf wayland wayland-protocols wlr-protocols \
+    && ROOST_CI_ONLY=1 /build/roost-vm-constraints-build
+
 FROM ${BASE_IMAGE}
+COPY --from=constraint-builder /usr/libexec/roost-vm-constraints /usr/libexec/roost-vm-constraints
+COPY --from=constraint-builder /usr/share/roost-vm-constraints /usr/share/roost-vm-constraints
 
 COPY packaging/marlin/vm-lane/greetd.toml /etc/greetd/config.toml
 COPY packaging/marlin/vm-lane/gtkgreet.css /etc/greetd/gtkgreet.css

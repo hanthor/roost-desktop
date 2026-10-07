@@ -50,6 +50,7 @@ pub mod a11y_keyboard;
 mod a11y_shadow;
 pub mod animation;
 pub mod capture_security;
+mod constraint_motion;
 pub mod control;
 pub mod corner_pressure;
 #[cfg(feature = "drm")]

@@ -652,6 +652,176 @@ def run_lifecycle(qmp, agent, out, serial_path, record, orca_contract="distribut
                            "devices": mice, "original_handler": original_mouse,
                            "restoration": restoration}, stream, indent=2)
 
+    # Same ordinary nonfullscreen Wayland principal must demonstrate the
+    # barrier before and after real persistent constraint ownership.
+    constraint_observations = []
+    principal = None
+    constraint_primary_error = None
+    def constraint_snapshot(label, action="status"):
+        value = agent.run("constraint-" + action)
+        if principal is not None and value["principal"] != principal:
+            raise RuntimeError("original native constraint principal changed")
+        state = agent.run("inventory")
+        constraint_observations.append({"label": label, **value, "state": state})
+        return value["client"]
+    def await_client(predicate, label):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            value = constraint_snapshot(label)
+            if predicate(value):
+                return value
+            time.sleep(0.05)
+        raise RuntimeError("actual constraint client condition not observed: " + label)
+    def relative_receipt(x, y, label):
+        before_client = constraint_snapshot(label + "-before")
+        count = len(before_client["relative"])
+        corner_move(x, y, relative=True)
+        actual = await_client(lambda value: len(value["relative"]) > count, label + "-delivered")
+        payloads = actual["relative"][count:]
+        if any(event["utime"] <= 0 for event in payloads):
+            raise RuntimeError("native client relative receipt lacks actual timestamp")
+        for axis, requested in (("dx_unaccel", x), ("dy_unaccel", y)):
+            if requested and not any(event[axis] * requested > 0 for event in payloads):
+                raise RuntimeError("actual native client did not receive requested relative axis direction")
+        return actual
+    def enter_original(label):
+        unconstrained = constraint_snapshot(label + "-before-absolute-setup")
+        if ((unconstrained["mode"] == 1 and unconstrained["locked"] > unconstrained["unlocked"])
+                or (unconstrained["mode"] == 2 and unconstrained["confined"] > unconstrained["unconfined"])):
+            raise RuntimeError("absolute principal setup cannot escape an active constraint")
+        before = agent.run("inventory")["state"]["native_relative_motion_count"]
+        # A distinct real tablet position forces a new absolute device event
+        # even when it remembers an earlier corner position after relative
+        # motion. This is focus setup, never pressure or native rearm proof.
+        corner_move(64, 64)
+        await_state(lambda value: value["state"]["pointer_position"] is not None
+                    and 63 < value["state"]["pointer_position"][0] < 65
+                    and 63 < value["state"]["pointer_position"][1] < 65
+                    and value["state"]["native_relative_motion_count"] == before,
+                    label=label + "-distinct-tablet-position-delivered")
+        local = await_client(lambda value: value["entered"] == 1 and 63 < value["local"][0] < 65
+                             and 63 < value["local"][1] < 65,
+                             label + "-distinct-original-principal")
+        global_state = agent.run("inventory")
+        position = global_state["state"]["pointer_position"]
+        if (position is None or not all(63 < coordinate < 65 for coordinate in position)
+                or local["buffer_size"] != [128, 128] or not local["configure_events"]):
+            raise RuntimeError("actual original layer origin/configuration receipt unavailable")
+        # Retain both actual coordinate spaces, including wire quantization;
+        # this precedes pressure and every real constraint creation.
+        origin_receipt = {"global": position, "local": local["local"],
+                          "global_minus_local": [position[i] - local["local"][i] for i in range(2)],
+                          "client": local, "state": global_state}
+        constraint_observations.append({"label": label + "-actual-layer-origin", **origin_receipt})
+        with open(os.path.join(evidence, label + "-actual-layer-origin.json"), "w") as stream:
+            json.dump(origin_receipt, stream, indent=2)
+        corner_move(0, 10)
+        await_state(lambda value: value["state"]["pointer_position"] is not None
+                    and value["state"]["pointer_position"][0] == 0
+                    and 1 < value["state"]["pointer_position"][1] < 32, label=label + "-pointer")
+        return await_client(lambda value: value["entered"] == 1 and value["local"][0] == 0
+                            and 1 < value["local"][1] < 32, label + "-actual-enter")
+    def leave_original(label):
+        # Actual observed approach within the same 128x128 surface. Large
+        # acceleration must not silently turn this into another principal.
+        for step in range(4):
+            relative_receipt(20, 20, label + "-step-" + str(step))
+            position = agent.run("inventory")["state"]["pointer_position"]
+            if not position or not 0 <= position[0] < 128 or not 0 <= position[1] < 128:
+                raise RuntimeError("native leave lost original principal geometry")
+            if position[0] > 32 and position[1] > 32:
+                constraint_snapshot(label + "-left-both")
+                return
+        raise RuntimeError("genuine native motion did not leave both barriers")
+    def genuine_positive(label):
+        enter_original(label)
+        relative_receipt(-200, 0, label)
+        observe_corner(label, True)
+        qmp.keys("esc")
+        observe_corner(label + "-escape-close", False)
+        # Genuine native leaving resets both held barriers. No absolute
+        # warp can serve as the rearm evidence after destruction.
+        leave_original(label + "-leave")
+    try:
+        started = agent.run("constraint-start")
+        principal = started["principal"]
+        constraint_observations.append({"label":"original-start", **started})
+        await_client(lambda value: value["configured"] > 0 and all(value["globals"].values())
+                     and value["buffer_size"] == [128, 128] and value["configure_events"]
+                     and all(event["chosen"] == [128, 128]
+                             and all(dimension in (0, 128) for dimension in event["raw"])
+                             for event in value["configure_events"]), "actual-layer-admission")
+        genuine_positive("constraint-original-unconstrained-positive")
+        for mode in ("lock", "confine"):
+            original = enter_original(mode + "-principal")
+            start_position = agent.run("inventory")["state"]["pointer_position"]
+            before_events = original["locked" if mode == "lock" else "confined"]
+            pending = constraint_snapshot(mode + "-request-roundtrip", mode)
+            if pending["constraint_id"] <= 0 or pending["mode"] != (1 if mode == "lock" else 2):
+                raise RuntimeError("actual constraint object was not admitted")
+            # Snapshot records whether activation occurred already; no
+            # race is inferred solely from request completion.
+            activated = relative_receipt(-200, 0, mode + "-first-motion")
+            activated = await_client(lambda value: value["locked" if mode == "lock" else "confined"] > before_events,
+                                     mode + "-actual-activation")
+            relative_receipt(-200, 0, mode + "-active-motion")
+            for sample in range(10):
+                actual = constraint_snapshot(mode + "-active-negative")
+                value = agent.run("inventory")
+                position = value["state"]["pointer_position"]
+                if value["state"]["overview_open"] or not actual["entered"]:
+                    raise RuntimeError("constraint ownership lost focus or opened overview")
+                if mode == "lock" and position != start_position:
+                    raise RuntimeError("real locked pointer moved")
+                if mode == "confine" and (not position or not 0 <= position[0] < 64 or not 0 <= position[1] < 64
+                                         or not 0 <= actual["local"][0] < 64 or not 0 <= actual["local"][1] < 64):
+                    raise RuntimeError("real confined pointer escaped its committed layer region")
+                time.sleep(0.05)
+            frame(mode + "-actual-constrained-negative")
+            # Real committed empty region causes observed deactivation;
+            # restore proves persistent reactivation on the same object.
+            deactivated_count = actual["unlocked" if mode == "lock" else "unconfined"]
+            constraint_snapshot(mode + "-empty-region-commit", "empty")
+            relative_receipt(-200, 0, mode + "-empty-region-motion")
+            await_client(lambda value: value["unlocked" if mode == "lock" else "unconfined"] > deactivated_count,
+                         mode + "-actual-deactivation")
+            # Empty regions no longer own motion. Preserve any actual
+            # unconstrained activation, close it with balanced real input,
+            # and observe the same original surface before restoring.
+            empty_state = agent.run("inventory")
+            constraint_snapshot(mode + "-deactivated-desktop")
+            if empty_state["state"]["overview_open"]:
+                qmp.keys("esc")
+                observe_corner(mode + "-empty-overview-close", False)
+            enter_original(mode + "-persistent-original-reenter")
+            active_count = activated["locked" if mode == "lock" else "confined"]
+            constraint_snapshot(mode + "-restore-region-commit", "restore")
+            relative_receipt(-200, 0, mode + "-restore-motion")
+            await_client(lambda value: value["locked" if mode == "lock" else "confined"] > active_count,
+                         mode + "-actual-persistent-reactivation")
+            destroyed = constraint_snapshot(mode + "-destroy-roundtrip", "destroy")
+            if destroyed["constraint_id"] or destroyed["mode"]:
+                raise RuntimeError("original constraint survived real destruction")
+            # Entirely relative leave, approach and crossing: unchanged
+            # original surface receives genuine native payloads again.
+            leave_original(mode + "-destroyed-leave")
+            relative_receipt(-2000, 0, mode + "-relative-left-edge")
+            relative_receipt(0, -2000, mode + "-relative-cross-positive")
+            observe_corner(mode + "-destroyed-original-positive", True)
+            qmp.keys("esc")
+            observe_corner(mode + "-destroyed-escape-close", False)
+            leave_original(mode + "-post-positive-leave")
+        record("V-HOT-CORNER-CONSTRAINTS", True,
+               "same actual session layer principal receives relative payloads; real persistent lock/confine activates, suppresses pressure, deactivates/reactivates on committed region updates, and destruction restores actual native pressure")
+    except Exception as error:
+        constraint_primary_error = {"type": type(error).__name__, "message": str(error)}
+        raise
+    finally:
+        finish_constraint_proof(agent, qmp, original_mouse, evidence,
+            {"principal": principal, "observations": constraint_observations,
+             "devices": mice, "relative_inputs": corner_inputs,
+             "primary_error": constraint_primary_error})
+
     # Capture the stable desktop after the final key OSD has disappeared.
     time.sleep(2)
 
@@ -1188,6 +1358,31 @@ def restore_corner_mouse(qmp, original):
     if response != "" or len(current) != 1 or any(current[0].get(key) != original[key] for key in ("name", "index", "absolute")):
         raise RuntimeError("original QMP mouse handler was not restored")
     return {"original": original, "before": before, "after": after}
+
+
+def finish_constraint_proof(agent, qmp, original_mouse, evidence, report):
+    """Retain all cleanup outcomes without replacing an original proof error."""
+    cleanup_errors = []
+    try:
+        agent.run("constraint-quit")
+    except Exception as error:
+        cleanup_errors.append({"action": "constraint-quit", "message": str(error)})
+    try:
+        restored = restore_corner_mouse(qmp, original_mouse)
+        with open(os.path.join(evidence, "hot-corner-constraint-mouse-restoration.json"), "w") as stream:
+            json.dump(restored, stream, indent=2)
+    except Exception as error:
+        cleanup_errors.append({"action": "original-mouse-restoration", "message": str(error)})
+    try:
+        with open(os.path.join(evidence, "hot-corner-constraint-stderr.json"), "w") as stream:
+            json.dump(agent.run("constraint-log"), stream, indent=2)
+    except Exception as error:
+        cleanup_errors.append({"action": "constraint-log-retention", "message": str(error)})
+    report["cleanup_errors"] = cleanup_errors
+    with open(os.path.join(evidence, "hot-corner-constraints.json"), "w") as stream:
+        json.dump(report, stream, indent=2)
+    if report["primary_error"] is None and cleanup_errors:
+        raise RuntimeError("actual constraint cleanup failed: " + json.dumps(cleanup_errors))
 
 
 def boot(disk, out, scratch, timeout, *, guest_agent=False, native_relative_mouse=False):

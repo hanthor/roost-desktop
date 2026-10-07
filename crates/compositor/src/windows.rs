@@ -1819,7 +1819,7 @@ impl WindowManager {
     /// The surface a press at `pos` would land on (layer or window).
     fn surface_for_click(&self, state: &State, pos: Point<f64, Logical>) -> Option<WlSurface> {
         if let Some((surface, _)) =
-            crate::layer::topmost_layer_at(state, pos.x as i32, pos.y as i32)
+            crate::layer::topmost_layer_at(state, pos.x.floor() as i32, pos.y.floor() as i32)
         {
             return Some(surface);
         }
@@ -1853,7 +1853,7 @@ impl WindowManager {
     pub fn pointer_motion(&mut self, state: &mut State, pos: Point<f64, Logical>, time: u32) {
         // A locked pointer stays where it is (relative motion still
         // flows); a confined one stays inside its window.
-        let Some(pos) = self.constrain(pos) else {
+        let Some(pos) = self.constrain(state, pos) else {
             return;
         };
         self.pointer_pos = pos;
@@ -1880,7 +1880,7 @@ impl WindowManager {
             return;
         }
         if let Some((surface, (ox, oy))) =
-            crate::layer::topmost_layer_at(state, pos.x as i32, pos.y as i32)
+            crate::layer::topmost_layer_at(state, pos.x.floor() as i32, pos.y.floor() as i32)
         {
             if let Some(pointer) = self.pointer.clone() {
                 // Focus point is the surface origin: smithay reports
@@ -1978,7 +1978,8 @@ impl WindowManager {
         // Do this before Super+drag so the parent cannot be moved through it.
         if pressed && !self.overview_open {
             let pos = self.pointer_pos;
-            if crate::layer::topmost_layer_at(state, pos.x as i32, pos.y as i32).is_none()
+            if crate::layer::topmost_layer_at(state, pos.x.floor() as i32, pos.y.floor() as i32)
+                .is_none()
                 && self.popup_at(state, pos).is_none()
             {
                 if let Some(id) = self.window_at(pos) {
@@ -1993,7 +1994,8 @@ impl WindowManager {
         // Super+press on a window starts a move (GNOME's Super+drag).
         if pressed && self.super_held && !self.overview_open {
             let pos = self.pointer_pos;
-            if crate::layer::topmost_layer_at(state, pos.x as i32, pos.y as i32).is_none()
+            if crate::layer::topmost_layer_at(state, pos.x.floor() as i32, pos.y.floor() as i32)
+                .is_none()
                 && self.popup_at(state, pos).is_none()
             {
                 if let Some(id) = self.window_at(pos) {
@@ -2032,7 +2034,7 @@ impl WindowManager {
         if pressed && !on_popup {
             let pos = self.pointer_pos;
             if let Some((surface, _)) =
-                crate::layer::topmost_layer_at(state, pos.x as i32, pos.y as i32)
+                crate::layer::topmost_layer_at(state, pos.x.floor() as i32, pos.y.floor() as i32)
             {
                 if !self.overview_open && crate::layer::surface_takes_keyboard_on_press(&surface) {
                     let serial = SERIAL_COUNTER.next_serial();
@@ -4209,7 +4211,7 @@ impl WindowManager {
             return;
         };
         let focus = pointer.current_focus().map(|surface| {
-            let origin = self.surface_origin_of(&surface);
+            let origin = self.surface_origin_of(state, &surface);
             (surface, origin)
         });
         pointer.relative_motion(
@@ -4224,20 +4226,100 @@ impl WindowManager {
         pointer.frame(state);
     }
 
-    /// Global origin of a surface's coordinates (window surfaces;
-    /// anything else reports the origin).
-    fn surface_origin_of(&self, surface: &WlSurface) -> Point<f64, Logical> {
-        self.windows
+    /// Resolve the compositor's actual placed geometry, including layers
+    /// on outputs whose logical origin is not the global origin.
+    fn constrained_surface_geometry(
+        &self,
+        state: &State,
+        surface: &WlSurface,
+    ) -> Option<(Point<f64, Logical>, Rectangle<i32, Logical>)> {
+        if let Some(window) = self
+            .windows
             .values()
-            .find(|w| w.surface.wl_surface().as_deref() == Some(surface))
-            .map(|w| crate::popup::surface_origin(surface, w.geometry.loc).to_f64())
+            .find(|window| window.surface.wl_surface().as_deref() == Some(surface))
+        {
+            let origin = crate::popup::surface_origin(surface, window.geometry.loc);
+            return Some((
+                origin.to_f64(),
+                Rectangle::new(window.geometry.loc - origin, window.geometry.size),
+            ));
+        }
+        if let Some((_, (x, y), _)) = crate::layer::layer_layout(state)
+            .into_iter()
+            .find(|(placed, _, _)| placed == surface)
+        {
+            let size = state
+                .layer_shell_state
+                .layer_surfaces()
+                .find(|layer| layer.wl_surface() == surface)
+                .and_then(|layer| layer.current_state().size)?;
+            return Some((
+                (f64::from(x), f64::from(y)).into(),
+                Rectangle::from_size(size),
+            ));
+        }
+        self.placed_popups(state)
+            .into_iter()
+            .find(|popup| &popup.surface == surface)
+            .map(|popup| {
+                (
+                    popup.origin.to_f64(),
+                    Rectangle::new(popup.rect.loc - popup.origin, popup.rect.size),
+                )
+            })
+    }
+
+    fn surface_origin_of(&self, state: &State, surface: &WlSurface) -> Point<f64, Logical> {
+        self.constrained_surface_geometry(state, surface)
+            .map(|(origin, _)| origin)
             .unwrap_or_default()
     }
 
-    /// The focused surface has a real pointer constraint registered with
-    /// Smithay. Include a pending constraint: the next motion activates it
-    /// in `constrain`, so native barriers must yield before that motion.
-    pub fn pointer_constraint_owns_motion(&self) -> bool {
+    fn effective_constraint_region(
+        &self,
+        state: &State,
+        surface: &WlSurface,
+    ) -> Option<(
+        Point<f64, Logical>,
+        crate::constraint_motion::EffectiveRegion,
+    )> {
+        let (origin, extent) = self.constrained_surface_geometry(state, surface)?;
+        let (input, over_budget) = smithay::wayland::compositor::with_states(surface, |states| {
+            let mut attributes = states
+                .cached_state
+                .get::<smithay::wayland::compositor::SurfaceAttributes>();
+            let current = attributes.current();
+            let total = 1usize.saturating_add(
+                current
+                    .input_region
+                    .as_ref()
+                    .map_or(0, |region| region.rects.len()),
+            );
+            let over_budget = total > crate::constraint_motion::MAX_RECTANGLES;
+            (
+                if over_budget {
+                    None
+                } else {
+                    current.input_region.clone()
+                },
+                over_budget,
+            )
+        });
+        Some((
+            origin,
+            crate::constraint_motion::EffectiveRegion {
+                extent,
+                input,
+                over_budget,
+                constraint: None,
+            },
+        ))
+    }
+
+    /// Active constraints and eligible pending constraints own the next
+    /// motion before native barriers. Ineligible persistent registrations
+    /// can later reactivate; they do not permanently swallow corner input.
+    pub fn pointer_constraint_owns_motion(&self, state: &State) -> bool {
         use smithay::wayland::pointer_constraints::with_pointer_constraint;
         let Some(pointer) = self.pointer.as_ref() else {
             return false;
@@ -4245,56 +4327,69 @@ impl WindowManager {
         let Some(surface) = pointer.current_focus() else {
             return false;
         };
+        if !with_pointer_constraint(&surface, pointer, |constraint| constraint.is_some()) {
+            return false;
+        }
         let mut owns_motion = false;
+        // with_pointer_constraint also holds the surface-state mutex. Take
+        // geometry/input snapshots first; its closure must not re-enter it.
+        let snapshot = self.effective_constraint_region(state, &surface);
         with_pointer_constraint(&surface, pointer, |constraint| {
-            owns_motion = constraint.is_some();
+            if let Some(constraint) = constraint {
+                owns_motion = constraint.is_active()
+                    || snapshot.is_none_or(|(origin, region)| {
+                        let region = region.with_constraint(constraint.region());
+                        !region.bounded() || region.contains(self.pointer_pos - origin)
+                    });
+            }
         });
         owns_motion
     }
 
-    /// Pointer-constraints (#89): a locked pointer stays put; a confined
-    /// one stays inside the focused window. Activates a pending
-    /// constraint on the surface under the pointer. Returns the position
-    /// motion may move to, or `None` when the pointer is locked.
-    fn constrain(&self, pos: Point<f64, Logical>) -> Option<Point<f64, Logical>> {
+    /// Apply actual committed constraint/input regions in surface-local
+    /// space. Region changes may explicitly deactivate rather than warp;
+    /// no synthetic relative motion is introduced.
+    fn constrain(&self, state: &State, pos: Point<f64, Logical>) -> Option<Point<f64, Logical>> {
         use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint};
         let pointer = self.pointer.as_ref()?;
         let Some(surface) = pointer.current_focus() else {
             return Some(pos);
         };
-        let mut locked = false;
-        let mut confined = false;
+        if !with_pointer_constraint(&surface, pointer, |constraint| constraint.is_some()) {
+            return Some(pos);
+        }
+        let mut position = Some(pos);
+        let snapshot = self.effective_constraint_region(state, &surface);
         with_pointer_constraint(&surface, pointer, |constraint| {
-            if let Some(constraint) = constraint {
-                if !constraint.is_active() {
-                    constraint.activate();
-                }
-                match &*constraint {
-                    PointerConstraint::Locked(_) => locked = true,
-                    PointerConstraint::Confined(_) => confined = true,
-                }
+            let Some(constraint) = constraint else { return };
+            let Some((origin, region)) = snapshot else {
+                // A constraint on unresolved geometry cannot broaden motion.
+                position = None;
+                return;
+            };
+            let region = region.with_constraint(constraint.region());
+            if !region.bounded() {
+                position = None;
+                return;
             }
+            let current = self.pointer_pos - origin;
+            if !region.contains(current) {
+                if constraint.is_active() {
+                    constraint.deactivate();
+                }
+                return;
+            }
+            if !constraint.is_active() {
+                constraint.activate();
+            }
+            position = match &*constraint {
+                PointerConstraint::Locked(_) => None,
+                PointerConstraint::Confined(_) => {
+                    Some(region.confine_global(origin, self.pointer_pos, pos))
+                }
+            };
         });
-        if locked {
-            return None;
-        }
-        if confined {
-            if let Some(window) = self
-                .windows
-                .values()
-                .find(|w| w.surface.wl_surface().as_deref() == Some(&surface))
-            {
-                let g = window.geometry;
-                return Some(
-                    (
-                        pos.x.clamp(g.loc.x as f64, (g.loc.x + g.size.w - 1) as f64),
-                        pos.y.clamp(g.loc.y as f64, (g.loc.y + g.size.h - 1) as f64),
-                    )
-                        .into(),
-                );
-            }
-        }
-        Some(pos)
+        position
     }
 
     /// Queued switcher drive events, drained by the runtime into the
