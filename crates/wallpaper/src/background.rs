@@ -41,10 +41,16 @@ pub fn render(
     let mut result = vec![0; w as usize * h as usize * 4];
     for y in 0..h {
         for x in 0..w {
+            // Mutter uses a two-texel LINEAR/CLAMP texture with normalized
+            // coordinates: its first/last quarters retain the endpoint colors.
             let progress = match settings.shading {
                 Shading::Solid => 0.0,
-                Shading::Horizontal => (f64::from(x) + 0.5) / f64::from(w),
-                Shading::Vertical => (f64::from(y) + 0.5) / f64::from(h),
+                Shading::Horizontal => {
+                    (2.0 * (f64::from(x) + 0.5) / f64::from(w) - 0.5).clamp(0.0, 1.0)
+                }
+                Shading::Vertical => {
+                    (2.0 * (f64::from(y) + 0.5) / f64::from(h) - 0.5).clamp(0.0, 1.0)
+                }
             };
             let mut color = [0.0; 3];
             for (channel, value) in color.iter_mut().enumerate() {
@@ -237,12 +243,12 @@ mod tests {
         s.secondary = [200, 0, 0];
         s.shading = Shading::Horizontal;
         let horizontal = render(None, s, geometry(4, 2)).unwrap();
-        assert_eq!(pixel(&horizontal, 4, 0, 0), [0, 0, 25, 255]);
-        assert_eq!(pixel(&horizontal, 4, 3, 1), [0, 0, 175, 255]);
+        assert_eq!(pixel(&horizontal, 4, 0, 0), [0, 0, 0, 255]);
+        assert_eq!(pixel(&horizontal, 4, 3, 1), [0, 0, 200, 255]);
         s.shading = Shading::Vertical;
         let vertical = render(None, s, geometry(4, 2)).unwrap();
-        assert_eq!(pixel(&vertical, 4, 0, 0), [0, 0, 50, 255]);
-        assert_eq!(pixel(&vertical, 4, 3, 1), [0, 0, 150, 255]);
+        assert_eq!(pixel(&vertical, 4, 0, 0), [0, 0, 0, 255]);
+        assert_eq!(pixel(&vertical, 4, 3, 1), [0, 0, 200, 255]);
         let im = RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 255, 128]));
         s.placement = Placement::Centered;
         s.shading = Shading::Solid;
@@ -292,5 +298,27 @@ mod tests {
         assert!(render(None, settings(Placement::None), g).is_none());
         g = geometry(u32::MAX, u32::MAX);
         assert!(render(None, settings(Placement::None), g).is_none());
+    }
+    #[test]
+    fn gradient_matches_actual_two_texel_gl_linear_clamp_sampling() {
+        let mut s = settings(Placement::None);
+        s.primary = [0, 200, 0];
+        s.secondary = [0, 0, 200];
+        s.shading = Shading::Horizontal;
+        let actual = render(None, s, geometry(8, 1)).unwrap();
+        // Retained Mesa EGL sampler operation; not a GNOME desktop capture.
+        let expected = [
+            [0, 200, 0, 255],
+            [0, 200, 0, 255],
+            [25, 175, 0, 255],
+            [75, 125, 0, 255],
+            [125, 75, 0, 255],
+            [175, 25, 0, 255],
+            [200, 0, 0, 255],
+            [200, 0, 0, 255],
+        ];
+        for (index, expected) in expected.into_iter().enumerate() {
+            assert_eq!(pixel(&actual, 8, index, 0), expected);
+        }
     }
 }

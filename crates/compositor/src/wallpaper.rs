@@ -119,6 +119,8 @@ const MAX_CARDS: usize = 4;
 #[derive(Debug, Default)]
 pub struct Wallpaper {
     loaded: Vec<Loaded>,
+    identities: Vec<IdentitySnapshot>,
+    identity_pending: Vec<(String, std::sync::mpsc::Receiver<Option<FileIdentity>>)>,
     /// Decodes running on worker threads, by URI and output size: a
     /// 4K JPEG XL takes long enough to stall frames, so the clear
     /// colour shows until the picture is ready (GNOME loads
@@ -166,10 +168,69 @@ struct Pending {
 /// covering the common multi-output case.
 const MAX_WALLPAPER_SLOTS: usize = 4;
 
+#[derive(Debug)]
+struct IdentitySnapshot {
+    uri: String,
+    value: Option<FileIdentity>,
+    observed: std::time::Instant,
+}
+
 impl Wallpaper {
     /// Empty wallpaper (solid clear until a drop file appears).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Arbitrary configured paths can reside on slow network/FUSE mounts.
+    /// Observe them only on bounded workers; the frame path uses snapshots.
+    fn poll_identity(&mut self, uri: &str) -> Option<Option<FileIdentity>> {
+        let mut index = 0;
+        while index < self.identity_pending.len() {
+            let result = match self.identity_pending[index].1.try_recv() {
+                Ok(value) => Some(value),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(None),
+            };
+            if let Some(value) = result {
+                let (completed, _) = self.identity_pending.remove(index);
+                self.identities.retain(|snapshot| snapshot.uri != completed);
+                if self.identities.len() >= MAX_WALLPAPER_SLOTS {
+                    self.identities.remove(0);
+                }
+                self.identities.push(IdentitySnapshot {
+                    uri: completed,
+                    value,
+                    observed: std::time::Instant::now(),
+                });
+            } else {
+                index += 1;
+            }
+        }
+        let snapshot = self.identities.iter().find(|snapshot| snapshot.uri == uri);
+        let value = snapshot.map(|snapshot| snapshot.value.clone());
+        let due = snapshot.is_none_or(|snapshot| {
+            snapshot.observed.elapsed() >= std::time::Duration::from_secs(1)
+        });
+        if due
+            && self.identity_pending.len() < MAX_WALLPAPER_SLOTS
+            && !self
+                .identity_pending
+                .iter()
+                .any(|(pending, _)| pending == uri)
+        {
+            let (send, result) = std::sync::mpsc::channel();
+            let path = uri.to_owned();
+            if std::thread::Builder::new()
+                .name("roost-wallpaper-identity".into())
+                .spawn(move || {
+                    let _ = send.send(FileIdentity::for_uri(&path));
+                })
+                .is_ok()
+            {
+                self.identity_pending.push((uri.to_owned(), result));
+            }
+        }
+        value
     }
 
     /// Start (or collect) the background decode of `uri` at `output`.
@@ -426,7 +487,7 @@ impl Wallpaper {
         if lock && !lock_uri.is_empty() {
             uri = lock_uri.to_owned();
         }
-        let identity = FileIdentity::for_uri(&uri);
+        let identity = self.poll_identity(&uri)?;
         // A missing picture still paints its configured color/gradient.
         let key = format!("{uri}\n{settings:?}\n{geometry:?}\n{identity:?}");
         if !self
@@ -650,7 +711,7 @@ fn static_cache_path(
         return None;
     }
     let mut hash = std::collections::hash_map::DefaultHasher::new();
-    3u32.hash(&mut hash);
+    4u32.hash(&mut hash);
     uri.hash(&mut hash);
     settings.hash(&mut hash);
     geometry.hash(&mut hash);
@@ -1014,7 +1075,22 @@ mod tests {
         };
         publish(&m);
         let mut wallpaper = Wallpaper::new();
-        let initial = wallpaper.refresh((8, 8).into(), test_geometry()).unwrap();
+        let wait_key = |wallpaper: &mut Wallpaper, previous: Option<&str>| {
+            let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                if let Some(key) = wallpaper.refresh((8, 8).into(), test_geometry()) {
+                    if previous != Some(key.as_str()) {
+                        break key;
+                    }
+                }
+                assert!(
+                    std::time::Instant::now() < end,
+                    "asynchronous identity observation did not complete"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let initial = wait_key(&mut wallpaper, None);
         let locked = wallpaper
             .refresh_picture((8, 8).into(), true, test_geometry())
             .unwrap();
@@ -1034,8 +1110,29 @@ mod tests {
         std::fs::rename(replacement, &path).unwrap();
         assert_ne!(
             changed,
-            wallpaper.refresh((8, 8).into(), test_geometry()).unwrap(),
+            wait_key(&mut wallpaper, Some(&changed)),
             "replacement inode must invalidate cached pixels even for same dimensions/content"
         );
+    }
+    #[test]
+    fn stalled_identity_observation_does_not_block_frames_or_spawn_unbounded_jobs() {
+        let mut wallpaper = Wallpaper::new();
+        let mut senders = Vec::new();
+        for index in 0..MAX_WALLPAPER_SLOTS {
+            let (send, result) = std::sync::mpsc::channel();
+            senders.push(send);
+            wallpaper
+                .identity_pending
+                .push((format!("stalled-{index}"), result));
+        }
+        // Four still-live workers exhaust the independent identity budget.
+        // Polling another source must return immediately without filesystem I/O.
+        let start = std::time::Instant::now();
+        assert!(wallpaper
+            .poll_identity("file:///another-source.png")
+            .is_none());
+        assert!(start.elapsed() < std::time::Duration::from_millis(100));
+        assert_eq!(wallpaper.identity_pending.len(), MAX_WALLPAPER_SLOTS);
+        assert_eq!(senders.len(), MAX_WALLPAPER_SLOTS);
     }
 }
