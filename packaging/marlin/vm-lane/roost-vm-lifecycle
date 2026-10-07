@@ -6,6 +6,8 @@ import pathlib
 import pwd
 import subprocess
 import sys
+import time
+import hashlib
 
 OWNER = pwd.getpwnam("roost-test")
 RUNTIME = f"/run/user/{OWNER.pw_uid}"
@@ -89,6 +91,71 @@ def inventory():
             "state": {k: state[k] for k in ("locked", "windows", "focused", "active_workspace", "overview_open", "pointer_position", "native_relative_motion_count")}
                      | {k: state.get(k) for k in ("mouse_left_handed", "touchpad_left_handed", "hot_corners")},
             "processes": sorted(processes, key=lambda item: item["pid"])}
+
+
+CONSTRAINT_OWNER = pathlib.Path("/run/roost-vm-constraint-owner.json")
+CONSTRAINT_LOG = pathlib.Path("/run/roost-vm-constraint.stderr")
+CONSTRAINT_EXE = pathlib.Path("/usr/libexec/roost-vm-constraints")
+
+
+def constraint_process(pid):
+    path = pathlib.Path(f"/proc/{pid}")
+    executable = pathlib.Path(os.readlink(path / "exe"))
+    if path.stat().st_uid != OWNER.pw_uid or executable != CONSTRAINT_EXE:
+        raise RuntimeError("constraint client is not the actual original session executable")
+    stat = (path / "stat").read_text().rsplit(")", 1)[1].split()
+    inode = (path / "exe").stat()
+    return {"pid": pid, "uid": OWNER.pw_uid, "start_ticks": int(stat[19]),
+            "executable": str(executable), "exe_inode": inode.st_ino,
+            "exe_device": inode.st_dev, "exe_sha256": hashlib.sha256(CONSTRAINT_EXE.read_bytes()).hexdigest()}
+
+
+def constraint_client(action):
+    if action not in ("start", "status", "lock", "confine", "destroy", "empty", "restore", "quit"):
+        raise ValueError("unknown fixed constraint action")
+    if action == "start":
+        if CONSTRAINT_OWNER.exists() or pathlib.Path(RUNTIME, "roost-vm-constraints.sock").exists():
+            raise RuntimeError("original constraint principal already exists")
+        compositor = next(process for process in inventory()["processes"] if process["executable"] == "roost-compositor")
+        display = f"roost-nested-{compositor['pid']}"
+        with CONSTRAINT_LOG.open("xb") as log:
+            os.chmod(CONSTRAINT_LOG, 0o600)
+            subprocess.Popen(["runuser", "-u", OWNER.pw_name, "--", "env", f"XDG_RUNTIME_DIR={RUNTIME}",
+                              f"WAYLAND_DISPLAY={display}", str(CONSTRAINT_EXE)],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log,
+                             start_new_session=True)
+        deadline = time.monotonic() + 5
+        while not pathlib.Path(RUNTIME, "roost-vm-constraints.sock").exists():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("actual constraint principal did not bind its session socket")
+            time.sleep(0.05)
+        snapshot = json.loads(call(str(CONSTRAINT_EXE), "--command", "status", user=True))
+        identity = constraint_process(snapshot["pid"])
+        record = {"identity": identity, "display": display,
+                  "surface_id": snapshot["surface_id"], "pointer_id": snapshot["pointer_id"],
+                  "relative_id": snapshot["relative_id"],
+                  "build_metadata": {name: pathlib.Path("/usr/share/roost-vm-constraints", name).read_text()
+                      for name in ("source-sha256sums", "build-sha256sums", "packages.txt", "compiler.txt")}}
+        with CONSTRAINT_OWNER.open("x") as stream:
+            os.chmod(CONSTRAINT_OWNER, 0o600)
+            json.dump(record, stream)
+    else:
+        record = json.loads(CONSTRAINT_OWNER.read_text())
+        identity = constraint_process(record["identity"]["pid"])
+        if identity != record["identity"]:
+            raise RuntimeError("actual original constraint client process changed")
+        snapshot = json.loads(call(str(CONSTRAINT_EXE), "--command", action, user=True))
+    if snapshot["uid"] != OWNER.pw_uid or snapshot["pid"] != record["identity"]["pid"]:
+        raise RuntimeError("constraint response principal differs from original")
+    if any(snapshot[key] != record[key] for key in ("surface_id", "pointer_id", "relative_id")):
+        raise RuntimeError("original constraint protocol objects changed")
+    if action == "quit":
+        deadline = time.monotonic() + 5
+        while pathlib.Path(f"/proc/{record['identity']['pid']}").exists():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("actual original constraint client did not terminate")
+            time.sleep(0.05)
+    return {"principal": record, "client": snapshot}
 
 
 def main():
@@ -240,6 +307,12 @@ def main():
                           "/usr/libexec/roost-vm-input"], stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
         result = {"started": "count-only GTK input probe"}
+    elif action == "constraint-log":
+        with CONSTRAINT_LOG.open("rb") as stream:
+            raw = stream.read(8193)
+        result = {"stderr": raw[:8192].decode(errors="replace"), "truncated": len(raw) > 8192}
+    elif action.startswith("constraint-"):
+        result = constraint_client(action.removeprefix("constraint-"))
     elif action == "hot-corners":
         value = sys.argv[2]
         if value not in ("true", "false"):
