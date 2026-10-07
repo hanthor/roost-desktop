@@ -49,6 +49,7 @@ struct Inner {
     epoch: u64,
     lifetime: u64,
     recipient: Option<String>,
+    recipient_generation: u64,
     reset_generation: u64,
     reset: Option<Reset>,
     locked: bool,
@@ -63,6 +64,9 @@ struct Inner {
 impl Inner {
     fn invalidate(&mut self) {
         self.epoch = self.epoch.wrapping_add(1);
+        // A brief revoke/re-admit of the identical bus owner must permanently
+        // discard disclosed modifier metadata, even if the emitter misses it.
+        self.recipient_generation = self.recipient_generation.wrapping_add(1);
         self.grants = None;
         self.recipient = None;
         self.reset = None;
@@ -141,6 +145,7 @@ impl Monitor {
             epoch: 0,
             lifetime: 0,
             recipient: None,
+            recipient_generation: 0,
             reset_generation: 0,
             reset: None,
             locked: false,
@@ -521,16 +526,19 @@ fn emit_key(conn: &zbus::blocking::Connection, owner: &str, key: Key) -> zbus::R
 struct Emitter {
     lifetime: u64,
     owner: String,
+    recipient_generation: u64,
     modifiers: HashMap<u16, u32>,
 }
 impl Emitter {
     fn retain(&mut self, inner: &Inner) {
         if inner.pid == 0
             || self.lifetime != inner.lifetime
+            || self.recipient_generation != inner.recipient_generation
             || inner.recipient.as_deref() != Some(self.owner.as_str())
         {
             self.modifiers.clear();
             self.lifetime = inner.lifetime;
+            self.recipient_generation = inner.recipient_generation;
             self.owner = inner.recipient.clone().unwrap_or_default();
         }
     }
@@ -625,6 +633,7 @@ pub(crate) mod tests {
             epoch: 1,
             lifetime: 1,
             recipient: Some(":1.23".into()),
+            recipient_generation: 0,
             reset_generation: 0,
             reset: None,
             locked: false,
@@ -944,6 +953,39 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(resets, 1);
         assert_eq!(m.snapshot()["resume_state"], "unwatched");
+    }
+    #[test]
+    fn recipient_invalidation_discards_metadata_before_identical_owner_readmission() {
+        for in_flight in [false, true] {
+            let (m, events) = monitor(vec![0xffe5], vec![]);
+            let mut emitter = Emitter::default();
+            m.key(key(0xffe5, 66, false, 0), Duration::from_secs(1));
+            let readmit = || {
+                let mut inner = m.inner.lock().unwrap();
+                let grants = inner.grants.take();
+                inner.invalidate();
+                inner.recipient = Some(":1.23".into());
+                inner.grants = grants;
+            };
+            emitter
+                .normal(&m, events.recv().unwrap(), |_, _| {
+                    if in_flight {
+                        readmit();
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(emitter.modifiers.len(), 1);
+            if !in_flight {
+                readmit();
+            }
+            m.set_locked(true);
+            emitter
+                .reset(&m, |_, _| panic!("metadata from revoked admission"))
+                .unwrap();
+            assert!(emitter.modifiers.is_empty());
+            assert!(m.inner.lock().unwrap().reset.is_none());
+        }
     }
     #[test]
     fn owner_loss_cancels_reset_and_cannot_target_replacement_connection() {
