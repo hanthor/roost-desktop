@@ -704,6 +704,7 @@ impl Wallpaper {
         // participate in the cache key. Old results cannot satisfy a new key.
         let key =
             format!("{uri}\n{settings:?}\n{geometry:?}\n{identity:?}\n{epoch:?}\n{animation:?}");
+
         if !self
             .loaded
             .iter()
