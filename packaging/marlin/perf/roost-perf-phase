@@ -259,28 +259,31 @@ def gnome_trace(action, index):
         provenance = payload if action == "failed-stop" else dict(payload, guest_kernel=os.uname().release)
         if action == "start":
             return dict(provenance, guest_kernel_provenance=kernel_before)
-        # The original profiler has stopped. Preserve its whole raw capture
-        # even when further provenance is missing or changes.
-        kernel_before = None
-        try:
-            descriptor = os.open(kernel_marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-            with os.fdopen(descriptor) as stream:
-                metadata = os.fstat(stream.fileno())
-                if (metadata.st_uid != 0 or metadata.st_mode & 0o077 or
-                        not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 16384):
-                    raise RuntimeError("invalid root kernel provenance marker")
-                kernel_before = json.load(stream)
-            kernel_after = guest_kernel_provenance()
-            provenance["guest_kernel_provenance"] = {
-                "before": kernel_before, "after": kernel_after,
-                "unchanged": kernel_before == kernel_after}
-        except Exception as error:
-            provenance["guest_kernel_provenance"] = {"before": kernel_before, "error": str(error)[:1024]}
-        finally:
+        # Failed-stop receipts keep their fixed schema: marker comparison
+        # runs only for actual stops.
+        if action == "stop":
+            # The original profiler has stopped. Preserve its whole raw capture
+            # even when further provenance is missing or changes.
+            kernel_before = None
             try:
-                kernel_marker.unlink(missing_ok=True)
-            except OSError as error:
-                provenance["guest_kernel_provenance"]["cleanup_error"] = str(error)[:1024]
+                descriptor = os.open(kernel_marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(descriptor) as stream:
+                    metadata = os.fstat(stream.fileno())
+                    if (metadata.st_uid != 0 or metadata.st_mode & 0o077 or
+                            not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 16384):
+                        raise RuntimeError("invalid root kernel provenance marker")
+                    kernel_before = json.load(stream)
+                kernel_after = guest_kernel_provenance()
+                provenance["guest_kernel_provenance"] = {
+                    "before": kernel_before, "after": kernel_after,
+                    "unchanged": kernel_before == kernel_after}
+            except Exception as error:
+                provenance["guest_kernel_provenance"] = {"before": kernel_before, "error": str(error)[:1024]}
+            finally:
+                try:
+                    kernel_marker.unlink(missing_ok=True)
+                except OSError as error:
+                    provenance["guest_kernel_provenance"]["cleanup_error"] = str(error)[:1024]
     path = Path(f"/run/user/{uid}/roost-perf-gnome.syscap")
     failed_receipt = Path("/run/roost-perf-gnome-failed-capture.json")
     if action == "failed-stop-read":

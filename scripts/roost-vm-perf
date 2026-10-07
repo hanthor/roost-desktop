@@ -24,7 +24,7 @@ from vm_guest_agent import GuestAgent  # noqa: E402
 from perf_trace_diagnostics import decode as decode_trace_failure, MAX_BYTES as TRACE_FAILURE_BYTES
 from gnome_failed_capture import validate_receipt as validate_failed_capture, validate_chunk as validate_failed_chunk
 from gnome_stop_boundary import capture_stop_boundary_evidence
-from gnome_sysprof import capture_boundary_evidence, decode as decode_gnome_sysprof, required_scope_counts, overview_frame_bounds, FrameOwnershipError, frame_source_evidence  # noqa: E402
+from gnome_sysprof import capture_boundary_evidence, decode as decode_gnome_sysprof, required_scope_counts, overview_frame_bounds, frame_source_evidence  # noqa: E402
 
 
 def guest_probe(agent, action, index=None, out=None):

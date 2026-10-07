@@ -8,7 +8,7 @@ import base64
 import io
 import subprocess
 import sys
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from types import SimpleNamespace
 from pathlib import Path
 import tempfile
@@ -32,6 +32,31 @@ sysprof = load("sysprof", ROOT / "scripts/lib/gnome_sysprof.py")
 phase = load("phase", ROOT / "packaging/marlin/perf/roost-perf-phase")
 profiler = load("profiler", ROOT / "packaging/marlin/perf/roost-gnome-profiler")
 diag = load("diagnostics", ROOT / "scripts/lib/perf_trace_diagnostics.py")
+
+
+@contextmanager
+def isolated_kernel_marker(directory):
+    """Redirect the fixed /run kernel marker into a scratch directory."""
+    real_path = phase.Path
+    def redirect(path, *args, **kwargs):
+        if str(path) == "/run/roost-perf-kernel.json":
+            return real_path(directory) / "roost-perf-kernel.json"
+        return real_path(path, *args, **kwargs)
+    with patch.object(phase, "Path", side_effect=redirect):
+        yield
+
+
+@contextmanager
+def isolated_trace_start(directory, run_error=None, run_result=None):
+    """Drive gnome_trace start with kernel provenance and marker isolated."""
+    run_mock = (patch.object(phase.subprocess, "run", side_effect=run_error)
+                if run_error is not None else
+                patch.object(phase.subprocess, "run", return_value=run_result))
+    with patch.object(phase.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=1000)), \
+         run_mock, \
+         patch.object(phase, "guest_kernel_provenance", return_value={}), \
+         isolated_kernel_marker(directory):
+        yield
 
 
 class TraceFailureDiagnostics(unittest.TestCase):
@@ -100,7 +125,7 @@ class TraceFailureDiagnostics(unittest.TestCase):
         raw=diag.encode(self.receipt(),'start').decode()
         error=subprocess.CalledProcessError(7,['fixed'],output=raw,stderr='PRIVATE STDERR')
         output=io.StringIO()
-        with patch.object(phase.pwd,'getpwnam',return_value=SimpleNamespace(pw_uid=1000)),patch.object(phase.subprocess,'run',side_effect=error),redirect_stdout(output):
+        with tempfile.TemporaryDirectory() as marker_dir,isolated_trace_start(marker_dir,run_error=error),redirect_stdout(output):
             with self.assertRaises(SystemExit) as failed:phase.gnome_trace('start',0)
         self.assertEqual(failed.exception.code,7)
         self.assertEqual(diag.decode(output.getvalue(),'start'),self.receipt())
@@ -129,7 +154,7 @@ class TraceFailureDiagnostics(unittest.TestCase):
             with self.subTest(raw=raw[:40]),self.assertRaises((ValueError,TypeError)):diag.decode(raw,'start')
             output=io.StringIO()
             error=subprocess.CalledProcessError(9,['fixed'],output=raw.decode(),stderr='PRIVATE STDERR')
-            with patch.object(phase.pwd,'getpwnam',return_value=SimpleNamespace(pw_uid=1000)),patch.object(phase.subprocess,'run',side_effect=error),redirect_stdout(output):
+            with tempfile.TemporaryDirectory() as marker_dir,isolated_trace_start(marker_dir,run_error=error),redirect_stdout(output):
                 with self.assertRaises(SystemExit) as phase_failure:phase.gnome_trace('start',0)
             self.assertEqual(phase_failure.exception.code,9)
             rejected=diag.decode(output.getvalue(),'start')['trace_failure']
@@ -156,7 +181,7 @@ class TraceFailureDiagnostics(unittest.TestCase):
             self.assertNotIn('PRIVATE',diag.encode(value,'start').decode())
     def test_zero_exit_cannot_turn_structured_failure_into_acquisition_success(self):
         raw=diag.encode(self.receipt(),'start').decode()
-        with patch.object(phase.pwd,'getpwnam',return_value=SimpleNamespace(pw_uid=1000)),patch.object(phase.subprocess,'run',return_value=SimpleNamespace(stdout=raw,returncode=0)):
+        with tempfile.TemporaryDirectory() as marker_dir,isolated_trace_start(marker_dir,run_result=SimpleNamespace(stdout=raw,returncode=0)):
             with self.assertRaisesRegex(ValueError,'cannot qualify'):phase.gnome_trace('start',0)
         row=dict(self.receipt(),boottime_s=100)
         class Agent:
@@ -171,7 +196,7 @@ class TraceFailureDiagnostics(unittest.TestCase):
     def test_malformed_inner_exit9_reaches_host_as_safe_rejection_not_success(self):
         output=io.StringIO()
         failure=subprocess.CalledProcessError(9,['fixed'],output='PRIVATE raw body',stderr='PRIVATE stderr')
-        with patch.object(phase.pwd,'getpwnam',return_value=SimpleNamespace(pw_uid=1000)),patch.object(phase.subprocess,'run',side_effect=failure),redirect_stdout(output):
+        with tempfile.TemporaryDirectory() as marker_dir,isolated_trace_start(marker_dir,run_error=failure),redirect_stdout(output):
             with self.assertRaises(SystemExit) as exit_status:phase.gnome_trace('start',0)
         raw=output.getvalue().encode()
         class Agent:
