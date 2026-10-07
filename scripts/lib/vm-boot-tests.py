@@ -6,6 +6,7 @@ import io
 import ast
 import base64
 import json
+import os
 import tempfile
 from pathlib import Path
 import unittest
@@ -450,6 +451,76 @@ class PciCapabilities(unittest.TestCase):
 
     def test_capability_cycle_is_bounded(self):
         self.assertTrue(self.probe(8, cycle=True)["no_soft_reset"])
+
+
+class ShippedSnapshotInventory(unittest.TestCase):
+    # Run 37696030597: the graphical PAM login produced a real greetd
+    # session, yet every inventory() probe failed because the published
+    # roost 0.1.0-2 snapshot predates the newer instrumentation keys.
+    # Session detection must not hard-require keys the shipped binary
+    # never emits.
+    SHIPPED_STATE = {"locked": False, "windows": [], "focused": None,
+                     "active_workspace": 0, "overview_open": True}
+
+    def run_inventory(self, state, sessions):
+        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
+        function = next(node for node in ast.parse(source.read_text()).body
+                        if isinstance(node, ast.FunctionDef) and node.name == "inventory")
+        uid = os.getuid()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            proc = root / "proc"
+            (proc / "1234").mkdir(parents=True)
+            (root / "roost-compositor").touch()
+            (proc / "1234/exe").symlink_to(root / "roost-compositor")
+            fields = ["S", "1"] + ["0"] * 17 + ["4242"]
+            (proc / "1234/stat").write_text("1234 (roost-composito) " + " ".join(fields))
+            state_path = root / "roost-vm-state.json"
+            state_path.write_text(json.dumps(state))
+            descriptions = {
+                "1": "Id=1\nVTNr=1\nUser=959\nType=tty\nService=greetd\nClass=greeter",
+                "3": (f"Id=3\nVTNr=1\nUser={uid}\nType=tty\n"
+                      "Service=greetd\nClass=user"),
+                "4": (f"Id=4\nVTNr=\nUser={uid}\nType=unspecified\n"
+                      "Service=systemd-user\nClass=manager"),
+            }
+            def fake_call(*args, **kwargs):
+                if args[:2] == ("loginctl", "list-sessions"):
+                    return "".join(f"{sid} {line}\n" for sid, line in sessions)
+                if args[:2] == ("loginctl", "show-session"):
+                    return descriptions[args[2]]
+                raise AssertionError(f"unexpected probe: {args}")
+            import pathlib as real_pathlib
+            scope = {"json": json, "os": os,
+                     "pathlib": SimpleNamespace(
+                         Path=lambda path: proc if str(path) == "/proc" else real_pathlib.Path(path)),
+                     "OWNER": SimpleNamespace(pw_uid=uid, pw_name="roost-test"),
+                     "RUNTIME": f"/run/user/{uid}", "STATE": state_path,
+                     "call": fake_call}
+            exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), scope)
+            return scope["inventory"]()
+
+    def test_shipped_snapshot_without_newer_keys_still_detects_session(self):
+        uid = os.getuid()
+        result = self.run_inventory(dict(self.SHIPPED_STATE), [
+            ("1", "959 greeter seat0 tty1"),
+            ("3", f"{uid} roost-test seat0 tty1"),
+            ("4", f"{uid} roost-test - -"),
+        ])
+        self.assertEqual(result["session"]["Id"], "3")
+        self.assertEqual(result["session"]["Service"], "greetd")
+        self.assertEqual(result["session_uid"], uid)
+        self.assertTrue(any(p["executable"] == "roost-compositor" for p in result["processes"]))
+        self.assertTrue(result["state"]["overview_open"])
+        self.assertIsNone(result["state"]["pointer_position"])
+        self.assertIsNone(result["state"]["native_relative_motion_count"])
+
+    def test_missing_owner_session_still_rejected(self):
+        uid = os.getuid()
+        state = {**self.SHIPPED_STATE, "pointer_position": [0, 0],
+                 "native_relative_motion_count": 0}
+        with self.assertRaisesRegex(RuntimeError, "expected exactly one greetd user session"):
+            self.run_inventory(state, [("4", f"{uid} roost-test - -")])
 
 
 if __name__ == "__main__":

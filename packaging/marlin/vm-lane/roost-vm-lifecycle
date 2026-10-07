@@ -90,10 +90,18 @@ def inventory():
             owned.append(properties)
     if len(owned) != 1:
         raise RuntimeError("expected exactly one greetd user session on the configured VT")
+    # Only the original four snapshot keys are mandatory: the published
+    # flavor still ships a Roost build that predates the newer
+    # instrumentation, and session detection must not depend on it.
+    # Gates that need a newer key observe an explicit None instead of
+    # collapsing every probe into a missing session (run 37696030597).
     return {"probe_uid": os.geteuid(), "session_uid": OWNER.pw_uid,
             "session": owned[0],
-            "state": {k: state[k] for k in ("locked", "windows", "focused", "active_workspace", "overview_open", "pointer_position", "native_relative_motion_count")}
-                     | {k: state.get(k) for k in ("mouse_left_handed", "touchpad_left_handed", "hot_corners")},
+            "state": {k: state[k] for k in ("locked", "windows", "focused", "active_workspace")}
+                     | {k: state.get(k) for k in ("overview_open", "pointer_position",
+                                                  "native_relative_motion_count",
+                                                  "mouse_left_handed", "touchpad_left_handed",
+                                                  "hot_corners")},
             "processes": sorted(processes, key=lambda item: item["pid"])}
 
 
