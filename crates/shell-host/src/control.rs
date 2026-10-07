@@ -1369,7 +1369,7 @@ mod tests {
         );
         client.poll().unwrap();
         assert_eq!(client.monitor_identities(), &[info]);
-        assert_eq!(client.native_outputs(), &[owner.clone()]);
+        assert_eq!(client.native_outputs(), std::slice::from_ref(&owner));
         server_write(
             &mut peer,
             &Message::MonitorIdentityInventory { outputs: vec![] },

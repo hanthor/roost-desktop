@@ -1920,8 +1920,10 @@ impl Drop for ControlHub {
 mod brightness_connection_tests {
     use super::*;
     use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
     fn setup() -> (tempfile::TempDir, ControlHub, StateModel) {
         let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let hub = ControlHub::bind(
             dir.path().join("control"),
             std::rc::Rc::new(TokenStore::new()),

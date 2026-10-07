@@ -1241,37 +1241,50 @@ mod tests {
     }
     #[test]
     fn changed_binding_missing_or_duplicate_receipt_never_commits() {
-        let mut journal = journal();
-        let grant = begin(
-            &mut journal,
-            Source::User,
-            vec![Target {
-                user: Some(800),
-                ..target(200)
-            }],
-        )
-        .unwrap();
         let mut replaced = binding("eDP-1");
         replaced.inode += 1;
-        assert_eq!(
-            journal.complete(authority(), grant, &[replaced], vec![observed(200, true)]),
-            Err(Error::Binding)
-        );
-        assert_eq!(journal.snapshot().readings[0].user, 700);
-        assert_eq!(
-            journal.complete(
-                authority(),
-                grant,
-                &[binding("eDP-1")],
-                vec![observed(200, true), observed(200, true)]
+        for (owned, observations, expected) in [
+            (vec![replaced], vec![observed(200, true)], Error::Binding),
+            (
+                vec![binding("eDP-1")],
+                vec![observed(200, true), observed(200, true)],
+                Error::Binding,
             ),
-            Err(Error::Binding)
-        );
-        assert_eq!(
-            journal.complete(authority(), grant, &[binding("eDP-1")], vec![]),
-            Err(Error::Incomplete)
-        );
-        assert_eq!(journal.snapshot().readings[0].user, 700);
+            (vec![binding("eDP-1")], vec![], Error::Incomplete),
+        ] {
+            // Each guard gets its own original admitted transaction. A prior
+            // rejection interrupts that grant and must not mask another case.
+            let mut journal = journal();
+            let grant = begin(
+                &mut journal,
+                Source::User,
+                vec![Target {
+                    user: Some(800),
+                    ..target(200)
+                }],
+            )
+            .unwrap();
+            assert_eq!(
+                journal.complete(authority(), grant, &owned, observations),
+                Err(expected)
+            );
+            let snapshot = journal.snapshot();
+            assert_eq!(snapshot.readings[0].user, 700);
+            assert_eq!(snapshot.readings[0].applied, 307);
+            assert!(snapshot.pending.unwrap().interrupted);
+            // Even a later complete-looking receipt cannot reuse the grant
+            // invalidated by this particular failed completion.
+            assert_eq!(
+                journal.complete(
+                    authority(),
+                    grant,
+                    &[binding("eDP-1")],
+                    vec![observed(200, true)]
+                ),
+                Err(Error::Stale)
+            );
+            assert_eq!(journal.snapshot().readings[0].user, 700);
+        }
     }
     #[test]
     fn invalid_bounds_and_nonfinite_ratio_do_not_admit_pending() {
