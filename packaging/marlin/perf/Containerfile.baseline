@@ -17,7 +17,7 @@ RUN sed -i '/^\[core\]/i [core-testing]\nInclude = /etc/pacman.d/mirrorlist\n\n[
     gnome-shell --version | grep -Eq '^GNOME Shell 51([. ]|$)' && \
     pacman -Q > /usr/share/roost-perf-baseline-packages.txt
 
-# Build the pinned Arch 51.0 source with its trace-context reference released.
+# Build the pinned Arch 51.0 diagnostic variant with closed writer and source IDs.
 # Toolchain and source files remain in this build stage, outside the measured image.
 FROM gnome-baseline AS mutter-profiler-build
 COPY packaging/marlin/perf/mutter-profiler /build/mutter-profiler
@@ -29,14 +29,14 @@ RUN pacman -S --needed --noconfirm base-devel git sudo && \
     cd /build/mutter-profiler && \
     runuser -u profiler-builder -- makepkg --syncdeps --noconfirm --cleanbuild && \
     mkdir /profiler-package && \
-    cp mutter-51.0-1.1-x86_64.pkg.tar.zst /profiler-package/ && \
-    cp PKGBUILD release-trace-context.patch /profiler-package/ && \
+    cp mutter-51.0-1.2-x86_64.pkg.tar.zst /profiler-package/ && \
+    cp PKGBUILD release-trace-context.patch frame-source-evidence.patch /profiler-package/ && \
     cd /profiler-package && \
-    sha256sum PKGBUILD release-trace-context.patch mutter-51.0-1.1-x86_64.pkg.tar.zst > sha256sums
+    sha256sum PKGBUILD release-trace-context.patch frame-source-evidence.patch mutter-51.0-1.2-x86_64.pkg.tar.zst > sha256sums
 
 FROM gnome-baseline
 COPY --from=mutter-profiler-build /profiler-package /usr/share/roost-perf-mutter-profiler
 RUN cd /usr/share/roost-perf-mutter-profiler && sha256sum -c sha256sums && \
-    pacman -U --noconfirm mutter-51.0-1.1-x86_64.pkg.tar.zst && \
-    pacman -Q mutter | grep -qx 'mutter 51.0-1.1' && \
+    pacman -U --noconfirm mutter-51.0-1.2-x86_64.pkg.tar.zst && \
+    pacman -Q mutter | grep -qx 'mutter 51.0-1.2' && \
     pacman -Q > /usr/share/roost-perf-baseline-packages.txt

@@ -1,0 +1,47 @@
+--- a/clutter/clutter/clutter-frame-clock.c
++++ b/clutter/clutter/clutter-frame-clock.c
+@@ -631,6 +631,18 @@
+     "triple" : "double";
+   int64_t last_presentation_time_us = 0;
+   int64_t dispatch_time_us;
++
++  COGL_TRACE_MESSAGE ("Roost::FrameClock::presented-id",
++                      "output=%s view_frame=%" G_GINT64_FORMAT
++                      " global_frame=%" G_GINT64_FORMAT
++                      " presentation_us=%" G_GINT64_FORMAT
++                      " sequence=%u flags=%u kms_ready_us=%" G_GINT64_FORMAT,
++                      frame_clock->output_name,
++                      frame_info->view_frame_counter,
++                      frame_info->global_frame_counter,
++                      frame_info->presentation_time,
++                      frame_info->sequence, (unsigned int) frame_info->flags,
++                      frame_info->kms_ready_time_us);
+ 
+   COGL_TRACE_BEGIN_SCOPED (ClutterFrameClockNotifyPresented,
+                            "Clutter::FrameClock::presented()");
+@@ -1925,6 +1937,11 @@
+ 
+   frame_count = frame_clock->frame_count++;
+ 
++  COGL_TRACE_MESSAGE ("Roost::FrameClock::dispatch-id",
++                      "output=%s frame=%" G_GINT64_FORMAT
++                      " dispatch_us=%" G_GINT64_FORMAT,
++                      frame_clock->output_name, frame_count, time_us);
++
+   if (iface->new_frame)
+     frame = iface->new_frame (frame_clock, frame_clock->listener.user_data);
+   if (!frame)
+--- a/src/backends/native/meta-kms-impl-device-atomic.c
++++ b/src/backends/native/meta-kms-impl-device-atomic.c
+@@ -1043,6 +1043,11 @@
+                                NULL,
+                                (gpointer *) &page_flip_data);
+ 
++  COGL_TRACE_MESSAGE ("Roost::KMS::raw-page-flip",
++                      "crtc=%u sequence=%u seconds=%u microseconds=%u device=%s",
++                      crtc_id, sequence, tv_sec, tv_usec,
++                      meta_kms_impl_device_get_path (impl_device));
++
+   COGL_TRACE_MESSAGE ("atomic_page_flip_handler()",
+                       "[atomic] Page flip callback for CRTC (%u, %s)",
+                       crtc_id, meta_kms_impl_device_get_path (impl_device));
