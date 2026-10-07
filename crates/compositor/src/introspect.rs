@@ -441,7 +441,7 @@ mod tests {
         let plain = window(1, Some("org.example.Spoofed"), false);
         assert!(!window_properties(&plain).contains_key("sandboxed-app-id"));
         assert!(
-            !running_apps(&[plain.clone()])["org.example.Spoofed.desktop"]
+            !running_apps(std::slice::from_ref(&plain))["org.example.Spoofed.desktop"]
                 .contains_key("sandboxed-app-id")
         );
         let mut actual = window(2, Some("org.example.Spoofed"), true);
