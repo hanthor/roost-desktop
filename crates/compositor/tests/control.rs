@@ -522,6 +522,17 @@ fn hub_handshake(hub: &mut ControlHub, model: &mut StateModel, client: &mut Unix
     assert!(matches!(client_read(client), Message::Hello { .. }));
     assert!(matches!(client_read(client), Message::Snapshot { .. }));
     assert!(matches!(client_read(client), Message::Overview { .. }));
+    // Current-minor newcomers receive explicit authority revocation even
+    // before a native device or EDID identity has been discovered. Assert
+    // these real ordered frames so later checks observe their own event.
+    assert_eq!(
+        client_read(client),
+        Message::NativeOutputInventory { outputs: vec![] }
+    );
+    assert_eq!(
+        client_read(client),
+        Message::MonitorIdentityInventory { outputs: vec![] }
+    );
 }
 
 #[test]
