@@ -99,11 +99,16 @@ def inventory():
 def orca_observation():
     state = json.loads(STATE.read_text())
     pid = int(state.get("screen_reader_pid") or 0)
-    owner_reply = call("busctl", "--user", "call", "org.freedesktop.DBus",
-                       "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetNameOwner",
-                       "s", "org.gnome.Orca1.Service", user=True, check=False)
-    owner_parts = shlex.split(owner_reply)
-    owner = owner_parts[1] if len(owner_parts) == 2 and owner_parts[0] == "s" else None
+    contracts = []
+    for name, path, prefix in (("org.gnome.Orca1.Service", "/org/gnome/Orca1/Service", "51."),
+                               ("org.gnome.Orca.Service", "/org/gnome/Orca/Service", "50.3")):
+        reply = call("busctl", "--user", "call", "org.freedesktop.DBus",
+                     "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetNameOwner",
+                     "s", name, user=True, check=False)
+        parts = shlex.split(reply)
+        if len(parts) == 2 and parts[0] == "s":
+            contracts.append((name, path, prefix, parts[1], reply))
+    owner = contracts[0][3] if contracts else None
     result = {"enabled": call("gsettings", "get", "org.gnome.desktop.a11y.applications",
                               "screen-reader-enabled", user=True) == "true",
               "state": state.get("screen_reader_state"), "pid": pid, "owner": owner,
@@ -111,6 +116,17 @@ def orca_observation():
               "frames": state.get("rendered_frames"), "keyboard": state.get("a11y_keyboard")}
     if pid == 0 or not owner:
         return result
+    name, path, version_prefix, owner, owner_reply = contracts[0]
+    # Two supported names may only coexist for the same original owned child.
+    for contract in contracts:
+        for method, expected in (("GetConnectionUnixProcessID", pid),
+                                 ("GetConnectionUnixUser", OWNER.pw_uid)):
+            reply = call("busctl", "--user", "call", "org.freedesktop.DBus",
+                         "/org/freedesktop/DBus", "org.freedesktop.DBus", method,
+                         "s", contract[3], user=True).split()
+            if reply != ["u", str(expected)]:
+                result["foreign_owner"] = True
+                return result
     credentials = {}
     for method in ("GetConnectionUnixProcessID", "GetConnectionUnixUser"):
         reply = call("busctl", "--user", "call", "org.freedesktop.DBus",
@@ -140,17 +156,17 @@ def orca_observation():
         raise RuntimeError("Orca launcher not distribution-owned")
     launcher_owner = call("pacman", "-Qqo", str(launcher))
     version = shlex.split(call("busctl", "--user", "call", owner,
-                              "/org/gnome/Orca1/Service", "org.gnome.Orca1.Service",
-                              "GetVersion", user=True))
+                              path, name, "GetVersion", user=True))
     stable = call("busctl", "--user", "call", "org.freedesktop.DBus",
                   "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetNameOwner",
-                  "s", "org.gnome.Orca1.Service", user=True) == owner_reply
+                  "s", name, user=True) == owner_reply
     compositor = next(item for item in inventory()["processes"]
                       if item["executable"] == "roost-compositor")
     expected_display = f"roost-nested-{compositor['pid']}"
     result.update({"uid": uid, "start_ticks": ticks, "display": displays,
                    "parent_pid": parent_pid, "compositor_pid": compositor["pid"],
                    "executable": os.readlink(process / "exe"), "version": version,
+                   "bus_name": name, "bus_path": path,
                    "launcher_sha256": hashlib.sha256(launcher.read_bytes()).hexdigest(),
                    "bus_pid": credentials["GetConnectionUnixProcessID"],
                    "bus_uid": credentials["GetConnectionUnixUser"]})
@@ -158,7 +174,7 @@ def orca_observation():
                        and pid == credentials["GetConnectionUnixProcessID"]
                        and parent_pid == compositor["pid"]
                        and displays == [expected_display] and launcher_owner == "orca"
-                       and len(version) == 2 and version[0] == "s" and version[1].startswith("51."))
+                       and len(version) == 2 and version[0] == "s" and version[1].startswith(version_prefix))
     return result
 
 

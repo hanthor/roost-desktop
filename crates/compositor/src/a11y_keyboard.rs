@@ -11,7 +11,7 @@ pub const NAME: &str = "org.freedesktop.a11y.Manager";
 const PATH: &str = "/org/freedesktop/a11y/Manager";
 const INTERFACE: &str = "org.freedesktop.a11y.KeyboardMonitor";
 const MONITOR_NAME: &str = "org.gnome.Orca.KeyboardMonitor";
-const ORCA_NAME: &str = "org.gnome.Orca1.Service";
+const ORCA_NAMES: [&str; 2] = ["org.gnome.Orca1.Service", "org.gnome.Orca.Service"];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Availability {
@@ -220,7 +220,7 @@ impl Monitor {
             }
             inner.revoked.insert(old.to_owned());
         }
-        if ours && (new.is_empty() || name == MONITOR_NAME || name == ORCA_NAME) {
+        if ours && (new.is_empty() || name == MONITOR_NAME || ORCA_NAMES.contains(&name.as_str())) {
             inner.invalidate();
         }
     }
@@ -246,7 +246,7 @@ impl Monitor {
                     if let Ok((name, old, new)) =
                         change.body().deserialize::<(String, String, String)>()
                     {
-                        if name == ORCA_NAME {
+                        if ORCA_NAMES.contains(&name.as_str()) {
                             let pid = if new.is_empty() {
                                 None
                             } else {
@@ -357,15 +357,20 @@ impl Monitor {
         }
         // Orca creates Atspi.Device before its remote controller. If present,
         // that separate connection must still belong to the same owned PID.
-        let name = zbus::names::BusName::try_from(ORCA_NAME).unwrap();
-        match dbus.get_name_owner(name).await {
-            Ok(owner) => {
-                if dbus.get_connection_unix_process_id(owner.into()).await? != pid {
-                    return Err(fdo::Error::AccessDenied("foreign Orca owner".into()));
+        for name in ORCA_NAMES {
+            let name = zbus::names::BusName::try_from(name).unwrap();
+            match dbus.get_name_owner(name).await {
+                Ok(owner) => {
+                    let credentials = dbus.get_connection_credentials(owner.into()).await?;
+                    if credentials.process_id() != Some(pid)
+                        || credentials.unix_user_id() != Some(rustix::process::geteuid().as_raw())
+                    {
+                        return Err(fdo::Error::AccessDenied("foreign Orca owner".into()));
+                    }
                 }
+                Err(fdo::Error::NameHasNoOwner(_)) => {}
+                Err(error) => return Err(error),
             }
-            Err(fdo::Error::NameHasNoOwner(_)) => {}
-            Err(error) => return Err(error),
         }
         let inner = self.inner.lock().unwrap();
         if inner.pid != pid || inner.epoch != epoch || inner.revoked.contains(sender.as_str()) {

@@ -21,10 +21,10 @@ impl Shadow {
         data: &mut State,
         generation: u64,
         monitor: &Monitor,
-        raw: u32,
-        pressed: bool,
+        physical: (u32, bool),
         delay: i32,
     ) -> bool {
+        let (raw, pressed) = physical;
         let Some(code) = raw.checked_add(8).and_then(|code| u16::try_from(code).ok()) else {
             return false;
         };
@@ -113,18 +113,18 @@ mod tests {
         let (monitor, _events) = crate::a11y_keyboard::tests::monitor(vec![0xffe5, 0xff7f], vec![]);
         let mut shadow = Shadow::default();
         for raw in [58, 69] {
-            assert!(shadow.key(&keyboard, &mut state, 1, &monitor, raw, true, 250));
-            assert!(shadow.key(&keyboard, &mut state, 1, &monitor, raw, false, 250));
+            assert!(shadow.key(&keyboard, &mut state, 1, &monitor, (raw, true), 250));
+            assert!(shadow.key(&keyboard, &mut state, 1, &monitor, (raw, false), 250));
             assert!(!keyboard.modifier_state().caps_lock);
             assert!(!keyboard.modifier_state().num_lock);
             assert!(keyboard.pressed_keys().is_empty());
         }
         // The second standalone NumLock press is intentionally ordinary and
         // must toggle the real seat, with its release also passed through.
-        assert!(!shadow.key(&keyboard, &mut state, 1, &monitor, 69, true, 250));
+        assert!(!shadow.key(&keyboard, &mut state, 1, &monitor, (69, true), 250));
         keyboard.input_discard(&mut state, 77u32.into(), KeyState::Pressed);
         assert!(keyboard.modifier_state().num_lock);
-        assert!(!shadow.key(&keyboard, &mut state, 1, &monitor, 69, false, 250));
+        assert!(!shadow.key(&keyboard, &mut state, 1, &monitor, (69, false), 250));
         keyboard.input_discard(&mut state, 77u32.into(), KeyState::Released);
         assert!(keyboard.pressed_keys().is_empty());
     }
@@ -139,7 +139,7 @@ mod tests {
         let (monitor, _events) = crate::a11y_keyboard::tests::monitor(vec![0xffe5], vec![]);
         let mut shadow = Shadow::default();
         for raw in [58, 29, 59] {
-            assert!(shadow.key(&keyboard, &mut state, 1, &monitor, raw, true, 250));
+            assert!(shadow.key(&keyboard, &mut state, 1, &monitor, (raw, true), 250));
         }
         assert!(!keyboard.modifier_state().ctrl);
         assert!(!keyboard.modifier_state().caps_lock);
@@ -153,7 +153,7 @@ mod tests {
             0
         );
         for raw in [59, 29, 58] {
-            assert!(shadow.key(&keyboard, &mut state, 1, &monitor, raw, false, 250));
+            assert!(shadow.key(&keyboard, &mut state, 1, &monitor, (raw, false), 250));
         }
         assert_eq!(
             shadow

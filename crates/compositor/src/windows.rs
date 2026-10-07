@@ -3346,8 +3346,7 @@ impl WindowManager {
             state,
             self.keymap_generation,
             monitor,
-            *keycode,
-            *pressed,
+            (*keycode, *pressed),
             self.repeat.1,
         )
     }
