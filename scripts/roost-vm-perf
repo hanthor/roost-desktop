@@ -160,10 +160,13 @@ def distribution(values):
 def retain_kernel_trace(agent, out, metadata):
     """Retain the whole observer before rejecting loss or invalid acquisition."""
     (out / "kernel-vblank-source.json").write_text(json.dumps(metadata, indent=2))
-    for kind, action, name, minimum, maximum in (
+    artifacts = [
         ("raw", "kernel-trace-read", "kernel-vblank-trace.txt", 1, 64 * 1024 * 1024),
         ("formats", "kernel-formats-read", "kernel-vblank-formats.json", 1, 2 * 1024 * 1024),
-    ):
+    ]
+    if "discovery_raw" in metadata:
+        artifacts.insert(0, ("discovery_raw", "kernel-discovery-read", "kernel-vblank-discovery.txt", 1, 2 * 1024 * 1024))
+    for kind, action, name, minimum, maximum in artifacts:
         source = metadata.get(kind, {})
         size, digest = source.get("bytes"), source.get("sha256")
         if type(size) is not int or not minimum <= size <= maximum or not isinstance(digest, str):
@@ -181,6 +184,12 @@ def retain_kernel_trace(agent, out, metadata):
             raise ValueError("kernel observer artifact changed during acquisition")
     if metadata.get("qualified_acquisition") is not True or metadata.get("errors") or metadata.get("cleanup_errors"):
         raise ValueError("kernel observer reports actual loss, missing probes or invalid acquisition")
+    if metadata.get("capture_filter") == "actual-native-timer-inventory-v1":
+        times = [metadata.get(name) for name in ('discovery_started_monotonic_ns', 'discovery_finished_monotonic_ns', 'filters_ready_monotonic_ns')]
+        if not all(type(value) is int for value in times) or not times[0] < times[1] <= times[2] or times[1] - times[0] > 1_000_000_000:
+            raise ValueError('actual kernel filter/discovery boundaries are invalid')
+        if not metadata.get('discovery_raw') or not metadata.get('timer_inventory') or len(metadata.get('timer_filters', {})) != 4:
+            raise ValueError('actual kernel filter/discovery evidence is incomplete')
 
 
 def retain_gnome_trace(agent, out, metadata):

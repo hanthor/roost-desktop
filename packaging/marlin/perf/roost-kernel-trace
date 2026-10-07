@@ -306,6 +306,72 @@ def validate_trace_fields(raw, group, definitions):
     return counts
 
 
+def timer_mappings(raw, group, expected=None):
+    mappings = {}
+    crtcs = {}
+    for line in raw.decode('utf-8', errors='strict').splitlines():
+        if expected is not None and re.search(r'\b' + re.escape(group) + r'_[a-z_]+:', line):
+            observed = {key: int(value, 16) if value.startswith('0x') else int(value)
+                        for key, value in re.findall(r'\b([a-z_]+)=(0x[0-9a-fA-F]+|[0-9]+)(?=\s|$)', line)}
+            if 'crtc' in observed and not any(all(observed.get(key) == identity[key] for key in ('crtc', 'object', 'pipe', 'dev', 'minor')) for identity in expected.values()):
+                raise ValueError('measurement CRTC escaped discovered timer inventory')
+            if 'event_pipe' in observed and not any(all(observed.get(key) == identity[target] for key, target in [('dev', 'dev'), ('minor', 'minor'), ('event_pipe', 'pipe')]) for identity in expected.values()):
+                raise ValueError('measurement event escaped discovered timer inventory')
+        matched = re.search(r'\b' + re.escape(group) + r'_(timer|timer_return):', line)
+        if not matched:
+            continue
+        fields = {key: int(value, 16) if value.startswith('0x') else int(value)
+                  for key, value in re.findall(r'\b([a-z_]+)=(0x[0-9a-fA-F]+|[0-9]+)(?=\s|$)', line)}
+        required = {'timer', 'crtc', 'object', 'pipe', 'dev', 'minor'}
+        if not required <= fields.keys():
+            raise ValueError('actual timer identity fields are missing')
+        identity = {key: fields[key] for key in required}
+        if any(identity[key] <= 0 for key in ('timer', 'crtc', 'object', 'dev')) or not all(0 <= identity[key] < 32 for key in ('pipe', 'minor')):
+            raise ValueError('invalid actual timer identity')
+        timer = str(identity['timer'])
+        crtc = str(identity['crtc'])
+        if timer in mappings and mappings[timer] != identity or crtc in crtcs and crtcs[crtc] != timer:
+            raise ValueError('inconsistent actual timer/CRTC mapping')
+        mappings[timer] = identity
+        crtcs[crtc] = timer
+        if len(mappings) > 8:
+            raise ValueError('actual timer inventory exceeds bound')
+        if expected is not None and expected.get(timer) != identity:
+            raise ValueError('measurement timer escaped discovered kernel filter identity')
+    if not mappings:
+        raise ValueError('no actual timer identity was observed')
+    return mappings
+
+
+def timer_filter(timer_inventory, actual_format):
+    if not re.search(r'field:void \* hrtimer;\s*offset:[0-9]+;\s*size:8;\s*signed:0;', actual_format):
+        raise ValueError('actual hrtimer filter field differs')
+    if not 1 <= len(timer_inventory) <= 8:
+        raise ValueError('actual timer filter inventory exceeds bound')
+    return ' || '.join('hrtimer == ' + hex(int(timer)) for timer in sorted(timer_inventory, key=int))
+
+
+def cpu_stats(instance, cpus):
+    stats = {}
+    for cpu in sorted((instance / 'per_cpu').glob('cpu[0-9]*')):
+        values = {}
+        for line in bounded(cpu / 'stats', 65536).decode().splitlines():
+            if ':' in line:
+                key, value = (part.strip() for part in line.split(':', 1))
+                values[key] = value
+        stats[cpu.name] = values
+    if len(stats) != cpus:
+        raise RuntimeError('actual per-CPU trace statistics are incomplete')
+    return stats
+
+
+def retain_raw(path, raw):
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'wb') as stream:
+        stream.write(raw)
+    return {'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
+
+
 def cleanup(marker):
     instance = TRACE / 'instances' / marker['group']
     errors = []
@@ -435,7 +501,8 @@ def start_observer():
         formats = {}
         for event in EVENTS:
             formats[event] = bounded(instance / 'events' / event / 'format', 65536).decode()
-            write(instance / 'events' / event / 'enable', '1')
+            if not event.startswith('timer/'):
+                write(instance / 'events' / event / 'enable', '1')
         for definition in definitions:
             probe_command(definition)
             marker['definitions'].append(definition)
@@ -446,8 +513,38 @@ def start_observer():
         if len(marker['profiles_before']) != len(definitions):
             raise RuntimeError('actual probe profile inventory is incomplete')
         save(ROOT / 'formats.json', formats)
-        save(ROOT / 'marker.json', marker)
+        formats_raw = bounded(ROOT / 'formats.json', 2 * 1024 * 1024)
+        marker['formats'] = {'bytes': len(formats_raw), 'sha256': hashlib.sha256(formats_raw).hexdigest()}
+        marker['capture_filter'] = 'actual-native-timer-inventory-v1'
+        marker['discovery_started_monotonic_ns'] = time.monotonic_ns()
         write(instance / 'tracing_on', '1')
+        # Observe actual native timers before profiler Start. No injected
+        # event, guessed address, buffer reset, consuming read or scope trim.
+        time.sleep(.5)
+        discovery = bounded(instance / 'trace', 2 * 1024 * 1024)
+        marker['discovery_raw'] = retain_raw(ROOT / 'discovery.txt', discovery)
+        marker['discovery_finished_monotonic_ns'] = time.monotonic_ns()
+        if marker['discovery_finished_monotonic_ns'] - marker['discovery_started_monotonic_ns'] > 1_000_000_000:
+            raise RuntimeError('actual timer discovery exceeded its one-second bound')
+        marker['discovery_cpu_stats'] = cpu_stats(instance, cpus)
+        marker['discovery_profiles'] = profiles(group)
+        validate_trace_fields(discovery, group, marker['definitions'])
+        inventory = timer_mappings(discovery, group)
+        marker['timer_inventory'] = inventory
+        marker['timer_filters'] = {}
+        for event in EVENTS:
+            if not event.startswith('timer/'):
+                continue
+            expression = timer_filter(inventory, formats[event])
+            write(instance / 'events' / event / 'filter', expression)
+            actual = bounded(instance / 'events' / event / 'filter', 65536).decode().strip()
+            if actual != expression:
+                raise ValueError('kernel timer filter readback differs')
+            marker['timer_filters'][event] = {'requested': expression, 'actual': actual}
+            write(instance / 'events' / event / 'enable', '1')
+        marker['filters_ready_monotonic_ns'] = time.monotonic_ns()
+        marker['generic_pointer_limitation'] = 'Generic trace text prints hashed %p; kernel filters compare actual raw hrtimer fields. No hash-to-pointer causal join is inferred.'
+        save(ROOT / 'marker.json', marker)
         subprocess.Popen([sys.executable, __file__, 'watchdog', '--group', group],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
@@ -474,10 +571,7 @@ def stop(watchdog=False):
     # Retain whole raw bytes before counter/provenance/semantic validation.
     try:
         raw = bounded(instance / 'trace', MAX_RAW)
-        fd = os.open(ROOT / 'capture.txt', os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, 'wb') as stream:
-            stream.write(raw)
-        result['raw'] = {'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
+        result['raw'] = retain_raw(ROOT / 'capture.txt', raw)
         formats_raw = bounded(ROOT / 'formats.json', 2 * 1024 * 1024)
         result['formats'] = {'bytes': len(formats_raw), 'sha256': hashlib.sha256(formats_raw).hexdigest()}
     except Exception as error:
@@ -492,24 +586,20 @@ def stop(watchdog=False):
             raw_btf = bounded(Path('/sys/kernel/btf') / name, 64 * 1024 * 1024)
             if len(raw_btf) != original['bytes'] or hashlib.sha256(raw_btf).hexdigest() != original['sha256']:
                 errors.append('live BTF changed during capture: ' + name)
-        stats = {}
-        for cpu in sorted((instance / 'per_cpu').glob('cpu[0-9]*')):
-            text = bounded(cpu / 'stats', 65536).decode()
-            values = {}
-            for line in text.splitlines():
-                if ':' not in line:
-                    continue
-                key, value = (part.strip() for part in line.split(':', 1))
-                values[key] = value
-            stats[cpu.name] = values
-        if len(stats) != marker['cpus']:
-            raise RuntimeError('actual per-CPU trace statistics are incomplete')
+        stats = cpu_stats(instance, marker['cpus'])
         result['cpu_stats'] = stats
+        result['timer_filters_after'] = {}
+        for event, proof in marker['timer_filters'].items():
+            actual = bounded(instance / 'events' / event / 'filter', 65536).decode().strip()
+            result['timer_filters_after'][event] = actual
+            if actual != proof['actual']:
+                errors.append('actual kernel timer filter changed during measurement')
         if raw is not None:
             try:
                 counts = validate_trace_fields(raw, marker['group'], marker['definitions'])
                 result['actual_record_counts'] = counts
                 result['unobserved_branches'] = [name for name, count in counts.items() if not count]
+                timer_mappings(raw, marker['group'], marker['timer_inventory'])
             except ValueError as error:
                 errors.append(str(error))
         if watchdog or (result['stopped_monotonic_ns'] - marker['started_monotonic_ns']) > MAX_SECONDS * 1_000_000_000:
@@ -550,7 +640,7 @@ def watchdog(group):
 def read(index, kind):
     if type(index) is not int or not 0 <= index < 1024:
         raise ValueError('invalid kernel trace chunk index')
-    paths = {'trace': 'capture.txt', 'formats': 'formats.json'}
+    paths = {'trace': 'capture.txt', 'formats': 'formats.json', 'discovery': 'discovery.txt'}
     path = ROOT / paths[kind]
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, 'rb') as stream:
@@ -568,7 +658,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('start', 'stop', 'read', 'watchdog'))
     parser.add_argument('--index', type=int, default=0)
-    parser.add_argument('--kind', choices=('trace', 'formats'), default='trace')
+    parser.add_argument('--kind', choices=('trace', 'formats', 'discovery'), default='trace')
     parser.add_argument('--group')
     args = parser.parse_args()
     if os.geteuid() != 0:

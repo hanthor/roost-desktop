@@ -127,6 +127,29 @@ class Parser(unittest.TestCase):
 
 
 class ActualRecordQualification(unittest.TestCase):
+    def test_actual_timer_inventory_filters_all_and_rejects_new_identity(self):
+        group = 'roost_test'
+        record = b'<idle>-0 [000] 1.0: roost_test_timer: (fn) timer=0xffff1000 crtc=0xffff2000 object=39 pipe=0 dev=0xffff3000 minor=1\n'
+        inventory = observer.timer_mappings(record, group)
+        actual_format = 'field:void * hrtimer;\toffset:8;\tsize:8;\tsigned:0;'
+        self.assertEqual(observer.timer_filter(inventory, actual_format), 'hrtimer == 0xffff1000')
+        self.assertEqual(observer.timer_mappings(record, group, inventory), inventory)
+        with self.assertRaisesRegex(ValueError, 'escaped discovered'):
+            observer.timer_mappings(record.replace(b'0xffff1000', b'0xffff1001'), group, inventory)
+        with self.assertRaisesRegex(ValueError, 'CRTC escaped'):
+            observer.timer_mappings(record.replace(b'object=39', b'object=40'), group, inventory)
+    def test_timer_inventory_missing_faulted_and_inconsistent_reject(self):
+        record = b'<idle>-0 [000] 1.0: roost_test_timer: (fn) timer=0xffff1000 crtc=0xffff2000 object=39 pipe=0 dev=0xffff3000 minor=1\n'
+        for bad in [b'', record.replace(b'timer=0xffff1000', b'timer=(fault)'), record.replace(b'minor=1', b'minor=100'), record + record.replace(b'object=39', b'object=40'), record + record.replace(b'timer=0xffff1000', b'timer=0xffff1001')]:
+            with self.assertRaises(ValueError):
+                observer.timer_mappings(bad, 'roost_test')
+    def test_timer_filter_requires_live_pointer_field_and_bounded_inventory(self):
+        inventory = {'4294901760': {}}
+        for actual in ['field:void * hrtimer; offset:8; size:4; signed:0;', 'field:void * timer; offset:8; size:8; signed:0;']:
+            with self.assertRaises(ValueError):
+                observer.timer_filter(inventory, actual)
+        with self.assertRaises(ValueError):
+            observer.timer_filter({}, 'field:void * hrtimer; offset:8; size:8; signed:0;')
     def test_required_fields_not_faulted_or_missing(self):
         definition=['p:roost_test/roost_test_arm fn crtc=$arg1:x64 object=+1($arg1):u32 pipe=+2($arg1):u32']
         good=b'<task>-1 [000] 1.000: roost_test_arm: (fn) crtc=0xffff object=39 pipe=0\n'
@@ -140,6 +163,15 @@ class ActualRecordQualification(unittest.TestCase):
 
 
 class Retention(unittest.TestCase):
+    def test_whole_discovery_retained_before_incomplete_measurement_rejection(self):
+        raw = b'entire discovery: actual timer entry and return\n'
+        metadata = {'qualified_acquisition':False, 'discovery_raw':{'bytes':len(raw),'sha256':__import__('hashlib').sha256(raw).hexdigest()}}
+        import base64
+        with tempfile.TemporaryDirectory() as tmp, patch.object(host, 'guest_probe', return_value={'kernel_trace':{'index':0,'data':base64.b64encode(raw).decode()}}) as probe:
+            with self.assertRaises(ValueError):
+                host.retain_kernel_trace(None, Path(tmp), metadata)
+            self.assertEqual((Path(tmp) / 'kernel-vblank-discovery.txt').read_bytes(), raw)
+            probe.assert_called_once_with(None, 'kernel-discovery-read', 0)
     def test_whole_kernel_trace_retained_before_actual_loss_rejection(self):
         import base64, hashlib
         raw=b'actual trace bytes\n';formats=b'{"actual": "format"}'
