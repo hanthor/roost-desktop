@@ -39,7 +39,8 @@ def digest(path):
     try:
         before = os.fstat(fd)
         if not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_mode & 0o022 or not 0 < before.st_size <= MAX_FILE:
-            raise ValueError('immutable-file-required')
+            raise ValueError('immutable-file-required:' + path + ':uid=' + str(before.st_uid)
+                             + ':mode=' + oct(before.st_mode & 0o7777) + ':size=' + str(before.st_size))
         h = hashlib.sha256()
         count = 0
         while True:

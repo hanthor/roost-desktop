@@ -646,8 +646,9 @@ if [ "$INSTALLED_PACKAGE" = 1 ]; then
         fail A11Y-PANEL "installed shell never registered on the accessibility bus"
     python3 "$ROOT/scripts/lib/installed-deb-proof.py" start "$COMPOSITOR_PID" "roost-gtk-proof-$$" "$ARTIFACTS/installed-package.json" unused "$ARTIFACTS/installed-start.json"
     installed_host="$(timeout 5 xdotool search --onlyvisible --name Smithay)"
-    [ "$installed_host" = "$WID" ] && [ "$(timeout 5 xdotool getwindowpid "$WID")" = "$COMPOSITOR_PID" ] ||
+    if [ "$installed_host" != "$WID" ] || [ "$(timeout 5 xdotool getwindowpid "$WID")" != "$COMPOSITOR_PID" ]; then
         fail G-INSTALLED-START "nested host is not the unique original installed compositor"
+    fi
     pass G-INSTALLED-START "original installed compositor selects its package-owned preferred GTK shell"
 fi
 xdotool windowfocus --sync "$WID"
@@ -665,8 +666,9 @@ if [ "$INSTALLED_PACKAGE" = 1 ]; then
     scrot "$ARTIFACTS/installed-startup-overview.png" >/dev/null
     installed_focus="$(timeout 5 xdotool getwindowfocus)"
     installed_host_pid="$(timeout 5 xdotool getwindowpid "$WID")"
-    [ "$installed_focus" = "$WID" ] && [ "$installed_host_pid" = "$COMPOSITOR_PID" ] ||
+    if [ "$installed_focus" != "$WID" ] || [ "$installed_host_pid" != "$COMPOSITOR_PID" ]; then
         fail G-INSTALLED-START "original installed host does not own genuine keyboard focus"
+    fi
     jq -n --argjson window "$WID" --argjson focus "$installed_focus" --argjson pid "$installed_host_pid" \
         '{window: $window, actual_focus: $focus, compositor_pid: $pid}' >"$ARTIFACTS/installed-host-input.json"
     python3 "$ROOT/scripts/lib/installed-deb-proof.py" stable "$COMPOSITOR_PID" "roost-gtk-proof-$$" "$ARTIFACTS/installed-package.json" "$ARTIFACTS/installed-start.json" "$ARTIFACTS/installed-before-escape.json"
