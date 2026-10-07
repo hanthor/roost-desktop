@@ -132,7 +132,10 @@ def provider_controls(original, label):
         if len(node.name or '') > 1024:
             raise RuntimeError('accessible name exceeds proof bound')
         nodes.append({'name': node.name, 'role': node.getRoleName(), 'showing': showing})
-        if showing and node.getRoleName() == 'push button' and node.name in ('Add', 'Cancel'):
+        # Fedora AT-SPI reports genuine dialog buttons as 'button' where other
+        # stacks report 'push button'; the retained a11y snapshot is ground truth.
+        # Name, showing state, and exactly-one-each uniqueness still gate the match.
+        if showing and node.getRoleName() in ('push button', 'button') and node.name in ('Add', 'Cancel'):
             controls.setdefault(node.name, []).append(node)
         if not 0 <= node.childCount <= 4096:
             raise RuntimeError("accessibility node exceeds proof child bound")
