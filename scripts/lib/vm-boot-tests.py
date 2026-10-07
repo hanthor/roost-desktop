@@ -43,6 +43,72 @@ class OrcaCommandWindow(unittest.TestCase):
                          ["start_speech", "trigger_before", "trigger_after", "len(values)"])
 
 
+class OrcaPublicWindow(unittest.TestCase):
+    def receipts(self):
+        profile = {"name": "public-navigation", "rate": 24000, "channels": 1,
+                   "sample_width": 2, "sample_count": 192000, "runtime_max_sec": 12}
+        return ({"receipt": {"profile": dict(profile), "started_monotonic": 241.86064434,
+                             "ready_monotonic": 242.236375991}},
+                {"receipt": {"profile": dict(profile)}},
+                {"guest_monotonic": 243.524247449}, {"guest_monotonic": 247.041191809})
+    def test_original_actual_full_navigation_bracket_needs_actual_samples(self):
+        args = self.receipts()
+        lane.require_public_speech_window(*args, 192000)
+        with self.assertRaises(RuntimeError): lane.require_public_speech_window(*args, 96000)
+    def test_exact_actual_end_delayed_reversed_or_preready_trigger_rejected(self):
+        for before, after in ((243, 249.86064434), (243, 250), (244, 243), (242, 243)):
+            args = self.receipts()
+            args[2]["guest_monotonic"] = before; args[3]["guest_monotonic"] = after
+            with self.subTest(before=before, after=after), self.assertRaises(RuntimeError):
+                lane.require_public_speech_window(*args, 192000)
+    def test_finite_samples_and_original_matching_profile_required(self):
+        for key, value in (("rate", True), ("sample_count", 192001), ("name", "native-command"),
+                           ("channels", 2), ("runtime_max_sec", 13)):
+            args = self.receipts(); args[1]["receipt"]["profile"][key] = value
+            with self.subTest(key=key), self.assertRaises(RuntimeError):
+                lane.require_public_speech_window(*args, 192000)
+        for samples in (True, -1, 192001, 192000.0):
+            with self.subTest(samples=samples), self.assertRaises(RuntimeError):
+                lane.require_public_speech_window(*self.receipts(), samples)
+        for value in (True, float("nan"), float("inf"), -1):
+            args = self.receipts(); args[3]["guest_monotonic"] = value
+            with self.subTest(value=value), self.assertRaises(RuntimeError):
+                lane.require_public_speech_window(*args, 192000)
+    def test_guest_fixed_profiles_and_changed_recording_refused(self):
+        source = Path(lane.__file__).parents[1] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
+        nodes = [n for n in ast.parse(source.read_text()).body if isinstance(n, ast.FunctionDef)
+                 and n.name in {"speech_capture_profile", "recording_profile"}]
+        scope = {}; exec(compile(ast.Module(body=nodes, type_ignores=[]), "actual-profile", "exec"), scope)
+        for name, count, limit in (("native-command", 96000, 8), ("public-navigation", 192000, 12)):
+            profile = scope["speech_capture_profile"](name)
+            self.assertEqual((profile["sample_count"], profile["runtime_max_sec"]), (count, limit))
+            self.assertEqual(scope["recording_profile"]({"profile": profile}), profile)
+            with self.assertRaises(RuntimeError):
+                scope["recording_profile"]({"profile": dict(profile, channels=True)})
+        for name in (True, [], "private", "public-navigation-extra"):
+            with self.assertRaises(RuntimeError): scope["speech_capture_profile"](name)
+    def test_public_profile_only_and_original_guard_before_lock_privacy(self):
+        tree = ast.parse(Path(lane.__file__).read_text())
+        public = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "public_capture")
+        native = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "native_command")
+        starts = lambda node: [n for n in ast.walk(node) if isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute) and n.func.attr == "run" and n.args
+                and isinstance(n.args[0], ast.Constant) and n.args[0].value == "orca-speech-start"]
+        self.assertEqual([ast.literal_eval(a) for a in starts(public)[0].args],
+                         ["orca-speech-start", "public-navigation"])
+        self.assertEqual([ast.literal_eval(a) for a in starts(native)[0].args], ["orca-speech-start"])
+        validator = next(n for n in ast.walk(public) if isinstance(n, ast.Call)
+                         and isinstance(n.func, ast.Name) and n.func.id == "require_public_speech_window")
+        self.assertEqual([ast.unparse(a) for a in validator.args],
+                         ["start", "end", "before_trigger", "after_trigger", "len(samples)"])
+        cleanup = next(n for n in ast.walk(public) if isinstance(n, ast.Try) and n.finalbody)
+        self.assertTrue(any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                            and n.func.attr == 'run' and n.args and isinstance(n.args[0], ast.Constant)
+                            and n.args[0].value == 'orca-speech-end' for n in ast.walk(cleanup.finalbody[0])))
+        source = Path(lane.__file__).read_text()
+        self.assertLess(source.index('public_capture("orca-quick-settings-volume"'), source.index('def pam_unlock('))
+
+
 class OrcaCommandCleanup(unittest.TestCase):
     def exercise(self, failure, cleanup_failure=False):
         source = Path(lane.__file__).read_text()
@@ -491,15 +557,18 @@ class PublicOrcaNavigation(unittest.TestCase):
         file = Path(__file__).resolve().parents[1] / "roost-vm-lane"
         tree = ast.parse(file.read_text())
         capture = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "public_capture")
-        guard = next(n for n in capture.body if isinstance(n, ast.If)
-                     and isinstance(n.test, ast.UnaryOp) and isinstance(n.test.operand, ast.Compare))
-        predicate = compile(ast.Expression(guard.test), str(file), "eval")
-        scope = {"window_start": 10.5, "conservative_end": 14.0,
-                 "before_trigger": {"guest_monotonic": 10.6}, "after_trigger": {"guest_monotonic": 11.0}}
-        self.assertFalse(eval(predicate, scope))
-        for before, after in ((10.4, 11.0), (11.0, 10.9), (13.9, 14.0), (14.1, 14.2)):
-            self.assertTrue(eval(predicate, {**scope, "before_trigger": {"guest_monotonic": before},
-                                             "after_trigger": {"guest_monotonic": after}}))
+        validator = next(n for n in ast.walk(capture) if isinstance(n, ast.Call)
+                         and isinstance(n.func, ast.Name) and n.func.id == "require_public_speech_window")
+        self.assertEqual([ast.unparse(arg) for arg in validator.args],
+                         ["start", "end", "before_trigger", "after_trigger", "len(samples)"])
+        # Retain the original four-second actual-data negatives: larger profile
+        # never creates samples, padding, or a renewed start clock.
+        start, end, before, after = OrcaPublicWindow().receipts()
+        start["receipt"].update(started_monotonic=10.0, ready_monotonic=10.5)
+        for first, last in ((10.4, 11.0), (11.0, 10.9), (13.9, 14.0), (14.1, 14.2)):
+            before["guest_monotonic"] = first; after["guest_monotonic"] = last
+            with self.subTest(first=first, last=last), self.assertRaises(RuntimeError):
+                lane.require_public_speech_window(start, end, before, after, 96000)
         volume = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "focus_volume")
         calls = [n for n in ast.walk(volume) if isinstance(n, ast.Call)
                  and isinstance(n.func, ast.Attribute) and n.func.attr == "keys"]

@@ -142,6 +142,28 @@ def require_speech_trigger_window(start, before, after, samples):
         raise RuntimeError("native command trigger is outside the original fresh recorder sample window")
 
 
+
+def require_public_speech_window(start, end, before, after, samples):
+    # Full physical input AND its focus observation must fit actual real samples.
+    # Public captures are closed before any subsequent lock/PAM action.
+    import math
+    expected = {"name": "public-navigation", "rate": 24000, "channels": 1,
+                "sample_width": 2, "sample_count": 192000, "runtime_max_sec": 12}
+    for receipt in (start["receipt"], end["receipt"]):
+        profile = receipt.get("profile")
+        if (type(profile) is not dict or profile != expected
+                or any(type(profile.get(key)) is not int for key in expected if key != "name")):
+            raise RuntimeError("original public speech profile is malformed or changed")
+    times = (start["receipt"]["started_monotonic"], start["receipt"]["ready_monotonic"],
+             before["guest_monotonic"], after["guest_monotonic"])
+    if any(type(value) not in (int, float) or not math.isfinite(value) or value < 0 for value in times):
+        raise RuntimeError("original public speech timing receipt is malformed")
+    if type(samples) is not int or not 0 <= samples <= expected["sample_count"]:
+        raise RuntimeError("original public PCM exceeds the bounded recorder sample count")
+    started, ready, trigger_before, trigger_after = times
+    if not (started <= ready <= trigger_before <= trigger_after < started + samples / expected["rate"]):
+        raise RuntimeError("public physical trigger is outside the original fresh recorder sample window")
+
 def public_speech_tokens(entries):
     # Preserve only fixed public fixture labels, never arbitrary presenter text.
     labels = {"search", "disks", "take screenshot", "volume"}
@@ -498,7 +520,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record, orca_contract="distribut
                 raise RuntimeError("original public shell control did not receive physical keyboard focus")
 
             def public_capture(label, expected, action):
-                start = agent.run("orca-speech-start")
+                start = agent.run("orca-speech-start", "public-navigation")
                 before_trigger = None
                 after_trigger = None
                 action_receipt = None
@@ -531,10 +553,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record, orca_contract="distribut
                                "trigger_after": after_trigger, "end": end, "public_speech_tokens": tokens,
                                "mixed_sink": True, "exclusive_pcm": False}, stream, indent=2)
                 samples = array.array("h"); samples.frombytes(pcm)
-                window_start = start["receipt"]["ready_monotonic"]
-                conservative_end = start["receipt"]["started_monotonic"] + len(samples) / 24000
-                if not (window_start <= before_trigger["guest_monotonic"] <= after_trigger["guest_monotonic"] < conservative_end):
-                    raise RuntimeError("public physical trigger is outside the fresh recorder sample window")
+                require_public_speech_window(start, end, before_trigger, after_trigger, len(samples))
                 if (expected not in tokens or len(samples) < 24000
                         or max((abs(value) for value in samples), default=0) <= 32):
                     raise RuntimeError("public focus lacked actual presenter label and fresh mixed-sink PCM")
@@ -600,7 +619,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record, orca_contract="distribut
                     return public_focus("Take Screenshot")
                 public_capture("orca-quick-settings-open", "take screenshot", open_quick)
                 # Discover the actual tab route before starting the fixed
-                # four-second capture; the final single Tab is the recorded
+                # bounded public capture; the final single Tab is the recorded
                 # trigger. No guessed service-dependent button ordering.
                 for _ in range(16):
                     qmp.keys("tab")

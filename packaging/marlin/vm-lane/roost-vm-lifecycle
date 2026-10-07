@@ -641,6 +641,25 @@ def shell_navigation_focus(kind, original_pid=None, original_ticks=None):
     return result
 
 
+def speech_capture_profile(name):
+    # Fixed CI-only real recorder profiles, never production reader settings.
+    if type(name) is not str or name not in {"native-command", "public-navigation"}:
+        raise RuntimeError("unknown fixed speech recording profile")
+    return {"name": name, "rate": 24000, "channels": 1, "sample_width": 2,
+            "sample_count": 192000 if name == "public-navigation" else 96000,
+            "runtime_max_sec": 12 if name == "public-navigation" else 8}
+
+
+def recording_profile(recording):
+    profile = recording["profile"]
+    if (type(profile) is not dict or type(profile.get("name")) is not str
+            or any(type(profile.get(key)) is not int for key in
+                   ("rate", "channels", "sample_width", "sample_count", "runtime_max_sec"))
+            or profile != speech_capture_profile(profile["name"])):
+        raise RuntimeError("original speech recording profile changed")
+    return profile
+
+
 def main():
     if os.geteuid() != 0 or OWNER.pw_uid == 0:
         raise RuntimeError("probe must be root and session owner must not be root")
@@ -724,6 +743,9 @@ print(json.dumps(result))
         result = (shell_navigation_focus("shell") if action == "orca-shell-focus"
                   else shell_navigation_focus("disks", int(sys.argv[2]), int(sys.argv[3])))
     elif action == "orca-speech-start":
+        if len(sys.argv) not in (2, 3):
+            raise RuntimeError("fixed speech recording profile argument required")
+        profile = speech_capture_profile(sys.argv[2] if len(sys.argv) == 3 else "native-command")
         actual = orca_observation()
         if not actual["ready"] or actual["state"] != "active":
             raise RuntimeError("genuine owned Orca is required for speech capture")
@@ -777,9 +799,9 @@ print(json.dumps(result))
             started = time.monotonic()
             unit_started = True
             call("systemd-run", "--user", "--quiet", "--collect", "--unit=" + unit,
-                 "--service-type=exec", "--property=RuntimeMaxSec=8s", "--property=UMask=0077", "/usr/bin/pw-record",
+                 "--service-type=exec", "--property=RuntimeMaxSec=" + str(profile["runtime_max_sec"]) + "s", "--property=UMask=0077", "/usr/bin/pw-record",
                  "--target=" + target, "--properties=" + json.dumps({"stream.capture.sink": True, "node.name": unit}),
-                 "--raw", "--format=s16", "--rate=24000", "--channels=1", "--sample-count=96000", pcm, user=True)
+                 "--raw", "--format=s16", "--rate=24000", "--channels=1", "--sample-count=" + str(profile["sample_count"]), pcm, user=True)
             main_pid = int(call("systemctl", "--user", "show", unit, "--property=MainPID", "--value", user=True))
             recorder = process_receipt(main_pid)
             if pathlib.Path(recorder["exe"]).name not in {"pw-cat", "pw-record"}:
@@ -807,7 +829,7 @@ print(json.dumps(result))
                 raise RuntimeError("original recording process changed during file readiness")
             if file_identity(os.lstat(log)) != log_identity:
                 raise RuntimeError("original presenter file identity changed")
-            recording = {"capture_state": "ready", "unit": unit, "pcm": pcm, "log": log, "owner": actual["owner"], "sink": target,
+            recording = {"profile": profile, "capture_state": "ready", "unit": unit, "pcm": pcm, "log": log, "owner": actual["owner"], "sink": target,
                          "pcm_identity": pcm_identity, "log_identity": log_identity, "sink_node": sinks[0],
                          "selection": selection, "graph_before": graph, "graph_ready": graph_ready,
                          "speech_process": speech_process, "synth_node": synth[0], "recorder": recorder,
@@ -852,7 +874,9 @@ print(json.dumps(result))
         if primary is not None or cleanup["errors"]:
             fail_speech(primary or RuntimeError("speech recording cleanup failed"), cleanup)
         try:
-            pcm = read_evidence(recording["pcm"], recording["pcm_identity"], 192000)
+            profile = recording_profile(recording)
+            pcm = read_evidence(recording["pcm"], recording["pcm_identity"],
+                                profile["sample_count"] * profile["sample_width"])
             log = read_evidence(recording["log"], recording["log_identity"], 64 * 1024).decode("utf-8")
             if file_identity(RECORDING_STATE.lstat()) != recording["state_identity"]:
                 raise RuntimeError("original root recording state changed before completion")
@@ -861,7 +885,7 @@ print(json.dumps(result))
                        for obj in graph_end["objects"] if (p := obj["props"]).get("media.class") == "Stream/Output/Audio"]
             result = {"pcm": base64.b64encode(pcm).decode(), "speech": [json.loads(line) for line in log.splitlines()],
                       "sink": recording["sink"], "streams": streams, "orca": orca_observation(),
-                      "receipt": {"selection": selection, "graph_end": graph_end, "ended_monotonic": ended,
+                      "receipt": {"profile": profile, "selection": selection, "graph_end": graph_end, "ended_monotonic": ended,
                                   "pcm_identity": recording["pcm_identity"], "log_identity": recording["log_identity"],
                                   "state_identity": recording["state_identity"],
                                   "pcm_bytes": len(pcm), "pcm_sha256": hashlib.sha256(pcm).hexdigest(),
