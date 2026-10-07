@@ -145,8 +145,10 @@ def select(case):
         # Stock Background appears below Style/Accent: scroll the actual item,
         # then invoke its real accessibility action once, never set a key.
         control=find()
-        control.queryComponent().scrollTo(pyatspi.SCROLL_ANYWHERE)
-        drain()
+        control.clear_cache()
+        if not control.getState().contains(pyatspi.STATE_SHOWING):
+            control.queryComponent().scrollTo(pyatspi.SCROLL_ANYWHERE)
+            drain()
         control.clear_cache()
         if not control.getState().contains(pyatspi.STATE_SHOWING): raise RuntimeError('actual chooser item not showing after scroll')
         action=control.queryAction()
