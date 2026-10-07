@@ -140,7 +140,7 @@ pub fn scalar(path: &Path) -> Result<u32, String> {
     if (before.dev(), before.ino()) != (after.dev(), after.ino()) || !after.is_file() {
         return Err("backlight scalar identity changed".into());
     }
-    if raw.len() > MAX_SCALAR_BYTES {
+    if raw.len() > MAX_SCALAR_BYTES as usize {
         return Err("backlight scalar exceeds bound".into());
     }
     std::str::from_utf8(&raw)

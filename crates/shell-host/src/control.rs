@@ -190,7 +190,6 @@ pub struct ControlClient {
     /// and never edits it.
     outputs: Vec<OutputInfo>,
     native_outputs: Vec<roost_shell_control::NativeOutputInfo>,
-    monitor_identities: Vec<roost_shell_control::MonitorIdentityInfo>,
     pointer_output: Option<String>,
     /// Session environment from the compositor (#59).
     environment: Vec<(String, String)>,
@@ -228,7 +227,6 @@ impl ControlClient {
             locked: false,
             outputs: Vec::new(),
             native_outputs: Vec::new(),
-            monitor_identities: Vec::new(),
             pointer_output: None,
             environment: Vec::new(),
             overview_previews: (Vec::new(), None),
