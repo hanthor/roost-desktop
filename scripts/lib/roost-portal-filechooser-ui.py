@@ -104,6 +104,17 @@ while time.monotonic() < end:
                 raise RuntimeError("Actual Nautilus dialog did not inherit its live parent, centered placement and focus")
         out.with_suffix(".a11y.json").write_text(json.dumps(nodes, indent=2))
         subprocess.run(["scrot", str(out.with_suffix(".png"))], check=True)
+        if request["decision"] == "close":
+            current = json.loads(Path("/out/compositor-state.json").read_text())
+            focused = [window for window in current["windows"] if window["id"] == current["focused"]
+                       and window.get("app_id") == "org.gnome.Nautilus"]
+            if len(focused) != 1:
+                raise RuntimeError("Request.Close proof lacks an actual focused Nautilus dialog")
+            out.with_suffix(".close-ready.json").write_text(json.dumps({
+                "dialog_id": focused[0]["id"], "provider": request["provider"], "scene": current,
+            }, indent=2))
+            print("actual Nautilus dialog ready for caller Request.Close")
+            sys.exit(0)
         if request["method"] == "OpenFile" and request["decision"] == "grant" and not located:
             # Click the actual expected file cell once. WINDOW coordinates
             # plus the compositor-known focused-surface origin avoid

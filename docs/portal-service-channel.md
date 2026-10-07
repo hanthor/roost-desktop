@@ -128,3 +128,15 @@ lock-recovery acceptance for the full Files application. The shortcuts follow
 [GNOME copy/move](https://help.gnome.org/gnome-help/files-copy.html),
 [rename](https://help.gnome.org/gnome-help/files-rename.html) and
 [Trash](https://help.gnome.org/gnome-help/files-delete.html) documentation.
+
+The reference file-picker journey also covers caller-initiated `Request.Close`
+for Open and Save with parentless, X11 and native Wayland callers. It first
+observes the actual focused Nautilus dialog (and the modal parent input block
+when parented), then closes the request from the original caller connection.
+The original dialog must disappear, ten fresh GLib timer observations must
+remain free of a response signal, and Save must leave no destination. Parented
+cases must restore focus and actual pointer delivery. This follows the
+[public Request contract](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Request.html),
+which distinguishes caller abort from a user cancellation response. Retained
+reference-container evidence remains separate from shipped-image, Flatpak,
+provider-restart and physical-hardware qualification.
