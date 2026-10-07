@@ -43,6 +43,7 @@ struct Inner {
     locked: bool,
     grants: Option<Grants>,
     held: HashSet<u16>,
+    protected: HashSet<u16>,
     custom: HashMap<u16, u32>,
     last_custom: Option<(u32, Instant)>,
     passed_custom: HashSet<u16>,
@@ -83,6 +84,7 @@ impl Monitor {
             locked: false,
             grants: None,
             held: HashSet::new(),
+            protected: HashSet::new(),
             custom: HashMap::new(),
             last_custom: None,
             passed_custom: HashSet::new(),
@@ -133,6 +135,10 @@ impl Monitor {
         let mut inner = self.inner.lock().unwrap();
         if inner.locked != locked {
             inner.locked = locked;
+            if locked {
+                let captured = std::mem::take(&mut inner.held);
+                inner.protected.extend(captured);
+            }
             inner.epoch = inner.epoch.wrapping_add(1);
             inner.custom.clear();
             inner.last_custom = None;
@@ -143,7 +149,20 @@ impl Monitor {
     pub fn key(&self, key: Key, repeat_delay: Duration) -> bool {
         let mut inner = self.inner.lock().unwrap();
         if inner.locked {
+            if key.released {
+                inner.protected.remove(&key.keycode);
+            } else {
+                inner.protected.insert(key.keycode);
+            }
             inner.held.remove(&key.keycode);
+            return false;
+        }
+        // A key originating in the lock/PAM route remains private through its
+        // release, even when verified unlock resumes the dormant monitor.
+        if inner.protected.contains(&key.keycode) {
+            if key.released {
+                inner.protected.remove(&key.keycode);
+            }
             return false;
         }
         let previous = inner.held.contains(&key.keycode);
@@ -422,6 +441,7 @@ pub(crate) mod tests {
                 keys,
             }),
             held: HashSet::new(),
+            protected: HashSet::new(),
             custom: HashMap::new(),
             last_custom: None,
             passed_custom: HashSet::new(),
@@ -506,9 +526,49 @@ pub(crate) mod tests {
         m.set_locked(false);
         assert!(m.inner.lock().unwrap().grants.as_ref().unwrap().watch);
         m.key(key(0x73, 39, true, 0), Duration::from_secs(1));
+        assert!(events.try_recv().is_err());
+        m.key(key(0x73, 39, false, 0), Duration::from_secs(1));
         let resumed = events.recv().unwrap();
         assert!(m.inner.lock().unwrap().valid(resumed.epoch, &resumed.owner));
         assert!(!m.inner.lock().unwrap().valid(resumed.epoch, ":1.24"));
+    }
+    #[test]
+    fn prelock_captured_hold_does_not_resume_with_a_release_only_event() {
+        let (m, events) = monitor(vec![0xffe5], vec![]);
+        let delay = Duration::from_secs(1);
+        assert!(m.key(key(0xffe5, 66, false, 0), delay));
+        let pending = events.recv().unwrap();
+        m.set_locked(true);
+        assert!(!m.inner.lock().unwrap().valid(pending.epoch, &pending.owner));
+        // Ordinary seat key-up routing remains available while locked.
+        assert!(!m.key(key(0xffe5, 66, true, 0), delay));
+        assert!(events.try_recv().is_err());
+        m.set_locked(false);
+        assert!(m.key(key(0xffe5, 66, false, 0), delay));
+        events.recv().unwrap();
+        m.set_locked(true);
+        m.set_locked(false);
+        // This time the old captured physical hold survived unlock.
+        assert!(!m.key(key(0xffe5, 66, true, 0), delay));
+        assert!(events.try_recv().is_err());
+        assert!(m.key(key(0xffe5, 66, false, 0), delay));
+        assert!(events.recv().unwrap().key.is_some());
+    }
+    #[test]
+    fn protected_press_never_leaks_repeat_or_release_after_unlock_or_reauthorization() {
+        let (m, events) = monitor(vec![], vec![]);
+        m.set_locked(true);
+        assert!(!m.key(key(0x70, 33, false, 0), Duration::from_secs(1)));
+        m.set_locked(false);
+        // Revocation/reestablishment must not discard the lock-origin identity.
+        let grants = m.inner.lock().unwrap().grants.take();
+        m.inner.lock().unwrap().invalidate();
+        m.inner.lock().unwrap().grants = grants;
+        assert!(!m.key(key(0x70, 33, false, 0), Duration::from_secs(1)));
+        assert!(!m.key(key(0x70, 33, true, 0), Duration::from_secs(1)));
+        assert!(events.try_recv().is_err());
+        assert!(!m.key(key(0x70, 33, false, 0), Duration::from_secs(1)));
+        assert!(events.recv().unwrap().key.is_some());
     }
     #[test]
     fn changing_grabs_never_swallows_an_already_forwarded_release() {
