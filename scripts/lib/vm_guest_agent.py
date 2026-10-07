@@ -41,8 +41,12 @@ def valid_native_files_error(value):
     phases={"start","mapped","dialog","create-typed","created","cancel-typed","cancelled","closed"}
     types={"RuntimeError","ValueError","OSError","FileNotFoundError","PermissionError","CalledProcessError",
            "TimeoutExpired","TimeoutError","ImportError","ModuleNotFoundError","OtherError"}
-    return (type(value) is dict and set(value)=={"phase","exception_type"}
+    stages={"context","start","guard-fast","guard-principals","guard-session","guard-route",
+            "guard-accessibility","guard-fixture","guard-final","closed-state","window","tree",
+            "cells","filesystem","cleanup","phase","final-guard","receipt"}
+    return (type(value) is dict and set(value)=={"phase","stage","exception_type"}
             and type(value["phase"]) is str and value["phase"] in phases
+            and type(value["stage"]) is str and value["stage"] in stages
             and type(value["exception_type"]) is str and value["exception_type"] in types)
 
 

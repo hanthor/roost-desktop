@@ -321,15 +321,33 @@ def fast_guard(value):
     return current
 
 
+# Fixed public invariant stages only; never retain exception messages or query data.
+ERROR_STAGE='context'
+
+def error_stage(stage):
+    global ERROR_STAGE
+    ERROR_STAGE=stage
+
+
 def guard(value):
+    previous_stage=ERROR_STAGE
+    error_stage('guard-fast')
     fast_guard(value)
+    error_stage('guard-principals')
     if principal(APP,'/usr/bin/nautilus')!=value['nautilus'] or principal(DISPLAY,'/usr/bin/roost-compositor')!=value['compositor'] or principal(SERVICE,'/usr/bin/roost-compositor')!=value['service_channel']:
         raise RuntimeError('original session or app principal changed')
+    error_stage('guard-session')
     if login_session()!=value['session']:raise RuntimeError('original native login session changed')
+    error_stage('guard-route')
     original_app_route(value)
+    error_stage('guard-accessibility')
     check_accessibility(value)
+    error_stage('guard-fixture')
     fixture_identity(value)
-    return fast_guard(value)
+    error_stage('guard-final')
+    current=fast_guard(value)
+    error_stage(previous_stage)
+    return current
 
 
 class Queries:
@@ -580,27 +598,35 @@ def cleanup_fixture(value):
 def inspect(value,phase):
     current=guard(value)
     if phase=='closed':
+        error_stage('closed-state')
         if not set(value['original_windows'])<=set(window_ids(current)):raise RuntimeError('original live window disappeared')
         if window_ids(current)!=value['original_windows'] or layout(current)!=value['original_layout'] or current['focused']!=value['original_focus'] or current['active_workspace']!=value['original_workspace']:raise ReadyLater()
         guard(value)
+        error_stage('filesystem')
         files=filesystem(value)
         if not files[CREATED]:raise RuntimeError('original created directory absent at close')
         result=common_receipt(value,phase,True,files)
         result.update(restored=True,restored_layout=layout(current),restored_focus=current['focused'],restored_workspace=current['active_workspace'])
+        error_stage('cleanup')
         result['cleanup']=cleanup_fixture(value)
         return result
+    error_stage('window')
     window=owned_window(value,current)
+    error_stage('tree')
     nodes,api,query,visited=accessibility(value)
+    error_stage('cells')
     cells={name:sum(query(node.getRoleName)=='table cell' and query(lambda:node.name) in (name,name+'. File',name+'. Folder') for node in nodes)
            for name in ('seed.txt',CREATED,CANCELLED)}
     entries=[node for node in nodes if query(node.getRoleName) in ('text','entry','text entry') and query(lambda:node.getState().contains(api.STATE_FOCUSED)) and query(lambda:node.getState().contains(api.STATE_EDITABLE))]
     dialogs=[node for node in nodes if query(node.getRoleName) in ('dialog','alert') and query(lambda:node.name)=='New Folder']
+    error_stage('filesystem')
     files=filesystem(value)
     check_outcomes(files,cells)
     result={'window_id':window['id'],'rect':window['rect'],'node_count':visited,'showing_node_count':len(nodes),
             'seed_cells':cells['seed.txt'],'created_cells':cells[CREATED],'cancelled_cells':cells[CANCELLED],
             'dialog_count':len(dialogs),'focused_entry_count':len(entries)}
     result.update(common_receipt(value,phase,True,files))
+    error_stage('phase')
     if phase=='mapped' and cells['seed.txt']==0:raise ReadyLater()
     if phase=='mapped' and cells['seed.txt']!=1:raise RuntimeError('known seed cell ambiguous')
     if phase in ('dialog','create-typed','cancel-typed'):
@@ -614,6 +640,7 @@ def inspect(value,phase):
     if phase=='created':retain_created_inode(value)
     if phase=='cancelled' and dialogs:raise ReadyLater()
     if phase=='cancelled' and (not files[CREATED] or cells[CREATED]!=1):raise RuntimeError('original created folder lost during cancellation')
+    error_stage('final-guard')
     guard(value)
     result['ready']=True
     return result
@@ -656,20 +683,29 @@ def main():
     DEADLINE=time.monotonic()+25
     if len(sys.argv)!=2 or sys.argv[1] not in ACTIONS:raise ValueError('fixed pilot action required')
     phase=sys.argv[1]
+    error_stage('context')
     try:
         try:
-            result=start() if phase=='start' else inspect(context(),phase)
+            if phase=='start':
+                error_stage('start')
+                result=start()
+            else:
+                original=context()
+                result=inspect(original,phase)
         except ReadyLater:
+            error_stage('context')
             original=context();guard(original)
+            error_stage('filesystem')
             files=filesystem(original)
             result=common_receipt(original,phase,False,files)
+        error_stage('receipt')
         encoded=json.dumps(result,separators=(',',':'))
         if len(encoded.encode())>16384:raise RuntimeError('fixed pilot receipt bound')
         print(encoded)
     except Exception as error:
         allowed={'RuntimeError','ValueError','OSError','FileNotFoundError','PermissionError','CalledProcessError','TimeoutExpired','TimeoutError','ImportError','ModuleNotFoundError'}
         name=type(error).__name__
-        print(json.dumps({'native_files_error':{'phase':phase,'exception_type':name if name in allowed else 'OtherError'}}))
+        print(json.dumps({'native_files_error':{'phase':phase,'stage':ERROR_STAGE,'exception_type':name if name in allowed else 'OtherError'}}))
         return 1
     return 0
 

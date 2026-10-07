@@ -7,6 +7,9 @@ import tempfile
 import copy
 import base64
 import os
+import io
+import json
+from contextlib import redirect_stdout
 import stat
 import unittest
 from unittest.mock import patch
@@ -110,10 +113,38 @@ class Policy(unittest.TestCase):
         self.assertEqual(G.layout({'windows':[{'id':2,'rect':[0,0,100,100]},{'id':1,'rect':[1,1,99,99]}]}),[[1,[1,1,99,99]],[2,[0,0,100,100]]])
         with self.assertRaises(RuntimeError):G.layout({'windows':[{'id':True,'rect':[0,0,100,100]}]})
     def test_transport_refuses_arbitrary_error_body(self):
-        good={'phase':'created','exception_type':'RuntimeError'}
+        good={'phase':'created','stage':'cells','exception_type':'RuntimeError'}
         self.assertTrue(T.valid_native_files_error(good))
-        for candidate in (dict(good,message='private content'),dict(good,phase=[]),dict(good,exception_type='private body')):
+        for candidate in (dict(good,message='private content'),dict(good,phase=[]),dict(good,exception_type='private body'),dict(good,stage='private body'),dict(good,stage=[]),{k:v for k,v in good.items() if k!='stage'}):
             self.assertFalse(T.valid_native_files_error(candidate))
+    def test_actual_failure_stage_preserves_exit_without_private_error_text(self):
+        for stage in ('context','window','tree'):
+            original=RuntimeError('private filename and credential must never be retained')
+            stream=io.StringIO()
+            with patch.object(G.sys,'argv',['fixed-probe','mapped']), redirect_stdout(stream):
+                if stage=='context':
+                    with patch.object(G,'context',side_effect=original):status=G.main()
+                else:
+                    with patch.object(G,'context',return_value={}),patch.object(G,'guard',return_value={}), \
+                         patch.object(G,'owned_window',side_effect=original if stage=='window' else None,return_value={}), \
+                         patch.object(G,'accessibility',side_effect=original):status=G.main()
+            self.assertEqual(status,1)
+            diagnostic=json.loads(stream.getvalue())
+            self.assertEqual(diagnostic,{'native_files_error':{'phase':'mapped','stage':stage,'exception_type':'RuntimeError'}})
+            self.assertTrue(T.valid_native_files_error(diagnostic['native_files_error']))
+            self.assertNotIn('private',stream.getvalue())
+    def test_guard_stage_retained_on_failure_restored_on_success(self):
+        value={'nautilus':1,'compositor':2,'service_channel':3,'session':4}
+        with patch.object(G,'fast_guard',return_value={}),patch.object(G,'principal',side_effect=[1,2,3]), \
+             patch.object(G,'login_session',return_value=4),patch.object(G,'original_app_route',side_effect=RuntimeError('private route')):
+            G.error_stage('tree')
+            with self.assertRaises(RuntimeError):G.guard(value)
+            self.assertEqual(G.ERROR_STAGE,'guard-route')
+        with patch.object(G,'fast_guard',return_value={}),patch.object(G,'principal',side_effect=[1,2,3]), \
+             patch.object(G,'login_session',return_value=4),patch.object(G,'original_app_route'), \
+             patch.object(G,'check_accessibility'),patch.object(G,'fixture_identity'):
+            G.error_stage('tree');G.guard(value)
+            self.assertEqual(G.ERROR_STAGE,'tree')
     def test_original_files_route_not_private_env(self):
         value={'nautilus':{'pid':12},'compositor':{'pid':34}}
         with patch.object(G,'bounded',return_value=b'PRIVATE=never retained\0WAYLAND_DISPLAY=roost-nested-34\0'):
@@ -123,10 +154,13 @@ class Policy(unittest.TestCase):
     def test_transport_diagnostic_matches_requested_phase(self):
         for phase in ('mapped','created'):
             agent=object.__new__(T.GuestAgent)
-            status={'exited':True,'exitcode':9,'out-data':base64.b64encode(__import__('json').dumps({'native_files_error':{'phase':phase,'exception_type':'RuntimeError'}}).encode()).decode()}
+            status={'exited':True,'exitcode':9,'out-data':base64.b64encode(__import__('json').dumps({'native_files_error':{'phase':phase,'stage':'cells','exception_type':'RuntimeError'}}).encode()).decode()}
             agent.command=lambda method,**kw:{'pid':123} if method=='guest-exec' else status
             with self.assertRaises(RuntimeError) as raised:agent.run('native-files','created')
-            if phase=='created':self.assertIn('"phase": "created"',str(raised.exception))
+            if phase=='created':
+                self.assertIn('"phase": "created"',str(raised.exception))
+                self.assertIn('"stage": "cells"',str(raised.exception))
+                self.assertIn('exit=9',str(raised.exception))
             else:self.assertNotIn('"phase"',str(raised.exception))
     def test_foreign_provider_child_rejected(self):
         class App:
