@@ -905,7 +905,6 @@ impl<'a> Session<'a> {
             | Message::Overview { .. }
             | Message::Switcher { .. }
             | Message::NativeOutputInventory { .. }
-            | Message::MonitorIdentityInventory { .. }
             | Message::Outputs { .. }
             | Message::Environment { .. }
             | Message::OverviewPreviews { .. }

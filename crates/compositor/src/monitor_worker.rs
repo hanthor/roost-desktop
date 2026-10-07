@@ -230,7 +230,7 @@ mod tests {
             name: "eDP-1".into(),
             id: 1,
         };
-        assert!(validate(&[connector.clone()]).is_ok());
+        assert!(validate(std::slice::from_ref(&connector)).is_ok());
         assert_eq!(
             validate(&vec![connector.clone(); MAX_CONNECTORS + 1]),
             Err(Failure::InvalidRequest)

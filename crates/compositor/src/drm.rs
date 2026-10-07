@@ -615,7 +615,7 @@ impl DrmBackend {
                 ) {
                     return Err("monitor candidate expired during resource commit".into());
                 }
-                let mut output = match previous.iter().position(|output| {
+                let output = match previous.iter().position(|output| {
                     output.connector == plan.connector && output.crtc == plan.crtc
                 }) {
                     Some(index) => {

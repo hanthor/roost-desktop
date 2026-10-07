@@ -88,7 +88,7 @@ fn meaningful_serial(serial: &str) -> bool {
 }
 
 pub fn parse(raw: &[u8]) -> Result<Identity, String> {
-    if raw.len() < 128 || raw.len() > MAX_BYTES || raw.len() % 128 != 0 {
+    if raw.len() < 128 || raw.len() > MAX_BYTES || !raw.len().is_multiple_of(128) {
         return Err("EDID block length outside bound".into());
     }
     if raw[..8] != [0, 255, 255, 255, 255, 255, 255, 0] || raw[18] != 1 || raw[19] > 4 {
@@ -114,7 +114,7 @@ pub fn parse(raw: &[u8]) -> Result<Identity, String> {
         }
     }
     if raw.len() != (extensions + 1) * 128
-        || raw.chunks_exact(128).any(|block| {
+        || raw.as_chunks::<128>().0.iter().any(|block| {
             block
                 .iter()
                 .fold(0_u8, |sum, value| sum.wrapping_add(*value))
@@ -141,7 +141,7 @@ pub fn parse(raw: &[u8]) -> Result<Identity, String> {
     let mut serial = None;
     let mut product_seen = false;
     let mut serial_seen = false;
-    for descriptor in raw[54..126].chunks_exact(18) {
+    for descriptor in raw[54..126].as_chunks::<18>().0 {
         if descriptor[..2] != [0, 0] || !matches!(descriptor[3], 0xfc | 0xff) {
             continue;
         }
@@ -239,7 +239,7 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     fn checksum(raw: &mut [u8]) {
-        for block in raw.chunks_exact_mut(128) {
+        for block in raw.as_chunks_mut::<128>().0 {
             block[127] = 0;
             block[127] = 0_u8.wrapping_sub(block.iter().fold(0_u8, |s, v| s.wrapping_add(*v)));
         }

@@ -3,10 +3,16 @@ use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT: AtomicU64 = AtomicU64::new(1);
 fn allocate(counter: &AtomicU64) -> Option<NonZeroU64> {
-    let value = counter
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_add(1))
-        .ok()?;
-    NonZeroU64::new(value)
+    // Equivalent checked update using the portable CAS API: return the old
+    // scalar only after successful admission; exhaustion never changes it.
+    let mut value = counter.load(Ordering::Acquire);
+    loop {
+        let next = value.checked_add(1)?;
+        match counter.compare_exchange_weak(value, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(original) => return NonZeroU64::new(original),
+            Err(current) => value = current,
+        }
+    }
 }
 /// Never reset when a DRM device, connector or native epoch is replaced.
 pub fn next_cookie() -> Option<NonZeroU64> {
