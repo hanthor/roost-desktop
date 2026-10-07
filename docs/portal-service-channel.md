@@ -98,3 +98,10 @@ Qualified reference evidence: #406 at `8ac36e67` passed all four actual installe
 At candidate `8b68365f`, the actual GTK `G-INTROSPECT-TYPES` journey changed all fourteen EWMH types and restored the absent-type default successfully; the complete GTK journey and all four X11 scale/input cases passed. DRM output and 240 ordered presentations also passed. This integrated follow-up needs fresh gates, and the earlier `5eda7c96` D-OUTPUT failure has not been assigned a proven root cause.
 
 At candidate `b68bad53`, actual instrumented coverage passed both typed/ordinary/native registry visibility and the ordinary-client raw blind-bind denial test. The original peer credential snapshot and typed X11 capability are retained separately in the integrated client state. Real X11-parent picker journeys and fresh integrated-head qualification remain pending.
+
+
+## Native Wayland caller reference coverage (#404)
+
+The reference driver additionally creates an actual native GTK caller, exports its live toplevel through GdkWayland's asynchronous `export_handle`, and passes that returned `wayland:` handle to the real portal. Its ordinary socket connection is independent of the typed Nautilus provider connection. The caller uses a distinct raw app ID only to locate its own mapped debug window; that label grants no authority. Open/Save cancel/accept retain the exported handle, actual provider identity, parent association/centered geometry, positive parent input before the dialog, blocked exposed-parent input while modal and restored focus/input after the response. The caller releases its exported handle through `drop_exported_handle`.
+
+The existing four parentless and four X11-parent outcomes remain required. These new native Wayland journeys are candidate coverage awaiting actual execution, not a claim of full picker, lifecycle, sandbox grant or final shipping-image qualification. API contract: [GTK Wayland toplevel export](https://docs.gtk.org/gdk4-wayland/method.WaylandToplevel.export_handle.html).
