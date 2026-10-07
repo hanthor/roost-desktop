@@ -2258,12 +2258,11 @@ impl Runtime {
         let paper = backdrop(
             &mut self.wallpaper,
             renderer,
-            size,
+            background_geometry(size, view, desktop),
             view,
             overview.is_none(),
             cards,
             false,
-            desktop,
         );
         let damage = Rectangle::from_size(size);
         let mut target = renderer.bind(&mut texture).ok()?;
@@ -3224,12 +3223,11 @@ impl Runtime {
                     let paper = backdrop(
                         &mut self.wallpaper,
                         renderer,
-                        size,
+                        background_geometry(size, view, desktop),
                         view,
                         show_paper,
                         cards,
                         locked,
-                        desktop,
                     );
                     // The winit EGL surface presents bottom-up (see the
                     // Y-flip in the backend's own damage path), so the
@@ -3343,12 +3341,11 @@ impl Runtime {
                     let paper = backdrop(
                         &mut self.wallpaper,
                         renderer,
-                        size,
+                        background_geometry(size, view, desktop),
                         view,
                         show_paper,
                         cards,
                         locked,
-                        desktop,
                     );
                     use crate::native_repaint::{ElementSignature, FrameSignature};
                     let signature = FrameSignature {
@@ -3948,26 +3945,36 @@ fn scene_elements(
     }
 }
 
+fn background_geometry(
+    size: smithay::utils::Size<i32, smithay::utils::Physical>,
+    view: View,
+    desktop: [i32; 4],
+) -> roost_wallpaper::background::Geometry {
+    roost_wallpaper::background::Geometry {
+        physical: [size.w.max(0) as u32, size.h.max(0) as u32],
+        origin: [view.offset.0, view.offset.1],
+        desktop,
+        scale_bits: view.scale.to_bits(),
+    }
+}
+
 /// What lies under the windows on one output, in physical pixels: the
 /// wallpaper on the desktop, or in the overview GNOME's workspace cards
 /// (the wallpaper below the bar, rounded, over a shadow).
 fn backdrop(
     wallpaper: &mut Wallpaper,
     renderer: &mut GlesRenderer,
-    size: smithay::utils::Size<i32, smithay::utils::Physical>,
+    geometry: roost_wallpaper::background::Geometry,
     view: View,
     show_paper: bool,
     cards: Option<&crate::overview::OverviewLayout>,
     locked: bool,
-    desktop: [i32; 4],
 ) -> Vec<smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<GlesRenderer>>
 {
-    let geometry = roost_wallpaper::background::Geometry {
-        physical: [size.w.max(0) as u32, size.h.max(0) as u32],
-        origin: [view.offset.0, view.offset.1],
-        desktop,
-        scale_bits: view.scale.to_bits(),
-    };
+    let size = smithay::utils::Size::<i32, smithay::utils::Physical>::from((
+        geometry.physical[0] as i32,
+        geometry.physical[1] as i32,
+    ));
     if locked {
         return wallpaper
             .lock_element(renderer, size.w, size.h, geometry)
