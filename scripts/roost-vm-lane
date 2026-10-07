@@ -278,6 +278,44 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     record("V-LIFECYCLE-OWNER", nonroot and intact, "root probe, non-root greetd session and three real app processes/surfaces")
     if not nonroot or not intact or before["state"]["locked"]:
         raise RuntimeError("lifecycle preconditions failed")
+    # Bell first: the audible PCM proof requires a quiet output graph, and the
+    # Orca phase below starts speech-dispatcher, whose streams linger afterwards.
+
+    # Actual backend audio acceptance. Policy and wire receipts alone cannot
+    # qualify playback; retain every fresh PCM before checking its result.
+    bell_proof = {"principal": None, "cases": [], "primary_error": None, "cleanup": None}
+    bell_primary_error = None
+    try:
+        bell_proof["principal"] = agent.run("bell-start")
+        with open(os.path.join(evidence, "bell-principal.json"), "w") as stream:
+            json.dump(bell_proof["principal"], stream, indent=2)
+        for name in ("audible", "audible-disabled", "events-disabled", "visual-independent",
+                     "theme-bound", "theme-disabled", "restored"):
+            actual = agent.run("bell-" + name)
+            pcm = base64.b64decode(actual.pop("pcm", ""), validate=True)
+            with open(os.path.join(evidence, "bell-" + name + ".pcm"), "wb") as stream:
+                stream.write(pcm)
+            with open(os.path.join(evidence, "bell-" + name + ".json"), "w") as stream:
+                json.dump(actual, stream, indent=2)
+            bell_proof["cases"].append(actual)
+            if not actual["qualified"]:
+                raise RuntimeError("genuine native bell PCM case failed: " + name + ": " + str(actual.get("error")))
+        record("V-BELL-PCM", True,
+               "original xdg_system_bell principal; packaged player and genuine virtual HDA sink PCM obey audible/event policy, independent visual preference, bounded/disabled theme controls and restored real theme")
+    except BaseException as error:
+        bell_primary_error = error
+        bell_proof["primary_error"] = {"type": type(error).__name__, "message": str(error)}
+    finally:
+        try:
+            bell_proof["cleanup"] = agent.run("bell-stop")
+        except Exception as error:
+            bell_proof["cleanup"] = {"restored": False, "error": str(error)}
+        with open(os.path.join(evidence, "bell-pcm-proof.json"), "w") as stream:
+            json.dump(bell_proof, stream, indent=2)
+    if bell_primary_error is not None:
+        raise bell_primary_error
+    if not bell_proof["cleanup"]["restored"]:
+        raise RuntimeError("genuine native bell proof cleanup failed")
     # Real distribution Orca owns a credential-verified bus name under the ordinary
     # session user. Settings writes trigger Roost's consumer, not test start/stop.
     orca_observations = []
@@ -336,41 +374,6 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     finally:
         agent.run("audio-amplification-reset")
 
-    # Actual backend audio acceptance. Policy and wire receipts alone cannot
-    # qualify playback; retain every fresh PCM before checking its result.
-    bell_proof = {"principal": None, "cases": [], "primary_error": None, "cleanup": None}
-    bell_primary_error = None
-    try:
-        bell_proof["principal"] = agent.run("bell-start")
-        with open(os.path.join(evidence, "bell-principal.json"), "w") as stream:
-            json.dump(bell_proof["principal"], stream, indent=2)
-        for name in ("audible", "audible-disabled", "events-disabled", "visual-independent",
-                     "theme-bound", "theme-disabled", "restored"):
-            actual = agent.run("bell-" + name)
-            pcm = base64.b64decode(actual.pop("pcm", ""), validate=True)
-            with open(os.path.join(evidence, "bell-" + name + ".pcm"), "wb") as stream:
-                stream.write(pcm)
-            with open(os.path.join(evidence, "bell-" + name + ".json"), "w") as stream:
-                json.dump(actual, stream, indent=2)
-            bell_proof["cases"].append(actual)
-            if not actual["qualified"]:
-                raise RuntimeError("genuine native bell PCM case failed: " + name + ": " + str(actual.get("error")))
-        record("V-BELL-PCM", True,
-               "original xdg_system_bell principal; packaged player and genuine virtual HDA sink PCM obey audible/event policy, independent visual preference, bounded/disabled theme controls and restored real theme")
-    except BaseException as error:
-        bell_primary_error = error
-        bell_proof["primary_error"] = {"type": type(error).__name__, "message": str(error)}
-    finally:
-        try:
-            bell_proof["cleanup"] = agent.run("bell-stop")
-        except Exception as error:
-            bell_proof["cleanup"] = {"restored": False, "error": str(error)}
-        with open(os.path.join(evidence, "bell-pcm-proof.json"), "w") as stream:
-            json.dump(bell_proof, stream, indent=2)
-    if bell_primary_error is not None:
-        raise bell_primary_error
-    if not bell_proof["cleanup"]["restored"]:
-        raise RuntimeError("genuine native bell proof cleanup failed")
 
     # Native pressure uses QMP relative mouse events delivered through real
     # libinput. Tablet/absolute positioning supplies no pressure.
