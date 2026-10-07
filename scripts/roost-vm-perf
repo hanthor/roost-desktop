@@ -22,36 +22,42 @@ loader.exec_module(lane)
 sys.path.insert(0, str(HERE / "lib"))
 from vm_guest_agent import GuestAgent  # noqa: E402
 from perf_trace_diagnostics import decode as decode_trace_failure, MAX_BYTES as TRACE_FAILURE_BYTES
+from gnome_failed_capture import validate_receipt as validate_failed_capture, validate_chunk as validate_failed_chunk
+from gnome_stop_boundary import capture_stop_boundary_evidence
 from gnome_sysprof import capture_boundary_evidence, decode as decode_gnome_sysprof, required_scope_counts, overview_frame_bounds, FrameOwnershipError, frame_source_evidence  # noqa: E402
 
 
 def guest_probe(agent, action, index=None, out=None):
     """Only this immutable CI helper is executed; no command/path input."""
     if action not in ("clock", "notify", "frames", "gnome-trace-start",
-                      "gnome-trace-stop", "gnome-trace-read"):
+                      "gnome-trace-stop", "gnome-trace-read",
+                      "gnome-trace-failed-stop", "gnome-trace-failed-stop-read"):
         raise ValueError("unsupported performance probe")
     arguments = [action]
     if action == "notify":
         if type(index) is not int or not 0 <= index < 10:
             raise ValueError("notification index outside the fixed workload")
         arguments += ["--index", str(index)]
-    if action == "gnome-trace-read":
+    if action in ("gnome-trace-read","gnome-trace-failed-stop-read"):
         if type(index) is not int or not 0 <= index < 128:
             raise ValueError("capture chunk index outside the bounded file")
         arguments += ["--index", str(index)]
     pid = agent.command("guest-exec", path="/usr/libexec/roost-perf-phase",
                         arg=arguments, **{"capture-output": True})["pid"]
-    deadline = time.monotonic() + 20
+    deadline = time.monotonic() + (30 if action in ("gnome-trace-stop","gnome-trace-failed-stop") else 20)
     while time.monotonic() < deadline:
         status = agent.command("guest-exec-status", pid=pid)
         if status["exited"]:
             if status.get("exitcode") != 0 or status.get("out-truncated") or status.get("err-truncated"):
-                if action in ("gnome-trace-start","gnome-trace-stop") and out is not None:
+                if action in ("gnome-trace-start","gnome-trace-stop","gnome-trace-failed-stop") and out is not None:
                     retain_trace_failure(status,action,out)
+                    if action=="gnome-trace-stop":retain_failed_gnome_capture(agent,out)
                 raise RuntimeError(f"guest performance {action} failed")
             result = json.loads(base64.b64decode(status.get("out-data", ""), validate=True))
-            if action in ("gnome-trace-start","gnome-trace-stop") and isinstance(result,dict) and "trace_failure" in result:
-                if out is not None:retain_trace_failure(status,action,out)
+            if action in ("gnome-trace-start","gnome-trace-stop","gnome-trace-failed-stop") and isinstance(result,dict) and "trace_failure" in result:
+                if out is not None:
+                    retain_trace_failure(status,action,out)
+                    if action=="gnome-trace-stop":retain_failed_gnome_capture(agent,out)
                 raise RuntimeError(f"guest performance {action} failed")
             clock = result.get("boottime_s")
             if type(clock) not in (int, float) or not math.isfinite(clock) or clock <= 0:
@@ -74,7 +80,7 @@ def retain_trace_failure(status,action,out):
         encoded=status.get("out-data","")
         if status.get("out-truncated") or status.get("err-truncated") or not isinstance(encoded,str) or len(encoded)>((TRACE_FAILURE_BYTES+2)//3)*4:
             raise ValueError("incomplete bounded trace failure")
-        value=decode_trace_failure(base64.b64decode(encoded,validate=True),action.removeprefix("gnome-trace-"))
+        value=decode_trace_failure(base64.b64decode(encoded,validate=True),("stop" if action=="gnome-trace-failed-stop" else action.removeprefix("gnome-trace-")))
         receipt.update(diagnostic_accepted=True,diagnostic=value)
     except (ValueError,TypeError,RecursionError):
         # A fixed rejection receipt survives malformed input without retaining
@@ -83,6 +89,43 @@ def retain_trace_failure(status,action,out):
     target=out/(action+"-failure.json")
     with target.open("x") as stream:
         json.dump(receipt,stream,indent=2)
+
+
+def retain_failed_gnome_capture(agent,out):
+    """One separate read-only bounded acquisition; original failure survives."""
+    report={"qualified":False,"raw_retained":False}
+    try:
+        metadata=validate_failed_capture(guest_probe(agent,"gnome-trace-failed-stop",out=out)["gnome_trace"])
+        if metadata.get("qualified") is not False:
+            raise ValueError("failed capture cannot qualify")
+        size=metadata.get("bytes");digest=metadata.get("sha256")
+        if (type(size) is not int or not 256<=size<=8*1024*1024
+                or type(digest) is not str or __import__('re').fullmatch(r'[0-9a-f]{64}',digest) is None):
+            raise ValueError("failed original capture bounds refused")
+        (out/"gnome-overview-failed-source.json").write_text(json.dumps(metadata,indent=2))
+        chunks=[]
+        for index in range((size+65535)//65536):
+            row=guest_probe(agent,"gnome-trace-failed-stop-read",index)["gnome_trace"]
+            chunk=validate_failed_chunk(row,index,metadata)
+            chunks.append(chunk)
+        raw=b''.join(chunks)
+        if hashlib.sha256(raw).hexdigest()!=digest:
+            raise ValueError("failed original capture hash refused")
+        (out/"gnome-overview-failed.syscap").write_bytes(raw)
+        report.update(raw_retained=True,bytes=size,sha256=digest,
+                      writer_closure_observed=metadata.get("writer_closure_observed") is True)
+    except Exception as error:
+        # No raw exception/provider body/credentials; original status unchanged.
+        report["acquisition_refused"]=True
+        report["reason"]=("file-io-refused" if isinstance(error,OSError) else
+                          "validation-refused" if isinstance(error,(ValueError,TypeError,KeyError)) else
+                          "guest-action-failed")
+    try:
+        with (out/"gnome-overview-failed-acquisition.json").open('x') as stream:
+            json.dump(report,stream,indent=2)
+    except OSError:
+        # Retain any prior owned receipt; finalization cannot mask original Stop.
+        print("Failed GNOME raw acquisition receipt could not be finalized",file=sys.stderr)
 
 
 def distribution(values):
@@ -117,13 +160,16 @@ def retain_gnome_trace(agent, out, metadata):
     # Preserve decoded evidence even if a required semantic scope is absent.
     (out / "gnome-overview-marks.json").write_text(json.dumps(decoded, indent=2))
     package = metadata.get("mutter_cogl_library", {}).get("package")
-    diagnostic = package in ("mutter 51.0-1.2", "mutter 51.0-1.4")
+    diagnostic = package in ("mutter 51.0-1.2", "mutter 51.0-1.5", "mutter 51.0-1.6")
     if diagnostic:
         evidence = frame_source_evidence(decoded, metadata["pid"])
         (out / "gnome-overview-source-frames.json").write_text(json.dumps(evidence, indent=2))
-    if package == "mutter 51.0-1.4":
+    if package in ("mutter 51.0-1.5", "mutter 51.0-1.6"):
         boundary = capture_boundary_evidence(decoded, metadata)
         (out / "gnome-overview-capture-boundary.json").write_text(json.dumps(boundary, indent=2))
+    if package == "mutter 51.0-1.6":
+        stop_boundary = capture_stop_boundary_evidence(decoded, metadata)
+        (out / "gnome-overview-capture-stop-boundary.json").write_text(json.dumps(stop_boundary, indent=2))
     if metadata.get("capture_writers_after_stop") != []:
         raise ValueError("GNOME capture writer did not close after Stop")
     counts = required_scope_counts(decoded, metadata["pid"])

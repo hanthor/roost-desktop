@@ -34,7 +34,7 @@ COPY --chmod=0755 packaging/marlin/roost-pinned-baseline /usr/libexec/roost-pinn
 # Refresh, upgrade, and install dependencies in one coherent transaction.
 # Both desktop sessions share the resulting image's packages and kernel.
 RUN set -eux; \
-    if test -n "$ROOST_PKG_SHA256"; then \
+    if test -n "${ROOST_PKG_SHA256:-}"; then \
         test "${#ROOST_PKG_SHA256}" = 64 && \
         case "$ROOST_PKG_SHA256" in *[!0-9a-f]*) exit 1 ;; esac && \
         sha256sum /tmp/roost.pkg.tar.zst && \

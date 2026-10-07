@@ -36,7 +36,8 @@ jobs:
           mkdir -p perf-artifacts
           run="$PACKAGE_RUN"
           if [[ -z "$run" ]]; then
-            run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --branch main --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=20" > perf-artifacts/package-candidates-api.json
+            run=$(python3 scripts/lib/roost-perf-payload.py latest-run --runs perf-artifacts/package-candidates-api.json --repository "$GITHUB_REPOSITORY" --out perf-artifacts/package-candidate-selection.json)
           fi
           [[ "$run" =~ ^[0-9]+$ ]]
           printf '%s\n' "$run" > perf-artifacts/selected-package-run

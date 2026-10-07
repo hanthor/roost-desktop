@@ -11,12 +11,13 @@ import subprocess
 import time
 import sys
 from perf_trace_diagnostics import Context, encode
+from gnome_failed_capture import identity, process_start, read_marker, write_marker, failed_source
 
 
 PEER = "org.gnome.Shell"
 OBJECT = "/org/gnome/Sysprof3/Profiler"
 INTERFACE = "org.gnome.Sysprof3.Profiler"
-DIAGNOSTIC_PACKAGE = "mutter 51.0-1.4"
+DIAGNOSTIC_PACKAGE = "mutter 51.0-1.6"
 
 
 MUTTER_MODULES = {"cogl": "libmutter-cogl-51", "clutter": "libmutter-clutter-51",
@@ -124,7 +125,7 @@ def main(context):
     from gi.repository import Gio, GLib
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("start", "stop"))
+    parser.add_argument("action", choices=("start", "stop", "failed-stop"))
     args = parser.parse_args()
     uid = os.getuid()
     if uid == 0:
@@ -132,6 +133,7 @@ def main(context):
     runtime = Path(f"/run/user/{uid}")
     capture = runtime / "roost-perf-gnome.syscap"
     marker = runtime / "roost-perf-gnome-profiler.json"
+    failure_marker = runtime / "roost-perf-gnome-stop-failed.json"
     context.stage="session-bus"
     bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
 
@@ -190,10 +192,13 @@ def main(context):
                 os.chmod(marker, 0o600)
                 json.dump({"owner": owner, "pid": pid, "uid": uid,
                            "gnome_shell_version": version,
+                           "process_start": process_start(pid),
+                           "capture_identity": identity(os.fstat(descriptor)),
                            "mutter_cogl_library": libraries["cogl"],
                            "mutter_mapped_libraries": libraries,
                            "start_requested_monotonic_ns": requested,
                            "drained_start_required": True,
+                           "drained_stop_required": True,
                            "started_monotonic_ns": time.monotonic_ns()}, stream)
         except BaseException:
             original_stage=context.stage
@@ -209,6 +214,17 @@ def main(context):
         finally:
             os.close(descriptor)
         print(json.dumps({"owner": owner, "pid": pid, "uid": uid}))
+    elif args.action == "failed-stop":
+        context.stage="stop-marker-open"
+        saved = read_marker(failure_marker, uid)
+        context.stage="mutter-provenance"
+        libraries = mutter_libraries_provenance(pid, context=context)
+        source = failed_source(saved,uid,owner,pid,libraries,process_start(pid))
+        if credentials("GetNameOwner", "(s)", PEER) != owner:
+            raise RuntimeError("failed Stop original owner changed")
+        print(json.dumps(dict(source, qualified=False, failure=saved["failure"],
+                              stop_requested_monotonic_ns=saved["stop_requested_monotonic_ns"],
+                              failed_stop_observed_monotonic_ns=time.monotonic_ns())))
     else:
         context.stage="stop-marker-open"
         descriptor = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW)
@@ -226,8 +242,21 @@ def main(context):
         if saved.get("gnome_shell_version") != version:
             raise RuntimeError("GNOME Shell version changed during profiling")
         context.stage="stop-call"
-        bus.call_sync(owner, OBJECT, INTERFACE, "Stop", None,
-                      GLib.VariantType.new("()"), Gio.DBusCallFlags.NONE, 5000, None)
+        stop_requested = time.monotonic_ns()
+        try:
+            bus.call_sync(owner, OBJECT, INTERFACE, "Stop", None,
+                          GLib.VariantType.new("()"), Gio.DBusCallFlags.NONE, 10000, None)
+        except GLib.Error as error:
+            # Only exact pinned cleanup failures admit later read-only raw
+            # acquisition. Unknown failures cannot borrow an old marker.
+            failure = context.failure(error, GLib.Error, Gio.DBusError.get_remote_error)
+            if failure["trace_failure"].get("drained_failure") in ("stop-owned-state", "stop-clock", "stop-timeout"):
+                try:
+                    write_marker(failure_marker,{"source":saved,"failure":failure,
+                                 "stop_requested_monotonic_ns":stop_requested},uid)
+                except (OSError,ValueError):
+                    pass  # Original nonzero GLib failure remains authoritative.
+            raise
         stopped = time.monotonic_ns()
         context.stage="stop-marker-remove"
         marker.unlink()
@@ -238,11 +267,13 @@ def main(context):
         if (saved.get("mutter_cogl_library") != libraries["cogl"] or
                 saved.get("mutter_mapped_libraries") != libraries):
             raise RuntimeError("mapped Mutter library changed during profiling")
-        print(json.dumps(dict(saved, stopped_monotonic_ns=stopped)))
+        print(json.dumps(dict(saved, stop_requested_monotonic_ns=stop_requested,
+                              stopped_monotonic_ns=stopped)))
 
 
 def run():
     action=sys.argv[1] if len(sys.argv)==2 and sys.argv[1] in ("start","stop") else None
+    if len(sys.argv)==2 and sys.argv[1]=="failed-stop":action="stop"
     if action is None:
         # Original argparse refusal, no diagnostics for arbitrary commands.
         main(Context("start"))

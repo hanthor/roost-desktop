@@ -55,6 +55,47 @@ class TraceFailureDiagnostics(unittest.TestCase):
         raw=diag.encode(value,'start')
         self.assertNotIn(b'PRIVATE',raw);self.assertNotIn(b'secret',raw)
         self.assertEqual(value['trace_failure']['glib'],{'domain':'other','code':37,'remote_name':'other'})
+    def test_exact_pinned_drained_messages_classify_without_transporting_text(self):
+        class Error(Exception):
+            domain='g-dbus-error-quark'
+            code=0
+        context=diag.Context('start');context.stage='start-call'
+        remote=lambda _: 'org.freedesktop.DBus.Error.Failed'
+        source=(ROOT/'packaging/marlin/perf/mutter-profiler/drained-capture-start.patch').read_text()
+        for message,label in diag.DRAINED_FAILURES.items():
+            self.assertIn('"'+message+'"',source)
+            for prefix in ('','GDBus.Error:org.freedesktop.DBus.Error.Failed: '):
+                error=Error('PRIVATE body');error.message=prefix+message
+                receipt=context.failure(error,Error,remote)
+                raw=diag.encode(receipt,'start')
+                self.assertEqual(diag.decode(raw,'start')['trace_failure']['drained_failure'],label)
+                self.assertNotIn(message.encode(),raw);self.assertNotIn(b'PRIVATE',raw)
+    def test_unknown_partial_private_or_oversized_message_never_classifies(self):
+        class Error(Exception):
+            domain='g-dbus-error-quark'
+            code=0
+        context=diag.Context('start');context.stage='start-call'
+        remote=lambda _: 'org.freedesktop.DBus.Error.Failed'
+        known=next(iter(diag.DRAINED_FAILURES))
+        for message in (None,{},known+' PRIVATE',known[:-1],'PRIVATE '+known,'x'*513,
+                        'GDBus.Error:org.private.Error: '+known):
+            error=Error('PRIVATE body');error.message=message
+            receipt=context.failure(error,Error,remote)
+            self.assertNotIn('drained_failure',receipt['trace_failure'])
+            self.assertNotIn(b'PRIVATE',diag.encode(receipt,'start'))
+    def test_classification_requires_original_start_failure_controls(self):
+        valid={'trace_failure':{'schema':1,'action':'start','stage':'start-call','error_class':'GLibError',
+               'glib':{'domain':'g-dbus-error-quark','code':0,'remote_name':'org.freedesktop.DBus.Error.Failed'},
+               'drained_failure':'owned-view'}}
+        self.assertEqual(diag.decode(diag.encode(valid,'start'),'start'),valid)
+        for field,value in [('drained_failure','PRIVATE'),('drained_failure',[]),('stage','stop-call'),('error_class','RuntimeError')]:
+            row=json.loads(json.dumps(valid));row['trace_failure'][field]=value
+            with self.assertRaises(ValueError):diag.encode(row,'start')
+        for field,value in [('domain','g-io-error-quark'),('remote_name','org.freedesktop.DBus.Error.NoReply')]:
+            row=json.loads(json.dumps(valid));row['trace_failure']['glib'][field]=value
+            with self.assertRaises(ValueError):diag.encode(row,'start')
+        row=json.loads(json.dumps(valid));row['trace_failure']['action']='stop'
+        with self.assertRaises(ValueError):diag.encode(row,'stop')
     def test_phase_transports_valid_failure_and_observed_nonzero_only(self):
         raw=diag.encode(self.receipt(),'start').decode()
         error=subprocess.CalledProcessError(7,['fixed'],output=raw,stderr='PRIVATE STDERR')
