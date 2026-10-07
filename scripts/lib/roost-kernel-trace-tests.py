@@ -271,13 +271,16 @@ class OriginalRejection(unittest.TestCase):
             raise ValueError('missing diagnostic marks')
         with tempfile.TemporaryDirectory() as tmp, patch.object(host,'guest_probe',side_effect=chunk), patch.object(host,'retain_kernel_trace',side_effect=kernel), patch.object(host,'frame_source_evidence',side_effect=identity):
             out = Path(tmp)
-            with self.assertRaisesRegex(host.FrameOwnershipError,'presentation precedes'):
+            with self.assertRaisesRegex(ValueError,'missing diagnostic marks'):
                 host.retain_gnome_trace(None,out,metadata)
             self.assertEqual(order,['kernel','identity'])
             self.assertEqual((out/'gnome-overview.syscap').read_bytes(),raw)
-            rejected = json.loads((out/'gnome-overview-frame-rejection.json').read_text())
-            self.assertEqual(rejected['evidence']['presentation_upper_ns'],123677789000)
-            self.assertIsNone(rejected['independent_source_evidence'])
+            owned = json.loads((out/'gnome-overview-frame-ownership.json').read_text())
+            anomalies = [row for row in owned['anomalies'] if row['kind']=='presentation-precedes-dispatch']
+            self.assertEqual([row['presentation_upper_ns'] for row in anomalies],[123677789000])
+            self.assertIn('no independent source frame identifier',anomalies[0]['limitation'])
+            rejected = json.loads((out/'gnome-overview-source-rejection.json').read_text())
+            self.assertEqual(rejected['reason'],'missing diagnostic marks')
             self.assertTrue((out/'kernel-vblank-acquisition-rejection.json').exists())
 
 
