@@ -125,6 +125,14 @@ fn idle_timeout_strips_snapshot_windows() {
         client_read(&mut client),
         Message::Overview { open: false }
     ));
+    assert_eq!(
+        client_read(&mut client),
+        Message::NativeOutputInventory { outputs: vec![] }
+    );
+    assert_eq!(
+        client_read(&mut client),
+        Message::MonitorIdentityInventory { outputs: vec![] }
+    );
 
     // Idle machine from input timestamps: activity at t=1000, timeout
     // 60 s, still clear at 30 s, tripped at 61 s.
@@ -162,6 +170,14 @@ fn reconnect_while_locked_stays_locked() {
         client_read(&mut first),
         Message::Overview { open: false }
     ));
+    assert_eq!(
+        client_read(&mut first),
+        Message::NativeOutputInventory { outputs: vec![] }
+    );
+    assert_eq!(
+        client_read(&mut first),
+        Message::MonitorIdentityInventory { outputs: vec![] }
+    );
 
     hub.set_locked(true);
     hub.poll(&mut model);
