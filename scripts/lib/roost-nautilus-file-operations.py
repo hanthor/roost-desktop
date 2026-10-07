@@ -82,7 +82,9 @@ def controls():
 def snapshot(label):
     nodes = [{'name': node.name, 'role': node.getRoleName(),
               'selected': node.getState().contains(pyatspi.STATE_SELECTED),
-              'focused': node.getState().contains(pyatspi.STATE_FOCUSED)}
+              'focused': node.getState().contains(pyatspi.STATE_FOCUSED),
+              'text': node.queryText().getText(0, -1)
+              if node.getRoleName() in ('text', 'entry') else None}
              for node in controls()]
     (OUT / ('nautilus-' + label + '.json')).write_text(
         json.dumps({'scene': scene(), 'a11y': nodes}, indent=2))
@@ -141,8 +143,13 @@ def select(name):
 
 
 def navigate(path):
+    if not path.is_absolute() or not path.is_dir():
+        raise RuntimeError('Files navigation requires an actual absolute fixture directory')
     key('ctrl+l')
-    rename_entry(str(path))
+    # Nautilus 51 completes directory names with a separator. Type the
+    # canonical directory spelling so the exact focused-entry assertion
+    # remains valid whether its asynchronous completion has run or not.
+    rename_entry(str(path) + '/')
 
 
 def rename_entry(value):
