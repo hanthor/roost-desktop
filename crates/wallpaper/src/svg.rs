@@ -12,6 +12,7 @@ use std::{
 pub const MAX_PIXELS: u64 = 7680 * 4320;
 const MAX_INPUT: usize = 64 * 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(5);
+type BackendObservation = Option<(Instant, Option<String>)>;
 
 fn helper_path() -> Option<std::path::PathBuf> {
     let executable = std::env::current_exe().ok()?;
@@ -22,7 +23,7 @@ fn helper_path() -> Option<std::path::PathBuf> {
 /// files, computed in a bounded process. Worker calls share a one-second
 /// observation; never invoke this from a render/frame callback.
 pub fn backend_identity() -> Option<String> {
-    static OBSERVATION: std::sync::OnceLock<std::sync::Mutex<Option<(Instant, Option<String>)>>> =
+    static OBSERVATION: std::sync::OnceLock<std::sync::Mutex<BackendObservation>> =
         std::sync::OnceLock::new();
     let mut observation = OBSERVATION.get_or_init(Default::default).lock().ok()?;
     if let Some((at, value)) = &*observation {
