@@ -62,4 +62,55 @@ class Boundary(unittest.TestCase):
         d,m=self.fixture();decoder.capture_boundary_evidence(d,m)
         with self.assertRaises(ValueError):decoder.overview_frame_bounds(d,m['pid'])
 
+
+
+def diagnostic_package_policy(recipe, container, receiver, host):
+    import re
+    def scalar(name):
+        rows=re.findall(r'^'+name+r'=([^\n]+)$',recipe,re.M)
+        if len(rows)!=1:raise ValueError('missing or duplicate '+name)
+        return rows[0]
+    rel=scalar('pkgrel');version=scalar('pkgver')
+    # Arch PKGBUILD(5): positive integer, optional positive integer subrelease.
+    if not re.fullmatch(r'[1-9][0-9]*(?:\.[1-9][0-9]*)?',rel):
+        raise ValueError('invalid Arch pkgrel')
+    package='mutter '+version+'-'+rel
+    archive='mutter-'+version+'-'+rel+'-x86_64.pkg.tar.zst'
+    archives=re.findall(r'mutter-[0-9.]+-[0-9.]+-x86_64\.pkg\.tar\.zst',container)
+    if len(archives)!=3 or any(item!=archive for item in archives):
+        raise ValueError('baseline archive pin mismatch')
+    pins=re.findall(r"mutter [0-9.]+-[0-9.]+",container)
+    if pins!=[package]:raise ValueError('baseline installed pin mismatch')
+    if re.findall(r'mutter [0-9.]+-[0-9.]+',receiver)!=[package]:
+        raise ValueError('mapped receiver package pin mismatch')
+    if re.findall(r'mutter [0-9.]+-[0-9.]+',host).count(package)!=2:
+        raise ValueError('host source-evidence and boundary pin mismatch')
+    if 'if package == '+repr(package)+':' not in host and 'if package == "'+package+'":' not in host:
+        raise ValueError('host boundary package pin mismatch')
+    return package
+
+class PackagePolicy(unittest.TestCase):
+    def actual(self):
+        return [(ROOT/n).read_text() for n in ['packaging/marlin/perf/mutter-profiler/PKGBUILD',
+                'packaging/marlin/perf/Containerfile.baseline','packaging/marlin/perf/roost-gnome-profiler','scripts/roost-vm-perf']]
+    def test_actual_recipe_and_all_acquisition_pins_agree(self):
+        self.assertEqual(diagnostic_package_policy(*self.actual()),'mutter 51.0-1.4')
+    def test_original_invalid_three_component_release_rejected(self):
+        a=self.actual();a[0]=a[0].replace('pkgrel=1.4','pkgrel=1.2.1')
+        with self.assertRaises(ValueError):diagnostic_package_policy(*a)
+    def test_zero_negative_alpha_missing_duplicate_releases_rejected(self):
+        for bad in ['0','1.0','-1','one','1.4.1','1.4\npkgrel=1.4']:
+            a=self.actual();a[0]=a[0].replace('pkgrel=1.4','pkgrel='+bad)
+            with self.subTest(bad=bad),self.assertRaises(ValueError):diagnostic_package_policy(*a)
+        a=self.actual();a[0]=a[0].replace('pkgrel=1.4\n','')
+        with self.assertRaises(ValueError):diagnostic_package_policy(*a)
+    def test_stale_builder_install_receiver_and_host_pins_rejected(self):
+        for lane in [1,2,3]:
+            a=self.actual();a[lane]=a[lane].replace('51.0-1.4','51.0-1.2',1)
+            with self.subTest(lane=lane),self.assertRaises(ValueError):diagnostic_package_policy(*a)
+    def test_missing_archive_or_boundary_gate_rejected(self):
+        for lane,needle in [(1,'mutter-51.0-1.4-x86_64.pkg.tar.zst'),(3,'if package == "mutter 51.0-1.4":')]:
+            a=self.actual();a[lane]=a[lane].replace(needle,'removed',1)
+            with self.subTest(lane=lane),self.assertRaises(ValueError):diagnostic_package_policy(*a)
+
 if __name__=='__main__':unittest.main()

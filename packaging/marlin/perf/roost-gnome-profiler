@@ -135,7 +135,7 @@ def main():
 
     if args.action == "start":
         libraries = mutter_libraries_provenance(pid)
-        if any(value["package"] != "mutter 51.0-1.2.1" for value in libraries.values()):
+        if any(value["package"] != "mutter 51.0-1.4" for value in libraries.values()):
             raise RuntimeError("drained acquisition requires the exact CI diagnostic package")
         descriptor = os.open(capture, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         started = False

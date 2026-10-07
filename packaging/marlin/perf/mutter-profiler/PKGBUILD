@@ -1,6 +1,6 @@
 # CI-only profiler lifecycle correction, upstream Arch recipe SHA-256:
 # f18d91c7654f6818ba7c8927636b43ca17b57d2a5af81909859ab14fc583a226
-# Source/optimization choices retained; package release 1.2.1 identifies the opt-in drained acquisition variant.
+# Source/optimization choices retained; package release 1.4 identifies the opt-in drained acquisition variant.
 # Maintainer: Jan Alexander Steffens (heftig) <heftig@archlinux.org>
 # Maintainer: Fabian Bornschein <fabiscafe@archlinux.org>
 # Contributor: Ionut Biru <ibiru@archlinux.org>
@@ -13,7 +13,7 @@ pkgname=(
   mutter-docs
 )
 pkgver=51.0
-pkgrel=1.2.1
+pkgrel=1.4
 pkgdesc="Window manager and compositor for GNOME"
 url="https://gitlab.gnome.org/GNOME/mutter"
 arch=(x86_64)
