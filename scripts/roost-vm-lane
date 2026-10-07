@@ -418,6 +418,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     # barrier before and after real persistent constraint ownership.
     constraint_observations = []
     principal = None
+    constraint_primary_error = None
     def constraint_snapshot(label, action="status"):
         value = agent.run("constraint-" + action)
         if principal is not None and value["principal"] != principal:
@@ -494,7 +495,11 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
         started = agent.run("constraint-start")
         principal = started["principal"]
         constraint_observations.append({"label":"original-start", **started})
-        await_client(lambda value: value["configured"] > 0 and all(value["globals"].values()), "actual-layer-admission")
+        await_client(lambda value: value["configured"] > 0 and all(value["globals"].values())
+                     and value["buffer_size"] == [128, 128] and value["configure_events"]
+                     and all(event["chosen"] == [128, 128]
+                             and all(dimension in (0, 128) for dimension in event["raw"])
+                             for event in value["configure_events"]), "actual-layer-admission")
         genuine_positive("constraint-original-unconstrained-positive")
         for mode in ("lock", "confine"):
             original = enter_original(mode + "-principal")
@@ -557,20 +562,14 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
             leave_original(mode + "-post-positive-leave")
         record("V-HOT-CORNER-CONSTRAINTS", True,
                "same actual session layer principal receives relative payloads; real persistent lock/confine activates, suppresses pressure, deactivates/reactivates on committed region updates, and destruction restores actual native pressure")
+    except Exception as error:
+        constraint_primary_error = {"type": type(error).__name__, "message": str(error)}
+        raise
     finally:
-        with open(os.path.join(evidence, "hot-corner-constraints.json"), "w") as stream:
-            json.dump({"principal": principal, "observations": constraint_observations,
-                       "devices": mice, "relative_inputs": corner_inputs}, stream, indent=2)
-        try:
-            agent.run("constraint-quit")
-        finally:
-            try:
-                restored = restore_corner_mouse(qmp, original_mouse)
-                with open(os.path.join(evidence, "hot-corner-constraint-mouse-restoration.json"), "w") as stream:
-                    json.dump(restored, stream, indent=2)
-            finally:
-                with open(os.path.join(evidence, "hot-corner-constraint-stderr.json"), "w") as stream:
-                    json.dump(agent.run("constraint-log"), stream, indent=2)
+        finish_constraint_proof(agent, qmp, original_mouse, evidence,
+            {"principal": principal, "observations": constraint_observations,
+             "devices": mice, "relative_inputs": corner_inputs,
+             "primary_error": constraint_primary_error})
 
     # Capture the stable desktop after the final key OSD has disappeared.
     time.sleep(2)
@@ -1097,6 +1096,31 @@ def restore_corner_mouse(qmp, original):
     if response != "" or len(current) != 1 or any(current[0].get(key) != original[key] for key in ("name", "index", "absolute")):
         raise RuntimeError("original QMP mouse handler was not restored")
     return {"original": original, "before": before, "after": after}
+
+
+def finish_constraint_proof(agent, qmp, original_mouse, evidence, report):
+    """Retain all cleanup outcomes without replacing an original proof error."""
+    cleanup_errors = []
+    try:
+        agent.run("constraint-quit")
+    except Exception as error:
+        cleanup_errors.append({"action": "constraint-quit", "message": str(error)})
+    try:
+        restored = restore_corner_mouse(qmp, original_mouse)
+        with open(os.path.join(evidence, "hot-corner-constraint-mouse-restoration.json"), "w") as stream:
+            json.dump(restored, stream, indent=2)
+    except Exception as error:
+        cleanup_errors.append({"action": "original-mouse-restoration", "message": str(error)})
+    try:
+        with open(os.path.join(evidence, "hot-corner-constraint-stderr.json"), "w") as stream:
+            json.dump(agent.run("constraint-log"), stream, indent=2)
+    except Exception as error:
+        cleanup_errors.append({"action": "constraint-log-retention", "message": str(error)})
+    report["cleanup_errors"] = cleanup_errors
+    with open(os.path.join(evidence, "hot-corner-constraints.json"), "w") as stream:
+        json.dump(report, stream, indent=2)
+    if report["primary_error"] is None and cleanup_errors:
+        raise RuntimeError("actual constraint cleanup failed: " + json.dumps(cleanup_errors))
 
 
 def boot(disk, out, scratch, timeout, *, guest_agent=False, native_relative_mouse=False):

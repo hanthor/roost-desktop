@@ -37,17 +37,26 @@ static double pointer_x, pointer_y;
 static int mode, running = 1;
 static char socket_path[108];
 static struct { double dx, dy, ux, uy; uint64_t time; } events[128];
+static struct { uint32_t serial, width, height; } configure_events[16];
 
 static void die(const char *message) { perror(message); exit(1); }
 static uint32_t id(void *proxy) { return proxy ? wl_proxy_get_id(proxy) : 0; }
 static void snapshot(char *buffer, size_t capacity) {
  int n = snprintf(buffer, capacity,
- "{\"pid\":%ld,\"uid\":%ld,\"configured\":%u,\"entered\":%u,\"enter_count\":%u,\"leave_count\":%u,\"motions\":%u,\"local\":[%.17g,%.17g],\"locked\":%u,\"unlocked\":%u,\"confined\":%u,\"unconfined\":%u,\"mode\":%d,\"surface_id\":%u,\"pointer_id\":%u,\"relative_id\":%u,\"constraint_id\":%u,\"globals\":{\"compositor\":%u,\"shm\":%u,\"seat\":%u,\"layer_shell\":%u,\"constraints\":%u,\"relative_manager\":%u},\"relative\":[",
+ "{\"pid\":%ld,\"uid\":%ld,\"configured\":%u,\"entered\":%u,\"enter_count\":%u,\"leave_count\":%u,\"motions\":%u,\"local\":[%.17g,%.17g],\"locked\":%u,\"unlocked\":%u,\"confined\":%u,\"unconfined\":%u,\"mode\":%d,\"surface_id\":%u,\"pointer_id\":%u,\"relative_id\":%u,\"constraint_id\":%u,\"globals\":{\"compositor\":%u,\"shm\":%u,\"seat\":%u,\"layer_shell\":%u,\"constraints\":%u,\"relative_manager\":%u},\"buffer_size\":[%u,%u],\"configure_events\":[",
  (long)getpid(), (long)getuid(), configured, entered, enter_count, leave_count, motions, pointer_x, pointer_y,
  locks, unlocks, confines, unconfines, mode, id(surface), id(pointer), id(relative), id(locked ? (void *)locked : (void *)confined),
- id(compositor), id(shm), id(seat), id(layers), id(constraints), id(relative_manager));
+ id(compositor), id(shm), id(seat), id(layers), id(constraints), id(relative_manager), configured ? 128u : 0u, configured ? 128u : 0u);
  if (n < 0 || (size_t)n >= capacity) die("snapshot bound");
  size_t used = (size_t)n;
+ for (unsigned i = 0; i < configured; i++) {
+  n = snprintf(buffer + used, capacity - used, "%s{\"serial\":%u,\"raw\":[%u,%u],\"chosen\":[128,128]}", i ? "," : "", configure_events[i].serial, configure_events[i].width, configure_events[i].height);
+  if (n < 0 || (size_t)n >= capacity - used) die("snapshot configure bound");
+  used += (size_t)n;
+ }
+ n = snprintf(buffer + used, capacity - used, "],\"relative\":[");
+ if (n < 0 || (size_t)n >= capacity - used) die("snapshot relative prefix bound");
+ used += (size_t)n;
  for (unsigned i = 0; i < receipts; i++) {
   n = snprintf(buffer + used, capacity - used, "%s{\"dx\":%.17g,\"dy\":%.17g,\"dx_unaccel\":%.17g,\"dy_unaccel\":%.17g,\"utime\":%llu}", i ? "," : "", events[i].dx, events[i].dy, events[i].ux, events[i].uy, (unsigned long long)events[i].time);
   if (n < 0 || (size_t)n >= capacity - used) die("snapshot events bound");
@@ -120,7 +129,15 @@ static void buffer_release(void *d, struct wl_buffer *b) { (void)d;(void)b; }
 static const struct wl_buffer_listener buffer_listener = { buffer_release };
 static void configure(void *d, struct zwlr_layer_surface_v1 *l, uint32_t serial, uint32_t w, uint32_t h) {
  (void)d;
- if (w != 128 || h != 128) die("actual configured size");
+ // Layer-shell zero dimensions explicitly leave the choice to the client.
+ // Keep the actual requested/buffer geometry fixed at 128; reject every
+ // nonzero suggestion that would change this principal's test geometry.
+ if ((w && w != 128) || (h && h != 128)) {
+  fprintf(stderr,"actual configured dimensions: %u,%u\n",w,h);
+  errno = EPROTO; die("actual configured size");
+ }
+ if (configured >= 16) { errno = EOVERFLOW; die("actual configure receipt bound"); }
+ configure_events[configured].serial=serial;configure_events[configured].width=w;configure_events[configured].height=h;
  zwlr_layer_surface_v1_ack_configure(l,serial);
  if (!configured) {
   int fd = memfd_create("roost-vm-constraint-buffer",MFD_CLOEXEC);
