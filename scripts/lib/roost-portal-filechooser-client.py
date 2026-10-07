@@ -13,7 +13,7 @@ import gi
 
 out, method, decision = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 parent_mode = sys.argv[4] if len(sys.argv) > 4 else "none"
-if parent_mode not in ("none", "x11"):
+if parent_mode not in ("none", "x11", "wayland"):
     raise RuntimeError("Unknown parent mode")
 parent_window = None
 parent_handle = ""
@@ -57,21 +57,29 @@ def click_parent_content():
     if not (0 <= x + 50 < int(geometry["WIDTH"]) and 0 <= y + 100 < int(geometry["HEIGHT"])):
         raise RuntimeError("Parent positive input control lies outside the nested host")
     subprocess.run(["xdotool", "mousemove", "--window", windows[0], str(x + 50), str(y + 100), "click", "1"], env=env, check=True)
-if parent_mode == "x11":
-    display = scene()["x11_display"]
+if parent_mode != "none":
+    display = scene()["x11_display"] if parent_mode == "x11" else os.environ.get("WAYLAND_DISPLAY")
     if not display:
-        raise RuntimeError("Roost did not reserve a rootless X11 display")
-    os.environ["DISPLAY"] = display
-    os.environ["GDK_BACKEND"] = "x11"
+        raise RuntimeError("Roost did not provide the requested parent display")
+    if parent_mode == "x11":
+        os.environ["DISPLAY"] = display
+    os.environ.pop("WAYLAND_SOCKET", None)
+    os.environ["GDK_BACKEND"] = parent_mode
     os.environ.setdefault("GSK_RENDERER", "cairo")
-    GLib.set_prgname("roost-x11-picker-parent")
+    GLib.set_prgname("roost-" + parent_mode + "-picker-parent")
     gi.require_version("Gtk", "4.0")
-    gi.require_version("GdkX11", "4.0")
-    from gi.repository import Gtk, GdkX11
+    from gi.repository import Gtk
+    if parent_mode == "x11":
+        gi.require_version("GdkX11", "4.0")
+        from gi.repository import GdkX11
+    else:
+        gi.require_version("GdkWayland", "4.0")
+        from gi.repository import GdkWayland
     Gtk.init()
-    parent_window = Gtk.Window(title="Roost X11 picker parent")
+    parent_title = "Roost " + parent_mode + " picker parent"
+    parent_window = Gtk.Window(title=parent_title)
     parent_window.set_default_size(1100, 700)
-    parent_button = Gtk.Button(label="Actual GTK X11 parent input control")
+    parent_button = Gtk.Button(label="Actual GTK " + parent_mode + " parent input control")
     def clicked(_button):
         global parent_clicks
         parent_clicks += 1
@@ -87,28 +95,49 @@ if parent_mode == "x11":
         return True
     GLib.timeout_add(50, record_parent_input)
     parent_window.present()
+    parent_app_id = "org.example.RoostWaylandPickerParent"
+    parent_app_id_set = False
     end = time.monotonic() + 10
     while time.monotonic() < end:
         while GLib.MainContext.default().pending():
             GLib.MainContext.default().iteration(False)
         native = parent_window.get_surface()
         if native is not None:
-            xid = GdkX11.X11Surface.get_xid(native)
-            candidates = [w for w in scene()["windows"] if w.get("x11_window_id") == xid]
+            if parent_mode == "wayland" and not parent_app_id_set:
+                GdkWayland.WaylandToplevel.set_application_id(native, parent_app_id)
+                parent_app_id_set = True
+            xid = GdkX11.X11Surface.get_xid(native) if parent_mode == "x11" else None
+            candidates = [w for w in scene()["windows"]
+                          if (w.get("x11_window_id") == xid if parent_mode == "x11"
+                              else w.get("app_id") == parent_app_id and w.get("x11_window_id") is None)]
             if len(candidates) == 1:
-                parent_identity = {"xid": xid, "id": candidates[0]["id"], "pid": os.getpid(), "display": display, "input_path": str(input_path)}
-                parent_handle = "x11:" + format(xid, "x")
+                parent_identity = {"mode": parent_mode, "xid": xid, "id": candidates[0]["id"], "pid": os.getpid(), "display": display, "input_path": str(input_path)}
+                if parent_mode == "x11":
+                    parent_handle = "x11:" + format(xid, "x")
                 break
         time.sleep(.05)
     else:
-        raise RuntimeError("Actual GTK parent did not map on Roost's X11 display")
-    pump_parent_until(lambda: scene()["focused"] == parent_identity["id"], "Actual X11 caller did not receive initial focus")
+        raise RuntimeError("Actual GTK parent did not map on Roost's requested display")
+    if parent_mode == "wayland":
+        exported_handles = []
+        def exported(_surface, handle, _data):
+            exported_handles.append(handle)
+        if not GdkWayland.WaylandToplevel.export_handle(native, exported, None):
+            raise RuntimeError("GTK refused to export the actual Wayland parent surface")
+        pump_parent_until(lambda: bool(exported_handles), "Actual Wayland parent handle was not exported")
+        if len(exported_handles) != 1 or not exported_handles[0]:
+            raise RuntimeError("Actual Wayland parent export did not identify one handle")
+        parent_handle = "wayland:" + exported_handles[0]
+        out.with_suffix(".parent-export.json").write_text(json.dumps({
+            "parent": parent_identity, "handle": parent_handle, "pid": os.getpid(),
+        }, indent=2))
+    pump_parent_until(lambda: scene()["focused"] == parent_identity["id"], "Actual caller did not receive initial focus")
     pump_parent_until(lambda: parent_button.get_mapped() and parent_button.get_width() >= 1000
                       and any(w["id"] == parent_identity["id"] and w["rect"][2] >= 1000 for w in scene()["windows"]),
-                      "Actual X11 caller content did not allocate and commit its probe size")
+                      "Actual caller content did not allocate and commit its probe size")
     # Real host pointer input must reach the GTK button before requesting a dialog.
     click_parent_content()
-    pump_parent_until(lambda: parent_clicks == 1, "Initial real pointer click did not reach the X11 parent button")
+    pump_parent_until(lambda: parent_clicks == 1, "Initial real pointer click did not reach the parent button")
     record_parent_input()
     out.with_suffix(".parent-before.json").write_text(input_path.read_text())
 fixture = out.parent / "filechooser-fixtures"
@@ -116,7 +145,7 @@ fixture.mkdir(exist_ok=True)
 payload = b"Roost genuine GNOME FileChooser application data\n"
 source = fixture / "open-proof.txt"
 source.write_bytes(payload)
-expected = source if method == "OpenFile" else fixture / (("saved-proof" if decision == "grant" else "cancel-save-proof") + ("-x11" if parent_mode == "x11" else "") + ".txt")
+expected = source if method == "OpenFile" else fixture / (("saved-proof" if decision == "grant" else "cancel-save-proof") + ("-" + parent_mode if parent_mode != "none" else "") + ".txt")
 if method == "SaveFile" and expected.exists():
     raise RuntimeError("Save fixture must start without a destination")
 title = "Roost " + method + " " + decision + " proof"
@@ -183,13 +212,15 @@ if parent_identity is not None:
             break
         time.sleep(.05)
     else:
-        raise RuntimeError("Closing the actual portal dialog did not return focus to its X11 parent")
+        raise RuntimeError("Closing the actual portal dialog did not return focus to its parent")
     if parent_clicks != 1:
-        raise RuntimeError("Modal picker leaked pointer activation to its X11 parent")
+        raise RuntimeError("Modal picker leaked pointer activation to its parent")
     click_parent_content()
     pump_parent_until(lambda: parent_clicks == 2, "Parent pointer input did not resume after closing the actual picker")
     record_parent_input()
     out.with_suffix(".parent-after.json").write_text(input_path.read_text())
+    if parent_mode == "wayland":
+        GdkWayland.WaylandToplevel.drop_exported_handle(native, exported_handles[0])
 if decision == "cancel":
     if code != 1 or results.get("uris"):
         raise RuntimeError("Cancel did not reject the file grant")
