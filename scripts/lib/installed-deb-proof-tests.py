@@ -289,5 +289,111 @@ class ReleaseDelegatePolicy(unittest.TestCase):
         self.assertIsNone(control)
 
 
+class StartupOverviewPolicy(unittest.TestCase):
+    def actual_script(self, mode='1', failure='', after=None, startup=None):
+        script = (ROOT / 'scripts/roost-gtk-shell-proof').read_text()
+        start = script.index('if [ "$INSTALLED_PACKAGE" = 1 ]; then', script.index('[ -n "$WID" ] || fail G-PANEL'))
+        end = script.index('# The panel is up once', start)
+        fragment = script[start:end]
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            original = {'overview_open': True, 'overview_progress': 1, 'locked': False,
+                        'pointer_position': [640, 400]}
+            (out/'state').write_text(json.dumps(startup or original))
+            final = after or dict(original, overview_open=False, overview_progress=0)
+            (out/'after').write_text(json.dumps(final))
+            prelude = r'''set -eu
+fail() { printf 'FAIL:%s\n' "$1" >>"$ARTIFACTS/events"; exit 9; }
+pass() { :; }
+fixture_a11y() { printf 'a11y\n' >>"$ARTIFACTS/events"; printf '[]' >"$3"; }
+python3() {
+    printf 'proof:%s\n' "$2" >>"$ARTIFACTS/events"
+    case "$FAILURE:$2:$7" in
+        start:start:*|before:stable:*/installed-before-escape.json|after:stable:*/installed-after-escape.json) return 9;;
+    esac
+    printf '{}' >"$7"
+}
+timeout() { shift; "$@"; }
+xdotool() {
+    printf 'input:%s\n' "$*" >>"$ARTIFACTS/events"
+    case "$1" in
+        search) if [ "$FAILURE" = ambiguous ]; then printf '99\n100\n'; else printf '99\n'; fi;;
+        getwindowpid) if [ "$FAILURE" = owner ]; then printf '456\n'; else printf '123\n'; fi;;
+        getwindowfocus) if [ "$FAILURE" = focus ]; then printf '100\n'; else printf '99\n'; fi;;
+        key) cp "$ARTIFACTS/after" "$CSTATE";;
+    esac
+}
+scrot() { printf 'screenshot' >"$1"; }
+sleep() { :; }
+date() {
+    if [ -f "$ARTIFACTS/clock" ]; then clock=$(cat "$ARTIFACTS/clock"); else clock=0; fi
+    clock=$((clock + 25)); printf '%s\n' "$clock" >"$ARTIFACTS/clock"; printf '%s\n' "$clock"
+}
+'''
+            env = dict(os.environ, INSTALLED_PACKAGE=mode, FAILURE=failure, PY='fixture_a11y',
+                       ROOT=str(ROOT), ARTIFACTS=str(out), CSTATE=str(out/'state'),
+                       COMPOSITOR_PID='123', WID='99', WIDTH='1280', HEIGHT='800')
+            result = subprocess.run(['bash', '-c', prelude+fragment], env=env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+            return result.returncode, (out/'events').read_text().splitlines(), sorted(p.name for p in out.iterdir())
+
+    def test_actual_installed_admission_precedes_all_input_and_one_escape(self):
+        status, events, files = self.actual_script()
+        self.assertEqual(status, 0)
+        self.assertLess(events.index('proof:start'), next(i for i, x in enumerate(events) if x.startswith('input:')))
+        self.assertEqual(events.count('input:key Escape'), 1)
+        self.assertEqual(events.count('proof:stable'), 2)
+        for path in ('installed-startup-overview.json', 'installed-startup-overview.png',
+                     'installed-desktop-before-panel.json', 'a11y-installed-startup.json'):
+            self.assertIn(path, files)
+
+    def test_unready_startup_overview_never_sends_escape(self):
+        for startup in ({'overview_open': False, 'overview_progress': 0, 'locked': False},
+                        {'overview_open': True, 'overview_progress': .5, 'locked': False},
+                        {'overview_open': True, 'overview_progress': 1, 'locked': True}):
+            with self.subTest(startup=startup):
+                status, events, files = self.actual_script(startup=startup)
+                self.assertNotEqual(status, 0)
+                self.assertNotIn('input:key Escape', events)
+                self.assertNotIn('installed-startup-overview.json', files)
+
+    def test_source_mode_never_admits_installed_or_sends_startup_escape(self):
+        status, events, files = self.actual_script(mode='0')
+        self.assertEqual(status, 0)
+        self.assertEqual(events, ['input:windowfocus --sync 99', 'input:mousemove --window 99 640 400'])
+        self.assertNotIn('installed-start.json', files)
+
+    def test_failed_original_admission_or_ambiguous_host_prevents_input(self):
+        for failure in ('start', 'owner', 'ambiguous'):
+            with self.subTest(failure=failure):
+                status, events, _ = self.actual_script(failure=failure)
+                self.assertNotEqual(status, 0)
+                self.assertFalse(any(x.startswith('input:windowfocus') or x.startswith('input:key') for x in events))
+
+    def test_lost_host_focus_or_principal_before_escape_prevents_key(self):
+        for failure in ('focus', 'before'):
+            with self.subTest(failure=failure):
+                status, events, _ = self.actual_script(failure=failure)
+                self.assertNotEqual(status, 0)
+                self.assertNotIn('input:key Escape', events)
+
+    def test_failed_post_escape_principal_never_accepts_panel_precondition(self):
+        status, events, files = self.actual_script(failure='after')
+        self.assertNotEqual(status, 0)
+        self.assertEqual(events.count('input:key Escape'), 1)
+        self.assertNotIn('installed-desktop-before-panel.json', files)
+
+    def test_real_script_restore_predicate_rejects_open_progress_lock_or_wrong_pointer(self):
+        valid = {'overview_open': False, 'overview_progress': 0, 'locked': False,
+                 'pointer_position': [640, 400]}
+        for key, value in [('overview_open', True), ('overview_progress', .5),
+                           ('locked', True), ('pointer_position', [1, 1])]:
+            with self.subTest(key=key):
+                status, events, files = self.actual_script(after=dict(valid, **{key: value}))
+                self.assertNotEqual(status, 0)
+                self.assertEqual(events.count('input:key Escape'), 1)
+                self.assertNotIn('installed-desktop-before-panel.json', files)
+
+
 if __name__ == '__main__':
     unittest.main()

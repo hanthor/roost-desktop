@@ -639,10 +639,47 @@ for _ in $(seq 1 60); do
     sleep 1
 done
 [ -n "$WID" ] || fail G-PANEL "no nested window"
+if [ "$INSTALLED_PACKAGE" = 1 ]; then
+    # The installed launcher intentionally opens GNOME's startup overview.
+    # Authenticate the original installed session before any physical input.
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-installed-startup.json" 60 ||
+        fail A11Y-PANEL "installed shell never registered on the accessibility bus"
+    python3 "$ROOT/scripts/lib/installed-deb-proof.py" start "$COMPOSITOR_PID" "roost-gtk-proof-$$" "$ARTIFACTS/installed-package.json" unused "$ARTIFACTS/installed-start.json"
+    installed_host="$(timeout 5 xdotool search --onlyvisible --name Smithay)"
+    [ "$installed_host" = "$WID" ] && [ "$(timeout 5 xdotool getwindowpid "$WID")" = "$COMPOSITOR_PID" ] ||
+        fail G-INSTALLED-START "nested host is not the unique original installed compositor"
+    pass G-INSTALLED-START "original installed compositor selects its package-owned preferred GTK shell"
+fi
 xdotool windowfocus --sync "$WID"
 # Park the pointer mid-screen: (0,0) is the hot corner, which opens the
 # overview (and the overview then claims Escape).
 xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
+
+if [ "$INSTALLED_PACKAGE" = 1 ]; then
+    end=$(($(date +%s) + 20))
+    until [ -s "$CSTATE" ] && jq -e '.overview_open == true and .overview_progress == 1 and .locked == false' "$CSTATE" >/dev/null; do
+        [ "$(date +%s)" -le "$end" ] || fail G-INSTALLED-START "installed startup overview never became ready"
+        sleep 0.3
+    done
+    cp "$CSTATE" "$ARTIFACTS/installed-startup-overview.json"
+    scrot "$ARTIFACTS/installed-startup-overview.png" >/dev/null
+    installed_focus="$(timeout 5 xdotool getwindowfocus)"
+    installed_host_pid="$(timeout 5 xdotool getwindowpid "$WID")"
+    [ "$installed_focus" = "$WID" ] && [ "$installed_host_pid" = "$COMPOSITOR_PID" ] ||
+        fail G-INSTALLED-START "original installed host does not own genuine keyboard focus"
+    jq -n --argjson window "$WID" --argjson focus "$installed_focus" --argjson pid "$installed_host_pid" \
+        '{window: $window, actual_focus: $focus, compositor_pid: $pid}' >"$ARTIFACTS/installed-host-input.json"
+    python3 "$ROOT/scripts/lib/installed-deb-proof.py" stable "$COMPOSITOR_PID" "roost-gtk-proof-$$" "$ARTIFACTS/installed-package.json" "$ARTIFACTS/installed-start.json" "$ARTIFACTS/installed-before-escape.json"
+    # Exactly one genuine Escape; the readiness loop never replays input.
+    timeout 5 xdotool key Escape
+    end=$(($(date +%s) + 20))
+    until [ -s "$CSTATE" ] && jq -e ".overview_open == false and .overview_progress == 0 and .locked == false and .pointer_position == [$((WIDTH / 2)), $((HEIGHT / 2))]" "$CSTATE" >/dev/null; do
+        [ "$(date +%s)" -le "$end" ] || fail G-INSTALLED-START "genuine Escape did not restore the installed desktop at center"
+        sleep 0.3
+    done
+    python3 "$ROOT/scripts/lib/installed-deb-proof.py" stable "$COMPOSITOR_PID" "roost-gtk-proof-$$" "$ARTIFACTS/installed-package.json" "$ARTIFACTS/installed-start.json" "$ARTIFACTS/installed-after-escape.json"
+    cp "$CSTATE" "$ARTIFACTS/installed-desktop-before-panel.json"
+fi
 
 # The panel is up once the shell registers on the a11y bus with its
 # controls; that also proves the accessible tree.
@@ -657,10 +694,6 @@ desk="$(px "$ARTIFACTS/01-panel.png" 300 200)"
 [ "$strip" = "0 0 0" ] || fail G-PANEL "panel strip is '$strip', not black"
 [ "$desk" != "0 0 0" ] || fail G-PANEL "desktop below the panel is black too"
 pass G-PANEL "GTK panel mapped as a black top strip"
-if [ "$INSTALLED_PACKAGE" = 1 ]; then
-    python3 "$ROOT/scripts/lib/installed-deb-proof.py" start "$COMPOSITOR_PID" "roost-gtk-proof-$$" "$ARTIFACTS/installed-package.json" unused "$ARTIFACTS/installed-start.json"
-    pass G-INSTALLED-START "original installed compositor selects its package-owned preferred GTK shell"
-fi
 for label in "Activities" "Date and Time" "System"; do
     jq -e --arg n "$label" 'any(.[]; .name == $n)' "$ARTIFACTS/a11y-panel.json" >/dev/null ||
         fail A11Y-PANEL "no accessible control named '$label'"
