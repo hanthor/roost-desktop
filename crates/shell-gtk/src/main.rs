@@ -36,6 +36,7 @@ mod polkit;
 mod power;
 mod preview_chrome;
 mod providers;
+mod public_search_diagnostic;
 mod screencast;
 mod screensaver;
 mod screenshot_selection;
@@ -149,6 +150,15 @@ struct Shell {
 struct ShellActions(Rc<RefCell<Shell>>);
 
 impl overview::OverviewActions for ShellActions {
+    fn public_navigation_unlocked(&self) -> bool {
+        self.0.try_borrow().ok().is_some_and(|shell| {
+            shell
+                .control
+                .as_ref()
+                .is_some_and(|control| !control.locked())
+        })
+    }
+
     fn close_overview(&self) {
         if let Some(control) = self.0.borrow_mut().control.as_mut() {
             if control.model().is_overview_open() {

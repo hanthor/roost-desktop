@@ -28,6 +28,10 @@ pub const MAX_RESULTS: usize = 6;
 
 /// What the overview asks the rest of the shell to do.
 pub trait OverviewActions {
+    /// CI diagnostic admission only; absent original control always withholds.
+    fn public_navigation_unlocked(&self) -> bool {
+        false
+    }
     /// Close the overview (after a launch or an activation).
     fn close_overview(&self);
     /// Raise an existing window by compositor id.
@@ -141,6 +145,7 @@ pub struct OverviewUi {
     search_cancel: RefCell<Option<gio::Cancellable>>,
     /// Whether the compositor was last told search is active.
     search_active: std::cell::Cell<bool>,
+    public_diagnostic: RefCell<Option<crate::public_search_diagnostic::Capture>>,
     /// First provider hit, for Enter when no app matches.
     first_remote_hit: Rc<RefCell<Option<(providers::Remote, String)>>>,
     dash: gtk::ApplicationWindow,
@@ -271,6 +276,7 @@ impl OverviewUi {
             remotes,
             search_cancel: RefCell::new(None),
             search_active: std::cell::Cell::new(false),
+            public_diagnostic: RefCell::new(crate::public_search_diagnostic::Capture::new()),
             first_remote_hit: Rc::new(RefCell::new(None)),
             dash,
             dash_row,
@@ -377,6 +383,15 @@ impl OverviewUi {
             self.results.append(&button);
         }
         self.results.set_visible(!hits.is_empty());
+        if let Some(diagnostic) = self.public_diagnostic.borrow_mut().as_mut() {
+            diagnostic.sample(
+                query,
+                apps.apps(),
+                &hits,
+                (self.search.is_visible(), self.results.is_visible()),
+                || self.actions.public_navigation_unlocked(),
+            );
+        }
         self.search_providers(query);
     }
 
@@ -885,6 +900,15 @@ impl OverviewUi {
 
     /// Follow the compositor's overview state.
     pub fn set_open(ui: &Rc<RefCell<Self>>, open: bool) {
+        {
+            let me = ui.borrow();
+            let mut slot = me.public_diagnostic.borrow_mut();
+            if let Some(diagnostic) = slot.as_mut() {
+                if !open || !me.actions.public_navigation_unlocked() {
+                    diagnostic.withhold();
+                }
+            }
+        }
         let signature = {
             let me = ui.borrow();
             me.actions

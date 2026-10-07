@@ -596,20 +596,21 @@ def mutate_orca_setting(action):
     return {"requested_enabled": requested, "readback_enabled": value == "true"}
 
 
-def shell_navigation_focus(kind, original_pid=None, original_ticks=None):
+def shell_navigation_focus(kind, original_pid=None, original_ticks=None, controlled=False):
     actual = orca_observation()
     state = json.loads(STATE.read_text())
     if state["locked"] or not actual["ready"] or actual["state"] != "active":
         raise RuntimeError("public navigation requires an unlocked original genuine reader")
     executable = "roost-shell-gtk" if kind == "shell" else "gnome-disks"
     candidates = [p for p in inventory()["processes"] if p["executable"] == executable and p["uid"] == OWNER.pw_uid]
-    if kind == "disks":
+    if kind == "disks" or controlled:
         candidates = [p for p in candidates if p["pid"] == original_pid and p["start_ticks"] == original_ticks]
     if len(candidates) != 1:
         raise RuntimeError("one original navigation application principal is required")
     process = candidates[0]
+    diagnostic_args = ("controlled-overview",) if controlled else ()
     receipt = json.loads(call("/usr/libexec/roost-vm-shell-focus", str(process["pid"]), str(process["start_ticks"]),
-                              executable, actual["display"][0], user=True))
+                              executable, actual["display"][0], *diagnostic_args, user=True))
     after = orca_observation()
     if any(actual[k] != after.get(k) for k in ("pid", "uid", "start_ticks", "owner", "bus_pid", "bus_uid", "version")) or not after["ready"]:
         raise RuntimeError("original genuine reader changed during navigation observation")
@@ -740,8 +741,13 @@ print(json.dumps(result))
                   "actor": actor,
                   "manager_pid": compositor["pid"], "before": before["keyboard"], "after": after["keyboard"]}
     elif action in {"orca-shell-focus", "orca-disks-focus"}:
-        result = (shell_navigation_focus("shell") if action == "orca-shell-focus"
-                  else shell_navigation_focus("disks", int(sys.argv[2]), int(sys.argv[3])))
+        if action == "orca-shell-focus" and len(sys.argv) != 2:
+            if len(sys.argv) != 5 or sys.argv[2] != "controlled-overview":
+                raise ValueError("fixed controlled overview principal required")
+            result = shell_navigation_focus("shell", int(sys.argv[3]), int(sys.argv[4]), controlled=True)
+        else:
+            result = (shell_navigation_focus("shell") if action == "orca-shell-focus"
+                      else shell_navigation_focus("disks", int(sys.argv[2]), int(sys.argv[3])))
     elif action == "orca-speech-start":
         if len(sys.argv) not in (2, 3):
             raise RuntimeError("fixed speech recording profile argument required")

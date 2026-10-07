@@ -70,6 +70,19 @@ CARD_HOLD = 10      # frames a title card is held (2.5 s at PLAY_FPS)
 OVMF = ("/usr/share/ovmf/OVMF.fd", "/usr/share/OVMF/OVMF_CODE.fd", "/usr/share/qemu/OVMF.fd")
 
 
+def safe_navigation_diagnostic(value):
+    """Finite failure summary only; full original FD/catalog receipts stay separate."""
+    if type(value) is not dict or set(value) not in ({"known_query_matches","Disks_result","focused_role_classes"},
+                                                   {"known_query_matches","Disks_result","focused_role_classes","catalog"}):
+        return None
+    matches=value["known_query_matches"];target=value["Disks_result"];roles=value["focused_role_classes"]
+    if (matches is not None and type(matches) is not bool) or type(target) is not dict or set(target)!={"present","showing","focused"}:
+        return None
+    if any(type(x) is not int or not 0<=x<=512 for x in target.values()):return None
+    if type(roles) is not list or len(roles)>512 or any(type(x) is not str or x not in {"entry","text","push button","slider","frame","other"} for x in roles):return None
+    return {"known_query_matches":matches,"Disks_result":dict(target),"focused_role_classes":list(roles)}
+
+
 def log(msg):
     print(f"roost-vm-lane: {msg}", flush=True)
 
@@ -502,10 +515,11 @@ def run_lifecycle(qmp, agent, out, serial_path, record, orca_contract="distribut
             disks_base = agent.run("orca-disks-focus", disks_principal["pid"], disks_principal["start_ticks"])
             navigation = []
 
-            def public_focus(label=None):
+            def public_focus(label=None, controlled=False):
                 deadline = time.monotonic() + 8
                 while time.monotonic() < deadline:
-                    actual = agent.run("orca-shell-focus")
+                    actual = (agent.run("orca-shell-focus", "controlled-overview", shell_identity["pid"], shell_identity["start_ticks"])
+                              if controlled else agent.run("orca-shell-focus"))
                     focus = actual["focus"]
                     navigation.append(actual)
                     if (not same_reader(actual["orca"]) or focus["principal"] != shell_identity
@@ -526,13 +540,19 @@ def run_lifecycle(qmp, agent, out, serial_path, record, orca_contract="distribut
                 action_receipt = None
                 primary = None
                 cleanup_error = None
+                stage = "trigger-before"
+                primary_stage = None
                 try:
                     before_trigger = agent.run("orca-speech-trigger")
+                    stage = "action-focus"
                     action_receipt = action()
+                    stage = "trigger-after"
                     after_trigger = agent.run("orca-speech-trigger")
+                    stage = "settle"
                     time.sleep(0.8)
                 except Exception as error:
                     primary = error
+                    primary_stage = stage
                 finally:
                     try:
                         end = agent.run("orca-speech-end")
@@ -541,7 +561,9 @@ def run_lifecycle(qmp, agent, out, serial_path, record, orca_contract="distribut
                 if primary is not None or cleanup_error is not None:
                     with open(os.path.join(evidence, label + "-failure.json"), "w") as stream:
                         json.dump({"primary_error_type": type(primary).__name__ if primary else None,
-                                   "cleanup_error_type": type(cleanup_error).__name__ if cleanup_error else None}, stream)
+                                   "cleanup_error_type": type(cleanup_error).__name__ if cleanup_error else None,
+                                   "primary_stage":primary_stage,"cleanup_stage":"speech-end" if cleanup_error else None,
+                                   "last_public_diagnostic":safe_navigation_diagnostic(navigation[-1].get("focus",{}).get("controlled_overview_diagnostic")) if navigation else None}, stream)
                     raise primary or cleanup_error
                 import base64, array, wave
                 pcm = base64.b64decode(end.pop("pcm"), validate=True)
@@ -591,10 +613,10 @@ def run_lifecycle(qmp, agent, out, serial_path, record, orca_contract="distribut
                     return public_focus("Search")
                 public_capture("orca-overview-search", "search", open_search)
                 qmp.type_text("disks")
-                public_focus("Search")
+                public_focus("Search", controlled=True)
                 def focus_result():
                     qmp.keys("tab")
-                    return public_focus("Disks")
+                    return public_focus("Disks", controlled=True)
                 public_capture("orca-overview-result", "disks", focus_result)
                 qmp.keys("ret")
                 await_state(lambda value: not value["state"]["overview_open"])

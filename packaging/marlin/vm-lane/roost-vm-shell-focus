@@ -1,11 +1,15 @@
 #!/usr/bin/python
 """Read-only, bounded original AT-SPI focus receipts for public CI controls.
 
-No synthetic AT-SPI actions, focus changes, text/value/description queries or
+Default observation has no text/value/description queries. The explicit controlled
+overview mode compares only the known five-character fixture query in scratch
+memory; no buffer is retained. No synthetic AT-SPI actions, focus changes or
 arbitrary names are recorded. Native QMP input performs every action.
 Primary API: https://gnome.pages.gitlab.gnome.org/at-spi2-core/libatspi/
 """
 import json
+import hashlib
+import stat
 import os
 import pathlib
 import re
@@ -37,11 +41,85 @@ def process_identity(pid, uid, ticks, executable, display):
     return actual
 
 
-def observe(pid, ticks, executable, display):
+def controlled_query(entries, query):
+    """Only the unique original public Search control, never arbitrary text."""
+    if len(entries) != 1:
+        return None
+    text = query(entries[0].get_text_iface)
+    if text is None:
+        return False
+    count = query(text.get_character_count)
+    if type(count) is not int or count != 5:
+        return False
+    # Five Unicode characters bound transport; compare and immediately discard.
+    return query(text.get_text, 0, 5) == "disks"
+
+
+def resource_key(value):
+    return (value.st_dev, value.st_ino, value.st_uid, value.st_mode, value.st_nlink,
+            value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+
+def executable_key(value):
+    return (value.st_dev, value.st_ino, value.st_uid, value.st_mode, value.st_size,
+            value.st_mtime_ns // 1000000000, value.st_mtime_ns % 1000000000,
+            value.st_ctime_ns // 1000000000, value.st_ctime_ns % 1000000000)
+
+
+def catalog_receipt(pid, uid, ticks):
+    """Original show_results sample, not independent parser/catalog inference."""
+    path = pathlib.Path(f"/run/user/{uid}/roost-vm-public-search.json")
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != uid or before.st_nlink != 1
+                or stat.S_IMODE(before.st_mode) != 0o600 or not 0 < before.st_size <= 4096):
+            raise ValueError("fixed public diagnostic resource")
+        raw = stream.read(4097)
+        after = os.fstat(stream.fileno())
+        if len(raw) != before.st_size or resource_key(before) != resource_key(after) or resource_key(after) != resource_key(path.lstat()):
+            raise ValueError("original public diagnostic changed")
+    value = json.loads(raw)
+    fields = {"schema","pid","uid","start_ticks","executed_key","sequence","sampled_monotonic_ns",
+              "known_query_matches","expected_catalog_count","expected_label_matches","expected_ranked_count",
+              "rendered_target_count","search_window_visible","results_container_visible","controlled_source_provenance","authentication_boundary"}
+    if type(value) is not dict or set(value) != fields:
+        raise ValueError("fixed public diagnostic schema")
+    for key, expected in (("schema",1),("pid",pid),("uid",uid),("start_ticks",ticks)):
+        if type(value[key]) is not int or value[key] != expected: raise ValueError("original public diagnostic principal")
+    for key, limit in (("sequence",2**64-1),("sampled_monotonic_ns",2**64-1)):
+        if type(value[key]) is not int or not 0 < value[key] <= limit: raise ValueError("fixed public diagnostic scalar")
+    for key, limit in (("expected_catalog_count",4096),("expected_ranked_count",6),("rendered_target_count",6)):
+        if type(value[key]) is not int or not 0 <= value[key] <= limit: raise ValueError("fixed public diagnostic count")
+    if (value["known_query_matches"] is not True or type(value["expected_label_matches"]) is not bool
+            or type(value["search_window_visible"]) is not bool or type(value["results_container_visible"]) is not bool
+            or value["controlled_source_provenance"] is not True or value["authentication_boundary"] is not False
+            or value["rendered_target_count"] != value["expected_ranked_count"]
+            or (value["expected_label_matches"] and value["expected_catalog_count"] != 1)):
+        raise ValueError("fixed public diagnostic flags")
+    mapped = os.stat(f"/proc/{pid}/exe")
+    named = pathlib.Path("/usr/bin/roost-shell-gtk").lstat()
+    if (os.readlink(f"/proc/{pid}/exe") != "/usr/bin/roost-shell-gtk" or not stat.S_ISREG(named.st_mode)
+            or named.st_uid != 0 or named.st_mode & 0o022
+            or type(value["executed_key"]) is not list or len(value["executed_key"]) != 9
+            or any(type(x) is not int for x in value["executed_key"])
+            or tuple(value["executed_key"]) != executable_key(mapped) or executable_key(mapped) != executable_key(named)):
+        raise ValueError("original public diagnostic executable")
+    age = time.monotonic_ns() - value["sampled_monotonic_ns"]
+    if not 0 <= age <= 30 * 1000000000:
+        raise ValueError("original public diagnostic sample expired")
+    # Retain both sampled source identity and independent original FD/hash.
+    return {"sample":value,"fd_receipt":{"dev":before.st_dev,"inode":before.st_ino,"size":before.st_size,
+            "mtime_ns":before.st_mtime_ns,"ctime_ns":before.st_ctime_ns,"sha256":hashlib.sha256(raw).hexdigest()},
+            "sample_scope":"original-show-results","authentication_boundary":False}
+
+
+def observe(pid, ticks, executable, display, controlled=False):
     import gi
     gi.require_version("Atspi", "2.0")
     from gi.repository import Atspi, Gio, GLib
     uid = os.getuid()
+    if type(controlled) is not bool or (controlled and executable != "roost-shell-gtk"):
+        raise RuntimeError("fixed controlled overview mode required")
     if uid == 0 or executable not in {"roost-shell-gtk", "gnome-disks"}:
         raise RuntimeError("probe requires the original non-root session principal")
     state = pathlib.Path(f"/run/user/{uid}/roost-vm-state.json")
@@ -106,6 +184,8 @@ def observe(pid, ticks, executable, display):
         return values
     before = credentials()
     nodes, pending, visited = [], [(app, 0)], 0
+    search_entries, target = [], {"showing":0,"focused":0,"present":0}
+    focused_roles = []
     while pending:
         if json.loads(state.read_text())["locked"]:
             raise RuntimeError("locked accessibility trees are never queried")
@@ -126,6 +206,16 @@ def observe(pid, ticks, executable, display):
                                  states.contains(Atspi.StateType.FOCUSED), states.contains(Atspi.StateType.ACTIVE))
             if record is not None:
                 nodes.append(record)
+            if controlled:
+                name = accessibility_query(node.get_name)
+                if name == "Search" and role in {"entry","text"} and showing:
+                    search_entries.append(node)
+                if name == "Disks" and role == "push button":
+                    target["present"] += 1
+                    target["showing"] += int(showing)
+                    target["focused"] += int(states.contains(Atspi.StateType.FOCUSED))
+        if controlled and states.contains(Atspi.StateType.FOCUSED):
+            focused_roles.append(role if role in PUBLIC_ROLES else "other")
         children = accessibility_query(node.get_child_count)
         if children > 128 or len(pending) + children > 512:
             raise RuntimeError("accessibility focus children exceed bound")
@@ -133,17 +223,38 @@ def observe(pid, ticks, executable, display):
             child = accessibility_query(node.get_child_at_index, index)
             if child is not None:
                 pending.append((child, depth + 1))
+    diagnostic = None
+    if controlled:
+        matches = controlled_query(search_entries, accessibility_query)
+        diagnostic = {"known_query_matches":matches,"Disks_result":target,"focused_role_classes":focused_roles}
+        if matches is True:
+            remaining_budget()
+            try: diagnostic["catalog"] = catalog_receipt(pid,uid,ticks)
+            except (OSError,ValueError,UnicodeError,RecursionError): diagnostic["catalog"] = {"status":"withheld"}
+            remaining_budget()
     after = credentials()
     if process_identity(pid, uid, ticks, executable, display) != original or json.loads(state.read_text())["locked"]:
         raise RuntimeError("original focus principal changed or session locked")
-    return {"principal": original, "atspi_owner": owner, "credentials_before": before,
+    result = {"principal": original, "atspi_owner": owner, "credentials_before": before,
             "credentials_after": after, "public_controls": nodes, "visited": visited,
             "guest_monotonic": time.monotonic(), "observation_only": True}
+    if controlled:
+        if diagnostic is not None and type(diagnostic.get("catalog")) is dict and "sample" in diagnostic["catalog"]:
+            sample = diagnostic["catalog"]["sample"]
+            if (tuple(sample["executed_key"]) != executable_key(os.stat(f"/proc/{pid}/exe"))
+                    or tuple(sample["executed_key"]) != executable_key(pathlib.Path("/usr/bin/roost-shell-gtk").lstat())):
+                diagnostic = {"status":"withheld"}
+        if json.loads(state.read_text())["locked"]:
+            raise RuntimeError("locked accessibility trees are never queried")
+        result["controlled_overview_diagnostic"] = diagnostic
+    return result
 
 
 if __name__ == "__main__":
     try:
-        print(json.dumps(observe(int(sys.argv[1]), int(sys.argv[2]), sys.argv[3], sys.argv[4])))
+        if len(sys.argv) not in (5,6) or (len(sys.argv)==6 and sys.argv[5]!="controlled-overview"):
+            raise ValueError("fixed observation mode")
+        print(json.dumps(observe(int(sys.argv[1]), int(sys.argv[2]), sys.argv[3], sys.argv[4], len(sys.argv)==6)))
     except Exception as error:
         # No private names/buffers, exception strings, argv or environments.
         print(json.dumps({"focus_error_type": type(error).__name__}))

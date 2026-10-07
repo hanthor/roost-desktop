@@ -486,8 +486,14 @@ class PublicOrcaNavigation(unittest.TestCase):
                                      ("Search", "entry", False), ("private filename", "frame", True)]:
             self.assertIsNone(module.public_node(name, role, showing, True, True))
         tree = ast.parse(Path(module.__file__).read_text())
-        queries = {n.func.attr for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+        # Default observation still has no text queries. Only the separately
+        # admitted controlled-query helper may compare its fixed five characters.
+        queries = {n.func.attr for fn in tree.body if isinstance(fn,ast.FunctionDef) and fn.name != "controlled_query"
+                   for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
         self.assertFalse(queries & {"get_text", "get_description", "get_value", "get_editable_text", "get_action", "do_action", "grab_focus"})
+        observer = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "observe")
+        hidden = next(n for n in ast.walk(observer) if isinstance(n, ast.If) and ast.dump(n.test) == ast.dump(ast.parse("depth and not showing", mode="eval").body))
+        self.assertIsInstance(hidden.body[0], ast.Continue)
 
     def test_locked_guard_rejects_before_any_accessibility_tree_query(self):
         module = self.focus_module()
@@ -587,7 +593,7 @@ class PublicOrcaNavigation(unittest.TestCase):
                 return {}
         original = RuntimeError("original public focus failure")
         def action(): raise original
-        scope = {"agent": Agent(), "action": action, "primary": None, "cleanup_error": None}
+        scope = {"agent": Agent(), "action": action, "primary": None, "cleanup_error": None,"stage":"trigger-before"}
         exec(compile(ast.Module(body=[guard], type_ignores=[]), str(file), "exec"), scope)
         self.assertIs(scope["primary"], original)
         self.assertIn("orca-speech-end", calls)
@@ -596,6 +602,111 @@ class PublicOrcaNavigation(unittest.TestCase):
             call = next(n for n in ast.walk(helper) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "keys")
             self.assertEqual(tuple(ast.literal_eval(arg) for arg in call.args), chord)
         # Actual source contracts/fault ordering only; the genuine VM must still qualify navigation.
+
+
+class ControlledOverviewDiagnostic(unittest.TestCase):
+    def module(self):
+        path=Path(lane.__file__).parents[1]/"packaging/marlin/vm-lane/roost-vm-shell-focus"
+        loader=importlib.machinery.SourceFileLoader("controlled_search_policy",str(path))
+        spec=importlib.util.spec_from_loader(loader.name,loader)
+        module=importlib.util.module_from_spec(spec);loader.exec_module(module)
+        return module
+
+    def test_actual_controlled_query_requires_unique_entry_and_five_characters(self):
+        module=self.module();calls=[]
+        class Text:
+            def get_character_count(self):calls.append("count");return count
+            def get_text(self,start,end):calls.append((start,end));return value
+        class Entry:
+            def get_text_iface(self):calls.append("interface");return Text()
+        entry=Entry()
+        query=lambda method,*args:method(*args)
+        for entries in ([],[entry,entry]):
+            self.assertIsNone(module.controlled_query(entries,query));self.assertEqual(calls,[])
+        for count,value,expected in ((0,"private",False),(6,"private",False),(True,"private",False),(5.0,"private",False),(5,"disks",True),(5,"other",False)):
+            calls.clear();self.assertIs(module.controlled_query([entry],query),expected)
+            self.assertEqual(calls,["interface","count"]+([(0,5)] if type(count) is int and count==5 else []))
+
+    def catalog(self,changes=None,replaced=False):
+        module=self.module()
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/"receipt";uid=os.getuid()
+            mapped=SimpleNamespace(st_dev=7,st_ino=9,st_uid=0,st_mode=0o100444,st_size=200,
+                                   st_mtime_ns=2000000003,st_ctime_ns=4000000005)
+            row={"schema":1,"pid":34,"uid":uid,"start_ticks":57,"executed_key":list(module.executable_key(mapped)),
+                 "sequence":1,"sampled_monotonic_ns":100000000000,"known_query_matches":True,
+                 "expected_catalog_count":1,"expected_label_matches":True,"expected_ranked_count":1,
+                 "rendered_target_count":1,"search_window_visible":True,"results_container_visible":True,"controlled_source_provenance":True,"authentication_boundary":False}
+            row.update(changes or {});path.write_text(json.dumps(row));path.chmod(0o600)
+            old_stat=os.fstat;count=0
+            def fstat(fd):
+                nonlocal count
+                value=old_stat(fd);count+=1
+                if count==2 and replaced:
+                    path.rename(path.with_name("original"));path.write_text('{}');path.chmod(0o600)
+                return value
+            module.pathlib=SimpleNamespace(Path=lambda name:SimpleNamespace(lstat=lambda:mapped)
+                              if name=="/usr/bin/roost-shell-gtk" else path)
+            module.os=SimpleNamespace(open=os.open,fdopen=os.fdopen,fstat=fstat,
+                stat=lambda name:mapped,readlink=lambda name:"/usr/bin/roost-shell-gtk",
+                O_RDONLY=os.O_RDONLY,O_NOFOLLOW=os.O_NOFOLLOW,O_NONBLOCK=os.O_NONBLOCK)
+            module.time=SimpleNamespace(monotonic_ns=lambda:100000000001)
+            return module.catalog_receipt(34,uid,57)
+
+    def test_actual_catalog_receipt_keeps_original_fd_and_cached_source_scope(self):
+        value=self.catalog();self.assertEqual(value["sample"]["expected_catalog_count"],1)
+        self.assertEqual(value["sample_scope"],"original-show-results")
+        self.assertEqual(len(value["fd_receipt"]["sha256"]),64)
+        self.assertIs(value["authentication_boundary"],False)
+
+    def test_actual_catalog_rejects_private_unknown_fields_changed_principal_and_expiry(self):
+        for changes in ({"message":"private"},{"pid":35},{"uid":True},{"start_ticks":58},
+                        {"known_query_matches":False},{"expected_catalog_count":True},
+                        {"expected_ranked_count":7},{"rendered_target_count":0},
+                        {"search_window_visible":1},{"results_container_visible":"private"},
+                        {"expected_catalog_count":2},{"executed_key":[1]*9},
+                        {"sampled_monotonic_ns":100000000002},{"sampled_monotonic_ns":1},
+                        {"authentication_boundary":True},{"controlled_source_provenance":False}):
+            with self.subTest(fields=list(changes)),self.assertRaises(ValueError):self.catalog(changes)
+        with self.assertRaises(ValueError):self.catalog(replaced=True)
+
+    def test_controlled_shell_replacement_or_lock_refuses_before_observer_rpc(self):
+        path=Path(lane.__file__).parents[1]/"packaging/marlin/vm-lane/roost-vm-lifecycle"
+        fn=next(n for n in ast.parse(path.read_text()).body if isinstance(n,ast.FunctionDef) and n.name=="shell_navigation_focus")
+        calls=[]
+        for locked in (True,False):
+            scope={"orca_observation":lambda:{"ready":True,"state":"active"},"json":json,
+                   "STATE":SimpleNamespace(read_text=lambda:json.dumps({"locked":locked})),
+                   "inventory":lambda:{"processes":[{"executable":"roost-shell-gtk","uid":1000,"pid":35,"start_ticks":58}]},
+                   "OWNER":SimpleNamespace(pw_uid=1000),"call":lambda *args,**kw:calls.append(args)}
+            exec(compile(ast.Module(body=[fn],type_ignores=[]),str(path),"exec"),scope)
+            with self.assertRaises(RuntimeError):scope["shell_navigation_focus"]("shell",34,57,controlled=True)
+            self.assertEqual(calls,[])
+
+    def test_finite_host_summary_discards_private_or_oversized_values(self):
+        good={"known_query_matches":True,"Disks_result":{"present":1,"showing":1,"focused":0},"focused_role_classes":["other"]}
+        self.assertEqual(lane.safe_navigation_diagnostic(good),good)
+        for value in (dict(good,message="private"),dict(good,known_query_matches="private"),
+                      dict(good,Disks_result={"present":True,"showing":1,"focused":0}),
+                      dict(good,focused_role_classes=["private"]),dict(good,focused_role_classes=["other"]*513)):
+            self.assertIsNone(lane.safe_navigation_diagnostic(value))
+
+    def test_actual_capture_finite_stage_preserves_primary_and_owned_end(self):
+        tree=ast.parse(Path(lane.__file__).read_text());fn=next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name=="public_capture")
+        calls=[];original=RuntimeError("private focus error")
+        class Agent:
+            def run(self,name,*args):calls.append(name);return {}
+        def action():raise original
+        with tempfile.TemporaryDirectory() as out:
+            scope={"agent":Agent(),"os":os,"json":json,"evidence":out,"navigation":[],
+                   "safe_navigation_diagnostic":lane.safe_navigation_diagnostic}
+            exec(compile(ast.Module(body=[fn],type_ignores=[]),"actual-public-capture","exec"),scope)
+            with self.assertRaises(RuntimeError) as error:scope["public_capture"]("orca-overview-result","disks",action)
+            self.assertIs(error.exception,original)
+            self.assertEqual(calls,["orca-speech-start","orca-speech-trigger","orca-speech-end"])
+            data=json.loads((Path(out)/"orca-overview-result-failure.json").read_text())
+            self.assertEqual(data["primary_stage"],"action-focus");self.assertIsNone(data["cleanup_stage"])
+            self.assertNotIn("private",json.dumps(data))
 
 
 class OrcaLifecycleAuthority(unittest.TestCase):

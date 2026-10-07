@@ -8,6 +8,8 @@ export LANGUAGE=C
 export XDG_SESSION_TYPE=wayland
 # CI-only anonymous overview action-to-scanout trace, capped at 64 actions.
 export ROOST_PERF_TRACE=1
+# Fixed public-query/catalog diagnostics only in this controlled CI session.
+export ROOST_VM_PUBLIC_SEARCH_DIAGNOSTICS=1
 export ROOST_COMPOSITOR_STATE="$XDG_RUNTIME_DIR/roost-vm-state.json"
 # Enable only upstream token-gated presenter recording in this CI fixture.
 # This does not replace Speech Dispatcher or add any speech-consuming extension.
