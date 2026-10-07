@@ -3490,6 +3490,12 @@ pub enum ManagerInput {
         pressed: bool,
         time: u32,
     },
+    /// A native relative device crossed the pressure threshold. Never
+    /// constructed from absolute motion or accepted from remote clients.
+    CornerPressure {
+        pos: Point<f64, Logical>,
+        time: u32,
+    },
     /// Pointer axis (wheel / scroll) motion, in backend units (v120
     /// for wheels, pixels for continuous devices). Only scroll mode
     /// consumes it; everywhere else it is dropped as before.
@@ -3665,12 +3671,18 @@ pub struct TriggerState {
     /// GNOME's `enable-hot-corners` off (default on, as in GNOME).
     hot_corner_off: bool,
     right_to_left: bool,
+    pressure_only: bool,
 }
 
 impl TriggerState {
     /// Drop a pending Super tap when a modal owner or inhibitor takes input.
     pub fn cancel(&mut self) {
         self.super_armed = false;
+    }
+
+    /// Native seats use physical relative barrier pressure, not hover.
+    pub fn set_pressure_only(&mut self, enabled: bool) {
+        self.pressure_only = enabled;
     }
 
     /// Follow GNOME's `enable-hot-corners`.
@@ -3782,7 +3794,7 @@ impl TriggerState {
             }
             ManagerInput::Motion { .. } => {
                 self.super_armed = false;
-                if !self.hot_corner_off && !overview_open && corner {
+                if !self.pressure_only && !self.hot_corner_off && !overview_open && corner {
                     TriggerAction::Open
                 } else {
                     TriggerAction::None
@@ -3803,6 +3815,14 @@ impl TriggerState {
             ManagerInput::Axis { .. } => {
                 self.super_armed = false;
                 TriggerAction::None
+            }
+            ManagerInput::CornerPressure { .. } => {
+                self.super_armed = false;
+                if !self.hot_corner_off {
+                    TriggerAction::Toggle
+                } else {
+                    TriggerAction::None
+                }
             }
             ManagerInput::RelativeMotion { .. }
             | ManagerInput::SwipeBegin { .. }
@@ -4083,6 +4103,7 @@ impl WindowManager {
                     self.pointer_axis(state, horizontal, vertical, time);
                 }
             }
+            ManagerInput::CornerPressure { .. } => {}
             ManagerInput::RelativeMotion {
                 delta,
                 delta_unaccel,
@@ -4211,6 +4232,24 @@ impl WindowManager {
             .find(|w| w.surface.wl_surface().as_deref() == Some(surface))
             .map(|w| crate::popup::surface_origin(surface, w.geometry.loc).to_f64())
             .unwrap_or_default()
+    }
+
+    /// The focused surface has a real pointer constraint registered with
+    /// Smithay. Include a pending constraint: the next motion activates it
+    /// in `constrain`, so native barriers must yield before that motion.
+    pub fn pointer_constraint_owns_motion(&self) -> bool {
+        use smithay::wayland::pointer_constraints::with_pointer_constraint;
+        let Some(pointer) = self.pointer.as_ref() else {
+            return false;
+        };
+        let Some(surface) = pointer.current_focus() else {
+            return false;
+        };
+        let mut owns_motion = false;
+        with_pointer_constraint(&surface, pointer, |constraint| {
+            owns_motion = constraint.is_some();
+        });
+        owns_motion
     }
 
     /// Pointer-constraints (#89): a locked pointer stays put; a confined

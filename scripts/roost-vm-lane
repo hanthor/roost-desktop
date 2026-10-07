@@ -482,6 +482,117 @@ def run_lifecycle(qmp, agent, out, serial_path, record, orca_contract="distribut
     finally:
         agent.run("audio-amplification-reset")
 
+    # Native pressure uses QMP relative mouse events delivered through real
+    # libinput. Tablet/absolute positioning supplies no pressure.
+    corner_observations = []
+    corner_inputs = []
+    mice = qmp.cmd("query-mice")
+    with open(os.path.join(evidence, "hot-corner-input-devices.json"), "w") as stream:
+        json.dump(mice, stream, indent=2)
+    original = [mouse for mouse in mice if mouse.get("current") is True] if isinstance(mice, list) else []
+    if len(original) != 1 or type(original[0].get("index")) is not int:
+        raise RuntimeError("actual original QMP mouse handler is unavailable")
+    original_mouse = original[0]
+    restoration = None
+    def corner_move(x, y, relative=False):
+        kind = "rel" if relative else "abs"
+        values = (x, y) if relative else (int(x * 32767 / WIDTH), int(y * 32767 / HEIGHT))
+        selected = select_corner_mouse(qmp, relative)
+        before_count = agent.run("inventory")["state"]["native_relative_motion_count"] if relative else None
+        observation = {"requested": [x, y], "kind": kind, "wire_values": list(values),
+                       "device_selection": selected, "before_count": before_count}
+        corner_inputs.append(observation)
+        qmp.cmd("input-send-event", events=[
+            {"type": kind, "data": {"axis": "x", "value": values[0]}},
+            {"type": kind, "data": {"axis": "y", "value": values[1]}}])
+        if relative:
+            if not isinstance(before_count, int):
+                raise RuntimeError("native relative input observation is unavailable")
+            delivered = await_state(lambda value: value["state"]["native_relative_motion_count"] > before_count,
+                                    label=f"corner-relative-delivered-{len(corner_inputs)}")
+            observation.update(after_count=delivered["state"]["native_relative_motion_count"],
+                               pointer_position=delivered["state"]["pointer_position"])
+    def observe_corner(label, expected):
+        value = await_state(lambda value: value["state"]["overview_open"] is expected, label=label)
+        corner_observations.append({"label": label, "overview_open": expected,
+                                    "processes": value["processes"],
+                                    "pointer_position": value["state"]["pointer_position"]})
+        frame(label)
+    try:
+        if not agent.run("hot-corners", "true")["stored"]:
+            raise RuntimeError("GNOME hot corner policy did not persist")
+        await_state(lambda value: value["state"]["hot_corners"] is True, label="corner-policy-enabled")
+        corner_move(0, 10)
+        await_state(lambda value: value["state"]["pointer_position"] is not None
+                    and value["state"]["pointer_position"][0] == 0
+                    and 1 < value["state"]["pointer_position"][1] < 32,
+                    label="corner-absolute-delivered")
+        for index in range(10):
+            value = agent.run("inventory")
+            if value["state"]["overview_open"]:
+                raise RuntimeError("absolute corner hover incorrectly supplied native pressure")
+            time.sleep(0.05)
+        observe_corner("corner-absolute-negative", False)
+        corner_move(-200, 0, relative=True)
+        observe_corner("corner-relative-open", True)
+        corner_move(-200, 0, relative=True)
+        for index in range(10):
+            value = agent.run("inventory")
+            if not value["state"]["overview_open"]:
+                raise RuntimeError("native pressure retriggered without leaving the barriers")
+            time.sleep(0.05)
+        observe_corner("corner-held-negative", True)
+        corner_move(100, 100, relative=True)
+        await_state(lambda value: value["state"]["pointer_position"] is not None
+                    and value["state"]["pointer_position"][0] > 32
+                    and value["state"]["pointer_position"][1] > 32,
+                    label="corner-relative-left-both")
+        # Return with actual relative motion. No absolute warp may manufacture
+        # leave/rearm between the held-barrier negative and this closing hit.
+        corner_move(-1000, 0, relative=True)
+        await_state(lambda value: value["state"]["pointer_position"] is not None
+                    and value["state"]["pointer_position"][0] == 0
+                    and value["state"]["pointer_position"][1] > 32,
+                    label="corner-relative-left-edge")
+        corner_move(0, -1000, relative=True)
+        observe_corner("corner-rearmed-close", False)
+        if not agent.run("hot-corners", "false")["stored"]:
+            raise RuntimeError("GNOME hot corner disable did not persist")
+        await_state(lambda value: value["state"]["hot_corners"] is False, label="corner-policy-disabled")
+        corner_move(100, 100, relative=True)
+        await_state(lambda value: value["state"]["pointer_position"] is not None
+                    and value["state"]["pointer_position"][0] > 32
+                    and value["state"]["pointer_position"][1] > 32,
+                    label="corner-disabled-left-both")
+        # Return through actual relative approach/crossing. The tablet still
+        # remembers the earlier absolute hover coordinates; repeating them
+        # after relative movement need not produce a new absolute event.
+        corner_move(-1000, 0, relative=True)
+        await_state(lambda value: value["state"]["pointer_position"] is not None
+                    and value["state"]["pointer_position"][0] == 0
+                    and value["state"]["pointer_position"][1] > 32,
+                    label="corner-disabled-left-edge")
+        corner_move(0, -1000, relative=True)
+        await_state(lambda value: value["state"]["pointer_position"] == [0, 0],
+                    label="corner-disabled-relative-cross-delivered")
+        corner_move(-200, 0, relative=True)
+        for index in range(10):
+            if agent.run("inventory")["state"]["overview_open"]:
+                raise RuntimeError("disabled native corner opened the overview")
+            time.sleep(0.05)
+        observe_corner("corner-disabled-negative", False)
+        record("V-HOT-CORNER-PRESSURE", True,
+               "real libinput relative mouse pressure opens and rearms to close; absolute hover, held barrier and disabled policy are negative controls")
+    finally:
+        try:
+            restoration = restore_corner_mouse(qmp, original_mouse)
+        finally:
+            agent.run("hot-corners", "true")
+            with open(os.path.join(evidence, "hot-corner-pressure.json"), "w") as stream:
+                json.dump({"observations": corner_observations, "relative_inputs": corner_inputs,
+                           "devices": mice, "original_handler": original_mouse,
+                           "restoration": restoration}, stream, indent=2)
+
     # Capture the stable desktop after the final key OSD has disappeared.
     time.sleep(2)
 
@@ -982,7 +1093,45 @@ def run_tour(qmp, out, serial_path):
             "playback_fps": PLAY_FPS}
 
 
-def boot(disk, out, scratch, timeout, *, guest_agent=False):
+def select_corner_mouse(qmp, relative):
+    """Select a real, uniquely identified handler before one native input."""
+    name = "QEMU Virtio Mouse" if relative else "QEMU HID Tablet"
+    absolute = not relative
+    before = qmp.cmd("query-mice")
+    if not isinstance(before, list):
+        raise RuntimeError("actual QMP mouse inventory is unavailable")
+    candidates = [mouse for mouse in before if mouse.get("name") == name]
+    if len(candidates) != 1:
+        raise RuntimeError("actual intended mouse is absent or ambiguous")
+    selected = candidates[0]
+    index = selected.get("index")
+    if selected.get("absolute") is not absolute or type(index) is not int or not 0 < index <= 0x7fffffff:
+        raise RuntimeError("actual intended mouse has invalid mode/index")
+    response = qmp.cmd("human-monitor-command", **{"command-line": f"mouse_set {index}"})
+    if response != "":
+        raise RuntimeError("actual QEMU mouse_set was rejected")
+    after = qmp.cmd("query-mice")
+    current = [mouse for mouse in after if mouse.get("current") is True] if isinstance(after, list) else []
+    if len(current) != 1 or current[0].get("name") != name or current[0].get("index") != index or current[0].get("absolute") is not absolute:
+        raise RuntimeError("actual QMP current mouse differs from intended handler")
+    return {"requested_name": name, "requested_index": index, "requested_absolute": absolute,
+            "before": before, "after": after}
+
+
+def restore_corner_mouse(qmp, original):
+    before = qmp.cmd("query-mice")
+    actual = [mouse for mouse in before if mouse.get("index") == original["index"]] if isinstance(before, list) else []
+    if len(actual) != 1 or actual[0].get("name") != original["name"] or actual[0].get("absolute") is not original["absolute"]:
+        raise RuntimeError("original QMP mouse handler disappeared or changed")
+    response = qmp.cmd("human-monitor-command", **{"command-line": f"mouse_set {original['index']}"})
+    after = qmp.cmd("query-mice")
+    current = [mouse for mouse in after if mouse.get("current") is True] if isinstance(after, list) else []
+    if response != "" or len(current) != 1 or any(current[0].get(key) != original[key] for key in ("name", "index", "absolute")):
+        raise RuntimeError("original QMP mouse handler was not restored")
+    return {"original": original, "before": before, "after": after}
+
+
+def boot(disk, out, scratch, timeout, *, guest_agent=False, native_relative_mouse=False):
     ovmf = next((p for p in OVMF if os.path.exists(p)), None)
     if not ovmf:
         sys.exit("roost-vm-lane: OVMF firmware not found (install ovmf)")
@@ -1004,6 +1153,8 @@ def boot(disk, out, scratch, timeout, *, guest_agent=False):
             "-display", "none", "-serial", f"file:{serial}",
             "-qmp", f"unix:{qmp_path},server=on,wait=off",
             "-nic", "user,model=virtio-net-pci"]
+    if native_relative_mouse:
+        qemu.extend(["-device", "virtio-mouse-pci,id=roost-relative-mouse"])
     if guest_agent:
         qemu.extend(["-device", "virtio-serial-pci",
                      "-chardev", f"socket,path={agent_path},server=on,wait=off,id=roost-qga",
@@ -1102,7 +1253,7 @@ def main():
         results[test_id] = (ok, desc)
         log(f"{test_id} {'pass' if ok else 'FAIL'}: {desc}")
 
-    vm, qmp_path, serial_path, kvm, agent_path = boot(os.path.abspath(a.disk), out, scratch, a.timeout, guest_agent=True)
+    vm, qmp_path, serial_path, kvm, agent_path = boot(os.path.abspath(a.disk), out, scratch, a.timeout, guest_agent=True, native_relative_mouse=True)
     start = time.time()
     drm = shell = None
     elapsed = 0.0

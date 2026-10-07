@@ -51,6 +51,7 @@ mod a11y_shadow;
 pub mod animation;
 pub mod capture_security;
 pub mod control;
+pub mod corner_pressure;
 #[cfg(feature = "drm")]
 pub mod drm;
 pub mod frame_timing;
@@ -1079,6 +1080,24 @@ impl State {
         self.outputs
             .iter()
             .filter_map(|e| Some((e.name.clone(), e.output.clone()?, e.loc, e.primary)))
+            .collect()
+    }
+
+    /// Native barrier geometry shares the live primary and logical output inventory.
+    pub fn hot_corner_outputs(
+        &self,
+    ) -> Vec<(
+        smithay::utils::Rectangle<i32, smithay::utils::Logical>,
+        bool,
+    )> {
+        self.outputs
+            .iter()
+            .map(|entry| {
+                (
+                    smithay::utils::Rectangle::new(entry.loc.into(), entry.size),
+                    entry.primary,
+                )
+            })
             .collect()
     }
 

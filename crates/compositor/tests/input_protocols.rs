@@ -20,6 +20,7 @@ use wayland_client::{
 };
 use wayland_protocols::wp::{
     pointer_constraints::zv1::client::{
+        zwp_confined_pointer_v1::ZwpConfinedPointerV1,
         zwp_locked_pointer_v1::ZwpLockedPointerV1,
         zwp_pointer_constraints_v1::{Lifetime, ZwpPointerConstraintsV1},
     },
@@ -234,6 +235,7 @@ wayland_client::delegate_noop!(Client: ignore ZwpInputMethodManagerV2);
 wayland_client::delegate_noop!(Client: ignore ZwpRelativePointerManagerV1);
 wayland_client::delegate_noop!(Client: ignore ZwpPointerConstraintsV1);
 wayland_client::delegate_noop!(Client: ignore ZwpLockedPointerV1);
+wayland_client::delegate_noop!(Client: ignore ZwpConfinedPointerV1);
 
 struct Peer {
     _conn: Connection,
@@ -404,4 +406,148 @@ fn three_finger_swipes_follow_gnome() {
         Some(SwipeAction::PreviousWorkspace)
     );
     assert_eq!(swipe_action(40.0, -60.0), None, "short swipes do nothing");
+}
+
+#[test]
+fn focused_real_constraints_own_motion_before_native_pressure_accumulates() {
+    for locked in [true, false] {
+        let mut comp = TestCompositor::new();
+        comp.state.set_output_size(1280, 800);
+        let mut manager = comp.window_manager();
+        let mut app = connect(&mut comp);
+        pump(&mut comp, &mut manager, &mut [&mut app]);
+        let surface = window(&mut app);
+        pump(&mut comp, &mut manager, &mut [&mut app]);
+        let (_, geometry) = manager.visible_windows()[0].clone();
+        let inside: Point<f64, Logical> = (geometry.loc + Point::from((50, 50))).to_f64();
+        manager.on_input(
+            &mut comp.state,
+            ManagerInput::Motion {
+                pos: inside,
+                time: 1,
+            },
+        );
+        pump(&mut comp, &mut manager, &mut [&mut app]);
+        assert!(app.client.pointer_entered);
+        assert!(!manager.pointer_constraint_owns_motion());
+        let qh = app.queue.handle();
+        let pointer = app.client.pointer.clone().unwrap();
+        let _relative = app
+            .client
+            .relative_manager
+            .as_ref()
+            .unwrap()
+            .get_relative_pointer(&pointer, &qh, ());
+        let constraints = app.client.constraints.as_ref().unwrap();
+        let lock = locked.then(|| {
+            constraints.lock_pointer(&surface, &pointer, None, Lifetime::Persistent, &qh, ())
+        });
+        let confinement = (!locked).then(|| {
+            constraints.confine_pointer(&surface, &pointer, None, Lifetime::Persistent, &qh, ())
+        });
+        surface.commit();
+        pump(&mut comp, &mut manager, &mut [&mut app]);
+        assert!(
+            manager.pointer_constraint_owns_motion(),
+            "pending focused constraint must already gate backend barriers"
+        );
+
+        let mut pressure = roost_compositor::corner_pressure::CornerPressure::default();
+        let layout = comp.state.hot_corner_outputs();
+        // Start with real partial pressure, then the protocol owner's gate
+        // disables interception and discards it before a large native hit.
+        for time in 0..6 {
+            assert!(pressure
+                .motion(
+                    (0.0, 10.0).into(),
+                    (-15.0, 0.0).into(),
+                    time,
+                    &layout,
+                    false,
+                    true
+                )
+                .1
+                .is_none());
+        }
+        let (position, trigger) = pressure.motion(
+            (0.0, 10.0).into(),
+            (-1000.0, 0.0).into(),
+            7,
+            &layout,
+            false,
+            !manager.pointer_constraint_owns_motion(),
+        );
+        assert_eq!(
+            position,
+            (-1000.0, 10.0).into(),
+            "barrier must not trap the constraint owner's motion"
+        );
+        assert!(
+            trigger.is_none(),
+            "no pressure action is allowed behind a real constraint"
+        );
+        manager.on_input(
+            &mut comp.state,
+            ManagerInput::Motion {
+                pos: inside + Point::from((-1000.0, -1000.0)),
+                time: 8,
+            },
+        );
+        manager.on_input(
+            &mut comp.state,
+            ManagerInput::RelativeMotion {
+                delta: (-1000.0, -1000.0).into(),
+                delta_unaccel: (-900.0, -900.0).into(),
+                utime: 9000,
+            },
+        );
+        pump(&mut comp, &mut manager, &mut [&mut app]);
+        assert!(manager.pointer_constraint_owns_motion());
+        if locked {
+            assert_eq!(manager.pointer_pos(), inside);
+        } else {
+            assert!(geometry.to_f64().contains(manager.pointer_pos()));
+        }
+        assert_eq!(
+            app.client.relative,
+            [(-1000.0, -1000.0)],
+            "original relative client payload must still arrive"
+        );
+        if let Some(lock) = lock {
+            lock.destroy();
+        }
+        if let Some(confinement) = confinement {
+            confinement.destroy();
+        }
+        pump(&mut comp, &mut manager, &mut [&mut app]);
+        assert!(
+            !manager.pointer_constraint_owns_motion(),
+            "destroying the owner restores native barrier eligibility"
+        );
+        assert!(
+            pressure
+                .motion(
+                    (0.0, 10.0).into(),
+                    (-15.0, 0.0).into(),
+                    10,
+                    &layout,
+                    false,
+                    !manager.pointer_constraint_owns_motion()
+                )
+                .1
+                .is_none(),
+            "old pressure must not survive constraint ownership"
+        );
+        assert!(pressure
+            .motion(
+                (0.0, 10.0).into(),
+                (-100.0, 0.0).into(),
+                11,
+                &layout,
+                false,
+                !manager.pointer_constraint_owns_motion()
+            )
+            .1
+            .is_some());
+    }
 }

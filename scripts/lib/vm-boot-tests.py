@@ -123,6 +123,48 @@ class BootApi(unittest.TestCase):
             self.assertIn("virtserialport,chardev=roost-qga,name=org.qemu.guest_agent.0", command)
 
 
+class NativeMouseSelection(unittest.TestCase):
+    def mouse(self, name="QEMU Virtio Mouse", absolute=False, current=False, index=8):
+        return {"name":name,"absolute":absolute,"current":current,"index":index}
+    def test_native_device_is_opt_in_and_preserves_performance_default(self):
+        with patch.object(lane.os.path,"exists",return_value=True), patch.object(lane.os,"access",return_value=True), patch.object(lane.subprocess,"Popen") as spawn:
+            lane.boot("disk.raw","/out","/scratch",30,guest_agent=True)
+            self.assertNotIn("virtio-mouse-pci,id=roost-relative-mouse",spawn.call_args.args[0])
+            lane.boot("disk.raw","/out","/scratch",30,guest_agent=True,native_relative_mouse=True)
+            self.assertIn("virtio-mouse-pci,id=roost-relative-mouse",spawn.call_args.args[0])
+    def test_actual_selected_name_index_and_mode_are_observed(self):
+        class Qmp:
+            def __init__(self):self.calls=[]
+            def cmd(qmp,command,**arguments):
+                qmp.calls.append((command,arguments))
+                if command=='human-monitor-command':return ''
+                return [self.mouse(current=len(qmp.calls)>1)]
+        qmp=Qmp();proof=lane.select_corner_mouse(qmp,True)
+        self.assertEqual(qmp.calls,[('query-mice',{}),('human-monitor-command',{'command-line':'mouse_set 8'}),('query-mice',{})])
+        self.assertTrue(proof['after'][0]['current'])
+        self.assertFalse(proof['requested_absolute'])
+    def test_wrong_name_duplicate_mode_or_index_cannot_be_selected(self):
+        bad=[[self.mouse(name='QEMU PS/2 Mouse')],[self.mouse(),self.mouse(index=9)],
+             [self.mouse(absolute=True)],[self.mouse(index=True)],[self.mouse(index=-1)]]
+        for inventory in bad:
+            with self.subTest(inventory=inventory):
+                qmp=SimpleNamespace(cmd=lambda *args,**kwargs:inventory)
+                with self.assertRaises(RuntimeError):lane.select_corner_mouse(qmp,True)
+    def test_failed_or_wrong_current_handler_cannot_prove_selection(self):
+        for result in ([self.mouse(current=False)],[self.mouse(name='vmmouse',absolute=True,current=True)],
+                       [self.mouse(current=True,index=9)]):
+            replies=iter([[self.mouse()],'',result])
+            with self.subTest(result=result),self.assertRaises(RuntimeError):
+                lane.select_corner_mouse(SimpleNamespace(cmd=lambda *args,**kwargs:next(replies)),True)
+    def test_original_handler_must_exist_and_restore_its_exact_identity(self):
+        original=self.mouse(name='vmmouse',absolute=True,current=True,index=7)
+        replies=iter([[original,self.mouse()],'',[original,self.mouse()]])
+        proof=lane.restore_corner_mouse(SimpleNamespace(cmd=lambda *args,**kwargs:next(replies)),original)
+        self.assertEqual(proof['after'][0],original)
+        with self.assertRaisesRegex(RuntimeError,'disappeared'):
+            lane.restore_corner_mouse(SimpleNamespace(cmd=lambda *args,**kwargs:[self.mouse()]),original)
+
+
 class InputProbePlacement(unittest.TestCase):
     def test_click_uses_placement_after_first_buffer(self):
         class FrameReached(Exception):
