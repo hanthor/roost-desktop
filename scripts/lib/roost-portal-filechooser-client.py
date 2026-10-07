@@ -27,6 +27,10 @@ parent_keys = 0
 unrelated_process = None
 unrelated_before = None
 parent_sequence = 0
+parent_paints = 0
+parent_painted_size = None
+parent_pointer_probes = []
+original_pointer_host = None
 state_path = Path(os.environ.get("ROOST_COMPOSITOR_STATE", "/out/compositor-state.json"))
 def scene():
     return json.loads(state_path.read_text())
@@ -44,25 +48,106 @@ def pump_parent_until(predicate, message, timeout=5):
             "window_size": [parent_window.get_width(), parent_window.get_height()],
             "button_size": [parent_button.get_width(), parent_button.get_height()],
             "button_mapped": parent_button.get_mapped(),
+            "client_after_paint_count": parent_paints,
+            "client_last_painted_size": parent_painted_size,
+            "pointer_probes": parent_pointer_probes,
         }, indent=2))
     raise RuntimeError(message)
+def measured_parent_target():
+    valid, bounds = parent_button.compute_bounds(parent_window)
+    if not valid or not parent_button.get_mapped() or not parent_button.is_sensitive():
+        raise RuntimeError("Original parent button has no mapped sensitive bounds")
+    bx, by, bw, bh = bounds.get_x(), bounds.get_y(), bounds.get_width(), bounds.get_height()
+    if bw < 100 or bh < 150:
+        raise RuntimeError("Original parent button bounds are too small for input proof")
+    # Keep the left content target: the separate application B intentionally
+    # overlaps the right of A later in this same journey.
+    wx, wy = bx + min(50, bw / 2), by + min(100, bh / 2)
+    picked = parent_window.pick(wx, wy, Gtk.PickFlags.DEFAULT)
+    widget, chain = picked, []
+    while widget is not None:
+        chain.append(widget.__gtype__.name)
+        if widget == parent_button:
+            break
+        widget = widget.get_parent()
+    if widget != parent_button:
+        raise RuntimeError("Measured original client point does not hit its actual button")
+    # GTK documents this as surface -> native widget translation. Invert it
+    # to turn the measured widget point into native surface coordinates.
+    tx, ty = parent_window.get_surface_transform()
+    sx, sy = wx - tx, wy - ty
+    surface = parent_window.get_surface()
+    if not (0 <= sx < surface.get_width() and 0 <= sy < surface.get_height()):
+        raise RuntimeError("Measured button point lies outside original native surface")
+    return {"bounds": [bx, by, bw, bh], "widget_point": [wx, wy],
+            "surface_transform": [tx, ty], "surface_point": [sx, sy],
+            "surface_size": [surface.get_width(), surface.get_height()],
+            "picked_ancestry": chain, "client_after_paint_count": parent_paints,
+            "client_last_painted_size": parent_painted_size}
+
 def click_parent_content():
+    global original_pointer_host
     current = scene()
     parent, = [w for w in current["windows"] if w["id"] == parent_identity["id"]]
-    x, y, width, height = parent["rect"]
-    if width < 100 or height < 150 or current["focused"] != parent_identity["id"]:
-        raise RuntimeError("Actual parent content is not ready for positive input control")
+    if current["focused"] != parent_identity["id"] or parent["x11_window_id"] != parent_identity["xid"] or parent["app_id"] != parent_identity["app_id"]:
+        raise RuntimeError("Original parent identity/focus changed before positive input")
     if not host_display:
         raise RuntimeError("Missing nested host display for real pointer control")
     env = dict(os.environ, DISPLAY=host_display)
-    windows = subprocess.check_output(["xdotool", "search", "--onlyvisible", "--name", "^Smithay"], env=env, text=True).split()
+    windows = subprocess.check_output(["xdotool", "search", "--onlyvisible", "--name", "^Smithay"], env=env, text=True, timeout=5).split()
     if len(windows) != 1:
         raise RuntimeError("Expected one nested host for real parent input control")
+    host = windows[0]
+    pid = int(subprocess.check_output(["xdotool", "getwindowpid", host], env=env, text=True, timeout=5))
+    process = Path(f"/proc/{pid}")
+    executable = (process / "exe").resolve(strict=True)
+    candidate = Path("/candidate/usr/bin/roost-compositor").resolve(strict=True)
+    if executable != candidate or process.stat().st_uid != os.getuid():
+        raise RuntimeError("Pointer host is not the original ordinary-user candidate")
+    identity = {"window": int(host), "pid": pid,
+                "start_ticks": (process / "stat").read_text().rsplit(")", 1)[1].split()[19],
+                "executable": str(executable), "sha256": hashlib.sha256(executable.read_bytes()).hexdigest()}
+    if original_pointer_host is None:
+        original_pointer_host = identity
+    elif original_pointer_host != identity:
+        raise RuntimeError("Original owned pointer host identity changed")
     geometry = dict(line.split("=", 1) for line in subprocess.check_output(
-        ["xdotool", "getwindowgeometry", "--shell", windows[0]], env=env, text=True).splitlines())
-    if not (0 <= x + 50 < int(geometry["WIDTH"]) and 0 <= y + 100 < int(geometry["HEIGHT"])):
-        raise RuntimeError("Parent positive input control lies outside the nested host")
-    subprocess.run(["xdotool", "mousemove", "--window", windows[0], str(x + 50), str(y + 100), "click", "1"], env=env, check=True)
+        ["xdotool", "getwindowgeometry", "--shell", host], env=env, text=True, timeout=5).splitlines())
+    target = measured_parent_target()
+    x, y, width, height = parent["rect"]
+    px, py = round(x + target["surface_point"][0]), round(y + target["surface_point"][1])
+    if not (0 <= px < int(geometry["WIDTH"]) and 0 <= py < int(geometry["HEIGHT"])):
+        raise RuntimeError("Measured original parent target lies outside actual nested host")
+    # Establish host focus before moving/clicking, never between button events.
+    subprocess.run(["xdotool", "windowfocus", "--sync", host], env=env, check=True, timeout=5)
+    focus = int(subprocess.check_output(["xdotool", "getwindowfocus"], env=env, text=True, timeout=5))
+    if focus != int(host):
+        raise RuntimeError("Original pointer host did not acquire actual X focus")
+    probe = {"host": identity, "host_geometry": geometry, "actual_host_focus": focus,
+             "parent": parent_identity, "parent_rect": parent["rect"], "target": target,
+             "host_point": [px, py], "phase": "before_move"}
+    if len(parent_pointer_probes) >= 4:
+        raise RuntimeError("Parent input proof observation budget exceeded")
+    parent_pointer_probes.append(probe)
+    out.with_suffix(".parent-pointer.json").write_text(json.dumps(parent_pointer_probes, indent=2))
+    subprocess.run(["xdotool", "mousemove", "--window", host, str(px), str(py)], env=env, check=True, timeout=5)
+    def at_target():
+        observed = scene()
+        return (observed["pointer_position"] == [px, py] and observed["focused"] == parent_identity["id"]
+                and any(w["id"] == parent_identity["id"] and w["rect"] == parent["rect"] for w in observed["windows"]))
+    pump_parent_until(at_target, "Original parent/actual pointer did not settle at measured target")
+    pointer = dict(line.split("=", 1) for line in subprocess.check_output(
+        ["xdotool", "getmouselocation", "--shell"], env=env, text=True, timeout=5).splitlines())
+    if [int(pointer["X"]), int(pointer["Y"])] != [int(geometry["X"]) + px, int(geometry["Y"]) + py]:
+        raise RuntimeError("Actual X pointer differs from measured original host point")
+    if measured_parent_target()["surface_point"] != target["surface_point"]:
+        raise RuntimeError("Original client button moved before the single click")
+    if (process / "stat").read_text().rsplit(")", 1)[1].split()[19] != identity["start_ticks"] or int(subprocess.check_output(["xdotool", "getwindowfocus"], env=env, text=True, timeout=5)) != focus:
+        raise RuntimeError("Original host identity/focus changed before the single click")
+    probe.update(phase="before_single_click", actual_pointer=pointer,
+                 actual_scene_pointer=scene()["pointer_position"])
+    out.with_suffix(".parent-pointer.json").write_text(json.dumps(parent_pointer_probes, indent=2))
+    subprocess.run(["xdotool", "click", "1"], env=env, check=True, timeout=5)
 if parent_mode != "none":
     display = scene()["x11_display"] if parent_mode == "x11" else os.environ.get("WAYLAND_DISPLAY")
     if not display:
@@ -111,6 +196,11 @@ if parent_mode != "none":
         return True
     GLib.timeout_add(50, record_parent_input)
     parent_window.present()
+    def painted(_clock):
+        global parent_paints, parent_painted_size
+        parent_paints += 1
+        parent_painted_size = [parent_window.get_width(), parent_window.get_height()]
+    parent_window.get_frame_clock().connect("after-paint", painted)
     parent_app_id = "org.example.RoostWaylandPickerParent"
     parent_app_id_set = False
     end = time.monotonic() + 10
@@ -127,7 +217,7 @@ if parent_mode != "none":
                           if (w.get("x11_window_id") == xid if parent_mode == "x11"
                               else w.get("app_id") == parent_app_id and w.get("x11_window_id") is None)]
             if len(candidates) == 1:
-                parent_identity = {"mode": parent_mode, "xid": xid, "id": candidates[0]["id"], "pid": os.getpid(), "display": display, "input_path": str(input_path)}
+                parent_identity = {"mode": parent_mode, "xid": xid, "id": candidates[0]["id"], "app_id": candidates[0]["app_id"], "pid": os.getpid(), "uid": os.getuid(), "start_ticks": Path("/proc/self/stat").read_text().rsplit(")", 1)[1].split()[19], "display": display, "input_path": str(input_path)}
                 if parent_mode == "x11":
                     parent_handle = "x11:" + format(xid, "x")
                 break
@@ -148,9 +238,9 @@ if parent_mode != "none":
             "parent": parent_identity, "handle": parent_handle, "pid": os.getpid(),
         }, indent=2))
     pump_parent_until(lambda: scene()["focused"] == parent_identity["id"], "Actual caller did not receive initial focus")
-    pump_parent_until(lambda: parent_button.get_mapped() and parent_button.get_width() >= 1000
+    pump_parent_until(lambda: parent_paints > 0 and parent_painted_size == [parent_window.get_width(), parent_window.get_height()] and parent_button.get_mapped() and parent_button.get_width() >= 1000
                       and any(w["id"] == parent_identity["id"] and w["rect"][2] >= 1000 for w in scene()["windows"]),
-                      "Actual caller content did not allocate and commit its probe size")
+                      "Actual original client did not map, allocate and complete its initial paint")
     # Real host pointer input must reach the GTK button before requesting a dialog.
     click_parent_content()
     pump_parent_until(lambda: parent_clicks == 1, "Initial real pointer click did not reach the parent button")
@@ -163,17 +253,17 @@ if parent_mode != "none":
         # already does. Do not activate A/B/C or replay failed input.
         env = dict(os.environ, DISPLAY=host_display)
         hosts = subprocess.check_output(["xdotool", "search", "--onlyvisible", "--name", "^Smithay"],
-                                        env=env, text=True).split()
+                                        env=env, text=True, timeout=5).split()
         if len(hosts) != 1:
             raise RuntimeError("Expected one nested host for actual keyboard input")
         host = hosts[0]
-        host_pid = int(subprocess.check_output(["xdotool", "getwindowpid", host], env=env, text=True))
+        host_pid = int(subprocess.check_output(["xdotool", "getwindowpid", host], env=env, text=True, timeout=5))
         executable = Path(f"/proc/{host_pid}/exe").resolve(strict=True)
         if executable != Path("/candidate/usr/bin/roost-compositor").resolve(strict=True):
             raise RuntimeError("Keyboard host is not the actual candidate compositor")
         start = Path(f"/proc/{host_pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
         subprocess.run(["xdotool", "windowfocus", "--sync", host], env=env, check=True, timeout=5)
-        actual_focus = int(subprocess.check_output(["xdotool", "getwindowfocus"], env=env, text=True))
+        actual_focus = int(subprocess.check_output(["xdotool", "getwindowfocus"], env=env, text=True, timeout=5))
         if actual_focus != int(host):
             raise RuntimeError("Nested X host did not acquire actual keyboard focus")
         keyboard_probes.append({"host_window": int(host), "host_pid": host_pid,
