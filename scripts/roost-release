@@ -76,6 +76,7 @@ cargo build --locked --release -p roost-compositor -p roost-shell-gtk -p roost-s
 
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT INT TERM
+chmod 0755 "$STAGE"
 mkdir -p "$STAGE/DEBIAN" "$STAGE/usr/bin" "$STAGE/usr/share/wayland-sessions" "$STAGE/etc/pam.d"
 
 for bin in roost-compositor roost-session roost-shell-gtk roost-shell-host roost-ibus-bridge roost-greeter; do
@@ -134,5 +135,5 @@ EOF
 
 mkdir -p "$OUT"
 PKG="$OUT/roost_${VERSION}_amd64.deb"
-dpkg-deb --build "$STAGE" "$PKG" >/dev/null
+dpkg-deb --root-owner-group --build "$STAGE" "$PKG" >/dev/null
 echo "roost-release: wrote $PKG"

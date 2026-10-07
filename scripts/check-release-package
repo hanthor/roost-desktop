@@ -22,6 +22,11 @@ fail() {
     exit 1
 }
 
+# Validate numeric metadata in BOTH original archives before extraction can
+# replace ownership with that of the checker process.
+ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+python3 "$ROOT/scripts/lib/release-deb-ownership.py" "$PKG" || fail "archive ownership rejected"
+
 CONTENTS="$(dpkg-deb -c "$PKG" 2>/dev/null)"
 for path in \
     usr/bin/roost-compositor \

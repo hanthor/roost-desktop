@@ -178,7 +178,8 @@ class PackagePolicy(unittest.TestCase):
 -c) find "$FIXTURE" -type f | while read -r path; do echo "-rwxr-xr-x $path"; done ;;
 -f) case "$3" in Version) echo 0.1.0 ;; Depends) echo 'libgtk4-layer-shell0 (>= 1.1), libgtk-4-1 (>= 4.12), libadwaita-1-0 (>= 1.0), libpam0g, gsettings-desktop-schemas' ;; esac ;;
 -x) cp -R "$FIXTURE/." "$3/" ;;
---ctrl-tarfile) tar -C "$FIXTURE" -cf - ./conffiles ;;
+--ctrl-tarfile) tar --owner=0 --group=0 -C "$FIXTURE" -cf - ./conffiles ;;
+--fsys-tarfile) tar --owner=0 --group=0 -C "$FIXTURE" -cf - ./usr ./etc ;;
 esac''')
         (self.stage / 'conffiles').write_text('/etc/pam.d/roost-lock\n')
         self.tool('ldd', 'echo "libc.so.6 => /lib/libc.so.6 (0)"')
@@ -252,7 +253,7 @@ class ReleaseDelegatePolicy(unittest.TestCase):
             tool('git', 'echo v0.1.0')
             tool('cargo', 'test "$*" = "build --locked --release -p roost-compositor -p roost-shell-gtk -p roost-shell-host -p roost-greeter"')
             tool('dpkg-shlibdeps', 'exit 9' if failure == 'shlibs' else ('echo unknown' if failure == 'malformed' else 'echo "shlibs:Depends=libc6 (>= 2.36)"'))
-            tool('dpkg-deb', 'test "$1" = --build; cp "$2/DEBIAN/control" "$OUTPUT"')
+            tool('dpkg-deb', 'test "$1" = --root-owner-group; test "$2" = --build; test "$(stat -c %a "$3")" = 755; cp "$3/DEBIAN/control" "$OUTPUT"')
             for name in M.BINS:
                 path = root / 'target/release' / name
                 path.parent.mkdir(parents=True, exist_ok=True)
