@@ -46,7 +46,8 @@ def valid_native_files_error(value):
             "tree-provider","tree-walk",
             "cells","filesystem","cleanup","phase","final-guard","receipt","diagnostic-transport"}
     fields={"phase","stage","exception_type"}
-    if type(value) is not dict or set(value) not in (fields,fields|{"query_context"}):return False
+    if type(value) is not dict or set(value) not in (fields,fields|{"query_context"},fields|{"message"},fields|{"query_context","message"}):return False
+    if "message" in value and (type(value["message"]) is not str or len(value["message"])>300):return False
     if "query_context" in value:
         query=value["query_context"]
         if (value.get("stage")!="cells" or type(query) is not dict or set(query)!={"operation","boundary","reason"}
