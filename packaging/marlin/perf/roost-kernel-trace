@@ -186,7 +186,7 @@ class Btf:
                     raise ValueError(f'BTF argument target differs: {name}')
 
 
-def build_probes(base, drm, virtio, group):
+def build_probes(base, drm, virtio, group, drm_module=True):
     offsets = {}
     def field(owner, typename, path, size):
         offset, actual = owner.offset(typename, *path.split('.'))
@@ -221,20 +221,21 @@ def build_probes(base, drm, virtio, group):
     arg = drm.types[drm.unwrap(timer_arg)]
     if arg['kind'] != 2 or drm.types[drm.unwrap(arg['size_type'])]['name'] != 'hrtimer':
         raise ValueError('BTF timer callback argument differs')
+    drm_owner = 'drm:' if drm_module else ''
     crtc = f'crtc=$arg1:x64 object=+{crtc_id}($arg1):u32 pipe=+{index}($arg1):u32 dev=+{dev}($arg1):x64 minor=+{minor_index}(+{primary}(+{dev}($arg1))):s32'
     pending = f'event=$arg2:x64 file=+{file}($arg2):x64 userdata=+{userdata}($arg2):x64'
     timer = f'timer=$arg1:x64 crtc=+{timer_crtc}($arg1):x64 interval=+{interval}($arg1):s64 expires=+{expires}($arg1):s64 object=+{crtc_id}(+{timer_crtc}($arg1)):u32 pipe=+{index}(+{timer_crtc}($arg1)):u32 dev=+{dev}(+{timer_crtc}($arg1)):x64 minor=+{minor_index}(+{primary}(+{dev}(+{timer_crtc}($arg1)))):s32'
     return [
         f'p:{group}/{group}_flush virtio_gpu:virtio_gpu_crtc_atomic_flush {crtc} commit=$arg2:x64',
-        f'p:{group}/{group}_arm drm:drm_crtc_arm_vblank_event {crtc} {pending}',
-        f'r64:{group}/{group}_arm_return drm:drm_crtc_arm_vblank_event {crtc} {pending} target=+{sequence}($arg2):u64 event_pipe=+{pipe}($arg2):u32',
-        f'p:{group}/{group}_accurate drm:drm_crtc_accurate_vblank_count {crtc}',
-        f'r64:{group}/{group}_accurate_return drm:drm_crtc_accurate_vblank_count {crtc} count=$retval:u64',
-        f'p:{group}/{group}_timeout drm:drm_crtc_vblank_get_vblank_timeout {crtc} output=$arg2:x64',
-        f'r64:{group}/{group}_timeout_return drm:drm_crtc_vblank_get_vblank_timeout {crtc} output=$arg2:x64 value=+0($arg2):s64',
-        f'p:{group}/{group}_timer drm:drm_vblank_timer_function {timer}',
-        f'r64:{group}/{group}_timer_return drm:drm_vblank_timer_function {timer} restart=$retval:s32',
-        f'p:{group}/{group}_send drm:send_vblank_event dev=$arg1:x64 minor=+{minor_index}(+{primary}($arg1)):s32 {pending} sequence=$arg3:u64 timestamp=$arg4:s64 event_pipe=+{pipe}($arg2):u32',
+        f'p:{group}/{group}_arm {drm_owner}drm_crtc_arm_vblank_event {crtc} {pending}',
+        f'r64:{group}/{group}_arm_return {drm_owner}drm_crtc_arm_vblank_event {crtc} {pending} target=+{sequence}($arg2):u64 event_pipe=+{pipe}($arg2):u32',
+        f'p:{group}/{group}_accurate {drm_owner}drm_crtc_accurate_vblank_count {crtc}',
+        f'r64:{group}/{group}_accurate_return {drm_owner}drm_crtc_accurate_vblank_count {crtc} count=$retval:u64',
+        f'p:{group}/{group}_timeout {drm_owner}drm_crtc_vblank_get_vblank_timeout {crtc} output=$arg2:x64',
+        f'r64:{group}/{group}_timeout_return {drm_owner}drm_crtc_vblank_get_vblank_timeout {crtc} output=$arg2:x64 value=+0($arg2):s64',
+        f'p:{group}/{group}_timer {drm_owner}drm_vblank_timer_function {timer}',
+        f'r64:{group}/{group}_timer_return {drm_owner}drm_vblank_timer_function {timer} restart=$retval:s32',
+        f'p:{group}/{group}_send {drm_owner}send_vblank_event dev=$arg1:x64 minor=+{minor_index}(+{primary}($arg1)):s32 {pending} sequence=$arg3:u64 timestamp=$arg4:s64 event_pipe=+{pipe}($arg2):u32',
     ], offsets
 
 
@@ -343,7 +344,12 @@ def start():
         if ROOT.exists() and not (ROOT / 'result.json').exists() and not (ROOT / 'marker.json').exists():
             metadata = ROOT.stat()
             if metadata.st_uid == 0 and not metadata.st_mode & 0o077 and not ROOT.is_symlink():
-                save(ROOT / 'result.json', {'group': 'roost_vblank_' + os.urandom(8).hex(),
+                preflight = {}
+                for name in ('inventory', 'vmlinux', 'virtio_gpu', 'drm'):
+                    path = ROOT / ('preflight-' + name + '.json')
+                    if path.exists():
+                        preflight[name] = read_json(path)
+                save(ROOT / 'result.json', {'preflight': preflight, 'group': 'roost_vblank_' + os.urandom(8).hex(),
                      'qualified_acquisition': False, 'stage': 'preflight',
                      'errors': [str(error)[:2048]], 'diagnostic_only': True})
         raise
@@ -371,15 +377,28 @@ def start_observer():
         subprocess.run(['/usr/bin/mount', '-t', 'tracefs', '-o', 'nosuid,nodev,noexec', 'tracefs', str(TRACE)],
                        check=True, capture_output=True, timeout=5)
     observer_raw = bounded(Path(__file__), 1024 * 1024)
+    # DRM may be built into vmlinux. The actual loaded module inventory
+    # and live BTF function definitions determine namespace, not filename
+    # assumptions or a fallback when a loaded module's BTF is missing.
+    module_inventory = bounded(Path('/proc/modules'), 1024 * 1024).decode()
+    module_names = {line.split()[0] for line in module_inventory.splitlines() if line.split()}
+    drm_module = 'drm' in module_names
+    if 'virtio_gpu' not in module_names:
+        raise RuntimeError('actual virtio_gpu module is not loaded')
+    inventory = {'kernel_release': os.uname().release, 'proc_modules': module_inventory,
+                 'drm_owner': 'drm' if drm_module else 'vmlinux', 'virtio_owner': 'virtio_gpu'}
+    save(ROOT / 'preflight-inventory.json', inventory)
     btf_sources = {}
     loaded = {}
-    for name in ('vmlinux', 'drm', 'virtio_gpu'):
+    for name in ('vmlinux', 'virtio_gpu') + (('drm',) if drm_module else ()):
         raw = bounded(Path('/sys/kernel/btf') / name, 64 * 1024 * 1024)
         btf_sources[name] = {'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
+        save(ROOT / ('preflight-' + name + '.json'), btf_sources[name])
         loaded[name] = Btf(raw, loaded.get('vmlinux'))
     group = 'roost_vblank_' + os.urandom(8).hex()
-    definitions, offsets = build_probes(loaded['vmlinux'], loaded['drm'], loaded['virtio_gpu'], group)
-    marker = {'group': group, 'definitions': [], 'offsets': offsets, 'btf': btf_sources,
+    definitions, offsets = build_probes(loaded['vmlinux'], loaded['drm'] if drm_module else loaded['vmlinux'],
+                                      loaded['virtio_gpu'], group, drm_module=drm_module)
+    marker = {'group': group, 'definitions': [], 'offsets': offsets, 'btf': btf_sources, 'source_inventory': inventory,
               'started_monotonic_ns': time.monotonic_ns(), 'cpus': cpus,
               'limit_seconds': MAX_SECONDS, 'buffer_kb_per_cpu': 512,
               'observer': {'bytes': len(observer_raw), 'sha256': hashlib.sha256(observer_raw).hexdigest(), 'python': sys.version},

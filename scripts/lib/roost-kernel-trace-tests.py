@@ -91,6 +91,13 @@ class Parser(unittest.TestCase):
         self.assertTrue(any('target=+32($arg2)' in row for row in definitions))
         self.assertTrue(any('interval=+32($arg1)' in row for row in definitions), 'timer container offset must be subtracted')
         self.assertTrue(any('minor=+0(+16(+0($arg1)))' in row for row in definitions))
+    def test_builtin_drm_uses_exact_base_btf_and_unprefixed_symbols(self):
+        btf = observer.Btf(fixture().raw())
+        definitions, _ = observer.build_probes(btf, btf, btf, 'roost_vblank_1234567890abcdef', drm_module=False)
+        self.assertFalse(any(' drm:' in row for row in definitions))
+        self.assertTrue(any(' drm_crtc_arm_vblank_event ' in row for row in definitions))
+        self.assertTrue(any(' virtio_gpu:virtio_gpu_crtc_atomic_flush ' in row for row in definitions))
+
     def test_split_module_uses_live_base_type_and_string_ids(self):
         base = observer.Btf(fixture().raw())
         f = Fixture(base)
