@@ -50,9 +50,11 @@ python3 /repo/scripts/lib/roost-portal-ready.py org.freedesktop.impl.portal.desk
 python3 /repo/scripts/lib/roost-portal-ready.py org.freedesktop.portal.Desktop org.freedesktop.portal.ScreenCast /out/frontend-ready.json --pid "$portal_frontend_pid"
 [ "$(rpm -q --qf '%{VERSION}' nautilus | cut -d. -f1)" = 51 ] || { echo 'GNOME51 Nautilus required' >&2; exit 1; }
 nautilus --gapplication-service >/out/nautilus.log 2>&1 & pids="$pids $!"
+# Parented cases additionally map/focus an independent ordinary Wayland app B
+# after caller A, and verify actual input returns to A after Nautilus C closes.
 for parent_mode in none x11 wayland; do
     for method in OpenFile SaveFile; do
-        for decision in cancel grant; do
+        for decision in cancel grant close; do
             file_out="/out/filechooser-$method-$decision"
             [ "$parent_mode" = none ] || file_out="$file_out-$parent_mode"
             python3 /repo/scripts/lib/roost-portal-filechooser-client.py "$file_out" "$method" "$decision" "$parent_mode" >"$file_out.log" 2>&1 & file_client=$!; pids="$pids $file_client"

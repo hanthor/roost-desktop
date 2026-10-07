@@ -1588,6 +1588,16 @@ impl Runtime {
         });
         doc["screen_reader_pid"] = serde_json::json!(self.orca.pid());
         doc["screen_reader_state"] = serde_json::json!(self.orca.state());
+        // Retain actual manager observations outside the large JSON macro.
+        // Coordinate diagnostics stay absent during credential input.
+        let pointer = (!self.is_locked()).then(|| {
+            let pos = self.manager.pointer_pos();
+            [pos.x, pos.y]
+        });
+        doc["pointer_position"] = serde_json::json!(pointer);
+        doc["pointer_fullscreen_blocked"] = serde_json::json!(
+            (!self.is_locked()).then(|| self.manager.fullscreen_at(self.manager.pointer_pos()))
+        );
         let doc = doc.to_string();
         if doc == self.state_last {
             return;
