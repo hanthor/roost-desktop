@@ -266,7 +266,7 @@ jobs:
           name: roost-arch
           path: ${{ runner.temp }}/portal-package
       - run: sudo apt-get -o Acquire::Retries=3 update -qq && sudo apt-get install -y --no-install-recommends podman zstd shellcheck
-      - run: shellcheck scripts/roost-portal-security tests/portal-reference/run.sh tests/portal-reference/settings-run.sh tests/portal-reference/backgrounds-run.sh
+      - run: shellcheck scripts/roost-portal-security tests/portal-reference/run.sh tests/portal-reference/settings-run.sh tests/portal-reference/backgrounds-run.sh tests/portal-reference/night-light-run.sh
       - run: python3 scripts/lib/roost-portal-artifact-tests.py
       - name: Test packaged compositor with actual GNOME 51 portal consent
         run: |
@@ -282,6 +282,45 @@ jobs:
         with:
           name: portal-security
           path: ${{ runner.temp }}/portal-security
+          retention-days: 90
+
+  night-light-negative:
+    # A separate installed feature RPM can qualify only controlled fallback.
+    needs: arch-package
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: roost-arch
+          path: ${{ runner.temp }}/normal-package
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: roost-night-light-fixture
+          path: ${{ runner.temp }}/feature-artifact
+      - run: sudo apt-get -o Acquire::Retries=3 update -qq && sudo apt-get install -y --no-install-recommends podman zstd shellcheck
+      - run: shellcheck tests/portal-reference/night-light-run.sh tests/portal-reference/night-light-fixture-install.sh
+      - run: python3 scripts/lib/night-light-fault-tests.py
+      - name: Genuine installed fixture RPM controlled final-pass failure
+        run: |
+          mkdir -p "$RUNNER_TEMP/normal-candidate" "$RUNNER_TEMP/night-light-negative"
+          package=$(find "$RUNNER_TEMP/normal-package" -name '*.pkg.tar.zst' -print -quit)
+          test -n "$package"
+          tar --zstd -xf "$package" -C "$RUNNER_TEMP/normal-candidate"
+          printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/night-light-negative/candidate-commit.txt"
+          podman build --tag localhost/roost-night-light-reference --file tests/portal-reference/Containerfile tests/portal-reference
+          podman run --rm --network=none --security-opt label=disable \
+            --volume "$GITHUB_WORKSPACE:/repo:ro" \
+            --volume "$RUNNER_TEMP/normal-candidate:/candidate:ro" \
+            --volume "$RUNNER_TEMP/feature-artifact:/fixture:ro" \
+            --volume "$RUNNER_TEMP/night-light-negative:/out" \
+            localhost/roost-night-light-reference /repo/tests/portal-reference/night-light-fixture-install.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: night-light-negative
+          path: ${{ runner.temp }}/night-light-negative
           retention-days: 90
 
   remote-security:
@@ -344,7 +383,7 @@ jobs:
     timeout-minutes: 40
     container: archlinux:latest
     steps:
-      - run: pacman -Syu --noconfirm --needed base-devel git rust pkgconf clang pipewire gtk4 gtk4-layer-shell libadwaita libsecret libxkbcommon libxkbcommon-x11 mesa wayland dbus glib2 seatd libinput systemd-libs libdrm namcap
+      - run: pacman -Syu --noconfirm --needed base-devel git rust pkgconf clang pipewire gtk4 gtk4-layer-shell libadwaita libsecret libxkbcommon libxkbcommon-x11 mesa wayland dbus glib2 seatd libinput systemd-libs libdrm namcap gnome-settings-daemon libcolord
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: |
           useradd -m builder
@@ -357,6 +396,26 @@ jobs:
           for bin in roost-compositor roost-session roost-shell-host roost-greeter; do "$bin" --version; done
           test -f /usr/share/wayland-sessions/roost.desktop
           mkdir -p arch-artifacts && cp "$pkg" arch-artifacts/
+          pacman -Si gnome-settings-daemon libcolord > arch-artifacts/night-light-repository-versions.txt
+          pacman -Q gnome-settings-daemon libcolord > arch-artifacts/night-light-installed-versions.txt
+          pacman -Qo /usr/lib/gsd-color /usr/lib/libcolord.so.2 > arch-artifacts/night-light-resource-owners.txt
+      # This feature binary is a separate controlled-fault fixture. It never
+      # enters the normal Arch package or production qualification artifact.
+      - name: Test and build isolated Night Light fault fixture
+        run: |
+          su builder -c "cd '$GITHUB_WORKSPACE' && CARGO_TARGET_DIR=target-night-light-fixture cargo test --locked -p roost-compositor --features night-light-vm-fixture"
+          su builder -c "cd '$GITHUB_WORKSPACE' && CARGO_TARGET_DIR=target-night-light-fixture cargo build --locked --release -p roost-compositor --features night-light-vm-fixture"
+          mkdir -p night-light-fixture-artifacts
+          cp target-night-light-fixture/release/roost-compositor night-light-fixture-artifacts/roost-vm-night-light-compositor
+          printf '%s\n' "$GITHUB_SHA" > night-light-fixture-artifacts/source-commit.txt
+          sha256sum night-light-fixture-artifacts/roost-vm-night-light-compositor > night-light-fixture-artifacts/binary-sha256.txt
+          night-light-fixture-artifacts/roost-vm-night-light-compositor --version > night-light-fixture-artifacts/version.txt
+          grep -F '[night-light-vm-fixture]' night-light-fixture-artifacts/version.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: roost-night-light-fixture
+          path: night-light-fixture-artifacts/
+          retention-days: 90
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: roost-arch

@@ -42,6 +42,8 @@ reis = { version = "=0.7.1", features = ["calloop"] }
 
 [features]
 default = ["drm", "xwayland"]
+# CI-only separate fixture binary; normal Arch/shipping packaging rejects it.
+night-light-vm-fixture = []
 # X11 compatibility (#59): Smithay's xwayland module within the pinned
 # =0.7.0 release (ADR 0001). On by default, like GNOME 51; a session uses
 # it only when Xwayland is installed (see `runtime::xwayland_wanted`).

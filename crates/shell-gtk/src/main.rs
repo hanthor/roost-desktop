@@ -29,6 +29,7 @@ mod logic;
 mod media_keys;
 mod network_agent;
 mod network_secrets;
+mod night_light;
 mod notify;
 mod orca;
 mod osd;
@@ -890,17 +891,7 @@ fn quick_settings_popover(
             let _ = iface.set_string("color-scheme", logic::color_scheme_for(t.is_active()));
         });
     }
-    match settings(COLOR_SCHEMA) {
-        Some(color) => {
-            night
-                .button
-                .set_active(color.boolean("night-light-enabled"));
-            night.button.connect_toggled(move |t| {
-                let _ = color.set_boolean("night-light-enabled", t.is_active());
-            });
-        }
-        None => night.present(false),
-    }
+    night_light::attach(&night, settings(COLOR_SCHEMA), shell);
     let battery_summary = gtk::Label::new(None);
     battery_summary.set_xalign(0.0);
     battery_summary.set_visible(false);

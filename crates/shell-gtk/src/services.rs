@@ -12,8 +12,8 @@
 //!   `SetBrightness` so the shell needs no root.
 //! - Volume: `wpctl` against the default PipeWire sink.
 //!
-//! Night Light and Dark Style are plain GSettings keys and live with
-//! the grid in `main.rs`.
+//! Night Light uses live GSettings and authenticated compositor capability in
+//! `night_light.rs`; Dark Style uses GSettings with the grid in `main.rs`.
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;

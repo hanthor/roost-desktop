@@ -18,6 +18,9 @@ license=('GPL-3.0-or-later')
 depends=(
     'dbus'
     'glib2'
+    'gnome-settings-daemon>=51.0'
+    'gnome-settings-daemon<52'
+    'libcolord'
     'gtk4'
     'gtk4-layer-shell'
     'libadwaita'
@@ -77,7 +80,19 @@ build() {
         -p roost-compositor -p roost-shell-host -p roost-shell-gtk -p roost-greeter
 }
 
+# CI failure-injection binaries belong only to their separately identified lane.
+# Check again during packaging so --nocheck cannot ship the fixture feature.
+_assert_production_compositor() {
+    local version
+    version="$("${CARGO_TARGET_DIR:-$srcdir/target}/release/roost-compositor" --version)" || return 1
+    if [[ "$version" == *"[night-light-vm-fixture]"* ]]; then
+        echo 'refusing to package the CI-only Night Light failure-injection binary' >&2
+        return 1
+    fi
+}
+
 check() {
+    _assert_production_compositor || return 1
     local bin
     for bin in roost-compositor roost-session roost-shell-host roost-shell-gtk roost-ibus-bridge roost-greeter; do
         local reported
@@ -90,6 +105,7 @@ check() {
 }
 
 package() {
+    _assert_production_compositor || return 1
     local root target bin
     root="$(_srcroot)"
     target="${CARGO_TARGET_DIR:-$srcdir/target}/release"

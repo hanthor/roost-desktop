@@ -82,7 +82,13 @@ fn main() -> ExitCode {
                 }
             },
             "--version" | "-V" => {
+                #[cfg(not(feature = "night-light-vm-fixture"))]
                 println!("roost-compositor {}", release_version());
+                #[cfg(feature = "night-light-vm-fixture")]
+                println!(
+                    "roost-compositor {} [night-light-vm-fixture]",
+                    release_version()
+                );
                 return ExitCode::SUCCESS;
             }
             "--help" | "-h" => {

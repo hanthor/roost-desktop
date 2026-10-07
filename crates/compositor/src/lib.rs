@@ -63,6 +63,10 @@ pub mod monitors;
 pub mod mutter;
 #[cfg(feature = "drm")]
 mod native_repaint;
+pub mod night_light;
+mod night_light_display;
+#[cfg(feature = "night-light-vm-fixture")]
+mod night_light_fixture;
 pub mod orca;
 pub mod overlay;
 pub mod overview;

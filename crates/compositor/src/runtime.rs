@@ -523,6 +523,11 @@ pub struct Runtime {
     control: ControlHub,
     shell: ShellDriver,
     orca: crate::orca::Reader,
+    night_light: crate::night_light::Observer,
+    #[cfg(feature = "night-light-vm-fixture")]
+    night_light_fault: Arc<crate::night_light_fixture::Fault>,
+    nested_night_light: crate::night_light_display::Stage,
+    nested_color_submission: Option<(u64, u64, u64, [f32; 3])>,
     /// The IBus bridge, when IBus is installed.
     ime: Option<crate::ime::ImeBridge>,
     overlay: Overlay,
@@ -854,6 +859,16 @@ impl Runtime {
 
         // org.gnome.Mutter.ScreenCast and DisplayConfig (#61): screen
         // sharing through the stock GNOME portal.
+        let native_color_session = match &backend {
+            Backend::Winit(_) => false,
+            #[cfg(feature = "drm")]
+            Backend::Drm(_) => true,
+        };
+        let night_light = crate::night_light::Observer::start(
+            native_color_session,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            &session.socket_name,
+        );
         let cast_outputs: crate::mutter::Outputs = Default::default();
         // org.gnome.Shell.Introspect: the portal's window picker.
         let capture_authority = crate::capture_security::Authority::default();
@@ -866,6 +881,7 @@ impl Runtime {
                     introspect.windows.clone(),
                     capture_authority.clone(),
                     display.handle(),
+                    night_light.capability(),
                 ),
                 |event, _, rt: &mut Runtime| {
                     if let calloop::channel::Event::Msg(request) = event {
@@ -959,6 +975,11 @@ impl Runtime {
             scale: clamp_scale(session.scale),
             input_settings: Default::default(),
             orca: crate::orca::Reader::new(&session.socket_name),
+            night_light,
+            #[cfg(feature = "night-light-vm-fixture")]
+            night_light_fault: crate::night_light_fixture::Fault::start(),
+            nested_night_light: Default::default(),
+            nested_color_submission: None,
             pipewire: None,
             casts: Vec::new(),
             cast_outputs,
@@ -1608,6 +1629,45 @@ impl Runtime {
         };
         doc["screen_reader_pid"] = serde_json::json!(self.orca.pid());
         doc["screen_reader_state"] = serde_json::json!(self.orca.state());
+        // Public display-transform receipt only: never surfaces, key payloads
+        // or captured pixels. Kept outside the large scene JSON macro.
+        let color = self.night_light.snapshot();
+        let color_outputs: Vec<_> = match &self.backend {
+            Backend::Winit(backend) => vec![serde_json::json!({
+                "name": "nested", "physical_size": [backend.window_size().w, backend.window_size().h],
+                "location": [0, 0], "scale": self.scale,
+                "stage_generation": self.nested_night_light.generation(),
+                "stage_counters": self.nested_night_light.counters(),
+                "last_submitted_transform": self.nested_color_submission,
+            })],
+            #[cfg(feature = "drm")]
+            Backend::Drm(drm) => drm
+                .outputs
+                .iter()
+                .take(crate::night_light_display::MAX_OUTPUTS)
+                .map(|output| {
+                    serde_json::json!({
+                        "name": output.name, "physical_size": [output.size.w, output.size.h],
+                        "location": [output.loc.0, output.loc.1], "scale": output.scale,
+                        "stage_generation": output.night_light.generation(),
+                        "stage_counters": output.night_light.counters(),
+                        "last_submitted_transform": output.last_frame.as_ref().map(|frame| frame.color_transform),
+                    })
+                })
+                .collect(),
+        };
+        doc["night_light"] = serde_json::json!({
+            "temperature": color.temperature, "service_rgb_scales": color.rgb,
+            "owner_epoch": color.owner_epoch, "generation": color.generation,
+            "service_supported": color.supported,
+            "supported": self.night_light.capability().supported(),
+            "outputs": color_outputs,
+            "display_only": true,
+        });
+        #[cfg(feature = "night-light-vm-fixture")]
+        {
+            doc["night_light_fixture"] = serde_json::json!(self.night_light_fault.receipt());
+        }
         // Keep backend-specific observations outside the large scene macro so
         // its expansion remains below the compiler's default recursion limit.
         // These values keep the same flat JSON fields and suppress lock input.
@@ -3133,6 +3193,7 @@ impl Runtime {
     /// no wallpaper — over a dark lock background.
     fn render(&mut self) -> Result<(), RuntimeError> {
         let locked = self.is_locked();
+        let color = self.night_light.snapshot();
         #[cfg(feature = "drm")]
         if locked {
             self.performance_trace.cancel();
@@ -3176,13 +3237,30 @@ impl Runtime {
         let desktop = self.background_desktop();
         match &mut self.backend {
             Backend::Winit(backend) => {
-                backend.window().set_cursor_visible(blank_alpha < 1.0);
+                let pointer = self.manager.pointer_pos();
                 let size = backend.window_size();
                 let damage = Rectangle::from_size(size);
+                let warmed;
+                let submitted_color;
                 {
-                    let (renderer, mut framebuffer) = backend
-                        .bind()
-                        .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+                    let (renderer, mut framebuffer) = backend.bind().map_err(|e| {
+                        self.night_light.set_renderer_ready(false);
+                        RuntimeError::Dispatch(e.to_string())
+                    })?;
+                    #[cfg(feature = "night-light-vm-fixture")]
+                    self.nested_night_light
+                        .set_fixture(self.night_light_fault.clone());
+                    let ready = crate::night_light_display::outputs_fit(&[size])
+                        && self.nested_night_light.prepare(renderer, size).is_ok();
+                    self.night_light.set_renderer_ready(ready);
+                    let rgb = if ready
+                        && color.supported
+                        && crate::night_light_display::valid_rgb(color.rgb)
+                    {
+                        color.rgb
+                    } else {
+                        [1.0; 3]
+                    };
                     let view = View {
                         offset: (0, 0),
                         scale: self.scale,
@@ -3238,31 +3316,55 @@ impl Runtime {
                     // Y-flip in the backend's own damage path), so the
                     // output transform mirrors vertically; placements
                     // stay top-down.
-                    let mut frame = renderer
-                        .render(&mut framebuffer, size, Transform::Flipped180)
-                        .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-                    draw_scene(
-                        &mut frame,
-                        background,
-                        &paper,
-                        &elements,
-                        Target {
-                            damage,
-                            scale: view.scale,
-                            blank_alpha,
+                    let result = self.nested_night_light.render(
+                        renderer,
+                        &mut framebuffer,
+                        size,
+                        Transform::Flipped180,
+                        rgb,
+                        |frame, software_cursor| {
+                            draw_scene(
+                                frame,
+                                background,
+                                &paper,
+                                &elements,
+                                Target {
+                                    damage,
+                                    scale: view.scale,
+                                    blank_alpha,
+                                },
+                                &decor,
+                                &previews,
+                            )?;
+                            if software_cursor && !locked && blank_alpha < 1.0 {
+                                draw_display_cursor(frame, pointer, (0, 0), view.scale, damage)?;
+                            }
+                            Ok(())
                         },
-                        &decor,
-                        &previews,
-                    )?;
-                    let _ = frame
-                        .finish()
-                        .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+                        |error| RuntimeError::Dispatch(error.to_string()),
+                        || self.night_light.set_renderer_ready(false),
+                    );
+                    if result.is_err() {
+                        self.night_light.set_renderer_ready(false);
+                    }
+                    warmed = result?.warmed;
+                    submitted_color = (
+                        color.owner_epoch,
+                        color.generation,
+                        self.nested_night_light.generation(),
+                        if warmed { rgb } else { [1.0; 3] },
+                    );
                 }
+                backend
+                    .window()
+                    .set_cursor_visible(!locked && blank_alpha < 1.0 && !warmed);
                 send_surface_scales(&self.state, &self.manager);
-                send_frame_callbacks(&self.state, &self.manager);
                 backend
                     .submit(Some(&[damage]))
                     .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+                // Submission state only, never a physical-pixel proof.
+                self.nested_color_submission = Some(submitted_color);
+                send_frame_callbacks(&self.state, &self.manager);
                 // The host took the frame: presentation feedback,
                 // fifo barriers and commit timers (#89).
                 crate::frame_timing::present_nested_frame(
@@ -3277,8 +3379,52 @@ impl Runtime {
             Backend::Drm(drm) => {
                 if !drm.scanout_ready() {
                     self.performance_trace.cancel();
+                    self.night_light.set_renderer_ready(false);
                     return Ok(());
                 }
+                // Preflight every active output, including pending outputs,
+                // before advertising capability or warming any one output.
+                let sizes: Vec<_> = drm.outputs.iter().map(|out| out.size).collect();
+                let mut ready = crate::night_light_display::outputs_fit(&sizes);
+                if (!ready
+                    && drm
+                        .outputs
+                        .iter()
+                        .any(|out| out.night_light.has_resources()))
+                    || (ready
+                        && drm
+                            .outputs
+                            .iter()
+                            .any(|out| !out.night_light.matches(&drm.renderer, out.size)))
+                {
+                    // Retire the whole old topology before allocating its
+                    // replacement, so old-size textures do not evade the sum.
+                    for out in &mut drm.outputs {
+                        out.night_light.reset();
+                    }
+                    self.night_light.set_renderer_ready(false);
+                }
+                if ready {
+                    for out in &mut drm.outputs {
+                        #[cfg(feature = "night-light-vm-fixture")]
+                        out.night_light.set_fixture(self.night_light_fault.clone());
+                        if out
+                            .night_light
+                            .prepare(&mut drm.renderer, out.size)
+                            .is_err()
+                        {
+                            ready = false;
+                        }
+                    }
+                }
+                self.night_light.set_renderer_ready(ready);
+                let mut rgb =
+                    if ready && color.supported && crate::night_light_display::valid_rgb(color.rgb)
+                    {
+                        color.rgb
+                    } else {
+                        [1.0; 3]
+                    };
                 let pointer = drm.pointer();
                 let crate::drm::DrmBackend {
                     renderer, outputs, ..
@@ -3353,10 +3499,16 @@ impl Runtime {
                         locked,
                     );
                     use crate::native_repaint::{ElementSignature, FrameSignature};
-                    let signature = FrameSignature {
+                    let mut signature = FrameSignature {
                         size: (size.w, size.h),
                         location: out.loc,
                         scale: out.scale,
+                        color_transform: (
+                            color.owner_epoch,
+                            color.generation,
+                            out.night_light.generation(),
+                            rgb,
+                        ),
                         locked,
                         background,
                         blank_alpha,
@@ -3428,58 +3580,77 @@ impl Runtime {
                             Transform::Normal,
                         )
                     });
-                    let damage = crate::native_repaint::damage_region(
+                    let tracked_damage = crate::native_repaint::damage_region(
                         tracker,
-                        if reset { 0 } else { usize::from(age) },
+                        if reset || rgb != [1.0; 3] {
+                            0
+                        } else {
+                            usize::from(age)
+                        },
                         &signature,
                     )
                     .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+                    // Intermediate contents have independent history: conservatively
+                    // render and copy the whole physical output whenever warmed.
+                    let damage = if rgb == [1.0; 3] {
+                        tracked_damage
+                    } else {
+                        Rectangle::from_size(size)
+                    };
                     let sync = {
-                        let mut target = renderer
-                            .bind(&mut dmabuf)
-                            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-                        let mut frame = renderer
-                            .render(&mut target, size, Transform::Normal)
-                            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-                        draw_scene(
-                            &mut frame,
-                            background,
-                            &paper,
-                            &elements,
-                            Target {
-                                damage,
-                                scale: view.scale,
-                                blank_alpha,
+                        let mut target = renderer.bind(&mut dmabuf).map_err(|e| {
+                            self.night_light.set_renderer_ready(false);
+                            RuntimeError::Dispatch(e.to_string())
+                        })?;
+                        let result = out.night_light.render(
+                            renderer,
+                            &mut target,
+                            size,
+                            Transform::Normal,
+                            rgb,
+                            |frame, _| {
+                                draw_scene(
+                                    frame,
+                                    background,
+                                    &paper,
+                                    &elements,
+                                    Target {
+                                        damage,
+                                        scale: view.scale,
+                                        blank_alpha,
+                                    },
+                                    &decor,
+                                    &previews,
+                                )?;
+                                if !locked && blank_alpha < 1.0 {
+                                    draw_display_cursor(
+                                        frame, pointer, out.loc, out.scale, damage,
+                                    )?;
+                                }
+                                Ok(())
                             },
-                            &decor,
-                            &previews,
-                        )?;
-                        // Software pointer on top (no host cursor on
-                        // bare hardware); hidden while locked.
-                        if !locked && blank_alpha < 1.0 {
-                            let (outline, fill) =
-                                crate::drm::cursor_rects(pointer, out.loc, out.scale);
-                            let clip = |rects: Vec<Rectangle<i32, smithay::utils::Physical>>| {
-                                rects
-                                    .into_iter()
-                                    .filter_map(|r| r.intersection(damage))
-                                    .collect::<Vec<_>>()
-                            };
-                            let (outline, fill) = (clip(outline), clip(fill));
-                            if !outline.is_empty() {
-                                frame
-                                    .clear(Color32F::new(0.0, 0.0, 0.0, 1.0), &outline)
-                                    .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-                            }
-                            if !fill.is_empty() {
-                                frame
-                                    .clear(Color32F::new(1.0, 1.0, 1.0, 1.0), &fill)
-                                    .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-                            }
+                            |error| RuntimeError::Dispatch(error.to_string()),
+                            || self.night_light.set_renderer_ready(false),
+                        );
+                        if result.is_err() {
+                            self.night_light.set_renderer_ready(false);
                         }
-                        frame
-                            .finish()
-                            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?
+                        let submitted = result?;
+                        if !submitted.warmed && rgb != [1.0; 3] {
+                            // This submission is neutral, and so are all later
+                            // outputs in this batch. Previously queued outputs
+                            // remain accurately warm in their saved signatures
+                            // until their next successful neutral repaint.
+                            rgb = [1.0; 3];
+                            out.damage_tracker = None;
+                            signature.color_transform = (
+                                color.owner_epoch,
+                                color.generation,
+                                out.night_light.generation(),
+                                rgb,
+                            );
+                        }
+                        submitted.sync
                     };
                     let feedback = crate::frame_timing::take_feedback(&mine, &out.output);
                     if let Err(e) = out.surface.queue_buffer(Some(sync), None, feedback) {
@@ -4018,6 +4189,31 @@ struct Target {
     damage: Rectangle<i32, smithay::utils::Physical>,
     scale: f64,
     blank_alpha: f32,
+}
+
+fn draw_display_cursor(
+    frame: &mut smithay::backend::renderer::gles::GlesFrame<'_, '_>,
+    pointer: Point<f64, Logical>,
+    location: (i32, i32),
+    scale: f64,
+    damage: Rectangle<i32, smithay::utils::Physical>,
+) -> Result<(), RuntimeError> {
+    let (outline, fill) = crate::night_light_display::cursor_rects(pointer, location, scale);
+    for (color, rects) in [
+        (Color32F::BLACK, outline),
+        (Color32F::new(1.0, 1.0, 1.0, 1.0), fill),
+    ] {
+        let clipped: Vec<_> = rects
+            .into_iter()
+            .filter_map(|r| r.intersection(damage))
+            .collect();
+        if !clipped.is_empty() {
+            frame
+                .clear(color, &clipped)
+                .map_err(|error| RuntimeError::Dispatch(error.to_string()))?;
+        }
+    }
+    Ok(())
 }
 
 fn draw_scene(
