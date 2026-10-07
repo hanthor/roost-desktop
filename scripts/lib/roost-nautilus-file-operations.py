@@ -79,6 +79,23 @@ def controls():
     return result
 
 
+def fixture_files():
+    """Retain only this owned fixture's bounded file contents as hashes."""
+    if fixture is None:
+        return []
+    result = []
+    for path in sorted(fixture.rglob('*')):
+        if path.is_symlink():
+            raise RuntimeError('Unexpected symlink in owned Files fixture')
+        if path.is_file():
+            if path.stat().st_size > 2048 or len(result) >= 16:
+                raise RuntimeError('Owned Files fixture exceeded evidence bounds')
+            raw = path.read_bytes()
+            result.append({'path': str(path.relative_to(fixture)), 'bytes': len(raw),
+                           'sha256': hashlib.sha256(raw).hexdigest()})
+    return result
+
+
 def snapshot(label):
     nodes = [{'name': node.name, 'role': node.getRoleName(),
               'selected': node.getState().contains(pyatspi.STATE_SELECTED),
@@ -87,7 +104,7 @@ def snapshot(label):
               if node.getRoleName() in ('text', 'entry') else None}
              for node in controls()]
     (OUT / ('nautilus-' + label + '.json')).write_text(
-        json.dumps({'scene': scene(), 'a11y': nodes}, indent=2))
+        json.dumps({'scene': scene(), 'a11y': nodes, 'fixture_files': fixture_files()}, indent=2))
     subprocess.run(['scrot', str(OUT / ('nautilus-' + label + '.png'))], check=True)
 
 
@@ -200,6 +217,14 @@ try:
     run('xdotool', 'windowfocus', host)
     # Container-local fixture remains available when an assertion fails.
     fixture = Path(tempfile.mkdtemp(prefix='roost-files-', dir=Path.home()))
+    data_home = Path(os.environ['XDG_DATA_HOME'])
+    filesystem = {name: {'path': str(path), 'device': path.stat().st_dev}
+                  for name, path in [('home', Path.home()), ('fixture', fixture),
+                                     ('data_home', data_home), ('evidence', OUT)]}
+    (OUT / 'nautilus-filesystem.json').write_text(json.dumps(filesystem, indent=2))
+    (OUT / 'nautilus-mountinfo.txt').write_text(Path('/proc/self/mountinfo').read_text())
+    if filesystem['fixture']['device'] != filesystem['data_home']['device']:
+        raise RuntimeError('Home fixture and XDG home Trash are on different filesystems')
     name = 'seed-' + uuid.uuid4().hex + '.txt'
     seed = fixture / name
     payload = b'Roost GNOME Files actual operation roundtrip\n' + name.encode() + b'\n'
