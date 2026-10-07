@@ -1487,7 +1487,7 @@ impl Runtime {
         let x11_ready = self.state.xwm.is_some();
         #[cfg(not(feature = "xwayland"))]
         let x11_ready = false;
-        let doc = serde_json::json!({
+        let mut doc = serde_json::json!({
             "rendered_frames": self.stats.frames,
             "x11_display": self.x11_display.map(|d| format!(":{d}")),
             "capture_streams": self.casts.len(),
@@ -1583,8 +1583,18 @@ impl Runtime {
                     }))
                 })
                 .collect::<Vec<_>>(),
-        })
-        .to_string();
+        });
+        // Retain actual manager observations outside the large JSON macro.
+        // Coordinate diagnostics stay absent during credential input.
+        let pointer = (!self.is_locked()).then(|| {
+            let pos = self.manager.pointer_pos();
+            [pos.x, pos.y]
+        });
+        doc["pointer_position"] = serde_json::json!(pointer);
+        doc["pointer_fullscreen_blocked"] = serde_json::json!(
+            (!self.is_locked()).then(|| self.manager.fullscreen_at(self.manager.pointer_pos()))
+        );
+        let doc = doc.to_string();
         if doc == self.state_last {
             return;
         }
