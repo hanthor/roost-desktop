@@ -63,6 +63,7 @@ for parent_mode in none x11 wayland; do
         done
     done
 done
+python3 /repo/scripts/lib/roost-nautilus-file-operations.py > /out/nautilus-operations.log 2>&1
 if grep -qE 'Failed to open service channel Wayland connection|Compositor service channel missing' /out/nautilus.log; then
     cat /out/nautilus.log
     echo 'Nautilus fell back after native service-channel failure' >&2

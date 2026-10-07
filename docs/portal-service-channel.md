@@ -105,3 +105,18 @@ At candidate `b68bad53`, actual instrumented coverage passed both typed/ordinary
 The reference driver additionally creates an actual native GTK caller, exports its live toplevel through GdkWayland's asynchronous `export_handle`, and passes that returned `wayland:` handle to the real portal. Its ordinary socket connection is independent of the typed Nautilus provider connection. The caller uses a distinct raw app ID only to locate its own mapped debug window; that label grants no authority. Open/Save cancel/accept retain the exported handle, actual provider identity, parent association/centered geometry, positive parent input before the dialog, blocked exposed-parent input while modal and restored focus/input after the response. The caller releases its exported handle through `drop_exported_handle`.
 
 The existing four parentless and four X11-parent outcomes remain required. These new native Wayland journeys are candidate coverage awaiting actual execution, not a claim of full picker, lifecycle, sandbox grant or final shipping-image qualification. API contract: [GTK Wayland toplevel export](https://docs.gtk.org/gdk4-wayland/method.WaylandToplevel.export_handle.html).
+
+
+The reference-container Files journey also launches the genuine installed
+Nautilus browser on a fresh directory owned by the ordinary session user.
+Actual desktop input creates a folder, copies a selected file through the
+clipboard, renames it, moves it, sends it to Trash, restores it through Undo
+and closes the browser. Exact file bytes and source/destination paths are
+verified independently; Trash is enumerated through its actual GIO backend
+with original-path and contents checks. Accessibility and painted screenshots
+are retained at each stage, including failures. This supplements picker proofs
+without establishing final-image, Flatpak, network-volume, scaling or
+lock-recovery acceptance for the full Files application. The shortcuts follow
+[GNOME copy/move](https://help.gnome.org/gnome-help/files-copy.html),
+[rename](https://help.gnome.org/gnome-help/files-rename.html) and
+[Trash](https://help.gnome.org/gnome-help/files-delete.html) documentation.
