@@ -336,10 +336,12 @@ def run_lifecycle(qmp, agent, out, serial_path, record, orca_contract="distribut
             identity_fields = ("pid", "start_ticks", "owner", "uid", "bus_pid", "bus_uid",
                                "version", "display", "parent_pid", "compositor_pid", "bus_name")
             original = {field: reader[field] for field in identity_fields}
+            original_keyboard_owner = reader["keyboard"]["owner"]
 
             def same_reader(actual):
                 return (actual["ready"] and actual["state"] == "active"
-                        and all(actual.get(field) == value for field, value in original.items()))
+                        and all(actual.get(field) == value for field, value in original.items())
+                        and (actual.get("keyboard") or {}).get("owner") == original_keyboard_owner)
 
             def native_command(label, test_id, min_normal=None):
                 start_speech = agent.run("orca-speech-start")
@@ -397,6 +399,26 @@ def run_lifecycle(qmp, agent, out, serial_path, record, orca_contract="distribut
                     time.sleep(0.1)
                 raise RuntimeError("native keyboard lock/reset readiness deadline exceeded")
 
+            def pam_unlock():
+                qmp.keys("ret")
+                time.sleep(0.3)
+                qmp.keys("ctrl", "a")
+                qmp.type_text("roost")
+                qmp.keys("ret")
+                await_state(lambda state: not state["state"]["locked"], timeout=15)
+
+            shortcut_before = agent.run("orca-read")
+            qmp.keys("meta_l", "l")
+            await_state(lambda state: state["state"]["locked"])
+            await_keyboard("physical-shortcut-locked", lambda keyboard: keyboard["locked"])
+            pam_unlock()
+            shortcut_ready = await_keyboard("physical-shortcut-authenticated", lambda keyboard:
+                not keyboard["locked"] and keyboard["resume_state"] == "ready")
+            if shortcut_ready["frames"] <= shortcut_before["frames"]:
+                raise RuntimeError("active-reader physical lock/PAM cycle stopped native frames")
+            record("V-ORCA-LOCK-SHORTCUT", True,
+                   "physical Super+L with the same genuine active reader and no custom hold locks; real PAM unlocks without replacing the reader")
+
             held = set()
 
             def physical(name, down):
@@ -412,7 +434,12 @@ def run_lifecycle(qmp, agent, out, serial_path, record, orca_contract="distribut
                 physical("insert", True)
                 disclosed = await_keyboard("prelock-custom-disclosed", lambda keyboard:
                     keyboard["normal_events"] > before_hold["keyboard"]["normal_events"])
-                qmp.keys("meta_l", "l")
+                # Mutter51 events.c processes accessibility before WM shortcuts;
+                # meta-a11y-manager.c grabs every chord while a custom modifier
+                # is held. Exercise that distinct privacy state via the genuine
+                # ScreenSaver.Lock endpoint, retaining physical shortcut proof
+                # above. This follows primary source, not a GNOME VM comparison.
+                agent.run("lock")
                 await_state(lambda state: state["state"]["locked"])
                 locked = await_keyboard("locked-reset-delivered", lambda keyboard:
                     keyboard["locked"] and keyboard["reset_events"] > disclosed["keyboard"]["reset_events"])
@@ -420,12 +447,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record, orca_contract="distribut
                 # private input is measured only by anonymous delivery counts.
                 baseline_count = locked["keyboard"]["normal_events"]
                 physical("f4", True)
-                qmp.keys("ret")
-                time.sleep(0.3)
-                qmp.keys("ctrl", "a")
-                qmp.type_text("roost")
-                qmp.keys("ret")
-                await_state(lambda state: not state["state"]["locked"], timeout=15)
+                pam_unlock()
                 resumed = await_keyboard("authenticated-ready", lambda keyboard:
                     not keyboard["locked"] and keyboard["resume_state"] == "ready")
                 if resumed["keyboard"]["normal_events"] != baseline_count or resumed["frames"] <= locked["frames"]:
@@ -444,7 +466,13 @@ def run_lifecycle(qmp, agent, out, serial_path, record, orca_contract="distribut
                        "same genuine reader survives real PAM unlock; disclosed custom reset succeeds, private held keys/releases cause no normal delivery, fresh spoken command works")
             finally:
                 with open(os.path.join(evidence, "orca-lock-privacy.json"), "w") as stream:
-                    json.dump(privacy, stream, indent=2)
+                    json.dump({"observations": privacy, "comparative_gnome_vm": False,
+                               "target_priority_sources": [
+                                   "https://github.com/GNOME/mutter/blob/51.0/src/core/events.c#L151",
+                                   "https://github.com/GNOME/mutter/blob/51.0/src/backends/meta-a11y-manager.c#L531",
+                                   "https://github.com/GNOME/gnome-shell/blob/51.0/js/ui/shellDBus.js#L318",
+                                   "https://github.com/GNOME/gnome-settings-daemon/blob/51.0/plugins/media-keys/gsd-media-keys-manager.c#L2490"]},
+                              stream, indent=2)
                 for name in tuple(held):
                     physical(name, False)
         agent.run("orca-off")
