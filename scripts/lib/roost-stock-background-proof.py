@@ -82,13 +82,16 @@ POINTS = [(10,780),(300,780),(640,400),(1270,780),(10,34)]
 CASES = ['centered','scaled','stretched','zoom','spanned','wallpaper','horizontal','vertical']
 
 
-def fixture():
-    # Genuine wallpaper-list metadata consumed by the unmodified stock app.
-    FIXTURE.mkdir(parents=True)
+def write_picture():
     def chunk(kind, data):
         return struct.pack('>I',len(data))+kind+data+struct.pack('>I',zlib.crc32(kind+data)&0xffffffff)
     rows = b''.join(b'\x00'+b''.join(bytes(COLORS[x//16]) for x in range(64)) for _ in range(32))
     PICTURE.write_bytes(b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',64,32,8,2,0,0,0))+chunk(b'IDAT',zlib.compress(rows))+chunk(b'IEND',b''))
+
+def fixture():
+    # Genuine wallpaper-list metadata consumed by the unmodified stock app.
+    FIXTURE.mkdir(parents=True)
+    write_picture()
     root=ET.Element('wallpapers')
     for case in CASES:
         item=ET.SubElement(root,'wallpaper',{'deleted':'false'})
@@ -174,10 +177,10 @@ def select(case):
 
 def expected(case,x,y):
     if case=='horizontal':
-        t=(x+.5)/1280
+        t=min(1,max(0,2*(x+.5)/1280-.5))
         return (0,round(200*(1-t)),round(200*t))
     if case=='vertical':
-        t=(y+.5)/800
+        t=min(1,max(0,2*(y+.5)/800-.5))
         return (0,round(200*(1-t)),round(200*t))
     if case=='centered':
         if not(608<=x<672 and 384<=y<416): return(0,200,0)
@@ -230,6 +233,16 @@ if PHASE=='initial':
     for case in CASES:
         app=select(case)
         pixels(case)
+        if case=='wallpaper':
+            # Change actual source bytes at the same URI without a settings
+            # write or synthetic event. Retain both real pixel observations.
+            original=json.loads((OUT/'fixture-identity.json').read_text())
+            COLORS.reverse()
+            write_picture()
+            PHASE='initial-replaced'
+            pixels(case)
+            (OUT/'replacement-identity.json').write_text(json.dumps({'before':original,'after_sha256':hashlib.sha256(PICTURE.read_bytes()).hexdigest(),'same_uri':PICTURE.as_uri()},indent=2))
+            PHASE='initial'
         steps.append({'case':case,'settings_identity':app})
     (OUT/'initial-session.json').write_text(json.dumps(current_session,indent=2))
     (OUT/'initial-journey.json').write_text(json.dumps(steps,indent=2))
