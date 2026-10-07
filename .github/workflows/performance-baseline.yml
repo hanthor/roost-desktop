@@ -79,6 +79,7 @@ jobs:
           sha256sum roost.pkg.tar.zst > perf-artifacts/package.sha256
           sudo podman build -f packaging/marlin/perf/Containerfile.baseline -t localhost/marlin-gnome51-perf:base . 2>&1 | tee perf-artifacts/baseline-build.log
           sudo podman build -f packaging/marlin/Containerfile --build-arg BASE_IMAGE=localhost/marlin-gnome51-perf:base --build-arg PERF_PINNED_BASELINE=true --build-arg ROOST_PKG=roost.pkg.tar.zst --build-arg ROOST_PKG_SHA256="$package_sha" -t localhost/marlin-roost-preview:perf . 2>&1 | tee perf-artifacts/shared-preview-build.log
+          sudo podman inspect ghcr.io/tuna-os/marlin:gnome --format '{{.Digest}}' | tee base-digest
           sudo podman inspect localhost/marlin-roost-preview:perf --format '{{.Id}}' | tee shared-image-id
           cp shared-image-id perf-artifacts/shared-image-id
           python3 scripts/lib/roost-perf-payload.py copy --package roost.pkg.tar.zst --report perf-artifacts/package-payload.json --out perf-artifacts/package-copy-after-build.json
@@ -117,6 +118,7 @@ jobs:
           sudo podman run --rm localhost/marlin-roost-preview:perf pacman -Q | tee baseline-packages.txt
           sudo podman run --rm localhost/marlin-roost-preview:perf cat /usr/share/roost-perf-baseline-critical.sha256 > perf-artifacts/baseline-critical.sha256
           for file in PKGBUILD release-trace-context.patch frame-source-evidence.patch drained-capture-start.patch sha256sums; do
+          sudo podman run --rm localhost/marlin-roost-preview:perf cat /usr/share/roost-perf-baseline-packages.txt > perf-artifacts/pinned-baseline-packages.txt
             sudo podman run --rm localhost/marlin-roost-preview:perf cat "/usr/share/roost-perf-mutter-profiler/$file" > "perf-artifacts/mutter-profiler-$file"
           done
       - name: Measure three instrumented GNOME then Roost pairs on this same host
