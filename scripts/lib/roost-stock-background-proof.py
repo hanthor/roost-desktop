@@ -127,17 +127,47 @@ def controls(process, original, label):
     return found
 
 
-def activate_chooser(control, process, original, label):
+def activate_chooser(find, process, original, label):
     # GNOME's chooser is GtkFlowBoxChild with an overridden accessible role.
     # Its generic Action indices enumerate muxer actions, not child::activate.
     # Retain that real inventory and activate the documented Enter keybinding.
-    action = control.queryAction()
-    actions = [action.getName(i) for i in range(action.nActions)]
-    control.clear_cache()
-    if not control.getState().contains(pyatspi.STATE_SHOWING):
-        raise RuntimeError('actual chooser target is not showing')
-    if not control.queryComponent().grabFocus():
-        raise RuntimeError('actual chooser target refused focus')
+    # The thumbnail panel rebuilds chooser children asynchronously while
+    # artwork loads, which can defunct a resolved accessible between lookup
+    # and focus: AT-SPI then raises GError even for a previously showing
+    # object. Resolve the live target inside a bounded wait, scrolling it
+    # into view as before; still exactly one genuine focus plus one Enter.
+    control = None
+    actions = None
+    seen_showing = False
+    end = time.monotonic() + 30
+    while True:
+        guard(process, original)
+        try:
+            candidate = find()
+        except GLib.GError:
+            candidate = None
+        if candidate is not None:
+            try:
+                candidate.clear_cache()
+                if not candidate.getState().contains(pyatspi.STATE_SHOWING):
+                    candidate.queryComponent().scrollTo(pyatspi.SCROLL_ANYWHERE)
+                    drain()
+                    candidate.clear_cache()
+                if candidate.getState().contains(pyatspi.STATE_SHOWING):
+                    seen_showing = True
+                    action = candidate.queryAction()
+                    names = [action.getName(i) for i in range(action.nActions)]
+                    if candidate.queryComponent().grabFocus():
+                        control, actions = candidate, names
+                        break
+            except GLib.GError:
+                pass
+        if time.monotonic() >= end:
+            if not seen_showing:
+                raise RuntimeError('actual chooser item not showing after scroll')
+            raise RuntimeError('actual chooser target refused focus')
+        drain()
+        time.sleep(.1)
     def focused():
         guard(process, original)
         control.clear_cache()
@@ -184,17 +214,15 @@ def select(case):
             matching=[c for c in controls(process,original,PHASE+'-'+case) if c.name==target]
             if len(matching)>1: raise RuntimeError('nonunique stock chooser item')
             return matching[0] if matching else None
-        wait_for(lambda: find() is not None,'stock chooser fixture item missing',30)
-        # Stock Background appears below Style/Accent: scroll the actual item,
-        # then invoke its real accessibility action once, never set a key.
-        control=find()
-        control.clear_cache()
-        if not control.getState().contains(pyatspi.STATE_SHOWING):
-            control.queryComponent().scrollTo(pyatspi.SCROLL_ANYWHERE)
-            drain()
-        control.clear_cache()
-        if not control.getState().contains(pyatspi.STATE_SHOWING): raise RuntimeError('actual chooser item not showing after scroll')
-        activate_chooser(control, process, original, PHASE+'-'+case)
+        def present():
+            try:
+                return find() is not None
+            except GLib.GError:
+                return False
+        wait_for(present,'stock chooser fixture item missing',30)
+        # Stock Background appears below Style/Accent: scroll the actual item
+        # into view, then focus it and send one genuine Enter, never set a key.
+        activate_chooser(find, process, original, PHASE+'-'+case)
         def saved():
             observed={}
             for schema in ['org.gnome.desktop.background','org.gnome.desktop.screensaver']:
