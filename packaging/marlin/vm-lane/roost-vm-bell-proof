@@ -310,7 +310,8 @@ def capture_case(name, record):
             result['graph_observations'].append(graph_observation)
             outputs = [row for row in streams if row['props'].get('media.class') == 'Stream/Output/Audio']
             if len(outputs) > 1:
-                raise RuntimeError('output stream is not uniquely observed')
+                seen = [(row.get('id'), (row.get('props') or {}).get('application.process.binary')) for row in outputs[:4]]
+                raise RuntimeError('output stream is not uniquely observed: ' + json.dumps(seen)[:256])
             for row in outputs:
                 if row['props'].get('application.process.binary') != 'canberra-gtk-play':
                     raise RuntimeError('unrelated output audio stream contaminates bell capture')
