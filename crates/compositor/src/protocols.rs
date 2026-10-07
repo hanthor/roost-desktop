@@ -79,9 +79,7 @@ use smithay::{
             KeyboardShortcutsInhibitHandler, KeyboardShortcutsInhibitState,
             KeyboardShortcutsInhibitor, KeyboardShortcutsInhibitorSeat,
         },
-        pointer_constraints::{
-            with_pointer_constraint, PointerConstraintsHandler, PointerConstraintsState,
-        },
+        pointer_constraints::{PointerConstraintsHandler, PointerConstraintsState},
         pointer_gestures::PointerGesturesState,
         relative_pointer::RelativePointerManagerState,
         shell::xdg::dialog::{XdgDialogHandler, XdgDialogState},
@@ -800,17 +798,11 @@ delegate_pointer_gestures!(State);
 delegate_relative_pointer!(State);
 
 impl PointerConstraintsHandler for State {
-    /// Lock or confine at once when the surface already has the
-    /// pointer; otherwise the window manager activates it on enter.
-    fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
-        if pointer.current_focus().as_ref() == Some(surface) {
-            with_pointer_constraint(surface, pointer, |constraint| {
-                if let Some(constraint) = constraint {
-                    constraint.activate();
-                }
-            });
-        }
-    }
+    /// Registration alone cannot establish region eligibility. The window
+    /// manager activates on actual motion using placed geometry and the
+    /// committed input/constraint intersection; eligible pending constraints
+    /// already own that motion before native pressure barriers.
+    fn new_constraint(&mut self, _surface: &WlSurface, _pointer: &PointerHandle<Self>) {}
 
     fn cursor_position_hint(
         &mut self,
