@@ -1,0 +1,400 @@
+--- a/clutter/clutter/clutter-frame-clock.c
++++ b/clutter/clutter/clutter-frame-clock.c
+@@ -125,6 +125,7 @@
+ 
+   Frame frame_pool[3];
+   Frame *prev_dispatch;
++  guint capture_depth;
+   Frame *next_presentation;
+   Frame *next_next_presentation;
+   Frame *prev_presentation;
+@@ -185,6 +186,21 @@
+ static void
+ clutter_frame_clock_schedule_update_later (ClutterFrameClock *frame_clock,
+                                            int64_t            target_us);
++
++typedef struct { ClutterFrameClock *clock; } CaptureScope;
++static CaptureScope
++capture_scope_enter (ClutterFrameClock *clock)
++{
++  clock->capture_depth++;
++  return (CaptureScope) { clock };
++}
++static void
++capture_scope_clear (CaptureScope *scope)
++{
++  g_assert (scope->clock->capture_depth > 0);
++  scope->clock->capture_depth--;
++}
++G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (CaptureScope, capture_scope_clear)
+ 
+ static const char *
+ clutter_frame_clock_state_to_string (ClutterFrameClockState state)
+@@ -623,6 +639,7 @@
+ clutter_frame_clock_notify_presented (ClutterFrameClock *frame_clock,
+                                       ClutterFrameInfo  *frame_info)
+ {
++  g_auto (CaptureScope) capture_scope G_GNUC_UNUSED = capture_scope_enter (frame_clock);
+   Frame *presented_frame;
+   const char *frr_or_vrr =
+     frame_clock->mode == CLUTTER_FRAME_CLOCK_MODE_VARIABLE ? "VRR" : "FRR";
+@@ -932,6 +949,7 @@
+ void
+ clutter_frame_clock_notify_ready (ClutterFrameClock *frame_clock)
+ {
++  g_auto (CaptureScope) capture_scope G_GNUC_UNUSED = capture_scope_enter (frame_clock);
+   COGL_TRACE_BEGIN_SCOPED (ClutterFrameClockNotifyReady, "Clutter::FrameClock::ready()");
+   COGL_TRACE_DESCRIBE (ClutterFrameClockNotifyReady, frame_clock->output_name);
+ 
+@@ -1816,6 +1834,7 @@
+ clutter_frame_clock_dispatch (ClutterFrameClock *frame_clock,
+                               int64_t            time_us)
+ {
++  g_auto (CaptureScope) capture_scope G_GNUC_UNUSED = capture_scope_enter (frame_clock);
+   const ClutterFrameListenerIface *iface = frame_clock->listener.iface;
+   g_autoptr (ClutterFrame) frame = NULL;
+   int64_t frame_count;
+@@ -2289,3 +2308,16 @@
+ 
+   clear_source (frame_clock);
+ }
++
++/* Diagnostic-only observer; does not inhibit, schedule, or mutate a frame. */
++void
++clutter_frame_clock_get_capture_state (ClutterFrameClock *clock,
++                                       ClutterFrameClockCaptureState *state)
++{
++  state->output = clock->output_name;
++  state->next_counter = clock->frame_count;
++  state->pending = (!!clock->next_presentation) + (!!clock->next_next_presentation);
++  state->depth = clock->capture_depth;
++  state->dispatched = clock->state >= CLUTTER_FRAME_CLOCK_STATE_DISPATCHED_ONE;
++  state->state = clutter_frame_clock_state_to_string (clock->state);
++}
+--- a/clutter/clutter/clutter-frame-clock.h
++++ b/clutter/clutter/clutter-frame-clock.h
+@@ -150,3 +150,17 @@
+ CLUTTER_EXPORT
+ ClutterFrameResult clutter_frame_clock_dispatch (ClutterFrameClock *frame_clock,
+                                                  int64_t            time_us);
++
++/* CI diagnostic acquisition snapshot of actual presentation ownership. */
++typedef struct
++{
++  const char *output;
++  const char *state;
++  int64_t next_counter;
++  guint pending;
++  guint depth;
++  gboolean dispatched;
++} ClutterFrameClockCaptureState;
++CLUTTER_EXPORT
++void clutter_frame_clock_get_capture_state (ClutterFrameClock *clock,
++                                            ClutterFrameClockCaptureState *state);
+--- a/src/core/meta-context.c
++++ b/src/core/meta-context.c
+@@ -380,7 +380,7 @@
+     }
+ 
+ #ifdef HAVE_PROFILER
+-  priv->profiler = meta_profiler_new (priv->trace_file);
++  priv->profiler = meta_profiler_new (context, priv->trace_file);
+ #endif
+ 
+   priv->state = META_CONTEXT_STATE_CONFIGURED;
+--- a/src/core/meta-profiler.c
++++ b/src/core/meta-profiler.c
+@@ -20,10 +20,14 @@
+ #include "src/core/meta-profiler.h"
+ 
+ #include <glib-unix.h>
++#include <unistd.h>
+ #include <glib/gi18n.h>
+ #include <gio/gunixfdlist.h>
+ 
+ #include "cogl/cogl.h"
++#include "clutter/clutter-mutter.h"
++#include "clutter/clutter-frame-clock.h"
++#include "meta/meta-backend.h"
+ 
+ #define META_SYSPROF_PROFILER_DBUS_PATH "/org/gnome/Sysprof3/Profiler"
+ 
+@@ -33,6 +37,8 @@
+   char *name;
+ } ThreadInfo;
+ 
++typedef struct _CaptureGate CaptureGate;
++
+ struct _MetaProfiler
+ {
+   MetaDBusSysprof3ProfilerSkeleton parent_instance;
+@@ -40,6 +46,9 @@
+   GMainContext *main_thread_context;
+   GDBusConnection *connection;
+   GCancellable *cancellable;
++
++  GWeakRef context;
++  CaptureGate *capture_gate;
+ 
+   gboolean persistent;
+   gboolean running;
+@@ -77,8 +86,10 @@
+   return thread_info;
+ }
+ 
++static void emit_capture_boundary (MetaProfiler *profiler);
++
+ static gboolean
+-handle_start (MetaDBusSysprof3Profiler *dbus_profiler,
++handle_start_now (MetaDBusSysprof3Profiler *dbus_profiler,
+               GDBusMethodInvocation    *invocation,
+               GUnixFDList              *fd_list,
+               GVariant                 *options,
+@@ -136,6 +147,17 @@
+   cogl_set_tracing_enabled_on_thread (profiler->main_thread_context,
+                                       group_name);
+ 
++  if (profiler->capture_gate && !cogl_is_tracing_enabled ())
++    {
++      /* No worker enable has been queued yet. Release the new writer and
++       * reject acquisition instead of terminating the compositor. */
++      cogl_stop_tracing ();
++      g_dbus_method_invocation_return_error (invocation, G_DBUS_ERROR,
++                                             G_DBUS_ERROR_FAILED,
++                                             "Main-thread capture tracing failed to enable");
++      return G_DBUS_METHOD_INVOCATION_HANDLED;
++    }
++
+   g_mutex_lock (&profiler->mutex);
+   for (l = profiler->threads; l; l = l->next)
+     {
+@@ -151,10 +173,180 @@
+   g_mutex_unlock (&profiler->mutex);
+ 
+   profiler->running = TRUE;
++  if (profiler->capture_gate)
++    emit_capture_boundary (profiler);
+ 
+   g_debug ("Profiler running");
+ 
+   meta_dbus_sysprof3_profiler_complete_start (dbus_profiler, invocation, NULL);
++  return TRUE;
++}
++
++struct _CaptureGate
++{
++  MetaProfiler *profiler;
++  GDBusMethodInvocation *invocation;
++  GUnixFDList *fd_list;
++  GVariant *options;
++  GVariant *fd_variant;
++  ClutterStage *stage;
++  ClutterStageView *view;
++  ClutterFrameClock *clock;
++  gint64 requested_us;
++  guint samples;
++};
++
++static void
++capture_gate_free (gpointer data)
++{
++  CaptureGate *gate = data;
++  gate->profiler->capture_gate = NULL;
++  g_clear_object (&gate->stage);
++  g_clear_object (&gate->view);
++  g_clear_object (&gate->clock);
++  g_clear_object (&gate->invocation);
++  g_clear_object (&gate->fd_list);
++  g_variant_unref (gate->options);
++  g_variant_unref (gate->fd_variant);
++  g_object_unref (gate->profiler);
++  g_free (gate);
++}
++
++static void
++emit_capture_boundary (MetaProfiler *profiler)
++{
++  CaptureGate *gate = profiler->capture_gate;
++  ClutterFrameClockCaptureState state;
++  g_autofree char *description = NULL;
++  clutter_frame_clock_get_capture_state (gate->clock, &state);
++  /* Same main-context callback: no dispatch may intervene after drain. */
++  g_assert (g_main_context_is_owner (profiler->main_thread_context));
++  g_assert (!state.pending && !state.depth && !state.dispatched);
++  description = g_strdup_printf ("output=%s clock=%p next=%" G_GINT64_FORMAT
++                                  " pending=%u depth=%u dispatched=%d state=%s"
++                                  " requested_us=%" G_GINT64_FORMAT " enabled_us=%" G_GINT64_FORMAT
++                                  " samples=%u",
++                                  state.output, gate->clock, state.next_counter,
++                                  state.pending, state.depth, state.dispatched, state.state,
++                                  gate->requested_us, g_get_monotonic_time (), gate->samples);
++  COGL_TRACE_MESSAGE ("Roost::CaptureBoundary", description);
++}
++
++static gboolean
++capture_gate_tick (gpointer data)
++{
++  CaptureGate *gate = data;
++  MetaProfiler *profiler = gate->profiler;
++  g_autoptr (MetaContext) context = g_weak_ref_get (&profiler->context);
++  MetaBackend *backend = context ? meta_context_get_backend (context) : NULL;
++  ClutterActor *actor = backend ? meta_backend_get_stage (backend) : NULL;
++  GList *views = actor ? clutter_stage_peek_stage_views (CLUTTER_STAGE (actor)) : NULL;
++  ClutterFrameClockCaptureState state;
++  gint64 now = g_get_monotonic_time ();
++  gate->samples++;
++  if (!g_main_context_is_owner (profiler->main_thread_context) || !actor ||
++      CLUTTER_STAGE (actor) != gate->stage || !views || views->next ||
++      views->data != gate->view || clutter_stage_view_get_frame_clock (gate->view) != gate->clock)
++    {
++      g_dbus_method_invocation_return_error (gate->invocation, G_DBUS_ERROR,
++                                             G_DBUS_ERROR_FAILED, "Owned capture stage/view/clock changed");
++      return G_SOURCE_REMOVE;
++    }
++  clutter_frame_clock_get_capture_state (gate->clock, &state);
++  if (!state.output || strcmp (state.output, "Virtual-1") || state.next_counter < 0)
++    {
++      g_dbus_method_invocation_return_error (gate->invocation, G_DBUS_ERROR,
++                                             G_DBUS_ERROR_FAILED, "Capture requires one actual Virtual-1 frame clock");
++      return G_SOURCE_REMOVE;
++    }
++  if (now - gate->requested_us >= 5 * G_USEC_PER_SEC || gate->samples > 5000)
++    {
++      g_dbus_method_invocation_return_error (gate->invocation, G_DBUS_ERROR,
++                                             G_DBUS_ERROR_TIMED_OUT,
++                                             "No actual drain in 5s: pending=%u depth=%u dispatched=%d state=%s samples=%u",
++                                             state.pending, state.depth, state.dispatched, state.state, gate->samples);
++      return G_SOURCE_REMOVE;
++    }
++  if (state.pending || state.depth || state.dispatched)
++    return G_SOURCE_CONTINUE;
++  /* Cogl's same-thread fast path compares the thread-default pointer,
++   * not merely context ownership. Push this owned context so enabling is
++   * synchronous before the raw boundary; restore the original afterwards. */
++  g_main_context_push_thread_default (profiler->main_thread_context);
++  handle_start_now (META_DBUS_SYSPROF3_PROFILER (profiler), gate->invocation,
++                    gate->fd_list, gate->options, gate->fd_variant);
++  g_main_context_pop_thread_default (profiler->main_thread_context);
++  return G_SOURCE_REMOVE;
++}
++
++static gboolean
++handle_start (MetaDBusSysprof3Profiler *dbus_profiler,
++              GDBusMethodInvocation *invocation,
++              GUnixFDList *fd_list,
++              GVariant *options,
++              GVariant *fd_variant)
++{
++  MetaProfiler *profiler = META_PROFILER (dbus_profiler);
++  g_autoptr (GVariant) option = g_variant_lookup_value (options, "roost-require-drained", NULL);
++  g_autoptr (MetaContext) context = NULL;
++  MetaBackend *backend;
++  ClutterActor *actor;
++  GList *views;
++  CaptureGate *gate;
++  GSource *source;
++  g_autoptr (GError) fd_error = NULL;
++  int position;
++  int checked_fd;
++  if (profiler->capture_gate)
++    {
++      g_dbus_method_invocation_return_error (invocation, G_DBUS_ERROR,
++                                             G_DBUS_ERROR_FAILED, "Capture Start already pending");
++      return TRUE;
++    }
++  if (!option || (g_variant_is_of_type (option, G_VARIANT_TYPE_BOOLEAN) && !g_variant_get_boolean (option)))
++    return handle_start_now (dbus_profiler, invocation, fd_list, options, fd_variant);
++  if (!g_variant_is_of_type (option, G_VARIANT_TYPE_BOOLEAN) || profiler->running || !fd_list)
++    {
++      g_dbus_method_invocation_return_error (invocation, G_DBUS_ERROR,
++                                             G_DBUS_ERROR_FAILED, "Invalid drained Start or profiler already running");
++      return TRUE;
++    }
++  g_variant_get (fd_variant, "h", &position);
++  checked_fd = g_unix_fd_list_get (fd_list, position, &fd_error);
++  if (checked_fd == -1)
++    {
++      g_dbus_method_invocation_return_error (invocation, G_DBUS_ERROR,
++                                             G_DBUS_ERROR_INVALID_ARGS,
++                                             "Invalid drained capture handle: %s",
++                                             fd_error ? fd_error->message : "no descriptor");
++      return TRUE;
++    }
++  close (checked_fd);
++  context = g_weak_ref_get (&profiler->context);
++  backend = context ? meta_context_get_backend (context) : NULL;
++  actor = backend ? meta_backend_get_stage (backend) : NULL;
++  views = actor ? clutter_stage_peek_stage_views (CLUTTER_STAGE (actor)) : NULL;
++  if (!actor || !views || views->next || !clutter_stage_view_get_frame_clock (views->data))
++    {
++      g_dbus_method_invocation_return_error (invocation, G_DBUS_ERROR,
++                                             G_DBUS_ERROR_FAILED, "Drained Start requires one actual owned stage view");
++      return TRUE;
++    }
++  gate = g_new0 (CaptureGate, 1);
++  gate->profiler = g_object_ref (profiler);
++  gate->invocation = g_object_ref (invocation);
++  gate->fd_list = g_object_ref (fd_list);
++  gate->options = g_variant_ref (options);
++  gate->fd_variant = g_variant_ref (fd_variant);
++  gate->stage = g_object_ref (CLUTTER_STAGE (actor));
++  gate->view = g_object_ref (views->data);
++  gate->clock = g_object_ref (clutter_stage_view_get_frame_clock (gate->view));
++  gate->requested_us = g_get_monotonic_time ();
++  profiler->capture_gate = gate;
++  source = g_timeout_source_new (1);
++  g_source_set_callback (source, capture_gate_tick, gate, capture_gate_free);
++  g_source_attach (source, profiler->main_thread_context);
++  g_source_unref (source);
+   return TRUE;
+ }
+ 
+@@ -258,6 +450,7 @@
+   g_clear_object (&self->cancellable);
+   g_clear_object (&self->connection);
+   g_mutex_clear (&self->mutex);
++  g_weak_ref_clear (&self->context);
+   g_list_free_full (self->threads, (GDestroyNotify) thread_info_free);
+   g_clear_pointer (&self->main_thread_context, g_main_context_unref);
+ 
+@@ -276,6 +469,7 @@
+ meta_profiler_init (MetaProfiler *self)
+ {
+   g_mutex_init (&self->mutex);
++  g_weak_ref_init (&self->context, NULL);
+   self->cancellable = g_cancellable_new ();
+ 
+   g_bus_get (G_BUS_TYPE_SESSION,
+@@ -285,11 +479,12 @@
+ }
+ 
+ MetaProfiler *
+-meta_profiler_new (const char *trace_file)
++meta_profiler_new (MetaContext *context, const char *trace_file)
+ {
+   MetaProfiler *profiler;
+ 
+   profiler = g_object_new (META_TYPE_PROFILER, NULL);
++  g_weak_ref_set (&profiler->context, context);
+ 
+   profiler->main_thread_context =
+     g_main_context_ref_thread_default ();
+--- a/src/core/meta-profiler.h
++++ b/src/core/meta-profiler.h
+@@ -18,6 +18,7 @@
+ #pragma once
+ 
+ #include <glib-object.h>
++#include "meta/meta-context.h"
+ 
+ #include "meta-dbus-sysprof3-profiler.h"
+ 
+@@ -31,7 +32,7 @@
+                       PROFILER,
+                       MetaDBusSysprof3ProfilerSkeleton)
+ 
+-MetaProfiler * meta_profiler_new (const char *trace_file);
++MetaProfiler * meta_profiler_new (MetaContext *context, const char *trace_file);
+ 
+ void meta_profiler_register_thread (MetaProfiler *profiler,
+                                     GMainContext *main_context,

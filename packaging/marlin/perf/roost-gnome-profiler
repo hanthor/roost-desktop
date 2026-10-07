@@ -135,15 +135,18 @@ def main():
 
     if args.action == "start":
         libraries = mutter_libraries_provenance(pid)
+        if any(value["package"] != "mutter 51.0-1.2.1" for value in libraries.values()):
+            raise RuntimeError("drained acquisition requires the exact CI diagnostic package")
         descriptor = os.open(capture, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         started = False
         try:
             descriptors = Gio.UnixFDList.new()
             index = descriptors.append(descriptor)
+            requested = time.monotonic_ns()
             bus.call_with_unix_fd_list_sync(
                 owner, OBJECT, INTERFACE, "Start",
-                GLib.Variant("(a{sv}h)", ({}, index)), GLib.VariantType.new("()"),
-                Gio.DBusCallFlags.NONE, 5000, descriptors, None)
+                GLib.Variant("(a{sv}h)", ({"roost-require-drained": GLib.Variant("b", True)}, index)), GLib.VariantType.new("()"),
+                Gio.DBusCallFlags.NONE, 10000, descriptors, None)
             started = True
             with marker.open("x") as stream:
                 os.chmod(marker, 0o600)
@@ -151,6 +154,8 @@ def main():
                            "gnome_shell_version": version,
                            "mutter_cogl_library": libraries["cogl"],
                            "mutter_mapped_libraries": libraries,
+                           "start_requested_monotonic_ns": requested,
+                           "drained_start_required": True,
                            "started_monotonic_ns": time.monotonic_ns()}, stream)
         except BaseException:
             # Never stop somebody else's profile when Start itself failed.

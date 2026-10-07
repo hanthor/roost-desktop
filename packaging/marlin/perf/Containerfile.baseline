@@ -34,16 +34,16 @@ RUN pacman -S --needed --noconfirm base-devel git sudo && \
     cd /build/mutter-profiler && \
     runuser -u profiler-builder -- makepkg --syncdeps --noconfirm --cleanbuild && \
     mkdir /profiler-package && \
-    cp mutter-51.0-1.2-x86_64.pkg.tar.zst /profiler-package/ && \
-    cp PKGBUILD release-trace-context.patch frame-source-evidence.patch /profiler-package/ && \
+    cp mutter-51.0-1.2.1-x86_64.pkg.tar.zst /profiler-package/ && \
+    cp PKGBUILD release-trace-context.patch frame-source-evidence.patch drained-capture-start.patch /profiler-package/ && \
     cd /profiler-package && \
-    sha256sum PKGBUILD release-trace-context.patch frame-source-evidence.patch mutter-51.0-1.2-x86_64.pkg.tar.zst > sha256sums
+    sha256sum PKGBUILD release-trace-context.patch frame-source-evidence.patch drained-capture-start.patch mutter-51.0-1.2.1-x86_64.pkg.tar.zst > sha256sums
 
 FROM gnome-baseline
 COPY --from=mutter-profiler-build /profiler-package /usr/share/roost-perf-mutter-profiler
 RUN cd /usr/share/roost-perf-mutter-profiler && sha256sum -c sha256sums && \
-    pacman -U --noconfirm mutter-51.0-1.2-x86_64.pkg.tar.zst && \
-    pacman -Q mutter | grep -qx 'mutter 51.0-1.2' && \
+    pacman -U --noconfirm mutter-51.0-1.2.1-x86_64.pkg.tar.zst && \
+    pacman -Q mutter | grep -qx 'mutter 51.0-1.2.1' && \
     pacman -Q > /tmp/roost-baseline-packages.txt && \
     LC_ALL=C sort /tmp/roost-baseline-packages.txt > /usr/share/roost-perf-baseline-packages.txt && \
     pacman -Qlq linux mutter > /tmp/roost-baseline-critical-files.txt && \

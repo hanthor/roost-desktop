@@ -69,7 +69,7 @@ jobs:
           grep -Eq '^GNOME Shell 51([. ]|$)' gnome-version
           sudo podman run --rm localhost/marlin-roost-preview:perf pacman -Q | tee baseline-packages.txt
           sudo podman run --rm localhost/marlin-roost-preview:perf cat /usr/share/roost-perf-baseline-critical.sha256 > perf-artifacts/baseline-critical.sha256
-          for file in PKGBUILD release-trace-context.patch frame-source-evidence.patch sha256sums; do
+          for file in PKGBUILD release-trace-context.patch frame-source-evidence.patch drained-capture-start.patch sha256sums; do
             sudo podman run --rm localhost/marlin-roost-preview:perf cat "/usr/share/roost-perf-mutter-profiler/$file" > "perf-artifacts/mutter-profiler-$file"
           done
       - name: Measure GNOME then Roost on this same host
