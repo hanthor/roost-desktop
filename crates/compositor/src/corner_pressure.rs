@@ -81,12 +81,12 @@ impl CornerPressure {
                     continue;
                 }
                 let x = f64::from(rect.loc.x) + if rtl { f64::from(rect.size.w) } else { 0.0 };
-                let beside = (
+                let beside: Point<f64, Logical> = (
                     f64::from(rect.loc.x) + if rtl { 1.0 } else { -1.0 },
                     f64::from(rect.loc.y),
                 )
                     .into();
-                let above = (x, f64::from(rect.loc.y) - 1.0).into();
+                let above: Point<f64, Logical> = (x, f64::from(rect.loc.y) - 1.0).into();
                 if primary
                     || !layout.iter().enumerate().any(|(other_index, (other, _))| {
                         index != other_index
