@@ -15,7 +15,8 @@ import xml.etree.ElementTree as ET
 import pyatspi
 import gi
 gi.require_version('GdkPixbuf','2.0')
-from gi.repository import Gio, GLib, GdkPixbuf
+gi.require_version('Gly','2')
+from gi.repository import Gio, GLib, GdkPixbuf, Gly
 OUT=Path('/out')
 STATE=OUT/'compositor-state.json'
 BUS=Gio.bus_get_sync(Gio.BusType.SESSION,None)
@@ -89,46 +90,121 @@ def controls(process, original, label):
     return found
 
 def activate_chooser(control, process, original, label):
-    # GNOME's chooser is GtkFlowBoxChild with an overridden accessible role.
-    # Its generic Action indices enumerate muxer actions, not child::activate.
-    # Retain that real inventory and activate the documented Enter keybinding.
+    # GNOME51's two chooser FlowBoxes explicitly activate on a single click.
+    # GTK4 supports window-relative bounds/hit queries, but neither GrabFocus
+    # nor ScrollTo. Use actual pointer input after checking the real viewport.
     action = control.queryAction()
     actions = [action.getName(i) for i in range(action.nActions)]
+    ancestors = []
+    node = control
+    for _ in range(32):
+        node = node.parent
+        if node is None:
+            break
+        ancestors.append(node)
+        if node.getRoleName() == 'frame':
+            break
+    frames = [n for n in ancestors if n.getRoleName() == 'frame']
+    panes = [n for n in ancestors if n.getRoleName() == 'scroll pane']
+    if len(frames) != 1 or not panes:
+        raise RuntimeError('chooser lacks actual bounded frame/scroll viewport')
+    frame, pane = frames[0], panes[0]
+    hosts = subprocess.check_output(['xdotool', 'search', '--onlyvisible', '--name', '^Smithay'], text=True).split()
+    if len(hosts) != 1:
+        raise RuntimeError('expected exactly one actual Smithay pointer host')
+    host = hosts[0]
+    pid = int(subprocess.check_output(['xdotool', 'getwindowpid', host], text=True))
+    def host_guard():
+        guard(process, original)
+        executable = Path(f'/proc/{pid}/exe').resolve(strict=True)
+        actual = {'pid': pid, 'executable': str(executable),
+                  'start_ticks': Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[19],
+                  'sha256': hashlib.sha256(executable.read_bytes()).hexdigest()}
+        if actual != ORIGINAL_HOST or scene().get('focused_app_id') != NAME:
+            raise RuntimeError('original compositor/Settings pointer identity changed')
+        if int(subprocess.check_output(['xdotool', 'getwindowfocus'], text=True)) != int(host):
+            raise RuntimeError('actual Smithay host does not own X input focus')
+        return actual
+    subprocess.run(['xdotool', 'windowfocus', '--sync', host], check=True, timeout=5)
+    geometry = dict(line.split('=', 1) for line in subprocess.check_output(
+        ['xdotool', 'getwindowgeometry', '--shell', host], text=True).splitlines())
+    def bounds(node):
+        node.clear_cache()
+        r = node.queryComponent().getExtents(pyatspi.WINDOW_COORDS)
+        return [r.x, r.y, r.width, r.height]
+    def measured():
+        host_guard()
+        fx, fy, fw, fh = scene()['focused_rect']
+        r, v = bounds(control), bounds(pane)
+        if min(r[2:]) <= 0 or min(v[2:]) <= 0:
+            raise RuntimeError('actual chooser/viewport has invalid bounds')
+        left, top = max(0, v[0]), max(0, v[1])
+        right, bottom = min(fw, v[0]+v[2]), min(fh, v[1]+v[3])
+        if right-left < 8 or bottom-top < 8:
+            raise RuntimeError('actual scroll viewport is outside Settings')
+        (OUT/f'{label}-pointer-measurement.json').write_text(json.dumps({
+            'target': control.name, 'bounds': r, 'viewport_bounds': v,
+            'focused_rect': [fx, fy, fw, fh], 'scene': scene()}, indent=2))
+        return r, [left, top, right, bottom], [fx, fy, fw, fh]
+    scrolls = []
+    for _ in range(24):
+        r, v, focused_rect = measured()
+        cx, cy = r[0]+r[2]//2, r[1]+r[3]//2
+        if v[0]+2 <= cx < v[2]-2 and v[1]+2 <= cy < v[3]-2:
+            break
+        if not v[0] <= cx < v[2]:
+            raise RuntimeError('actual chooser requires unsupported horizontal scrolling')
+        direction = 5 if cy >= v[3]-2 else 4
+        wx, wy = focused_rect[0]+(v[0]+v[2])//2, focused_rect[1]+(v[1]+v[3])//2
+        if not (0 <= wx < int(geometry['WIDTH']) and 0 <= wy < int(geometry['HEIGHT'])):
+            raise RuntimeError('actual scroll point is outside the original host')
+        before = r
+        host_guard()
+        subprocess.run(['xdotool', 'mousemove', '--window', host, str(wx), str(wy), 'click', str(direction)], check=True)
+        wait_for(lambda: bounds(control) != before, 'genuine wheel did not change actual chooser bounds', 3)
+        after, _, _ = measured()
+        if (direction == 5 and after[1] >= before[1]) or (direction == 4 and after[1] <= before[1]):
+            raise RuntimeError('genuine wheel did not move the target toward its viewport')
+        scrolls.append({'before': before, 'after': after, 'wheel': direction, 'host_point': [wx, wy]})
+    else:
+        raise RuntimeError('actual chooser did not enter viewport within the bounded wheel budget')
     control.clear_cache()
     if not control.getState().contains(pyatspi.STATE_SHOWING):
         raise RuntimeError('actual chooser target is not showing')
-    if not control.queryComponent().grabFocus():
-        raise RuntimeError('actual chooser target refused focus')
-    def focused():
-        guard(process, original)
-        control.clear_cache()
-        return (control.getState().contains(pyatspi.STATE_FOCUSED)
-                and scene().get('focused_app_id') == NAME)
-    wait_for(focused, 'actual chooser target did not acquire focus')
-    hosts = subprocess.check_output(['xdotool', 'search', '--onlyvisible', '--name', '^Smithay'], text=True).split()
-    if len(hosts) != 1:
-        raise RuntimeError('expected exactly one actual Smithay keyboard host')
-    host = hosts[0]
-    pid = int(subprocess.check_output(['xdotool', 'getwindowpid', host], text=True))
-    executable = Path(f'/proc/{pid}/exe').resolve(strict=True)
-    start = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[19]
-    actual = {'pid': pid, 'executable': str(executable), 'start_ticks': start,
-              'sha256': hashlib.sha256(executable.read_bytes()).hexdigest()}
-    if actual != ORIGINAL_HOST:
-        raise RuntimeError('keyboard host identity changed from the original candidate compositor')
-    subprocess.run(['xdotool', 'windowfocus', '--sync', host], check=True, timeout=5)
-    actual_focus = int(subprocess.check_output(['xdotool', 'getwindowfocus'], text=True))
-    if actual_focus != int(host) or not focused():
-        raise RuntimeError('actual host/chooser focus changed before the key')
-    (OUT/f'{label}-keyboard-host.json').write_text(json.dumps({
-        'host': actual, 'window': int(host), 'actual_x_focus': actual_focus,
-        'target': control.name, 'actions': actions, 'target_focused': True,
-        'scene_before_key': scene(), 'settings_identity': original}, indent=2))
-    # One genuine event, without SendEvent, direct setters, retries or replay.
-    subprocess.run(['xdotool', 'key', 'Return'], check=True)
-    guard(process, original)
-    if Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[19] != start:
-        raise RuntimeError('keyboard host changed during the key')
+    hit = frame.queryComponent().getAccessibleAtPoint(cx, cy, pyatspi.WINDOW_COORDS)
+    hit_chain = []
+    for _ in range(32):
+        if hit is None:
+            break
+        hit_chain.append({'name': hit.name, 'role': hit.getRoleName()})
+        if hit == control:
+            break
+        hit = hit.parent
+    else:
+        raise RuntimeError('bounded actual pointer hit ancestry exceeded')
+    (OUT/f'{label}-pointer-hit.json').write_text(json.dumps({
+        'target': control.name, 'window_point': [cx, cy],
+        'hit_chain': hit_chain, 'matches_target': hit == control}, indent=2))
+    if hit != control:
+        raise RuntimeError('actual pointer hit does not identify the unique chooser target')
+    fx, fy, _, _ = focused_rect
+    x, y = fx+cx, fy+cy
+    if not (0 <= x < int(geometry['WIDTH']) and 0 <= y < int(geometry['HEIGHT'])):
+        raise RuntimeError('actual chooser click is outside the original host')
+    actual = host_guard()
+    subprocess.run(['scrot', '-o', str(OUT/f'{label}-before-click.png')], check=True)
+    (OUT/f'{label}-pointer-host.json').write_text(json.dumps({
+        'host': actual, 'window': int(host), 'actual_x_focus': int(host),
+        'target': control.name, 'actions': actions, 'target_bounds': r,
+        'viewport': v, 'hit_chain': hit_chain, 'scrolls': scrolls,
+        'click': [x, y], 'scene_before_click': scene(),
+        'settings_identity': original, 'activation_contract': 'single-click'}, indent=2))
+    host_guard()
+    if measured() != (r, v, focused_rect):
+        raise RuntimeError('actual target/viewport moved before the single click')
+    # Exactly one genuine selection click. Wheel setup never activates a tile.
+    subprocess.run(['xdotool', 'mousemove', '--window', host, str(x), str(y), 'click', '1'], check=True)
+    host_guard()
 
 
 def write_svg(style, color):
@@ -173,11 +249,9 @@ def select(style,choose=False):
         def activate(target,chooser=False):
             wait_for(lambda:find(target) is not None,'actual Settings control missing: '+target,30)
             control=find(target);control.clear_cache()
-            if not control.getState().contains(pyatspi.STATE_SHOWING):
-                control.queryComponent().scrollTo(pyatspi.SCROLL_ANYWHERE);drain();control.clear_cache()
-            if not control.getState().contains(pyatspi.STATE_SHOWING):raise RuntimeError('actual control not showing')
             if chooser:activate_chooser(control,process,original,PHASE+'-'+style)
             else:
+                if not control.getState().contains(pyatspi.STATE_SHOWING):raise RuntimeError('actual style control not showing')
                 action=control.queryAction()
                 if action.nActions!=1 or action.getName(0)!='click' or not action.doAction(0):
                     raise RuntimeError('actual style button action failed')
@@ -200,9 +274,14 @@ def select(style,choose=False):
 
 
 def pixels(style,label):
-    # Independent real installed GdkPixbuf reference, not the candidate helper.
-    source=SVG[style].read_bytes();loader=GdkPixbuf.PixbufLoader.new_with_type('svg')
-    loader.write(source);loader.close();reference=loader.get_pixbuf()
+    # Independent real installed Glycin stream API exactly as GNOME Shell51.
+    # GdkPixbuf supplies the separate actual Settings chooser and PNG reader.
+    source=SVG[style].read_bytes()
+    loader=Gly.Loader.new_for_stream(Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(source)))
+    loader.set_accepted_memory_formats(Gly.MemoryFormatSelection.R8G8B8A8)
+    image=loader.load();frame=image.next_frame()
+    if frame.get_memory_format()!=Gly.MemoryFormat.R8G8B8A8:raise RuntimeError('wrong actual Glycin reference memory format')
+    reference=GdkPixbuf.Pixbuf.new_from_bytes(frame.get_buf_bytes(),GdkPixbuf.Colorspace.RGB,True,8,frame.get_width(),frame.get_height(),frame.get_stride())
     if reference.get_width()!=1280 or reference.get_height()!=800:raise RuntimeError('actual SVG intrinsic/viewBox reference changed')
     reference.savev(str(OUT/f'{PHASE}-{label}-reference.png'),'png',[],[])
     ref=reference.get_pixels();rs=reference.get_rowstride();rc=reference.get_n_channels()

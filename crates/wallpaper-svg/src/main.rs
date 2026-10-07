@@ -1,5 +1,8 @@
 //! The compositor never initializes GdkPixbuf, librsvg or FontConfig. This
 //! single-use process decodes a stream without a base URI, like GNOME's loader.
+mod modern;
+mod provenance;
+
 use gdk_pixbuf::prelude::*;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
@@ -24,6 +27,16 @@ fn main() {
 }
 
 fn limits() -> Result<(), Box<dyn std::error::Error>> {
+    // Bind the helper to its caller. Actual Glycin/bwrap binds its monitor
+    // and PID-namespace child with --die-with-parent; other native paths use
+    // PDEATHSIG. Killing our helper tears down those owned descendants too.
+    let parent = unsafe { libc::getppid() };
+    if parent == 1
+        || unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } != 0
+        || unsafe { libc::getppid() } != parent
+    {
+        return Err("caller lifecycle unavailable".into());
+    }
     for (resource, soft, hard) in [
         (libc::RLIMIT_AS, 1024 * 1024 * 1024, 1024 * 1024 * 1024),
         (libc::RLIMIT_CPU, 4, 5),
@@ -59,19 +72,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Err("input bound".into());
         }
     }
-    let loader = gdk_pixbuf::PixbufLoader::with_type("svg")?;
-    loader.connect_size_prepared(|_, w, h| {
-        // This signal precedes allocation. Never silently resize a valid SVG.
-        if w <= 0 || h <= 0 || w as u64 * h as u64 > MAX_PIXELS {
-            eprintln!("roost-wallpaper-svg: intrinsic dimension bound");
-            std::process::exit(1);
-        }
-    });
-    loader.write(&bytes)?;
-    loader.close()?;
-    let pixbuf = loader.pixbuf().ok_or("missing pixels")?;
+    let decoded = modern::decode(&bytes)?;
+    let pixbuf = if let Some(decoded) = decoded.as_ref() {
+        decoded.pixbuf.clone()
+    } else {
+        let loader = gdk_pixbuf::PixbufLoader::with_type("svg")?;
+        loader.connect_size_prepared(|_, w, h| {
+            // This signal precedes allocation. Never silently resize a valid SVG.
+            if w <= 0 || h <= 0 || w as u64 * h as u64 > MAX_PIXELS {
+                eprintln!("roost-wallpaper-svg: intrinsic dimension bound");
+                std::process::exit(1);
+            }
+        });
+        loader.write(&bytes)?;
+        loader.close()?;
+        loader.pixbuf().ok_or("missing pixels")?
+    };
     if identity {
-        let receipt = backend_identity()?;
+        let receipt = backend_identity(decoded.is_some())?;
         if argument.as_deref() == Some("--receipt") {
             println!("{receipt}");
         } else {
@@ -91,6 +109,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if w <= 0
         || h <= 0
         || w as u64 * h as u64 > MAX_PIXELS
+        || pixbuf.colorspace() != gdk_pixbuf::Colorspace::Rgb
+        || pixbuf.has_alpha() != (channels == 4)
         || pixbuf.bits_per_sample() != 8
         || !matches!(channels, 3 | 4)
         || stride < w.checked_mul(channels).ok_or("stride overflow")?
@@ -156,10 +176,11 @@ unsafe extern "C" {
     ) -> libc::c_int;
 }
 
-fn backend_identity() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+fn backend_identity(modern: bool) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     use std::{collections::BTreeSet, ffi::CStr, os::unix::ffi::OsStrExt};
     let mut paths = BTreeSet::new();
     paths.insert(std::env::current_exe()?);
+    let processors = provenance::observe(&mut paths, modern)?;
     // Actual mapped helper/loader/native libraries, including the dynamically
     // selected SVG module. The compositor observes this receipt off-thread.
     for line in std::fs::read_to_string("/proc/self/maps")?.lines() {
@@ -278,6 +299,6 @@ fn backend_identity() -> Result<serde_json::Value, Box<dyn std::error::Error>> {
         resources.push(serde_json::json!({"path":path.to_string_lossy(),"bytes":length,"sha256":format!("{:x}",file_hash.finalize())}));
     }
     Ok(
-        serde_json::json!({"kind":"actual SVG stream loader, mapped libraries and FontConfig resources", "sha256":format!("{:x}",hash.finalize()), "resources":resources}),
+        serde_json::json!({"kind":"actual no-base SVG stream loader, owned processors, mapped libraries and FontConfig resources", "sha256":format!("{:x}",hash.finalize()), "resources":resources,"processors":processors,"modern_glycin":modern}),
     )
 }

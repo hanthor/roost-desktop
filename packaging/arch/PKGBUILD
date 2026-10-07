@@ -20,6 +20,7 @@ depends=(
     'glib2'
     'gdk-pixbuf2'
     'librsvg'
+    'glycin'
     'fontconfig'
     'adwaita-fonts'
     'gtk4'

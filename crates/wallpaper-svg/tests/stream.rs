@@ -51,8 +51,6 @@ fn actual_svg_loader_intrinsic_viewbox_css_internal_use_and_alpha() {
 fn actual_svg_loader_text_uses_native_fonts_and_stream_has_no_base_uri() {
     let pixels = rgba(b"<svg xmlns='http://www.w3.org/2000/svg' width='120' height='32'><text x='2' y='24' font-family='sans-serif' font-size='22'>Roost</text></svg>",120,32);
     assert!(pixels.chunks_exact(4).filter(|p| p[3] != 0).count() > 100);
-    let pixels = rgba(b"<svg xmlns='http://www.w3.org/2000/svg' width='2' height='1'><image href='file:///etc/passwd' width='2' height='1'/></svg>",2,1);
-    assert!(pixels.iter().all(|v| *v == 0));
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_roost-wallpaper-svg"))
         .arg("--identity")
         .output()
@@ -64,6 +62,30 @@ fn actual_svg_loader_text_uses_native_fonts_and_stream_has_no_base_uri() {
     );
     assert_eq!(output.stdout.len(), 65);
     assert!(output.stdout[..64].iter().all(u8::is_ascii_hexdigit));
+}
+
+#[test]
+fn actual_svg_stream_accepts_embedded_image_but_has_no_file_base() {
+    let directory = tempfile::tempdir().unwrap();
+    let png = [
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2, 8, 2,
+        0, 0, 0, 253, 212, 154, 115, 0, 0, 0, 18, 73, 68, 65, 84, 120, 156, 99, 56, 193, 37, 114,
+        130, 75, 132, 1, 66, 1, 0, 28, 6, 3, 153, 27, 167, 232, 225, 0, 0, 0, 0, 73, 69, 78, 68,
+        174, 66, 96, 130,
+    ];
+    let path = directory.path().join("actual-image.png");
+    std::fs::write(&path, png).unwrap();
+    for href in [
+        "actual-image.png".to_owned(),
+        format!("file://{}", path.display()),
+    ] {
+        let svg=format!("<svg xmlns='http://www.w3.org/2000/svg' width='2' height='2'><image href='{href}' width='2' height='2'/></svg>");
+        assert!(rgba(svg.as_bytes(), 2, 2).iter().all(|v| *v == 0));
+    }
+    let svg=b"<svg xmlns='http://www.w3.org/2000/svg' width='2' height='2'><image href='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGM4wSVygkuEAUIBABwGA5kbp+jhAAAAAElFTkSuQmCC' width='2' height='2'/></svg>";
+    assert!(rgba(svg, 2, 2)
+        .chunks_exact(4)
+        .all(|p| p == [200, 10, 20, 255]));
 }
 
 #[test]

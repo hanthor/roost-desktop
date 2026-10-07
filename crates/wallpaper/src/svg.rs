@@ -4,6 +4,7 @@
 use std::{
     io::{Read, Write},
     os::fd::AsRawFd,
+    os::unix::process::CommandExt,
     process::{Command, Stdio},
     time::{Duration, Instant},
 };
@@ -39,6 +40,9 @@ pub fn backend_identity() -> Option<String> {
 }
 
 pub fn decode(bytes: &[u8]) -> Option<image::DynamicImage> {
+    // A missing/failed backend observation cannot produce a reusable SVG cache
+    // entry whose identity silently omits its actual loader and fonts.
+    backend_identity()?;
     let output = exchange(None, bytes, (MAX_PIXELS * 4 + 16) as usize)?;
     parse_output(&output)
 }
@@ -73,6 +77,7 @@ fn exchange(argument: Option<&str>, bytes: &[u8], maximum: usize) -> Option<Vec<
     }
     let mut command = Command::new(helper_path()?);
     command
+        .process_group(0)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
@@ -148,6 +153,11 @@ fn exchange(argument: Option<&str>, bytes: &[u8], maximum: usize) -> Option<Vec<
             std::thread::sleep(Duration::from_millis(2));
         }
     })();
+    // This owned group supplements actual Glycin/bwrap's parent-death chain
+    // and PID-namespace cleanup. Never kill unrelated processes by UID.
+    unsafe {
+        libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
+    }
     let _ = child.kill();
     let _ = child.wait();
     result

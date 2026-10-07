@@ -3598,9 +3598,12 @@ name = "roost-wallpaper-svg"
 version = "0.1.0"
 dependencies = [
  "gdk-pixbuf",
+ "gio",
+ "glib",
  "libc",
  "serde_json",
  "sha2",
+ "tempfile",
 ]
 
 [[package]]
