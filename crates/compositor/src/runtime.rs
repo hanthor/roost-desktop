@@ -1505,14 +1505,6 @@ impl Runtime {
         let x11_ready = false;
         let mut doc = serde_json::json!({
             "rendered_frames": self.stats.frames,
-            // Fixture diagnostics distinguish a missing backend motion from a
-            // rejected corner. Suppress coordinates during credential input.
-            "pointer_position": (!self.is_locked()).then(|| {
-                let pos = self.manager.pointer_pos();
-                [pos.x, pos.y]
-            }),
-            "pointer_fullscreen_blocked": (!self.is_locked())
-                .then(|| self.manager.fullscreen_at(self.manager.pointer_pos())),
             "x11_display": self.x11_display.map(|d| format!(":{d}")),
             "capture_streams": self.casts.len(),
             "remote_input_sessions": self.remote_held.len(),
@@ -1609,6 +1601,16 @@ impl Runtime {
                 })
                 .collect::<Vec<_>>(),
         });
+        // Fixture diagnostics distinguish a missing backend motion from a
+        // rejected corner. Suppress coordinates during credential input.
+        // These stay outside the large scene macro so its expansion remains
+        // below the compiler's default recursion limit.
+        doc["pointer_position"] = serde_json::json!((!self.is_locked()).then(|| {
+            let pos = self.manager.pointer_pos();
+            [pos.x, pos.y]
+        }));
+        doc["pointer_fullscreen_blocked"] = serde_json::json!((!self.is_locked())
+            .then(|| self.manager.fullscreen_at(self.manager.pointer_pos())));
         doc["screen_reader_pid"] = serde_json::json!(self.orca.pid());
         doc["screen_reader_state"] = serde_json::json!(self.orca.state());
         // Keep backend-specific observations outside the large scene macro so
