@@ -1,6 +1,6 @@
 # CI-only profiler lifecycle correction, upstream Arch recipe SHA-256:
 # f18d91c7654f6818ba7c8927636b43ca17b57d2a5af81909859ab14fc583a226
-# Source/optimization choices retained; package release 1.6 identifies actual owned-clock Start AND Stop drain boundaries.
+# Source/optimization choices retained; package release 1.7 adds the page-flip identity patch to the 1.6 drain boundaries.
 # Maintainer: Jan Alexander Steffens (heftig) <heftig@archlinux.org>
 # Maintainer: Fabian Bornschein <fabiscafe@archlinux.org>
 # Contributor: Ionut Biru <ibiru@archlinux.org>
@@ -13,7 +13,7 @@ pkgname=(
   mutter-docs
 )
 pkgver=51.0
-pkgrel=1.6
+pkgrel=1.7
 pkgdesc="Window manager and compositor for GNOME"
 url="https://gitlab.gnome.org/GNOME/mutter"
 arch=(x86_64)
@@ -94,18 +94,21 @@ source=(
   release-trace-context.patch
   frame-source-evidence.patch
   drained-capture-start.patch
+  page-flip-identity.patch
 )
 b2sums=('3c7e7159e70b09b91325335c4d13bb0ff51a161e430a0a63c65f380d5d31927cc8812cfb32b38b4964741c65c34ba12decc81274c7f556e7225d4255778689d8'
         'f989bc2ceb52aad3c6a23c439df3bbc672bc11d561a247d19971d30cc85ed5d42295de40f8e55b13404ed32aa44f12307c9f5b470f2e288d1c9c8329255c43bf'
         'c63ead61e342e938f8574b2b332e2dec8978d27ab4efe4ceb6a974d2b8903bfc50af3689a5a89b1762467faaa62c4d9be13660421e68a4a7d9ac173b35db56af'
         'b3529e5027d0d5aa323cf7878a75a16b31b9b7f0be60de97ce98ddd380273411d25e960ff7b5f452518a2ab6060e7afce25f5df83d429b82a374072b7f92f711'
         'e5f7e0a19ee26a2239a8f9efe04e4705f99967ff30d6c36ac8d4edfc49accfe062aabaed6c4ff55835cb2662c1266c9b6a8c3efc2cb4bb212a6d822c99cdb6c8')
+        'c585926557eba73f630eae41ccc3651c74350eddb74af0078d41b63d235997fdc19db26a8be4387329ee3d94b43a780f0f0bde41ae459cf128e3d16c1ac9d64a')
 
 prepare() {
   cd mutter
   patch --batch --fuzz=0 -p1 < "$srcdir/release-trace-context.patch"
   patch --batch --fuzz=0 -p1 < "$srcdir/frame-source-evidence.patch"
   patch --batch --fuzz=0 -p1 < "$srcdir/drained-capture-start.patch"
+  patch --batch --fuzz=0 -p1 < "$srcdir/page-flip-identity.patch"
 }
 
 build() {

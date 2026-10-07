@@ -231,6 +231,42 @@ def frame_source_evidence(decoded, pid):
         raise ValueError("missing diagnostic raw kernel events")
     result["limitation"] = ("Instrumented Mutter 51.0 diagnostic capture; source counters and raw kernel event fields are retained independently. "
                             "No inferred frame-to-kernel pairing, timestamp substitution or final performance parity claim.")
+    # Device user_data is stable across frames. Keep actual commit/listener
+    # observations separately; none is an inferred frame-to-kernel join.
+    pointer = r"(0x[0-9a-f]+|\(nil\))"
+    commit_pattern = rf"impl_device={pointer} update={pointer} req={pointer} fd=(\d+) flags=(\d+)"
+    observation_formats = {
+        "Roost::KMS::atomic-commit-begin": commit_pattern,
+        "Roost::KMS::atomic-commit-end": commit_pattern + r" ret=(-?\d+)",
+        "Roost::KMS::page-flip-listener-identity": rf"crtc=(\d+) impl_device={pointer} update={pointer} page_flip_data={pointer} listener_user_data={pointer}",
+    }
+    observations = []
+    for row in decoded["marks"]:
+        if row["pid"] != pid or row["name"] not in observation_formats:
+            continue
+        if not re.fullmatch(observation_formats[row["name"]], row["message"]):
+            raise ValueError("malformed actual commit/listener identity mark")
+        observations.append(dict(mark_monotonic_ns=row["monotonic_ns"], name=row["name"], message=row["message"]))
+    if observations:
+        result["kernel_commit_listener_observations"] = observations
+    identities = []
+    for row in decoded["marks"]:
+        if row["pid"] != pid or row["name"] != "Roost::KMS::raw-page-flip-identity":
+            continue
+        match = re.fullmatch(r"crtc=(\d+) sequence=(\d+) user_data=(0x[0-9a-f]+|\(nil\)) page_flip_data=(0x[0-9a-f]+|\(nil\))", row["message"])
+        if not match:
+            raise ValueError("malformed actual kernel callback identity mark")
+        crtc, sequence = map(int, match.groups()[:2])
+        if crtc > 0xffffffff or sequence > 0xffffffff:
+            raise ValueError("invalid actual kernel callback identity")
+        identities.append(dict(mark_monotonic_ns=row["monotonic_ns"], crtc=crtc,
+                               sequence=sequence, user_data=match[3], page_flip_data=match[4]))
+    if identities:
+        actual_keys = [(row["crtc"], row["sequence"]) for row in result["kernel_events"]]
+        identity_keys = [(row["crtc"], row["sequence"]) for row in identities]
+        if actual_keys != identity_keys or len(set(identity_keys)) != len(identity_keys):
+            raise ValueError("kernel callback identity marks do not match actual raw events")
+        result["kernel_callback_identities"] = identities
     return result
 
 

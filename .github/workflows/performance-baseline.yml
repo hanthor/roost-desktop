@@ -28,6 +28,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: python3 scripts/lib/roost-perf-tests.py
       - run: python3 scripts/lib/roost-perf-repeatability-tests.py
+      - run: python3 scripts/lib/roost-kernel-trace-tests.py
       - name: Select a successful trusted main package
         env:
           GH_TOKEN: ${{ github.token }}
