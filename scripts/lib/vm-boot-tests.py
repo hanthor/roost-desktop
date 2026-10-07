@@ -19,6 +19,36 @@ loader.exec_module(lane)
 
 
 class OrcaLifecycleAuthority(unittest.TestCase):
+    def test_setting_mutation_ack_never_observes_vanishing_reader(self):
+        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
+        tree = ast.parse(source.read_text())
+        helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                      and node.name == "mutate_orca_setting")
+        calls = []
+        value = "false"
+        def call(*args, **kwargs):
+            calls.append(args)
+            if args[:2] == ("gsettings", "get"):
+                return value
+            return ""
+        def departed_reader():
+            raise RuntimeError("original reader bus is already gone")
+        scope = {"call": call, "orca_observation": departed_reader}
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), str(source), "exec"), scope)
+        self.assertEqual(scope["mutate_orca_setting"]("orca-off"),
+                         {"requested_enabled": False, "readback_enabled": False})
+        self.assertEqual(calls[0][-1], "false")
+        value = "true"
+        self.assertEqual(scope["mutate_orca_setting"]("orca-on")["readback_enabled"], True)
+        self.assertEqual(scope["mutate_orca_setting"]("orca-reset")["requested_enabled"], None)
+        value = "false"
+        with self.assertRaisesRegex(RuntimeError, "readback disagrees"):
+            scope["mutate_orca_setting"]("orca-on")
+        value = "malformed"
+        with self.assertRaisesRegex(RuntimeError, "readback disagrees"):
+            scope["mutate_orca_setting"]("orca-reset")
+        # The existing host await remains mandatory; this acknowledgment claims no process departure.
+
     def test_read_diagnostics_preserve_only_fixed_public_dbus_failure(self):
         source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
         tree = ast.parse(source.read_text())

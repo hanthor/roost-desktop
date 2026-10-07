@@ -217,6 +217,21 @@ def orca_observation():
     return result
 
 
+def mutate_orca_setting(action):
+    schema, key = "org.gnome.desktop.a11y.applications", "screen-reader-enabled"
+    if action == "orca-reset":
+        call("gsettings", "reset", schema, key, user=True)
+        requested = None
+    else:
+        requested = action == "orca-on"
+        call("gsettings", "set", schema, key, str(requested).lower(), user=True)
+    value = call("gsettings", "get", schema, key, user=True)
+    if value not in {"true", "false"} or (requested is not None and (value == "true") != requested):
+        raise RuntimeError("screen reader setting readback disagrees with mutation")
+    # Acknowledgment only. The host separately awaits strict owned process/bus lifecycle evidence.
+    return {"requested_enabled": requested, "readback_enabled": value == "true"}
+
+
 def main():
     if os.geteuid() != 0 or OWNER.pw_uid == 0:
         raise RuntimeError("probe must be root and session owner must not be root")
@@ -365,13 +380,7 @@ print(json.dumps(result))
             print(json.dumps({"orca_read_error": orca_read_error(error)}))
             raise SystemExit(1) from None
     elif action in ("orca-off", "orca-on", "orca-reset"):
-        if action == "orca-reset":
-            call("gsettings", "reset", "org.gnome.desktop.a11y.applications",
-                 "screen-reader-enabled", user=True)
-        elif action != "orca-read":
-            call("gsettings", "set", "org.gnome.desktop.a11y.applications",
-                 "screen-reader-enabled", str(action == "orca-on").lower(), user=True)
-        result = orca_observation()
+        result = mutate_orca_setting(action)
     elif action in ("audio-amplification-off", "audio-amplification-on",
                     "audio-amplification-high", "audio-amplification-read",
                     "audio-amplification-reset"):
