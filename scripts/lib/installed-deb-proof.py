@@ -247,6 +247,12 @@ def main(args):
 if __name__ == '__main__':
     try:
         main(sys.argv[1:])
-    except (OSError, ValueError, subprocess.SubprocessError, KeyError, TypeError, RecursionError):
-        print('installed-deb-proof: provenance rejected', file=sys.stderr)
+    except (OSError, ValueError, subprocess.SubprocessError, KeyError, TypeError, RecursionError) as failure:
+        # Report only the fixed-vocabulary reason token, never raw paths or
+        # command output, so the rejection stays attributable in CI logs.
+        if isinstance(failure, ValueError):
+            reason = str(failure)[:64]
+        else:
+            reason = type(failure).__name__
+        print(f'installed-deb-proof: provenance rejected ({reason})', file=sys.stderr)
         sys.exit(1)
