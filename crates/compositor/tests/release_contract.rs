@@ -165,5 +165,10 @@ fn arch_package_stamps_and_checks_the_version() {
     assert!(containerfile.contains("Name=Roost (preview)"));
     assert!(containerfile.contains("test -f /etc/pam.d/roost-lock"));
     assert!(!containerfile.contains("mv /usr/share/wayland-sessions/roost.desktop"));
-    assert!(containerfile.contains("roost-shell-gtk --version"));
+    // Both installed executables are checked through the bounded diagnostic
+    // loop; a missing executable or failed version command aborts the build.
+    assert!(containerfile.contains("for bin in roost-compositor roost-shell-gtk; do"));
+    assert!(containerfile.contains("command -v \"$bin\" && test -f \"/usr/bin/$bin\""));
+    assert!(containerfile.contains("test -x \"/usr/bin/$bin\""));
+    assert!(containerfile.contains("\"$bin\" --version || exit 1;"));
 }
