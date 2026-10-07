@@ -31,6 +31,7 @@ jobs:
       - run: python3 scripts/lib/roost-soak-tests.py
       - run: python3 scripts/lib/vm-boot-tests.py
       - run: python3 scripts/lib/marlin-kernel-tests.py
+      - run: python3 scripts/lib/night-light-unsupported-tests.py
       - run: python3 scripts/lib/gnome-drained-tests.py
       - run: python3 scripts/lib/roost-perf-payload-tests.py
       - run: python3 scripts/lib/roost-perf-reference-tests.py
