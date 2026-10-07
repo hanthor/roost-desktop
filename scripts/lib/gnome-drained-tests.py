@@ -94,22 +94,22 @@ class PackagePolicy(unittest.TestCase):
         return [(ROOT/n).read_text() for n in ['packaging/marlin/perf/mutter-profiler/PKGBUILD',
                 'packaging/marlin/perf/Containerfile.baseline','packaging/marlin/perf/roost-gnome-profiler','scripts/roost-vm-perf']]
     def test_actual_recipe_and_all_acquisition_pins_agree(self):
-        self.assertEqual(diagnostic_package_policy(*self.actual()),'mutter 51.0-1.4')
+        self.assertEqual(diagnostic_package_policy(*self.actual()),'mutter 51.0-1.5')
     def test_original_invalid_three_component_release_rejected(self):
-        a=self.actual();a[0]=a[0].replace('pkgrel=1.4','pkgrel=1.2.1')
+        a=self.actual();a[0]=a[0].replace('pkgrel=1.5','pkgrel=1.2.1')
         with self.assertRaises(ValueError):diagnostic_package_policy(*a)
     def test_zero_negative_alpha_missing_duplicate_releases_rejected(self):
-        for bad in ['0','1.0','-1','one','1.4.1','1.4\npkgrel=1.4']:
-            a=self.actual();a[0]=a[0].replace('pkgrel=1.4','pkgrel='+bad)
+        for bad in ['0','1.0','-1','one','1.5.1','1.5\npkgrel=1.5']:
+            a=self.actual();a[0]=a[0].replace('pkgrel=1.5','pkgrel='+bad)
             with self.subTest(bad=bad),self.assertRaises(ValueError):diagnostic_package_policy(*a)
-        a=self.actual();a[0]=a[0].replace('pkgrel=1.4\n','')
+        a=self.actual();a[0]=a[0].replace('pkgrel=1.5\n','')
         with self.assertRaises(ValueError):diagnostic_package_policy(*a)
     def test_stale_builder_install_receiver_and_host_pins_rejected(self):
         for lane in [1,2,3]:
-            a=self.actual();a[lane]=a[lane].replace('51.0-1.4','51.0-1.2',1)
+            a=self.actual();a[lane]=a[lane].replace('51.0-1.5','51.0-1.2',1)
             with self.subTest(lane=lane),self.assertRaises(ValueError):diagnostic_package_policy(*a)
     def test_missing_archive_or_boundary_gate_rejected(self):
-        for lane,needle in [(1,'mutter-51.0-1.4-x86_64.pkg.tar.zst'),(3,'if package == "mutter 51.0-1.4":')]:
+        for lane,needle in [(1,'mutter-51.0-1.5-x86_64.pkg.tar.zst'),(3,'if package == "mutter 51.0-1.5":')]:
             a=self.actual();a[lane]=a[lane].replace(needle,'removed',1)
             with self.subTest(lane=lane),self.assertRaises(ValueError):diagnostic_package_policy(*a)
 

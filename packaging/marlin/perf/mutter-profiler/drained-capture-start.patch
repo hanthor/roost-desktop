@@ -268,9 +268,9 @@
 +    }
 +  if (state.pending || state.depth || state.dispatched)
 +    return G_SOURCE_CONTINUE;
-+  /* Cogl's same-thread fast path compares the thread-default pointer,
-+   * not merely context ownership. Push this owned context so enabling is
-+   * synchronous before the raw boundary; restore the original afterwards. */
++  /* Scope the original owned context while enabling. Cogl also checks
++   * ownership: GLib represents a pushed global-default context as NULL,
++   * so pointer equality alone would still defer enable past this boundary. */
 +  g_main_context_push_thread_default (profiler->main_thread_context);
 +  handle_start_now (META_DBUS_SYSPROF3_PROFILER (profiler), gate->invocation,
 +                    gate->fd_list, gate->options, gate->fd_variant);
@@ -398,3 +398,16 @@
  
  void meta_profiler_register_thread (MetaProfiler *profiler,
                                      GMainContext *main_context,
+--- a/cogl/cogl/cogl-trace.c
++++ b/cogl/cogl/cogl-trace.c
+@@ -264,2 +264,3 @@
+-  if (main_context == g_main_context_get_thread_default ())
++  if (main_context == g_main_context_get_thread_default () ||
++      g_main_context_is_owner (main_context))
+     {
+@@ -286,3 +287,4 @@
+ {
+-  if (g_main_context_get_thread_default () == main_context)
++  if (g_main_context_get_thread_default () == main_context ||
++      g_main_context_is_owner (main_context))
+     {

@@ -117,11 +117,11 @@ def retain_gnome_trace(agent, out, metadata):
     # Preserve decoded evidence even if a required semantic scope is absent.
     (out / "gnome-overview-marks.json").write_text(json.dumps(decoded, indent=2))
     package = metadata.get("mutter_cogl_library", {}).get("package")
-    diagnostic = package in ("mutter 51.0-1.2", "mutter 51.0-1.4")
+    diagnostic = package in ("mutter 51.0-1.2", "mutter 51.0-1.5")
     if diagnostic:
         evidence = frame_source_evidence(decoded, metadata["pid"])
         (out / "gnome-overview-source-frames.json").write_text(json.dumps(evidence, indent=2))
-    if package == "mutter 51.0-1.4":
+    if package == "mutter 51.0-1.5":
         boundary = capture_boundary_evidence(decoded, metadata)
         (out / "gnome-overview-capture-boundary.json").write_text(json.dumps(boundary, indent=2))
     if metadata.get("capture_writers_after_stop") != []:

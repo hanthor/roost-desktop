@@ -16,7 +16,7 @@ from perf_trace_diagnostics import Context, encode
 PEER = "org.gnome.Shell"
 OBJECT = "/org/gnome/Sysprof3/Profiler"
 INTERFACE = "org.gnome.Sysprof3.Profiler"
-DIAGNOSTIC_PACKAGE = "mutter 51.0-1.4"
+DIAGNOSTIC_PACKAGE = "mutter 51.0-1.5"
 
 
 MUTTER_MODULES = {"cogl": "libmutter-cogl-51", "clutter": "libmutter-clutter-51",
