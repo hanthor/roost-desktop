@@ -18,6 +18,31 @@ loader.exec_module(lane)
 
 
 class OrcaLifecycleAuthority(unittest.TestCase):
+    def test_negative_control_consumes_actual_inventory_identity_contract(self):
+        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
+        tree = ast.parse(source.read_text())
+        producer = next(node for node in tree.body
+                        if isinstance(node, ast.FunctionDef) and node.name == "inventory")
+        record = next(node for node in ast.walk(producer) if isinstance(node, ast.Dict)
+                      and any(isinstance(key, ast.Constant) and key.value == "start_ticks"
+                              for key in node.keys))
+        stat = ["0"] * 20
+        stat[19] = "18000"
+        actual = eval(compile(ast.Expression(record), str(source), "eval"), {
+            "path": SimpleNamespace(name="874"), "uid": 1000,
+            "executable": "roost-compositor", "stat": stat})
+        consumer = next(node for node in tree.body
+                        if isinstance(node, ast.FunctionDef) and node.name == "owned_compositor")
+        scope = {"OWNER": SimpleNamespace(pw_uid=1000)}
+        exec(compile(ast.Module(body=[consumer], type_ignores=[]), str(source), "exec"), scope)
+        select = scope["owned_compositor"]
+        self.assertIs(select([actual, {**actual, "executable": "roost-shell-gtk"}]), actual)
+        for invalid in ([], [{**actual, "uid": 1001}], [actual, {**actual, "pid": 875}]):
+            with self.assertRaises(RuntimeError):
+                select(invalid)
+        # This verifies producer/consumer shape and refusal policy. Only the
+        # genuine VM can qualify actual bus credentials and reader exclusion.
+
     def test_compositor_authority_comes_from_actual_backend(self):
         source = (Path(__file__).resolve().parents[2] / "crates/compositor/src/runtime.rs").read_text()
         self.assertIn("let hardware = matches!(self.backend, Backend::Drm(_));", source)

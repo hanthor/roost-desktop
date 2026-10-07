@@ -96,6 +96,15 @@ def inventory():
             "processes": sorted(processes, key=lambda item: item["pid"])}
 
 
+def owned_compositor(processes):
+    candidates = [process for process in processes
+                  if process.get("executable") == "roost-compositor"
+                  and process.get("uid") == OWNER.pw_uid]
+    if len(candidates) != 1:
+        raise RuntimeError("one original same-user compositor is required")
+    return candidates[0]
+
+
 def orca_observation():
     state = json.loads(STATE.read_text())
     pid = int(state.get("screen_reader_pid") or 0)
@@ -228,8 +237,8 @@ def main():
             raise RuntimeError("native manager has no original bus owner")
         pid = call("busctl", "--user", "call", "org.freedesktop.DBus", "/org/freedesktop/DBus",
                    "org.freedesktop.DBus", "GetConnectionUnixProcessID", "s", owner[1], user=True).split()
-        compositor = [p for p in inventory()["processes"] if p["comm"] == "roost-composito"]
-        if len(compositor) != 1 or pid != ["u", str(compositor[0]["pid"])]:
+        compositor = owned_compositor(inventory()["processes"])
+        if pid != ["u", str(compositor["pid"])]:
             raise RuntimeError("native keyboard manager is not the actual compositor")
         command = ["runuser", "-u", OWNER.pw_name, "--", "env", f"XDG_RUNTIME_DIR={RUNTIME}",
                    f"DBUS_SESSION_BUS_ADDRESS=unix:path={RUNTIME}/bus", "busctl", "--user", "call",
@@ -237,7 +246,7 @@ def main():
         denied = subprocess.run(command, capture_output=True, text=True, timeout=15)
         after = orca_observation()
         result = {"denied": denied.returncode != 0 and "owned reader credentials required" in denied.stderr,
-                  "manager_pid": compositor[0]["pid"], "before": before["keyboard"], "after": after["keyboard"]}
+                  "manager_pid": compositor["pid"], "before": before["keyboard"], "after": after["keyboard"]}
     elif action == "orca-speech-start":
         actual = orca_observation()
         if not actual["ready"] or actual["state"] != "active":
