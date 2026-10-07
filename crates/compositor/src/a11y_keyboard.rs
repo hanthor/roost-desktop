@@ -36,10 +36,21 @@ struct Grants {
     modifiers: Vec<u32>,
     keys: Vec<(u32, u32)>,
 }
+#[derive(Clone)]
+struct Reset {
+    lifetime: u64,
+    generation: u64,
+    owner: String,
+    deadline: Instant,
+}
 struct Inner {
     available: Availability,
     pid: u32,
     epoch: u64,
+    lifetime: u64,
+    recipient: Option<String>,
+    reset_generation: u64,
+    reset: Option<Reset>,
     locked: bool,
     grants: Option<Grants>,
     held: HashSet<u16>,
@@ -53,14 +64,59 @@ impl Inner {
     fn invalidate(&mut self) {
         self.epoch = self.epoch.wrapping_add(1);
         self.grants = None;
+        self.recipient = None;
+        self.reset = None;
         self.custom.clear();
         self.last_custom = None;
         self.passed_custom.clear();
         // Held grabbed releases remain suppressed until physically released.
     }
+    fn request_reset(&mut self) {
+        if self.pid == 0 {
+            return;
+        }
+        if let Some(owner) = self.recipient.clone() {
+            self.reset_generation = self.reset_generation.wrapping_add(1);
+            let deadline = self
+                .reset
+                .as_ref()
+                .map_or(Instant::now() + Duration::from_secs(2), |reset| {
+                    reset.deadline
+                });
+            self.reset = Some(Reset {
+                lifetime: self.lifetime,
+                generation: self.reset_generation,
+                owner,
+                deadline,
+            });
+        }
+    }
+    fn reset_current(&self, reset: &Reset) -> bool {
+        self.pid != 0
+            && self.lifetime == reset.lifetime
+            && self.recipient.as_deref() == Some(reset.owner.as_str())
+            && !self.revoked.contains(&reset.owner)
+            && self
+                .reset
+                .as_ref()
+                .is_some_and(|current| current.generation == reset.generation)
+    }
+    fn fail(&mut self) {
+        self.available = Availability::Unavailable;
+        self.pid = 0;
+        self.invalidate();
+    }
+    fn suspend_holds(&mut self) {
+        let captured = std::mem::take(&mut self.held);
+        self.protected.extend(captured);
+        self.custom.clear();
+        self.last_custom = None;
+        self.passed_custom.clear();
+    }
     fn valid(&self, epoch: u64, owner: &str) -> bool {
         self.pid != 0
             && !self.locked
+            && self.reset.is_none()
             && self.epoch == epoch
             && self.grants.as_ref().is_some_and(|g| g.owner == owner)
     }
@@ -69,6 +125,8 @@ pub(crate) struct Event {
     epoch: u64,
     owner: String,
     key: Option<Key>,
+    lifetime: u64,
+    custom_modifier: bool,
 }
 #[derive(Clone)]
 pub struct Monitor {
@@ -81,6 +139,10 @@ impl Monitor {
             available: Availability::Pending,
             pid: 0,
             epoch: 0,
+            lifetime: 0,
+            recipient: None,
+            reset_generation: 0,
+            reset: None,
             locked: false,
             grants: None,
             held: HashSet::new(),
@@ -102,11 +164,20 @@ impl Monitor {
         serde_json::json!({ "reader_pid": inner.pid, "epoch": inner.epoch, "locked": inner.locked,
             "owner": grants.map(|g| g.owner.as_str()), "watch": grants.is_some_and(|g| g.watch),
             "grab_all": grants.is_some_and(|g| g.all),
+            "resume_state": if inner.locked { "locked" } else if inner.reset.is_some() { "resetting" } else if inner.pid == 0 { "unavailable" } else if grants.is_none() { "unwatched" } else { "ready" },
             "modifier_count": grants.map_or(0, |g| g.modifiers.len()),
             "keystroke_count": grants.map_or(0, |g| g.keys.len()) })
     }
     pub fn availability(&self) -> Availability {
-        self.inner.lock().unwrap().available
+        let mut inner = self.inner.lock().unwrap();
+        if inner
+            .reset
+            .as_ref()
+            .is_some_and(|reset| Instant::now() >= reset.deadline)
+        {
+            inner.fail();
+        }
+        inner.available
     }
     /// Hold admission closed across fork until the owned child identity exists.
     pub fn spawn(&self, command: &mut Command) -> std::io::Result<Child> {
@@ -114,12 +185,14 @@ impl Monitor {
         let child = command.spawn()?;
         inner.invalidate();
         inner.revoked.clear();
+        inner.lifetime = inner.lifetime.wrapping_add(1);
         inner.pid = child.id();
         Ok(child)
     }
     pub fn revoke_reader(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.pid = 0;
+        inner.lifetime = inner.lifetime.wrapping_add(1);
         inner.invalidate();
     }
     pub fn shutdown(&self) {
@@ -129,6 +202,8 @@ impl Monitor {
             epoch: 0,
             owner: String::new(),
             key: None,
+            lifetime: 0,
+            custom_modifier: false,
         });
     }
     pub fn set_locked(&self, locked: bool) {
@@ -136,8 +211,8 @@ impl Monitor {
         if inner.locked != locked {
             inner.locked = locked;
             if locked {
-                let captured = std::mem::take(&mut inner.held);
-                inner.protected.extend(captured);
+                inner.suspend_holds();
+                inner.request_reset();
             }
             inner.epoch = inner.epoch.wrapping_add(1);
             inner.custom.clear();
@@ -148,7 +223,7 @@ impl Monitor {
     /// Pure local seat decision; no credential lookup or D-Bus roundtrip.
     pub fn key(&self, key: Key, repeat_delay: Duration) -> bool {
         let mut inner = self.inner.lock().unwrap();
-        if inner.locked {
+        if inner.locked || inner.reset.is_some() {
             if key.released {
                 inner.protected.remove(&key.keycode);
             } else {
@@ -215,11 +290,17 @@ impl Monitor {
                 epoch: inner.epoch,
                 owner,
                 key: Some(key),
+                lifetime: inner.lifetime,
+                custom_modifier: custom,
             };
             if self.events.try_send(event).is_err() {
                 // Losing a press/release can strand Orca modifiers. Fail closed
                 // until the genuine owner explicitly reestablishes its grants.
-                inner.invalidate();
+                // Reliable reset is separate from the full raw-event queue.
+                inner.request_reset();
+                inner.grants = None;
+                inner.epoch = inner.epoch.wrapping_add(1);
+                inner.suspend_holds();
             }
         }
         grabbed
@@ -227,9 +308,9 @@ impl Monitor {
     fn vanished(&self, name: &str, old: &str, new: &str) {
         let mut inner = self.inner.lock().unwrap();
         let ours = inner
-            .grants
+            .recipient
             .as_ref()
-            .is_some_and(|g| g.owner == name || g.owner == old);
+            .is_some_and(|owner| owner == name || owner == old);
         if !old.is_empty()
             && (name == MONITOR_NAME || ours && name.starts_with(':') && new.is_empty())
         {
@@ -300,35 +381,28 @@ impl Monitor {
                 return Err(error);
             }
             self.inner.lock().unwrap().available = Availability::Ready;
+            let mut emitter = Emitter::default();
             let mut delivery = Ok(());
-            for event in incoming {
-                let Some(key) = event.key else {
-                    break;
-                };
+            loop {
                 if self.availability() == Availability::Unavailable {
                     break;
                 }
-                if !self.inner.lock().unwrap().valid(event.epoch, &event.owner) {
-                    continue;
-                }
-                // Sending runs off the seat thread. A prelock event that has
-                // passed this epoch check may already be in flight at lock;
-                // raw lock/PAM keys never enter this queue in the first place.
-                if let Err(error) = conn.emit_signal(
-                    Some(event.owner.as_str()),
-                    PATH,
-                    INTERFACE,
-                    "KeyEvent",
-                    &(
-                        key.released,
-                        key.state,
-                        key.keysym,
-                        key.unichar,
-                        key.keycode,
-                    ),
-                ) {
+                if let Err(error) = emitter.reset(self, |owner, key| emit_key(&conn, owner, key)) {
                     delivery = Err(error);
                     break;
+                }
+                match incoming.recv_timeout(Duration::from_millis(10)) {
+                    Ok(event) if event.key.is_none() => break,
+                    Ok(event) => {
+                        if let Err(error) =
+                            emitter.normal(self, event, |owner, key| emit_key(&conn, owner, key))
+                        {
+                            delivery = Err(error);
+                            break;
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
             conn.close()?;
@@ -408,14 +482,131 @@ impl Monitor {
         if inner.epoch != epoch || inner.pid == 0 || inner.revoked.contains(&owner) {
             return Err(fdo::Error::AccessDenied("reader revoked".into()));
         }
-        if inner.grants.as_ref().is_some_and(|g| g.owner != owner) {
+        if inner
+            .recipient
+            .as_ref()
+            .is_some_and(|current| current != &owner)
+        {
             inner.invalidate();
         }
+        inner.recipient = Some(owner.clone());
         let grants = inner.grants.get_or_insert_with(|| Grants {
             owner,
             ..Default::default()
         });
         update(grants);
+        Ok(())
+    }
+}
+
+fn emit_key(conn: &zbus::blocking::Connection, owner: &str, key: Key) -> zbus::Result<()> {
+    conn.emit_signal(
+        Some(owner),
+        PATH,
+        INTERFACE,
+        "KeyEvent",
+        &(
+            key.released,
+            key.state,
+            key.keysym,
+            key.unichar,
+            key.keycode,
+        ),
+    )
+}
+/// One serialized emitter records only successfully disclosed custom presses.
+/// Reset is a reliable slot, not a raw queued event. Send completion/FIFO order
+/// precedes resumed key delivery; this API has no client acknowledgement.
+#[derive(Default)]
+struct Emitter {
+    lifetime: u64,
+    owner: String,
+    modifiers: HashMap<u16, u32>,
+}
+impl Emitter {
+    fn retain(&mut self, inner: &Inner) {
+        if inner.pid == 0
+            || self.lifetime != inner.lifetime
+            || inner.recipient.as_deref() != Some(self.owner.as_str())
+        {
+            self.modifiers.clear();
+            self.lifetime = inner.lifetime;
+            self.owner = inner.recipient.clone().unwrap_or_default();
+        }
+    }
+    fn normal(
+        &mut self,
+        monitor: &Monitor,
+        event: Event,
+        mut send: impl FnMut(&str, Key) -> zbus::Result<()>,
+    ) -> zbus::Result<()> {
+        {
+            let inner = monitor.inner.lock().unwrap();
+            self.retain(&inner);
+            if inner.lifetime != event.lifetime || !inner.valid(event.epoch, &event.owner) {
+                return Ok(());
+            }
+        }
+        let mut key = event.key.unwrap();
+        if let Some(original) = self.modifiers.get(&key.keycode) {
+            // AT-SPI clears virtual bits by keysym, not physical code. Repeats
+            // and release keep a disclosed custom hold's original symbol even
+            // across a layout change. Ordinary physical keys are unaffected.
+            key.keysym = *original;
+            key.unichar = 0;
+        }
+        // Off-seat send can already be in flight when lock starts. Its successful
+        // custom press is recorded before the same emitter services that reset.
+        if let Err(error) = send(&event.owner, key) {
+            monitor.inner.lock().unwrap().fail();
+            return Err(error);
+        }
+        if key.released {
+            self.modifiers.remove(&key.keycode);
+        } else if event.custom_modifier {
+            self.modifiers.entry(key.keycode).or_insert(key.keysym);
+        }
+        Ok(())
+    }
+    fn reset(
+        &mut self,
+        monitor: &Monitor,
+        mut send: impl FnMut(&str, Key) -> zbus::Result<()>,
+    ) -> zbus::Result<()> {
+        let reset = {
+            let inner = monitor.inner.lock().unwrap();
+            self.retain(&inner);
+            inner.reset.clone()
+        };
+        let Some(reset) = reset else {
+            return Ok(());
+        };
+        let keys = self
+            .modifiers
+            .iter()
+            .map(|(&code, &sym)| (code, sym))
+            .collect::<Vec<_>>();
+        for (keycode, keysym) in keys {
+            if !monitor.inner.lock().unwrap().reset_current(&reset) {
+                return Ok(());
+            }
+            let key = Key {
+                released: true,
+                state: 0,
+                keysym,
+                unichar: 0,
+                keycode,
+            };
+            if let Err(error) = send(&reset.owner, key) {
+                monitor.inner.lock().unwrap().fail();
+                return Err(error);
+            }
+            self.modifiers.remove(&keycode);
+        }
+        let mut inner = monitor.inner.lock().unwrap();
+        if inner.reset_current(&reset) {
+            inner.reset = None;
+        }
         Ok(())
     }
 }
@@ -432,6 +623,10 @@ pub(crate) mod tests {
             available: Availability::Ready,
             pid: 13,
             epoch: 1,
+            lifetime: 1,
+            recipient: Some(":1.23".into()),
+            reset_generation: 0,
+            reset: None,
             locked: false,
             grants: Some(Grants {
                 owner: ":1.23".into(),
@@ -524,6 +719,7 @@ pub(crate) mod tests {
         assert!(!m.key(key(0x73, 39, false, 0), Duration::from_secs(1)));
         assert!(events.try_recv().is_err());
         m.set_locked(false);
+        Emitter::default().reset(&m, |_, _| Ok(())).unwrap();
         assert!(m.inner.lock().unwrap().grants.as_ref().unwrap().watch);
         m.key(key(0x73, 39, true, 0), Duration::from_secs(1));
         assert!(events.try_recv().is_err());
@@ -544,6 +740,7 @@ pub(crate) mod tests {
         assert!(!m.key(key(0xffe5, 66, true, 0), delay));
         assert!(events.try_recv().is_err());
         m.set_locked(false);
+        Emitter::default().reset(&m, |_, _| Ok(())).unwrap();
         assert!(m.key(key(0xffe5, 66, false, 0), delay));
         events.recv().unwrap();
         m.set_locked(true);
@@ -551,6 +748,7 @@ pub(crate) mod tests {
         // This time the old captured physical hold survived unlock.
         assert!(!m.key(key(0xffe5, 66, true, 0), delay));
         assert!(events.try_recv().is_err());
+        Emitter::default().reset(&m, |_, _| Ok(())).unwrap();
         assert!(m.key(key(0xffe5, 66, false, 0), delay));
         assert!(events.recv().unwrap().key.is_some());
     }
@@ -563,12 +761,228 @@ pub(crate) mod tests {
         // Revocation/reestablishment must not discard the lock-origin identity.
         let grants = m.inner.lock().unwrap().grants.take();
         m.inner.lock().unwrap().invalidate();
-        m.inner.lock().unwrap().grants = grants;
+        {
+            let mut inner = m.inner.lock().unwrap();
+            inner.recipient = grants.as_ref().map(|g| g.owner.clone());
+            inner.grants = grants;
+        }
         assert!(!m.key(key(0x70, 33, false, 0), Duration::from_secs(1)));
         assert!(!m.key(key(0x70, 33, true, 0), Duration::from_secs(1)));
         assert!(events.try_recv().is_err());
         assert!(!m.key(key(0x70, 33, false, 0), Duration::from_secs(1)));
         assert!(events.recv().unwrap().key.is_some());
+    }
+    // These closure-based tests qualify transport policy, never genuine speech.
+    #[test]
+    fn disclosed_custom_reset_survives_unlock_and_balances_changed_layout_release() {
+        let (m, events) = monitor(vec![0xffe5], vec![]);
+        let delay = Duration::from_secs(1);
+        let mut emitter = Emitter::default();
+        assert!(m.key(key(0xffe5, 66, false, 0), delay));
+        emitter
+            .normal(&m, events.recv().unwrap(), |_, _| Ok(()))
+            .unwrap();
+        // Ordinary/chord letters are deliberately excluded from reset metadata.
+        m.key(key(0x61, 38, false, 0), delay);
+        emitter
+            .normal(&m, events.recv().unwrap(), |_, _| Ok(()))
+            .unwrap();
+        m.set_locked(true);
+        m.set_locked(false);
+        assert_eq!(m.snapshot()["resume_state"], "resetting");
+        assert!(!m.key(key(0x70, 33, false, 0), delay));
+        let mut resets = Vec::new();
+        emitter
+            .reset(&m, |owner, key| {
+                assert_eq!(owner, ":1.23");
+                resets.push(key);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(resets.len(), 1);
+        assert!(resets[0].released);
+        assert_eq!(
+            (
+                resets[0].keysym,
+                resets[0].keycode,
+                resets[0].state,
+                resets[0].unichar
+            ),
+            (0xffe5, 66, 0, 0)
+        );
+        assert_eq!(m.snapshot()["resume_state"], "ready");
+        // Both lock/reset-origin repeats and their releases remain private.
+        assert!(!m.key(key(0x70, 33, false, 0), delay));
+        assert!(!m.key(key(0x70, 33, true, 0), delay));
+        assert!(!m.key(key(0xffe5, 66, true, 0), delay));
+        assert!(events.try_recv().is_err());
+        assert!(m.key(key(0xffe5, 66, false, 0), delay));
+        emitter
+            .normal(&m, events.recv().unwrap(), |_, _| Ok(()))
+            .unwrap();
+        assert!(m.key(key(0xffe6, 66, false, 0), delay));
+        emitter
+            .normal(&m, events.recv().unwrap(), |_, repeat| {
+                assert_eq!(repeat.keysym, 0xffe5);
+                Ok(())
+            })
+            .unwrap();
+        assert!(m.key(key(0xffe6, 66, true, 0), delay));
+        emitter
+            .normal(&m, events.recv().unwrap(), |_, release| {
+                assert_eq!(release.keysym, 0xffe5);
+                assert_eq!(release.unichar, 0);
+                Ok(())
+            })
+            .unwrap();
+        assert!(emitter.modifiers.is_empty());
+    }
+    #[test]
+    fn in_flight_custom_press_is_disclosed_before_serialized_lock_reset() {
+        let (m, events) = monitor(vec![0xffe5], vec![]);
+        let mut emitter = Emitter::default();
+        m.key(key(0xffe5, 66, false, 0), Duration::from_secs(1));
+        emitter
+            .normal(&m, events.recv().unwrap(), |_, _| {
+                m.set_locked(true);
+                Ok(())
+            })
+            .unwrap();
+        let mut sent = 0;
+        emitter
+            .reset(&m, |_, reset| {
+                assert_eq!(reset.keysym, 0xffe5);
+                sent += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(sent, 1);
+        assert!(m.inner.lock().unwrap().reset.is_none());
+    }
+    #[test]
+    fn overlapping_lock_generation_cannot_resume_before_latest_reset() {
+        let (m, events) = monitor(vec![0xffe5], vec![]);
+        let mut emitter = Emitter::default();
+        m.key(key(0xffe5, 66, false, 0), Duration::from_secs(1));
+        emitter
+            .normal(&m, events.recv().unwrap(), |_, _| Ok(()))
+            .unwrap();
+        m.set_locked(true);
+        let first = m.inner.lock().unwrap().reset.as_ref().unwrap().generation;
+        emitter
+            .reset(&m, |_, _| {
+                m.set_locked(false);
+                m.set_locked(true);
+                Ok(())
+            })
+            .unwrap();
+        assert_ne!(
+            m.inner.lock().unwrap().reset.as_ref().unwrap().generation,
+            first
+        );
+        m.set_locked(false);
+        assert_eq!(m.snapshot()["resume_state"], "resetting");
+        emitter
+            .reset(&m, |_, _| panic!("already reset disclosed bit"))
+            .unwrap();
+        assert_eq!(m.snapshot()["resume_state"], "ready");
+    }
+    #[test]
+    fn full_queue_cannot_drop_reset_and_stale_keys_cannot_resume() {
+        let (m, events) = monitor(vec![0xffe5], vec![]);
+        let delay = Duration::from_secs(1);
+        let mut emitter = Emitter::default();
+        m.key(key(0xffe5, 66, false, 0), delay);
+        emitter
+            .normal(&m, events.recv().unwrap(), |_, _| Ok(()))
+            .unwrap();
+        for _ in 0..256 {
+            m.key(key(0x61, 38, false, 0), delay);
+        }
+        m.set_locked(true);
+        m.set_locked(false);
+        let mut resets = 0;
+        emitter
+            .reset(&m, |_, _| {
+                resets += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(resets, 1);
+        while let Ok(event) = events.try_recv() {
+            emitter
+                .normal(&m, event, |_, _| panic!("stale queued key"))
+                .unwrap();
+        }
+        assert!(!m.key(key(0xffe5, 66, true, 0), delay));
+        assert!(m.key(key(0xffe5, 66, false, 0), delay));
+        emitter
+            .normal(&m, events.recv().unwrap(), |_, _| Ok(()))
+            .unwrap();
+        assert_eq!(emitter.modifiers.len(), 1);
+    }
+    #[test]
+    fn queue_overflow_preserves_reset_but_requires_explicit_grant_reestablishment() {
+        let (m, events) = monitor(vec![0xffe5], vec![]);
+        let delay = Duration::from_secs(1);
+        let mut emitter = Emitter::default();
+        m.key(key(0xffe5, 66, false, 0), delay);
+        emitter
+            .normal(&m, events.recv().unwrap(), |_, _| Ok(()))
+            .unwrap();
+        for _ in 0..257 {
+            m.key(key(0x61, 38, false, 0), delay);
+        }
+        assert!(m.inner.lock().unwrap().reset.is_some());
+        assert!(m.inner.lock().unwrap().grants.is_none());
+        let mut resets = 0;
+        emitter
+            .reset(&m, |_, _| {
+                resets += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(resets, 1);
+        assert_eq!(m.snapshot()["resume_state"], "unwatched");
+    }
+    #[test]
+    fn owner_loss_cancels_reset_and_cannot_target_replacement_connection() {
+        let (m, events) = monitor(vec![0xffe5], vec![]);
+        let mut emitter = Emitter::default();
+        m.key(key(0xffe5, 66, false, 0), Duration::from_secs(1));
+        emitter
+            .normal(&m, events.recv().unwrap(), |_, _| Ok(()))
+            .unwrap();
+        m.set_locked(true);
+        m.vanished(":1.23", ":1.23", "");
+        emitter
+            .reset(&m, |_, _| panic!("revoked destination"))
+            .unwrap();
+        assert!(emitter.modifiers.is_empty());
+        assert!(m.inner.lock().unwrap().reset.is_none());
+        assert!(m.inner.lock().unwrap().revoked.contains(":1.23"));
+    }
+    #[test]
+    fn reset_send_failure_or_deadline_refuses_native_resume() {
+        let (m, events) = monitor(vec![0xffe5], vec![]);
+        let mut emitter = Emitter::default();
+        m.key(key(0xffe5, 66, false, 0), Duration::from_secs(1));
+        emitter
+            .normal(&m, events.recv().unwrap(), |_, _| Ok(()))
+            .unwrap();
+        m.set_locked(true);
+        assert!(emitter
+            .reset(&m, |_, _| Err(std::io::Error::other("send failed").into()))
+            .is_err());
+        assert!(m.availability() == Availability::Unavailable);
+        assert_eq!(m.inner.lock().unwrap().pid, 0);
+        let (m, _events) = monitor(vec![], vec![]);
+        m.set_locked(true);
+        m.inner.lock().unwrap().reset.as_mut().unwrap().deadline =
+            Instant::now() - Duration::from_secs(1);
+        m.set_locked(false);
+        assert!(m.availability() == Availability::Unavailable);
+        assert_eq!(m.snapshot()["resume_state"], "unavailable");
     }
     #[test]
     fn changing_grabs_never_swallows_an_already_forwarded_release() {
