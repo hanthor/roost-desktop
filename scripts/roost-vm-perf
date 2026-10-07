@@ -32,7 +32,8 @@ def guest_probe(agent, action, index=None, out=None):
     if action not in ("clock", "notify", "frames", "gnome-trace-start",
                       "gnome-trace-stop", "gnome-trace-read",
                       "gnome-trace-failed-stop", "gnome-trace-failed-stop-read",
-                      "kernel-trace-stop", "kernel-trace-read", "kernel-formats-read"):
+                      "kernel-trace-stop", "kernel-trace-read", "kernel-formats-read",
+                      "kernel-discovery-read"):
         raise ValueError("unsupported performance probe")
     arguments = [action]
     if action == "notify":
@@ -43,7 +44,7 @@ def guest_probe(agent, action, index=None, out=None):
         if type(index) is not int or not 0 <= index < 128:
             raise ValueError("capture chunk index outside the bounded file")
         arguments += ["--index", str(index)]
-    if action in ("kernel-trace-read", "kernel-formats-read"):
+    if action in ("kernel-trace-read", "kernel-formats-read", "kernel-discovery-read"):
         if type(index) is not int or not 0 <= index < 1024:
             raise ValueError("kernel capture chunk index outside the bounded file")
         arguments += ["--index", str(index)]
@@ -166,22 +167,29 @@ def retain_kernel_trace(agent, out, metadata):
     ]
     if "discovery_raw" in metadata:
         artifacts.insert(0, ("discovery_raw", "kernel-discovery-read", "kernel-vblank-discovery.txt", 1, 2 * 1024 * 1024))
+    errors = []
     for kind, action, name, minimum, maximum in artifacts:
-        source = metadata.get(kind, {})
-        size, digest = source.get("bytes"), source.get("sha256")
-        if type(size) is not int or not minimum <= size <= maximum or not isinstance(digest, str):
-            raise ValueError("kernel observer artifact metadata is missing or invalid")
-        with (out / name).open("wb") as stream:
-            hashed = hashlib.sha256()
-            for index in range((size + 65535) // 65536):
-                row = guest_probe(agent, action, index)["kernel_trace"]
-                chunk = base64.b64decode(row["data"], validate=True)
-                if row["index"] != index or len(chunk) != min(65536, size - index * 65536):
-                    raise ValueError("incomplete actual kernel observer chunk")
-                stream.write(chunk)
-                hashed.update(chunk)
-        if hashed.hexdigest() != digest:
-            raise ValueError("kernel observer artifact changed during acquisition")
+        try:
+            source = metadata.get(kind, {})
+            size, digest = source.get("bytes"), source.get("sha256")
+            if type(size) is not int or not minimum <= size <= maximum or not isinstance(digest, str):
+                raise ValueError("kernel observer artifact metadata is missing or invalid")
+            with (out / name).open("wb") as stream:
+                hashed = hashlib.sha256()
+                for index in range((size + 65535) // 65536):
+                    row = guest_probe(agent, action, index)["kernel_trace"]
+                    chunk = base64.b64decode(row["data"], validate=True)
+                    if row["index"] != index or len(chunk) != min(65536, size - index * 65536):
+                        raise ValueError("incomplete actual kernel observer chunk")
+                    stream.write(chunk)
+                    hashed.update(chunk)
+            if hashed.hexdigest() != digest:
+                raise ValueError("kernel observer artifact changed during acquisition")
+        except Exception as error:
+            errors.append({'artifact': name, 'reason': str(error)[:2048]})
+    if errors:
+        (out / 'kernel-vblank-artifact-errors.json').write_text(json.dumps(errors, indent=2))
+        raise ValueError('incomplete independent kernel artifacts: ' + json.dumps(errors))
     if metadata.get("qualified_acquisition") is not True or metadata.get("errors") or metadata.get("cleanup_errors"):
         raise ValueError("kernel observer reports actual loss, missing probes or invalid acquisition")
     if metadata.get("capture_filter") == "actual-native-timer-inventory-v1":

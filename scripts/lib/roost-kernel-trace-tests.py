@@ -163,6 +163,35 @@ class ActualRecordQualification(unittest.TestCase):
 
 
 class Retention(unittest.TestCase):
+    def test_actual_guest_probe_accepts_only_fixed_bounded_discovery_action(self):
+        import base64
+        agent = MagicMock()
+        agent.command.side_effect = [{'pid':1}, {'exited':True, 'exitcode':0, 'out-data':base64.b64encode(json.dumps({'boottime_s':1,'kernel_trace':{'index':3}}).encode()).decode()}]
+        result = host.guest_probe(agent, 'kernel-discovery-read', 3)
+        self.assertEqual(result['kernel_trace']['index'], 3)
+        self.assertEqual(agent.command.call_args_list[0].kwargs['arg'], ['kernel-discovery-read','--index','3'])
+        for index in [-1,1024,True]:
+            with self.assertRaises(ValueError):
+                host.guest_probe(agent, 'kernel-discovery-read', index)
+        with self.assertRaises(ValueError):
+            host.guest_probe(agent, 'kernel-arbitrary-command', 0)
+    def test_failed_discovery_does_not_prevent_whole_other_artifacts(self):
+        import base64,hashlib
+        raws = {'raw':b'whole actual kernel trace\n','formats':b'whole actual formats\n','discovery_raw':b'whole discovery\n'}
+        metadata = {key:{'bytes':len(value),'sha256':hashlib.sha256(value).hexdigest()}for key,value in raws.items()}
+        def read(agent, action, index):
+            if action == 'kernel-discovery-read':
+                raise RuntimeError('actual discovery read failed')
+            raw = raws['raw' if action == 'kernel-trace-read' else 'formats']
+            return {'kernel_trace':{'index':index,'data':base64.b64encode(raw).decode()}}
+        with tempfile.TemporaryDirectory() as tmp, patch.object(host, 'guest_probe', side_effect=read):
+            out = Path(tmp)
+            with self.assertRaisesRegex(ValueError, 'actual discovery read failed'):
+                host.retain_kernel_trace(None, out, metadata)
+            self.assertEqual((out/'kernel-vblank-trace.txt').read_bytes(),raws['raw'])
+            self.assertEqual((out/'kernel-vblank-formats.json').read_bytes(),raws['formats'])
+            self.assertEqual((out/'kernel-vblank-discovery.txt').read_bytes(),b'')
+            self.assertEqual(json.loads((out/'kernel-vblank-artifact-errors.json').read_text())[0]['artifact'],'kernel-vblank-discovery.txt')
     def test_whole_discovery_retained_before_incomplete_measurement_rejection(self):
         raw = b'entire discovery: actual timer entry and return\n'
         metadata = {'qualified_acquisition':False, 'discovery_raw':{'bytes':len(raw),'sha256':__import__('hashlib').sha256(raw).hexdigest()}}
