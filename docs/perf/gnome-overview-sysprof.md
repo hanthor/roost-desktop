@@ -90,3 +90,15 @@ check, not acceptance based on elapsed time or file quietness. Raw bytes and
 decoded marks are retained even when the writer does not close; such a capture
 cannot qualify. Actual closure still does not bypass whole-file integrity,
 required scopes, strict frame ownership, repeated measurements or release gates.
+
+
+The comparison runs three complete GNOME/Roost pairs on the same host and
+shared source/image. Each desktop boots from a newly installed guest disk.
+The first pair keeps the original artifact paths; the next pairs are retained
+under `repeat-2/` and `repeat-3/`, with `acquisition_repeat` in each report.
+Every acquisition must pass the actual writer-closure and unchanged integrity,
+scope and frame-ownership checks. The workflow stops on a failure and uploads
+all retained evidence; it never retries a rejected capture to select a pass.
+These are repeated fresh-guest acquisitions, not physical cold-host or warm
+session measurements, and they still cannot qualify a newer desktop package
+than the trusted main payload named in the manifest.
