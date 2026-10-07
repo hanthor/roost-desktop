@@ -2522,6 +2522,31 @@ for _ in $(seq 1 30); do [ "$(cat "$MIC_MUTED_FILE")" = 1 ] && break; sleep 0.1;
 xdotool key XF86AudioMicMute
 for _ in $(seq 1 30); do [ "$(cat "$MIC_MUTED_FILE")" = 0 ] && break; sleep 0.1; done
 [ "$(cat "$MIC_MUTED_FILE")" = 0 ] || fail G-MEDIA-VOLUME "microphone unmute did not unmute"
+# This headed fixture uses a wpctl stand-in; the native VM separately checks
+# actual HDA/PipeWire channel volume. Same live shell and real hardware keys.
+SOUND_SCHEMA=org.gnome.desktop.sound
+gsettings set "$SOUND_SCHEMA" allow-volume-above-100-percent false
+sleep 0.3
+echo 0.98 >"$VOLUME_FILE"
+xdotool key XF86AudioRaiseVolume
+media_volume 1.0000 || fail G-MEDIA-AMPLIFICATION "disabled amplification did not cap at 100%"
+gsettings set "$SOUND_SCHEMA" allow-volume-above-100-percent true
+sleep 0.3
+echo 0.98 >"$VOLUME_FILE"
+xdotool key XF86AudioRaiseVolume
+media_volume 1.0400 || fail G-MEDIA-AMPLIFICATION "live enabled amplification did not cross 100%"
+echo 1.50 >"$VOLUME_FILE"
+xdotool key XF86AudioRaiseVolume
+media_volume 1.5252 || fail G-MEDIA-AMPLIFICATION "amplified key did not obey GNOME's +11dB limit"
+gsettings set "$SOUND_SCHEMA" allow-volume-above-100-percent false
+sleep 0.3
+echo 0.98 >"$VOLUME_FILE"
+xdotool key XF86AudioRaiseVolume
+media_volume 1.0000 || fail G-MEDIA-AMPLIFICATION "live disable did not restore the ordinary limit"
+gsettings reset "$SOUND_SCHEMA" allow-volume-above-100-percent
+echo 0.4200 >"$VOLUME_FILE"
+pass G-MEDIA-AMPLIFICATION "same shell follows live opt-in and reset; native VM qualifies real PipeWire separately"
+
 # Live rebinding and an empty static array must take effect without restart.
 MEDIA_SCHEMA=org.gnome.settings-daemon.plugins.media-keys
 gsettings set "$MEDIA_SCHEMA" volume-up-static '[]'

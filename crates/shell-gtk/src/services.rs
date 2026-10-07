@@ -728,9 +728,28 @@ struct AudioUi {
     syncing: Cell<bool>,
     process: RefCell<Option<gio::Subprocess>>,
     stopping: Cell<bool>,
+    sound: Option<gio::Settings>,
 }
 
 impl AudioUi {
+    fn refresh_volume_limit(&self) {
+        let limit = crate::media_keys::output_limit(self.sound.as_ref());
+        self.syncing.set(true);
+        self.widgets.volume.clear_marks();
+        self.widgets.volume.set_range(0.0, limit);
+        if limit > 100.0 {
+            self.widgets
+                .volume
+                .add_mark(100.0, gtk::PositionType::Bottom, None);
+        }
+        if let Some((percent, muted)) = self.last.borrow().sink {
+            self.widgets
+                .volume
+                .set_value(if muted { 0.0 } else { percent });
+        }
+        self.syncing.set(false);
+    }
+
     fn update(self: &Rc<Self>, snapshot: crate::audio_state::Snapshot) {
         if *self.last.borrow() == snapshot {
             return;
@@ -968,13 +987,34 @@ fn audio(w: &Rc<Widgets>) {
         syncing: Cell::new(false),
         process: RefCell::new(None),
         stopping: Cell::new(false),
+        sound: crate::media_keys::sound_settings(),
     });
+    ui.refresh_volume_limit();
+    if let Some(sound) = ui.sound.as_ref() {
+        let weak = Rc::downgrade(&ui);
+        sound.connect_changed(Some("allow-volume-above-100-percent"), move |_, _| {
+            if let Some(ui) = weak.upgrade() {
+                ui.refresh_volume_limit();
+            }
+        });
+    }
     for (slider, node) in [(&w.volume, SINK), (&w.mic, SOURCE)] {
         let ui = ui.clone();
         slider.connect_value_changed(move |s| {
             if !ui.syncing.get() {
                 wpctl(
-                    &["set-volume", node, &logic::wpctl_volume_arg(s.value())],
+                    &[
+                        "set-volume",
+                        node,
+                        &if node == SINK {
+                            logic::wpctl_volume_arg_with_limit(
+                                s.value(),
+                                crate::media_keys::output_limit(ui.sound.as_ref()),
+                            )
+                        } else {
+                            logic::wpctl_volume_arg(s.value())
+                        },
+                    ],
                     |_| {},
                 );
             }

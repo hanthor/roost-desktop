@@ -8,7 +8,7 @@ import base64
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, mock_open
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -38,6 +38,52 @@ class MutterLibraryIdentity(unittest.TestCase):
                     maps.replace(".so.0.0.0", ".so.0.0.0 (deleted)")):
             with self.subTest(maps=bad), self.assertRaises(RuntimeError):
                 profiler.mapped_cogl_library(bad)
+
+    def test_all_diagnostic_modules_require_unique_live_mapping_identities(self):
+        maps = "".join(f"1000-2000 r-xp 0 08:01 {42 + i} /usr/lib/{name}.so.0.0.0\n"
+                       for i, name in enumerate(profiler.MUTTER_MODULES.values()))
+        for i, (component, name) in enumerate(profiler.MUTTER_MODULES.items()):
+            with self.subTest(component=component):
+                expected = (f"/usr/lib/{name}.so.0.0.0", os.makedev(8, 1), 42 + i)
+                self.assertEqual(profiler.mapped_mutter_library(maps, component), expected)
+                segment = next(row for row in maps.splitlines() if f"/{name}.so" in row)
+                for bad in (maps.replace(segment, ""),
+                            maps.replace(segment, segment + " (deleted)"),
+                            maps + segment.replace(f" {42 + i} ", " 99 ") + "\n"):
+                    with self.assertRaises(RuntimeError):
+                        profiler.mapped_mutter_library(bad, component)
+        with self.assertRaises(ValueError):
+            profiler.mapped_mutter_library(maps, "unknown")
+
+    def test_mapped_module_collection_rejects_foreign_ownership_and_remapping(self):
+        import io
+        maps = "".join(f"1000-2000 r-xp 0 08:01 {42 + i} /usr/lib/{name}.so.0.0.0\n"
+                       for i, name in enumerate(profiler.MUTTER_MODULES.values()))
+
+        def fingerprint(path, device, inode):
+            return dict(path=path, device=device, inode=inode, uid=0, bytes=100,
+                        sha256="a" * 64)
+
+        def package(arguments, **unused):
+            return "mutter 51.0-1.2\n" if arguments[1:3] == ["-Q", "mutter"] else "mutter\n"
+
+        with patch.object(profiler.Path, "open", mock_open(read_data=maps)), \
+                patch.object(profiler, "mapped_library_digest", side_effect=fingerprint), \
+                patch.object(profiler.subprocess, "check_output", side_effect=package):
+            self.assertEqual(set(profiler.mutter_libraries_provenance(123)), {"core", "clutter", "cogl"})
+            with patch.object(profiler.subprocess, "check_output",
+                              side_effect=lambda arguments, **unused:
+                                  package(arguments) if arguments[1:3] == ["-Q", "mutter"] else "foreign\n"):
+                with self.assertRaisesRegex(RuntimeError, "different package"):
+                    profiler.mutter_libraries_provenance(123)
+            with patch.object(profiler, "mapped_library_digest",
+                              side_effect=lambda *args: dict(fingerprint(*args), uid=1000)):
+                with self.assertRaisesRegex(RuntimeError, "not owned by root"):
+                    profiler.mutter_libraries_provenance(123)
+            with patch.object(profiler.Path, "open", side_effect=[io.StringIO(maps),
+                              io.StringIO(maps.replace(" 44 ", " 99 "))]):
+                with self.assertRaisesRegex(RuntimeError, "mappings changed"):
+                    profiler.mutter_libraries_provenance(123)
 
     def test_replaced_mapped_path_is_rejected_even_with_identical_bytes(self):
         import hashlib
