@@ -18,6 +18,37 @@ loader.exec_module(lane)
 
 
 class OrcaLifecycleAuthority(unittest.TestCase):
+    def test_native_grabs_wait_for_same_actual_reader_and_retain_samples(self):
+        reader = {"pid": 6914, "start_ticks": 21798, "owner": ":1.685",
+                  "uid": 1000, "bus_pid": 6914, "bus_uid": 1000,
+                  "version": ["s", "50.3"], "display": ["roost-nested-840"],
+                  "parent_pid": 840, "compositor_pid": 840,
+                  "bus_name": "org.gnome.Orca.Service", "ready": True, "state": "active",
+                  "keyboard": {"owner": ":1.685", "reader_pid": 6914, "watch": True,
+                               "modifier_count": 0, "keystroke_count": 0}}
+        pending = {**reader, "keyboard": dict(reader["keyboard"])}
+        ready = {**reader, "keyboard": {**reader["keyboard"], "modifier_count": 2,
+                                       "keystroke_count": 464}}
+        observations = [reader]
+        with patch.object(lane.time, "monotonic", return_value=0), patch.object(lane.time, "sleep"):
+            samples = iter([pending, ready])
+            self.assertIs(lane.await_orca_keyboard(reader, lambda: next(samples), observations), ready)
+        self.assertEqual(observations, [reader, pending, ready])
+        with patch.object(lane.time, "monotonic", return_value=0):
+            with self.assertRaisesRegex(RuntimeError, "before deadline"):
+                lane.await_orca_keyboard(reader, lambda: self.fail("expired wait read"), [], timeout=0)
+        for replacement in ({**ready, "pid": 6915}, {**ready, "start_ticks": 21799},
+                            {**ready, "owner": ":1.686"},
+                            {**ready, "keyboard": {**ready["keyboard"], "owner": ":1.686"}},
+                            {**ready, "keyboard": {**ready["keyboard"], "owner": None}}):
+            observations = [reader]
+            with patch.object(lane.time, "monotonic", return_value=0), patch.object(lane.time, "sleep"):
+                with self.assertRaisesRegex(RuntimeError, "changed before"):
+                    lane.await_orca_keyboard(reader, lambda: replacement, observations)
+            self.assertEqual(observations, [reader, replacement])
+        # Pure wait policy only: the CI VM must still supply real PID/UID/bus
+        # credentials and genuine Orca WatchKeyboard/SetKeyGrabs observations.
+
     def test_negative_control_consumes_actual_inventory_identity_contract(self):
         source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
         tree = ast.parse(source.read_text())

@@ -128,6 +128,35 @@ def check_panel(path):
     return ok, f"{w}x{h}, y=5 row {black:.0%} black, {len(body)} body colors"
 
 
+def await_orca_keyboard(reader, read, observations, timeout=20):
+    """Wait for actual grants without accepting a replacement reader/connection."""
+    fields = ("pid", "start_ticks", "owner", "uid", "bus_pid", "bus_uid",
+              "version", "display", "parent_pid", "compositor_pid", "bus_name")
+    original = {field: reader[field] for field in fields}
+    keyboard_owner = (reader.get("keyboard") or {}).get("owner")
+    deadline = time.monotonic() + timeout
+    actual = reader
+    while True:
+        if (not actual["ready"] or actual["state"] != "active"
+                or any(actual.get(field) != value for field, value in original.items())):
+            raise RuntimeError("original genuine Orca identity changed before keyboard readiness")
+        keyboard = actual.get("keyboard") or {}
+        owner = keyboard.get("owner")
+        if keyboard_owner is not None and owner != keyboard_owner:
+            raise RuntimeError("original genuine Orca keyboard connection changed before readiness")
+        if owner is not None:
+            keyboard_owner = owner
+        if (owner is not None and keyboard.get("reader_pid") == reader["pid"]
+                and keyboard.get("watch")
+                and (keyboard.get("modifier_count") or keyboard.get("keystroke_count"))):
+            return actual
+        if time.monotonic() >= deadline:
+            raise RuntimeError("genuine Orca did not establish native keyboard monitoring/grabs before deadline")
+        time.sleep(0.2)
+        actual = read()
+        observations.append(actual)
+
+
 def run_lifecycle(qmp, agent, out, serial_path, record, orca_contract="distribution"):
     """Actual DRM/logind lifecycle on the final boot, with unchanged app identities."""
     evidence = os.path.join(out, "lifecycle")
@@ -319,9 +348,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record, orca_contract="distribut
         await_orca(False)
         agent.run("orca-on")
         reader = await_orca(True)
-        keyboard = reader["keyboard"]
-        if not keyboard or keyboard["reader_pid"] != reader["pid"] or not keyboard["watch"] or not (keyboard["modifier_count"] or keyboard["keystroke_count"]):
-            raise RuntimeError("genuine Orca did not establish native keyboard monitoring/grabs")
+        reader = await_orca_keyboard(reader, lambda: agent.run("orca-read"), orca_observations)
         negative = agent.run("orca-keyboard-negative")
         with open(os.path.join(evidence, "orca-keyboard-negative.json"), "w") as stream:
             json.dump(negative, stream, indent=2)
