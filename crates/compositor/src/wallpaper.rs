@@ -220,12 +220,14 @@ struct AnimationSample {
     sampled_mono: std::time::Instant,
     sample: Sample,
 }
+type AnimationPaint = (Sample, Vec<(PathBuf, Option<FileIdentity>)>);
+
 #[derive(Debug, Clone)]
 struct Paint {
     epoch: Option<String>,
     uri: String,
     identity: Option<FileIdentity>,
-    animation: Option<(Sample, Vec<(PathBuf, Option<FileIdentity>)>)>,
+    animation: Option<AnimationPaint>,
 }
 
 impl Wallpaper {
@@ -639,8 +641,8 @@ impl Wallpaper {
             let references = observation
                 .references
                 .iter()
+                .filter(|&(path, _)| *path == sample.from || sample.to.as_ref() == Some(path))
                 .cloned()
-                .filter(|(path, _)| *path == sample.from || sample.to.as_ref() == Some(path))
                 .collect::<Vec<_>>();
             Some((sample, references))
         } else {
