@@ -52,6 +52,7 @@ pub const INITIAL_REQUEST_ID: u64 = 1;
 /// What one handled inbound message meant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Handled {
+    ScreenReader(roost_shell_control::ScreenReaderState),
     /// Compositor greeted back (e.g. after a resnapshot re-hello); the
     /// awaited full snapshot still follows.
     Hello,
@@ -365,6 +366,16 @@ impl ControlClient {
         self.write_message(&Message::Command {
             id,
             kind: CommandKind::ToggleOverview,
+        })?;
+        Ok(id)
+    }
+
+    /// Publish the Screen Reader preference to the owning compositor.
+    pub fn set_screen_reader(&mut self, enabled: bool) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::SetScreenReader { enabled },
         })?;
         Ok(id)
     }
@@ -694,6 +705,7 @@ impl ControlClient {
                 Ok(Handled::PointerOutput)
             }
             Message::ShortcutConsent { request } => Ok(Handled::ShortcutConsent(request)),
+            Message::ScreenReader { state } => Ok(Handled::ScreenReader(state)),
             Message::WorkspacePopup { index, count } => {
                 Ok(Handled::WorkspacePopup { index, count })
             }
@@ -857,6 +869,7 @@ fn message_label(msg: &Message) -> &'static str {
         Message::AcceleratorActivated { .. } => "AcceleratorActivated",
         Message::WindowMenu { .. } => "WindowMenu",
         Message::WorkspacePopup { .. } => "WorkspacePopup",
+        Message::ScreenReader { .. } => "ScreenReader",
         Message::PointerOutput { .. } => "PointerOutput",
         Message::ShortcutConsent { .. } => "ShortcutConsent",
     }

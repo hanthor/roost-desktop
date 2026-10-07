@@ -29,6 +29,7 @@ mod media_keys;
 mod network_agent;
 mod network_secrets;
 mod notify;
+mod orca;
 mod osd;
 mod overview;
 mod polkit;
@@ -1196,6 +1197,7 @@ fn build(app: &adw::Application) {
         pill_state: Vec::new(),
     }));
     render_pills(&mut shell.borrow_mut());
+    orca::start(shell.clone());
 
     // The compositor toggles the overview on presses over the
     // Activities control (ACTIVITIES_WIDTH_PX); sending a toggle here
@@ -2094,6 +2096,15 @@ fn build(app: &adw::Application) {
                         }
                         Ok(Handled::WindowMenu(request)) => menus.push(request),
                         Ok(Handled::ShortcutConsent(request)) => consent = Some(request),
+                        Ok(Handled::ScreenReader(state)) => {
+                            if matches!(
+                                state,
+                                roost_shell_control::ScreenReaderState::Unavailable
+                                    | roost_shell_control::ScreenReaderState::Conflict
+                            ) {
+                                notify.post("Screen Reader", "preferences-desktop-accessibility-symbolic", "Screen Reader unavailable", "Orca could not start for this session. Check its installation and other active sessions.");
+                            }
+                        }
                         Ok(Handled::WorkspacePopup { index, count }) => {
                             popups.push((index, count));
                         }

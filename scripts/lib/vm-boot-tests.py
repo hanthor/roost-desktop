@@ -17,6 +17,27 @@ lane = importlib.util.module_from_spec(spec)
 loader.exec_module(lane)
 
 
+class OrcaLifecycleAuthority(unittest.TestCase):
+    def test_compositor_authority_comes_from_actual_backend(self):
+        source = (Path(__file__).resolve().parents[2] / "crates/compositor/src/runtime.rs").read_text()
+        self.assertIn("let hardware = matches!(self.backend, Backend::Drm(_));", source)
+        self.assertIn("self.orca.set_enabled(enabled && hardware);", source)
+        self.assertIn("let hardware = false;", source)
+        self.assertTrue('doc["screen_reader_pid"] = serde_json::json!(self.orca.pid());' in source)
+
+    def test_no_global_orca_service_control_or_replace(self):
+        root = Path(__file__).resolve().parents[2]
+        compositor = (root / "crates/compositor/src/orca.rs").read_text()
+        shell = (root / "crates/shell-gtk/src/orca.rs").read_text()
+        self.assertNotIn('"--replace"', compositor)
+        self.assertNotIn('"orca.service"', compositor)
+        self.assertIn('Command::new("/usr/bin/orca")', compositor)
+        self.assertIn('libc::PR_SET_PDEATHSIG, libc::SIGTERM', compositor)
+        self.assertIn('libc::getppid() != parent', compositor)
+        self.assertNotIn('gio::bus_get_future', shell)
+        self.assertIn('control.set_screen_reader(enabled)', shell)
+
+
 class BootApi(unittest.TestCase):
     def test_qmp_command_accepts_protocol_name_argument(self):
         qmp = lane.baseline.Qmp.__new__(lane.baseline.Qmp)
