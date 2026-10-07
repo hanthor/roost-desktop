@@ -754,6 +754,7 @@ impl<'a> Session<'a> {
             | Message::WindowMenu { .. }
             | Message::WorkspacePopup { .. }
             | Message::PointerOutput { .. }
+            | Message::ScreenReader { .. }
             | Message::ShortcutConsent { .. }
             | Message::Error { .. } => {
                 let _ = self.conn.write_frame(&Message::Error {
