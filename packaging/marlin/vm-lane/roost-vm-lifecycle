@@ -279,6 +279,24 @@ def main():
     action = sys.argv[1]
     if action == "inventory":
         result = inventory()
+    elif action=='native-picker':
+        phases={'start','parent','parent-clicked','parent-tested','grant-dialog','blocked','selected','granted','cancel-dialog','dismissed','restored-clicked','restored-tested','closed'}
+        if len(sys.argv)!=3 or sys.argv[2] not in phases:raise ValueError('fixed native picker phase required')
+        original=inventory();compositor=next(p for p in original['processes'] if p['executable']=='roost-compositor');phase=sys.argv[2]
+        completed=subprocess.run(['runuser','-u',OWNER.pw_name,'--','env',
+            f'XDG_RUNTIME_DIR={RUNTIME}',f'DBUS_SESSION_BUS_ADDRESS=unix:path={RUNTIME}/bus',
+            f"WAYLAND_DISPLAY=roost-nested-{compositor['pid']}",f"ROOST_VM_NATIVE_SESSION={original['session']['Id']}",
+            'LC_ALL=C.UTF-8','GTK_A11Y=atspi','GDK_BACKEND=wayland','/usr/libexec/roost-vm-gtk-picker-pilot',phase],capture_output=True,timeout=28)
+        if completed.returncode!=0 or len(completed.stdout)>16384:
+            diagnostic={'phase':phase,'exception_type':'RuntimeError'}
+            try:
+                decoded=json.loads(completed.stdout) if len(completed.stdout)<=4096 else None
+                candidate=decoded.get('native_picker_error') if type(decoded) is dict and set(decoded)=={'native_picker_error'} else None
+                allowed={'RuntimeError','ValueError','OSError','FileNotFoundError','PermissionError','CalledProcessError','TimeoutExpired','TimeoutError','ImportError','ModuleNotFoundError','OtherError'}
+                if type(candidate) is dict and set(candidate)=={'phase','exception_type'} and candidate['phase']==phase and type(candidate['exception_type']) is str and candidate['exception_type'] in allowed:diagnostic=candidate
+            except (ValueError,TypeError,RecursionError):pass
+            print(json.dumps({'native_picker_error':diagnostic}));sys.exit(completed.returncode if 0<completed.returncode<256 else 1)
+        result=json.loads(completed.stdout)
     elif action == "native-files":
         phases={"start","mapped","dialog","create-typed","created","cancel-typed","cancelled","closed"}
         if len(sys.argv)!=3 or sys.argv[2] not in phases:

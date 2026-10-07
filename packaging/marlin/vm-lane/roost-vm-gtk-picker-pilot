@@ -1,0 +1,455 @@
+#!/usr/bin/python3
+"""Genuine native Gtk.FileDialog caller/observer; input exclusively from QMP."""
+import configparser
+import hashlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import pwd
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from urllib.parse import unquote,urlparse
+
+def load(name,path):
+    loader=importlib.machinery.SourceFileLoader(name,str(path));spec=importlib.util.spec_from_loader(name,loader)
+    module=importlib.util.module_from_spec(spec);loader.exec_module(module);return module
+
+HERE=Path(__file__).parent
+files=load('picker_files_helpers',HERE/'roost-vm-nautilus-pilot')
+POLICY_PATH=HERE/'native_picker_pilot.py' if HERE==Path('/usr/libexec') else HERE.parents[2]/'scripts/lib/native_picker_pilot.py'
+policy=load('picker_policy',POLICY_PATH)
+UID=os.getuid();RUNTIME=Path(f'/run/user/{UID}')
+CONTEXT=RUNTIME/'roost-native-picker-context.json'
+UI=RUNTIME/'roost-native-picker-ui.json'
+EXE='/usr/bin/python3'
+FRONT='org.freedesktop.portal.Desktop'
+BACK='org.freedesktop.impl.portal.desktop.gnome'
+FRONT_EXE='/usr/lib/xdg-desktop-portal'
+BACK_EXE='/usr/lib/xdg-desktop-portal-gnome'
+IFACE='org.freedesktop.portal.FileChooser'
+PATH='/org/freedesktop/portal/desktop'
+CHOOSER_TITLE=policy.TITLE+' chooser'
+
+
+def atomic(path,value):
+    raw=json.dumps(value,separators=(',',':')).encode()
+    if len(raw)>16384:raise RuntimeError('fixed publisher bound')
+    temp=path.with_suffix('.new')
+    fd=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    try:
+        with os.fdopen(fd,'wb') as stream:stream.write(raw)
+        os.replace(temp,path)
+    finally:
+        if temp.exists():temp.unlink()
+
+
+def environment(pid):
+    raw=files.bounded(Path(f'/proc/{pid}/environ'),65536,uid=UID,proc=True)
+    allowed={'HOME','XDG_CURRENT_DESKTOP','XDG_CONFIG_HOME','XDG_CONFIG_DIRS','XDG_DATA_HOME','XDG_DATA_DIRS','XDG_DESKTOP_PORTAL_DIR','WAYLAND_DISPLAY','XDG_RUNTIME_DIR','DBUS_SESSION_BUS_ADDRESS','GDK_DEBUG','GTK_USE_PORTAL'}
+    result={}
+    for entry in raw.split(b'\0'):
+        if not entry:continue
+        key,sep,value=entry.partition(b'=')
+        if sep and key.decode(errors='replace') in allowed:
+            name=key.decode()
+            if name in result or len(value)>4096:raise RuntimeError('fixed public environment bound')
+            result[name]=value.decode()
+    return result
+
+
+def selection_paths(env):
+    home=pwd.getpwuid(UID).pw_dir
+    if env.get('HOME')!=home or 'XDG_DESKTOP_PORTAL_DIR' in env:raise RuntimeError('original portal config environment')
+    desktops=env.get('XDG_CURRENT_DESKTOP','').lower().split(':')
+    if not 1<=len(desktops)<=8 or desktops[0]!='roost' or any(re.fullmatch('[a-z][a-z0-9_-]{0,31}',v) is None for v in desktops):raise RuntimeError('original Roost portal desktop route')
+    def dirs(name,default):
+        values=env.get(name,default).split(':')
+        if not 1<=len(values)<=8 or any(not v.startswith('/') or len(v)>256 or '..' in Path(v).parts for v in values):raise RuntimeError('original public XDG directory bounds')
+        return values
+    roots=dirs('XDG_CONFIG_HOME',home+'/.config')+dirs('XDG_CONFIG_DIRS','/etc/xdg')+['/etc']+dirs('XDG_DATA_HOME',home+'/.local/share')+dirs('XDG_DATA_DIRS','/usr/local/share:/usr/share')+['/usr/share']
+    return [Path(root)/'xdg-desktop-portal'/name for root in roots for name in [*(v+'-portals.conf' for v in desktops),'portals.conf']]
+
+
+def route(front):
+    # Exact original frontend environment and real precedence. No preference write.
+    env=environment(front['pid']);selected=None
+    for path in selection_paths(env):
+        files.deadline()
+        if path.is_symlink():raise RuntimeError('portal configuration symlink rejected')
+        if path.exists():selected=path;break
+    expected=Path('/usr/share/xdg-desktop-portal/roost-portals.conf')
+    if selected!=expected:raise RuntimeError('original frontend selected unexpected configuration')
+    raw=files.bounded(expected,8192,uid=0)
+    conf=configparser.ConfigParser(interpolation=None,strict=True);conf.optionxform=str;conf.read_string(raw.decode())
+    if not conf.has_section('preferred'):raise RuntimeError('actual portal preference missing')
+    preference=conf.get('preferred','org.freedesktop.impl.portal.FileChooser',fallback=conf.get('preferred','default',fallback='')).split(';')
+    if preference[0]!='gnome':raise RuntimeError('actual chooser preference is not GNOME')
+    metadata=Path('/usr/share/xdg-desktop-portal/portals/gnome.portal')
+    data=files.bounded(metadata,8192,uid=0);impl=configparser.ConfigParser(interpolation=None,strict=True);impl.optionxform=str;impl.read_string(data.decode())
+    if impl.get('portal','DBusName',fallback='')!=BACK or 'org.freedesktop.impl.portal.FileChooser' not in impl.get('portal','Interfaces',fallback='').split(';'):raise RuntimeError('actual installed GNOME chooser metadata')
+    if files.command(['/usr/bin/pacman','-Qqo',str(metadata)])!='xdg-desktop-portal-gnome':raise RuntimeError('actual GNOME metadata package owner')
+    if files.principal(FRONT,FRONT_EXE)!=front or environment(front['pid'])!=env:raise RuntimeError('original frontend changed during config observation')
+    return hashlib.sha256(raw).hexdigest(),hashlib.sha256(data).hexdigest()
+
+
+def fixture(value):
+    directory=Path(value['fixture']);info=directory.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid!=UID or info.st_mode&0o077 or [info.st_dev,info.st_ino]!=value['fixture_inode']:raise RuntimeError('original fixture directory replaced')
+    fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:
+        if (os.fstat(fd).st_dev,os.fstat(fd).st_ino)!=(info.st_dev,info.st_ino):raise RuntimeError('original directory changed on open')
+        with os.scandir(fd) as entries:
+            names=[]
+            for entry in entries:
+                if len(names)>=2:raise RuntimeError('unexpected controlled fixture member count')
+                names.append(entry.name)
+        if names!=[policy.SEED]:raise RuntimeError('unexpected controlled fixture members')
+        seed=directory/policy.SEED;row=seed.lstat()
+        if [row.st_dev,row.st_ino]!=value['seed_inode'] or row.st_nlink!=1 or row.st_mode&0o077:raise RuntimeError('original known seed replaced')
+        if files.bounded(seed,len(policy.PAYLOAD),uid=UID,private=True)!=policy.PAYLOAD:raise RuntimeError('known seed bytes changed')
+        if (directory.lstat().st_dev,directory.lstat().st_ino)!=(info.st_dev,info.st_ino):raise RuntimeError('original directory changed during observation')
+    finally:os.close(fd)
+
+
+def caller(value):
+    original=value['caller']
+    if files.process(original['pid'],EXE)!=original:raise RuntimeError('original GTK caller replaced')
+    expected=[os.fsencode(str(Path(EXE).resolve())),os.fsencode(str(HERE/'roost-vm-gtk-picker-pilot')),b'client',os.fsencode(value['fixture'])]
+    actual=files.bounded(Path(f"/proc/{original['pid']}/cmdline"),4096,uid=UID,proc=True).rstrip(b'\0').split(b'\0')
+    # Python executable argv spelling is preserved by our original fixed launch.
+    expected[0]=os.fsencode(EXE)
+    if actual!=expected:raise RuntimeError('original caller command route changed')
+    env=environment(original['pid'])
+    if (env.get('WAYLAND_DISPLAY')!=f"roost-nested-{value['compositor']['pid']}" or env.get('XDG_RUNTIME_DIR')!=str(RUNTIME) or env.get('DBUS_SESSION_BUS_ADDRESS')!=f'unix:path={RUNTIME}/bus' or 'GDK_DEBUG' in env or 'GTK_USE_PORTAL' in env):raise RuntimeError('original ordinary GTK route changed')
+
+
+def fast(value,exited=False):
+    files.fast_guard(value)
+    if not exited:caller(value)
+    elif Path(f"/proc/{value['caller']['pid']}").exists():raise files.ReadyLater()
+    fixture(value)
+
+
+def guard(value,exited=False):
+    fast(value,exited)
+    for key,name,exe in (('frontend',FRONT,FRONT_EXE),('backend',BACK,BACK_EXE),('nautilus',files.APP,'/usr/bin/nautilus'),('compositor',files.DISPLAY,'/usr/bin/roost-compositor'),('service_channel',files.SERVICE,'/usr/bin/roost-compositor')):
+        if files.principal(name,exe)!=value[key]:raise RuntimeError('original picker principal changed')
+    if files.login_session()!=value['session']:raise RuntimeError('original native session changed')
+    files.original_app_route(value);files.check_accessibility(value)
+    if route(value['frontend'])!=(value['route_sha256'],value['metadata_sha256']):raise RuntimeError('original portal selection changed')
+    if hashlib.sha256(files.bounded(HERE/'roost-vm-gtk-picker-pilot',256*1024,uid=0)).hexdigest()!=value['caller_script_sha256']:raise RuntimeError('original caller helper changed')
+    fast(value,exited)
+
+
+def query(value,operation):
+    fast(value);result=operation();fast(value);return result
+
+
+def original(value):
+    return {key:value[key] for key in ('frontend','backend','route_sha256','metadata_sha256','packages','fixture','seed_sha256','caller_script_sha256')}|{'base':files.original_receipt(value)}
+
+
+def context():
+    value=json.loads(files.bounded(CONTEXT,16384,uid=UID,private=True))
+    keys={'compositor','nautilus','service_channel','display','session','accessibility','original_windows','original_layout','original_focus','original_workspace','frontend','backend','route_sha256','metadata_sha256','fixture','fixture_inode','seed_inode','seed_sha256','caller_script_sha256','packages','parent_id','parent_rect','caller_provider','caller'}
+    if type(value) is not dict or set(value)!=keys:raise RuntimeError('fixed picker context schema')
+    policy.original(original(value));policy.files.principal(value['caller'],UID,owner=False)
+    for key in ('fixture_inode','seed_inode'):
+        if type(value[key]) is not list or len(value[key])!=2 or any(not policy.files.integer(v) for v in value[key]):raise RuntimeError('original fixture inode schema')
+    if value['parent_id'] is not None:
+        if not policy.files.integer(value['parent_id'],1):raise RuntimeError('original parent ID schema')
+        policy.rect(value['parent_rect']);policy.files.principal(value['caller_provider'],UID)
+    elif value['parent_rect'] is not None or value['caller_provider'] is not None:raise RuntimeError('original initial parent schema')
+    return value
+
+
+def ui(value,exited=False):
+    if not exited:caller(value)
+    try:raw=files.bounded(UI,8192,uid=UID,private=True)
+    except FileNotFoundError:raise files.ReadyLater() from None
+    result=json.loads(raw)
+    keys={'pid','start_ticks','sequence','open_count','parent_clicks','parent_keys','portal_calls','portal_responses','callback_count','granted','dismissed','uri_matches','read_sha256','fatal'}
+    if type(result) is not dict or set(result)!=keys or result['pid']!=value['caller']['pid'] or result['start_ticks']!=value['caller']['start_ticks'] or result['fatal'] is not False:raise RuntimeError('original caller finite state admission')
+    for key,limit in (('pid',2**32-1),('start_ticks',2**63-1),('sequence',2**63-1),('open_count',2),('parent_clicks',2),('parent_keys',2),('portal_calls',2),('portal_responses',2),('callback_count',2)):
+        if not policy.files.integer(result[key],0,limit):raise RuntimeError('original caller counter bound')
+    if any(type(result[key]) is not bool for key in ('granted','dismissed','uri_matches','fatal')) or result['read_sha256'] not in (None,policy.SHA):raise RuntimeError('original caller completion schema')
+    if not exited:caller(value)
+    return result
+
+
+def app_tree(value,principal,title):
+    import gi
+    gi.require_version('Atspi','2.0')
+    from gi.repository import Atspi
+    import pyatspi
+    Atspi.set_timeout(1000,1000);call=lambda op:query(value,op)
+    desktop=call(lambda:pyatspi.Registry.getDesktop(0));count=call(lambda:desktop.childCount)
+    if type(count) is not int or not 0<=count<=256:raise RuntimeError('original accessible desktop bound')
+    connection,receipt=files.a11y_connection();matches=[];provider=None;app_count=0
+    try:
+        if any(receipt[k]!=value['accessibility'][k] for k in ('socket','broker','transport_peer')):raise RuntimeError('original accessibility route changed')
+        for index in range(count):
+            app=call(lambda:desktop.getChildAtIndex(index))
+            if app is None:continue
+            owner=call(lambda:app.app.bus_name)
+            pid=files.query_connection(connection,'GetConnectionUnixProcessID',owner)
+            if pid!=principal['pid']:continue
+            app_count+=1
+            actual=files.process(pid,EXE if principal is value['caller'] else '/usr/bin/nautilus')
+            if any(actual[k]!=principal[k] for k in actual) or files.query_connection(connection,'GetConnectionUnixUser',owner)!=UID or files.query_connection(connection,'GetNameOwner',owner)!=owner:raise RuntimeError('original accessible provider changed')
+            provider=dict(actual,owner=owner)
+            if principal is value['caller'] and value.get('caller_provider') not in (None,provider):raise RuntimeError('original caller accessible provider replaced')
+            if principal is not value['caller'] and provider!=value['accessibility']['provider']:raise RuntimeError('original Nautilus accessible provider changed')
+            children=call(lambda:app.childCount)
+            if type(children) is not int or not 0<=children<=64:raise RuntimeError('original accessible app bound')
+            for child in range(children):
+                root=call(lambda:app.getChildAtIndex(child))
+                if root is not None and call(lambda:root.getState().contains(pyatspi.STATE_SHOWING)) and call(lambda:root.name)==title:matches.append(root)
+        if not matches:raise files.ReadyLater()
+        if len(matches)!=1 or provider is None or app_count!=1:raise RuntimeError('original accessible fixture ambiguous')
+        nodes,_count=files.walk_tree(matches[0],call,pyatspi.STATE_SHOWING,provider['owner'])
+        if files.query_connection(connection,'GetConnectionUnixProcessID',provider['owner'])!=principal['pid'] or files.process(principal['pid'],EXE if principal is value['caller'] else '/usr/bin/nautilus')!=dict((k,principal[k]) for k in actual):raise RuntimeError('original provider changed after traversal')
+    finally:connection.close_sync(None)
+    guard(value)
+    return nodes,pyatspi,call,provider,matches[0]
+
+
+def extent(node,rect,api,call):
+    component=call(node.queryComponent);row=call(lambda:component.getExtents(api.WINDOW_COORDS))
+    raw=[row.x,row.y,row.width,row.height]
+    if any(type(v) is not int for v in raw) or min(raw[:2])<0 or min(raw[2:])<1 or raw[0]+raw[2]>rect[2] or raw[1]+raw[3]>rect[3]:raise RuntimeError('actual accessible target outside original window')
+    target=[rect[0]+raw[0],rect[1]+raw[1],raw[2],raw[3]];policy.rect(target);return target
+
+
+def windows(value,current,phase):
+    added=[row for row in current['windows'] if row['id'] not in value['original_windows']]
+    parents=[row for row in added if row.get('app_id')==policy.APP]
+    if not parents:raise files.ReadyLater()
+    if len(parents)!=1 or 'parent_window_id' not in parents[0] or parents[0]['parent_window_id'] is not None:raise RuntimeError('original GTK parent correlation ambiguous')
+    parent=parents[0];policy.rect(parent['rect'])
+    if value.get('parent_id') not in (None,parent['id']):raise RuntimeError('original GTK parent ID changed')
+    dialogs=[row for row in added if row['id']!=parent['id']]
+    dialog_phase=phase in ('grant-dialog','blocked','selected','cancel-dialog')
+    if dialog_phase and not dialogs:raise files.ReadyLater()
+    if (len(dialogs)!=1 if dialog_phase else bool(dialogs)):
+        if phase in ('granted','dismissed') and len(dialogs)==1 and dialogs[0].get('app_id')==files.APP and 'parent_window_id' in dialogs[0] and dialogs[0]['parent_window_id']==parent['id']:raise files.ReadyLater()
+        raise RuntimeError('original picker child count mismatch')
+    dialog=dialogs[0] if dialogs else None
+    if dialog is not None:
+        if 'parent_window_id' not in dialog or dialog['parent_window_id']!=parent['id'] or dialog.get('app_id')!=files.APP or current['focused']!=dialog['id'] or current.get('focused_app_id')!=files.APP:raise RuntimeError('actual original Nautilus child/parent focus mismatch')
+        policy.rect(dialog['rect'])
+    elif current['focused']!=parent['id'] or current.get('focused_app_id')!=policy.APP:raise files.ReadyLater()
+    return parent,dialog
+
+
+def common(value,phase):
+    return {'phase':phase,'ready':True,'scope':policy.SCOPE,'original':original(value),'principals_retained':True,'filesystem_unchanged':True}
+
+
+def inspect(value,phase):
+    if phase=='closed':
+        guard(value,True);current=files.scene();state=ui(value,True)
+        if files.window_ids(current)!=value['original_windows']:raise files.ReadyLater()
+        if files.layout(current)!=value['original_layout'] or current['focused']!=value['original_focus'] or current['active_workspace']!=value['original_workspace']:raise files.ReadyLater()
+        result=common(value,phase)|{'caller':value['caller'],'caller_provider':value['caller_provider'],'parent_id':value['parent_id'],'parent_rect':value['parent_rect'],'ui_sequence':state['sequence']}|{key:state[key] for key in ('open_count','parent_clicks','parent_keys','portal_calls','portal_responses','callback_count','granted','dismissed','uri_matches','read_sha256')}
+        result|={'restored_layout':files.layout(current),'restored_focus':current['focused'],'restored_workspace':current['active_workspace'],'cleanup':True}
+        policy.validate(result,phase);guard(value,True);fixture(value)
+        directory=Path(value['fixture']);fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:
+            if [os.fstat(fd).st_dev,os.fstat(fd).st_ino]!=value['fixture_inode']:raise RuntimeError('original cleanup directory changed')
+            row=os.stat(policy.SEED,dir_fd=fd,follow_symlinks=False)
+            if [row.st_dev,row.st_ino]!=value['seed_inode']:raise RuntimeError('original cleanup seed replaced')
+            os.unlink(policy.SEED,dir_fd=fd)
+            if [directory.lstat().st_dev,directory.lstat().st_ino]!=value['fixture_inode']:raise RuntimeError('original cleanup named directory replaced')
+            os.rmdir(directory)
+        finally:os.close(fd)
+        return result
+    guard(value)
+    state=ui(value);current=files.scene();parent,dialog=windows(value,current,phase)
+    result=common(value,phase)|{'caller':value['caller'],'parent_id':parent['id'],'parent_rect':parent['rect'],'ui_sequence':state['sequence']}|{key:state[key] for key in ('open_count','parent_clicks','parent_keys','portal_calls','portal_responses','callback_count','granted','dismissed','uri_matches','read_sha256')}
+    parent_nodes,api,call,caller_provider,_root=app_tree(value,value['caller'],policy.TITLE)
+    result['caller_provider']=caller_provider
+    buttons={}
+    for label in ('Open known file','Parent probe'):
+        matches=[node for node in parent_nodes if call(lambda:node.getRole())==api.ROLE_PUSH_BUTTON and call(lambda:node.name)==label]
+        if len(matches)!=1:raise RuntimeError('actual parent button ambiguity')
+        buttons[label]=extent(matches[0],parent['rect'],api,call)
+    if dialog:
+        nodes,api,call,provider,root=app_tree(value,value['nautilus'],CHOOSER_TITLE)
+        if not call(lambda:root.getState().contains(api.STATE_MODAL)):raise RuntimeError('actual chooser is not modal')
+        cells=[node for node in nodes if call(lambda:node.getRole())==api.ROLE_TABLE_CELL and call(lambda:node.name) in (policy.SEED,policy.SEED+'. File')]
+        if not cells:raise files.ReadyLater()
+        if len(cells)!=1:raise RuntimeError('known seed cell ambiguity')
+        selected=call(lambda:cells[0].getState().contains(api.STATE_SELECTED))
+        target=extent(cells[0],dialog['rect'],api,call)
+        if phase=='blocked':
+            target=buttons['Parent probe'];x,y,w,h=target;dx,dy,dw,dh=dialog['rect']
+            if not (x+w<=dx or x>=dx+dw or y+h<=dy or y>=dy+dh):raise RuntimeError('measured parent probe overlaps actual modal child')
+        result|={'dialog_id':dialog['id'],'dialog_rect':dialog['rect'],'target':target,'selected':bool(selected),'nautilus_provider':provider}
+    else:result|={'open_target':buttons['Open known file'],'probe_target':buttons['Parent probe']}
+    guard(value)
+    # Use the latest original caller heartbeat after the full observation chain.
+    state=ui(value);result['ui_sequence']=state['sequence']
+    result.update({key:state[key] for key in ('open_count','parent_clicks','parent_keys','portal_calls','portal_responses','callback_count','granted','dismissed','uri_matches','read_sha256')})
+    events=policy.expected_events(phase)
+    if any(state[key]>count for key,count in events.items()):raise RuntimeError('actual caller advanced beyond requested phase')
+    minimum=(0,0) if phase in ('parent','parent-clicked') else (1,0) if phase=='parent-tested' else (2,1) if phase=='restored-tested' else (1,1)
+    if state['parent_clicks']<minimum[0] or state['parent_keys']<minimum[1]:raise RuntimeError('previously proven parent input counters regressed')
+    # Explicit finite async progress only; never convert an arbitrary schema mismatch to pending.
+    if any(state[key]<count for key,count in events.items()) or phase=='selected' and not result.get('selected'):raise files.ReadyLater()
+    policy.validate(result,phase)
+    if value.get('parent_id') is None:value['parent_id']=parent['id'];value['parent_rect']=parent['rect'];value['caller_provider']=caller_provider;atomic(CONTEXT,value)
+    return result
+
+
+def start():
+    from gi.repository import Gio,GLib
+    if UID==0 or CONTEXT.exists() or UI.exists():raise RuntimeError('fresh ordinary picker context required')
+    compositor=files.principal(files.DISPLAY,'/usr/bin/roost-compositor');nautilus=files.principal(files.APP,'/usr/bin/nautilus');service=files.principal(files.SERVICE,'/usr/bin/roost-compositor')
+    current=files.scene();display=files.bind_display(compositor,service)
+    session=files.login_session();provisional={'compositor':compositor,'nautilus':nautilus,'display':display}
+    _app,_api,accessibility=files.provider_app(provisional,files.Queries(provisional).call)
+    connection=Gio.bus_get_sync(Gio.BusType.SESSION,None)
+    reply=connection.call_sync(FRONT,PATH,'org.freedesktop.DBus.Properties','Get',GLib.Variant('(ss)',(IFACE,'version')),GLib.VariantType.new('(v)'),Gio.DBusCallFlags.NONE,2000,None)
+    version=reply.unpack()[0]
+    if type(version) is not int or version<3:raise RuntimeError('actual portal OpenFile version unavailable')
+    connection.call_sync('org.freedesktop.DBus','/org/freedesktop/DBus','org.freedesktop.DBus','StartServiceByName',GLib.Variant('(su)',(BACK,0)),GLib.VariantType.new('(u)'),Gio.DBusCallFlags.NONE,2000,None)
+    front=files.principal(FRONT,FRONT_EXE);back=files.principal(BACK,BACK_EXE);route_sha,metadata_sha=route(front)
+    for executable,name in ((FRONT_EXE,'xdg-desktop-portal'),(BACK_EXE,'xdg-desktop-portal-gnome'),('/usr/bin/nautilus','nautilus')):
+        if files.command(['/usr/bin/pacman','-Qqo',executable])!=name:raise RuntimeError('actual original provider package owner')
+    directory=Path(tempfile.mkdtemp(prefix='roost-native-picker-',dir=RUNTIME));info=directory.lstat()
+    seed=directory/policy.SEED;fd=os.open(seed,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,'wb') as stream:stream.write(policy.PAYLOAD)
+    value={'compositor':compositor,'nautilus':nautilus,'service_channel':service,'display':display,'session':session,'accessibility':accessibility,
+           'original_windows':files.window_ids(current),'original_layout':files.layout(current),'original_focus':current['focused'],'original_workspace':current['active_workspace'],
+           'frontend':front,'backend':back,'route_sha256':route_sha,'metadata_sha256':metadata_sha,'fixture':str(directory),'fixture_inode':[info.st_dev,info.st_ino],
+           'seed_inode':[seed.lstat().st_dev,seed.lstat().st_ino],'seed_sha256':policy.SHA,'caller_script_sha256':hashlib.sha256(files.bounded(HERE/'roost-vm-gtk-picker-pilot',256*1024,uid=0)).hexdigest(),
+           'packages':{name:files.command(['/usr/bin/pacman','-Q',name]) for name in ('gtk4','nautilus','xdg-desktop-portal','xdg-desktop-portal-gnome','python-gobject','python-atspi','roost')},'parent_id':None,'parent_rect':None,'caller_provider':None}
+    policy.original(original(value));fixture(value)
+    files.deadline()
+    env=dict(os.environ);env.pop('GDK_DEBUG',None);env.pop('GTK_USE_PORTAL',None)
+    # Owned genuine app child; stdin/output detached, no capture privilege or GNOME Shell.
+    child=subprocess.Popen([EXE,str(HERE/'roost-vm-gtk-picker-pilot'),'client',str(directory)],env=env,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+    value['caller']=files.process(child.pid,EXE);atomic(CONTEXT,value);guard(value)
+    return common(value,'start')
+
+
+def client(directory):
+    import gi
+    gi.require_version('Gtk','4.0');gi.require_version('GdkWayland','4.0')
+    from gi.repository import Gtk,Gio,GLib,Gdk,GdkWayland
+    if UID==0 or 'GDK_DEBUG' in os.environ or 'GTK_USE_PORTAL' in os.environ or not hasattr(Gtk,'FileDialog'):raise RuntimeError('ordinary genuine FileDialog required')
+    path=Path(directory)
+    if path.parent!=RUNTIME or re.fullmatch('roost-native-picker-[A-Za-z0-9_]{8}',path.name) is None:raise RuntimeError('fixed client fixture route')
+    expected_uri=(path/policy.SEED).as_uri();initial_seed=(path/policy.SEED).lstat()
+    own=files.process(os.getpid(),EXE);front=files.principal(FRONT,FRONT_EXE)
+    connection=Gio.bus_get_sync(Gio.BusType.SESSION,None)
+    unique=connection.get_unique_name()
+    if files.bus('GetConnectionUnixProcessID',unique)!=os.getpid():raise RuntimeError('original GTK shared connection principal')
+    lock=threading.Lock();requests={}
+    state={'pid':own['pid'],'start_ticks':own['start_ticks'],'sequence':0,'open_count':0,'parent_clicks':0,'parent_keys':0,'portal_calls':0,'portal_responses':0,'callback_count':0,'granted':False,'dismissed':False,'uri_matches':False,'read_sha256':None,'fatal':False}
+    def message_filter(_connection,message,incoming,_data):
+        try:
+            if not incoming and message.get_message_type()==Gio.DBusMessageType.METHOD_CALL and message.get_interface()==IFACE and message.get_member()=='OpenFile' and message.get_path()==PATH:
+                if message.get_destination() not in (FRONT,front['owner']):raise RuntimeError('original GTK portal destination')
+                body=message.get_body()
+                if body.get_type_string()!='(ssa{sv})' or body.get_size()>8192:raise RuntimeError('original GTK OpenFile body bound')
+                parent,title,options=body.unpack();token=policy.request_fields(parent,title,options,directory,CHOOSER_TITLE)
+                request=PATH+'/request/'+unique[1:].replace('.','_')+'/'+token
+                with lock:
+                    if request in requests or len(requests)>=2:raise RuntimeError('original request count or reuse')
+                    requests[request]=False;state['portal_calls']+=1
+            elif incoming and message.get_message_type()==Gio.DBusMessageType.SIGNAL and message.get_interface()=='org.freedesktop.portal.Request' and message.get_member()=='Response' and message.get_path() in requests:
+                body=message.get_body()
+                if message.get_sender()!=front['owner'] or body.get_type_string()!='(ua{sv})' or body.get_size()>8192:raise RuntimeError('original portal response principal/bound')
+                code,result=body.unpack();policy.response_fields(code,result,expected_uri)
+                with lock:
+                    if requests[message.get_path()]:raise RuntimeError('actual request duplicate response')
+                    requests[message.get_path()]=True;state['portal_responses']+=1
+        except Exception:
+            with lock:state['fatal']=True
+        return message
+    filter_id=connection.add_filter(message_filter,None)
+    application=Gtk.Application(application_id=policy.APP,flags=Gio.ApplicationFlags.NON_UNIQUE)
+    def activate(app):
+        window=Gtk.ApplicationWindow(application=app,title=policy.TITLE);window.set_default_size(1100,720)
+        box=Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=24);box.set_margin_top(12);box.set_margin_start(12);window.set_child(box)
+        open_button=Gtk.Button(label='Open known file');probe=Gtk.Button(label='Parent probe');box.append(probe);box.append(open_button)
+        def callback(dialog,result):
+            try:
+                try:chosen=dialog.open_finish(result)
+                except GLib.Error as error:
+                    if not error.matches(Gtk.dialog_error_quark(),Gtk.DialogError.DISMISSED):raise RuntimeError('actual user-dismiss error required') from None
+                    with lock:
+                        if state['open_count']!=2 or state['callback_count']!=1 or not state['granted']:raise RuntimeError('actual second user-dismiss order')
+                        state['dismissed']=True;state['callback_count']+=1
+                    return
+                if chosen is None or chosen.get_uri()!=expected_uri or chosen.get_path()!=str(path/policy.SEED):raise RuntimeError('actual Gtk.FileDialog selected wrong file')
+                parsed=urlparse(chosen.get_uri())
+                if parsed.scheme!='file' or parsed.netloc or unquote(parsed.path)!=str(path/policy.SEED):raise RuntimeError('actual selected URI once-decode mismatch')
+                row=(path/policy.SEED).lstat()
+                if (row.st_dev,row.st_ino)!=(initial_seed.st_dev,initial_seed.st_ino) or files.bounded(path/policy.SEED,len(policy.PAYLOAD),uid=UID,private=True)!=policy.PAYLOAD:raise RuntimeError('actual selected original file bytes')
+                with lock:
+                    if state['open_count']!=1 or state['callback_count']!=0:raise RuntimeError('actual first grant order')
+                    state.update(granted=True,uri_matches=True,read_sha256=policy.SHA,callback_count=1)
+            except Exception:
+                with lock:state['fatal']=True
+        def opened(_button):
+            with lock:
+                if state['open_count']>=2:state['fatal']=True;return
+                state['open_count']+=1
+            if not isinstance(window.get_surface(),GdkWayland.WaylandSurface):
+                with lock:state['fatal']=True
+                return
+            dialog=Gtk.FileDialog();dialog.set_title(CHOOSER_TITLE);dialog.set_modal(True);dialog.set_initial_folder(Gio.File.new_for_path(directory));dialog.set_accept_label('Open known seed')
+            dialog.open(window,None,callback)
+        def probed(_button):
+            with lock:state['parent_clicks']+=1
+        def key(_controller,keyval,_keycode,_mods):
+            if keyval==Gdk.KEY_F8:
+                with lock:state['parent_keys']+=1
+                return True
+            if keyval in (Gdk.KEY_w,Gdk.KEY_W) and _mods&Gdk.ModifierType.CONTROL_MASK:window.close();return True
+            return False
+        open_button.connect('clicked',opened);probe.connect('clicked',probed)
+        controller=Gtk.EventControllerKey();controller.connect('key-pressed',key);window.add_controller(controller)
+        def publish():
+            with lock:state['sequence']+=1;snapshot=dict(state)
+            atomic(UI,snapshot);return True
+        GLib.timeout_add(100,publish)
+        # Bound this owned fixture's lifetime even if the host fails; never kill borrowed apps.
+        GLib.timeout_add_seconds(180,lambda:app.quit() or False);window.present()
+    application.connect('activate',activate)
+    try:application.run([str(HERE/'roost-vm-gtk-picker-pilot')])
+    finally:connection.remove_filter(filter_id)
+
+
+def main():
+    files.DEADLINE=time.monotonic()+25
+    if len(sys.argv)==3 and sys.argv[1]=='client':
+        files.DEADLINE=None
+        return client(sys.argv[2])
+    phase=sys.argv[1] if len(sys.argv)==2 else 'invalid'
+    try:
+        if phase not in policy.PHASES:raise ValueError('fixed native picker phase required')
+        if phase=='start':result=start()
+        else:
+            value=context()
+            while True:
+                try:result=inspect(value,phase);break
+                except files.ReadyLater:files.deadline();time.sleep(.1)
+        policy.validate(result,phase);print(json.dumps(result,separators=(',',':')))
+    except Exception as error:
+        allowed={'RuntimeError','ValueError','OSError','FileNotFoundError','PermissionError','CalledProcessError','TimeoutExpired','TimeoutError','ImportError','ModuleNotFoundError'}
+        print(json.dumps({'native_picker_error':{'phase':phase,'exception_type':type(error).__name__ if type(error).__name__ in allowed else 'OtherError'}}));return 1
+    return 0
+
+
+if __name__=='__main__':sys.exit(main())

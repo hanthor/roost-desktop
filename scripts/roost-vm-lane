@@ -62,6 +62,10 @@ _files_loader=importlib.machinery.SourceFileLoader("native_files_pilot",os.path.
 _files_spec=importlib.util.spec_from_loader("native_files_pilot",_files_loader)
 files_pilot=importlib.util.module_from_spec(_files_spec)
 _files_loader.exec_module(files_pilot)
+_picker_loader=importlib.machinery.SourceFileLoader("native_picker_pilot",os.path.join(HERE,"lib","native_picker_pilot.py"))
+_picker_spec=importlib.util.spec_from_loader("native_picker_pilot",_picker_loader)
+picker_pilot=importlib.util.module_from_spec(_picker_spec)
+_picker_loader.exec_module(picker_pilot)
 
 WIDTH, HEIGHT = baseline.WIDTH, baseline.HEIGHT
 DRM_RE = re.compile(r"roost-compositor: drm: output (\S+) (\d+)x(\d+)")
@@ -1374,6 +1378,7 @@ def main():
                     agent = guest_agent.GuestAgent(agent_path)
                     try:
                         files_pilot.run(qmp,agent,out,record)
+                        picker_pilot.run(qmp,agent,out,record)
                         run_lifecycle(qmp, agent, out, serial_path, record)
                     finally:
                         agent.close()

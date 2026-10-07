@@ -32,6 +32,9 @@ COPY packaging/marlin/vm-lane/gtkgreet.css /etc/greetd/gtkgreet.css
 COPY packaging/marlin/vm-lane/roost-vm-session /usr/libexec/roost-vm-session
 COPY packaging/marlin/vm-lane/roost-vm-lifecycle /usr/libexec/roost-vm-lifecycle
 COPY packaging/marlin/vm-lane/roost-vm-nautilus-pilot /usr/libexec/roost-vm-nautilus-pilot
+COPY packaging/marlin/vm-lane/roost-vm-gtk-picker-pilot /usr/libexec/roost-vm-gtk-picker-pilot
+COPY scripts/lib/native_picker_pilot.py /usr/libexec/native_picker_pilot.py
+COPY scripts/lib/native_files_pilot.py /usr/libexec/native_files_pilot.py
 COPY packaging/marlin/vm-lane/roost-vm-input /usr/libexec/roost-vm-input
 COPY packaging/marlin/vm-lane/roost-vm-lane.tmpfiles /usr/lib/tmpfiles.d/roost-vm-lane.conf
 COPY packaging/marlin/vm-lane/journald.conf /usr/lib/systemd/journald.conf.d/90-roost-vm-lane.conf
@@ -48,7 +51,7 @@ RUN pacman -Syu --needed --noconfirm greetd greetd-gtkgreet cage qemu-guest-agen
     && useradd -M -d /home/roost-test -s /bin/bash -U roost-test \
     && echo 'roost-test:roost' | chpasswd \
     && test -f /usr/share/wayland-sessions/roost.desktop \
-    && chmod 0755 /usr/libexec/roost-vm-session /usr/libexec/roost-vm-lifecycle /usr/libexec/roost-vm-input /usr/libexec/roost-vm-nautilus-pilot \
+    && chmod 0755 /usr/libexec/roost-vm-session /usr/libexec/roost-vm-lifecycle /usr/libexec/roost-vm-input /usr/libexec/roost-vm-nautilus-pilot /usr/libexec/roost-vm-gtk-picker-pilot \
     && printf 'roost-session\n' > /etc/greetd/environments \
     && systemctl disable gdm.service \
     && systemctl mask serial-getty@ttyS0.service \
