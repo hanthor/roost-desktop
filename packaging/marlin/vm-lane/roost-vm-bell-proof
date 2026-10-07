@@ -1,0 +1,527 @@
+#!/usr/bin/env python3
+"""CI-only real Wayland principal and virtual HDA sink bell acceptance."""
+import array
+import base64
+import hashlib
+import json
+import os
+from pathlib import Path
+import stat
+import subprocess
+import sys
+import time
+import uuid
+
+EXE = Path('/usr/libexec/roost-vm-bell')
+RUNTIME = Path(os.environ['XDG_RUNTIME_DIR'])
+OWNER = RUNTIME / 'roost-vm-bell-owner.json'
+STATE = RUNTIME / 'roost-vm-state.json'
+CASES = {
+    'audible': (True, True, False, 'freedesktop', True),
+    'audible-disabled': (False, True, False, 'freedesktop', False),
+    'events-disabled': (True, False, False, 'freedesktop', False),
+    'visual-independent': (True, True, True, 'freedesktop', True),
+    'theme-disabled': (True, True, False, None, False),
+    'theme-bound': (True, True, False, 'x' * 257, False),
+    'restored': (True, True, False, 'freedesktop', True),
+}
+SETTINGS = [('org.gnome.desktop.wm.preferences', 'audible-bell'),
+            ('org.gnome.desktop.wm.preferences', 'visual-bell'),
+            ('org.gnome.desktop.sound', 'event-sounds'),
+            ('org.gnome.desktop.sound', 'theme-name')]
+
+
+def call(*args):
+    result = subprocess.run(args, capture_output=True, text=True, timeout=5, check=True)
+    if len(result.stdout.encode()) > 4 * 1024 * 1024 or len(result.stderr.encode()) > 65536:
+        raise RuntimeError('subprocess evidence exceeded bound')
+    return result.stdout.strip()
+
+
+def file_identity(metadata):
+    return {'dev': metadata.st_dev, 'inode': metadata.st_ino, 'uid': metadata.st_uid,
+            'mode': stat.S_IFMT(metadata.st_mode)}
+
+
+def bounded_file(path, limit, original=None, owner=None):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        before = os.fstat(fd)
+        current = file_identity(before)
+        if (not stat.S_ISREG(before.st_mode) or before.st_size > limit
+                or (original is not None and current != original)
+                or (owner is not None and before.st_uid != owner)):
+            raise RuntimeError('bounded original regular file identity/size/owner rejected')
+        with os.fdopen(fd, 'rb', closefd=False) as stream:
+            raw = stream.read(limit + 1)
+        if (len(raw) > limit or file_identity(os.fstat(fd)) != current
+                or file_identity(os.stat(path, follow_symlinks=False)) != current):
+            raise RuntimeError('bounded file changed identity or exceeded read limit')
+        return raw, current
+    finally:
+        os.close(fd)
+
+
+def properties(obj):
+    return obj.get('info', {}).get('props', {})
+
+
+def secure_client(objects, node, expected_pid=None):
+    client_id = int(node['props']['client.id'])
+    clients = [obj for obj in objects if obj.get('type') == 'PipeWire:Interface:Client' and obj['id'] == client_id]
+    if len(clients) != 1:
+        raise RuntimeError('actual audio node Client ownership missing or ambiguous')
+    values = properties(clients[0])
+    pid, uid = int(values['pipewire.sec.pid']), int(values['pipewire.sec.uid'])
+    if uid != os.getuid() or (expected_pid is not None and pid != expected_pid):
+        raise RuntimeError('protocol-authenticated audio Client identity does not match original recorder')
+    if len(str(values.get('pipewire.protocol', '')).encode()) > 128:
+        raise RuntimeError('actual Client protocol field bound exceeded')
+    return {'id': client_id, 'secure_pid': pid, 'secure_uid': uid,
+            'protocol': values.get('pipewire.protocol'), 'process': identity(pid)}
+
+
+def graph_route(objects, output_node, input_node, monitor=False):
+    ports = {obj['id']: obj for obj in objects if obj.get('type') == 'PipeWire:Interface:Port'}
+    links = []
+    for obj in objects:
+        if obj.get('type') != 'PipeWire:Interface:Link':
+            continue
+        info = obj['info']
+        if info['output-node-id'] != output_node or info['input-node-id'] != input_node or info['state'] != 'active':
+            continue
+        output = ports.get(info['output-port-id']); incoming = ports.get(info['input-port-id'])
+        if (output is None or incoming is None or int(properties(output)['node.id']) != output_node
+                or int(properties(incoming)['node.id']) != input_node
+                or output['info']['direction'] != 'output' or incoming['info']['direction'] != 'input'
+                or (monitor and properties(output).get('port.monitor') not in (True, 'true'))):
+            raise RuntimeError('actual audio link port ownership/direction/monitor route invalid')
+        links.append({'id': obj['id'], 'output_node': output_node, 'input_node': input_node,
+                      'output_port': output['id'], 'input_port': incoming['id'], 'state': info['state'],
+                      'monitor': properties(output).get('port.monitor')})
+    if len(links) > 8:
+        raise RuntimeError('actual audio route link bound exceeded')
+    return links
+
+
+def stream_graph(objects):
+    if not isinstance(objects, list) or len(objects) > 2048:
+        raise RuntimeError('actual PipeWire inventory object bound exceeded')
+    wanted = ('client.id', 'node.name', 'media.class', 'application.process.binary', 'application.process.id', 'object.serial')
+    streams = []
+    for obj in objects:
+        props = properties(obj)
+        if props.get('media.class') not in ('Stream/Input/Audio', 'Stream/Output/Audio'):
+            continue
+        filtered = {key: props[key] for key in wanted if key in props}
+        if len(streams) >= 16 or any(len(str(value).encode()) > 256 for value in filtered.values()):
+            raise RuntimeError('actual stream count/property bound exceeded')
+        streams.append({'id': obj['id'], 'state': obj['info'].get('state'), 'props': filtered})
+    return streams
+
+
+def identity(pid, expected=None):
+    path = Path('/proc') / str(pid)
+    original = bounded_file(path / 'stat', 8192)[0].decode().rsplit(')', 1)[1].split()
+    executable = (path / 'exe').resolve(strict=True)
+    metadata = executable.stat()
+    uid = next(line.split()[1] for line in bounded_file(path / 'status', 65536)[0].decode().splitlines() if line.startswith('Uid:'))
+    result = {'pid': pid, 'uid': int(uid), 'parent_pid': int(original[1]), 'start_ticks': int(original[19]),
+              'executable': str(executable), 'exe_device': metadata.st_dev, 'exe_inode': metadata.st_ino,
+              'exe_sha256': hashlib.sha256(bounded_file(executable, 128 * 1024 * 1024)[0]).hexdigest()}
+    if result['uid'] != os.getuid() or (expected and result != expected):
+        raise RuntimeError('original ordinary process identity changed')
+    return result
+
+
+def client(command, record):
+    current = identity(record['principal']['pid'], record['principal'])
+    actual = json.loads(call(str(EXE), '--command', command))
+    if (actual['pid'] != current['pid'] or actual['uid'] != current['uid']
+            or actual['server_pid'] != record['manager']['pid'] or actual['server_uid'] != os.getuid()
+            or actual['surface_id'] != record['wire']['surface_id'] or actual['bell_id'] != record['wire']['bell_id']):
+        raise RuntimeError('original client or actual Wayland owner changed')
+    identity(record['manager']['pid'], record['manager'])
+    return actual
+
+
+def sink_inventory():
+    objects = json.loads(call('pw-dump'))
+    if not isinstance(objects, list) or len(objects) > 2048:
+        raise RuntimeError('actual PipeWire inventory object bound exceeded')
+    defaults = [entry for obj in objects if obj.get('props', {}).get('metadata.name') == 'default'
+                for entry in obj.get('metadata', []) if entry.get('subject') == 0
+                and entry.get('key') == 'default.audio.sink']
+    if len(defaults) != 1:
+        raise RuntimeError('one genuine default audio sink required')
+    value = defaults[0]['value']
+    name = (json.loads(value) if isinstance(value, str) else value)['name']
+    sinks = [obj for obj in objects if obj.get('info', {}).get('props', {}).get('node.name') == name
+             and obj.get('info', {}).get('props', {}).get('media.class') == 'Audio/Sink']
+    if len(sinks) != 1 or not name.startswith('alsa_output.'):
+        raise RuntimeError('genuine virtual HDA ALSA sink required')
+    sink = sinks[0]
+    props = sink['info']['params']['Props'][0]
+    if (props.get('mute', False) or not props.get('channelVolumes') or len(props['channelVolumes']) > 8
+            or min(props['channelVolumes']) <= 0):
+        raise RuntimeError('actual HDA sink is muted or silent by volume')
+    return {'id': sink['id'], 'serial': sink['info']['props'].get('object.serial'), 'name': name,
+            'props': {key: sink['info']['props'][key] for key in ('node.name', 'device.id', 'object.serial', 'media.class') if key in sink['info']['props']},
+            'volume': {'mute': props.get('mute', False), 'channelVolumes': props['channelVolumes']}}, objects
+
+
+def policy():
+    actual = json.loads(STATE.read_text())
+    if actual['locked']:
+        raise RuntimeError('ordinary unlocked session required for first-phase bell PCM')
+    return {'policy': actual['bell_policy'], 'requests': actual['bell_requests'],
+            'locked': actual['locked']}
+
+
+def set_case(name, record):
+    audible, events, visual, theme, _ = CASES[name]
+    if theme is None:
+        theme = record['disabled_theme']['name']
+    for (schema, key), value in zip(SETTINGS, (audible, visual, events, theme)):
+        call('gsettings', 'set', schema, key, json.dumps(value) if isinstance(value, str) else str(value).lower())
+    wanted = {'audible': audible, 'visual': visual, 'event_sounds': events if len(theme) <= 256 else False,
+              'theme': theme if len(theme) <= 256 else ''}
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        actual = policy()
+        if all(actual['policy'].get(key) == value for key, value in wanted.items()):
+            return actual
+        time.sleep(.05)
+    raise RuntimeError('actual compositor did not receive genuine GSettings bell policy')
+
+
+def theme_receipts():
+    names = call('pacman', '-Qlq', 'sound-theme-freedesktop').splitlines()
+    if len(names) > 256 or any(len(name.encode()) > 1024 for name in names):
+        raise RuntimeError('installed theme inventory count/path bound exceeded')
+    paths = [Path(name) for name in names if Path(name).name == 'index.theme'
+             or Path(name).stem in ('bell-window-system', 'bell-window', 'bell')]
+    files = []
+    if len(paths) > 8:
+        raise RuntimeError('installed relevant theme file count exceeded')
+    for path in paths:
+        if path.is_file():
+            resolved = path.resolve(strict=True)
+            metadata = resolved.stat()
+            if metadata.st_uid != 0 or metadata.st_size > 1024 * 1024:
+                raise RuntimeError('packaged theme file ownership/size invalid')
+            files.append({'path': str(path), 'resolved': str(resolved), 'size': metadata.st_size,
+                          'sha256': hashlib.sha256(bounded_file(resolved, 1024 * 1024, owner=0)[0]).hexdigest(),
+                          'package': call('pacman', '-Qo', str(resolved))})
+    if not any(Path(row['path']).stem == 'bell' or Path(row['path']).stem == 'bell-window-system' for row in files):
+        raise RuntimeError('installed real freedesktop bell sample missing')
+    player = Path('/usr/bin/canberra-gtk-play').resolve(strict=True)
+    return {'packages': call('pacman', '-Q', 'libcanberra', 'sound-theme-freedesktop', 'pipewire', 'pipewire-audio'),
+            'files': files, 'player': {'path': str(player), 'sha256': hashlib.sha256(bounded_file(player, 128 * 1024 * 1024, owner=0)[0]).hexdigest(),
+                                     'package': call('pacman', '-Qo', str(player))},
+            'recorder_help': call('/usr/bin/pw-record', '--help'),
+            'recorder_package': call('pacman', '-Qo', '/usr/bin/pw-record'),
+            'build': {name: bounded_file(Path('/usr/share/roost-vm-bell') / name, 65536, owner=0)[0].decode()
+                      for name in ('source-sha256sums', 'packages.txt', 'compiler.txt', 'build-sha256sums')}}
+
+
+def mapped_audio_libraries(pid):
+    raw = bounded_file(Path('/proc') / str(pid) / 'maps', 256 * 1024)[0]
+    paths = sorted({line.split(None, 5)[5] for line in raw.decode().splitlines()
+                    if len(line.split(None, 5)) == 6 and line.split(None, 5)[5].startswith('/')
+                    and Path(line.split(None, 5)[5]).name.startswith(('libcanberra', 'libpulse', 'libpipewire'))})
+    if not paths or len(paths) > 16:
+        raise RuntimeError('normal mapped audio library inventory missing or exceeds bound')
+    result = []
+    for name in paths:
+        path = Path(name).resolve(strict=True)
+        contents, metadata = bounded_file(path, 16 * 1024 * 1024, owner=0)
+        result.append({'path': str(path), 'identity': metadata, 'bytes': len(contents),
+                       'sha256': hashlib.sha256(contents).hexdigest(), 'package': call('pacman', '-Qo', str(path))})
+    if not any(Path(row['path']).name.startswith('libcanberra.so') for row in result):
+        raise RuntimeError('actual player lacks the normal installed libcanberra mapping')
+    return {'maps_sha256': hashlib.sha256(raw).hexdigest(), 'libraries': result}
+
+
+def pcm_stats(raw):
+    if len(raw) != 96000:
+        raise RuntimeError('full bounded two-second s16 mono capture required')
+    samples = array.array('h'); samples.frombytes(raw)
+    return {'bytes': len(raw), 'samples': len(samples), 'nonzero': sum(value != 0 for value in samples),
+            'peak': max(map(abs, samples)), 'sha256': hashlib.sha256(raw).hexdigest()}
+
+
+def validate_case_result(name, result):
+    if result['stats']['bytes'] != 96000 or result['armed']['baseline_bytes'] != 24000:
+        raise RuntimeError('full real capture and pre-request baseline required')
+    if (result['wire']['rings'] != result['client_before']['rings'] + 1
+        or result['client_after']['rings'] != result['wire']['rings']
+        or result['after']['requests'] != result['before']['requests'] + 1):
+        raise RuntimeError('not exactly one original native bell request admitted')
+    expected = CASES[name][-1]
+    if expected and (result['stats']['nonzero'] == 0 or not result['player_observations']):
+        raise RuntimeError('enabled bell lacks genuine owned player and nonzero sink PCM')
+    if not expected and (result['stats']['nonzero'] != 0 or result['player_observations']):
+        raise RuntimeError('disabled bell produced audio or owned playback')
+
+
+def capture_case(name, record):
+    result = {'case': name, 'qualified': False, 'error': None, 'cleanup_errors': [],
+              'player_observations': [], 'graph_observations': []}
+    path = RUNTIME / ('roost-vm-bell-' + uuid.uuid4().hex + '.pcm')
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    pcm_identity = file_identity(os.fstat(fd)); os.close(fd)
+    result['file_created'] = {'identity': pcm_identity, 'size': 0, 'monotonic_ns': time.monotonic_ns()}
+    recorder = None
+    recorder_unit = None
+    try:
+        if '--sample-count' not in record['theme']['recorder_help'] or '--raw' not in record['theme']['recorder_help']:
+            raise RuntimeError('actual installed recorder lacks required bounded raw capture options')
+        result['before'] = set_case(name, record)
+        result['client_before'] = client('status', record)
+        result['sink'], _ = sink_inventory()
+        node = 'roost-vm-bell-capture-' + uuid.uuid4().hex
+        recorder_unit = 'roost-vm-bell-pcm-' + uuid.uuid4().hex
+        recorder = subprocess.Popen(['systemd-run', '--user', '--quiet', '--pipe', '--wait', '--collect',
+            '--service-type=exec', '--unit=' + recorder_unit, '--property=RuntimeMaxSec=8s', '/usr/bin/pw-record', '--target=' + result['sink']['name'],
+            '--properties=' + json.dumps({'stream.capture.sink': True, 'node.name': node}),
+            '--raw', '--format=s16', '--rate=24000', '--channels=1', '--sample-count=48000', str(path)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        result['recorder_wrapper'] = identity(recorder.pid)
+        result['recorder_unit'] = recorder_unit
+        recorder_pid = None
+        deadline = time.monotonic() + 8
+        armed = False
+        while time.monotonic() < deadline and recorder.poll() is None:
+            if recorder_pid is None:
+                actual_pid = int(call('systemctl', '--user', 'show', '--property=MainPID', '--value', recorder_unit) or '0')
+                if actual_pid:
+                    recorder_pid = actual_pid
+                    result['recorder'] = identity(recorder_pid)
+                    if Path(result['recorder']['executable']) != Path('/usr/bin/pw-record').resolve(strict=True):
+                        raise RuntimeError('actual recorder unit does not own genuine pw-record implementation')
+            actual_sink, objects = sink_inventory()
+            if actual_sink['id'] != result['sink']['id'] or actual_sink['serial'] != result['sink']['serial']:
+                raise RuntimeError('original HDA sink changed during capture')
+            streams = stream_graph(objects)
+            if len(result['graph_observations']) >= 80:
+                raise RuntimeError('bounded actual audio graph evidence exceeded')
+            graph_observation = {'monotonic_ns': time.monotonic_ns(), 'streams': streams, 'routes': [], 'clients': []}
+            result['graph_observations'].append(graph_observation)
+            outputs = [row for row in streams if row['props'].get('media.class') == 'Stream/Output/Audio']
+            if len(outputs) > 1:
+                raise RuntimeError('output stream is not uniquely observed')
+            for row in outputs:
+                if row['props'].get('application.process.binary') != 'canberra-gtk-play':
+                    raise RuntimeError('unrelated output audio stream contaminates bell capture')
+                pid = int(row['props']['application.process.id'])
+                actual = identity(pid)
+                secure = secure_client(objects, row)
+                route = graph_route(objects, row['id'], result['sink']['id'])
+                if not route:
+                    continue
+                if secure['secure_pid'] != pid:
+                    if Path(secure['process']['executable']) != Path('/usr/bin/pipewire-pulse').resolve(strict=True):
+                        raise RuntimeError('actual secure stream owner is neither player nor normal Pulse bridge')
+                    secure['limitation'] = 'Secure PipeWire owner is real Pulse bridge; application PID plus live player is observed, cross-protocol Pulse peer ownership is not independently proven.'
+                graph_observation['clients'].append(secure); graph_observation['routes'].extend(route)
+                if actual['parent_pid'] != record['manager']['pid'] or actual['exe_sha256'] != record['theme']['player']['sha256']:
+                    raise RuntimeError('audio stream is not normal compositor-owned packaged player')
+                environment = bounded_file(Path('/proc') / str(pid) / 'environ', 65536)[0].split(b'\0')
+                if b'WAYLAND_DISPLAY=' + record['display'].encode() not in environment:
+                    raise RuntimeError('normal player uses another Wayland display')
+                arguments = bounded_file(Path('/proc') / str(pid) / 'cmdline', 4096)[0].split(b'\0')
+                if (b'--id' not in arguments or arguments[arguments.index(b'--id') + 1] != b'bell-window-system'
+                        or b'canberra.xdg-theme.name=' + result['before']['policy']['theme'].encode() not in arguments
+                        or b'GDK_BACKEND=wayland' not in environment or any(item.startswith(b'DISPLAY=') for item in environment)):
+                    raise RuntimeError('normal owned player lacks genuine selected-theme bell arguments/environment')
+                if not result.get('mapped_audio_libraries'):
+                    result['mapped_audio_libraries'] = mapped_audio_libraries(pid)
+                actual['event_id'] = 'bell-window-system'
+                actual['theme'] = result['before']['policy']['theme']
+                result['player_observations'].append(actual)
+            inputs = [row for row in streams if row['props'].get('node.name') == node
+                      and int(row['props'].get('application.process.id', 0)) == recorder_pid]
+            if armed and len(inputs) == 1 and inputs[0]['state'] == 'running':
+                identity(recorder_pid, result['recorder'])
+                secure = secure_client(objects, inputs[0], recorder_pid)
+                routes = graph_route(objects, result['sink']['id'], inputs[0]['id'], monitor=True)
+                if not routes:
+                    raise RuntimeError('original recorder lost actual sink-monitor route while active')
+                graph_observation['clients'].append(secure); graph_observation['routes'].extend(routes)
+            raw, actual_pcm_identity = bounded_file(path, 96000, pcm_identity, os.getuid())
+            if not armed and len(inputs) == 1 and inputs[0]['state'] == 'running' and len(raw) >= 24000:
+                identity(recorder_pid, result['recorder'])
+                secure = secure_client(objects, inputs[0], recorder_pid)
+                routes = graph_route(objects, result['sink']['id'], inputs[0]['id'], monitor=True)
+                if not routes:
+                    continue
+                graph_observation['clients'].append(secure); graph_observation['routes'].extend(routes)
+                baseline = raw[:24000]
+                if len(baseline) != 24000 or any(baseline):
+                    raise RuntimeError('actual fresh pre-request sink PCM baseline is not silent')
+                result['armed'] = {'node': inputs[0], 'baseline_bytes': len(baseline),
+                                   'baseline_sha256': hashlib.sha256(baseline).hexdigest(),
+                                   'monotonic_ns': time.monotonic_ns(), 'routes': routes, 'secure_client': secure,
+                                   'file_identity': actual_pcm_identity}
+                result['wire'] = client('ring', record)
+                armed = True
+            time.sleep(.025)
+        if recorder.poll() is None:
+            raise RuntimeError('real recorder did not complete inside capture deadline')
+        error = recorder.stderr.read(65537)
+        result['recorder_status'] = recorder.returncode
+        result['recorder_stderr'] = error.decode(errors='replace')
+        if recorder.returncode != 0 or len(error) > 65536 or not armed:
+            raise RuntimeError('actual armed bounded recording failed')
+        raw = bounded_file(path, 96000, pcm_identity, os.getuid())[0]
+        result['capture_ended_monotonic_ns'] = time.monotonic_ns()
+        if not result['armed']['monotonic_ns'] <= result['wire']['before_ns'] <= result['wire']['after_ns'] <= result['capture_ended_monotonic_ns']:
+            raise RuntimeError('guest-monotonic recording/ring boundaries inconsistent')
+        result['stats'] = pcm_stats(raw)
+        result['after'] = policy()
+        result['client_after'] = client('status', record)
+        validate_case_result(name, result)
+        result['qualified'] = True
+    except Exception as error:
+        result['error'] = {'type': type(error).__name__, 'message': str(error)}
+    finally:
+        if recorder_unit is not None and recorder is not None and recorder.poll() is None:
+            try: call('systemctl', '--user', 'stop', recorder_unit)
+            except Exception as error: result['cleanup_errors'].append(str(error))
+            try:
+                recorder.wait(timeout=2)
+            except Exception as error:
+                result['cleanup_errors'].append(str(error))
+                try: recorder.kill(); recorder.wait(timeout=2)
+                except Exception as kill_error: result['cleanup_errors'].append(str(kill_error))
+        try:
+            raw = bounded_file(path, 96000, pcm_identity, os.getuid())[0]
+            result['pcm'] = base64.b64encode(raw).decode()
+            result['file_ended'] = {'identity': pcm_identity, 'size': len(raw), 'monotonic_ns': time.monotonic_ns()}
+        except Exception as error:
+            result['cleanup_errors'].append(str(error))
+        if result['cleanup_errors']:
+            result['qualified'] = False
+    return result
+
+
+def restore_record(record):
+    errors = []
+    for (schema, key), value in zip(SETTINGS, record['saved_settings']):
+        try: call('gsettings', 'set', schema, key, value)
+        except Exception as error: errors.append(str(error))
+    if 'principal' in record and 'wire' in record:
+        try: client('quit', record)
+        except Exception as error: errors.append(str(error))
+    # A successful quit can remove a --collect transient unit before stop.
+    # Absence is accepted only when the original recorded process departed.
+    deadline = time.monotonic() + 2
+    departed = False
+    if 'principal' in record:
+        while time.monotonic() < deadline:
+            try:
+                identity(record['principal']['pid'], record['principal'])
+            except FileNotFoundError:
+                departed = True; break
+            except Exception as error:
+                errors.append(str(error)); break
+            time.sleep(.025)
+    if not departed:
+        try: call('systemctl', '--user', 'stop', record['unit'])
+        except Exception as error: errors.append(str(error))
+    if not departed and 'principal' in record:
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            try: identity(record['principal']['pid'], record['principal'])
+            except FileNotFoundError: departed = True; break
+            except Exception as error: errors.append(str(error)); break
+            time.sleep(.025)
+        if not departed: errors.append('original bell principal still present after owned stop')
+    restored_values = []
+    for (schema, key), value in zip(SETTINGS, record['saved_settings']):
+        try:
+            actual = call('gsettings', 'get', schema, key)
+            restored_values.append({'schema': schema, 'key': key, 'expected': value, 'actual': actual})
+            if actual != value: raise RuntimeError('actual original GSettings value not restored')
+        except Exception as error: errors.append(str(error))
+    for row in record.get('disabled_theme', {}).get('files', []):
+        try:
+            path = Path(row['path']); metadata = path.lstat()
+            if (metadata.st_dev, metadata.st_ino, metadata.st_uid) != (row['dev'], row['inode'], os.getuid()):
+                raise RuntimeError('owned disabled-theme metadata identity changed')
+            path.unlink()
+        except Exception as error: errors.append(str(error))
+    if 'disabled_theme' in record:
+        try: Path(record['disabled_theme']['directory']).rmdir()
+        except Exception as error: errors.append(str(error))
+    return {'restored': not errors, 'errors': errors, 'principal': record.get('principal'), 'original_departed': departed, 'settings_readbacks': restored_values}
+
+
+def main():
+    if os.getuid() == 0:
+        raise RuntimeError('ordinary native session principal required')
+    action = sys.argv[1]
+    if action == 'start':
+        manager = identity(int(sys.argv[2]))
+        display = os.environ['WAYLAND_DISPLAY']
+        if manager['executable'] != '/usr/bin/roost-compositor' or display != 'roost-nested-' + str(manager['pid']):
+            raise RuntimeError('actual original compositor/display required')
+        if OWNER.exists():
+            raise RuntimeError('original bell principal already recorded')
+        saved = [call('gsettings', 'get', schema, key) for schema, key in SETTINGS]
+        unit = 'roost-vm-bell-' + uuid.uuid4().hex
+        record = {'manager': manager, 'display': display, 'saved_settings': saved, 'unit': unit}
+        fd = os.open(OWNER, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'w') as stream: json.dump(record, stream)
+        call('systemd-run', '--user', '--quiet', '--collect', '--unit=' + unit, '--service-type=exec',
+             '--property=RuntimeMaxSec=120s', '--setenv=WAYLAND_DISPLAY=' + display, str(EXE))
+        launched = int(call('systemctl', '--user', 'show', '--property=MainPID', '--value', unit) or '0')
+        if launched:
+            record['principal'] = identity(launched)
+            OWNER.write_text(json.dumps(record))
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                wire = json.loads(call(str(EXE), '--command', 'status'))
+                if wire['configured'] and wire['server_pid'] == manager['pid']:
+                    break
+            except subprocess.CalledProcessError:
+                pass
+            time.sleep(.05)
+        else:
+            raise RuntimeError('actual original bell principal did not map')
+        theme_name = 'roost-vm-bell-' + uuid.uuid4().hex
+        theme_dir = Path.home() / '.local/share/sounds' / theme_name
+        theme_dir.mkdir(parents=True, mode=0o700, exist_ok=False)
+        record['disabled_theme'] = {'name': theme_name, 'directory': str(theme_dir), 'files': []}
+        OWNER.write_text(json.dumps(record))
+        (theme_dir / 'index.theme').write_text('[Sound Theme]\nName=Owned bell lookup negative\nComment=CI-only disabled event metadata\nInherits=freedesktop\nDirectories=.\n[.]\nOutputProfile=stereo\n')
+        (theme_dir / 'bell-window-system.disabled').touch(exist_ok=False)
+        disabled = {'name': theme_name, 'directory': str(theme_dir), 'files': []}
+        for path in sorted(theme_dir.iterdir()):
+            metadata = path.stat()
+            disabled['files'].append({'path': str(path), 'dev': metadata.st_dev, 'inode': metadata.st_ino,
+                                     'uid': metadata.st_uid, 'size': metadata.st_size,
+                                     'sha256': hashlib.sha256(bounded_file(path, 65536, owner=os.getuid())[0]).hexdigest()})
+        record.update(disabled_theme=disabled, principal=identity(wire['pid']), wire=wire)
+        OWNER.write_text(json.dumps(record))
+        record['theme'] = theme_receipts()
+        current = json.loads(STATE.read_text())
+        windows = [item for item in current['windows'] if item['app_id'] == 'org.roost.VmBell']
+        if len(windows) != 1:
+            raise RuntimeError('original native bell window admission missing or ambiguous')
+        record['mapped_window'] = windows[0]
+        OWNER.write_text(json.dumps(record)); return record
+    record = json.loads(bounded_file(OWNER, 65536, owner=os.getuid())[0])
+    if action in CASES:
+        return capture_case(action, record)
+    if action == 'stop':
+        result = restore_record(record)
+        OWNER.unlink()
+        return result
+    raise ValueError('fixed bell action required')
+
+
+if __name__ == '__main__':
+    print(json.dumps(main()))

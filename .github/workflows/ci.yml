@@ -34,6 +34,7 @@ jobs:
       - run: python3 scripts/lib/gnome-drained-tests.py
       - run: python3 scripts/lib/roost-perf-payload-tests.py
       - run: python3 scripts/lib/native-constraint-tests.py
+      - run: python3 scripts/lib/native-bell-tests.py
       - run: python3 scripts/lib/roost-pipewire-dump-tests.py
       - run: scripts/roost-settings-inventory-check
       - run: cargo fmt --all -- --check

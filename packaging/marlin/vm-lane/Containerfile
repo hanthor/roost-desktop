@@ -17,6 +17,11 @@
 # .github/workflows/ci.yml; booted by scripts/roost-vm-lane.
 
 ARG BASE_IMAGE=localhost/marlin-roost-preview:ci
+FROM ${BASE_IMAGE} AS bell-builder
+COPY packaging/marlin/vm-lane/roost-vm-bell.c /build/roost-vm-bell.c
+COPY packaging/marlin/vm-lane/roost-vm-bell-build /build/roost-vm-bell-build
+RUN pacman -S --needed --noconfirm gcc pkgconf wayland wayland-protocols \
+    && ROOST_CI_ONLY=1 bash /build/roost-vm-bell-build
 FROM ${BASE_IMAGE} AS constraint-builder
 COPY packaging/marlin/vm-lane/roost-vm-constraints.c /build/roost-vm-constraints.c
 COPY packaging/marlin/vm-lane/roost-vm-constraints-build /build/roost-vm-constraints-build
@@ -24,6 +29,9 @@ RUN pacman -S --needed --noconfirm gcc pkgconf wayland wayland-protocols wlr-pro
     && ROOST_CI_ONLY=1 /build/roost-vm-constraints-build
 
 FROM ${BASE_IMAGE}
+COPY --from=bell-builder /usr/libexec/roost-vm-bell /usr/libexec/roost-vm-bell
+COPY --from=bell-builder /usr/share/roost-vm-bell /usr/share/roost-vm-bell
+COPY packaging/marlin/vm-lane/roost-vm-bell-proof /usr/libexec/roost-vm-bell-proof
 COPY --from=constraint-builder /usr/libexec/roost-vm-constraints /usr/libexec/roost-vm-constraints
 COPY --from=constraint-builder /usr/share/roost-vm-constraints /usr/share/roost-vm-constraints
 
@@ -47,7 +55,8 @@ RUN pacman -Syu --needed --noconfirm greetd greetd-gtkgreet cage qemu-guest-agen
     && useradd -M -d /home/roost-test -s /bin/bash -U roost-test \
     && echo 'roost-test:roost' | chpasswd \
     && test -f /usr/share/wayland-sessions/roost.desktop \
-    && chmod 0755 /usr/libexec/roost-vm-session /usr/libexec/roost-vm-lifecycle /usr/libexec/roost-vm-input \
+    && test -x /usr/bin/canberra-gtk-play && test -x /usr/bin/pw-record \
+    && chmod 0755 /usr/libexec/roost-vm-bell-proof /usr/libexec/roost-vm-session /usr/libexec/roost-vm-lifecycle /usr/libexec/roost-vm-input \
     && printf 'roost-session\n' > /etc/greetd/environments \
     && systemctl disable gdm.service \
     && systemctl mask serial-getty@ttyS0.service \
