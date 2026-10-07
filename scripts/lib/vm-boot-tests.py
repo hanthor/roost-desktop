@@ -17,6 +17,21 @@ lane = importlib.util.module_from_spec(spec)
 loader.exec_module(lane)
 
 
+class OrcaLifecycleAuthority(unittest.TestCase):
+    def test_hardware_service_guard_outlives_reaped_runtime(self):
+        source = (Path(__file__).resolve().parents[2] / "crates/compositor/src/runtime.rs").read_text()
+        run = source[source.index("pub fn run(session:"):]
+        self.assertLess(run.index("let _session_services;"), run.index("Runtime::launch(session)?"))
+        self.assertLess(run.index("Runtime::launch(session)?"), run.index("_session_services = if matches!(runtime.backend, Backend::Drm(_))"))
+        self.assertIn('shell.set_env(\n            "ROOST_SESSION_SERVICES",\n            match backend', source)
+        self.assertIn('Backend::Winit(_) => "nested"', source)
+
+    def test_nested_shell_checks_authority_before_session_bus(self):
+        source = (Path(__file__).resolve().parents[2] / "crates/shell-gtk/src/orca.rs").read_text()
+        self.assertLess(source.index('if !hardware('), source.index('gio::bus_get_future('))
+        self.assertNotIn('Command::new', source)
+
+
 class BootApi(unittest.TestCase):
     def test_qmp_command_accepts_protocol_name_argument(self):
         qmp = lane.baseline.Qmp.__new__(lane.baseline.Qmp)

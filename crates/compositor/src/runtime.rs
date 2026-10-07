@@ -830,6 +830,17 @@ impl Runtime {
             );
         }
 
+        // Service control is actual-backend authority, not the overridable
+        // preview UI/session-kind preference above. Always replace inherited
+        // values so a nested compositor cannot control host Orca.
+        shell.set_env(
+            "ROOST_SESSION_SERVICES",
+            match backend {
+                Backend::Winit(_) => "nested",
+                Backend::Drm(_) => "hardware",
+            },
+        );
+
         // linux-dmabuf lists exactly what this renderer imports (#89).
         let mut backend = backend;
         let mut state = state;
@@ -4101,10 +4112,14 @@ fn send_frame_callbacks(state: &State, manager: &WindowManager) {
 /// `WAYLAND_DISPLAY` is set, so setting it first would point winit at our
 /// own not-yet-existing socket.
 pub fn run(session: &NestedSession) -> Result<RunStats, RuntimeError> {
+    // Drop/reap the runtime's supervised shell before service cleanup, so it
+    // cannot issue another screen-reader start while this session is ending.
+    #[cfg(feature = "drm")]
+    let _session_services;
     let (mut runtime, mut event_loop) = Runtime::launch(session)?;
     let prev_env = apply_nested_env(&session.socket_name);
     #[cfg(feature = "drm")]
-    let _session_services = if matches!(runtime.backend, Backend::Drm(_)) {
+    _session_services = if matches!(runtime.backend, Backend::Drm(_)) {
         Some(crate::session_services::publish(&session.socket_name))
     } else {
         None

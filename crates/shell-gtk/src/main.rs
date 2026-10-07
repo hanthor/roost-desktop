@@ -29,6 +29,7 @@ mod media_keys;
 mod network_agent;
 mod network_secrets;
 mod notify;
+mod orca;
 mod osd;
 mod overview;
 mod polkit;
@@ -1054,6 +1055,7 @@ fn take_screenshot(window: bool, notify: Rc<notify::NotifyUi>) {
 }
 
 fn build(app: &adw::Application) {
+    orca::start();
     let provider = gtk::CssProvider::new();
     // Shell CSS has GNOME's baseline face/size, but follows the user's font live.
     let apply_font = {
