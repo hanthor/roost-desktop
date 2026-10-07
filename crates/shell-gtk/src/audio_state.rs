@@ -222,7 +222,7 @@ fn node_level(node: &Value) -> Option<(f64, bool)> {
         .or_else(|| props["volume"].as_f64())?;
     // WirePlumber's mixer API exposes the cubic (perceptual) scale.
     Some((
-        volume.max(0.0).cbrt().mul_add(100.0, 0.0).clamp(0.0, 100.0),
+        volume.max(0.0).cbrt().mul_add(100.0, 0.0),
         props["mute"].as_bool().unwrap_or(false),
     ))
 }
@@ -231,6 +231,14 @@ fn node_level(node: &Value) -> Option<(f64, bool)> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn amplified_backend_level_is_not_silently_truncated() {
+        let node = json!({"info":{"params":{"Props":[{"channelVolumes":[1.728],"mute":false}]}}});
+        let (percent, muted) = node_level(&node).unwrap();
+        assert!((percent - 120.0).abs() < 0.000001);
+        assert!(!muted);
+    }
+
     fn feed(state: &mut AudioState, value: Value) {
         state.feed(value.to_string().as_bytes()).unwrap();
     }

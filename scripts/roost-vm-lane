@@ -191,6 +191,32 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
                                                           right[2][offset:offset+3])) > 24
         return changed
 
+    # Real GNOME sound preference and virtual HDA/PipeWire data, not OSD state.
+    amplified_observations = []
+    try:
+        for mode, expected in (("off", 100.0), ("on", 104.0), ("high", 152.52), ("off", 100.0)):
+            initial = agent.run("audio-amplification-" + mode)
+            time.sleep(0.3)
+            qmp.keys("volumeup")
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                actual = agent.run("audio-amplification-read")
+                if (abs(actual["percent"] - expected) < 0.001 and not actual["muted"]
+                        and actual["amplified"] == (mode != "off")
+                        and actual["sink_id"] == initial["sink_id"]
+                        and actual["sink_name"].startswith("alsa_output")):
+                    break
+                time.sleep(0.2)
+            else:
+                raise RuntimeError("live GNOME overamplification did not update the real PipeWire sink")
+            amplified_observations.append(actual)
+        with open(os.path.join(evidence, "audio-amplification.json"), "w") as stream:
+            json.dump(amplified_observations, stream, indent=2)
+        record("V-AUDIO-AMPLIFICATION", True,
+               "real HDA/PipeWire output obeys live disable/enable, GNOME +11dB ceiling and disable reset")
+    finally:
+        agent.run("audio-amplification-reset")
+
     agent.run("start-input-probe")
     probe = await_state(lambda state: any(w["app_id"] == "org.roost.VmInput" for w in state["state"]["windows"]), label="input-created")
     probe_window = next(w for w in probe["state"]["windows"] if w["app_id"] == "org.roost.VmInput")

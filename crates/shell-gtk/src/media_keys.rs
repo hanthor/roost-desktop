@@ -4,7 +4,21 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
+use gio::prelude::*;
 use gtk4::{gio, glib};
+
+const AMPLIFIED_KEY: &str = "allow-volume-above-100-percent";
+
+pub fn sound_settings() -> Option<gio::Settings> {
+    let schema = gio::SettingsSchemaSource::default()?.lookup("org.gnome.desktop.sound", true)?;
+    schema
+        .has_key(AMPLIFIED_KEY)
+        .then(|| gio::Settings::new_full(&schema, None::<&gio::SettingsBackend>, None))
+}
+
+pub fn output_limit(settings: Option<&gio::Settings>) -> f64 {
+    crate::logic::volume_limit(settings.is_some_and(|s| s.boolean(AMPLIFIED_KEY)))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VolumeKey {
@@ -26,7 +40,7 @@ fn parse_volume(output: &str) -> Option<(f64, bool)> {
 
 /// GNOME unmutes without raising an existing nonzero level; lowering to
 /// zero mutes it. The ordinary range stops at 100 percent.
-fn adjusted(percent: f64, muted: bool, key: VolumeKey, step: f64) -> (f64, bool) {
+fn adjusted(percent: f64, muted: bool, key: VolumeKey, step: f64, limit: f64) -> (f64, bool) {
     match key {
         VolumeKey::Mute => (percent, !muted),
         VolumeKey::Up => (
@@ -35,11 +49,11 @@ fn adjusted(percent: f64, muted: bool, key: VolumeKey, step: f64) -> (f64, bool)
             } else {
                 percent + step
             })
-            .clamp(0.0, 100.0),
+            .clamp(0.0, limit),
             false,
         ),
         VolumeKey::Down => {
-            let percent = (percent - step).clamp(0.0, 100.0);
+            let percent = (percent - step).clamp(0.0, limit);
             (percent, muted || percent == 0.0)
         }
     }
@@ -52,6 +66,7 @@ struct Inner {
     queue: RefCell<VecDeque<(VolumeKey, f64, bool)>>,
     busy: Cell<bool>,
     osd: Osd,
+    sound: Option<gio::Settings>,
 }
 impl MediaKeys {
     pub fn new(osd: Osd) -> Self {
@@ -59,6 +74,7 @@ impl MediaKeys {
             queue: RefCell::new(VecDeque::new()),
             busy: Cell::new(false),
             osd,
+            sound: sound_settings(),
         }))
     }
     pub fn change(&self, key: VolumeKey, step: f64, microphone: bool) {
@@ -92,7 +108,17 @@ impl MediaKeys {
                 this.finish();
                 return;
             };
-            let (percent, muted) = adjusted(percent, muted, key, step);
+            let (percent, muted) = adjusted(
+                percent,
+                muted,
+                key,
+                step,
+                if microphone {
+                    100.0
+                } else {
+                    output_limit(this.0.sound.as_ref())
+                },
+            );
             let volume = format!("{:.4}", percent / 100.0);
             wpctl(&["set-volume", target, &volume], move |success| {
                 if success.is_none() {
@@ -156,12 +182,50 @@ fn wpctl(args: &[&str], done: impl FnOnce(Option<String>) + 'static) {
 mod tests {
     use super::*;
     #[test]
+    fn amplified_output_obeys_live_limit_and_preserves_unmute_level() {
+        let max = crate::logic::volume_limit(true);
+        assert_eq!(
+            adjusted(98.0, false, VolumeKey::Up, 6.0, max),
+            (104.0, false)
+        );
+        assert_eq!(
+            adjusted(150.0, false, VolumeKey::Up, 6.0, max),
+            (max, false)
+        );
+        assert_eq!(
+            adjusted(120.0, true, VolumeKey::Up, 6.0, max),
+            (120.0, false)
+        );
+        assert_eq!(
+            adjusted(120.0, false, VolumeKey::Up, 6.0, 100.0),
+            (100.0, false)
+        );
+        assert_eq!(
+            adjusted(98.0, false, VolumeKey::Up, 6.0, 100.0),
+            (100.0, false)
+        );
+        assert_eq!(output_limit(None), 100.0);
+    }
+
+    #[test]
     fn gnome_volume_unmute_zero_and_bounds() {
-        assert_eq!(adjusted(40.0, true, VolumeKey::Up, 6.0), (40.0, false));
-        assert_eq!(adjusted(0.0, true, VolumeKey::Up, 6.0), (6.0, false));
-        assert_eq!(adjusted(4.0, false, VolumeKey::Down, 6.0), (0.0, true));
-        assert_eq!(adjusted(98.0, false, VolumeKey::Up, 6.0), (100.0, false));
-        assert_eq!(adjusted(40.0, false, VolumeKey::Mute, 0.0), (40.0, true));
+        assert_eq!(
+            adjusted(40.0, true, VolumeKey::Up, 6.0, 100.0),
+            (40.0, false)
+        );
+        assert_eq!(adjusted(0.0, true, VolumeKey::Up, 6.0, 100.0), (6.0, false));
+        assert_eq!(
+            adjusted(4.0, false, VolumeKey::Down, 6.0, 100.0),
+            (0.0, true)
+        );
+        assert_eq!(
+            adjusted(98.0, false, VolumeKey::Up, 6.0, 100.0),
+            (100.0, false)
+        );
+        assert_eq!(
+            adjusted(40.0, false, VolumeKey::Mute, 0.0, 100.0),
+            (40.0, true)
+        );
         assert_eq!(parse_volume("Volume: 0.40 [MUTED]"), Some((40.0, true)));
         assert_eq!(parse_volume("Volume: NaN"), None);
         assert_eq!(parse_volume("no default sink"), None);
