@@ -2365,13 +2365,12 @@ rm -f "$corner_requests" "$corner_requests.ack"
 corner_count="$(jq '.windows | length' "$CSTATE")"
 WAYLAND_DISPLAY="$SOCKET_NAME" ROOST_TEST_REQUESTS="$corner_requests" "$PY" "$ROOT/scripts/lib/roost-test-window.py" "Fullscreen Corner Proof" '#804000' >"$ARTIFACTS/hot-corner-fullscreen.log" 2>&1 &
 HOT_CORNER_PID=$!
-cstate ".windows | length == $((corner_count + 1))" "corner proof mapped" ||
-    fail G-HOT-CORNER-FULLSCREEN "genuine GTK proof window did not map"
-cstate '([.windows[] | select(.app_id == "roost-test-fullscreen corner proof")] | length) == 1' "unique actual corner client identity" ||
-    fail G-HOT-CORNER-FULLSCREEN "actual corner client identity was not unique"
-corner_window_id="$(jq '.windows[] | select(.app_id == "roost-test-fullscreen corner proof") | .id' "$CSTATE")"
-corner_restored_rect="$(jq -c '.windows[] | select(.app_id == "roost-test-fullscreen corner proof") | .rect' "$CSTATE")"
-cp "$CSTATE" "$ARTIFACTS/hot-corner-client-before-fullscreen.json"
+cstate "(.windows | length == $((corner_count + 1))) and .focused != null and .focused_app_id == \"roost-test-fullscreen corner proof\" and (.focused_rect | type == \"array\" and length == 4 and all(.[]; type == \"number\"))" "corner proof mapped" ||
+    fail G-HOT-CORNER-FULLSCREEN "genuine GTK proof window did not map with its original focus and geometry"
+corner_window_id="$(jq -r '.focused' "$CSTATE")"
+corner_app_id="$(jq -c '.focused_app_id' "$CSTATE")"
+corner_normal_rect="$(jq -c '.focused_rect' "$CSTATE")"
+cp "$CSTATE" "$ARTIFACTS/hot-corner-original-window.json"
 printf '{"generation":1,"request":"fullscreen"}\n' >"$corner_requests"
 cstate ".focused_rect == [0, 0, $WIDTH, $HEIGHT]" "corner proof fullscreen" ||
     fail G-HOT-CORNER-FULLSCREEN "actual GTK fullscreen request did not cover the output"
@@ -2397,11 +2396,8 @@ cstate ".pointer_position == [$((WIDTH / 2)), $((HEIGHT / 2))]" "fullscreen corn
     fail G-HOT-CORNER-FULLSCREEN "backend did not deliver the requested corner exit"
 cp "$CSTATE" "$ARTIFACTS/hot-corner-fullscreen-before-unfullscreen.json"
 printf '{"generation":2,"request":"unfullscreen"}\n' >"$corner_requests"
-# A null focus during overview teardown is not an unfullscreen completion.
-# Observe the original mapped client and its exact saved rectangle with the
-# real pointer still at the center, before the one genuine corner entry.
-cstate ".focused == $corner_window_id and .focused_rect == $corner_restored_rect and (.windows | any(.id == $corner_window_id and .rect == $corner_restored_rect)) and .pointer_position == [$((WIDTH / 2)), $((HEIGHT / 2))] and (.pointer_fullscreen_blocked | not)" "original corner proof restored at center" ||
-    fail G-HOT-CORNER-FULLSCREEN "actual GTK unfullscreen request did not restore geometry"
+cstate ".focused == $corner_window_id and .focused_app_id == $corner_app_id and .focused_rect == $corner_normal_rect and .focused_rect != null and .pointer_position == [$((WIDTH / 2)), $((HEIGHT / 2))] and .pointer_fullscreen_blocked == false and .overview_open == false" "corner proof restored" ||
+    fail G-HOT-CORNER-FULLSCREEN "actual original GTK window did not restore its saved geometry and corner guard at the center"
 cp "$CSTATE" "$ARTIFACTS/hot-corner-unfullscreen-before-entry.json"
 xdotool mousemove --window "$WID" 1 1
 xdotool getmouselocation --shell >"$ARTIFACTS/hot-corner-unfullscreen-host-pointer.txt"
