@@ -231,10 +231,13 @@ fn bus_call(method: &str, arg: &str) -> Option<String> {
 fn observe_orca_name(pid: u32) -> State {
     let until = Instant::now() + Duration::from_secs(10);
     while Instant::now() < until {
-        if let Some(reply) = bus_call(
-            "org.freedesktop.DBus.GetNameOwner",
-            "org.gnome.Orca1.Service",
-        ) {
+        let mut active = false;
+        // Orca 50.3 and 51 expose different genuine remote-controller names.
+        // A foreign owner of either contract is a conflict, never replacement.
+        for name in ["org.gnome.Orca1.Service", "org.gnome.Orca.Service"] {
+            let Some(reply) = bus_call("org.freedesktop.DBus.GetNameOwner", name) else {
+                continue;
+            };
             let Some(owner) = reply.split('\'').nth(1) else {
                 return State::Unavailable;
             };
@@ -245,19 +248,30 @@ fn observe_orca_name(pid: u32) -> State {
             {
                 return State::Unavailable;
             }
-            if let Some(reply) = bus_call("org.freedesktop.DBus.GetConnectionUnixProcessID", owner)
-            {
-                let actual = reply
-                    .trim()
-                    .strip_prefix("(uint32 ")
-                    .and_then(|s| s.strip_suffix(",)"))
-                    .and_then(|s| s.parse::<u32>().ok());
-                return match actual {
-                    Some(actual) if actual == pid => State::Active,
-                    Some(_) => State::Conflict,
-                    None => State::Unavailable,
-                };
+            for (method, expected) in [
+                ("org.freedesktop.DBus.GetConnectionUnixProcessID", pid),
+                (
+                    "org.freedesktop.DBus.GetConnectionUnixUser",
+                    rustix::process::geteuid().as_raw(),
+                ),
+            ] {
+                let actual = bus_call(method, owner).and_then(|reply| {
+                    reply
+                        .trim()
+                        .strip_prefix("(uint32 ")
+                        .and_then(|s| s.strip_suffix(",)"))
+                        .and_then(|s| s.parse::<u32>().ok())
+                });
+                match actual {
+                    Some(actual) if actual == expected => {}
+                    Some(_) => return State::Conflict,
+                    None => return State::Unavailable,
+                }
             }
+            active = true;
+        }
+        if active {
+            return State::Active;
         }
         std::thread::sleep(Duration::from_millis(100));
     }

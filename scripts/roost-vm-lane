@@ -277,7 +277,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     record("V-LIFECYCLE-OWNER", nonroot and intact, "root probe, non-root greetd session and three real app processes/surfaces")
     if not nonroot or not intact or before["state"]["locked"]:
         raise RuntimeError("lifecycle preconditions failed")
-    # Real Orca51 owns a credential-verified bus name under the ordinary
+    # Real distribution Orca owns a credential-verified bus name under the ordinary
     # session user. Settings writes trigger Roost's consumer, not test start/stop.
     orca_observations = []
     def await_orca(enabled):
@@ -291,7 +291,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
                              and actual["state"] == "disabled"))):
                 return actual
             time.sleep(0.2)
-        raise RuntimeError("GNOME Screen Reader preference did not control genuine Orca51")
+        raise RuntimeError("GNOME Screen Reader preference did not control genuine distribution Orca")
     try:
         first_orca = None
         for enabled in (False, True, False, True, False):
@@ -303,7 +303,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
                     raise RuntimeError("Orca retained the stopped process identity")
                 first_orca = identity
         record("V-ORCA-ACTIVATION", True,
-               "live GNOME key starts/stops genuine Orca51; bus PID/UID, package hash, compositor parent and display verified")
+               "live GNOME key starts/stops genuine distribution Orca; bus PID/UID, package hash, compositor parent and display verified")
     finally:
         agent.run("orca-reset")
         with open(os.path.join(evidence, "orca-activation.json"), "w") as stream:
