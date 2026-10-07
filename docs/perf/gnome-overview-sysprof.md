@@ -90,3 +90,26 @@ check, not acceptance based on elapsed time or file quietness. Raw bytes and
 decoded marks are retained even when the writer does not close; such a capture
 cannot qualify. Actual closure still does not bypass whole-file integrity,
 required scopes, strict frame ownership, repeated measurements or release gates.
+
+## Rejected presentation evidence
+
+A complete capture with closed writer descriptors can still fail timing
+qualification. The second GNOME capture in job 112576389653 (run 37554162135,
+artifact 11455021454) reconstructed a presentation at
+123677782000–123677789000 ns for a dispatch beginning at 123682891000 ns.
+The strict qualifier rejects this frame; it cannot become a latency sample.
+
+For this failure, `gnome-overview-frame-rejection.json` retains the reason,
+whole-capture digest, original dispatch and notification marks, reconstructed
+presentation bounds, KMS feedback readiness, swap count, and remaining pending
+dispatches. The whole raw capture, source provenance and decoded marks remain
+authoritative; no qualified ownership result is emitted. These scope-order
+associations are not independent source frame identifiers or raw kernel flip
+events, so the report does not establish whether the cause is ownership or the
+presentation provider. Issue #434 tracks that unresolved distinction.
+
+The gzip fixture `gnome51-presentation-before-dispatch.syscap.gz` contains the
+entire unmodified rejected capture, with its original provenance and artifact
+coordinates in the adjacent JSON. Tests verify the whole checksum, continued
+strict rejection, exact observed bounds, and preservation of rejection evidence
+without producing a qualified result.

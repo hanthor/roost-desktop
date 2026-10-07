@@ -88,6 +88,51 @@ class CaptureClosure(unittest.TestCase):
                         dict(metadata, capture_writers_after_stop=[]))
 
 
+class RejectedPresentationCapture(unittest.TestCase):
+    def capture(self):
+        import gzip
+        import hashlib
+        root = ROOT / "scripts/lib/fixtures"
+        metadata = json.loads((root / "gnome51-presentation-before-dispatch.json").read_text())
+        raw = gzip.decompress((root / "gnome51-presentation-before-dispatch.syscap.gz").read_bytes())
+        self.assertEqual(len(raw), metadata["bytes"])
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), metadata["sha256"])
+        self.assertEqual(metadata["capture_writers_after_stop"], [])
+        return raw, metadata
+
+    def test_complete_closed_actual_capture_still_rejects_early_presentation(self):
+        raw, metadata = self.capture()
+        with self.assertRaisesRegex(sysprof.FrameOwnershipError, "presentation precedes") as result:
+            sysprof.overview_frame_bounds(sysprof.decode(raw), metadata["pid"])
+        evidence = result.exception.evidence
+        self.assertEqual(evidence["dispatch"]["monotonic_ns"], 123682891000)
+        self.assertEqual(evidence["presentation_lower_ns"], 123677782000)
+        self.assertEqual(evidence["presentation_upper_ns"], 123677789000)
+        self.assertLess(evidence["presentation_upper_ns"], evidence["dispatch"]["monotonic_ns"])
+        self.assertEqual(evidence["kms_ready_ns"], 123684532000)
+        self.assertEqual(evidence["swap_count"], 1)
+
+    def test_rejection_retains_whole_capture_and_bounds_without_qualified_result(self):
+        raw, metadata = self.capture()
+
+        def chunk(agent, action, index):
+            self.assertEqual(action, "gnome-trace-read")
+            return {"gnome_trace": {"index": index,
+                    "data": base64.b64encode(raw[index * 65536:(index + 1) * 65536]).decode()}}
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(host, "guest_probe", chunk):
+            out = Path(directory)
+            with self.assertRaisesRegex(ValueError, "presentation precedes"):
+                host.retain_gnome_trace(None, out, metadata)
+            self.assertEqual((out / "gnome-overview.syscap").read_bytes(), raw)
+            self.assertEqual(json.loads((out / "gnome-overview-source.json").read_text()), metadata)
+            self.assertTrue((out / "gnome-overview-marks.json").exists())
+            rejected = json.loads((out / "gnome-overview-frame-rejection.json").read_text())
+            self.assertEqual(rejected["capture_sha256"], metadata["sha256"])
+            self.assertEqual(rejected["evidence"]["presentation_upper_ns"], 123677789000)
+            self.assertFalse((out / "gnome-overview-frame-ownership.json").exists())
+
+
 class SysprofCapture(unittest.TestCase):
     def test_actual_gnome51_truncated_scope_names_and_owner(self):
         root = ROOT / "scripts/lib/fixtures"
