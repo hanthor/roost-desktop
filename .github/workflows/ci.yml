@@ -33,6 +33,8 @@ jobs:
       - run: python3 scripts/lib/marlin-kernel-tests.py
       - run: python3 scripts/lib/gnome-drained-tests.py
       - run: python3 scripts/lib/roost-perf-payload-tests.py
+      - run: python3 scripts/lib/roost-perf-reference-tests.py
+      - run: python3 scripts/lib/roost-perf-repeatability-tests.py
       - run: python3 scripts/lib/native-constraint-tests.py
       - run: python3 scripts/lib/roost-pipewire-dump-tests.py
       - run: scripts/roost-settings-inventory-check

@@ -2,7 +2,7 @@
 """Execute the actual workflow shell with controlled command receipts.
 
 No images, guest disks or VMs are created. These tests qualify workflow control
-flow only; six real acquisitions and measurement qualification remain CI work.
+flow only; twelve real acquisitions and measurement qualification remain CI work.
 """
 import json
 import os
@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def measurement_script():
     source = (ROOT / '.github/workflows/performance-baseline.yml').read_text()
-    marker = '      - name: Measure three instrumented GNOME then Roost pairs on this same host\n        run: |\n'
+    marker = '      - name: Measure three alternating fresh pairs for each explicit reference profile\n        run: |\n'
     if source.count(marker) != 1:
         raise ValueError('exact measurement step missing or duplicated')
     body = source.split(marker, 1)[1].split('\n      - ', 1)[0]
@@ -37,7 +37,8 @@ if name=='roost-vm-perf':
     row['out']=args[args.index('--out')+1]
     row['meta']=[args[i+1] for i,v in enumerate(args) if v=='--meta']
     repeat=next(v.split('=',1)[1] for v in row['meta'] if v.startswith('acquisition_repeat='))
-    row['case']=repeat+':'+row['desktop']
+    row['profile']=args[args.index('--gnome-profile')+1]
+    row['case']=row['profile']+':'+repeat+':'+row['desktop']
 with open(os.environ['RECEIPTS'],'a') as stream:
     stream.write(json.dumps(row)+'\n')
 if name=='roost-vm-perf':
@@ -62,7 +63,7 @@ class Repeatability(unittest.TestCase):
             path = root / 'scripts/roost-vm-perf'
             path.write_text(COMMAND)
             path.chmod(0o755)
-            for name in ('base-digest', 'shared-image-id', 'gnome-version', 'baseline-packages.txt'):
+            for name in ('base-digest', 'shared-image-id-diagnostic', 'shared-image-id-stock', 'gnome-version', 'baseline-packages.txt'):
                 (root / name).write_text('controlled-original-' + name + '\n')
             receipts = root / 'receipts.jsonl'
             env = dict(os.environ, PATH=str(commands) + os.pathsep + os.environ['PATH'],
@@ -73,29 +74,32 @@ class Repeatability(unittest.TestCase):
             artifacts = sorted(str(path.relative_to(root)) for path in (root / 'perf-artifacts').rglob('controlled-command-receipt.json'))
             return result, rows, artifacts
 
-    def test_actual_shell_retains_six_distinct_fresh_guest_measurements_and_order_metadata(self):
+    def test_actual_shell_retains_twelve_distinct_fresh_guest_measurements_and_order_metadata(self):
         result, rows, artifacts = self.execute()
         self.assertEqual(result.returncode, 0, result.stderr)
         measurements = [row for row in rows if row['command'] == 'roost-vm-perf']
         self.assertEqual([row['case'] for row in measurements],
-                         ['1:gnome', '1:roost', '2:gnome', '2:roost', '3:gnome', '3:roost'])
-        expected = ['perf-artifacts/gnome', 'perf-artifacts/roost',
-                    'perf-artifacts/repeat-2/gnome', 'perf-artifacts/repeat-2/roost',
+                         [profile+':'+case for profile in ('diagnostic','stock') for case in ('1:gnome','1:roost','2:roost','2:gnome','3:gnome','3:roost')])
+        first_profile = ['perf-artifacts/gnome', 'perf-artifacts/roost',
+                    'perf-artifacts/repeat-2/roost', 'perf-artifacts/repeat-2/gnome',
                     'perf-artifacts/repeat-3/gnome', 'perf-artifacts/repeat-3/roost']
+        expected = first_profile + [path.replace('perf-artifacts/', 'perf-artifacts/stock/', 1) for path in first_profile]
         self.assertEqual([row['out'] for row in measurements], expected)
         self.assertEqual(artifacts, sorted(path + '/controlled-command-receipt.json' for path in expected))
-        self.assertEqual(sum(row['command'] == 'truncate' for row in rows), 6)
+        self.assertEqual(sum(row['command'] == 'truncate' for row in rows), 12)
         installs = [row for row in rows if row['command'] == 'sudo' and 'bootc' in row['args']]
-        self.assertEqual(len(installs), 6)
+        self.assertEqual(len(installs), 12)
         self.assertTrue(all('install' in row['args'] and '--wipe' in row['args'] for row in installs))
         for row in measurements:
-            self.assertIn('acquisition_order=gnome-first-fixed', row['meta'])
-            self.assertIn('reference_kind=instrumented-gnome51', row['meta'])
+            self.assertIn('acquisition_order='+('roost-gnome' if ':2:' in row['case'] else 'gnome-roost'), row['meta'])
+            self.assertIn('reference_kind='+('instrumented-gnome51' if row['profile']=='diagnostic' else 'distribution-stock-gnome51'), row['meta'])
             self.assertIn('observer_revision=controlled-source', row['meta'])
+            expected_root='perf-artifacts' if row['profile']=='diagnostic' else 'perf-artifacts/stock'
+            self.assertEqual(row['args'][row['args'].index('--reference-image')+1], expected_root+'/reference-image.json')
 
     def test_first_and_later_rejections_preserve_nonzero_without_replay_or_selecting_later_passes(self):
-        order = ['1:gnome', '1:roost', '2:gnome', '2:roost', '3:gnome', '3:roost']
-        for failure in ('1:gnome', '2:gnome', '2:roost'):
+        order = [profile+':'+case for profile in ('diagnostic','stock') for case in ('1:gnome','1:roost','2:roost','2:gnome','3:gnome','3:roost')]
+        for failure in ('diagnostic:1:gnome', 'diagnostic:2:gnome', 'diagnostic:2:roost','stock:1:gnome','stock:3:roost'):
             with self.subTest(failure=failure):
                 result, rows, artifacts = self.execute(failure)
                 self.assertEqual(result.returncode, 9)
@@ -106,7 +110,7 @@ class Repeatability(unittest.TestCase):
 
     def test_failure_evidence_upload_remains_unconditional(self):
         source = (ROOT / '.github/workflows/performance-baseline.yml').read_text()
-        suffix = source.split('      - name: Measure three instrumented GNOME then Roost pairs on this same host', 1)[1]
+        suffix = source.split('      - name: Measure three alternating fresh pairs for each explicit reference profile', 1)[1]
         self.assertIn('        if: always()\n', suffix)
         self.assertIn('          path: perf-artifacts\n', suffix)
         self.assertIn('- run: python3 scripts/lib/roost-perf-repeatability-tests.py', source)
