@@ -3832,7 +3832,7 @@ fn scene_elements(
             .then_some(visual.surface.as_ref())
             .flatten()
     });
-    let window = target.and_then(|surface| {
+    let target_window = target.and_then(|surface| {
         manager
             .model()
             .windows()
@@ -3848,7 +3848,7 @@ fn scene_elements(
         Rectangle::new(at, (end.x - at.x, end.y - at.y).into())
     };
     let fullscreen = (visual.is_some_and(|v| v.fullscreen || !v.window_target)
-        && window.is_none()
+        && target_window.is_none()
         && alpha > 0.0)
         .then(|| {
             state
@@ -3893,7 +3893,7 @@ fn scene_elements(
             let preview = overview?
                 .previews
                 .iter()
-                .find(|preview| Some(preview.id) == window)?;
+                .find(|preview| Some(preview.id) == target_window)?;
             (alpha > 0.0).then(|| BellFrame {
                 rect: physical(preview.rect),
                 alpha: alpha * preview.alpha,
@@ -3949,7 +3949,10 @@ fn scene_elements(
                 1.0
             };
             tree(renderer, &mut elements, &surface, origin, sx);
-            if target.is_some_and(|target| target == &*surface) && window.is_some() && alpha > 0.0 {
+            if target.is_some_and(|target| target == &*surface)
+                && target_window.is_some()
+                && alpha > 0.0
+            {
                 frame_flash = Some((elements.len(), physical(geometry)));
             }
             // Popups (#88) right above their window.
