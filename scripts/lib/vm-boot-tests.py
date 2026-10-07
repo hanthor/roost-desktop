@@ -92,6 +92,55 @@ class InputProbePlacement(unittest.TestCase):
             self.assertTrue(ready["active"])
 
 
+class RepeatedCoverage(unittest.TestCase):
+    def run_boots(self, root, manifests, returncodes=None):
+        next_boot = iter(zip(manifests, returncodes or [0] * len(manifests)))
+
+        def boot(command, check):
+            self.assertFalse(check)
+            manifest, code = next(next_boot)
+            destination = Path(command[command.index("--out") + 1])
+            destination.mkdir(parents=True, exist_ok=True)
+            (destination / "manifest.json").write_text(json.dumps({"assertions": manifest}))
+            return SimpleNamespace(returncode=code)
+
+        args = SimpleNamespace(out=str(root), boots=5, disk="disk.raw", timeout=30,
+                               tour=True, meta=[])
+        with patch.object(lane.subprocess, "run", side_effect=boot):
+            lane.repeat_boots(args)
+
+    def test_final_lifecycle_check_does_not_claim_five_observations(self):
+        startup = {"V-DRM": {"pass": True}}
+        full = {**startup, "V-SUSPEND": {"pass": True}}
+        with tempfile.TemporaryDirectory() as root:
+            self.run_boots(root, [startup] * 4 + [full])
+            proof = json.loads((Path(root) / "repeat-manifest.json").read_text())
+            self.assertEqual(proof["assertion_coverage"]["V-DRM"]["passed_boots"], [1, 2, 3, 4, 5])
+            self.assertEqual(proof["assertion_coverage"]["V-SUSPEND"]["observed_boots"], [5])
+            lines = (Path(root) / "assertions.txt").read_text().splitlines()
+            self.assertTrue(any(line.startswith("V-SUSPEND pass observed on 1/5") for line in lines))
+
+    def test_missing_baseline_check_is_fatal_and_retained(self):
+        startup = {"V-DRM": {"pass": True}}
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(SystemExit, "repeated boot gate failed"):
+                self.run_boots(root, [startup, {}, startup, startup, startup])
+            proof = json.loads((Path(root) / "repeat-manifest.json").read_text())
+            self.assertEqual(proof["assertion_coverage"]["V-DRM"]["missing_boots"], [2])
+            self.assertIn("V-DRM fail observed on 4/5", (Path(root) / "assertions.txt").read_text())
+
+    def test_observed_failure_and_failed_process_each_remain_fatal(self):
+        startup = {"V-DRM": {"pass": True}}
+        for last, codes in [({"V-DRM": {"pass": False}}, [0] * 5),
+                            (startup, [0, 0, 0, 0, 1])]:
+            with self.subTest(last=last, codes=codes), tempfile.TemporaryDirectory() as root:
+                with self.assertRaisesRegex(SystemExit, "repeated boot gate failed"):
+                    self.run_boots(root, [startup] * 4 + [last], codes)
+                proof = json.loads((Path(root) / "repeat-manifest.json").read_text())
+                self.assertEqual(proof["boot_results"][-1]["returncode"], codes[-1])
+                self.assertIn("V-REPEAT fail", (Path(root) / "assertions.txt").read_text())
+
+
 class PciCapabilities(unittest.TestCase):
     def probe(self, pm_control, pcie=True, cycle=False):
         helper = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
