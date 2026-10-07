@@ -700,8 +700,17 @@ impl Runtime {
                     .map_err(|e| RuntimeError::Loop(e.to_string()))?;
                 handle
                     .insert_source(sources.input, |event, _, rt: &mut Runtime| {
+                        let corners_active = !rt.is_locked()
+                            && !rt.manager.pointer_constraint_owns_motion()
+                            && !rt.overlay.visible
+                            && crate::layer::exclusive_popup_keyboard_layer(&rt.state).is_none();
+                        let corner_layout = rt.state.hot_corner_outputs();
+                        rt.triggers.set_pressure_only(true);
                         let inputs = match &mut rt.backend {
-                            Backend::Drm(drm) => drm.translate(event),
+                            Backend::Drm(drm) => {
+                                drm.set_hot_corner_active(corners_active);
+                                drm.translate(event, &corner_layout)
+                            }
                             Backend::Winit(_) => Vec::new(),
                         };
                         for input in inputs {
@@ -1235,6 +1244,11 @@ impl Runtime {
             match action {
                 TriggerAction::None => {}
                 TriggerAction::Toggle => {
+                    if let ManagerInput::CornerPressure { pos, .. } = input {
+                        if !self.control.overview_open() && self.manager.fullscreen_at(pos) {
+                            return;
+                        }
+                    }
                     self.control.set_overview(!self.control.overview_open());
                     #[cfg(feature = "drm")]
                     if matches!(self.backend, Backend::Drm(_)) {
@@ -1504,6 +1518,7 @@ impl Runtime {
             "overview_open": overview_open,
             "animations_enabled": self.input_settings.enable_animations,
             "mouse_left_handed": self.input_settings.mouse_left_handed,
+            "hot_corners": self.input_settings.hot_corners,
             "touchpad_left_handed": self.input_settings.touchpad_left_handed,
             "locked": self.is_locked(),
             "active_workspace": model.active_workspace(),
@@ -1584,13 +1599,20 @@ impl Runtime {
                 })
                 .collect::<Vec<_>>(),
         });
-        // Retain actual manager observations outside the large JSON macro.
-        // Coordinate diagnostics stay absent during credential input.
-        let pointer = (!self.is_locked()).then(|| {
+        // Keep backend-specific observations outside the large scene macro so
+        // its expansion remains below the compiler's default recursion limit.
+        // These values keep the same flat JSON fields and suppress lock input.
+        doc["native_relative_motion_count"] = serde_json::json!((!self.is_locked())
+            .then(|| match &self.backend {
+                #[cfg(feature = "drm")]
+                Backend::Drm(drm) => Some(drm.relative_motion_events()),
+                Backend::Winit(_) => None,
+            })
+            .flatten());
+        doc["pointer_position"] = serde_json::json!((!self.is_locked()).then(|| {
             let pos = self.manager.pointer_pos();
             [pos.x, pos.y]
-        });
-        doc["pointer_position"] = serde_json::json!(pointer);
+        }));
         doc["pointer_fullscreen_blocked"] = serde_json::json!(
             (!self.is_locked()).then(|| self.manager.fullscreen_at(self.manager.pointer_pos()))
         );
@@ -4181,6 +4203,7 @@ fn input_time(input: &ManagerInput) -> u64 {
     match *input {
         ManagerInput::Key { time, .. }
         | ManagerInput::Motion { time, .. }
+        | ManagerInput::CornerPressure { time, .. }
         | ManagerInput::Button { time, .. }
         | ManagerInput::Axis { time, .. }
         | ManagerInput::SwipeBegin { time, .. }
