@@ -147,6 +147,19 @@ class Policy(unittest.TestCase):
              patch.object(G,'check_accessibility'),patch.object(G,'fixture_identity'):
             G.error_stage('tree');G.guard(value)
             self.assertEqual(G.ERROR_STAGE,'tree')
+    def test_tree_stage_names_provider_lookup_and_subtree_walk(self):
+        value={'fixture':'/owner/seed','accessibility':{'provider':{'owner':':1.2'}}}
+        node=SimpleNamespace(name='seed',getState=lambda:SimpleNamespace(contains=lambda _state:True))
+        app=SimpleNamespace(childCount=1,getChildAtIndex=lambda _index:node)
+        api=SimpleNamespace(STATE_SHOWING=object())
+        with patch.object(G,'fast_guard',return_value=None):
+            with patch.object(G,'provider_app',side_effect=RuntimeError('fixed provider')):
+                with self.assertRaises(RuntimeError):G.accessibility(value)
+                self.assertEqual(G.ERROR_STAGE,'tree-provider')
+            with patch.object(G,'provider_app',return_value=(app,api,None)), \
+                 patch.object(G,'walk_tree',side_effect=RuntimeError('fixed walk')):
+                with self.assertRaises(RuntimeError):G.accessibility(value)
+                self.assertEqual(G.ERROR_STAGE,'tree-walk')
     def test_original_files_route_not_private_env(self):
         value={'nautilus':{'pid':12},'compositor':{'pid':34}}
         with patch.object(G,'bounded',return_value=b'PRIVATE=never retained\0WAYLAND_DISPLAY=roost-nested-34\0'):
@@ -280,7 +293,7 @@ class Policy(unittest.TestCase):
         return output.getvalue().encode()
 
     def test_actual_wrapper_retains_finite_helper_stage_and_nonzero(self):
-        for stage in ('context','guard-route','window','tree','cells','final-guard'):
+        for stage in ('context','guard-route','window','tree','tree-provider','tree-walk','cells','final-guard'):
             good={'phase':'mapped','stage':stage,'exception_type':'RuntimeError'}
             output=self.wrapper_failure(json.dumps({'native_files_error':good}).encode())
             self.assertEqual(json.loads(output),{'native_files_error':good})

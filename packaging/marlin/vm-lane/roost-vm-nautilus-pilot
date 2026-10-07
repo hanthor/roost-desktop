@@ -510,6 +510,9 @@ def provider_app(value,query):
 
 def accessibility(value):
     query=Queries(value).call
+    # Narrow the wide tree stage so a failure names provider lookup, the
+    # subtree walk, or the post-walk guard without retaining query data.
+    error_stage('tree-provider')
     app,pyatspi,_receipt=provider_app(value,query)
     count=query(lambda:app.childCount)
     if type(count) is not int or not 0<=count<=64:raise RuntimeError('original accessible Files app bound')
@@ -519,7 +522,9 @@ def accessibility(value):
         if node is not None and query(lambda:node.name)==Path(value['fixture']).name and query(lambda:node.getState().contains(pyatspi.STATE_SHOWING)):roots.append(node)
     if not roots:raise ReadyLater()
     if len(roots)!=1:raise RuntimeError('original fixture accessible window ambiguous')
+    error_stage('tree-walk')
     nodes,visited=walk_tree(roots[0],query,pyatspi.STATE_SHOWING,value['accessibility']['provider']['owner'])
+    error_stage('tree')
     guard(value)
     return nodes,pyatspi,query,visited
 
