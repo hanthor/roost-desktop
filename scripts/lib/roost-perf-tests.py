@@ -88,6 +88,42 @@ class CaptureClosure(unittest.TestCase):
                         dict(metadata, capture_writers_after_stop=[]))
 
 
+class DiagnosticSourceEvidence(unittest.TestCase):
+    def marks(self):
+        # Parser-only synthetic records; real package emission is a CI/VM gate.
+        return {"marks": [dict(pid=123, monotonic_ns=10, name=name, message=message)
+                for name, message in (
+                    ("Clutter::FrameClock::dispatch()", ""),
+                    ("Clutter::FrameClock::presented()", ""),
+                    ("Roost::FrameClock::dispatch-id", "output=Virtual-1 frame=42 dispatch_us=100"),
+                    ("Roost::FrameClock::presented-id", "output=Virtual-1 view_frame=42 global_frame=45 presentation_us=90 sequence=98 flags=4 kms_ready_us=101"),
+                    ("Roost::KMS::raw-page-flip", "crtc=55 sequence=98 seconds=0 microseconds=90 device=/dev/dri/card1"))]}
+
+    def test_raw_kernel_time_is_retained_without_replacing_early_presentation(self):
+        result = sysprof.frame_source_evidence(self.marks(), 123)
+        self.assertEqual(result["dispatches"][0]["frame_counter"], 42)
+        self.assertEqual(result["presentations"][0]["source_time_us"], 90)
+        self.assertEqual(result["kernel_events"][0]["microseconds"], 90)
+        self.assertNotIn("latency", result)
+
+    def test_missing_duplicate_foreign_or_malformed_diagnostic_records_fail(self):
+        import copy
+        for case in ("missing", "duplicate", "foreign", "bad-time", "wrong-output"):
+            marks = self.marks()
+            if case == "missing":
+                marks["marks"].pop()
+            elif case == "duplicate":
+                marks["marks"].append(copy.deepcopy(marks["marks"][2]))
+            elif case == "foreign":
+                marks["marks"][2]["pid"] = 124
+            elif case == "bad-time":
+                marks["marks"][-1]["message"] = marks["marks"][-1]["message"].replace("microseconds=90", "microseconds=1000000")
+            else:
+                marks["marks"][2]["message"] = marks["marks"][2]["message"].replace("Virtual-1", "Virtual-2")
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                sysprof.frame_source_evidence(marks, 123)
+
+
 class RejectedPresentationCapture(unittest.TestCase):
     def capture(self):
         import gzip

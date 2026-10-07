@@ -21,7 +21,7 @@ lane = importlib.util.module_from_spec(spec)
 loader.exec_module(lane)
 sys.path.insert(0, str(HERE / "lib"))
 from vm_guest_agent import GuestAgent  # noqa: E402
-from gnome_sysprof import decode as decode_gnome_sysprof, required_scope_counts, overview_frame_bounds, FrameOwnershipError  # noqa: E402
+from gnome_sysprof import decode as decode_gnome_sysprof, required_scope_counts, overview_frame_bounds, FrameOwnershipError, frame_source_evidence  # noqa: E402
 
 
 def guest_probe(agent, action, index=None):
@@ -90,6 +90,10 @@ def retain_gnome_trace(agent, out, metadata):
     decoded = decode_gnome_sysprof(raw)
     # Preserve decoded evidence even if a required semantic scope is absent.
     (out / "gnome-overview-marks.json").write_text(json.dumps(decoded, indent=2))
+    diagnostic = metadata.get("mutter_cogl_library", {}).get("package") == "mutter 51.0-1.2"
+    if diagnostic:
+        evidence = frame_source_evidence(decoded, metadata["pid"])
+        (out / "gnome-overview-source-frames.json").write_text(json.dumps(evidence, indent=2))
     if metadata.get("capture_writers_after_stop") != []:
         raise ValueError("GNOME capture writer did not close after Stop")
     counts = required_scope_counts(decoded, metadata["pid"])
@@ -109,7 +113,7 @@ def retain_gnome_trace(agent, out, metadata):
     frames["latency_upper_ms"] = distribution([row["latency_upper_ms"] for row in frames["inputs"]])
     return {"bytes": size, "sha256": digest, "frame_count": decoded["frame_count"],
             "mark_count": len(decoded["marks"]), "scope_counts": counts, "frame_ownership": frames,
-            "limitation": frames["limitation"]}
+            "limitation": (evidence["limitation"] if diagnostic else frames["limitation"])}
 
 
 def presentation_summary(trace):

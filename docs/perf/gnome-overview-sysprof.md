@@ -113,3 +113,26 @@ entire unmodified rejected capture, with its original provenance and artifact
 coordinates in the adjacent JSON. Tests verify the whole checksum, continued
 strict rejection, exact observed bounds, and preservation of rejection evidence
 without producing a qualified result.
+
+
+## Instrumented source-frame diagnostic variant
+
+The reference package `mutter 51.0-1.2` additionally applies
+`frame-source-evidence.patch` to the pinned 51.0 source. It records actual
+Clutter dispatch counters, the presentation's view/global-frame counters,
+supplied presentation time, sequence, flags and KMS readiness, and the raw
+atomic KMS callback's CRTC, sequence, seconds,
+microseconds and device path. Original scheduling, timestamp handling and the
+strict ownership qualifier remain unchanged. This variant is diagnostic: extra
+trace marks have measurement overhead, and these measurements are not final
+performance parity evidence.
+
+`gnome-overview-source-frames.json` retains these independently observed values
+before timing qualification. Missing, duplicate, foreign-PID or malformed
+source records fail validation; early presentation times are retained exactly,
+not repaired. The original complete capture/provenance remains authoritative.
+No pairing between a kernel event and a view-frame counter is inferred merely
+because their times are close. A rejected ownership result remains rejected.
+The recipe, both patches and package checksum manifest are retained with each
+run, and the original mapped library's installed package identity selects this
+additional diagnostic requirement.
