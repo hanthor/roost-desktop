@@ -1501,7 +1501,7 @@ impl Runtime {
         let x11_ready = self.state.xwm.is_some();
         #[cfg(not(feature = "xwayland"))]
         let x11_ready = false;
-        let doc = serde_json::json!({
+        let mut doc = serde_json::json!({
             "rendered_frames": self.stats.frames,
             "x11_display": self.x11_display.map(|d| format!(":{d}")),
             "capture_streams": self.casts.len(),
@@ -1519,17 +1519,6 @@ impl Runtime {
             "animations_enabled": self.input_settings.enable_animations,
             "mouse_left_handed": self.input_settings.mouse_left_handed,
             "hot_corners": self.input_settings.hot_corners,
-            "native_relative_motion_count": (!self.is_locked()).then(|| {
-                match &self.backend {
-                    #[cfg(feature = "drm")]
-                    Backend::Drm(drm) => Some(drm.relative_motion_events()),
-                    Backend::Winit(_) => None,
-                }
-            }).flatten(),
-            "pointer_position": (!self.is_locked()).then(|| {
-                let pos = self.manager.pointer_pos();
-                [pos.x, pos.y]
-            }),
             "touchpad_left_handed": self.input_settings.touchpad_left_handed,
             "locked": self.is_locked(),
             "active_workspace": model.active_workspace(),
@@ -1609,8 +1598,22 @@ impl Runtime {
                     }))
                 })
                 .collect::<Vec<_>>(),
-        })
-        .to_string();
+        });
+        // Keep backend-specific observations outside the large scene macro so
+        // its expansion remains below the compiler's default recursion limit.
+        // These values keep the same flat JSON fields and suppress lock input.
+        doc["native_relative_motion_count"] = serde_json::json!((!self.is_locked())
+            .then(|| match &self.backend {
+                #[cfg(feature = "drm")]
+                Backend::Drm(drm) => Some(drm.relative_motion_events()),
+                Backend::Winit(_) => None,
+            })
+            .flatten());
+        doc["pointer_position"] = serde_json::json!((!self.is_locked()).then(|| {
+            let pos = self.manager.pointer_pos();
+            [pos.x, pos.y]
+        }));
+        let doc = doc.to_string();
         if doc == self.state_last {
             return;
         }
