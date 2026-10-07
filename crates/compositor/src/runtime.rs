@@ -1062,6 +1062,7 @@ impl Runtime {
         self.performance_trace.cancel();
         self.lock.lock();
         self.control.set_locked(true);
+        self.state.protocols.bell.set_locked(true);
         let remote_ids: Vec<_> = self.remote_held.keys().copied().collect();
         for id in remote_ids {
             self.stop_remote_input(id);
@@ -2563,6 +2564,7 @@ impl Runtime {
     /// Apply GNOME's input settings (#60): the seat's keymap and key
     /// repeat, libinput pointer devices (hardware), the hot corner.
     fn apply_input_settings(&mut self, settings: roost_shell_control::InputSettings) {
+        self.state.protocols.bell.set_policy(settings.bells.clone());
         self.manager
             .apply_keyboard_settings(&mut self.state, &settings);
         self.triggers.set_hot_corner(settings.hot_corners);
@@ -2966,6 +2968,7 @@ impl Runtime {
         }
         // Only the supervised shell may hold a control session (#30):
         // between restarts nobody may.
+        self.state.protocols.bell.set_locked(self.is_locked());
         self.capture_authority
             .publish(self.is_locked(), self.shell.child_pid());
         self.control.set_peer_gate(match self.shell.child_pid() {
@@ -3321,6 +3324,10 @@ impl Runtime {
                         pointer: (!locked && blank_alpha < 1.0).then_some((pointer.x, pointer.y)),
                         decor: decor.clone(),
                         above: elements.above,
+                        bell: elements
+                            .bell
+                            .as_ref()
+                            .map(|bell| (bell.rect, bell.alpha, bell.index)),
                         groups: vec![
                             paper
                                 .iter()
@@ -3649,6 +3656,15 @@ struct Scene {
     tile: Vec<smithay::backend::renderer::element::solid::SolidColorRenderElement>,
     /// Window thumbnails over everything (the Alt+Tab switcher's).
     top: Vec<PreviewElement>,
+    bell: Option<BellFrame>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct BellFrame {
+    rect: Rectangle<i32, smithay::utils::Physical>,
+    alpha: f32,
+    /// Front-to-back position above its window; None means the whole stage.
+    index: Option<usize>,
 }
 
 impl Scene {
@@ -3669,6 +3685,7 @@ impl Scene {
             above,
             tile: Vec::new(),
             top: Vec::new(),
+            bell: None,
         }
     }
 }
@@ -3808,6 +3825,44 @@ fn scene_elements(
             .unwrap_or_default(),
         );
     }
+    let visual = state.protocols.bell.visual();
+    let alpha = visual.map_or(0.0, |visual| visual.alpha(std::time::Instant::now()));
+    let target = visual.and_then(|visual| {
+        (!visual.fullscreen)
+            .then_some(visual.surface.as_ref())
+            .flatten()
+    });
+    let window = target.and_then(|surface| {
+        manager
+            .model()
+            .windows()
+            .find(|window| manager.surface_of(window.id).as_ref() == Some(surface))
+            .map(|window| window.id)
+    });
+    let physical = |rect: Rectangle<i32, Logical>| {
+        let at = view.physical(f64::from(rect.loc.x), f64::from(rect.loc.y));
+        let end = view.physical(
+            f64::from(rect.loc.x + rect.size.w),
+            f64::from(rect.loc.y + rect.size.h),
+        );
+        Rectangle::new(at, (end.x - at.x, end.y - at.y).into())
+    };
+    let fullscreen = (visual.is_some_and(|v| v.fullscreen || !v.window_target)
+        && window.is_none()
+        && alpha > 0.0)
+        .then(|| {
+            state
+                .outputs
+                .iter()
+                .map(|output| Rectangle::new(output.loc.into(), output.size))
+                .reduce(Rectangle::merge)
+                .map(|rect| BellFrame {
+                    rect: physical(rect),
+                    alpha,
+                    index: None,
+                })
+        })
+        .flatten();
     if overview.is_some() {
         // Overview (#54): windows are drawn as rescaled previews in
         // their own pass (`preview_elements`); here only the shell's
@@ -3833,11 +3888,24 @@ fn scene_elements(
                 ));
             }
         }
-        return Scene::flat(crate::layer::front_to_back(elements));
+        let mut scene = Scene::flat(crate::layer::front_to_back(elements));
+        scene.bell = fullscreen.or_else(|| {
+            let preview = overview?
+                .previews
+                .iter()
+                .find(|preview| Some(preview.id) == window)?;
+            (alpha > 0.0).then(|| BellFrame {
+                rect: physical(preview.rect),
+                alpha: alpha * preview.alpha,
+                index: Some(scene.elements.len()),
+            })
+        });
+        return scene;
     }
     let mut elements: Vec<PreviewElement> = Vec::new();
     // Bottom-to-top index where the dragged window starts.
     let mut split_from = None;
+    let mut frame_flash = None;
     let tree = |renderer: &mut GlesRenderer,
                 elements: &mut Vec<PreviewElement>,
                 surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
@@ -3881,6 +3949,9 @@ fn scene_elements(
                 1.0
             };
             tree(renderer, &mut elements, &surface, origin, sx);
+            if target.is_some_and(|target| target == &*surface) && window.is_some() && alpha > 0.0 {
+                frame_flash = Some((elements.len(), physical(geometry)));
+            }
             // Popups (#88) right above their window.
             for popup in crate::popup::placed_popups(&surface, origin, true) {
                 tree(renderer, &mut elements, &popup.surface, popup.origin, 1.0);
@@ -3899,11 +3970,19 @@ fn scene_elements(
     // background-to-overlay layers); Smithay 0.7 draws the first
     // element topmost.
     let above = elements.len() - split_from.unwrap_or(0);
+    let bell = fullscreen.or_else(|| {
+        frame_flash.map(|(from, rect)| BellFrame {
+            rect,
+            alpha,
+            index: Some(elements.len() - from),
+        })
+    });
     Scene {
         elements: crate::layer::front_to_back(elements),
         above,
         tile: Vec::new(),
         top: Vec::new(),
+        bell,
     }
 }
 
@@ -4003,22 +4082,34 @@ fn draw_scene(
     }
     // Beneath the tile preview, the preview (blended), then the
     // dragged window and the layers over it.
-    let (over, under) = scene
-        .elements
-        .split_at(scene.above.min(scene.elements.len()));
-    if !under.is_empty() {
-        draw_render_elements(frame, scale, under, &[damage])
-            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-    }
+    draw_bell_section(
+        frame,
+        scale,
+        scene,
+        scene.above.min(scene.elements.len()),
+        scene.elements.len(),
+        damage,
+    )?;
     if !scene.tile.is_empty() {
         draw_render_elements::<GlesRenderer, _, _>(frame, 1.0, &scene.tile, &[damage])
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
     }
-    draw_render_elements(frame, scale, over, &[damage])
-        .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    if scene.above > 0 {
+        draw_bell_section(
+            frame,
+            scale,
+            scene,
+            0,
+            scene.above.min(scene.elements.len()),
+            damage,
+        )?;
+    }
     if !scene.top.is_empty() {
         draw_render_elements(frame, scale, &scene.top, &[damage])
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    }
+    if let Some(bell) = scene.bell.as_ref().filter(|bell| bell.index.is_none()) {
+        draw_bell(frame, bell, damage)?;
     }
     if blank_alpha > 0.0 {
         use smithay::backend::renderer::element::{solid::SolidColorRenderElement, Id, Kind};
@@ -4031,6 +4122,54 @@ fn draw_scene(
             Kind::Unspecified,
         );
         draw_render_elements::<GlesRenderer, _, _>(frame, 1.0, &[shield], &[damage])
+            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    }
+    Ok(())
+}
+
+fn draw_bell(
+    frame: &mut smithay::backend::renderer::gles::GlesFrame<'_, '_>,
+    bell: &BellFrame,
+    damage: Rectangle<i32, smithay::utils::Physical>,
+) -> Result<(), RuntimeError> {
+    use smithay::backend::renderer::element::{solid::SolidColorRenderElement, Id, Kind};
+    thread_local! { static BELL: Id = Id::new(); }
+    let flash = SolidColorRenderElement::new(
+        BELL.with(Clone::clone),
+        bell.rect,
+        0usize,
+        Color32F::new(0.0, 0.0, 0.0, bell.alpha),
+        Kind::Unspecified,
+    );
+    draw_render_elements::<GlesRenderer, _, _>(frame, 1.0, &[flash], &[damage])
+        .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    Ok(())
+}
+
+fn draw_bell_section(
+    frame: &mut smithay::backend::renderer::gles::GlesFrame<'_, '_>,
+    scale: f64,
+    scene: &Scene,
+    from: usize,
+    to: usize,
+    damage: Rectangle<i32, smithay::utils::Physical>,
+) -> Result<(), RuntimeError> {
+    let bell = scene.bell.as_ref().filter(|bell| {
+        bell.index.is_some_and(|index| {
+            index >= from
+                && (index < to
+                    || index == scene.elements.len() && from == to && to == scene.elements.len())
+        })
+    });
+    if let Some(bell) = bell {
+        let index = bell.index.unwrap();
+        draw_render_elements(frame, scale, &scene.elements[index..to], &[damage])
+            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+        draw_bell(frame, bell, damage)?;
+        draw_render_elements(frame, scale, &scene.elements[from..index], &[damage])
+            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    } else {
+        draw_render_elements(frame, scale, &scene.elements[from..to], &[damage])
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
     }
     Ok(())

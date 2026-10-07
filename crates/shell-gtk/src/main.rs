@@ -1901,6 +1901,8 @@ fn build(app: &adw::Application) {
             "org.gnome.desktop.peripherals.mouse",
             INTERFACE_SCHEMA,
             A11Y_INTERFACE_SCHEMA,
+            "org.gnome.desktop.wm.preferences",
+            "org.gnome.desktop.sound",
         ];
         let all: Rc<Vec<Option<gio::Settings>>> =
             Rc::new(schemas.iter().map(|s| settings(s)).collect());
@@ -1950,6 +1952,15 @@ fn build(app: &adw::Application) {
                 }
                 out.right_to_left = gtk::Widget::default_direction() == gtk::TextDirection::Rtl;
                 out.enable_animations = animations_enabled(all[4].as_ref(), all[5].as_ref());
+                if let Some(wm) = all[6].as_ref() {
+                    out.bells.audible = wm.boolean("audible-bell");
+                    out.bells.visual = wm.boolean("visual-bell");
+                    out.bells.fullscreen = wm.string("visual-bell-type") == "fullscreen-flash";
+                }
+                if let Some(sound) = all[7].as_ref() {
+                    out.bells.event_sounds = sound.boolean("event-sounds");
+                    out.bells.theme = sound.string("theme-name").to_string();
+                }
                 if let Some(gtk_settings) = gtk::Settings::default() {
                     gtk_settings.set_gtk_enable_animations(out.enable_animations);
                 }
