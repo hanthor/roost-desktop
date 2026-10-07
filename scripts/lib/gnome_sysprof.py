@@ -53,6 +53,14 @@ def decode(raw):
             "limitation": "Raw GNOME scope marks; no input-to-presentation association inferred."}
 
 
+class FrameOwnershipError(ValueError):
+    """Rejected frame evidence; these bounds never become qualified latency."""
+
+    def __init__(self, reason, evidence):
+        super().__init__(reason)
+        self.evidence = evidence
+
+
 def overview_frame_bounds(decoded, pid, expected_inputs=20, output="Virtual-1"):
     """Reconstruct Mutter 51's two presentation slots, including newest aborts.
 
@@ -124,7 +132,14 @@ def overview_frame_bounds(decoded, pid, expected_inputs=20, output="Virtual-1"):
         lower = row["monotonic_ns"] + delta - 1000
         upper = row["monotonic_ns"] + row["duration_ns"] + delta + 1000
         if lower < owner["monotonic_ns"] or row["monotonic_ns"] < owner["monotonic_ns"] + owner["duration_ns"]:
-            raise ValueError("presentation precedes its owned frame")
+            raise FrameOwnershipError("presentation precedes its owned frame", {
+                "pid": pid, "output": output,
+                "dispatch": owner, "notification": row,
+                "presentation_lower_ns": lower, "presentation_upper_ns": upper,
+                "kms_ready_ns": int(match[4]) * 1000,
+                "swap_count": swap_counts[owner["monotonic_ns"]],
+                "remaining_pending_dispatches": pending,
+                "limitation": "Dispatch ownership reconstructed from scope order; no independent source frame identifier or raw kernel flip event."})
         kms_ready = int(match[4]) * 1000
         # KMS feedback readiness is a userspace timestamp, not the kernel flip
         # timestamp. It can follow that flip; it must precede this notification.
