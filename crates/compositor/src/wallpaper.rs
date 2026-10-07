@@ -525,8 +525,17 @@ impl Wallpaper {
         if lock && !lock_uri.is_empty() {
             uri = lock_uri.to_owned();
         }
-        self.refresh_stage = Some("source-identity-pending");
-        let identity = self.poll_identity(&uri)?;
+        let identity = if settings.placement == roost_shell_control::background::Placement::None {
+            // GNOME NONE has no source file. In particular, an ignored lock
+            // URI must not schedule a network/FUSE identity task or delay its
+            // pure color/gradient. Empty URI also makes every downstream cache
+            // and render worker independent of the unused file.
+            uri.clear();
+            None
+        } else {
+            self.refresh_stage = Some("source-identity-pending");
+            self.poll_identity(&uri)?
+        };
         // A missing picture still paints its configured color/gradient.
         let key = format!("{uri}\n{settings:?}\n{geometry:?}\n{identity:?}");
         if !self
@@ -663,6 +672,11 @@ fn load_static_wallpaper(
 ) -> Option<Vec<u8>> {
     if !geometry.valid() {
         return None;
+    }
+    if settings.placement == roost_shell_control::background::Placement::None {
+        // This request is a pure color/gradient, including for the lock screen.
+        // Do not observe or decode its unused source, or consult an image cache.
+        return roost_wallpaper::background::render(None, settings, geometry);
     }
     if FileIdentity::for_uri(uri) != expected {
         return None;
@@ -1067,6 +1081,120 @@ mod tests {
             scale_bits: 1.0f64.to_bits(),
         }
     }
+    #[test]
+    fn no_picture_desktop_and_lock_do_not_schedule_ignored_source_observations() {
+        let _lock = RUNTIME_DIR_LOCK.lock().expect("runtime lock");
+        let dir = tempfile::TempDir::new().unwrap();
+        let _runtime = RuntimeDirGuard::point_at(dir.path());
+        let picture = PictureSettings {
+            placement: roost_shell_control::background::Placement::None,
+            shading: roost_shell_control::background::Shading::Horizontal,
+            primary: [240, 0, 0],
+            secondary: [0, 0, 240],
+        };
+        let metadata = serde_json::to_string(&BackgroundMetadata {
+            version: 1,
+            desktop: picture,
+            lock: picture,
+        })
+        .unwrap();
+        let mut wallpaper = Wallpaper::new();
+        let mut previous = None;
+        for uri in [
+            "file:///ignored-source-a.png",
+            "file:///ignored-source-b.xml",
+        ] {
+            std::fs::write(
+                wallpaper_drop_path(),
+                format!("{uri}\n#023c88\n#3584e4\n{uri}\n{metadata}\n"),
+            )
+            .unwrap();
+            for lock in [false, true] {
+                let key = wallpaper
+                    .refresh_picture((8, 8).into(), lock, test_geometry())
+                    .expect("NONE accepts metadata immediately without a source observation");
+                assert!(wallpaper.identity_pending.is_empty());
+                assert!(wallpaper.identities.is_empty());
+                assert!(!key.contains("ignored-source"));
+                if let Some(previous) = previous.as_ref() {
+                    assert_eq!(&key, previous);
+                }
+                previous = Some(key);
+            }
+        }
+    }
+
+    #[test]
+    fn no_picture_render_cache_tracks_real_color_shading_and_geometry() {
+        let _lock = RUNTIME_DIR_LOCK.lock().expect("runtime lock");
+        let dir = tempfile::TempDir::new().unwrap();
+        let _runtime = RuntimeDirGuard::point_at(dir.path());
+        let mut picture = PictureSettings {
+            placement: roost_shell_control::background::Placement::None,
+            shading: roost_shell_control::background::Shading::Horizontal,
+            primary: [240, 0, 0],
+            secondary: [0, 0, 240],
+        };
+        let mut wallpaper = Wallpaper::new();
+        let publish = |picture: PictureSettings| {
+            let metadata = serde_json::to_string(&BackgroundMetadata {
+                version: 1,
+                desktop: picture,
+                lock: picture,
+            })
+            .unwrap();
+            std::fs::write(
+                wallpaper_drop_path(),
+                format!(
+                    "file:///ignored.png\n#023c88\n#3584e4\nfile:///ignored-lock.png\n{metadata}\n"
+                ),
+            )
+            .unwrap();
+        };
+        let render = |wallpaper: &mut Wallpaper, geometry: Geometry| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                let key = wallpaper
+                    .refresh_picture((8, 8).into(), true, geometry)
+                    .unwrap();
+                assert!(wallpaper.identity_pending.is_empty());
+                if let Some(pixels) = wallpaper
+                    .loaded
+                    .iter()
+                    .find(|item| item.uri == key)
+                    .and_then(|item| item.pixels.clone())
+                {
+                    return (key, pixels);
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "pure gradient worker did not complete"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        publish(picture);
+        let (horizontal_key, horizontal) = render(&mut wallpaper, test_geometry());
+        assert_eq!(&horizontal[..4], &[0, 0, 240, 255]);
+        assert_eq!(&horizontal[7 * 4..8 * 4], &[240, 0, 0, 255]);
+        picture.shading = roost_shell_control::background::Shading::Vertical;
+        publish(picture);
+        let (vertical_key, vertical) = render(&mut wallpaper, test_geometry());
+        assert_ne!(horizontal_key, vertical_key);
+        assert_eq!(&vertical[7 * 4..8 * 4], &[0, 0, 240, 255]);
+        assert_eq!(&vertical[56 * 4..57 * 4], &[240, 0, 0, 255]);
+        picture.primary = [0, 240, 0];
+        publish(picture);
+        let (color_key, color) = render(&mut wallpaper, test_geometry());
+        assert_ne!(vertical_key, color_key);
+        assert_eq!(&color[..4], &[0, 240, 0, 255]);
+        let mut geometry = test_geometry();
+        geometry.origin = [8, 0];
+        geometry.desktop = [0, 0, 16, 8];
+        let (geometry_key, _) = render(&mut wallpaper, geometry);
+        assert_ne!(color_key, geometry_key);
+    }
+
     #[test]
     fn invalid_metadata_never_selects_the_legacy_zoom_path() {
         let _lock = RUNTIME_DIR_LOCK.lock().expect("runtime lock");
