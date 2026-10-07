@@ -17,13 +17,13 @@ export XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=GNOME GSETTINGS_BACKEND=keyf
 mkdir -p "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
 chmod 700 "$XDG_RUNTIME_DIR"
 id > /out/session-identity.txt
-rpm -q gnome-control-center mutter-common gnome-shell-common gnome-desktop4 gsettings-desktop-schemas gtk4 libadwaita at-spi2-core > /out/runtime-versions.txt
+rpm -q gnome-control-center mutter-common gnome-shell-common glycin-libs glycin-loaders gdk-pixbuf2 librsvg2 fontconfig adwaita-fonts-all gsettings-desktop-schemas gtk4 libadwaita at-spi2-core > /out/runtime-versions.txt
 [ "$(rpm -q --qf '%{VERSION}' gnome-control-center | cut -d. -f1)" = 51 ]
 rpm -V gnome-control-center > /out/settings-package-verify.txt
 [ "$(rpm -q --qf '%{VERSION}' mutter-common | cut -d. -f1)" = 51 ]
-[ "$(rpm -q --qf '%{VERSION}' gnome-desktop4 | cut -d. -f1)" = 51 ]
-rpm -qf /usr/lib64/girepository-1.0/GnomeBG-4.0.typelib > /out/slideshow-reference-owner.txt
-rpm -V gnome-desktop4 > /out/slideshow-reference-verify.txt
+rpm -qf /usr/lib64/girepository-1.0/Gly-2.typelib > /out/svg-reference-owner.txt
+rpm -V glycin-libs > /out/svg-reference-verify.txt
+sha256sum /usr/lib64/girepository-1.0/Gly-2.typelib > /out/svg-reference-typelib-sha256.txt
 rpm -qf /usr/share/glib-2.0/schemas/org.gnome.mutter.gschema.xml > /out/mutter-schema-owner.txt
 rpm -V mutter-common > /out/mutter-package-verify.txt
 [ "$(rpm -q --qf '%{VERSION}' gnome-shell-common | cut -d. -f1)" = 51 ]
