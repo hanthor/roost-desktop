@@ -36,12 +36,19 @@ jobs:
           mkdir -p perf-artifacts
           run="$PACKAGE_RUN"
           if [[ -z "$run" ]]; then
-            run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --branch main --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=20" > perf-artifacts/package-candidates-api.json
+            run=$(python3 scripts/lib/roost-perf-payload.py latest-run --runs perf-artifacts/package-candidates-api.json --repository "$GITHUB_REPOSITORY" --out perf-artifacts/package-candidate-selection.json)
           fi
           [[ "$run" =~ ^[0-9]+$ ]]
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run" > package-run.json
-          jq -e '.head_branch == "main" and .event == "push" and .conclusion == "success"' package-run.json
-          gh run download "$run" --repo "$GITHUB_REPOSITORY" --name roost-arch --dir arch-artifacts
+          printf '%s\n' "$run" > perf-artifacts/selected-package-run
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run" > perf-artifacts/package-run.json
+          jq -e '.head_branch == "main" and .event == "push" and .conclusion == "success"' perf-artifacts/package-run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/artifacts?name=roost-arch&per_page=100" > perf-artifacts/package-artifacts-api.json
+          jq -e '.total_count <= 100 and (.artifacts | length) == .total_count and ([.artifacts[] | select(.name == "roost-arch" and .expired == false)] | length) == 1' perf-artifacts/package-artifacts-api.json
+          artifact=$(jq -r '.artifacts[] | select(.name == "roost-arch" and .expired == false) | .id' perf-artifacts/package-artifacts-api.json)
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact" > perf-artifacts/package-artifact-api.json
+          python3 scripts/lib/roost-perf-payload.py select --run-id "$run" --run perf-artifacts/package-run.json --artifact perf-artifacts/package-artifact-api.json --out perf-artifacts/package-selection.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact/zip" > perf-artifacts/package-artifact.zip
       - name: Prepare KVM and disk space
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -54,28 +61,67 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache /usr/local/share/boost /usr/share/swift
           sudo mkdir -p /mnt/perf && sudo chown "$(id -u):$(id -g)" /mnt/perf
           sudo apt-get -o Acquire::Retries=3 update -qq
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf shellcheck
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf shellcheck zstd
           shellcheck scripts/roost-frame-pacer-build
+          python3 scripts/lib/roost-perf-payload-tests.py
       - name: Build one shared preview payload
         run: |
+          # Evidence redirects intentionally belong to the unprivileged runner.
+          # shellcheck disable=SC2024
           set -euo pipefail
-          cp arch-artifacts/roost-[0-9]*.pkg.tar.zst roost.pkg.tar.zst
-          sha256sum roost.pkg.tar.zst > package.sha256
-          sudo podman build -f packaging/marlin/perf/Containerfile.baseline -t localhost/marlin-gnome51-perf:base .
-          sudo podman build -f packaging/marlin/Containerfile --build-arg BASE_IMAGE=localhost/marlin-gnome51-perf:base --build-arg ROOST_PKG=roost.pkg.tar.zst -t localhost/marlin-roost-preview:perf .
-          sudo podman inspect ghcr.io/tuna-os/marlin:gnome --format '{{.Digest}}' | tee base-digest
+          mkdir -p arch-artifacts
+          python3 scripts/lib/roost-perf-payload.py archive --zip perf-artifacts/package-artifact.zip --report perf-artifacts/package-selection.json --package arch-artifacts/selected.pkg.tar.zst --out perf-artifacts/package-payload.json
+          cp arch-artifacts/selected.pkg.tar.zst roost.pkg.tar.zst
+          python3 scripts/lib/roost-perf-payload.py copy --package roost.pkg.tar.zst --report perf-artifacts/package-payload.json --out perf-artifacts/package-copy.json
+          package_sha=$(jq -r '.package.sha256' perf-artifacts/package-payload.json)
+          sha256sum roost.pkg.tar.zst > perf-artifacts/package.sha256
+          sudo podman build -f packaging/marlin/perf/Containerfile.baseline -t localhost/marlin-gnome51-perf:base . 2>&1 | tee perf-artifacts/baseline-build.log
+          sudo podman build -f packaging/marlin/Containerfile --build-arg BASE_IMAGE=localhost/marlin-gnome51-perf:base --build-arg PERF_PINNED_BASELINE=true --build-arg ROOST_PKG=roost.pkg.tar.zst --build-arg ROOST_PKG_SHA256="$package_sha" -t localhost/marlin-roost-preview:perf . 2>&1 | tee perf-artifacts/shared-preview-build.log
           sudo podman inspect localhost/marlin-roost-preview:perf --format '{{.Id}}' | tee shared-image-id
+          cp shared-image-id perf-artifacts/shared-image-id
+          python3 scripts/lib/roost-perf-payload.py copy --package roost.pkg.tar.zst --report perf-artifacts/package-payload.json --out perf-artifacts/package-copy-after-build.json
+          sudo podman run --rm localhost/marlin-roost-preview:perf pacman -Q roost > perf-artifacts/installed-roost-version
+          sudo podman run --rm localhost/marlin-roost-preview:perf pacman -Ql roost > perf-artifacts/installed-roost-files
+          # Copy actual installed critical bytes without executing the container.
+          container=$(sudo podman create localhost/marlin-roost-preview:perf /usr/bin/true)
+          trap 'sudo podman rm "$container"' EXIT
+          while IFS= read -r member; do
+            mkdir -p "perf-artifacts/installed-payload/$(dirname "$member")"
+            sudo podman cp "$container:/$member" "perf-artifacts/installed-payload/$member"
+          done < <(jq -r '.required_members | keys[]' perf-artifacts/package-payload.json)
+          sudo chown -R "$(id -u):$(id -g)" perf-artifacts/installed-payload
+          python3 scripts/lib/roost-perf-payload.py installed --installed perf-artifacts/installed-payload --pacman-version perf-artifacts/installed-roost-version --pacman-files perf-artifacts/installed-roost-files --report perf-artifacts/package-payload.json --out perf-artifacts/installed-payload.json
+          mkdir -p perf-artifacts/runtime-versions
+          while IFS= read -r loader; do
+            sudo podman run --rm localhost/marlin-roost-preview:perf sh -eu -c 'test -f "$1" && test -x "$1" && sha256sum "$1"' sh "$loader"
+          done < <(jq -r '.required_members[] | select(.elf) | .elf.interpreter' perf-artifacts/package-payload.json | sort -u) | tee perf-artifacts/installed-interpreters.log
+          for bin in roost-compositor roost-session roost-shell-host roost-shell-gtk roost-ibus-bridge roost-greeter; do
+            sudo podman run --rm localhost/marlin-roost-preview:perf sh -eu -c 'command -v "$1" && ldd "/usr/bin/$1"' sh "$bin" > "perf-artifacts/runtime-versions/$bin.ldd" 2>&1
+            if sudo podman run --rm localhost/marlin-roost-preview:perf "$bin" --version > "perf-artifacts/runtime-versions/$bin.version" 2>&1; then
+              printf '0\n' > "perf-artifacts/runtime-versions/$bin.status"
+            else
+              status=$?
+              printf '%s\n' "$status" > "perf-artifacts/runtime-versions/$bin.status"
+              cat "perf-artifacts/runtime-versions/$bin.ldd" "perf-artifacts/runtime-versions/$bin.version"
+              exit "$status"
+            fi
+          done
+          python3 scripts/lib/roost-perf-payload.py runtime --runtime perf-artifacts/runtime-versions --report perf-artifacts/package-payload.json --out perf-artifacts/installed-runtime.json
+          sudo podman rm "$container"
+          trap - EXIT
+          sudo podman inspect ghcr.io/tuna-os/marlin:gnome --format '{{.Digest}}' | tee base-digest
           sudo podman run --rm localhost/marlin-roost-preview:perf gnome-shell --version | tee gnome-version
           grep -Eq '^GNOME Shell 51([. ]|$)' gnome-version
           sudo podman run --rm localhost/marlin-roost-preview:perf pacman -Q | tee baseline-packages.txt
-          for file in PKGBUILD release-trace-context.patch frame-source-evidence.patch sha256sums; do
+          sudo podman run --rm localhost/marlin-roost-preview:perf cat /usr/share/roost-perf-baseline-critical.sha256 > perf-artifacts/baseline-critical.sha256
+          for file in PKGBUILD release-trace-context.patch frame-source-evidence.patch drained-capture-start.patch sha256sums; do
             sudo podman run --rm localhost/marlin-roost-preview:perf cat "/usr/share/roost-perf-mutter-profiler/$file" > "perf-artifacts/mutter-profiler-$file"
           done
       - name: Measure GNOME then Roost on this same host
         run: |
           set -euo pipefail
           mkdir -p perf-artifacts
-          cp package-run.json package.sha256 base-digest shared-image-id gnome-version baseline-packages.txt perf-artifacts/
+          cp base-digest shared-image-id gnome-version baseline-packages.txt perf-artifacts/
           for desktop in gnome roost; do
             image="localhost/marlin-$desktop-perf:ci"
             sudo podman build -f packaging/marlin/perf/Containerfile --build-arg DESKTOP="$desktop" -t "$image" .
