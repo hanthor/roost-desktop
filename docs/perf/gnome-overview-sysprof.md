@@ -20,14 +20,52 @@ raw capture. The decoder supports the little-endian version-1 ABI used by the
 amd64 baseline. A fixture generated with the actual Sysprof writer validates
 the layout independently of the Python decoder.
 
-These files contain GNOME scopes, **not a derived latency measurement**.
-Scope names can be truncated to 39 bytes in the capture format. Event processing,
-frame dispatch and presentation must be associated by frame ownership before
-calculating handling-to-presentation latency; a frame queued before an input
-cannot count as its response. GNOME's `presentation was N µs earlier` description
-also uses a timestamp taken inside a scope, so recovering it from a scope boundary
-requires explicit bounds. QMP screenshot polling remains a separate host-visible
-response bound. No parity threshold is introduced here.
+The host also retains `gnome-overview-frame-ownership.json`. This analysis is
+restricted to the pinned GNOME Shell 51.0, authenticated Shell PID, single
+`Virtual-1` output and isolated twenty-Super-tap workload. The source fixture
+already requires GNOME 51 and injects only these inputs during this capture.
+It requires exactly twenty release-handler scopes; autorepeated presses do not
+become additional actions.
+
+The decoder follows Mutter 51's actual frame ownership transitions:
+`dispatch()` fills `next_presentation`, then `next_next_presentation`;
+`notify_presented()` completes the first slot and advances the second;
+`notify_ready()` aborts the newest slot. It requires exactly one nested
+`swap_framebuffer()` for each presented owner, no swap for an aborted owner,
+and no pending slots at the end. A completed frame dispatched before an input
+cannot become its response. Missing events, two-slot overflow, ambiguous swaps,
+unexpected outputs, overlapping input/dispatch scopes and responses crossing
+another input fail the measurement.
+
+For each release handler, the response is the first successfully presented
+owned frame whose dispatch starts after the handler completes. The actual
+accepted-toggle instant lies somewhere within the handler; these scopes do not
+identify that instant. The analysis therefore retains lower and upper latency
+bounds, with separate p50/p95/p99 and counts, rather than an exact point value.
+GNOME's `presentation was N µs earlier` description samples monotonic time
+inside its presented scope. Recover its kernel timestamp as an interval across
+that scope, with explicit microsecond rounding room. No host/guest clock
+subtraction is involved. QMP image-response bounds remain separate observations.
+
+The separately reported KMS-ready time is userspace feedback, not the kernel
+flip timestamp. Mutter copies it into frame info and emits it in the presented
+notification; it can follow the kernel flip. Validate it within the owned
+frame's dispatch-to-notification lifetime, rather than using the reconstructed
+kernel timestamp as its upper bound. This does not change presentation bounds
+or admit missing owners, swaps, completions or pending end-of-capture slots.
+
+
+The raw Sysprof capture remains authoritative. An unmodified subset of the
+actual paired capture retains all relevant native mark frames with source
+revision, package versions, full-capture and subset hashes. That fixture balances
+354 dispatches, 337 presentations and 17 aborted frames, with twenty distinct
+input responses. Regression mutations remove or duplicate completions, change
+outputs, remove swaps, add inputs and create overlap; each must fail.
+
+This is controlled event-handler-to-first-later-frame timing, not device-arrival
+latency or a claim about the precise visible animation stage. Comparison with
+Roost's accepted-action point trace must preserve this difference and use the
+GNOME intervals explicitly. No parity threshold is introduced here.
 
 Primary contracts:
 
