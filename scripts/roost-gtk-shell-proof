@@ -862,6 +862,11 @@ if command -v Xwayland >/dev/null 2>&1; then
     pass G-X11-DEMAND "native GTK and IBus startup advertise sockets without an XWayland or XIM process"
 fi
 SOCKET_NAME="$(sed -n 's/.*nested session on \([^ ]*\) .*/\1/p' "$LOG" | head -1)"
+# Pin the original compositor before the long UI journey; no replacement may
+# acquire DisplayConfig authority for the later scale test.
+python3 "$ROOT/scripts/lib/roost-display-config-fixture.py" pin "$COMPOSITOR_PID" \
+    "$ROOT/target/debug/roost-compositor" "$SOCKET_NAME" "$ARTIFACTS/display-original.json" -- "$WIDTH" "$HEIGHT" \
+    >"$ARTIFACTS/display-settings.log" 2>&1 || fail G-DISPLAY-SETTINGS "original display principal could not be pinned"
 # One at a time, so window ids (and with them GNOME's running-app order
 # in the dash) follow Alpha, Beta, Gamma.
 n=0
@@ -3492,11 +3497,9 @@ fi
 
 # Display settings (#59): what GNOME Settings' Displays panel sends.
 apply_display() {
-    gdbus call --session --dest org.gnome.Mutter.DisplayConfig \
-        --object-path /org/gnome/Mutter/DisplayConfig \
-        --method org.gnome.Mutter.DisplayConfig.ApplyMonitorsConfig \
-        -- 0 "$1" "[(0, 0, $2, uint32 0, true, [('roost-0', '${WIDTH}x${HEIGHT}@60.000', @a{sv} {})])]" \
-        "@a{sv} {}" >>"$ARTIFACTS/display-settings.log" 2>&1
+    python3 "$ROOT/scripts/lib/roost-display-config-fixture.py" apply "$COMPOSITOR_PID" \
+        "$ROOT/target/debug/roost-compositor" "$SOCKET_NAME" "$ARTIFACTS/display-original.json" -- \
+        "$WIDTH" "$HEIGHT" "$1" "$2" >>"$ARTIFACTS/display-settings.log" 2>&1
 }
 # The observer must subscribe before the actual display configuration changes.
 python3 "$ROOT/scripts/lib/roost-introspect-size-client.py" \
