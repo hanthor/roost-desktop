@@ -2677,9 +2677,17 @@ impl Runtime {
             .filter_map(|(name, output, loc, primary)| {
                 let mode = output.current_mode()?;
                 Some(crate::mutter::OutputSnapshot {
-                    connector: name,
+                    connector: name.clone(),
                     make: output.physical_properties().make,
                     model: output.physical_properties().model,
+                    serial: match &self.backend {
+                        #[cfg(feature = "drm")]
+                        Backend::Drm(drm) => drm
+                            .monitor_identity(&name)
+                            .map(|edid| edid.serial.clone())
+                            .unwrap_or_default(),
+                        Backend::Winit(_) => String::new(),
+                    },
                     width: mode.size.w,
                     height: mode.size.h,
                     refresh_mhz: mode.refresh,
@@ -2779,6 +2787,13 @@ impl Runtime {
             native_outputs = drm.native_outputs();
         }
         self.control.set_native_outputs(native_outputs);
+        #[allow(unused_mut)]
+        let mut monitor_identities = Vec::new();
+        #[cfg(feature = "drm")]
+        if let Backend::Drm(drm) = &self.backend {
+            monitor_identities = drm.monitor_identities();
+        }
+        self.control.set_monitor_identities(monitor_identities);
         let pointer = self.manager.pointer_pos();
         let output = self
             .state

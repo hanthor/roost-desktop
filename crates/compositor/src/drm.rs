@@ -69,6 +69,8 @@ pub struct DrmOutput {
     pub crtc: crtc::Handle,
     pub connector: connector::Handle,
     native_owner: Option<roost_shell_control::NativeOutputInfo>,
+    /// Optional EDID observed during original connector discovery. Never authority.
+    native_edid: Option<crate::monitor_edid::Observation>,
     /// GBM swapchain bound to the CRTC.
     pub surface: ScanoutSurface,
     /// Protocol output advertised to clients.
@@ -225,6 +227,39 @@ impl DrmBackend {
             .collect()
     }
 
+    /// Cached discovery metadata, gated by active VT, the original KMS FD,
+    /// and unchanged cached output ownership. No connector file I/O occurs on
+    /// this frame/snapshot path. Future restore admission must freshly validate
+    /// the connector and metadata; this cache does not detect EDID hotplug.
+    pub fn monitor_identity(&self, name: &str) -> Option<&crate::monitor_edid::Identity> {
+        let owners = self.native_outputs();
+        let output = self.outputs.iter().find(|output| output.name == name)?;
+        let owner = output.native_owner.as_ref()?;
+        if !owners.contains(owner) {
+            return None;
+        }
+        output.native_edid.as_ref()?.cached_identity(owner)
+    }
+
+    /// Optional cached discovery metadata. The existing native-output gate
+    /// checks active VT and the original char-device FD without reading sysfs.
+    /// Connector/EDID reads occur only at actual discovery, not render ticks.
+    pub fn monitor_identities(&self) -> Vec<roost_shell_control::MonitorIdentityInfo> {
+        self.native_outputs()
+            .into_iter()
+            .map(|owner| {
+                let edid = self
+                    .outputs
+                    .iter()
+                    .find(|output| output.native_owner.as_ref() == Some(&owner))
+                    .and_then(|output| output.native_edid.as_ref())
+                    .and_then(|edid| edid.cached_identity(&owner))
+                    .map(roost_shell_control::EdidIdentityInfo::from);
+                roost_shell_control::MonitorIdentityInfo { owner, edid }
+            })
+            .collect()
+    }
+
     /// Open the seat, the primary GPU, every connected output, and
     /// libinput. Fails with a readable reason (no seat daemon, no GPU,
     /// nothing connected) so the launcher can report it.
@@ -327,18 +362,6 @@ impl DrmBackend {
             let (w, h) = mode.size();
             let size: Size<i32, Physical> = (i32::from(w), i32::from(h)).into();
             let (mm_w, mm_h) = info.size().unwrap_or((0, 0));
-            let output = Output::new(
-                name.clone(),
-                PhysicalProperties {
-                    size: (mm_w as i32, mm_h as i32).into(),
-                    subpixel: Subpixel::Unknown,
-                    make: "Roost".to_owned(),
-                    model: name.clone(),
-                },
-            );
-            let out_mode = Mode::from(mode);
-            output.change_current_state(Some(out_mode), None, None, None);
-            output.set_preferred(out_mode);
             let native_owner = native_device.and_then(|device| {
                 crate::native_output::resolve(
                     std::path::Path::new("/sys"),
@@ -348,11 +371,37 @@ impl DrmBackend {
                 )
                 .ok()
             });
+            let native_edid = native_owner.as_ref().and_then(|owner| {
+                crate::monitor_edid::read_owned(drm.device_fd().as_fd(), owner)
+                    .ok()
+                    .flatten()
+            });
+            let output = Output::new(
+                name.clone(),
+                PhysicalProperties {
+                    size: (mm_w as i32, mm_h as i32).into(),
+                    subpixel: Subpixel::Unknown,
+                    make: native_edid
+                        .as_ref()
+                        .map(|edid| edid.identity.vendor.clone())
+                        .unwrap_or_default(),
+                    // A connector fallback is a display label, never an EDID identity.
+                    model: native_edid
+                        .as_ref()
+                        .map(|edid| edid.identity.product.clone())
+                        .unwrap_or_else(|| name.clone()),
+                },
+            );
+            let out_mode = Mode::from(mode);
+            output.change_current_state(Some(out_mode), None, None, None);
+            output.set_preferred(out_mode);
+
             outputs.push(DrmOutput {
                 name,
                 crtc,
                 connector: *handle,
                 native_owner,
+                native_edid,
                 surface,
                 output,
                 size,

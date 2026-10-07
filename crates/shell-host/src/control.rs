@@ -169,6 +169,7 @@ pub struct ControlClient {
     /// and never edits it.
     outputs: Vec<OutputInfo>,
     native_outputs: Vec<roost_shell_control::NativeOutputInfo>,
+    monitor_identities: Vec<roost_shell_control::MonitorIdentityInfo>,
     pointer_output: Option<String>,
     /// Session environment from the compositor (#59).
     environment: Vec<(String, String)>,
@@ -202,6 +203,7 @@ impl ControlClient {
             locked: false,
             outputs: Vec::new(),
             native_outputs: Vec::new(),
+            monitor_identities: Vec::new(),
             pointer_output: None,
             environment: Vec::new(),
             overview_previews: (Vec::new(), None),
@@ -255,6 +257,10 @@ impl ControlClient {
     /// surfaces against this and never edits it.
     pub fn pointer_output(&self) -> Option<&str> {
         self.pointer_output.as_deref()
+    }
+
+    pub fn monitor_identities(&self) -> &[roost_shell_control::MonitorIdentityInfo] {
+        &self.monitor_identities
     }
 
     pub fn native_outputs(&self) -> &[roost_shell_control::NativeOutputInfo] {
@@ -661,6 +667,12 @@ impl ControlClient {
                 Ok(Handled::Changes { to_revision })
             }
             Message::CommandResult { id, status } => Ok(Handled::CommandResult { id, status }),
+            Message::MonitorIdentityInventory { outputs } => {
+                self.monitor_identities = outputs;
+                Ok(Handled::Outputs {
+                    count: self.monitor_identities.len(),
+                })
+            }
             Message::NativeOutputInventory { outputs } => {
                 self.native_outputs = outputs;
                 Ok(Handled::Outputs {
@@ -876,6 +888,7 @@ fn message_label(msg: &Message) -> &'static str {
         Message::Overview { .. } => "Overview",
         Message::Switcher { .. } => "Switcher",
         Message::NativeOutputInventory { .. } => "NativeOutputInventory",
+        Message::MonitorIdentityInventory { .. } => "MonitorIdentityInventory",
         Message::Outputs { .. } => "Outputs",
         Message::Environment { .. } => "Environment",
         Message::OverviewPreviews { .. } => "OverviewPreviews",
@@ -1190,6 +1203,50 @@ mod tests {
         assert!(
             crate::apps::launch_environment().contains(&("DISPLAY".to_owned(), ":7".to_owned()))
         );
+    }
+
+    #[test]
+    fn optional_identity_none_and_revocation_preserve_owner_outputs_and_revision() {
+        let (mut client, mut peer) = handshook();
+        server_write(&mut peer, &snapshot_rev7());
+        client.poll().unwrap();
+        let owner = roost_shell_control::NativeOutputInfo {
+            name: "eDP-1".into(),
+            drm_device: 226,
+            connector_id: 39,
+            connector_sysfs: "/sys/owned/connector".into(),
+            connector_device: 1,
+            connector_inode: 2,
+        };
+        server_write(
+            &mut peer,
+            &Message::NativeOutputInventory {
+                outputs: vec![owner.clone()],
+            },
+        );
+        client.poll().unwrap();
+        let info = roost_shell_control::MonitorIdentityInfo {
+            owner: owner.clone(),
+            edid: None,
+        };
+        server_write(
+            &mut peer,
+            &Message::MonitorIdentityInventory {
+                outputs: vec![info.clone()],
+            },
+        );
+        client.poll().unwrap();
+        assert_eq!(client.monitor_identities(), &[info]);
+        assert_eq!(client.native_outputs(), &[owner.clone()]);
+        server_write(
+            &mut peer,
+            &Message::MonitorIdentityInventory { outputs: vec![] },
+        );
+        client.poll().unwrap();
+        assert!(client.monitor_identities().is_empty());
+        assert_eq!(client.native_outputs(), &[owner]);
+        assert!(client.outputs().is_empty());
+        assert_eq!(client.revision(), Some(7));
     }
 
     #[test]

@@ -10,6 +10,8 @@ smithay.workspace = true
 # loaded at run time, so builds need no PAM headers and a system without
 # it fails closed.
 libc = "0.2"
+# Exact original kernel EDID bytes, separate from mutable connector names.
+sha2 = "=0.10.9"
 libloading = "0.9"
 # GNOME's monitors.xml (per-output scale and layout, #59).
 roxmltree = "0.21"

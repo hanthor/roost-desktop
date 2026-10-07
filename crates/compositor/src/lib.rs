@@ -59,6 +59,8 @@ pub mod ime;
 pub mod introspect;
 pub mod layer;
 pub mod lock;
+#[cfg(feature = "drm")]
+pub mod monitor_edid;
 pub mod monitors;
 pub mod mutter;
 pub mod native_output;

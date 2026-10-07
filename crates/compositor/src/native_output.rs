@@ -119,6 +119,26 @@ pub fn resolve(
     found.ok_or_else(|| "owned connector missing".into())
 }
 
+/// Revalidate an originally resolved connector without card/name enumeration.
+pub(crate) fn current(fd: BorrowedFd<'_>, owner: &NativeOutputInfo) -> Result<(), String> {
+    if device(fd)? != owner.drm_device {
+        return Err("original KMS device changed".into());
+    }
+    let path = Path::new(&owner.connector_sysfs);
+    if std::fs::canonicalize(path).map_err(|e| e.to_string())? != path {
+        return Err("original connector path changed".into());
+    }
+    let metadata = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    if !metadata.is_dir()
+        || (metadata.dev(), metadata.ino()) != (owner.connector_device, owner.connector_inode)
+        || text(&path.join("connector_id"))? != owner.connector_id.to_string()
+        || text(&path.join("status"))? != "connected"
+    {
+        return Err("original connector changed or disconnected".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

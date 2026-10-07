@@ -431,6 +431,18 @@ impl<'a> Session<'a> {
         })
     }
 
+    pub fn send_monitor_identities(
+        &mut self,
+        outputs: &[roost_shell_control::MonitorIdentityInfo],
+    ) -> Result<(), ControlError> {
+        if self.peer_minor < 30 {
+            return Ok(());
+        }
+        self.conn.write_frame(&Message::MonitorIdentityInventory {
+            outputs: outputs.to_vec(),
+        })
+    }
+
     pub fn send_outputs(&mut self, outputs: &[OutputInfo]) -> Result<(), ControlError> {
         self.conn.write_frame(&Message::Outputs {
             outputs: outputs.to_vec(),
@@ -763,6 +775,7 @@ impl<'a> Session<'a> {
             | Message::Overview { .. }
             | Message::Switcher { .. }
             | Message::NativeOutputInventory { .. }
+            | Message::MonitorIdentityInventory { .. }
             | Message::Outputs { .. }
             | Message::Environment { .. }
             | Message::OverviewPreviews { .. }
@@ -809,6 +822,7 @@ fn message_kind(msg: &Message) -> &'static str {
         Message::Overview { .. } => "Overview",
         Message::Switcher { .. } => "Switcher",
         Message::NativeOutputInventory { .. } => "NativeOutputInventory",
+        Message::MonitorIdentityInventory { .. } => "MonitorIdentityInventory",
         Message::Outputs { .. } => "Outputs",
         Message::Environment { .. } => "Environment",
         Message::OverviewPreviews { .. } => "OverviewPreviews",
@@ -1145,11 +1159,13 @@ pub struct ControlHub {
     /// whenever it differs from `outputs_sent`.
     outputs: Vec<OutputInfo>,
     native_outputs: Vec<roost_shell_control::NativeOutputInfo>,
+    monitor_identities: Vec<roost_shell_control::MonitorIdentityInfo>,
     pointer_output: Option<String>,
     /// Inventory value every live session holds; a mismatch means a
     /// broadcast is still owed (or a newcomer joined mid-state).
     outputs_sent: Vec<OutputInfo>,
     native_outputs_sent: Vec<roost_shell_control::NativeOutputInfo>,
+    monitor_identities_sent: Vec<roost_shell_control::MonitorIdentityInfo>,
     /// Session environment for launched apps (#59), and the last value
     /// every live session holds.
     environment: Vec<(String, String)>,
@@ -1211,9 +1227,11 @@ impl ControlHub {
             menu_queue: Vec::new(),
             outputs: Vec::new(),
             native_outputs: Vec::new(),
+            monitor_identities: Vec::new(),
             pointer_output: None,
             outputs_sent: Vec::new(),
             native_outputs_sent: Vec::new(),
+            monitor_identities_sent: Vec::new(),
             environment: Vec::new(),
             environment_sent: Vec::new(),
             previews: (Vec::new(), None),
@@ -1277,6 +1295,13 @@ impl ControlHub {
     /// the current value sends nothing. The runtime calls this every
     /// tick from the compositor's tracking — the single inventory the
     /// spec requires, never a parallel database.
+    pub fn set_monitor_identities(
+        &mut self,
+        outputs: Vec<roost_shell_control::MonitorIdentityInfo>,
+    ) {
+        self.monitor_identities = outputs;
+    }
+
     pub fn set_native_outputs(&mut self, outputs: Vec<roost_shell_control::NativeOutputInfo>) {
         self.native_outputs = outputs;
     }
@@ -1505,6 +1530,20 @@ impl ControlHub {
                 self.previews_sent = self.previews.clone();
             }
         }
+        if self.monitor_identities != self.monitor_identities_sent {
+            let mut all_sent = true;
+            for session in &mut self.sessions {
+                if session
+                    .send_monitor_identities(&self.monitor_identities)
+                    .is_err()
+                {
+                    all_sent = false;
+                }
+            }
+            if all_sent {
+                self.monitor_identities_sent = self.monitor_identities.clone();
+            }
+        }
         if self.native_outputs != self.native_outputs_sent {
             let mut all_sent = true;
             for session in &mut self.sessions {
@@ -1597,6 +1636,7 @@ impl ControlHub {
                 // real one arrives.
                 let _ = session.send_overview(open);
                 let _ = session.send_native_outputs(&self.native_outputs);
+                let _ = session.send_monitor_identities(&self.monitor_identities);
                 if !self.outputs.is_empty() {
                     let _ = session.send_outputs(&self.outputs);
                 }
