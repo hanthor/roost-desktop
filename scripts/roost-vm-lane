@@ -385,11 +385,17 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
                     and value["state"]["pointer_position"][0] > 32
                     and value["state"]["pointer_position"][1] > 32,
                     label="corner-disabled-left-both")
-        corner_move(0, 10)
+        # Return through actual relative approach/crossing. The tablet still
+        # remembers the earlier absolute hover coordinates; repeating them
+        # after relative movement need not produce a new absolute event.
+        corner_move(-1000, 0, relative=True)
         await_state(lambda value: value["state"]["pointer_position"] is not None
                     and value["state"]["pointer_position"][0] == 0
-                    and 1 < value["state"]["pointer_position"][1] < 32,
-                    label="corner-disabled-absolute-delivered")
+                    and value["state"]["pointer_position"][1] > 32,
+                    label="corner-disabled-left-edge")
+        corner_move(0, -1000, relative=True)
+        await_state(lambda value: value["state"]["pointer_position"] == [0, 0],
+                    label="corner-disabled-relative-cross-delivered")
         corner_move(-200, 0, relative=True)
         for index in range(10):
             if agent.run("inventory")["state"]["overview_open"]:
