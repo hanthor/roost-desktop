@@ -23,13 +23,32 @@ REMOTE={'org.freedesktop.DBus.Error.'+name for name in ('Failed','NoReply','Unkn
         'UnknownMethod','InvalidArgs','AccessDenied','ServiceUnknown','NameHasNoOwner',
         'NotSupported','TimedOut','LimitsExceeded','Disconnected','FileNotFound','IOError')}
 REMOTE.add('other')
+# Exact static diagnostics from the pinned drained-capture patch only. Never
+# retain or summarize arbitrary message text; unknown text stays unclassified.
+DRAINED_FAILURES={
+    'Capture Start already pending':'start-pending',
+    'Invalid drained Start or profiler already running':'invalid-start',
+    'Drained Start requires one actual owned stage view':'owned-view',
+    'Owned capture stage/view/clock changed':'view-changed',
+    'Capture requires one actual Virtual-1 frame clock':'virtual-clock',
+    'Main-thread capture tracing failed to enable':'trace-enable',
+}
+
+
+def drained_failure(message):
+    if type(message) is not str or len(message)>512:
+        return None
+    prefix='GDBus.Error:org.freedesktop.DBus.Error.Failed: '
+    if message.startswith(prefix):
+        message=message[len(prefix):]
+    return DRAINED_FAILURES.get(message)
 
 
 def validate(value, action):
     if type(action) is not str or action not in ACTIONS or not isinstance(value,dict) or set(value)!={'trace_failure'}:
         raise ValueError('invalid fixed trace failure envelope')
     row=value['trace_failure']
-    if not isinstance(row,dict) or set(row)-{'schema','action','stage','error_class','glib','principal','modules','shell_version','component','payload_rejected','subprocess_returncode'}:
+    if not isinstance(row,dict) or set(row)-{'schema','action','stage','error_class','glib','principal','modules','shell_version','component','payload_rejected','subprocess_returncode','drained_failure'}:
         raise ValueError('unknown trace diagnostic fields')
     if row.get('schema')!=1 or type(row.get('schema')) is not int or row.get('action')!=action or type(row.get('stage')) is not str or row['stage'] not in STAGES or type(row.get('error_class')) is not str or row['error_class'] not in CLASSES:
         raise ValueError('invalid trace diagnostic controls')
@@ -44,6 +63,12 @@ def validate(value, action):
         item=row['glib']
         if not isinstance(item,dict) or set(item)!={'domain','code','remote_name'} or type(item['domain']) is not str or item['domain'] not in DOMAINS or type(item['remote_name']) is not str or item['remote_name'] not in REMOTE or type(item['code']) is not int or not -(2**31)<=item['code']<2**31:
             raise ValueError('invalid public GLib diagnostic')
+    if 'drained_failure' in row:
+        if (type(row['drained_failure']) is not str or row['drained_failure'] not in DRAINED_FAILURES.values()
+                or action!='start' or row['stage']!='start-call' or row['error_class']!='GLibError'
+                or row.get('glib',{}).get('domain')!='g-dbus-error-quark'
+                or row.get('glib',{}).get('remote_name')!='org.freedesktop.DBus.Error.Failed'):
+            raise ValueError('invalid fixed drained failure classification')
     if 'shell_version' in row and row['shell_version']!='GNOME Shell 51.0':
         raise ValueError('unknown public shell version')
     if 'principal' in row:
@@ -104,4 +129,9 @@ class Context:
             if type(code) is int and -(2**31)<=code<2**31:
                 row['glib']={'domain':domain if type(domain) is str and domain in DOMAINS else 'other',
                              'code':code,'remote_name':remote if type(remote) is str and remote in REMOTE else 'other'}
+                if (self.action=='start' and self.stage=='start-call'
+                        and row['glib']['domain']=='g-dbus-error-quark'
+                        and row['glib']['remote_name']=='org.freedesktop.DBus.Error.Failed'):
+                    known=drained_failure(getattr(error,'message',None))
+                    if known is not None:row['drained_failure']=known
         return {'trace_failure':row}
