@@ -42,6 +42,21 @@ fn toward(value: f64, target: f64) -> f64 {
 }
 
 impl EffectiveRegion {
+    /// Combine a bounded surface snapshot with the constraint while its
+    /// Smithay guard is held, without re-entering the surface-state mutex.
+    pub fn with_constraint(mut self, constraint: Option<&RegionAttributes>) -> Self {
+        let total = 1usize
+            .saturating_add(self.input.as_ref().map_or(0, |region| region.rects.len()))
+            .saturating_add(constraint.map_or(0, |region| region.rects.len()));
+        self.over_budget |= total > MAX_RECTANGLES;
+        self.constraint = if self.over_budget {
+            None
+        } else {
+            constraint.cloned()
+        };
+        self
+    }
+
     pub fn bounded(&self) -> bool {
         !self.over_budget
             && 1 + self.input.as_ref().map_or(0, |region| region.rects.len())
@@ -258,5 +273,24 @@ mod tests {
         let start = (10.0, 10.0).into();
         assert!(!region.bounded());
         assert_eq!(region.confine(start, (80.0, 10.0).into()), start);
+    }
+    #[test]
+    fn separated_surface_snapshot_keeps_combined_budget_closed() {
+        let mut snapshot = region(vec![]);
+        snapshot.constraint = None;
+        snapshot.input = Some(RegionAttributes {
+            rects: vec![(RectangleKind::Add, rect(0, 0, 100, 100)); MAX_RECTANGLES - 2],
+        });
+        let constraint = RegionAttributes {
+            rects: vec![(RectangleKind::Add, rect(0, 0, 100, 100)); 2],
+        };
+        let combined = snapshot.with_constraint(Some(&constraint));
+        assert!(!combined.bounded());
+        assert!(
+            combined.constraint.is_none(),
+            "oversized constraint is never cloned"
+        );
+        let start = (10.0, 10.0).into();
+        assert_eq!(combined.confine(start, (80.0, 10.0).into()), start);
     }
 }

@@ -4247,7 +4247,6 @@ impl WindowManager {
         &self,
         state: &State,
         surface: &WlSurface,
-        constraint: Option<&smithay::wayland::compositor::RegionAttributes>,
     ) -> Option<(
         Point<f64, Logical>,
         crate::constraint_motion::EffectiveRegion,
@@ -4258,14 +4257,12 @@ impl WindowManager {
                 .cached_state
                 .get::<smithay::wayland::compositor::SurfaceAttributes>();
             let current = attributes.current();
-            let total = 1usize
-                .saturating_add(
-                    current
-                        .input_region
-                        .as_ref()
-                        .map_or(0, |region| region.rects.len()),
-                )
-                .saturating_add(constraint.map_or(0, |region| region.rects.len()));
+            let total = 1usize.saturating_add(
+                current
+                    .input_region
+                    .as_ref()
+                    .map_or(0, |region| region.rects.len()),
+            );
             let over_budget = total > crate::constraint_motion::MAX_RECTANGLES;
             (
                 if over_budget {
@@ -4282,11 +4279,7 @@ impl WindowManager {
                 extent,
                 input,
                 over_budget,
-                constraint: if over_budget {
-                    None
-                } else {
-                    constraint.cloned()
-                },
+                constraint: None,
             },
         ))
     }
@@ -4302,15 +4295,20 @@ impl WindowManager {
         let Some(surface) = pointer.current_focus() else {
             return false;
         };
+        if !with_pointer_constraint(&surface, pointer, |constraint| constraint.is_some()) {
+            return false;
+        }
         let mut owns_motion = false;
+        // with_pointer_constraint also holds the surface-state mutex. Take
+        // geometry/input snapshots first; its closure must not re-enter it.
+        let snapshot = self.effective_constraint_region(state, &surface);
         with_pointer_constraint(&surface, pointer, |constraint| {
             if let Some(constraint) = constraint {
                 owns_motion = constraint.is_active()
-                    || self
-                        .effective_constraint_region(state, &surface, constraint.region())
-                        .is_none_or(|(origin, region)| {
-                            !region.bounded() || region.contains(self.pointer_pos - origin)
-                        });
+                    || snapshot.is_none_or(|(origin, region)| {
+                        let region = region.with_constraint(constraint.region());
+                        !region.bounded() || region.contains(self.pointer_pos - origin)
+                    });
             }
         });
         owns_motion
@@ -4325,16 +4323,19 @@ impl WindowManager {
         let Some(surface) = pointer.current_focus() else {
             return Some(pos);
         };
+        if !with_pointer_constraint(&surface, pointer, |constraint| constraint.is_some()) {
+            return Some(pos);
+        }
         let mut position = Some(pos);
+        let snapshot = self.effective_constraint_region(state, &surface);
         with_pointer_constraint(&surface, pointer, |constraint| {
             let Some(constraint) = constraint else { return };
-            let Some((origin, region)) =
-                self.effective_constraint_region(state, &surface, constraint.region())
-            else {
+            let Some((origin, region)) = snapshot else {
                 // A constraint on unresolved geometry cannot broaden motion.
                 position = None;
                 return;
             };
+            let region = region.with_constraint(constraint.region());
             if !region.bounded() {
                 position = None;
                 return;
