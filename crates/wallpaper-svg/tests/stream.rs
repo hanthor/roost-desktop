@@ -39,7 +39,7 @@ fn actual_svg_loader_intrinsic_viewbox_css_internal_use_and_alpha() {
             .as_chunks::<4>()
             .0
             .iter()
-            .all(|p| p == [25, 87, 200, 255]));
+            .all(|p| *p == [25, 87, 200, 255]));
     }
     let pixels = rgba(b"<svg xmlns='http://www.w3.org/2000/svg' width='2' height='1'><rect width='1' height='1' fill='#c80a14' fill-opacity='0.5'/></svg>",2,1);
     assert_eq!(&pixels[4..], &[0, 0, 0, 0]);
@@ -99,7 +99,7 @@ fn actual_svg_stream_accepts_embedded_image_but_has_no_file_base() {
         .as_chunks::<4>()
         .0
         .iter()
-        .all(|p| p == [200, 10, 20, 255]));
+        .all(|p| *p == [200, 10, 20, 255]));
 }
 
 #[test]
