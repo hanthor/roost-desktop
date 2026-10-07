@@ -73,3 +73,20 @@ Primary contracts:
 - [Sysprof 51 capture ABI](https://github.com/GNOME/sysprof/blob/51.0/src/libsysprof-capture/sysprof-capture-types.h)
 - [Mutter 51 profiler](https://github.com/GNOME/mutter/blob/51.0/src/core/meta-profiler.c)
 - [Mutter 51 frame-clock traces](https://github.com/GNOME/mutter/blob/51.0/clutter/clutter/clutter-frame-clock.c)
+
+
+The CI reference variant `mutter 51.0-1.1` adds a trace-context lifetime correction
+to the pinned Arch 51.0 source: each thread context releases the reference it
+acquired during construction. This permits the final context release to flush
+and close the Sysprof writer. The original Arch recipe hash, changed recipe,
+exact patch and resulting package hash are retained in the comparison artifacts.
+Build tools remain in a separate image stage. Reports using this variant must
+identify it explicitly; previous captures from `51.0-1` remain separate evidence.
+
+The observer retains the actual mapped Cogl library identity and checks it across
+Start/Stop. After Stop, acquisition waits at most five seconds for the original
+GNOME process to close its writable capture descriptors. This is a condition
+check, not acceptance based on elapsed time or file quietness. Raw bytes and
+decoded marks are retained even when the writer does not close; such a capture
+cannot qualify. Actual closure still does not bypass whole-file integrity,
+required scopes, strict frame ownership, repeated measurements or release gates.

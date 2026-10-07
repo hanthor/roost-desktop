@@ -1,0 +1,10 @@
+--- a/cogl/cogl/cogl-trace.c
++++ b/cogl/cogl/cogl-trace.c
+@@ -206,6 +206,7 @@
+   if (!thread_context)
+     return;
+ 
++  g_clear_pointer (&thread_context->trace_context, cogl_trace_context_unref);
+   g_free (thread_context->group);
+   g_free (thread_context);
+ }
