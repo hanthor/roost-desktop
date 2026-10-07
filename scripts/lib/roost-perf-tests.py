@@ -3,6 +3,7 @@
 import importlib.machinery
 import importlib.util
 import json
+import os
 import base64
 from pathlib import Path
 import tempfile
@@ -22,6 +23,7 @@ def load(name, path):
 guest = load("guest", ROOT / "scripts/lib/roost-perf-guest.py")
 host = load("host", ROOT / "scripts/roost-vm-perf")
 sysprof = load("sysprof", ROOT / "scripts/lib/gnome_sysprof.py")
+phase = load("phase", ROOT / "packaging/marlin/perf/roost-perf-phase")
 
 
 class SysprofCapture(unittest.TestCase):
@@ -36,6 +38,89 @@ class SysprofCapture(unittest.TestCase):
         self.assertEqual(sorted(counts.values()), [1, 1, 1])
         self.assertEqual(max(len(name) for name in counts), 39)
         self.assertFalse(any(sysprof.required_scope_counts(decoded, provenance["pid"] + 1).values()))
+
+    def ownership_capture(self):
+        root = ROOT / "scripts/lib/fixtures"
+        provenance = json.loads((root / "gnome51-frame-ownership.json").read_text())
+        raw = (root / "gnome51-frame-ownership.syscap").read_bytes()
+        import hashlib
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), provenance["sample_sha256"])
+        return sysprof.decode(raw), provenance["pid"]
+
+    def test_actual_native_trace_balances_owned_frames_and_twenty_inputs(self):
+        decoded, pid = self.ownership_capture()
+        result = sysprof.overview_frame_bounds(decoded, pid)
+        self.assertEqual((result["dispatch_count"], result["presented_count"], result["aborted_count"]), (354, 337, 17))
+        self.assertEqual(len(result["inputs"]), 20)
+        self.assertEqual(result["pending_count"], 0)
+        first = result["inputs"][0]
+        self.assertAlmostEqual(first["latency_lower_ms"], 475.063)
+        self.assertAlmostEqual(first["latency_upper_ms"], 492.549)
+        self.assertTrue(all(row["latency_lower_ms"] <= row["latency_upper_ms"] for row in result["inputs"]))
+
+    def test_kms_feedback_after_kernel_flip_is_bounded_by_notification_not_flip(self):
+        import copy
+        import re
+        decoded, pid = self.ownership_capture()
+        before = sysprof.overview_frame_bounds(decoded, pid)
+        row = next(row for row in decoded["marks"]
+                   if row["name"] == "Clutter::FrameClock::presented()")
+        # Reproduce the real second a60 capture: userspace feedback follows
+        # the kernel flip, while preceding the notification that carries it.
+        ready = row["monotonic_ns"] // 1000 - 1
+        row["message"] = re.sub(r"ready at \d+", f"ready at {ready}", row["message"])
+        after = sysprof.overview_frame_bounds(decoded, pid)
+        self.assertEqual(before["inputs"], after["inputs"], "feedback is not the presentation timestamp")
+        for invalid in (0, (row["monotonic_ns"] + row["duration_ns"]) // 1000 + 10):
+            bad = copy.deepcopy(decoded)
+            changed = next(mark for mark in bad["marks"]
+                           if mark["name"] == "Clutter::FrameClock::presented()")
+            changed["message"] = re.sub(r"ready at \d+", f"ready at {invalid}", changed["message"])
+            with self.subTest(ready=invalid), self.assertRaisesRegex(ValueError, "KMS readiness"):
+                sysprof.overview_frame_bounds(bad, pid)
+
+    def test_actual_trace_missing_duplicate_or_wrong_output_completion_fails(self):
+        import copy
+        for case in ("missing-presented", "missing-ready", "duplicate-presented", "wrong-output", "unknown-description", "missing-swap", "foreign-owner"):
+            decoded, pid = self.ownership_capture()
+            decoded = copy.deepcopy(decoded)
+            marks = decoded["marks"]
+            def find(name):
+                return next(row for row in marks if row["name"] == name)
+            if case == "missing-presented":
+                marks.remove(find("Clutter::FrameClock::presented()"))
+            elif case == "missing-ready":
+                marks.remove(find("Clutter::FrameClock::ready()"))
+            elif case == "duplicate-presented":
+                marks.append(copy.deepcopy(find("Clutter::FrameClock::presented()")))
+            elif case == "wrong-output":
+                find("Clutter::FrameClock::ready()")["message"] = "Virtual-2"
+            elif case == "unknown-description":
+                find("Clutter::FrameClock::presented()")["message"] = "no kernel time"
+            elif case == "missing-swap":
+                marks.remove(find("Meta::StageImpl::swap_framebuffer()"))
+            else:
+                pid += 1
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                sysprof.overview_frame_bounds(decoded, pid)
+
+    def test_missing_extra_overlapping_or_coalesced_input_is_not_a_latency(self):
+        import copy
+        for case in ("missing", "extra", "overlap", "coalesced"):
+            decoded, pid = self.ownership_capture()
+            marks = decoded["marks"]
+            inputs = [row for row in marks if row["name"] == "Meta::Display::handle_event()" and row["message"] == "key-release"]
+            if case == "missing":
+                marks.remove(inputs[0])
+            elif case == "extra":
+                marks.append(copy.deepcopy(inputs[0]))
+            elif case == "overlap":
+                dispatch = next(row for row in marks if row["name"] == "Clutter::FrameClock::dispatch()")
+                inputs[0]["monotonic_ns"] = dispatch["monotonic_ns"]
+            else:
+                inputs[1]["monotonic_ns"] = inputs[0]["monotonic_ns"] + inputs[0]["duration_ns"] + 1000
+            with self.subTest(case=case), self.assertRaises(ValueError):
+                sysprof.overview_frame_bounds(decoded, pid)
 
     def capture(self):
         # Produced by the real libsysprof-capture writer, not by this decoder.
@@ -299,6 +384,22 @@ class Accounting(unittest.TestCase):
             with self.assertRaises(ValueError):
                 host.guest_probe(agent, action, index)
 
+
+
+
+class CaptureAcquisition(unittest.TestCase):
+    def test_real_kernel_writer_handles_exclude_readers_and_other_inodes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "capture"
+            target.write_bytes(b"raw capture fixture")
+            other = Path(directory) / "other"
+            other.write_bytes(b"other writer")
+            with target.open("rb") as reader, target.open("ab") as writer, other.open("ab"):
+                metadata = os.fstat(reader.fileno())
+                observed = phase.capture_writers(os.getpid(), metadata)
+                self.assertEqual([row["fd"] for row in observed], [writer.fileno()])
+                writer.close()
+                self.assertEqual(phase.capture_writers(os.getpid(), metadata), [])
 
 if __name__ == "__main__":
     unittest.main()
