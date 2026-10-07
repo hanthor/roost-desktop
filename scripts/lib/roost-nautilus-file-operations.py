@@ -16,6 +16,7 @@ OUT = Path('/out')
 STATE = OUT / 'compositor-state.json'
 records = []
 stage = 'launch'
+identity = None
 
 
 def run(*arguments):
@@ -27,6 +28,26 @@ def scene():
     if result.get('locked'):
         raise RuntimeError('Files operation attempted while the desktop is locked')
     return result
+
+
+def nautilus_identity():
+    bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+
+    def call(method, signature, name):
+        return bus.call_sync('org.freedesktop.DBus', '/org/freedesktop/DBus',
+                             'org.freedesktop.DBus', method,
+                             GLib.Variant('(s)', (name,)), GLib.VariantType.new(signature),
+                             Gio.DBusCallFlags.NONE, 5000, None).unpack()[0]
+
+    owner = call('GetNameOwner', '(s)', 'org.gnome.Nautilus')
+    pid = call('GetConnectionUnixProcessID', '(u)', owner)
+    uid = call('GetConnectionUnixUser', '(u)', owner)
+    executable = Path(f'/proc/{pid}/exe').resolve(strict=True)
+    installed = Path('/usr/bin/nautilus').resolve(strict=True)
+    metadata = installed.stat()
+    if uid != os.getuid() or executable != installed or metadata.st_uid != 0 or metadata.st_mode & 0o022:
+        raise RuntimeError('Files owner is not the genuine installed Nautilus')
+    return {'owner': owner, 'pid': pid, 'uid': uid, 'exe': str(executable)}
 
 
 def controls():
@@ -47,7 +68,7 @@ def controls():
     desktop = pyatspi.Registry.getDesktop(0)
     for index in range(desktop.childCount):
         app = desktop.getChildAtIndex(index)
-        if app.name in ('org.gnome.Nautilus', 'nautilus', 'Files'):
+        if identity is not None and app.get_process_id() == identity['pid']:
             walk(app)
     return result
 
@@ -73,6 +94,8 @@ def wait(predicate, description):
 
 def focused():
     current = scene()
+    if nautilus_identity() != identity:
+        raise RuntimeError('Files original bus owner or installed process changed')
     if current.get('focused_app_id') != 'org.gnome.Nautilus':
         raise RuntimeError('Files lost actual compositor keyboard focus')
     return current
@@ -169,6 +192,7 @@ try:
         payload = b'Roost GNOME Files actual operation roundtrip\n' + name.encode() + b'\n'
         seed.write_bytes(payload)
         run('nautilus', '--new-window', str(fixture))
+        identity = nautilus_identity()
         wait(lambda: scene().get('focused_app_id') == 'org.gnome.Nautilus' and cell(name) is not None,
              'map its native window with the actual fixture contents')
         browser_id = scene()['focused']
@@ -224,7 +248,7 @@ try:
              'restore the same file through its real Undo action')
         snapshot('restored')
         records.append({'uid': os.getuid(), 'app_id': 'org.gnome.Nautilus',
-                        'browser_window_id': browser_id, 'fixture': str(fixture),
+                        'browser_window_id': browser_id, 'process': identity, 'fixture': str(fixture),
                         'file_sha256': hashlib.sha256(payload).hexdigest(),
                         'bytes': len(payload), 'trash_uris': trash_uris,
                         'passed': ['native-content', 'create-folder', 'copy', 'rename',
