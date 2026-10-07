@@ -397,7 +397,7 @@ jobs:
     # the Roost hardware session on the DRM/KMS backend. The image is
     # rebuilt rootful here (bootc install reads it from root's storage),
     # in parallel with marlin-image rather than after it.
-    name: marlin-vm (${{ matrix.orca }})
+    name: ${{ matrix.orca == 'distribution' && 'marlin-vm' || 'marlin-vm-orca51' }}
     strategy:
       fail-fast: false
       matrix:
