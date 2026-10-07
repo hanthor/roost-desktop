@@ -3993,6 +3993,20 @@ if grep -q 'g_variant_get_variant: assertion' "$LOG"; then
 fi
 pass G-IME-VARIANT-TYPES "IBus focus/composition decoded variants without native type criticals"
 
+# ROOST_IBUS_DEBUG is enabled throughout this actual IME and PAM journey.
+# Require real bridge observations, then reject value-bearing records even
+# when the input context was inactive while forwarding password keys.
+if grep -q 'roost-ibus-bridge: ready' "$LOG"; then
+    grep -Eq 'roost-ibus-bridge: key pressed (true|false): IBus took it: (true|false)' "$LOG" ||
+        fail G-IME-TRACE-PRIVATE "the real bridge did not retain redacted key diagnostics"
+    if grep -Eq 'roost-ibus-bridge: key [0-9]+|roost-ibus-bridge:.*sym 0x' "$LOG"; then
+        fail G-IME-TRACE-PRIVATE "IBus diagnostics disclosed an actual key value"
+    fi
+    pass G-IME-TRACE-PRIVATE "real IME and PAM keyboard diagnostics omit keycodes and key symbols"
+elif [ "${ROOST_REQUIRE_IBUS:-0}" = 1 ]; then
+    fail G-IME-TRACE-PRIVATE "the required real IBus bridge did not run"
+fi
+
 
 
 
