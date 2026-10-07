@@ -426,8 +426,9 @@ def run_lifecycle(qmp, agent, out, serial_path, record, orca_contract="distribut
                     time.sleep(0.1)
                 raise RuntimeError("native keyboard lock/reset readiness deadline exceeded")
 
-            def pam_unlock():
-                qmp.keys("ret")
+            def pam_unlock(wake=True):
+                if wake:
+                    qmp.keys("ret")
                 time.sleep(0.3)
                 qmp.keys("ctrl", "a")
                 qmp.type_text("roost")
@@ -474,7 +475,10 @@ def run_lifecycle(qmp, agent, out, serial_path, record, orca_contract="distribut
                 # private input is measured only by anonymous delivery counts.
                 baseline_count = locked["keyboard"]["normal_events"]
                 physical("f4", True)
-                pam_unlock()
+                # F4 already lifts the lock curtain. Another initial Return
+                # would submit an empty password and disable the entry while
+                # authentication runs; retain real typing/submission below.
+                pam_unlock(wake=False)
                 resumed = await_keyboard("authenticated-ready", lambda keyboard:
                     not keyboard["locked"] and keyboard["resume_state"] == "ready")
                 if resumed["keyboard"]["normal_events"] != baseline_count or resumed["frames"] <= locked["frames"]:

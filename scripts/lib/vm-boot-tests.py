@@ -4,6 +4,7 @@ import importlib.machinery
 import importlib.util
 import io
 import ast
+import base64
 import json
 import tempfile
 from pathlib import Path
@@ -18,6 +19,57 @@ loader.exec_module(lane)
 
 
 class OrcaLifecycleAuthority(unittest.TestCase):
+    def test_read_diagnostics_preserve_only_fixed_public_dbus_failure(self):
+        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
+        tree = ast.parse(source.read_text())
+        helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                      and node.name == "orca_read_error")
+        scope = {"subprocess": lane.subprocess}
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), str(source), "exec"), scope)
+        diagnose = scope["orca_read_error"]
+        command = ["runuser", "-u", "roost-test", "--", "env", "PRIVATE_ENV=do-not-copy",
+                   "busctl", "--user", "call", "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                   "org.freedesktop.DBus", "GetConnectionUnixProcessID", "s", ":1.527"]
+        error = lane.subprocess.CalledProcessError(1, command, stderr="Call failed: owner vanished\n" + "x" * 1024)
+        result = diagnose(error)
+        self.assertEqual(result["dbus_method"], "GetConnectionUnixProcessID")
+        self.assertEqual(result["returncode"], 1)
+        self.assertEqual(len(result["stderr"]), 512)
+        self.assertNotIn("PRIVATE_ENV", json.dumps(result))
+        for unsafe in (["orca", "--testing-token=do-not-copy"],
+                       [*command[:-3], "SetLogFileForTesting", "ss", "do-not-copy"]):
+            result = diagnose(lane.subprocess.CalledProcessError(1, unsafe, stderr="do-not-copy"))
+            self.assertNotIn("stderr", result)
+            self.assertNotIn("do-not-copy", json.dumps(result))
+        self.assertEqual(diagnose(FileNotFoundError(2, "do-not-copy")),
+                         {"exception_type": "FileNotFoundError", "errno": 2})
+
+    def test_guest_transport_keeps_read_failure_and_other_action_output_private(self):
+        diagnostic = {"orca_read_error": {"exception_type": "CalledProcessError",
+                      "returncode": 1, "dbus_method": "GetVersion", "stderr": "Call failed: owner vanished"}}
+        failed = {"exited": True, "exitcode": 1,
+                  "out-data": base64.b64encode(json.dumps(diagnostic).encode()).decode(),
+                  "err-data": base64.b64encode(b"private arbitrary traceback").decode()}
+        actor = lane.guest_agent.GuestAgent.__new__(lane.guest_agent.GuestAgent)
+        for action in ("orca-read", "orca-speech-start"):
+            with patch.object(actor, "command", side_effect=[{"pid": 10}, failed]):
+                with self.assertRaises(RuntimeError) as caught:
+                    actor.run(action)
+            message = str(caught.exception)
+            self.assertNotIn("private arbitrary traceback", message)
+            if action == "orca-read":
+                self.assertIn("owner vanished", message)
+            else:
+                self.assertNotIn("owner vanished", message)
+        malformed = ["!", base64.b64encode(b"\xff").decode(),
+                     base64.b64encode(b"[").decode(), base64.b64encode(b"[]").decode(),
+                     base64.b64encode(b"x" * 4097).decode(), "A" * 5465, None, ["not text"]]
+        for output in malformed:
+            with patch.object(actor, "command", side_effect=[{"pid": 10}, {**failed, "out-data": output}]):
+                with self.assertRaisesRegex(RuntimeError, r"guest lifecycle orca-read failed \(exit=1\)"):
+                    actor.run("orca-read")
+        # Transport/unit refusal evidence only; actual bus failure comes from CI.
+
     def test_negative_control_requires_exact_remote_denial_and_distinct_same_uid(self):
         source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
         tree = ast.parse(source.read_text())
@@ -118,6 +170,23 @@ class OrcaLifecycleAuthority(unittest.TestCase):
 
 
 class BootApi(unittest.TestCase):
+    def test_already_woken_held_key_prompt_does_not_submit_empty_password(self):
+        tree = ast.parse((Path(__file__).resolve().parents[1] / "roost-vm-lane").read_text())
+        helper = next(node for node in ast.walk(tree)
+                      if isinstance(node, ast.FunctionDef) and node.name == "pam_unlock")
+        events = []
+        qmp = SimpleNamespace(keys=lambda *keys: events.append(keys),
+                              type_text=lambda text: events.append("fixture typed"))
+        scope = {"qmp": qmp, "time": SimpleNamespace(sleep=lambda delay: None),
+                 "await_state": lambda predicate, timeout: predicate({"state": {"locked": False}})}
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), "<actual-pam-helper>", "exec"), scope)
+        scope["pam_unlock"](wake=False)
+        self.assertEqual(events, [("ctrl", "a"), "fixture typed", ("ret",)])
+        events.clear()
+        scope["pam_unlock"]()
+        self.assertEqual(events, [("ret",), ("ctrl", "a"), "fixture typed", ("ret",)])
+        # Actual prompt/PAM transitions still require the genuine hardware VM.
+
     def test_actual_orca_commands_use_distinct_qmp_qcodes_for_chords(self):
         tree = ast.parse((Path(__file__).resolve().parents[1] / "roost-vm-lane").read_text())
         command = next(node for node in ast.walk(tree)

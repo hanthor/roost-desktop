@@ -105,6 +105,36 @@ def owned_compositor(processes):
     return candidates[0]
 
 
+def orca_read_error(error):
+    """Bounded diagnostics only for the fixed credential-free read action."""
+    result = {"exception_type": type(error).__name__}
+    if isinstance(error, OSError):
+        result["errno"] = error.errno
+    if isinstance(error, subprocess.CalledProcessError):
+        result["returncode"] = error.returncode
+        command = error.cmd if isinstance(error.cmd, list) else []
+        # Never serialize argv, environment or arbitrary helper stderr. The
+        # fixed D-Bus reads take only public names and return no secret values.
+        try:
+            index = command.index("busctl")
+            dbus = command[index:]
+            method = dbus[6]
+            safe = dbus[1:3] == ["--user", "call"] and (
+                (len(dbus) == 9 and dbus[3:6] == ["org.freedesktop.DBus", "/org/freedesktop/DBus",
+                                                "org.freedesktop.DBus"] and dbus[7] == "s"
+                 and method in {"GetNameOwner", "GetConnectionUnixProcessID", "GetConnectionUnixUser"})
+                or (len(dbus) == 7 and dbus[3].startswith(":") and method == "GetVersion"
+                    and dbus[4:6] in [["/org/gnome/Orca/Service", "org.gnome.Orca.Service"],
+                                     ["/org/gnome/Orca1/Service", "org.gnome.Orca1.Service"]]))
+        except (ValueError, IndexError):
+            safe = False
+        if safe:
+            result["dbus_method"] = method
+            result["stderr"] = "".join(c for c in (error.stderr or "")[:512]
+                                       if c.isprintable() or c in "\n\t")
+    return result
+
+
 def orca_observation():
     state = json.loads(STATE.read_text())
     pid = int(state.get("screen_reader_pid") or 0)
@@ -328,7 +358,13 @@ print(json.dumps(result))
         except (FileNotFoundError, ProcessLookupError):
             alive = False
         result = {"original_alive": alive, **orca_observation()}
-    elif action in ("orca-off", "orca-on", "orca-read", "orca-reset"):
+    elif action == "orca-read":
+        try:
+            result = orca_observation()
+        except Exception as error:
+            print(json.dumps({"orca_read_error": orca_read_error(error)}))
+            raise SystemExit(1) from None
+    elif action in ("orca-off", "orca-on", "orca-reset"):
         if action == "orca-reset":
             call("gsettings", "reset", "org.gnome.desktop.a11y.applications",
                  "screen-reader-enabled", user=True)

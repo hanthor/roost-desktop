@@ -3,6 +3,7 @@
 Protocol: https://www.qemu.org/docs/master/interop/qemu-ga-ref.html
 """
 import base64
+import binascii
 import json
 import socket
 import time
@@ -49,6 +50,20 @@ class GuestAgent:
             status = self.command("guest-exec-status", pid=pid)
             if status["exited"]:
                 if status.get("exitcode") != 0 or status.get("out-truncated") or status.get("err-truncated"):
+                    if action == "orca-read" and not status.get("out-truncated"):
+                        try:
+                            encoded = status.get("out-data", "")
+                            if not isinstance(encoded, str) or len(encoded) > 5464:
+                                raise ValueError("read diagnostic exceeds transport bound")
+                            output = base64.b64decode(encoded, validate=True)
+                            if len(output) <= 4096:
+                                diagnostic = json.loads(output).get("orca_read_error")
+                            else:
+                                diagnostic = None
+                        except (binascii.Error, ValueError, UnicodeDecodeError, AttributeError, TypeError):
+                            diagnostic = None
+                        if isinstance(diagnostic, dict):
+                            raise RuntimeError(f"guest lifecycle orca-read failed: {json.dumps(diagnostic)}")
                     raise RuntimeError(f"guest lifecycle {action} failed (exit={status.get('exitcode')})")
                 return json.loads(base64.b64decode(status.get("out-data", ""), validate=True))
             time.sleep(0.1)
