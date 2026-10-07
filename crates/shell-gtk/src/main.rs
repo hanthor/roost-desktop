@@ -1939,6 +1939,7 @@ fn build(app: &adw::Application) {
                 if let Some(iface) = all[4].as_ref() {
                     out.hot_corners = iface.boolean("enable-hot-corners");
                 }
+                out.right_to_left = gtk::Widget::default_direction() == gtk::TextDirection::Rtl;
                 out.enable_animations = animations_enabled(all[4].as_ref(), all[5].as_ref());
                 if let Some(gtk_settings) = gtk::Settings::default() {
                     gtk_settings.set_gtk_enable_animations(out.enable_animations);
