@@ -279,7 +279,16 @@ def valid_native_files_error(value,phase):
             "cells","filesystem","cleanup","phase","final-guard","receipt"}
     allowed={"RuntimeError","ValueError","OSError","FileNotFoundError","PermissionError","CalledProcessError",
              "TimeoutExpired","TimeoutError","ImportError","ModuleNotFoundError","OtherError"}
-    return (type(value) is dict and set(value)=={"phase","stage","exception_type"}
+    fields={"phase","stage","exception_type"}
+    if type(value) is not dict or set(value) not in (fields,fields|{"query_context"}):return False
+    if "query_context" in value:
+        query=value["query_context"]
+        if (value.get("stage")!="cells" or type(query) is not dict or set(query)!={"operation","boundary","reason"}
+                or type(query["operation"]) is not str or query["operation"] not in {"role","name","state"}
+                or type(query["boundary"]) is not str or query["boundary"] not in {"guard-before","operation","guard-after"}
+                or type(query["reason"]) is not str
+                or (query["reason"] not in ({"rpc"} if query["boundary"]=="operation" else {"deadline","process","route","scene"}))):return False
+    return (type(value) is dict
             and type(value["phase"]) is str and value["phase"]==phase
             and type(value["stage"]) is str and value["stage"] in stages
             and type(value["exception_type"]) is str and value["exception_type"] in allowed)

@@ -332,4 +332,96 @@ class Policy(unittest.TestCase):
         error=T.NativeFilesError(good,9);error.diagnostic['message']='private'
         self.assertIsNone(T.native_files_failure(error))
 
+
+class CellsQueryDiagnostic(unittest.TestCase):
+    wrapper_failure=Policy.wrapper_failure
+    def test_actual_fast_guard_finite_reason_before_after_and_rpc(self):
+        value={'nautilus':{'pid':12,'start_ticks':2},'compositor':{'pid':34,'start_ticks':3},'display':{'original':True}}
+        actual_path=G.Path
+        class Proc:
+            def __init__(self,name):self.name=name
+            def stat(self):
+                if boundary==G.QUERY_CONTEXT['boundary'] and reason=='process':
+                    return SimpleNamespace(st_uid=G.UID+1)
+                return SimpleNamespace(st_uid=G.UID)
+            def resolve(self,strict=True):
+                return actual_path('/usr/bin/nautilus' if '/12/' in self.name else '/usr/bin/roost-compositor')
+        def path(name):
+            return Proc(str(name)) if str(name).startswith('/proc/') else SimpleNamespace(resolve=lambda strict=True:actual_path(name))
+        def bounded(path,*args,**kwargs):
+            ticks=2 if '/12/' in path.name else 3
+            return ('1 (original) '+' '.join(['S']+['0']*18+[str(ticks)])).encode()
+        def route(value):
+            return {'other':True} if boundary==G.QUERY_CONTEXT['boundary'] and reason=='route' else {'original':True}
+        def scene():
+            if boundary==G.QUERY_CONTEXT['boundary'] and reason=='scene':raise RuntimeError('private scene body')
+            return {}
+        for boundary in ('guard-before','guard-after'):
+            for reason in ('process','route','scene','deadline'):
+                with self.subTest(boundary=boundary,reason=reason),patch.object(G,'Path',side_effect=path), \
+                     patch.object(G,'bounded',side_effect=bounded),patch.object(G,'display_receipt',side_effect=route), \
+                     patch.object(G,'scene',side_effect=scene),patch.object(G,'deadline',side_effect=lambda: (_ for _ in ()).throw(TimeoutError('private clock')) if boundary==G.QUERY_CONTEXT['boundary'] and reason=='deadline' else None):
+                    G.error_stage('cells');G.QUERY_CONTEXT=None;called=[]
+                    with self.assertRaises((RuntimeError,TimeoutError)):
+                        G.Queries(value).call(lambda:called.append(True),kind='role')
+                    self.assertEqual(G.QUERY_CONTEXT,{'operation':'role','boundary':boundary,'reason':reason})
+                    self.assertEqual(called,[] if boundary=='guard-before' else [True])
+        for kind in ('role','name','state'):
+            error=RuntimeError('private RPC body')
+            with patch.object(G,'fast_guard',return_value={}):
+                G.error_stage('cells')
+                with self.assertRaises(RuntimeError) as failed:
+                    G.Queries(value).call(lambda:(_ for _ in ()).throw(error),kind=kind)
+                self.assertIs(failed.exception,error)
+                self.assertEqual(G.QUERY_CONTEXT,{'operation':kind,'boundary':'operation','reason':'rpc'})
+                self.assertEqual(G.Queries(value).call(lambda:7,kind=kind),7)
+                self.assertIsNone(G.QUERY_CONTEXT)
+
+    def test_actual_helper_wrapper_agent_host_nested_context_roundtrip(self):
+        original=RuntimeError('private node name or RPC body')
+        class Node:
+            def getRoleName(self):raise original
+        output=io.StringIO()
+        with patch.object(G.sys,'argv',['fixed-probe','mapped']),patch.object(G,'context',return_value={}), \
+             patch.object(G,'guard',return_value={}),patch.object(G,'owned_window',return_value={}), \
+             patch.object(G,'accessibility',return_value=([Node()],SimpleNamespace(),G.Queries({}).call,1)), \
+             patch.object(G,'fast_guard',return_value={}),redirect_stdout(output):
+            self.assertEqual(G.main(),1)
+        good={'phase':'mapped','stage':'cells','exception_type':'RuntimeError',
+              'query_context':{'operation':'role','boundary':'operation','reason':'rpc'}}
+        self.assertEqual(json.loads(output.getvalue()),{'native_files_error':good})
+        wrapped=self.wrapper_failure(output.getvalue().encode(),code=9)
+        agent=object.__new__(T.GuestAgent);current=[]
+        def command(method,**arguments):
+            if method=='guest-exec':current[:]=arguments['arg'];return {'pid':123}
+            payload=json.dumps(evidence('start')).encode() if current==['native-files','start'] else wrapped
+            return {'exited':True,'exitcode':0 if current==['native-files','start'] else 9,'out-data':base64.b64encode(payload).decode()}
+        agent.command=command
+        with tempfile.TemporaryDirectory() as out:
+            with self.assertRaises(T.NativeFilesError) as failed:
+                H.run(SimpleNamespace(),agent,out,lambda *args:None,failure_receipt=T.native_files_failure)
+            receipt=json.loads((Path(out)/'native-files-pilot/failure.json').read_text())
+            self.assertEqual(receipt,{'exception_type':'NativeFilesError','native_files_error':good,'exitcode':9})
+            self.assertEqual(failed.exception.exitcode,9)
+            self.assertNotIn('private',json.dumps(receipt))
+
+    def test_every_finite_nested_context_and_unknown_fields_refused_through_wrapper(self):
+        good={'phase':'mapped','stage':'cells','exception_type':'RuntimeError'}
+        for operation in ('role','name','state'):
+            for boundary,reasons in (('operation',('rpc',)),('guard-before',('process','route','scene','deadline')),('guard-after',('process','route','scene','deadline'))):
+                for reason in reasons:
+                    candidate=dict(good,query_context={'operation':operation,'boundary':boundary,'reason':reason})
+                    self.assertTrue(T.valid_native_files_error(candidate))
+                    self.assertEqual(json.loads(self.wrapper_failure(json.dumps({'native_files_error':candidate}).encode())),{'native_files_error':candidate})
+        query={'operation':'role','boundary':'operation','reason':'rpc'}
+        bad=[None,[],dict(query,message='private'),dict(query,operation='private'),dict(query,operation=True),
+             dict(query,boundary='private'),dict(query,reason='scene'),dict(query,boundary='guard-before',reason='rpc'),
+             {k:v for k,v in query.items() if k!='reason'}]
+        for context in bad:
+            candidate=dict(good,query_context=context)
+            self.assertFalse(T.valid_native_files_error(candidate))
+            result=json.loads(self.wrapper_failure(json.dumps({'native_files_error':candidate}).encode()))
+            self.assertEqual(result,{'native_files_error':{'phase':'mapped','stage':'diagnostic-transport','exception_type':'RuntimeError'}})
+        self.assertFalse(T.valid_native_files_error(dict(good,stage='tree',query_context=query)))
+
 if __name__=='__main__':unittest.main()

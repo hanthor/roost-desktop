@@ -307,22 +307,34 @@ def bind_display(compositor,service):
     return receipt
 
 
+def query_guard_reason(reason):
+    if QUERY_CONTEXT is not None:
+        QUERY_CONTEXT['reason']=reason
+
+
 def fast_guard(value):
+    query_guard_reason('deadline')
     deadline()
+    query_guard_reason('process')
     for key,expected in (('nautilus','/usr/bin/nautilus'),('compositor','/usr/bin/roost-compositor')):
         original=value[key];pid=original['pid']
         if Path(f'/proc/{pid}').stat().st_uid!=UID or Path(f'/proc/{pid}/exe').resolve(strict=True)!=Path(expected).resolve(strict=True):
             raise RuntimeError('original process changed during accessibility query')
         ticks=int(bounded(Path(f'/proc/{pid}/stat'),8192,uid=UID,proc=True).decode().rsplit(')',1)[1].split()[19])
         if ticks!=original['start_ticks']:raise RuntimeError('original PID recycled')
+    query_guard_reason('route')
     if display_receipt(value['compositor'])!=value['display']:raise RuntimeError('original display route replaced')
+    query_guard_reason('scene')
     current=scene()
+    query_guard_reason('deadline')
     deadline()
     return current
 
 
 # Fixed public invariant stages only; never retain exception messages or query data.
 ERROR_STAGE='context'
+# Only fixed cells RPC operation and its original guard boundary; no query data.
+QUERY_CONTEXT=None
 
 def error_stage(stage):
     global ERROR_STAGE
@@ -352,10 +364,18 @@ def guard(value):
 
 class Queries:
     def __init__(self,value):self.value=value
-    def call(self,operation):
+    def call(self,operation,kind=None):
+        global QUERY_CONTEXT
+        if kind is not None and (ERROR_STAGE!='cells' or kind not in {'role','name','state'}):
+            raise ValueError('fixed cells query operation')
+        if kind is not None:
+            QUERY_CONTEXT={'operation':kind,'boundary':'guard-before','reason':'deadline'}
         fast_guard(self.value)
+        if kind is not None:QUERY_CONTEXT.update(boundary='operation',reason='rpc')
         result=operation()
+        if kind is not None:QUERY_CONTEXT.update(boundary='guard-after',reason='deadline')
         fast_guard(self.value)
+        QUERY_CONTEXT=None
         return result
 
 def owned_window(value,current):
@@ -615,10 +635,10 @@ def inspect(value,phase):
     error_stage('tree')
     nodes,api,query,visited=accessibility(value)
     error_stage('cells')
-    cells={name:sum(query(node.getRoleName)=='table cell' and query(lambda:node.name) in (name,name+'. File',name+'. Folder') for node in nodes)
+    cells={name:sum(query(node.getRoleName,kind='role')=='table cell' and query(lambda:node.name,kind='name') in (name,name+'. File',name+'. Folder') for node in nodes)
            for name in ('seed.txt',CREATED,CANCELLED)}
-    entries=[node for node in nodes if query(node.getRoleName) in ('text','entry','text entry') and query(lambda:node.getState().contains(api.STATE_FOCUSED)) and query(lambda:node.getState().contains(api.STATE_EDITABLE))]
-    dialogs=[node for node in nodes if query(node.getRoleName) in ('dialog','alert') and query(lambda:node.name)=='New Folder']
+    entries=[node for node in nodes if query(node.getRoleName,kind='role') in ('text','entry','text entry') and query(lambda:node.getState().contains(api.STATE_FOCUSED),kind='state') and query(lambda:node.getState().contains(api.STATE_EDITABLE),kind='state')]
+    dialogs=[node for node in nodes if query(node.getRoleName,kind='role') in ('dialog','alert') and query(lambda:node.name,kind='name')=='New Folder']
     error_stage('filesystem')
     files=filesystem(value)
     check_outcomes(files,cells)
@@ -679,7 +699,8 @@ def start():
 
 
 def main():
-    global DEADLINE
+    global DEADLINE,QUERY_CONTEXT
+    QUERY_CONTEXT=None
     DEADLINE=time.monotonic()+25
     if len(sys.argv)!=2 or sys.argv[1] not in ACTIONS:raise ValueError('fixed pilot action required')
     phase=sys.argv[1]
@@ -705,7 +726,10 @@ def main():
     except Exception as error:
         allowed={'RuntimeError','ValueError','OSError','FileNotFoundError','PermissionError','CalledProcessError','TimeoutExpired','TimeoutError','ImportError','ModuleNotFoundError'}
         name=type(error).__name__
-        print(json.dumps({'native_files_error':{'phase':phase,'stage':ERROR_STAGE,'exception_type':name if name in allowed else 'OtherError'}}))
+        diagnostic={'phase':phase,'stage':ERROR_STAGE,'exception_type':name if name in allowed else 'OtherError'}
+        if ERROR_STAGE=='cells' and QUERY_CONTEXT is not None:
+            diagnostic['query_context']=dict(QUERY_CONTEXT)
+        print(json.dumps({'native_files_error':diagnostic}))
         return 1
     return 0
 
