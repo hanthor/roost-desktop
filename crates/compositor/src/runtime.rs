@@ -701,6 +701,7 @@ impl Runtime {
                 handle
                     .insert_source(sources.input, |event, _, rt: &mut Runtime| {
                         let corners_active = !rt.is_locked()
+                            && !rt.manager.pointer_constraint_owns_motion()
                             && !rt.overlay.visible
                             && crate::layer::exclusive_popup_keyboard_layer(&rt.state).is_none();
                         let corner_layout = rt.state.hot_corner_outputs();

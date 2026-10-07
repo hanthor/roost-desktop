@@ -4202,6 +4202,24 @@ impl WindowManager {
             .unwrap_or_default()
     }
 
+    /// The focused surface has a real pointer constraint registered with
+    /// Smithay. Include a pending constraint: the next motion activates it
+    /// in `constrain`, so native barriers must yield before that motion.
+    pub fn pointer_constraint_owns_motion(&self) -> bool {
+        use smithay::wayland::pointer_constraints::with_pointer_constraint;
+        let Some(pointer) = self.pointer.as_ref() else {
+            return false;
+        };
+        let Some(surface) = pointer.current_focus() else {
+            return false;
+        };
+        let mut owns_motion = false;
+        with_pointer_constraint(&surface, pointer, |constraint| {
+            owns_motion = constraint.is_some();
+        });
+        owns_motion
+    }
+
     /// Pointer-constraints (#89): a locked pointer stays put; a confined
     /// one stays inside the focused window. Activates a pending
     /// constraint on the surface under the pointer. Returns the position
