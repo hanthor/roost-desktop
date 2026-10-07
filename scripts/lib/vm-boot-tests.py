@@ -17,6 +17,45 @@ lane = importlib.util.module_from_spec(spec)
 loader.exec_module(lane)
 
 
+class ConstraintProofCleanup(unittest.TestCase):
+    def test_original_error_survives_all_independent_cleanup_failures(self):
+        calls = []
+        def run(action):
+            calls.append(action)
+            raise RuntimeError("failed " + action)
+        def restore(*arguments):
+            calls.append("restore")
+            raise RuntimeError("failed restoration")
+        original = RuntimeError("original admission failure")
+        with tempfile.TemporaryDirectory() as out, patch.object(lane, "restore_corner_mouse", side_effect=restore):
+            with self.assertRaises(RuntimeError) as caught:
+                try:
+                    raise original
+                finally:
+                    lane.finish_constraint_proof(SimpleNamespace(run=run), object(), {}, out,
+                        {"principal": None, "primary_error": {"message": str(original)}})
+            self.assertIs(caught.exception, original)
+            self.assertEqual(calls, ["constraint-quit", "restore", "constraint-log"])
+            actual = json.loads((Path(out) / "hot-corner-constraints.json").read_text())
+            self.assertIsNone(actual["principal"])
+            self.assertEqual(actual["primary_error"]["message"], str(original))
+            self.assertEqual([error["action"] for error in actual["cleanup_errors"]],
+                             ["constraint-quit", "original-mouse-restoration", "constraint-log-retention"])
+
+    def test_cleanup_only_failure_rejects_instead_of_qualifying(self):
+        def run(action):
+            if action == "constraint-quit":
+                raise RuntimeError("original principal quit failed")
+            return {"stderr": "original client log", "truncated": False}
+        with tempfile.TemporaryDirectory() as out, patch.object(lane, "restore_corner_mouse", return_value={"verified": True}):
+            with self.assertRaisesRegex(RuntimeError, "actual constraint cleanup failed"):
+                lane.finish_constraint_proof(SimpleNamespace(run=run), object(), {}, out,
+                    {"principal": {"pid": 42}, "primary_error": None})
+            actual = json.loads((Path(out) / "hot-corner-constraints.json").read_text())
+            self.assertIsNone(actual["primary_error"])
+            self.assertEqual(actual["cleanup_errors"][0]["action"], "constraint-quit")
+            self.assertTrue((Path(out) / "hot-corner-constraint-mouse-restoration.json").exists())
+            self.assertTrue((Path(out) / "hot-corner-constraint-stderr.json").exists())
 class OrcaLifecycleAuthority(unittest.TestCase):
     def test_compositor_authority_comes_from_actual_backend(self):
         source = (Path(__file__).resolve().parents[2] / "crates/compositor/src/runtime.rs").read_text()
@@ -36,6 +75,8 @@ class OrcaLifecycleAuthority(unittest.TestCase):
         self.assertIn('libc::getppid() != parent', compositor)
         self.assertNotIn('gio::bus_get_future', shell)
         self.assertIn('control.set_screen_reader(enabled)', shell)
+
+
 
 
 class BootApi(unittest.TestCase):

@@ -7,8 +7,10 @@ if [ "$(id -u)" -eq 0 ]; then
     chown -R --no-dereference roost-proof:roost-proof /out
     status=0
     env -u DBUS_SESSION_BUS_ADDRESS -u ROOST_SETTINGS_BUS runuser -u roost-proof -- "$0" || status=$?
-    chown -R --no-dereference 0:0 /out
-    exit "$status"
+    finalization=0
+    python3 /repo/scripts/lib/roost-portal-artifact-finalize.py /out --proof-status "$status" || finalization=$?
+    [ "$status" -eq 0 ] || exit "$status"
+    exit "$finalization"
 fi
 if [ -z "${ROOST_SETTINGS_BUS:-}" ]; then ROOST_SETTINGS_BUS=1 exec dbus-run-session -- "$0"; fi
 [ "$(id -u)" -eq 1000 ]
