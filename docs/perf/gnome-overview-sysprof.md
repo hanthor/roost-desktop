@@ -136,3 +136,31 @@ because their times are close. A rejected ownership result remains rejected.
 The recipe, both patches and package checksum manifest are retained with each
 run, and the original mapped library's installed package identity selects this
 additional diagnostic requirement.
+
+
+## Three fresh-guest acquisitions per desktop
+
+The repeatability lane runs three complete GNOME/Roost pairs on the same host
+and shared image/package baseline. Each desktop uses a newly installed guest
+disk. Pair one keeps the original artifact paths; subsequent pairs use
+`repeat-2/` and `repeat-3/`. Each report records `acquisition_repeat`,
+`acquisition_order=gnome-first-fixed`, and
+`reference_kind=instrumented-gnome51`.
+
+Every acquisition must pass the original writer-closure, whole-capture integrity,
+actual Start/Stop boundary, source identity, and strict ownership checks. A failure
+stops the workflow and uploads the evidence already retained. It does not rerun a
+rejected capture, replace timestamps, trim frames or select only successful pairs.
+These are fresh-guest repeatability measurements, not physical cold-host or warm
+session measurements. The trusted original main package and pinned shared image
+remain explicit; no newer feature candidate is inferred from the observer branch.
+
+GNOME runs first in every pair. Fixed order, shared host contention and warmed
+host/container caches can confound a comparison. Three pairs do not resolve
+those effects or establish a release threshold. The current reference uses
+instrumented `mutter 51.0-1.6`, including diagnostic marks and bounded drained
+capture gates; its overhead is not measured here. Results must be labeled as
+comparisons with an instrumented GNOME 51 reference, not an unmodified stock
+GNOME benchmark. Stock-reference resource/cadence measurements require a
+separately identified unmodified lane; unavailable stock frame-ownership timing
+must remain unavailable rather than become zero.
