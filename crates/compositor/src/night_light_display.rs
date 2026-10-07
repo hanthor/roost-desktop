@@ -101,11 +101,13 @@ fn classify_attempt<T, E>(attempt: Result<T, AttemptError<E>>) -> Result<Option<
 
 // Existing native arrow geometry, shared with nested software transformation.
 // This preserves Roost's fixed-arrow policy; it does not add client cursor shapes.
+pub(crate) type CursorRectangles = Vec<Rectangle<i32, Physical>>;
+
 pub(crate) fn cursor_rects(
     pos: Point<f64, Logical>,
     output_loc: (i32, i32),
     scale: f64,
-) -> (Vec<Rectangle<i32, Physical>>, Vec<Rectangle<i32, Physical>>) {
+) -> (CursorRectangles, CursorRectangles) {
     let x = ((pos.x - f64::from(output_loc.0)) * scale).round() as i32;
     let y = ((pos.y - f64::from(output_loc.1)) * scale).round() as i32;
     // The arrow grows by whole pixels with the scale, staying crisp.
