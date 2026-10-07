@@ -24,6 +24,35 @@ guest = load("guest", ROOT / "scripts/lib/roost-perf-guest.py")
 host = load("host", ROOT / "scripts/roost-vm-perf")
 sysprof = load("sysprof", ROOT / "scripts/lib/gnome_sysprof.py")
 phase = load("phase", ROOT / "packaging/marlin/perf/roost-perf-phase")
+profiler = load("profiler", ROOT / "packaging/marlin/perf/roost-gnome-profiler")
+
+
+class MutterLibraryIdentity(unittest.TestCase):
+    def test_multiple_segments_share_one_kernel_library_identity(self):
+        maps = "1000-2000 r--p 0 08:01 42 /usr/lib/mutter-51/libmutter-cogl-51.so.0.0.0\n"
+        maps += "2000-3000 r-xp 1000 08:01 42 /usr/lib/mutter-51/libmutter-cogl-51.so.0.0.0\n"
+        self.assertEqual(profiler.mapped_cogl_library(maps),
+                         ("/usr/lib/mutter-51/libmutter-cogl-51.so.0.0.0", os.makedev(8, 1), 42))
+        for bad in (maps.replace("51.so", "50.so"), maps + maps.replace(" 42 ", " 43 "),
+                    maps.replace(".so.0.0.0", ".so.0.0.0 (deleted)")):
+            with self.subTest(maps=bad), self.assertRaises(RuntimeError):
+                profiler.mapped_cogl_library(bad)
+
+    def test_replaced_mapped_path_is_rejected_even_with_identical_bytes(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "library.so"
+            path.write_bytes(b"mapped library evidence")
+            path.chmod(0o644)
+            identity = path.stat()
+            fingerprint = profiler.mapped_library_digest(str(path), identity.st_dev, identity.st_ino)
+            self.assertEqual(fingerprint["sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
+            replacement = path.with_name("replacement.so")
+            replacement.write_bytes(path.read_bytes())
+            replacement.chmod(0o644)
+            replacement.replace(path)
+            with self.assertRaisesRegex(RuntimeError, "identity changed"):
+                profiler.mapped_library_digest(str(path), identity.st_dev, identity.st_ino)
 
 
 class SysprofCapture(unittest.TestCase):
