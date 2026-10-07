@@ -11,6 +11,8 @@ import signal
 import stat
 import re
 import subprocess
+import sys
+from perf_trace_diagnostics import decode, encode, Context
 import time
 
 
@@ -94,13 +96,30 @@ def capture_writers(pid, metadata):
 def gnome_trace(action, index):
     uid = pwd.getpwnam("roost-test").pw_uid
     if action in ("start", "stop"):
-        process = subprocess.run([
-            "runuser", "-u", "roost-test", "--", "env", "-i", "PATH=/usr/bin:/bin",
-            f"XDG_RUNTIME_DIR=/run/user/{uid}",
-            f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
-            "/usr/libexec/roost-gnome-profiler", action],
-            text=True, capture_output=True, timeout=12, check=True)
-        provenance = dict(json.loads(process.stdout), guest_kernel=os.uname().release)
+        try:
+            process = subprocess.run([
+                "runuser", "-u", "roost-test", "--", "env", "-i", "PATH=/usr/bin:/bin",
+                f"XDG_RUNTIME_DIR=/run/user/{uid}",
+                f"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus",
+                "/usr/libexec/roost-gnome-profiler", action],
+                text=True, capture_output=True, timeout=12, check=True)
+        except subprocess.CalledProcessError as error:
+            # Forward only the strict public receipt. Unknown/raw error output
+            # is never transported, and the observed nonzero result survives.
+            observed=error.returncode if type(error.returncode) is int and -255 <= error.returncode <= 255 and error.returncode!=0 else 1
+            try:
+                receipt=decode(error.stdout,action)
+            except (ValueError,TypeError,RecursionError):
+                context=Context(action);context.stage="diagnostic-transport"
+                receipt=context.failure(error)
+                receipt["trace_failure"].update(payload_rejected=True,subprocess_returncode=observed)
+            print(encode(receipt,action).decode())
+            exit_status=observed if observed>0 else 128-observed
+            raise SystemExit(exit_status if 1 <= exit_status <= 255 else 1) from None
+        payload=json.loads(process.stdout)
+        if isinstance(payload,dict) and "trace_failure" in payload:
+            raise ValueError("trace failure cannot qualify a successful subprocess")
+        provenance = dict(payload, guest_kernel=os.uname().release)
         if action == "start":
             return provenance
     path = Path(f"/run/user/{uid}/roost-perf-gnome.syscap")

@@ -21,10 +21,11 @@ lane = importlib.util.module_from_spec(spec)
 loader.exec_module(lane)
 sys.path.insert(0, str(HERE / "lib"))
 from vm_guest_agent import GuestAgent  # noqa: E402
+from perf_trace_diagnostics import decode as decode_trace_failure, MAX_BYTES as TRACE_FAILURE_BYTES
 from gnome_sysprof import capture_boundary_evidence, decode as decode_gnome_sysprof, required_scope_counts, overview_frame_bounds, FrameOwnershipError, frame_source_evidence  # noqa: E402
 
 
-def guest_probe(agent, action, index=None):
+def guest_probe(agent, action, index=None, out=None):
     """Only this immutable CI helper is executed; no command/path input."""
     if action not in ("clock", "notify", "frames", "gnome-trace-start",
                       "gnome-trace-stop", "gnome-trace-read"):
@@ -45,8 +46,13 @@ def guest_probe(agent, action, index=None):
         status = agent.command("guest-exec-status", pid=pid)
         if status["exited"]:
             if status.get("exitcode") != 0 or status.get("out-truncated") or status.get("err-truncated"):
+                if action in ("gnome-trace-start","gnome-trace-stop") and out is not None:
+                    retain_trace_failure(status,action,out)
                 raise RuntimeError(f"guest performance {action} failed")
             result = json.loads(base64.b64decode(status.get("out-data", ""), validate=True))
+            if action in ("gnome-trace-start","gnome-trace-stop") and isinstance(result,dict) and "trace_failure" in result:
+                if out is not None:retain_trace_failure(status,action,out)
+                raise RuntimeError(f"guest performance {action} failed")
             clock = result.get("boottime_s")
             if type(clock) not in (int, float) or not math.isfinite(clock) or clock <= 0:
                 raise ValueError("invalid guest clock marker")
@@ -57,6 +63,26 @@ def guest_probe(agent, action, index=None):
             return result
         time.sleep(.1)
     raise RuntimeError(f"guest performance {action} timed out")
+
+
+def retain_trace_failure(status,action,out):
+    receipt={"action":action,"diagnostic_accepted":False}
+    exitcode=status.get("exitcode")
+    if type(exitcode) is int and -255 <= exitcode <= 255:
+        receipt["guest_exitcode"]=exitcode
+    try:
+        encoded=status.get("out-data","")
+        if status.get("out-truncated") or status.get("err-truncated") or not isinstance(encoded,str) or len(encoded)>((TRACE_FAILURE_BYTES+2)//3)*4:
+            raise ValueError("incomplete bounded trace failure")
+        value=decode_trace_failure(base64.b64decode(encoded,validate=True),action.removeprefix("gnome-trace-"))
+        receipt.update(diagnostic_accepted=True,diagnostic=value)
+    except (ValueError,TypeError,RecursionError):
+        # A fixed rejection receipt survives malformed input without retaining
+        # its body/stderr. This is still the original failed guest execution.
+        receipt["diagnostic_rejected"]=True
+    target=out/(action+"-failure.json")
+    with target.open("x") as stream:
+        json.dump(receipt,stream,indent=2)
 
 
 def distribution(values):
@@ -304,7 +330,7 @@ def main():
             qmp.keys("ret")
             time.sleep(8)
         if args.desktop == "gnome":
-            guest_probe(agent, "gnome-trace-start")
+            guest_probe(agent, "gnome-trace-start", out=out)
             gnome_trace_active = True
             time.sleep(1)  # Preserve pre-input scopes after the actual drained boundary.
         phases["workload_start"] = time.clock_gettime(time.CLOCK_BOOTTIME)
@@ -329,7 +355,7 @@ def main():
                 raise RuntimeError(f"overview input {index} produced no broad visible response")
             time.sleep(1)
         if gnome_trace_active:
-            metadata = guest_probe(agent, "gnome-trace-stop")["gnome_trace"]
+            metadata = guest_probe(agent, "gnome-trace-stop", out=out)["gnome_trace"]
             gnome_trace_active = False
             gnome_trace_summary = retain_gnome_trace(agent, out, metadata)
         for _ in range(10):
@@ -390,7 +416,7 @@ def main():
     finally:
         if gnome_trace_active and agent is not None:
             try:
-                guest_probe(agent, "gnome-trace-stop")
+                guest_probe(agent, "gnome-trace-stop", out=out)
             except Exception as error:
                 print(f"GNOME profile cleanup failed: {error}", file=sys.stderr)
         if agent is not None:
