@@ -287,6 +287,7 @@ pub struct Widgets {
     pub sound_list: gtk::Box,
     pub sound_arrow: gtk::ToggleButton,
     pub brightness: gtk::Scale,
+    pub brightness_controller: Rc<crate::brightness_service::Controller>,
 }
 
 /// Wire every service to its widgets. Missing buses leave the tiles
@@ -605,15 +606,33 @@ pub enum BrightnessStep {
 }
 
 /// GNOME's brightness keys (brightnessManager.js): step the backlight
-/// by a twentieth through logind and return the new level (0..1) for
-/// the OSD, or `None` without a backlight.
-pub fn step_brightness_for(step: BrightnessStep, output: Option<&str>) -> Option<f64> {
+/// by a twentieth through asynchronous logind. The callback receives the
+/// actual verified level (0..1) for the OSD, or an explicit failure.
+pub fn step_brightness_for(
+    step: BrightnessStep,
+    output: Option<&str>,
+    done: Box<dyn FnOnce(Result<f64, String>)>,
+) {
+    use std::os::unix::fs::MetadataExt;
     let root = std::env::var_os("ROOST_BACKLIGHT_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/sys/class/backlight"));
-    let (name, dir) = backlight_for(&root, output)?;
-    let max = read_u32(&dir.join("max_brightness"))?;
-    let now = read_u32(&dir.join("brightness"))?;
+    let Some((name, dir)) = backlight_for(&root, output) else {
+        done(Err("no backlight".into()));
+        return;
+    };
+    let Some(max) = read_u32(&dir.join("max_brightness")) else {
+        done(Err("invalid backlight range".into()));
+        return;
+    };
+    let Some(now) = read_u32(&dir.join("brightness")) else {
+        done(Err("invalid brightness".into()));
+        return;
+    };
+    let Ok(identity) = std::fs::metadata(&dir) else {
+        done(Err("backlight disappeared".into()));
+        return;
+    };
     let current = logic::brightness_percent(now, max);
     let percent = match step {
         BrightnessStep::Up => logic::brightness_step(current, true),
@@ -627,65 +646,142 @@ pub fn step_brightness_for(step: BrightnessStep, output: Option<&str>) -> Option
         }
     };
     let value = logic::brightness_value(percent, max);
-    let conn = gio::bus_get_sync(gio::BusType::System, gio::Cancellable::NONE).ok()?;
-    conn.call(
-        Some(LOGIND_NAME),
-        LOGIND_SESSION_PATH,
-        LOGIND_SESSION_IFACE,
-        "SetBrightness",
-        Some(&("backlight", name.as_str(), value).to_variant()),
-        None,
-        gio::DBusCallFlags::NONE,
-        2000,
-        gio::Cancellable::NONE,
-        |_| {},
-    );
-    Some(percent / 100.0)
+    let device = crate::brightness::Device {
+        name,
+        output: output.unwrap_or("").into(),
+        path: dir,
+        max,
+        current: now,
+        dev: identity.dev(),
+        inode: identity.ino(),
+    };
+    gio::bus_get(gio::BusType::System, gio::Cancellable::NONE, move |conn| {
+        let Ok(conn) = conn else {
+            done(Err("system bus unavailable".into()));
+            return;
+        };
+        conn.call(
+            Some(LOGIND_NAME),
+            LOGIND_SESSION_PATH,
+            LOGIND_SESSION_IFACE,
+            "SetBrightness",
+            Some(&("backlight", device.name.as_str(), value).to_variant()),
+            None,
+            gio::DBusCallFlags::NONE,
+            2000,
+            gio::Cancellable::NONE,
+            move |reply| {
+                done(reply.map_err(|e| e.to_string()).and_then(|_| {
+                    let actual = crate::brightness::readback(&device)?;
+                    if actual != value {
+                        return Err("backlight readback mismatch".into());
+                    }
+                    Ok(logic::brightness_percent(actual, device.max) / 100.0)
+                }));
+            },
+        );
+    });
 }
 
 fn read_u32(path: &std::path::Path) -> Option<u32> {
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+    crate::brightness::scalar(path).ok()
 }
 
 fn brightness(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
-    let Some((name, dir)) = backlight() else {
-        w.brightness_row.set_visible(false);
-        return;
-    };
-    let Some(max) = read_u32(&dir.join("max_brightness")) else {
-        w.brightness_row.set_visible(false);
-        return;
-    };
-    w.brightness_row.set_visible(true);
+    use std::os::unix::fs::MetadataExt;
+    let legacy = backlight()
+        .and_then(|(name, dir)| read_u32(&dir.join("max_brightness")).map(|max| (name, dir, max)));
     let syncing = Rc::new(Cell::new(false));
-    let read = {
-        let (w, dir, syncing) = (w.clone(), dir.clone(), syncing.clone());
-        move || {
-            if let Some(value) = read_u32(&dir.join("brightness")) {
+    let read: Rc<dyn Fn()> = {
+        let (w, legacy, syncing) = (w.clone(), legacy.clone(), syncing.clone());
+        Rc::new(move || {
+            let level = if w.brightness_controller.has_output(None) {
+                w.brightness_controller
+                    .level(None)
+                    .map(|level| 100.0 * level)
+            } else {
+                legacy.as_ref().and_then(|(_, dir, max)| {
+                    read_u32(&dir.join("brightness"))
+                        .map(|value| logic::brightness_percent(value, *max))
+                })
+            };
+            w.brightness_row.set_visible(level.is_some());
+            if let Some(level) = level {
                 syncing.set(true);
-                w.brightness
-                    .set_value(logic::brightness_percent(value, max));
+                w.brightness.set_value(level);
                 syncing.set(false);
             }
-        }
+        })
     };
     read();
-    // Re-read whenever the menu opens: other tools change it too.
-    w.brightness.connect_map(move |_| read());
-    let session = Remote::new(conn, LOGIND_NAME, LOGIND_SESSION_PATH, LOGIND_SESSION_IFACE);
+    let mapped = read.clone();
+    w.brightness.connect_map(move |_| mapped());
+    let weak = Rc::downgrade(w);
+    let poll = read.clone();
+    glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+        if weak.upgrade().is_none() {
+            return glib::ControlFlow::Break;
+        }
+        poll();
+        glib::ControlFlow::Continue
+    });
+    let conn = conn.clone();
+    let controller = w.brightness_controller.clone();
     w.brightness.connect_value_changed(move |s| {
         if syncing.get() {
             return;
         }
-        let value = logic::brightness_value(s.value(), max);
-        let args = ("backlight", name.as_str(), value).to_variant();
-        session.call(
-            LOGIND_SESSION_IFACE,
-            "SetBrightness",
-            Some(args),
-            None,
-            |_| {},
-        );
+        if controller.has_output(None) {
+            controller.user(
+                None,
+                s.value() / 100.0,
+                Box::new(|result| {
+                    if let Err(e) = result {
+                        eprintln!("roost-shell-gtk: brightness slider: {e}");
+                    }
+                }),
+            );
+        } else if let Some((name, dir, max)) = legacy.as_ref() {
+            let value = logic::brightness_value(s.value(), *max);
+            let Ok(identity) = std::fs::metadata(dir) else {
+                eprintln!("roost-shell-gtk: legacy brightness device disappeared");
+                return;
+            };
+            let device = crate::brightness::Device {
+                name: name.clone(),
+                output: String::new(),
+                path: dir.clone(),
+                max: *max,
+                current: 0,
+                dev: identity.dev(),
+                inode: identity.ino(),
+            };
+            if crate::brightness::readback(&device).is_err() {
+                eprintln!("roost-shell-gtk: legacy brightness pre-admission readback rejected");
+                return;
+            }
+            conn.call(
+                Some(LOGIND_NAME),
+                LOGIND_SESSION_PATH,
+                LOGIND_SESSION_IFACE,
+                "SetBrightness",
+                Some(&("backlight", name.as_str(), value).to_variant()),
+                None,
+                gio::DBusCallFlags::NONE,
+                2000,
+                gio::Cancellable::NONE,
+                move |reply| match reply {
+                    Err(e) => eprintln!("roost-shell-gtk: legacy brightness slider: {e}"),
+                    Ok(_) => {
+                        if crate::brightness::readback(&device) != Ok(value) {
+                            eprintln!(
+                                "roost-shell-gtk: legacy brightness slider readback mismatch"
+                            );
+                        }
+                    }
+                },
+            );
+        }
     });
 }
 

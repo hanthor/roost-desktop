@@ -441,6 +441,21 @@ def method_call(c, sender, path, iface, method, params, invocation):
         if not os.path.isdir(target):
             invocation.return_dbus_error("org.freedesktop.login1.NoSuchDevice", device)
             return
+        # Explicit controlled-fixture error modes; this provider is never used
+        # as native hardware qualification. Ordinary production logind is unchanged.
+        mode_path = os.path.join(os.path.dirname(BACKLIGHT), ".roost-brightness-failure")
+        mode = ""
+        if os.path.exists(mode_path):
+            with open(mode_path) as fh:
+                mode = fh.read(17).strip()
+            if mode not in ("deny", "mismatch"):
+                invocation.return_dbus_error("org.freedesktop.DBus.Error.InvalidArgs", "unknown controlled error mode")
+                return
+        if mode == "deny":
+            invocation.return_dbus_error("org.freedesktop.DBus.Error.AccessDenied", "controlled logind refusal")
+            return
+        if mode == "mismatch":
+            value += 1
         # Atomically, as the kernel's attribute never reads half-written:
         # a reader racing a truncate-then-write would see it empty.
         path = os.path.join(target, "brightness")

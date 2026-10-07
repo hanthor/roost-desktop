@@ -14,6 +14,8 @@
 //! `ROOST_SHELL_BIN=roost-shell-gtk` while it grows to parity.
 
 mod audio_state;
+mod brightness;
+mod brightness_service;
 mod bt_menu;
 mod calendar;
 mod events;
@@ -569,6 +571,7 @@ fn quick_settings_popover(
     shell: &Rc<RefCell<Shell>>,
     notify: &Rc<notify::NotifyUi>,
     power_ui: &Rc<power::PowerUi>,
+    brightness_controller: &Rc<brightness_service::Controller>,
     icons: PanelIcons,
 ) -> gtk::Popover {
     let popover = gtk::Popover::new();
@@ -930,6 +933,7 @@ fn quick_settings_popover(
         sound_list,
         sound_arrow,
         brightness,
+        brightness_controller: brightness_controller.clone(),
     }));
     // Do Not Disturb drives the shell's notification store (banners
     // held back) and mirrors GNOME's show-banners key.
@@ -1280,10 +1284,39 @@ fn build(app: &adw::Application) {
             }),
         )
     };
+    let brightness_policy_settings =
+        settings("org.gnome.settings-daemon.plugins.power").filter(|s| {
+            s.settings_schema()
+                .is_some_and(|schema| schema.has_key("idle-brightness"))
+        });
+    let brightness_controller = brightness_service::start(
+        {
+            let weak = Rc::downgrade(&shell);
+            Rc::new(move || {
+                weak.upgrade()
+                    .and_then(|shell| {
+                        let shell = shell.try_borrow().ok()?;
+                        shell
+                            .control
+                            .as_ref()
+                            .map(|c| c.outputs().iter().map(|o| o.name.clone()).collect())
+                    })
+                    .unwrap_or_default()
+            })
+        },
+        brightness_policy_settings
+            .as_ref()
+            .map(|s| f64::from(s.int("idle-brightness")) / 100.0)
+            .unwrap_or(0.3),
+    );
+    if let Some(settings) = brightness_policy_settings {
+        brightness_controller.settings(settings);
+    }
     let qs = quick_settings_popover(
         &shell,
         &notify,
         &power_ui,
+        &brightness_controller,
         PanelIcons {
             mic: panel_mic,
             network: panel_network,
@@ -1503,6 +1536,7 @@ fn build(app: &adw::Application) {
             );
             let (apps, notify, osd_ui) = (apps.clone(), notify.clone(), osd_ui.clone());
             let screenshot_ui = screenshot_ui.clone();
+            let brightness_controller = brightness_controller.clone();
             let workspace_popup_keys = workspace_popup.clone();
             Rc::new(move |action| {
                 use keybindings::Action;
@@ -1736,15 +1770,22 @@ fn build(app: &adw::Application) {
                             }
                             _ => services::BrightnessStep::Cycle,
                         };
-                        if let Some(level) = services::step_brightness_for(
-                            step,
-                            output.as_deref().filter(|_| monitor),
-                        ) {
-                            osd_ui.show(&osd::OsdRequest {
+                        let output = output.as_deref().filter(|_| monitor);
+                        let osd = osd_ui.clone();
+                        let show = move |result: Result<f64, String>| match result {
+                            Ok(level) => osd.show(&osd::OsdRequest {
                                 icon: Some("display-brightness-symbolic".into()),
                                 level: Some(level),
                                 ..Default::default()
-                            });
+                            }),
+                            Err(e) => eprintln!("roost-shell-gtk: brightness key: {e}"),
+                        };
+                        if brightness_controller.has_output(output) {
+                            brightness_controller.step(output, step, Box::new(show));
+                        } else {
+                            // Preserve legacy global/associated-key access, but this
+                            // fallback cannot establish the new interface capability.
+                            services::step_brightness_for(step, output, Box::new(show));
                         }
                     }
                 }

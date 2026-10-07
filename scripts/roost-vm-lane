@@ -277,6 +277,14 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     record("V-LIFECYCLE-OWNER", nonroot and intact, "root probe, non-root greetd session and three real app processes/surfaces")
     if not nonroot or not intact or before["state"]["locked"]:
         raise RuntimeError("lifecycle preconditions failed")
+    brightness_contract=agent.run("brightness-contract")
+    with open(os.path.join(evidence,"brightness-contract.json"),"w") as stream:
+        json.dump(brightness_contract,stream,indent=2)
+    if not brightness_contract.get("pass") or not brightness_contract.get("native") or brightness_contract.get("backlights"):
+        raise RuntimeError("actual unsupported native brightness contract not qualified")
+    record("V-BRIGHTNESS-CONTRACT",True,
+        "original shell brightness wire interface, actual empty kernel backlight inventory, false capability and harmless policy resets; no physical-control proof")
+
     # Real distribution Orca owns a credential-verified bus name under the ordinary
     # session user. Settings writes trigger Roost's consumer, not test start/stop.
     orca_observations = []

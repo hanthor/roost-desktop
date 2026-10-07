@@ -436,6 +436,19 @@ def main():
         elif action == "input-buttons":
             result = {key: result[key] for key in
                       ("pid", "buttons", "button_releases", "event_count", "motions", "gtk_version")}
+    elif action == "brightness-contract":
+        original=inventory()
+        shells=[item for item in original["processes"] if item["executable"]=="roost-shell-gtk"]
+        compositors=[item for item in original["processes"] if item["executable"]=="roost-compositor"]
+        if len(shells)!=1 or len(compositors)!=1:raise RuntimeError("expected original unique shell and compositor")
+        shell,compositor=shells[0],compositors[0]
+        result=json.loads(call("python3", "/usr/libexec/roost-brightness-proof",
+            "--out", os.path.join(RUNTIME,"roost-brightness-native.json"),
+            "--shell-executable", "/usr/bin/roost-shell-gtk",
+            "--shell-pid",str(shell["pid"]),"--shell-start",str(shell["start_ticks"]),
+            "--compositor-pid",str(compositor["pid"]),"--compositor-start",str(compositor["start_ticks"]),
+            "--session-id",original["session"]["Id"],user=True))
+        result["original_session_inventory"]=original
     elif action == "logout":
         call("loginctl", "terminate-session", inventory()["session"]["Id"])
         result = {"requested": "terminate session"}

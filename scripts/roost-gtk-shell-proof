@@ -3548,20 +3548,22 @@ ln -s "$ARTIFACTS/devices/card0-roost-0" "$BACKLIGHT/device"
 ln -s "$ARTIFACTS/devices/card0-other" "$ARTIFACTS/backlight/aaa-other/device"
 echo 1000 >"$ARTIFACTS/backlight/aaa-other/max_brightness"
 echo 700 >"$ARTIFACTS/backlight/aaa-other/brightness"
-echo 500 >"$BACKLIGHT/brightness"
+echo 1010 >"$BACKLIGHT/max_brightness"
+echo 510 >"$BACKLIGHT/brightness"
 gsettings set org.gnome.shell.keybindings screen-brightness-up-monitor "['<Super>F5']"
 gsettings set org.gnome.shell.keybindings screen-brightness-down-monitor "['<Super>F4']"
 gsettings set org.gnome.shell.keybindings screen-brightness-cycle-monitor "['<Super>F3']"
 sleep 1.5
 xdotool mousemove --window "$WID" 600 450
-for spec in 'F5:550' 'F4:500' 'F3:550'; do
+# Real GNOME floor..max normalization: 10..1010 gives twenty exact 50-unit steps.
+for spec in 'F5:560' 'F4:510' 'F3:560'; do
     xdotool key "super+${spec%%:*}"
     end=$(($(date +%s) + 10))
     until [ "$(cat "$BACKLIGHT/brightness")" = "${spec#*:}" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
     [ "$(cat "$BACKLIGHT/brightness")" = "${spec#*:}" ] || fail G-MONITOR-BRIGHTNESS-KEYS "${spec%%:*} did not set ${spec#*:} on the pointer's monitor"
     [ "$(cat "$ARTIFACTS/backlight/aaa-other/brightness")" = 700 ] || fail G-MONITOR-BRIGHTNESS-KEYS "a different monitor's backlight changed"
 done
-echo 1000 >"$BACKLIGHT/brightness"
+echo 1010 >"$BACKLIGHT/brightness"
 xdotool key super+F3
 end=$(($(date +%s) + 10))
 # GNOME normalized zero maps to the hardware minimum, not a powered-off
@@ -3571,6 +3573,17 @@ until [ "$(cat "$BACKLIGHT/brightness")" = 10 ] || [ "$(date +%s)" -gt "$end" ];
 for key in screen-brightness-up-monitor screen-brightness-down-monitor screen-brightness-cycle-monitor; do
     gsettings reset org.gnome.shell.keybindings "$key"
 done
+# Controlled backlight/logind policy test; no physical brightness claim.
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-brightness-policy.json" 20 \
+    --set Brightness 50 || fail G-BRIGHTNESS-CONTRACT "could not set associated user brightness"
+end=$(($(date +%s) + 10))
+until [ "$(cat "$BACKLIGHT/brightness")" = 510 ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+[ "$(cat "$BACKLIGHT/brightness")" = 510 ] || fail G-BRIGHTNESS-CONTRACT "actual associated user baseline missing"
+"$PY" "$ROOT/scripts/lib/gnome-brightness-proof.py" --out "$ARTIFACTS/brightness-controlled.json" \
+    --controlled-root "$ARTIFACTS/backlight" --device roost-bl \
+    --shell-executable "${ROOST_PROOF_SHELL_BIN:-$ROOT/target/debug/roost-shell-gtk}" >"$ARTIFACTS/brightness-controlled.log" 2>&1 ||
+    fail G-BRIGHTNESS-CONTRACT "controlled policy/readback contract rejected; see retained JSON/log"
+pass G-BRIGHTNESS-CONTRACT "actual original shell wire schema and controlled associated dim/restore/auto/reset readbacks; synthetic sysfs/logind only"
 rm -rf "$ARTIFACTS/backlight/aaa-other"
 pass G-MONITOR-BRIGHTNESS-KEYS "bound monitor up/down/cycle change only the connector under the pointer; cycle wraps"
 # A rebound notification key focuses the active banner's real button.
