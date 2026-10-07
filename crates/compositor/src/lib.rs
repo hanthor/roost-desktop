@@ -70,6 +70,7 @@ pub mod popup;
 pub mod protocols;
 pub mod runtime;
 mod runtime_signal;
+mod sandbox_identity;
 pub mod screencast;
 pub mod screenshot;
 pub mod session_lock;
@@ -210,12 +211,18 @@ pub(crate) struct ClientState {
     pub(crate) x11_interop: bool,
     /// Original bus or accepted-socket peer credentials, with a process pin.
     original_credentials: Option<Arc<zbus::fdo::ConnectionCredentials>>,
+    sandboxed_app_id: Arc<std::sync::OnceLock<Option<String>>>,
 }
 
 impl ClientState {
     pub(crate) fn native_connection(socket: &UnixStream) -> Self {
+        let credentials = crate::capture_security::socket_credentials(socket);
         Self {
-            original_credentials: crate::capture_security::socket_credentials(socket),
+            sandboxed_app_id: credentials
+                .clone()
+                .map(crate::sandbox_identity::discover_async)
+                .unwrap_or_default(),
+            original_credentials: credentials,
             ..Self::default()
         }
     }
@@ -294,6 +301,21 @@ impl State {
         let data = client.get_data::<ClientState>()?;
         let credentials = data.original_credentials.as_ref()?;
         crate::capture_security::pinned_process_id(credentials)
+    }
+
+    /// Optional sandbox metadata captured from the original connecting peer.
+    /// Cached once at admission; publication still requires the same live pin.
+    pub fn authenticated_sandboxed_app_id(
+        &self,
+        surface: &wl_surface::WlSurface,
+    ) -> Option<String> {
+        self.authenticated_client_pid(surface)?;
+        surface
+            .client()?
+            .get_data::<ClientState>()?
+            .sandboxed_app_id
+            .get()?
+            .clone()
     }
 
     /// Service-channel-only form retained for callers that need that origin.

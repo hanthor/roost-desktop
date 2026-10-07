@@ -2676,6 +2676,14 @@ impl Runtime {
                         owner_id,
                         owner.app_id.as_deref(),
                     )),
+                    sandboxed_app_id: if self.manager.is_x11(entry.id) {
+                        // The Wayland peer here is Xwayland, not the X11 application.
+                        None
+                    } else {
+                        self.manager
+                            .surface_of(entry.id)
+                            .and_then(|surface| self.state.authenticated_sandboxed_app_id(&surface))
+                    },
                     width: geometry.size.w,
                     height: geometry.size.h,
                     focused: entry.focused,

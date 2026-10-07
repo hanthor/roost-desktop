@@ -260,6 +260,12 @@ fn service_window_keeps_original_pinned_process_instead_of_socketpair_creator() 
     let (server, socket) = UnixStream::pair().unwrap();
     let mut data = crate::ClientState::service_connection(Arc::new(AtomicBool::new(true)), None);
     data.original_credentials = Some(credentials);
+    // Cached fixture metadata tests live-pin expiration, not real Flatpak discovery.
+    data.sandboxed_app_id
+        .set(Some("org.example.CachedFixture".into()))
+        .unwrap();
+    assert!(!data.ime_bridge);
+    assert!(!data.x11_interop);
     let client = comp
         .display
         .handle()
@@ -277,11 +283,17 @@ fn service_window_keeps_original_pinned_process_instead_of_socketpair_creator() 
     let server_surface = client.object_from_protocol_id::<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>(&comp.display.handle(), surface.id().protocol_id()).unwrap();
     let socket_creator = client.get_credentials(&comp.display.handle()).unwrap().pid;
     let original = comp.state.authenticated_service_client_pid(&server_surface);
+    let sandbox = comp.state.authenticated_sandboxed_app_id(&server_surface);
     child.kill().unwrap();
     child.wait().unwrap();
     assert_eq!(socket_creator, std::process::id() as i32);
     assert_ne!(pid, std::process::id());
     assert_eq!(original, Some(pid));
+    assert_eq!(sandbox.as_deref(), Some("org.example.CachedFixture"));
+    assert_eq!(
+        comp.state.authenticated_sandboxed_app_id(&server_surface),
+        None
+    );
     assert_eq!(
         comp.state.authenticated_service_client_pid(&server_surface),
         None

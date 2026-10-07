@@ -100,6 +100,14 @@ At candidate `8b68365f`, the actual GTK `G-INTROSPECT-TYPES` journey changed all
 At candidate `b68bad53`, actual instrumented coverage passed both typed/ordinary/native registry visibility and the ordinary-client raw blind-bind denial test. The original peer credential snapshot and typed X11 capability are retained separately in the integrated client state. Real X11-parent picker journeys and fresh integrated-head qualification remain pending.
 
 
+## Optional GNOME sandbox identities (#410)
+
+Native and service-channel connections schedule bounded background discovery from their original live process pin. Flatpak identity uses `/proc/PID/root/.flatpak-info` and GLib's actual `GKeyFile` `[Application] name` parser; Snap identity uses the kernel `/proc/PID/attr/current` profile, with GNOME's namespace/binary normalization. No identity is inferred from a client-supplied application ID or X11 class. Missing, malformed, inaccessible or oversized metadata leaves the optional field absent. Four workers and a 32-entry nonblocking queue bound discovery work; peer filesystem access never runs in the compositor loop.
+
+`GetWindows` and eligible running applications expose `sandboxed-app-id` independently of desktop application association. Cached publication still requires the original process pin to be live. X11 windows remain unknown here: their Wayland peer is Xwayland, not the application. Metadata grants no provider, capture, IME or X11 interoperability authority. Tests exercise real GKeyFile parsing, bounded file/FIFO/symlink handling, missing-pin denial, optional D-Bus fields and expiration of cached fixture metadata through a real service surface. Current-head Rust execution, actual Flatpak/Snap process discovery, sandbox document grants and shipped-image qualification remain pending; #410/#395/#397 remain open.
+
+Contracts: [Mutter 51 sandbox discovery](https://github.com/GNOME/mutter/blob/51.0/src/core/window.c) and [GNOME Shell 51 Introspect fields](https://github.com/GNOME/gnome-shell/blob/51.0/js/misc/introspect.js).
+
 ## Native Wayland caller reference coverage (#404)
 
 The reference driver additionally creates an actual native GTK caller, exports its live toplevel through GdkWayland's asynchronous `export_handle`, and passes that returned `wayland:` handle to the real portal. Its ordinary socket connection is independent of the typed Nautilus provider connection. The caller uses a distinct raw app ID only to locate its own mapped debug window; that label grants no authority. Open/Save cancel/accept retain the exported handle, actual provider identity, parent association/centered geometry, positive parent input before the dialog, blocked exposed-parent input while modal and restored focus/input after the response. The caller releases its exported handle through `drop_exported_handle`.
