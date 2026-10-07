@@ -90,3 +90,49 @@ check, not acceptance based on elapsed time or file quietness. Raw bytes and
 decoded marks are retained even when the writer does not close; such a capture
 cannot qualify. Actual closure still does not bypass whole-file integrity,
 required scopes, strict frame ownership, repeated measurements or release gates.
+
+## Rejected presentation evidence
+
+A complete capture with closed writer descriptors can still fail timing
+qualification. The second GNOME capture in job 112576389653 (run 37554162135,
+artifact 11455021454) reconstructed a presentation at
+123677782000–123677789000 ns for a dispatch beginning at 123682891000 ns.
+The strict qualifier rejects this frame; it cannot become a latency sample.
+
+For this failure, `gnome-overview-frame-rejection.json` retains the reason,
+whole-capture digest, original dispatch and notification marks, reconstructed
+presentation bounds, KMS feedback readiness, swap count, and remaining pending
+dispatches. The whole raw capture, source provenance and decoded marks remain
+authoritative; no qualified ownership result is emitted. These scope-order
+associations are not independent source frame identifiers or raw kernel flip
+events, so the report does not establish whether the cause is ownership or the
+presentation provider. Issue #434 tracks that unresolved distinction.
+
+The gzip fixture `gnome51-presentation-before-dispatch.syscap.gz` contains the
+entire unmodified rejected capture, with its original provenance and artifact
+coordinates in the adjacent JSON. Tests verify the whole checksum, continued
+strict rejection, exact observed bounds, and preservation of rejection evidence
+without producing a qualified result.
+
+
+## Instrumented source-frame diagnostic variant
+
+The reference package `mutter 51.0-1.2` additionally applies
+`frame-source-evidence.patch` to the pinned 51.0 source. It records actual
+Clutter dispatch counters, the presentation's view/global-frame counters,
+supplied presentation time, sequence, flags and KMS readiness, and the raw
+atomic KMS callback's CRTC, sequence, seconds,
+microseconds and device path. Original scheduling, timestamp handling and the
+strict ownership qualifier remain unchanged. This variant is diagnostic: extra
+trace marks have measurement overhead, and these measurements are not final
+performance parity evidence.
+
+`gnome-overview-source-frames.json` retains these independently observed values
+before timing qualification. Missing, duplicate, foreign-PID or malformed
+source records fail validation; early presentation times are retained exactly,
+not repaired. The original complete capture/provenance remains authoritative.
+No pairing between a kernel event and a view-frame counter is inferred merely
+because their times are close. A rejected ownership result remains rejected.
+The recipe, both patches and package checksum manifest are retained with each
+run, and the original mapped library's installed package identity selects this
+additional diagnostic requirement.
