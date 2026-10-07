@@ -176,7 +176,7 @@ class PackagePolicy(unittest.TestCase):
         self.env = dict(os.environ, PATH=str(self.tools) + ':' + os.environ['PATH'], FIXTURE=str(self.stage))
         self.tool('dpkg-deb', '''case "$1" in
 -c) find "$FIXTURE" -type f | while read -r path; do echo "-rwxr-xr-x $path"; done ;;
--f) case "$3" in Version) echo 0.1.0 ;; Depends) echo 'libgtk4-layer-shell0 (>= 1.1), libgtk-4-1 (>= 4.12), libadwaita-1-0 (>= 1.0)' ;; esac ;;
+-f) case "$3" in Version) echo 0.1.0 ;; Depends) echo 'libgtk4-layer-shell0 (>= 1.1), libgtk-4-1 (>= 4.12), libadwaita-1-0 (>= 1.0), libpam0g, gsettings-desktop-schemas' ;; esac ;;
 -x) cp -R "$FIXTURE/." "$3/" ;;
 --ctrl-tarfile) tar -C "$FIXTURE" -cf - ./conffiles ;;
 esac''')
@@ -221,6 +221,19 @@ esac''')
         path.write_text(path.read_text().replace('libgtk4-layer-shell0 (>= 1.1)', 'not-libgtk4-layer-shell0 (>= 1.1)'))
         self.assertNotEqual(self.check(), 0)
 
+    def test_missing_or_obsolete_pam_runtime_dependency_rejected(self):
+        path = self.tools / 'dpkg-deb'
+        original = path.read_text()
+        for replacement in ('', 'libpam0', 'not-libpam0g'):
+            with self.subTest(replacement=replacement):
+                path.write_text(original.replace('libpam0g', replacement))
+                self.assertNotEqual(self.check(), 0)
+
+    def test_missing_desktop_schemas_runtime_dependency_rejected(self):
+        path = self.tools / 'dpkg-deb'
+        path.write_text(path.read_text().replace(', gsettings-desktop-schemas', ''))
+        self.assertNotEqual(self.check(), 0)
+
     def test_launcher_override_denies_before_any_process(self):
         result = subprocess.run(['sh', str(ROOT / 'scripts/lib/roost-proof-session-launch'), '1', str(ROOT), 'owned'], env=dict(self.env, ROOST_SHELL_BIN='/tmp/wrong'), timeout=5)
         self.assertNotEqual(result.returncode, 0)
@@ -258,6 +271,10 @@ class ReleaseDelegatePolicy(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertIn('libc6 (>= 2.36)', control)
         self.assertIn('libgtk4-layer-shell0 (>= 1.1)', control)
+        depends = next(line.removeprefix('Depends: ') for line in control.splitlines() if line.startswith('Depends: ')).split(', ')
+        self.assertIn('libpam0g', depends)
+        self.assertIn('gsettings-desktop-schemas', depends)
+        self.assertNotIn('libpam0', depends)
 
     def test_shlibs_failure_or_unknown_output_cannot_package(self):
         for failure in ('shlibs', 'malformed'):

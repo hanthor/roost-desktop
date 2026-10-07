@@ -58,7 +58,7 @@ for bin in roost-compositor roost-session roost-shell-gtk roost-shell-host roost
 done
 
 DEPENDS="$(dpkg-deb -f "$PKG" Depends)"
-for required in 'libgtk4-layer-shell0 (>= 1.1)' 'libgtk-4-1 (>= 4.12)' 'libadwaita-1-0 (>= 1.0)'; do
+for required in 'libgtk4-layer-shell0 (>= 1.1)' 'libgtk-4-1 (>= 4.12)' 'libadwaita-1-0 (>= 1.0)' 'libpam0g' 'gsettings-desktop-schemas'; do
     printf '%s\n' "$DEPENDS" | tr ',' '\n' | sed 's/^ *//; s/ *$//' | grep -Fxq "$required" || fail "missing runtime floor $required"
 done
 [ "$(cat "$DIR/DEBIAN/conffiles" 2>/dev/null || dpkg-deb --ctrl-tarfile "$PKG" | tar -xOf - ./conffiles)" = /etc/pam.d/roost-lock ] || fail "PAM conffile missing"
