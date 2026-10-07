@@ -1,7 +1,7 @@
 //! GNOME's native KeyboardMonitor, restricted to our unreaped Orca child.
 //! Bus credentials are resolved off the seat thread. Signals are unicast and
 //! carry a lifetime/lock epoch; raw keys never cross the locked-session route.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::process::{Child, Command};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -43,7 +43,7 @@ struct Inner {
     locked: bool,
     grants: Option<Grants>,
     held: HashSet<u16>,
-    custom: HashSet<u32>,
+    custom: HashMap<u16, u32>,
     last_custom: Option<(u32, Instant)>,
     passed_custom: HashSet<u16>,
     revoked: HashSet<String>,
@@ -83,7 +83,7 @@ impl Monitor {
             locked: false,
             grants: None,
             held: HashSet::new(),
-            custom: HashSet::new(),
+            custom: HashMap::new(),
             last_custom: None,
             passed_custom: HashSet::new(),
             revoked: HashSet::new(),
@@ -164,14 +164,13 @@ impl Monitor {
         // A release follows its press, even if SetKeyGrabs changed meanwhile.
         if key.released {
             grabbed = previous;
-            inner.custom.remove(&key.keysym);
+            inner.custom.remove(&key.keycode);
+            if inner.passed_custom.remove(&key.keycode) {
+                grabbed = false;
+            }
         }
         if custom {
-            if key.released {
-                if inner.passed_custom.remove(&key.keycode) {
-                    grabbed = false;
-                }
-            } else if !previous {
+            if !key.released && !previous {
                 let now = Instant::now();
                 if inner.last_custom.is_some_and(|(sym, at)| {
                     sym == key.keysym && now.saturating_duration_since(at) <= repeat_delay
@@ -180,7 +179,7 @@ impl Monitor {
                     inner.passed_custom.insert(key.keycode);
                     inner.last_custom = None;
                 } else {
-                    inner.custom.insert(key.keysym);
+                    inner.custom.insert(key.keycode, key.keysym);
                     inner.last_custom = Some((key.keysym, now));
                 }
             }
@@ -276,7 +275,8 @@ impl Monitor {
                 conn.close()?;
                 return Ok(());
             }
-            if let Err(error) = conn.object_server().at(PATH, self.clone()) {
+            let exported = conn.object_server().at(PATH, self.clone());
+            if let Err(error) = exported {
                 let _ = conn.close();
                 return Err(error);
             }
@@ -414,7 +414,7 @@ pub(crate) mod tests {
                 keys,
             }),
             held: HashSet::new(),
-            custom: HashSet::new(),
+            custom: HashMap::new(),
             last_custom: None,
             passed_custom: HashSet::new(),
             revoked: HashSet::new(),
@@ -444,6 +444,22 @@ pub(crate) mod tests {
         assert!(m.key(key(0xffe5, 66, true, 0), delay));
         assert!(!m.key(key(0xffe5, 66, false, 0), delay));
         assert!(!m.key(key(0xffe5, 66, true, 0), delay));
+    }
+    #[test]
+    fn layout_change_release_clears_physical_custom_hold() {
+        let (m, _events) = monitor(vec![0xffe5], vec![]);
+        let delay = Duration::from_secs(1);
+        assert!(m.key(key(0xffe5, 66, false, 0), delay));
+        // The physical release survives a layout/keymap keysym change.
+        assert!(m.key(key(0xffe6, 66, true, 0), delay));
+        assert!(!m.key(key(0x61, 38, false, 0), delay));
+        assert!(!m.key(key(0x61, 38, true, 0), delay));
+        // The second standalone tap must also balance after a layout change.
+        assert!(m.key(key(0xffe5, 66, false, 0), delay));
+        assert!(m.key(key(0xffe5, 66, true, 0), delay));
+        assert!(!m.key(key(0xffe5, 66, false, 0), delay));
+        assert!(!m.key(key(0xffe6, 66, true, 0), delay));
+        assert!(m.inner.lock().unwrap().passed_custom.is_empty());
     }
     #[test]
     fn chord_and_shifted_grabs_cannot_leak_to_normal_shortcuts() {
