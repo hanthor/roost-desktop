@@ -39,7 +39,7 @@ fn flash_alpha(elapsed: Duration, repeats: u8) -> f32 {
         return 0.0;
     }
     let progress = (elapsed_ms % 50.0) / 50.0;
-    let progress = if leg % 2 == 0 {
+    let progress = if leg.is_multiple_of(2) {
         progress
     } else {
         1.0 - progress

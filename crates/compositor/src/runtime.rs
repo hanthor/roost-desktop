@@ -2083,12 +2083,32 @@ impl Runtime {
                     1.0,
                     Kind::Unspecified,
                 ));
+                elements.len()
             };
-        tree(renderer, &surface, origin);
+        let window_elements = tree(renderer, &surface, origin);
         for popup in crate::popup::placed_popups(&surface, origin, true) {
             tree(renderer, &popup.surface, popup.origin);
         }
-        let elements = Scene::flat(crate::layer::front_to_back(elements));
+        let mut elements = Scene::flat(crate::layer::front_to_back(elements));
+        // A frame alert belongs to the captured window, below its popups.
+        // Whole-stage alerts are compositor overlays and stay outside an
+        // isolated window capture, as do alerts for another window.
+        if let Some(visual) = self
+            .state
+            .protocols
+            .bell
+            .visual()
+            .filter(|visual| !visual.fullscreen && visual.surface.as_ref() == Some(&surface))
+        {
+            let alpha = visual.alpha(std::time::Instant::now());
+            if alpha > 0.0 {
+                elements.bell = Some(BellFrame {
+                    rect: Rectangle::from_size(natural.into()),
+                    alpha,
+                    index: Some(elements.elements.len() - window_elements),
+                });
+            }
+        }
         let buffer_size = (w, h).into();
         let mut texture: smithay::backend::renderer::gles::GlesTexture =
             renderer.create_buffer(fourcc, buffer_size).ok()?;
