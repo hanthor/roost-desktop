@@ -370,7 +370,8 @@ class RepeatedCoverage(unittest.TestCase):
             return SimpleNamespace(returncode=code)
 
         args = SimpleNamespace(out=str(root), boots=5, disk="disk.raw", timeout=30,
-                               tour=True, meta=[])
+                               tour=True, greeter_login=False, require_kvm=False,
+                               meta=[])
         with patch.object(lane.subprocess, "run", side_effect=boot):
             lane.repeat_boots(args)
 
