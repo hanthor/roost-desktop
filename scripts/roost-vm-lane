@@ -493,9 +493,22 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
                     and 63 < value["state"]["pointer_position"][1] < 65
                     and value["state"]["native_relative_motion_count"] == before,
                     label=label + "-distinct-tablet-position-delivered")
-        await_client(lambda value: value["entered"] == 1 and 63 < value["local"][0] < 65
-                     and 63 < value["local"][1] < 65,
-                     label + "-distinct-original-principal")
+        local = await_client(lambda value: value["entered"] == 1 and 63 < value["local"][0] < 65
+                             and 63 < value["local"][1] < 65,
+                             label + "-distinct-original-principal")
+        global_state = agent.run("inventory")
+        position = global_state["state"]["pointer_position"]
+        if (position is None or not all(63 < coordinate < 65 for coordinate in position)
+                or local["buffer_size"] != [128, 128] or not local["configure_events"]):
+            raise RuntimeError("actual original layer origin/configuration receipt unavailable")
+        # Retain both actual coordinate spaces, including wire quantization;
+        # this precedes pressure and every real constraint creation.
+        origin_receipt = {"global": position, "local": local["local"],
+                          "global_minus_local": [position[i] - local["local"][i] for i in range(2)],
+                          "client": local, "state": global_state}
+        constraint_observations.append({"label": label + "-actual-layer-origin", **origin_receipt})
+        with open(os.path.join(evidence, label + "-actual-layer-origin.json"), "w") as stream:
+            json.dump(origin_receipt, stream, indent=2)
         corner_move(0, 10)
         await_state(lambda value: value["state"]["pointer_position"] is not None
                     and value["state"]["pointer_position"][0] == 0

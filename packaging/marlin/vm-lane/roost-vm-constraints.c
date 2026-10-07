@@ -211,7 +211,8 @@ int main(int argc,char **argv) {
  layer=zwlr_layer_shell_v1_get_layer_surface(layers,surface,NULL,ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY,"roost-vm-constraints");
  zwlr_layer_surface_v1_add_listener(layer,&layer_listener,NULL);
  zwlr_layer_surface_v1_set_size(layer,128,128);zwlr_layer_surface_v1_set_anchor(layer,ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP|ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT);
- zwlr_layer_surface_v1_set_exclusive_zone(layer,0);zwlr_layer_surface_v1_set_keyboard_interactivity(layer,ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE);wl_surface_commit(surface);
+ /* Ordinary layer protocol: extend this test overlay to its anchored edges. */
+ zwlr_layer_surface_v1_set_exclusive_zone(layer,-1);zwlr_layer_surface_v1_set_keyboard_interactivity(layer,ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE);wl_surface_commit(surface);
  time_t deadline=time(NULL)+300;
  while(running&&time(NULL)<deadline) {
   while(wl_display_prepare_read(display)!=0)if(wl_display_dispatch_pending(display)<0)die("actual dispatch pending");
