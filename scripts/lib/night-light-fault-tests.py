@@ -20,6 +20,15 @@ loader.exec_module(control)
 
 
 class FaultAdmission(unittest.TestCase):
+    def test_actual_helper_entrypoint_executes_and_refuses_invalid_invocation(self):
+        # Exercise the actual executable mode and interpreter used by the
+        # root controller, without admitting any process or opening a marker.
+        helper = ROOT / "packaging/marlin/vm-lane/roost-vm-night-light-fault"
+        result = subprocess.run([str(helper)], capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(json.loads(result.stdout), {"fixture_control_error_type": "IndexError"})
+        self.assertEqual(result.stderr, b"")
+
     def baseline(self):
         return {"locked": False, "night_light": {"supported": True, "service_supported": True, "temperature": 3700,
                 "service_rgb_scales": [1.0, .7, .3], "owner_epoch": 4, "generation": 9,
