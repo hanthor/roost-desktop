@@ -49,13 +49,14 @@ def isolated_kernel_marker(directory):
 
 @contextmanager
 def isolated_trace_start(directory, run_error=None, run_result=None):
-    """Drive gnome_trace start with kernel provenance and marker isolated."""
+    """Drive gnome_trace start with the independent kernel observer isolated."""
     run_mock = (patch.object(phase.subprocess, "run", side_effect=run_error)
                 if run_error is not None else
                 patch.object(phase.subprocess, "run", return_value=run_result))
     with patch.object(phase.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=1000)), \
          run_mock, \
          patch.object(phase, "guest_kernel_provenance", return_value={}), \
+         patch.object(phase, "kernel_trace", return_value={}), \
          isolated_kernel_marker(directory):
         yield
 
@@ -890,8 +891,14 @@ class PinnedBaselinePackageGuards(unittest.TestCase):
             pacman.write_text('#!/bin/sh\nif test "$1" = -Q; then printf "%s\\n" '
                               '"$TEST_MUTTER_PIN"; else touch "$TEST_PACKAGE_MUTATION"; fi\n')
             pacman.chmod(0o755)
+            package = root / "roost-pkg.tar.zst"
+            package.write_bytes(b"immutable roost package fixture")
             script = script.replace("/usr/share", str(root / "share"))
             script = script.replace("/tmp/roost-", str(root / "roost-"))
+            script = script.replace("/tmp/roost.pkg.tar.zst", str(package))
+            script = script.replace("/usr/libexec/roost-pinned-baseline",
+                                    "bash %s %s %s" % (ROOT / "packaging/marlin/roost-pinned-baseline",
+                                                       inventory, manifest))
             for name, has_inventory, pin, corrupt, accepted in (
                 ("valid", True, "mutter 51.0-1.3", False, True),
                 ("missing-inventory", False, "mutter 51.0-1.3", False, False),
@@ -906,7 +913,8 @@ class PinnedBaselinePackageGuards(unittest.TestCase):
                     critical.write_bytes(b"changed" if corrupt else original)
                     environment = dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}",
                                        PERF_PINNED_BASELINE="true", TEST_MUTTER_PIN=pin,
-                                       TEST_PACKAGE_MUTATION=str(marker))
+                                       TEST_PACKAGE_MUTATION=str(marker),
+                                       ROOST_PKG_SHA256=hashlib.sha256(package.read_bytes()).hexdigest())
                     result = subprocess.run(["bash", "-e", "-c", script], env=environment,
                                             capture_output=True, text=True)
                     self.assertEqual(result.returncode == 0, accepted, result.stderr)

@@ -284,15 +284,15 @@ def gnome_trace(action, index):
         provenance = payload if action == "failed-stop" else dict(payload, guest_kernel=os.uname().release)
         if action == "start":
             return dict(provenance, guest_kernel_provenance=kernel_before)
-        # Failed-stop receipts keep their fixed schema: marker comparison
-        # runs only for actual stops.
+        # Failed-stop receipts keep their fixed schema: independent kernel
+        # acquisition and marker comparison run only for actual stops.
         if action == "stop":
-            # The original profiler has stopped. Preserve its whole raw capture
-            # even when further provenance is missing or changes.
             try:
                 provenance["kernel_trace"] = kernel_trace("stop")
             except Exception as error:
                 provenance["kernel_trace"] = {"error": str(error)[:2048], "qualified_acquisition": False}
+            # The original profiler has stopped. Preserve its whole raw capture
+            # even when further provenance is missing or changes.
             kernel_before = None
             try:
                 descriptor = os.open(kernel_marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
