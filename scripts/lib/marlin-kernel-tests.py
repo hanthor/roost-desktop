@@ -144,13 +144,21 @@ class PinnedBaseline(unittest.TestCase):
             self.assertNotEqual(self.run_guard().returncode, 0)
 
     def test_actual_preview_preflight_refuses_before_any_package_mutation(self):
+        import hashlib
         container = HELPER.with_name('Containerfile').read_text()
-        body = container.split('RUN set -eux;', 1)[1].split('&& pacman -U', 1)[0].replace('\\\n', '\n')
+        body = container.split('RUN set -eux;', 1)[1].split('&& pacman -U', 1)[0].replace('\\\n', ' ')
+        # Admit actual controlled package bytes through the preceding hash
+        # guard so this negative still reaches the original baseline guard.
+        # These bytes are never installed or claimed as a Roost package.
+        package = self.root / 'candidate.pkg.tar.zst'
+        package.write_bytes(b'controlled package hash fixture')
+        body = body.replace('/tmp/roost.pkg.tar.zst', shlex.quote(str(package)))
         guard = 'bash '+shlex.quote(str(self.guard))+' '+shlex.quote(str(self.baseline))+' '+shlex.quote(str(self.critical))
         body = body.replace('/usr/libexec/roost-pinned-baseline', guard)
         self.critical_file.write_bytes(b'changed')
         result = subprocess.run(['bash', '-c', 'set -e; '+body+'\n'],
                                 env={**self.env, 'CURRENT_PACKAGES': self.packages,
+                                     'ROOST_PKG_SHA256': hashlib.sha256(package.read_bytes()).hexdigest(),
                                      'PERF_PINNED_BASELINE': 'true'}, capture_output=True)
         self.assertNotEqual(result.returncode, 0)
         calls = [json.loads(line) for line in self.log.read_text().splitlines()]
