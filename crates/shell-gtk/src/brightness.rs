@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Explicit controlled fixture ONLY. Caller must also have an overridden
 /// backlight root. This never supplies native hardware evidence.
@@ -372,6 +372,7 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     fn device(name: &str, output: &str, current: u32) -> Device {
         Device {
             name: name.into(),

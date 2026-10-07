@@ -698,7 +698,7 @@ pub fn step_brightness_for(
 }
 
 fn read_u32(path: &std::path::Path) -> Option<u32> {
-    crate::brightness::scalar(path).ok()
+    roost_backlight::scalar(path).ok()
 }
 
 fn brightness(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
