@@ -3,6 +3,7 @@
 import importlib.machinery
 import importlib.util
 import json
+import os
 from pathlib import Path
 import struct
 import tempfile
@@ -245,6 +246,23 @@ class Lifecycle(unittest.TestCase):
             self.assertEqual(len(errors), 2)
             self.assertEqual((trace / 'kprobe_events').read_text(), '-:roost_test/roost_test_arm\n')
             self.assertFalse(instance.exists())
+    def test_probe_control_preserves_other_definitions_without_seek(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            trace = Path(tmp)
+            control = trace / 'kprobe_events'
+            control.write_text('p:other/event other_function\n')
+            with patch.object(observer, 'TRACE', trace), patch.object(observer.os, 'lseek', side_effect=OSError('SEEK_END unsupported')):
+                observer.probe_command('p:roost_test/owned real_function')
+                observer.probe_command('-:roost_test/owned')
+            self.assertEqual(control.read_text(), 'p:other/event other_function\np:roost_test/owned real_function\n-:roost_test/owned\n')
+    def test_probe_control_short_write_rejects_and_closes(self):
+        with patch.object(observer.os, 'open', return_value=17) as opened, patch.object(observer.os, 'write', return_value=1), patch.object(observer.os, 'close') as closed:
+            with self.assertRaisesRegex(OSError, 'short actual probe'):
+                observer.probe_command('p:roost_test/owned real_function')
+            flags = opened.call_args.args[1]
+            self.assertTrue(flags & os.O_APPEND)
+            self.assertFalse(flags & (os.O_TRUNC | os.O_CREAT))
+            closed.assert_called_once_with(17)
     def test_unobserved_branch_is_coverage_not_fabricated_records(self):
         definitions = ['p:roost_test/roost_test_arm fn crtc=$arg1:x64', 'p:roost_test/roost_test_timeout fn output=$arg2:x64']
         counts = observer.validate_trace_fields(b'<task>-1 [000] 1.000: roost_test_arm: (fn) crtc=0xffff\n', 'roost_test', definitions)

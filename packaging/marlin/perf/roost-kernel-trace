@@ -48,6 +48,22 @@ def read_json(path):
     return json.loads(bounded(path, 2 * 1024 * 1024))
 
 
+def probe_command(command):
+    # FileIO append initialization seeks SEEK_END, which seq_lseek rejects.
+    # Raw append preserves other observers' definitions without that seek or
+    # O_TRUNC (the latter deletes every kprobe owned by the tracefs control).
+    raw = (command + '\n').encode('ascii')
+    if len(raw) > 4096 or '\n' in command:
+        raise ValueError('invalid bounded probe command')
+    fd = os.open(TRACE / 'kprobe_events',
+                 os.O_WRONLY | os.O_APPEND | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        if os.write(fd, raw) != len(raw):
+            raise OSError('short actual probe command write')
+    finally:
+        os.close(fd)
+
+
 class Btf:
     """Read native little-endian BTF and split module BTF with its live base."""
     PAYLOAD = {1: (4, 0), 2: (0, 0), 3: (12, 0), 4: (0, 12),
@@ -302,8 +318,7 @@ def cleanup(marker):
     for definition in marker['definitions']:
         event = definition.split()[0].split(':', 1)[1]
         try:
-            with (TRACE / 'kprobe_events').open('a') as stream:
-                stream.write(f'-:{event}\n')
+            probe_command(f'-:{event}')
         except OSError as error:
             errors.append(str(error))
     try:
@@ -422,8 +437,7 @@ def start_observer():
             formats[event] = bounded(instance / 'events' / event / 'format', 65536).decode()
             write(instance / 'events' / event / 'enable', '1')
         for definition in definitions:
-            with (TRACE / 'kprobe_events').open('a') as stream:
-                stream.write(definition + '\n')
+            probe_command(definition)
             marker['definitions'].append(definition)
             event = definition.split()[0].split(':', 1)[1]
             formats[event] = bounded(instance / 'events' / event / 'format', 65536).decode()
