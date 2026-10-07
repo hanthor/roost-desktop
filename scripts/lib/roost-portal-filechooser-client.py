@@ -13,6 +13,8 @@ import gi
 
 out, method, decision = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 parent_mode = sys.argv[4] if len(sys.argv) > 4 else "none"
+if method not in ("OpenFile", "SaveFile") or decision not in ("cancel", "grant", "close"):
+    raise RuntimeError("Unknown file-picker operation or decision")
 if parent_mode not in ("none", "x11", "wayland"):
     raise RuntimeError("Unknown parent mode")
 parent_window = None
@@ -24,8 +26,8 @@ parent_sequence = 0
 state_path = Path(os.environ.get("ROOST_COMPOSITOR_STATE", "/out/compositor-state.json"))
 def scene():
     return json.loads(state_path.read_text())
-def pump_parent_until(predicate, message):
-    end = time.monotonic() + 5
+def pump_parent_until(predicate, message, timeout=5):
+    end = time.monotonic() + timeout
     while time.monotonic() < end:
         while GLib.MainContext.default().pending():
             GLib.MainContext.default().iteration(False)
@@ -145,7 +147,7 @@ fixture.mkdir(exist_ok=True)
 payload = b"Roost genuine GNOME FileChooser application data\n"
 source = fixture / "open-proof.txt"
 source.write_bytes(payload)
-expected = source if method == "OpenFile" else fixture / (("saved-proof" if decision == "grant" else "cancel-save-proof") + ("-" + parent_mode if parent_mode != "none" else "") + ".txt")
+expected = source if method == "OpenFile" else fixture / (("saved-proof" if decision == "grant" else decision + "-save-proof") + ("-" + parent_mode if parent_mode != "none" else "") + ".txt")
 if method == "SaveFile" and expected.exists():
     raise RuntimeError("Save fixture must start without a destination")
 title = "Roost " + method + " " + decision + " proof"
@@ -192,16 +194,60 @@ while True:
         GLib.MainContext.default().iteration(False)
         time.sleep(.05)
 out.with_suffix(".waiting.json").write_text(json.dumps({"method": method, "decision": decision, "title": title, "path": str(expected), "provider": identity, "parent": parent_identity}, indent=2))
-end = time.monotonic() + 45
-while handle not in responses and time.monotonic() < end:
-    GLib.MainContext.default().iteration(False)
-    time.sleep(.01)
-if handle not in responses:
-    raise RuntimeError("Nautilus FileChooser response timed out")
-code, results = responses[handle]
-if nautilus_identity() != identity:
-    raise RuntimeError("Nautilus provider owner or executable changed during request")
-out.with_suffix(".response.json").write_text(json.dumps({"response": code, "results": results, "provider": identity}, indent=2))
+if decision == "close":
+    ready_path = out.with_suffix(".close-ready.json")
+    pump_parent_until(ready_path.exists, "Actual file-picker UI was not ready for Request.Close", timeout=30)
+    dialog_identity = json.loads(ready_path.read_text())
+    if dialog_identity["provider"] != identity:
+        raise RuntimeError("Request.Close UI identified a different provider")
+    dialog_id = dialog_identity["dialog_id"]
+    if handle in responses:
+        raise RuntimeError("FileChooser responded before the caller aborted its request")
+    before_close = scene()
+    if before_close["focused"] != dialog_id or not any(
+            window["id"] == dialog_id and window.get("app_id") == "org.gnome.Nautilus"
+            for window in before_close["windows"]):
+        raise RuntimeError("Original actual file-picker dialog disappeared before Request.Close")
+    call("org.freedesktop.portal.Desktop", handle, "org.freedesktop.portal.Request", "Close", None)
+    pump_parent_until(lambda: not any(window["id"] == dialog_id for window in scene()["windows"]),
+                      "Request.Close did not remove its actual Nautilus dialog")
+    # The public Request.Close contract emits no Response. Observe fresh GLib
+    # iterations after disappearance instead of treating a returned method as
+    # proof of teardown, or synthesizing a cancellation response.
+    close_observations = []
+    def observe_close():
+        current = scene()
+        if handle in responses or any(window["id"] == dialog_id for window in current["windows"]):
+            close_observations.append({"failure": "response or original dialog remained", "scene": current})
+            return False
+        close_observations.append({"sequence": len(close_observations) + 1, "scene": current})
+        return len(close_observations) < 10
+    GLib.timeout_add(50, observe_close)
+    pump_parent_until(lambda: len(close_observations) >= 10 or any(
+        "failure" in row for row in close_observations), "No fresh post-close observations")
+    out.with_suffix(".request-close.json").write_text(json.dumps({
+        "handle": handle, "provider": identity, "dialog_id": dialog_id,
+        "before": before_close, "observations": close_observations,
+        "response_emitted": handle in responses,
+        "save_destination_exists": expected.exists() if method == "SaveFile" else None,
+    }, indent=2))
+    if any("failure" in row for row in close_observations) or handle in responses:
+        raise RuntimeError("Aborted portal request emitted a response or retained its dialog")
+    if nautilus_identity() != identity:
+        raise RuntimeError("Request.Close replaced the original Nautilus provider")
+    if method == "SaveFile" and expected.exists():
+        raise RuntimeError("Request.Close created a save destination")
+else:
+    end = time.monotonic() + 45
+    while handle not in responses and time.monotonic() < end:
+        GLib.MainContext.default().iteration(False)
+        time.sleep(.01)
+    if handle not in responses:
+        raise RuntimeError("Nautilus FileChooser response timed out")
+    code, results = responses[handle]
+    if nautilus_identity() != identity:
+        raise RuntimeError("Nautilus provider owner or executable changed during request")
+    out.with_suffix(".response.json").write_text(json.dumps({"response": code, "results": results, "provider": identity}, indent=2))
 if parent_identity is not None:
     end = time.monotonic() + 5
     while time.monotonic() < end:
@@ -221,6 +267,13 @@ if parent_identity is not None:
     out.with_suffix(".parent-after.json").write_text(input_path.read_text())
     if parent_mode == "wayland":
         GdkWayland.WaylandToplevel.drop_exported_handle(native, exported_handles[0])
+if decision == "close":
+    while GLib.MainContext.default().pending():
+        GLib.MainContext.default().iteration(False)
+    if handle in responses:
+        raise RuntimeError("Aborted portal request emitted a response during parent restoration")
+    print(method + " Request.Close: actual dialog removed, no response or file grant")
+    sys.exit(0)
 if decision == "cancel":
     if code != 1 or results.get("uris"):
         raise RuntimeError("Cancel did not reject the file grant")
