@@ -8,6 +8,7 @@ import base64
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -53,6 +54,38 @@ class MutterLibraryIdentity(unittest.TestCase):
             replacement.replace(path)
             with self.assertRaisesRegex(RuntimeError, "identity changed"):
                 profiler.mapped_library_digest(str(path), identity.st_dev, identity.st_ino)
+
+
+class CaptureClosure(unittest.TestCase):
+    def test_writer_closure_required_without_discarding_rejected_capture(self):
+        import hashlib
+        root = ROOT / "scripts/lib/fixtures"
+        raw = (root / "gnome51-frame-ownership.syscap").read_bytes()
+        source = json.loads((root / "gnome51-frame-ownership.json").read_text())
+        metadata = {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                    "pid": source["pid"], "gnome_shell_version": "GNOME Shell 51.0"}
+
+        def chunk(agent, action, index):
+            self.assertEqual(action, "gnome-trace-read")
+            return {"gnome_trace": {"index": index,
+                    "data": base64.b64encode(raw[index * 65536:(index + 1) * 65536]).decode()}}
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(host, "guest_probe", chunk):
+            out = Path(directory)
+            for writers in (None, [{"fd": 80, "flags": os.O_WRONLY}]):
+                row = dict(metadata)
+                if writers is not None:
+                    row["capture_writers_after_stop"] = writers
+                with self.subTest(writers=writers), self.assertRaisesRegex(ValueError, "writer did not close"):
+                    host.retain_gnome_trace(None, out, row)
+                self.assertEqual((out / "gnome-overview.syscap").read_bytes(), raw)
+                self.assertTrue((out / "gnome-overview-marks.json").exists())
+                self.assertFalse((out / "gnome-overview-frame-ownership.json").exists())
+            # This ownership fixture omits the generic event scope. Closing
+            # its writer passes the fence but cannot bypass semantic checks.
+            with self.assertRaisesRegex(ValueError, "lacks actual event"):
+                host.retain_gnome_trace(None, out,
+                        dict(metadata, capture_writers_after_stop=[]))
 
 
 class SysprofCapture(unittest.TestCase):

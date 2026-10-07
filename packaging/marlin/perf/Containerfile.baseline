@@ -2,7 +2,7 @@
 # Arch stable currently ships GNOME 50.5; enable both testing repositories
 # together and perform a complete upgrade to avoid a partial Arch upgrade.
 ARG BASE_IMAGE=ghcr.io/tuna-os/marlin:gnome
-FROM ${BASE_IMAGE}
+FROM ${BASE_IMAGE} AS gnome-baseline
 RUN sed -i '/^\[core\]/i [core-testing]\nInclude = /etc/pacman.d/mirrorlist\n\n[extra-testing]\nInclude = /etc/pacman.d/mirrorlist\n' /etc/pacman.conf && \
     pacman -Syu --noconfirm gnome-shell mutter gdm && \
     kernel_count=0 && \
@@ -15,4 +15,28 @@ RUN sed -i '/^\[core\]/i [core-testing]\nInclude = /etc/pacman.d/mirrorlist\n\n[
     done && \
     test "$kernel_count" -gt 0 && \
     gnome-shell --version | grep -Eq '^GNOME Shell 51([. ]|$)' && \
+    pacman -Q > /usr/share/roost-perf-baseline-packages.txt
+
+# Build the pinned Arch 51.0 source with its trace-context reference released.
+# Toolchain and source files remain in this build stage, outside the measured image.
+FROM gnome-baseline AS mutter-profiler-build
+COPY packaging/marlin/perf/mutter-profiler /build/mutter-profiler
+RUN pacman -S --needed --noconfirm base-devel git sudo && \
+    useradd --create-home --user-group profiler-builder && \
+    printf '%s\n' 'profiler-builder ALL=(ALL) NOPASSWD: /usr/bin/pacman' > /etc/sudoers.d/profiler-builder && \
+    chmod 0440 /etc/sudoers.d/profiler-builder && \
+    chown -R profiler-builder:profiler-builder /build/mutter-profiler && \
+    cd /build/mutter-profiler && \
+    runuser -u profiler-builder -- makepkg --syncdeps --noconfirm --cleanbuild && \
+    mkdir /profiler-package && \
+    cp mutter-51.0-1.1-x86_64.pkg.tar.zst /profiler-package/ && \
+    cp PKGBUILD release-trace-context.patch /profiler-package/ && \
+    cd /profiler-package && \
+    sha256sum PKGBUILD release-trace-context.patch mutter-51.0-1.1-x86_64.pkg.tar.zst > sha256sums
+
+FROM gnome-baseline
+COPY --from=mutter-profiler-build /profiler-package /usr/share/roost-perf-mutter-profiler
+RUN cd /usr/share/roost-perf-mutter-profiler && sha256sum -c sha256sums && \
+    pacman -U --noconfirm mutter-51.0-1.1-x86_64.pkg.tar.zst && \
+    pacman -Q mutter | grep -qx 'mutter 51.0-1.1' && \
     pacman -Q > /usr/share/roost-perf-baseline-packages.txt

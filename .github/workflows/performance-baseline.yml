@@ -68,6 +68,9 @@ jobs:
           sudo podman run --rm localhost/marlin-roost-preview:perf gnome-shell --version | tee gnome-version
           grep -Eq '^GNOME Shell 51([. ]|$)' gnome-version
           sudo podman run --rm localhost/marlin-roost-preview:perf pacman -Q | tee baseline-packages.txt
+          for file in PKGBUILD release-trace-context.patch sha256sums; do
+            sudo podman run --rm localhost/marlin-roost-preview:perf cat "/usr/share/roost-perf-mutter-profiler/$file" > "perf-artifacts/mutter-profiler-$file"
+          done
       - name: Measure GNOME then Roost on this same host
         run: |
           set -euo pipefail

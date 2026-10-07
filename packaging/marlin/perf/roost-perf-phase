@@ -103,10 +103,6 @@ def gnome_trace(action, index):
         provenance = dict(json.loads(process.stdout), guest_kernel=os.uname().release)
         if action == "start":
             return provenance
-        # Allow queued shutdown work to run, but do not label this delay a
-        # flush fence. Record live writer handles; strict host ownership and
-        # whole-capture structural/hash checks still decide acceptance.
-        time.sleep(.5)
     path = Path(f"/run/user/{uid}/roost-perf-gnome.syscap")
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(descriptor, "rb") as stream:
@@ -116,7 +112,17 @@ def gnome_trace(action, index):
                 or not 256 <= metadata.st_size <= 8 * 1024 * 1024):
             raise RuntimeError("invalid GNOME Sysprof capture ownership/size")
         if action == "stop":
-            writers = capture_writers(provenance["pid"], metadata)
+            initial_writers = capture_writers(provenance["pid"], metadata)
+            writers = initial_writers
+            waiting_since = time.monotonic_ns()
+            deadline = time.monotonic() + 5
+            while writers and time.monotonic() < deadline:
+                time.sleep(.05)
+                writers = capture_writers(provenance["pid"], metadata)
+            # Returning unclosed evidence preserves the complete rejected raw
+            # capture on the host; only actual closure qualifies acquisition.
+            closed_after = time.monotonic_ns()
+            metadata = os.fstat(stream.fileno())
             raw = stream.read(8 * 1024 * 1024 + 1)
             after = os.fstat(stream.fileno())
             if (len(raw) != metadata.st_size or
@@ -124,7 +130,9 @@ def gnome_trace(action, index):
                     (metadata.st_size, metadata.st_mtime_ns, metadata.st_ctime_ns)):
                 raise RuntimeError("GNOME capture changed while reading")
             return dict(provenance, bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest(),
+                        capture_writers_at_stop=initial_writers,
                         capture_writers_after_stop=writers,
+                        capture_writer_close_wait_ns=closed_after - waiting_since,
                         capture_mtime_ns=after.st_mtime_ns)
         if type(index) is not int or not 0 <= index < 128:
             raise ValueError("invalid Sysprof capture chunk index")
