@@ -167,7 +167,26 @@ Each profile performs three fresh-guest pairs on one host, ordered GNOME/Roost,
 Roost/GNOME, GNOME/Roost. Reports retain actual repeat and order; the order count
 is 2:1, not fully balanced or randomized. First diagnostic paths are unchanged;
 later pairs use `repeat-2/` and `repeat-3/`, and stock pairs live beneath `stock/`.
-All twelve acquisitions are mandatory. A failure stops the workflow and uploads
+All twelve acquisitions are mandatory for whole-workflow success. Each profile
+fails at its original first failed command, retaining that exit status and a
+finite `acquisition-status.json` stage/case receipt. A failed diagnostic step
+still permits the independent stock step on the same runner only after the
+shared package, both reference images, and all installed-runtime guards passed.
+Before any stock image or disk operation, its preflight also requires the
+original finite diagnostic status and every reached case's original owned-VM
+departure receipt. Each worker creates a private original FD before boot, pins
+its returned child PID/UID/start time and pidfd, and records terminal departure
+only after actual wait and pidfd readiness. Transport-close errors still run
+owned-child cleanup; the original metric failure remains nonzero. Missing,
+changed or nonterminal receipts (including an abruptly killed worker) forbid
+stock acquisition. No process-name scan or unrelated process killing is used.
+These same-user artifact checks establish controlled source provenance rather
+than an unforgeable security boundary. A departure receipt proves neither guest
+measurement success nor package/runtime qualification. Cancellation or failed
+shared setup forbids stock acquisition. Neither profile retries its failed case.
+Diagnostic failure keeps the workflow failed, and partial diagnostic reports
+must not be pooled or labeled qualified. Successful stock pairs are separately
+scoped evidence, never a fallback diagnostic result. The workflow uploads
 retained evidence, without retries or selecting only successful samples.
 The job has a finite 180-minute budget, extended from the original single-pair
 lane to cover twelve fresh installations/acquisitions and one diagnostic build.

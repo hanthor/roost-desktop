@@ -322,6 +322,7 @@ def changed(before, after):
 
 
 def main():
+    from perf_vm_lifetime import Handoff, cleanup_owned_vm
     ap = argparse.ArgumentParser()
     ap.add_argument("--disk", required=True)
     ap.add_argument("--desktop", required=True, choices=("gnome", "roost"))
@@ -330,20 +331,31 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--meta", action="append", default=[])
+    ap.add_argument("--owned-vm-handoff", action="store_true", help="paired CI original child departure receipt")
     args = ap.parse_args()
     expected_image = read_image(args.reference_image, args.gnome_profile) if args.reference_image else None
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=False)
     scratch = out / ".work"
     scratch.mkdir()
-    vm, qmp_path, serial_path, kvm, agent_path = lane.boot(
-        os.path.abspath(args.disk), str(out), str(scratch), args.timeout, guest_agent=True)
-    started = time.monotonic()
+    handoff = None
+    if args.owned_vm_handoff:
+        repeats = [item.split('=', 1)[1] for item in args.meta if item.startswith('acquisition_repeat=')]
+        if len(repeats) != 1 or repeats[0] not in ('1', '2', '3'):
+            raise RuntimeError('original paired acquisition repeat required')
+        handoff = Handoff(out, args.gnome_profile, args.desktop, int(repeats[0]))
+    vm = None
     observations, phases, guest_phases, notifications = [], {}, {}, []
     agent = None
     gnome_trace_active = False
     gnome_trace_summary = None
+    primary = None
     try:
+        vm, qmp_path, serial_path, kvm, agent_path = lane.boot(
+            os.path.abspath(args.disk), str(out), str(scratch), args.timeout, guest_agent=True)
+        started = time.monotonic()
+        if handoff is not None:
+            handoff.attach(vm)
         if not kvm:
             raise RuntimeError("paired performance comparison requires actual KVM")
         qmp = lane.baseline.Qmp(qmp_path)
@@ -484,19 +496,35 @@ def main():
                                  "No release threshold or claim of within-10-percent parity is introduced."]}
         (out / "report.json").write_text(json.dumps(report, indent=2))
         print(json.dumps({"desktop":args.desktop,"samples":len(samples),"observations":len(observations)}))
+    except BaseException as error:
+        primary = error
+        raise
     finally:
-        if gnome_trace_active and agent is not None:
-            try:
-                guest_probe(agent, "gnome-trace-stop", out=out)
-            except Exception as error:
-                print(f"GNOME profile cleanup failed: {error}", file=sys.stderr)
-        if agent is not None:
-            agent.close()
-        vm.terminate()
+        cleanup_error = None
         try:
-            vm.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            vm.kill();vm.wait()
+            if gnome_trace_active and agent is not None:
+                try:
+                    guest_probe(agent, "gnome-trace-stop", out=out)
+                except Exception:
+                    # Fixed diagnostics only; preserve the original metric error.
+                    print("GNOME profile cleanup failed", file=sys.stderr)
+        finally:
+            try:
+                if vm is not None:
+                    cleanup_owned_vm(vm, agent, handoff)
+            except BaseException as error:
+                cleanup_error = error
+            finally:
+                if handoff is not None:
+                    try:
+                        handoff.close()
+                    except BaseException as error:
+                        if cleanup_error is None:
+                            cleanup_error = error
+        if cleanup_error is not None:
+            if primary is None:
+                raise cleanup_error
+            print("Original owned VM cleanup or handoff failed; metric failure retained", file=sys.stderr)
 
 
 if __name__ == "__main__":
