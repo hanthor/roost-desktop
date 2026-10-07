@@ -273,6 +273,58 @@ class MutterLibraryIdentity(unittest.TestCase):
                 profiler.mapped_library_digest(str(path), identity.st_dev, identity.st_ino)
 
 
+class KernelBuildEvidence(unittest.TestCase):
+    @staticmethod
+    def note(name=b"GNU\0", descriptor=b"12345678901234567890", kind=3):
+        import struct
+        return (struct.pack("<III", len(name), len(descriptor), kind) + name +
+                b"\0" * ((-len(name)) % 4) + descriptor + b"\0" * ((-len(descriptor)) % 4))
+
+    def test_reads_live_build_id_among_other_notes(self):
+        raw = self.note(b"Linux\0", b"other", 0) + self.note()
+        result = phase.gnu_build_id(raw)
+        self.assertEqual(result["build_id"], b"12345678901234567890".hex())
+        self.assertEqual(bytes.fromhex(result["gnu_note_hex"]), self.note())
+
+    def test_missing_duplicate_truncated_and_oversized_notes_are_denied(self):
+        for bad in (b"", self.note(b"Linux\0"), self.note() * 2,
+                    self.note()[:-1], self.note() + b"x", self.note(descriptor=b""),
+                    self.note(descriptor=b"x" * 65), b"\xff" * 12):
+            with self.subTest(raw=bad), self.assertRaises(ValueError):
+                phase.gnu_build_id(bad)
+
+    def test_kernel_file_final_symlink_and_nonregular_files_are_denied(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "target").write_bytes(b"kernel payload")
+            (root / "link").symlink_to(root / "target")
+            with self.assertRaises(OSError):
+                phase.kernel_file_digest(root / "link")
+            with self.assertRaises(RuntimeError):
+                phase.kernel_file_digest(root)
+
+    def test_missing_and_changed_kernel_evidence_preserves_complete_capture(self):
+        import hashlib
+        fixture = ROOT / "scripts/lib/fixtures/gnome51-frame-ownership.syscap"
+        raw = fixture.read_bytes()
+        metadata = json.loads((fixture.with_suffix(".json")).read_text())
+        def chunk(_agent, _action, index):
+            return {"gnome_trace": {"index": index,
+                    "data": base64.b64encode(raw[index * 65536:(index + 1) * 65536]).decode()}}
+        for kernel in ([], {"error": "missing live GNU build ID"},
+                       {"before": {"release": "one"}, "after": {"release": "two"}, "unchanged": False}):
+            with self.subTest(kernel=kernel), tempfile.TemporaryDirectory() as directory:
+                out = Path(directory)
+                row = dict(metadata, bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest(),
+                           capture_writers_after_stop=[], guest_kernel_provenance=kernel)
+                with patch.object(host, "guest_probe", side_effect=chunk):
+                    with self.assertRaisesRegex(ValueError, "kernel provenance"):
+                        host.retain_gnome_trace(None, out, row)
+                self.assertEqual((out / "gnome-overview.syscap").read_bytes(), raw)
+                self.assertEqual(json.loads((out / "gnome-overview-source.json").read_text()), row)
+                self.assertTrue((out / "gnome-overview-marks.json").is_file())
+
+
 class CaptureClosure(unittest.TestCase):
     def test_writer_closure_required_without_discarding_rejected_capture(self):
         import hashlib

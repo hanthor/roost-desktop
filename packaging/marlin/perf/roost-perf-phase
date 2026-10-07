@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import signal
 import stat
+import struct
 import re
 import subprocess
 import sys
@@ -102,8 +103,124 @@ def capture_writers(pid, metadata):
     return sorted(writers, key=lambda row: row["fd"])
 
 
+def gnu_build_id(notes):
+    """Parse actual little-endian ELF notes emitted by the x86-64 guest."""
+    offset = 0
+    matches = []
+    while offset < len(notes):
+        if offset + 12 > len(notes):
+            raise ValueError("truncated kernel/module ELF note header")
+        namesz, descsz, kind = struct.unpack_from("<III", notes, offset)
+        start = offset
+        offset += 12
+        name_end = offset + namesz
+        descriptor_start = (name_end + 3) & ~3
+        descriptor_end = descriptor_start + descsz
+        end = (descriptor_end + 3) & ~3
+        if end > len(notes):
+            raise ValueError("truncated kernel/module ELF note body")
+        if notes[offset:name_end] == b"GNU\0" and kind == 3:
+            if not 4 <= descsz <= 64:
+                raise ValueError("invalid GNU build ID length")
+            matches.append({"build_id": notes[descriptor_start:descriptor_end].hex(),
+                            "gnu_note_hex": notes[start:end].hex()})
+        offset = end
+    if len(matches) != 1:
+        raise ValueError("expected one live GNU build ID")
+    return matches[0]
+
+
+def live_build_id(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise RuntimeError("kernel/module provenance requires a regular file")
+    with os.fdopen(descriptor, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        if metadata.st_uid != 0 or metadata.st_mode & 0o022 or not stat.S_ISREG(metadata.st_mode):
+            raise RuntimeError("live build notes are not protected by root")
+        raw = stream.read(65537)
+    if not 12 <= len(raw) <= 65536:
+        raise RuntimeError("live build notes exceed provenance bound")
+    return dict(gnu_build_id(raw), path=str(path), bytes=len(raw),
+                sha256=hashlib.sha256(raw).hexdigest())
+
+
+def kernel_file_digest(path):
+    """Hash a bounded installed file without following a replaced final link."""
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise RuntimeError("kernel/module provenance requires a regular file")
+    with os.fdopen(descriptor, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if (before.st_uid != 0 or before.st_mode & 0o022 or
+                not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= 128 * 1024 * 1024):
+            raise RuntimeError("installed kernel/module file is not bounded and root-owned")
+        digest = hashlib.sha256()
+        size = 0
+        while chunk := stream.read(1024 * 1024):
+            size += len(chunk)
+            if size > 128 * 1024 * 1024:
+                raise RuntimeError("installed kernel/module file grew beyond provenance bound")
+            digest.update(chunk)
+        after = os.fstat(stream.fileno())
+        current = os.stat(path, follow_symlinks=False)
+        if (size != before.st_size or
+                (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) !=
+                (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) or
+                (current.st_dev, current.st_ino) != (before.st_dev, before.st_ino)):
+            raise RuntimeError("installed kernel/module file changed while hashing")
+    owner = subprocess.check_output(["/usr/bin/pacman", "-Qqo", str(path)],
+                                    text=True, timeout=5).strip()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9@+_.-]{0,127}", owner):
+        raise RuntimeError("ambiguous installed kernel/module package owner")
+    package = subprocess.check_output(["/usr/bin/pacman", "-Q", owner],
+                                      text=True, timeout=5).strip()
+    if not package.startswith(owner + " ") or "\n" in package:
+        raise RuntimeError("invalid installed kernel/module package version")
+    return {"path": str(path), "device": before.st_dev, "inode": before.st_ino,
+            "bytes": size, "sha256": digest.hexdigest(), "package": package}
+
+
+def guest_kernel_provenance():
+    running = os.uname()
+    release = running.release
+    if running.machine != "x86_64":
+        raise RuntimeError("kernel note parser requires the qualified x86-64 guest")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", release):
+        raise RuntimeError("invalid running kernel release")
+    directory = Path("/usr/lib/modules") / release
+    filename = subprocess.check_output(
+        ["/usr/bin/modinfo", "-k", release, "-F", "filename", "virtio_gpu"],
+        text=True, timeout=5).strip()
+    path = Path(filename).resolve(strict=True)
+    if not path.is_relative_to(directory / "kernel") or not re.fullmatch(
+            r"virtio_gpu\.ko(?:\.(?:zst|xz|gz))?", path.name):
+        raise RuntimeError("virtio GPU module is not in the running kernel package tree")
+    vermagic = subprocess.check_output(["/usr/bin/modinfo", "-F", "vermagic", str(path)],
+                                       text=True, timeout=5).strip()
+    if not vermagic.startswith(release + " "):
+        raise RuntimeError("virtio GPU module vermagic differs from running kernel")
+    kernel = kernel_file_digest(directory / "vmlinuz")
+    module = dict(kernel_file_digest(path), vermagic=vermagic)
+    if kernel["package"] != module["package"]:
+        raise RuntimeError("installed kernel and virtio GPU belong to different package builds")
+    return {"release": release, "machine": running.machine, "live_kernel": live_build_id("/sys/kernel/notes"),
+            "live_virtio_gpu": live_build_id("/sys/module/virtio_gpu/notes/.note.gnu.build-id"),
+            "installed_kernel": kernel, "installed_virtio_gpu": module,
+            "limitation": "Live build IDs and installed-file hashes are separate evidence; "
+                          "no equality of loaded code and installed bytes or source attribution is inferred."}
+
+
 def gnome_trace(action, index):
     uid = pwd.getpwnam("roost-test").pw_uid
+    kernel_marker = Path("/run/roost-perf-kernel.json")
+    if action == "start":
+        kernel_before = guest_kernel_provenance()
+        with kernel_marker.open("x") as stream:
+            os.chmod(kernel_marker, 0o600)
+            json.dump(kernel_before, stream)
     if action in ("start", "stop", "failed-stop"):
         try:
             process = subprocess.run([
@@ -113,6 +230,8 @@ def gnome_trace(action, index):
                 "/usr/libexec/roost-gnome-profiler", action],
                 text=True, capture_output=True, timeout=20 if action in ("stop","failed-stop") else 12, check=True)
         except subprocess.CalledProcessError as error:
+            if action == "start":
+                kernel_marker.unlink()
             # Forward only the strict public receipt. Unknown/raw error output
             # is never transported, and the observed nonzero result survives.
             observed=error.returncode if type(error.returncode) is int and -255 <= error.returncode <= 255 and error.returncode!=0 else 1
@@ -125,12 +244,38 @@ def gnome_trace(action, index):
             print(encode(receipt,"stop" if action=="failed-stop" else action).decode())
             exit_status=observed if observed>0 else 128-observed
             raise SystemExit(exit_status if 1 <= exit_status <= 255 else 1) from None
+        except BaseException:
+            if action == "start":
+                kernel_marker.unlink()
+            raise
         payload=json.loads(process.stdout)
         if isinstance(payload,dict) and "trace_failure" in payload:
             raise ValueError("trace failure cannot qualify a successful subprocess")
         provenance = payload if action == "failed-stop" else dict(payload, guest_kernel=os.uname().release)
         if action == "start":
-            return provenance
+            return dict(provenance, guest_kernel_provenance=kernel_before)
+        # The original profiler has stopped. Preserve its whole raw capture
+        # even when further provenance is missing or changes.
+        kernel_before = None
+        try:
+            descriptor = os.open(kernel_marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(descriptor) as stream:
+                metadata = os.fstat(stream.fileno())
+                if (metadata.st_uid != 0 or metadata.st_mode & 0o077 or
+                        not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 16384):
+                    raise RuntimeError("invalid root kernel provenance marker")
+                kernel_before = json.load(stream)
+            kernel_after = guest_kernel_provenance()
+            provenance["guest_kernel_provenance"] = {
+                "before": kernel_before, "after": kernel_after,
+                "unchanged": kernel_before == kernel_after}
+        except Exception as error:
+            provenance["guest_kernel_provenance"] = {"before": kernel_before, "error": str(error)[:1024]}
+        finally:
+            try:
+                kernel_marker.unlink(missing_ok=True)
+            except OSError as error:
+                provenance["guest_kernel_provenance"]["cleanup_error"] = str(error)[:1024]
     path = Path(f"/run/user/{uid}/roost-perf-gnome.syscap")
     failed_receipt = Path("/run/roost-perf-gnome-failed-capture.json")
     if action == "failed-stop-read":

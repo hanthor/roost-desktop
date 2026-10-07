@@ -172,6 +172,11 @@ def retain_gnome_trace(agent, out, metadata):
         (out / "gnome-overview-capture-stop-boundary.json").write_text(json.dumps(stop_boundary, indent=2))
     if metadata.get("capture_writers_after_stop") != []:
         raise ValueError("GNOME capture writer did not close after Stop")
+    kernel = metadata.get("guest_kernel_provenance")
+    if kernel is not None and (not isinstance(kernel, dict) or kernel.get("cleanup_error") or
+                               kernel.get("unchanged") is not True or
+                               not kernel.get("before") or kernel.get("before") != kernel.get("after")):
+        raise ValueError("guest kernel provenance is missing or changed during profiling")
     counts = required_scope_counts(decoded, metadata["pid"])
     if not all(counts.values()):
         raise ValueError("GNOME profile lacks actual event/dispatch/presentation scopes")
