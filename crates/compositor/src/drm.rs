@@ -122,6 +122,8 @@ pub struct DrmBackend {
     wake_scanout_blocked: bool,
     wake_event_traces: u8,
     pointer: Point<f64, Logical>,
+    corner_pressure: crate::corner_pressure::CornerPressure,
+    hot_corner_active: bool,
     ctrl: bool,
     alt: bool,
     /// libinput devices, for GNOME's touchpad and mouse settings (#60).
@@ -402,6 +404,8 @@ impl DrmBackend {
                 alt: false,
                 devices: Vec::new(),
                 input_settings: Default::default(),
+                corner_pressure: Default::default(),
+                hot_corner_active: true,
             },
             DrmSources {
                 session: session_notifier,
@@ -426,6 +430,7 @@ impl DrmBackend {
 
     /// Session pause/activate from libseat.
     pub fn on_session_event(&mut self, event: SessionEvent) {
+        self.corner_pressure.reset();
         match event {
             SessionEvent::PauseSession => {
                 eprintln!("roost-compositor: drm: session paused");
@@ -578,13 +583,25 @@ impl DrmBackend {
     /// Translate one libinput event into manager inputs, handling the
     /// pieces only the hardware backend owns: relative pointer motion
     /// (accumulated, clamped) and Ctrl+Alt+F<n> VT switching (consumed).
-    pub fn translate(&mut self, event: InputEvent<LibinputInputBackend>) -> Vec<ManagerInput> {
+    pub fn translate(
+        &mut self,
+        event: InputEvent<LibinputInputBackend>,
+        layout: &[(Rectangle<i32, Logical>, bool)],
+    ) -> Vec<ManagerInput> {
         match event {
             InputEvent::PointerMotion { event } => {
                 let delta = event.delta();
                 let rects = self.output_rects();
-                self.pointer = clamp_to_outputs(self.pointer + delta, &rects);
-                vec![
+                let (attempt, corner) = self.corner_pressure.motion(
+                    self.pointer,
+                    delta,
+                    event.time() / 1000,
+                    layout,
+                    self.input_settings.right_to_left,
+                    self.active && self.hot_corner_active && self.input_settings.hot_corners,
+                );
+                self.pointer = clamp_to_outputs(attempt, &rects);
+                let mut inputs = vec![
                     ManagerInput::Motion {
                         pos: self.pointer,
                         time: (event.time() / 1000) as u32,
@@ -595,7 +612,14 @@ impl DrmBackend {
                         delta_unaccel: event.delta_unaccel(),
                         utime: event.time(),
                     },
-                ]
+                ];
+                if let Some(pos) = corner {
+                    inputs.push(ManagerInput::CornerPressure {
+                        pos,
+                        time: (event.time() / 1000) as u32,
+                    });
+                }
+                inputs
             }
             InputEvent::DeviceAdded { mut device } => {
                 apply_libinput(&self.input_settings, &mut device);
@@ -603,6 +627,7 @@ impl DrmBackend {
                 Vec::new()
             }
             InputEvent::DeviceRemoved { device } => {
+                self.corner_pressure.reset();
                 self.devices.retain(|d| *d != device);
                 Vec::new()
             }
@@ -653,6 +678,7 @@ impl DrmBackend {
                 let inputs = crate::windows::translate_input(other, self.primary_size());
                 for input in &inputs {
                     if let ManagerInput::Motion { pos, .. } = input {
+                        self.corner_pressure.reset();
                         self.pointer = *pos;
                     }
                 }
@@ -663,7 +689,19 @@ impl DrmBackend {
 
     /// GNOME's touchpad and mouse settings on every device, now and as
     /// devices arrive (#60).
+    pub fn set_hot_corner_active(&mut self, active: bool) {
+        self.hot_corner_active = active;
+        if !active {
+            self.corner_pressure.reset();
+        }
+    }
+
     pub fn apply_input_settings(&mut self, settings: &roost_shell_control::InputSettings) {
+        if self.input_settings.hot_corners != settings.hot_corners
+            || self.input_settings.right_to_left != settings.right_to_left
+        {
+            self.corner_pressure.reset();
+        }
         self.input_settings = settings.clone();
         for device in &mut self.devices {
             apply_libinput(settings, device);
@@ -672,6 +710,9 @@ impl DrmBackend {
 
     /// Move the drawn cursor to where the window manager put the pointer.
     pub fn set_pointer(&mut self, pos: Point<f64, Logical>) {
+        if pos != self.pointer {
+            self.corner_pressure.reset();
+        }
         self.pointer = pos;
     }
 

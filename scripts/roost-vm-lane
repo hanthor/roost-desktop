@@ -303,6 +303,62 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     finally:
         agent.run("audio-amplification-reset")
 
+    # Native pressure uses QMP relative mouse events delivered through real
+    # libinput. Tablet/absolute positioning supplies no pressure.
+    corner_observations = []
+    def corner_move(x, y, relative=False):
+        kind = "rel" if relative else "abs"
+        values = (x, y) if relative else (int(x * 32767 / WIDTH), int(y * 32767 / HEIGHT))
+        qmp.cmd("input-send-event", events=[
+            {"type": kind, "data": {"axis": "x", "value": values[0]}},
+            {"type": kind, "data": {"axis": "y", "value": values[1]}}])
+    def observe_corner(label, expected):
+        value = await_state(lambda value: value["state"]["overview_open"] is expected, label=label)
+        corner_observations.append({"label": label, "overview_open": expected,
+                                    "processes": value["processes"]})
+        frame(label)
+    try:
+        if not agent.run("hot-corners", "true")["stored"]:
+            raise RuntimeError("GNOME hot corner policy did not persist")
+        await_state(lambda value: value["state"]["hot_corners"] is True, label="corner-policy-enabled")
+        corner_move(0, 10)
+        for index in range(10):
+            value = agent.run("inventory")
+            if value["state"]["overview_open"]:
+                raise RuntimeError("absolute corner hover incorrectly supplied native pressure")
+            time.sleep(0.05)
+        observe_corner("corner-absolute-negative", False)
+        corner_move(-200, 0, relative=True)
+        observe_corner("corner-relative-open", True)
+        corner_move(-200, 0, relative=True)
+        for index in range(10):
+            value = agent.run("inventory")
+            if not value["state"]["overview_open"]:
+                raise RuntimeError("native pressure retriggered without leaving the barriers")
+            time.sleep(0.05)
+        observe_corner("corner-held-negative", True)
+        corner_move(100, 100, relative=True)
+        corner_move(0, 10)
+        corner_move(-200, 0, relative=True)
+        observe_corner("corner-rearmed-close", False)
+        if not agent.run("hot-corners", "false")["stored"]:
+            raise RuntimeError("GNOME hot corner disable did not persist")
+        await_state(lambda value: value["state"]["hot_corners"] is False, label="corner-policy-disabled")
+        corner_move(100, 100, relative=True)
+        corner_move(0, 10)
+        corner_move(-200, 0, relative=True)
+        for index in range(10):
+            if agent.run("inventory")["state"]["overview_open"]:
+                raise RuntimeError("disabled native corner opened the overview")
+            time.sleep(0.05)
+        observe_corner("corner-disabled-negative", False)
+        record("V-HOT-CORNER-PRESSURE", True,
+               "real libinput relative mouse pressure opens and rearms to close; absolute hover, held barrier and disabled policy are negative controls")
+    finally:
+        agent.run("hot-corners", "true")
+        with open(os.path.join(evidence, "hot-corner-pressure.json"), "w") as stream:
+            json.dump(corner_observations, stream, indent=2)
+
     # Capture the stable desktop after the final key OSD has disappeared.
     time.sleep(2)
 

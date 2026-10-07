@@ -3460,6 +3460,12 @@ pub enum ManagerInput {
         pressed: bool,
         time: u32,
     },
+    /// A native relative device crossed the pressure threshold. Never
+    /// constructed from absolute motion or accepted from remote clients.
+    CornerPressure {
+        pos: Point<f64, Logical>,
+        time: u32,
+    },
     /// Pointer axis (wheel / scroll) motion, in backend units (v120
     /// for wheels, pixels for continuous devices). Only scroll mode
     /// consumes it; everywhere else it is dropped as before.
@@ -3635,12 +3641,18 @@ pub struct TriggerState {
     /// GNOME's `enable-hot-corners` off (default on, as in GNOME).
     hot_corner_off: bool,
     right_to_left: bool,
+    pressure_only: bool,
 }
 
 impl TriggerState {
     /// Drop a pending Super tap when a modal owner or inhibitor takes input.
     pub fn cancel(&mut self) {
         self.super_armed = false;
+    }
+
+    /// Native seats use physical relative barrier pressure, not hover.
+    pub fn set_pressure_only(&mut self, enabled: bool) {
+        self.pressure_only = enabled;
     }
 
     /// Follow GNOME's `enable-hot-corners`.
@@ -3752,7 +3764,7 @@ impl TriggerState {
             }
             ManagerInput::Motion { .. } => {
                 self.super_armed = false;
-                if !self.hot_corner_off && !overview_open && corner {
+                if !self.pressure_only && !self.hot_corner_off && !overview_open && corner {
                     TriggerAction::Open
                 } else {
                     TriggerAction::None
@@ -3773,6 +3785,14 @@ impl TriggerState {
             ManagerInput::Axis { .. } => {
                 self.super_armed = false;
                 TriggerAction::None
+            }
+            ManagerInput::CornerPressure { .. } => {
+                self.super_armed = false;
+                if !self.hot_corner_off {
+                    TriggerAction::Toggle
+                } else {
+                    TriggerAction::None
+                }
             }
             ManagerInput::RelativeMotion { .. }
             | ManagerInput::SwipeBegin { .. }
@@ -4051,6 +4071,7 @@ impl WindowManager {
                     self.pointer_axis(state, horizontal, vertical, time);
                 }
             }
+            ManagerInput::CornerPressure { .. } => {}
             ManagerInput::RelativeMotion {
                 delta,
                 delta_unaccel,
