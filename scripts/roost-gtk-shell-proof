@@ -3591,6 +3591,9 @@ for key in screen-brightness-up-monitor screen-brightness-down-monitor screen-br
     gsettings reset org.gnome.shell.keybindings "$key"
 done
 # Controlled backlight/logind policy test; no physical brightness claim.
+# The monitor-key sequence above closes quick settings; reopen it so the
+# Brightness slider is showing before setting it.
+open_qs
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-brightness-policy.json" 20 \
     --set Brightness 50 || fail G-BRIGHTNESS-CONTRACT "could not set associated user brightness"
 end=$(($(date +%s) + 10))
