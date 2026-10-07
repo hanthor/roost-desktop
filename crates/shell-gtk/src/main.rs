@@ -1421,6 +1421,7 @@ fn build(app: &adw::Application) {
     let osd_ui = osd::OsdUi::new(app.upcast_ref());
     let media_keys = media_keys::MediaKeys::new({
         let osd = osd_ui.clone();
+        let sound = media_keys::sound_settings();
         Rc::new(move |percent, muted, microphone| {
             osd.show(&osd::OsdRequest {
                 icon: Some(
@@ -1432,6 +1433,11 @@ fn build(app: &adw::Application) {
                     .into(),
                 ),
                 level: Some(if muted { 0.0 } else { percent / 100.0 }),
+                max_level: Some(if microphone {
+                    1.0
+                } else {
+                    media_keys::output_limit(sound.as_ref()) / 100.0
+                }),
                 ..Default::default()
             });
         })
