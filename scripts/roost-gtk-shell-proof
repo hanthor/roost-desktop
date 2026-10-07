@@ -2366,6 +2366,8 @@ cstate ".focused_rect == [0, 0, $WIDTH, $HEIGHT]" "corner proof fullscreen" ||
     fail G-HOT-CORNER-FULLSCREEN "actual GTK fullscreen request did not cover the output"
 xdotool mousemove --window "$WID" 1 1
 sleep 1
+cstate '.pointer_position == [1, 1] and .pointer_fullscreen_blocked' "fullscreen corner motion delivered" ||
+    fail G-HOT-CORNER-FULLSCREEN "actual corner coordinates or fullscreen guard were not observed"
 cstate '.overview_open | not' "fullscreen corner blocked" ||
     fail G-HOT-CORNER-FULLSCREEN "the corner opened over the fullscreen window"
 cp "$CSTATE" "$ARTIFACTS/hot-corner-fullscreen-blocked.json"
@@ -2377,10 +2379,23 @@ cstate '.overview_open' "fullscreen deliberate overview" ||
 xdotool key Escape
 cstate '.overview_open | not' "fullscreen deliberate overview dismissed" ||
     fail G-HOT-CORNER-FULLSCREEN "fullscreen overview did not close"
+# Observe a real corner exit after overview teardown before the one fresh
+# entry after unfullscreen.
+xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
+cstate ".pointer_position == [$((WIDTH / 2)), $((HEIGHT / 2))]" "fullscreen corner exit delivered" ||
+    fail G-HOT-CORNER-FULLSCREEN "backend did not deliver the requested corner exit"
+cp "$CSTATE" "$ARTIFACTS/hot-corner-fullscreen-before-unfullscreen.json"
 printf '{"generation":2,"request":"unfullscreen"}\n' >"$corner_requests"
 cstate ".focused_rect != [0, 0, $WIDTH, $HEIGHT]" "corner proof restored" ||
     fail G-HOT-CORNER-FULLSCREEN "actual GTK unfullscreen request did not restore geometry"
+cp "$CSTATE" "$ARTIFACTS/hot-corner-unfullscreen-before-entry.json"
 xdotool mousemove --window "$WID" 1 1
+xdotool getmouselocation --shell >"$ARTIFACTS/hot-corner-unfullscreen-host-pointer.txt"
+cstate '.pointer_position == [1, 1]' "unfullscreen corner entry delivered" ||
+    fail G-HOT-CORNER-FULLSCREEN "backend did not deliver the requested corner entry"
+cp "$CSTATE" "$ARTIFACTS/hot-corner-unfullscreen-entry.json"
+cstate '.pointer_fullscreen_blocked | not' "unfullscreen corner guard removed" ||
+    fail G-HOT-CORNER-FULLSCREEN "actual fullscreen guard remained after restoring geometry"
 cstate '.overview_open' "corner restored after fullscreen" ||
     fail G-HOT-CORNER-FULLSCREEN "unfullscreen did not restore corner opening"
 xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
@@ -3714,6 +3729,9 @@ end=$(($(date +%s) + 10))
 until grep -q Suspend "$POWER_LOG" 2>/dev/null || [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
 grep -q Suspend "$POWER_LOG" || fail G-SUSPEND-LOCK "logind never got Suspend"
 cstate '.locked' "locked" 10 || fail G-SUSPEND-LOCK "PrepareForSleep did not lock the session"
+cstate 'has("pointer_position") and has("pointer_fullscreen_blocked") and .pointer_position == null and .pointer_fullscreen_blocked == null' "locked pointer diagnostics redacted" ||
+    fail G-POINTER-TRACE-PRIVATE "credential input retained pointer diagnostics"
+pass G-POINTER-TRACE-PRIVATE "actual locked scene omits pointer coordinates and fullscreen observations"
 "$PY" "$ROOT/scripts/lib/roost-capture-security-client.py" >"$ARTIFACTS/capture-locked-denial.log" 2>&1 ||
     fail G-CAPTURE-LOCKED "capture accepted while locked"
 pass G-CAPTURE-LOCKED "locked session denies all untrusted and forged portal capture requests"

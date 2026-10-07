@@ -1613,6 +1613,9 @@ impl Runtime {
             let pos = self.manager.pointer_pos();
             [pos.x, pos.y]
         }));
+        doc["pointer_fullscreen_blocked"] = serde_json::json!(
+            (!self.is_locked()).then(|| self.manager.fullscreen_at(self.manager.pointer_pos()))
+        );
         let doc = doc.to_string();
         if doc == self.state_last {
             return;
