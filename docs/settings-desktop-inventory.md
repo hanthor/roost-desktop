@@ -18,7 +18,7 @@ Source: [GTK Wayland settings translations](https://github.com/GNOME/gtk/blob/4.
 |---|---|---|
 | screen-keyboard-enabled | Ignored | Roost has no equivalent compositor accessibility feature; toolkit support is listed separately |
 | screen-magnifier-enabled | Ignored | Roost has no equivalent compositor accessibility feature; toolkit support is listed separately |
-| screen-reader-enabled | Ignored | Roost has no equivalent compositor accessibility feature; toolkit support is listed separately |
+| screen-reader-enabled | Partial | Hardware GTK shell reconciles the preference with the distribution Orca service after session readiness; nested sessions do not manage host services. Genuine Orca activation/logout VM probes are required; Settings UI activation and complete spoken lock/login/shell navigation remain unqualified (#352) |
 ## org.gnome.desktop.a11y.interface
 
 | Key | Status | Reason |
