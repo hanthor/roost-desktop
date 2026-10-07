@@ -31,3 +31,12 @@ regular-file/64MiB bounded and check identity before/after; local file URI bytes
 are decoded once. Static replacement changes invalidate the cache; slideshow XML
 is still unsupported. `picture-opacity` and desktop icons remain documented
 schema/legacy settings without a corresponding stock GNOME 51 Background control.
+
+Gradient colors follow Mutter 51's actual two-texel LINEAR/CLAMP sampler (flat
+endpoint quarters), not an assumed full-width ramp. A separate Mesa EGL operation
+was read back to verify this sampling rule; it is not a GNOME desktop capture.
+Arbitrary source-path identity observation runs only on bounded asynchronous
+workers, with cached snapshots and periodic refresh. Rendering never canonicalizes
+or stats a configured image path on the frame thread. The stock fixture also
+replaces real image bytes at the same selected URI without a settings write or
+synthetic event and requires newly painted pixels, retaining before/after proof.
