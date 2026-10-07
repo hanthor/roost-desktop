@@ -614,6 +614,12 @@ pub fn step_brightness_for(
     done: Box<dyn FnOnce(Result<f64, String>)>,
 ) {
     use std::os::unix::fs::MetadataExt;
+    if output.is_some() {
+        done(Err(
+            "monitor brightness requires compositor-owned native authority".into(),
+        ));
+        return;
+    }
     let root = std::env::var_os("ROOST_BACKLIGHT_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/sys/class/backlight"));
@@ -649,6 +655,14 @@ pub fn step_brightness_for(
     let device = crate::brightness::Device {
         name,
         output: output.unwrap_or("").into(),
+        owner: None,
+        kind: match crate::brightness::BacklightKind::read(&dir.join("type")) {
+            Ok(kind) => kind,
+            Err(error) => {
+                done(Err(error));
+                return;
+            }
+        },
         path: dir,
         max,
         current: now,
@@ -750,6 +764,14 @@ fn brightness(conn: &gio::DBusConnection, w: &Rc<Widgets>) {
             let device = crate::brightness::Device {
                 name: name.clone(),
                 output: String::new(),
+                owner: None,
+                kind: match crate::brightness::BacklightKind::read(&dir.join("type")) {
+                    Ok(kind) => kind,
+                    Err(error) => {
+                        eprintln!("roost-shell-gtk: legacy brightness type: {error}");
+                        return;
+                    }
+                },
                 path: dir.clone(),
                 max: *max,
                 current: 0,

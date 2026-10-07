@@ -462,6 +462,10 @@ echo 1000 >"$BACKLIGHT/max_brightness"
 echo 500 >"$BACKLIGHT/brightness"
 ROOST_BACKLIGHT_ROOT="$ARTIFACTS/backlight"
 export ROOST_BACKLIGHT_ROOT
+ROOST_BACKLIGHT_TEST_CONNECTORS="$ARTIFACTS/controlled-brightness-connectors.json"
+export ROOST_BACKLIGHT_TEST_CONNECTORS
+printf '[]\n' >"$ROOST_BACKLIGHT_TEST_CONNECTORS"
+echo platform >"$BACKLIGHT/type"
 VOLUME_FILE="$ARTIFACTS/volume"
 echo 0.80 >"$VOLUME_FILE"
 VOLUME_MUTED_FILE="$ARTIFACTS/volume-muted"
@@ -3549,6 +3553,16 @@ ln -s "$ARTIFACTS/devices/card0-other" "$ARTIFACTS/backlight/aaa-other/device"
 echo 1000 >"$ARTIFACTS/backlight/aaa-other/max_brightness"
 echo 700 >"$ARTIFACTS/backlight/aaa-other/brightness"
 echo 1010 >"$BACKLIGHT/max_brightness"
+echo raw >"$BACKLIGHT/type"
+"$PY" - "$ARTIFACTS/devices/card0-roost-0" "$ROOST_BACKLIGHT_TEST_CONNECTORS" <<'PYFIXTURE'
+import json,os,pathlib,sys
+path=pathlib.Path(sys.argv[1]).resolve()
+for name,value in [('connector_id','1'),('status','connected'),('enabled','enabled')]:
+    (path/name).write_text(value+'\n')
+metadata=path.stat()
+pathlib.Path(sys.argv[2]).write_text(json.dumps([dict(name='roost-0',drm_device=0,connector_id=1,
+    connector_sysfs=str(path),connector_device=metadata.st_dev,connector_inode=metadata.st_ino)]))
+PYFIXTURE
 echo 510 >"$BACKLIGHT/brightness"
 gsettings set org.gnome.shell.keybindings screen-brightness-up-monitor "['<Super>F5']"
 gsettings set org.gnome.shell.keybindings screen-brightness-down-monitor "['<Super>F4']"

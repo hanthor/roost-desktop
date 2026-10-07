@@ -2772,6 +2772,13 @@ impl Runtime {
         // short comparison. The inventory is the compositor's tracking
         // handed over as-is — never a parallel database.
         self.control.set_outputs(self.state.output_infos());
+        #[allow(unused_mut)]
+        let mut native_outputs = Vec::new();
+        #[cfg(feature = "drm")]
+        if let Backend::Drm(drm) = &self.backend {
+            native_outputs = drm.native_outputs();
+        }
+        self.control.set_native_outputs(native_outputs);
         let pointer = self.manager.pointer_pos();
         let output = self
             .state

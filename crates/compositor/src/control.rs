@@ -244,6 +244,7 @@ pub struct Session<'a> {
     /// snapshot (resnapshot rule for lock transitions): locking strips
     /// window content, unlocking restores it.
     locked_sent: bool,
+    peer_minor: u16,
     /// Window ids the shell asked to close this round (`CloseWindow`
     /// commands the mirror applied). Drained by [`ControlHub::poll`]
     /// so the runtime can send the polite client close.
@@ -329,6 +330,7 @@ impl<'a> Session<'a> {
             overview,
             locked,
             locked_sent,
+            peer_minor: 0,
             closed: Vec::new(),
             idle_timeout: None,
             accelerators: None,
@@ -378,6 +380,7 @@ impl<'a> Session<'a> {
                 current: CURRENT_VERSION,
             }));
         }
+        session.peer_minor = version.minor;
         // Same major line: accept any minor (lenient reader on our side).
         session.conn.write_frame(&Message::Hello {
             version: CURRENT_VERSION,
@@ -416,6 +419,18 @@ impl<'a> Session<'a> {
     /// Send the current output inventory (multi-monitor). Best-effort
     /// like overview: the hub rebroadcasts until every live session
     /// holds it, and newcomers get it right after the handshake.
+    pub fn send_native_outputs(
+        &mut self,
+        outputs: &[roost_shell_control::NativeOutputInfo],
+    ) -> Result<(), ControlError> {
+        if self.peer_minor < 29 {
+            return Ok(());
+        }
+        self.conn.write_frame(&Message::NativeOutputInventory {
+            outputs: outputs.to_vec(),
+        })
+    }
+
     pub fn send_outputs(&mut self, outputs: &[OutputInfo]) -> Result<(), ControlError> {
         self.conn.write_frame(&Message::Outputs {
             outputs: outputs.to_vec(),
@@ -747,6 +762,7 @@ impl<'a> Session<'a> {
             | Message::CommandResult { .. }
             | Message::Overview { .. }
             | Message::Switcher { .. }
+            | Message::NativeOutputInventory { .. }
             | Message::Outputs { .. }
             | Message::Environment { .. }
             | Message::OverviewPreviews { .. }
@@ -776,6 +792,7 @@ fn decode_error_to_wire(e: &DecodeError) -> (ErrorKind, String) {
         DecodeError::IncompatibleVersion { .. } => (ErrorKind::IncompatibleVersion, e.to_string()),
         DecodeError::Truncated { .. }
         | DecodeError::Malformed(_)
+        | DecodeError::CollectionTooLong { .. }
         | DecodeError::TitleTooLong { .. } => (ErrorKind::MalformedFrame, e.to_string()),
     }
 }
@@ -791,6 +808,7 @@ fn message_kind(msg: &Message) -> &'static str {
         Message::Error { .. } => "Error",
         Message::Overview { .. } => "Overview",
         Message::Switcher { .. } => "Switcher",
+        Message::NativeOutputInventory { .. } => "NativeOutputInventory",
         Message::Outputs { .. } => "Outputs",
         Message::Environment { .. } => "Environment",
         Message::OverviewPreviews { .. } => "OverviewPreviews",
@@ -1126,10 +1144,12 @@ pub struct ControlHub {
     /// compositor's tracking, and [`poll`](Self::poll) broadcasts it
     /// whenever it differs from `outputs_sent`.
     outputs: Vec<OutputInfo>,
+    native_outputs: Vec<roost_shell_control::NativeOutputInfo>,
     pointer_output: Option<String>,
     /// Inventory value every live session holds; a mismatch means a
     /// broadcast is still owed (or a newcomer joined mid-state).
     outputs_sent: Vec<OutputInfo>,
+    native_outputs_sent: Vec<roost_shell_control::NativeOutputInfo>,
     /// Session environment for launched apps (#59), and the last value
     /// every live session holds.
     environment: Vec<(String, String)>,
@@ -1190,8 +1210,10 @@ impl ControlHub {
             accelerator_queue: Vec::new(),
             menu_queue: Vec::new(),
             outputs: Vec::new(),
+            native_outputs: Vec::new(),
             pointer_output: None,
             outputs_sent: Vec::new(),
+            native_outputs_sent: Vec::new(),
             environment: Vec::new(),
             environment_sent: Vec::new(),
             previews: (Vec::new(), None),
@@ -1255,6 +1277,10 @@ impl ControlHub {
     /// the current value sends nothing. The runtime calls this every
     /// tick from the compositor's tracking — the single inventory the
     /// spec requires, never a parallel database.
+    pub fn set_native_outputs(&mut self, outputs: Vec<roost_shell_control::NativeOutputInfo>) {
+        self.native_outputs = outputs;
+    }
+
     pub fn set_outputs(&mut self, outputs: Vec<OutputInfo>) {
         self.outputs = outputs;
     }
@@ -1479,6 +1505,17 @@ impl ControlHub {
                 self.previews_sent = self.previews.clone();
             }
         }
+        if self.native_outputs != self.native_outputs_sent {
+            let mut all_sent = true;
+            for session in &mut self.sessions {
+                if session.send_native_outputs(&self.native_outputs).is_err() {
+                    all_sent = false;
+                }
+            }
+            if all_sent {
+                self.native_outputs_sent = self.native_outputs.clone();
+            }
+        }
         if self.outputs != self.outputs_sent {
             let mut all_sent = true;
             for session in &mut self.sessions {
@@ -1559,6 +1596,7 @@ impl ControlHub {
                 // send it; the shell keeps its legacy surfaces until a
                 // real one arrives.
                 let _ = session.send_overview(open);
+                let _ = session.send_native_outputs(&self.native_outputs);
                 if !self.outputs.is_empty() {
                     let _ = session.send_outputs(&self.outputs);
                 }

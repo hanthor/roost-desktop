@@ -67,6 +67,8 @@ pub struct DrmOutput {
     pub name: String,
     /// CRTC driving the connector.
     pub crtc: crtc::Handle,
+    pub connector: connector::Handle,
+    native_owner: Option<roost_shell_control::NativeOutputInfo>,
     /// GBM swapchain bound to the CRTC.
     pub surface: ScanoutSurface,
     /// Protocol output advertised to clients.
@@ -202,6 +204,27 @@ pub fn clamp_to_outputs(
 }
 
 impl DrmBackend {
+    pub fn native_outputs(&self) -> Vec<roost_shell_control::NativeOutputInfo> {
+        use std::os::fd::AsFd;
+        if !self.active || !self.drm.is_active() {
+            return Vec::new();
+        }
+        let Ok(device) = crate::native_output::device(self.drm.device_fd().as_fd()) else {
+            return Vec::new();
+        };
+        if device != self.drm.device_id() {
+            return Vec::new();
+        }
+        // Identity is captured during actual connector discovery, not scanned
+        // every render tick. Shell admission revalidates canonical status/object.
+        self.outputs
+            .iter()
+            .filter_map(|output| output.native_owner.as_ref())
+            .filter(|owner| owner.drm_device == device)
+            .cloned()
+            .collect()
+    }
+
     /// Open the seat, the primary GPU, every connected output, and
     /// libinput. Fails with a readable reason (no seat daemon, no GPU,
     /// nothing connected) so the launcher can report it.
@@ -244,6 +267,10 @@ impl DrmBackend {
         let resources = drm
             .resource_handles()
             .map_err(|e| err("drm resources")(e.to_string()))?;
+        use std::os::fd::AsFd;
+        let native_device = crate::native_output::device(drm.device_fd().as_fd())
+            .ok()
+            .filter(|device| *device == drm.device_id());
         let mut used: Vec<crtc::Handle> = Vec::new();
         let mut outputs = Vec::new();
         let mut next_x = 0;
@@ -312,9 +339,20 @@ impl DrmBackend {
             let out_mode = Mode::from(mode);
             output.change_current_state(Some(out_mode), None, None, None);
             output.set_preferred(out_mode);
+            let native_owner = native_device.and_then(|device| {
+                crate::native_output::resolve(
+                    std::path::Path::new("/sys"),
+                    device,
+                    &name,
+                    u32::from(*handle),
+                )
+                .ok()
+            });
             outputs.push(DrmOutput {
                 name,
                 crtc,
+                connector: *handle,
+                native_owner,
                 surface,
                 output,
                 size,

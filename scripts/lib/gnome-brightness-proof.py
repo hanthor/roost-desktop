@@ -84,6 +84,40 @@ def retain(path,result):
         if (before.st_dev,before.st_ino)!=(after.st_dev,after.st_ino) or after.st_size!=len(raw):raise RuntimeError('receipt identity/size changed')
     finally:os.close(fd)
 
+def backlight_type(path):
+    fd=os.open(path,os.O_RDONLY|os.O_NONBLOCK|os.O_NOFOLLOW|os.O_CLOEXEC)
+    try:
+        before=os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):raise RuntimeError('backlight type is nonregular')
+        raw=os.read(fd,17);after=os.stat(path,follow_symlinks=False)
+        if len(raw)>16 or not stat.S_ISREG(after.st_mode) or (before.st_dev,before.st_ino)!=(after.st_dev,after.st_ino):raise RuntimeError('backlight type identity/bound mismatch')
+        kind=raw.decode().strip()
+        if kind not in ('raw','firmware','platform'):raise RuntimeError('unknown backlight type')
+        return kind
+    finally:os.close(fd)
+
+def floor(maximum,kind):
+    if kind not in ('raw','firmware','platform') or maximum<=0:raise RuntimeError('invalid real backlight type/range')
+    return 0 if kind=='raw' and maximum<99 else max(1,maximum//100)
+
+def controlled_manifest(path):
+    fd=os.open(path,os.O_RDONLY|os.O_NONBLOCK|os.O_NOFOLLOW|os.O_CLOEXEC)
+    try:
+        before=os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_uid!=os.getuid():raise RuntimeError('controlled manifest owner/type mismatch')
+        raw=os.read(fd,65537);after=os.stat(path,follow_symlinks=False)
+        if len(raw)>65536 or not stat.S_ISREG(after.st_mode) or (before.st_dev,before.st_ino)!=(after.st_dev,after.st_ino):raise RuntimeError('controlled manifest identity/bound mismatch')
+        outputs=json.loads(raw)
+        if not isinstance(outputs,list) or len(outputs)>64:raise RuntimeError('controlled manifest count/type mismatch')
+        for output in outputs:
+            if not isinstance(output,dict) or set(output)!={'name','drm_device','connector_id','connector_sysfs','connector_device','connector_inode'}:raise RuntimeError('controlled manifest schema mismatch')
+            if output['drm_device']!=0 or not isinstance(output['name'],str) or len(output['name'])>512 or not isinstance(output['connector_sysfs'],str) or len(output['connector_sysfs'])>512:raise RuntimeError('controlled manifest field bounds/source mismatch')
+        return outputs
+    finally:os.close(fd)
+
+def overridden_backlight_environment():
+    return any(key in os.environ for key in ('ROOST_BACKLIGHT_ROOT','ROOST_BACKLIGHT_TEST_CONNECTORS'))
+
 def signal_receipt(signals,overflow):
     if len(signals)>=512:overflow[0]=True
     else:signals.append(time.monotonic_ns())
@@ -104,7 +138,7 @@ def main():
     subscription=bus.signal_subscribe(identity['owner'],NAME,'BrightnessChanged',PATH,None,Gio.DBusSignalFlags.NONE,lambda *args:signal_receipt(signals,signal_overflow))
     text=call(bus,owner,PATH,'org.freedesktop.DBus.Introspectable','Introspect').unpack()[0];schema(text)
     root=Path(args.controlled_root) if args.controlled_root else Path('/sys/class/backlight')
-    if not args.controlled_root and os.environ.get('ROOST_BACKLIGHT_ROOT'):raise RuntimeError('native proof cannot accept overridden backlight')
+    if not args.controlled_root and overridden_backlight_environment():raise RuntimeError('native proof cannot accept overridden backlight')
     entries=[]
     if root.exists():
         for index,entry in enumerate(root.iterdir()):
@@ -139,14 +173,18 @@ def main():
             if not args.device or not available(bus,owner):raise RuntimeError('controlled associated backlight missing')
             device=root/args.device
             def read(name):return scalar(device/name)
-            maximum=read('max_brightness');floor=max(1,maximum//100)
-            baseline=read('brightness');relative=(baseline-floor)/(maximum-floor)
+            maximum=read('max_brightness');kind=backlight_type(device/'type');minimum=floor(maximum,kind)
+            manifest=controlled_manifest(os.environ['ROOST_BACKLIGHT_TEST_CONNECTORS'])
+            parent=(device/'device').resolve();metadata=parent.stat()
+            if len(manifest)!=1 or manifest[0]['connector_sysfs']!=str(parent) or (manifest[0]['connector_device'],manifest[0]['connector_inode'])!=(metadata.st_dev,metadata.st_ino) or manifest[0]['connector_id']!=scalar(parent/'connector_id'):raise RuntimeError('controlled actual associated authority mismatch')
+            result['controlled_authority']=manifest
+            baseline=read('brightness');relative=(baseline-minimum)/(maximum-minimum)
             def observe(expected):
                 actual=read('brightness');receipts[-1]['actual_brightness']=actual;receipts[-1]['expected_brightness']=expected
                 if actual!=expected:raise RuntimeError(f'actual brightness={actual}, expected={expected}')
             # Source policy's ordinary installed idle setting, not an invented target.
             settings=Gio.Settings.new('org.gnome.settings-daemon.plugins.power');idle=settings.get_int('idle-brightness')/100
-            absolute=lambda level:floor+int((maximum-floor)*max(0,min(1,level))+0.5)
+            absolute=lambda level:minimum+int((maximum-minimum)*max(0,min(1,level))+0.5)
             request('SetDimming',True);observe(absolute(min(idle,relative)))
             saved_idle=settings.get_int('idle-brightness');settings_restore=(settings,saved_idle)
             changed_idle=20 if saved_idle!=20 else 40

@@ -19,7 +19,7 @@ namespace={'ET':ET,'NAME':'org.gnome.Shell.Brightness','os':os,'stat':stat,'json
 function=next(node for node in parsed.body if isinstance(node,ast.FunctionDef) and node.name=='schema')
 exec(compile(ast.Module(body=[function],type_ignores=[]),'<actual-schema-parser>','exec'),namespace)
 schema=namespace['schema']
-for name in ['scalar','retain','process','principal','available','signal_receipt','drain']:
+for name in ['scalar','retain','process','principal','available','signal_receipt','drain','floor','controlled_manifest','backlight_type','overridden_backlight_environment']:
     node=next(node for node in parsed.body if isinstance(node,ast.FunctionDef) and node.name==name)
     exec(compile(ast.Module(body=[node],type_ignores=[]),'<actual-bounded-proof-io>','exec'),namespace)
 scalar=namespace['scalar'];retain=namespace['retain']
@@ -130,5 +130,51 @@ class BoundedSignalDispatch(unittest.TestCase):
         self.assertEqual(iterations,[])
         budget=[100];namespace['drain'](context,time.monotonic()+5,budget)
         self.assertEqual((len(iterations),budget[0]),(2,98))
+
+class ActualControlledAuthority(unittest.TestCase):
+    def test_native_environment_rejects_even_empty_fixture_overrides(self):
+        with mock.patch.dict(os.environ,{},clear=True):
+            self.assertFalse(namespace['overridden_backlight_environment']())
+            for key in ('ROOST_BACKLIGHT_ROOT','ROOST_BACKLIGHT_TEST_CONNECTORS'):
+                for value in ('','/controlled/fixture'):
+                    with mock.patch.dict(os.environ,{key:value},clear=True):
+                        self.assertTrue(namespace['overridden_backlight_environment']())
+    def test_real_type_floor_exact_raw_boundary_and_other_kinds(self):
+        for kind in ['firmware','platform']:
+            self.assertEqual(namespace['floor'](2,kind),1)
+        for maximum,expected in [(1,0),(2,0),(98,0),(99,1),(1000,10)]:self.assertEqual(namespace['floor'](maximum,'raw'),expected)
+        for kind in ['','unknown','RAW']:
+            with self.assertRaises(RuntimeError):namespace['floor'](98,kind)
+    def test_actual_type_io_rejects_unknown_oversize_fifo_and_permission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'type'
+            for value in ['raw','firmware','platform']:
+                path.write_text(value);self.assertEqual(namespace['backlight_type'](path),value)
+            for value in ['unknown','raw platform','raw'+'x'*14]:
+                path.write_text(value)
+                with self.assertRaises(RuntimeError):namespace['backlight_type'](path)
+            fifo=Path(directory)/'fifo';os.mkfifo(fifo)
+            with self.assertRaises(RuntimeError):namespace['backlight_type'](fifo)
+        with mock.patch.object(os,'open',side_effect=PermissionError):
+            with self.assertRaises(PermissionError):namespace['backlight_type']('/refused')
+    def test_manifest_fd_bounds_regular_no_follow_and_count(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'manifest';path.write_text('[]');self.assertEqual(namespace['controlled_manifest'](path),[])
+            for raw in [' '*65537,json.dumps([{}]*65),'{}',json.dumps([{'name':'unowned'}])]:
+                path.write_text(raw)
+                with self.assertRaises(RuntimeError):namespace['controlled_manifest'](path)
+            link=Path(directory)/'link';link.symlink_to(path)
+            with self.assertRaises(OSError):namespace['controlled_manifest'](link)
+            fifo=Path(directory)/'fifo';os.mkfifo(fifo)
+            with self.assertRaises(RuntimeError):namespace['controlled_manifest'](fifo)
+    def test_manifest_replacement_and_permission_refusal_are_failures(self):
+        with mock.patch.object(os,'open',side_effect=PermissionError):
+            with self.assertRaises(PermissionError):namespace['controlled_manifest']('/refused')
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'manifest';path.write_text('[]');replacement=Path(directory)/'new';replacement.write_text('[]')
+            read=os.read
+            def replace(fd,count):
+                raw=read(fd,count);os.replace(replacement,path);return raw
+            with mock.patch.object(os,'read',side_effect=replace),self.assertRaises(RuntimeError):namespace['controlled_manifest'](path)
 
 if __name__=='__main__':unittest.main()

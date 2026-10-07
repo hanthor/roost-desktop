@@ -1296,10 +1296,7 @@ fn build(app: &adw::Application) {
                 weak.upgrade()
                     .and_then(|shell| {
                         let shell = shell.try_borrow().ok()?;
-                        shell
-                            .control
-                            .as_ref()
-                            .map(|c| c.outputs().iter().map(|o| o.name.clone()).collect())
+                        shell.control.as_ref().map(|c| c.native_outputs().to_vec())
                     })
                     .unwrap_or_default()
             })
@@ -1782,8 +1779,12 @@ fn build(app: &adw::Application) {
                         };
                         if brightness_controller.has_output(output) {
                             brightness_controller.step(output, step, Box::new(show));
+                        } else if monitor {
+                            eprintln!(
+                                "roost-shell-gtk: no authoritative native pointer-output backlight"
+                            );
                         } else {
-                            // Preserve legacy global/associated-key access, but this
+                            // Preserve explicitly global legacy access, but this
                             // fallback cannot establish the new interface capability.
                             services::step_brightness_for(step, output, Box::new(show));
                         }

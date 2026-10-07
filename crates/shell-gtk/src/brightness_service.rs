@@ -19,8 +19,9 @@ const XML: &str = r#"<node><interface name="org.gnome.Shell.Brightness">
 type Done = Box<dyn FnOnce(Result<f64, String>)>;
 pub struct Controller {
     model: RefCell<Model>,
-    outputs: Rc<dyn Fn() -> Vec<String>>,
+    outputs: Rc<dyn Fn() -> Vec<roost_shell_control::NativeOutputInfo>>,
     root: PathBuf,
+    fixture_manifest: Option<PathBuf>,
     session: RefCell<Option<gio::DBusConnection>>,
     system: RefCell<Option<gio::DBusConnection>>,
     busy: Cell<bool>,
@@ -29,11 +30,19 @@ pub struct Controller {
     settings: RefCell<Option<gio::Settings>>,
 }
 impl Controller {
+    fn output_inventory(&self) -> Result<Vec<roost_shell_control::NativeOutputInfo>, String> {
+        if let Some(path) = &self.fixture_manifest {
+            return brightness::controlled_outputs(path);
+        }
+        Ok((self.outputs)())
+    }
     fn refresh(self: &Rc<Self>) {
         if self.busy.get() {
             return;
         }
-        let devices = brightness::inventory(&self.root, &(self.outputs)());
+        let devices = self
+            .output_inventory()
+            .and_then(|outputs| brightness::inventory(&self.root, &outputs));
         let valid = devices.is_ok();
         let changed = match devices {
             Ok(devices) => self.model.borrow_mut().refresh(devices),
@@ -274,7 +283,11 @@ impl Controller {
                 gio::Cancellable::NONE,
                 move |reply| {
                     let result = (|| {
-                        if !(service.outputs)().iter().any(|o| o == &device.output) {
+                        if !service
+                            .output_inventory()?
+                            .iter()
+                            .any(|o| Some(o) == device.owner.as_ref())
+                        {
                             return Err("output disappeared during brightness update".into());
                         }
                         let actual = brightness::readback(&device)?;
@@ -330,12 +343,20 @@ impl Controller {
     }
 }
 
-pub fn start(outputs: Rc<dyn Fn() -> Vec<String>>, idle: f64) -> Rc<Controller> {
+pub fn start(
+    outputs: Rc<dyn Fn() -> Vec<roost_shell_control::NativeOutputInfo>>,
+    idle: f64,
+) -> Rc<Controller> {
     let mut model = Model::default();
     model.policy.idle = idle.clamp(0.0, 1.0);
     let service = Rc::new(Controller {
         model: RefCell::new(model),
         outputs,
+        fixture_manifest: if std::env::var_os("ROOST_BACKLIGHT_ROOT").is_some() {
+            std::env::var_os("ROOST_BACKLIGHT_TEST_CONNECTORS").map(PathBuf::from)
+        } else {
+            None
+        },
         root: std::env::var_os("ROOST_BACKLIGHT_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|| "/sys/class/backlight".into()),

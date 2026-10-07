@@ -168,6 +168,7 @@ pub struct ControlClient {
     /// Read-only here; the shell reconciles its surfaces against it
     /// and never edits it.
     outputs: Vec<OutputInfo>,
+    native_outputs: Vec<roost_shell_control::NativeOutputInfo>,
     pointer_output: Option<String>,
     /// Session environment from the compositor (#59).
     environment: Vec<(String, String)>,
@@ -200,6 +201,7 @@ impl ControlClient {
             shadow_workspaces: Vec::new(),
             locked: false,
             outputs: Vec::new(),
+            native_outputs: Vec::new(),
             pointer_output: None,
             environment: Vec::new(),
             overview_previews: (Vec::new(), None),
@@ -253,6 +255,10 @@ impl ControlClient {
     /// surfaces against this and never edits it.
     pub fn pointer_output(&self) -> Option<&str> {
         self.pointer_output.as_deref()
+    }
+
+    pub fn native_outputs(&self) -> &[roost_shell_control::NativeOutputInfo] {
+        &self.native_outputs
     }
 
     pub fn outputs(&self) -> &[OutputInfo] {
@@ -655,6 +661,12 @@ impl ControlClient {
                 Ok(Handled::Changes { to_revision })
             }
             Message::CommandResult { id, status } => Ok(Handled::CommandResult { id, status }),
+            Message::NativeOutputInventory { outputs } => {
+                self.native_outputs = outputs;
+                Ok(Handled::Outputs {
+                    count: self.native_outputs.len(),
+                })
+            }
             Message::Outputs { outputs } => {
                 // Structural state, not model truth — never touches
                 // revision, `needs_snapshot`, or the window list. The
@@ -863,6 +875,7 @@ fn message_label(msg: &Message) -> &'static str {
         Message::Error { .. } => "Error",
         Message::Overview { .. } => "Overview",
         Message::Switcher { .. } => "Switcher",
+        Message::NativeOutputInventory { .. } => "NativeOutputInventory",
         Message::Outputs { .. } => "Outputs",
         Message::Environment { .. } => "Environment",
         Message::OverviewPreviews { .. } => "OverviewPreviews",
@@ -1179,6 +1192,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn native_owner_inventory_revocation_never_rewrites_legacy_outputs_or_revision() {
+        let (mut client, mut peer) = handshook();
+        server_write(&mut peer, &snapshot_rev7());
+        client.poll().unwrap();
+        let owner = roost_shell_control::NativeOutputInfo {
+            name: "eDP-1".into(),
+            drm_device: 226,
+            connector_id: 39,
+            connector_sysfs: "/sys/owned/connector".into(),
+            connector_device: 1,
+            connector_inode: 2,
+        };
+        server_write(
+            &mut peer,
+            &Message::NativeOutputInventory {
+                outputs: vec![owner.clone()],
+            },
+        );
+        assert!(matches!(
+            client.poll().unwrap(),
+            Handled::Outputs { count: 1 }
+        ));
+        assert_eq!(client.native_outputs(), &[owner]);
+        assert!(client.outputs().is_empty());
+        assert_eq!(client.revision(), Some(7));
+        server_write(
+            &mut peer,
+            &Message::NativeOutputInventory { outputs: vec![] },
+        );
+        assert!(matches!(
+            client.poll().unwrap(),
+            Handled::Outputs { count: 0 }
+        ));
+        assert!(client.native_outputs().is_empty());
+        assert_eq!(client.revision(), Some(7));
+    }
     #[test]
     fn outputs_frame_stores_inventory_without_touching_revision() {
         let (mut client, mut peer) = handshook();

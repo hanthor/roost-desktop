@@ -153,9 +153,12 @@ impl ProtocolVersion {
     /// `0.26` appends the shell text direction to InputSettings.
     /// Both positional postcard peers ship together.
     /// `0.27` appends hardware Screen Reader preference/status messages.
+    /// `0.29` appends NativeOutputInventory without altering OutputInfo.
+    /// 0.28 is reserved for the independently prepared GlobalShortcuts change;
+    /// integration must preserve both append-only additions and their order.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 27,
+        minor: 29,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -223,6 +226,21 @@ pub struct OutputInfo {
     pub height: i32,
     /// Whether the dock anchors here.
     pub primary: bool,
+}
+
+/// Actual selected native DRM output authority. Missing inventory means no
+/// authority, including nested sessions; connector text alone is insufficient.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeOutputInfo {
+    pub name: String,
+    /// Actual char-device rdev from the compositor-owned KMS FD.
+    pub drm_device: u64,
+    /// Actual DRM connector object ID, checked against kernel sysfs.
+    pub connector_id: u32,
+    /// Canonical sysfs DRM connector directory under that owned device.
+    pub connector_sysfs: String,
+    pub connector_device: u64,
+    pub connector_inode: u64,
 }
 
 /// One ordered state mutation between two snapshot revisions.
@@ -698,6 +716,9 @@ pub enum Message {
     PointerOutput { name: Option<String> },
     /// Actual compositor-owned Screen Reader child status.
     ScreenReader { state: ScreenReaderState },
+    /// Full actual native authority; empty explicitly revokes prior authority.
+    /// Append-only, sent only to peers advertising minor >=29.
+    NativeOutputInventory { outputs: Vec<NativeOutputInfo> },
 }
 
 /// GNOME's dynamic workspace count: one empty workspace always follows
@@ -935,6 +956,8 @@ pub struct TokenMeta {
 /// sides can log, count, and drop the offending frame (ADR 0002).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DecodeError {
+    /// A typed collection exceeds its admission bound.
+    CollectionTooLong { len: usize, max: usize },
     /// Fewer than 4 prefix bytes, or a body shorter than the prefix claims.
     Truncated {
         /// Bytes required.
@@ -971,6 +994,9 @@ pub enum DecodeError {
 impl std::fmt::Display for DecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::CollectionTooLong { len, max } => {
+                write!(f, "collection of {len} records exceeds {max}")
+            }
             Self::Truncated { expected, actual } => {
                 write!(f, "truncated frame: need {expected} bytes, have {actual}")
             }
@@ -1161,6 +1187,18 @@ fn validate_titles(msg: &Message) -> Result<(), DecodeError> {
         | Message::Outputs { .. }
         | Message::OverviewPreviews { .. } => {}
         // Names and values share the title bound: short by nature.
+        Message::NativeOutputInventory { outputs } => {
+            if outputs.len() > 64 {
+                return Err(DecodeError::CollectionTooLong {
+                    len: outputs.len(),
+                    max: 64,
+                });
+            }
+            for output in outputs {
+                check_title(&output.name)?;
+                check_title(&output.connector_sysfs)?;
+            }
+        }
         Message::Environment { vars } => {
             for (name, value) in vars {
                 check_title(name)?;
@@ -1193,6 +1231,37 @@ mod tests {
             name: Some(format!("ws{id}")),
             active: id == 1,
         }
+    }
+
+    #[test]
+    fn native_inventory_is_appended_and_bounds_authority_collection() {
+        let legacy = Message::Outputs {
+            outputs: vec![OutputInfo {
+                name: "n".into(),
+                width: 1,
+                height: 1,
+                primary: true,
+            }],
+        };
+        // Existing Outputs index8 and unchanged positional OutputInfo body.
+        assert_eq!(&encode_frame(&legacy)[4..], &[8, 1, 1, b'n', 2, 2, 1]);
+        let owner = NativeOutputInfo {
+            name: "eDP-1".into(),
+            drm_device: 226,
+            connector_id: 39,
+            connector_sysfs: "/sys/owned/connector".into(),
+            connector_device: 1,
+            connector_inode: 2,
+        };
+        roundtrip(&Message::NativeOutputInventory {
+            outputs: vec![owner.clone()],
+        });
+        assert!(matches!(
+            decode_frame(&encode_frame(&Message::NativeOutputInventory {
+                outputs: vec![owner; 65]
+            })),
+            Err(DecodeError::CollectionTooLong { len: 65, max: 64 })
+        ));
     }
 
     fn sample_token() -> ActivationToken {
