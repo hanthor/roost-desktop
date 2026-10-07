@@ -44,7 +44,7 @@ use crate::{
     state::{StateModel, WindowUpdate},
     State, WindowRequest,
 };
-use roost_shell_control::{SwitcherAction, PANEL_HEIGHT};
+use roost_shell_control::{switcher_keys, SwitcherAction, PANEL_HEIGHT};
 
 /// Default floating size for a newly mapped window.
 const DEFAULT_WIDTH: i32 = 800;
@@ -3590,13 +3590,13 @@ pub const CTRL_RIGHT_KEYCODE: u32 = 97;
 /// (GNOME's AppSwitcherPopup: arrows, Q, W, F4).
 fn switcher_keysym(keycode: u32) -> Option<u32> {
     Some(match keycode {
-        ARROW_LEFT_KEYCODE => 0xff51,
-        ARROW_UP_KEYCODE => 0xff52,
-        ARROW_RIGHT_KEYCODE => 0xff53,
-        ARROW_DOWN_KEYCODE => 0xff54,
-        F4_KEYCODE => 0xffc1,
-        Q_KEYCODE => 0x71,
-        W_KEYCODE => 0x77,
+        ARROW_LEFT_KEYCODE => switcher_keys::LEFT,
+        ARROW_UP_KEYCODE => switcher_keys::UP,
+        ARROW_RIGHT_KEYCODE => switcher_keys::RIGHT,
+        ARROW_DOWN_KEYCODE => switcher_keys::DOWN,
+        F4_KEYCODE => switcher_keys::F4,
+        Q_KEYCODE => switcher_keys::Q,
+        W_KEYCODE => switcher_keys::W,
         _ => return None,
     })
 }
@@ -4745,6 +4745,24 @@ pub fn translate_input<B: InputBackend>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn evdev_switcher_wire_mapping_uses_shared_keys_and_refuses_unmapped_input() {
+        for (code, keysym) in [
+            (ARROW_LEFT_KEYCODE, 0xff51),
+            (ARROW_UP_KEYCODE, 0xff52),
+            (ARROW_RIGHT_KEYCODE, 0xff53),
+            (ARROW_DOWN_KEYCODE, 0xff54),
+            (F4_KEYCODE, 0xffc1),
+            (Q_KEYCODE, 0x71),
+            (W_KEYCODE, 0x77),
+        ] {
+            assert_eq!(switcher_keysym(code), Some(keysym));
+        }
+        for code in [0, TAB_KEYCODE, GRAVE_KEYCODE, CTRL_LEFT_KEYCODE, u32::MAX] {
+            assert_eq!(switcher_keysym(code), None);
+        }
+    }
 
     #[test]
     fn new_windows_take_the_first_free_cascade_slot_like_mutter() {
