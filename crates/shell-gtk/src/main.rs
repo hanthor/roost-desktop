@@ -14,6 +14,7 @@
 //! `ROOST_SHELL_BIN=roost-shell-gtk` while it grows to parity.
 
 mod audio_state;
+mod background_settings;
 mod bt_menu;
 mod calendar;
 mod events;
@@ -1833,7 +1834,7 @@ fn build(app: &adw::Application) {
                 let dark = interface
                     .as_ref()
                     .is_some_and(|i| i.string("color-scheme") == "prefer-dark");
-                let mut text = logic::wallpaper_drop(
+                let text = logic::wallpaper_drop(
                     &bg.string("picture-uri"),
                     &bg.string("picture-uri-dark"),
                     dark,
@@ -1870,25 +1871,13 @@ fn build(app: &adw::Application) {
                             .unwrap_or_default()
                     })
                     .unwrap_or_default();
-                text.push_str(&lock_uri);
-                text.push('\n');
-                let picture_settings = |s: &gio::Settings| -> Option<
-                    roost_shell_control::background::PictureSettings,
-                > {
-                    use roost_shell_control::background::{PictureSettings, Placement, Shading};
-                    let color = |key: &str| -> Option<[u8; 3]> {
-                        let rgb = gtk::gdk::RGBA::parse(s.string(key).as_str()).ok()?;
-                        Some(
-                            [rgb.red(), rgb.green(), rgb.blue()]
-                                .map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8),
-                        )
-                    };
-                    Some(PictureSettings {
-                        placement: Placement::from_key(s.string("picture-options").as_str())?,
-                        shading: Shading::from_key(s.string("color-shading-type").as_str())?,
-                        primary: color("primary-color")?,
-                        secondary: color("secondary-color")?,
-                    })
+                let picture_settings = |s: &gio::Settings| {
+                    background_settings::picture_settings(
+                        s.string("picture-options").as_str(),
+                        s.string("color-shading-type").as_str(),
+                        s.string("primary-color").as_str(),
+                        s.string("secondary-color").as_str(),
+                    )
                 };
                 let Some(desktop) = picture_settings(bg) else {
                     return;
@@ -1901,16 +1890,10 @@ fn build(app: &adw::Application) {
                 } else {
                     desktop
                 };
-                let metadata = roost_shell_control::background::BackgroundMetadata {
-                    version: 1,
-                    desktop,
-                    lock,
-                };
-                let Ok(encoded) = serde_json::to_string(&metadata) else {
+                let Ok(text) = background_settings::append_metadata(text, &lock_uri, desktop, lock)
+                else {
                     return;
                 };
-                text.push_str(&encoded);
-                text.push('\n');
 
                 let dir = std::env::var_os("XDG_RUNTIME_DIR")
                     .map(std::path::PathBuf::from)
