@@ -62,7 +62,7 @@ while time.monotonic() < end:
                         cx, cy, cw, ch = child["rect"]
                         px, py, pw, ph = parent["rect"]
                         if abs(2*cx + cw - (2*px + pw)) <= 1 and abs(2*cy + ch - (2*py + ph)) <= 1:
-                            out.with_suffix(".x11-parent.json").write_text(json.dumps(current, indent=2))
+                            out.with_suffix("." + request["parent"].get("mode", "x11") + "-parent.json").write_text(json.dumps(current, indent=2))
                             # Probe actual exposed GTK content, not a decoration or
                             # synthetic activation. Positive controls run in the caller.
                             points = [(px + 50, py + 100), (px + pw - 50, py + 100),
@@ -70,7 +70,7 @@ while time.monotonic() < end:
                             exposed = [(x, y) for x, y in points
                                        if not (cx <= x < cx + cw and cy <= y < cy + ch)]
                             if not exposed:
-                                raise RuntimeError("No exposed X11 parent content for modal input proof")
+                                raise RuntimeError("No exposed parent content for modal input proof")
                             windows = subprocess.check_output(["xdotool", "search", "--onlyvisible", "--name", "^Smithay"], text=True).split()
                             if len(windows) != 1:
                                 raise RuntimeError("Expected one nested host for modal parent click")
@@ -82,7 +82,7 @@ while time.monotonic() < end:
                             input_path = Path(request["parent"]["input_path"])
                             before = json.loads(input_path.read_text())
                             if before["clicks"] != 1 or before["pid"] != request["parent"]["pid"]:
-                                raise RuntimeError("Missing actual X11 parent positive input control")
+                                raise RuntimeError("Missing actual parent positive input control")
                             subprocess.run(["xdotool", "mousemove", "--window", windows[0], str(x), str(y), "click", "1"], check=True)
                             probe_end = time.monotonic() + 2
                             while time.monotonic() < probe_end:
@@ -101,7 +101,7 @@ while time.monotonic() < end:
                             break
                 time.sleep(.05)
             else:
-                raise RuntimeError("Actual Nautilus dialog did not inherit its live X11 parent, centered placement and focus")
+                raise RuntimeError("Actual Nautilus dialog did not inherit its live parent, centered placement and focus")
         out.with_suffix(".a11y.json").write_text(json.dumps(nodes, indent=2))
         subprocess.run(["scrot", str(out.with_suffix(".png"))], check=True)
         if request["method"] == "OpenFile" and request["decision"] == "grant" and not located:
