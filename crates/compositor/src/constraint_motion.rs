@@ -88,6 +88,26 @@ impl EffectiveRegion {
             })
     }
 
+    /// Translation can round a valid local predecessor onto an excluded
+    /// global edge. Validate what will actually be stored by the manager.
+    pub fn confine_global(
+        &self,
+        origin: Point<f64, Logical>,
+        start: Point<f64, Logical>,
+        end: Point<f64, Logical>,
+    ) -> Point<f64, Logical> {
+        let candidate = origin + self.confine(start - origin, end - origin);
+        if self.contains(candidate - origin) {
+            return candidate;
+        }
+        let inside = (toward(candidate.x, start.x), toward(candidate.y, start.y)).into();
+        if self.contains(inside - origin) {
+            inside
+        } else {
+            start
+        }
+    }
+
     /// Stop at the first forbidden interval, even if the destination is
     /// in another allowed component. Work exhaustion freezes the pointer.
     fn segment(
@@ -292,5 +312,16 @@ mod tests {
         );
         let start = (10.0, 10.0).into();
         assert_eq!(combined.confine(start, (80.0, 10.0).into()), start);
+    }
+    #[test]
+    fn final_global_negative_origin_remains_representably_inside() {
+        let region = region(vec![(RectangleKind::Add, rect(20, 20, 40, 40))]);
+        let origin = (-400.0, -400.0).into();
+        let start = (-370.0, -370.0).into();
+        for end in [(1000.0, -365.0), (-365.0, 1000.0), (1000.0, 1000.0)] {
+            let position = region.confine_global(origin, start, end.into());
+            assert!(region.contains(position - origin));
+            assert!(position.x < -340.0 && position.y < -340.0);
+        }
     }
 }

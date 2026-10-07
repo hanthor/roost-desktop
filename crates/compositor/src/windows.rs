@@ -4353,7 +4353,7 @@ impl WindowManager {
             position = match &*constraint {
                 PointerConstraint::Locked(_) => None,
                 PointerConstraint::Confined(_) => {
-                    Some(origin + region.confine(current, pos - origin))
+                    Some(region.confine_global(origin, self.pointer_pos, pos))
                 }
             };
         });
