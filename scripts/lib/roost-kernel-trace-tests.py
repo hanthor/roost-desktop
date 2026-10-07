@@ -281,6 +281,59 @@ class OriginalRejection(unittest.TestCase):
             self.assertTrue((out/'kernel-vblank-acquisition-rejection.json').exists())
 
 
+class BufferAllocation(unittest.TestCase):
+    def header(self, offset=16, size=4080):
+        return f'field: char data; offset:{offset}; size:{size}; signed:1;\n'
+
+    def test_exact_linux_payload_rounding_reserves_reader_within_bound(self):
+        result = observer.buffer_allocation(self.header(), '4', 4096)
+        self.assertEqual(result['requested_kb'], 2036)
+        self.assertEqual(result['ring_pages'], 511)
+        self.assertEqual(result['reader_pages'], 1)
+        self.assertEqual(result['event_payload_bytes_per_cpu'], 2084880)
+        self.assertEqual(result['expected_readback_kb'], '2036')
+        self.assertEqual(result['data_page_bytes_per_cpu'], 2 * 1024 * 1024)
+        # The failed 2048-KB request really rounds to 515 ring pages.
+        failed_pages = (2048 * 1024 + 4080 - 1) // 4080
+        self.assertEqual(failed_pages * 4080 // 1024, 2051)
+        self.assertGreater((failed_pages + 1) * 4096, result['bound_bytes_per_cpu'])
+
+    def test_larger_actual_subbuffers_keep_exact_data_page_bound(self):
+        result = observer.buffer_allocation(self.header(size=8176), '8', 4096)
+        self.assertLessEqual(result['data_page_bytes_per_cpu'], 2 * 1024 * 1024)
+        self.assertEqual(result['data_page_bytes_per_cpu'],
+                         (result['ring_pages'] + result['reader_pages']) * 8192)
+        self.assertEqual(int(result['expected_readback_kb']), result['ring_pages'] * 8176 // 1024)
+
+    def test_malformed_or_inconsistent_actual_layouts_reject(self):
+        for header, subbuffer, page in (
+            ('', '4', 4096), (self.header() * 2, '4', 4096),
+            (self.header(offset=0), '4', 4096), (self.header(size=4081), '4', 4096),
+            (self.header(), '3', 4096), (self.header(), '8', 4096),
+            (self.header(), 'X', 4096), (self.header(), '4', 3000),
+            (self.header(size=2 * 1024 * 1024 - 16), '2048', 4096),
+        ):
+            with self.subTest(header=header, subbuffer=subbuffer, page=page), self.assertRaises(ValueError):
+                observer.buffer_allocation(header, subbuffer, page)
+
+    def test_all_cpu_readbacks_must_match_exact_bound(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            (instance / 'buffer_size_kb').write_text('2036\n')
+            for cpu in range(2):
+                path = instance / 'per_cpu' / f'cpu{cpu}'
+                path.mkdir(parents=True)
+                (path / 'buffer_size_kb').write_text('2036\n')
+            with patch.object(observer, 'bounded', side_effect=lambda path, limit: path.read_bytes()):
+                self.assertEqual(observer.buffer_readbacks(instance, 2, '2036'),
+                                 {'all':'2036', 'cpu0':'2036', 'cpu1':'2036'})
+                (instance / 'per_cpu/cpu1/buffer_size_kb').write_text('2037\n')
+                with self.assertRaisesRegex(RuntimeError, 'exact bounded allocation'):
+                    observer.buffer_readbacks(instance, 2, '2036')
+                with self.assertRaisesRegex(RuntimeError, 'incomplete'):
+                    observer.buffer_readbacks(instance, 3, '2036')
+
+
 class Lifecycle(unittest.TestCase):
     def test_preflight_failure_retains_unqualified_metadata(self):
         root = MagicMock()

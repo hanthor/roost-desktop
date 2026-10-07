@@ -351,6 +351,60 @@ def timer_filter(timer_inventory, actual_format):
     return ' || '.join('hrtimer == ' + hex(int(timer)) for timer in sorted(timer_inventory, key=int))
 
 
+BUFFER_DATA_PAGE_BOUND = 2 * 1024 * 1024
+
+
+def buffer_allocation(header_page, subbuffer_kb, page_bytes):
+    """Account for Linux ring payload rounding and its separate reader page."""
+    if not isinstance(page_bytes, int) or page_bytes < 4096 or page_bytes & (page_bytes - 1):
+        raise ValueError('actual kernel page size is invalid')
+    if not re.fullmatch(r'[1-9][0-9]*', subbuffer_kb):
+        raise ValueError('actual trace subbuffer size is invalid')
+    subbuffer_bytes = int(subbuffer_kb) * 1024
+    if (subbuffer_bytes < page_bytes or subbuffer_bytes > BUFFER_DATA_PAGE_BOUND
+            or subbuffer_bytes & (subbuffer_bytes - 1) or subbuffer_bytes % page_bytes):
+        raise ValueError('actual trace subbuffer/page layout is inconsistent')
+    data = re.findall(r'field:\s*char data;\s*offset:([0-9]+);\s*size:([0-9]+);\s*signed:[01];', header_page)
+    if len(data) != 1:
+        raise ValueError('actual trace data page format is missing or ambiguous')
+    header_bytes, payload_bytes = map(int, data[0])
+    if header_bytes <= 0 or payload_bytes <= 0 or header_bytes + payload_bytes != subbuffer_bytes:
+        raise ValueError('actual trace header/data extent differs from subbuffer size')
+    # ring_buffer_resize rounds requested bytes UP by the reported payload.
+    # rb_allocate_cpu_buffer allocates one additional reader data page.
+    max_ring_pages = BUFFER_DATA_PAGE_BOUND // subbuffer_bytes - 1
+    request_kb = max_ring_pages * payload_bytes // 1024
+    ring_pages = (request_kb * 1024 + payload_bytes - 1) // payload_bytes
+    if request_kb < 1 or ring_pages < 2 or (ring_pages + 1) * subbuffer_bytes > BUFFER_DATA_PAGE_BOUND:
+        raise ValueError('actual trace layout cannot fit ring and reader within fixed bound')
+    return {'page_bytes': page_bytes, 'subbuffer_kb': subbuffer_kb,
+            'subbuffer_bytes': subbuffer_bytes, 'header_page': header_page,
+            'header_bytes': header_bytes, 'payload_bytes_per_subbuffer': payload_bytes,
+            'requested_kb': request_kb, 'ring_pages': ring_pages, 'reader_pages': 1,
+            'event_payload_bytes_per_cpu': ring_pages * payload_bytes,
+            'expected_readback_kb': str(ring_pages * payload_bytes // 1024),
+            'data_page_bytes_per_cpu': (ring_pages + 1) * subbuffer_bytes,
+            'bound_bytes_per_cpu': BUFFER_DATA_PAGE_BOUND,
+            'limitation': 'Bound covers ring and reader data pages, not allocator metadata or total kernel heap.'}
+
+
+def actual_buffer_layout(instance):
+    return buffer_allocation(bounded(instance / 'events/header_page', 16384).decode(),
+                             bounded(instance / 'buffer_subbuf_size_kb', 4096).decode().strip(),
+                             os.sysconf('SC_PAGE_SIZE'))
+
+
+def buffer_readbacks(instance, cpus, expected):
+    paths = sorted((instance / 'per_cpu').glob('cpu[0-9]*'))
+    if len(paths) != cpus:
+        raise RuntimeError('actual per-CPU buffer sizes are incomplete')
+    values = {'all': bounded(instance / 'buffer_size_kb', 4096).decode().strip()}
+    values.update({cpu.name: bounded(cpu / 'buffer_size_kb', 4096).decode().strip() for cpu in paths})
+    if any(value != expected for value in values.values()):
+        raise RuntimeError('actual per-CPU buffer readback differs from exact bounded allocation: ' + json.dumps(values))
+    return values
+
+
 def cpu_stats(instance, cpus):
     stats = {}
     for cpu in sorted((instance / 'per_cpu').glob('cpu[0-9]*')):
@@ -481,7 +535,7 @@ def start_observer():
                                       loaded['virtio_gpu'], group, drm_module=drm_module)
     marker = {'group': group, 'definitions': [], 'offsets': offsets, 'btf': btf_sources, 'source_inventory': inventory,
               'started_monotonic_ns': time.monotonic_ns(), 'cpus': cpus,
-              'limit_seconds': MAX_SECONDS, 'buffer_kb_per_cpu': 2048,
+              'limit_seconds': MAX_SECONDS, 'buffer_data_page_bound_bytes_per_cpu': BUFFER_DATA_PAGE_BOUND,
               'observer': {'bytes': len(observer_raw), 'sha256': hashlib.sha256(observer_raw).hexdigest(), 'python': sys.version},
               'return_argument_provenance': {'source': 'https://github.com/archlinux/linux/blob/v7.2.9-arch1/kernel/trace/trace_kprobe.c',
                   'mechanism': 'trace_kprobe_entry_handler saves arguments in ri->data; __kretprobe_trace_func consumes that exact instance data'},
@@ -492,10 +546,9 @@ def start_observer():
         marker['instance_created'] = True
         write(instance / 'tracing_on', '0')
         write(instance / 'current_tracer', 'nop')
-        write(instance / 'buffer_size_kb', '2048')
-        marker['actual_buffer_size_kb'] = bounded(instance / 'buffer_size_kb', 4096).decode().strip()
-        if marker['actual_buffer_size_kb'] != '2048':
-            raise RuntimeError('actual trace buffer allocation differs from fixed bound')
+        marker['buffer_layout'] = actual_buffer_layout(instance)
+        write(instance / 'buffer_size_kb', str(marker['buffer_layout']['requested_kb']))
+        marker['buffer_readbacks'] = buffer_readbacks(instance, cpus, marker['buffer_layout']['expected_readback_kb'])
         write(instance / 'options/overwrite', '0')
         write(instance / 'trace_clock', 'mono')
         clock = bounded(instance / 'trace_clock', 4096).decode()
@@ -589,6 +642,13 @@ def stop(watchdog=False):
             raw_btf = bounded(Path('/sys/kernel/btf') / name, 64 * 1024 * 1024)
             if len(raw_btf) != original['bytes'] or hashlib.sha256(raw_btf).hexdigest() != original['sha256']:
                 errors.append('live BTF changed during capture: ' + name)
+        result['buffer_layout_after'] = actual_buffer_layout(instance)
+        if result['buffer_layout_after'] != marker['buffer_layout']:
+            errors.append('actual trace data page layout changed during capture')
+        result['buffer_readbacks_after'] = buffer_readbacks(
+            instance, marker['cpus'], marker['buffer_layout']['expected_readback_kb'])
+        if result['buffer_readbacks_after'] != marker['buffer_readbacks']:
+            errors.append('actual per-CPU buffer allocation changed during capture')
         stats = cpu_stats(instance, marker['cpus'])
         result['cpu_stats'] = stats
         result['timer_filters_after'] = {}
