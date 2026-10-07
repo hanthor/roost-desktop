@@ -533,8 +533,7 @@ def walk_tree(root,query,showing,provider=None):
     nodes=[];visited=set()
     def walk(node,depth):
         # Count every visited object, including hidden nodes; cycles are rejected.
-        owner=query(lambda:node.app.bus_name)
-        if provider is not None and owner!=provider:raise RuntimeError('foreign provider object in original fixture subtree:'+str(owner)[:32])
+        if provider is not None and query(lambda:node.app.bus_name)!=provider:raise RuntimeError('foreign provider object in original fixture subtree')
         identity=query(lambda:node.path)
         if type(identity) is not str or not 1<=len(identity)<=256:raise RuntimeError('accessible object identity bound')
         if identity in visited or depth>32 or len(visited)>=4096:raise RuntimeError('fixture accessibility traversal bound or cycle:depth='+str(depth)+' visited='+str(len(visited)))
@@ -732,7 +731,7 @@ def main():
     except Exception as error:
         allowed={'RuntimeError','ValueError','OSError','FileNotFoundError','PermissionError','CalledProcessError','TimeoutExpired','TimeoutError','ImportError','ModuleNotFoundError'}
         name=type(error).__name__
-        diagnostic={'phase':phase,'stage':ERROR_STAGE,'exception_type':name if name in allowed else 'OtherError','message':str(error)[:300]}
+        diagnostic={'phase':phase,'stage':ERROR_STAGE,'exception_type':name if name in allowed else 'OtherError'}
         if ERROR_STAGE=='cells' and QUERY_CONTEXT is not None:
             diagnostic['query_context']=dict(QUERY_CONTEXT)
         print(json.dumps({'native_files_error':diagnostic}))
