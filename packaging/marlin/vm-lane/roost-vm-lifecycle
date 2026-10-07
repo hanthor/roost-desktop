@@ -279,6 +279,31 @@ def main():
     action = sys.argv[1]
     if action == "inventory":
         result = inventory()
+    elif action == "native-files":
+        phases={"start","mapped","dialog","create-typed","created","cancel-typed","cancelled","closed"}
+        if len(sys.argv)!=3 or sys.argv[2] not in phases:
+            raise ValueError("fixed native Files phase required")
+        original=inventory()
+        compositor=next(p for p in original["processes"] if p["executable"]=="roost-compositor")
+        phase=sys.argv[2]
+        result=subprocess.run(["runuser","-u",OWNER.pw_name,"--","env",
+            f"XDG_RUNTIME_DIR={RUNTIME}",f"DBUS_SESSION_BUS_ADDRESS=unix:path={RUNTIME}/bus",
+            f"WAYLAND_DISPLAY=roost-nested-{compositor['pid']}",f"ROOST_VM_NATIVE_SESSION={original['session']['Id']}","LC_ALL=C.UTF-8","GTK_A11Y=atspi",
+            "/usr/libexec/roost-vm-nautilus-pilot",phase],capture_output=True,timeout=28)
+        # Fixed finite diagnostic only; no stderr/body forwarding on any failure.
+        if result.returncode!=0 or len(result.stdout)>16384:
+            diagnostic={"phase":phase,"exception_type":"RuntimeError"}
+            try:
+                decoded=json.loads(result.stdout) if len(result.stdout)<=4096 else None
+                candidate=decoded.get("native_files_error") if type(decoded) is dict and set(decoded)=={"native_files_error"} else None
+                allowed={"RuntimeError","ValueError","OSError","FileNotFoundError","PermissionError","CalledProcessError",
+                         "TimeoutExpired","TimeoutError","ImportError","ModuleNotFoundError","OtherError"}
+                if type(candidate) is dict and set(candidate)=={"phase","exception_type"} and candidate["phase"]==phase and type(candidate["exception_type"]) is str and candidate["exception_type"] in allowed:
+                    diagnostic=candidate
+            except (ValueError,TypeError,RecursionError):pass
+            print(json.dumps({"native_files_error":diagnostic}))
+            sys.exit(result.returncode if 0<result.returncode<256 else 1)
+        result=json.loads(result.stdout)
     elif action == "orca-departed":
         pid, ticks = int(sys.argv[2]), int(sys.argv[3])
         try:

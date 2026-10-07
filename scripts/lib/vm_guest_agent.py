@@ -37,6 +37,15 @@ def valid_orca_read_error(value):
     return True
 
 
+def valid_native_files_error(value):
+    phases={"start","mapped","dialog","create-typed","created","cancel-typed","cancelled","closed"}
+    types={"RuntimeError","ValueError","OSError","FileNotFoundError","PermissionError","CalledProcessError",
+           "TimeoutExpired","TimeoutError","ImportError","ModuleNotFoundError","OtherError"}
+    return (type(value) is dict and set(value)=={"phase","exception_type"}
+            and type(value["phase"]) is str and value["phase"] in phases
+            and type(value["exception_type"]) is str and value["exception_type"] in types)
+
+
 class GuestAgent:
     def __init__(self, path):
         self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -78,6 +87,17 @@ class GuestAgent:
             status = self.command("guest-exec-status", pid=pid)
             if status["exited"]:
                 if status.get("exitcode") != 0 or status.get("out-truncated") or status.get("err-truncated"):
+                    if action == "native-files" and not status.get("out-truncated"):
+                        try:
+                            encoded=status.get("out-data","")
+                            if type(encoded) is not str or len(encoded)>5464:raise ValueError("fixed receipt bound")
+                            raw=base64.b64decode(encoded,validate=True)
+                            if len(raw)>4096:raise ValueError("fixed receipt bound")
+                            value=json.loads(raw)
+                            diagnostic=value.get("native_files_error") if type(value) is dict and set(value)=={"native_files_error"} else None
+                        except (binascii.Error,ValueError,UnicodeDecodeError,TypeError,RecursionError):diagnostic=None
+                        if valid_native_files_error(diagnostic) and len(arguments)==1 and diagnostic["phase"]==str(arguments[0]):
+                            raise RuntimeError(f"guest lifecycle native-files failed (exit={status.get('exitcode')}): {json.dumps(diagnostic)}")
                     if action == "orca-read" and not status.get("out-truncated"):
                         try:
                             encoded = status.get("out-data", "")
