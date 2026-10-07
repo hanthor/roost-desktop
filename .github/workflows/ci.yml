@@ -385,7 +385,7 @@ jobs:
           podman run --rm marlin-roost-preview:ci roost-compositor --version
           podman run --rm marlin-roost-preview:ci test -f /usr/share/applications/roost-nested-preview.desktop
           mkdir -p marlin-image-kernels
-          kernel_container=$(podman create marlin-roost-preview:ci)
+          kernel_container=$(podman create marlin-roost-preview:ci /usr/bin/true)
           trap 'podman rm "$kernel_container"' EXIT
           podman cp "$kernel_container:/usr/share/roost-image-kernels/." marlin-image-kernels/
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -441,7 +441,7 @@ jobs:
           sudo podman image inspect ghcr.io/tuna-os/marlin:gnome --format '{{.Digest}}' | tee /mnt/vm/base-digest
           sudo podman image inspect localhost/marlin-roost-vm:ci --format '{{.Id}}' | tee /mnt/vm/image-id
           mkdir -p vm-lane-artifacts/image-kernels
-          kernel_container=$(sudo podman create localhost/marlin-roost-vm:ci)
+          kernel_container=$(sudo podman create localhost/marlin-roost-vm:ci /usr/bin/true)
           trap 'sudo podman rm "$kernel_container"' EXIT
           sudo podman cp "$kernel_container:/usr/share/roost-image-kernels/." vm-lane-artifacts/image-kernels/
           sudo chown -R "$(id -u):$(id -g)" vm-lane-artifacts/image-kernels
