@@ -14,9 +14,11 @@ fi
 if [ -z "${ROOST_PORTAL_BUS:-}" ]; then ROOST_PORTAL_BUS=1 exec dbus-run-session -- "$0"; fi
 [ "$(id -u)" -eq 1000 ] || { echo 'ordinary fixture UID required' >&2; exit 1; }
 id > /out/session-identity.txt
-export DISPLAY=:99 XDG_RUNTIME_DIR=/out/runtime XDG_CONFIG_HOME=/out/config XDG_DATA_HOME=/out/data XDG_STATE_HOME=/out/state
+export DISPLAY=:99 XDG_RUNTIME_DIR=/out/runtime XDG_CONFIG_HOME=/out/config XDG_DATA_HOME="$HOME/.local/share" XDG_STATE_HOME=/out/state
 export XDG_PICTURES_DIR=/out/pictures
 export XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=GNOME GSETTINGS_BACKEND=memory LIBGL_ALWAYS_SOFTWARE=1 GTK_A11Y=atspi
+# Keep home files and their real home Trash on the same filesystem.
+# /out is a separate bind mount used only for retained evidence.
 mkdir -p "$XDG_RUNTIME_DIR" "$XDG_CONFIG_HOME/xdg-desktop-portal" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
 chmod 700 "$XDG_RUNTIME_DIR"
 cp /repo/packaging/marlin/roost-portals.conf "$XDG_CONFIG_HOME/xdg-desktop-portal/portals.conf"
@@ -63,6 +65,7 @@ for parent_mode in none x11 wayland; do
         done
     done
 done
+python3 /repo/scripts/lib/roost-nautilus-file-operations.py > /out/nautilus-operations.log 2>&1
 if grep -qE 'Failed to open service channel Wayland connection|Compositor service channel missing' /out/nautilus.log; then
     cat /out/nautilus.log
     echo 'Nautilus fell back after native service-channel failure' >&2

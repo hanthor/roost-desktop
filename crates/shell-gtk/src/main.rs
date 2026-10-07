@@ -1860,12 +1860,13 @@ fn build(app: &adw::Application) {
                         if !uri.starts_with("file://") {
                             return String::new();
                         }
-                        // GIO decodes escaped path components before the
-                        // compositor's simple local-file drop reader.
+                        // Validate a local native path, then keep a canonical
+                        // escaped URI across the line-based drop. The compositor
+                        // decodes once; literal percent signs remain filename bytes.
                         gio::File::for_uri(&uri)
                             .path()
                             .filter(|path| path.is_absolute())
-                            .map(|path| format!("file://{}", path.display()))
+                            .map(|path| gio::File::for_path(path).uri().to_string())
                             .unwrap_or_default()
                     })
                     .unwrap_or_default();
