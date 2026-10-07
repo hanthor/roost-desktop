@@ -1,5 +1,7 @@
 #!/usr/bin/python3
 """Pure production-path policy tests; no actual GTK/native qualification."""
+import ast
+from types import SimpleNamespace
 import importlib.machinery
 import importlib.util
 from pathlib import Path
@@ -259,4 +261,75 @@ class Policy(unittest.TestCase):
         with tempfile.TemporaryDirectory() as out:
             with self.assertRaises(RuntimeError):H.run(qmp,Agent(),out,lambda *r:records.append(r))
         self.assertEqual(qmp.inputs,[('ctrl','shift','n')]);self.assertFalse(records[-1][1])
+
+    def wrapper_failure(self,payload,code=9):
+        # Compile the actual production main+validator, controlling only external
+        # original inventory/runuser dependencies; no mirror wrapper implementation.
+        tree=ast.parse((ROOT/'packaging/marlin/vm-lane/roost-vm-lifecycle').read_text())
+        definitions=[node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name in ('main','valid_native_files_error')]
+        self.assertEqual(len(definitions),2)
+        scope={'json':json,'sys':SimpleNamespace(argv=['fixed-lifecycle','native-files','mapped'],exit=lambda code:(_ for _ in ()).throw(SystemExit(code))),
+               'os':SimpleNamespace(geteuid=lambda:0),'OWNER':SimpleNamespace(pw_uid=1000,pw_name='original-test-owner'),
+               'RUNTIME':'/run/user/1000','inventory':lambda:{'processes':[{'executable':'roost-compositor','pid':34}],'session':{'Id':'1'}},
+               'subprocess':SimpleNamespace(run=lambda *a,**k:SimpleNamespace(returncode=code,stdout=payload,stderr=b'private stderr must never survive'))}
+        exec(compile(ast.Module(body=definitions,type_ignores=[]),'actual-lifecycle-wrapper','exec'),scope)
+        output=io.StringIO()
+        with redirect_stdout(output),self.assertRaises(SystemExit) as failure:scope['main']()
+        self.assertEqual(failure.exception.code,code)
+        self.assertNotIn('private',output.getvalue())
+        return output.getvalue().encode()
+
+    def test_actual_wrapper_retains_finite_helper_stage_and_nonzero(self):
+        for stage in ('context','guard-route','window','tree','cells','final-guard'):
+            good={'phase':'mapped','stage':stage,'exception_type':'RuntimeError'}
+            output=self.wrapper_failure(json.dumps({'native_files_error':good}).encode())
+            self.assertEqual(json.loads(output),{'native_files_error':good})
+            self.assertTrue(T.valid_native_files_error(good))
+
+    def test_actual_wrapper_rejects_unknown_private_malformed_and_oversized(self):
+        good={'phase':'mapped','stage':'tree','exception_type':'RuntimeError'}
+        cases=[{'native_files_error':dict(good,message='private filename')},
+               {'native_files_error':dict(good,phase='created')},
+               {'native_files_error':dict(good,stage=[])},
+               {'native_files_error':dict(good,exception_type={})},
+               {'native_files_error':dict(good,stage='private unknown')},
+               {'native_files_error':{k:v for k,v in good.items() if k!='stage'}},
+               {'native_files_error':good,'body':'private body'}]
+        payloads=[json.dumps(case).encode() for case in cases]+[b'private not JSON',b'x'*4097,b'['*1800+b']'*1800]
+        for payload in payloads:
+            with self.subTest(length=len(payload)):
+                output=self.wrapper_failure(payload)
+                self.assertEqual(json.loads(output),{'native_files_error':{'phase':'mapped','stage':'diagnostic-transport','exception_type':'RuntimeError'}})
+                self.assertTrue(T.valid_native_files_error(json.loads(output)['native_files_error']))
+
+    def test_actual_wrapper_guest_agent_host_failure_artifact_preserves_stage_exit(self):
+        helper_output=io.StringIO()
+        with patch.object(G.sys,'argv',['fixed-probe','mapped']),patch.object(G,'context',return_value={}), \
+             patch.object(G,'guard',return_value={}),patch.object(G,'owned_window',side_effect=RuntimeError('private source error')),redirect_stdout(helper_output):
+            self.assertEqual(G.main(),1)
+        wrapped=self.wrapper_failure(helper_output.getvalue().encode(),code=9)
+        agent=object.__new__(T.GuestAgent);current=[]
+        def command(method,**arguments):
+            if method=='guest-exec':current[:]=arguments['arg'];return {'pid':123}
+            payload=json.dumps(evidence('start')).encode() if current==['native-files','start'] else wrapped
+            return {'exited':True,'exitcode':0 if current==['native-files','start'] else 9,'out-data':base64.b64encode(payload).decode()}
+        agent.command=command;records=[]
+        with tempfile.TemporaryDirectory() as out:
+            with self.assertRaises(T.NativeFilesError) as error:
+                H.run(SimpleNamespace(),agent,out,lambda *args:records.append(args),failure_receipt=T.native_files_failure)
+            failure=json.loads((Path(out)/'native-files-pilot/failure.json').read_text())
+            self.assertEqual(failure,{'exception_type':'NativeFilesError','native_files_error':{'phase':'mapped','stage':'window','exception_type':'RuntimeError'},'exitcode':9})
+            self.assertEqual(error.exception.exitcode,9)
+            self.assertEqual(len(json.loads((Path(out)/'native-files-pilot/observations.json').read_text())),1)
+            self.assertNotIn('private',json.dumps(failure))
+        self.assertFalse(records[-1][1])
+
+    def test_typed_failure_rejects_forged_or_changed_fields(self):
+        good={'phase':'mapped','stage':'window','exception_type':'RuntimeError'}
+        for code in (True,0,-1,256,'9'):
+            with self.assertRaises(ValueError):T.NativeFilesError(good,code)
+        self.assertIsNone(T.native_files_failure(RuntimeError('private body')))
+        error=T.NativeFilesError(good,9);error.diagnostic['message']='private'
+        self.assertIsNone(T.native_files_failure(error))
+
 if __name__=='__main__':unittest.main()

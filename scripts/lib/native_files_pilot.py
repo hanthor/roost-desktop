@@ -84,7 +84,7 @@ def validate_receipt(value,phase,original=None,window_id=None,created=False):
     if phase in ('create-typed','cancel-typed') and value['known_entry_text_matches'] is not True:raise RuntimeError('native Files known actual input evidence')
 
 
-def run(qmp,agent,out,record):
+def run(qmp,agent,out,record,failure_receipt=None):
     evidence=os.path.join(out,'native-files-pilot');os.makedirs(evidence,exist_ok=True)
     sequence=[];original=None;window_id=None;created=False
     def observe(phase,wait=True):
@@ -121,7 +121,11 @@ def run(qmp,agent,out,record):
         keys('cancelled','ctrl','w');observe('closed');picture('restored')
     except Exception as error:
         # Error originates solely in fixed transport/schema paths; redact arbitrary bodies.
-        with open(os.path.join(evidence,"failure.json"),"w") as stream:json.dump({"exception_type":type(error).__name__},stream)
+        failure={"exception_type":type(error).__name__}
+        if failure_receipt is not None:
+            finite=failure_receipt(error)
+            if finite is not None:failure.update(finite)
+        with open(os.path.join(evidence,"failure.json"),"w") as stream:json.dump(failure,stream)
         record('V-NAUTILUS-NATIVE-PILOT',False,'native Files create/cancel original-owner journey failed')
         raise
     record('V-NAUTILUS-NATIVE-PILOT',True,'actual native Files new-folder/cancel; original process/provider and seed hash retained; correlated window/layout restored')

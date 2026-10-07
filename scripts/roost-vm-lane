@@ -1377,7 +1377,7 @@ def main():
                     tour_serial_end = len(read_text(serial_path))
                     agent = guest_agent.GuestAgent(agent_path)
                     try:
-                        files_pilot.run(qmp,agent,out,record)
+                        files_pilot.run(qmp,agent,out,record,failure_receipt=guest_agent.native_files_failure)
                         picker_pilot.run(qmp,agent,out,record)
                         run_lifecycle(qmp, agent, out, serial_path, record)
                     finally:

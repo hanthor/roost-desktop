@@ -43,11 +43,28 @@ def valid_native_files_error(value):
            "TimeoutExpired","TimeoutError","ImportError","ModuleNotFoundError","OtherError"}
     stages={"context","start","guard-fast","guard-principals","guard-session","guard-route",
             "guard-accessibility","guard-fixture","guard-final","closed-state","window","tree",
-            "cells","filesystem","cleanup","phase","final-guard","receipt"}
+            "cells","filesystem","cleanup","phase","final-guard","receipt","diagnostic-transport"}
     return (type(value) is dict and set(value)=={"phase","stage","exception_type"}
             and type(value["phase"]) is str and value["phase"] in phases
             and type(value["stage"]) is str and value["stage"] in stages
             and type(value["exception_type"]) is str and value["exception_type"] in types)
+
+
+
+class NativeFilesError(RuntimeError):
+    """Only finite validated public diagnostics from a failed fixed Files probe."""
+    def __init__(self, diagnostic, exitcode):
+        if not valid_native_files_error(diagnostic) or type(exitcode) is not int or not 0<exitcode<256:
+            raise ValueError("fixed native Files failure schema")
+        self.diagnostic=dict(diagnostic)
+        self.exitcode=exitcode
+        super().__init__(f"guest lifecycle native-files failed (exit={exitcode}): {json.dumps(self.diagnostic)}")
+
+
+def native_files_failure(error):
+    if type(error) is not NativeFilesError or not valid_native_files_error(error.diagnostic) or type(error.exitcode) is not int or not 0<error.exitcode<256:
+        return None
+    return {"native_files_error":dict(error.diagnostic),"exitcode":error.exitcode}
 
 
 def valid_native_picker_error(value):
@@ -118,8 +135,8 @@ class GuestAgent:
                             value=json.loads(raw)
                             diagnostic=value.get("native_files_error") if type(value) is dict and set(value)=={"native_files_error"} else None
                         except (binascii.Error,ValueError,UnicodeDecodeError,TypeError,RecursionError):diagnostic=None
-                        if valid_native_files_error(diagnostic) and len(arguments)==1 and diagnostic["phase"]==str(arguments[0]):
-                            raise RuntimeError(f"guest lifecycle native-files failed (exit={status.get('exitcode')}): {json.dumps(diagnostic)}")
+                        if valid_native_files_error(diagnostic) and len(arguments)==1 and diagnostic["phase"]==str(arguments[0]) and type(status.get("exitcode")) is int and 0<status["exitcode"]<256:
+                            raise NativeFilesError(diagnostic,status.get("exitcode"))
                     if action == "orca-read" and not status.get("out-truncated"):
                         try:
                             encoded = status.get("out-data", "")
