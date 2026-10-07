@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """Fail-visible actual candidate SVG loader and native font inventory."""
 import hashlib
+import os
 import json
 from pathlib import Path
 import stat
@@ -48,8 +49,51 @@ receipt['owned_processor_cleanup']=cleanup
 packages = set()
 for resource in receipt['resources']:
     path = Path(resource['path'])
-    if path.stat().st_size != resource['bytes'] or hashlib.sha256(path.read_bytes()).hexdigest() != resource['sha256']:
-        raise RuntimeError('actual backend resource differs from helper observation')
+    unchanged=lambda m:(m.st_dev,m.st_ino,m.st_size,m.st_uid,m.st_mode,m.st_mtime_ns,m.st_ctime_ns)
+    # Native FontConfig follows config symlinks. Keep that contract, but pin
+    # observations to an opened nonblocking descriptor and verify the named
+    # identity again afterwards; never allocate an unbounded directory/file.
+    fd=os.open(path,os.O_RDONLY|os.O_NONBLOCK|os.O_CLOEXEC)
+    try:
+        before=os.fstat(fd)
+        if (before.st_size,before.st_uid,before.st_mode,before.st_dev,before.st_ino,
+                [before.st_mtime_ns//1000000000,before.st_mtime_ns%1000000000],
+                [before.st_ctime_ns//1000000000,before.st_ctime_ns%1000000000])!=(
+                resource['bytes'],resource['uid'],resource['mode'],resource['dev'],resource['ino'],
+                resource['mtime'],resource['ctime']):
+            raise RuntimeError('actual backend resource identity differs from helper observation')
+        if resource['kind']=='fontconfig-directory':
+            if not stat.S_ISDIR(before.st_mode):raise RuntimeError('native declared directory changed type')
+            names=[]
+            with os.scandir(fd) as entries:
+                for entry in entries:
+                    if len(names)==16384:raise RuntimeError('actual FontConfig directory member bound failed')
+                    names.append(os.fsencode(entry.name))
+            names.sort()
+            if [name.hex() for name in names]!=resource['member_names_hex']:
+                raise RuntimeError('actual FontConfig directory members differ')
+            digest=hashlib.sha256(b'fontconfig-directory-v1\0'+len(names).to_bytes(8,'little'))
+            for name in names:digest.update(len(name).to_bytes(8,'little')+name)
+        elif resource['kind']=='file':
+            limit=64*1024*1024
+            if not stat.S_ISREG(before.st_mode) or before.st_size>limit:
+                raise RuntimeError('actual native regular-file resource bound failed')
+            digest=hashlib.sha256();total=0
+            while True:
+                chunk=os.read(fd,min(65536,limit+1-total))
+                if not chunk:break
+                total+=len(chunk)
+                if total>limit:raise RuntimeError('actual native regular-file resource grew beyond bound')
+                digest.update(chunk)
+            if total!=before.st_size:raise RuntimeError('actual native regular-file resource changed length')
+        else:raise RuntimeError('unknown native resource type')
+        after=os.fstat(fd)
+        named=path.stat()
+        if (digest.hexdigest()!=resource['sha256'] or unchanged(after)!=unchanged(before)
+                or unchanged(named)!=unchanged(before)):
+            raise RuntimeError('actual backend resource differs or changed during verification')
+    finally:
+        os.close(fd)
     if path != HELPER:
         package = subprocess.check_output(['rpm', '-qf', '--qf', '%{NAME}', str(path)], text=True)
         packages.add(package)
@@ -71,7 +115,7 @@ for package in sorted(packages):
         raise RuntimeError('actual native loader/font package verification failed')
 (OUT/'svg-package-verification.json').write_text(json.dumps(verification, indent=2))
 receipt['helper'] = {'path': str(HELPER), 'uid': metadata.st_uid,
-                     'sha256': hashlib.sha256(HELPER.read_bytes()).hexdigest(),
+                     'sha256': next(r['sha256'] for r in receipt['resources'] if r['path']==str(HELPER)),
                      'version': subprocess.check_output([str(HELPER), '--version'], text=True).strip()}
 receipt['reference_gdk_pixbuf_formats'] = formats
 (OUT/'svg-loader-receipt.json').write_text(json.dumps(receipt, indent=2))

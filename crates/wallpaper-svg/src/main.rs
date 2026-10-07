@@ -2,6 +2,7 @@
 //! single-use process decodes a stream without a base URI, like GNOME's loader.
 mod modern;
 mod provenance;
+mod resource;
 
 use gdk_pixbuf::prelude::*;
 use sha2::{Digest, Sha256};
@@ -179,6 +180,7 @@ unsafe extern "C" {
 fn backend_identity(modern: bool) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     use std::{collections::BTreeSet, ffi::CStr, os::unix::ffi::OsStrExt};
     let mut paths = BTreeSet::new();
+    let mut config_directories = BTreeSet::new();
     paths.insert(std::env::current_exe()?);
     let processors = provenance::observe(&mut paths, modern)?;
     // Actual mapped helper/loader/native libraries, including the dynamically
@@ -208,9 +210,15 @@ fn backend_identity(modern: bool) -> Result<serde_json::Value, Box<dyn std::erro
             if value.is_null() {
                 break;
             }
-            paths.insert(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
+            let path = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
                 CStr::from_ptr(value.cast()).to_bytes(),
-            )));
+            ));
+            // FcConfigGetConfigFiles explicitly includes loaded directories.
+            // Only those native-declared config directories receive this type.
+            if path.is_dir() {
+                config_directories.insert(path.clone());
+            }
+            paths.insert(path);
             if paths.len() > 16384 {
                 return Err("font resource count bound".into());
             }
@@ -245,58 +253,42 @@ fn backend_identity(modern: bool) -> Result<serde_json::Value, Box<dyn std::erro
         FcPatternDestroy(pattern);
         FcConfigDestroy(config);
     }
+    if paths.len() > 16384 {
+        return Err("native resource count bound".into());
+    }
     let mut hash = Sha256::new();
     let mut resources = Vec::new();
-    hash.update(b"roost-svg-stream-v1");
+    hash.update(b"roost-svg-stream-v2");
     for path in paths {
-        let file = std::fs::File::open(&path)?;
-        let metadata = file.metadata()?;
-        if !metadata.is_file() || metadata.len() > MAX_INPUT {
-            return Err("backend file bound".into());
-        }
+        let kind = if config_directories.contains(&path) {
+            resource::Kind::FontConfigDirectory
+        } else {
+            resource::Kind::File
+        };
+        let observed = resource::observe(&path, kind)?;
         hash.update((path.as_os_str().as_bytes().len() as u64).to_le_bytes());
         hash.update(path.as_os_str().as_bytes());
-        hash.update(metadata.len().to_le_bytes());
-        let mut file_hash = Sha256::new();
-        let mut reader = file.take(MAX_INPUT + 1);
-        let mut buffer = [0; 16384];
-        let mut length = 0;
-        loop {
-            let count = reader.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            length += count as u64;
-            if length > MAX_INPUT {
-                return Err("backend file bound".into());
-            }
-            hash.update(&buffer[..count]);
-            file_hash.update(&buffer[..count]);
+        hash.update(
+            observed["kind"]
+                .as_str()
+                .ok_or("resource kind unavailable")?
+                .as_bytes(),
+        );
+        for field in ["bytes", "uid", "mode"] {
+            hash.update(
+                observed[field]
+                    .as_u64()
+                    .ok_or("resource identity unavailable")?
+                    .to_le_bytes(),
+            );
         }
-        let after = reader.get_ref().metadata()?;
-        use std::os::unix::fs::MetadataExt;
-        if length != metadata.len()
-            || (
-                metadata.dev(),
-                metadata.ino(),
-                metadata.len(),
-                metadata.mtime(),
-                metadata.mtime_nsec(),
-                metadata.ctime(),
-                metadata.ctime_nsec(),
-            ) != (
-                after.dev(),
-                after.ino(),
-                after.len(),
-                after.mtime(),
-                after.mtime_nsec(),
-                after.ctime(),
-                after.ctime_nsec(),
-            )
-        {
-            return Err("backend file changed".into());
-        }
-        resources.push(serde_json::json!({"path":path.to_string_lossy(),"bytes":length,"sha256":format!("{:x}",file_hash.finalize())}));
+        hash.update(
+            observed["sha256"]
+                .as_str()
+                .ok_or("resource hash unavailable")?
+                .as_bytes(),
+        );
+        resources.push(observed);
     }
     Ok(
         serde_json::json!({"kind":"actual no-base SVG stream loader, owned processors, mapped libraries and FontConfig resources", "sha256":format!("{:x}",hash.finalize()), "resources":resources,"processors":processors,"modern_glycin":modern}),
