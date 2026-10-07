@@ -3620,6 +3620,7 @@ pub struct TriggerState {
     super_armed: bool,
     /// GNOME's `enable-hot-corners` off (default on, as in GNOME).
     hot_corner_off: bool,
+    right_to_left: bool,
 }
 
 impl TriggerState {
@@ -3631,6 +3632,11 @@ impl TriggerState {
     /// Follow GNOME's `enable-hot-corners`.
     pub fn set_hot_corner(&mut self, enabled: bool) {
         self.hot_corner_off = !enabled;
+    }
+
+    /// Follow the shell's default text direction, including live updates.
+    pub fn set_right_to_left(&mut self, right_to_left: bool) {
+        self.right_to_left = right_to_left;
     }
 
     /// Decide the overview action for one input event. `overview_open`
@@ -3652,8 +3658,8 @@ impl TriggerState {
 
     /// Decide against the current logical output layout. GNOME 51 always
     /// offers the primary corner; a secondary corner is eligible only when
-    /// no other output touches its left or top edge. The Activities strip
-    /// belongs to the primary panel. Geometry is borrowed, never cached.
+    /// no other output contains GNOME's direction-dependent approach probes.
+    /// The Activities strip belongs to the primary panel. Geometry is borrowed, never cached.
     pub fn feed_on_outputs(
         &mut self,
         input: &ManagerInput,
@@ -3661,32 +3667,49 @@ impl TriggerState {
         pointer: Point<f64, Logical>,
         outputs: impl Iterator<Item = (Rectangle<i32, Logical>, bool)> + Clone,
     ) -> TriggerAction {
-        let outputs = outputs.filter(|(rect, _)| rect.size.w > 0 && rect.size.h > 0);
+        let outputs = outputs
+            .filter(|(rect, _)| rect.size.w > 0 && rect.size.h > 0)
+            .enumerate();
         let in_region =
             |pos: Point<f64, Logical>, rect: Rectangle<i32, Logical>, w: f64, h: f64| {
-                let x = pos.x - f64::from(rect.loc.x);
+                let x = if self.right_to_left {
+                    f64::from(rect.loc.x) + f64::from(rect.size.w) - pos.x
+                } else {
+                    pos.x - f64::from(rect.loc.x)
+                };
                 let y = pos.y - f64::from(rect.loc.y);
-                (0.0..w.min(f64::from(rect.size.w))).contains(&x)
-                    && (0.0..h.min(f64::from(rect.size.h))).contains(&y)
+                let within_x = if self.right_to_left {
+                    x > 0.0 && x <= w.min(f64::from(rect.size.w))
+                } else {
+                    (0.0..w.min(f64::from(rect.size.w))).contains(&x)
+                };
+                within_x && (0.0..h.min(f64::from(rect.size.h))).contains(&y)
             };
         let corner = if let ManagerInput::Motion { pos, .. } = input {
-            outputs.clone().any(|(rect, primary)| {
+            outputs.clone().any(|(index, (rect, primary))| {
                 if !in_region(*pos, rect, HOT_CORNER_PX, HOT_CORNER_PX) {
                     return false;
                 }
-                let left: Point<f64, Logical> =
-                    (f64::from(rect.loc.x) - 1.0, f64::from(rect.loc.y)).into();
-                let above: Point<f64, Logical> =
-                    (f64::from(rect.loc.x), f64::from(rect.loc.y) - 1.0).into();
+                // GNOME Shell 51 layout.js's exact secondary approach probes.
+                let corner_x = f64::from(rect.loc.x)
+                    + if self.right_to_left {
+                        f64::from(rect.size.w)
+                    } else {
+                        0.0
+                    };
+                let beside_x = f64::from(rect.loc.x) + if self.right_to_left { 1.0 } else { -1.0 };
+                let beside: Point<f64, Logical> = (beside_x, f64::from(rect.loc.y)).into();
+                let above: Point<f64, Logical> = (corner_x, f64::from(rect.loc.y) - 1.0).into();
                 primary
-                    || !outputs.clone().any(|(other, _)| {
-                        other.to_f64().contains(left) || other.to_f64().contains(above)
+                    || !outputs.clone().any(|(other_index, (other, _))| {
+                        other_index != index
+                            && (other.to_f64().contains(beside) || other.to_f64().contains(above))
                     })
             })
         } else {
             false
         };
-        let strip = outputs.clone().any(|(rect, primary)| {
+        let strip = outputs.clone().any(|(_, (rect, primary))| {
             primary && in_region(pointer, rect, ACTIVITIES_WIDTH_PX, ACTIVITIES_STRIP_PX)
         });
         self.feed_regions(input, overview_open, corner, strip)
