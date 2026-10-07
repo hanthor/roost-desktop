@@ -154,8 +154,33 @@ if parent_mode != "none":
     # Real host pointer input must reach the GTK button before requesting a dialog.
     click_parent_content()
     pump_parent_until(lambda: parent_clicks == 1, "Initial real pointer click did not reach the parent button")
+    keyboard_probes = []
     def send_focus_key():
-        subprocess.run(["xdotool", "key", "F8"], env=dict(os.environ, DISPLAY=host_display), check=True)
+        # Compositor focus and Xvfb host keyboard focus are separate. A pointer
+        # click proves pointer delivery but does not establish the latter in
+        # this headless X server without a window manager. Target the genuine
+        # nested host before injecting each single real key, as the GTK proof
+        # already does. Do not activate A/B/C or replay failed input.
+        env = dict(os.environ, DISPLAY=host_display)
+        hosts = subprocess.check_output(["xdotool", "search", "--onlyvisible", "--name", "^Smithay"],
+                                        env=env, text=True).split()
+        if len(hosts) != 1:
+            raise RuntimeError("Expected one nested host for actual keyboard input")
+        host = hosts[0]
+        host_pid = int(subprocess.check_output(["xdotool", "getwindowpid", host], env=env, text=True))
+        executable = Path(f"/proc/{host_pid}/exe").resolve(strict=True)
+        if executable != Path("/candidate/usr/bin/roost-compositor").resolve(strict=True):
+            raise RuntimeError("Keyboard host is not the actual candidate compositor")
+        start = Path(f"/proc/{host_pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+        subprocess.run(["xdotool", "windowfocus", "--sync", host], env=env, check=True, timeout=5)
+        actual_focus = int(subprocess.check_output(["xdotool", "getwindowfocus"], env=env, text=True))
+        if actual_focus != int(host):
+            raise RuntimeError("Nested X host did not acquire actual keyboard focus")
+        keyboard_probes.append({"host_window": int(host), "host_pid": host_pid,
+            "host_executable": str(executable), "host_start_time": start,
+            "actual_x_focus": actual_focus, "scene_before_key": scene()})
+        out.with_suffix(".keyboard-host.json").write_text(json.dumps(keyboard_probes, indent=2))
+        subprocess.run(["xdotool", "key", "F8"], env=env, check=True)
     send_focus_key()
     pump_parent_until(lambda: parent_keys == 1, "Initial actual keyboard input did not reach caller")
     record_parent_input()
