@@ -752,6 +752,8 @@ impl WindowManager {
         for id in gone {
             self.unmap(state, id);
         }
+        // Discard destruction records for roles that never entered the model.
+        state.closed_toplevel_parents.clear();
         #[cfg(feature = "xwayland")]
         self.drain_x11_events(state);
         #[cfg(feature = "xwayland")]
@@ -1296,8 +1298,20 @@ impl WindowManager {
         let return_parent = self
             .windows
             .get(&id)
-            .and_then(|w| w.x11_parent)
-            .filter(|parent| self.model.focused() == Some(id) && self.windows.contains_key(parent));
+            .and_then(|w| {
+                w.x11_parent.or_else(|| {
+                    let surface = w.surface.wl_surface()?;
+                    let parent = state.closed_toplevel_parents.get(surface.as_ref())?;
+                    self.surface_index.get(parent).copied()
+                })
+            })
+            .filter(|parent| {
+                self.model.focused() == Some(id)
+                    && self
+                        .windows
+                        .get(parent)
+                        .is_some_and(|window| window.surface.alive())
+            });
         if let Some(window) = self.windows.remove(&id) {
             eprintln!("roost-compositor: window {id} unmapped");
             match window.surface.underlying_surface() {

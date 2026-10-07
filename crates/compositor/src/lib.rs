@@ -170,6 +170,10 @@ pub struct State {
     /// Client window-state requests awaiting the manager's next
     /// `reconcile` drain (002 window actions).
     pub(crate) window_requests: Vec<(wl_surface::WlSurface, WindowRequest)>,
+    /// Exact native parent at role destruction, consumed on the next reconcile.
+    /// Smithay clears role data immediately after `toplevel_destroyed` returns.
+    pub(crate) closed_toplevel_parents:
+        std::collections::HashMap<wl_surface::WlSurface, wl_surface::WlSurface>,
     /// dmabuf, activation, viewporter and the other #89 protocols.
     pub(crate) protocols: protocols::Protocols,
     /// presentation-time, fifo and commit-timing (#89).
@@ -328,6 +332,19 @@ impl XdgShellHandler for State {
     }
 
     fn new_toplevel(&mut self, _surface: ToplevelSurface) {}
+
+    fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        let parent = smithay::wayland::compositor::with_states(surface.wl_surface(), |states| {
+            states
+                .data_map
+                .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+                .and_then(|data| data.lock().unwrap().parent.clone())
+        });
+        if let Some(parent) = parent {
+            self.closed_toplevel_parents
+                .insert(surface.wl_surface().clone(), parent);
+        }
+    }
 
     fn parent_changed(&mut self, surface: ToplevelSurface) {
         self.refresh_initial_surface_scale(surface.wl_surface());
@@ -799,6 +816,7 @@ impl State {
             initial_outputs: std::collections::HashMap::new(),
             outputs: Vec::new(),
             window_requests: Vec::new(),
+            closed_toplevel_parents: std::collections::HashMap::new(),
             protocols: protocols::Protocols::new(dh),
             frame_timing: frame_timing::FrameTiming::new(dh),
             lock_protocol: session_lock::LockProtocol::new(dh),

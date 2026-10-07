@@ -3343,3 +3343,111 @@ fn modal_parent_blocks_pointer_clicks_scroll_and_super_drag_until_unset() {
         vec![(BTN_LEFT, true), (BTN_LEFT, false)]
     );
 }
+
+/// Close a native modal with an unrelated higher-stacked window present.
+/// Optional protocol teardown steps are sent in the same dispatch batch,
+/// so a cached relationship from an earlier reconcile cannot pass the test.
+fn close_native_modal(unset_parent: bool, destroy_parent: bool, focus_other: bool) {
+    let mut f = two_windows();
+    assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    let qh = f.queue_a.handle();
+    let surface = f
+        .client_a
+        .compositor
+        .as_ref()
+        .unwrap()
+        .create_surface(&qh, ());
+    let xdg = f
+        .client_a
+        .xdg_base
+        .as_ref()
+        .unwrap()
+        .get_xdg_surface(&surface, &qh, ());
+    let top = xdg.get_toplevel(&qh, ());
+    top.set_title("native-modal-return".into());
+    top.set_parent(f.client_a.toplevel.as_ref());
+    let dialog = f
+        .client_a
+        .dialogs
+        .as_ref()
+        .unwrap()
+        .get_xdg_dialog(&top, &qh, ());
+    dialog.set_modal();
+    surface.commit();
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    f.manager.reconcile(&mut f.comp.state);
+    let child = f
+        .manager
+        .model()
+        .windows()
+        .find(|w| w.title == "native-modal-return")
+        .unwrap()
+        .id;
+    assert_eq!(f.manager.transient_parent(child), Some(f.id_a));
+    assert_eq!(f.manager.model().focused(), Some(child));
+    if focus_other {
+        assert!(f.manager.focus(&mut f.comp.state, Some(f.id_b)));
+    }
+    if unset_parent {
+        top.set_parent(None);
+    }
+    if destroy_parent {
+        f.client_a.toplevel.take().unwrap().destroy();
+        f.client_a.xdg_surface.take().unwrap().destroy();
+        f.client_a.surface.take().unwrap().destroy();
+    }
+    dialog.destroy();
+    top.destroy();
+    xdg.destroy();
+    surface.destroy();
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    f.manager.reconcile(&mut f.comp.state);
+    let expected = if unset_parent || destroy_parent || focus_other {
+        f.id_b
+    } else {
+        f.id_a
+    };
+    assert_eq!(f.manager.model().focused(), Some(expected));
+    assert!(!f.manager.model().windows().any(|w| w.id == child));
+    if destroy_parent {
+        assert!(!f.manager.model().windows().any(|w| w.id == f.id_a));
+    }
+    // Assert actual wire delivery to the selected app and no delivery to the
+    // other connection, rather than accepting only a model-focus change.
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    f.client_a.keys.clear();
+    f.client_b.keys.clear();
+    press(&mut f.manager, &mut f.comp, R_KEYCODE);
+    release(&mut f.manager, &mut f.comp, R_KEYCODE);
+    sync_client(&mut f.comp, &f.conn_a, &mut f.queue_a, &mut f.client_a);
+    sync_client(&mut f.comp, &f.conn_b, &mut f.queue_b, &mut f.client_b);
+    let expected_keys = [(R_KEYCODE, true), (R_KEYCODE, false)];
+    if expected == f.id_a {
+        assert_eq!(f.client_a.keys, expected_keys);
+        assert!(f.client_b.keys.is_empty());
+    } else {
+        assert_eq!(f.client_b.keys, expected_keys);
+        assert!(f.client_a.keys.is_empty());
+    }
+}
+
+#[test]
+fn native_modal_close_restores_its_parent_and_keyboard_delivery() {
+    close_native_modal(false, false, false);
+}
+
+#[test]
+fn native_modal_unset_parent_immediately_before_close_has_no_stale_focus_return() {
+    close_native_modal(true, false, false);
+}
+
+#[test]
+fn native_modal_close_with_destroyed_parent_focuses_live_window() {
+    close_native_modal(false, true, false);
+}
+
+#[test]
+fn unfocused_native_modal_close_does_not_steal_focus_from_another_app() {
+    close_native_modal(false, false, true);
+}
