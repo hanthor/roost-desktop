@@ -34,8 +34,8 @@ COPY packaging/marlin/vm-lane/roost-vm-health.service /usr/lib/systemd/system/ro
 # /home is a symlink to /var/home on bootc systems and /var is only
 # seeded at install time, so the home directory and the AccountsService
 # record come from tmpfiles.d on every boot rather than from this layer.
-RUN pacman -Sy --noconfirm \
-    && pacman -S --needed --noconfirm greetd greetd-gtkgreet cage qemu-guest-agent python python-gobject grim wtype wayland-utils \
+RUN pacman -Syu --needed --noconfirm greetd greetd-gtkgreet cage qemu-guest-agent python python-gobject grim wtype wayland-utils \
+    && /usr/libexec/roost-image-kernels vm \
     && useradd -M -d /home/roost-test -s /bin/bash -U roost-test \
     && echo 'roost-test:roost' | chpasswd \
     && test -f /usr/share/wayland-sessions/roost.desktop \

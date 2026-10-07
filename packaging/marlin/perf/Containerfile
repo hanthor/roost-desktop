@@ -13,7 +13,9 @@ COPY packaging/marlin/perf/roost-perf-phase /usr/libexec/roost-perf-phase
 COPY packaging/marlin/perf/roost-gnome-profiler /usr/libexec/roost-gnome-profiler
 COPY packaging/marlin/perf/roost-perf.service /usr/lib/systemd/system/roost-perf.service
 RUN case "$DESKTOP" in gnome|roost) ;; *) exit 1 ;; esac && \
+    /usr/libexec/roost-pinned-baseline && \
     pacman -S --needed --noconfirm python python-gobject wayland-utils qemu-guest-agent gcc pkgconf wayland-protocols && \
+    /usr/libexec/roost-pinned-baseline && \
     bash /tmp/frame-pacer/scripts/roost-frame-pacer-build /tmp/frame-pacer/build && \
     install -Dm755 /tmp/frame-pacer/build/roost-frame-pacer /usr/libexec/roost-frame-pacer && \
     rm -rf /tmp/frame-pacer && \
