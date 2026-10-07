@@ -50,7 +50,7 @@ impl OsdUi {
         window.set_title(Some("On-Screen Display"));
         window.init_layer_shell();
         window.set_layer(Layer::Overlay);
-        window.set_namespace(Some("roost-osd"));
+        window.set_namespace(Some(roost_shell_control::OSD_NAMESPACE));
         window.set_anchor(Edge::Bottom, true);
         window.set_margin(Edge::Bottom, BOTTOM_MARGIN);
         window.set_exclusive_zone(-1);

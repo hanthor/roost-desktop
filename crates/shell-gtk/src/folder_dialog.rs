@@ -51,7 +51,7 @@ impl FolderDialog {
         window.set_title(Some("App Folder"));
         window.init_layer_shell();
         window.set_layer(Layer::Overlay);
-        window.set_namespace(Some("roost-folder-dialog"));
+        window.set_namespace(Some(roost_shell_control::FOLDER_DIALOG_NAMESPACE));
         for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
             window.set_anchor(edge, true);
         }

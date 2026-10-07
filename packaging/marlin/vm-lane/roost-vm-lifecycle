@@ -190,6 +190,75 @@ def orca_read_error(error):
     return result
 
 
+def orca_child_diagnostic(state, pid):
+    """Unready-child evidence only; never grants bus readiness or process authority."""
+    if state.get("locked") is not False:
+        return {"status": "locked"}
+    if type(pid) is not int or pid <= 0:
+        return {"status": "no-child"}
+    def bounded(path, limit):
+        with path.open("rb") as stream:
+            data = stream.read(limit + 1)
+        if len(data) > limit:
+            raise OverflowError()
+        return data
+    try:
+        process = pathlib.Path(f"/proc/{pid}")
+        before = bounded(process / "stat", 4096).decode().rsplit(")", 1)[1].split()
+        uid = process.stat().st_uid
+        parent = int(before[1])
+        ticks = int(before[19])
+        executable = os.readlink(process / "exe")
+        executed = os.stat(process / "exe")
+        # Emit only known system Python/Orca executable names, never arbitrary paths.
+        import re
+        if not re.fullmatch(r"/usr/bin/(?:orca|python3(?:\.[0-9]{1,2})?)", executable):
+            return {"status": "executable-refused"}
+        parent_path = pathlib.Path(f"/proc/{parent}")
+        parent_before = bounded(parent_path / "stat", 4096)
+        if (uid != OWNER.pw_uid or parent_path.stat().st_uid != OWNER.pw_uid
+                or os.readlink(parent_path / "exe") != "/usr/bin/roost-compositor"):
+            return {"status": "principal-refused"}
+        environment = bounded(process / "environ", 128 * 1024)
+        expected = f"roost-nested-{parent}".encode()
+        displays = [item.split(b"=", 1)[1] for item in environment.split(b"\0")
+                    if item.startswith(b"WAYLAND_DISPLAY=")]
+        session_buses = [item.split(b"=", 1)[1] for item in environment.split(b"\0")
+                         if item.startswith(b"DBUS_SESSION_BUS_ADDRESS=")]
+        expected_bus = f"unix:path={RUNTIME}/bus".encode()
+        package = call("pacman", "-Qqo", executable)
+        if package not in {"python", "orca"}:
+            return {"status": "package-refused"}
+        after = bounded(process / "stat", 4096).decode().rsplit(")", 1)[1].split()
+        final_state = json.loads(bounded(STATE, 1024 * 1024))
+        executed_after = os.stat(process / "exe")
+        if (after[19] != before[19] or after[1] != before[1]
+                or process.stat().st_uid != uid or os.readlink(process / "exe") != executable
+                or bounded(parent_path / "stat", 4096).decode().rsplit(")", 1)[1].split()[19]
+                   != parent_before.decode().rsplit(")", 1)[1].split()[19]
+                or parent_path.stat().st_uid != OWNER.pw_uid
+                or os.readlink(parent_path / "exe") != "/usr/bin/roost-compositor"
+                or (executed_after.st_dev, executed_after.st_ino, executed_after.st_size)
+                   != (executed.st_dev, executed.st_ino, executed.st_size)
+                or type(final_state) is not dict or final_state.get("locked") is not False
+                or final_state.get("screen_reader_pid") != pid):
+            return {"status": "changed"}
+        return {"status": "observed", "pid": pid, "uid": uid, "start_ticks": ticks,
+                "parent_pid": parent, "executable": executable, "executable_package": package,
+                "executed_dev": executed.st_dev, "executed_inode": executed.st_ino,
+                "executed_size": executed.st_size,
+                "display_matches_parent": displays == [expected],
+                "session_bus_matches": session_buses == [expected_bus]}
+    except (FileNotFoundError, ProcessLookupError):
+        return {"status": "gone"}
+    except PermissionError:
+        return {"status": "permission"}
+    except (OverflowError, ValueError, IndexError, UnicodeError):
+        return {"status": "malformed"}
+    except (OSError, subprocess.SubprocessError):
+        return {"status": "acquisition-error"}
+
+
 def orca_observation():
     state = json.loads(STATE.read_text())
     pid = int(state.get("screen_reader_pid") or 0)
@@ -207,6 +276,8 @@ def orca_observation():
                               "screen-reader-enabled", user=True) == "true",
               "state": state.get("screen_reader_state"), "pid": pid, "owner": owner,
               "package": call("pacman", "-Q", "orca"), "ready": False}
+    if not owner:
+        result["unready_child_diagnostic"] = orca_child_diagnostic(state, pid)
     if pid == 0 or not owner:
         return result
     name, path, version_prefix, owner, owner_reply = contracts[0]

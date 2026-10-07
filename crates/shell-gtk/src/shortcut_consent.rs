@@ -31,7 +31,7 @@ impl Consent {
         window.add_css_class("roost-end-session");
         window.init_layer_shell();
         window.set_layer(Layer::Overlay);
-        window.set_namespace(Some("roost-shortcut-consent"));
+        window.set_namespace(Some(roost_shell_control::SHORTCUT_CONSENT_NAMESPACE));
         for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
             window.set_anchor(edge, true);
         }
