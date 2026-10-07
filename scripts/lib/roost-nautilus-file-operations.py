@@ -17,6 +17,7 @@ STATE = OUT / 'compositor-state.json'
 records = []
 stage = 'launch'
 identity = None
+fixture = None
 
 
 def run(*arguments):
@@ -190,83 +191,83 @@ try:
         raise RuntimeError('Expected one actual nested desktop host')
     host = windows[0]
     run('xdotool', 'windowfocus', host)
-    with tempfile.TemporaryDirectory(prefix='roost-files-', dir=Path.home()) as directory:
-        fixture = Path(directory)
-        name = 'seed-' + uuid.uuid4().hex + '.txt'
-        seed = fixture / name
-        payload = b'Roost GNOME Files actual operation roundtrip\n' + name.encode() + b'\n'
-        seed.write_bytes(payload)
-        run('nautilus', '--new-window', str(fixture))
-        identity = nautilus_identity()
-        wait(lambda: scene().get('focused_app_id') == 'org.gnome.Nautilus' and cell(name) is not None,
-             'map its native window with the actual fixture contents')
-        browser_id = scene()['focused']
-        snapshot('opened')
-        stage = 'create-folder'
-        key('ctrl+shift+n')
-        folder_name = 'created-through-files'
-        rename_entry(folder_name)
-        folder = fixture / folder_name
-        wait(lambda: folder.is_dir(), 'create the folder through its real dialog')
-        snapshot('folder-created')
-        stage = 'copy'
-        select(name)
-        key('ctrl+c')
-        navigate(folder)
-        wait(lambda: cell(name) is None, 'navigate into the empty destination folder')
-        key('ctrl+v')
-        copied = folder / name
-        wait(lambda: has_payload(copied, payload) and has_payload(seed, payload) and cell(name) is not None,
-             'copy the selected file through the real clipboard')
-        snapshot('copied')
-        stage = 'rename'
-        select(name)
-        key('F2')
-        renamed_name = 'renamed-through-files.txt'
-        rename_entry(renamed_name)
-        renamed = folder / renamed_name
-        wait(lambda: not copied.exists() and has_payload(renamed, payload) and cell(renamed_name) is not None,
-             'rename the actual selected file')
-        snapshot('renamed')
-        stage = 'move'
-        select(renamed_name)
-        key('ctrl+x')
-        navigate(fixture)
-        wait(lambda: cell(name) is not None, 'navigate back to the original directory')
-        key('ctrl+v')
-        moved = fixture / renamed_name
-        wait(lambda: not renamed.exists() and has_payload(moved, payload) and cell(renamed_name) is not None,
-             'move the selected file through the real clipboard')
-        snapshot('moved')
-        stage = 'trash'
-        select(renamed_name)
-        key('Delete')
-        wait(lambda: not moved.exists() and len(trash_matches(moved, payload)) == 1,
-             'move the selected file into actual Trash with its original path and bytes')
-        trash_uris = trash_matches(moved, payload)
-        if not has_payload(seed, payload):
-            raise RuntimeError('Trash affected the unselected original file')
-        snapshot('trashed')
-        stage = 'undo-trash'
-        key('ctrl+z')
-        wait(lambda: has_payload(moved, payload) and not trash_matches(moved, payload),
-             'restore the same file through its real Undo action')
-        snapshot('restored')
-        records.append({'uid': os.getuid(), 'app_id': 'org.gnome.Nautilus',
-                        'browser_window_id': browser_id, 'process': identity, 'fixture': str(fixture),
-                        'file_sha256': hashlib.sha256(payload).hexdigest(),
-                        'bytes': len(payload), 'trash_uris': trash_uris,
-                        'passed': ['native-content', 'create-folder', 'copy', 'rename',
-                                   'move', 'trash-original-path-and-bytes', 'undo-trash'],
-                        'scope': 'ordinary native app in the reference container; final shipped image remains untested'})
-        stage = 'close'
-        key('ctrl+w')
-        wait(lambda: all(window['id'] != browser_id for window in scene()['windows']),
-             'close its native browser window')
-        (OUT / 'nautilus-operations.json').write_text(json.dumps(records, indent=2))
-        print('Nautilus genuine native file operations passed: create/copy/rename/move/trash/undo/close')
+    # Container-local fixture remains available when an assertion fails.
+    fixture = Path(tempfile.mkdtemp(prefix='roost-files-', dir=Path.home()))
+    name = 'seed-' + uuid.uuid4().hex + '.txt'
+    seed = fixture / name
+    payload = b'Roost GNOME Files actual operation roundtrip\n' + name.encode() + b'\n'
+    seed.write_bytes(payload)
+    run('nautilus', '--new-window', str(fixture))
+    identity = nautilus_identity()
+    wait(lambda: scene().get('focused_app_id') == 'org.gnome.Nautilus' and cell(name) is not None,
+         'map its native window with the actual fixture contents')
+    browser_id = scene()['focused']
+    snapshot('opened')
+    stage = 'create-folder'
+    key('ctrl+shift+n')
+    folder_name = 'created-through-files'
+    rename_entry(folder_name)
+    folder = fixture / folder_name
+    wait(lambda: folder.is_dir(), 'create the folder through its real dialog')
+    snapshot('folder-created')
+    stage = 'copy'
+    select(name)
+    key('ctrl+c')
+    navigate(folder)
+    wait(lambda: cell(name) is None, 'navigate into the empty destination folder')
+    key('ctrl+v')
+    copied = folder / name
+    wait(lambda: has_payload(copied, payload) and has_payload(seed, payload) and cell(name) is not None,
+         'copy the selected file through the real clipboard')
+    snapshot('copied')
+    stage = 'rename'
+    select(name)
+    key('F2')
+    renamed_name = 'renamed-through-files.txt'
+    rename_entry(renamed_name)
+    renamed = folder / renamed_name
+    wait(lambda: not copied.exists() and has_payload(renamed, payload) and cell(renamed_name) is not None,
+         'rename the actual selected file')
+    snapshot('renamed')
+    stage = 'move'
+    select(renamed_name)
+    key('ctrl+x')
+    navigate(fixture)
+    wait(lambda: cell(name) is not None, 'navigate back to the original directory')
+    key('ctrl+v')
+    moved = fixture / renamed_name
+    wait(lambda: not renamed.exists() and has_payload(moved, payload) and cell(renamed_name) is not None,
+         'move the selected file through the real clipboard')
+    snapshot('moved')
+    stage = 'trash'
+    select(renamed_name)
+    key('Delete')
+    wait(lambda: not moved.exists() and len(trash_matches(moved, payload)) == 1,
+         'move the selected file into actual Trash with its original path and bytes')
+    trash_uris = trash_matches(moved, payload)
+    if not has_payload(seed, payload):
+        raise RuntimeError('Trash affected the unselected original file')
+    snapshot('trashed')
+    stage = 'undo-trash'
+    key('ctrl+z')
+    wait(lambda: has_payload(moved, payload) and not trash_matches(moved, payload),
+         'restore the same file through its real Undo action')
+    snapshot('restored')
+    records.append({'uid': os.getuid(), 'app_id': 'org.gnome.Nautilus',
+                    'browser_window_id': browser_id, 'process': identity, 'fixture': str(fixture),
+                    'file_sha256': hashlib.sha256(payload).hexdigest(),
+                    'bytes': len(payload), 'trash_uris': trash_uris,
+                    'passed': ['native-content', 'create-folder', 'copy', 'rename',
+                               'move', 'trash-original-path-and-bytes', 'undo-trash'],
+                    'scope': 'ordinary native app in the reference container; final shipped image remains untested'})
+    stage = 'close'
+    key('ctrl+w')
+    wait(lambda: all(window['id'] != browser_id for window in scene()['windows']),
+         'close its native browser window')
+    (OUT / 'nautilus-operations.json').write_text(json.dumps(records, indent=2))
+    print('Nautilus genuine native file operations passed: create/copy/rename/move/trash/undo/close')
 except Exception as error:
-    (OUT / 'nautilus-operations-failure.json').write_text(json.dumps({'stage': stage, 'error': str(error)}, indent=2))
+    (OUT / 'nautilus-operations-failure.json').write_text(json.dumps({'stage': stage, 'error': str(error), 'fixture': str(fixture) if fixture else None}, indent=2))
     try:
         snapshot('failure')
     except Exception as evidence_error:
