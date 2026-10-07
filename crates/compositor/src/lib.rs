@@ -46,6 +46,8 @@ use smithay::{
     },
 };
 
+pub mod a11y_keyboard;
+mod a11y_shadow;
 pub mod animation;
 pub mod capture_security;
 pub mod control;

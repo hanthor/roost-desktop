@@ -262,6 +262,8 @@ pub struct WindowManager {
     super_held: bool,
     /// Key repeat as last set: rate (keys/s, 0 off) and delay (ms).
     repeat: (i32, i32),
+    a11y_shadow: crate::a11y_shadow::Shadow,
+    keymap_generation: u64,
     /// Shift held (either side) for move-window keybindings.
     shift_held: bool,
     /// Alt held (either side) for the Alt-Tab switcher.
@@ -357,6 +359,8 @@ impl WindowManager {
             super_held: false,
             // add_keyboard below: 200 ms delay, 200 keys/s.
             repeat: (200, 200),
+            a11y_shadow: Default::default(),
+            keymap_generation: 1,
             shift_held: false,
             alt_held: false,
             switcher_open: false,
@@ -3321,6 +3325,33 @@ impl WindowManager {
         true
     }
 
+    /// Accessibility intercepts before ordinary shortcuts and real seat XKB.
+    pub fn accessibility_input(
+        &mut self,
+        state: &mut State,
+        monitor: &crate::a11y_keyboard::Monitor,
+        input: &ManagerInput,
+    ) -> bool {
+        let (
+            Some(keyboard),
+            ManagerInput::Key {
+                keycode, pressed, ..
+            },
+        ) = (self.keyboard.clone(), input)
+        else {
+            return false;
+        };
+        self.a11y_shadow.key(
+            &keyboard,
+            state,
+            self.keymap_generation,
+            monitor,
+            *keycode,
+            *pressed,
+            self.repeat.1,
+        )
+    }
+
     /// Keep physical modifier holds current even when a lock, blanking shield
     /// or recovery overlay consumes the event. This never delivers client input.
     pub fn note_modifiers(&mut self, input: &ManagerInput) {
@@ -3806,6 +3837,8 @@ impl WindowManager {
                 "roost-compositor: keymap {}({}) refused: {e:?}",
                 settings.xkb_layout, settings.xkb_variant
             );
+        } else {
+            self.keymap_generation = self.keymap_generation.wrapping_add(1);
         }
         let rate = if settings.repeat && settings.repeat_interval_ms > 0 {
             (1000 / settings.repeat_interval_ms).max(1) as i32

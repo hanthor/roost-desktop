@@ -8,6 +8,9 @@ import subprocess
 import sys
 import hashlib
 import shlex
+import time
+import uuid
+import base64
 
 OWNER = pwd.getpwnam("roost-test")
 RUNTIME = f"/run/user/{OWNER.pw_uid}"
@@ -104,7 +107,8 @@ def orca_observation():
     result = {"enabled": call("gsettings", "get", "org.gnome.desktop.a11y.applications",
                               "screen-reader-enabled", user=True) == "true",
               "state": state.get("screen_reader_state"), "pid": pid, "owner": owner,
-              "package": call("pacman", "-Q", "orca"), "ready": False}
+              "package": call("pacman", "-Q", "orca"), "ready": False,
+              "frames": state.get("rendered_frames"), "keyboard": state.get("a11y_keyboard")}
     if pid == 0 or not owner:
         return result
     credentials = {}
@@ -164,6 +168,86 @@ def main():
     action = sys.argv[1]
     if action == "inventory":
         result = inventory()
+    elif action == "orca-rapid-toggle":
+        samples = []
+        for enabled in [True, False] * 10:
+            call("gsettings", "set", "org.gnome.desktop.a11y.applications",
+                 "screen-reader-enabled", str(enabled).lower(), user=True)
+            time.sleep(0.02)
+            state = json.loads(STATE.read_text())
+            samples.append({"elapsed": time.monotonic(), "frames": state["rendered_frames"],
+                            "pid": state.get("screen_reader_pid"), "state": state.get("screen_reader_state")})
+        result = {"samples": samples}
+    elif action == "orca-keyboard-negative":
+        before = orca_observation()
+        owner = shlex.split(call("busctl", "--user", "call", "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                                 "org.freedesktop.DBus", "GetNameOwner", "s", "org.freedesktop.a11y.Manager", user=True))
+        if len(owner) != 2 or owner[0] != "s":
+            raise RuntimeError("native manager has no original bus owner")
+        pid = call("busctl", "--user", "call", "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                   "org.freedesktop.DBus", "GetConnectionUnixProcessID", "s", owner[1], user=True).split()
+        compositor = [p for p in inventory()["processes"] if p["comm"] == "roost-composito"]
+        if len(compositor) != 1 or pid != ["u", str(compositor[0]["pid"])]:
+            raise RuntimeError("native keyboard manager is not the actual compositor")
+        command = ["runuser", "-u", OWNER.pw_name, "--", "env", f"XDG_RUNTIME_DIR={RUNTIME}",
+                   f"DBUS_SESSION_BUS_ADDRESS=unix:path={RUNTIME}/bus", "busctl", "--user", "call",
+                   owner[1], "/org/freedesktop/a11y/Manager", "org.freedesktop.a11y.KeyboardMonitor", "WatchKeyboard"]
+        denied = subprocess.run(command, capture_output=True, text=True, timeout=15)
+        after = orca_observation()
+        result = {"denied": denied.returncode != 0 and "owned reader credentials required" in denied.stderr,
+                  "manager_pid": compositor[0]["pid"], "before": before["keyboard"], "after": after["keyboard"]}
+    elif action == "orca-speech-start":
+        actual = orca_observation()
+        if not actual["ready"] or actual["state"] != "active":
+            raise RuntimeError("genuine owned Orca is required for speech capture")
+        token = pathlib.Path(RUNTIME, "roost-vm-orca-token").read_text()
+        log = str(pathlib.Path(RUNTIME, "roost-vm-orca-speech.jsonl"))
+        try:
+            reply = call("busctl", "--user", "call", actual["owner"],
+                         "/org/gnome/Orca1/Service/SpeechPresenter", "org.gnome.Orca1.SpeechPresenter",
+                         "SetLogFileForTesting", "ss", token, log, user=True)
+        except subprocess.CalledProcessError:
+            raise RuntimeError("upstream presenter recording setup failed") from None
+        if reply != "b true":
+            raise RuntimeError("upstream presenter refused recording")
+        objects = json.loads(call("pw-dump", user=True))
+        defaults = [entry for obj in objects if obj.get("props", {}).get("metadata.name") == "default"
+                    for entry in obj.get("metadata", []) if entry.get("subject") == 0
+                    and entry.get("key") == "default.audio.sink"]
+        if len(defaults) != 1:
+            raise RuntimeError("one genuine default audio sink is required")
+        value = defaults[0]["value"]
+        target = (json.loads(value) if isinstance(value, str) else value)["name"]
+        unit = "roost-vm-orca-pcm-" + uuid.uuid4().hex
+        pcm = str(pathlib.Path(RUNTIME, "roost-vm-orca-speech.pcm"))
+        call("systemd-run", "--user", "--quiet", "--collect", "--unit=" + unit,
+             "--service-type=exec", "--property=RuntimeMaxSec=8s", "/usr/bin/pw-record",
+             "--target=" + target, "--properties={\"stream.capture.sink\":true}",
+             "--raw", "--format=s16", "--rate=24000", "--channels=1", "--sample-count=96000", pcm, user=True)
+        pathlib.Path(RUNTIME, "roost-vm-orca-recording.json").write_text(
+            json.dumps({"unit": unit, "pcm": pcm, "log": log, "owner": actual["owner"], "sink": target}))
+        result = {"orca": actual, "sink": target, "recording": "genuine PipeWire sink s16 PCM; normal Orca speech backend retained"}
+    elif action == "orca-speech-end":
+        recording = json.loads(pathlib.Path(RUNTIME, "roost-vm-orca-recording.json").read_text())
+        if not recording["unit"].startswith("roost-vm-orca-pcm-"):
+            raise RuntimeError("invalid recording unit")
+        call("systemctl", "--user", "stop", recording["unit"], user=True, check=False)
+        token = pathlib.Path(RUNTIME, "roost-vm-orca-token").read_text()
+        try:
+            call("busctl", "--user", "call", recording["owner"],
+                 "/org/gnome/Orca1/Service/SpeechPresenter", "org.gnome.Orca1.SpeechPresenter",
+                 "SetLogFileForTesting", "ss", token, "", user=True)
+        except subprocess.CalledProcessError:
+            raise RuntimeError("upstream presenter recording close failed") from None
+        pcm = pathlib.Path(recording["pcm"]).read_bytes()
+        log = pathlib.Path(recording["log"]).read_text()
+        if len(pcm) > 192000 or len(log.encode()) > 64 * 1024:
+            raise RuntimeError("speech capture exceeded evidence bounds")
+        objects = json.loads(call("pw-dump", user=True))
+        streams = [{k: p[k] for k in ("node.name", "application.process.binary", "application.process.id") if k in p}
+                   for obj in objects if (p := obj.get("info", {}).get("props", {})).get("media.class") == "Stream/Output/Audio"]
+        result = {"pcm": base64.b64encode(pcm).decode(), "speech": [json.loads(line) for line in log.splitlines()],
+                  "sink": recording["sink"], "streams": streams, "orca": orca_observation()}
     elif action == "orca-departed":
         pid, ticks = int(sys.argv[2]), int(sys.argv[3])
         try:

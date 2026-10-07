@@ -302,6 +302,65 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
                 if first_orca == identity:
                     raise RuntimeError("Orca retained the stopped process identity")
                 first_orca = identity
+        rapid = agent.run("orca-rapid-toggle")
+        with open(os.path.join(evidence, "orca-rapid-toggle.json"), "w") as stream:
+            json.dump(rapid, stream, indent=2)
+        samples = rapid["samples"]
+        progress = samples[0]["elapsed"]
+        longest = 0
+        previous_frames = samples[0]["frames"]
+        for sample in samples[1:]:
+            longest = max(longest, sample["elapsed"] - progress)
+            if sample["frames"] > previous_frames:
+                progress = sample["elapsed"]
+                previous_frames = sample["frames"]
+        if samples[-1]["frames"] <= samples[0]["frames"] or longest > 0.75:
+            raise RuntimeError("genuine Orca rapid preference toggles stalled native frame progress")
+        await_orca(False)
+        agent.run("orca-on")
+        reader = await_orca(True)
+        keyboard = reader["keyboard"]
+        if not keyboard or keyboard["reader_pid"] != reader["pid"] or not keyboard["watch"] or not (keyboard["modifier_count"] or keyboard["keystroke_count"]):
+            raise RuntimeError("genuine Orca did not establish native keyboard monitoring/grabs")
+        negative = agent.run("orca-keyboard-negative")
+        with open(os.path.join(evidence, "orca-keyboard-negative.json"), "w") as stream:
+            json.dump(negative, stream, indent=2)
+        if not negative["denied"] or negative["before"] != negative["after"]:
+            raise RuntimeError("same-user non-reader obtained or changed native keyboard authority")
+        start_speech = agent.run("orca-speech-start")
+        time.sleep(0.4)
+        qmp.keys("insert-h")
+        time.sleep(1.2)
+        learn = agent.run("orca-read")
+        if not learn["keyboard"]["grab_all"]:
+            raise RuntimeError("real Orca modifier command did not enter learned keyboard grab")
+        qmp.keys("shift-f4")
+        time.sleep(1.4)
+        qmp.keys("esc")
+        time.sleep(1.1)
+        speech = agent.run("orca-speech-end")
+        import base64
+        import array
+        import wave
+        pcm = base64.b64decode(speech.pop("pcm"), validate=True)
+        with wave.open(os.path.join(evidence, "orca-native-command.wav"), "wb") as stream:
+            stream.setnchannels(1)
+            stream.setsampwidth(2)
+            stream.setframerate(24000)
+            stream.writeframes(pcm)
+        with open(os.path.join(evidence, "orca-native-command.json"), "w") as stream:
+            json.dump({"start": start_speech, "learn": learn, "end": speech}, stream, indent=2)
+        values = array.array("h")
+        values.frombytes(pcm)
+        spoken = " ".join(entry.get("text", "") for entry in speech["speech"] if entry.get("kind") == "speech").lower()
+        if len(values) < 24000 or max((abs(v) for v in values), default=0) <= 32 or "learn mode" not in spoken or speech["orca"]["keyboard"]["grab_all"]:
+            raise RuntimeError("native Orca command lacked paired genuine presenter/PCM evidence or failed to ungrab")
+        if not any("speech" in stream.get("application.process.binary", "") or "sd_" in stream.get("application.process.binary", "") for stream in speech["streams"]):
+            raise RuntimeError("no genuine Speech Dispatcher output stream accompanied Orca command")
+        record("V-ORCA-NATIVE-KEYBOARD", True,
+               "genuine Insert+h enters learn mode, shifted key is consumed, Escape ungrabs; upstream JSONL paired with real Speech Dispatcher/PipeWire PCM")
+        agent.run("orca-off")
+        await_orca(False)
         record("V-ORCA-ACTIVATION", True,
                "live GNOME key starts/stops genuine Orca51; bus PID/UID, package hash, compositor parent and display verified")
     finally:
