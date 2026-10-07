@@ -83,6 +83,7 @@ impl Timeline {
             roxmltree::ParsingOptions {
                 allow_dtd: false,
                 nodes_limit: 4096,
+                ..roxmltree::ParsingOptions::default()
             },
         )
         .ok()?;
