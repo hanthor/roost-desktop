@@ -243,7 +243,8 @@ def main():
         if not actual["ready"] or actual["state"] != "active":
             raise RuntimeError("genuine owned Orca is required for speech capture")
         token = pathlib.Path(RUNTIME, "roost-vm-orca-token").read_text()
-        log = str(pathlib.Path(RUNTIME, "roost-vm-orca-speech.jsonl"))
+        capture = uuid.uuid4().hex
+        log = str(pathlib.Path(RUNTIME, "roost-vm-orca-speech-" + capture + ".jsonl"))
         try:
             reply = call("busctl", "--user", "call", actual["owner"],
                          "/org/gnome/Orca1/Service/SpeechPresenter", "org.gnome.Orca1.SpeechPresenter",
@@ -261,7 +262,7 @@ def main():
         value = defaults[0]["value"]
         target = (json.loads(value) if isinstance(value, str) else value)["name"]
         unit = "roost-vm-orca-pcm-" + uuid.uuid4().hex
-        pcm = str(pathlib.Path(RUNTIME, "roost-vm-orca-speech.pcm"))
+        pcm = str(pathlib.Path(RUNTIME, "roost-vm-orca-speech-" + capture + ".pcm"))
         call("systemd-run", "--user", "--quiet", "--collect", "--unit=" + unit,
              "--service-type=exec", "--property=RuntimeMaxSec=8s", "/usr/bin/pw-record",
              "--target=" + target, "--properties={\"stream.capture.sink\":true}",

@@ -50,6 +50,8 @@ struct Inner {
     lifetime: u64,
     recipient: Option<String>,
     recipient_generation: u64,
+    normal_events: u64,
+    reset_events: u64,
     reset_generation: u64,
     reset: Option<Reset>,
     locked: bool,
@@ -146,6 +148,8 @@ impl Monitor {
             lifetime: 0,
             recipient: None,
             recipient_generation: 0,
+            normal_events: 0,
+            reset_events: 0,
             reset_generation: 0,
             reset: None,
             locked: false,
@@ -169,6 +173,7 @@ impl Monitor {
         serde_json::json!({ "reader_pid": inner.pid, "epoch": inner.epoch, "locked": inner.locked,
             "owner": grants.map(|g| g.owner.as_str()), "watch": grants.is_some_and(|g| g.watch),
             "grab_all": grants.is_some_and(|g| g.all),
+            "normal_events": inner.normal_events, "reset_events": inner.reset_events,
             "resume_state": if inner.locked { "locked" } else if inner.reset.is_some() { "resetting" } else if inner.pid == 0 { "unavailable" } else if grants.is_none() { "unwatched" } else { "ready" },
             "modifier_count": grants.map_or(0, |g| g.modifiers.len()),
             "keystroke_count": grants.map_or(0, |g| g.keys.len()) })
@@ -569,6 +574,10 @@ impl Emitter {
             monitor.inner.lock().unwrap().fail();
             return Err(error);
         }
+        {
+            let mut inner = monitor.inner.lock().unwrap();
+            inner.normal_events = inner.normal_events.saturating_add(1);
+        }
         if key.released {
             self.modifiers.remove(&key.keycode);
         } else if event.custom_modifier {
@@ -609,6 +618,10 @@ impl Emitter {
                 monitor.inner.lock().unwrap().fail();
                 return Err(error);
             }
+            {
+                let mut inner = monitor.inner.lock().unwrap();
+                inner.reset_events = inner.reset_events.saturating_add(1);
+            }
             self.modifiers.remove(&keycode);
         }
         let mut inner = monitor.inner.lock().unwrap();
@@ -634,6 +647,8 @@ pub(crate) mod tests {
             lifetime: 1,
             recipient: Some(":1.23".into()),
             recipient_generation: 0,
+            normal_events: 0,
+            reset_events: 0,
             reset_generation: 0,
             reset: None,
             locked: false,
@@ -820,6 +835,8 @@ pub(crate) mod tests {
             (0xffe5, 66, 0, 0)
         );
         assert_eq!(m.snapshot()["resume_state"], "ready");
+        assert_eq!(m.snapshot()["normal_events"], 2);
+        assert_eq!(m.snapshot()["reset_events"], 1);
         // Both lock/reset-origin repeats and their releases remain private.
         assert!(!m.key(key(0x70, 33, false, 0), delay));
         assert!(!m.key(key(0x70, 33, true, 0), delay));
@@ -1016,6 +1033,8 @@ pub(crate) mod tests {
         assert!(emitter
             .reset(&m, |_, _| Err(std::io::Error::other("send failed").into()))
             .is_err());
+        assert_eq!(m.snapshot()["normal_events"], 1);
+        assert_eq!(m.snapshot()["reset_events"], 0);
         assert!(m.availability() == Availability::Unavailable);
         assert_eq!(m.inner.lock().unwrap().pid, 0);
         let (m, _events) = monitor(vec![], vec![]);

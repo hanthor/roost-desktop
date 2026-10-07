@@ -333,38 +333,120 @@ def run_lifecycle(qmp, agent, out, serial_path, record, orca_contract="distribut
                 json.dump(provenance, stream, indent=2)
             if not provenance["qualified"]:
                 raise RuntimeError("upstream51 lane lacks actual packaged 51/AT-SPI override/version provenance")
-            start_speech = agent.run("orca-speech-start")
-            time.sleep(0.4)
-            qmp.keys("insert-h")
-            time.sleep(1.2)
-            learn = agent.run("orca-read")
-            if not learn["keyboard"]["grab_all"]:
-                raise RuntimeError("real Orca modifier command did not enter learned keyboard grab")
-            qmp.keys("shift-f4")
-            time.sleep(1.4)
-            qmp.keys("esc")
-            time.sleep(1.1)
-            speech = agent.run("orca-speech-end")
-            import base64
-            import array
-            import wave
-            pcm = base64.b64decode(speech.pop("pcm"), validate=True)
-            with wave.open(os.path.join(evidence, "orca-native-command.wav"), "wb") as stream:
-                stream.setnchannels(1)
-                stream.setsampwidth(2)
-                stream.setframerate(24000)
-                stream.writeframes(pcm)
-            with open(os.path.join(evidence, "orca-native-command.json"), "w") as stream:
-                json.dump({"start": start_speech, "learn": learn, "end": speech}, stream, indent=2)
-            values = array.array("h")
-            values.frombytes(pcm)
-            spoken = " ".join(entry.get("text", "") for entry in speech["speech"] if entry.get("kind") == "speech").lower()
-            if len(values) < 24000 or max((abs(v) for v in values), default=0) <= 32 or "learn mode" not in spoken or speech["orca"]["keyboard"]["grab_all"]:
-                raise RuntimeError("native Orca command lacked paired genuine presenter/PCM evidence or failed to ungrab")
-            if not any("speech" in stream.get("application.process.binary", "") or "sd_" in stream.get("application.process.binary", "") for stream in speech["streams"]):
-                raise RuntimeError("no genuine Speech Dispatcher output stream accompanied Orca command")
-            record("V-ORCA-NATIVE-KEYBOARD", True,
-                   "genuine Insert+h enters learn mode, shifted key is consumed, Escape ungrabs; upstream JSONL paired with real Speech Dispatcher/PipeWire PCM")
+            identity_fields = ("pid", "start_ticks", "owner", "uid", "bus_pid", "bus_uid",
+                               "version", "display", "parent_pid", "compositor_pid", "bus_name")
+            original = {field: reader[field] for field in identity_fields}
+
+            def same_reader(actual):
+                return (actual["ready"] and actual["state"] == "active"
+                        and all(actual.get(field) == value for field, value in original.items()))
+
+            def native_command(label, test_id, min_normal=None):
+                start_speech = agent.run("orca-speech-start")
+                time.sleep(0.4)
+                qmp.keys("insert", "h")
+                time.sleep(1.2)
+                learn = agent.run("orca-read")
+                if not learn["keyboard"]["grab_all"]:
+                    raise RuntimeError("real Orca modifier command did not enter learned keyboard grab")
+                qmp.keys("shift", "f4")
+                time.sleep(1.4)
+                qmp.keys("esc")
+                time.sleep(1.1)
+                speech = agent.run("orca-speech-end")
+                import base64
+                import array
+                import wave
+                pcm = base64.b64decode(speech.pop("pcm"), validate=True)
+                with wave.open(os.path.join(evidence, f"{label}.wav"), "wb") as stream:
+                    stream.setnchannels(1)
+                    stream.setsampwidth(2)
+                    stream.setframerate(24000)
+                    stream.writeframes(pcm)
+                with open(os.path.join(evidence, f"{label}.json"), "w") as stream:
+                    json.dump({"start": start_speech, "learn": learn, "end": speech}, stream, indent=2)
+                values = array.array("h")
+                values.frombytes(pcm)
+                spoken = " ".join(entry.get("text", "") for entry in speech["speech"] if entry.get("kind") == "speech").lower()
+                if len(values) < 24000 or max((abs(v) for v in values), default=0) <= 32 or "learn mode" not in spoken or speech["orca"]["keyboard"]["grab_all"]:
+                    raise RuntimeError("native Orca command lacked paired genuine presenter/PCM evidence or failed to ungrab")
+                if not any("speech" in stream.get("application.process.binary", "") or "sd_" in stream.get("application.process.binary", "") for stream in speech["streams"]):
+                    raise RuntimeError("no genuine Speech Dispatcher output stream accompanied Orca command")
+                if (not same_reader(start_speech["orca"]) or not same_reader(learn)
+                        or not same_reader(speech["orca"])):
+                    raise RuntimeError("native command changed the original genuine reader identity")
+                if min_normal is not None and speech["orca"]["keyboard"]["normal_events"] <= min_normal:
+                    raise RuntimeError("fresh physical command did not resume native delivery")
+                record(test_id, True,
+                       "genuine Insert+h enters learn mode, shifted key is consumed, Escape ungrabs; upstream JSONL paired with real Speech Dispatcher/PipeWire PCM")
+                return speech["orca"]
+
+            native_command("orca-native-command", "V-ORCA-NATIVE-KEYBOARD")
+            privacy = []
+
+            def await_keyboard(stage, predicate):
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    actual = agent.run("orca-read")
+                    if not same_reader(actual):
+                        raise RuntimeError("lock/unlock replaced or lost the original genuine reader")
+                    if predicate(actual["keyboard"]):
+                        privacy.append({"stage": stage, "identity": original,
+                                        "keyboard": actual["keyboard"], "frames": actual["frames"]})
+                        return actual
+                    time.sleep(0.1)
+                raise RuntimeError("native keyboard lock/reset readiness deadline exceeded")
+
+            held = set()
+
+            def physical(name, down):
+                qmp.cmd("input-send-event", events=[{"type": "key", "data": {
+                    "down": down, "key": {"type": "qcode", "data": name}}}])
+                if down:
+                    held.add(name)
+                else:
+                    held.discard(name)
+
+            before_hold = agent.run("orca-read")
+            try:
+                physical("insert", True)
+                disclosed = await_keyboard("prelock-custom-disclosed", lambda keyboard:
+                    keyboard["normal_events"] > before_hold["keyboard"]["normal_events"])
+                qmp.keys("meta_l", "l")
+                await_state(lambda state: state["state"]["locked"])
+                locked = await_keyboard("locked-reset-delivered", lambda keyboard:
+                    keyboard["locked"] and keyboard["reset_events"] > disclosed["keyboard"]["reset_events"])
+                # Baseline follows the successful serialized reset. Subsequent
+                # private input is measured only by anonymous delivery counts.
+                baseline_count = locked["keyboard"]["normal_events"]
+                physical("f4", True)
+                qmp.keys("ret")
+                time.sleep(0.3)
+                qmp.keys("ctrl", "a")
+                qmp.type_text("roost")
+                qmp.keys("ret")
+                await_state(lambda state: not state["state"]["locked"], timeout=15)
+                resumed = await_keyboard("authenticated-ready", lambda keyboard:
+                    not keyboard["locked"] and keyboard["resume_state"] == "ready")
+                if resumed["keyboard"]["normal_events"] != baseline_count or resumed["frames"] <= locked["frames"]:
+                    raise RuntimeError("private lock/PAM keys reached Orca or native frames stopped")
+                physical("insert", False)
+                physical("f4", False)
+                time.sleep(0.3)
+                released = await_keyboard("protected-held-releases", lambda keyboard:
+                    keyboard["resume_state"] == "ready")
+                if released["keyboard"]["normal_events"] != baseline_count:
+                    raise RuntimeError("protected held-key release reached Orca after unlock")
+                fresh = native_command("orca-postunlock-command", "V-ORCA-POSTUNLOCK-COMMAND", baseline_count)
+                privacy.append({"stage": "fresh-command", "identity": original,
+                                "keyboard": fresh["keyboard"], "frames": fresh["frames"]})
+                record("V-ORCA-LOCK-PRIVACY", True,
+                       "same genuine reader survives real PAM unlock; disclosed custom reset succeeds, private held keys/releases cause no normal delivery, fresh spoken command works")
+            finally:
+                with open(os.path.join(evidence, "orca-lock-privacy.json"), "w") as stream:
+                    json.dump(privacy, stream, indent=2)
+                for name in tuple(held):
+                    physical(name, False)
         agent.run("orca-off")
         await_orca(False)
         record("V-ORCA-ACTIVATION", True,

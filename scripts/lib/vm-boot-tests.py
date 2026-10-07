@@ -39,6 +39,27 @@ class OrcaLifecycleAuthority(unittest.TestCase):
 
 
 class BootApi(unittest.TestCase):
+    def test_actual_orca_commands_use_distinct_qmp_qcodes_for_chords(self):
+        tree = ast.parse((Path(__file__).resolve().parents[1] / "roost-vm-lane").read_text())
+        command = next(node for node in ast.walk(tree)
+                       if isinstance(node, ast.FunctionDef) and node.name == "native_command")
+        chords = [tuple(ast.literal_eval(arg) for arg in node.args)
+                  for node in ast.walk(command) if isinstance(node, ast.Call)
+                  and isinstance(node.func, ast.Attribute) and node.func.attr == "keys"]
+        self.assertIn(("insert", "h"), chords)
+        self.assertIn(("shift", "f4"), chords)
+        for chord in chords:
+            self.assertTrue(set(chord) <= {"insert", "h", "shift", "f4", "esc"})
+            qmp = lane.baseline.Qmp.__new__(lane.baseline.Qmp)
+            qmp.file = io.StringIO()
+            qmp._read = lambda: {"return": {}}
+            with patch.object(lane.baseline.time, "sleep"):
+                qmp.keys(*chord)
+            wire = json.loads(qmp.file.getvalue())
+            self.assertEqual(wire["execute"], "send-key")
+            self.assertEqual(wire["arguments"]["keys"],
+                             [{"type": "qcode", "data": name} for name in chord])
+
     def test_qmp_command_accepts_protocol_name_argument(self):
         qmp = lane.baseline.Qmp.__new__(lane.baseline.Qmp)
         qmp.file = io.StringIO()
