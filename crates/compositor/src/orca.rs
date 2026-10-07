@@ -124,6 +124,9 @@ impl Reader {
             command
                 .env("WAYLAND_DISPLAY", &self.display)
                 .env("XDG_SESSION_TYPE", "wayland")
+                // Orca's setproctitle must preserve /proc environ so the native
+                // lifecycle probe can verify this owned child's actual display.
+                .env("SPT_NOENV", "1")
                 .env_remove("DISPLAY")
                 .env_remove("NOTIFY_SOCKET")
                 .env_remove("WATCHDOG_USEC")
