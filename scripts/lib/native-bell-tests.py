@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """Strict audio evidence negatives; no fake backend playback qualification."""
 import copy
+import hashlib
 import importlib.machinery
 import importlib.util
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -108,6 +112,75 @@ class StrictPcm(unittest.TestCase):
         with self.assertRaises(RuntimeError): f.stream_graph([{}] * 2049)
         obj = {'id': 1, 'info': {'props': {'media.class': 'Stream/Input/Audio', 'node.name': 'x' * 257}}}
         with self.assertRaises(RuntimeError): f.stream_graph([obj])
+
+    def test_output_row_verdict_prefers_live_attestation_over_teardown_residue(self):
+        self.assertEqual(f.output_row_verdict('canberra-gtk-play', 'canberra-gtk-play', False), 'verify')
+        self.assertEqual(f.output_row_verdict('canberra-gtk-play', None, False), 'verify')
+        self.assertEqual(f.output_row_verdict(None, 'canberra-gtk-play', True), 'skip-residue')
+        self.assertEqual(f.output_row_verdict(None, 'canberra-gtk-play', False), 'contaminate')
+        self.assertEqual(f.output_row_verdict(None, 'other-player', True), 'contaminate')
+        self.assertEqual(f.output_row_verdict('other-player', 'other-player', True), 'contaminate')
+
+    def test_attest_rejects_gone_wrong_parent_and_wrong_executable(self):
+        spec = {'manager_pid': os.getpid(), 'player_sha256': '0' * 64, 'theme': 'freedesktop', 'display': 'roost-nested-1'}
+        self.assertIsNone(f.attest_player_process(424242, spec))
+        self.assertIsNone(f.attest_player_process(os.getpid(), spec))
+
+    def test_watcher_attests_live_genuine_player_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = Path(directory) / 'canberra-gtk-play'
+            shutil.copy('/usr/bin/python3', fake)
+            fake.chmod(0o755)
+            sha = hashlib.sha256(fake.read_bytes()).hexdigest()
+            display = 'roost-nested-test-99'
+            theme = 'freedesktop'
+            environment = {'WAYLAND_DISPLAY': display, 'GDK_BACKEND': 'wayland'}
+            child = subprocess.Popen([str(fake), '-c', 'import time;time.sleep(60)', '--id', 'bell-window-system',
+                                      'canberra.xdg-theme.name=' + theme], env=environment)
+            try:
+                spec = {'manager_pid': os.getpid(), 'player_sha256': sha, 'theme': theme, 'display': display}
+                matches, stop = [], threading.Event()
+                with patch.object(f, 'mapped_audio_libraries', return_value={'sentinel': True}):
+                    watcher = threading.Thread(target=f.watch_player_process, args=(spec, stop, matches))
+                    watcher.start()
+                    deadline = time.monotonic() + 5
+                    while not matches and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    stop.set(); watcher.join(timeout=5)
+                self.assertEqual(len(matches), 1)
+                receipt = matches[0]
+                self.assertEqual((receipt['pid'], receipt['parent_pid'], receipt['theme'],
+                                  receipt['exe_sha256'], receipt['provenance'], receipt['event_id'],
+                                  receipt['mapped_audio_libraries']),
+                                 (child.pid, os.getpid(), theme, sha, 'proc-watch', 'bell-window-system',
+                                  {'sentinel': True}))
+                self.assertEqual(receipt['executable'], str(fake.resolve()))
+            finally:
+                child.kill(); child.wait()
+
+    def test_attest_fails_closed_when_library_inventory_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake = Path(directory) / 'canberra-gtk-play'
+            shutil.copy('/usr/bin/python3', fake)
+            fake.chmod(0o755)
+            sha = hashlib.sha256(fake.read_bytes()).hexdigest()
+            display = 'roost-nested-test-99'
+            environment = {'WAYLAND_DISPLAY': display, 'GDK_BACKEND': 'wayland'}
+            child = subprocess.Popen([str(fake), '-c', 'import time;time.sleep(60)', '--id', 'bell-window-system',
+                                      'canberra.xdg-theme.name=freedesktop'], env=environment)
+            try:
+                spec = {'manager_pid': os.getpid(), 'player_sha256': sha, 'theme': 'freedesktop', 'display': display}
+                with patch.object(f, 'mapped_audio_libraries', side_effect=RuntimeError('no audio mappings')):
+                    self.assertIsNone(f.attest_player_process(child.pid, spec))
+            finally:
+                child.kill(); child.wait()
+
+    def test_watcher_ignores_processes_that_fail_attestation(self):
+        spec = {'manager_pid': os.getpid(), 'player_sha256': '0' * 64, 'theme': 'freedesktop', 'display': 'roost-nested-1'}
+        matches, stop = [], threading.Event()
+        stop.set()
+        f.watch_player_process(spec, stop, matches)
+        self.assertEqual(matches, [])
 
     def test_partial_start_cleanup_restores_actual_settings_and_owned_unit(self):
         values = ['false', 'false', 'true', "'freedesktop'"]
