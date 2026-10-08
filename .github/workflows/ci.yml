@@ -31,6 +31,10 @@ jobs:
       # 24.04 does not package.
       - run: sudo apt-get install -y meson ninja-build libwayland-dev wayland-protocols && scripts/ci-install-gtk4-layer-shell
       - run: scripts/roost-a11y-baseline check
+      # The rename to Tuna Desktop (#505): the script's self-test, and
+      # a guard that no branch brings the old name back.
+      - run: python3 scripts/lib/rename-to-tuna-tests.py
+      - run: scripts/rename-to-tuna --check --no-cargo
       - run: python3 scripts/lib/roost-soak-tests.py
       - run: python3 scripts/lib/vm-boot-tests.py
       - run: python3 scripts/lib/marlin-kernel-tests.py
