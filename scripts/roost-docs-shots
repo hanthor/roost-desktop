@@ -6,18 +6,17 @@
 #   scripts/roost-docs-shots regen [--dest DIR] [--display :N]
 #
 # `collect` copies the curated frame set out of harness artifact
-# directories (the same ones CI uploads) into docs/shots under stable
-# names, so docs/screenshots.md never churns when harness internals
-# change. `regen` re-runs all three harnesses locally first, for
-# release-time regeneration. Both fail when any source frame is
-# missing: docs must never silently ship a stale or partial set.
-# CI enforces freshness by collecting from the run's own artifacts
-# and failing on `git diff --exit-code -- docs/shots`.
+# directories (the same ones CI uploads) under stable names; CI uploads
+# the result as the `docs-shots` artifact. `regen` re-runs all three
+# harnesses locally first. Both fail when any source frame is missing,
+# so a set is never stale or partial. The committed docs/shots set was
+# removed (#506); the docs use docs/walkthrough.md instead. Without
+# --dest, frames go to target/docs-shots.
 set -eu
 
 unset CDPATH
 ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
-DEST="$ROOT/docs/shots"
+DEST="$ROOT/target/docs-shots"
 
 usage() {
     sed -n '2,14p' "$0"
