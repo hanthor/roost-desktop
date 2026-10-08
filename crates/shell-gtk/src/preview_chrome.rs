@@ -23,10 +23,12 @@ const CLOSE_SIZE: i32 = 32;
 /// (`WINDOW_OVERLAY_FADE_TIME`, ease-out-quad).
 const OVERLAY_FADE_MS: f64 = 200.0;
 
-/// Overlay opacity `elapsed_ms` into the fade (all at once without motion).
-pub fn overlay_opacity(elapsed_ms: f64, enabled: bool) -> f64 {
-    let t = if enabled {
-        (elapsed_ms / OVERLAY_FADE_MS).clamp(0.0, 1.0)
+/// Overlay opacity `elapsed_ms` into the fade under `policy`: a fade,
+/// so fade-only keeps it; the slow-down factor stretches it.
+pub fn overlay_opacity(elapsed_ms: f64, policy: roost_shell_control::MotionPolicy) -> f64 {
+    let duration = policy.adjust_ms(OVERLAY_FADE_MS);
+    let t = if policy.allows_fades() && duration > 0.0 {
+        (elapsed_ms / duration).clamp(0.0, 1.0)
     } else {
         1.0
     };
@@ -38,7 +40,7 @@ fn fade_in(widgets: Vec<gtk::Widget>) {
     let Some(first) = widgets.first().cloned() else {
         return;
     };
-    if !gtk::Settings::default().is_none_or(|s| s.is_gtk_enable_animations()) {
+    if !crate::motion::current().allows_fades() {
         return;
     }
     for w in &widgets {
@@ -51,8 +53,7 @@ fn fade_in(widgets: Vec<gtk::Widget>) {
             clock.frame_time()
         });
         let elapsed_ms = (clock.frame_time() - start) as f64 / 1000.0;
-        let enabled = gtk::Settings::default().is_none_or(|s| s.is_gtk_enable_animations());
-        let opacity = overlay_opacity(elapsed_ms, enabled);
+        let opacity = overlay_opacity(elapsed_ms, crate::motion::current());
         for w in &widgets {
             w.set_opacity(opacity);
         }
@@ -195,12 +196,23 @@ impl PreviewChrome {
 #[cfg(test)]
 mod tests {
     use super::overlay_opacity;
+    use roost_shell_control::{MotionLevel, MotionPolicy};
 
     #[test]
     fn the_hover_overlay_fades_in_over_200_ms_ease_out_quad() {
-        assert_eq!(overlay_opacity(0.0, true), 0.0);
-        assert_eq!(overlay_opacity(100.0, true), 0.75);
-        assert_eq!(overlay_opacity(200.0, true), 1.0);
-        assert_eq!(overlay_opacity(0.0, false), 1.0);
+        let full = MotionPolicy::default();
+        assert_eq!(overlay_opacity(0.0, full), 0.0);
+        assert_eq!(overlay_opacity(100.0, full), 0.75);
+        assert_eq!(overlay_opacity(200.0, full), 1.0);
+        let fade_only = MotionPolicy::new(MotionLevel::FadeOnly, 1.0);
+        assert_eq!(overlay_opacity(100.0, fade_only), 0.75);
+        assert_eq!(
+            overlay_opacity(200.0, MotionPolicy::new(MotionLevel::Full, 2.0)),
+            0.75
+        );
+        assert_eq!(
+            overlay_opacity(0.0, MotionPolicy::new(MotionLevel::Off, 1.0)),
+            1.0
+        );
     }
 }

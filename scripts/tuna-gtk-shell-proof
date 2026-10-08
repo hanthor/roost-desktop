@@ -2787,8 +2787,9 @@ xdotool key Super_L
 cstate '.overview_open and .overview_progress == 0' "frozen overview" ||
     fail G-ANIMATION-CLOCK "the overview moved while animation time was frozen"
 anim_clock 125
-cstate '.overview_progress == 0.5' "overview at 125 ms" ||
-    fail G-ANIMATION-CLOCK "the overview was not exactly half open 125 ms in"
+# Opening eases out-sine (#499): sin(pi/4) of the way at half time.
+cstate '(.overview_progress - 0.7071067811865476 | if . < 0 then -. else . end) < 1e-9' "overview at 125 ms" ||
+    fail G-ANIMATION-CLOCK "the overview was not sin(pi/4) open 125 ms in (EASE_OUT_SINE)"
 cp "$CSTATE" "$ARTIFACTS/animation-clock-125ms.json"
 anim_clock 250
 cstate '.overview_progress == 1' "overview at 250 ms" ||
@@ -2797,15 +2798,16 @@ xdotool key Escape
 cstate '(.overview_open | not) and .overview_progress == 1' "frozen close" ||
     fail G-ANIMATION-CLOCK "the closing overview moved while animation time was frozen"
 anim_clock 375
-cstate '.overview_progress == 0.5' "close at 125 ms" ||
-    fail G-ANIMATION-CLOCK "the closing overview was not exactly half way 125 ms in"
+# Closing eases out-quad: three quarters of the way gone at half time.
+cstate '(.overview_progress - 0.25 | if . < 0 then -. else . end) < 1e-9' "close at 125 ms" ||
+    fail G-ANIMATION-CLOCK "the closing overview was not a quarter open 125 ms in (EASE_OUT_QUAD)"
 anim_clock 500
 cstate '.overview_progress == 0' "close at 250 ms" ||
     fail G-ANIMATION-CLOCK "the closing overview had not settled 250 ms in"
 rm -f "$TUNA_ANIMATION_CLOCK"
 cstate '.animation_clock_manual | not' "real clock" ||
     fail G-ANIMATION-CLOCK "removing the clock file did not resume real time"
-pass G-ANIMATION-CLOCK "a proof-driven clock freezes compositor animation time and samples the overview at exact 125/250 ms delays both ways"
+pass G-ANIMATION-CLOCK "a proof-driven clock freezes compositor animation time and samples the overview's out-sine opening and out-quad closing at exact 125/250 ms delays"
 
 # GNOME settings (#63): the idle lock follows idle-delay and
 # lock-enabled as they change.
