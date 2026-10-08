@@ -1547,6 +1547,9 @@ impl Runtime {
             // Where the strip is drawn this frame: trails the target
             // on niri's view-movement spring, equal once settled.
             "strip_view": self.manager.strip_view(),
+            // GNOME's size-change transitions (#496): in flight, and the
+            // last few with every drawn frame, for the proofs.
+            "size_changes": self.manager.size_changes().to_json(),
             "minimized": snapshot
                 .windows
                 .iter()
@@ -1767,6 +1770,28 @@ impl Runtime {
         self.strip_view_at = now;
         self.manager
             .step_strip_view(dt / self.input_settings.motion.slowdown());
+    }
+
+    /// Start and advance GNOME's size-change transitions (#496) before
+    /// the scene is built. Skipped while the overview is open or a
+    /// three-finger swipe is held, as GNOME's `_shouldAnimate`.
+    fn step_size_changes(&mut self) {
+        let policy = crate::size_change::Policy::from_motion(self.input_settings.motion);
+        let allowed = !self.control.overview_open() && self.shell_swipe.is_none();
+        let now = self.animation_clock.now();
+        let renderer = match &mut self.backend {
+            Backend::Winit(backend) => backend.renderer(),
+            #[cfg(feature = "drm")]
+            Backend::Drm(drm) => &mut drm.renderer,
+        };
+        crate::size_change::step_frame(
+            &mut self.manager,
+            renderer,
+            &self.state,
+            now,
+            policy,
+            allowed,
+        );
     }
 
     /// A press while the overview is open that no shell surface took:
@@ -3175,6 +3200,7 @@ impl Runtime {
         };
         let drawn = self.step_overview_transition();
         self.step_strip_view();
+        self.step_size_changes();
         let overview = (show_content && !overlay_visible && drawn).then(|| self.overview_layout());
         // While search shows results, the workspace view steps aside.
         let cards = overview.as_ref().filter(|_| !self.overview_search);
@@ -3409,6 +3435,11 @@ impl Runtime {
                                 .top
                                 .iter()
                                 .map(|e| ElementSignature::capture(e, view.scale))
+                                .collect(),
+                            elements
+                                .snapshots
+                                .iter()
+                                .map(|(_, e)| ElementSignature::capture(e, 1.0))
                                 .collect(),
                         ],
                     };
@@ -3714,7 +3745,15 @@ struct Scene {
     tile: Vec<smithay::backend::renderer::element::solid::SolidColorRenderElement>,
     /// Window thumbnails over everything (the Alt+Tab switcher's).
     top: Vec<PreviewElement>,
+    /// Old-frame snapshots of size-change transitions (#496), each
+    /// drawn in front of `elements[index..]`, in physical pixels.
+    snapshots: Vec<(usize, SnapshotElement)>,
 }
+
+/// A size-change snapshot, drawn at scale 1.
+type SnapshotElement = smithay::backend::renderer::element::texture::TextureRenderElement<
+    smithay::backend::renderer::gles::GlesTexture,
+>;
 
 impl Scene {
     /// Surfaces with nothing between them.
@@ -3734,6 +3773,7 @@ impl Scene {
             above,
             tile: Vec::new(),
             top: Vec::new(),
+            snapshots: Vec::new(),
         }
     }
 }
@@ -3928,12 +3968,50 @@ fn scene_elements(
             }),
         );
     };
-    for (window, geometry) in manager.render_windows() {
+    // Size-change snapshots with the bottom-to-top index they sit at.
+    let mut snapshots = Vec::new();
+    for (id, window, geometry) in manager.render_entries() {
         // Unassociated X11 windows contribute no surface yet and
         // render nothing this frame.
         if let Some(surface) = window.wl_surface() {
             if split_from.is_none() && split.is_some_and(|s| *s == *surface) {
                 split_from = Some(elements.len());
+            }
+            if let Some((frame, snapshot)) = manager.size_changes().frame(id) {
+                // GNOME's size-change transition (#496): the live window
+                // eased (never scaled past its size), the old frame
+                // fading over it. Popups wait for the window to land.
+                if frame.live_visible {
+                    let geo = crate::popup::window_geometry_loc(&surface);
+                    let (sx, sy) = frame.live_scale;
+                    let origin = view.physical(
+                        frame.live.loc.x - f64::from(geo.x) * sx,
+                        frame.live.loc.y - f64::from(geo.y) * sy,
+                    );
+                    elements.extend(
+                        render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(
+                            renderer,
+                            &surface,
+                            origin,
+                            view.scale,
+                            1.0,
+                            Kind::Unspecified,
+                        )
+                        .into_iter()
+                        .map(|element| {
+                            smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
+                                element,
+                                origin,
+                                (sx, sy),
+                            )
+                        }),
+                    );
+                }
+                snapshots.extend(
+                    crate::size_change::snapshot_element(renderer, snapshot, &frame, view)
+                        .map(|element| (elements.len(), element)),
+                );
+                continue;
             }
             let origin = crate::popup::surface_origin(&surface, geometry.loc);
             let committed_width = window.geometry().size.w;
@@ -3964,11 +4042,17 @@ fn scene_elements(
     // background-to-overlay layers); Smithay 0.7 draws the first
     // element topmost.
     let above = elements.len() - split_from.unwrap_or(0);
+    let total = elements.len();
+    let snapshots = snapshots
+        .into_iter()
+        .map(|(index, element)| (total - index, element))
+        .collect();
     Scene {
         elements: crate::layer::front_to_back(elements),
         above,
         tile: Vec::new(),
         top: Vec::new(),
+        snapshots,
     }
 }
 
@@ -4085,19 +4169,14 @@ fn draw_scene(
     }
     // Beneath the tile preview, the preview (blended), then the
     // dragged window and the layers over it.
-    let (over, under) = scene
-        .elements
-        .split_at(scene.above.min(scene.elements.len()));
-    if !under.is_empty() {
-        draw_render_elements(frame, scale, under, &[damage])
-            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-    }
+    let split = scene.above.min(scene.elements.len());
+    let (over, under) = scene.elements.split_at(split);
+    draw_with_snapshots(frame, scale, under, split, true, &scene.snapshots, damage)?;
     if !scene.tile.is_empty() {
         draw_render_elements::<GlesRenderer, _, _>(frame, 1.0, &scene.tile, &[damage])
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
     }
-    draw_render_elements(frame, scale, over, &[damage])
-        .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    draw_with_snapshots(frame, scale, over, 0, false, &scene.snapshots, damage)?;
     if !scene.top.is_empty() {
         draw_render_elements(frame, scale, &scene.top, &[damage])
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
@@ -4113,6 +4192,52 @@ fn draw_scene(
             Kind::Unspecified,
         );
         draw_render_elements::<GlesRenderer, _, _>(frame, 1.0, &[shield], &[damage])
+            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    }
+    Ok(())
+}
+
+/// Draw the front-to-back `elements`, the scene's `[base..]` slice,
+/// back to front with the size-change snapshots that sit among them
+/// (#496). A snapshot at the slice's end belongs to it only when
+/// `through_end` (the two halves around the tile preview share that
+/// boundary).
+fn draw_with_snapshots(
+    frame: &mut smithay::backend::renderer::gles::GlesFrame<'_, '_>,
+    scale: f64,
+    elements: &[PreviewElement],
+    base: usize,
+    through_end: bool,
+    snapshots: &[(usize, SnapshotElement)],
+    damage: Rectangle<i32, smithay::utils::Physical>,
+) -> Result<(), RuntimeError> {
+    let mut cuts: Vec<_> = snapshots
+        .iter()
+        .filter(|(index, _)| {
+            *index >= base
+                && (*index < base + elements.len()
+                    || (through_end && *index == base + elements.len()))
+        })
+        .map(|(index, element)| (index - base, element))
+        .collect();
+    cuts.sort_by_key(|(index, _)| std::cmp::Reverse(*index));
+    let mut end = elements.len();
+    for (index, snapshot) in cuts {
+        if index < end {
+            draw_render_elements(frame, scale, &elements[index..end], &[damage])
+                .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+            end = index;
+        }
+        draw_render_elements::<GlesRenderer, _, _>(
+            frame,
+            1.0,
+            std::slice::from_ref(snapshot),
+            &[damage],
+        )
+        .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    }
+    if end > 0 {
+        draw_render_elements(frame, scale, &elements[..end], &[damage])
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
     }
     Ok(())

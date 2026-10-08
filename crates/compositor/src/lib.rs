@@ -79,6 +79,7 @@ pub mod screencast;
 pub mod screenshot;
 pub mod session_lock;
 pub mod session_services;
+pub mod size_change;
 #[cfg(feature = "drm")]
 pub mod sleep;
 pub mod spring;
