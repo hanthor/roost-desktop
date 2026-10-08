@@ -196,24 +196,35 @@ def action(node, label):
         raise RuntimeError('actual widget has no verified single action: '+label)
 
 
-def unique_actionable(pid, label, predicate, seconds=20):
-    # The node can appear in the tree before its action interface is realized
-    # over the AT-SPI bridge; re-walk until exactly one allowed action shows.
+def keyboard_navigation(pid, label, predicate, host, original, seconds=120):
+    # The Displays-panel rows expose no AT-SPI action at all, so focus is
+    # acquired with genuine Tab key events through the verified X host and
+    # the row is opened with one genuine Return. Every resolved accessible
+    # is re-read live because the panel rebuilds children asynchronously.
+    subprocess.run(['xdotool', 'windowfocus', '--sync', host['xid']], check=True, timeout=5)
+    if int(command(['xdotool', 'getwindowfocus'])) != int(host['xid']):
+        raise RuntimeError('actual keyboard host focus refused: '+label)
+    tabs = 0
     end = time.monotonic() + seconds
     while True:
-        node = unique(pid, label, predicate)
+        guard(SETTINGS, CC, original)
+        host_guard(host)
+        if scene().get('focused_app_id') != SETTINGS:
+            raise RuntimeError('actual compositor focus left Settings during traversal: '+label)
         try:
-            iface = node.queryAction()
-            names = [iface.getName(i) for i in range(iface.nActions)]
-        except Exception:
-            names = []
-        (OUT / (label+'-actions.json')).write_text(json.dumps(names))
-        if len(names) == 1 and names[0] in ('click', 'activate', 'toggle', 'press'):
-            action(node, label)
-            return
-        if time.monotonic() >= end:
-            raise RuntimeError('actual widget has no verified single action: '+label)
+            matches = [n for n in tree(pid, label) if predicate(n)]
+            if len(matches) == 1:
+                matches[0].clear_cache()
+                if matches[0].getState().contains(pyatspi.STATE_FOCUSED):
+                    break
+        except GLib.GError:
+            pass
+        tabs += 1
+        if tabs > 150 or time.monotonic() >= end:
+            raise RuntimeError('actual Settings row never acquired focus: '+label)
+        subprocess.run(['xdotool', 'key', 'Tab'], check=True, timeout=5)
         time.sleep(.2)
+    subprocess.run(['xdotool', 'key', 'Return'], check=True, timeout=5)
 
 
 def toggle(process, original, desired, label):
@@ -530,7 +541,7 @@ try:
     wait(lambda: scene().get('focused_app_id') == SETTINGS, 'stock Settings lacks actual compositor focus')
     wait(lambda: any(n.name.replace('_', '') == 'Night Light' for n in tree(settings.pid, 'display-panel')),
          'actual Night Light navigation did not appear')
-    unique_actionable(settings.pid, 'night-light-navigation', lambda n: n.name.replace('_', '') == 'Night Light' and n.getRoleName() not in ('label','static','text'))
+    keyboard_navigation(settings.pid, 'night-light-navigation', lambda n: n.name.replace('_', '') == 'Night Light' and n.getRoleName() not in ('label','static','text'), host, cc_id)
     wait(lambda: any(n.getRoleName() == 'slider' for n in tree(settings.pid, 'night-light-page')),
          'actual temperature slider did not appear')
     if persisted()['night-light-enabled'] != 'false':
@@ -630,8 +641,7 @@ try:
         raise RuntimeError('Settings restart identity unchanged')
     cc_id = replacement
     wait(lambda: any(n.name.replace('_','')=='Night Light' for n in tree(settings.pid,'restarted-panel')), 'Night Light row absent after restart')
-    navigation = unique(settings.pid,'restarted-navigation',lambda n:n.name.replace('_','')=='Night Light' and n.getRoleName() not in ('label','static','text'))
-    action(navigation,'restarted-navigation')
+    keyboard_navigation(settings.pid,'restarted-navigation',lambda n:n.name.replace('_','')=='Night Light' and n.getRoleName() not in ('label','static','text'),host,cc_id)
     wait(lambda: any(n.getRoleName()=='slider' for n in tree(settings.pid,'restarted-page')), 'restarted actual temperature slider absent')
     if persisted()['night-light-enabled']!='true' or persisted()['night-light-temperature']!='uint32 3700':
         raise RuntimeError('actual persisted controls did not survive Settings restart')
