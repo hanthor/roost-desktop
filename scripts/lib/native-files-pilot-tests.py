@@ -119,6 +119,28 @@ class Policy(unittest.TestCase):
         self.assertTrue(T.valid_native_files_error(good))
         for candidate in (dict(good,message='private content'),dict(good,phase=[]),dict(good,exception_type='private body'),dict(good,stage='private body'),dict(good,stage=[]),{k:v for k,v in good.items() if k!='stage'}):
             self.assertFalse(T.valid_native_files_error(candidate))
+    def test_transport_accepts_fixed_receipt_sub_stage(self):
+        staged={'phase':'mapped','stage':'provider-receipt','exception_type':'RuntimeError','sub_stage':'receipt-match'}
+        self.assertTrue(T.valid_native_files_error(staged))
+        for candidate in (dict(staged,sub_stage='private check'),dict(staged,sub_stage='receipt-match',stage='cells'),
+                          dict(staged,sub_stage=[]),dict(staged,sub_stage='receipt-match',query_context={})):
+            self.assertFalse(T.valid_native_files_error(candidate))
+    def test_receipt_owner_shape_names_failing_check(self):
+        G.error_substage(None)
+        with self.assertRaises(RuntimeError):G.provider_receipt(None,'private owner body',{})
+        self.assertEqual(G.ERROR_SUBSTAGE,'owner-shape')
+    def test_receipt_failure_emits_fixed_sub_stage(self):
+        def broken(_original,_phase):
+            G.error_stage('provider-receipt')
+            G.error_substage('provider-identity')
+            raise RuntimeError('private receipt body')
+        stream=io.StringIO()
+        with patch.object(G.sys,'argv',['fixed-probe','mapped']),patch.object(G,'context',return_value={}), \
+             patch.object(G,'inspect',side_effect=broken),redirect_stdout(stream):
+            self.assertEqual(G.main(),1)
+        diagnostic=json.loads(stream.getvalue())
+        self.assertEqual(diagnostic,{'native_files_error':{'phase':'mapped','stage':'provider-receipt','exception_type':'RuntimeError','sub_stage':'provider-identity'}})
+        self.assertTrue(T.valid_native_files_error(diagnostic['native_files_error']))
     def test_actual_failure_stage_preserves_exit_without_private_error_text(self):
         for stage in ('context','window','tree'):
             original=RuntimeError('private filename and credential must never be retained')

@@ -338,12 +338,18 @@ def fast_guard(value):
 
 # Fixed public invariant stages only; never retain exception messages or query data.
 ERROR_STAGE='context'
+# Fixed provider-receipt check that failed, or None outside it; never query data.
+ERROR_SUBSTAGE=None
 # Only fixed cells RPC operation and its original guard boundary; no query data.
 QUERY_CONTEXT=None
 
 def error_stage(stage):
     global ERROR_STAGE
     ERROR_STAGE=stage
+
+def error_substage(substage):
+    global ERROR_SUBSTAGE
+    ERROR_SUBSTAGE=substage
 
 
 def guard(value):
@@ -452,15 +458,19 @@ def a11y_connection():
 
 
 def provider_receipt(connection,owner,original):
+    error_substage('owner-shape')
     if type(owner) is not str or re.fullmatch(r':[0-9]{1,10}\.[0-9]{1,10}',owner) is None:
         raise RuntimeError('original accessibility provider unique name bound')
+    error_substage('owner-current')
     if query_connection(connection,'GetNameOwner',owner)!=owner:
         raise RuntimeError('original accessibility unique owner changed')
     pid=query_connection(connection,'GetConnectionUnixProcessID',owner)
     uid=query_connection(connection,'GetConnectionUnixUser',owner)
+    error_substage('provider-identity')
     result=process(pid,'/usr/bin/nautilus')
     if uid!=UID or any(result[key]!=original[key] for key in result):
         raise RuntimeError('accessibility provider is not original Nautilus')
+    error_substage('provider-stable')
     if query_connection(connection,'GetConnectionUnixProcessID',owner)!=pid or query_connection(connection,'GetConnectionUnixUser',owner)!=uid or process(pid,'/usr/bin/nautilus')!=result:
         raise RuntimeError('original accessibility provider changed during observation')
     return dict(result,owner=owner)
@@ -493,6 +503,7 @@ def provider_app(value,query):
     import pyatspi
     Atspi.set_timeout(1000,1000)
     error_stage('provider-enumerate')
+    error_substage(None)
     desktop=query(lambda:pyatspi.Registry.getDesktop(0))
     count=query(lambda:desktop.childCount)
     if type(count) is not int or not 0<=count<=256:raise RuntimeError('accessibility desktop bound')
@@ -512,6 +523,7 @@ def provider_app(value,query):
                 apps.append(app)
         if len(apps)!=1:raise RuntimeError('original accessible Files provider ambiguous')
         error_stage('provider-receipt')
+        error_substage('receipt-match')
         if 'accessibility' in value and receipt!=value['accessibility']:raise RuntimeError('original accessible Files provider changed')
     finally:connection.close_sync(None)
     return apps[0],pyatspi,receipt
@@ -766,6 +778,10 @@ def main():
         allowed={'RuntimeError','ValueError','OSError','FileNotFoundError','PermissionError','CalledProcessError','TimeoutExpired','TimeoutError','ImportError','ModuleNotFoundError'}
         name=type(error).__name__
         diagnostic={'phase':phase,'stage':ERROR_STAGE,'exception_type':name if name in allowed else 'OtherError'}
+        if ERROR_STAGE=='provider-receipt' and ERROR_SUBSTAGE is not None:
+            if ERROR_SUBSTAGE not in {'owner-shape','owner-current','provider-identity','provider-stable','receipt-match'}:
+                raise ValueError('fixed provider receipt sub-stage required')
+            diagnostic['sub_stage']=ERROR_SUBSTAGE
         if ERROR_STAGE=='cells' and QUERY_CONTEXT is not None:
             diagnostic['query_context']=dict(QUERY_CONTEXT)
         print(json.dumps({'native_files_error':diagnostic}))

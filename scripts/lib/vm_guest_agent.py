@@ -46,7 +46,8 @@ def valid_native_files_error(value):
             "tree-provider","provider-enumerate","provider-receipt","tree-walk",
             "cells","filesystem","cleanup","phase","final-guard","receipt","diagnostic-transport"}
     fields={"phase","stage","exception_type"}
-    if type(value) is not dict or set(value) not in (fields,fields|{"query_context"}):return False
+    if type(value) is not dict or set(value) not in (fields,fields|{"query_context"},fields|{"sub_stage"}):return False
+    if "sub_stage" in value and (value.get("stage")!="provider-receipt" or type(value["sub_stage"]) is not str or value["sub_stage"] not in {"owner-shape","owner-current","provider-identity","provider-stable","receipt-match"}):return False
     if "query_context" in value:
         query=value["query_context"]
         if (value.get("stage")!="cells" or type(query) is not dict or set(query)!={"operation","boundary","reason"}
