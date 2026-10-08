@@ -3482,7 +3482,11 @@ impl Runtime {
                             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?
                     };
                     let feedback = crate::frame_timing::take_feedback(&mine, &out.output);
-                    if let Err(e) = out.surface.queue_buffer(Some(sync), None, feedback) {
+                    if let Err(e) = out.surface.queue_buffer(
+                        Some(sync),
+                        Some(crate::native_repaint::scanout_damage(damage)),
+                        feedback,
+                    ) {
                         eprintln!("roost-compositor: drm: queue_buffer {}: {e}", out.name);
                         // Never reuse history after an unsubmitted partial update.
                         out.last_frame = None;
