@@ -291,6 +291,7 @@ struct LogicalMonitorConfiguration {
 }
 
 struct DisplayConfig {
+    night_light: crate::night_light::Capability,
     outputs: Outputs,
     to_loop: calloop::channel::Sender<ToLoop>,
 }
@@ -417,7 +418,7 @@ impl DisplayConfig {
 
     #[zbus(property)]
     fn night_light_supported(&self) -> bool {
-        false
+        self.night_light.supported()
     }
 }
 
@@ -867,12 +868,14 @@ pub fn start(
     windows: Windows,
     authority: crate::capture_security::Authority,
     display: smithay::reexports::wayland_server::DisplayHandle,
+    night_light: crate::night_light::Capability,
 ) -> calloop::channel::Channel<ToLoop> {
     let (to_loop, from_dbus) = calloop::channel::channel();
     let _ = std::thread::Builder::new()
         .name("roost-mutter-dbus".into())
         .spawn(move || {
             let display_config = DisplayConfig {
+                night_light: night_light.clone(),
                 outputs: outputs.clone(),
                 to_loop: to_loop.clone(),
             };
@@ -931,11 +934,32 @@ pub fn start(
                     }
                 }
             }
+            let mut night_light_sent = None;
             // Revoke on lock, unique-name disconnect or loss of the trusted
             // service identity. 100ms admission scan plus one compositor tick
             // bounds stream teardown; frames additionally fail closed on lock.
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(100));
+                let supported = night_light.supported();
+                if night_light_sent != Some(supported) {
+                    let changed = HashMap::from([("NightLightSupported", Value::from(supported))]);
+                    if conn
+                        .emit_signal(
+                            None::<()>,
+                            "/org/gnome/Mutter/DisplayConfig",
+                            "org.freedesktop.DBus.Properties",
+                            "PropertiesChanged",
+                            &(
+                                "org.gnome.Mutter.DisplayConfig",
+                                changed,
+                                Vec::<&str>::new(),
+                            ),
+                        )
+                        .is_ok()
+                    {
+                        night_light_sent = Some(supported);
+                    }
+                }
                 let remote_snapshot = remote.lock().map(|s| s.clone()).unwrap_or_default();
                 for (remote_id, grant) in remote_snapshot {
                     let alive = zbus::block_on(authority.owner_alive(conn.inner(), &grant.owner));

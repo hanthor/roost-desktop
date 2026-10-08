@@ -81,6 +81,7 @@ pub struct DrmOutput {
     /// A frame is queued and its page flip has not completed yet.
     pub pending: bool,
     pub(crate) last_frame: Option<crate::native_repaint::FrameSignature>,
+    pub(crate) night_light: crate::night_light_display::Stage,
     pub(crate) damage_tracker: Option<smithay::backend::renderer::damage::OutputDamageTracker>,
     wake_trace: bool,
 }
@@ -322,6 +323,7 @@ impl DrmBackend {
                 scale: 1.0,
                 pending: false,
                 last_frame: None,
+                night_light: Default::default(),
                 damage_tracker: None,
                 wake_trace: false,
             });
@@ -452,6 +454,7 @@ impl DrmBackend {
                     out.surface.reset_buffers();
                     out.pending = false;
                     out.last_frame = None;
+                    out.night_light.reset();
                     out.damage_tracker = None;
                 }
                 self.active = true;
@@ -484,6 +487,7 @@ impl DrmBackend {
             out.surface.reset_buffers();
             out.pending = false;
             out.last_frame = None;
+            out.night_light.reset();
             out.damage_tracker = None;
             out.wake_trace = trace;
         }
@@ -837,27 +841,7 @@ pub fn cursor_rects(
     output_loc: (i32, i32),
     scale: f64,
 ) -> (PixelRects, PixelRects) {
-    let x = ((pos.x - f64::from(output_loc.0)) * scale).round() as i32;
-    let y = ((pos.y - f64::from(output_loc.1)) * scale).round() as i32;
-    // The arrow grows by whole pixels with the scale, staying crisp.
-    let k = (scale.round() as i32).max(1);
-    let rect = |dx: i32, dy: i32, w: i32| -> Rectangle<i32, Physical> {
-        Rectangle::new((x + dx * k, y + dy * k).into(), (w * k, k).into())
-    };
-    let mut outline = Vec::new();
-    let mut fill = Vec::new();
-    // Left-aligned triangle, 12 rows tall, plus a short tail.
-    for row in 0..12 {
-        outline.push(rect(0, row, row + 2));
-        if row > 0 && row < 11 {
-            fill.push(rect(1, row, row));
-        }
-    }
-    for row in 12..17 {
-        outline.push(rect(4, row, 4));
-        fill.push(rect(5, row, 2));
-    }
-    (outline, fill)
+    crate::night_light_display::cursor_rects(pos, output_loc, scale)
 }
 
 #[cfg(test)]

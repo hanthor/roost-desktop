@@ -176,6 +176,13 @@ pub struct ControlClient {
 }
 
 impl ControlClient {
+    /// Borrow the actual connected peer socket for kernel identity checks.
+    /// This does not reconnect or infer authority from the socket pathname.
+    pub fn peer_socket(&self) -> std::os::fd::BorrowedFd<'_> {
+        use std::os::fd::AsFd;
+        self.stream.as_fd()
+    }
+
     /// Connect to the compositor's control socket and wrap the stream.
     /// Sends nothing: call [`hello`](Self::hello) first, then await the
     /// full snapshot before trusting any delta.

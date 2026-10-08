@@ -22,6 +22,15 @@ fn stamped_version() -> String {
     }
 }
 
+fn expected_line(name: &str) -> String {
+    let version = stamped_version();
+    if name == "roost-compositor" && cfg!(feature = "night-light-vm-fixture") {
+        format!("{name} {version} [night-light-vm-fixture]")
+    } else {
+        format!("{name} {version}")
+    }
+}
+
 fn assert_reports_stamp(exe: &str, name: &str, expected: &str) {
     for flag in ["--version", "-V"] {
         let out = Command::new(exe)
@@ -40,14 +49,14 @@ fn assert_reports_stamp(exe: &str, name: &str, expected: &str) {
 #[test]
 fn compositor_version_matches_stamp() {
     let exe = env!("CARGO_BIN_EXE_roost-compositor");
-    let expected = format!("roost-compositor {}", stamped_version());
+    let expected = expected_line("roost-compositor");
     assert_reports_stamp(exe, "roost-compositor", &expected);
 }
 
 #[test]
 fn session_launcher_version_matches_stamp() {
     let exe = env!("CARGO_BIN_EXE_roost-session");
-    let expected = format!("roost-session {}", stamped_version());
+    let expected = expected_line("roost-session");
     assert_reports_stamp(exe, "roost-session", &expected);
 }
 
@@ -63,10 +72,15 @@ fn side_by_side_binaries_agree_on_version() {
                 .output()
                 .unwrap_or_else(|err| panic!("{name} --version runs: {err}"));
             assert!(out.status.success(), "{name} --version must succeed");
-            String::from_utf8_lossy(&out.stdout)
-                .split_whitespace()
-                .last()
-                .expect("version output ends with a version")
+            let line = String::from_utf8_lossy(&out.stdout);
+            assert_eq!(
+                line.trim_end(),
+                expected_line(name),
+                "{name} --version must retain its exact production or fixture identity"
+            );
+            line.split_whitespace()
+                .nth(1)
+                .expect("version output has the known second version token")
                 .to_owned()
         })
         .collect::<Vec<_>>();

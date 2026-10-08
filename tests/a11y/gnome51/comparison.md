@@ -41,7 +41,7 @@ GNOME: 136 visible nodes; 9 named controls. Roost: 15 named nodes in the proof g
 
 ## quick-settings
 
-GNOME: 93 visible nodes; 7 named controls. Roost: 25 named nodes in the proof golden.
+GNOME: 93 visible nodes; 7 named controls. Roost: 24 named nodes in the proof golden.
 
 | GNOME named control | Roost named node |
 | --- | --- |
@@ -67,7 +67,6 @@ GNOME: 93 visible nodes; 7 named controls. Roost: 25 named nodes in the proof go
 | — | toggle button: Bluetooth Menu |
 | — | toggle button: Power Mode |
 | — | toggle button: Power Mode Menu |
-| — | toggle button: Night Light |
 | — | toggle button: Dark Style |
 | — | toggle button: Do Not Disturb |
 

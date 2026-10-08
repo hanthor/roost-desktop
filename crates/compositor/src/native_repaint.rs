@@ -68,6 +68,7 @@ pub(crate) struct FrameSignature {
     pub size: (i32, i32),
     pub location: (i32, i32),
     pub scale: f64,
+    pub color_transform: (u64, u64, u64, [f32; 3]),
     pub locked: bool,
     pub background: Color32F,
     pub blank_alpha: f32,
@@ -86,6 +87,7 @@ impl FrameSignature {
         self.size == old.size
             && self.location == old.location
             && self.scale == old.scale
+            && self.color_transform == old.color_transform
             && self.locked == old.locked
             && self.background == old.background
             && self.blank_alpha == old.blank_alpha
@@ -137,6 +139,7 @@ mod tests {
             size: (1280, 800),
             location: (0, 0),
             scale: 1.0,
+            color_transform: (0, 0, 0, [1.0; 3]),
             locked: false,
             background: Color32F::BLACK,
             blank_alpha: 0.0,
@@ -174,6 +177,21 @@ mod tests {
         )];
         for next in variants {
             assert!(needs_repaint(Some(&before), &next, false));
+        }
+    }
+
+    #[test]
+    fn temperature_only_owner_replacement_and_stage_reset_require_full_repaint() {
+        let before = scene();
+        for transform in [
+            (0, 1, 0, [1.0, 0.7, 0.3]),
+            (1, 0, 0, [1.0; 3]),
+            (0, 0, 1, [1.0; 3]),
+        ] {
+            let mut after = before.clone();
+            after.color_transform = transform;
+            assert!(needs_repaint(Some(&before), &after, false));
+            assert!(!after.same_global_drawing(&before));
         }
     }
 

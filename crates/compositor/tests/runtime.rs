@@ -110,7 +110,22 @@ fn launch_smoke_binds_private_socket_or_skips_without_backend() {
         "missing sibling binary {}; run `cargo build -p roost-compositor --bins` first",
         bin.display()
     );
+    // Preserve an inherited host route. Without one, provide a private
+    // runtime directory to the child rather than only guessing its socket path.
+    // Keep the TempDir alive through child reaping and socket cleanup below.
+    let (runtime_dir, _private_runtime) = match std::env::var_os("XDG_RUNTIME_DIR") {
+        Some(path) => (std::path::PathBuf::from(path), None),
+        None => {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = tempfile::tempdir().expect("private nested runtime directory");
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+                .expect("private nested runtime permissions");
+            (dir.path().to_path_buf(), Some(dir))
+        }
+    };
+    let socket_path = runtime_dir.join(&socket_name);
     let mut child = Command::new(bin)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
         .args([
             "--socket",
             &socket_name,
@@ -124,11 +139,6 @@ fn launch_smoke_binds_private_socket_or_skips_without_backend() {
         .spawn()
         .expect("spawn nested compositor");
 
-    // `ListeningSocketSource::with_name` binds under `XDG_RUNTIME_DIR`.
-    let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    let socket_path = runtime_dir.join(&socket_name);
     let mut bound = false;
     let mut exited = None;
     for _ in 0..RETRY_ROUNDS {

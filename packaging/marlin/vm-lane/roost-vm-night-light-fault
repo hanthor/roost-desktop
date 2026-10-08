@@ -1,0 +1,274 @@
+#!/usr/bin/python3
+"""Privileged CI-only control for the separately installed fixture binary.
+
+The caller must retain its independent genuine warm-pixel baseline before this
+control. State observations here are admission checks, never pixel evidence.
+"""
+import hashlib
+import json
+import os
+import pathlib
+import re
+import stat
+import subprocess
+import sys
+import time
+
+EXE = pathlib.Path("/usr/libexec/roost-vm-night-light-compositor")
+CONTENT = b"final-pass-once\n"
+
+
+def original_identity(pid, ticks, expected_sha):
+    process = pathlib.Path(f"/proc/{pid}")
+    with (process / "stat").open("rb") as stream:
+        raw = stream.read(8193)
+    if len(raw) > 8192:
+        raise RuntimeError("identity bound")
+    actual_ticks = int(raw.decode().rsplit(")", 1)[1].split()[19])
+    metadata = EXE.stat()
+    if (process.stat().st_uid != 1000 or actual_ticks != ticks or os.readlink(process / "exe") != str(EXE)
+            or metadata.st_uid != 0 or metadata.st_mode & 0o022 or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size > 128 * 1024 * 1024):
+        raise RuntimeError("original fixture identity")
+    fd = os.open(EXE, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+        after = os.fstat(stream.fileno())
+    named = EXE.stat()
+    signature = lambda value: (value.st_dev, value.st_ino, value.st_uid, value.st_mode, value.st_size, value.st_mtime_ns)
+    if signature(metadata) != signature(before) or signature(before) != signature(after) or signature(after) != signature(named) or digest != expected_sha:
+        raise RuntimeError("fixture executable changed")
+    return {"pid": pid, "uid": 1000, "start_ticks": ticks, "exe_sha256": digest,
+            "exe_dev": before.st_dev, "exe_inode": before.st_ino}
+
+
+def fixture_package():
+    # Use the actual installed distribution database. A failed native query is
+    # never retried through another manager or an extracted artifact manifest.
+    if pathlib.Path("/usr/bin/rpm").is_file():
+        owner = subprocess.run(["/usr/bin/rpm", "-qf", "--queryformat", "%{NAME}\\n", str(EXE)],
+                               capture_output=True, timeout=5)
+        verified = subprocess.run(["/usr/bin/rpm", "-Vf", str(EXE)], capture_output=True, timeout=5)
+        if not valid_rpm_receipt(owner, verified):
+            raise RuntimeError("installed fixture RPM identity or verification")
+        return {"manager": "rpm", "name": "roost-night-light-fixture", "verified": True,
+                "owner_returncode": owner.returncode, "verify_returncode": verified.returncode}
+    owner = subprocess.run(["/usr/bin/pacman", "-Qoq", str(EXE)], capture_output=True, timeout=5)
+    if owner.returncode != 0 or owner.stdout != b"roost-night-light-fixture\n" or owner.stderr:
+        raise RuntimeError("installed fixture Arch identity")
+    return {"manager": "pacman", "name": "roost-night-light-fixture", "verified": False,
+            "owner_returncode": owner.returncode}
+
+
+def valid_rpm_receipt(owner, verified):
+    return (owner.returncode == 0 and owner.stdout == b"roost-night-light-fixture\n" and not owner.stderr
+            and verified.returncode == 0 and verified.stdout == b"" and verified.stderr == b"")
+
+
+def warm_submission(value):
+    if not isinstance(value, dict) or value.get("locked") is not False:
+        return False
+    light = value.get("night_light", {})
+    outputs = light.get("outputs", [])
+    if (light.get("supported") is not True or not isinstance(outputs, list) or not 1 <= len(outputs) <= 8
+            or any(type(light.get(key)) is not int or not 0 <= light[key] < 2**64 for key in ("owner_epoch", "generation"))):
+        return False
+    for output in outputs:
+        submitted = output.get("last_submitted_transform") if isinstance(output, dict) else None
+        if not isinstance(submitted, list) or len(submitted) != 4:
+            return False
+        if (any(type(v) is not int or not 0 <= v < 2**64 for v in submitted[:3])
+                or submitted[0] != light.get("owner_epoch") or submitted[1] != light.get("generation")):
+            return False
+        rgb = submitted[3]
+        if not isinstance(rgb, list) or len(rgb) != 3 or rgb == [1, 1, 1]:
+            return False
+        if any(type(v) not in (int, float) or not 0 <= v <= 1 for v in rgb):
+            return False
+    return True
+
+
+def transform_summary(value):
+    if not warm_submission(value):
+        raise RuntimeError("bounded genuine warm transform required")
+    light = value["night_light"]
+    temperature = light.get("temperature")
+    rgb = light.get("service_rgb_scales")
+    if (type(temperature) is not int or not 1000 <= temperature <= 10000
+            or light.get("service_supported") is not True
+            or not isinstance(rgb, list) or len(rgb) != 3 or rgb == [1, 1, 1]
+            or any(type(v) not in (int, float) or not 0 <= v <= 1 for v in rgb)):
+        raise RuntimeError("bounded genuine warm service required")
+    outputs = []
+    names = set()
+    for row in light["outputs"]:
+        name = row.get("name")
+        size = row.get("physical_size")
+        location = row.get("location")
+        scale = row.get("scale")
+        if (not isinstance(name, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}", name) is None
+                or name in names or not isinstance(size, list) or len(size) != 2
+                or any(type(v) is not int or not 1 <= v <= 8192 for v in size)
+                or not isinstance(location, list) or len(location) != 2
+                or any(type(v) is not int or not -(2**31) <= v < 2**31 for v in location)
+                or type(scale) not in (int, float) or not 0 < scale <= 8
+                or row["last_submitted_transform"][3] != rgb):
+            raise RuntimeError("bounded original output transform required")
+        names.add(name)
+        outputs.append({"name": name, "physical_size": size, "location": location,
+                        "scale": scale, "last_submitted_transform": row["last_submitted_transform"]})
+    return {"owner_epoch": light["owner_epoch"], "generation": light["generation"],
+            "temperature": temperature, "service_rgb_scales": rgb, "outputs": outputs}
+
+
+def state_signature(value):
+    return (value.st_dev, value.st_ino, value.st_uid, value.st_mode, value.st_nlink,
+            value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+
+def read_state_receipt(state_path):
+    path = pathlib.Path(state_path)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        named_before = path.lstat()
+        if (before.st_uid != 1000 or before.st_mode & 0o022 or not stat.S_ISREG(before.st_mode)
+                or not 0 < before.st_size <= 1024 * 1024
+                or state_signature(before) != state_signature(named_before)):
+            raise RuntimeError("original bounded fixture state required")
+        raw = stream.read(1024 * 1024 + 1)
+        after = os.fstat(stream.fileno())
+        named_after = path.lstat()
+        if (len(raw) != before.st_size or state_signature(before) != state_signature(after)
+                or state_signature(after) != state_signature(named_after)):
+            raise RuntimeError("original fixture state changed")
+    value = json.loads(raw)
+    transform = transform_summary(value)
+    return {"transform": transform, "admitted_wall_ns": time.time_ns(), "sha256": hashlib.sha256(raw).hexdigest(), "dev": before.st_dev,
+            "inode": before.st_ino, "uid": before.st_uid, "mode": stat.S_IMODE(before.st_mode),
+            "size": before.st_size, "mtime_ns": before.st_mtime_ns, "ctime_ns": before.st_ctime_ns}
+
+
+def admit_baseline(request_path, original, state_receipt):
+    path = pathlib.Path(request_path)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 1000 or before.st_mode & 0o022
+                or not 0 < before.st_size <= 8192 or state_signature(before) != state_signature(path.lstat())):
+            raise RuntimeError("original bounded baseline request required")
+        raw = stream.read(8193)
+        after = os.fstat(stream.fileno())
+        if (len(raw) != before.st_size or state_signature(before) != state_signature(after)
+                or state_signature(after) != state_signature(path.lstat())):
+            raise RuntimeError("original baseline request changed")
+    request = json.loads(raw)
+    if not isinstance(request, dict) or set(request) != {"pid", "start", "exe_sha256", "baseline_receipt", "baseline_transform"}:
+        raise RuntimeError("fixed baseline request required")
+    if (type(request["pid"]) is not int or request["pid"] != original["pid"]
+            or type(request["start"]) is not int or request["start"] != original["start_ticks"]
+            or request["exe_sha256"] != original["exe_sha256"]):
+        raise RuntimeError("original baseline principal mismatch")
+    baseline = request["baseline_receipt"]
+    if (not isinstance(baseline, dict)
+            or set(baseline) != {"sha256", "dev", "inode", "size", "mtime_ns", "ctime_ns", "observed_wall_ns"}
+            or not isinstance(baseline["sha256"], str) or re.fullmatch(r"[0-9a-f]{64}", baseline["sha256"]) is None
+            or any(type(baseline[key]) is not int or not 0 <= baseline[key] < 2**64
+                   for key in ("dev", "inode", "size", "mtime_ns", "ctime_ns", "observed_wall_ns"))
+            or not 0 < baseline["size"] <= 1024 * 1024 or baseline["observed_wall_ns"] <= 0):
+        raise RuntimeError("bounded independent baseline receipt required")
+    transform = request["baseline_transform"]
+    if (not isinstance(transform, dict)
+            or set(transform) != {"owner_epoch", "generation", "temperature", "service_rgb_scales", "outputs"}
+            or not isinstance(transform["outputs"], list)
+            or any(not isinstance(row, dict) or set(row) != {"name", "physical_size", "location", "scale", "last_submitted_transform"}
+                   for row in transform["outputs"])):
+        raise RuntimeError("bounded baseline transform schema required")
+    checked = transform_summary({"locked": False, "night_light": {**transform, "supported": True, "service_supported": True}})
+    if checked != state_receipt["transform"]:
+        raise RuntimeError("admitted transform differs from independent warm baseline")
+    # This decision precedes marker creation. A rejected request must never arm
+    # the optional pass, even if the controller's later cross-check also fails.
+    admitted_wall_ns = time.time_ns()
+    elapsed = admitted_wall_ns - baseline["observed_wall_ns"]
+    if not 0 <= elapsed <= 5_000_000_000:
+        raise RuntimeError("baseline admission clock expired or reversed")
+    state_receipt["admitted_wall_ns"] = admitted_wall_ns
+    return {"baseline_receipt": baseline, "capture_to_admission_ns": elapsed,
+            "request_sha256": hashlib.sha256(raw).hexdigest(), "request_dev": before.st_dev,
+            "request_inode": before.st_ino, "request_size": before.st_size,
+            "same_snapshot_required": False}
+
+
+def require_original_state_route(pid, state_path):
+    # Inspect only the fixed public snapshot route; never retain or print the
+    # remaining environment (which may contain session credentials).
+    if not pathlib.Path(state_path).is_absolute():
+        raise RuntimeError("absolute original state route required")
+    with pathlib.Path(f"/proc/{pid}/environ").open("rb") as stream:
+        raw = stream.read(65537)
+    if len(raw) > 65536:
+        raise RuntimeError("original state route bound")
+    selected = [entry for entry in raw.split(b"\0") if entry.startswith(b"ROOST_COMPOSITOR_STATE=")]
+    if selected != [b"ROOST_COMPOSITOR_STATE=" + os.fsencode(state_path)]:
+        raise RuntimeError("original compositor state route required")
+
+
+def main(pid, ticks, expected_sha, state_path, request_path):
+    if os.geteuid() != 0 or re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None:
+        raise RuntimeError("privileged fixture controller required")
+    original = original_identity(pid, ticks, expected_sha)
+    version = subprocess.run([str(EXE), "--version"], capture_output=True, timeout=5, check=True).stdout
+    if len(version) > 256 or b"[night-light-vm-fixture]" not in version:
+        raise RuntimeError("separate fixture feature required")
+    package = fixture_package()
+    require_original_state_route(pid, state_path)
+    state_receipt = read_state_receipt(state_path)
+    if original_identity(pid, ticks, expected_sha) != original:
+        raise RuntimeError("original fixture departed during state admission")
+    baseline_admission = admit_baseline(request_path, original, state_receipt)
+    directory = pathlib.Path("/run").stat()
+    if directory.st_uid != 0 or directory.st_mode & 0o022:
+        raise RuntimeError("root fixture directory required")
+    marker = pathlib.Path(f"/run/roost-vm-night-light-fault-{pid}")
+    fd = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    owned = os.fstat(fd)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(CONTENT)
+            stream.flush()
+            os.fsync(stream.fileno())
+            os.fchmod(stream.fileno(), 0o444)
+            owned = os.fstat(stream.fileno())
+        if original_identity(pid, ticks, expected_sha) != original:
+            raise RuntimeError("original fixture departed")
+        print(json.dumps({"controller_uid": os.geteuid(), "original": original, "fixture_package": package,
+                          "state_receipt": state_receipt, "original_state_route_matched": True,
+                          "baseline_admission": baseline_admission,
+                          "marker": {"path": str(marker), "uid": owned.st_uid, "mode": stat.S_IMODE(owned.st_mode),
+                                     "dev": owned.st_dev, "inode": owned.st_ino, "size": owned.st_size},
+                          "injected_driver_failure": False, "controlled_optional_final_pass": True}))
+    except Exception as primary:
+        # O_EXCL gives authority only to this marker identity, including a
+        # partially written file. Never unlink a substituted path.
+        cleanup = None
+        try:
+            named = marker.lstat()
+            if (named.st_dev, named.st_ino) != (owned.st_dev, owned.st_ino):
+                raise RuntimeError("owned marker replaced")
+            marker.unlink()
+        except Exception as error:
+            cleanup = type(error).__name__
+        print(json.dumps({"fixture_control_error_type": type(primary).__name__,
+                          "owned_marker_cleanup_error_type": cleanup}))
+        raise SystemExit(1) from None
+
+
+
+if __name__ == "__main__":
+    try:
+        main(int(sys.argv[1]), int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5])
+    except Exception as error:
+        print(json.dumps({"fixture_control_error_type": type(error).__name__}))
+        raise SystemExit(1) from None
