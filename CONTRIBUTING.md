@@ -1,10 +1,14 @@
 # Contributing to Tuna Desktop
 
-Tuna Desktop is in design-and-planning stage: no compositor implementation has
-started yet (see [README.md](README.md)). Most contributions right now are
-planning artifacts (specs, plans, ADRs) and documentation. This guide covers
-both that work and the code contribution process for when implementation
-begins.
+Tuna Desktop (formerly Roost) is in active implementation as a nested developer preview (see
+[README.md](README.md) and [ROADMAP.md](ROADMAP.md)). A Smithay compositor
+supervises a GTK4/libadwaita shell, session supervisor, greetd greeter, and
+versioned control protocol, tested across nested graphical journeys, AT-SPI
+accessibility, and Marlin VM lanes.
+
+This guide covers contributing code, tests, documentation, and planning
+artifacts. For complete developer setup and build instructions, see the
+[development guide](docs/development.md) and [testing guide](docs/testing.md).
 
 ## Before you start
 
@@ -111,12 +115,12 @@ Once a plan is approved and implementation starts:
   shell-host (wire-only, no private compositor APIs). Preserve these
   boundaries even though the crates currently live together.
 
-## Documentation and planning-only contributions
+## Documentation and planning contributions
 
-Given the current stage, doc fixes, ADR proposals, and spec/plan work are
-welcome and don't require the full code-contribution checklist above — just
-DCO sign-off on the commit. Use plain file edits for anything under `docs/`,
-`README.md`, or this file; use the Spektacular CLI for anything under
+Documentation improvements, ADR proposals, and spec/plan updates are
+always welcome and don't require the full code-contribution checklist
+above — just DCO sign-off on the commit. Use plain file edits for anything under
+`docs/`, `README.md`, or this file; use the Spektacular CLI for anything under
 `.spektacular/`.
 
 ## Test strategy
