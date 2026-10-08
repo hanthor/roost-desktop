@@ -94,13 +94,9 @@ use crate::watcher::{
 /// Shared with the compositor: both sides read these from the same source
 /// to prevent drift in the compositor↔shell interface.
 pub use roost_shell_control::{
-    BANNER_NAMESPACE, OVERVIEW_NAMESPACE, PANEL_HEIGHT, PANEL_NAMESPACE,
+    BANNER_NAMESPACE, DOCK_NAMESPACE, OVERVIEW_NAMESPACE, PANEL_HEIGHT, PANEL_NAMESPACE,
+    SWITCHER_NAMESPACE,
 };
-
-/// Layer namespace for the bottom dock surface (shell-local; compositor does not use).
-pub const DOCK_NAMESPACE: &str = "roost-shell-dock";
-/// Layer namespace for the Alt-Tab switcher surface (shell-local; compositor does not use).
-pub const SWITCHER_NAMESPACE: &str = "roost-shell-switcher";
 
 /// Tunables for the panel surface. Defaults give a top-anchored,
 /// full-width strip reserving an exclusive zone.

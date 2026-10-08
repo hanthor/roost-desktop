@@ -11,6 +11,8 @@ COPY scripts/roost-frame-pacer-build /tmp/frame-pacer/scripts/roost-frame-pacer-
 COPY scripts/lib/roost-frame-pacer.c /tmp/frame-pacer/scripts/lib/roost-frame-pacer.c
 COPY packaging/marlin/perf/roost-perf-phase /usr/libexec/roost-perf-phase
 COPY packaging/marlin/perf/roost-gnome-profiler /usr/libexec/roost-gnome-profiler
+COPY scripts/lib/gnome_reference.py /usr/libexec/gnome_reference.py
+COPY packaging/marlin/perf/roost-gnome-reference /usr/libexec/roost-gnome-reference
 COPY scripts/lib/perf_trace_diagnostics.py /usr/libexec/perf_trace_diagnostics.py
 COPY scripts/lib/gnome_failed_capture.py /usr/libexec/gnome_failed_capture.py
 COPY packaging/marlin/perf/roost-perf.service /usr/lib/systemd/system/roost-perf.service

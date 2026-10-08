@@ -27,3 +27,5 @@ podman run --rm --network=none --security-opt label=disable --volume "$ROOT:/rep
 # This backend-only stage does not use a host-app-ID frontend test bypass.
 mkdir -p "$out/global-shortcuts"
 podman run --rm --network=none --security-opt label=disable --volume "$ROOT:/repo:ro" --volume "$candidate:/candidate:ro" --volume "$out/global-shortcuts:/out" localhost/roost-portal-reference /repo/tests/portal-reference/global-shortcuts-run.sh
+mkdir -p "$out/stock-backgrounds"
+podman run --rm --network=none --security-opt label=disable --volume "$ROOT:/repo:ro" --volume "$candidate:/candidate:ro" --volume "$out/stock-backgrounds:/out" localhost/roost-portal-reference /repo/tests/portal-reference/backgrounds-run.sh

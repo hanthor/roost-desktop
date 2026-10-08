@@ -3600,6 +3600,7 @@ version = "0.1.0"
 dependencies = [
  "image",
  "jxl-oxide",
+ "roost-shell-control",
 ]
 
 [[package]]

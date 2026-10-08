@@ -16,7 +16,7 @@ use roost_shell_control::SwitcherThumbnail;
 use roost_shell_host::model::ShellModel;
 
 /// Layer namespace (matches the legacy shell's switcher surface).
-pub const NAMESPACE: &str = "roost-shell-switcher";
+pub use roost_shell_control::SWITCHER_NAMESPACE as NAMESPACE;
 
 type SwitcherItem = (u64, String, Option<String>, usize, Option<String>);
 
@@ -91,7 +91,7 @@ impl SwitcherUi {
         thumbs_window.add_css_class("roost-switcher");
         thumbs_window.init_layer_shell();
         thumbs_window.set_layer(Layer::Overlay);
-        thumbs_window.set_namespace(Some("roost-shell-switcher-thumbnails"));
+        thumbs_window.set_namespace(Some(roost_shell_control::SWITCHER_THUMBNAILS_NAMESPACE));
         thumbs_window.set_keyboard_mode(KeyboardMode::None);
         thumbs_window.set_exclusive_zone(-1);
         thumbs_window.set_anchor(Edge::Top, true);

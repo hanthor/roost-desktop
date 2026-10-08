@@ -136,3 +136,96 @@ because their times are close. A rejected ownership result remains rejected.
 The recipe, both patches and package checksum manifest are retained with each
 run, and the original mapped library's installed package identity selects this
 additional diagnostic requirement.
+
+
+## Explicit stock and diagnostic benchmark profiles
+
+The benchmark prepares one coherent distribution GNOME 51 image, records its
+image ID, and derives two explicit references from those same bytes. `stock`
+uses the distribution's unmodified Mutter package before diagnostic replacement;
+this means distribution stock, not an upstream build without distribution
+patches. `diagnostic` installs the exact checksum-pinned `mutter 51.0-1.6`.
+The default profile and every original diagnostic Start/Stop, writer-closure,
+whole-capture, source and ownership gate remain required.
+
+Each profile installs the same authenticated trusted-main Roost payload into
+one shared preview image. Its GNOME and Roost sessions use that profile's image,
+package manifest and critical kernel/library hashes. Stock admission verifies
+original ordinary GNOME session UID, unique bus owner, PID, start ticks and
+installed executable, plus actual loaded Mutter/Clutter/Cogl inode identities,
+package ownership and hashes against the protected pre-instrumentation image.
+These exact receipts are retained before and after the workload. An original
+process replacement or changed reference fails the acquisition.
+
+Stock runs the same resource, QMP overview, native presentation-cadence and
+notification workloads. Its trace result is explicitly unavailable: stock does
+not request diagnostic Sysprof options or substitute zero latency. A diagnostic
+failure never falls back to stock. Both profiles retain raw samples, guest-clock
+phase markers, captures and actual image/package receipts.
+
+Each profile performs three fresh-guest pairs on one host, ordered GNOME/Roost,
+Roost/GNOME, GNOME/Roost. Reports retain actual repeat and order; the order count
+is 2:1, not fully balanced or randomized. First diagnostic paths are unchanged;
+later pairs use `repeat-2/` and `repeat-3/`, and stock pairs live beneath `stock/`.
+All twelve acquisitions are mandatory for whole-workflow success. Each profile
+fails at its original first failed command, retaining that exit status and a
+finite `acquisition-status.json` stage/case receipt. A failed diagnostic step
+still permits the independent stock step on the same runner only after the
+shared package, both reference images, and all installed-runtime guards passed.
+Before any stock image or disk operation, its preflight also requires the
+original finite diagnostic status and every reached case's original owned-VM
+departure receipt. Each worker creates a private original FD before boot, pins
+its returned child PID/UID/start time and pidfd, and records terminal departure
+only after actual wait and pidfd readiness. Transport-close errors still run
+owned-child cleanup; the original metric failure remains nonzero. Missing,
+changed or nonterminal receipts (including an abruptly killed worker) forbid
+stock acquisition. No process-name scan or unrelated process killing is used.
+These same-user artifact checks establish controlled source provenance rather
+than an unforgeable security boundary. A departure receipt proves neither guest
+measurement success nor package/runtime qualification. Cancellation or failed
+shared setup forbids stock acquisition. Neither profile retries its failed case.
+Diagnostic failure keeps the workflow failed, and partial diagnostic reports
+must not be pooled or labeled qualified. Successful stock pairs are separately
+scoped evidence, never a fallback diagnostic result. The workflow uploads
+retained evidence, without retries or selecting only successful samples.
+The job has a finite 180-minute budget, extended from the original single-pair
+lane to cover twelve fresh installations/acquisitions and one diagnostic build.
+This source budget has not yet been qualified by the new VM run.
+
+Idle CPU uses only intervals wholly within the actual guest idle window. Idle
+PSS and RSS use only collections wholly inside that window and require at least
+twenty samples. Whole-run summaries include startup and later workloads. PSS
+and RSS sum the test UID's processes, excluding the observer and descendants;
+RSS can double-count shared pages. Host polling of the panel includes VM boot
+and provides an upper bound, not exact session startup. QMP overview timings
+are broad visible host responses, not input-to-photon. Search followed by an
+eight-second sleep neither measures nor proves app launch/readiness.
+
+Three pairs do not establish statistical significance or a release threshold.
+Host cache warming/contention, virtual GPU behavior and diagnostic mark/drain
+overhead remain confounds. Physical cold/warm startup and sustained app/soak
+measurements remain open.
+
+## Retained single-pair observations before the stock lane
+
+PR #461's successful comparison used instrumented GNOME 51, not stock. Its
+trusted-main measured Roost payload was `e970c7b12a66a2c338ee8e8c5ab01d2ccd748bfc`;
+the benchmark observer was the PR merge source. Linux was `7.2.9.arch1-1`, Mesa
+`1:26.2.4-1`, GNOME Shell `1:51.0-1`, and Mutter `51.0-1.6`.
+The original artifact is from run `37620809723`, job `112790314887`.
+
+| Observation | Instrumented GNOME | Roost |
+| --- | ---: | ---: |
+| Panel observed upper bound | 28.7368 s | 24.5626 s |
+| Whole-user PSS p50 | 927766 KiB | 929079 KiB |
+| Idle sampled CPU mean | 0.206869% | 1.103330% |
+| Whole-run sampled CPU mean | 21.330033% | 41.082553% |
+| Overview host upper bound p50 | 0.165681 s | 0.452012 s |
+| Overview host upper bound p95 | 0.534667 s | 0.760166 s |
+| Native client presentation interval p95 | 26.669 ms | 13.335 ms |
+
+These mixed single-pair observations demonstrate no repeatable stock-GNOME
+benefit. CPU percentages use one core as 100% and count surviving sampled
+processes; departed processes can consume unobserved CPU. The presentation
+probe is one native SHM client on the virtual display, not all compositor frames.
+New stock/repeat results must carry their own successful qualification.

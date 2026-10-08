@@ -156,7 +156,7 @@ impl PowerUi {
         dialog.add_css_class("roost-end-session");
         dialog.init_layer_shell();
         dialog.set_layer(Layer::Overlay);
-        dialog.set_namespace(Some("roost-shell-end-session"));
+        dialog.set_namespace(Some(roost_shell_control::END_SESSION_NAMESPACE));
         for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
             dialog.set_anchor(edge, true);
         }

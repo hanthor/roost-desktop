@@ -34,6 +34,8 @@ jobs:
       - run: python3 scripts/lib/marlin-kernel-tests.py
       - run: python3 scripts/lib/gnome-drained-tests.py
       - run: python3 scripts/lib/roost-perf-payload-tests.py
+      - run: python3 scripts/lib/roost-perf-reference-tests.py
+      - run: python3 scripts/lib/roost-perf-repeatability-tests.py
       - run: python3 scripts/lib/native-constraint-tests.py
       - run: python3 scripts/lib/roost-pipewire-dump-tests.py
       - run: scripts/roost-settings-inventory-check
@@ -95,13 +97,13 @@ jobs:
       # the ledger's cargo:<name> references against this list.
       - run: cargo test --workspace -q -- --list --format terse > test-list.txt
       - run: scripts/roost-test-strategy --test-list test-list.txt --report test-strategy-report.md
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: executed-test-strategy-report
           path: test-strategy-report.md
           retention-days: 14
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: test-list
           path: test-list.txt
@@ -128,13 +130,13 @@ jobs:
       - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck jq dbus gsettings-desktop-schemas libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev
       - run: shellcheck -x scripts/roost-journey scripts/roost-nested scripts/roost-release scripts/check-release-package scripts/lib/roost-introspect.sh
       - run: scripts/roost-release --allow-dirty --out package-artifacts && scripts/check-release-package package-artifacts/*.deb
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: roost-deb
           path: package-artifacts/
           retention-days: 14
       - run: scripts/roost-journey --artifacts journey-artifacts
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: journey-shots
@@ -160,7 +162,7 @@ jobs:
       - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck python3-venv libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev
       - run: shellcheck scripts/roost-app-content scripts/roost-nested
       - run: scripts/roost-app-content --artifacts app-content-artifacts
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: app-content-shots
@@ -185,7 +187,7 @@ jobs:
       - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck python3-venv libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev
       - run: shellcheck scripts/roost-scroll-proof scripts/roost-nested
       - run: scripts/roost-scroll-proof --artifacts scroll-proof-artifacts
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: scroll-proof-shots
@@ -215,7 +217,7 @@ jobs:
       - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config libwayland-dev wayland-protocols seatd jq ffmpeg shellcheck libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev "linux-modules-extra-$(uname -r)"
       - run: shellcheck scripts/roost-drm-smoke scripts/roost-frame-pacer-build
       - run: scripts/roost-drm-smoke --artifacts drm-smoke-artifacts
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: drm-smoke
@@ -280,12 +282,12 @@ jobs:
       # manifest names must still be taken, and the bundle is what a
       # docs refresh commits (scripts/roost-walkthrough).
       - run: scripts/roost-walkthrough build gtk-shell-artifacts --dest walkthrough
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: walkthrough
           path: walkthrough/
           retention-days: 90
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         id: gtk_artifact
         if: always()
         with:
@@ -299,12 +301,12 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: roost-arch
           path: ${{ runner.temp }}/portal-package
       - run: sudo apt-get -o Acquire::Retries=3 update -qq && sudo apt-get install -y --no-install-recommends podman zstd shellcheck
-      - run: shellcheck scripts/roost-portal-security tests/portal-reference/run.sh tests/portal-reference/settings-run.sh tests/portal-reference/global-shortcuts-run.sh
+      - run: shellcheck scripts/roost-portal-security tests/portal-reference/run.sh tests/portal-reference/settings-run.sh tests/portal-reference/global-shortcuts-run.sh tests/portal-reference/backgrounds-run.sh
       - run: python3 scripts/lib/roost-portal-artifact-tests.py
       - name: Test packaged compositor with actual GNOME 51 portal consent
         run: |
@@ -315,7 +317,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/portal-security"
           printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/portal-security/candidate-commit.txt"
           scripts/roost-portal-security --candidate "$RUNNER_TEMP/portal-candidate" --out "$RUNNER_TEMP/portal-security"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: portal-security
@@ -328,7 +330,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: roost-arch
           path: ${{ runner.temp }}/remote-package
@@ -343,7 +345,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/remote-security"
           printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/remote-security/candidate-commit.txt"
           scripts/roost-remote-security --candidate "$RUNNER_TEMP/remote-candidate" --out "$RUNNER_TEMP/remote-security"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: remote-security
@@ -356,7 +358,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: roost-arch
           path: niri-package
@@ -367,7 +369,7 @@ jobs:
           tar --zstd -xf niri-package/roost-*.pkg.tar.zst -C niri-candidate
           scripts/roost-niri-compare --candidate niri-candidate --out niri-parity-artifacts
           printf '%s\n' "$GITHUB_SHA" >niri-parity-artifacts/candidate-revision.txt
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: niri-parity
@@ -395,7 +397,7 @@ jobs:
           for bin in roost-compositor roost-session roost-shell-host roost-greeter; do "$bin" --version; done
           test -f /usr/share/wayland-sessions/roost.desktop
           mkdir -p arch-artifacts && cp "$pkg" arch-artifacts/
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: roost-arch
           path: arch-artifacts/
@@ -412,7 +414,7 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: roost-arch
           path: arch-artifacts
@@ -430,7 +432,7 @@ jobs:
           kernel_container=$(podman create marlin-roost-preview:ci /usr/bin/true)
           trap 'podman rm "$kernel_container"' EXIT
           podman cp "$kernel_container:/usr/share/roost-image-kernels/." marlin-image-kernels/
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: marlin-image-kernels
@@ -457,7 +459,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: roost-arch
           path: arch-artifacts
@@ -522,7 +524,7 @@ jobs:
           --meta "test_image_id=$(cat /mnt/vm/image-id)"
           --meta "roost_package=$(basename arch-artifacts/roost-[0-9]*.pkg.tar.zst)"
           --meta "commit=${{ github.sha }}"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: marlin-vm
@@ -530,7 +532,7 @@ jobs:
             vm-lane-artifacts/
             !vm-lane-artifacts/tour/
           retention-days: 14
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: roost-tour
@@ -546,11 +548,11 @@ jobs:
     needs: [check, journey, gtk-shell, drm-smoke, marlin-vm]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: test-list
           path: ledger-in
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: journey-shots
           path: ledger-in/journey
@@ -558,15 +560,15 @@ jobs:
         env:
           GTK_PROOF_ARTIFACT_ID: ${{ needs.gtk-shell.outputs.proof_artifact_id }}
         run: '[[ "$GTK_PROOF_ARTIFACT_ID" =~ ^[0-9]+$ ]]'
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           artifact-ids: ${{ needs.gtk-shell.outputs.proof_artifact_id }}
           path: ledger-in/gtk-shell
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: drm-smoke
           path: ledger-in/drm-smoke
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: marlin-vm
           path: ledger-in/marlin-vm
@@ -588,21 +590,21 @@ jobs:
       # docs/shots refresh from here (see docs/screenshots.md). No
       # byte-freshness gate: the panel clock renders live, so a fresh
       # run legitimately differs from the committed set by its digits.
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: journey-shots
           path: /tmp/roost-docs/journey
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: app-content-shots
           path: /tmp/roost-docs/app
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: scroll-proof-shots
           path: /tmp/roost-docs/scroll
       - run: shellcheck scripts/roost-docs-shots
       - run: scripts/roost-docs-shots collect /tmp/roost-docs/journey /tmp/roost-docs/app /tmp/roost-docs/scroll --dest /tmp/roost-docs/shots && ls /tmp/roost-docs/shots | wc -l | grep -q 7
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: docs-shots
           path: /tmp/roost-docs/shots/

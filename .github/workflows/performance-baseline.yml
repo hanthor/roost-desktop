@@ -4,10 +4,13 @@ on:
     paths:
       - .github/workflows/performance-baseline.yml
       - scripts/roost-vm-perf
+      - scripts/roost-perf-profile-pairs
       - scripts/roost-frame-pacer-build
       - scripts/lib/roost-frame-pacer.c
       - scripts/lib/roost-perf-*.py
+      - scripts/lib/perf_vm_lifetime.py
       - scripts/lib/gnome_sysprof.py
+      - scripts/lib/gnome_reference.py
       - scripts/lib/fixtures/sysprof-mark.*
       - scripts/lib/fixtures/gnome51-*
       - packaging/marlin/perf/**
@@ -23,10 +26,13 @@ permissions:
 jobs:
   compare:
     runs-on: ubuntu-26.04
-    timeout-minutes: 90
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: python3 scripts/lib/roost-perf-tests.py
+      - run: python3 scripts/lib/roost-perf-repeatability-tests.py
+      - run: python3 scripts/lib/roost-perf-vm-lifetime-tests.py
+      - run: python3 scripts/lib/roost-perf-reference-tests.py
       - name: Select a successful trusted main package
         env:
           GH_TOKEN: ${{ github.token }}
@@ -65,6 +71,7 @@ jobs:
           shellcheck scripts/roost-frame-pacer-build
           python3 scripts/lib/roost-perf-payload-tests.py
       - name: Build one shared preview payload
+        id: shared_payload
         run: |
           # Evidence redirects intentionally belong to the unprivileged runner.
           # shellcheck disable=SC2024
@@ -75,67 +82,68 @@ jobs:
           python3 scripts/lib/roost-perf-payload.py copy --package roost.pkg.tar.zst --report perf-artifacts/package-payload.json --out perf-artifacts/package-copy.json
           package_sha=$(jq -r '.package.sha256' perf-artifacts/package-payload.json)
           sha256sum roost.pkg.tar.zst > perf-artifacts/package.sha256
-          sudo podman build -f packaging/marlin/perf/Containerfile.baseline -t localhost/marlin-gnome51-perf:base . 2>&1 | tee perf-artifacts/baseline-build.log
-          sudo podman build -f packaging/marlin/Containerfile --build-arg BASE_IMAGE=localhost/marlin-gnome51-perf:base --build-arg PERF_PINNED_BASELINE=true --build-arg ROOST_PKG=roost.pkg.tar.zst --build-arg ROOST_PKG_SHA256="$package_sha" -t localhost/marlin-roost-preview:perf . 2>&1 | tee perf-artifacts/shared-preview-build.log
-          sudo podman inspect localhost/marlin-roost-preview:perf --format '{{.Id}}' | tee shared-image-id
-          cp shared-image-id perf-artifacts/shared-image-id
-          python3 scripts/lib/roost-perf-payload.py copy --package roost.pkg.tar.zst --report perf-artifacts/package-payload.json --out perf-artifacts/package-copy-after-build.json
-          sudo podman run --rm localhost/marlin-roost-preview:perf pacman -Q roost > perf-artifacts/installed-roost-version
-          sudo podman run --rm localhost/marlin-roost-preview:perf pacman -Ql roost > perf-artifacts/installed-roost-files
-          # Copy actual installed critical bytes without executing the container.
-          container=$(sudo podman create localhost/marlin-roost-preview:perf /usr/bin/true)
-          trap 'sudo podman rm "$container"' EXIT
-          while IFS= read -r member; do
-            mkdir -p "perf-artifacts/installed-payload/$(dirname "$member")"
-            sudo podman cp "$container:/$member" "perf-artifacts/installed-payload/$member"
-          done < <(jq -r '.required_members | keys[]' perf-artifacts/package-payload.json)
-          sudo chown -R "$(id -u):$(id -g)" perf-artifacts/installed-payload
-          python3 scripts/lib/roost-perf-payload.py installed --installed perf-artifacts/installed-payload --pacman-version perf-artifacts/installed-roost-version --pacman-files perf-artifacts/installed-roost-files --report perf-artifacts/package-payload.json --out perf-artifacts/installed-payload.json
-          mkdir -p perf-artifacts/runtime-versions
-          while IFS= read -r loader; do
-            sudo podman run --rm localhost/marlin-roost-preview:perf sh -eu -c 'test -f "$1" && test -x "$1" && sha256sum "$1"' sh "$loader"
-          done < <(jq -r '.required_members[] | select(.elf) | .elf.interpreter' perf-artifacts/package-payload.json | sort -u) | tee perf-artifacts/installed-interpreters.log
-          for bin in roost-compositor roost-session roost-shell-host roost-shell-gtk roost-ibus-bridge roost-greeter; do
-            sudo podman run --rm localhost/marlin-roost-preview:perf sh -eu -c 'command -v "$1" && ldd "/usr/bin/$1"' sh "$bin" > "perf-artifacts/runtime-versions/$bin.ldd" 2>&1
-            if sudo podman run --rm localhost/marlin-roost-preview:perf "$bin" --version > "perf-artifacts/runtime-versions/$bin.version" 2>&1; then
-              printf '0\n' > "perf-artifacts/runtime-versions/$bin.status"
+          # One coherent distribution upgrade supplies BOTH explicit profiles.
+          sudo podman build -f packaging/marlin/perf/Containerfile.baseline --target gnome-baseline -t localhost/marlin-gnome51-coherent:base . 2>&1 | tee perf-artifacts/coherent-build.log
+          coherent_image=$(sudo podman inspect localhost/marlin-gnome51-coherent:base --format '{{.Id}}')
+          printf '%s\n' "$coherent_image" > perf-artifacts/coherent-image-id
+          for profile in diagnostic stock; do
+            profile_artifacts=perf-artifacts
+            if [[ "$profile" == stock ]]; then profile_artifacts=perf-artifacts/stock; fi
+            mkdir -p "$profile_artifacts"
+            sudo podman build -f packaging/marlin/perf/Containerfile.baseline --build-arg "COHERENT_BASE=$coherent_image" --target "$profile-reference" -t localhost/marlin-gnome51-perf:base . 2>&1 | tee "$profile_artifacts/baseline-build.log"
+            sudo podman build -f packaging/marlin/Containerfile --build-arg BASE_IMAGE=localhost/marlin-gnome51-perf:base --build-arg PERF_PINNED_BASELINE=true --build-arg ROOST_PKG=roost.pkg.tar.zst --build-arg ROOST_PKG_SHA256="$package_sha" -t "localhost/marlin-roost-preview:$profile" . 2>&1 | tee "$profile_artifacts/shared-preview-build.log"
+            sudo podman inspect "localhost/marlin-roost-preview:$profile" --format '{{.Id}}' | tee "shared-image-id-$profile"
+            cp "shared-image-id-$profile" "$profile_artifacts/shared-image-id"
+            python3 scripts/lib/roost-perf-payload.py copy --package roost.pkg.tar.zst --report perf-artifacts/package-payload.json --out "$profile_artifacts/package-copy-after-build.json"
+            sudo podman run --rm "localhost/marlin-roost-preview:$profile" pacman -Q roost > "$profile_artifacts/installed-roost-version"
+            sudo podman run --rm "localhost/marlin-roost-preview:$profile" pacman -Ql roost > "$profile_artifacts/installed-roost-files"
+            # Copy actual installed critical bytes without executing the container.
+            container=$(sudo podman create "localhost/marlin-roost-preview:$profile" /usr/bin/true)
+            trap 'sudo podman rm "$container"' EXIT
+            while IFS= read -r member; do
+            mkdir -p "$profile_artifacts/installed-payload/$(dirname "$member")"
+            sudo podman cp "$container:/$member" "$profile_artifacts/installed-payload/$member"
+            done < <(jq -r '.required_members | keys[]' perf-artifacts/package-payload.json)
+            sudo chown -R "$(id -u):$(id -g)" "$profile_artifacts/installed-payload"
+            python3 scripts/lib/roost-perf-payload.py installed --installed "$profile_artifacts/installed-payload" --pacman-version "$profile_artifacts/installed-roost-version" --pacman-files "$profile_artifacts/installed-roost-files" --report perf-artifacts/package-payload.json --out "$profile_artifacts/installed-payload.json"
+            mkdir -p "$profile_artifacts/runtime-versions"
+            while IFS= read -r loader; do
+            sudo podman run --rm "localhost/marlin-roost-preview:$profile" sh -eu -c 'test -f "$1" && test -x "$1" && sha256sum "$1"' sh "$loader"
+            done < <(jq -r '.required_members[] | select(.elf) | .elf.interpreter' perf-artifacts/package-payload.json | sort -u) | tee "$profile_artifacts/installed-interpreters.log"
+            for bin in roost-compositor roost-session roost-shell-host roost-shell-gtk roost-ibus-bridge roost-greeter; do
+            sudo podman run --rm "localhost/marlin-roost-preview:$profile" sh -eu -c 'command -v "$1" && ldd "/usr/bin/$1"' sh "$bin" > "$profile_artifacts/runtime-versions/$bin.ldd" 2>&1
+            if sudo podman run --rm "localhost/marlin-roost-preview:$profile" "$bin" --version > "$profile_artifacts/runtime-versions/$bin.version" 2>&1; then
+              printf '0\n' > "$profile_artifacts/runtime-versions/$bin.status"
             else
               status=$?
-              printf '%s\n' "$status" > "perf-artifacts/runtime-versions/$bin.status"
-              cat "perf-artifacts/runtime-versions/$bin.ldd" "perf-artifacts/runtime-versions/$bin.version"
+              printf '%s\n' "$status" > "$profile_artifacts/runtime-versions/$bin.status"
+              cat "$profile_artifacts/runtime-versions/$bin.ldd" "$profile_artifacts/runtime-versions/$bin.version"
               exit "$status"
             fi
+            done
+            python3 scripts/lib/roost-perf-payload.py runtime --runtime "$profile_artifacts/runtime-versions" --report perf-artifacts/package-payload.json --out "$profile_artifacts/installed-runtime.json"
+            sudo podman rm "$container"
+            trap - EXIT
+            sudo podman inspect ghcr.io/tuna-os/marlin:gnome --format '{{.Digest}}' | tee base-digest
+            sudo podman run --rm "localhost/marlin-roost-preview:$profile" gnome-shell --version | tee "$profile_artifacts/gnome-version"
+            grep -Eq '^GNOME Shell 51([. ]|$)' "$profile_artifacts/gnome-version"
+            sudo podman run --rm "localhost/marlin-roost-preview:$profile" pacman -Q | tee "$profile_artifacts/baseline-packages.txt"
+            sudo podman run --rm "localhost/marlin-roost-preview:$profile" cat /usr/share/roost-perf-baseline-critical.sha256 > "$profile_artifacts/baseline-critical.sha256"
+            if [[ "$profile" == diagnostic ]]; then
+            for file in PKGBUILD release-trace-context.patch frame-source-evidence.patch drained-capture-start.patch sha256sums; do
+            sudo podman run --rm "localhost/marlin-roost-preview:$profile" cat "/usr/share/roost-perf-mutter-profiler/$file" > "$profile_artifacts/mutter-profiler-$file"
+            done
+            fi
+            sudo podman run --rm "localhost/marlin-roost-preview:$profile" cat /usr/share/roost-perf-reference.json > "$profile_artifacts/reference-image.json"
+            chmod 0444 "$profile_artifacts/reference-image.json"
           done
-          python3 scripts/lib/roost-perf-payload.py runtime --runtime perf-artifacts/runtime-versions --report perf-artifacts/package-payload.json --out perf-artifacts/installed-runtime.json
-          sudo podman rm "$container"
-          trap - EXIT
-          sudo podman inspect ghcr.io/tuna-os/marlin:gnome --format '{{.Digest}}' | tee base-digest
-          sudo podman run --rm localhost/marlin-roost-preview:perf gnome-shell --version | tee gnome-version
-          grep -Eq '^GNOME Shell 51([. ]|$)' gnome-version
-          sudo podman run --rm localhost/marlin-roost-preview:perf pacman -Q | tee baseline-packages.txt
-          sudo podman run --rm localhost/marlin-roost-preview:perf cat /usr/share/roost-perf-baseline-critical.sha256 > perf-artifacts/baseline-critical.sha256
-          for file in PKGBUILD release-trace-context.patch frame-source-evidence.patch drained-capture-start.patch sha256sums; do
-            sudo podman run --rm localhost/marlin-roost-preview:perf cat "/usr/share/roost-perf-mutter-profiler/$file" > "perf-artifacts/mutter-profiler-$file"
-          done
-      - name: Measure GNOME then Roost on this same host
-        run: |
-          set -euo pipefail
-          mkdir -p perf-artifacts
-          cp base-digest shared-image-id gnome-version baseline-packages.txt perf-artifacts/
-          for desktop in gnome roost; do
-            image="localhost/marlin-$desktop-perf:ci"
-            sudo podman build -f packaging/marlin/perf/Containerfile --build-arg DESKTOP="$desktop" -t "$image" .
-            probe='if grep -A8 "^\[composefs\]" /usr/lib/ostree/prepare-root.conf 2>/dev/null | grep -qiE "enabled[[:space:]]*=[[:space:]]*(yes|true|1|signed)" || ls /usr/lib/systemd/boot/efi/systemd-boot*.efi >/dev/null 2>&1; then echo --composefs-backend; fi; grep -A8 "^\[composefs\]" /usr/lib/ostree/prepare-root.conf 2>/dev/null | grep -qiE "enabled[[:space:]]*=[[:space:]]*(yes|true|1|signed)" && echo "--filesystem ext4" || true'
-            args=$(sudo podman run --rm --entrypoint "" "$image" sh -c "$probe" | tr '\n' ' ')
-            truncate -s 20G /mnt/perf/disk.raw
-            # shellcheck disable=SC2086
-            sudo podman run --rm --privileged --pid=host --security-opt label=type:unconfined_t -v /dev:/dev -v /var/lib/containers:/var/lib/containers -v /mnt/perf:/output "$image" bootc install to-disk --via-loopback --generic-image --wipe $args /output/disk.raw
-            sudo chown "$(id -u):$(id -g)" /mnt/perf/disk.raw
-            scripts/roost-vm-perf --disk /mnt/perf/disk.raw --desktop "$desktop" --out "perf-artifacts/$desktop" --meta "base_digest=$(cat base-digest)" --meta "shared_image_id=$(cat shared-image-id)" --meta "observer_revision=$GITHUB_SHA"
-            rm /mnt/perf/disk.raw
-            sudo podman rmi "$image"
-          done
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - name: Measure three alternating diagnostic pairs
+        run: scripts/roost-perf-profile-pairs diagnostic
+      - name: Measure three alternating stock pairs
+        # A rejected diagnostic capture stays a failed step. Stock still runs
+        # from its separately guarded immutable image on this original host.
+        if: ${{ !cancelled() && steps.shared_payload.outcome == 'success' }}
+        run: scripts/roost-perf-profile-pairs stock
         if: always()
         with:
           name: marlin-performance

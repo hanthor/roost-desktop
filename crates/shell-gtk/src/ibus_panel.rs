@@ -257,7 +257,7 @@ impl CandidatePopup {
         window.set_title(Some("Input Method Candidates"));
         window.init_layer_shell();
         window.set_layer(Layer::Overlay);
-        window.set_namespace(Some("roost-ibus-candidates"));
+        window.set_namespace(Some(roost_shell_control::IBUS_CANDIDATES_NAMESPACE));
         window.set_anchor(Edge::Top, true);
         window.set_anchor(Edge::Left, true);
         window.set_exclusive_zone(-1);
