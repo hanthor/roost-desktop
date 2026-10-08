@@ -218,11 +218,13 @@ fn fading_at<B: Clone>(
 
 /// Crossfade observations for the proofs: swaps seen, frames drawn
 /// mid-fade, and whether one is running now.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct FadeStats {
     pub started: u64,
     pub animated_frames: u64,
     pub active: bool,
+    /// The outgoing picture's opacity while it fades.
+    pub value: Option<f32>,
 }
 
 impl std::fmt::Debug for CardCache {
@@ -458,6 +460,7 @@ impl Wallpaper {
                 shown.fading = None;
             }
             self.fades.active = false;
+            self.fades.value = None;
         }
     }
 
@@ -519,6 +522,7 @@ impl Wallpaper {
         self.fades.active = self.shown.iter().any(|s| s.fading.is_some());
         let at = Point::<f64, Physical>::from((0.0, 0.0));
         let mut elements = Vec::with_capacity(2);
+        self.fades.value = fading.as_ref().map(|(_, alpha)| *alpha);
         if let Some((old, alpha)) = fading {
             self.fades.animated_frames += 1;
             elements.extend(

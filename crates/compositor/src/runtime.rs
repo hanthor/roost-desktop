@@ -1097,6 +1097,7 @@ impl Runtime {
             "started": fade.started,
             "animated_frames": fade.animated_frames,
             "active": fade.active,
+            "value": fade.value,
         });
         doc
     }

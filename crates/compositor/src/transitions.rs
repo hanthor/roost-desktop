@@ -312,17 +312,21 @@ pub fn screen_alpha(elapsed_ms: f64) -> Option<f32> {
 }
 
 /// What one family did, for the proofs: transitions begun, frames drawn
-/// part way through one, and whether one is running.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// part way through one, whether one is running, and its current value
+/// (the curtain's lift, an overlay's opacity), sampled on the animation
+/// clock so a proof can check exact delays.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct Counter {
     pub started: u64,
     pub animated_frames: u64,
     pub active: bool,
+    pub value: Option<f64>,
 }
 
 impl Counter {
-    fn sample(&mut self, active: bool) {
+    fn sample(&mut self, active: bool, value: Option<f64>) {
         self.active = active;
+        self.value = value;
         if active {
             self.animated_frames += 1;
         }
@@ -332,6 +336,7 @@ impl Counter {
             "started": self.started,
             "animated_frames": self.animated_frames,
             "active": self.active,
+            "value": self.value,
         })
     }
 }
@@ -425,29 +430,39 @@ impl Transitions {
             self.stats[CURTAIN].started += 1;
         }
         let moving = self.curtain.moving(now);
-        self.stats[CURTAIN].sample(moving);
+        let lift = self.curtain.frame(now).map(|c| c.lift);
+        self.stats[CURTAIN].sample(moving, lift);
         if self.revealed.is_none()
             && (shell_ready || locked || ms(now.saturating_sub(self.born)) >= STARTUP_HOLD_MS)
         {
             self.revealed = Some(now);
             self.stats[STARTUP].started += 1;
         }
-        let startup = self.startup_cover().is_some_and(|a| a < 1.0 && a > 0.0);
-        self.stats[STARTUP].sample(startup);
+        let cover = self.startup_cover();
+        let startup = cover.is_some_and(|a| a < 1.0 && a > 0.0);
+        self.stats[STARTUP].sample(startup, cover.map(f64::from));
         if self
             .flash
             .is_some_and(|(_, at)| flash_alpha(self.elapsed(at)).is_none())
         {
             self.flash = None;
         }
-        self.stats[FLASH].sample(self.flash.is_some());
+        let flash = self
+            .flash
+            .and_then(|(_, at)| flash_alpha(self.elapsed(at)))
+            .map(f64::from);
+        self.stats[FLASH].sample(self.flash.is_some(), flash);
         if self
             .ripples
             .is_some_and(|(_, _, at)| self.elapsed(at) >= ripples_end())
         {
             self.ripples = None;
         }
-        self.stats[RIPPLE].sample(self.ripples.is_some());
+        let ring = self
+            .ripples
+            .and_then(|(_, _, at)| ripple_ring(0, self.elapsed(at)))
+            .map(|(_, opacity)| opacity);
+        self.stats[RIPPLE].sample(self.ripples.is_some(), ring);
         // The old screen is session content: never over a lock.
         if locked
             || self
@@ -457,7 +472,12 @@ impl Transitions {
         {
             self.screen = None;
         }
-        self.stats[SCREEN].sample(self.screen.is_some());
+        let screen = self
+            .screen
+            .as_ref()
+            .and_then(|(_, at)| screen_alpha(self.elapsed(*at)))
+            .map(f64::from);
+        self.stats[SCREEN].sample(self.screen.is_some(), screen);
     }
 
     /// The lock curtain this frame (see [`Curtain::frame`]).
@@ -536,7 +556,6 @@ impl Transitions {
         locked: bool,
     ) -> Overlay {
         let mut overlay = Overlay::default();
-        let now = self.now;
         let whole = Rectangle::from_size(size);
         if let Some(alpha) = self.startup_cover() {
             overlay.solids.push(solid(
@@ -637,8 +656,10 @@ impl Transitions {
 
     /// Per-family counters for the compositor state document.
     pub fn diagnostics(&self) -> serde_json::Value {
+        let mut curtain = self.stats[CURTAIN].json();
+        curtain["alpha"] = serde_json::json!(self.curtain().map(|c| c.alpha));
         serde_json::json!({
-            "lock_curtain": self.stats[CURTAIN].json(),
+            "lock_curtain": curtain,
             "screenshot_flash": self.stats[FLASH].json(),
             "hot_corner_ripples": self.stats[RIPPLE].json(),
             "startup": self.stats[STARTUP].json(),

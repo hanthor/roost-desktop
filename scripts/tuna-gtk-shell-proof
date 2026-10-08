@@ -92,12 +92,14 @@
 #                  the shell maps, then nothing animates
 #   G-WALLPAPER-CROSSFADE a new background crossfades over 1000 ms, then
 #                  nothing animates; instant with animations off
-#   G-HOT-CORNER-RIPPLES the hot corner plays GNOME's ripples, none with
-#                  animations off
+#   G-HOT-CORNER-RIPPLES the hot corner plays GNOME's ripples, none under
+#                  Reduced Motion or with animations off
 #   G-MONITOR-TRANSITION a monitor change fades the old screen out, none
 #                  with animations off
 #   G-LOCK-SLIDE   the lock curtain lowers on lock and lifts after PAM
-#                  unlocks, instant with animations off
+#                  unlocks, fades only under Reduced Motion, instant
+#                  with animations off
+#                  (these sample TUNA_ANIMATION_CLOCK at exact delays)
 #   G-DISPLAY-SETTINGS GNOME Settings' ApplyMonitorsConfig changes the
 #                  scale live and saves it to Tuna Desktop's monitors.xml (#59)
 #   G-POWER-MENU   the power button opens GNOME's menu (Suspend,
@@ -352,6 +354,22 @@ cstate() {
     echo "tuna-gtk-shell-proof: compositor state was:" >&2
     cat "$CSTATE" >&2 2>/dev/null || true
     return 1
+}
+# Drive compositor animation time (TUNA_ANIMATION_CLOCK): the first
+# write freezes it, later writes move it to that moment plus N ms, and
+# removing the file resumes real time.
+anim_clock() {
+    printf '%s\n' "$1" >"$TUNA_ANIMATION_CLOCK.tmp"
+    mv "$TUNA_ANIMATION_CLOCK.tmp" "$TUNA_ANIMATION_CLOCK"
+}
+real_clock() {
+    rm -f "$TUNA_ANIMATION_CLOCK"
+    cstate '.animation_clock_manual | not' "real animation clock" 5
+}
+# The family's current value ($2: lift or opacity) within a hair, on the
+# frozen animation clock; $3 another jq field of the family (value).
+tvalue() {
+    cstate "(.transitions.$1.${3:-value} // -9) - ($2) | fabs < 0.002" "$1 ${3:-value} $2" 10
 }
 # One transition family counter from the compositor state:
 # `tval <family> <started|animated_frames>`.
@@ -802,10 +820,21 @@ wait_wallpaper_rgb() {
 decoy_uri=$("$PY" -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve().as_uri())' "$wallpaper_decoy")
 fade_started=$(tval wallpaper_crossfade started)
 fade_frames=$(tval wallpaper_crossfade animated_frames)
+anim_clock 0
+cstate '.animation_clock_manual' "frozen wallpaper clock" ||
+    fail G-WALLPAPER-CROSSFADE "the clock file did not freeze animation time"
 gsettings set org.gnome.desktop.background picture-uri "$decoy_uri"
 gsettings set org.gnome.desktop.background picture-uri-dark "$decoy_uri"
+cstate ".transitions.wallpaper_crossfade.started > $fade_started and .transitions.wallpaper_crossfade.active" "crossfade began" ||
+    fail G-WALLPAPER-CROSSFADE "the new background did not start a crossfade"
+tvalue wallpaper_crossfade 1 || fail G-WALLPAPER-CROSSFADE "the old picture was not fully shown at the start"
+anim_clock 500
+tvalue wallpaper_crossfade 0.25 || fail G-WALLPAPER-CROSSFADE "the old picture was not at ease-out-quad 25% 500 ms in"
+scrot -o "$ARTIFACTS/01d-wallpaper-crossfade-500ms.png" >/dev/null
+anim_clock 1000
 tsettled wallpaper_crossfade "$fade_started" "$fade_frames" ||
     fail G-WALLPAPER-CROSSFADE "the new background did not crossfade and settle"
+real_clock || fail G-WALLPAPER-CROSSFADE "removing the clock file did not resume real time"
 wait_wallpaper_rgb red || fail G-WALLPAPER-CROSSFADE "the crossfade did not end on the new picture"
 gsettings set org.gnome.desktop.interface enable-animations false
 cstate '(.animations_enabled | not)' "still wallpaper" ||
@@ -2626,33 +2655,54 @@ gsettings set org.gnome.desktop.interface enable-hot-corners true
 sleep 1
 ripples_started=$(tval hot_corner_ripples started)
 ripples_frames=$(tval hot_corner_ripples animated_frames)
+anim_clock 0
+cstate '.animation_clock_manual' "frozen corner clock" ||
+    fail G-HOT-CORNER-RIPPLES "the clock file did not freeze animation time"
 xdotool mousemove --window "$WID" 1 1
 cstate '.overview_open' "hot corner enabled" ||
     fail G-HOT-CORNER "enabling GNOME hot corners did not open the actual overview"
 cp "$CSTATE" "$ARTIFACTS/hot-corner-enabled.json"
-scrot "$ARTIFACTS/hot-corner-enabled.png" >/dev/null
+# The first ring starts at full opacity and is a quarter gone half way.
+tvalue hot_corner_ripples 1 || fail G-HOT-CORNER-RIPPLES "the corner did not start GNOME's ripples"
+anim_clock 415
+tvalue hot_corner_ripples 0.75 || fail G-HOT-CORNER-RIPPLES "the first ring was not at ease-in-quad 75% half way"
+scrot "$ARTIFACTS/hot-corner-ripples-415ms.png" >/dev/null
+anim_clock 1350
 tsettled hot_corner_ripples "$ripples_started" "$ripples_frames" ||
     fail G-HOT-CORNER-RIPPLES "the corner did not play GNOME's ripples to the end"
+scrot "$ARTIFACTS/hot-corner-enabled.png" >/dev/null
 xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
 xdotool key Escape
+anim_clock 1700
 cstate '.overview_open | not' "hot corner dismissed" ||
     fail G-HOT-CORNER "the corner-opened overview did not close"
+real_clock || fail G-HOT-CORNER-RIPPLES "removing the clock file did not resume real time"
 pass G-HOT-CORNER "live GNOME disable rejects the corner; enable opens the actual overview"
-gsettings set org.gnome.desktop.interface enable-animations false
-cstate '(.animations_enabled | not)' "still corner" ||
-    fail G-HOT-CORNER-RIPPLES "enable-animations false did not reach the compositor"
-ripples_started=$(tval hot_corner_ripples started)
-xdotool mousemove --window "$WID" 1 1
-cstate ".overview_open and .transitions.hot_corner_ripples.started == $ripples_started" "corner without ripples" ||
-    fail G-HOT-CORNER-RIPPLES "the corner rippled with animations off"
-xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
-xdotool key Escape
-cstate '.overview_open | not' "still corner dismissed" ||
-    fail G-HOT-CORNER-RIPPLES "the corner-opened overview did not close"
-gsettings set org.gnome.desktop.interface enable-animations true
-cstate '.animations_enabled' "corner motion restored" ||
-    fail G-HOT-CORNER-RIPPLES "enable-animations true did not reach the compositor"
-pass G-HOT-CORNER-RIPPLES "the hot corner plays GNOME's three ripples and settles; none with animations off"
+# Ripples are motion: Reduced Motion drops them, as does animations off.
+for policy in reduce off; do
+    if [ "$policy" = reduce ]; then
+        gsettings set org.gnome.desktop.a11y.interface reduced-motion 'reduce'
+        cstate '.motion_policy == "fade-only"' "reduced corner" ||
+            fail G-HOT-CORNER-RIPPLES "Reduced Motion did not reach the compositor"
+    else
+        gsettings set org.gnome.desktop.interface enable-animations false
+        cstate '.motion_policy == "off"' "still corner" ||
+            fail G-HOT-CORNER-RIPPLES "enable-animations false did not reach the compositor"
+    fi
+    ripples_started=$(tval hot_corner_ripples started)
+    xdotool mousemove --window "$WID" 1 1
+    cstate ".overview_open and .transitions.hot_corner_ripples.started == $ripples_started" "corner without ripples ($policy)" ||
+        fail G-HOT-CORNER-RIPPLES "the corner rippled under motion policy $policy"
+    xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
+    xdotool key Escape
+    cstate '(.overview_open | not) and .overview_progress == 0' "corner dismissed ($policy)" ||
+        fail G-HOT-CORNER-RIPPLES "the corner-opened overview did not close"
+    gsettings reset org.gnome.desktop.a11y.interface reduced-motion
+    gsettings set org.gnome.desktop.interface enable-animations true
+    cstate '.motion_policy == "full"' "corner motion restored" ||
+        fail G-HOT-CORNER-RIPPLES "the full motion policy did not return"
+done
+pass G-HOT-CORNER-RIPPLES "the hot corner plays GNOME's three ripples on the exact curve and settles; none under Reduced Motion or with animations off"
 
 # A genuine GTK fullscreen request blocks accidental corner opening, while
 # deliberate Super access remains available and unfullscreen restores it.
@@ -2815,10 +2865,6 @@ pass G-INTROSPECT-MOTION "GNOME clients receive four enable-animations changes; 
 
 # The proof-driven animation clock samples the overview transition at
 # exact delays: 250 ms each way, so 125 ms is exactly half.
-anim_clock() {
-    printf '%s\n' "$1" >"$TUNA_ANIMATION_CLOCK.tmp"
-    mv "$TUNA_ANIMATION_CLOCK.tmp" "$TUNA_ANIMATION_CLOCK"
-}
 anim_clock 0
 cstate '.animation_clock_manual and .motion_policy == "full" and (.overview_open | not) and .overview_progress == 0' "frozen clock" ||
     fail G-ANIMATION-CLOCK "the clock file did not freeze compositor animation time"
@@ -3881,6 +3927,11 @@ case "$reply" in *AccessDenied*) ;; *) fail G-SCREENSHOT-DENY "unexpected denial
 [ ! -f "$ARTIFACTS/untrusted.png" ] || fail G-SCREENSHOT-DENY "denied capture wrote a file"
 pass G-SCREENSHOT-DENY "direct Screenshot requires trusted desktop identity"
 
+# The button asks for GNOME's flash: white over the capture, sampled on
+# the frozen animation clock.
+anim_clock 0
+cstate '.animation_clock_manual' "frozen screenshot clock" ||
+    fail G-SCREENSHOT-FLASH "the clock file did not freeze animation time"
 open_qs
 "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-shot.json" 20 \
     --press "Take Screenshot" || fail G-SCREENSHOT-BUTTON "could not press Take Screenshot"
@@ -3889,6 +3940,15 @@ until [ -n "$(find "$XDG_PICTURES_DIR/Screenshots" -name 'Screenshot From *.png'
     [ "$(date +%s)" -gt "$end" ]; do sleep 0.3; done
 [ -n "$(find "$XDG_PICTURES_DIR/Screenshots" -name 'Screenshot From *.png' 2>/dev/null)" ] ||
     fail G-SCREENSHOT-BUTTON "no Pictures/Screenshots/Screenshot From *.png"
+cstate '.transitions.screenshot_flash.started > 0 and .transitions.screenshot_flash.active' "flash began" ||
+    fail G-SCREENSHOT-FLASH "the screenshot did not start GNOME's flash"
+tvalue screenshot_flash 1 || fail G-SCREENSHOT-FLASH "the flash did not start fully white"
+anim_clock 250
+tvalue screenshot_flash 0.25 || fail G-SCREENSHOT-FLASH "the flash was not at ease-out-quad 25% 250 ms in"
+scrot "$ARTIFACTS/screenshot-flash-250ms.png" >/dev/null
+anim_clock 500
+tsettled screenshot_flash 0 0 || fail G-SCREENSHOT-FLASH "the screenshot did not flash and settle"
+real_clock || fail G-SCREENSHOT-FLASH "removing the clock file did not resume real time"
 sleep 1
 xdotool mousemove --window "$WID" $((WIDTH / 2)) 16 click 1
 sleep 2
@@ -3899,8 +3959,6 @@ showing "$ARTIFACTS/a11y-shot-list.json" "Screenshot captured" ||
 xdotool key Escape
 sleep 1
 pass G-SCREENSHOT-BUTTON "the button saves to Pictures/Screenshots and notifies"
-# The button asks for GNOME's flash: white over the capture, fading out.
-tsettled screenshot_flash 0 0 || fail G-SCREENSHOT-FLASH "the screenshot did not flash and settle"
 gsettings set org.gnome.desktop.interface enable-animations false
 cstate '(.animations_enabled | not)' "still screenshot" ||
     fail G-SCREENSHOT-FLASH "enable-animations false did not reach the compositor"
@@ -3922,7 +3980,7 @@ sleep 1
 gsettings set org.gnome.desktop.interface enable-animations true
 cstate '.animations_enabled' "screenshot motion restored" ||
     fail G-SCREENSHOT-FLASH "enable-animations true did not reach the compositor"
-pass G-SCREENSHOT-FLASH "a flashing screenshot fades GNOME's white flashspot out, then nothing animates; none with animations off"
+pass G-SCREENSHOT-FLASH "a flashing screenshot fades GNOME's white flashspot out on the exact curve, then nothing animates; none with animations off"
 
 # GNOME's screenshot UI on Print: Screen, then Capture saves the whole
 # screen where GNOME does.
@@ -4189,12 +4247,24 @@ wait_size_marker() {
 wait_size_marker ready || fail G-INTROSPECT-SIZE "D-Bus desktop-size observer did not subscribe"
 screen_started=$(tval monitor_change started)
 screen_frames=$(tval monitor_change animated_frames)
+anim_clock 0
+cstate '.animation_clock_manual' "frozen monitor clock" ||
+    fail G-MONITOR-TRANSITION "the clock file did not freeze animation time"
 apply_display 2 1.25 || fail G-DISPLAY-SETTINGS "ApplyMonitorsConfig failed: $(tail -2 "$ARTIFACTS/display-settings.log")"
 cstate '.layers | any(.namespace == "tuna-panel" and .rect[2] == 1024)' "125 percent" ||
     fail G-DISPLAY-SETTINGS "the layout did not follow scale 1.25"
-# GNOME's ScreenTransition: the old screen fades out over the new one.
+# GNOME's ScreenTransition: the old screen holds 250 ms, then fades out
+# over the new one for 500 ms.
+cstate ".transitions.monitor_change.started > $screen_started" "monitor transition began" ||
+    fail G-MONITOR-TRANSITION "the monitor change did not picture the old screen"
+tvalue monitor_change 1 || fail G-MONITOR-TRANSITION "the old screen was not held at first"
+anim_clock 500
+tvalue monitor_change 0.25 || fail G-MONITOR-TRANSITION "the old screen was not at ease-out-quad 25% 250 ms into its fade"
+scrot "$ARTIFACTS/24a-monitor-transition-500ms.png" >/dev/null
+anim_clock 750
 tsettled monitor_change "$screen_started" "$screen_frames" ||
     fail G-MONITOR-TRANSITION "the monitor change did not fade the old screen out and settle"
+real_clock || fail G-MONITOR-TRANSITION "removing the clock file did not resume real time"
 grep -q '<scale>1.25</scale>' "$XDG_CONFIG_HOME/tuna/monitors.xml" 2>/dev/null ||
     fail G-DISPLAY-SETTINGS "the arrangement was not saved to tuna/monitors.xml"
 scrot "$ARTIFACTS/24-scale-125.png" >/dev/null
@@ -4499,11 +4569,23 @@ if [ -n "$PAM_ON" ]; then
     screen_active | grep -q false || fail G-LOCK-KEY "GetActive stayed locked after authentication"
     curtain_started=$(tval lock_curtain started)
     curtain_frames=$(tval lock_curtain animated_frames)
+    # GNOME's curtain on the frozen animation clock: it lowers over
+    # 250 ms once the lock surface maps; the session stays hidden.
+    anim_clock 0
+    cstate '.animation_clock_manual' "frozen lock clock" ||
+        fail G-LOCK-SLIDE "the clock file did not freeze animation time"
     xdotool key super+l
     cstate '.locked' "Super+L locked" 10 || fail G-LOCK-KEY "Super+L did not lock"
-    # GNOME's curtain lowers over 250 ms; the session stays hidden.
+    cstate ".locked and .transitions.lock_curtain.started > $curtain_started" "curtain lowering" 10 ||
+        fail G-LOCK-SLIDE "the lock curtain did not start lowering"
+    tvalue lock_curtain 1 || fail G-LOCK-SLIDE "the curtain did not start off the top of the screen"
+    anim_clock 125
+    tvalue lock_curtain 0.25 || fail G-LOCK-SLIDE "the curtain was not at ease-out-quad 75% down 125 ms in"
+    scrot "$ARTIFACTS/25a-lock-curtain-125ms.png" >/dev/null
+    anim_clock 250
     tsettled lock_curtain "$curtain_started" "$curtain_frames" ||
         fail G-LOCK-SLIDE "the lock curtain did not lower and settle"
+    tvalue lock_curtain 0 || fail G-LOCK-SLIDE "the settled curtain does not cover the screen"
     cstate '.locked' "still locked after the curtain" 2 || fail G-LOCK-SLIDE "the curtain unlocked the session"
     curtain_started=$(tval lock_curtain started)
     curtain_frames=$(tval lock_curtain animated_frames)
@@ -4515,8 +4597,18 @@ if [ -n "$PAM_ON" ]; then
     xdotool key Return
     cstate '(.locked | not)' "shortcut lock unlocked through PAM" 15 || fail G-LOCK-KEY "shortcut lock did not unlock"
     # Only after PAM: the curtain lifts off the session over 300 ms.
+    cstate ".transitions.lock_curtain.started > $curtain_started" "curtain lifting" 10 ||
+        fail G-LOCK-SLIDE "the curtain did not start lifting after unlocking"
+    tvalue lock_curtain 0 || fail G-LOCK-SLIDE "the lift did not start from the covering curtain"
+    anim_clock 400
+    tvalue lock_curtain 0.75 || fail G-LOCK-SLIDE "the curtain was not at ease-out-quad 75% up 150 ms into the lift"
+    scrot "$ARTIFACTS/25b-unlock-curtain-150ms.png" >/dev/null
+    anim_clock 550
     tsettled lock_curtain "$curtain_started" "$curtain_frames" ||
         fail G-LOCK-SLIDE "the curtain did not lift and settle after unlocking"
+    cstate '.transitions.lock_curtain.value == null' "curtain gone" 5 ||
+        fail G-LOCK-SLIDE "the lifted curtain is still drawn"
+    real_clock || fail G-LOCK-SLIDE "removing the clock file did not resume real time"
     sleep 0.5
     grep -q 'ActiveChanged.*true' "$ARTIFACTS/screensaver-signals.log" || fail G-LOCK-KEY "no active signal"
     grep -q 'ActiveChanged.*false' "$ARTIFACTS/screensaver-signals.log" || fail G-LOCK-KEY "no inactive signal"
@@ -4547,9 +4639,38 @@ if [ -n "$PAM_ON" ]; then
     tsettled lock_curtain "$curtain_started" "$curtain_frames" same ||
         fail G-LOCK-SLIDE "with animations off the curtain did not lift at once"
     gsettings set org.gnome.desktop.interface enable-animations true
-    cstate '.animations_enabled' "curtain motion restored" ||
+    cstate '.motion_policy == "full"' "curtain motion restored" ||
         fail G-LOCK-SLIDE "enable-animations true did not reach the compositor"
-    pass G-LOCK-SLIDE "the curtain lowers on lock and lifts only after PAM, settling each time; instant with animations off"
+    # Reduced Motion keeps GNOME's opacity change and drops the slide.
+    gsettings set org.gnome.desktop.a11y.interface reduced-motion 'reduce'
+    cstate '.motion_policy == "fade-only"' "reduced curtain" ||
+        fail G-LOCK-SLIDE "Reduced Motion did not reach the compositor"
+    curtain_started=$(tval lock_curtain started)
+    anim_clock 0
+    cstate '.animation_clock_manual' "frozen reduced lock clock" ||
+        fail G-LOCK-SLIDE "the clock file did not freeze animation time"
+    xdotool key super+l
+    cstate ".locked and .transitions.lock_curtain.started > $curtain_started" "reduced curtain lowering" 10 ||
+        fail G-LOCK-SLIDE "the reduced-motion lock did not start its curtain"
+    anim_clock 125
+    tvalue lock_curtain 0 || fail G-LOCK-SLIDE "the curtain slid under Reduced Motion"
+    tvalue lock_curtain 0.75 alpha || fail G-LOCK-SLIDE "the curtain did not fade in on ease-out-quad under Reduced Motion"
+    anim_clock 250
+    tvalue lock_curtain 1 alpha || fail G-LOCK-SLIDE "the reduced-motion curtain did not settle opaque"
+    real_clock || fail G-LOCK-SLIDE "removing the clock file did not resume real time"
+    sleep 0.5
+    xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT * 3 / 4)) click 1
+    sleep 1
+    xdotool type --delay 30 "$UNLOCK_PASSWORD"
+    xdotool key Return
+    cstate '(.locked | not)' "reduced-motion lock unlocked through PAM" 15 ||
+        fail G-LOCK-SLIDE "the reduced-motion lock did not unlock"
+    cstate '(.transitions.lock_curtain.active | not) and .transitions.lock_curtain.value == null' "reduced curtain gone" 5 ||
+        fail G-LOCK-SLIDE "the reduced-motion curtain did not fade off"
+    gsettings reset org.gnome.desktop.a11y.interface reduced-motion
+    cstate '.motion_policy == "full"' "full motion after the curtain" ||
+        fail G-LOCK-SLIDE "the full motion policy did not return"
+    pass G-LOCK-SLIDE "the curtain lowers on lock and lifts only after PAM on GNOME's exact curves; fades only under Reduced Motion; instant with animations off"
     pass G-LOCK-FIRST-PRINTABLE "a printable wake key becomes exactly one password character and PAM unlocks"
     pass G-DBUS-LOCK "org.gnome.Shell exposes the screen-saver object and Lock waits for confirmation"
 
