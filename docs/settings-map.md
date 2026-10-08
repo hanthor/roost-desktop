@@ -73,7 +73,7 @@ GNOME 51 `org.gnome.desktop.a11y.interface reduced-motion` is read live. `reduce
 | org.gnome.desktop.wm.keybindings switch-windows(-backward), cycle-windows(-backward), cycle-group(-backward) | Honored | compositor drives bound keys through SetSwitcherKeys: a window-only MRU popup (current workspace), or immediate window/app-group cycling without a popup. GNOME's switch-windows defaults are empty |
 | org.gnome.desktop.wm.preferences button-layout | Via GTK | Client-side decorations read it |
 | org.gnome.desktop.wm.preferences focus-mode, num-workspaces | Ignored | Click to focus and dynamic workspaces, as GNOME's defaults |
-| org.gnome.desktop.wm.preferences audible-bell, visual-bell | Ignored | The bell always sounds (GNOME's default audible bell) and never flashes (xdg-system-bell, #89) |
+| org.gnome.desktop.wm.preferences audible-bell, visual-bell, visual-bell-type; org.gnome.desktop.sound event-sounds, theme-name | Candidate, qualification pending | Live independent audible/visual preferences; GNOME51 stage/window flash timing and sound-theme playback. Real pixels/PCM, X11 bell ingress, window capture and final-image/device acceptance remain open under #353. |
 | org.gnome.mutter dynamic-workspaces, edge-tiling | Ignored | Always on, as GNOME's defaults |
 | org.gnome.desktop.peripherals.keyboard repeat, delay, repeat-interval | Honored | Seat key repeat, live. Proof G-SETTINGS-INPUT |
 | org.gnome.desktop.peripherals.touchpad tap-to-click, natural-scroll, speed, disable-while-typing | Honored | libinput on hardware sessions, live and on hotplug |

@@ -754,6 +754,38 @@ fn the_system_bell_rings() {
 }
 
 #[test]
+fn actual_system_bell_requests_follow_live_visual_preferences() {
+    let (mut comp, mut manager) = compositor();
+    let mut peer = connect(&mut comp, &mut manager);
+    let bell: XdgSystemBellV1 = peer.bind(1);
+    let (surface, _toplevel) = window(&mut peer, "terminal");
+    pump(&mut comp, &mut manager, &mut [&mut peer]);
+    comp.state
+        .set_bell_preferences(roost_shell_control::BellPreferences {
+            audible: false,
+            visual: true,
+            fullscreen: false,
+            ..Default::default()
+        });
+    bell.ring(Some(&surface));
+    pump(&mut comp, &mut manager, &mut [&mut peer]);
+    assert_eq!(comp.state.bell_rings(), 1);
+    assert_eq!(comp.state.bell_visual_requests(), 1);
+    comp.state
+        .set_bell_preferences(roost_shell_control::BellPreferences {
+            audible: false,
+            visual: false,
+            ..Default::default()
+        });
+    assert!(!comp.state.bell_visual_active());
+    bell.ring(None);
+    pump(&mut comp, &mut manager, &mut [&mut peer]);
+    assert_eq!(comp.state.bell_rings(), 2);
+    assert_eq!(comp.state.bell_visual_requests(), 1);
+    assert!(!comp.state.bell_visual_active());
+}
+
+#[test]
 fn windows_keep_their_toplevel_tag() {
     let (mut comp, mut manager) = compositor();
     let mut peer = connect(&mut comp, &mut manager);

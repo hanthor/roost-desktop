@@ -36,6 +36,7 @@ jobs:
       - run: python3 scripts/lib/roost-perf-reference-tests.py
       - run: python3 scripts/lib/roost-perf-repeatability-tests.py
       - run: python3 scripts/lib/native-constraint-tests.py
+      - run: python3 scripts/lib/native-bell-tests.py
       - run: python3 scripts/lib/roost-pipewire-dump-tests.py
       - run: scripts/roost-settings-inventory-check
       - run: cargo fmt --all -- --check
@@ -344,7 +345,7 @@ jobs:
     timeout-minutes: 40
     container: archlinux:latest
     steps:
-      - run: pacman -Syu --noconfirm --needed base-devel git rust pkgconf clang pipewire gtk4 gtk4-layer-shell libadwaita libsecret libxkbcommon libxkbcommon-x11 mesa wayland dbus glib2 seatd libinput systemd-libs libdrm namcap
+      - run: pacman -Syu --noconfirm --needed base-devel git rust pkgconf clang pipewire gtk4 gtk4-layer-shell libadwaita libcanberra sound-theme-freedesktop libsecret libxkbcommon libxkbcommon-x11 mesa wayland dbus glib2 seatd libinput systemd-libs libdrm namcap
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: |
           useradd -m builder

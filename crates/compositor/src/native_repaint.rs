@@ -75,6 +75,7 @@ pub(crate) struct FrameSignature {
     pub pointer: Option<(f64, f64)>,
     pub decor: Vec<(Color32F, Vec<Rectangle<i32, Physical>>)>,
     pub above: usize,
+    pub bell: Option<(Rectangle<i32, Physical>, f32, Option<usize>)>,
     // Separate passes preserve both ordering and which scale each pass uses.
     pub groups: Vec<Vec<ElementSignature>>,
 }
@@ -93,6 +94,7 @@ impl FrameSignature {
             && self.pointer == old.pointer
             && self.decor == old.decor
             && self.above == old.above
+            && self.bell == old.bell
             && self.groups.len() == old.groups.len()
             && self.groups.iter().zip(&old.groups).all(|(new, old)| {
                 new.len() == old.len()
@@ -144,6 +146,7 @@ mod tests {
             pointer: Some((100.0, 200.0)),
             decor: vec![],
             above: 0,
+            bell: None,
             groups: vec![],
         }
     }
@@ -154,6 +157,30 @@ mod tests {
         assert!(needs_repaint(None, &next, false));
         assert!(!needs_repaint(Some(&next), &next, false));
         assert!(needs_repaint(Some(&next), &next, true));
+    }
+
+    #[test]
+    fn visual_alert_geometry_alpha_and_layer_order_invalidate_native_scanout() {
+        let before = scene();
+        let mut flash = before.clone();
+        flash.bell = Some((
+            Rectangle::new((10, 20).into(), (400, 300).into()),
+            0.5,
+            Some(2),
+        ));
+        assert!(needs_repaint(Some(&before), &flash, false));
+        assert!(!flash.same_global_drawing(&before));
+        let mut faded = flash.clone();
+        faded.bell.as_mut().unwrap().1 = 0.1;
+        assert!(needs_repaint(Some(&flash), &faded, false));
+        assert!(!faded.same_global_drawing(&flash));
+        let mut reordered = flash.clone();
+        reordered.bell.as_mut().unwrap().2 = Some(3);
+        assert!(!reordered.same_global_drawing(&flash));
+        // Expiry must paint the original content again, even with no client
+        // commits or presentation-timing work.
+        assert!(needs_repaint(Some(&flash), &before, false));
+        assert!(!before.same_global_drawing(&flash));
     }
 
     #[test]

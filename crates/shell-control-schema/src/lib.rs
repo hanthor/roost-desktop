@@ -151,9 +151,11 @@ impl ProtocolVersion {
     /// `0.26` appends the shell text direction to InputSettings.
     /// Both positional postcard peers ship together.
     /// `0.27` appends hardware Screen Reader preference/status messages.
+    /// `0.28` appends bell preferences to InputSettings.
+    /// Both positional postcard peers upgrade together.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 27,
+        minor: 28,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -767,6 +769,9 @@ pub struct InputSettings {
     /// GTK shell default text direction; corners and Activities follow it.
     #[serde(default)]
     pub right_to_left: bool,
+    /// Live window-manager bell and sound-theme preferences.
+    #[serde(default)]
+    pub bells: BellPreferences,
 }
 
 fn animations_default() -> bool {
@@ -794,6 +799,30 @@ impl Default for InputSettings {
             mouse_left_handed: false,
             touchpad_left_handed: false,
             right_to_left: false,
+            bells: BellPreferences::default(),
+        }
+    }
+}
+
+/// GNOME's independent audible/visual alerts. Positional postcard peers ship
+/// together; serde defaults apply to named-field formats, not an old wire body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BellPreferences {
+    pub audible: bool,
+    pub visual: bool,
+    pub fullscreen: bool,
+    pub event_sounds: bool,
+    pub theme: String,
+}
+
+impl Default for BellPreferences {
+    fn default() -> Self {
+        Self {
+            audible: true,
+            visual: false,
+            fullscreen: true,
+            event_sounds: true,
+            theme: "freedesktop".into(),
         }
     }
 }
@@ -1230,8 +1259,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_27() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 27));
+    fn current_version_is_0_28() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 28));
     }
 
     #[test]
@@ -1283,6 +1312,27 @@ mod tests {
     }
 
     #[test]
+    fn independent_bell_preferences_survive_the_positional_control_wire() {
+        for audible in [false, true] {
+            for visual in [false, true] {
+                roundtrip(&Message::Command {
+                    id: 1,
+                    kind: CommandKind::SetInputSettings(InputSettings {
+                        bells: BellPreferences {
+                            audible,
+                            visual,
+                            fullscreen: !visual,
+                            event_sounds: false,
+                            theme: "custom-theme".into(),
+                        },
+                        ..Default::default()
+                    }),
+                });
+            }
+        }
+    }
+
+    #[test]
     fn version_compat_same_major_minor_not_newer() {
         let ours = ProtocolVersion::CURRENT;
         assert!(ours.is_compatible_with(&ours));
@@ -1314,7 +1364,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 25).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 26).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 27).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 28).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 28).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 29).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }

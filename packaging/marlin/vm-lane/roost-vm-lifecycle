@@ -481,6 +481,14 @@ def main():
                   "percent": float(props["channelVolumes"][0]) ** (1 / 3) * 100,
                   "muted": bool(props.get("mute", False)),
                   "amplified": call("gsettings", "get", schema, key, user=True) == "true"}
+    elif action in ("bell-start", "bell-audible", "bell-audible-disabled", "bell-events-disabled",
+                    "bell-visual-independent", "bell-theme-bound", "bell-theme-disabled", "bell-restored", "bell-stop"):
+        compositor = next(item for item in inventory()["processes"] if item["executable"] == "roost-compositor")
+        display = f"WAYLAND_DISPLAY=roost-nested-{compositor['pid']}"
+        args = [action.removeprefix("bell-")]
+        if action == "bell-start":
+            args.append(str(compositor["pid"]))
+        result = json.loads(call("env", display, "/usr/libexec/roost-vm-bell-proof", *args, user=True))
     elif action == "suspend":
         # Queue real logind suspend, so QGA can reply before the guest sleeps.
         policy = {name: pathlib.Path(f"/sys/power/{name}").read_text().strip()
