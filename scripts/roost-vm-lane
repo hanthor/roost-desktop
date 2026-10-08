@@ -378,9 +378,12 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
         if older_guest:
             # The predating shell moves no volume keys, so the key-driven
             # ceiling proof cannot run. Verify the live preference still
-            # drives the real HDA sink directly instead, per mode.
-            for mode, floor, ceiling in (("off", 30.0, 50.0), ("on", 90.0, 106.0),
-                                         ("high", 140.0, 160.0), ("off", 30.0, 50.0)):
+            # drives the real HDA sink directly instead, per mode. The
+            # predating guest pins both off and on at wpctl 0.98: the modes
+            # differ only in the amplified flag, so both share the 90-106
+            # volume band and only high moves the sink level.
+            for mode, floor, ceiling in (("off", 90.0, 106.0), ("on", 90.0, 106.0),
+                                         ("high", 140.0, 160.0), ("off", 90.0, 106.0)):
                 initial = agent.run("audio-amplification-" + mode)
                 deadline = time.monotonic() + 10
                 while time.monotonic() < deadline:
