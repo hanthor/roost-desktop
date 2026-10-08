@@ -119,7 +119,7 @@ def attest_player_process(pid, spec):
                 or b'GDK_BACKEND=wayland' not in environment or any(item.startswith(b'DISPLAY=') for item in environment)):
             return None
         libraries = mapped_audio_libraries(pid)
-    except (OSError, ValueError, IndexError, RuntimeError):
+    except (OSError, ValueError, IndexError, RuntimeError, StopIteration):
         return None
     return {'pid': pid, 'uid': int(uid), 'parent_pid': int(fields[1]), 'start_ticks': int(fields[19]),
             'executable': str(executable), 'exe_sha256': sha, 'event_id': 'bell-window-system',
