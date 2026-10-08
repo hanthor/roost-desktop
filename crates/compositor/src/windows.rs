@@ -26,7 +26,7 @@ use smithay::{
     },
     desktop::{Window, WindowSurface},
     input::{
-        keyboard::{FilterResult, KeyboardHandle, XkbConfig},
+        keyboard::{FilterResult, KeyboardHandle, ModifiersState, XkbConfig},
         pointer::{AxisFrame, ButtonEvent, MotionEvent, PointerHandle},
     },
     reexports::wayland_server::protocol::wl_surface::WlSurface,
@@ -2446,6 +2446,17 @@ impl WindowManager {
 
     /// Replace the switcher's chords (the shell's GNOME keybindings).
     pub fn set_switcher_keys(&mut self, keys: Vec<roost_shell_control::SwitcherKey>) {
+        // Fixed-shape receipt for the CI journey: count plus the
+        // direct-cycle chords, so a rebound key that never arrives
+        // names the applied list instead of failing silently.
+        eprintln!(
+            "roost-compositor: switcher keys: {} chords, cycle-group {:?}, cycle-windows {:?}",
+            keys.len(),
+            keys.iter()
+                .find(|k| k.kind == roost_shell_control::SwitcherKeyKind::CycleGroup),
+            keys.iter()
+                .find(|k| k.kind == roost_shell_control::SwitcherKeyKind::CycleWindows)
+        );
         self.switcher_keys = Some(keys);
     }
 
@@ -3361,11 +3372,15 @@ impl WindowManager {
     }
 
     /// Track Super/Shift hold state for workspace keybindings. The
-    /// modifier events themselves still forward to clients.
+    /// modifier events themselves still forward to clients. Every
+    /// transition is logged: a press the harness never sent (or a
+    /// release it never delivered) shows up here first.
     fn track_workspace_modifiers(&mut self, keycode: u32, pressed: bool) {
         if keycode == SUPER_LEFT_KEYCODE || keycode == SUPER_RIGHT_KEYCODE {
+            eprintln!("roost-compositor: modifier super keycode={keycode} pressed={pressed}");
             self.super_held = pressed;
         } else if keycode == SHIFT_LEFT_KEYCODE || keycode == SHIFT_RIGHT_KEYCODE {
+            eprintln!("roost-compositor: modifier shift keycode={keycode} pressed={pressed}");
             self.shift_held = pressed;
         }
     }
@@ -4490,23 +4505,68 @@ impl WindowManager {
     }
 
     /// Track Alt hold state for the switcher. The modifier events
-    /// themselves still forward to clients.
+    /// themselves still forward to clients. Every transition is
+    /// logged: a press the harness never sent (or a release it never
+    /// delivered) shows up here first.
     fn track_switcher_modifiers(&mut self, keycode: u32, pressed: bool) {
         if self.is_alt(keycode) {
+            eprintln!("roost-compositor: modifier alt keycode={keycode} pressed={pressed}");
             self.alt_held = pressed;
         } else if keycode == CTRL_LEFT_KEYCODE || keycode == CTRL_RIGHT_KEYCODE {
+            eprintln!("roost-compositor: modifier ctrl keycode={keycode} pressed={pressed}");
             self.ctrl_held = pressed;
         }
     }
 
     /// The modifiers held now, as `MOD_*` bits.
+    ///
+    /// A latch bit only counts when the seat's XKB machine agrees it is
+    /// held (with no seat yet, the latch stands alone). A press delivered
+    /// without its release — a backend/XTest edge the G-CYCLE-KEYS proof
+    /// watched turn Super+F1 into Super+Alt — leaves the latch set while
+    /// nothing is physically held; the seat still advances on every event
+    /// it sees, so the intersection clears the stale bit while a genuine
+    /// hold (both sides set) keeps matching.
     fn held_mods(&self) -> u32 {
+        let seat = self
+            .keyboard
+            .clone()
+            .map(|keyboard| keyboard.modifier_state());
+        Self::combine_mods(
+            self.shift_held,
+            self.ctrl_held,
+            self.alt_held,
+            self.super_held,
+            seat,
+        )
+    }
+
+    /// Intersect the press/release latch with the seat's XKB modifier
+    /// state, as `MOD_*` bits. With no seat yet the latch stands alone;
+    /// once the seat exists both sides must agree, so a stale bit on
+    /// either side clears instead of matching a chord it should not.
+    fn combine_mods(
+        shift: bool,
+        ctrl: bool,
+        alt: bool,
+        logo: bool,
+        seat: Option<ModifiersState>,
+    ) -> u32 {
         use roost_shell_control::{MOD_ALT, MOD_CTRL, MOD_LOGO, MOD_SHIFT};
+        let (shift, ctrl, alt, logo) = match seat {
+            None => (shift, ctrl, alt, logo),
+            Some(state) => (
+                shift && state.shift,
+                ctrl && state.ctrl,
+                alt && state.alt,
+                logo && state.logo,
+            ),
+        };
         [
-            (self.shift_held, MOD_SHIFT),
-            (self.ctrl_held, MOD_CTRL),
-            (self.alt_held, MOD_ALT),
-            (self.super_held, MOD_LOGO),
+            (shift, MOD_SHIFT),
+            (ctrl, MOD_CTRL),
+            (alt, MOD_ALT),
+            (logo, MOD_LOGO),
         ]
         .into_iter()
         .filter(|(held, _)| *held)
@@ -4546,7 +4606,24 @@ impl WindowManager {
                 sym == Some(k.keysym)
             };
             same && (k.mods == mods || k.mods | MOD_SHIFT == mods)
-        })?;
+        });
+        if key.is_none()
+            && keys.iter().any(|k| {
+                matches!(
+                    k.kind,
+                    K::CycleGroup
+                        | K::CycleGroupBackward
+                        | K::CycleWindows
+                        | K::CycleWindowsBackward
+                ) && Some(k.keysym) == sym
+            })
+        {
+            // Fixed-shape near-miss receipt for the CI journey: the
+            // direct-cycle key arrived with the rebound keysym but the
+            // modifiers did not match, so no Cycle action queued.
+            eprintln!("roost-compositor: cycle chord near-miss: sym={sym:?} mods={mods}");
+        }
+        let key = key?;
         let flip = mods & MOD_SHIFT != 0 && key.mods & MOD_SHIFT == 0;
         let kind = match (key.kind, flip) {
             (K::Applications, true) => K::ApplicationsBackward,
@@ -4762,6 +4839,47 @@ mod tests {
         for code in [0, TAB_KEYCODE, GRAVE_KEYCODE, CTRL_LEFT_KEYCODE, u32::MAX] {
             assert_eq!(switcher_keysym(code), None);
         }
+    }
+
+    #[test]
+    fn stale_latch_bits_clear_against_the_seat_while_genuine_holds_match() {
+        use roost_shell_control::{MOD_ALT, MOD_CTRL, MOD_LOGO, MOD_SHIFT};
+        // No seat yet: the latch stands alone.
+        assert_eq!(
+            WindowManager::combine_mods(false, false, true, true, None),
+            MOD_ALT | MOD_LOGO
+        );
+        let seat = |shift: bool, ctrl: bool, alt: bool, logo: bool| {
+            Some(ModifiersState {
+                shift,
+                ctrl,
+                alt,
+                logo,
+                ..ModifiersState::default()
+            })
+        };
+        // Both sides agree: genuine holds keep matching.
+        assert_eq!(
+            WindowManager::combine_mods(true, true, true, true, seat(true, true, true, true)),
+            MOD_SHIFT | MOD_CTRL | MOD_ALT | MOD_LOGO
+        );
+        // The G-CYCLE-KEYS failure: Alt released (seat free) but the
+        // latch stuck, so Super+F1 arrived as Super+Alt.
+        assert_eq!(
+            WindowManager::combine_mods(false, false, true, true, seat(false, false, false, true)),
+            MOD_LOGO
+        );
+        // A latch the seat never saw clears the same way.
+        assert_eq!(
+            WindowManager::combine_mods(
+                true,
+                false,
+                false,
+                false,
+                seat(false, false, false, false)
+            ),
+            0
+        );
     }
 
     #[test]

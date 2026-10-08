@@ -18,7 +18,7 @@ def validate_image(value, profile):
         raise ValueError('reference Mutter package refused')
     if not isinstance(value['shell_package'], str) or not re.fullmatch(r'gnome-shell (?:[0-9]+:)?51\.0-[A-Za-z0-9.+_]+', value['shell_package']):
         raise ValueError('reference Shell package refused')
-    if profile == 'diagnostic' and value['mutter_package'] != 'mutter 51.0-1.6':
+    if profile == 'diagnostic' and value['mutter_package'] != 'mutter 51.0-1.7':
         raise ValueError('diagnostic package mismatch')
     for key in ('packages_sha256', 'critical_sha256'):
         if not isinstance(value[key], str) or not re.fullmatch('[0-9a-f]{64}', value[key]):
