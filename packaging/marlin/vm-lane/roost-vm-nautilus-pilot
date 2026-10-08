@@ -1,0 +1,792 @@
+#!/usr/bin/python3
+"""Independent native Files create/cancel pilot; fixed commands, no UI setters.
+
+All input comes from host QMP. AT-SPI returns only known-fixture booleans,
+counts and original window geometry, never arbitrary app names or text.
+"""
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import select
+import stat
+import socket
+import struct
+import threading
+import subprocess
+import sys
+import tempfile
+import time
+
+ACTIONS={'start','mapped','dialog','created','create-typed','cancel-typed','cancelled','closed'}
+# Bounded fresh-traversal attempts for one probe: the live tree mutates
+# mid-walk (compositor scene republishes, Nautilus rebuilds accessibles),
+# so a single tree-walk pass can hit a transient inconsistency. Only the
+# tree-walk stage is retried; persistent failures keep the exact diagnostic.
+TREE_WALK_ATTEMPTS=6
+APP='org.gnome.Nautilus'
+DISPLAY='org.gnome.Mutter.DisplayConfig'
+SERVICE='org.gnome.Mutter.ServiceChannel'
+CREATED='created-through-files'
+CANCELLED='cancelled-through-files'
+PAYLOAD=b'Roost native Files pilot known seed\n'
+UID=os.getuid()
+RUNTIME=Path(f'/run/user/{UID}')
+CONTEXT=RUNTIME/'roost-native-files-pilot.json'
+STATE=RUNTIME/'roost-vm-state.json'
+OWNER_SCOPE='original process/provider authenticated; compositor window ID/app-id/geometry correlation only'
+DEADLINE=None
+
+
+def deadline():
+    if DEADLINE is not None and time.monotonic()>=DEADLINE:
+        raise TimeoutError('original observation deadline expired')
+
+
+def bounded(path,limit,uid=None,private=False,proc=False):
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(fd,'rb') as stream:
+        before=os.fstat(stream.fileno())
+        if (not stat.S_ISREG(before.st_mode) or (uid is not None and before.st_uid!=uid)
+                or (private and before.st_mode&0o077) or before.st_mode&0o022
+                or not (0<=before.st_size<=limit if proc else 0<before.st_size<=limit)):
+            raise RuntimeError('fixed resource admission failed')
+        raw=stream.read(limit+1);after=os.fstat(stream.fileno())
+    named=Path(path).lstat()
+    key=lambda row:(row.st_dev,row.st_ino,row.st_uid,row.st_mode,row.st_nlink,row.st_size,row.st_mtime_ns,row.st_ctime_ns)
+    if len(raw)>limit or key(before)!=key(after) or key(after)!=key(named):
+        raise RuntimeError('fixed resource identity changed')
+    return raw
+
+
+def command(args):
+    end=time.monotonic()+5
+    with subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL) as child:
+        raw=b''
+        try:
+            while True:
+                remaining=end-time.monotonic()
+                if remaining<=0:raise subprocess.TimeoutExpired(args,5)
+                if not select.select([child.stdout],[],[],remaining)[0]:raise subprocess.TimeoutExpired(args,5)
+                chunk=os.read(child.stdout.fileno(),8193-len(raw))
+                if not chunk:break
+                raw+=chunk
+                if len(raw)>8192:raise RuntimeError('fixed command output bound')
+            status=child.wait(timeout=max(0.001,end-time.monotonic()))
+            if status:raise subprocess.CalledProcessError(status,args)
+            return raw.decode().strip()
+        finally:
+            if child.poll() is None:child.kill();child.wait(timeout=2)
+
+
+class ReadyLater(Exception):
+    """Only an explicitly known map/content transition; never admission failure."""
+
+
+def process(pid,expected):
+    if type(pid) is not int or not 1<pid<2**32:raise RuntimeError('original PID bound')
+    executable=Path(expected).resolve(strict=True)
+    info=executable.stat()
+    if info.st_uid!=0 or info.st_mode&0o022 or Path(f'/proc/{pid}/exe').resolve(strict=True)!=executable:
+        raise RuntimeError('original executable admission failed')
+    ticks=bounded(Path(f'/proc/{pid}/stat'),8192,uid=UID,proc=True).decode().rsplit(')',1)[1].split()[19]
+    return {'pid':pid,'uid':Path(f'/proc/{pid}').stat().st_uid,'start_ticks':int(ticks),
+            'exe_sha256':hashlib.sha256(bounded(executable,64*1024*1024,uid=0)).hexdigest()}
+
+
+def bus(method,name):
+    from gi.repository import Gio,GLib
+    deadline()
+    cancel=Gio.Cancellable()
+    timer=threading.Timer(2,cancel.cancel);timer.daemon=True;timer.start()
+    try:
+        connection=Gio.bus_get_sync(Gio.BusType.SESSION,cancel)
+    finally:timer.cancel()
+    deadline()
+    result=connection.call_sync('org.freedesktop.DBus','/org/freedesktop/DBus','org.freedesktop.DBus',
+        method,GLib.Variant('(s)',(name,)),None,Gio.DBusCallFlags.NONE,2000,None).unpack()[0]
+    deadline()
+    return result
+
+
+def principal(name,expected):
+    owner=bus('GetNameOwner',name)
+    if type(owner) is not str or re.fullmatch(r':[0-9]{1,10}\.[0-9]{1,10}',owner) is None:
+        raise RuntimeError('original bus owner bound')
+    pid=bus('GetConnectionUnixProcessID',owner);uid=bus('GetConnectionUnixUser',owner)
+    result=process(pid,expected)
+    if (uid!=UID or result['uid']!=UID or bus('GetNameOwner',name)!=owner or bus('GetConnectionUnixProcessID',owner)!=pid
+            or bus('GetConnectionUnixUser',owner)!=uid or process(pid,expected)!=result):
+        raise RuntimeError('original owner changed during observation')
+    return dict(result,owner=owner)
+
+
+def scene():
+    value=json.loads(bounded(STATE,1024*1024,uid=UID))
+    if (value.get('locked') is not False or type(value.get('windows')) is not list
+            or len(value['windows'])>64 or type(value.get('focused')) not in (int,type(None))):
+        raise RuntimeError('original unlocked scene admission failed')
+    return value
+
+
+def window_ids(value):
+    ids=[row['id'] for row in value['windows']]
+    if any(type(item) is not int or not 0<item<2**64 for item in ids) or len(set(ids))!=len(ids):
+        raise RuntimeError('original window IDs invalid')
+    return sorted(ids)
+
+
+def validate_context(value):
+    keys={'schema','fixture','fixture_dev','fixture_inode','seed_sha256','original_windows','nautilus','compositor','packages','display','service_channel','session','original_layout','original_focus','original_workspace','accessibility','seed_inode','created_inode'}
+    if type(value) is not dict or set(value)!=keys or value['schema']!=1 or type(value['schema']) is not int:
+        raise RuntimeError('fixed owner context schema')
+    fixture=Path(value['fixture'])
+    if fixture.parent!=RUNTIME or re.fullmatch(r'roost-native-files-[A-Za-z0-9_]{8}',fixture.name) is None:
+        raise RuntimeError('fixed fixture route admission failed')
+    if value['seed_sha256']!=hashlib.sha256(PAYLOAD).hexdigest():raise RuntimeError('fixed fixture seed identity failed')
+    for key in ('fixture_dev','fixture_inode'):
+        if type(value[key]) is not int or not 0<=value[key]<2**64:raise RuntimeError('fixture identity bound')
+    if (type(value['original_windows']) is not list or len(value['original_windows'])>64
+            or any(type(item) is not int or not 0<item<2**64 for item in value['original_windows'])
+            or len(set(value['original_windows']))!=len(value['original_windows'])):
+        raise RuntimeError('original window set bound')
+    for key in ('nautilus','compositor','service_channel'):
+        row=value[key]
+        if type(row) is not dict or set(row)!={'pid','uid','start_ticks','exe_sha256','owner'}:
+            raise RuntimeError('fixed principal schema')
+        if any(type(row[k]) is not int or not 0<row[k]<2**64 for k in ('pid','uid','start_ticks')) or row['uid']!=UID:
+            raise RuntimeError('original principal bounds')
+        if type(row['exe_sha256']) is not str or re.fullmatch('[0-9a-f]{64}',row['exe_sha256']) is None or type(row['owner']) is not str or re.fullmatch(r':[0-9]{1,10}\.[0-9]{1,10}',row['owner']) is None:
+            raise RuntimeError('original principal receipt bound')
+    if type(value['original_workspace']) is not int or not 0<=value['original_workspace']<=4096 or type(value['original_focus']) not in (int,type(None)):
+        raise RuntimeError('original scene restoration schema')
+    if type(value['original_layout']) is not list or len(value['original_layout'])>64 or any(type(row) is not list or len(row)!=2 for row in value['original_layout']):
+        raise RuntimeError('original layout receipt bound')
+    if value['original_layout']!=layout({'windows':[{'id':i,'rect':rect} for i,rect in value['original_layout']]}):
+        raise RuntimeError('original geometry receipt order')
+    validate_session(value['session'])
+    for key in ('seed_inode','created_inode'):
+        inode=value[key]
+        if inode is None and key=='created_inode':continue
+        if type(inode) is not list or len(inode)!=2 or any(type(v) is not int or not 0<=v<2**64 for v in inode):raise RuntimeError('known original file inode receipt')
+    validate_accessibility(value['accessibility'],value['nautilus'])
+    display=value['display']
+    if type(display) is not dict or set(display)!={'dev','inode','uid','mode'} or any(type(v) is not int or v<0 for v in display.values()) or display['uid']!=UID or not stat.S_ISSOCK(display['mode']):
+        raise RuntimeError('original display socket receipt')
+    packages=value['packages']
+    if type(packages) is not dict or set(packages)!={'nautilus','python-atspi','roost'}:
+        raise RuntimeError('fixed package inventory schema')
+    if any(type(v) is not str or re.fullmatch(re.escape(k)+r' [0-9][A-Za-z0-9.+_:~-]{0,95}',v) is None for k,v in packages.items()):
+        raise RuntimeError('fixed package version bound')
+    return value
+
+
+def context():
+    return validate_context(json.loads(bounded(CONTEXT,16384,uid=UID,private=True)))
+
+
+def fixture_identity(value):
+    info=Path(value['fixture']).lstat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid!=UID or info.st_mode&0o077
+            or (info.st_dev,info.st_ino)!=(value['fixture_dev'],value['fixture_inode'])):
+        raise RuntimeError('original fixture directory replaced')
+
+
+def filesystem(value):
+    fixture_identity(value)
+    directory=Path(value['fixture'])
+    seed_info=(directory/'seed.txt').lstat()
+    if [seed_info.st_dev,seed_info.st_ino]!=value['seed_inode']:raise RuntimeError('original seed inode replaced')
+    seed=bounded(directory/'seed.txt',1024,uid=UID)
+    if hashlib.sha256(seed).hexdigest()!=value['seed_sha256']:raise RuntimeError('original seed changed')
+    result={'seed_sha256':value['seed_sha256']}
+    for name in (CREATED,CANCELLED):
+        path=directory/name
+        try:info=path.lstat()
+        except FileNotFoundError:
+            if name==CREATED and value['created_inode'] is not None:raise RuntimeError('original created directory disappeared')
+            result[name]=False;continue
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid!=UID:raise RuntimeError('unexpected created object type')
+        if name==CANCELLED:raise RuntimeError('cancelled directory unexpectedly created')
+        if value['created_inode'] is not None and [info.st_dev,info.st_ino]!=value['created_inode']:raise RuntimeError('original created directory replaced')
+        result[name]=True
+    fixture_identity(value)
+    return result
+
+
+def validate_session(value):
+    keys={'Id','VTNr','User','Service','Class'}
+    if (type(value) is not dict or set(value)!=keys or type(value['Id']) is not str
+            or re.fullmatch('[A-Za-z0-9]{1,32}',value['Id']) is None
+            or value['VTNr']!='1' or value['User']!=str(UID) or value['Service']!='greetd'
+            or value['Class'] not in ('user','user-early')):
+        raise RuntimeError('original native login session admission')
+    return value
+
+
+def login_session():
+    identifier=os.environ.get('ROOST_VM_NATIVE_SESSION','')
+    if re.fullmatch('[A-Za-z0-9]{1,32}',identifier) is None:raise RuntimeError('original session route missing')
+    properties=command(['/usr/bin/loginctl','show-session',identifier,'--property=Id','--property=VTNr',
+        '--property=User','--property=Service','--property=Class'])
+    lines=properties.splitlines()
+    if len(lines)!=5 or any('=' not in line for line in lines):raise RuntimeError('original session reply bound')
+    pairs=[line.split('=',1) for line in lines]
+    if len({pair[0] for pair in pairs})!=5:raise RuntimeError('original session reply duplicate')
+    result=validate_session(dict(pairs))
+    if result['Id']!=identifier:raise RuntimeError('original login session changed')
+    return result
+
+
+def layout(current):
+    window_ids(current)
+    result=[]
+    for row in current['windows']:
+        rect=row['rect']
+        if type(rect) is not list or len(rect)!=4 or any(type(v) is not int or not -2**31<=v<2**31 for v in rect) or rect[2]<=0 or rect[3]<=0:
+            raise RuntimeError('original geometry restoration schema')
+        result.append([row['id'],rect])
+    return sorted(result)
+
+
+def original_app_route(value):
+    raw=bounded(Path(f"/proc/{value['nautilus']['pid']}/environ"),65536,uid=UID,proc=True)
+    prefix=b'WAYLAND_DISPLAY='
+    entries=[entry[len(prefix):] for entry in raw.split(b'\0') if entry.startswith(prefix)]
+    if entries!=[f"roost-nested-{value['compositor']['pid']}".encode()]:
+        raise RuntimeError('original Files process display route changed')
+
+
+def display_receipt(compositor):
+    display=f"roost-nested-{compositor['pid']}"
+    if (os.environ.get('WAYLAND_DISPLAY')!=display
+            or os.environ.get('XDG_RUNTIME_DIR')!=str(RUNTIME)
+            or os.environ.get('DBUS_SESSION_BUS_ADDRESS')!=f'unix:path={RUNTIME}/bus'):
+        raise RuntimeError('original native session environment changed')
+    info=(RUNTIME/display).lstat()
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid!=UID:
+        raise RuntimeError('original native socket admission failed')
+    return {'dev':info.st_dev,'inode':info.st_ino,'uid':info.st_uid,'mode':info.st_mode}
+
+
+def bind_display(compositor,service):
+    from gi.repository import Gio,GLib
+    receipt=display_receipt(compositor)
+    if any(service[key]!=compositor[key] for key in ('pid','uid','start_ticks','exe_sha256')):
+        raise RuntimeError('original ServiceChannel compositor mismatch')
+    deadline()
+    cancel=Gio.Cancellable()
+    timer=threading.Timer(2,cancel.cancel);timer.daemon=True;timer.start()
+    try:connection=Gio.bus_get_sync(Gio.BusType.SESSION,cancel)
+    finally:timer.cancel()
+    reply,fds=connection.call_with_unix_fd_list_sync(service['owner'],
+        '/org/gnome/Mutter/ServiceChannel','org.gnome.Mutter.ServiceChannel','OpenWaylandConnection',
+        GLib.Variant('(a{sv})',({'window-tag':GLib.Variant('s','roost-native-files-pilot')},)),
+        GLib.VariantType.new('(h)'),Gio.DBusCallFlags.NONE,2000,None,None)
+    deadline()
+    values=reply.unpack()
+    if type(values) is not tuple or len(values)!=1 or type(values[0]) is not int or fds is None or fds.get_length()!=1 or values[0]!=0:
+        raise RuntimeError('original ordinary Wayland FD reply bound')
+    fd=fds.get(values[0])
+    try:peer=socket.socket(fileno=fd)
+    except BaseException:
+        os.close(fd);raise
+    with peer:
+        if peer.family!=socket.AF_UNIX or peer.type!=socket.SOCK_STREAM:raise RuntimeError('original ordinary Wayland socket type')
+        peer.settimeout(2)
+        pid,uid,_gid=struct.unpack('3i',peer.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
+        if (pid,uid)!=(compositor['pid'],UID):raise RuntimeError('original compositor socket peer changed')
+        peer.sendall(struct.pack('=III',1,12<<16,2))
+        raw=b''
+        while len(raw)<24:
+            part=peer.recv(24-len(raw))
+            if not part:raise RuntimeError('original Wayland display closed before sync')
+            raw+=part
+        words=struct.unpack('=IIIIII',raw)
+        if words[:2]!=(2,12<<16) or words[3:]!=(1,(12<<16)|1,2):
+            raise RuntimeError('original Wayland sync reply invalid')
+    if display_receipt(compositor)!=receipt or principal(SERVICE,'/usr/bin/roost-compositor')!=service:
+        raise RuntimeError('original display or ServiceChannel route replaced')
+    deadline()
+    return receipt
+
+
+def query_guard_reason(reason):
+    if QUERY_CONTEXT is not None:
+        QUERY_CONTEXT['reason']=reason
+
+
+def fast_guard(value):
+    query_guard_reason('deadline')
+    deadline()
+    query_guard_reason('process')
+    for key,expected in (('nautilus','/usr/bin/nautilus'),('compositor','/usr/bin/roost-compositor')):
+        original=value[key];pid=original['pid']
+        if Path(f'/proc/{pid}').stat().st_uid!=UID or Path(f'/proc/{pid}/exe').resolve(strict=True)!=Path(expected).resolve(strict=True):
+            raise RuntimeError('original process changed during accessibility query')
+        ticks=int(bounded(Path(f'/proc/{pid}/stat'),8192,uid=UID,proc=True).decode().rsplit(')',1)[1].split()[19])
+        if ticks!=original['start_ticks']:raise RuntimeError('original PID recycled')
+    query_guard_reason('route')
+    if display_receipt(value['compositor'])!=value['display']:raise RuntimeError('original display route replaced')
+    query_guard_reason('scene')
+    current=scene()
+    query_guard_reason('deadline')
+    deadline()
+    return current
+
+
+# Fixed public invariant stages only; never retain exception messages or query data.
+ERROR_STAGE='context'
+# Fixed provider-receipt check that failed, or None outside it; never query data.
+ERROR_SUBSTAGE=None
+# Only fixed cells RPC operation and its original guard boundary; no query data.
+QUERY_CONTEXT=None
+
+def error_stage(stage):
+    global ERROR_STAGE
+    ERROR_STAGE=stage
+
+def error_substage(substage):
+    global ERROR_SUBSTAGE
+    ERROR_SUBSTAGE=substage
+
+
+def guard(value):
+    previous_stage=ERROR_STAGE
+    error_stage('guard-fast')
+    fast_guard(value)
+    error_stage('guard-principals')
+    if principal(APP,'/usr/bin/nautilus')!=value['nautilus'] or principal(DISPLAY,'/usr/bin/roost-compositor')!=value['compositor'] or principal(SERVICE,'/usr/bin/roost-compositor')!=value['service_channel']:
+        raise RuntimeError('original session or app principal changed')
+    error_stage('guard-session')
+    if login_session()!=value['session']:raise RuntimeError('original native login session changed')
+    error_stage('guard-route')
+    original_app_route(value)
+    error_stage('guard-accessibility')
+    check_accessibility(value)
+    error_stage('guard-fixture')
+    fixture_identity(value)
+    error_stage('guard-final')
+    current=fast_guard(value)
+    error_stage(previous_stage)
+    return current
+
+
+class Queries:
+    def __init__(self,value):self.value=value
+    def call(self,operation,kind=None):
+        global QUERY_CONTEXT
+        if kind is not None and (ERROR_STAGE!='cells' or kind not in {'role','name','state'}):
+            raise ValueError('fixed cells query operation')
+        if kind is not None:
+            QUERY_CONTEXT={'operation':kind,'boundary':'guard-before','reason':'deadline'}
+        fast_guard(self.value)
+        if kind is not None:QUERY_CONTEXT.update(boundary='operation',reason='rpc')
+        result=operation()
+        if kind is not None:QUERY_CONTEXT.update(boundary='guard-after',reason='deadline')
+        fast_guard(self.value)
+        QUERY_CONTEXT=None
+        return result
+
+def owned_window(value,current):
+    added=[row for row in current['windows'] if row['id'] not in value['original_windows']]
+    if not added:raise ReadyLater()
+    if len(added)!=1 or 'parent_window_id' not in added[0] or added[0].get('app_id')!=APP or added[0]['parent_window_id'] is not None:
+        raise RuntimeError('one original Files fixture window required')
+    window=added[0]
+    rect=window.get('rect')
+    if type(rect) is not list or len(rect)!=4 or any(type(v) is not int for v in rect) or not 100<=rect[2]<=1280 or not 100<=rect[3]<=800 or not 0<=rect[0]<=1280-rect[2] or not 0<=rect[1]<=800-rect[3]:
+        raise RuntimeError('original mapped fixture window bounds')
+    if current['focused']!=window['id'] or current.get('focused_app_id')!=APP:
+        raise ReadyLater()
+    return window
+
+
+def query_connection(connection,method,name):
+    from gi.repository import Gio,GLib
+    deadline()
+    value=connection.call_sync('org.freedesktop.DBus','/org/freedesktop/DBus','org.freedesktop.DBus',
+        method,GLib.Variant('(s)',(name,)),None,Gio.DBusCallFlags.NONE,1000,None).unpack()[0]
+    deadline()
+    return value
+
+
+def a11y_connection():
+    from gi.repository import Gio
+    deadline()
+    cancel=Gio.Cancellable();timer=threading.Timer(2,cancel.cancel);timer.daemon=True;timer.start()
+    try:
+        session=Gio.bus_get_sync(Gio.BusType.SESSION,cancel)
+        address=session.call_sync('org.a11y.Bus','/org/a11y/bus','org.a11y.Bus','GetAddress',None,None,
+            Gio.DBusCallFlags.NONE,1000,cancel).unpack()[0]
+    finally:timer.cancel()
+    # No TCP, arbitrary address lists, external runtime path or env-selected bus.
+    match=re.fullmatch(r'unix:path=('+re.escape(str(RUNTIME))+r'/at-spi/bus(?:_[0-9]{1,5}(?:\.[0-9]{1,3})?)?)(?:,guid=[0-9a-f]{32})?',address) if type(address) is str else None
+    if not match or os.environ.get('AT_SPI_BUS_ADDRESS',address)!=address:raise RuntimeError('original accessibility bus route')
+    path=Path(match[1]);info=path.lstat()
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid!=UID:raise RuntimeError('original accessibility bus socket admission')
+    with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as peer:
+        peer.settimeout(1);peer.connect(str(path))
+        pid,uid,_gid=struct.unpack('3i',peer.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
+    executable=Path(f'/proc/{pid}/exe').resolve(strict=True)
+    allowed_peers={Path('/usr/bin/dbus-daemon'),Path('/usr/bin/dbus-broker'),Path('/usr/bin/dbus-broker-launch'),Path('/usr/lib/at-spi-bus-launcher'),Path('/usr/libexec/at-spi-bus-launcher')}
+    if uid!=UID or executable not in allowed_peers:
+        raise RuntimeError('original accessibility broker executable')
+    transport_peer=process(pid,str(executable))
+    if executable.name=='at-spi-bus-launcher':
+        launcher=principal('org.a11y.Bus',str(executable))
+        if any(launcher[k]!=transport_peer[k] for k in transport_peer):raise RuntimeError('original accessibility launcher peer mismatch')
+    deadline()
+    cancel=Gio.Cancellable();timer=threading.Timer(2,cancel.cancel);timer.daemon=True;timer.start()
+    try:connection=Gio.DBusConnection.new_for_address_sync(address,
+        Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT|Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,None,cancel)
+    finally:timer.cancel()
+    try:
+        broker_pid=query_connection(connection,'GetConnectionUnixProcessID','org.freedesktop.DBus')
+        broker_uid=query_connection(connection,'GetConnectionUnixUser','org.freedesktop.DBus')
+        broker_exe=Path(f'/proc/{broker_pid}/exe').resolve(strict=True)
+        if broker_uid!=UID or broker_exe not in {Path('/usr/bin/dbus-daemon'),Path('/usr/bin/dbus-broker'),Path('/usr/bin/dbus-broker-launch')}:raise RuntimeError('original accessibility broker credentials')
+        broker=process(broker_pid,str(broker_exe))
+        if process(pid,str(executable))!=transport_peer or query_connection(connection,'GetConnectionUnixProcessID','org.freedesktop.DBus')!=broker_pid or process(broker_pid,str(broker_exe))!=broker:raise RuntimeError('original accessibility broker changed')
+    except BaseException:
+        connection.close_sync(None);raise
+    receipt={'socket':{'dev':info.st_dev,'inode':info.st_ino,'uid':info.st_uid,'mode':info.st_mode},'broker':broker,'transport_peer':transport_peer}
+    if (path.lstat().st_dev,path.lstat().st_ino)!=(info.st_dev,info.st_ino):
+        connection.close_sync(None);raise RuntimeError('original accessibility broker socket replaced')
+    return connection,receipt
+
+
+def provider_receipt(connection,owner,original):
+    error_substage('owner-shape')
+    if type(owner) is not str or re.fullmatch(r':[0-9]{1,10}\.[0-9]{1,10}',owner) is None:
+        raise RuntimeError('original accessibility provider unique name bound')
+    error_substage('owner-current')
+    if query_connection(connection,'GetNameOwner',owner)!=owner:
+        raise RuntimeError('original accessibility unique owner changed')
+    pid=query_connection(connection,'GetConnectionUnixProcessID',owner)
+    uid=query_connection(connection,'GetConnectionUnixUser',owner)
+    error_substage('provider-identity')
+    result=process(pid,'/usr/bin/nautilus')
+    if uid!=UID or any(result[key]!=original[key] for key in result):
+        raise RuntimeError('accessibility provider is not original Nautilus')
+    error_substage('provider-stable')
+    if query_connection(connection,'GetConnectionUnixProcessID',owner)!=pid or query_connection(connection,'GetConnectionUnixUser',owner)!=uid or process(pid,'/usr/bin/nautilus')!=result:
+        raise RuntimeError('original accessibility provider changed during observation')
+    return dict(result,owner=owner)
+
+
+def validate_accessibility(value,original):
+    if type(value) is not dict or set(value)!={'socket','broker','provider','transport_peer'}:raise RuntimeError('accessibility receipt schema')
+    provider=value['provider'];broker=value['broker'];sock=value['socket']
+    if type(provider) is not dict or set(provider)!=set(original) or any(provider.get(k)!=original[k] for k in ('pid','uid','start_ticks','exe_sha256')) or type(provider['owner']) is not str or re.fullmatch(r':[0-9]{1,10}\.[0-9]{1,10}',provider['owner']) is None:
+        raise RuntimeError('original accessibility provider receipt')
+    if type(broker) is not dict or set(broker)!={'pid','uid','start_ticks','exe_sha256'} or any(type(broker[k]) is not int or not 0<broker[k]<2**64 for k in ('pid','uid','start_ticks')) or broker['uid']!=UID or type(broker['exe_sha256']) is not str or re.fullmatch('[0-9a-f]{64}',broker['exe_sha256']) is None:
+        raise RuntimeError('original accessibility broker receipt')
+    transport=value['transport_peer']
+    if type(transport) is not dict or set(transport)!=set(broker) or any(type(transport[k]) is not int or not 0<transport[k]<2**64 for k in ('pid','uid','start_ticks')) or transport['uid']!=UID or type(transport['exe_sha256']) is not str or re.fullmatch('[0-9a-f]{64}',transport['exe_sha256']) is None:raise RuntimeError('accessibility socket peer receipt')
+    if type(sock) is not dict or set(sock)!={'dev','inode','uid','mode'} or any(type(v) is not int or not 0<=v<2**64 for v in sock.values()) or sock['uid']!=UID or not stat.S_ISSOCK(sock['mode']):raise RuntimeError('accessibility socket receipt')
+
+
+def check_accessibility(value):
+    connection,receipt=a11y_connection()
+    try:
+        receipt['provider']=provider_receipt(connection,value['accessibility']['provider']['owner'],value['nautilus'])
+        if receipt!=value['accessibility']:raise RuntimeError('original accessibility bus/provider replaced')
+    finally:connection.close_sync(None)
+
+
+def provider_app(value,query):
+    import gi
+    gi.require_version('Atspi','2.0')
+    from gi.repository import Atspi
+    import pyatspi
+    Atspi.set_timeout(1000,1000)
+    error_stage('provider-enumerate')
+    error_substage(None)
+    desktop=query(lambda:pyatspi.Registry.getDesktop(0))
+    count=query(lambda:desktop.childCount)
+    if type(count) is not int or not 0<=count<=256:raise RuntimeError('accessibility desktop bound')
+    apps=[]
+    connection,receipt=a11y_connection()
+    try:
+        for index in range(count):
+            app=query(lambda:desktop.getChildAtIndex(index))
+            if app is None:continue
+            owner=query(lambda:app.app.bus_name)
+            if type(owner) is not str or re.fullmatch(r':[0-9]{1,10}\.[0-9]{1,10}',owner) is None:raise RuntimeError('accessible provider unique name bound')
+            pid=query(lambda:query_connection(connection,'GetConnectionUnixProcessID',owner))
+            if pid==value['nautilus']['pid']:
+                error_stage('provider-receipt')
+                receipt['provider']=provider_receipt(connection,owner,value['nautilus'])
+                error_stage('provider-enumerate')
+                apps.append(app)
+        if len(apps)!=1:raise RuntimeError('original accessible Files provider ambiguous')
+        error_stage('provider-receipt')
+        error_substage('receipt-match')
+        if 'accessibility' in value and receipt!=value['accessibility']:raise RuntimeError('original accessible Files provider changed')
+    finally:connection.close_sync(None)
+    return apps[0],pyatspi,receipt
+
+
+def accessibility(value):
+    query=Queries(value).call
+    # Narrow the wide tree stage so a failure names provider lookup, the
+    # subtree walk, or the post-walk guard without retaining query data.
+    error_stage('tree-provider')
+    app,pyatspi,_receipt=provider_app(value,query)
+    count=query(lambda:app.childCount)
+    if type(count) is not int or not 0<=count<=64:raise RuntimeError('original accessible Files app bound')
+    roots=[]
+    for index in range(count):
+        node=query(lambda:app.getChildAtIndex(index))
+        if node is not None and query(lambda:node.name)==Path(value['fixture']).name and query(lambda:node.getState().contains(pyatspi.STATE_SHOWING)):roots.append(node)
+    if not roots:raise ReadyLater()
+    if len(roots)!=1:raise RuntimeError('original fixture accessible window ambiguous')
+    error_stage('tree-walk')
+    nodes,visited=walk_tree(roots[0],query,pyatspi.STATE_SHOWING,value['accessibility']['provider']['owner'])
+    error_stage('tree')
+    guard(value)
+    return nodes,pyatspi,query,visited
+
+
+def walk_tree(root,query,showing,provider=None):
+    nodes=[];visited=set()
+    def walk(node,depth):
+        # Count every visited object, including hidden nodes; cycles are rejected.
+        if provider is not None and query(lambda:node.app.bus_name)!=provider:raise RuntimeError('foreign provider object in original fixture subtree')
+        identity=query(lambda:node.path)
+        if type(identity) is not str or not 1<=len(identity)<=256:raise RuntimeError('accessible object identity bound')
+        if identity in visited or depth>32 or len(visited)>=4096:raise RuntimeError('fixture accessibility traversal bound or cycle:depth='+str(depth)+' visited='+str(len(visited)))
+        visited.add(identity)
+        query(node.clear_cache)
+        count=query(lambda:node.childCount)
+        if type(count) is not int or not 0<=count<=256:raise RuntimeError('fixture accessibility child bound:'+str(count)[:16])
+        if query(lambda:node.getState().contains(showing)):nodes.append(node)
+        for index in range(count):
+            child=query(lambda:node.getChildAtIndex(index))
+            if child is not None:walk(child,depth+1)
+    walk(root,0)
+    return nodes,len(visited)
+
+
+def known_text(entry,expected,query):
+    text_api=query(entry.queryText)
+    count=query(lambda:text_api.characterCount)
+    if type(count) is not int or count!=len(expected):raise RuntimeError('known entry text length mismatch')
+    if query(lambda:text_api.getText(0,len(expected)+1))!=expected:
+        raise RuntimeError('actual known input did not reach the original entry')
+    return True
+
+
+def original_receipt(value):
+    return {key:value[key] for key in ('nautilus','compositor','accessibility','session','original_windows',
+        'original_layout','original_focus','original_workspace')}
+
+
+def common_receipt(value,phase,ready,files):
+    return {'phase':phase,'ready':ready,'original':original_receipt(value),'owner_scope':OWNER_SCOPE,
+        'original_principals_retained':True,'filesystem':files}
+
+
+def check_outcomes(files,cells):
+    if files[CANCELLED] or cells[CANCELLED]:raise RuntimeError('cancelled object unexpectedly exists')
+    if any(type(v) is not int or not 0<=v<=1 for v in cells.values()):raise RuntimeError('known fixture cell ambiguous')
+
+
+def retain_created_inode(value):
+    info=(Path(value['fixture'])/CREATED).lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid!=UID:raise RuntimeError('created directory identity admission')
+    inode=[info.st_dev,info.st_ino]
+    if value['created_inode'] is not None:
+        if value['created_inode']!=inode:raise RuntimeError('original created directory replaced')
+        return
+    value['created_inode']=inode
+    # Retain only observed metadata after real UI and filesystem evidence passed.
+    current=context()
+    if dict(current,created_inode=inode)!=value:raise RuntimeError('original context changed before metadata retention')
+    fd=os.open(CONTEXT,os.O_WRONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(fd,'wb') as stream:
+        info=os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid!=UID or info.st_mode&0o077:raise RuntimeError('original private context changed')
+        raw=json.dumps(value,separators=(',',':')).encode()
+        if len(raw)>16384:raise RuntimeError('original context metadata bound')
+        stream.write(raw);stream.truncate()
+
+
+def cleanup_fixture(value):
+    fixture_identity(value);filesystem(value)
+    if value['created_inode'] is None:raise RuntimeError('created directory receipt missing for cleanup')
+    path=Path(value['fixture'])
+    fd=os.open(path,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    try:
+        info=os.fstat(fd)
+        if (info.st_dev,info.st_ino)!=(value['fixture_dev'],value['fixture_inode']):raise RuntimeError('original cleanup directory changed')
+        with os.scandir(fd) as iterator:
+            names=[]
+            for row in iterator:
+                names.append(row.name)
+                if len(names)>2:raise RuntimeError('unexpected fixture cleanup member')
+        if set(names)!={'seed.txt',CREATED}:raise RuntimeError('unexpected fixture cleanup member')
+        seed=os.stat('seed.txt',dir_fd=fd,follow_symlinks=False)
+        folder=os.stat(CREATED,dir_fd=fd,follow_symlinks=False)
+        if not stat.S_ISREG(seed.st_mode) or seed.st_nlink!=1 or [seed.st_dev,seed.st_ino]!=value['seed_inode'] or not stat.S_ISDIR(folder.st_mode) or [folder.st_dev,folder.st_ino]!=value['created_inode']:
+            raise RuntimeError('original cleanup members replaced')
+        # rmdir refuses nonempty directories; no recursion, broad glob or symlink follow.
+        os.rmdir(CREATED,dir_fd=fd)
+        os.unlink('seed.txt',dir_fd=fd)
+        fixture_identity(value)
+        os.rmdir(path)
+    finally:os.close(fd)
+    return {'fixture_inode_matched':True,'known_members_removed':True,'fixture_removed':True,'context_retained':True}
+
+
+def inspect(value,phase):
+    current=guard(value)
+    if phase=='closed':
+        error_stage('closed-state')
+        if not set(value['original_windows'])<=set(window_ids(current)):raise RuntimeError('original live window disappeared')
+        if window_ids(current)!=value['original_windows'] or layout(current)!=value['original_layout'] or current['focused']!=value['original_focus'] or current['active_workspace']!=value['original_workspace']:raise ReadyLater()
+        guard(value)
+        error_stage('filesystem')
+        files=filesystem(value)
+        if not files[CREATED]:raise RuntimeError('original created directory absent at close')
+        result=common_receipt(value,phase,True,files)
+        result.update(restored=True,restored_layout=layout(current),restored_focus=current['focused'],restored_workspace=current['active_workspace'])
+        error_stage('cleanup')
+        result['cleanup']=cleanup_fixture(value)
+        return result
+    error_stage('window')
+    window=owned_window(value,current)
+    error_stage('tree')
+    nodes,api,query,visited=accessibility(value)
+    error_stage('cells')
+    cells={name:sum(query(node.getRoleName,kind='role')=='table cell' and query(lambda:node.name,kind='name') in (name,name+'. File',name+'. Folder') for node in nodes)
+           for name in ('seed.txt',CREATED,CANCELLED)}
+    entries=[node for node in nodes if query(node.getRoleName,kind='role') in ('text','entry','text entry') and query(lambda:node.getState().contains(api.STATE_FOCUSED),kind='state') and query(lambda:node.getState().contains(api.STATE_EDITABLE),kind='state')]
+    dialogs=[node for node in nodes if query(node.getRoleName,kind='role') in ('dialog','alert') and query(lambda:node.name,kind='name')=='New Folder']
+    error_stage('filesystem')
+    files=filesystem(value)
+    check_outcomes(files,cells)
+    result={'window_id':window['id'],'rect':window['rect'],'node_count':visited,'showing_node_count':len(nodes),
+            'seed_cells':cells['seed.txt'],'created_cells':cells[CREATED],'cancelled_cells':cells[CANCELLED],
+            'dialog_count':len(dialogs),'focused_entry_count':len(entries)}
+    result.update(common_receipt(value,phase,True,files))
+    error_stage('phase')
+    if phase=='mapped' and cells['seed.txt']==0:raise ReadyLater()
+    if phase=='mapped' and cells['seed.txt']!=1:raise RuntimeError('known seed cell ambiguous')
+    if phase in ('dialog','create-typed','cancel-typed'):
+        if len(dialogs)>1 or len(entries)>1:raise RuntimeError('original folder dialog entry ambiguous')
+        if not dialogs or not entries:raise ReadyLater()
+        if phase in ('create-typed','cancel-typed'):
+            expected=CREATED if phase=='create-typed' else CANCELLED
+            known_text(entries[0],expected,query)
+            result['known_entry_text_matches']=True
+    if phase=='created' and (not files[CREATED] or cells[CREATED]==0 or dialogs):raise ReadyLater()
+    if phase=='created':retain_created_inode(value)
+    if phase=='cancelled' and dialogs:raise ReadyLater()
+    if phase=='cancelled' and (not files[CREATED] or cells[CREATED]!=1):raise RuntimeError('original created folder lost during cancellation')
+    error_stage('final-guard')
+    guard(value)
+    result['ready']=True
+    return result
+
+
+def start_provider(provisional):
+    # The start phase observes a just-launched Nautilus while the desktop
+    # settles, so a transient enumeration miss (e.g. a momentary extra
+    # accessible app) retries here exactly like the later phases do in
+    # main() instead of failing the whole pilot on the first attempt.
+    attempts=0
+    query=Queries(provisional).call
+    while True:
+        try:
+            return provider_app(provisional,query)
+        except RuntimeError:
+            attempts+=1
+            if ERROR_STAGE!='provider-enumerate' or attempts>=TREE_WALK_ATTEMPTS:
+                raise
+
+
+def start():
+    if UID==0:raise RuntimeError('ordinary fixture user required')
+    if CONTEXT.exists():raise RuntimeError('fresh pilot owner context required')
+    nautilus=principal(APP,'/usr/bin/nautilus');compositor=principal(DISPLAY,'/usr/bin/roost-compositor')
+    current=scene()
+    session=login_session()
+    if current.get('overview_open') is not False or type(current.get('active_workspace')) is not int:raise RuntimeError('original unobscured scene required')
+    display=f"roost-nested-{compositor['pid']}"
+    if os.environ.get('WAYLAND_DISPLAY')!=display:raise RuntimeError('original native display route required')
+    service=principal(SERVICE,'/usr/bin/roost-compositor')
+    display=bind_display(compositor,service)
+    provisional={'nautilus':nautilus,'compositor':compositor,'display':display}
+    _app,_api,accessibility_receipt=start_provider(provisional)
+    packages={name:command(['/usr/bin/pacman','-Q',name]) for name in ('nautilus','python-atspi','roost')}
+    directory=Path(tempfile.mkdtemp(prefix='roost-native-files-',dir=RUNTIME))
+    info=directory.lstat()
+    seed_fd=os.open(directory/'seed.txt',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    with os.fdopen(seed_fd,'wb') as stream:stream.write(PAYLOAD)
+    value=validate_context({'schema':1,'fixture':str(directory),'fixture_dev':info.st_dev,'fixture_inode':info.st_ino,
+        'seed_sha256':hashlib.sha256(PAYLOAD).hexdigest(),'original_windows':window_ids(current),
+        'nautilus':nautilus,'compositor':compositor,'packages':packages,'display':display,'service_channel':service,'session':session,'original_layout':layout(current),
+        'original_focus':current['focused'],'original_workspace':current['active_workspace'],'accessibility':accessibility_receipt,
+        'seed_inode':[(directory/'seed.txt').lstat().st_dev,(directory/'seed.txt').lstat().st_ino],'created_inode':None})
+    fd=os.open(CONTEXT,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,'w') as stream:json.dump(value,stream)
+    guard(value)
+    command(['/usr/bin/nautilus','--new-window',str(directory)])
+    result=common_receipt(value,'start',True,filesystem(value))
+    result['packages']=packages
+    return result
+
+
+def main():
+    global DEADLINE,QUERY_CONTEXT
+    QUERY_CONTEXT=None
+    DEADLINE=time.monotonic()+25
+    if len(sys.argv)!=2 or sys.argv[1] not in ACTIONS:raise ValueError('fixed pilot action required')
+    phase=sys.argv[1]
+    error_stage('context')
+    try:
+        try:
+            if phase=='start':
+                error_stage('start')
+                result=start()
+            else:
+                original=context()
+                attempts=0
+                while True:
+                    try:
+                        result=inspect(original,phase)
+                        break
+                    except RuntimeError:
+                        attempts+=1
+                        if ERROR_STAGE not in ('tree-walk','provider-enumerate') or attempts>=TREE_WALK_ATTEMPTS:
+                            raise
+                        QUERY_CONTEXT=None
+        except ReadyLater:
+            error_stage('context')
+            original=context();guard(original)
+            error_stage('filesystem')
+            files=filesystem(original)
+            result=common_receipt(original,phase,False,files)
+        error_stage('receipt')
+        encoded=json.dumps(result,separators=(',',':'))
+        if len(encoded.encode())>16384:raise RuntimeError('fixed pilot receipt bound')
+        print(encoded)
+    except Exception as error:
+        allowed={'RuntimeError','ValueError','OSError','FileNotFoundError','PermissionError','CalledProcessError','TimeoutExpired','TimeoutError','ImportError','ModuleNotFoundError'}
+        name=type(error).__name__
+        diagnostic={'phase':phase,'stage':ERROR_STAGE,'exception_type':name if name in allowed else 'OtherError'}
+        if ERROR_STAGE=='provider-receipt' and ERROR_SUBSTAGE is not None:
+            if ERROR_SUBSTAGE not in {'owner-shape','owner-current','provider-identity','provider-stable','receipt-match'}:
+                raise ValueError('fixed provider receipt sub-stage required')
+            diagnostic['sub_stage']=ERROR_SUBSTAGE
+        if ERROR_STAGE=='cells' and QUERY_CONTEXT is not None:
+            diagnostic['query_context']=dict(QUERY_CONTEXT)
+        print(json.dumps({'native_files_error':diagnostic}))
+        return 1
+    return 0
+
+
+if __name__=='__main__':sys.exit(main())

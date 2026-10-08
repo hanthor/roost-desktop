@@ -58,6 +58,14 @@ _guest_loader = importlib.machinery.SourceFileLoader("vm_guest_agent", os.path.j
 _guest_spec = importlib.util.spec_from_loader("vm_guest_agent", _guest_loader)
 guest_agent = importlib.util.module_from_spec(_guest_spec)
 _guest_loader.exec_module(guest_agent)
+_files_loader=importlib.machinery.SourceFileLoader("native_files_pilot",os.path.join(HERE,"lib","native_files_pilot.py"))
+_files_spec=importlib.util.spec_from_loader("native_files_pilot",_files_loader)
+files_pilot=importlib.util.module_from_spec(_files_spec)
+_files_loader.exec_module(files_pilot)
+_picker_loader=importlib.machinery.SourceFileLoader("native_picker_pilot",os.path.join(HERE,"lib","native_picker_pilot.py"))
+_picker_spec=importlib.util.spec_from_loader("native_picker_pilot",_picker_loader)
+picker_pilot=importlib.util.module_from_spec(_picker_spec)
+_picker_loader.exec_module(picker_pilot)
 
 WIDTH, HEIGHT = baseline.WIDTH, baseline.HEIGHT
 DRM_RE = re.compile(r"roost-compositor: drm: output (\S+) (\d+)x(\d+)")
@@ -1384,6 +1392,8 @@ def main():
                     tour_serial_end = len(read_text(serial_path))
                     agent = guest_agent.GuestAgent(agent_path)
                     try:
+                        files_pilot.run(qmp,agent,out,record,failure_receipt=guest_agent.native_files_failure)
+                        picker_pilot.run(qmp,agent,out,record)
                         run_lifecycle(qmp, agent, out, serial_path, record)
                     finally:
                         agent.close()

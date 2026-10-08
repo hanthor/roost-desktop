@@ -415,6 +415,29 @@ def background_user_diagnostics():
     return result
 
 
+def valid_native_files_error(value,phase):
+    stages={"context","start","guard-fast","guard-principals","guard-session","guard-route",
+            "guard-accessibility","guard-fixture","guard-final","closed-state","window","tree",
+            "tree-provider","provider-enumerate","provider-receipt","tree-walk",
+            "cells","filesystem","cleanup","phase","final-guard","receipt"}
+    allowed={"RuntimeError","ValueError","OSError","FileNotFoundError","PermissionError","CalledProcessError",
+             "TimeoutExpired","TimeoutError","ImportError","ModuleNotFoundError","OtherError"}
+    fields={"phase","stage","exception_type"}
+    if type(value) is not dict or set(value) not in (fields,fields|{"query_context"},fields|{"sub_stage"}):return False
+    if "sub_stage" in value and (value.get("stage")!="provider-receipt" or type(value["sub_stage"]) is not str or value["sub_stage"] not in {"owner-shape","owner-current","provider-identity","provider-stable","receipt-match"}):return False
+    if "query_context" in value:
+        query=value["query_context"]
+        if (value.get("stage")!="cells" or type(query) is not dict or set(query)!={"operation","boundary","reason"}
+                or type(query["operation"]) is not str or query["operation"] not in {"role","name","state"}
+                or type(query["boundary"]) is not str or query["boundary"] not in {"guard-before","operation","guard-after"}
+                or type(query["reason"]) is not str
+                or (query["reason"] not in ({"rpc"} if query["boundary"]=="operation" else {"deadline","process","route","scene"}))):return False
+    return (type(value) is dict
+            and type(value["phase"]) is str and value["phase"]==phase
+            and type(value["stage"]) is str and value["stage"] in stages
+            and type(value["exception_type"]) is str and value["exception_type"] in allowed)
+
+
 def main():
     if sys.argv[1] == "background-user-diagnostics":
         print(json.dumps(background_user_diagnostics()))
@@ -427,6 +450,46 @@ def main():
         result = json.loads(call(sys.executable, __file__, "background-user-diagnostics", user=True))
     elif action == "inventory":
         result = inventory()
+    elif action=='native-picker':
+        phases={'start','parent','parent-clicked','parent-tested','grant-dialog','blocked','selected','granted','cancel-dialog','dismissed','restored-clicked','restored-tested','closed'}
+        if len(sys.argv)!=3 or sys.argv[2] not in phases:raise ValueError('fixed native picker phase required')
+        original=inventory();compositor=next(p for p in original['processes'] if p['executable']=='roost-compositor');phase=sys.argv[2]
+        completed=subprocess.run(['runuser','-u',OWNER.pw_name,'--','env',
+            f'XDG_RUNTIME_DIR={RUNTIME}',f'DBUS_SESSION_BUS_ADDRESS=unix:path={RUNTIME}/bus',
+            f"WAYLAND_DISPLAY=roost-nested-{compositor['pid']}",f"ROOST_VM_NATIVE_SESSION={original['session']['Id']}",
+            'LC_ALL=C.UTF-8','GTK_A11Y=atspi','GDK_BACKEND=wayland','/usr/libexec/roost-vm-gtk-picker-pilot',phase],capture_output=True,timeout=28)
+        if completed.returncode!=0 or len(completed.stdout)>16384:
+            diagnostic={'phase':phase,'exception_type':'RuntimeError'}
+            try:
+                decoded=json.loads(completed.stdout) if len(completed.stdout)<=4096 else None
+                candidate=decoded.get('native_picker_error') if type(decoded) is dict and set(decoded)=={'native_picker_error'} else None
+                allowed={'RuntimeError','ValueError','OSError','FileNotFoundError','PermissionError','CalledProcessError','TimeoutExpired','TimeoutError','ImportError','ModuleNotFoundError','OtherError'}
+                if type(candidate) is dict and set(candidate)=={'phase','exception_type'} and candidate['phase']==phase and type(candidate['exception_type']) is str and candidate['exception_type'] in allowed:diagnostic=candidate
+            except (ValueError,TypeError,RecursionError):pass
+            print(json.dumps({'native_picker_error':diagnostic}));sys.exit(completed.returncode if 0<completed.returncode<256 else 1)
+        result=json.loads(completed.stdout)
+    elif action == "native-files":
+        phases={"start","mapped","dialog","create-typed","created","cancel-typed","cancelled","closed"}
+        if len(sys.argv)!=3 or sys.argv[2] not in phases:
+            raise ValueError("fixed native Files phase required")
+        original=inventory()
+        compositor=next(p for p in original["processes"] if p["executable"]=="roost-compositor")
+        phase=sys.argv[2]
+        result=subprocess.run(["runuser","-u",OWNER.pw_name,"--","env",
+            f"XDG_RUNTIME_DIR={RUNTIME}",f"DBUS_SESSION_BUS_ADDRESS=unix:path={RUNTIME}/bus",
+            f"WAYLAND_DISPLAY=roost-nested-{compositor['pid']}",f"ROOST_VM_NATIVE_SESSION={original['session']['Id']}","LC_ALL=C.UTF-8","GTK_A11Y=atspi",
+            "/usr/libexec/roost-vm-nautilus-pilot",phase],capture_output=True,timeout=28)
+        # Fixed finite diagnostic only; no stderr/body forwarding on any failure.
+        if result.returncode!=0 or len(result.stdout)>16384:
+            diagnostic={"phase":phase,"stage":"diagnostic-transport","exception_type":"RuntimeError"}
+            try:
+                decoded=json.loads(result.stdout) if len(result.stdout)<=4096 else None
+                candidate=decoded.get("native_files_error") if type(decoded) is dict and set(decoded)=={"native_files_error"} else None
+                if valid_native_files_error(candidate,phase):diagnostic=candidate
+            except (ValueError,TypeError,RecursionError):pass
+            print(json.dumps({"native_files_error":diagnostic}))
+            sys.exit(result.returncode if 0<result.returncode<256 else 1)
+        result=json.loads(result.stdout)
     elif action == "orca-departed":
         pid, ticks = int(sys.argv[2]), int(sys.argv[3])
         try:

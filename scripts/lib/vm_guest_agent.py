@@ -37,6 +37,55 @@ def valid_orca_read_error(value):
     return True
 
 
+def valid_native_files_error(value):
+    phases={"start","mapped","dialog","create-typed","created","cancel-typed","cancelled","closed"}
+    types={"RuntimeError","ValueError","OSError","FileNotFoundError","PermissionError","CalledProcessError",
+           "TimeoutExpired","TimeoutError","ImportError","ModuleNotFoundError","OtherError"}
+    stages={"context","start","guard-fast","guard-principals","guard-session","guard-route",
+            "guard-accessibility","guard-fixture","guard-final","closed-state","window","tree",
+            "tree-provider","provider-enumerate","provider-receipt","tree-walk",
+            "cells","filesystem","cleanup","phase","final-guard","receipt","diagnostic-transport"}
+    fields={"phase","stage","exception_type"}
+    if type(value) is not dict or set(value) not in (fields,fields|{"query_context"},fields|{"sub_stage"}):return False
+    if "sub_stage" in value and (value.get("stage")!="provider-receipt" or type(value["sub_stage"]) is not str or value["sub_stage"] not in {"owner-shape","owner-current","provider-identity","provider-stable","receipt-match"}):return False
+    if "query_context" in value:
+        query=value["query_context"]
+        if (value.get("stage")!="cells" or type(query) is not dict or set(query)!={"operation","boundary","reason"}
+                or type(query["operation"]) is not str or query["operation"] not in {"role","name","state"}
+                or type(query["boundary"]) is not str or query["boundary"] not in {"guard-before","operation","guard-after"}
+                or type(query["reason"]) is not str
+                or (query["reason"] not in ({"rpc"} if query["boundary"]=="operation" else {"deadline","process","route","scene"}))):return False
+    return (type(value) is dict
+            and type(value["phase"]) is str and value["phase"] in phases
+            and type(value["stage"]) is str and value["stage"] in stages
+            and type(value["exception_type"]) is str and value["exception_type"] in types)
+
+
+
+class NativeFilesError(RuntimeError):
+    """Only finite validated public diagnostics from a failed fixed Files probe."""
+    def __init__(self, diagnostic, exitcode):
+        if not valid_native_files_error(diagnostic) or type(exitcode) is not int or not 0<exitcode<256:
+            raise ValueError("fixed native Files failure schema")
+        self.diagnostic=dict(diagnostic)
+        self.exitcode=exitcode
+        super().__init__(f"guest lifecycle native-files failed (exit={exitcode}): {json.dumps(self.diagnostic)}")
+
+
+def native_files_failure(error):
+    if type(error) is not NativeFilesError or not valid_native_files_error(error.diagnostic) or type(error.exitcode) is not int or not 0<error.exitcode<256:
+        return None
+    return {"native_files_error":dict(error.diagnostic),"exitcode":error.exitcode}
+
+
+def valid_native_picker_error(value):
+    phases={'start','parent','parent-clicked','parent-tested','grant-dialog','blocked','selected','granted','cancel-dialog','dismissed','restored-clicked','restored-tested','closed'}
+    types={'RuntimeError','ValueError','OSError','FileNotFoundError','PermissionError','CalledProcessError',
+           'TimeoutExpired','TimeoutError','ImportError','ModuleNotFoundError','OtherError'}
+    return (type(value) is dict and set(value)=={'phase','exception_type'} and type(value['phase']) is str
+            and value['phase'] in phases and type(value['exception_type']) is str and value['exception_type'] in types)
+
+
 class GuestAgent:
     def __init__(self, path):
         self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -78,6 +127,27 @@ class GuestAgent:
             status = self.command("guest-exec-status", pid=pid)
             if status["exited"]:
                 if status.get("exitcode") != 0 or status.get("out-truncated") or status.get("err-truncated"):
+                    if action=='native-picker' and not status.get('out-truncated'):
+                        try:
+                            encoded=status.get('out-data','')
+                            if type(encoded) is not str or len(encoded)>5464:raise ValueError('fixed receipt bound')
+                            raw=base64.b64decode(encoded,validate=True)
+                            if len(raw)>4096:raise ValueError('fixed receipt bound')
+                            value=json.loads(raw)
+                            diagnostic=value.get('native_picker_error') if type(value) is dict and set(value)=={'native_picker_error'} else None
+                        except (binascii.Error,ValueError,UnicodeDecodeError,TypeError,RecursionError):diagnostic=None
+                        if valid_native_picker_error(diagnostic) and len(arguments)==1 and diagnostic['phase']==str(arguments[0]):raise RuntimeError(f"guest lifecycle native-picker failed (exit={status.get('exitcode')}): {json.dumps(diagnostic)}")
+                    if action == "native-files" and not status.get("out-truncated"):
+                        try:
+                            encoded=status.get("out-data","")
+                            if type(encoded) is not str or len(encoded)>5464:raise ValueError("fixed receipt bound")
+                            raw=base64.b64decode(encoded,validate=True)
+                            if len(raw)>4096:raise ValueError("fixed receipt bound")
+                            value=json.loads(raw)
+                            diagnostic=value.get("native_files_error") if type(value) is dict and set(value)=={"native_files_error"} else None
+                        except (binascii.Error,ValueError,UnicodeDecodeError,TypeError,RecursionError):diagnostic=None
+                        if valid_native_files_error(diagnostic) and len(arguments)==1 and diagnostic["phase"]==str(arguments[0]) and type(status.get("exitcode")) is int and 0<status["exitcode"]<256:
+                            raise NativeFilesError(diagnostic,status.get("exitcode"))
                     if action == "orca-read" and not status.get("out-truncated"):
                         try:
                             encoded = status.get("out-data", "")
