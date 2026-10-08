@@ -28,7 +28,7 @@ reference = load('stock_reference', ROOT/'packaging/marlin/perf/roost-gnome-refe
 
 
 def image(profile='stock'):
-    return dict(schema=1, profile=profile, mutter_package='mutter 51.0-1.6' if profile=='diagnostic' else 'mutter 51.0-1',
+    return dict(schema=1, profile=profile, mutter_package='mutter 51.0-1.7' if profile=='diagnostic' else 'mutter 51.0-1',
                 shell_package='gnome-shell 1:51.0-1', packages_sha256='a'*64, critical_sha256='b'*64)
 
 
