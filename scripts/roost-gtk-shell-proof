@@ -2386,7 +2386,7 @@ cstate ".pointer_position == [$((WIDTH / 2)), $((HEIGHT / 2))]" "fullscreen corn
     fail G-HOT-CORNER-FULLSCREEN "backend did not deliver the requested corner exit"
 cp "$CSTATE" "$ARTIFACTS/hot-corner-fullscreen-before-unfullscreen.json"
 printf '{"generation":2,"request":"unfullscreen"}\n' >"$corner_requests"
-cstate ".focused_rect != [0, 0, $WIDTH, $HEIGHT]" "corner proof restored" ||
+cstate ".windows | any(.[]; .app_id == \"roost-test-fullscreen corner proof\" and .rect != [0, 0, $WIDTH, $HEIGHT])" "corner proof restored" ||
     fail G-HOT-CORNER-FULLSCREEN "actual GTK unfullscreen request did not restore geometry"
 cp "$CSTATE" "$ARTIFACTS/hot-corner-unfullscreen-before-entry.json"
 xdotool mousemove --window "$WID" 1 1
@@ -2396,6 +2396,15 @@ cstate '.pointer_position == [1, 1]' "unfullscreen corner entry delivered" ||
 cp "$CSTATE" "$ARTIFACTS/hot-corner-unfullscreen-entry.json"
 cstate '.pointer_fullscreen_blocked | not' "unfullscreen corner guard removed" ||
     fail G-HOT-CORNER-FULLSCREEN "actual fullscreen guard remained after restoring geometry"
+# The parked corner motion may have been consumed while the guard held, so
+# leave and re-enter only after the guard is proven clear: the re-entry
+# motion is then processed strictly unblocked.
+xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
+cstate ".pointer_position == [$((WIDTH / 2)), $((HEIGHT / 2))]" "unfullscreen corner exit observed" ||
+    fail G-HOT-CORNER-FULLSCREEN "backend did not deliver the requested corner exit after unfullscreen"
+xdotool mousemove --window "$WID" 1 1
+cstate '.pointer_position == [1, 1]' "unfullscreen corner re-entry delivered" ||
+    fail G-HOT-CORNER-FULLSCREEN "backend did not deliver the requested corner re-entry after unfullscreen"
 cstate '.overview_open' "corner restored after fullscreen" ||
     fail G-HOT-CORNER-FULLSCREEN "unfullscreen did not restore corner opening"
 xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
