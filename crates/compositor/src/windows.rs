@@ -26,7 +26,7 @@ use smithay::{
     },
     desktop::{Window, WindowSurface},
     input::{
-        keyboard::{FilterResult, KeyboardHandle, XkbConfig},
+        keyboard::{FilterResult, KeyboardHandle, ModifiersState, XkbConfig},
         pointer::{AxisFrame, ButtonEvent, MotionEvent, PointerHandle},
     },
     reexports::wayland_server::protocol::wl_surface::WlSurface,
@@ -4511,13 +4511,54 @@ impl WindowManager {
     }
 
     /// The modifiers held now, as `MOD_*` bits.
+    ///
+    /// A latch bit only counts when the seat's XKB machine agrees it is
+    /// held (with no seat yet, the latch stands alone). A press delivered
+    /// without its release — a backend/XTest edge the G-CYCLE-KEYS proof
+    /// watched turn Super+F1 into Super+Alt — leaves the latch set while
+    /// nothing is physically held; the seat still advances on every event
+    /// it sees, so the intersection clears the stale bit while a genuine
+    /// hold (both sides set) keeps matching.
     fn held_mods(&self) -> u32 {
+        let seat = self
+            .keyboard
+            .clone()
+            .map(|keyboard| keyboard.modifier_state());
+        Self::combine_mods(
+            self.shift_held,
+            self.ctrl_held,
+            self.alt_held,
+            self.super_held,
+            seat,
+        )
+    }
+
+    /// Intersect the press/release latch with the seat's XKB modifier
+    /// state, as `MOD_*` bits. With no seat yet the latch stands alone;
+    /// once the seat exists both sides must agree, so a stale bit on
+    /// either side clears instead of matching a chord it should not.
+    fn combine_mods(
+        shift: bool,
+        ctrl: bool,
+        alt: bool,
+        logo: bool,
+        seat: Option<ModifiersState>,
+    ) -> u32 {
         use roost_shell_control::{MOD_ALT, MOD_CTRL, MOD_LOGO, MOD_SHIFT};
+        let (shift, ctrl, alt, logo) = match seat {
+            None => (shift, ctrl, alt, logo),
+            Some(state) => (
+                shift && state.shift,
+                ctrl && state.ctrl,
+                alt && state.alt,
+                logo && state.logo,
+            ),
+        };
         [
-            (self.shift_held, MOD_SHIFT),
-            (self.ctrl_held, MOD_CTRL),
-            (self.alt_held, MOD_ALT),
-            (self.super_held, MOD_LOGO),
+            (shift, MOD_SHIFT),
+            (ctrl, MOD_CTRL),
+            (alt, MOD_ALT),
+            (logo, MOD_LOGO),
         ]
         .into_iter()
         .filter(|(held, _)| *held)
@@ -4790,6 +4831,47 @@ mod tests {
         for code in [0, TAB_KEYCODE, GRAVE_KEYCODE, CTRL_LEFT_KEYCODE, u32::MAX] {
             assert_eq!(switcher_keysym(code), None);
         }
+    }
+
+    #[test]
+    fn stale_latch_bits_clear_against_the_seat_while_genuine_holds_match() {
+        use roost_shell_control::{MOD_ALT, MOD_CTRL, MOD_LOGO, MOD_SHIFT};
+        // No seat yet: the latch stands alone.
+        assert_eq!(
+            WindowManager::combine_mods(false, false, true, true, None),
+            MOD_ALT | MOD_LOGO
+        );
+        let seat = |shift: bool, ctrl: bool, alt: bool, logo: bool| {
+            Some(ModifiersState {
+                shift,
+                ctrl,
+                alt,
+                logo,
+                ..ModifiersState::default()
+            })
+        };
+        // Both sides agree: genuine holds keep matching.
+        assert_eq!(
+            WindowManager::combine_mods(true, true, true, true, seat(true, true, true, true)),
+            MOD_SHIFT | MOD_CTRL | MOD_ALT | MOD_LOGO
+        );
+        // The G-CYCLE-KEYS failure: Alt released (seat free) but the
+        // latch stuck, so Super+F1 arrived as Super+Alt.
+        assert_eq!(
+            WindowManager::combine_mods(false, false, true, true, seat(false, false, false, true)),
+            MOD_LOGO
+        );
+        // A latch the seat never saw clears the same way.
+        assert_eq!(
+            WindowManager::combine_mods(
+                true,
+                false,
+                false,
+                false,
+                seat(false, false, false, false)
+            ),
+            0
+        );
     }
 
     #[test]
