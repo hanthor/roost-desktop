@@ -3377,10 +3377,10 @@ impl WindowManager {
     /// release it never delivered) shows up here first.
     fn track_workspace_modifiers(&mut self, keycode: u32, pressed: bool) {
         if keycode == SUPER_LEFT_KEYCODE || keycode == SUPER_RIGHT_KEYCODE {
-            eprintln!("roost-compositor: modifier super pressed={pressed}");
+            eprintln!("roost-compositor: modifier super keycode={keycode} pressed={pressed}");
             self.super_held = pressed;
         } else if keycode == SHIFT_LEFT_KEYCODE || keycode == SHIFT_RIGHT_KEYCODE {
-            eprintln!("roost-compositor: modifier shift pressed={pressed}");
+            eprintln!("roost-compositor: modifier shift keycode={keycode} pressed={pressed}");
             self.shift_held = pressed;
         }
     }
@@ -4510,10 +4510,10 @@ impl WindowManager {
     /// delivered) shows up here first.
     fn track_switcher_modifiers(&mut self, keycode: u32, pressed: bool) {
         if self.is_alt(keycode) {
-            eprintln!("roost-compositor: modifier alt pressed={pressed}");
+            eprintln!("roost-compositor: modifier alt keycode={keycode} pressed={pressed}");
             self.alt_held = pressed;
         } else if keycode == CTRL_LEFT_KEYCODE || keycode == CTRL_RIGHT_KEYCODE {
-            eprintln!("roost-compositor: modifier ctrl pressed={pressed}");
+            eprintln!("roost-compositor: modifier ctrl keycode={keycode} pressed={pressed}");
             self.ctrl_held = pressed;
         }
     }
