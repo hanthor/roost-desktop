@@ -240,7 +240,7 @@ def decision(kind, number):
     BUS.call(RECEIPT['backend']['owner'], PATH, IFACE, 'BindShortcuts',
         GLib.Variant('(ooa(sa{sv})sa{sv})', (request, session,
             [('activate-proof', {'description': GLib.Variant('s', 'Shortcut proof'),
-                'preferred_trigger': GLib.Variant('s', 'CTRL+ALT+F8')})], '', {})),
+                'preferred_trigger': GLib.Variant('s', 'CTRL+ALT+T')})], '', {})),
         None, Gio.DBusCallFlags.NONE, 45000, None, complete, None)
     controls = wait(lambda: provider_controls(RECEIPT['provider'], kind),
         'actual GNOME51 Add/Cancel controls did not appear', 30)
@@ -268,13 +268,13 @@ def decision(kind, number):
     if kind == 'cancel':
         if result.get('shortcuts') or 'activate-proof' in persisted:
             raise RuntimeError('denied dialog retained a shortcut grant')
-        key_command('key', 'ctrl+alt+F8')
+        key_command('key', 'ctrl+alt+t')
         observe(1, 0)
     else:
         if len(result.get('shortcuts', [])) != 1 or 'activate-proof' not in persisted:
             raise RuntimeError('Add did not persist actual GNOME shortcut metadata')
         try:
-            down = key_command('keydown', 'ctrl+alt+F8')
+            down = key_command('keydown', 'ctrl+alt+t')
             wait(lambda: matching_sequence(session, False)[0] > 0,
                 'actual held shortcut did not activate', 5)
             end = time.monotonic() + .5
@@ -294,7 +294,7 @@ def decision(kind, number):
             # GNOME service failed after receiving a partial keydown.
             try:
                 host(require_normal=False)
-                subprocess.run(['xdotool', 'keyup', 'ctrl+alt+F8'], check=True, timeout=5)
+                subprocess.run(['xdotool', 'keyup', 'ctrl+alt+t'], check=True, timeout=5)
                 RECEIPT['keyup'] = {'wall': time.time(), 'monotonic': time.monotonic()}
                 RECEIPT['held_cleanup'] = 'original-host-modifiers-released'
             except BaseException as error:
@@ -315,7 +315,7 @@ def decision(kind, number):
     call(RECEIPT['backend']['owner'], session, 'org.freedesktop.impl.portal.Session', 'Close')
     pin_services('after-'+kind+'-Close')
     expected_events = len(EVENTS)
-    key_command('key', 'ctrl+alt+F8')
+    key_command('key', 'ctrl+alt+t')
     observe(1, expected_events)
     pin_services('after-'+kind+'-Close-negative')
 
