@@ -23,6 +23,9 @@ flowchart LR
   S3 --> S4
   S0 --> S4
   S0 --> S6[006 Performance, packaging, release]
+  S2 --> S7[007 GNOME 51 animation parity]
+  S3 --> S7
+  S7 --> S6
   S2 --> S6
   S3 --> S6
   S4 --> S6
@@ -45,6 +48,7 @@ Specs 002 and 003 may proceed in parallel after the 001 compositor/control contr
 | 004 | [Secure session, accessibility, and system integration](../.spektacular/specs/20260927170320-a01f0014-secure-session-accessibility-integration.md) | Lock/auth, portals, AT-SPI journeys, settings and existing services | 000, 001, 002, 003 | Mandatory 1.0 security/usability gate |
 | 005 | [Extension broker and public API](../.spektacular/specs/20260927170321-a01f0015-extension-broker-and-api.md) | Capability-limited, out-of-process extensions | 000, 001, 002, 004 | Optional later capability; excluded from initial 1.0 unless explicitly promoted |
 | 006 | [Performance, packaging, and release readiness](../.spektacular/specs/20260927170322-a01f0016-performance-packaging-and-release.md) | Benchmarks, CI/conformance, package/rollback and release evidence | 000, 001, 002, 003, 004 | Required for daily-driver candidate |
+| 007 | [GNOME 51 animation parity](../.spektacular/specs/20261008122728-6ac4a932-gnome-animation-parity.md) | Every GNOME 51 shell and window animation with GNOME timing and motion preferences, cheaper than GNOME on the same VM ([epic #492](https://github.com/tuna-os/tuna-desktop/issues/492)) | 001, 002, 003 | Required for daily-driver candidate |
 
 The plan store contains `plan.md`, `context.md`, `research.md`, and `test-plan.md` for each unit. Plans are drafts until reviewed against current source, confirmed dependencies, and explicit acceptance evidence. Do not begin implementation from a draft plan if a blocking decision or security boundary is unresolved.
 
@@ -70,7 +74,7 @@ with their spek number (`001-R5`), per the register's naming rule.
 | R13 display correctness | 003, 006 | scale/hotplug/mixed-refresh matrix with measured behavior and fallbacks |
 | R14 capture/privileged surfaces | 000 threat model; 003 integration; 004 enforcement; 005 extension denials | spoofing, consent/revoke, unauthorized layer/capture tests |
 | R15 recoverable configuration/upgrade | 006 | broken package/config recovery without user-data loss |
-| R16 comparable performance | 000 baseline; 006 release comparison | raw comparable traces, variance and soak results |
+| R16 comparable performance | 000 baseline; 006 release comparison; 007 animation cost ([#503](https://github.com/tuna-os/tuna-desktop/issues/503)) | raw comparable traces, variance and soak results |
 
 ## Global decision gates
 
