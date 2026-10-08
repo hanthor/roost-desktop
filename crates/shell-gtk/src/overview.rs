@@ -1539,8 +1539,8 @@ impl DragPager {
                 .unwrap_or(0.0)
         }
         .max(0.0);
-        let enabled =
-            gtk::Settings::default().is_none_or(|settings| settings.is_gtk_enable_animations());
+        // The hint slides in: pure motion, so fade-only snaps it too.
+        let enabled = crate::motion::current().allows_motion();
         let mut actors = Vec::new();
         for (widget, point) in tiles {
             let x = f64::from(point.x()) - crop;
@@ -1574,10 +1574,9 @@ impl DragPager {
             if !hint.is_visible() {
                 return glib::ControlFlow::Break;
             }
-            let enabled =
-                gtk::Settings::default().is_none_or(|settings| settings.is_gtk_enable_animations());
-            let progress = if enabled {
-                (started.elapsed().as_secs_f64() / 0.150).min(1.0)
+            let policy = crate::motion::current();
+            let progress = if policy.allows_motion() {
+                (started.elapsed().as_secs_f64() * 1000.0 / policy.adjust_ms(150.0)).min(1.0)
             } else {
                 1.0
             };

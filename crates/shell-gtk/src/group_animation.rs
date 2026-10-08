@@ -62,7 +62,8 @@ impl Group {
         let (_, natural, _, _) =
             child.measure(gtk::Orientation::Vertical, self.widget.width().max(1));
         let to = f64::from(natural);
-        let enabled = gtk::Settings::default().is_none_or(|s| s.is_gtk_enable_animations());
+        // Height growth is motion: fade-only snaps it like off.
+        let enabled = crate::motion::current().allows_motion();
         let generation = self.generation.get().wrapping_add(1);
         self.generation.set(generation);
         if !enabled {
@@ -85,7 +86,10 @@ impl Group {
                 time
             });
             let elapsed_ms = (clock.frame_time() - start) as f64 / 1000.0;
-            let enabled = gtk::Settings::default().is_none_or(|s| s.is_gtk_enable_animations());
+            let policy = crate::motion::current();
+            let enabled = policy.allows_motion();
+            // GNOME's slow-down factor stretches the 200 ms ease.
+            let elapsed_ms = elapsed_ms / policy.slowdown();
             group.set_height(height_at(from, to, elapsed_ms, enabled));
             if !enabled || elapsed_ms >= 200.0 {
                 glib::ControlFlow::Break

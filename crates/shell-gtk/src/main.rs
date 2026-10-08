@@ -27,6 +27,7 @@ mod live_apps;
 mod lock;
 mod logic;
 mod media_keys;
+mod motion;
 mod network_agent;
 mod network_secrets;
 mod notify;
@@ -84,24 +85,6 @@ fn settings(schema: &str) -> Option<gio::Settings> {
     let source = gio::SettingsSchemaSource::default()?;
     source.lookup(schema, true)?;
     Some(gio::Settings::new(schema))
-}
-
-/// GNOME 51's Reduced Motion is an enum, independent of enable-animations.
-/// Keep older schema sets working without reading a missing key.
-fn animations_enabled(interface: Option<&gio::Settings>, a11y: Option<&gio::Settings>) -> bool {
-    let enabled = interface
-        .filter(|s| {
-            s.settings_schema()
-                .is_some_and(|schema| schema.has_key("enable-animations"))
-        })
-        .is_none_or(|s| s.boolean("enable-animations"));
-    let reduced = a11y
-        .filter(|s| {
-            s.settings_schema()
-                .is_some_and(|schema| schema.has_key("reduced-motion"))
-        })
-        .is_some_and(|s| s.string("reduced-motion") == "reduce");
-    enabled && !reduced
 }
 
 fn is_would_block(e: &ControlError) -> bool {
@@ -1972,10 +1955,8 @@ fn build(app: &adw::Application) {
                     out.hot_corners = iface.boolean("enable-hot-corners");
                 }
                 out.right_to_left = gtk::Widget::default_direction() == gtk::TextDirection::Rtl;
-                out.enable_animations = animations_enabled(all[4].as_ref(), all[5].as_ref());
-                if let Some(gtk_settings) = gtk::Settings::default() {
-                    gtk_settings.set_gtk_enable_animations(out.enable_animations);
-                }
+                out.motion = motion::from_settings(all[4].as_ref(), all[5].as_ref());
+                motion::set(out.motion);
                 if let Some(control) = shell.borrow_mut().control.as_mut() {
                     let _ = control.set_input_settings(out);
                 }
@@ -2013,16 +1994,16 @@ fn build(app: &adw::Application) {
                     .as_ref()
                     .map(|s| (s.boolean("lock-enabled"), s.uint("lock-delay")))
                     .unwrap_or((true, 0));
-                let animations = animations_enabled(interface.as_ref(), a11y.as_ref());
-                let ms = logic::idle_lock_ms(idle, enabled, delay, animations);
+                // GNOME's idle shield is a fade: reduced motion keeps it,
+                // and the slow-down factor stretches it (screenShield.js).
+                let fade_ms = motion::from_settings(interface.as_ref(), a11y.as_ref())
+                    .adjust_ms(logic::IDLE_FADE_MS as f64)
+                    .round() as u64;
+                let ms = logic::idle_lock_ms(idle, enabled, delay, fade_ms);
                 if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
                     let dir = std::path::PathBuf::from(dir);
                     let temporary = dir.join(".roost-idle-blank.tmp");
-                    let policy = format!(
-                        "{}\n{}\n",
-                        u64::from(idle) * 1000,
-                        if animations { 10_000 } else { 0 }
-                    );
+                    let policy = format!("{}\n{}\n", u64::from(idle) * 1000, fade_ms);
                     if std::fs::write(&temporary, policy).is_ok() {
                         let _ = std::fs::rename(temporary, dir.join("roost-idle-blank"));
                     }
