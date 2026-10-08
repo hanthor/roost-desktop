@@ -3494,47 +3494,79 @@ sleep 1
 
 # GNOME's keyboard workspace switch (workspaceAnimation.js): both
 # workspaces slide 250 ms ease-out-cubic as a render offset, a second
-# press retargets from where the strip is drawn, and with animations off
-# the switch is instant. The compositor records each switch's timing.
+# press retargets from where the strip is drawn, fade-only motion
+# crossfades in place and with animations off the switch is instant. The
+# animation clock freezes time so each frame is sampled exactly; the
+# compositor records each switch's timing.
 slide_last() { jq -c '.workspace_slide.history[-1]' "$CSTATE"; }
 slide_settled() {
     cstate ".active_workspace == $1 and .workspace_slide.in_flight == null and (.workspace_slide.history | length) > 0 and .workspace_slide.history[-1].to == $1" "$2"
 }
-# Settling is detected on the next frame after 250 ms; allow for a slow CI frame.
-SLIDE_TOLERANCE_MS=150
 slide_home="$(jq -r '.active_workspace' "$CSTATE")"
+anim_clock 10000
+cstate '.animation_clock_manual and .motion_policy == "full"' "slide clock frozen" ||
+    fail G-WORKSPACE-SLIDE "the animation clock did not freeze"
 xdotool key super+Page_Down
-# Best-effort sample of the strip mid-flight for the artifacts.
-slide_deadline=$(($(date +%s%N) + 1000000000))
-while [ "$(date +%s%N)" -lt "$slide_deadline" ]; do
-    if jq -e '.workspace_slide.in_flight.position as $p | $p != null and $p != ($p | floor)' "$CSTATE" >/dev/null 2>&1; then
-        cp "$CSTATE" "$ARTIFACTS/workspace-slide-in-flight.json"
-        break
-    fi
-    sleep 0.01
-done
-slide_settled $((slide_home + 1)) "slide settled" || fail G-WORKSPACE-SLIDE "Super+Page_Down did not settle on the next workspace"
+# Frozen at the start: the model switched, the old workspace still fills the screen.
+cstate ".active_workspace == $slide_home + 1 and (.workspace_slide.in_flight | .position == .from_slot and .to_slot == .from_slot + 1 and .record.motion == \"slide\")" "slide started" ||
+    fail G-WORKSPACE-SLIDE "Super+Page_Down did not start a slide from the current workspace"
+anim_clock 10125
+# Ease-out-cubic is 87.5% of the way at half time.
+cstate '.workspace_slide.in_flight | ((.position - .from_slot) - 0.875 | . < 0.001 and . > -0.001)' "slide half way" ||
+    fail G-WORKSPACE-SLIDE "the slide was not 87.5% across at 125 ms"
+cp "$CSTATE" "$ARTIFACTS/workspace-slide-in-flight.json"
+scrot "$ARTIFACTS/24g-workspace-slide-mid.png" >/dev/null 2>&1 || true
+anim_clock 10250
+slide_settled $((slide_home + 1)) "slide settled" || fail G-WORKSPACE-SLIDE "the slide had not settled at 250 ms"
 slide_last >"$ARTIFACTS/workspace-slide-key.json"
-jq -e --argjson home "$slide_home" --argjson tol "$SLIDE_TOLERANCE_MS" \
+jq -e --argjson home "$slide_home" \
     '.motion == "slide" and (.gesture | not) and .from == $home and .to == $home + 1
-     and .duration_ms == 250 and .frames >= 2 and .elapsed_ms >= 250 and .elapsed_ms <= 250 + $tol
-     and (.reversed | not)' "$ARTIFACTS/workspace-slide-key.json" >/dev/null ||
+     and .duration_ms == 250 and .elapsed_ms == 250 and .frames >= 2 and (.reversed | not)' \
+    "$ARTIFACTS/workspace-slide-key.json" >/dev/null ||
     fail G-WORKSPACE-SLIDE "the key switch did not slide 250 ms: $(cat "$ARTIFACTS/workspace-slide-key.json")"
 xdotool key super+Page_Up
+anim_clock 10600
 slide_settled "$slide_home" "slid back" || fail G-WORKSPACE-SLIDE "Super+Page_Up did not slide back"
-# Twice in quick succession: two workspaces over, never backwards.
+# Twice in quick succession: the second press carries on from the drawn
+# offset and ends two workspaces over, never moving backwards.
+anim_clock 11000
 xdotool key super+Page_Down
-sleep 0.08
+cstate ".active_workspace == $slide_home + 1 and .workspace_slide.in_flight != null" "first press" ||
+    fail G-WORKSPACE-SLIDE "the first press did not start a slide"
+anim_clock 11060
+cstate '.workspace_slide.in_flight.position > .workspace_slide.in_flight.from_slot' "first press moving" ||
+    fail G-WORKSPACE-SLIDE "the first slide did not move"
+first_position="$(jq '.workspace_slide.in_flight.position' "$CSTATE")"
 xdotool key super+Page_Down
+cstate ".active_workspace == $slide_home + 2 and (.workspace_slide.in_flight | .record.retargets == 1 and ((.position - $first_position) | . < 0.001 and . > -0.001))" "retargeted" ||
+    fail G-WORKSPACE-SLIDE "the second press jumped instead of retargeting from the drawn offset"
+cp "$CSTATE" "$ARTIFACTS/workspace-slide-retarget-in-flight.json"
+anim_clock 11310
 slide_settled $((slide_home + 2)) "double press settled" ||
     fail G-WORKSPACE-SLIDE "two rapid Super+Page_Down did not end two workspaces over"
 slide_last >"$ARTIFACTS/workspace-slide-retarget.json"
-jq -e --argjson home "$slide_home" --argjson tol "$SLIDE_TOLERANCE_MS" \
-    '.motion == "slide" and .from == $home and .to == $home + 2 and .retargets >= 1
-     and (.reversed | not) and .elapsed_ms <= 80 + 250 + $tol' "$ARTIFACTS/workspace-slide-retarget.json" >/dev/null ||
+jq -e --argjson home "$slide_home" \
+    '.motion == "slide" and .from == $home and .to == $home + 2 and .retargets == 1
+     and (.reversed | not) and .elapsed_ms == 310' "$ARTIFACTS/workspace-slide-retarget.json" >/dev/null ||
     fail G-WORKSPACE-SLIDE "the second press did not retarget forwards: $(cat "$ARTIFACTS/workspace-slide-retarget.json")"
 xdotool key super+Page_Up
+anim_clock 11700
 slide_settled "$slide_home" "home again" || fail G-WORKSPACE-SLIDE "could not return home"
+# Reduced motion keeps fades: the workspaces crossfade in place.
+gsettings set org.gnome.desktop.a11y.interface reduced-motion 'reduce'
+cstate '.motion_policy == "fade-only"' "fade-only slide" ||
+    fail G-WORKSPACE-SLIDE "reduced motion did not reach the compositor"
+anim_clock 12000
+xdotool key super+Page_Down
+anim_clock 12125
+cstate ".active_workspace == $slide_home + 1 and .workspace_slide.in_flight.record.motion == \"fade\"" "crossfading" ||
+    fail G-WORKSPACE-SLIDE "fade-only motion did not crossfade"
+anim_clock 12250
+slide_settled $((slide_home + 1)) "crossfade settled" || fail G-WORKSPACE-SLIDE "the crossfade did not settle in 250 ms"
+xdotool key super+Page_Up
+anim_clock 12600
+slide_settled "$slide_home" "crossfade back" || fail G-WORKSPACE-SLIDE "could not crossfade back"
+gsettings reset org.gnome.desktop.a11y.interface reduced-motion
 gsettings set org.gnome.desktop.interface enable-animations false
 cstate '(.animations_enabled | not)' "slide animations off" ||
     fail G-WORKSPACE-SLIDE "enable-animations false did not reach the compositor"
@@ -3546,9 +3578,11 @@ jq -e '.motion == "off" and .frames == 0 and .elapsed_ms == 0' "$ARTIFACTS/works
 xdotool key super+Page_Up
 slide_settled "$slide_home" "instant back" || fail G-WORKSPACE-SLIDE "could not return home with animations off"
 gsettings set org.gnome.desktop.interface enable-animations true
-cstate '.animations_enabled' "slide animations restored" ||
+cstate '.animations_enabled and .motion_policy == "full"' "slide animations restored" ||
     fail G-WORKSPACE-SLIDE "could not restore animations"
-pass G-WORKSPACE-SLIDE "Super+Page_Down slides 250 ms, a second press retargets forwards, and animations off switches instantly"
+rm -f "$ROOST_ANIMATION_CLOCK"
+cstate '(.animation_clock_manual | not)' "slide clock resumed" || fail G-WORKSPACE-SLIDE "the animation clock did not resume"
+pass G-WORKSPACE-SLIDE "Super+Page_Down slides 250 ms (87.5% at 125 ms), a second press retargets from the drawn offset, fade-only crossfades and animations off switches instantly"
 sleep 1
 
 # Exercise the normal three-finger handler with nested synthetic phases.

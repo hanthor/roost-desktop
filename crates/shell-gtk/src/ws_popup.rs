@@ -29,8 +29,9 @@ pub fn fade_at(from: f64, to: f64, elapsed_ms: f64, enabled: bool) -> f64 {
     from + (to - from) * (1.0 - (1.0 - p).powi(2))
 }
 
+/// The fade is opacity, so it runs under fade-only motion too.
 fn animations_enabled() -> bool {
-    gtk::Settings::default().is_none_or(|s| s.is_gtk_enable_animations())
+    crate::motion::current().allows_fades()
 }
 /// Each `.ws-switcher-indicator` slot: 32px (dot plus margins).
 const SLOT: f64 = 32.0;
@@ -168,7 +169,9 @@ impl WorkspacePopup {
                 started.set(Some(clock.frame_time()));
                 clock.frame_time()
             });
-            let elapsed = (clock.frame_time() - start) as f64 / 1000.0;
+            // GNOME's slow-down factor stretches the fade.
+            let elapsed =
+                (clock.frame_time() - start) as f64 / 1000.0 / crate::motion::current().slowdown();
             let enabled = animations_enabled();
             if !enabled || elapsed >= FADE_MS {
                 finish(&ui);

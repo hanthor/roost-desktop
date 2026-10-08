@@ -174,12 +174,14 @@ impl Dots {
     }
 }
 
+/// Animation time: monotonic time slowed by GNOME's slow-down factor.
 fn now_ms() -> f64 {
-    glib::monotonic_time() as f64 / 1000.0
+    glib::monotonic_time() as f64 / 1000.0 / crate::motion::current().slowdown()
 }
 
+/// The dots resize and scale, which is motion: fade-only snaps them.
 fn animations_enabled() -> bool {
-    gtk::Settings::default().is_none_or(|s| s.is_gtk_enable_animations())
+    crate::motion::current().allows_motion()
 }
 
 /// The dots in the Activities button.

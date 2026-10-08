@@ -1534,7 +1534,7 @@ impl Runtime {
             "active_workspace": model.active_workspace(),
             // GNOME's workspace switch: the drawn strip while it moves,
             // and the last finished switches with their timing.
-            "workspace_slide": self.manager.workspace_slide().snapshot(Instant::now()),
+            "workspace_slide": self.manager.workspace_slide().snapshot(self.animation_clock.now()),
             "focused": focused,
             "focused_app_id": focused.and_then(app_of),
             "focused_rect": focused
@@ -1800,10 +1800,8 @@ impl Runtime {
     /// Follow the active workspace with GNOME's switch animation; the
     /// overview (and the lock) settle it at once.
     fn step_workspace_slide(&mut self) {
-        let now = Instant::now();
-        let policy = crate::workspace_slide::MotionPolicy::from_enabled(
-            self.input_settings.enable_animations,
-        );
+        let now = self.animation_clock.now();
+        let policy = self.input_settings.motion;
         let suspended =
             self.overview_progress > 0.0 || self.control.overview_open() || self.is_locked();
         let width = self.state.primary_size().w;
@@ -1955,15 +1953,14 @@ impl Runtime {
                         && self.overview_swipe_from.is_none()
                         && travel.x.abs() > travel.y.abs()
                     {
-                        let policy = crate::workspace_slide::MotionPolicy::from_enabled(
-                            self.input_settings.enable_animations,
-                        );
+                        let policy = self.input_settings.motion;
+                        let now = self.animation_clock.now();
                         let width = self.state.primary_size().w;
                         let model = self.manager.model();
                         let active = model.active_workspace();
                         let workspaces = model.workspaces().to_vec();
                         let slide = self.manager.workspace_slide_mut();
-                        slide.begin_swipe(active, &workspaces, width, policy, Instant::now());
+                        slide.begin_swipe(active, &workspaces, width, policy, now);
                         slide.update_swipe(travel.x, time);
                     }
                     // GNOME's overview follows the fingers: a vertical
@@ -1995,11 +1992,11 @@ impl Runtime {
                     // Released: the slide finishes on the fingers'
                     // velocity; the model switches now so focus and
                     // input never wait for it.
-                    let target = self.manager.workspace_slide_mut().end_swipe(
-                        cancelled,
-                        time,
-                        Instant::now(),
-                    );
+                    let now = self.animation_clock.now();
+                    let target = self
+                        .manager
+                        .workspace_slide_mut()
+                        .end_swipe(cancelled, time, now);
                     if let Some(target) = target {
                         if target != self.manager.model().active_workspace()
                             && !self.manager.switch_to_workspace(&mut self.state, target)

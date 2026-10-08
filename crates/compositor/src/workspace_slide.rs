@@ -14,9 +14,12 @@
 //! it. Nothing is reconfigured: the offset is applied at render time.
 //! Under a fade-only motion policy the workspaces stay in place and
 //! crossfade over the same timeline; with motion off nothing animates.
+//! Times are animation-clock time ([`crate::animation_clock`]).
 
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use roost_shell_control::MotionPolicy;
 
 /// `WINDOW_ANIMATION_TIME`: the keyboard switch.
 pub const SWITCH_MS: f64 = 250.0;
@@ -45,17 +48,26 @@ pub fn ease_out_cubic(t: f64) -> f64 {
     t * t * t + 1.0
 }
 
-/// How the switch is shown. Today the compositor only knows GNOME's
-/// on/off animation preference; a fade-only policy (reduced motion that
-/// still allows opacity) maps to [`Motion::Fade`].
+/// How the switch is shown under a motion policy.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Motion {
     Slide,
+    /// Fade-only (reduced motion): crossfade in place.
     Fade,
     Off,
 }
 
 impl Motion {
+    pub fn of(policy: MotionPolicy) -> Self {
+        if policy.allows_motion() {
+            Motion::Slide
+        } else if policy.allows_fades() {
+            Motion::Fade
+        } else {
+            Motion::Off
+        }
+    }
+
     fn name(self) -> &'static str {
         match self {
             Motion::Slide => "slide",
@@ -65,25 +77,9 @@ impl Motion {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct MotionPolicy {
-    pub motion: Motion,
-    /// Duration multiplier (1.0 is GNOME's speed).
-    pub slowdown: f64,
-}
-
-impl MotionPolicy {
-    /// The policy for GNOME's effective `enable-animations`.
-    pub fn from_enabled(enabled: bool) -> Self {
-        Self {
-            motion: if enabled { Motion::Slide } else { Motion::Off },
-            slowdown: 1.0,
-        }
-    }
-
-    fn scaled(self, ms: f64) -> Duration {
-        Duration::from_secs_f64((ms * self.slowdown.max(0.0)) / 1000.0)
-    }
+/// GNOME's `adjustAnimationTime` for `ms`.
+fn scaled(policy: MotionPolicy, ms: f64) -> Duration {
+    Duration::from_secs_f64(policy.adjust_ms(ms).max(0.0) / 1000.0)
 }
 
 /// Recent finger deltas (`EventHistory`): the release velocity is their
@@ -190,7 +186,7 @@ pub struct SlideRecord {
     pub reversed: bool,
     /// The release velocity of a swipe (px/ms).
     pub velocity: f64,
-    started: Instant,
+    started: Duration,
 }
 
 impl SlideRecord {
@@ -216,7 +212,7 @@ enum Phase {
     Easing {
         from: f64,
         to: f64,
-        start: Instant,
+        start: Duration,
         duration: Duration,
     },
     Following {
@@ -239,7 +235,7 @@ pub struct WorkspaceSlide {
     seen: Option<u32>,
     last_value: Option<f64>,
     /// The time the current frame draws at.
-    frame: Option<Instant>,
+    frame: Option<Duration>,
     record: Option<SlideRecord>,
     finished: VecDeque<SlideRecord>,
 }
@@ -249,7 +245,7 @@ impl Default for WorkspaceSlide {
         Self {
             strip: Vec::new(),
             distance: 0.0,
-            policy: MotionPolicy::from_enabled(true),
+            policy: MotionPolicy::default(),
             phase: Phase::Idle,
             seen: None,
             last_value: None,
@@ -270,7 +266,7 @@ pub struct Placement {
 impl WorkspaceSlide {
     /// Whether a motion is drawn (motion off draws nothing).
     pub fn running(&self) -> bool {
-        self.policy.motion != Motion::Off && !matches!(self.phase, Phase::Idle)
+        Motion::of(self.policy) != Motion::Off && !matches!(self.phase, Phase::Idle)
     }
 
     /// Whether fingers hold the strip.
@@ -279,7 +275,7 @@ impl WorkspaceSlide {
     }
 
     /// The drawn strip position in slots, while anything moves.
-    pub fn value(&self, now: Instant) -> Option<f64> {
+    pub fn value(&self, now: Duration) -> Option<f64> {
         match &self.phase {
             Phase::Idle => None,
             Phase::Following { progress, .. } => Some(*progress),
@@ -292,7 +288,7 @@ impl WorkspaceSlide {
                 let t = if duration.is_zero() {
                     1.0
                 } else {
-                    now.saturating_duration_since(*start).as_secs_f64() / duration.as_secs_f64()
+                    now.saturating_sub(*start).as_secs_f64() / duration.as_secs_f64()
                 };
                 Some(from + (to - from) * ease_out_cubic(t))
             }
@@ -308,12 +304,12 @@ impl WorkspaceSlide {
 
     /// Where `workspace`'s windows draw this frame, or `None` when they
     /// are out of view. Only meaningful while [`running`](Self::running).
-    pub fn placement(&self, workspace: u32, now: Instant) -> Option<Placement> {
+    pub fn placement(&self, workspace: u32, now: Duration) -> Option<Placement> {
         let d = self.slot(workspace)? - self.value(now)?;
         if d.abs() >= 1.0 {
             return None;
         }
-        Some(match self.policy.motion {
+        Some(match Motion::of(self.policy) {
             Motion::Fade => Placement {
                 dx: 0,
                 alpha: (1.0 - d.abs()) as f32,
@@ -366,10 +362,9 @@ impl WorkspaceSlide {
         self.strip = strip;
     }
 
-    fn archive(&mut self, now: Instant) {
+    fn archive(&mut self, now: Duration) {
         if let Some(mut record) = self.record.take() {
-            record.elapsed_ms =
-                now.saturating_duration_since(record.started).as_secs_f64() * 1000.0;
+            record.elapsed_ms = now.saturating_sub(record.started).as_secs_f64() * 1000.0;
             if self.finished.len() == HISTORY_LEN {
                 self.finished.pop_front();
             }
@@ -391,7 +386,7 @@ impl WorkspaceSlide {
         output_width: i32,
         policy: MotionPolicy,
         suspended: bool,
-        now: Instant,
+        now: Duration,
     ) {
         self.policy = policy;
         self.distance = f64::from(output_width + WORKSPACE_SPACING);
@@ -408,7 +403,7 @@ impl WorkspaceSlide {
         let Some(previous) = previous.filter(|p| *p != active) else {
             return;
         };
-        if policy.motion == Motion::Off {
+        if Motion::of(policy) == Motion::Off {
             self.archive(now);
             self.record = Some(SlideRecord {
                 from: previous,
@@ -438,19 +433,19 @@ impl WorkspaceSlide {
             (Phase::Easing { .. }, Some(shown)) => shown,
             _ => self.slot(previous).unwrap_or(to),
         };
-        let duration = policy.scaled(SWITCH_MS);
+        let duration = scaled(policy, SWITCH_MS);
         match &mut self.record {
             Some(record) => {
                 record.to = active;
                 record.retargets += 1;
                 record.duration_ms = duration.as_secs_f64() * 1000.0;
-                record.motion = policy.motion;
+                record.motion = Motion::of(policy);
             }
             None => {
                 self.record = Some(SlideRecord {
                     from: previous,
                     to: active,
-                    motion: policy.motion,
+                    motion: Motion::of(policy),
                     gesture: false,
                     duration_ms: duration.as_secs_f64() * 1000.0,
                     elapsed_ms: 0.0,
@@ -472,7 +467,7 @@ impl WorkspaceSlide {
     }
 
     /// Advance to `now`; returns whether a motion is still drawn.
-    pub fn step(&mut self, now: Instant) -> bool {
+    pub fn step(&mut self, now: Duration) -> bool {
         self.frame = Some(now);
         let Some(value) = self.value(now) else {
             return false;
@@ -485,7 +480,7 @@ impl WorkspaceSlide {
         } = &self.phase
         {
             let to = *to;
-            let done = now.saturating_duration_since(*start) >= *duration;
+            let done = now.saturating_sub(*start) >= *duration;
             if let (Some(record), Some(last)) = (self.record.as_mut(), self.last_value) {
                 record.frames += 1;
                 if (value - last) * (to - last).signum() < -1e-9 {
@@ -493,7 +488,7 @@ impl WorkspaceSlide {
                 }
             }
             self.last_value = Some(value);
-            if done || self.policy.motion == Motion::Off {
+            if done || Motion::of(self.policy) == Motion::Off {
                 self.archive(now);
                 return false;
             }
@@ -511,7 +506,7 @@ impl WorkspaceSlide {
         workspaces: &[u32],
         output_width: i32,
         policy: MotionPolicy,
-        now: Instant,
+        now: Duration,
     ) {
         self.policy = policy;
         self.distance = f64::from(output_width + WORKSPACE_SPACING);
@@ -537,7 +532,7 @@ impl WorkspaceSlide {
             self.record = Some(SlideRecord {
                 from,
                 to: from,
-                motion: policy.motion,
+                motion: Motion::of(policy),
                 gesture: true,
                 duration_ms: 0.0,
                 elapsed_ms: 0.0,
@@ -578,7 +573,7 @@ impl WorkspaceSlide {
 
     /// Fingers lifted: animate to where the swipe lands and return that
     /// workspace for the caller to activate.
-    pub fn end_swipe(&mut self, cancelled: bool, time: u32, now: Instant) -> Option<u32> {
+    pub fn end_swipe(&mut self, cancelled: bool, time: u32, now: Duration) -> Option<u32> {
         let Phase::Following {
             progress,
             initial,
@@ -591,12 +586,12 @@ impl WorkspaceSlide {
         let (progress, initial) = (*progress, *initial);
         let (end, ms) = swipe_release(progress, initial, self.strip.len(), velocity, cancelled);
         let target = self.strip.get(end as usize).copied();
-        let duration = self.policy.scaled(ms);
+        let duration = scaled(self.policy, ms);
         if let Some(record) = self.record.as_mut() {
             record.to = target.unwrap_or(record.to);
             record.duration_ms = duration.as_secs_f64() * 1000.0;
             record.velocity = velocity;
-            record.motion = self.policy.motion;
+            record.motion = Motion::of(self.policy);
         }
         self.phase = Phase::Easing {
             from: progress,
@@ -604,7 +599,7 @@ impl WorkspaceSlide {
             start: now,
             duration,
         };
-        if self.policy.motion == Motion::Off || duration.is_zero() {
+        if Motion::of(self.policy) == Motion::Off || duration.is_zero() {
             self.archive(now);
         }
         target
@@ -612,7 +607,7 @@ impl WorkspaceSlide {
 
     /// The in-flight motion and the last finished ones, for the state
     /// snapshot.
-    pub fn snapshot(&self, now: Instant) -> serde_json::Value {
+    pub fn snapshot(&self, now: Duration) -> serde_json::Value {
         let flight = self.value(now).map(|position| {
             let (to, from) = match &self.phase {
                 Phase::Easing { to, from, .. } => (*to, *from),
@@ -640,6 +635,11 @@ impl WorkspaceSlide {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roost_shell_control::MotionLevel;
+
+    fn policy(level: MotionLevel, slowdown: f64) -> MotionPolicy {
+        MotionPolicy::new(level, slowdown)
+    }
 
     fn ms(n: u64) -> Duration {
         Duration::from_millis(n)
@@ -655,9 +655,9 @@ mod tests {
 
     #[test]
     fn a_key_switch_slides_both_workspaces_for_250_ms() {
-        let t0 = Instant::now();
+        let t0 = Duration::from_secs(10);
         let mut slide = WorkspaceSlide::default();
-        let on = MotionPolicy::from_enabled(true);
+        let on = MotionPolicy::default();
         slide.observe(0, &[0], 1000, on, false, t0);
         assert!(!slide.running());
         slide.observe(1, &[0, 1], 1000, on, false, t0);
@@ -681,9 +681,9 @@ mod tests {
 
     #[test]
     fn a_second_press_retargets_from_the_drawn_offset() {
-        let t0 = Instant::now();
+        let t0 = Duration::from_secs(10);
         let mut slide = WorkspaceSlide::default();
-        let on = MotionPolicy::from_enabled(true);
+        let on = MotionPolicy::default();
         slide.observe(0, &[0], 1000, on, false, t0);
         slide.observe(1, &[0, 1], 1000, on, false, t0);
         let mid = t0 + ms(60);
@@ -710,23 +710,13 @@ mod tests {
 
     #[test]
     fn motion_off_switches_instantly_and_fade_crossfades_in_place() {
-        let t0 = Instant::now();
+        let t0 = Duration::from_secs(10);
         let mut slide = WorkspaceSlide::default();
-        slide.observe(0, &[0], 1000, MotionPolicy::from_enabled(false), false, t0);
-        slide.observe(
-            1,
-            &[0, 1],
-            1000,
-            MotionPolicy::from_enabled(false),
-            false,
-            t0,
-        );
+        slide.observe(0, &[0], 1000, policy(MotionLevel::Off, 1.0), false, t0);
+        slide.observe(1, &[0, 1], 1000, policy(MotionLevel::Off, 1.0), false, t0);
         assert!(!slide.running());
         assert_eq!(slide.snapshot(t0)["history"][0]["motion"], "off");
-        let fade = MotionPolicy {
-            motion: Motion::Fade,
-            slowdown: 1.0,
-        };
+        let fade = policy(MotionLevel::FadeOnly, 1.0);
         slide.observe(2, &[0, 1, 2], 1000, fade, false, t0);
         let mid = t0 + ms(125);
         let out = slide.placement(1, mid).unwrap();
@@ -738,12 +728,9 @@ mod tests {
 
     #[test]
     fn the_slowdown_factor_stretches_the_switch() {
-        let t0 = Instant::now();
+        let t0 = Duration::from_secs(10);
         let mut slide = WorkspaceSlide::default();
-        let slow = MotionPolicy {
-            motion: Motion::Slide,
-            slowdown: 2.0,
-        };
+        let slow = policy(MotionLevel::Full, 2.0);
         slide.observe(0, &[0], 1000, slow, false, t0);
         slide.observe(1, &[0, 1], 1000, slow, false, t0);
         assert!(slide.step(t0 + ms(300)));
@@ -752,9 +739,9 @@ mod tests {
 
     #[test]
     fn the_overview_settles_a_running_switch() {
-        let t0 = Instant::now();
+        let t0 = Duration::from_secs(10);
         let mut slide = WorkspaceSlide::default();
-        let on = MotionPolicy::from_enabled(true);
+        let on = MotionPolicy::default();
         slide.observe(0, &[0], 1000, on, false, t0);
         slide.observe(1, &[0, 1], 1000, on, false, t0);
         slide.observe(1, &[0, 1], 1000, on, true, t0 + ms(10));
@@ -807,9 +794,9 @@ mod tests {
 
     #[test]
     fn a_swipe_follows_the_fingers_then_finishes_on_its_velocity() {
-        let t0 = Instant::now();
+        let t0 = Duration::from_secs(10);
         let mut slide = WorkspaceSlide::default();
-        let on = MotionPolicy::from_enabled(true);
+        let on = MotionPolicy::default();
         slide.observe(0, &[0], 1000, on, false, t0);
         slide.begin_swipe(0, &[0], 1000, on, t0);
         slide.update_swipe(-100.0, 1000);
@@ -830,9 +817,9 @@ mod tests {
 
     #[test]
     fn a_swipe_catches_a_switch_in_flight() {
-        let t0 = Instant::now();
+        let t0 = Duration::from_secs(10);
         let mut slide = WorkspaceSlide::default();
-        let on = MotionPolicy::from_enabled(true);
+        let on = MotionPolicy::default();
         slide.observe(0, &[0], 1000, on, false, t0);
         slide.observe(1, &[0, 1], 1000, on, false, t0);
         let mid = t0 + ms(50);
