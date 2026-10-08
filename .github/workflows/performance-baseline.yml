@@ -33,6 +33,7 @@ jobs:
       - run: python3 scripts/lib/roost-perf-repeatability-tests.py
       - run: python3 scripts/lib/roost-perf-vm-lifetime-tests.py
       - run: python3 scripts/lib/roost-perf-reference-tests.py
+      - run: python3 scripts/lib/roost-kernel-trace-tests.py
       - name: Select a successful trusted main package
         env:
           GH_TOKEN: ${{ github.token }}
