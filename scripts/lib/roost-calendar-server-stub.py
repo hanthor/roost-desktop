@@ -37,23 +37,22 @@ IFACE = "org.gnome.Shell.CalendarServer"
 def load_events(path):
     if not path:
         return []
-    today = datetime.date.today()
-    out = []
     with open(path, encoding="utf-8") as fh:
-        for n, item in enumerate(json.load(fh)):
-            day = today + datetime.timedelta(days=item.get("day", 0))
-            if "start" in item:
-                start = datetime.datetime.combine(
-                    day, datetime.time.fromisoformat(item["start"]))
-                end = datetime.datetime.combine(
-                    day, datetime.time.fromisoformat(item.get("end", item["start"])))
-            else:
-                start = datetime.datetime.combine(day, datetime.time())
-                end = start + datetime.timedelta(days=1)
-            # Local times, as the server reports them in Unix seconds.
-            out.append((f"stub\n{n}\n", item["summary"],
-                        int(start.timestamp()), int(end.timestamp())))
-    return out
+        return list(enumerate(json.load(fh)))
+
+
+def stamp(item, today):
+    day = today + datetime.timedelta(days=item.get("day", 0))
+    if "start" in item:
+        start = datetime.datetime.combine(
+            day, datetime.time.fromisoformat(item["start"]))
+        end = datetime.datetime.combine(
+            day, datetime.time.fromisoformat(item.get("end", item["start"])))
+    else:
+        start = datetime.datetime.combine(day, datetime.time())
+        end = start + datetime.timedelta(days=1)
+    # Local times, as the server reports them in Unix seconds.
+    return int(start.timestamp()), int(end.timestamp())
 
 
 EVENTS = load_events(sys.argv[1] if len(sys.argv) > 1 else None)
@@ -63,7 +62,12 @@ NODE = Gio.DBusNodeInfo.new_for_xml(XML)
 def method_call(conn, sender, path, iface, method, params, invocation):
     if method == "SetTimeRange":
         since, until, _force = params.unpack()
-        inside = [(i, s, a, b, {}) for (i, s, a, b) in EVENTS if a < until and b > since]
+        # "day" counts from the day of the query, so midnight crossings keep
+        # today's events under today.
+        today = datetime.date.today()
+        inside = [(f"stub\n{n}\n", item["summary"], a, b, {})
+                  for n, item in EVENTS
+                  for a, b in [stamp(item, today)] if a < until and b > since]
         invocation.return_value(None)
         if inside:
             conn.emit_signal(None, PATH, IFACE, "EventsAddedOrUpdated",
