@@ -196,7 +196,7 @@ class ReferencePolicy(unittest.TestCase):
         self.assertIn('roost-perf-reference-image stock',stock)
         self.assertTrue(source.rsplit('FROM ',1)[1].startswith('${COHERENT_BASE} AS diagnostic-reference'))
         diagnostic=source.rsplit('FROM ',1)[1]
-        self.assertIn("pacman -Q mutter | grep -qx 'mutter 51.0-1.6'",diagnostic)
+        self.assertIn("pacman -Q mutter | grep -qx 'mutter 51.0-1.7'",diagnostic)
         self.assertIn('sha256sum -c sha256sums',diagnostic)
 
 
