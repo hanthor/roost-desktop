@@ -588,6 +588,16 @@ class PredatingGuestQualification(unittest.TestCase):
         ok, _ = self.verdict(self.BASELINE_SERIAL, None)
         self.assertFalse(ok)
 
+    def test_lock_chord_held_until_lock_owns_input_on_predating_guest(self):
+        # Run 37727015469: a quick Super release on the 0.1.0-2 guest is
+        # dropped before the lock surface maps, latching Super so the
+        # password never reaches PAM. Hold the chord on such guests only.
+        self.assertGreaterEqual(lane.lock_chord_hold_ms(True), 1000)
+
+    def test_lock_chord_stays_quick_on_current_guest(self):
+        # Current guests keep exercising the quick-release regression path.
+        self.assertEqual(lane.lock_chord_hold_ms(False), 80)
+
     def test_media_volume_requires_hda_and_baseline(self):
         ok, _ = self.verdict("roost-vm-health: volume=0.40\n", self.SHIPPED_STATE)
         self.assertFalse(ok)

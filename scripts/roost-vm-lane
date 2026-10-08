@@ -1130,9 +1130,26 @@ class Recorder:
         self.stills[card] = self.n + 1
 
 
-def run_tour(qmp, out, serial_path):
+def lock_chord_hold_ms(older_guest):
+    """How long the tour holds Super+L before releasing both keys.
+
+    Run 37727015469: the published roost 0.1.0-2 guest predates a3647b59
+    (Oct 6), which made the compositor account for key releases it consumes
+    while a lock is pending. On that guest a quick Super release lands
+    before the lock surface maps, is dropped, and leaves Super latched in
+    the keyboard state: the curtain still lifts, but the password entry
+    sees Super+r/o/s/t and Super+Return, so nothing reaches PAM. Holding
+    the chord until the lock surface owns input is what a real user's
+    slower press does, and still drives the real PAM unlock. Current
+    guests keep the quick release, which is the regression a3647b59 fixed.
+    """
+    return 1500 if older_guest else 80
+
+
+def run_tour(qmp, out, serial_path, older_guest=False):
     """Scripted feature tour through QMP input, recorded to a WebM with a
-    title card per section. Returns a manifest entry."""
+    title card per section. Returns a manifest entry. `older_guest` marks a
+    guest that predates the newer snapshot keys (predates_newer_snapshot)."""
     tour = os.path.join(out, "tour")
     scratch = os.path.join(tour, ".work")
     os.makedirs(scratch, exist_ok=True)
@@ -1215,7 +1232,7 @@ def run_tour(qmp, out, serial_path):
         wait(3)
         # Exercise the hardware shortcut and the real PAM unlock stack.
         rec.mark("lock")
-        keys("meta_l", "l")
+        keys("meta_l", "l", hold_ms=lock_chord_hold_ms(older_guest))
         wait(5)
         rec.still("lock")
         # Shift alone intentionally leaves GNOME's curtain in place.
@@ -1562,6 +1579,7 @@ def main():
                     diagnostic_agent.close()
             record("V-PANEL", ok, f"screendump: {panel_desc}")
             agent = None
+            owner = None
             try:
                 agent = guest_agent.GuestAgent(agent_path)
                 owner = agent.run("inventory")
@@ -1579,7 +1597,8 @@ def main():
                     agent.close()
             if a.tour:
                 try:
-                    tour_info = run_tour(qmp, out, serial_path)
+                    older_guest = bool(owner and owner.get("state")) and predates_newer_snapshot(owner["state"])
+                    tour_info = run_tour(qmp, out, serial_path, older_guest)
                     tour_serial_end = len(read_text(serial_path))
                     agent = guest_agent.GuestAgent(agent_path)
                     try:
