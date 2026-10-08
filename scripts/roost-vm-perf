@@ -31,7 +31,9 @@ def guest_probe(agent, action, index=None, out=None):
     """Only this immutable CI helper is executed; no command/path input."""
     if action not in ("clock", "notify", "frames", "gnome-trace-start",
                       "gnome-trace-stop", "gnome-trace-read",
-                      "gnome-trace-failed-stop", "gnome-trace-failed-stop-read"):
+                      "gnome-trace-failed-stop", "gnome-trace-failed-stop-read",
+                      "kernel-trace-stop", "kernel-trace-read", "kernel-formats-read",
+                      "kernel-discovery-read"):
         raise ValueError("unsupported performance probe")
     arguments = [action]
     if action == "notify":
@@ -41,6 +43,10 @@ def guest_probe(agent, action, index=None, out=None):
     if action in ("gnome-trace-read","gnome-trace-failed-stop-read"):
         if type(index) is not int or not 0 <= index < 128:
             raise ValueError("capture chunk index outside the bounded file")
+        arguments += ["--index", str(index)]
+    if action in ("kernel-trace-read", "kernel-formats-read", "kernel-discovery-read"):
+        if type(index) is not int or not 0 <= index < 1024:
+            raise ValueError("kernel capture chunk index outside the bounded file")
         arguments += ["--index", str(index)]
     pid = agent.command("guest-exec", path="/usr/libexec/roost-perf-phase",
                         arg=arguments, **{"capture-output": True})["pid"]
@@ -152,6 +158,48 @@ def distribution(values):
             "mean": statistics.mean(values)}
 
 
+def retain_kernel_trace(agent, out, metadata):
+    """Retain the whole observer before rejecting loss or invalid acquisition."""
+    (out / "kernel-vblank-source.json").write_text(json.dumps(metadata, indent=2))
+    artifacts = [
+        ("raw", "kernel-trace-read", "kernel-vblank-trace.txt", 1, 64 * 1024 * 1024),
+        ("formats", "kernel-formats-read", "kernel-vblank-formats.json", 1, 2 * 1024 * 1024),
+    ]
+    if "discovery_raw" in metadata:
+        artifacts.insert(0, ("discovery_raw", "kernel-discovery-read", "kernel-vblank-discovery.txt", 1, 2 * 1024 * 1024))
+    errors = []
+    for kind, action, name, minimum, maximum in artifacts:
+        try:
+            source = metadata.get(kind, {})
+            size, digest = source.get("bytes"), source.get("sha256")
+            if type(size) is not int or not minimum <= size <= maximum or not isinstance(digest, str):
+                raise ValueError("kernel observer artifact metadata is missing or invalid")
+            with (out / name).open("wb") as stream:
+                hashed = hashlib.sha256()
+                for index in range((size + 65535) // 65536):
+                    row = guest_probe(agent, action, index)["kernel_trace"]
+                    chunk = base64.b64decode(row["data"], validate=True)
+                    if row["index"] != index or len(chunk) != min(65536, size - index * 65536):
+                        raise ValueError("incomplete actual kernel observer chunk")
+                    stream.write(chunk)
+                    hashed.update(chunk)
+            if hashed.hexdigest() != digest:
+                raise ValueError("kernel observer artifact changed during acquisition")
+        except Exception as error:
+            errors.append({'artifact': name, 'reason': str(error)[:2048]})
+    if errors:
+        (out / 'kernel-vblank-artifact-errors.json').write_text(json.dumps(errors, indent=2))
+        raise ValueError('incomplete independent kernel artifacts: ' + json.dumps(errors))
+    if metadata.get("qualified_acquisition") is not True or metadata.get("errors") or metadata.get("cleanup_errors"):
+        raise ValueError("kernel observer reports actual loss, missing probes or invalid acquisition")
+    if metadata.get("capture_filter") == "actual-native-timer-inventory-v1":
+        times = [metadata.get(name) for name in ('discovery_started_monotonic_ns', 'discovery_finished_monotonic_ns', 'filters_ready_monotonic_ns')]
+        if not all(type(value) is int for value in times) or not times[0] < times[1] <= times[2] or times[1] - times[0] > 1_000_000_000:
+            raise ValueError('actual kernel filter/discovery boundaries are invalid')
+        if not metadata.get('discovery_raw') or not metadata.get('timer_inventory') or len(metadata.get('timer_filters', {})) != 4:
+            raise ValueError('actual kernel filter/discovery evidence is incomplete')
+
+
 def retain_gnome_trace(agent, out, metadata):
     size = metadata.get("bytes")
     digest = metadata.get("sha256")
@@ -173,16 +221,34 @@ def retain_gnome_trace(agent, out, metadata):
     # Preserve decoded evidence even if a required semantic scope is absent.
     (out / "gnome-overview-marks.json").write_text(json.dumps(decoded, indent=2))
     package = metadata.get("mutter_cogl_library", {}).get("package")
-    diagnostic = package in ("mutter 51.0-1.2", "mutter 51.0-1.5", "mutter 51.0-1.6")
+    diagnostic = package in ("mutter 51.0-1.2", "mutter 51.0-1.3", "mutter 51.0-1.5", "mutter 51.0-1.6", "mutter 51.0-1.7")
+    observer_error = None
+    # Acquire independent whole kernel bytes before any diagnostic validation.
+    if "kernel_trace" in metadata:
+        try:
+            retain_kernel_trace(agent, out, metadata["kernel_trace"])
+        except Exception as error:
+            observer_error = str(error)
+            (out / "kernel-vblank-acquisition-rejection.json").write_text(json.dumps({"reason": observer_error}, indent=2))
+    evidence = {}
     if diagnostic:
-        evidence = frame_source_evidence(decoded, metadata["pid"])
-        (out / "gnome-overview-source-frames.json").write_text(json.dumps(evidence, indent=2))
-    if package in ("mutter 51.0-1.5", "mutter 51.0-1.6"):
+        try:
+            evidence = frame_source_evidence(decoded, metadata["pid"])
+            (out / "gnome-overview-source-frames.json").write_text(json.dumps(evidence, indent=2))
+        except ValueError as error:
+            observer_error = str(error)
+            (out / "gnome-overview-source-rejection.json").write_text(json.dumps({"reason": str(error)}, indent=2))
+    if package in ("mutter 51.0-1.5", "mutter 51.0-1.6", "mutter 51.0-1.7"):
         boundary = capture_boundary_evidence(decoded, metadata)
         (out / "gnome-overview-capture-boundary.json").write_text(json.dumps(boundary, indent=2))
-    if package == "mutter 51.0-1.6":
+    if package in ("mutter 51.0-1.6", "mutter 51.0-1.7"):
         stop_boundary = capture_stop_boundary_evidence(decoded, metadata)
         (out / "gnome-overview-capture-stop-boundary.json").write_text(json.dumps(stop_boundary, indent=2))
+    if metadata.get("mutter_cogl_library", {}).get("package") == "mutter 51.0-1.3":
+        if not evidence.get("kernel_callback_identities") or not evidence.get("kernel_commit_listener_observations"):
+            observer_error = observer_error or "instrumented Mutter lacks actual callback/commit/listener identity observations"
+        if "kernel_trace" not in metadata:
+            observer_error = observer_error or "instrumented kernel diagnostic capture lacks independent observer metadata"
     if metadata.get("capture_writers_after_stop") != []:
         raise ValueError("GNOME capture writer did not close after Stop")
     kernel = metadata.get("guest_kernel_provenance")
@@ -197,6 +263,8 @@ def retain_gnome_trace(agent, out, metadata):
         raise ValueError("frame ownership requires the pinned GNOME Shell 51.0")
     frames = overview_frame_bounds(decoded, metadata["pid"])
     (out / "gnome-overview-frame-ownership.json").write_text(json.dumps(frames, indent=2))
+    if observer_error is not None:
+        raise ValueError(observer_error)
     frames["latency_lower_ms"] = distribution([row["latency_lower_ms"] for row in frames["inputs"]])
     frames["latency_upper_ms"] = distribution([row["latency_upper_ms"] for row in frames["inputs"]])
     return {"bytes": size, "sha256": digest, "frame_count": decoded["frame_count"],
@@ -477,6 +545,13 @@ def main():
                 guest_probe(agent, "gnome-trace-stop", out=out)
             except Exception as error:
                 print(f"GNOME profile cleanup failed: {error}", file=sys.stderr)
+        if agent is not None and args.desktop == "gnome":
+            try:
+                observer = guest_probe(agent, "kernel-trace-stop")["kernel_trace"]
+                if not (out / "kernel-vblank-source.json").exists():
+                    retain_kernel_trace(agent, out, observer)
+            except Exception as error:
+                print(f"Kernel observer cleanup/acquisition failed: {error}", file=sys.stderr)
         if agent is not None:
             agent.close()
         vm.terminate()
