@@ -131,7 +131,7 @@ fn compositor() -> TestCompositor {
         PhysicalProperties {
             size: (0, 0).into(),
             subpixel: Subpixel::Unknown,
-            make: "Roost".into(),
+            make: "Tuna Desktop".into(),
             model: "Test".into(),
         },
     );

@@ -67,7 +67,7 @@ fn current_desktop(set: Option<&std::ffi::OsStr>) -> Option<&'static str> {
 }
 
 fn print_help() {
-    println!("roost-session: launch one Roost desktop session (image entry point)");
+    println!("roost-session: launch one Tuna Desktop session (image entry point)");
     println!();
     println!("Usage: roost-session [--socket NAME] [--width W] [--height H]");
     println!();

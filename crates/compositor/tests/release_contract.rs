@@ -163,7 +163,7 @@ fn arch_package_stamps_and_checks_the_version() {
     assert!(containerfile.contains("ghcr.io/tuna-os/marlin:gnome"));
     // Selectable at login now that the lock screen unlocks through PAM
     // under GDM (#62): the session and its PAM service must both ship.
-    assert!(containerfile.contains("Name=Roost (preview)"));
+    assert!(containerfile.contains("Name=Tuna Desktop (preview)"));
     assert!(containerfile.contains("test -f /etc/pam.d/roost-lock"));
     assert!(!containerfile.contains("mv /usr/share/wayland-sessions/roost.desktop"));
     // Both installed executables are checked through the bounded diagnostic

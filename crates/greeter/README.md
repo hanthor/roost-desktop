@@ -1,6 +1,6 @@
 # roost-greeter
 
-The Roost login greeter for greetd: a prompt state machine, installed
+The Tuna Desktop login greeter for greetd: a prompt state machine, installed
 session enumeration, a greetd JSON-IPC client, and a GTK4/libadwaita login
 window rendered from the model. No password-specific flow exists anywhere
 in the crate; it follows whatever conversation greetd drives.
@@ -31,5 +31,5 @@ with `gtk-ui` off. Tests in `tests/` drive a fake greetd.
 ## Docs
 
 [Greeter VM acceptance](../../docs/greeter-vm-acceptance.md),
-[installing Roost](../../docs/install.md),
+[installing Tuna Desktop](../../docs/install.md),
 [architecture](../../docs/architecture.md).

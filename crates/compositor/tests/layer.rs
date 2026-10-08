@@ -380,7 +380,7 @@ fn bound_panel_arranges_at_its_output_size_and_offset() {
         PhysicalProperties {
             size: (0, 0).into(),
             subpixel: Subpixel::Unknown,
-            make: "Roost".to_owned(),
+            make: "Tuna Desktop".to_owned(),
             model: "Test".to_owned(),
         },
     );

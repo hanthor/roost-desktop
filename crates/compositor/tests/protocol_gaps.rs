@@ -266,7 +266,7 @@ fn compositor() -> (TestCompositor, WindowManager) {
         PhysicalProperties {
             size: (0, 0).into(),
             subpixel: Subpixel::Unknown,
-            make: "Roost".to_owned(),
+            make: "Tuna Desktop".to_owned(),
             model: "Test".to_owned(),
         },
     );
@@ -779,7 +779,7 @@ fn parented_dialogs_remain_centered_on_left_and_upper_outputs() {
                     PhysicalProperties {
                         size: (0, 0).into(),
                         subpixel: Subpixel::Unknown,
-                        make: "Roost".into(),
+                        make: "Tuna Desktop".into(),
                         model: "Dialog topology test".into(),
                     },
                 );

@@ -23,8 +23,8 @@ fn shipped_roost_desktop_parses_to_session_launcher() {
     let entry = found
         .entries
         .iter()
-        .find(|entry| entry.name == "Roost")
-        .expect("shipped roost.desktop must enumerate as Roost");
+        .find(|entry| entry.name == "Tuna Desktop")
+        .expect("shipped roost.desktop must enumerate as Tuna Desktop");
     assert_eq!(
         entry.command,
         vec!["roost-session".to_string()],

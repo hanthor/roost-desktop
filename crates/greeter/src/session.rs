@@ -123,7 +123,7 @@ mod tests {
         dir
     }
 
-    const ROOST: &str = "[Desktop Entry]\nName=Roost\nExec=roost-session\n";
+    const ROOST: &str = "[Desktop Entry]\nName=Tuna Desktop\nExec=roost-session\n";
     const LEGACY: &str = "[Desktop Entry]\nName=RWD\nExec=rwd-session\n";
     const SWAY: &str = "[Desktop Entry]\nName=Sway\nExec=sway\n";
     const BAD: &str = "[Desktop Entry]\nName=Broken\n";
@@ -134,7 +134,7 @@ mod tests {
         let dir = fixture_dir(&[("sway.desktop", SWAY), ("roost.desktop", ROOST)]);
         let out = enumerate_dirs(&[dir.path()]);
         assert_eq!(out.entries.len(), 2);
-        assert_eq!(out.entries[0].name, "Roost");
+        assert_eq!(out.entries[0].name, "Tuna Desktop");
         assert!(out.entries[0].is_default);
         assert_eq!(out.entries[0].command, vec!["roost-session"]);
         assert_eq!(out.skipped, 0);
