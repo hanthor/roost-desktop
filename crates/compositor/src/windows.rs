@@ -3372,11 +3372,15 @@ impl WindowManager {
     }
 
     /// Track Super/Shift hold state for workspace keybindings. The
-    /// modifier events themselves still forward to clients.
+    /// modifier events themselves still forward to clients. Every
+    /// transition is logged: a press the harness never sent (or a
+    /// release it never delivered) shows up here first.
     fn track_workspace_modifiers(&mut self, keycode: u32, pressed: bool) {
         if keycode == SUPER_LEFT_KEYCODE || keycode == SUPER_RIGHT_KEYCODE {
+            eprintln!("roost-compositor: modifier super pressed={pressed}");
             self.super_held = pressed;
         } else if keycode == SHIFT_LEFT_KEYCODE || keycode == SHIFT_RIGHT_KEYCODE {
+            eprintln!("roost-compositor: modifier shift pressed={pressed}");
             self.shift_held = pressed;
         }
     }
@@ -4501,11 +4505,15 @@ impl WindowManager {
     }
 
     /// Track Alt hold state for the switcher. The modifier events
-    /// themselves still forward to clients.
+    /// themselves still forward to clients. Every transition is
+    /// logged: a press the harness never sent (or a release it never
+    /// delivered) shows up here first.
     fn track_switcher_modifiers(&mut self, keycode: u32, pressed: bool) {
         if self.is_alt(keycode) {
+            eprintln!("roost-compositor: modifier alt pressed={pressed}");
             self.alt_held = pressed;
         } else if keycode == CTRL_LEFT_KEYCODE || keycode == CTRL_RIGHT_KEYCODE {
+            eprintln!("roost-compositor: modifier ctrl pressed={pressed}");
             self.ctrl_held = pressed;
         }
     }

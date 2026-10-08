@@ -1076,16 +1076,29 @@ if tail -c +"$((grab_mark + 1))" "$LOG" | grep -q "roost-shell-gtk: keybindings:
 else
     fail G-CYCLE-KEYS "shell never re-grabbed the rebound cycle keys"
 fi
+# A stray held modifier from the harness (an XTEST press the server
+# delivered twice, or a release it swallowed) poisons one chord press
+# with extra mods and never clears itself. Releasing every modifier
+# once is a no-op when nothing is held and resyncs the server,
+# compositor and seat when something is; a retry that fires stays
+# greppable so a systematic miss cannot hide behind it.
+xdotool keyup Alt_L Super_L Shift_L Control_L
+sleep 0.5
+cycle_press() {
+    xdotool key "$1"
+    if cstate "$2" "$3" 10; then return 0; fi
+    echo "roost-gtk-shell-proof: G-CYCLE-KEYS resync: '$1' missed, releasing all modifiers and pressing again" >&2
+    xdotool keyup Alt_L Super_L Shift_L Control_L
+    sleep 0.5
+    xdotool key "$1"
+    cstate "$2" "$3" || fail G-CYCLE-KEYS "$4"
+}
 original="$(jq -r .focused "$CSTATE")"
-xdotool key super+F1
-cstate ".focused != $original and .focused_app_id == \"roost-test-alpha\"" "cycle group" || fail G-CYCLE-KEYS "cycle-group did not move within Alpha"
-xdotool key super+shift+F1
-cstate ".focused == $original" "cycle group backward" || fail G-CYCLE-KEYS "cycle-group-backward did not return"
-xdotool key super+F2
-cstate ".focused != $original" "cycle windows" || fail G-CYCLE-KEYS "cycle-windows did not move"
+cycle_press "super+F1" ".focused != $original and .focused_app_id == \"roost-test-alpha\"" "cycle group" "cycle-group did not move within Alpha"
+cycle_press "super+shift+F1" ".focused == $original" "cycle group backward" "cycle-group-backward did not return"
+cycle_press "super+F2" ".focused != $original" "cycle windows" "cycle-windows did not move"
 cycled="$(jq -r .focused "$CSTATE")"
-xdotool key super+shift+F2
-cstate ".focused != $cycled" "cycle windows backward" || fail G-CYCLE-KEYS "cycle-windows-backward did not move"
+cycle_press "super+shift+F2" ".focused != $cycled" "cycle windows backward" "cycle-windows-backward did not move"
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-cycle-keys.json" 20 || fail G-CYCLE-KEYS "a11y dump failed"
 showing "$ARTIFACTS/a11y-cycle-keys.json" "Switch Windows" && fail G-CYCLE-KEYS "direct cycling opened a popup"
 pass G-CYCLE-KEYS "bound forward/backward window and app-group cycling activate immediately without a popup"
