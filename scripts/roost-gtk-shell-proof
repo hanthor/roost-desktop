@@ -1084,6 +1084,15 @@ fi
 # greppable so a systematic miss cannot hide behind it.
 xdotool keyup Alt_L Super_L Shift_L Control_L
 sleep 0.5
+# The nested journey's IBus session can leave this X server with a
+# merged keymap in which function keys resolve behind an Alt level;
+# xdotool then taps Alt around every F-key press on its own. Show
+# what the server offers for the chord's keysyms, then restore the
+# plain layout so they resolve at their base level. Temporary until
+# the stray-Alt fault is understood.
+"$PY" "$ROOT/scripts/lib/xkeysym-levels.py" "$DISPLAY" ffbe ffbf ffeb ffe9 >&2 || true
+setxkbmap -display "$DISPLAY" us >&2 || true
+"$PY" "$ROOT/scripts/lib/xkeysym-levels.py" "$DISPLAY" ffbe ffbf >&2 || true
 # Temporary harness introspection for the stray-Alt fault: how this
 # server maps the chord's keycodes (an F1 that resolves behind an Alt
 # level would explain a harness-side Alt tap around every press).
