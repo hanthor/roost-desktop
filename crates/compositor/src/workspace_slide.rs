@@ -664,12 +664,13 @@ mod tests {
         slide.observe(1, &[0, 1], 1000, on, false, t0);
         assert!(slide.running());
         // At the start the old workspace fills the screen, the new one
-        // waits one output plus 100px to the right.
+        // waits just off it, one output plus 100px to the right.
         assert_eq!(slide.placement(0, t0).unwrap().dx, 0);
-        assert_eq!(slide.placement(1, t0).unwrap().dx, 1100);
+        assert!(slide.placement(1, t0).is_none());
         let half = t0 + ms(125);
         let d0 = slide.placement(0, half).unwrap().dx;
         assert_eq!(d0, -(0.875f64 * 1100.0).round() as i32);
+        assert!((slide.placement(1, half).unwrap().dx - (1100 + d0)).abs() <= 1);
         assert!(slide.step(half));
         assert!(!slide.step(t0 + ms(250)));
         assert!(!slide.running());

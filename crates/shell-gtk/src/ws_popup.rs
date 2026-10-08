@@ -145,7 +145,7 @@ impl WorkspacePopup {
         let generation = self.fade.get().wrapping_add(1);
         self.fade.set(generation);
         let from = self.pill.opacity();
-        let finish = |ui: &Self| {
+        let finish = move |ui: &Self| {
             ui.pill.set_opacity(to);
             if to == 0.0 {
                 ui.window.set_visible(false);
