@@ -3492,6 +3492,65 @@ fi
 pass G-WS-POPUP "a workspace key shows GNOME's workspace switcher popup"
 sleep 1
 
+# GNOME's keyboard workspace switch (workspaceAnimation.js): both
+# workspaces slide 250 ms ease-out-cubic as a render offset, a second
+# press retargets from where the strip is drawn, and with animations off
+# the switch is instant. The compositor records each switch's timing.
+slide_last() { jq -c '.workspace_slide.history[-1]' "$CSTATE"; }
+slide_settled() {
+    cstate ".active_workspace == $1 and .workspace_slide.in_flight == null and (.workspace_slide.history | length) > 0 and .workspace_slide.history[-1].to == $1" "$2"
+}
+# Settling is detected on the next frame after 250 ms; allow for a slow CI frame.
+SLIDE_TOLERANCE_MS=150
+slide_home="$(jq -r '.active_workspace' "$CSTATE")"
+xdotool key super+Page_Down
+# Best-effort sample of the strip mid-flight for the artifacts.
+slide_deadline=$(($(date +%s%N) + 1000000000))
+while [ "$(date +%s%N)" -lt "$slide_deadline" ]; do
+    if jq -e '.workspace_slide.in_flight.position as $p | $p != null and $p != ($p | floor)' "$CSTATE" >/dev/null 2>&1; then
+        cp "$CSTATE" "$ARTIFACTS/workspace-slide-in-flight.json"
+        break
+    fi
+    sleep 0.01
+done
+slide_settled $((slide_home + 1)) "slide settled" || fail G-WORKSPACE-SLIDE "Super+Page_Down did not settle on the next workspace"
+slide_last >"$ARTIFACTS/workspace-slide-key.json"
+jq -e --argjson home "$slide_home" --argjson tol "$SLIDE_TOLERANCE_MS" \
+    '.motion == "slide" and (.gesture | not) and .from == $home and .to == $home + 1
+     and .duration_ms == 250 and .frames >= 2 and .elapsed_ms >= 250 and .elapsed_ms <= 250 + $tol
+     and (.reversed | not)' "$ARTIFACTS/workspace-slide-key.json" >/dev/null ||
+    fail G-WORKSPACE-SLIDE "the key switch did not slide 250 ms: $(cat "$ARTIFACTS/workspace-slide-key.json")"
+xdotool key super+Page_Up
+slide_settled "$slide_home" "slid back" || fail G-WORKSPACE-SLIDE "Super+Page_Up did not slide back"
+# Twice in quick succession: two workspaces over, never backwards.
+xdotool key super+Page_Down
+sleep 0.08
+xdotool key super+Page_Down
+slide_settled $((slide_home + 2)) "double press settled" ||
+    fail G-WORKSPACE-SLIDE "two rapid Super+Page_Down did not end two workspaces over"
+slide_last >"$ARTIFACTS/workspace-slide-retarget.json"
+jq -e --argjson home "$slide_home" --argjson tol "$SLIDE_TOLERANCE_MS" \
+    '.motion == "slide" and .from == $home and .to == $home + 2 and .retargets >= 1
+     and (.reversed | not) and .elapsed_ms <= 80 + 250 + $tol' "$ARTIFACTS/workspace-slide-retarget.json" >/dev/null ||
+    fail G-WORKSPACE-SLIDE "the second press did not retarget forwards: $(cat "$ARTIFACTS/workspace-slide-retarget.json")"
+xdotool key super+Page_Up
+slide_settled "$slide_home" "home again" || fail G-WORKSPACE-SLIDE "could not return home"
+gsettings set org.gnome.desktop.interface enable-animations false
+cstate '(.animations_enabled | not)' "slide animations off" ||
+    fail G-WORKSPACE-SLIDE "enable-animations false did not reach the compositor"
+xdotool key super+Page_Down
+slide_settled $((slide_home + 1)) "instant switch" || fail G-WORKSPACE-SLIDE "the switch failed with animations off"
+slide_last >"$ARTIFACTS/workspace-slide-off.json"
+jq -e '.motion == "off" and .frames == 0 and .elapsed_ms == 0' "$ARTIFACTS/workspace-slide-off.json" >/dev/null ||
+    fail G-WORKSPACE-SLIDE "the switch animated with animations off: $(cat "$ARTIFACTS/workspace-slide-off.json")"
+xdotool key super+Page_Up
+slide_settled "$slide_home" "instant back" || fail G-WORKSPACE-SLIDE "could not return home with animations off"
+gsettings set org.gnome.desktop.interface enable-animations true
+cstate '.animations_enabled' "slide animations restored" ||
+    fail G-WORKSPACE-SLIDE "could not restore animations"
+pass G-WORKSPACE-SLIDE "Super+Page_Down slides 250 ms, a second press retargets forwards, and animations off switches instantly"
+sleep 1
+
 # Exercise the normal three-finger handler with nested synthetic phases.
 # Physical touchpad/libinput qualification remains a separate hardware gate.
 swipe_sequence=100
@@ -3503,19 +3562,69 @@ swipe_phase() {
     sleep 0.2
 }
 gesture_home="$(jq -r '.active_workspace' "$CSTATE")"
+# GNOME commits a slow release past half a workspace (400px of travel).
 swipe_phase begin 0 0
-swipe_phase update -180 0
+swipe_phase update -240 0
 swipe_phase end 0 0
 cstate ".active_workspace == $gesture_home + 1 and (.overview_open | not)" "left swipe" ||
     fail G-SWIPE-DIRECTIONS "three-finger left did not select the next workspace"
 cp "$CSTATE" "$ARTIFACTS/swipe-next-workspace.json"
 swipe_phase begin 0 0
-swipe_phase update 180 0
+swipe_phase update 240 0
 swipe_phase end 0 0
 cstate ".active_workspace == $gesture_home and (.overview_open | not)" "right swipe" ||
     fail G-SWIPE-DIRECTIONS "three-finger right did not restore the previous workspace"
 cp "$CSTATE" "$ARTIFACTS/swipe-previous-workspace.json"
 pass G-SWIPE-DIRECTIONS "nested three-finger left/right switch and restore the exact workspace"
+
+# The strip follows the fingers while they are down (1 workspace per
+# 400px), and a slow release short of half way goes back.
+slide_settled "$gesture_home" "swipe start" || fail G-SWIPE-FOLLOW "the restore swipe did not settle"
+held_at() {
+    cstate "(.workspace_slide.in_flight | .following and ((.position - (.strip | index($gesture_home)) - $1) | . < 0.001 and . > -0.001)) and .active_workspace == $gesture_home" "$2"
+}
+swipe_phase begin 0 0
+swipe_phase update -100 0
+held_at 0.25 "a quarter over" || fail G-SWIPE-FOLLOW "100px of travel did not hold the strip a quarter over"
+cp "$CSTATE" "$ARTIFACTS/swipe-follow-quarter.json"
+swipe_phase update -60 0
+held_at 0.4 "0.4 over" || fail G-SWIPE-FOLLOW "the strip did not keep following the fingers"
+swipe_phase update 0 0
+sleep 0.3
+swipe_phase end 0 0
+slide_settled "$gesture_home" "cancelled swipe" || fail G-SWIPE-FOLLOW "a slow release under half way did not go back"
+jq -e '.workspace_slide.history[-1] | .gesture and .motion == "slide"' "$CSTATE" >/dev/null ||
+    fail G-SWIPE-FOLLOW "the cancelled swipe was not animated back"
+pass G-SWIPE-FOLLOW "a held three-finger swipe drags the workspace strip and a slow short release slides back"
+
+# Release velocity decides the landing and the duration (swipeTracker.js):
+# a fast short flick still switches, sooner than a slow drag finishes.
+# Phases carry event times so the velocity is deterministic.
+swipe_at() {
+    swipe_sequence=$((swipe_sequence + 1))
+    printf '{"phase":"%s","dx":%s,"dy":0,"time":%s,"sequence":%s}\n' \
+        "$1" "$2" "$3" "$swipe_sequence" >"$TUNA_PROOF_SWIPE_INPUT.tmp"
+    mv "$TUNA_PROOF_SWIPE_INPUT.tmp" "$TUNA_PROOF_SWIPE_INPUT"
+    sleep 0.2
+}
+swipe_at begin 0 10000
+swipe_at update -40 10008
+swipe_at update -40 10016
+swipe_at end 0 10024
+slide_settled $((gesture_home + 1)) "flick" || fail G-SWIPE-VELOCITY "a fast 80px flick did not switch"
+slide_last >"$ARTIFACTS/swipe-velocity-flick.json"
+swipe_at begin 0 20000
+swipe_at update 240 20010
+swipe_at end 0 20500
+slide_settled "$gesture_home" "slow drag" || fail G-SWIPE-VELOCITY "a slow drag past half way did not switch back"
+slide_last >"$ARTIFACTS/swipe-velocity-drag.json"
+flick_ms="$(jq '.duration_ms' "$ARTIFACTS/swipe-velocity-flick.json")"
+drag_ms="$(jq '.duration_ms' "$ARTIFACTS/swipe-velocity-drag.json")"
+jq -e '.gesture and .velocity >= 0.6 and .duration_ms >= 100 and .duration_ms < 400' \
+    "$ARTIFACTS/swipe-velocity-flick.json" >/dev/null &&
+    jq -e '.gesture and .velocity == 0 and .duration_ms == 400' "$ARTIFACTS/swipe-velocity-drag.json" >/dev/null ||
+    fail G-SWIPE-VELOCITY "release durations ignore velocity (flick ${flick_ms}ms, drag ${drag_ms}ms)"
+pass G-SWIPE-VELOCITY "a fast flick lands in ${flick_ms}ms, a slow drag in ${drag_ms}ms"
 
 gsettings set org.gnome.desktop.interface enable-animations false
 cstate '(.animations_enabled | not) and .overview_progress == 0' "reduced-motion swipe ready" ||
