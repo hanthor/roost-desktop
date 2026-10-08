@@ -1061,7 +1061,18 @@ while [ "$(date +%s)" -le "$grab_end" ]; do
     sleep 0.3
 done
 if tail -c +"$((grab_mark + 1))" "$LOG" | grep -q "roost-shell-gtk: keybindings:"; then
-    sleep 1
+    # Five rapid rebinds land as a burst of re-grabs; the first new line
+    # does not mean the final Super+F1 binding is live yet. Wait for two
+    # consecutive quiet seconds before sending keys.
+    settled=0
+    previous=$(grep -c 'roost-shell-gtk: keybindings:' "$LOG")
+    for _ in $(seq 1 30); do
+        sleep 1
+        current=$(grep -c 'roost-shell-gtk: keybindings:' "$LOG")
+        if [ "$current" = "$previous" ]; then settled=$((settled + 1)); else settled=0; fi
+        previous=$current
+        [ "$settled" -ge 2 ] && break
+    done
 else
     fail G-CYCLE-KEYS "shell never re-grabbed the rebound cycle keys"
 fi
