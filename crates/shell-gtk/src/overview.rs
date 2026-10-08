@@ -90,7 +90,9 @@ fn app_button(entry: &AppEntry, icon_size: i32, with_label: bool) -> gtk::Button
         label.set_ellipsize(gtk::pango::EllipsizeMode::End);
         column.append(&label);
     }
-    let button = gtk::Button::builder().child(&column).build();
+    let button = gtk::Button::builder()
+        .child(&crate::grid_animation::Zoom::new(&column))
+        .build();
     button.add_css_class("flat");
     button.add_css_class("overview-app");
     button.update_property(&[gtk::accessible::Property::Label(&entry.name)]);
@@ -155,6 +157,8 @@ pub struct OverviewUi {
     want_apps: std::cell::Cell<bool>,
     /// GNOME's app folder dialog.
     folder_dialog: Rc<crate::folder_dialog::FolderDialog>,
+    /// The grid's items as last built: one new since scales in.
+    grid_keys: RefCell<std::collections::HashSet<String>>,
 }
 
 impl OverviewUi {
@@ -285,6 +289,7 @@ impl OverviewUi {
                 app,
                 Rc::new(crate::folders::rename),
             ),
+            grid_keys: RefCell::new(std::collections::HashSet::new()),
         }));
         // An app dragged out of a folder's dialog leaves the folder.
         {
@@ -615,6 +620,7 @@ impl OverviewUi {
             new_page: Rc::new(new_page),
             columns,
             per_page,
+            slots: RefCell::new(std::collections::HashMap::new()),
         });
         let add = |id: &str, widget: &gtk::Widget| {
             widget.set_widget_name(id);
@@ -704,8 +710,9 @@ impl OverviewUi {
                 });
             }
             let entry = entry.clone();
-            button.connect_clicked(move |_| {
+            button.connect_clicked(move |button| {
                 if tuna_shell_host::apps::launch(&entry).is_ok() {
+                    crate::grid_animation::launch_zoom(button);
                     actions.close_overview();
                 }
             });
@@ -744,7 +751,7 @@ impl OverviewUi {
                     column.append(&collage);
                     column.append(&gtk::Label::new(Some(&folder.name)));
                     let button = gtk::Button::builder()
-                        .child(&column)
+                        .child(&crate::grid_animation::Zoom::new(&column))
                         .valign(gtk::Align::Start)
                         .build();
                     button.add_css_class("flat");
@@ -785,7 +792,7 @@ impl OverviewUi {
                         let actions = me.actions.clone();
                         let members: Vec<AppEntry> = members.iter().map(|e| (*e).clone()).collect();
                         let (id, name) = (folder.id.clone(), folder.name.clone());
-                        button.connect_clicked(move |_| {
+                        button.connect_clicked(move |button| {
                             let tiles = members
                                 .iter()
                                 .map(|entry| {
@@ -795,19 +802,32 @@ impl OverviewUi {
                                     drag_source(&tile, format!("folder-app:{id}:{}", entry.app_id));
                                     let (entry, actions, dialog) =
                                         (entry.clone(), actions.clone(), dialog.clone());
-                                    tile.connect_clicked(move |_| {
+                                    tile.connect_clicked(move |tile| {
                                         if tuna_shell_host::apps::launch(&entry).is_ok() {
-                                            dialog.close();
+                                            crate::grid_animation::launch_zoom(tile);
+                                            dialog.close_now();
                                             actions.close_overview();
                                         }
                                     });
                                     tile.upcast::<gtk::Widget>()
                                 })
                                 .collect();
-                            dialog.open(&id, &name, tiles);
+                            dialog.open(&id, &name, tiles, button.upcast_ref());
                         });
                     }
                     add(&key, button.upcast_ref());
+                }
+            }
+        }
+        let keys: std::collections::HashSet<String> =
+            reflow.widgets.borrow().keys().cloned().collect();
+        let previous = me.grid_keys.replace(keys);
+        if !previous.is_empty() {
+            for (id, widget) in reflow.widgets.borrow().iter() {
+                if !previous.contains(id) {
+                    if let Some(widget) = widget.upgrade() {
+                        scale_in(&widget);
+                    }
                 }
             }
         }
@@ -919,7 +939,7 @@ impl OverviewUi {
             }
         } else {
             let me = ui.borrow();
-            me.folder_dialog.close();
+            me.folder_dialog.close_now();
             me.search.set_keyboard_mode(KeyboardMode::None);
             me.search.set_visible(false);
             me.dash.set_visible(false);
@@ -1001,10 +1021,12 @@ struct GridReflow {
     original: RefCell<Option<Vec<Vec<String>>>>,
     widgets: RefCell<std::collections::HashMap<String, glib::WeakRef<gtk::Widget>>>,
     pages: RefCell<Vec<glib::WeakRef<gtk::FlowBox>>>,
-    carousel: RefCell<Option<glib::WeakRef<libadwaita::Carousel>>>,
+    carousel: RefCell<Option<glib::WeakRef<crate::grid_pager::GridPager>>>,
     new_page: Rc<dyn Fn() -> gtk::FlowBox>,
     columns: usize,
     per_page: usize,
+    /// Each tile's reflow, by id.
+    slots: RefCell<std::collections::HashMap<String, Rc<crate::grid_animation::Slot>>>,
 }
 
 impl GridReflow {
@@ -1021,10 +1043,11 @@ impl GridReflow {
             return;
         };
         if self.original.borrow().is_none() {
-            *self.original.borrow_mut() = Some(current);
+            *self.original.borrow_mut() = Some(current.clone());
         }
         *self.order.borrow_mut() = moved;
         self.arrange();
+        self.animate_reflow(&current);
     }
 
     fn commit(&self) {
@@ -1035,8 +1058,79 @@ impl GridReflow {
     fn cancel(&self) {
         let original = self.original.borrow_mut().take();
         if let Some(original) = original {
-            *self.order.borrow_mut() = original;
+            let current = std::mem::replace(&mut *self.order.borrow_mut(), original);
             self.arrange();
+            self.animate_reflow(&current);
+        }
+    }
+
+    /// GNOME's icon reflow (iconGrid.js animateIconPosition): each tile
+    /// that changed place on its page slides from its old cell, ease-out
+    /// quad, 10 ms after the one before.
+    fn animate_reflow(&self, old: &[Vec<String>]) {
+        use crate::grid_animation as anim;
+        let policy = anim::motion();
+        let rtl = gtk::Widget::default_direction() == gtk::TextDirection::Rtl;
+        let order = self.order.borrow().clone();
+        let widgets = self.widgets.borrow().clone();
+        let mut changed = 0.0;
+        for (page, ids) in order.iter().enumerate() {
+            for (to, id) in ids.iter().enumerate() {
+                let Some(from) = old
+                    .get(page)
+                    .and_then(|ids| ids.iter().position(|old| old == id))
+                else {
+                    continue;
+                };
+                if from == to {
+                    continue;
+                }
+                let Some(widget) = widgets.get(id).and_then(|w| w.upgrade()) else {
+                    continue;
+                };
+                let Some(zoom) = widget.first_child().and_downcast::<anim::Zoom>() else {
+                    continue;
+                };
+                // A cell is the tile's slot plus the grid's 12px spacing.
+                let cell = widget.parent().unwrap_or_else(|| widget.clone());
+                let (cols, rows) = anim::reflow_shift(from, to, self.columns);
+                let pitch_x = f64::from(cell.width().max(widget.width()) + 12);
+                let pitch_y = f64::from(cell.height().max(widget.height()) + 12);
+                let now = zoom.shift();
+                let start = (
+                    now.0 + if rtl { -cols } else { cols } * pitch_x,
+                    now.1 + rows * pitch_y,
+                );
+                let timing = anim::REFLOW.delayed(changed * anim::REFLOW_STAGGER_MS);
+                changed += 1.0;
+                let slot = self
+                    .slots
+                    .borrow_mut()
+                    .entry(id.clone())
+                    .or_default()
+                    .clone();
+                let weak = zoom.downgrade();
+                let total = if widget.is_mapped() {
+                    timing.end_ms(policy)
+                } else {
+                    0.0
+                };
+                slot.start(
+                    &zoom,
+                    "reflow",
+                    total,
+                    move |elapsed| {
+                        if let Some(zoom) = weak.upgrade() {
+                            let t = timing.at(elapsed, policy);
+                            zoom.set_shift((
+                                anim::lerp(start.0, 0.0, t),
+                                anim::lerp(start.1, 0.0, t),
+                            ));
+                        }
+                    },
+                    || {},
+                );
+            }
         }
     }
 
@@ -1266,12 +1360,8 @@ glib::wrapper! {
 }
 
 fn paged_grid(pages: Vec<gtk::FlowBox>, reflow: Rc<GridReflow>) -> gtk::Widget {
-    use libadwaita as adw;
-    let carousel = adw::Carousel::new();
+    let carousel = crate::grid_pager::GridPager::new();
     *reflow.carousel.borrow_mut() = Some(carousel.downgrade());
-    carousel.set_allow_scroll_wheel(true);
-    carousel.set_hexpand(true);
-    carousel.set_vexpand(true);
     let n = pages.len();
     for page in &pages {
         carousel.append(page);
@@ -1296,9 +1386,7 @@ fn paged_grid(pages: Vec<gtk::FlowBox>, reflow: Rc<GridReflow>) -> gtk::Widget {
             button.add_css_class("page-indicator");
             button.update_property(&[gtk::accessible::Property::Label(&format!("Page {}", i + 1))]);
             let carousel = carousel.clone();
-            button.connect_clicked(move |_| {
-                carousel.scroll_to(&carousel.nth_page(i as u32), true);
-            });
+            button.connect_clicked(move |_| carousel.scroll_to(i as u32, true));
             indicators.append(&button);
             button
         })
@@ -1312,7 +1400,7 @@ fn paged_grid(pages: Vec<gtk::FlowBox>, reflow: Rc<GridReflow>) -> gtk::Widget {
         button.set_valign(gtk::Align::Center);
         button.update_property(&[gtk::accessible::Property::Label(label)]);
         let carousel = carousel.clone();
-        button.connect_clicked(move |_| step_page(&carousel, step));
+        button.connect_clicked(move |_| carousel.step(step));
         overlay.add_overlay(&button);
         button
     };
@@ -1351,6 +1439,7 @@ fn paged_grid(pages: Vec<gtk::FlowBox>, reflow: Rc<GridReflow>) -> gtk::Widget {
         previous: previous.clone(),
         next: next.clone(),
         dragging: Cell::new(false),
+        fades: Default::default(),
         initial: RefCell::new(None),
         repeat: RefCell::new(None),
         overshoot: Cell::new(-1.0),
@@ -1407,7 +1496,7 @@ fn paged_grid(pages: Vec<gtk::FlowBox>, reflow: Rc<GridReflow>) -> gtk::Widget {
         }
     };
     sync(0);
-    carousel.connect_page_changed(move |_, page| sync(page));
+    carousel.connect_page_changed(sync);
     let motion = gtk::DropControllerMotion::new();
     {
         let pager = pager.clone();
@@ -1438,11 +1527,11 @@ fn paged_grid(pages: Vec<gtk::FlowBox>, reflow: Rc<GridReflow>) -> gtk::Widget {
         let carousel = carousel.clone();
         keys.connect_key_pressed(move |_, key, _, _| match key {
             gtk::gdk::Key::Page_Down => {
-                step_page(&carousel, 1);
+                carousel.step(1);
                 gtk::glib::Propagation::Stop
             }
             gtk::gdk::Key::Page_Up => {
-                step_page(&carousel, -1);
+                carousel.step(-1);
                 gtk::glib::Propagation::Stop
             }
             _ => gtk::glib::Propagation::Proceed,
@@ -1452,18 +1541,20 @@ fn paged_grid(pages: Vec<gtk::FlowBox>, reflow: Rc<GridReflow>) -> gtk::Widget {
     column.upcast()
 }
 
-/// One page forward or back, clamped.
 /// GNOME's page switching during a drag (appDisplay.js): bumping the
 /// pointer within 20px of the grid's edge turns the page at once, and
 /// hovering a page hint turns it after a second; either repeats every
 /// second while the pointer stays.
 struct DragPager {
-    carousel: libadwaita::Carousel,
+    carousel: crate::grid_pager::GridPager,
     previous_hint: PageHint,
     next_hint: PageHint,
     previous: gtk::Button,
     next: gtk::Button,
     dragging: Cell<bool>,
+    /// The arrows' and hints' fades: previous, next, previous hint,
+    /// next hint.
+    fades: [Rc<crate::grid_animation::Slot>; 4],
     initial: RefCell<Option<glib::SourceId>>,
     repeat: RefCell<Option<glib::SourceId>>,
     /// Where the pointer last bumped the edge (-1: not since leaving).
@@ -1477,18 +1568,41 @@ const DRAG_PAGE_SWITCH: std::time::Duration = std::time::Duration::from_millis(1
 
 impl DragPager {
     fn page(&self) -> u32 {
-        self.carousel.position().round() as u32
+        self.carousel.page()
     }
 
-    /// Arrows outside a drag, hints (where a page lies) during one.
+    /// Arrows outside a drag, hints (where a page lies) during one,
+    /// each fading in and out over 200 ms (_syncPageIndicatorsVisibility).
     fn sync(&self, page: u32) {
+        use crate::grid_animation::fade_visible;
         let before = page > 0;
         let after = page + 1 < self.carousel.n_pages();
         let dragging = self.dragging.get();
-        self.previous.set_visible(before && !dragging);
-        self.next.set_visible(after && !dragging);
-        self.previous_hint.set_visible(before && dragging);
-        self.next_hint.set_visible(after && dragging);
+        let [previous, next, previous_hint, next_hint] = &self.fades;
+        fade_visible(
+            self.previous.upcast_ref(),
+            previous,
+            "page-arrow",
+            before && !dragging,
+        );
+        fade_visible(
+            self.next.upcast_ref(),
+            next,
+            "page-arrow",
+            after && !dragging,
+        );
+        fade_visible(
+            self.previous_hint.upcast_ref(),
+            previous_hint,
+            "page-hint",
+            before && dragging,
+        );
+        fade_visible(
+            self.next_hint.upcast_ref(),
+            next_hint,
+            "page-hint",
+            after && dragging,
+        );
         if dragging {
             if before {
                 self.preview(&self.previous_hint, page - 1, -1.0);
@@ -1503,7 +1617,11 @@ impl DragPager {
         while let Some(child) = hint.first_child() {
             hint.remove(&child);
         }
-        let Some(flow) = self.carousel.nth_page(page).downcast::<gtk::FlowBox>().ok() else {
+        let Some(flow) = self
+            .carousel
+            .nth_page(page)
+            .and_then(|page| page.downcast::<gtk::FlowBox>().ok())
+        else {
             return;
         };
         let width = hint.width().max(hint.width_request());
@@ -1629,14 +1747,14 @@ impl DragPager {
     }
 
     fn turn_and_repeat(self: &Rc<Self>, step: i32) {
-        step_page(&self.carousel, step);
+        self.carousel.step(step);
         if let Some(id) = self.repeat.borrow_mut().take() {
             id.remove();
         }
         let weak = Rc::downgrade(self);
         let id = glib::timeout_add_local(DRAG_PAGE_SWITCH, move || match weak.upgrade() {
             Some(pager) => {
-                step_page(&pager.carousel, step);
+                pager.carousel.step(step);
                 glib::ControlFlow::Continue
             }
             None => glib::ControlFlow::Break,
@@ -1702,13 +1820,6 @@ impl DragPager {
     }
 }
 
-fn step_page(carousel: &libadwaita::Carousel, step: i32) {
-    let current = carousel.position().round() as i32;
-    let target = (current + step).clamp(0, carousel.n_pages() as i32 - 1);
-    let page = carousel.nth_page(target as u32);
-    carousel.scroll_to(&page, true);
-}
-
 /// Make `widget` a drag source of `text`, the widget itself as the
 /// icon (GNOME drags the tile).
 fn drag_source(widget: &impl IsA<gtk::Widget>, text: String) -> gtk::DragSource {
@@ -1719,16 +1830,90 @@ fn drag_source(widget: &impl IsA<gtk::Widget>, text: String) -> gtk::DragSource 
     )));
     // The widget owns its controller; the callback must not own the widget.
     let w = widget.clone().upcast::<gtk::Widget>().downgrade();
-    source.connect_drag_begin(move |source, _| {
-        let Some(w) = w.upgrade() else { return };
-        if std::env::var_os("TUNA_GRID_TRACE").is_some() {
-            eprintln!("tuna-shell-gtk: app tile drag started");
+    let slot = Rc::new(crate::grid_animation::Slot::default());
+    {
+        let slot = slot.clone();
+        source.connect_drag_begin(move |source, _| {
+            let Some(w) = w.upgrade() else { return };
+            if std::env::var_os("TUNA_GRID_TRACE").is_some() {
+                eprintln!("tuna-shell-gtk: app tile drag started");
+            }
+            // The icon is the tile as it was: the tile itself fades.
+            let paintable = gtk::WidgetPaintable::new(Some(&w)).current_image();
+            source.set_icon(Some(&paintable), w.width() / 2, w.height() / 2);
+            scale_and_fade(&w, &slot, true);
+        });
+    }
+    let w = widget.clone().upcast::<gtk::Widget>().downgrade();
+    source.connect_drag_end(move |_, _, _| {
+        if let Some(w) = w.upgrade() {
+            scale_and_fade(&w, &slot, false);
         }
-        let paintable = gtk::WidgetPaintable::new(Some(&w));
-        source.set_icon(Some(&paintable), w.width() / 2, w.height() / 2);
     });
     widget.add_controller(source.clone());
     source
+}
+
+/// GNOME's scaleAndFade (a dragged icon shrinks to half and fades from
+/// its place) and undoScaleAndFade.
+fn scale_and_fade(tile: &gtk::Widget, slot: &Rc<crate::grid_animation::Slot>, away: bool) {
+    use crate::grid_animation as anim;
+    let Some(zoom) = tile.first_child().and_downcast::<anim::Zoom>() else {
+        return;
+    };
+    let policy = anim::motion();
+    let (from_scale, from_alpha) = (zoom.scale().0, zoom.alpha());
+    let (to_scale, to_alpha) = if away { (0.5, 0.0) } else { (1.0, 1.0) };
+    let total = if tile.is_mapped() {
+        anim::ICON_SCALE
+            .end_ms(policy)
+            .max(anim::ICON_FADE.end_ms(policy))
+    } else {
+        0.0
+    };
+    let weak = zoom.downgrade();
+    slot.start(
+        &zoom,
+        if away {
+            "scale-and-fade"
+        } else {
+            "undo-scale-and-fade"
+        },
+        total,
+        move |elapsed| {
+            if let Some(zoom) = weak.upgrade() {
+                zoom.set_look(
+                    anim::lerp(from_scale, to_scale, anim::ICON_SCALE.at(elapsed, policy)),
+                    anim::lerp(from_alpha, to_alpha, anim::ICON_FADE.at(elapsed, policy)),
+                );
+            }
+        },
+        || {},
+    );
+}
+
+/// GNOME's AppIcon scaleIn: a tile new to the grid grows from nothing,
+/// after 700 ms, over 500 ms ease-out-quint.
+fn scale_in(tile: &gtk::Widget) {
+    use crate::grid_animation as anim;
+    let Some(zoom) = tile.first_child().and_downcast::<anim::Zoom>() else {
+        return;
+    };
+    let policy = anim::motion();
+    let slot = Rc::new(anim::Slot::default());
+    let keep = slot.clone();
+    let weak = zoom.downgrade();
+    slot.start(
+        &zoom,
+        "scale-in",
+        anim::ICON_SCALE_IN.end_ms(policy),
+        move |elapsed| {
+            if let Some(zoom) = weak.upgrade() {
+                zoom.set_look(anim::ICON_SCALE_IN.at(elapsed, policy), 1.0);
+            }
+        },
+        move || drop(keep),
+    );
 }
 
 /// Accept a dropped string on `widget`: `act` edits the folders and

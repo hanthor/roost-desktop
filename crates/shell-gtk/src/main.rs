@@ -20,6 +20,8 @@ mod calendar;
 mod events;
 mod folder_dialog;
 mod folders;
+mod grid_animation;
+mod grid_pager;
 mod group_animation;
 mod ibus_panel;
 mod keybindings;

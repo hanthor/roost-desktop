@@ -2,6 +2,9 @@
 //! a folder in the app grid dims the overview and shows a 720px rounded
 //! dialog with the folder's name, a rename button, and its apps in a
 //! centred 3x3 grid of large tiles. Escape or a click outside closes it.
+//! It zooms out of its folder's icon and back into it over 200 ms
+//! (`_zoomAndFadeIn`, `_zoomAndFadeOut`), the shade darkening with it,
+//! while the icon in the grid fades out and back.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -10,6 +13,8 @@ use gtk4 as gtk;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+
+use crate::grid_animation::{self as anim, Slot, Zoom};
 
 /// Called with (folder id, app id) when an app is dragged out of the
 /// folder onto the shade.
@@ -29,7 +34,14 @@ pub type OnShade = Rc<dyn Fn(bool)>;
 
 pub struct FolderDialog {
     window: gtk::Window,
+    shade_box: gtk::Box,
+    zoom: Zoom,
     dialog: gtk::Box,
+    /// The dialog's zoom, fade and shade.
+    slot: Rc<Slot>,
+    /// The folder's icon in the grid, and its fade.
+    source: RefCell<Option<glib::WeakRef<gtk::Widget>>>,
+    source_slot: Rc<Slot>,
     title: gtk::Label,
     entry: gtk::Entry,
     name: gtk::Stack,
@@ -59,15 +71,23 @@ impl FolderDialog {
         window.set_exclusive_zone(-1);
         window.set_keyboard_mode(KeyboardMode::Exclusive);
 
+        // The shade under the dialog, so each fades on its own.
+        let overlay = gtk::Overlay::new();
         let shade = gtk::Box::new(gtk::Orientation::Vertical, 0);
         shade.add_css_class("folder-dialog-shade");
+        shade.set_hexpand(true);
+        shade.set_vexpand(true);
+        overlay.set_child(Some(&shade));
         let dialog = gtk::Box::new(gtk::Orientation::Vertical, 0);
         dialog.add_css_class("app-folder-dialog");
         dialog.set_size_request(DIALOG_W, DIALOG_H);
-        dialog.set_halign(gtk::Align::Center);
-        dialog.set_valign(gtk::Align::Start);
-        dialog.set_margin_top(TOP);
         dialog.set_vexpand(false);
+        let zoom = Zoom::new(&dialog);
+        zoom.set_pivot(0.0, 0.0);
+        zoom.set_halign(gtk::Align::Center);
+        zoom.set_valign(gtk::Align::Start);
+        zoom.set_margin_top(TOP);
+        overlay.add_overlay(&zoom);
 
         // The name row (.folder-name-container): the name, or its entry
         // while renaming, and the rename button at the right.
@@ -102,12 +122,16 @@ impl FolderDialog {
             .build();
         grid.add_css_class("icon-grid");
         dialog.append(&grid);
-        shade.append(&dialog);
-        window.set_child(Some(&shade));
+        window.set_child(Some(&overlay));
 
         let ui = Rc::new(Self {
             window,
+            shade_box: shade,
+            zoom,
             dialog,
+            slot: Rc::new(Slot::default()),
+            source: RefCell::new(None),
+            source_slot: Rc::new(Slot::default()),
             title,
             entry,
             name,
@@ -229,8 +253,9 @@ impl FolderDialog {
         }
     }
 
-    /// Show folder `id` named `name` with `tiles` (its apps), three a row.
-    pub fn open(&self, id: &str, name: &str, tiles: Vec<gtk::Widget>) {
+    /// Show folder `id` named `name` with `tiles` (its apps), three a
+    /// row, zooming out of `source` (its icon in the grid).
+    pub fn open(&self, id: &str, name: &str, tiles: Vec<gtk::Widget>, source: &gtk::Widget) {
         *self.folder.borrow_mut() = Some(id.to_owned());
         self.title.set_label(name);
         self.name.set_visible_child_name("label");
@@ -252,21 +277,185 @@ impl FolderDialog {
             self.grid
                 .attach(&spacer, (i % 3) as i32, (i / 3) as i32, 1, 1);
         }
+        let from = anim::screen_bounds(source);
+        self.set_source(Some(source));
         self.window.present();
         self.shade(true);
         // GNOME focuses the rename button (focus ring and all).
         self.edit.grab_focus();
+        self.zoom_in(from);
     }
 
-    /// Close the dialog (after a launch too).
-    pub fn close(&self) {
-        if self.edit.is_active() {
-            self.edit.set_active(false);
+    fn set_source(&self, source: Option<&gtk::Widget>) {
+        let old = self.source.replace(source.map(|s| s.downgrade()));
+        if let Some(old) = old.and_then(|w| w.upgrade()) {
+            if Some(&old) != source {
+                self.source_slot.stop();
+                old.set_opacity(1.0);
+            }
         }
+    }
+
+    /// Where the dialog rests on the output.
+    fn resting_box() -> (f64, f64, f64, f64) {
+        let (mx, my, mw, _) = anim::monitor_bounds();
+        (
+            mx + (mw - f64::from(DIALOG_W)) / 2.0,
+            my + f64::from(PANEL_H + TOP),
+            f64::from(DIALOG_W),
+            f64::from(DIALOG_H),
+        )
+    }
+
+    /// Fade the folder's icon in the grid out (opening) or back.
+    fn fade_source(&self, visible: bool) {
+        let Some(source) = self.source.borrow().as_ref().and_then(|w| w.upgrade()) else {
+            return;
+        };
+        let timing = if visible {
+            anim::FOLDER_ICON_SHOW
+        } else {
+            anim::FOLDER_ICON_HIDE
+        };
+        let policy = anim::motion();
+        let from = source.opacity();
+        let to = if visible { 1.0 } else { 0.0 };
+        let total = if source.is_mapped() {
+            timing.end_ms(policy)
+        } else {
+            0.0
+        };
+        let weak = source.downgrade();
+        self.source_slot.start(
+            &source,
+            "folder-icon",
+            total,
+            move |elapsed| {
+                if let Some(source) = weak.upgrade() {
+                    source.set_opacity(anim::lerp(from, to, timing.at(elapsed, policy)));
+                }
+            },
+            || {},
+        );
+    }
+
+    /// `_zoomAndFadeIn`: from the folder's icon, transparent over a
+    /// clear shade, to the dialog in place over the shade.
+    fn zoom_in(&self, from: Option<(f64, f64, f64, f64)>) {
+        let policy = anim::motion();
+        let dialog = Self::resting_box();
+        let source = from.unwrap_or(dialog);
+        let total = [anim::FOLDER_ZOOM, anim::FOLDER_FADE_IN, anim::FOLDER_SHADE]
+            .iter()
+            .map(|t| t.end_ms(policy))
+            .fold(0.0, f64::max);
+        let (zoom, shade) = (self.zoom.downgrade(), self.shade_box.downgrade());
+        self.slot.start(
+            &self.zoom,
+            "folder-zoom-in",
+            total,
+            move |elapsed| {
+                let (Some(zoom), Some(shade)) = (zoom.upgrade(), shade.upgrade()) else {
+                    return;
+                };
+                let (shift, scale) =
+                    anim::folder_zoom(source, dialog, anim::FOLDER_ZOOM.at(elapsed, policy));
+                zoom.set(shift, scale, anim::FOLDER_FADE_IN.at(elapsed, policy));
+                shade.set_opacity(anim::FOLDER_SHADE.at(elapsed, policy));
+            },
+            || {},
+        );
+        self.fade_source(false);
+    }
+
+    /// Close the dialog: back into its folder's icon when that still
+    /// shows (`_zoomAndFadeOut`), at once when it does not.
+    pub fn close(&self) {
+        let source = self.source.borrow().as_ref().and_then(|w| w.upgrade());
+        let target = source
+            .as_ref()
+            .filter(|s| s.is_mapped())
+            .and_then(anim::screen_bounds);
+        match target {
+            Some(target) if self.window.is_visible() => self.zoom_out(target),
+            _ => self.close_now(),
+        }
+    }
+
+    /// Close the dialog without animating (the overview went, or an app
+    /// launched from it).
+    pub fn close_now(&self) {
+        self.slot.stop();
+        self.end_rename();
         if self.window.is_visible() {
             self.shade(false);
         }
         self.window.set_visible(false);
+        self.zoom.set((0.0, 0.0), (1.0, 1.0), 1.0);
+        self.shade_box.set_opacity(1.0);
+        self.source_slot.stop();
+        self.set_source(None);
+    }
+
+    fn end_rename(&self) {
+        if self.edit.is_active() {
+            self.edit.set_active(false);
+        }
+    }
+
+    fn zoom_out(&self, target: (f64, f64, f64, f64)) {
+        self.end_rename();
+        self.shade(false);
+        let policy = anim::motion();
+        let dialog = Self::resting_box();
+        let (from_shift, from_scale, from_alpha) =
+            (self.zoom.shift(), self.zoom.scale(), self.zoom.alpha());
+        let from_shade = self.shade_box.opacity();
+        let (to_shift, to_scale) = anim::folder_zoom(target, dialog, 0.0);
+        let total = [anim::FOLDER_ZOOM, anim::FOLDER_FADE_OUT, anim::FOLDER_SHADE]
+            .iter()
+            .map(|t| t.end_ms(policy))
+            .fold(0.0, f64::max);
+        let (zoom, shade) = (self.zoom.downgrade(), self.shade_box.downgrade());
+        let step = move |elapsed: f64| {
+            let (Some(zoom), Some(shade)) = (zoom.upgrade(), shade.upgrade()) else {
+                return;
+            };
+            let t = anim::FOLDER_ZOOM.at(elapsed, policy);
+            let fade = anim::FOLDER_FADE_OUT.at(elapsed, policy);
+            zoom.set(
+                (
+                    anim::lerp(from_shift.0, to_shift.0, t),
+                    anim::lerp(from_shift.1, to_shift.1, t),
+                ),
+                (
+                    anim::lerp(from_scale.0, to_scale.0, t),
+                    anim::lerp(from_scale.1, to_scale.1, t),
+                ),
+                anim::lerp(from_alpha, 0.0, fade),
+            );
+            shade.set_opacity(anim::lerp(
+                from_shade,
+                0.0,
+                anim::FOLDER_SHADE.at(elapsed, policy),
+            ));
+        };
+        let (window, zoom, shade) = (
+            self.window.downgrade(),
+            self.zoom.downgrade(),
+            self.shade_box.downgrade(),
+        );
+        self.slot
+            .start(&self.zoom, "folder-zoom-out", total, step, move || {
+                if let Some(window) = window.upgrade() {
+                    window.set_visible(false);
+                }
+                if let (Some(zoom), Some(shade)) = (zoom.upgrade(), shade.upgrade()) {
+                    zoom.set((0.0, 0.0), (1.0, 1.0), 1.0);
+                    shade.set_opacity(1.0);
+                }
+            });
+        self.fade_source(true);
     }
 
     fn commit_rename(&self) {
