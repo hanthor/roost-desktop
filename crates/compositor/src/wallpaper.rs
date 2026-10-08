@@ -618,8 +618,19 @@ impl Wallpaper {
         if lock && !lock_uri.is_empty() {
             uri = lock_uri.to_owned();
         }
-        self.refresh_stage = Some("source-identity-pending");
-        let observation = self.poll_source(&uri)?;
+        let observation = if settings.placement
+            == roost_shell_control::background::Placement::None
+        {
+            // GNOME NONE has no source file. In particular, an ignored lock
+            // URI must not schedule a network/FUSE identity task or delay its
+            // pure color/gradient. Empty URI also makes every downstream cache
+            // and render worker independent of the unused file.
+            uri.clear();
+            std::sync::Arc::new(SourceObservation::default())
+        } else {
+            self.refresh_stage = Some("source-identity-pending");
+            self.poll_source(&uri)?
+        };
         let identity = observation.identity.clone();
         let epoch = observation.timeline.as_ref().map(|_| {
             format!(
@@ -833,6 +844,8 @@ struct FileIdentity {
     bytes: u64,
     modified: (i64, i64),
     changed: (i64, i64),
+    // Native loader/font identity observed only by existing background workers.
+    decoder: Option<String>,
 }
 impl FileIdentity {
     fn from_metadata(path: PathBuf, m: &std::fs::Metadata) -> Option<Self> {
@@ -846,6 +859,7 @@ impl FileIdentity {
             bytes: m.len(),
             modified: (m.mtime(), m.mtime_nsec()),
             changed: (m.ctime(), m.ctime_nsec()),
+            decoder: roost_wallpaper::svg::backend_identity(),
         })
     }
     fn for_uri(uri: &str) -> Option<Self> {
@@ -1165,7 +1179,7 @@ fn static_cache_path(
         return None;
     }
     let mut hash = std::collections::hash_map::DefaultHasher::new();
-    4u32.hash(&mut hash);
+    5u32.hash(&mut hash);
     uri.hash(&mut hash);
     settings.hash(&mut hash);
     geometry.hash(&mut hash);

@@ -23,7 +23,7 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # smithay links system libxkbcommon via the xkbcommon crate;
       # the greeter UI needs GTK4/libadwaita dev files.
-      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev pkg-config libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev libpam-wrapper zstd
+      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev pkg-config libgtk-4-dev libfontconfig1-dev librsvg2-common libpipewire-0.3-dev libadwaita-1-dev libpam-wrapper zstd
       # The GTK shell (ADR 0006) links gtk4-layer-shell, which Ubuntu
       # 24.04 does not package.
       - run: sudo apt-get install -y meson ninja-build libwayland-dev wayland-protocols && scripts/ci-install-gtk4-layer-shell
@@ -85,7 +85,7 @@ jobs:
       # check does not. Mesa swrast provides software GL on runners.
       # The shell's gio settings read needs glib dev files at build
       # time (check gets them transitively via GTK).
-      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck jq dbus gsettings-desktop-schemas libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev
+      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck jq dbus gsettings-desktop-schemas libglib2.0-dev libgtk-4-dev libfontconfig1-dev librsvg2-common libpipewire-0.3-dev libadwaita-1-dev
       - run: shellcheck -x scripts/roost-journey scripts/roost-nested scripts/roost-release scripts/check-release-package scripts/lib/roost-introspect.sh
       - run: scripts/roost-release --allow-dirty --out package-artifacts && scripts/check-release-package package-artifacts/*.deb
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -117,7 +117,7 @@ jobs:
       # (baseline-vs-app diff plus app-color pixel count), humans review
       # the uploaded frames. Playwright installs its own venv, browser,
       # and browser system libraries on the runner.
-      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck python3-venv libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev
+      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck python3-venv libglib2.0-dev libgtk-4-dev libfontconfig1-dev librsvg2-common libpipewire-0.3-dev libadwaita-1-dev
       - run: shellcheck scripts/roost-app-content scripts/roost-nested
       - run: scripts/roost-app-content --artifacts app-content-artifacts
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -142,7 +142,7 @@ jobs:
       # Playwright, Super+Shift+T toggle, Super+R preset cycling, and
       # wheel scrolling, with gap-geometry pixel asserts. Humans review
       # the uploaded frames.
-      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck python3-venv libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev
+      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck python3-venv libglib2.0-dev libgtk-4-dev libfontconfig1-dev librsvg2-common libpipewire-0.3-dev libadwaita-1-dev
       - run: shellcheck scripts/roost-scroll-proof scripts/roost-nested
       - run: scripts/roost-scroll-proof --artifacts scroll-proof-artifacts
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -172,7 +172,7 @@ jobs:
               sudo sed -i 's|https\?://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' "$source"
             fi
           done
-      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config libwayland-dev wayland-protocols seatd jq ffmpeg shellcheck libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev "linux-modules-extra-$(uname -r)"
+      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config libwayland-dev wayland-protocols seatd jq ffmpeg shellcheck libglib2.0-dev libgtk-4-dev libfontconfig1-dev librsvg2-common libpipewire-0.3-dev libadwaita-1-dev "linux-modules-extra-$(uname -r)"
       - run: shellcheck scripts/roost-drm-smoke scripts/roost-frame-pacer-build
       - run: scripts/roost-drm-smoke --artifacts drm-smoke-artifacts
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -207,7 +207,7 @@ jobs:
               sudo sed -i 's|https\?://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' "$source"
             fi
           done
-      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y --no-install-recommends libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool scrot ffmpeg jq dbus libglib2.0-bin xwayland x11-apps x11-utils pipewire wireplumber gstreamer1.0-pipewire gstreamer1.0-tools gstreamer1.0-plugins-good at-spi2-core python3-pyatspi python3-pil libsecret-tools gnome-keyring fonts-cantarell shellcheck libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev meson ninja-build libwayland-dev wayland-protocols libpam-wrapper ibus ibus-gtk3 ibus-gtk4 gir1.2-ibus-1.0 gir1.2-gtk-3.0 wayland-utils xdg-desktop-portal xdg-desktop-portal-gnome xdg-desktop-portal-gtk
+      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y --no-install-recommends libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool scrot ffmpeg jq dbus libglib2.0-bin xwayland x11-apps x11-utils pipewire wireplumber gstreamer1.0-pipewire gstreamer1.0-tools gstreamer1.0-plugins-good at-spi2-core python3-pyatspi python3-pil libsecret-tools gnome-keyring fonts-cantarell shellcheck libglib2.0-dev libgtk-4-dev libfontconfig1-dev librsvg2-common libpipewire-0.3-dev libadwaita-1-dev meson ninja-build libwayland-dev wayland-protocols libpam-wrapper ibus ibus-gtk3 ibus-gtk4 gir1.2-ibus-1.0 gir1.2-gtk-3.0 wayland-utils xdg-desktop-portal xdg-desktop-portal-gnome xdg-desktop-portal-gtk
       - run: scripts/ci-install-gtk4-layer-shell
       - run: shellcheck scripts/roost-gtk-shell-proof scripts/roost-walkthrough
       # docs/walkthrough.md must match its manifest (docs/walkthrough.tsv).
@@ -230,7 +230,7 @@ jobs:
       - if: always()
         run: |
           mkdir -p gtk-shell-artifacts/bin
-          cp target/debug/roost-compositor target/debug/roost-shell-gtk gtk-shell-artifacts/bin/
+          cp target/debug/roost-compositor target/debug/roost-shell-gtk target/debug/roost-wallpaper-svg gtk-shell-artifacts/bin/
           cp /usr/local/lib/*/libgtk4-layer-shell.so* gtk-shell-artifacts/bin/ 2>/dev/null || cp /usr/local/lib/libgtk4-layer-shell.so* gtk-shell-artifacts/bin/
       # G-WS-INSERT publishes the targeted insertion frame/state. Full
       # parity captures need native fonts, wallpapers and installed apps;
@@ -264,8 +264,9 @@ jobs:
           name: roost-arch
           path: ${{ runner.temp }}/portal-package
       - run: sudo apt-get -o Acquire::Retries=3 update -qq && sudo apt-get install -y --no-install-recommends podman zstd shellcheck
-      - run: shellcheck scripts/roost-portal-security tests/portal-reference/run.sh tests/portal-reference/settings-run.sh tests/portal-reference/backgrounds-run.sh tests/portal-reference/slideshow-run.sh
+      - run: shellcheck scripts/roost-portal-security tests/portal-reference/run.sh tests/portal-reference/settings-run.sh tests/portal-reference/backgrounds-run.sh tests/portal-reference/slideshow-run.sh tests/portal-reference/svg-run.sh
       - run: python3 scripts/lib/roost-portal-artifact-tests.py
+      - run: shellcheck scripts/roost-portal-security tests/portal-reference/run.sh tests/portal-reference/backgrounds-run.sh tests/portal-reference/slideshow-run.sh
       - name: Test packaged compositor with actual GNOME 51 portal consent
         run: |
           mkdir -p "$RUNNER_TEMP/portal-candidate"
@@ -342,7 +343,7 @@ jobs:
     timeout-minutes: 40
     container: archlinux:latest
     steps:
-      - run: pacman -Syu --noconfirm --needed base-devel git rust pkgconf clang pipewire gtk4 gtk4-layer-shell libadwaita libsecret libxkbcommon libxkbcommon-x11 mesa wayland dbus glib2 seatd libinput systemd-libs libdrm namcap
+      - run: pacman -Syu --noconfirm --needed base-devel git rust pkgconf clang pipewire gtk4 gtk4-layer-shell libadwaita libsecret libxkbcommon libxkbcommon-x11 mesa wayland dbus glib2 seatd libinput systemd-libs libdrm librsvg glycin fontconfig adwaita-fonts namcap
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: |
           useradd -m builder
@@ -352,7 +353,7 @@ jobs:
           pkg=$(ls packaging/arch/roost-[0-9]*.pkg.tar.zst)
           namcap "$pkg" || true
           pacman -U --noconfirm "$pkg"
-          for bin in roost-compositor roost-session roost-shell-host roost-greeter; do "$bin" --version; done
+          for bin in roost-compositor roost-session roost-shell-host roost-greeter roost-wallpaper-svg; do "$bin" --version; done
           test -f /usr/share/wayland-sessions/roost.desktop
           mkdir -p arch-artifacts && cp "$pkg" arch-artifacts/
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

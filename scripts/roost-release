@@ -72,13 +72,13 @@ if [ -z "$VERSION" ]; then
 fi
 
 export ROOST_VERSION="$VERSION"
-cargo build --release -p roost-compositor -p roost-shell-host -p roost-greeter
+cargo build --release -p roost-compositor -p roost-wallpaper-svg -p roost-shell-host -p roost-greeter
 
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT INT TERM
 mkdir -p "$STAGE/DEBIAN" "$STAGE/usr/bin" "$STAGE/usr/share/wayland-sessions" "$STAGE/etc/pam.d"
 
-for bin in roost-compositor roost-session roost-shell-host roost-ibus-bridge roost-greeter; do
+for bin in roost-compositor roost-session roost-shell-host roost-ibus-bridge roost-greeter roost-wallpaper-svg; do
     install -m0755 "target/release/$bin" "$STAGE/usr/bin/$bin"
 done
 install -m0644 share/wayland-sessions/roost.desktop \
@@ -90,7 +90,7 @@ install -m0644 share/pam.d/roost-lock "$STAGE/etc/pam.d/roost-lock"
 echo /etc/pam.d/roost-lock >"$STAGE/DEBIAN/conffiles"
 
 # Agreement check: the stamped binaries must report the stamped version.
-for bin in roost-compositor roost-session roost-shell-host roost-ibus-bridge roost-greeter; do
+for bin in roost-compositor roost-session roost-shell-host roost-ibus-bridge roost-greeter roost-wallpaper-svg; do
     REPORTED="$("$STAGE/usr/bin/$bin" --version | awk '{print $NF}')"
     if [ -n "$VERSION" ] && [ "$REPORTED" != "$VERSION" ]; then
         echo "roost-release: $bin reports $REPORTED, expected $VERSION" >&2

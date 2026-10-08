@@ -41,9 +41,9 @@ RUN set -eux; \
         printf '%s  /tmp/roost.pkg.tar.zst\n' "$ROOST_PKG_SHA256" | sha256sum -c -; \
     else test "$PERF_PINNED_BASELINE" = false; fi \
     && case "$PERF_PINNED_BASELINE" in \
-        false) pacman -Syu --needed --noconfirm evolution-data-server gnome-keyring xdg-desktop-portal-gnome xdg-desktop-portal-gtk gst-plugin-pipewire gst-plugins-good orca speech-dispatcher ;; \
+        false) pacman -Syu --needed --noconfirm librsvg glycin gdk-pixbuf2 fontconfig adwaita-fonts evolution-data-server gnome-keyring xdg-desktop-portal-gnome xdg-desktop-portal-gtk gst-plugin-pipewire gst-plugins-good orca speech-dispatcher ;; \
         true) /usr/libexec/roost-pinned-baseline && \
-            pacman -S --needed --noconfirm evolution-data-server gnome-keyring xdg-desktop-portal-gnome xdg-desktop-portal-gtk gst-plugin-pipewire gst-plugins-good orca speech-dispatcher ;; \
+            pacman -S --needed --noconfirm librsvg glycin gdk-pixbuf2 fontconfig adwaita-fonts evolution-data-server gnome-keyring xdg-desktop-portal-gnome xdg-desktop-portal-gtk gst-plugin-pipewire gst-plugins-good orca speech-dispatcher ;; \
         *) exit 1 ;; \
     esac \
     && pacman -U --noconfirm /tmp/roost.pkg.tar.zst \

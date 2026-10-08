@@ -7,6 +7,7 @@
 //! wallpapers are 4096x4096 JPEG XL files.
 
 pub mod background;
+pub mod svg;
 
 use image::GenericImageView;
 
@@ -32,7 +33,13 @@ pub fn decode(bytes: &[u8]) -> Option<image::DynamicImage> {
     if is_jxl(bytes) {
         return decode_jxl(bytes);
     }
-    image::load_from_memory(bytes).ok()
+    if let Ok(image) = image::load_from_memory(bytes) {
+        return Some(image);
+    }
+    // The actual loader accepts declarations/comments, UTF BOMs and SVGZ.
+    // Try its parser after the raster codecs rather than a divergent prefix
+    // recognizer that rejects otherwise valid GNOME images.
+    svg::decode(bytes)
 }
 
 /// Decode JPEG XL converted to sRGB, as GNOME (mutter's colour

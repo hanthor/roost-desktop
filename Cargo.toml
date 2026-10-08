@@ -8,6 +8,7 @@ members = [
     "crates/greeter",
     "crates/shell-gtk",
     "crates/wallpaper",
+    "crates/wallpaper-svg",
 ]
 
 # Pinned per ADR 0001 (docs/adr/0001-nested-backend-smithay-pin.md).

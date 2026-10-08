@@ -18,6 +18,11 @@ license=('GPL-3.0-or-later')
 depends=(
     'dbus'
     'glib2'
+    'gdk-pixbuf2'
+    'librsvg'
+    'glycin'
+    'fontconfig'
+    'adwaita-fonts'
     'gtk4'
     'gtk4-layer-shell'
     'libadwaita'
@@ -74,12 +79,12 @@ build() {
     export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$srcdir/target}"
     export ROOST_VERSION="v${pkgver}"
     cargo build --frozen --release \
-        -p roost-compositor -p roost-shell-host -p roost-shell-gtk -p roost-greeter
+        -p roost-compositor -p roost-wallpaper-svg -p roost-shell-host -p roost-shell-gtk -p roost-greeter
 }
 
 check() {
     local bin
-    for bin in roost-compositor roost-session roost-shell-host roost-shell-gtk roost-ibus-bridge roost-greeter; do
+    for bin in roost-compositor roost-session roost-shell-host roost-shell-gtk roost-ibus-bridge roost-greeter roost-wallpaper-svg; do
         local reported
         reported="$("${CARGO_TARGET_DIR:-$srcdir/target}/release/$bin" --version | awk '{print $NF}')"
         if [[ "$reported" != "$pkgver" ]]; then
@@ -93,7 +98,7 @@ package() {
     local root target bin
     root="$(_srcroot)"
     target="${CARGO_TARGET_DIR:-$srcdir/target}/release"
-    for bin in roost-compositor roost-session roost-shell-host roost-shell-gtk roost-ibus-bridge roost-greeter; do
+    for bin in roost-compositor roost-session roost-shell-host roost-shell-gtk roost-ibus-bridge roost-greeter roost-wallpaper-svg; do
         install -Dm0755 "$target/$bin" "$pkgdir/usr/bin/$bin"
     done
     install -Dm0644 "$root/share/wayland-sessions/roost.desktop" \

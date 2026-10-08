@@ -1,0 +1,21 @@
+[package]
+name = "roost-wallpaper-svg"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+description = "Isolated GNOME SVG stream decoder for Roost wallpapers"
+
+[[bin]]
+name = "roost-wallpaper-svg"
+path = "src/main.rs"
+
+[dependencies]
+gdk-pixbuf = "0.22"
+glib.workspace = true
+gio.workspace = true
+libc = "0.2"
+sha2 = "0.10"
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
