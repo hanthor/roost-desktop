@@ -946,7 +946,9 @@ scrot "$ARTIFACTS/06-picked.png" >/dev/null
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-test-beta "$ARTIFACTS/a11y-beta-menu.json" 20 ||
     fail G-APP-POPOVER "test window never registered on the accessibility bus"
 beta_origin="$(jq -r '.windows[] | select(.app_id == "roost-test-beta") | .rect | "\(.[0]) \(.[1])"' "$CSTATE")"
-[ -n "$beta_origin" ] && [ "$beta_origin" != "null null" ] || fail G-APP-POPOVER "beta window rect went missing"
+if [ -z "$beta_origin" ] || [ "$beta_origin" = "null null" ]; then
+    fail G-APP-POPOVER "beta window rect went missing"
+fi
 menu="$(jq -er --argjson ox "${beta_origin%% *}" --argjson oy "${beta_origin##* }" '[.[] | select(.showing and .name == "Main Menu" and ((.bounds[2] // 0) > 0) and ((.bounds[3] // 0) > 0))][0].bounds | "\((.[0] + $ox + .[2] / 2) | floor) \(.[1] + $oy + .[3] / 2 | floor)"' "$ARTIFACTS/a11y-beta-menu.json")" ||
     fail G-APP-POPOVER "menu button has no showing accessibility bounds"
 # shellcheck disable=SC2086
@@ -1042,13 +1044,27 @@ sleep 1
 new_alpha="$(jq -r .focused "$CSTATE")"
 # Rebound window-only and direct-cycle keys (#216), with two windows
 # from Alpha proving that window switching does not group by app.
+grab_mark="$(wc -c <"$LOG")"
 gsettings set org.gnome.desktop.wm.keybindings cycle-group "['<Super>F1']"
 gsettings set org.gnome.desktop.wm.keybindings cycle-group-backward "['<Super><Shift>F1']"
 gsettings set org.gnome.desktop.wm.keybindings cycle-windows "['<Super>F2']"
 gsettings set org.gnome.desktop.wm.keybindings cycle-windows-backward "['<Super><Shift>F2']"
 gsettings set org.gnome.desktop.wm.keybindings switch-windows "['<Control>k']"
 gsettings set org.gnome.desktop.wm.keybindings switch-windows-backward "['<Control><Shift>k']"
-sleep 1.5
+# The session bus can deliver the settings change notifications late; wait
+# for the shell's actual re-grab line before sending the rebound keys.
+grab_end=$(($(date +%s) + 30))
+while [ "$(date +%s)" -le "$grab_end" ]; do
+    if [ "$(wc -c <"$LOG")" -gt "$grab_mark" ] && tail -c +"$((grab_mark + 1))" "$LOG" | grep -q "roost-shell-gtk: keybindings:"; then
+        break
+    fi
+    sleep 0.3
+done
+if tail -c +"$((grab_mark + 1))" "$LOG" | grep -q "roost-shell-gtk: keybindings:"; then
+    sleep 1
+else
+    fail G-CYCLE-KEYS "shell never re-grabbed the rebound cycle keys"
+fi
 original="$(jq -r .focused "$CSTATE")"
 xdotool key super+F1
 cstate ".focused != $original and .focused_app_id == \"roost-test-alpha\"" "cycle group" || fail G-CYCLE-KEYS "cycle-group did not move within Alpha"
