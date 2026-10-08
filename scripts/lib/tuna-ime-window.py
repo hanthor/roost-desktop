@@ -27,6 +27,20 @@ def changed(entry):
     os.replace(OUT + ".tmp", OUT)
 
 
+def refocus_field(*_):
+    """Return the keyboard to the main field once the popover closes.
+
+    GTK 4.16 and later focus the popover's parent (the menu button) after
+    "closed" is emitted, so a grab inside the handler would be undone.
+    """
+
+    def grab():
+        entry.grab_focus()
+        return GLib.SOURCE_REMOVE
+
+    GLib.idle_add(grab)
+
+
 GLib.set_prgname("tuna-ime")
 loop = GLib.MainLoop()
 win = Gtk.Window(title="IME")
@@ -43,7 +57,7 @@ popup_entry = Gtk.Entry()
 popup_entry.update_property([Gtk.AccessibleProperty.LABEL], ["IME Popover Field"])
 popover.set_child(popup_entry)
 popover.connect("show", lambda *_: popup_entry.grab_focus())
-popover.connect("closed", lambda *_: entry.grab_focus())
+popover.connect("closed", refocus_field)
 menu.set_popover(popover)
 box.append(menu)
 win.set_child(box)

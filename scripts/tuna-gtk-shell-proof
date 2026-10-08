@@ -3240,6 +3240,10 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     sleep 0.5
     "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-ime "$ARTIFACTS/a11y-ime-qs-closed.json" 20 || fail G-IME-ESCAPE "post-Escape dump failed"
     if showing "$ARTIFACTS/a11y-ime-qs-closed.json" "IME Popover Field"; then fail G-IME-ESCAPE "Escape did not close the popover with the composing engine enabled"; fi
+    # The fixture hands the keyboard back to the main field (GTK 4.16+
+    # first focuses the menu button); later gates type into it.
+    jq -e 'any(.[]; .name == "IME Field" and .focused)' "$ARTIFACTS/a11y-ime-qs-closed.json" >/dev/null ||
+        fail G-IME-ESCAPE "focus did not return to the field after the popover closed ($(jq -r '[.[] | select(.focused) | .name] | join(", ")' "$ARTIFACTS/a11y-ime-qs-closed.json"))"
     pass G-IME-ESCAPE "Escape closes the GTK popover while the composing engine is enabled"
     cstate '.focused_app_id == "tuna-ime"' "IME focus after Escape" || fail G-IME-ESCAPE "Escape transferred focus to another application"
     # Cover the original layer-shell regression too, after the focused
