@@ -430,6 +430,8 @@ def main():
             context=Context("stop");context.stage="failed-capture-acquisition"
             print(encode(context.failure(error),"stop").decode())
             raise SystemExit(1) from None
+    if args.action.startswith("kernel-"):
+        result["kernel_trace"] = kernel_trace(args.action.removeprefix("kernel-"), args.index)
     result["boottime_s"] = time.clock_gettime(time.CLOCK_BOOTTIME)
     print(json.dumps(result))
 

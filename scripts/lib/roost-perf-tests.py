@@ -967,5 +967,36 @@ class PinnedBaselinePackageGuards(unittest.TestCase):
                                                 capture_output=True)
                         self.assertEqual(result.returncode, 0, result.stderr)
 
+class KernelTraceDispatch(unittest.TestCase):
+    def run_main(self, *argv):
+        calls = []
+        def fake(action, index=0):
+            calls.append((action, index))
+            return {"index": index, "data": "AA=="}
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["roost-perf-phase", *argv]), \
+             patch.object(phase, "kernel_trace", side_effect=fake), \
+             redirect_stdout(output):
+            phase.main()
+        return calls, json.loads(output.getvalue())
+    def test_read_actions_map_to_observer_kinds(self):
+        for lane_action, observer_action in (("kernel-trace-read", "trace-read"),
+                                             ("kernel-formats-read", "formats-read"),
+                                             ("kernel-discovery-read", "discovery-read")):
+            calls, result = self.run_main(lane_action, "--index", "3")
+            self.assertEqual(calls, [(observer_action, 3)])
+            self.assertEqual(result["kernel_trace"], {"index": 3, "data": "AA=="})
+            self.assertIn("boottime_s", result)
+    def test_stop_maps_to_observer_stop(self):
+        calls, result = self.run_main("kernel-trace-stop")
+        self.assertEqual(calls, [("trace-stop", 0)])
+        self.assertIn("kernel_trace", result)
+    def test_observer_failure_propagates(self):
+        with patch.object(sys, "argv", ["roost-perf-phase", "kernel-trace-read"]), \
+             patch.object(phase, "kernel_trace", side_effect=RuntimeError("observer offline")), \
+             redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError, "observer offline"):
+                phase.main()
+
 if __name__ == "__main__":
     unittest.main()
