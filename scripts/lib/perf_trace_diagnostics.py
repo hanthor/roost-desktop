@@ -101,7 +101,7 @@ def validate(value, action):
             if (not isinstance(item,dict) or set(item)!={'sha256','bytes','package'}
                     or not isinstance(item['sha256'],str) or re.fullmatch(r'[0-9a-f]{64}',item['sha256']) is None
                     or type(item['bytes']) is not int or not 0<item['bytes']<=16*1024*1024
-                    or item['package']!='mutter 51.0-1.6'):
+                    or item['package']!='mutter 51.0-1.7'):
                 raise ValueError('invalid validated public module receipt')
     return value
 
