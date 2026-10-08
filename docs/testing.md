@@ -200,8 +200,10 @@ cites it in the same PR.
 ## Release screenshots
 
 The `docs-shots` job runs `scripts/roost-docs-shots collect` over the
-`journey`, `app-content` and `scroll-proof` artifacts; see
-[screenshots](screenshots.md).
+`journey`, `app-content` and `scroll-proof` artifacts and uploads the
+curated frames as the `docs-shots` artifact. Nothing in the repository is
+refreshed from it. The docs show the GTK shell through the
+[walkthrough](walkthrough.md), which the GTK shell proof captures.
 
 ## Pixel parity capture (not in CI)
 

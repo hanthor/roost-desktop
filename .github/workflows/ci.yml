@@ -593,11 +593,10 @@ jobs:
     needs: [journey, app-content, scroll-proof]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      # Curate the release screenshot set out of this run's own proof
-      # artifacts and upload it as one bundle: each release takes its
-      # docs/shots refresh from here (see docs/screenshots.md). No
-      # byte-freshness gate: the panel clock renders live, so a fresh
-      # run legitimately differs from the committed set by its digits.
+      # Curate a screenshot set out of this run's own proof artifacts
+      # and upload it as one bundle. Nothing is committed from it: the
+      # docs use the walkthrough (docs/walkthrough.md), which the GTK
+      # shell proof captures.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: journey-shots
