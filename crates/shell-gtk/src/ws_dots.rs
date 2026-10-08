@@ -142,13 +142,11 @@ impl Dots {
     /// Jump every motion to its end.
     pub fn finish(&mut self) {
         self.dots.retain(|dot| !dot.removing());
-        for dot in &mut self.dots {
-            *dot = Dot {
-                from: 1.0,
-                to: 1.0,
-                start: f64::NEG_INFINITY,
-            };
-        }
+        self.dots.fill(Dot {
+            from: 1.0,
+            to: 1.0,
+            start: f64::NEG_INFINITY,
+        });
         self.position = (self.position.1, self.position.1, f64::NEG_INFINITY);
     }
 

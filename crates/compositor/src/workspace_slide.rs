@@ -36,7 +36,6 @@ const DECELERATION_PARABOLA_MULTIPLIER: f64 = 0.35;
 /// The derivative of ease-out-cubic at 0: a release keeps its speed.
 const DURATION_MULTIPLIER: f64 = 3.0;
 const ANIMATION_BASE_VELOCITY: f64 = 0.002;
-const EPSILON: f64 = 0.005;
 /// Finished motions kept for the state snapshot.
 const HISTORY_LEN: usize = 8;
 
