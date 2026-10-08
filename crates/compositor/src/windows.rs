@@ -2446,6 +2446,17 @@ impl WindowManager {
 
     /// Replace the switcher's chords (the shell's GNOME keybindings).
     pub fn set_switcher_keys(&mut self, keys: Vec<roost_shell_control::SwitcherKey>) {
+        // Fixed-shape receipt for the CI journey: count plus the
+        // direct-cycle chords, so a rebound key that never arrives
+        // names the applied list instead of failing silently.
+        eprintln!(
+            "roost-compositor: switcher keys: {} chords, cycle-group {:?}, cycle-windows {:?}",
+            keys.len(),
+            keys.iter()
+                .find(|k| k.kind == roost_shell_control::SwitcherKeyKind::CycleGroup),
+            keys.iter()
+                .find(|k| k.kind == roost_shell_control::SwitcherKeyKind::CycleWindows)
+        );
         self.switcher_keys = Some(keys);
     }
 
