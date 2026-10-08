@@ -97,4 +97,3 @@ mod tests {
         assert!(shell_err.to_string().contains("poll failed"));
     }
 }
-
