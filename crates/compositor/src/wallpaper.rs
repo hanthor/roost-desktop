@@ -618,8 +618,7 @@ impl Wallpaper {
         if lock && !lock_uri.is_empty() {
             uri = lock_uri.to_owned();
         }
-        let observation = if settings.placement
-            == roost_shell_control::background::Placement::None
+        let observation = if settings.placement == roost_shell_control::background::Placement::None
         {
             // GNOME NONE has no source file. In particular, an ignored lock
             // URI must not schedule a network/FUSE identity task or delay its
