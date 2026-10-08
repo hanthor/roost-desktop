@@ -1,6 +1,6 @@
-# Roost roadmap: October 2026–October 2027
+# Tuna Desktop roadmap: October 2026–October 2027
 
-Updated 2026-10-04. This is the public contribution roadmap; [program gates and requirement traceability](docs/roadmap.md) describe the acceptance process. Work and evidence live on the [roadmap board](https://github.com/users/hanthor/projects/4). Dates are planning windows, and release qualification depends on evidence.
+Updated 2026-10-08. Tuna Desktop was previously named Roost; code, packages and older evidence still use that name until the rename lands ([#504](https://github.com/tuna-os/tuna-desktop/issues/504), [#505](https://github.com/tuna-os/tuna-desktop/issues/505)). This is the public contribution roadmap; [program gates and requirement traceability](docs/roadmap.md) describe the acceptance process. Work and evidence live on the [roadmap board](https://github.com/users/hanthor/projects/4). Dates are planning windows, and release qualification depends on evidence.
 
 ## Current status
 
@@ -10,13 +10,20 @@ The latest GitHub release entry is [v0.0.0-ci, “Demo media bundle”](https://
 
 At this update, GitHub reports three contributor entries, zero stars and zero forks. The media release assets have one download in total. Media downloads are not package installs, and none of these counts measures active users. Package-download and installed-user metrics are unavailable; Roost does not collect usage telemetry. These dated counts are a starting record, not an adoption claim.
 
+## Direction: GNOME's functionality, better performance
+
+Tuna Desktop aims to do everything GNOME 51 does and to run lighter than GNOME on the same machine. Parity at rest is close: most screens are within 0.1–1.7% of GNOME 51's pixels. Performance is not there yet. On the 2026-10-04 paired Marlin VM run, memory matched GNOME, but median CPU was 159% of a core against GNOME's 19%, and the median overview response was 382 ms against 159 ms. Closing and reversing that gap is a release requirement, tracked in [#503](https://github.com/tuna-os/tuna-desktop/issues/503).
+
 ## Next three months: through 2027-01-04
 
-1. Finish and validate the core shell journeys: workspace insertion, app-grid hover/page behavior, notifications, shortcut consent, IME caret placement and live settings interoperability. Keep concrete GNOME differences in the [parity ledger](docs/gnome-parity.md), with actual graphical acceptance evidence.
+1. Finish and validate the core shell journeys: workspace insertion, app-grid hover/page behavior, notifications, shortcut consent, IME caret placement and live settings interoperability. Keep concrete GNOME differences in the [parity ledger](docs/parity-ledger.md) and pixel comparisons in [GNOME parity captures](docs/gnome-parity.md), with actual graphical acceptance evidence.
 2. Complete secure screen sharing and RemoteDesktop integration ([#61](https://github.com/hanthor/roost-desktop/issues/61)). Require real GNOME portal consent, authenticated ownership, disconnect and lock revocation, and verified input delivery for each advertised capability.
 3. Refresh and qualify the admitted signed amd64 Marlin Roost image: current-source package, clean installation, graphical login, portals, PAM, boot and update/rollback evidence. Initial flavor admission and boot/login acceptance are complete ([#69](https://github.com/hanthor/roost-desktop/issues/69)); later source fixes and endurance qualification remain open. This scope adds no ISO or LUKS matrix cells.
 4. Run the actual 24-hour endurance and comparable performance work ([#203](https://github.com/hanthor/roost-desktop/issues/203), [#73](https://github.com/hanthor/roost-desktop/issues/73)). Record binary/image provenance, resource growth, frame pacing and failures. Investigate measured regressions before making performance parity claims.
 5. Record session lifecycle qualification ([#62](https://github.com/hanthor/roost-desktop/issues/62), [#68](https://github.com/hanthor/roost-desktop/issues/68)): real VM suspend/resume, VT switching, logout and fail-closed lock behavior, plus the separate physical GPU/driver and mixed-display support matrix. AWS KubeVirt VM evidence covers its own profile only.
+6. Port every GNOME 51 animation ([epic #492](https://github.com/tuna-os/tuna-desktop/issues/492), [spec](.spektacular/specs/20261008122728-6ac4a932-gnome-animation-parity.md)). An audit on 2026-10-08 found 6 of GNOME 51's 54 animations ported and 7 partial. Deliver, in order: GNOME's motion policy (reduced motion keeps fades, slow-down factor) and a deterministic test clock; window open and close; minimize; maximize and tiling; workspace slide and swipe; modal dimming; overview corrections; app grid; menus and transient surfaces; lock screen and desktop transitions. Each family needs a CI gate and a paired GNOME 51 capture, and must cost less CPU than GNOME.
+7. Beat GNOME 51 on CPU, frame pacing and overview response on the same Marlin VM ([#503](https://github.com/tuna-os/tuna-desktop/issues/503)). Profile first, then set regression gates ([#315](https://github.com/tuna-os/tuna-desktop/issues/315)).
+8. Finish the rename to Tuna Desktop and bring the docs in line with the code: user-facing names ([#504](https://github.com/tuna-os/tuna-desktop/issues/504)), a coordinated internal and package rename ([#505](https://github.com/tuna-os/tuna-desktop/issues/505)), current screenshots ([#506](https://github.com/tuna-os/tuna-desktop/issues/506)) and complete parity-ledger rows for every open GNOME 51 gap ([#507](https://github.com/tuna-os/tuna-desktop/issues/507)).
 
 ## Six to twelve months: 2027-04-04–2027-10-04
 
