@@ -70,7 +70,16 @@ RUN set -eux; \
     && cat /tmp/roost-calendar.ldd \
     && ! grep -q 'not found' /tmp/roost-calendar.ldd \
     && rm -f /tmp/roost-calendar.ldd \
-    && test -f /usr/share/xdg-desktop-portal/roost-portals.conf
+    && test -f /usr/share/xdg-desktop-portal/roost-portals.conf \
+    && if test "$PERF_PINNED_BASELINE" = true; then \
+        pacman -Q > /tmp/roost-preview-packages-unsorted.txt; \
+        LC_ALL=C sort /tmp/roost-preview-packages-unsorted.txt > /tmp/roost-preview-packages.txt; \
+        LC_ALL=C join -a 1 -e MISSING -o 1.1,1.2,2.2 /usr/share/roost-perf-baseline-packages.txt /tmp/roost-preview-packages.txt \
+            > /tmp/roost-preview-package-join.txt; \
+        awk '$2 != $3 { print "changed baseline package:", $0; bad=1 } END { exit bad }' /tmp/roost-preview-package-join.txt; \
+        sha256sum -c /usr/share/roost-perf-baseline-critical.sha256; \
+        rm /tmp/roost-preview-packages-unsorted.txt /tmp/roost-preview-packages.txt /tmp/roost-preview-package-join.txt; \
+    fi
 
 LABEL org.opencontainers.image.title="marlin-roost-preview" \
       org.opencontainers.image.description="TunaOS Marlin GNOME 51 plus Roost as a login-screen and nested preview" \

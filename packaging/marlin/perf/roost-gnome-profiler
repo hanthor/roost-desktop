@@ -17,7 +17,7 @@ from gnome_failed_capture import identity, process_start, read_marker, write_mar
 PEER = "org.gnome.Shell"
 OBJECT = "/org/gnome/Sysprof3/Profiler"
 INTERFACE = "org.gnome.Sysprof3.Profiler"
-DIAGNOSTIC_PACKAGE = "mutter 51.0-1.6"
+DIAGNOSTIC_PACKAGE = "mutter 51.0-1.7"
 
 
 MUTTER_MODULES = {"cogl": "libmutter-cogl-51", "clutter": "libmutter-clutter-51",

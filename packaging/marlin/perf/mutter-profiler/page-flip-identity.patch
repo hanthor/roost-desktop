@@ -1,0 +1,38 @@
+--- a/src/backends/native/meta-kms-impl-device-atomic.c
++++ b/src/backends/native/meta-kms-impl-device-atomic.c
+@@ -990,6 +990,10 @@
+ 
+   listener_user_data = g_steal_pointer (&listener->user_data);
+   listener_destroy_notify = g_steal_pointer (&listener->destroy_notify);
++  COGL_TRACE_MESSAGE ("Roost::KMS::page-flip-listener-identity",
++                      "crtc=%u impl_device=%p update=%p page_flip_data=%p listener_user_data=%p",
++                      crtc_id, impl_device, update, page_flip_data,
++                      listener_user_data);
+   meta_kms_page_flip_data_add_listener (page_flip_data,
+                                         listener->vtable,
+                                         listener->main_context,
+@@ -1047,6 +1051,10 @@
+                       "crtc=%u sequence=%u seconds=%u microseconds=%u device=%s",
+                       crtc_id, sequence, tv_sec, tv_usec,
+                       meta_kms_impl_device_get_path (impl_device));
++
++  COGL_TRACE_MESSAGE ("Roost::KMS::raw-page-flip-identity",
++                      "crtc=%u sequence=%u user_data=%p page_flip_data=%p",
++                      crtc_id, sequence, user_data, page_flip_data);
+ 
+   COGL_TRACE_MESSAGE ("atomic_page_flip_handler()",
+                       "[atomic] Page flip callback for CRTC (%u, %s)",
+@@ -1290,7 +1298,13 @@
+               commit_flags_string (commit_flags));
+ 
+   fd = meta_kms_impl_device_get_fd (impl_device);
++  COGL_TRACE_MESSAGE ("Roost::KMS::atomic-commit-begin",
++                      "impl_device=%p update=%p req=%p fd=%d flags=%u",
++                      impl_device, update, req, fd, commit_flags);
+   ret = drmModeAtomicCommit (fd, req, commit_flags, impl_device);
++  COGL_TRACE_MESSAGE ("Roost::KMS::atomic-commit-end",
++                      "impl_device=%p update=%p req=%p fd=%d flags=%u ret=%d",
++                      impl_device, update, req, fd, commit_flags, ret);
+   if (ret < 0)
+     {
+       g_set_error (&error, G_IO_ERROR, g_io_error_from_errno (-ret),
