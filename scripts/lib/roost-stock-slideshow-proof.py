@@ -137,23 +137,15 @@ def fixture():
     ET.ElementTree(root).write(directory/'roost-dynamic.xml',encoding='utf-8',xml_declaration=True)
 
 
-def activate_chooser(control, process, original, label):
+def activate_chooser(find_chooser, process, original, label):
     # GNOME's chooser is GtkFlowBoxChild with an overridden accessible role.
     # Its generic Action indices enumerate muxer actions, not child::activate.
     # Retain that real inventory and activate the documented Enter keybinding.
-    action = control.queryAction()
-    actions = [action.getName(i) for i in range(action.nActions)]
-    control.clear_cache()
-    if not control.getState().contains(pyatspi.STATE_SHOWING):
-        raise RuntimeError('actual chooser target is not showing')
-    if not control.queryComponent().grabFocus():
-        raise RuntimeError('actual chooser target refused focus')
-    def focused():
-        guard(process, original)
-        control.clear_cache()
-        return (control.getState().contains(pyatspi.STATE_FOCUSED)
-                and scene().get('focused_app_id') == NAME)
-    wait_for(focused, 'actual chooser target did not acquire focus')
+    # These chooser accessibles do not honor programmatic focus grabs, so
+    # focus is acquired with genuine Tab key events through the verified
+    # keyboard host instead. Traversal sends only real Tabs, activation is
+    # exactly one genuine Return, and every resolved accessible is re-read
+    # live because the thumbnail panel rebuilds children asynchronously.
     hosts = subprocess.check_output(['xdotool', 'search', '--onlyvisible', '--name', '^Smithay'], text=True).split()
     if len(hosts) != 1:
         raise RuntimeError('expected exactly one actual Smithay keyboard host')
@@ -166,6 +158,56 @@ def activate_chooser(control, process, original, label):
     if actual != ORIGINAL_HOST:
         raise RuntimeError('keyboard host identity changed from the original candidate compositor')
     subprocess.run(['xdotool', 'windowfocus', '--sync', host], check=True, timeout=5)
+    control = None
+    actions = None
+    seen_showing = False
+    tabs = 0
+    end = time.monotonic() + 120
+    while True:
+        guard(process, original)
+        if scene().get('focused_app_id') != NAME:
+            raise RuntimeError('actual compositor focus left Settings during traversal')
+        try:
+            candidate = find_chooser()
+        except GLib.GError:
+            candidate = None
+        if candidate is not None:
+            try:
+                candidate.clear_cache()
+                if not candidate.getState().contains(pyatspi.STATE_SHOWING):
+                    candidate.queryComponent().scrollTo(pyatspi.SCROLL_ANYWHERE)
+                    drain()
+                    candidate.clear_cache()
+                if candidate.getState().contains(pyatspi.STATE_SHOWING):
+                    seen_showing = True
+                    action = candidate.queryAction()
+                    names = [action.getName(i) for i in range(action.nActions)]
+                    candidate.clear_cache()
+                    if candidate.getState().contains(pyatspi.STATE_FOCUSED):
+                        control, actions = candidate, names
+                        break
+            except GLib.GError:
+                pass
+        tabs += 1
+        if tabs > 150 or time.monotonic() >= end:
+            if not seen_showing:
+                raise RuntimeError('actual chooser item not showing after scroll')
+            raise RuntimeError('actual chooser target did not acquire focus')
+        subprocess.run(['xdotool', 'key', 'Tab'], check=True, timeout=5)
+        guard(process, original)
+        drain()
+        time.sleep(.2)
+    def focused():
+        guard(process, original)
+        try:
+            control.clear_cache()
+            state = control.getState()
+        except GLib.GError:
+            return False
+        return (state.contains(pyatspi.STATE_FOCUSED)
+                and scene().get('focused_app_id') == NAME)
+    wait_for(focused, 'actual chooser target did not acquire focus')
+    actual_focus = int(subprocess.check_output(['xdotool', 'getwindowfocus'], text=True))
     actual_focus = int(subprocess.check_output(['xdotool', 'getwindowfocus'], text=True))
     if actual_focus != int(host) or not focused():
         raise RuntimeError('actual host/chooser focus changed before the key')
@@ -199,7 +241,7 @@ def select(style,choose=False):
                 control.queryComponent().scrollTo(pyatspi.SCROLL_ANYWHERE);drain();control.clear_cache()
             if not control.getState().contains(pyatspi.STATE_SHOWING):raise RuntimeError('actual control not showing')
             if target=='Roost dynamic proof':
-                activate_chooser(control,process,original,PHASE+'-'+style)
+                activate_chooser(lambda:find('Roost dynamic proof'),process,original,PHASE+'-'+style)
             else:
                 action=control.queryAction()
                 if action.nActions<1 or not action.doAction(0):raise RuntimeError('actual control action failed')
