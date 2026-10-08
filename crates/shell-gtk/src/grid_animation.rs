@@ -320,8 +320,15 @@ impl Slot {
 }
 
 /// Fade `widget` in or out over `PAGE_ARROW_FADE`, hiding it once out.
-/// While fading out it takes no clicks. Unmapped, it jumps.
-pub fn fade_visible(widget: &gtk::Widget, slot: &Rc<Slot>, name: &'static str, visible: bool) {
+/// A `targetable` one takes clicks only while shown, not while fading
+/// out; others never do. Unmapped, it jumps.
+pub fn fade_visible(
+    widget: &gtk::Widget,
+    slot: &Rc<Slot>,
+    name: &'static str,
+    visible: bool,
+    targetable: bool,
+) {
     let shown = widget.parent().is_some_and(|parent| parent.is_mapped());
     let animate = shown && widget.is_visible() != visible;
     let from = if widget.is_visible() {
@@ -333,7 +340,7 @@ pub fn fade_visible(widget: &gtk::Widget, slot: &Rc<Slot>, name: &'static str, v
     if visible {
         widget.set_visible(true);
     }
-    widget.set_can_target(visible);
+    widget.set_can_target(visible && targetable);
     let total = if animate || slot.running() {
         PAGE_ARROW_FADE.end_ms(motion())
     } else {

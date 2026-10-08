@@ -1584,24 +1584,28 @@ impl DragPager {
             previous,
             "page-arrow",
             before && !dragging,
+            true,
         );
         fade_visible(
             self.next.upcast_ref(),
             next,
             "page-arrow",
             after && !dragging,
+            true,
         );
         fade_visible(
             self.previous_hint.upcast_ref(),
             previous_hint,
             "page-hint",
             before && dragging,
+            false,
         );
         fade_visible(
             self.next_hint.upcast_ref(),
             next_hint,
             "page-hint",
             after && dragging,
+            false,
         );
         if dragging {
             if before {
