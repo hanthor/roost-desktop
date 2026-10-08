@@ -1133,6 +1133,20 @@ setxkbmap -display "$DISPLAY" us >&2 || true
         echo "xset not installed"
     fi
 } >&2
+# Tap a function key by raw keycode while holding $1 (space-separated
+# modifier keysyms, possibly empty). $2 is the F-key keysym hex
+# (F1 = ffbe ... F10 = ffc7). `xdotool key F8` taps Alt around the
+# press on this server's keymap (see cycle_chord), so a bare or
+# Super-chorded F-key binding never matches. Every F-key chord after
+# this point goes through here instead.
+fkey_tap() {
+    # shellcheck disable=SC2086 # intentional word splitting of the modifier list
+    for _fmod in $1; do xdotool keydown "$_fmod"; done
+    [ -z "$1" ] || sleep 0.3
+    "$PY" "$ROOT/scripts/lib/xkeycode-tap.py" "$DISPLAY" "$2" >&2 || return 1
+    # shellcheck disable=SC2086 # intentional word splitting of the modifier list
+    for _fmod in $1; do xdotool keyup "$_fmod"; done
+}
 # $1: space-separated modifiers to hold (e.g. "Super_L" or
 # "Super_L Shift_L"), $2: keysym hex of the key to tap (e.g. ffbe
 # for F1), $3: cstate jq, $4: cstate label, $5: failure message.
@@ -2749,7 +2763,7 @@ sleep 0.7
 gsettings set "$MEDIA_SCHEMA" volume-up "['F8']"
 gsettings set "$MEDIA_SCHEMA" volume-step 10
 sleep 0.7
-xdotool key F8
+fkey_tap "" ffc5 || fail G-MEDIA-VOLUME "F8 tap failed"
 media_volume 0.5200 || fail G-MEDIA-VOLUME "live rebound volume key ignored the configured step"
 gsettings reset "$MEDIA_SCHEMA" volume-up
 gsettings reset "$MEDIA_SCHEMA" volume-up-static
@@ -2793,13 +2807,13 @@ pass G-KEYBINDINGS "Super+S, Super+V and Super+A open GNOME's menus and the app 
 gsettings set org.gnome.shell.keybindings shift-overview-up "['<Super>F8']"
 gsettings set org.gnome.shell.keybindings shift-overview-down "['<Super>F7']"
 sleep 1.5
-xdotool key super+F8
+fkey_tap Super_L ffc5 || fail G-OVERVIEW-STATE-KEYS "Super+F8 tap failed"
 cstate '.overview_open and (.overview_app_grid | not)' "picker" || fail G-OVERVIEW-STATE-KEYS "up did not open the picker"
-xdotool key super+F8
+fkey_tap Super_L ffc5 || fail G-OVERVIEW-STATE-KEYS "Super+F8 tap failed"
 cstate '.overview_open and .overview_app_grid' "apps" || fail G-OVERVIEW-STATE-KEYS "up did not show apps"
-xdotool key super+F7
+fkey_tap Super_L ffc4 || fail G-OVERVIEW-STATE-KEYS "Super+F7 tap failed"
 cstate '.overview_open and (.overview_app_grid | not)' "picker again" || fail G-OVERVIEW-STATE-KEYS "down did not return to picker"
-xdotool key super+F7
+fkey_tap Super_L ffc4 || fail G-OVERVIEW-STATE-KEYS "Super+F7 tap failed"
 cstate '(.overview_open | not)' "session" || fail G-OVERVIEW-STATE-KEYS "down did not return to session"
 gsettings reset org.gnome.shell.keybindings shift-overview-up
 gsettings reset org.gnome.shell.keybindings shift-overview-down
@@ -2884,7 +2898,7 @@ xdotool key super+Up
 sleep 1.5
 cstate ".focused_rect[2] != $WIDTH" "unbound" 3 ||
     fail G-WM-REBIND "Super+Up still maximized after maximize moved to Super+F9"
-xdotool key super+F9
+fkey_tap Super_L ffc6 || fail G-WM-REBIND "Super+F9 tap failed"
 cstate ".focused_rect[2] == $WIDTH" "rebound" || fail G-WM-REBIND "Super+F9 did not maximize"
 xdotool key super+Down
 cstate ".focused_rect[2] != $WIDTH" "restored" || fail G-WM-REBIND "Super+Down did not restore"
@@ -2958,7 +2972,7 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     for _ in $(seq 1 20); do grep -q "surrounding 你好 2 2" "$ENGINE_LOG" && break; sleep 0.3; done
     grep -q "surrounding 你好 2 2" "$ENGINE_LOG" ||
         fail G-IME-SURROUNDING "the engine never saw '你好' with the cursor at 2: $(grep surrounding "$ENGINE_LOG" | tail -3)"
-    xdotool key F2
+    fkey_tap "" ffbf || fail G-IME-SURROUNDING "F2 tap failed"
     for _ in $(seq 1 20); do [ "$(cat "$IME_OUT" 2>/dev/null)" = "你|你好|2" ] && break; sleep 0.3; done
     [ "$(cat "$IME_OUT" 2>/dev/null)" = "你|你好|2" ] ||
         fail G-IME-SURROUNDING "the field holds '$(cat "$IME_OUT" 2>/dev/null)', not 你|你好|2"
@@ -3739,7 +3753,7 @@ for spec in 'F5:550' 'F4:500' 'F3:550'; do
     [ "$(cat "$ARTIFACTS/backlight/aaa-other/brightness")" = 700 ] || fail G-MONITOR-BRIGHTNESS-KEYS "a different monitor's backlight changed"
 done
 echo 1000 >"$BACKLIGHT/brightness"
-xdotool key super+F3
+fkey_tap Super_L ffc0 || fail G-MONITOR-BRIGHTNESS-KEYS "Super+F3 tap failed"
 end=$(($(date +%s) + 10))
 # GNOME normalized zero maps to the hardware minimum, not a powered-off
 # panel: Mutter's sysfs floor is max(1, max_brightness / 100).
@@ -3769,7 +3783,7 @@ for _attempt in 1 2 3 4 5 6 7 8 9 10; do
     sleep 0.1
 done
 showing "$ARTIFACTS/a11y-notification-focus-before.json" "Focus Proof Banner" || fail G-NOTIFICATION-FOCUS-KEY "no active banner to focus"
-xdotool key super+F6
+fkey_tap Super_L ffc3 || fail G-NOTIFICATION-FOCUS-KEY "Super+F6 tap failed"
 sleep 0.5
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-notification-focus.json" 20 || fail G-NOTIFICATION-FOCUS-KEY "a11y dump failed"
 jq -e '.[] | select(.showing and .focused and .name == "Close")' "$ARTIFACTS/a11y-notification-focus.json" >/dev/null || fail G-NOTIFICATION-FOCUS-KEY "banner's Close button did not get keyboard focus"
