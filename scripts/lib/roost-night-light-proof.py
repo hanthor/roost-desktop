@@ -196,6 +196,26 @@ def action(node, label):
         raise RuntimeError('actual widget has no verified single action: '+label)
 
 
+def unique_actionable(pid, label, predicate, seconds=20):
+    # The node can appear in the tree before its action interface is realized
+    # over the AT-SPI bridge; re-walk until exactly one allowed action shows.
+    end = time.monotonic() + seconds
+    while True:
+        node = unique(pid, label, predicate)
+        try:
+            iface = node.queryAction()
+            names = [iface.getName(i) for i in range(iface.nActions)]
+        except Exception:
+            names = []
+        (OUT / (label+'-actions.json')).write_text(json.dumps(names))
+        if len(names) == 1 and names[0] in ('click', 'activate', 'toggle', 'press'):
+            action(node, label)
+            return
+        if time.monotonic() >= end:
+            raise RuntimeError('actual widget has no verified single action: '+label)
+        time.sleep(.2)
+
+
 def toggle(process, original, desired, label):
     guard(SETTINGS, CC, original)
     node = unique(process.pid, label, lambda n: n.name.replace('_', '') == 'Night Light'
@@ -510,8 +530,7 @@ try:
     wait(lambda: scene().get('focused_app_id') == SETTINGS, 'stock Settings lacks actual compositor focus')
     wait(lambda: any(n.name.replace('_', '') == 'Night Light' for n in tree(settings.pid, 'display-panel')),
          'actual Night Light navigation did not appear')
-    navigation = unique(settings.pid, 'night-light-navigation', lambda n: n.name.replace('_', '') == 'Night Light' and n.getRoleName() not in ('label','static','text'))
-    action(navigation, 'night-light-navigation')
+    unique_actionable(settings.pid, 'night-light-navigation', lambda n: n.name.replace('_', '') == 'Night Light' and n.getRoleName() not in ('label','static','text'))
     wait(lambda: any(n.getRoleName() == 'slider' for n in tree(settings.pid, 'night-light-page')),
          'actual temperature slider did not appear')
     if persisted()['night-light-enabled'] != 'false':
