@@ -1,6 +1,6 @@
 //! Notification intake: the `org.freedesktop.Notifications` bus edge.
 //!
-//! The shell owns the desktop-notifications name (a Roost session runs
+//! The shell owns the desktop-notifications name (a Tuna Desktop session runs
 //! no other daemon, so nothing fights for it) and files wire arrivals
 //! into the shared [`NotificationCenter`]. Banner presses route back
 //! through [`NotificationBus::invoke_action`] and
@@ -178,7 +178,7 @@ impl NotificationBus {
         let builder = match builder {
             Ok(builder) => builder,
             Err(e) => {
-                eprintln!("roost-shell-host: notification bus unavailable: {e}");
+                eprintln!("tuna-shell-host: notification bus unavailable: {e}");
                 return false;
             }
         };
@@ -188,14 +188,14 @@ impl NotificationBus {
         let conn = match builder.serve_at(NOTIFICATIONS_PATH, notifications) {
             Ok(conn) => conn,
             Err(e) => {
-                eprintln!("roost-shell-host: notification serve failed: {e}");
+                eprintln!("tuna-shell-host: notification serve failed: {e}");
                 return false;
             }
         };
         let conn = match conn.build() {
             Ok(conn) => conn,
             Err(e) => {
-                eprintln!("roost-shell-host: notification connect failed: {e}");
+                eprintln!("tuna-shell-host: notification connect failed: {e}");
                 return false;
             }
         };
@@ -209,11 +209,11 @@ impl NotificationBus {
                 true
             }
             Ok(other) => {
-                eprintln!("roost-shell-host: notifications name taken ({other:?}), intake off");
+                eprintln!("tuna-shell-host: notifications name taken ({other:?}), intake off");
                 false
             }
             Err(e) => {
-                eprintln!("roost-shell-host: notifications name request failed: {e}");
+                eprintln!("tuna-shell-host: notifications name request failed: {e}");
                 false
             }
         }
@@ -258,7 +258,7 @@ impl NotificationBus {
             "ActionInvoked",
             &(id, action.to_owned()),
         ) {
-            eprintln!("roost-shell-host: notification signal ActionInvoked failed: {e}");
+            eprintln!("tuna-shell-host: notification signal ActionInvoked failed: {e}");
         }
     }
 
@@ -276,7 +276,7 @@ impl NotificationBus {
             "NotificationClosed",
             &(id, reason),
         ) {
-            eprintln!("roost-shell-host: notification signal NotificationClosed failed: {e}");
+            eprintln!("tuna-shell-host: notification signal NotificationClosed failed: {e}");
         }
     }
 }

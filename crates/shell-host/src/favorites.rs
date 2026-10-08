@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 /// Favorites shown in the overview grid.
 pub const MAX_FAVORITES: usize = 32;
 /// Shell data dir name under `$XDG_DATA_HOME`.
-pub const DATA_DIR_NAME: &str = "roost-shell";
+pub const DATA_DIR_NAME: &str = "tuna-shell";
 /// Favorites file name.
 pub const FAVORITES_FILE: &str = "favorites.json";
 
@@ -120,7 +120,7 @@ impl Favorites {
     }
 }
 
-/// `$XDG_DATA_HOME/roost-shell` (default `~/.local/share/roost-shell`),
+/// `$XDG_DATA_HOME/tuna-shell` (default `~/.local/share/tuna-shell`),
 /// or `None` when neither resolves (#49: never `/tmp`).
 pub fn data_dir() -> Option<PathBuf> {
     crate::xdg::data_home().map(|base| base.join(DATA_DIR_NAME))

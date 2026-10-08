@@ -1,7 +1,7 @@
 //! Compositor-side control channel (001 R4/R6, ADR 0002).
 //!
 //! Private local IPC between the compositor (authoritative) and the shell
-//! host. Wire types and framing live in the `roost-shell-control` crate
+//! host. Wire types and framing live in the `tuna-shell-control` crate
 //! (version handshake, length-prefixed frames, 1 MiB cap); this module owns
 //! the compositor side: accept, handshake, snapshots, change deltas, and
 //! command dispatch over a [`StateModel`].
@@ -37,7 +37,7 @@
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 
-use roost_shell_control::{
+use tuna_shell_control::{
     decode_frame, encode_frame, ActivationToken, CommandKind, CommandStatus, DecodeError,
     ErrorKind, Message, OutputInfo, ProtocolVersion, StateOp, SwitcherAction, WorkspaceInfo,
     CURRENT_VERSION, MAX_FRAME_BYTES,
@@ -47,10 +47,10 @@ use crate::state::{StateChange, StateModel, TokenStore, WindowEntry};
 
 /// Transport and protocol failures, shared with the shell-host endpoint.
 ///
-/// Defined in [`roost_shell_control`] so both endpoints name the same type;
-/// re-exported here because `roost_compositor::control::ControlError` is the
+/// Defined in [`tuna_shell_control`] so both endpoints name the same type;
+/// re-exported here because `tuna_compositor::control::ControlError` is the
 /// path the rest of this crate (and its tests) use.
-pub use roost_shell_control::ControlError;
+pub use tuna_shell_control::ControlError;
 
 /// Bound control socket. Wraps an already-bound [`UnixListener`] (tests pass
 /// a bound socket or use a socketpair directly with [`ControlConn`]).
@@ -251,9 +251,9 @@ pub struct Session<'a> {
     /// Latest `SetIdleTimeout` from the shell, drained by the hub.
     idle_timeout: Option<u64>,
     /// The latest SetAccelerators the shell sent, until drained.
-    accelerators: Option<Vec<roost_shell_control::Accelerator>>,
+    accelerators: Option<Vec<tuna_shell_control::Accelerator>>,
     /// Window-menu actions the shell asked for, until drained.
-    window_actions: Vec<(u64, roost_shell_control::WindowAction)>,
+    window_actions: Vec<(u64, tuna_shell_control::WindowAction)>,
     shortcut_consent: Vec<(u64, bool)>,
     /// Latest `SetOverviewSearch` from the shell, drained by the hub.
     overview_search: Option<bool>,
@@ -261,18 +261,18 @@ pub struct Session<'a> {
     overview_app_grid: Option<bool>,
     /// A lock-screen password awaiting verification, with its request
     /// id: the reply waits for the result (see `ControlHub::finish_unlock`).
-    unlock_request: Option<(u64, roost_shell_control::Secret)>,
+    unlock_request: Option<(u64, tuna_shell_control::Secret)>,
     /// The request id whose `CommandResult` is still owed.
     unlock_pending: Option<u64>,
     /// Latest `SetInputSettings` from the shell, drained by the hub.
-    input_settings: Option<roost_shell_control::InputSettings>,
+    input_settings: Option<tuna_shell_control::InputSettings>,
     screen_reader: Option<bool>,
     /// Input-source switches the shell asked for (`true` backward).
     input_source_switches: Vec<bool>,
     /// The switcher's thumbnail frames, when the shell sent new ones.
-    switcher_thumbnails: Option<Vec<roost_shell_control::SwitcherThumbnail>>,
+    switcher_thumbnails: Option<Vec<tuna_shell_control::SwitcherThumbnail>>,
     /// The shell's switcher keys, until the runtime drains them.
-    switcher_keys: Option<Vec<roost_shell_control::SwitcherKey>>,
+    switcher_keys: Option<Vec<tuna_shell_control::SwitcherKey>>,
 }
 
 impl std::fmt::Debug for Session<'_> {
@@ -428,7 +428,7 @@ impl<'a> Session<'a> {
     }
 
     /// Window-menu actions the shell sent since the last call.
-    pub fn take_window_actions(&mut self) -> Vec<(u64, roost_shell_control::WindowAction)> {
+    pub fn take_window_actions(&mut self) -> Vec<(u64, tuna_shell_control::WindowAction)> {
         std::mem::take(&mut self.window_actions)
     }
 
@@ -438,7 +438,7 @@ impl<'a> Session<'a> {
     }
 
     /// The latest `SetAccelerators` the shell sent, once.
-    pub fn take_accelerators(&mut self) -> Option<Vec<roost_shell_control::Accelerator>> {
+    pub fn take_accelerators(&mut self) -> Option<Vec<tuna_shell_control::Accelerator>> {
         self.accelerators.take()
     }
 
@@ -456,7 +456,7 @@ impl<'a> Session<'a> {
     /// Send where the overview's window previews sit.
     pub fn send_overview_previews(
         &mut self,
-        previews: &[roost_shell_control::PreviewInfo],
+        previews: &[tuna_shell_control::PreviewInfo],
         hovered: Option<u64>,
     ) -> Result<(), ControlError> {
         self.conn.write_frame(&Message::OverviewPreviews {
@@ -842,8 +842,8 @@ fn snapshot_message(
 fn window_to_wire(
     w: &WindowEntry,
     mint: &dyn Fn(Option<&str>) -> String,
-) -> roost_shell_control::WindowInfo {
-    roost_shell_control::WindowInfo {
+) -> tuna_shell_control::WindowInfo {
+    tuna_shell_control::WindowInfo {
         icon: w.icon.clone(),
         id: w.id,
         title: w.title.clone(),
@@ -993,22 +993,22 @@ pub struct PollOutcome {
     /// Whether the overview shows the app grid, if the shell said.
     pub overview_app_grid: Option<bool>,
     /// A lock-screen password to verify, with its request id.
-    pub unlock: Option<(u64, roost_shell_control::Secret)>,
+    pub unlock: Option<(u64, tuna_shell_control::Secret)>,
     /// GNOME input settings the shell sent, if any.
-    pub input_settings: Option<roost_shell_control::InputSettings>,
+    pub input_settings: Option<tuna_shell_control::InputSettings>,
     pub screen_reader: Option<bool>,
     /// Accelerator grabs the shell sent, if they changed.
-    pub accelerators: Option<Vec<roost_shell_control::Accelerator>>,
+    pub accelerators: Option<Vec<tuna_shell_control::Accelerator>>,
     /// Window-menu actions to carry out.
-    pub window_actions: Vec<(u64, roost_shell_control::WindowAction)>,
+    pub window_actions: Vec<(u64, tuna_shell_control::WindowAction)>,
     /// Trusted shell decisions for pending inhibitors.
     pub shortcut_consent: Vec<(u64, bool)>,
     /// Input-source switches to make (`true` backward), in order.
     pub input_source_switches: Vec<bool>,
     /// New switcher thumbnail frames, if the shell sent any.
-    pub switcher_thumbnails: Option<Vec<roost_shell_control::SwitcherThumbnail>>,
+    pub switcher_thumbnails: Option<Vec<tuna_shell_control::SwitcherThumbnail>>,
     /// The shell's switcher keys, if it sent new ones.
-    pub switcher_keys: Option<Vec<roost_shell_control::SwitcherKey>>,
+    pub switcher_keys: Option<Vec<tuna_shell_control::SwitcherKey>>,
 }
 
 /// Peers accepted but not yet handshaken are capped so a same-user
@@ -1136,8 +1136,8 @@ pub struct ControlHub {
     environment_sent: Vec<(String, String)>,
     /// Overview previews for the shell's chrome, and the last value
     /// every session holds.
-    previews: (Vec<roost_shell_control::PreviewInfo>, Option<u64>),
-    previews_sent: (Vec<roost_shell_control::PreviewInfo>, Option<u64>),
+    previews: (Vec<tuna_shell_control::PreviewInfo>, Option<u64>),
+    previews_sent: (Vec<tuna_shell_control::PreviewInfo>, Option<u64>),
     /// Peer admission rule (#30); the runtime narrows it to the
     /// supervised shell's pid every tick.
     gate: PeerGate,
@@ -1266,7 +1266,7 @@ impl ControlHub {
     /// to the shell when it changes (empty while the overview is closed).
     pub fn set_overview_previews(
         &mut self,
-        previews: Vec<roost_shell_control::PreviewInfo>,
+        previews: Vec<tuna_shell_control::PreviewInfo>,
         hovered: Option<u64>,
     ) {
         self.previews = (previews, hovered);

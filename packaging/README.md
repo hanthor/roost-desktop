@@ -2,7 +2,7 @@
 
 | Target | Path | Built by |
 |---|---|---|
-| Debian / Ubuntu `.deb` (dev hosts) | `scripts/roost-release` | CI `journey` job |
+| Debian / Ubuntu `.deb` (dev hosts) | `scripts/tuna-release` | CI `journey` job |
 | Arch Linux package (TunaOS Marlin) | `packaging/arch/PKGBUILD` | CI `arch-package` job |
 | Marlin preview image | `packaging/marlin/Containerfile` | CI `marlin-image` job (main) |
 
@@ -19,23 +19,23 @@ parity baseline. The preview image layers the Tuna Desktop package on
 
 The preview image offers "Tuna Desktop (preview)" on the GDM login screen
 beside GNOME: the DRM/KMS backend runs the hardware session (#52), the
-lock screen unlocks through PAM (`/etc/pam.d/roost-lock`, #62), and the
+lock screen unlocks through PAM (`/etc/pam.d/tuna-lock`, #62), and the
 power menu logs out back to GDM. A "Tuna Desktop (nested preview)" launcher
-also opens Tuna Desktop in a window inside GNOME. Upstreaming a `marlin:roost`
+also opens Tuna Desktop in a window inside GNOME. Upstreaming a `marlin:tuna`
 flavor to `tuna-os/tunaOS` (#69) follows once hardware runs in the VM
 lane (#68) are green.
 
 The Arch package ships both shells. The compositor runs the
-GTK4/libadwaita shell (`roost-shell-gtk`, ADR 0006) when it is installed
-beside it and falls back to the legacy `roost-shell-host`; set
-`ROOST_SHELL_BIN=roost-shell-host` to choose the legacy shell. The
+GTK4/libadwaita shell (`tuna-shell-gtk`, ADR 0006) when it is installed
+beside it and falls back to the legacy `tuna-shell-host`; set
+`TUNA_SHELL_BIN=tuna-shell-host` to choose the legacy shell. The
 `.deb` keeps only the legacy shell, because Ubuntu 24.04 has no
 gtk4-layer-shell package.
 
 Try the preview on a Marlin machine:
 
 ```sh
-sudo bootc switch ghcr.io/hanthor/roost-desktop/marlin-roost-preview:latest
+sudo bootc switch ghcr.io/tuna-os/tuna-desktop/marlin-tuna-preview:latest
 ```
 
 ## Upgrading from the former name

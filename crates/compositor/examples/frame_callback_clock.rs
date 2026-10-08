@@ -120,7 +120,7 @@ fn main() {
     let surface = s.compositor.as_ref().unwrap().create_surface(&q, ());
     let xdg = s.wm.as_ref().unwrap().get_xdg_surface(&surface, &q, ());
     let top = xdg.get_toplevel(&q, ());
-    top.set_app_id("org.roost.FrameTimestampProof".into());
+    top.set_app_id("org.tuna.FrameTimestampProof".into());
     top.set_title("Frame Timestamp Wire Probe".into());
     let mut file = std::fs::OpenOptions::new()
         .read(true)

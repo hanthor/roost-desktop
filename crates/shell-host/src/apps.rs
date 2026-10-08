@@ -540,13 +540,13 @@ mod tests {
 
     #[test]
     fn show_in_follows_glib() {
-        let gnome = vec!["Roost".to_owned(), "GNOME".to_owned()];
+        let gnome = vec!["Tuna".to_owned(), "GNOME".to_owned()];
         assert!(shown_in(None, None, &gnome));
         assert!(shown_in(Some(vec!["GNOME"]), None, &gnome));
         assert!(!shown_in(Some(vec!["KDE"]), None, &gnome));
         assert!(!shown_in(None, Some(vec!["GNOME"]), &gnome));
         // The first desktop that the entry names decides.
-        assert!(shown_in(Some(vec!["Roost"]), Some(vec!["GNOME"]), &gnome));
+        assert!(shown_in(Some(vec!["Tuna"]), Some(vec!["GNOME"]), &gnome));
         assert!(!shown_in(Some(vec!["GNOME"]), None, &[]));
     }
 
@@ -577,16 +577,16 @@ mod tests {
         write_entry(
             dir.path(),
             "probe.desktop",
-            "[Desktop Entry]\nName=Roostterm Probe\nExec=touch \"/tmp/roost-marker\"\nType=Application\n",
+            "[Desktop Entry]\nName=Tunaterm Probe\nExec=touch \"/tmp/tuna-marker\"\nType=Application\n",
         );
         let apps = discover(&[dir.path().to_owned()]);
         let app = apps
             .iter()
-            .find(|a| a.name == "Roostterm Probe")
+            .find(|a| a.name == "Tunaterm Probe")
             .expect("probe");
         assert_eq!(
             app.argv,
-            vec![OsString::from("touch"), OsString::from("/tmp/roost-marker")],
+            vec![OsString::from("touch"), OsString::from("/tmp/tuna-marker")],
             "quoted Exec arg keeps its quotes: {:?}",
             app.argv
         );
@@ -626,7 +626,7 @@ mod tests {
             name: "Missing".to_owned(),
             generic_name: None,
             keywords: Vec::new(),
-            argv: vec![OsString::from("/nonexistent-roost-binary-xyz")],
+            argv: vec![OsString::from("/nonexistent-tuna-binary-xyz")],
             icon: None,
             categories: Vec::new(),
         };

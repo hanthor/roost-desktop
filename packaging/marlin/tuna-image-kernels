@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Rebuild the image's initramfs after a complete Arch transaction, never the
+# build host's running kernel. Receipts describe the resulting image, not a boot.
+set -euo pipefail
+stage="${1:?expected preview or vm stage}"
+case "$stage" in preview|vm) ;; *) exit 2 ;; esac
+# Optional roots let regression tests exercise the actual helper with fixture
+# trees and stub build commands. Container builds use the defaults.
+modules_root="${2:-/usr/lib/modules}"
+receipt_root="${3:-/usr/share/tuna-image-kernels}"
+receipt="$receipt_root/$stage"
+mkdir -p "$receipt"
+pacman -Q | LC_ALL=C sort > "$receipt/packages.txt"
+test -s "$receipt/packages.txt"
+printf '' > "$receipt/module-directories.txt"
+kernel_count=0
+for module_dir in "$modules_root"/*; do
+    test -d "$module_dir" || continue
+    kernel="${module_dir##*/}"
+    printf '%s\n' "$kernel" >> "$receipt/module-directories.txt"
+    test -f "$module_dir/vmlinuz" || continue
+    test -s "$module_dir/vmlinuz"
+    kernel_count=$((kernel_count + 1))
+    # bootc requires one kernel. Never choose one by directory sort order.
+    test "$kernel_count" -eq 1
+    printf '%s\n' "$kernel" > "$receipt/kernel-version.txt"
+    pacman -Qqo "$module_dir/vmlinuz" > "$receipt/kernel-package.txt"
+    test -s "$receipt/kernel-package.txt"
+    depmod "$kernel"
+    test -s "$module_dir/modules.dep"
+    dracut --force --no-hostonly "$module_dir/initramfs.img" "$kernel"
+    test -s "$module_dir/initramfs.img"
+    lsinitrd -m "$module_dir/initramfs.img" > "$receipt/dracut-modules.txt"
+    grep -qx '[[:space:]]*bootc[[:space:]]*' "$receipt/dracut-modules.txt"
+    lsinitrd "$module_dir/initramfs.img" > "$receipt/initramfs-files.txt"
+    # Verify that inspection actually found the selected kernel's modules.
+    grep -Fq "lib/modules/$kernel/" "$receipt/initramfs-files.txt"
+    grep -Fq 'bootc-root-setup.service' "$receipt/initramfs-files.txt"
+    sha256sum "$module_dir/vmlinuz" "$module_dir/initramfs.img" \
+        "$module_dir/modules.dep" > "$receipt/kernel-sha256.txt"
+    find "$module_dir" -type f -printf '%P\t%s\n' | LC_ALL=C sort \
+        > "$receipt/module-files.txt"
+done
+test "$kernel_count" -eq 1

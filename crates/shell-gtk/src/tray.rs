@@ -1,6 +1,6 @@
 //! AppIndicator tray in the panel (StatusNotifier host).
 //!
-//! GNOME 51 needs an extension for this; Roost ships it natively, as the
+//! GNOME 51 needs an extension for this; Tuna Desktop ships it natively, as the
 //! legacy shell does (ledger P-TR-01). The shell-host `WatcherBus`
 //! owns `org.kde.StatusNotifierWatcher` and talks to items. Its calls
 //! block, so it lives on a worker thread: the panel only exchanges
@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use gtk4 as gtk;
 use gtk4::prelude::*;
-use roost_shell_host::watcher::{pick_pixmap, MenuEntry, WatcherBus};
+use tuna_shell_host::watcher::{pick_pixmap, MenuEntry, WatcherBus};
 
 /// How often the worker re-reads the registered items.
 const POLL: Duration = Duration::from_secs(2);
@@ -129,7 +129,7 @@ pub fn tray() -> gtk::Box {
     let (to_worker, worker_rx) = mpsc::channel();
     let (worker_tx, from_worker) = mpsc::channel();
     std::thread::Builder::new()
-        .name("roost-tray".into())
+        .name("tuna-tray".into())
         .spawn(move || worker(worker_rx, worker_tx))
         .expect("spawn tray worker");
 
@@ -145,7 +145,7 @@ pub fn tray() -> gtk::Box {
                     menus.borrow_mut().clear();
                     for item in &items {
                         let popover = gtk::Popover::new();
-                        popover.add_css_class("roost-shell-popover");
+                        popover.add_css_class("tuna-shell-popover");
                         popover.set_has_arrow(false);
                         let button = gtk::MenuButton::builder()
                             .child(&icon_for(item))

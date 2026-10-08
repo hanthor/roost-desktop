@@ -1,5 +1,5 @@
 //! Session enumeration: parse installed `.desktop` session files into
-//! picker entries, with Roost preselected when present. Tolerant by
+//! picker entries, with Tuna Desktop preselected when present. Tolerant by
 //! design — malformed entries are skipped with a count, never failing
 //! the whole read. Live system paths stay behind [`SESSION_DIRS`]
 //! so tests inject fixture directories.
@@ -18,7 +18,7 @@ pub struct SessionEntry {
     pub command: Vec<String>,
     /// Source file (for diagnostics, not identity).
     pub source: PathBuf,
-    /// True when this is the Roost session.
+    /// True when this is the Tuna Desktop session.
     pub is_default: bool,
 }
 
@@ -57,12 +57,12 @@ fn parse_entry(path: &Path, text: &str) -> Option<SessionEntry> {
         return None;
     }
     let lowered = name.to_lowercase();
-    let is_default = lowered.contains("roost")
+    let is_default = lowered.contains("tuna")
         || lowered.contains("rust wayland")
         // Legacy working-title entry; keep matching old installs.
         || lowered.contains("rwd")
         || command.first().is_some_and(|c| {
-            c.starts_with("roost-") || c.starts_with("rwd-")
+            c.starts_with("tuna-") || c.starts_with("rwd-")
         });
     Some(SessionEntry {
         name,
@@ -91,7 +91,7 @@ fn hidden_entry(text: &str) -> bool {
     false
 }
 
-/// Enumerate `dirs`, returning entries sorted by name with the Roost
+/// Enumerate `dirs`, returning entries sorted by name with the Tuna Desktop
 /// default first when present.
 pub fn enumerate_dirs(dirs: &[&Path]) -> Enumeration {
     let mut out = Enumeration::default();
@@ -143,20 +143,20 @@ mod tests {
         dir
     }
 
-    const ROOST: &str = "[Desktop Entry]\nName=Tuna Desktop\nExec=roost-session\n";
+    const TUNA: &str = "[Desktop Entry]\nName=Tuna Desktop\nExec=tuna-session\n";
     const LEGACY: &str = "[Desktop Entry]\nName=RWD\nExec=rwd-session\n";
     const SWAY: &str = "[Desktop Entry]\nName=Sway\nExec=sway\n";
     const BAD: &str = "[Desktop Entry]\nName=Broken\n";
     const NOT_DESKTOP: &str = "[Desktop Entry]\nName=X\nExec=x\n";
 
     #[test]
-    fn lists_sessions_with_roost_default_first() {
-        let dir = fixture_dir(&[("sway.desktop", SWAY), ("roost.desktop", ROOST)]);
+    fn lists_sessions_with_tuna_default_first() {
+        let dir = fixture_dir(&[("sway.desktop", SWAY), ("tuna.desktop", TUNA)]);
         let out = enumerate_dirs(&[dir.path()]);
         assert_eq!(out.entries.len(), 2);
         assert_eq!(out.entries[0].name, "Tuna Desktop");
         assert!(out.entries[0].is_default);
-        assert_eq!(out.entries[0].command, vec!["roost-session"]);
+        assert_eq!(out.entries[0].command, vec!["tuna-session"]);
         assert_eq!(out.skipped, 0);
     }
 

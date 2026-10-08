@@ -27,7 +27,7 @@ frames are in [baseline-233](niri-parity/baseline-233/provenance.json).
 
 Both compositors run nested in the same Fedora container at 1280×800,
 scale 1, with the same GTK 4.24.1 / libadwaita 1.10 runtime and the same
-`roost-test-window.py` windows: Scroll One, Two and Three. Each uses the
+`tuna-test-window.py` windows: Scroll One, Two and Three. Each uses the
 same header, text and list content. Niri reserves 32px at the top to match
 Tuna Desktop's shell panel, uses 16px gaps, half-width columns, a 4px #7fc8ff focus
 ring and `center-focused-column "never"`. Its default spring is retained.
@@ -41,7 +41,7 @@ middle column leaves that widened column intact. Tuna Desktop's state confirms
 matching client sizes, and the frames confirm the positions. No frame is
 resized to make this comparison.
 
-`scripts/lib/roost-parity-compare.py` measured the work area, excluding only
+`scripts/lib/tuna-parity-compare.py` measured the work area, excluding only
 the 32px shell panel:
 
 | State | Mean difference | Pixels off >24 |
@@ -62,7 +62,7 @@ desktops have identical pixels.
 The [difference frames](niri-parity/baseline-233/difference/02-strip-preset-0_32_1280_768.png)
 place niri above Tuna Desktop and amplify their difference four times below.
 The raw [niri frame](niri-parity/baseline-233/niri/02-strip-preset.png) and
-[Tuna Desktop frame](niri-parity/baseline-233/roost/02-strip-preset.png) are also
+[Tuna Desktop frame](niri-parity/baseline-233/tuna/02-strip-preset.png) are also
 retained, with IPC/state JSON alongside each frame.
 
 Timing samples repeat a fresh right-to-left transition for each delay;
@@ -97,12 +97,12 @@ output area, rather than niri's independent layout on every output.
 To reproduce without compiling a local GTK shell:
 
 ```sh
-scripts/roost-niri-reference --out /tmp/fresh-niri-reference
-scripts/roost-niri-compare --candidate /tmp/extracted-roost-package --out /tmp/fresh-niri-pair
+scripts/tuna-niri-reference --out /tmp/fresh-niri-reference
+scripts/tuna-niri-compare --candidate /tmp/extracted-tuna-package --out /tmp/fresh-niri-pair
 ```
 
-The candidate directory must contain `usr/bin/roost-compositor` and
-`usr/bin/roost-shell-gtk`. CI extracts its current Arch package, captures
+The candidate directory must contain `usr/bin/tuna-compositor` and
+`usr/bin/tuna-shell-gtk`. CI extracts its current Arch package, captures
 both compositors, checks endpoint geometry/content and records timing and
 pixel reports in the `niri-parity` artifact. The broader interactions remain
 in `gtk-shell`; both jobs must pass before the comparison change is merged.

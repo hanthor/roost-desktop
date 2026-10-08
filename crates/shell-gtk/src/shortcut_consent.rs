@@ -28,10 +28,10 @@ impl Consent {
         let window = gtk::Window::new();
         window.set_application(Some(app));
         window.set_title(Some("Allow inhibiting shortcuts"));
-        window.add_css_class("roost-end-session");
+        window.add_css_class("tuna-end-session");
         window.init_layer_shell();
         window.set_layer(Layer::Overlay);
-        window.set_namespace(Some(roost_shell_control::SHORTCUT_CONSENT_NAMESPACE));
+        window.set_namespace(Some(tuna_shell_control::SHORTCUT_CONSENT_NAMESPACE));
         for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
             window.set_anchor(edge, true);
         }
@@ -123,7 +123,7 @@ impl Consent {
         // excludes. Resolve the first desktop file in XDG precedence order.
         let desktop = (!stem.contains('/'))
             .then(|| {
-                roost_shell_host::apps::default_app_dirs()
+                tuna_shell_host::apps::default_app_dirs()
                     .into_iter()
                     .map(|dir| dir.join(&desktop_id))
                     .find(|path| path.is_file())
@@ -131,7 +131,7 @@ impl Consent {
             .flatten();
         let name = desktop
             .as_deref()
-            .and_then(roost_shell_host::apps::handler_entry_from_file)
+            .and_then(tuna_shell_host::apps::handler_entry_from_file)
             .map(|entry| entry.name);
         let known = desktop.is_some();
         let stable = known.then_some(desktop_id.clone());

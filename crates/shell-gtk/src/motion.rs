@@ -1,11 +1,11 @@
 //! The shell's live copy of GNOME's motion policy
-//! ([`roost_shell_control::MotionPolicy`]), shared with the compositor
+//! ([`tuna_shell_control::MotionPolicy`]), shared with the compositor
 //! through `InputSettings` and read by the shell's own animations.
 use std::cell::Cell;
 
 use gio::prelude::*;
 use gtk4 as gtk;
-use roost_shell_control::{motion::SLOWDOWN_ENV, MotionPolicy};
+use tuna_shell_control::{motion::SLOWDOWN_ENV, MotionPolicy};
 
 thread_local! {
     static CURRENT: Cell<MotionPolicy> = Cell::new(MotionPolicy::default());
@@ -66,7 +66,7 @@ pub fn from_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roost_shell_control::MotionLevel;
+    use tuna_shell_control::MotionLevel;
 
     #[test]
     fn gnome_keys_combine_into_three_levels() {

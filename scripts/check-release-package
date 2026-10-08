@@ -1,5 +1,5 @@
 #!/bin/sh
-# check-release-package — verify a Roost .deb built by scripts/roost-release.
+# check-release-package — verify a Tuna Desktop .deb built by scripts/tuna-release.
 #
 # Usage:
 #   scripts/check-release-package <package.deb>
@@ -29,19 +29,19 @@ python3 "$ROOT/scripts/lib/release-deb-ownership.py" "$PKG" || fail "archive own
 
 CONTENTS="$(dpkg-deb -c "$PKG" 2>/dev/null)"
 for path in \
-    usr/bin/roost-compositor \
-    usr/bin/roost-session \
-    usr/bin/roost-shell-gtk \
-    usr/bin/roost-shell-host \
-    usr/bin/roost-ibus-bridge \
-    usr/bin/roost-greeter \
-    usr/share/wayland-sessions/roost.desktop \
-    usr/lib/systemd/user/roost-session.target \
-    etc/pam.d/roost-lock; do
+    usr/bin/tuna-compositor \
+    usr/bin/tuna-session \
+    usr/bin/tuna-shell-gtk \
+    usr/bin/tuna-shell-host \
+    usr/bin/tuna-ibus-bridge \
+    usr/bin/tuna-greeter \
+    usr/share/wayland-sessions/tuna.desktop \
+    usr/lib/systemd/user/tuna-session.target \
+    etc/pam.d/tuna-lock; do
     printf '%s' "$CONTENTS" | grep -q "$path" || fail "missing $path"
 done
 
-printf '%s' "$CONTENTS" | grep "usr/bin/roost-" | grep -q "^-rwx" \
+printf '%s' "$CONTENTS" | grep "usr/bin/tuna-" | grep -q "^-rwx" \
     || fail "session binaries are not executable"
 
 VERSION="$(dpkg-deb -f "$PKG" Version)"
@@ -50,10 +50,10 @@ VERSION="$(dpkg-deb -f "$PKG" Version)"
 DIR="$(mktemp -d)"
 trap 'rm -rf "$DIR"' EXIT INT TERM
 dpkg-deb -x "$PKG" "$DIR"
-for path in usr/share/wayland-sessions/roost.desktop usr/lib/systemd/user/roost-session.target etc/pam.d/roost-lock; do
+for path in usr/share/wayland-sessions/tuna.desktop usr/lib/systemd/user/tuna-session.target etc/pam.d/tuna-lock; do
     [ -f "$DIR/$path" ] && [ ! -L "$DIR/$path" ] || fail "invalid required file $path"
 done
-for bin in roost-compositor roost-session roost-shell-gtk roost-shell-host roost-ibus-bridge roost-greeter; do
+for bin in tuna-compositor tuna-session tuna-shell-gtk tuna-shell-host tuna-ibus-bridge tuna-greeter; do
     [ -f "$DIR/usr/bin/$bin" ] && [ ! -L "$DIR/usr/bin/$bin" ] && [ -x "$DIR/usr/bin/$bin" ] || fail "invalid executable $bin"
     (ulimit -f 8; timeout 10 "$DIR/usr/bin/$bin" --version) >"$DIR/version-output" || fail "$bin version command failed"
     printf '%s\n' "$bin $VERSION" >"$DIR/version-expected"
@@ -89,9 +89,9 @@ cmp -s "$DIR/etc/pam.d/roost-lock" "$ROOT/share/compat/pam.d/roost-lock" || fail
 # entries ship it and display managers read it; the base-spec validator
 # flags it).
 if command -v desktop-file-validate >/dev/null 2>&1; then
-    DESKTOP_ERRORS="$(desktop-file-validate "$DIR/usr/share/wayland-sessions/roost.desktop" 2>&1 || true)"
+    DESKTOP_ERRORS="$(desktop-file-validate "$DIR/usr/share/wayland-sessions/tuna.desktop" 2>&1 || true)"
     DESKTOP_ERRORS="$(printf '%s' "$DESKTOP_ERRORS" | grep -v 'key "DesktopNames"' || true)"
-    [ -z "$DESKTOP_ERRORS" ] || fail "roost.desktop invalid: $DESKTOP_ERRORS"
+    [ -z "$DESKTOP_ERRORS" ] || fail "tuna.desktop invalid: $DESKTOP_ERRORS"
 fi
 
 echo "check-release-package: $PKG OK (version $VERSION)"

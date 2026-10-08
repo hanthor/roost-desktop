@@ -4,9 +4,9 @@
 //!
 //! As GNOME's screencast service (screencastService.js) does, a
 //! recording asks Mutter's ScreenCast for the area (`RecordArea`, which
-//! Roost's compositor serves), and GStreamer encodes the PipeWire stream
+//! Tuna Desktop's compositor serves), and GStreamer encodes the PipeWire stream
 //! to VP8 in WebM under `~/Videos/Screencasts`. GNOME runs the pipeline
-//! in-process; Roost runs the same software pipeline through
+//! in-process; Tuna Desktop runs the same software pipeline through
 //! `gst-launch-1.0`, ending it with an EOS (SIGINT under `-e`) so the
 //! file is finalized.
 //!
@@ -118,7 +118,7 @@ pub fn videos_dir() -> PathBuf {
 ///
 /// pipewiresrc's `keepalive-time` and `resend-last`, which GNOME sets,
 /// are left out: with them the EOS that gst-launch forces on SIGINT
-/// never reaches the end of the pipeline against Roost's streams, so
+/// never reaches the end of the pipeline against Tuna Desktop's streams, so
 /// the file is never finished.
 pub fn pipeline(node: u32, encoder: Option<&str>, threads: u32, path: &Path) -> Vec<String> {
     let mut args: Vec<String> = vec![
@@ -269,7 +269,7 @@ impl Recorder {
             {
                 Ok(()) => done(Ok(path)),
                 Err(e) => {
-                    eprintln!("roost-shell-gtk: screencast failed to start: {e}");
+                    eprintln!("tuna-shell-gtk: screencast failed to start: {e}");
                     *this.phase.borrow_mut() = Phase::Idle;
                     this.changed(false);
                     (this.notify)("Screencast Failed to Start", "");
@@ -452,7 +452,7 @@ impl Recorder {
                 if let Phase::Recording { conn, session, .. } = phase {
                     stop_session(&conn, &session);
                 }
-                eprintln!("roost-shell-gtk: the screencast pipeline stopped on its own");
+                eprintln!("tuna-shell-gtk: the screencast pipeline stopped on its own");
                 this.emit_error(
                     "org.gnome.Shell.Screencast.Error.PipelineFailed",
                     "recording failed",
@@ -469,7 +469,7 @@ impl Recorder {
             _closed: closed,
         };
         eprintln!(
-            "roost-shell-gtk: recording {x},{y} {w}x{h} to {}",
+            "tuna-shell-gtk: recording {x},{y} {w}x{h} to {}",
             path.display()
         );
         Ok(())
@@ -514,7 +514,7 @@ impl Recorder {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                eprintln!("roost-shell-gtk: screencast saved to {}", path.display());
+                eprintln!("tuna-shell-gtk: screencast saved to {}", path.display());
                 (this.notify)("Screencast Recorded", &name);
             } else {
                 (this.notify)("Screencast Failed", "");
@@ -568,7 +568,7 @@ pub fn serve(recorder: Rc<Recorder>) {
     let node = match gio::DBusNodeInfo::for_xml(XML) {
         Ok(node) => node,
         Err(e) => {
-            eprintln!("roost-shell-gtk: org.gnome.Shell.Screencast interface: {e}");
+            eprintln!("tuna-shell-gtk: org.gnome.Shell.Screencast interface: {e}");
             return;
         }
     };
@@ -599,11 +599,11 @@ pub fn serve(recorder: Rc<Recorder>) {
                 })
                 .build();
             if let Err(e) = registered {
-                eprintln!("roost-shell-gtk: org.gnome.Shell.Screencast object: {e}");
+                eprintln!("tuna-shell-gtk: org.gnome.Shell.Screencast object: {e}");
             }
         },
         |_, _| {},
-        |_, _| eprintln!("roost-shell-gtk: org.gnome.Shell.Screencast is owned elsewhere"),
+        |_, _| eprintln!("tuna-shell-gtk: org.gnome.Shell.Screencast is owned elsewhere"),
     );
     // Held for the session.
     let _ = id;

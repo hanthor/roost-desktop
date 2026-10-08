@@ -6,7 +6,7 @@ itself, not against screenshots or memory.
 
 ## Reference: GNOME 51 in a container
 
-`scripts/roost-gnome-reference` builds `tests/gnome-reference/Containerfile`
+`scripts/tuna-gnome-reference` builds `tests/gnome-reference/Containerfile`
 (Fedora 45, GNOME Shell 51.0) with podman. It runs `gnome-shell --headless`
 at 1280x800 with `capture.js` as its automation script, the way GNOME's own
 performance tests drive the shell. Tuna Desktop's proof stubs stand in for
@@ -21,17 +21,17 @@ GNOME 51's default wallpapers (`adwaita-l.jxl`, `adwaita-d.jxl`).
 
 ## Tuna Desktop capture and comparison
 
-`scripts/roost-parity-capture` drives the nested compositor and GTK shell
+`scripts/tuna-parity-capture` drives the nested compositor and GTK shell
 through the same states with the same settings and wallpaper.
-`scripts/lib/roost-parity-compare.py` stacks GNOME, Tuna Desktop and their
+`scripts/lib/tuna-parity-compare.py` stacks GNOME, Tuna Desktop and their
 difference for each state, optionally cropped to one element. It prints
 the mean channel difference and the share of pixels that are visibly off.
 
 ```sh
-scripts/roost-gnome-reference
-scripts/roost-parity-capture
-scripts/lib/roost-parity-compare.py target/gnome-reference target/roost-parity target/parity-compare
-scripts/lib/roost-parity-compare.py target/gnome-reference target/roost-parity target/parity-compare 01-desktop:0,0,1280,32
+scripts/tuna-gnome-reference
+scripts/tuna-parity-capture
+scripts/lib/tuna-parity-compare.py target/gnome-reference target/tuna-parity target/parity-compare
+scripts/lib/tuna-parity-compare.py target/gnome-reference target/tuna-parity target/parity-compare 01-desktop:0,0,1280,32
 ```
 
 ## States
@@ -78,7 +78,7 @@ run, so the host's older theme and fonts do not leak in. Ubuntu, for
 example, defaults to Yaru and lacks `dark-mode-symbolic`.
 
 Both sides open the same three libadwaita test windows
-(`scripts/lib/roost-test-window.py`), one at a time, so window size,
+(`scripts/lib/tuna-test-window.py`), one at a time, so window size,
 placement, stacking and decorations compare directly. Tuna Desktop's capture
 sets GNOME 51's interface fonts, since the host's schema may still name
 Cantarell. Both sides switch apps the way releasing Alt does, and the
@@ -156,7 +156,7 @@ GTK and St differ in a few ways that matter when matching numbers:
 ## Accessibility baseline
 
 The reference also records AT-SPI trees for the panel, quick settings and
-the overview with the three test windows. `scripts/roost-a11y-baseline
+the overview with the three test windows. `scripts/tuna-a11y-baseline
 update target/gnome-reference` keeps visible nodes, hierarchy, unnamed
 controls and state flags in `tests/a11y/gnome51/`, with the clock normalized.
 The committed [comparison](../tests/a11y/gnome51/comparison.md) catalogs
@@ -174,7 +174,7 @@ commit `e101d566048986c3c8c78e193cd41a26b44947bd`, with the native fonts,
 icons and wallpaper. The GTK live proof passed; that job's later standalone
 ShellCheck failed on the old cleanup expression, which was corrected.
 The recorded native and Tuna Desktop window states are committed in
-`tests/gnome-reference/baseline-state.json` and `roost-baseline-state.json`.
+`tests/gnome-reference/baseline-state.json` and `tuna-baseline-state.json`.
 
 | State | Pixels visibly off | Recorded behavior |
 | --- | --- | --- |

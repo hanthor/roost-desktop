@@ -1,6 +1,6 @@
 # Tuna Desktop
 
-Formerly **Roost**. Binaries, packages, crates and environment variables still use the `roost` name until the internal rename ([#505](https://github.com/tuna-os/tuna-desktop/issues/505)).
+Formerly **Roost**. Binaries, packages, crates and environment variables still use the `tuna` name until the internal rename ([#505](https://github.com/tuna-os/tuna-desktop/issues/505)).
 
 A new, independent Wayland desktop session with a GNOME-inspired everyday workflow. This project is not a GNOME Shell rewrite and does not promise compatibility with GNOME Shell extensions or private Mutter APIs.
 
@@ -17,7 +17,7 @@ The compositor is a long-lived Rust process built with Smithay. The shell UI run
   ```sh
   git clone https://github.com/tuna-os/tuna-desktop.git
   cd tuna-desktop
-  ./scripts/roost-nested run
+  ./scripts/tuna-nested run
   ```
 
   See [the nested session guide](docs/nested-session.md) for options and

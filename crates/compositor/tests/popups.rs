@@ -9,9 +9,9 @@
 
 use std::os::unix::net::UnixStream;
 
-use roost_compositor::windows::WindowManager;
-use roost_compositor::TestCompositor;
 use smithay::utils::{Logical, Point};
+use tuna_compositor::windows::WindowManager;
+use tuna_compositor::TestCompositor;
 use wayland_client::{
     protocol::{
         wl_callback::WlCallback,

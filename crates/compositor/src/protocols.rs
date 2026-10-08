@@ -226,7 +226,7 @@ impl Bell {
                 _ => self.player = None,
             }
         }
-        if std::env::var_os("ROOST_BELL").is_some_and(|v| v == "0") {
+        if std::env::var_os("TUNA_BELL").is_some_and(|v| v == "0") {
             return;
         }
         self.player = std::process::Command::new("canberra-gtk-play")
@@ -287,12 +287,12 @@ impl State {
     pub fn enable_dmabuf(&mut self, formats: Vec<Format>) {
         if formats.is_empty() || self.protocols.dmabuf_global.is_some() {
             if formats.is_empty() {
-                eprintln!("roost-compositor: no dmabuf formats, linux-dmabuf not advertised");
+                eprintln!("tuna-compositor: no dmabuf formats, linux-dmabuf not advertised");
             }
             return;
         }
         eprintln!(
-            "roost-compositor: linux-dmabuf v3 with {} formats",
+            "tuna-compositor: linux-dmabuf v3 with {} formats",
             formats.len()
         );
         let dh = self.dh.clone();

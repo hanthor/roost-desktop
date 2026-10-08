@@ -7,9 +7,9 @@
 use std::collections::BTreeMap;
 use std::os::unix::net::UnixStream;
 
-use roost_compositor::windows::WindowManager;
-use roost_compositor::TestCompositor;
 use smithay::backend::allocator::{Fourcc, Modifier};
+use tuna_compositor::windows::WindowManager;
+use tuna_compositor::TestCompositor;
 use wayland_client::{
     protocol::{
         wl_compositor::WlCompositor,

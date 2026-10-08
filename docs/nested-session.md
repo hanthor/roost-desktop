@@ -4,25 +4,25 @@ One command starts the 001 nested desktop slice: a supervised compositor
 session with the shell panel attached.
 
 ```sh
-scripts/roost-nested run [--socket NAME] [--shell-bin PATH] [--artifacts DIR]
+scripts/tuna-nested run [--socket NAME] [--shell-bin PATH] [--artifacts DIR]
 ```
 
-Defaults: socket `roost-nested-<pid>`, shell binary from the workspace
+Defaults: socket `tuna-nested-<pid>`, shell binary from the workspace
 build, artifacts under
-`$XDG_STATE_HOME/roost-nested/<socket>` (else
-`~/.local/state/roost-nested/<socket>`). The script builds both binaries,
-starts `roost-compositor` on a private socket, and records
+`$XDG_STATE_HOME/tuna-nested/<socket>` (else
+`~/.local/state/tuna-nested/<socket>`). The script builds both binaries,
+starts `tuna-compositor` on a private socket, and records
 `nested.log` plus `compositor.pid` in the artifacts dir. Needs a host
 Wayland/X session with EGL (llvmpipe is fine); headless CI cannot run
 it — automation covers the same paths headless (see below).
 
 ## Crash and reconnect journey
 
-1. Launch with `scripts/roost-nested run`. The nested window appears;
+1. Launch with `scripts/tuna-nested run`. The nested window appears;
    the panel attaches as a top strip.
 2. Open application clients inside the session (e.g.
    `WAYLAND_DISPLAY=<socket> <app>` from another terminal).
-3. Kill the shell: `scripts/roost-nested kill-shell --socket <socket>`.
+3. Kill the shell: `scripts/tuna-nested kill-shell --socket <socket>`.
    Application windows stay mapped and the background shifts to deep
    red: the compositor-owned recovery overlay covers the session.
 4. The compositor respawns the shell within its finite restart budget
@@ -39,7 +39,7 @@ it — automation covers the same paths headless (see below).
 `WAYLAND_DISPLAY` points at the private socket for the compositor
 process and its shell child only. The parent shell and the host
 session are never mutated; shutdown restores the previous value.
-`ROOST_CONTROL_SOCKET` hands the shell child its control socket path
+`TUNA_CONTROL_SOCKET` hands the shell child its control socket path
 (overview feed); without it the panel runs with an empty overview.
 Neither variable is exported by the launcher into your shell.
 
@@ -76,18 +76,18 @@ input, focus, and frame paths never wait on it.
 ### Reading `nested.log`
 
 The compositor and its shell child both write to `nested.log`. Compositor
-lines start with `roost-compositor:`; the default shell's fatal errors
-start with `roost-shell-host:`. The lines that matter most:
+lines start with `tuna-compositor:`; the default shell's fatal errors
+start with `tuna-shell-host:`. The lines that matter most:
 
 | Line | Meaning |
 |---|---|
-| `roost-compositor: nested session on <socket> (<w>x<h>)` | Arguments parsed; the compositor is about to open its backend and socket. It prints before any backend error, so it does not prove the session started. |
-| `roost-compositor: nested backend unavailable: ...` | The window/GLES backend could not start: no host display or no EGL. See below. |
-| `roost-compositor: nested socket failed: ...` | The Wayland socket could not be created. See below. |
-| `roost-compositor: shell supervision: ShellExited { code: ... }` | The shell child exited. `code: None` means a signal killed it (for example `kill-shell`). |
-| `roost-compositor: shell supervision: RestartScheduled { delay_ms: N }` | A restart is armed after `N` ms of backoff; budget remains. |
-| `roost-compositor: shell supervision: BudgetExhausted` | The restart budget is spent; the shell stays down until you press R on the overlay. |
-| `roost-compositor: shutdown after N frames, N clients, N shell restarts` | Clean exit, with the session's totals. |
+| `tuna-compositor: nested session on <socket> (<w>x<h>)` | Arguments parsed; the compositor is about to open its backend and socket. It prints before any backend error, so it does not prove the session started. |
+| `tuna-compositor: nested backend unavailable: ...` | The window/GLES backend could not start: no host display or no EGL. See below. |
+| `tuna-compositor: nested socket failed: ...` | The Wayland socket could not be created. See below. |
+| `tuna-compositor: shell supervision: ShellExited { code: ... }` | The shell child exited. `code: None` means a signal killed it (for example `kill-shell`). |
+| `tuna-compositor: shell supervision: RestartScheduled { delay_ms: N }` | A restart is armed after `N` ms of backoff; budget remains. |
+| `tuna-compositor: shell supervision: BudgetExhausted` | The restart budget is spent; the shell stays down until you press R on the overlay. |
+| `tuna-compositor: shutdown after N frames, N clients, N shell restarts` | Clean exit, with the session's totals. |
 
 Lines naming a D-Bus service (`serving ...`, `... is taken; ... off`) say
 whether the compositor claimed a GNOME service name on the session bus.
@@ -135,7 +135,7 @@ name behind.
 ### The nested window does not appear
 
 1. Look for `nested session on` in `nested.log`. If it is missing, the
-   build or the launch failed; the terminal running `scripts/roost-nested
+   build or the launch failed; the terminal running `scripts/tuna-nested
    run` shows the cargo error.
 2. If the log ends with `nested backend unavailable` or `nested socket
    failed`, see the sections above.
@@ -144,13 +144,13 @@ name behind.
 
    ```sh
    Xvfb :98 -screen 0 1280x800x24 &
-   DISPLAY=:98 scripts/roost-nested run
+   DISPLAY=:98 scripts/tuna-nested run
    ```
 
 ### The panel does not appear, or the background turns deep red
 
 Deep red is the recovery overlay: the shell is not running.
-`scripts/roost-nested shell-pid --socket <socket>` prints
+`scripts/tuna-nested shell-pid --socket <socket>` prints
 `shell not running (overlay covers the session)` while it is down.
 `nested.log` then shows `ShellExited` lines with the shell's own error
 just before them. A shell started on a compositor without
@@ -158,13 +158,13 @@ just before them. A shell started on a compositor without
 rather than drawing a misplaced surface. After `BudgetExhausted` the
 session stays up without a shell until you press R.
 
-`scripts/roost-nested run` starts `roost-shell-host`. To run the GTK shell
+`scripts/tuna-nested run` starts `tuna-shell-host`. To run the GTK shell
 ([ADR 0006](adr/0006-gtk4-libadwaita-shell.md)) instead, build it and pass
 it explicitly:
 
 ```sh
-cargo build -p roost-shell-gtk
-scripts/roost-nested run --shell-bin target/debug/roost-shell-gtk
+cargo build -p tuna-shell-gtk
+scripts/tuna-nested run --shell-bin target/debug/tuna-shell-gtk
 ```
 
 ### Filing a bug
@@ -176,7 +176,7 @@ Open an issue with:
   revisions and counts only (see the redaction note above), but the shell
   child's stderr lands in the same file, so read it before attaching;
 - the commit (`git rev-parse HEAD`) and the output of
-  `target/debug/roost-compositor --version`;
+  `target/debug/tuna-compositor --version`;
 - the host: distro, kernel, whether you ran inside Wayland, X11 or Xvfb,
   and the GPU driver or Mesa version;
 - for a proof script failure, the whole artifacts directory, which also

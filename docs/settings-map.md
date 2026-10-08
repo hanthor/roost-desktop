@@ -57,7 +57,7 @@ GNOME 51 `org.gnome.desktop.a11y.interface reduced-motion` is read live and comb
 | File | Status | Notes |
 |---|---|---|
 | ~/.config/monitors.xml | Honored | The arrangement for the lit connectors sets each output's scale, position and primary monitor (hardware sessions). Proof D-SCALE |
-| GNOME Settings' Displays panel | Partial | ApplyMonitorsConfig over org.gnome.Mutter.DisplayConfig changes scale and position live; "keep changes" saves to ~/.config/roost/monitors.xml, which Tuna Desktop reads before GNOME's file (GNOME's own file is never rewritten). Proof G-DISPLAY-SETTINGS |
+| GNOME Settings' Displays panel | Partial | ApplyMonitorsConfig over org.gnome.Mutter.DisplayConfig changes scale and position live; "keep changes" saves to ~/.config/tuna/monitors.xml, which Tuna Desktop reads before GNOME's file (GNOME's own file is never rewritten). Proof G-DISPLAY-SETTINGS |
 
 ## Window management and input
 

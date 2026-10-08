@@ -29,7 +29,7 @@ pub enum Request {
         reply: mpsc::Sender<Option<PathBuf>>,
     },
     /// Every window of the screenshot UI's window selector, each saved
-    /// into `directory` (Roost's `ScreenshotWindows`).
+    /// into `directory` (Tuna Desktop's `ScreenshotWindows`).
     Windows {
         directory: PathBuf,
         reply: mpsc::Sender<Vec<WindowShot>>,
@@ -73,7 +73,7 @@ struct Service {
     to_loop: calloop::channel::Sender<Request>,
 }
 
-/// Roost's own addition on the same object: the screenshot UI's window
+/// Tuna Desktop's own addition on the same object: the screenshot UI's window
 /// selector needs every window's picture, which GNOME Shell takes
 /// in-process (`paint_to_content`). Window contents are no more private
 /// than the screen, which `org.gnome.Shell.Screenshot` already hands out.
@@ -86,7 +86,7 @@ struct WindowsService {
 /// x, y, width, height, path.
 pub type WindowShotReply = (u64, String, bool, i32, i32, i32, i32, String);
 
-#[zbus::interface(name = "org.roost.Screenshot")]
+#[zbus::interface(name = "org.tuna.Screenshot")]
 impl WindowsService {
     /// `(directory) -> a(tsbiiiis)`: the active workspace's windows,
     /// each saved as a PNG into `directory`, with their selector slots.
@@ -148,7 +148,7 @@ impl Service {
     }
 
     /// `(include_frame, include_cursor, flash, filename)`: the focused
-    /// window. Roost windows draw their own frames, so it is always in.
+    /// window. Tuna Desktop windows draw their own frames, so it is always in.
     async fn screenshot_window(
         &self,
         _include_frame: bool,
@@ -192,7 +192,7 @@ impl Service {
 pub fn start(authority: crate::capture_security::Authority) -> calloop::channel::Channel<Request> {
     let (to_loop, from_dbus) = calloop::channel::channel();
     let _ = std::thread::Builder::new()
-        .name("roost-screenshot".into())
+        .name("tuna-screenshot".into())
         .spawn(move || {
             let conn = match zbus::blocking::connection::Builder::session()
                 .and_then(|b| {
@@ -209,20 +209,20 @@ pub fn start(authority: crate::capture_security::Authority) -> calloop::channel:
             {
                 Ok(conn) => conn,
                 Err(e) => {
-                    eprintln!("roost-compositor: screenshot service: no session bus: {e}");
+                    eprintln!("tuna-compositor: screenshot service: no session bus: {e}");
                     return;
                 }
             };
             let flags = zbus::fdo::RequestNameFlags::DoNotQueue.into();
             match conn.request_name_with_flags(NAME, flags) {
                 Ok(zbus::fdo::RequestNameReply::PrimaryOwner) => {
-                    eprintln!("roost-compositor: screenshot service on {NAME}");
+                    eprintln!("tuna-compositor: screenshot service on {NAME}");
                     // The connection serves from its own executor; keep it.
                     loop {
                         std::thread::park();
                     }
                 }
-                _ => eprintln!("roost-compositor: {NAME} is taken; screenshot service off"),
+                _ => eprintln!("tuna-compositor: {NAME} is taken; screenshot service off"),
             }
         });
     from_dbus

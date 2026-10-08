@@ -1,33 +1,33 @@
 # CI-only identical image, different GDM session; no shipping defaults changed.
-ARG BASE_IMAGE=localhost/marlin-roost-preview:perf
+ARG BASE_IMAGE=localhost/marlin-tuna-preview:perf
 FROM ${BASE_IMAGE}
 ARG DESKTOP
 COPY packaging/marlin/vm-lane/custom.conf /etc/gdm/custom.conf
-COPY packaging/marlin/vm-lane/roost-vm-lane.tmpfiles /usr/lib/tmpfiles.d/roost-vm-lane.conf
-COPY packaging/marlin/vm-lane/journald.conf /usr/lib/systemd/journald.conf.d/90-roost-vm-lane.conf
-COPY packaging/marlin/vm-lane/kargs.toml /usr/lib/bootc/kargs.d/90-roost-vm-lane.toml
-COPY scripts/lib/roost-perf-guest.py /usr/libexec/roost-perf-guest
-COPY scripts/roost-frame-pacer-build /tmp/frame-pacer/scripts/roost-frame-pacer-build
-COPY scripts/lib/roost-frame-pacer.c /tmp/frame-pacer/scripts/lib/roost-frame-pacer.c
-COPY packaging/marlin/perf/roost-perf-phase /usr/libexec/roost-perf-phase
-COPY packaging/marlin/perf/roost-kernel-trace /usr/libexec/roost-kernel-trace
-COPY packaging/marlin/perf/roost-gnome-profiler /usr/libexec/roost-gnome-profiler
+COPY packaging/marlin/vm-lane/tuna-vm-lane.tmpfiles /usr/lib/tmpfiles.d/tuna-vm-lane.conf
+COPY packaging/marlin/vm-lane/journald.conf /usr/lib/systemd/journald.conf.d/90-tuna-vm-lane.conf
+COPY packaging/marlin/vm-lane/kargs.toml /usr/lib/bootc/kargs.d/90-tuna-vm-lane.toml
+COPY scripts/lib/tuna-perf-guest.py /usr/libexec/tuna-perf-guest
+COPY scripts/tuna-frame-pacer-build /tmp/frame-pacer/scripts/tuna-frame-pacer-build
+COPY scripts/lib/tuna-frame-pacer.c /tmp/frame-pacer/scripts/lib/tuna-frame-pacer.c
+COPY packaging/marlin/perf/tuna-perf-phase /usr/libexec/tuna-perf-phase
+COPY packaging/marlin/perf/tuna-kernel-trace /usr/libexec/tuna-kernel-trace
+COPY packaging/marlin/perf/tuna-gnome-profiler /usr/libexec/tuna-gnome-profiler
 COPY scripts/lib/gnome_reference.py /usr/libexec/gnome_reference.py
-COPY packaging/marlin/perf/roost-gnome-reference /usr/libexec/roost-gnome-reference
+COPY packaging/marlin/perf/tuna-gnome-reference /usr/libexec/tuna-gnome-reference
 COPY scripts/lib/perf_trace_diagnostics.py /usr/libexec/perf_trace_diagnostics.py
 COPY scripts/lib/gnome_failed_capture.py /usr/libexec/gnome_failed_capture.py
-COPY packaging/marlin/perf/roost-perf.service /usr/lib/systemd/system/roost-perf.service
-RUN case "$DESKTOP" in gnome|roost) ;; *) exit 1 ;; esac && \
-    /usr/libexec/roost-pinned-baseline && \
+COPY packaging/marlin/perf/tuna-perf.service /usr/lib/systemd/system/tuna-perf.service
+RUN case "$DESKTOP" in gnome|tuna) ;; *) exit 1 ;; esac && \
+    /usr/libexec/tuna-pinned-baseline && \
     pacman -S --needed --noconfirm python python-gobject wayland-utils qemu-guest-agent gcc pkgconf wayland-protocols && \
-    /usr/libexec/roost-pinned-baseline && \
-    bash /tmp/frame-pacer/scripts/roost-frame-pacer-build /tmp/frame-pacer/build && \
-    install -Dm755 /tmp/frame-pacer/build/roost-frame-pacer /usr/libexec/roost-frame-pacer && \
+    /usr/libexec/tuna-pinned-baseline && \
+    bash /tmp/frame-pacer/scripts/tuna-frame-pacer-build /tmp/frame-pacer/build && \
+    install -Dm755 /tmp/frame-pacer/build/tuna-frame-pacer /usr/libexec/tuna-frame-pacer && \
     rm -rf /tmp/frame-pacer && \
-    chmod 0755 /usr/libexec/roost-perf-phase /usr/libexec/roost-gnome-profiler /usr/libexec/roost-kernel-trace && \
-    useradd -M -d /home/roost-test -s /bin/bash -U roost-test && \
-    echo 'roost-test:roost' | chpasswd && \
-    sed -i "s/DefaultSession=roost.desktop/DefaultSession=${DESKTOP}.desktop/" /etc/gdm/custom.conf && \
-    sed -i "s/Session=roost/Session=${DESKTOP}/" /usr/lib/tmpfiles.d/roost-vm-lane.conf && \
+    chmod 0755 /usr/libexec/tuna-perf-phase /usr/libexec/tuna-gnome-profiler /usr/libexec/tuna-kernel-trace && \
+    useradd -M -d /home/tuna-test -s /bin/bash -U tuna-test && \
+    echo 'tuna-test:tuna' | chpasswd && \
+    sed -i "s/DefaultSession=tuna.desktop/DefaultSession=${DESKTOP}.desktop/" /etc/gdm/custom.conf && \
+    sed -i "s/Session=tuna/Session=${DESKTOP}/" /usr/lib/tmpfiles.d/tuna-vm-lane.conf && \
     test -f "/usr/share/wayland-sessions/${DESKTOP}.desktop" && \
-    systemctl enable roost-perf.service qemu-guest-agent.service
+    systemctl enable tuna-perf.service qemu-guest-agent.service

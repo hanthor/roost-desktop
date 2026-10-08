@@ -1,4 +1,4 @@
-# roost-wallpaper
+# tuna-wallpaper
 
 Wallpaper decoding for the compositor: any format the `image` crate reads,
 plus JPEG XL through `jxl-oxide`, cover-scaled to an output.
@@ -20,7 +20,7 @@ seconds to decode, which would stall nested sessions and proofs.
 
 ## Dependents
 
-`roost-compositor`, through its `wallpaper` module.
+`tuna-compositor`, through its `wallpaper` module.
 
 ## Docs
 

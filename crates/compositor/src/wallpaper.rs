@@ -9,13 +9,13 @@
 //! failure — missing file, unparsable URI, undecodable image,
 //! oversized output — degrades to the solid clear, never an error.
 
-use roost_shell_control::background::{BackgroundMetadata, PictureSettings};
-use roost_wallpaper::background::Geometry;
 use std::ffi::OsString;
 use std::io::Read;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::PathBuf;
+use tuna_shell_control::background::{BackgroundMetadata, PictureSettings};
+use tuna_wallpaper::background::Geometry;
 
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::memory::{
@@ -26,7 +26,7 @@ use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Logical, Physical, Point, Rectangle, Size, Transform};
 
 /// Drop-file name in the runtime dir carrying the wallpaper URI.
-pub const WALLPAPER_FILE: &str = "roost-wallpaper";
+pub const WALLPAPER_FILE: &str = "tuna-wallpaper";
 /// Largest output area (in pixels) a wallpaper is scaled to; bigger
 /// outputs keep the solid clear rather than burning memory.
 pub const MAX_WALLPAPER_AREA: u64 = 7680 * 4320;
@@ -254,7 +254,7 @@ impl Wallpaper {
             let (send, result) = std::sync::mpsc::channel();
             let path = uri.to_owned();
             if std::thread::Builder::new()
-                .name("roost-wallpaper-identity".into())
+                .name("tuna-wallpaper-identity".into())
                 .spawn(move || {
                     let _ = send.send(FileIdentity::for_uri(&path));
                 })
@@ -295,12 +295,12 @@ impl Wallpaper {
             let (send, result) = std::sync::mpsc::channel();
             let job = uri.to_owned();
             let spawned = std::thread::Builder::new()
-                .name("roost-wallpaper".into())
+                .name("tuna-wallpaper".into())
                 .spawn(move || {
                     let started = std::time::Instant::now();
                     let pixels = load_static_wallpaper(&job, settings, geometry, identity);
                     eprintln!(
-                        "roost-compositor: wallpaper {} for {}x{} in {} ms",
+                        "tuna-compositor: wallpaper {} for {}x{} in {} ms",
                         if pixels.is_some() {
                             "decoded"
                         } else {
@@ -394,7 +394,7 @@ impl Wallpaper {
     }
 
     /// GNOME's lock-screen background over a `w` x `h` output: the
-    /// wallpaper blurred and dimmed (`roost_wallpaper::LOCK_*`), cached
+    /// wallpaper blurred and dimmed (`tuna_wallpaper::LOCK_*`), cached
     /// per URI and size. `None` while the picture is still decoding or
     /// when there is none (the caller clears to the dimmed
     /// primary-color).
@@ -417,12 +417,12 @@ impl Wallpaper {
                 .iter()
                 .find(|l| l.uri == uri && l.size == Some(output))
                 .and_then(|l| l.pixels.as_deref())?;
-            let pixels = roost_wallpaper::blur_dim_argb(
+            let pixels = tuna_wallpaper::blur_dim_argb(
                 full,
                 w as u32,
                 h as u32,
-                roost_wallpaper::LOCK_BLUR_SIGMA,
-                roost_wallpaper::LOCK_BRIGHTNESS,
+                tuna_wallpaper::LOCK_BLUR_SIGMA,
+                tuna_wallpaper::LOCK_BRIGHTNESS,
             )?;
             if self.locked.len() >= MAX_CARDS {
                 self.locked.remove(0);
@@ -525,7 +525,7 @@ impl Wallpaper {
         if lock && !lock_uri.is_empty() {
             uri = lock_uri.to_owned();
         }
-        let identity = if settings.placement == roost_shell_control::background::Placement::None {
+        let identity = if settings.placement == tuna_shell_control::background::Placement::None {
             // GNOME NONE has no source file. In particular, an ignored lock
             // URI must not schedule a network/FUSE identity task or delay its
             // pure color/gradient. Empty URI also makes every downstream cache
@@ -602,14 +602,14 @@ impl Wallpaper {
             let scale = f64::from(rendered.w) / f64::from(output.w.max(1));
             let s = scale as f32;
             let top = work_top.clamp(0, output.h - 1) as u32;
-            let rendered = roost_wallpaper::card(
+            let rendered = tuna_wallpaper::card(
                 full.map(|p| (p, output.w as u32, output.h as u32)),
                 (0, top, output.w as u32, output.h as u32 - top),
                 color.unwrap_or([0x14, 0x17, 0x1c]),
                 rendered.w as u32,
                 rendered.h as u32,
                 30.0 * s,
-                roost_wallpaper::Shadow {
+                tuna_wallpaper::Shadow {
                     dy: 4.0 * s,
                     blur: 16.0 * s,
                     spread: 4.0 * s,
@@ -714,10 +714,10 @@ fn load_static_wallpaper(
     if !geometry.valid() {
         return None;
     }
-    if settings.placement == roost_shell_control::background::Placement::None {
+    if settings.placement == tuna_shell_control::background::Placement::None {
         // This request is a pure color/gradient, including for the lock screen.
         // Do not observe or decode its unused source, or consult an image cache.
-        return roost_wallpaper::background::render(None, settings, geometry);
+        return tuna_wallpaper::background::render(None, settings, geometry);
     }
     if FileIdentity::for_uri(uri) != expected {
         return None;
@@ -749,7 +749,7 @@ fn load_static_wallpaper(
             }
         }
     }
-    let image = if settings.placement == roost_shell_control::background::Placement::None {
+    let image = if settings.placement == tuna_shell_control::background::Placement::None {
         None
     } else if let Some(expected) = expected {
         let mut file = std::fs::OpenOptions::new()
@@ -774,11 +774,11 @@ fn load_static_wallpaper(
         {
             return None;
         }
-        roost_wallpaper::decode(&bytes).map(|im| im.to_rgba8())
+        tuna_wallpaper::decode(&bytes).map(|im| im.to_rgba8())
     } else {
         None
     };
-    let pixels = roost_wallpaper::background::render(image.as_ref(), settings, geometry)?;
+    let pixels = tuna_wallpaper::background::render(image.as_ref(), settings, geometry)?;
     if FileIdentity::for_uri(uri) != original_identity {
         return None;
     }
@@ -815,7 +815,7 @@ fn static_cache_path(
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
     Some(
-        base.join("roost/wallpaper")
+        base.join("tuna/wallpaper")
             .join(format!("static-{:016x}.argb", hash.finish())),
     )
 }
@@ -839,7 +839,7 @@ fn load_wallpaper(uri: &str, output: Size<i32, Logical>) -> Option<Vec<u8>> {
             return Some(cached);
         }
     }
-    let pixels = roost_wallpaper::decode_cover_argb(&bytes, w, h)?;
+    let pixels = tuna_wallpaper::decode_cover_argb(&bytes, w, h)?;
     if let Some(cache) = cache {
         let tmp = cache.with_extension("tmp");
         if cache
@@ -875,7 +875,7 @@ fn cache_path(path: &std::path::Path, w: u32, h: u32) -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
     Some(
-        base.join("roost")
+        base.join("tuna")
             .join("wallpaper")
             .join(format!("{:016x}-{w}x{h}.argb", hasher.finish())),
     )
@@ -1020,11 +1020,9 @@ mod tests {
         let output = Size::<i32, Logical>::from((64, 64));
         assert!(load_wallpaper("", output).is_none());
         assert!(load_wallpaper("http://example.com/wall.png", output).is_none());
-        assert!(load_wallpaper(
-            "file:///definitely/missing/roost-test-wallpaper.png",
-            output
-        )
-        .is_none());
+        assert!(
+            load_wallpaper("file:///definitely/missing/tuna-test-wallpaper.png", output).is_none()
+        );
         let dir = tempfile::TempDir::new().expect("tempdir");
         let junk = dir.path().join("junk.png");
         std::fs::write(&junk, b"not an image at all").expect("write junk");
@@ -1148,8 +1146,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let _runtime = RuntimeDirGuard::point_at(dir.path());
         let picture = PictureSettings {
-            placement: roost_shell_control::background::Placement::None,
-            shading: roost_shell_control::background::Shading::Horizontal,
+            placement: tuna_shell_control::background::Placement::None,
+            shading: tuna_shell_control::background::Shading::Horizontal,
             primary: [240, 0, 0],
             secondary: [0, 0, 240],
         };
@@ -1191,8 +1189,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let _runtime = RuntimeDirGuard::point_at(dir.path());
         let mut picture = PictureSettings {
-            placement: roost_shell_control::background::Placement::None,
-            shading: roost_shell_control::background::Shading::Horizontal,
+            placement: tuna_shell_control::background::Placement::None,
+            shading: tuna_shell_control::background::Shading::Horizontal,
             primary: [240, 0, 0],
             secondary: [0, 0, 240],
         };
@@ -1238,7 +1236,7 @@ mod tests {
         let (horizontal_key, horizontal) = render(&mut wallpaper, test_geometry());
         assert_eq!(&horizontal[..4], &[0, 0, 240, 255]);
         assert_eq!(&horizontal[7 * 4..8 * 4], &[240, 0, 0, 255]);
-        picture.shading = roost_shell_control::background::Shading::Vertical;
+        picture.shading = tuna_shell_control::background::Shading::Vertical;
         publish(picture);
         let (vertical_key, vertical) = render(&mut wallpaper, test_geometry());
         assert_ne!(horizontal_key, vertical_key);
@@ -1288,7 +1286,7 @@ mod tests {
             version: 1,
             desktop: PictureSettings::default(),
             lock: PictureSettings {
-                placement: roost_shell_control::background::Placement::Centered,
+                placement: tuna_shell_control::background::Placement::Centered,
                 ..PictureSettings::default()
             },
         };
@@ -1327,7 +1325,7 @@ mod tests {
             initial, locked,
             "independent lock placement must not reuse desktop pixels"
         );
-        m.desktop.shading = roost_shell_control::background::Shading::Horizontal;
+        m.desktop.shading = tuna_shell_control::background::Shading::Horizontal;
         publish(&m);
         let changed = wallpaper.refresh((8, 8).into(), test_geometry()).unwrap();
         assert_ne!(

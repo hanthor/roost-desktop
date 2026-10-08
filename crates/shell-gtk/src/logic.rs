@@ -515,15 +515,15 @@ mod tests {
 /// on name, generic name, keywords, or id; ties keep discovery order.
 /// Case-insensitive; a blank query matches nothing.
 pub fn rank_apps<'a>(
-    apps: &'a [roost_shell_host::apps::AppEntry],
+    apps: &'a [tuna_shell_host::apps::AppEntry],
     query: &str,
     limit: usize,
-) -> Vec<&'a roost_shell_host::apps::AppEntry> {
+) -> Vec<&'a tuna_shell_host::apps::AppEntry> {
     let needle = query.trim().to_lowercase();
     if needle.is_empty() {
         return Vec::new();
     }
-    let mut scored: Vec<(u8, usize, &roost_shell_host::apps::AppEntry)> = apps
+    let mut scored: Vec<(u8, usize, &tuna_shell_host::apps::AppEntry)> = apps
         .iter()
         .enumerate()
         .filter_map(|(i, app)| {
@@ -577,7 +577,7 @@ pub const DEFAULT_FAVORITES: &[&str] = &[
 #[cfg(test)]
 mod search_tests {
     use super::*;
-    use roost_shell_host::apps::AppEntry;
+    use tuna_shell_host::apps::AppEntry;
 
     fn app(id: &str, name: &str, generic: Option<&str>, keywords: &[&str]) -> AppEntry {
         AppEntry {

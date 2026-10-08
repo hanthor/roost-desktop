@@ -2,10 +2,10 @@
 //! xdg-desktop-portal-gnome shows in its "Share a window" picker, and
 //! the running-apps list it uses for app-scoped sharing. Adapted from
 //! niri's `src/dbus/gnome_shell_introspect.rs` (GPL-3.0-or-later, like
-//! Roost), with GNOME Shell's interface shape (`shell-introspect.c`):
+//! Tuna Desktop), with GNOME Shell's interface shape (`shell-introspect.c`):
 //! version 3, `WindowsChanged` on every change, and the same caller
 //! policy, since window titles are private. Only the desktop portal
-//! may ask, unless `ROOST_INTROSPECT_UNRESTRICTED=1` (GNOME's "unsafe
+//! may ask, unless `TUNA_INTROSPECT_UNRESTRICTED=1` (GNOME's "unsafe
 //! mode", for tests and development).
 
 use std::collections::{HashMap, HashSet};
@@ -20,7 +20,7 @@ use crate::mutter::{WindowSnapshot, Windows};
 
 pub const NAME: &str = "org.gnome.Shell.Introspect";
 pub const PATH: &str = "/org/gnome/Shell/Introspect";
-pub const UNRESTRICTED_ENV: &str = "ROOST_INTROSPECT_UNRESTRICTED";
+pub const UNRESTRICTED_ENV: &str = "TUNA_INTROSPECT_UNRESTRICTED";
 
 struct Service {
     authority: crate::capture_security::Authority,
@@ -273,7 +273,7 @@ pub fn start(screen_size: (i32, i32), authority: crate::capture_security::Author
     };
     let slot = handle.conn.clone();
     let _ = std::thread::Builder::new()
-        .name("roost-introspect".into())
+        .name("tuna-introspect".into())
         .spawn(move || {
             let conn = match zbus::blocking::connection::Builder::session()
                 .and_then(|b| b.serve_at(PATH, service))
@@ -281,20 +281,20 @@ pub fn start(screen_size: (i32, i32), authority: crate::capture_security::Author
             {
                 Ok(conn) => conn,
                 Err(e) => {
-                    eprintln!("roost-compositor: introspect: no session bus: {e}");
+                    eprintln!("tuna-compositor: introspect: no session bus: {e}");
                     return;
                 }
             };
             let flags = zbus::fdo::RequestNameFlags::DoNotQueue.into();
             match conn.request_name_with_flags(NAME, flags) {
                 Ok(zbus::fdo::RequestNameReply::PrimaryOwner) => {
-                    eprintln!("roost-compositor: serving {NAME}");
+                    eprintln!("tuna-compositor: serving {NAME}");
                     let _ = slot.set(conn);
                     loop {
                         std::thread::park();
                     }
                 }
-                _ => eprintln!("roost-compositor: {NAME} is taken; introspection off"),
+                _ => eprintln!("tuna-compositor: {NAME} is taken; introspection off"),
             }
         });
     handle

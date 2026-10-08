@@ -16,7 +16,7 @@ use crate::tiles::{Tile, TileState};
 /// Popup band height below the strip; the panel surface grows by this
 /// much while a popup is open (exclusive zone stays at strip height).
 /// Sized for the calendar's day grid plus its two footer toggle rows
-/// (clock format above, Roost prefs below).
+/// (clock format above, Tuna Desktop prefs below).
 pub const POPUP_HEIGHT: i32 = 264;
 
 /// Integer rectangle for hit-testing painted regions.
@@ -303,7 +303,7 @@ fn paint_box(pixels: &mut [u8], stride: usize, rect: &Rect) {
 /// network menu), `sound` carries the sound tile's toggle rows
 /// (painted only under the sound menu), `clock_format` paints the
 /// calendar's clock-format footer row, and `show_weekday` paints the
-/// Roost-prefs footer row below it. No-ops on degenerate sizes.
+/// Tuna-prefs footer row below it. No-ops on degenerate sizes.
 #[allow(clippy::too_many_arguments)]
 pub fn paint_popup(
     pixels: &mut [u8],
@@ -374,7 +374,7 @@ pub fn calendar_weekday_row(rect: &Rect) -> Rect {
 }
 
 /// Upper footer toggle row rect: above the prefs row with the same
-/// small gap. The clock-format toggle lives here; the Roost prefs
+/// small gap. The clock-format toggle lives here; the Tuna Desktop prefs
 /// toggle takes the bottom row.
 pub fn calendar_clock_row(rect: &Rect) -> Rect {
     let below = calendar_weekday_row(rect);
@@ -402,7 +402,7 @@ pub fn clock_format_row(format: ClockFormat) -> TileRow {
     }
 }
 
-/// Calendar Roost-prefs toggle row: names the flip, like the menu
+/// Calendar Tuna-prefs toggle row: names the flip, like the menu
 /// rows. Always enabled — the pref always has a value, and a failed
 /// persist keeps the snapshot quietly.
 pub fn clock_weekday_row(show_weekday: bool) -> TileRow {
@@ -417,7 +417,7 @@ pub fn clock_weekday_row(show_weekday: bool) -> TileRow {
 }
 
 /// Month title, weekday header, day grid with today inverted, and the
-/// two footer toggle rows (clock format above, Roost prefs below).
+/// two footer toggle rows (clock format above, Tuna Desktop prefs below).
 fn paint_calendar(
     pixels: &mut [u8],
     stride: usize,
@@ -761,7 +761,7 @@ mod tests {
         assert!(layout.tiles[0].x + layout.tiles[0].w >= right - 8);
         assert_eq!(layout.tile_at(right - DOT_SIZE, 16), Some(0));
         assert_eq!(layout.tile_at(640, 16), None);
-        // scripts/roost-capture clicks here for the network menu.
+        // scripts/tuna-capture clicks here for the network menu.
         assert_eq!(layout.tile_at(1263, 16), Some(0));
     }
 

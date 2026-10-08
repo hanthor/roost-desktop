@@ -1,8 +1,8 @@
-//! Roost-owned prefs: shell knobs outside the shared desktop schema.
+//! Tuna-owned prefs: shell knobs outside the shared desktop schema.
 //!
 //! Clock format, wallpaper, and icon theme live in the shared settings
 //! the shell shares with GNOME apps ([`crate::settings`]); this file
-//! is home to the small Roost-only remainder (bar clock extras the
+//! is home to the small Tuna-only remainder (bar clock extras the
 //! shared schema never covered). Persistence mirrors the notification
 //! queue: a versioned JSON file under the XDG state dir, written
 //! atomically (temp file plus rename) on every change, so a restart
@@ -20,15 +20,15 @@ const PREFS_VERSION: u64 = 1;
 /// Prefs file name under the XDG state dir.
 pub const PREFS_FILE: &str = "prefs.json";
 
-/// Roost-only display knobs. Kept tiny on purpose: only options the
+/// Tuna-only display knobs. Kept tiny on purpose: only options the
 /// shared desktop schema does not cover belong here.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RoostPrefs {
+pub struct TunaPrefs {
     /// Prefix the bar clock with the two-letter weekday (`mo 12:34`).
     pub clock_show_weekday: bool,
 }
 
-impl Default for RoostPrefs {
+impl Default for TunaPrefs {
     /// Plain clock, as before prefs existed.
     fn default() -> Self {
         Self {
@@ -45,9 +45,9 @@ pub fn system_path() -> Option<PathBuf> {
 
 /// Load from the system prefs file, creating its dir when absent.
 /// Missing, corrupt, or version-skewed files read as defaults.
-pub fn load_system() -> RoostPrefs {
+pub fn load_system() -> TunaPrefs {
     let Some(path) = system_path() else {
-        return RoostPrefs::default();
+        return TunaPrefs::default();
     };
     let _ = fs::create_dir_all(path.parent().expect("prefs file has a parent"));
     load(&path)
@@ -56,23 +56,23 @@ pub fn load_system() -> RoostPrefs {
 /// Load from `path`; missing or unreadable files read as defaults.
 /// Unknown fields are ignored so a newer shell never breaks an
 /// older file it can still honor.
-pub fn load(path: &Path) -> RoostPrefs {
+pub fn load(path: &Path) -> TunaPrefs {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
-        Err(_) => return RoostPrefs::default(),
+        Err(_) => return TunaPrefs::default(),
     };
     match serde_json::from_str(&text) {
         Ok(doc) => decode(&doc),
-        Err(_) => RoostPrefs::default(),
+        Err(_) => TunaPrefs::default(),
     }
 }
 
 /// Decode a prefs document; version skew reads as defaults.
-fn decode(doc: &serde_json::Value) -> RoostPrefs {
+fn decode(doc: &serde_json::Value) -> TunaPrefs {
     if doc.get("version").and_then(serde_json::Value::as_u64) != Some(PREFS_VERSION) {
-        return RoostPrefs::default();
+        return TunaPrefs::default();
     }
-    RoostPrefs {
+    TunaPrefs {
         clock_show_weekday: doc
             .get("clock_show_weekday")
             .and_then(serde_json::Value::as_bool)
@@ -83,7 +83,7 @@ fn decode(doc: &serde_json::Value) -> RoostPrefs {
 /// Persist to `path` atomically: write plus rename, so readers never
 /// see a torn file. Creates parent dirs; surfaces I/O errors to the
 /// caller (the in-memory prefs stay regardless).
-pub fn save(prefs: &RoostPrefs, path: &Path) -> std::io::Result<()> {
+pub fn save(prefs: &TunaPrefs, path: &Path) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -105,13 +105,13 @@ mod tests {
 
     #[test]
     fn defaults_hold_a_plain_clock() {
-        assert!(!RoostPrefs::default().clock_show_weekday);
+        assert!(!TunaPrefs::default().clock_show_weekday);
     }
 
     #[test]
     fn missing_file_reads_as_defaults() {
         let dir = tempfile::tempdir().expect("tempdir");
-        assert_eq!(load(&dir.path().join(PREFS_FILE)), RoostPrefs::default());
+        assert_eq!(load(&dir.path().join(PREFS_FILE)), TunaPrefs::default());
     }
 
     #[test]
@@ -119,16 +119,16 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(PREFS_FILE);
         fs::write(&path, "{not json").expect("write");
-        assert_eq!(load(&path), RoostPrefs::default());
+        assert_eq!(load(&path), TunaPrefs::default());
         fs::write(&path, r#"{"version": 999, "clock_show_weekday": true}"#).expect("write");
-        assert_eq!(load(&path), RoostPrefs::default());
+        assert_eq!(load(&path), TunaPrefs::default());
     }
 
     #[test]
     fn save_round_trips_and_writes_atomically() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(PREFS_FILE);
-        let prefs = RoostPrefs {
+        let prefs = TunaPrefs {
             clock_show_weekday: true,
         };
         save(&prefs, &path).expect("save");

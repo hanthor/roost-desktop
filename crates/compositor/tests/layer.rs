@@ -12,14 +12,14 @@
 
 use std::os::unix::net::UnixStream;
 
-use roost_compositor::TestCompositor;
-use roost_shell_control::{OVERVIEW_NAMESPACE, PANEL_HEIGHT, PANEL_NAMESPACE};
 use smithay::wayland::{
     compositor::with_states,
     shell::wlr_layer::{
         Anchor, ExclusiveZone, KeyboardInteractivity, Layer, LayerSurfaceCachedState,
     },
 };
+use tuna_compositor::TestCompositor;
+use tuna_shell_control::{OVERVIEW_NAMESPACE, PANEL_HEIGHT, PANEL_NAMESPACE};
 use wayland_client::{
     protocol::{
         wl_callback::WlCallback, wl_compositor::WlCompositor, wl_output::WlOutput,
@@ -365,8 +365,8 @@ fn destroyed_panel_leaves_no_record() {
 
 #[test]
 fn bound_panel_arranges_at_its_output_size_and_offset() {
-    use roost_compositor::State;
     use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
+    use tuna_compositor::State;
 
     let mut comp = TestCompositor::new();
     // Virtual primary on the left; the bound output tiles right of it.
@@ -421,7 +421,7 @@ fn bound_panel_arranges_at_its_output_size_and_offset() {
     let panels = comp.state.panel_surfaces();
     assert_eq!(panels.len(), 1);
     assert_eq!(panels[0].output_name.as_deref(), Some("right"));
-    let placed = roost_compositor::layer::layer_layout(&comp.state);
+    let placed = tuna_compositor::layer::layer_layout(&comp.state);
     assert_eq!(placed.len(), 1);
     assert_eq!(
         placed[0].1,

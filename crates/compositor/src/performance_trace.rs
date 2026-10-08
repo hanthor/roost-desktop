@@ -30,7 +30,7 @@ pub(crate) struct Trace {
 
 impl Trace {
     pub fn from_env() -> Self {
-        Self::new(std::env::var("ROOST_PERF_TRACE").as_deref() == Ok("1"))
+        Self::new(std::env::var("TUNA_PERF_TRACE").as_deref() == Ok("1"))
     }
 
     fn new(enabled: bool) -> Self {
@@ -53,7 +53,7 @@ impl Trace {
         };
         self.pending.push(input);
         eprintln!(
-            "roost-perf-input: {{\"kind\":\"input\",\"id\":{},\"input_ns\":{}}}",
+            "tuna-perf-input: {{\"kind\":\"input\",\"id\":{},\"input_ns\":{}}}",
             input.id, input.input_ns
         );
     }
@@ -72,7 +72,7 @@ impl Trace {
         let queued_ns = at.as_nanos();
         for input in &inputs {
             eprintln!(
-                "roost-perf-input: {{\"kind\":\"queued\",\"id\":{},\"queued_ns\":{}}}",
+                "tuna-perf-input: {{\"kind\":\"queued\",\"id\":{},\"queued_ns\":{}}}",
                 input.id, queued_ns
             );
         }
@@ -98,7 +98,7 @@ impl Trace {
         }
         inputs.into_iter().map(|input| {
             let row = Presented { id: input.id, input_ns: input.input_ns, queued_ns, presented_ns, sequence };
-            eprintln!("roost-perf-input: {{\"kind\":\"presented\",\"id\":{},\"input_ns\":{},\"queued_ns\":{},\"presented_ns\":{},\"sequence\":{}}}", row.id, row.input_ns, row.queued_ns, row.presented_ns, row.sequence);
+            eprintln!("tuna-perf-input: {{\"kind\":\"presented\",\"id\":{},\"input_ns\":{},\"queued_ns\":{},\"presented_ns\":{},\"sequence\":{}}}", row.id, row.input_ns, row.queued_ns, row.presented_ns, row.sequence);
             row
         }).collect()
     }
@@ -114,7 +114,7 @@ impl Trace {
     fn discard(&self, inputs: &[Input]) {
         for input in inputs {
             eprintln!(
-                "roost-perf-input: {{\"kind\":\"discarded\",\"id\":{}}}",
+                "tuna-perf-input: {{\"kind\":\"discarded\",\"id\":{}}}",
                 input.id
             );
         }

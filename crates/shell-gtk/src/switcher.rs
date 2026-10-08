@@ -12,11 +12,11 @@ use crate::live_apps::LiveApps;
 use gtk4 as gtk;
 use gtk4::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
-use roost_shell_control::SwitcherThumbnail;
-use roost_shell_host::model::ShellModel;
+use tuna_shell_control::SwitcherThumbnail;
+use tuna_shell_host::model::ShellModel;
 
 /// Layer namespace (matches the legacy shell's switcher surface).
-pub use roost_shell_control::SWITCHER_NAMESPACE as NAMESPACE;
+pub use tuna_shell_control::SWITCHER_NAMESPACE as NAMESPACE;
 
 type SwitcherItem = (u64, String, Option<String>, usize, Option<String>);
 
@@ -115,7 +115,7 @@ fn ease_progress(elapsed_ms: f64, duration_ms: f64) -> f64 {
 
 /// A fade's length under the motion policy: GNOME's 100 ms times the
 /// slow-down factor, kept under Reduced Motion, zero with animations off.
-fn fade_ms(policy: roost_shell_control::MotionPolicy) -> f64 {
+fn fade_ms(policy: tuna_shell_control::MotionPolicy) -> f64 {
     if policy.allows_fades() {
         policy.adjust_ms(FADE_MS)
     } else {
@@ -124,7 +124,7 @@ fn fade_ms(policy: roost_shell_control::MotionPolicy) -> f64 {
 }
 
 /// The strip's scroll is motion: Reduced Motion snaps it.
-fn scroll_ms(policy: roost_shell_control::MotionPolicy) -> f64 {
+fn scroll_ms(policy: tuna_shell_control::MotionPolicy) -> f64 {
     if policy.allows_motion() {
         policy.adjust_ms(FADE_MS)
     } else {
@@ -166,12 +166,12 @@ fn fade(
     let duration = fade_ms(crate::motion::current());
     let enabled = duration > 0.0;
     if from != to {
-        eprintln!("roost-shell-gtk: switcher fade {name} start animated={enabled}");
+        eprintln!("tuna-shell-gtk: switcher fade {name} start animated={enabled}");
     }
     if !enabled || from == to {
         widget.set_opacity(to);
         if from != to {
-            eprintln!("roost-shell-gtk: switcher fade {name} settled");
+            eprintln!("tuna-shell-gtk: switcher fade {name} settled");
         }
         done();
         return;
@@ -189,7 +189,7 @@ fn fade(
         if t < 1.0 {
             return gtk::glib::ControlFlow::Continue;
         }
-        eprintln!("roost-shell-gtk: switcher fade {name} settled");
+        eprintln!("tuna-shell-gtk: switcher fade {name} settled");
         if let Some(done) = done.take() {
             done();
         }
@@ -235,7 +235,7 @@ pub struct SwitcherUi {
 impl SwitcherUi {
     pub fn new(app: &gtk::Application, apps: Rc<LiveApps>) -> Rc<Self> {
         let window = gtk::ApplicationWindow::new(app);
-        window.add_css_class("roost-switcher");
+        window.add_css_class("tuna-switcher");
         window.init_layer_shell();
         window.set_layer(Layer::Overlay);
         window.set_namespace(Some(NAMESPACE));
@@ -254,10 +254,10 @@ impl SwitcherUi {
         // The thumbnails: a second list, anchored top-left and moved by
         // its margins to sit centred under the selected icon.
         let thumbs_window = gtk::ApplicationWindow::new(app);
-        thumbs_window.add_css_class("roost-switcher");
+        thumbs_window.add_css_class("tuna-switcher");
         thumbs_window.init_layer_shell();
         thumbs_window.set_layer(Layer::Overlay);
-        thumbs_window.set_namespace(Some(roost_shell_control::SWITCHER_THUMBNAILS_NAMESPACE));
+        thumbs_window.set_namespace(Some(tuna_shell_control::SWITCHER_THUMBNAILS_NAMESPACE));
         thumbs_window.set_keyboard_mode(KeyboardMode::None);
         thumbs_window.set_exclusive_zone(-1);
         thumbs_window.set_anchor(Edge::Top, true);
@@ -851,7 +851,7 @@ mod tests {
 
     #[test]
     fn fades_follow_the_motion_policy() {
-        use roost_shell_control::{MotionLevel, MotionPolicy};
+        use tuna_shell_control::{MotionLevel, MotionPolicy};
         let full = MotionPolicy::new(MotionLevel::Full, 1.0);
         assert_eq!(fade_ms(full), 100.0);
         assert_eq!(scroll_ms(full), 100.0);

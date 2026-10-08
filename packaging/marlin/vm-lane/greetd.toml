@@ -3,8 +3,8 @@
 vt = 1
 
 [initial_session]
-command = "/usr/libexec/roost-vm-session"
-user = "roost-test"
+command = "/usr/libexec/tuna-vm-session"
+user = "tuna-test"
 
 [default_session]
 command = "cage -s -- gtkgreet -s /etc/greetd/gtkgreet.css"

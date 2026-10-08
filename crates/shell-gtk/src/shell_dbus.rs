@@ -6,7 +6,7 @@
 //!
 //! As in GNOME, those methods answer only allowlisted callers (Settings,
 //! the media-keys daemon, the GNOME portal backend). Harnesses set
-//! `ROOST_SHELL_DBUS_UNRESTRICTED=1`, GNOME's unsafe mode.
+//! `TUNA_SHELL_DBUS_UNRESTRICTED=1`, GNOME's unsafe mode.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -69,7 +69,7 @@ pub trait ShellActions {
     fn show_applications(&self);
     fn overview_active(&self) -> bool;
     /// Hand the compositor the full set of grabs.
-    fn set_accelerators(&self, accelerators: Vec<roost_shell_control::Accelerator>);
+    fn set_accelerators(&self, accelerators: Vec<tuna_shell_control::Accelerator>);
 }
 
 /// Parse a GNOME accelerator string (`<Super>p`, `XF86AudioRaiseVolume`)
@@ -82,10 +82,10 @@ pub fn parse_accelerator(accelerator: &str) -> Option<(u32, u32)> {
     while let Some(after) = rest.strip_prefix('<') {
         let (token, tail) = after.split_once('>')?;
         bits |= match token.to_ascii_lowercase().as_str() {
-            "shift" => roost_shell_control::MOD_SHIFT,
-            "control" | "ctrl" | "primary" => roost_shell_control::MOD_CTRL,
-            "alt" | "mod1" | "meta" => roost_shell_control::MOD_ALT,
-            "super" | "mod4" | "hyper" => roost_shell_control::MOD_LOGO,
+            "shift" => tuna_shell_control::MOD_SHIFT,
+            "control" | "ctrl" | "primary" => tuna_shell_control::MOD_CTRL,
+            "alt" | "mod1" | "meta" => tuna_shell_control::MOD_ALT,
+            "super" | "mod4" | "hyper" => tuna_shell_control::MOD_LOGO,
             _ => return None,
         };
         rest = tail;
@@ -138,14 +138,14 @@ impl Grabs {
                 .by_action
                 .values()
                 .any(|g| g.keysym == keysym && g.mods == mods)
-            || self.by_action.len() >= roost_shell_control::MAX_ACCELERATORS
+            || self.by_action.len() >= tuna_shell_control::MAX_ACCELERATORS
         {
             return 0;
         }
         self.next = self.next.wrapping_add(1).max(1);
         // GNOME's modes; none given means the normal session.
         let modes = if modes == 0 {
-            roost_shell_control::MODE_NORMAL
+            tuna_shell_control::MODE_NORMAL
         } else {
             modes
         };
@@ -178,10 +178,10 @@ impl Grabs {
         before != self.by_action.len()
     }
 
-    fn list(&self) -> Vec<roost_shell_control::Accelerator> {
+    fn list(&self) -> Vec<tuna_shell_control::Accelerator> {
         self.by_action
             .iter()
-            .map(|(action, g)| roost_shell_control::Accelerator {
+            .map(|(action, g)| tuna_shell_control::Accelerator {
                 action: *action,
                 keysym: g.keysym,
                 mods: g.mods,
@@ -203,7 +203,7 @@ pub struct Service {
     conn: RefCell<Option<gio::DBusConnection>>,
     grabs: RefCell<Grabs>,
     /// The shell's own keybindings, ids from [`INTERNAL_BASE`].
-    internal: RefCell<Vec<roost_shell_control::Accelerator>>,
+    internal: RefCell<Vec<tuna_shell_control::Accelerator>>,
     /// Runs an internal binding by its index.
     on_internal: RefCell<Option<InternalRun>>,
     actions: Rc<dyn ShellActions>,
@@ -227,7 +227,7 @@ impl Service {
         for (i, (accel, modes)) in accelerators.iter().enumerate() {
             if let Some((keysym, mods)) = parse_accelerator(accel) {
                 reserved.push((keysym, mods));
-                list.push(roost_shell_control::Accelerator {
+                list.push(tuna_shell_control::Accelerator {
                     action: INTERNAL_BASE + i as u32,
                     keysym,
                     mods,
@@ -292,7 +292,7 @@ pub fn parse_osd(params: &glib::Variant) -> OsdRequest {
 
 /// Whether `sender` (a unique bus name) owns one of the allowlisted names.
 fn sender_allowed(conn: &gio::DBusConnection, sender: Option<&str>) -> bool {
-    if std::env::var_os("ROOST_SHELL_DBUS_UNRESTRICTED").is_some_and(|v| v == "1") {
+    if std::env::var_os("TUNA_SHELL_DBUS_UNRESTRICTED").is_some_and(|v| v == "1") {
         return true;
     }
     let Some(sender) = sender else {
@@ -330,7 +330,7 @@ pub fn start(actions: Rc<dyn ShellActions>) -> Rc<Service> {
     let node = match gio::DBusNodeInfo::for_xml(XML) {
         Ok(node) => node,
         Err(e) => {
-            eprintln!("roost-shell-gtk: org.gnome.Shell interface: {e}");
+            eprintln!("tuna-shell-gtk: org.gnome.Shell interface: {e}");
             return service;
         }
     };
@@ -448,7 +448,7 @@ pub fn start(actions: Rc<dyn ShellActions>) -> Rc<Service> {
                 })
                 .build();
             if let Err(e) = registered {
-                eprintln!("roost-shell-gtk: org.gnome.Shell object: {e}");
+                eprintln!("tuna-shell-gtk: org.gnome.Shell object: {e}");
             }
             // A caller that leaves the bus loses its grabs, as in GNOME.
             let leave_svc = svc.clone();
@@ -474,7 +474,7 @@ pub fn start(actions: Rc<dyn ShellActions>) -> Rc<Service> {
             *leave_svc.watch.borrow_mut() = Some(subscription);
         },
         |_, _| {},
-        |_, _| eprintln!("roost-shell-gtk: org.gnome.Shell is owned elsewhere"),
+        |_, _| eprintln!("tuna-shell-gtk: org.gnome.Shell is owned elsewhere"),
     );
     // The name is held for the session: an OwnerId releases nothing
     // when it drops.
@@ -515,11 +515,11 @@ mod tests {
         assert_eq!((vol, mods), (0x1008FF13, 0));
         let (p, mods) = parse_accelerator("<Super>p").unwrap();
         assert_eq!(p, u32::from(b'p'));
-        assert_eq!(mods, roost_shell_control::MOD_LOGO);
+        assert_eq!(mods, tuna_shell_control::MOD_LOGO);
         let (_, mods) = parse_accelerator("<Primary><Alt>Delete").unwrap();
         assert_eq!(
             mods,
-            roost_shell_control::MOD_CTRL | roost_shell_control::MOD_ALT
+            tuna_shell_control::MOD_CTRL | tuna_shell_control::MOD_ALT
         );
         assert!(parse_accelerator("not a key").is_none());
     }
@@ -535,7 +535,7 @@ mod tests {
         assert!(!grabs.ungrab(":1.6", a), "only the owner ungrabs");
         let list = grabs.list();
         assert_eq!(list.len(), 1);
-        assert_eq!(list[0].modes, roost_shell_control::MODE_NORMAL);
+        assert_eq!(list[0].modes, tuna_shell_control::MODE_NORMAL);
         assert!(grabs.forget(":1.5"));
         assert!(grabs.list().is_empty());
     }

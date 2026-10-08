@@ -4,9 +4,9 @@
 
 use std::os::unix::net::UnixStream;
 
-use roost_compositor::windows::{swipe_action, ManagerInput, SwipeAction, WindowManager};
-use roost_compositor::TestCompositor;
 use smithay::utils::{Logical, Point};
+use tuna_compositor::windows::{swipe_action, ManagerInput, SwipeAction, WindowManager};
+use tuna_compositor::TestCompositor;
 use wayland_client::{
     protocol::{
         wl_compositor::WlCompositor,
@@ -543,7 +543,7 @@ fn focused_real_constraints_own_motion_before_native_pressure_accumulates() {
             "pending focused constraint must already gate backend barriers"
         );
 
-        let mut pressure = roost_compositor::corner_pressure::CornerPressure::default();
+        let mut pressure = tuna_compositor::corner_pressure::CornerPressure::default();
         let layout = comp.state.hot_corner_outputs();
         // Start with real partial pressure, then the protocol owner's gate
         // disables interception and discards it before a large native hit.
@@ -651,7 +651,7 @@ fn layer_constraints_use_actual_origin_and_commit_regions_before_activation() {
         for lifetime in [Lifetime::Persistent, Lifetime::Oneshot] {
             let mut comp = TestCompositor::new();
             comp.state.set_output_size(1280, 800);
-            comp.state.set_output_location("roost-0", (-400, 100));
+            comp.state.set_output_location("tuna-0", (-400, 100));
             let mut manager = comp.window_manager();
             let mut app = connect(&mut comp);
             pump(&mut comp, &mut manager, &mut [&mut app]);

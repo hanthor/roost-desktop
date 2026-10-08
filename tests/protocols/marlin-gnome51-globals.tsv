@@ -4,7 +4,7 @@
 # Source-only rows retain the original headless reference floors; absent
 # syncobj and Xwayland-private globals have not been measured here.
 # Policy is inherited from gnome51-globals.tsv; known gaps are explicit.
-# interface\tGNOME version\tsource\troost expectation
+# interface\tGNOME version\tsource\ttuna expectation
 wl_compositor	6	capture	match
 wl_shm	2	capture	match
 wl_output	4	capture	match

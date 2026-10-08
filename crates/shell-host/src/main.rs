@@ -10,9 +10,9 @@
 
 use std::process::ExitCode;
 
-use roost_shell_host::panel::{run_panel_with_control, PanelConfig};
+use tuna_shell_host::panel::{run_panel_with_control, PanelConfig};
 
-/// Release version stamped at build time: `ROOST_VERSION` (a `vX.Y.Z` tag or
+/// Release version stamped at build time: `TUNA_VERSION` (a `vX.Y.Z` tag or
 /// plain `X.Y.Z`) wins, otherwise the crate version. Duplicated per binary on
 /// purpose — no shared dependency for a few lines.
 fn normalize_version<'a>(raw: Option<&'a str>, fallback: &'a str) -> &'a str {
@@ -23,7 +23,7 @@ fn normalize_version<'a>(raw: Option<&'a str>, fallback: &'a str) -> &'a str {
 }
 
 fn release_version() -> &'static str {
-    normalize_version(option_env!("ROOST_VERSION"), env!("CARGO_PKG_VERSION"))
+    normalize_version(option_env!("TUNA_VERSION"), env!("CARGO_PKG_VERSION"))
 }
 
 fn main() -> ExitCode {
@@ -31,18 +31,18 @@ fn main() -> ExitCode {
         .skip(1)
         .any(|arg| arg == "--version" || arg == "-V")
     {
-        println!("roost-shell-host {}", release_version());
+        println!("tuna-shell-host {}", release_version());
         return ExitCode::SUCCESS;
     }
     // The old name's environment, for one release (#505).
-    roost_shell_control::legacy::import_env("roost-shell-host");
+    tuna_shell_control::legacy::import_env("tuna-shell-host");
     // Set by the supervised compositor child recipe (ADR 0003); absent
     // when run by hand against any compositor.
-    let control_path = std::env::var_os("ROOST_CONTROL_SOCKET").map(std::path::PathBuf::from);
+    let control_path = std::env::var_os("TUNA_CONTROL_SOCKET").map(std::path::PathBuf::from);
     match run_panel_with_control(PanelConfig::default(), control_path) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("roost-shell-host: {err}");
+            eprintln!("tuna-shell-host: {err}");
             ExitCode::FAILURE
         }
     }

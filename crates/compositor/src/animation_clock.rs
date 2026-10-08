@@ -1,8 +1,8 @@
 //! The time base for compositor animations.
 //!
 //! Sessions animate on the monotonic clock. Nested proofs that also set
-//! `ROOST_COMPOSITOR_STATE` can name an absolute file path in
-//! `ROOST_ANIMATION_CLOCK` to take over animation time:
+//! `TUNA_COMPOSITOR_STATE` can name an absolute file path in
+//! `TUNA_ANIMATION_CLOCK` to take over animation time:
 //!
 //! - while the file is absent, animation time is real time;
 //! - when it first holds a whole number of milliseconds `N`, animation
@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// Environment variable naming the clock file.
-pub const CLOCK_ENV: &str = "ROOST_ANIMATION_CLOCK";
+pub const CLOCK_ENV: &str = "TUNA_ANIMATION_CLOCK";
 
 #[derive(Debug)]
 enum Mode {
@@ -62,7 +62,7 @@ impl AnimationClock {
         }
     }
 
-    /// Real time, drivable through `ROOST_ANIMATION_CLOCK` when the
+    /// Real time, drivable through `TUNA_ANIMATION_CLOCK` when the
     /// session is `instrumented` (state file on) and the path is absolute.
     pub fn from_env(instrumented: bool) -> Self {
         Self::with_file(

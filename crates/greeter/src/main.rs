@@ -1,9 +1,9 @@
 // Greeter entry point: builds the login window from the model.
 // Daemon conversation wiring lands with the walkthrough task.
 use gtk4::gio::prelude::*;
-use roost_greeter::{model::GreeterModel, session::enumerate_system, ui};
+use tuna_greeter::{model::GreeterModel, session::enumerate_system, ui};
 
-/// Release version stamped at build time: `ROOST_VERSION` (a `vX.Y.Z` tag or
+/// Release version stamped at build time: `TUNA_VERSION` (a `vX.Y.Z` tag or
 /// plain `X.Y.Z`) wins, otherwise the crate version. Duplicated per binary on
 /// purpose — no shared dependency for a few lines.
 fn normalize_version<'a>(raw: Option<&'a str>, fallback: &'a str) -> &'a str {
@@ -14,7 +14,7 @@ fn normalize_version<'a>(raw: Option<&'a str>, fallback: &'a str) -> &'a str {
 }
 
 fn release_version() -> &'static str {
-    normalize_version(option_env!("ROOST_VERSION"), env!("CARGO_PKG_VERSION"))
+    normalize_version(option_env!("TUNA_VERSION"), env!("CARGO_PKG_VERSION"))
 }
 
 fn main() {
@@ -22,11 +22,11 @@ fn main() {
         .skip(1)
         .any(|arg| arg == "--version" || arg == "-V")
     {
-        println!("roost-greeter {}", release_version());
+        println!("tuna-greeter {}", release_version());
         return;
     }
     let app = libadwaita::Application::builder()
-        .application_id("asia.reilly.roost.greeter")
+        .application_id("asia.reilly.tuna.greeter")
         .build();
     app.connect_activate(|app| {
         let model = GreeterModel::new();

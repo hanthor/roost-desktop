@@ -42,7 +42,7 @@ impl Monitor {
         let pending = Arc::new(Pending::default());
         let worker_pending = pending.clone();
         let worker = std::thread::Builder::new()
-            .name("roost-logind-sleep".into())
+            .name("tuna-logind-sleep".into())
             .spawn(move || {
                 let mut prepared = false;
                 for signal in signals {

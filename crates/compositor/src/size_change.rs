@@ -62,7 +62,7 @@ impl Policy {
     /// From the shared motion policy (#493): the scale and translation
     /// need `allows_motion`, the crossfade `allows_fades`, and the
     /// 250 ms go through GNOME's `adjustAnimationTime`.
-    pub fn from_motion(policy: roost_shell_control::motion::MotionPolicy) -> Self {
+    pub fn from_motion(policy: tuna_shell_control::motion::MotionPolicy) -> Self {
         let motion = if policy.allows_motion() {
             Motion::Full
         } else if policy.allows_fades() {
@@ -744,7 +744,7 @@ mod tests {
         Policy::from_motion(Default::default())
     }
     fn off() -> Policy {
-        Policy::from_motion(roost_shell_control::motion::MotionPolicy::from_gnome(
+        Policy::from_motion(tuna_shell_control::motion::MotionPolicy::from_gnome(
             false, false, 1.0,
         ))
     }
@@ -774,7 +774,7 @@ mod tests {
 
     #[test]
     fn the_shared_motion_policy_sets_the_level_and_duration() {
-        use roost_shell_control::motion::{MotionLevel, MotionPolicy};
+        use tuna_shell_control::motion::{MotionLevel, MotionPolicy};
         let full = Policy::from_motion(MotionPolicy::default());
         assert_eq!((full.motion, full.duration()), (Motion::Full, DURATION));
         let slow = Policy::from_motion(MotionPolicy::new(MotionLevel::Full, 2.0));

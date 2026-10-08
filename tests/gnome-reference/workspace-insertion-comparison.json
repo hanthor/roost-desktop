@@ -1,6 +1,6 @@
 {
   "reference": "GNOME Shell51.0; gsettings-desktop-schemas51.0-1.fc45; native handleDragOver",
-  "roost": {
+  "tuna": {
     "run": 37175952333,
     "job": 111359239198,
     "checkout": "49a70b0",
@@ -38,7 +38,7 @@
       ],
       "mean": 0.69,
       "off_percent": 0.0,
-      "exclusion": "bottom two pixels overlap the Roost drag ghost; native synthetic handler has no ghost"
+      "exclusion": "bottom two pixels overlap the Tuna Desktop drag ghost; native synthetic handler has no ghost"
     }
   ]
 }
