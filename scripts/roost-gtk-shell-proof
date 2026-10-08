@@ -1093,6 +1093,17 @@ sleep 0.5
 "$PY" "$ROOT/scripts/lib/xkeysym-levels.py" "$DISPLAY" ffbe ffbf ffeb ffe9 >&2 || true
 setxkbmap -display "$DISPLAY" us >&2 || true
 "$PY" "$ROOT/scripts/lib/xkeysym-levels.py" "$DISPLAY" ffbe ffbf >&2 || true
+# Temporary: IBus-daemon X-grabs its hotkey triggers, and a trigger
+# inherited (via shared dconf) from the nested journey that matches
+# Super+F1 would let the daemon fiddle modifiers around every replay.
+{
+    echo "roost-gtk-shell-proof: IBus general settings:"
+    for key in triggers trigger next-engine previous-engine preload-engines engines-order use-system-keyboard-layout embed-preedit-text; do
+        printf 'ibus.%s = ' "$key"
+        gsettings get org.freedesktop.ibus.general "$key" 2>&1 || echo "(unreadable)"
+    done
+    echo "roost-gtk-shell-proof: IBus engine now: $(ibus engine 2>&1 || echo '(no engine)')"
+} >&2 || true
 # Temporary harness introspection for the stray-Alt fault: how this
 # server maps the chord's keycodes (an F1 that resolves behind an Alt
 # level would explain a harness-side Alt tap around every press).
