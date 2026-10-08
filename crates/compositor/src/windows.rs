@@ -2749,8 +2749,9 @@ impl WindowManager {
         self.strip_anim = None;
     }
 
-    /// Apply the live animation preference and finish motion already in flight.
-    pub fn set_animations_enabled(&mut self, enabled: bool) {
+    /// Apply the live motion policy (whether translation animates) and
+    /// finish motion already in flight when it no longer may.
+    pub fn set_motion_allowed(&mut self, enabled: bool) {
         self.animations_enabled = enabled;
         if !enabled {
             self.snap_strip_view();

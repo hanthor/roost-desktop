@@ -47,6 +47,7 @@ use smithay::{
 };
 
 pub mod animation;
+pub mod animation_clock;
 pub mod capture_security;
 mod constraint_motion;
 pub mod control;

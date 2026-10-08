@@ -1,5 +1,6 @@
 //! Deterministic geometry motion shared by tile previews and strip columns.
 use crate::spring::Spring;
+use roost_shell_control::MotionPolicy;
 use smithay::utils::{Logical, Rectangle};
 
 pub type Rect = Rectangle<i32, Logical>;
@@ -18,6 +19,28 @@ impl EaseRect {
             1.0
         };
         interpolate(self.from, self.to, p)
+    }
+}
+
+/// Move a linear 0..1 transition (the overview's) `dt_ms` toward
+/// `target`. Its `duration_ms` goes through GNOME's `adjustAnimationTime`;
+/// the transition is motion, so fade-only and off land on the target.
+pub fn step_transition(
+    progress: f64,
+    target: f64,
+    dt_ms: f64,
+    duration_ms: f64,
+    motion: MotionPolicy,
+) -> f64 {
+    let step = if motion.allows_motion() {
+        dt_ms.max(0.0) / motion.adjust_ms(duration_ms)
+    } else {
+        1.0
+    };
+    if target > progress {
+        (progress + step).min(target)
+    } else {
+        (progress - step).max(target)
     }
 }
 
@@ -101,6 +124,50 @@ mod tests {
         assert_eq!(animation.value_at(0.2, true), animation.to);
         assert_eq!(animation.value_at(0.0, false), animation.to);
     }
+    #[test]
+    fn transitions_sample_exactly_on_a_manual_clock() {
+        use crate::animation_clock::AnimationClock;
+        use roost_shell_control::MotionLevel;
+        use std::time::Duration;
+        // Drive the overview's 250 ms transition the way the runtime
+        // does: frame deltas from a manual clock.
+        let run = |motion: MotionPolicy, samples: &[u64]| {
+            let mut clock = AnimationClock::manual();
+            let (mut progress, mut last) = (0.0, clock.now());
+            samples
+                .iter()
+                .map(|ms| {
+                    clock.set(Duration::from_millis(*ms));
+                    let dt = clock.now().saturating_sub(last).as_secs_f64() * 1000.0;
+                    last = clock.now();
+                    progress = step_transition(progress, 1.0, dt, 250.0, motion);
+                    progress
+                })
+                .collect::<Vec<_>>()
+        };
+        let full = MotionPolicy::default();
+        assert_eq!(run(full, &[0, 125, 250, 300]), [0.0, 0.5, 1.0, 1.0]);
+        let slow = MotionPolicy::new(MotionLevel::Full, 2.0);
+        assert_eq!(run(slow, &[125, 250, 500]), [0.25, 0.5, 1.0]);
+        for level in [MotionLevel::FadeOnly, MotionLevel::Off] {
+            let policy = MotionPolicy::new(level, 2.0);
+            assert_eq!(run(policy, &[0]), [1.0], "{level:?} is instant");
+        }
+        // Closing moves down the same way.
+        assert_eq!(step_transition(1.0, 0.0, 125.0, 250.0, full), 0.5);
+    }
+
+    #[test]
+    fn a_live_policy_change_lands_a_transition_in_flight() {
+        let full = MotionPolicy::default();
+        let mid = step_transition(0.0, 1.0, 125.0, 250.0, full);
+        assert_eq!(mid, 0.5);
+        let reduced = MotionPolicy::from_gnome(true, true, 1.0);
+        assert_eq!(step_transition(mid, 1.0, 0.0, 250.0, reduced), 1.0);
+        let slowed = MotionPolicy::from_gnome(true, false, 4.0);
+        assert_eq!(step_transition(mid, 1.0, 125.0, 250.0, slowed), 0.625);
+    }
+
     #[test]
     fn strip_columns_spring_width_and_position_and_snap_when_disabled() {
         let mut animation = ColumnSpring::new(rect(0, 600), rect(632, 900));

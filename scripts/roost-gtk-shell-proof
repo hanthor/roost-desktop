@@ -615,6 +615,11 @@ ROOST_GRID_TRACE=1
 export ROOST_GRID_TRACE
 ROOST_PROOF_SWIPE_INPUT="$ARTIFACTS/swipe-input.json"
 export ROOST_PROOF_SWIPE_INPUT
+# G-ANIMATION-CLOCK drives compositor animation time through this file;
+# while it is absent animations run on real time.
+ROOST_ANIMATION_CLOCK="$ARTIFACTS/animation-clock"
+rm -f "$ROOST_ANIMATION_CLOCK"
+export ROOST_ANIMATION_CLOCK
 if [ "$INSTALLED_PACKAGE" = 0 ]; then
     cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk -p roost-shell-host
     cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor --example icon-probe
@@ -2627,9 +2632,11 @@ gsettings set org.gnome.desktop.interface enable-animations true
 cstate '.animations_enabled' "animations enabled" ||
     fail G-ANIMATIONS-OFF "enable-animations true did not restore live animation"
 # Settings' Reduced Motion switch must work even with enable-animations true.
+# GNOME 51 keeps fades and drops motion: enable-animations (and Introspect's
+# AnimationsEnabled) stays true while the policy turns fade-only.
 gsettings set org.gnome.desktop.a11y.interface reduced-motion 'reduce'
-cstate '(.animations_enabled | not)' "reduced motion" ||
-    fail G-ANIMATIONS-OFF "Reduced Motion did not disable compositor animation"
+cstate '.animations_enabled and .motion_policy == "fade-only"' "reduced motion" ||
+    fail G-ANIMATIONS-OFF "Reduced Motion did not reach the compositor as fade-only"
 xdotool key Super_L
 cstate '.overview_open and .overview_progress == 1' "reduced overview" ||
     fail G-ANIMATIONS-OFF "Reduced Motion overview did not jump to its open state"
@@ -2637,26 +2644,64 @@ cp "$CSTATE" "$ARTIFACTS/reduced-motion-open.json"
 xdotool key Escape
 cstate '(.overview_open | not) and .overview_progress == 0' "reduced desktop" ||
     fail G-ANIMATIONS-OFF "Reduced Motion overview did not jump to its closed state"
-# Idle blanking must follow the same policy as compositor and GTK transitions.
+# The idle shield is a fade: Reduced Motion keeps it (GNOME's screenShield
+# uses adjustAnimationTime), while animations off removes it.
 gsettings set org.gnome.desktop.screensaver lock-enabled true
 gsettings set org.gnome.desktop.screensaver lock-delay 0
 gsettings set org.gnome.desktop.session idle-delay 600
-cstate '.idle_timeout_ms == 600000' "reduced idle" ||
-    fail G-ANIMATIONS-OFF "Reduced Motion left the ten-second idle fade in the lock timeout"
-[ "$(sed -n '2p' "$XDG_RUNTIME_DIR/roost-idle-blank")" = 0 ] ||
-    fail G-ANIMATIONS-OFF "Reduced Motion left the screen-blank fade enabled"
+cstate '.idle_timeout_ms == 610000' "reduced idle" ||
+    fail G-ANIMATIONS-OFF "Reduced Motion dropped the ten-second idle fade from the lock timeout"
+[ "$(sed -n '2p' "$XDG_RUNTIME_DIR/roost-idle-blank")" = 10000 ] ||
+    fail G-ANIMATIONS-OFF "Reduced Motion dropped the screen-blank fade"
 gsettings set org.gnome.desktop.interface enable-animations false
+cstate '(.animations_enabled | not) and .motion_policy == "off" and .idle_timeout_ms == 600000' "animations off idle" ||
+    fail G-ANIMATIONS-OFF "enable-animations false left the idle fade in the lock timeout"
+[ "$(sed -n '2p' "$XDG_RUNTIME_DIR/roost-idle-blank")" = 0 ] ||
+    fail G-ANIMATIONS-OFF "enable-animations false left the screen-blank fade enabled"
 gsettings reset org.gnome.desktop.a11y.interface reduced-motion
-cstate '(.animations_enabled | not)' "explicit animation disable" ||
+cstate '(.animations_enabled | not) and .motion_policy == "off"' "explicit animation disable" ||
     fail G-ANIMATIONS-OFF "resetting Reduced Motion overrode enable-animations false"
 gsettings set org.gnome.desktop.interface enable-animations true
-cstate '.animations_enabled and .idle_timeout_ms == 610000' "motion restored" ||
+cstate '.animations_enabled and .motion_policy == "full" and .idle_timeout_ms == 610000' "motion restored" ||
     fail G-ANIMATIONS-OFF "resetting both preferences did not restore motion and idle fade"
-pass G-ANIMATIONS-OFF "enable-animations and GNOME 51 Reduced Motion are live; overview, strip and idle fade follow effective motion policy"
+pass G-ANIMATIONS-OFF "enable-animations and GNOME 51 Reduced Motion are live; off snaps everything, fade-only snaps overview/strip motion and keeps the idle fade"
 python3 "$ROOT/scripts/lib/roost-introspect-motion-client.py" "$CSTATE" \
     "$ARTIFACTS/introspect-motion.json" >"$ARTIFACTS/introspect-motion.log" 2>&1 || \
     fail G-INTROSPECT-MOTION "live D-Bus motion properties/signals disagree with actual compositor policy"
-pass G-INTROSPECT-MOTION "GNOME clients receive four effective motion changes; property and compositor agree"
+pass G-INTROSPECT-MOTION "GNOME clients receive four enable-animations changes; Reduced Motion leaves AnimationsEnabled true as in GNOME 51; property and compositor agree"
+
+# The proof-driven animation clock samples the overview transition at
+# exact delays: 250 ms each way, so 125 ms is exactly half.
+anim_clock() {
+    printf '%s\n' "$1" >"$ROOST_ANIMATION_CLOCK.tmp"
+    mv "$ROOST_ANIMATION_CLOCK.tmp" "$ROOST_ANIMATION_CLOCK"
+}
+anim_clock 0
+cstate '.animation_clock_manual and .motion_policy == "full" and (.overview_open | not) and .overview_progress == 0' "frozen clock" ||
+    fail G-ANIMATION-CLOCK "the clock file did not freeze compositor animation time"
+xdotool key Super_L
+cstate '.overview_open and .overview_progress == 0' "frozen overview" ||
+    fail G-ANIMATION-CLOCK "the overview moved while animation time was frozen"
+anim_clock 125
+cstate '.overview_progress == 0.5' "overview at 125 ms" ||
+    fail G-ANIMATION-CLOCK "the overview was not exactly half open 125 ms in"
+cp "$CSTATE" "$ARTIFACTS/animation-clock-125ms.json"
+anim_clock 250
+cstate '.overview_progress == 1' "overview at 250 ms" ||
+    fail G-ANIMATION-CLOCK "the overview had not settled 250 ms in"
+xdotool key Escape
+cstate '(.overview_open | not) and .overview_progress == 1' "frozen close" ||
+    fail G-ANIMATION-CLOCK "the closing overview moved while animation time was frozen"
+anim_clock 375
+cstate '.overview_progress == 0.5' "close at 125 ms" ||
+    fail G-ANIMATION-CLOCK "the closing overview was not exactly half way 125 ms in"
+anim_clock 500
+cstate '.overview_progress == 0' "close at 250 ms" ||
+    fail G-ANIMATION-CLOCK "the closing overview had not settled 250 ms in"
+rm -f "$ROOST_ANIMATION_CLOCK"
+cstate '.animation_clock_manual | not' "real clock" ||
+    fail G-ANIMATION-CLOCK "removing the clock file did not resume real time"
+pass G-ANIMATION-CLOCK "a proof-driven clock freezes compositor animation time and samples the overview at exact 125/250 ms delays both ways"
 
 # GNOME settings (#63): the idle lock follows idle-delay and
 # lock-enabled as they change.

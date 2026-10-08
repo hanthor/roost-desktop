@@ -577,10 +577,12 @@ pub struct Runtime {
     /// The overview transition: 0 the desktop, 1 the overview (linear
     /// time; drawn eased), moving toward the open state each frame.
     overview_progress: f64,
-    overview_progress_at: Instant,
-    tile_animation: Option<(u64, crate::animation::EaseRect, Instant)>,
+    overview_progress_at: Duration,
+    tile_animation: Option<(u64, crate::animation::EaseRect, Duration)>,
     /// Last strip-view spring step, for the per-frame time delta.
-    strip_view_at: Instant,
+    strip_view_at: Duration,
+    /// Time base for the animations above: real, or manual for proofs.
+    animation_clock: crate::animation_clock::AnimationClock,
     /// A three-finger vertical swipe driving the transition: the
     /// progress it started from.
     overview_swipe_from: Option<f64>,
@@ -952,9 +954,10 @@ impl Runtime {
             switcher_thumbnails: Vec::new(),
             shell_swipe: None,
             overview_progress: 0.0,
-            overview_progress_at: Instant::now(),
+            overview_progress_at: Duration::ZERO,
             tile_animation: None,
-            strip_view_at: Instant::now(),
+            strip_view_at: Duration::ZERO,
+            animation_clock: crate::animation_clock::AnimationClock::real(),
             overview_swipe_from: None,
             scale: clamp_scale(session.scale),
             input_settings: Default::default(),
@@ -981,6 +984,11 @@ impl Runtime {
             #[cfg(feature = "drm")]
             performance_trace: crate::performance_trace::Trace::from_env(),
         };
+        runtime.animation_clock =
+            crate::animation_clock::AnimationClock::from_env(runtime.state_path.is_some());
+        let started = runtime.animation_clock.now();
+        runtime.overview_progress_at = started;
+        runtime.strip_view_at = started;
         // Reserve and advertise sockets, but spawn only when a real X11
         // client connects. Native clients do not start a compatibility process.
         #[cfg(feature = "xwayland")]
@@ -1518,7 +1526,7 @@ impl Runtime {
             "overview_app_grid": self.overview_app_grid,
             "keyboard": keyboard,
             "overview_open": overview_open,
-            "animations_enabled": self.input_settings.enable_animations,
+            "animations_enabled": self.input_settings.motion.animations_enabled(),
             "mouse_left_handed": self.input_settings.mouse_left_handed,
             "hot_corners": self.input_settings.hot_corners,
             "touchpad_left_handed": self.input_settings.touchpad_left_handed,
@@ -1606,6 +1614,15 @@ impl Runtime {
         } else {
             self.wallpaper.diagnostics()
         };
+        let motion = self.input_settings.motion;
+        doc["motion_policy"] = serde_json::json!(motion.level.as_str());
+        doc["animation_slowdown"] = serde_json::json!(motion.slowdown());
+        // Only a frozen clock is reported: real time would rewrite the
+        // state file every frame.
+        let manual = self.animation_clock.is_manual();
+        doc["animation_clock_manual"] = serde_json::json!(manual);
+        doc["animation_clock_ms"] =
+            serde_json::json!(manual.then(|| self.animation_clock.now().as_millis() as u64));
         doc["screen_reader_pid"] = serde_json::json!(self.orca.pid());
         doc["screen_reader_state"] = serde_json::json!(self.orca.state());
         // Keep backend-specific observations outside the large scene macro so
@@ -1677,28 +1694,27 @@ impl Runtime {
     }
 
     /// Move the overview transition toward the open state (250 ms each
-    /// way, as GNOME's), unless a swipe holds it. Returns whether the
-    /// overview is drawn at all.
+    /// way, as GNOME's, times the slow-down factor), unless a swipe holds
+    /// it. The transition is motion, so fade-only snaps it like off.
+    /// Returns whether the overview is drawn at all.
     fn step_overview_transition(&mut self) -> bool {
-        let now = Instant::now();
-        let dt = now.duration_since(self.overview_progress_at).as_secs_f64() * 1000.0;
+        let now = self.animation_clock.now();
+        let dt = now.saturating_sub(self.overview_progress_at).as_secs_f64() * 1000.0;
         self.overview_progress_at = now;
+        let motion = self.input_settings.motion;
         if self.overview_swipe_from.is_none() {
             let target = if self.control.overview_open() {
                 1.0
             } else {
                 0.0
             };
-            let step = if self.input_settings.enable_animations {
-                dt / crate::overview::TRANSITION_MS
-            } else {
-                1.0
-            };
-            self.overview_progress = if target > self.overview_progress {
-                (self.overview_progress + step).min(target)
-            } else {
-                (self.overview_progress - step).max(target)
-            };
+            self.overview_progress = crate::animation::step_transition(
+                self.overview_progress,
+                target,
+                dt,
+                crate::overview::TRANSITION_MS,
+                motion,
+            );
         }
         self.overview_progress > 0.0
     }
@@ -1711,7 +1727,8 @@ impl Runtime {
             self.tile_animation = None;
             return None;
         };
-        let now = Instant::now();
+        let now = self.animation_clock.now();
+        let motion = self.input_settings.motion;
         let unchanged = self
             .tile_animation
             .as_ref()
@@ -1723,8 +1740,8 @@ impl Runtime {
                 .filter(|(old, _, _)| *old == id)
                 .map(|(_, animation, start)| {
                     animation.value_at(
-                        now.duration_since(*start).as_secs_f64(),
-                        self.input_settings.enable_animations,
+                        now.saturating_sub(*start).as_secs_f64() / motion.slowdown(),
+                        motion.allows_motion(),
                     )
                 })
                 .or_else(|| self.manager.render_geometry(id))
@@ -1735,19 +1752,21 @@ impl Runtime {
         Some((
             id,
             animation.value_at(
-                now.duration_since(*start).as_secs_f64(),
-                self.input_settings.enable_animations,
+                now.saturating_sub(*start).as_secs_f64() / motion.slowdown(),
+                motion.allows_motion(),
             ),
         ))
     }
 
     /// Advance the scroll-mode strip view on its spring by the time
-    /// since the last frame (niri's view-movement animation).
+    /// since the last frame (niri's view-movement animation), slowed by
+    /// GNOME's slow-down factor.
     fn step_strip_view(&mut self) {
-        let now = Instant::now();
-        let dt = now.duration_since(self.strip_view_at).as_secs_f64();
+        let now = self.animation_clock.now();
+        let dt = now.saturating_sub(self.strip_view_at).as_secs_f64();
         self.strip_view_at = now;
-        self.manager.step_strip_view(dt);
+        self.manager
+            .step_strip_view(dt / self.input_settings.motion.slowdown());
     }
 
     /// A press while the overview is open that no shell surface took:
@@ -1883,7 +1902,7 @@ impl Runtime {
                             .overview_swipe_from
                             .get_or_insert(self.overview_progress);
                         let progress = (from - travel.y / OVERVIEW_SWIPE_DISTANCE).clamp(0.0, 1.0);
-                        self.overview_progress = if self.input_settings.enable_animations {
+                        self.overview_progress = if self.input_settings.motion.allows_motion() {
                             progress
                         } else if progress >= 0.5 {
                             1.0
@@ -2609,11 +2628,13 @@ impl Runtime {
             .apply_keyboard_settings(&mut self.state, &settings);
         self.triggers.set_hot_corner(settings.hot_corners);
         self.triggers.set_right_to_left(settings.right_to_left);
+        // Introspect's AnimationsEnabled is GNOME's enable-animations
+        // (St): reduced motion keeps it true, as in GNOME 51.
         self.introspect
-            .publish_animations_enabled(settings.enable_animations);
+            .publish_animations_enabled(settings.motion.animations_enabled());
         self.manager
-            .set_animations_enabled(settings.enable_animations);
-        if !settings.enable_animations {
+            .set_motion_allowed(settings.motion.allows_motion());
+        if !settings.motion.allows_motion() {
             self.overview_progress = if self.control.overview_open() {
                 1.0
             } else {
@@ -3074,6 +3095,7 @@ impl Runtime {
         }
         self.stats.shell_restarts = self.shell.restarts_used();
         self.proof_swipe_input();
+        self.animation_clock.poll();
         self.publish_state();
         self.publish_cast_outputs();
         self.publish_overview_previews();

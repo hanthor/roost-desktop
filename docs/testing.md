@@ -138,6 +138,38 @@ You need `/dev/kvm`, about 30 GB of free disk, and the podman and
 `bootc install` commands from the job to run this locally. Do not use your
 desktop session for it.
 
+## Animation clock and motion policy
+
+Compositor animations (the overview transition, the scroll-strip springs and
+the tile preview) read time from one animation clock
+(`crates/compositor/src/animation_clock.rs`). Two environment variables
+make their timing reproducible on slow CI renderers such as llvmpipe:
+
+| Variable | Read by | Effect |
+|---|---|---|
+| `ROOST_ANIMATION_CLOCK` | compositor, only when `ROOST_COMPOSITOR_STATE` is also set | Absolute path of a clock file. While the file is absent, animations run on real time. When it first holds a whole number of milliseconds `N`, animation time freezes at that moment plus `N`. Rewriting it with `M` moves time to that moment plus `M`. Removing it resumes real time. Time never runs backwards across these switches. |
+| `GNOME_SHELL_SLOWDOWN_FACTOR` | shell (sent to the compositor in `InputSettings`) | GNOME Shell's own slow-down factor: a positive number multiplies every animation duration, as GNOME's `adjustAnimationTime` does. Anything else keeps 1. Read at shell start. |
+
+Write the clock file atomically (write a temporary file, then `mv`), as
+`anim_clock` in `scripts/roost-gtk-shell-proof` does. The compositor state
+file reports `animation_clock_manual` and, while the clock is frozen, `animation_clock_ms`, plus the
+effective `motion_policy` (`full`, `fade-only` or `off`),
+`animation_slowdown` and `animations_enabled` (GNOME's
+`enable-animations`, which Reduced Motion leaves on). For example, the
+overview transition takes 250 ms each way, so after Super:
+
+```sh
+echo 0 > clock.tmp && mv clock.tmp "$ROOST_ANIMATION_CLOCK"    # freeze
+xdotool key Super_L                                            # progress 0
+echo 125 > clock.tmp && mv clock.tmp "$ROOST_ANIMATION_CLOCK"  # progress 0.5
+rm "$ROOST_ANIMATION_CLOCK"                                    # real time again
+```
+
+Proof `G-ANIMATION-CLOCK` samples the overview this way at 125 and 250 ms
+in both directions. `G-ANIMATIONS-OFF` and `G-INTROSPECT-MOTION` check the
+live motion policy: animations off snaps everything, Reduced Motion
+(fade-only) snaps overview and strip motion but keeps the idle-shield fade.
+
 ## Parity ledger check
 
 The `parity-ledger` job runs `scripts/roost-ledger` against the test list
