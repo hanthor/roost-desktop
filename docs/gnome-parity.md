@@ -169,7 +169,7 @@ and records each window's rectangle, workspace and focused identity in
 `*.state.json`. Tuna Desktop records equivalent compositor state alongside its
 frames and asserts focus restoration and exact maximize/tile bounds.
 The paired 2026-10-04 captures use GNOME Shell 51.0 and Tuna Desktop binaries from
-[CI job 111350817693](https://github.com/hanthor/roost-desktop/actions/runs/37172493269/job/111350817693),
+[CI job 111350817693](https://github.com/tuna-os/tuna-desktop/actions/runs/37172493269/job/111350817693),
 commit `e101d566048986c3c8c78e193cd41a26b44947bd`, with the native fonts,
 icons and wallpaper. The GTK live proof passed; that job's later standalone
 ShellCheck failed on the old cleanup expression, which was corrected.

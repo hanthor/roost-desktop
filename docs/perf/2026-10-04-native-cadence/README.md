@@ -1,8 +1,8 @@
 # Native presentation and idle CPU, 2026-10-04
 
-[Paired run 37200994800](https://github.com/hanthor/roost-desktop/actions/runs/37200994800) completed on one KVM runner using the same four-vCPU, 6 GiB, 1280×800 profile and shared image for both sessions. GNOME ran first, followed by Roost. Each session booted once. The derived baseline contains GNOME Shell/Mutter 51.0; the published Marlin base before its CI-only upgrade was 50.5.
+[Paired run 37200994800](https://github.com/tuna-os/tuna-desktop/actions/runs/37200994800) completed on one KVM runner using the same four-vCPU, 6 GiB, 1280×800 profile and shared image for both sessions. GNOME ran first, followed by Roost. Each session booted once. The derived baseline contains GNOME Shell/Mutter 51.0; the published Marlin base before its CI-only upgrade was 50.5.
 
-The Roost package came from successful trusted-main [run 37189354041](https://github.com/hanthor/roost-desktop/actions/runs/37189354041), source `7546647e5967825f522a352ee781e0908f889d1e`. It predates the idle retention and buffer-age damage fixes proposed after this measurement. This is a measured baseline, not qualification of the latest roadmap source.
+The Roost package came from successful trusted-main [run 37189354041](https://github.com/tuna-os/tuna-desktop/actions/runs/37189354041), source `7546647e5967825f522a352ee781e0908f889d1e`. It predates the idle retention and buffer-age damage fixes proposed after this measurement. This is a measured baseline, not qualification of the latest roadmap source.
 
 | Metric | GNOME 51 | Roost | Samples per session |
 |---|---:|---:|---:|

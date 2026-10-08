@@ -13,7 +13,7 @@ the interfaces built into the same `libmutter-51.so`, marked `source` in
 `tests/protocols/gnome51-globals.tsv`. This is upstream GNOME 51 in a
 Fedora container, not a capture from the Marlin baseline VM.
 
-**Native Marlin reference.** [Run 37196669447](https://github.com/hanthor/roost-desktop/actions/runs/37196669447)
+**Native Marlin reference.** [Run 37196669447](https://github.com/tuna-os/tuna-desktop/actions/runs/37196669447)
 also captured GNOME Shell/Mutter 51.0 in the derived Marlin GNOME 51
 baseline on the shared four-vCPU, 6 GiB, 1280×800 QEMU/KVM profile.
 `tests/protocols/marlin-gnome-wayland-info.txt` retains its full output;

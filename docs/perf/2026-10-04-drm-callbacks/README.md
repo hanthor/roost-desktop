@@ -1,6 +1,6 @@
 # Short DRM frame-callback CPU probe
 
-PR [#263](https://github.com/hanthor/roost-desktop/pull/263) corrected frame-callback accounting when a DRM page flip is already pending. This probe found no idle CPU improvement. It does not establish GNOME parity, frame pacing, GPU efficiency or endurance.
+PR [#263](https://github.com/tuna-os/tuna-desktop/pull/263) corrected frame-callback accounting when a DRM page flip is already pending. This probe found no idle CPU improvement. It does not establish GNOME parity, frame pacing, GPU efficiency or endurance.
 
 The same AWS KubeVirt VM ran both candidates on the same boot: four vCPUs, 6 GiB RAM, bochs-drm output at 1280×800 and approximately 75 Hz, kernel 7.2.8-arch1-2. The desktop was unlocked with no application workload. Both packages were temporarily installed in a transient `/usr` overlay above Marlin image `sha256:36dc326935943ef0651e4433307e5eae5c6abef730f082ab18ca072afc5f43e7`; this is not qualification of a published image. The GTK shell hash stayed identical. Exact candidate source revisions, measured binary hashes and boot ID are in the raw records.
 
@@ -15,4 +15,4 @@ Each run contains 15 approximately two-second intervals. CPU is `(utime + stime)
 
 Raw records, summaries and the exact two observer scripts are retained here. Reproduction requires the same two built packages, a stable logged-in fixture UID1000 session, and running each observer as root. Changing the payload or VM profile makes it a new measurement.
 
-Issue [#73](https://github.com/hanthor/roost-desktop/issues/73) stays open. Idle rendering still consumes most of one core in this profile; comparable input latency, frame pacing, GPU memory and a completed 24-hour soak remain unmeasured.
+Issue [#73](https://github.com/tuna-os/tuna-desktop/issues/73) stays open. Idle rendering still consumes most of one core in this profile; comparable input latency, frame pacing, GPU memory and a completed 24-hour soak remain unmeasured.

@@ -20,7 +20,7 @@ The retained pre-animation baseline follows for comparison.
 The comparison uses niri **26.04** from Fedora 45 and the fully green Tuna Desktop
 PR #233 package, before #238's column animation changes. It is a measured
 baseline, not evidence for the later animation implementation. The package
-came from [run 37169850678](https://github.com/hanthor/roost-desktop/actions/runs/37169850678),
+came from [run 37169850678](https://github.com/tuna-os/tuna-desktop/actions/runs/37169850678),
 head `5b76d44d9e6282b0b33d47e74eb01ed52394689e`; its check, GTK proof,
 scroll proof and packaging jobs all passed. The exact provenance and raw
 frames are in [baseline-233](niri-parity/baseline-233/provenance.json).
