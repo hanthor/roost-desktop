@@ -28,7 +28,7 @@ reference = load('stock_reference', ROOT/'packaging/marlin/perf/roost-gnome-refe
 
 
 def image(profile='stock'):
-    return dict(schema=1, profile=profile, mutter_package='mutter 51.0-1.6' if profile=='diagnostic' else 'mutter 51.0-1',
+    return dict(schema=1, profile=profile, mutter_package='mutter 51.0-1.7' if profile=='diagnostic' else 'mutter 51.0-1',
                 shell_package='gnome-shell 1:51.0-1', packages_sha256='a'*64, critical_sha256='b'*64)
 
 
@@ -196,7 +196,7 @@ class ReferencePolicy(unittest.TestCase):
         self.assertIn('roost-perf-reference-image stock',stock)
         self.assertTrue(source.rsplit('FROM ',1)[1].startswith('${COHERENT_BASE} AS diagnostic-reference'))
         diagnostic=source.rsplit('FROM ',1)[1]
-        self.assertIn("pacman -Q mutter | grep -qx 'mutter 51.0-1.6'",diagnostic)
+        self.assertIn("pacman -Q mutter | grep -qx 'mutter 51.0-1.7'",diagnostic)
         self.assertIn('sha256sum -c sha256sums',diagnostic)
 
 

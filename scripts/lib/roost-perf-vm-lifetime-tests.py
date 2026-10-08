@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from unittest.mock import patch
 
@@ -88,6 +89,7 @@ class Lifetime(unittest.TestCase):
                 handoff.attach(child)
                 scope = {'original': original, 'primary': None, 'vm': child, 'agent': Agent(),
                          'handoff': handoff, 'gnome_trace_active': False,
+                         'args': types.SimpleNamespace(desktop='gnome', gnome_profile='diagnostic'),
                          'cleanup_owned_vm': life.cleanup_owned_vm, 'sys': sys}
                 with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(RuntimeError) as raised:
                     exec(compile(actual, 'actual-worker-finally', 'exec'), scope)
