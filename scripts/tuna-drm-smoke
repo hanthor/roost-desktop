@@ -178,10 +178,14 @@ fi
 pass D-IDLE "retained stationary scanout: $idle_before to $idle_after frames in 3 seconds"
 sleep "$SECONDS_UP"
 initial_frames=$(jq -er '.rendered_frames' "$CSTATE")
-if [ "$initial_frames" -lt 1 ] || [ "$initial_frames" -gt 10 ]; then
-    fail D-IDLE "unchanged shell should submit initial frames then sleep, got $initial_frames"
+# GNOME's 500 ms startup reveal draws its own frames once, then settles.
+reveal_frames=$(jq -er '.transitions.startup.animated_frames' "$CSTATE")
+jq -e '.transitions.startup.active | not' "$CSTATE" >/dev/null ||
+    fail D-IDLE "the startup reveal never settled"
+if [ "$initial_frames" -lt 1 ] || [ "$((initial_frames - reveal_frames))" -gt 10 ]; then
+    fail D-IDLE "unchanged shell should submit initial frames then sleep, got $initial_frames ($reveal_frames for the startup reveal)"
 fi
-pass D-IDLE "$initial_frames initial frames over $SECONDS_UP additional idle seconds; no continuous repaint"
+pass D-IDLE "$initial_frames initial frames ($reveal_frames for the startup reveal) over $SECONDS_UP additional idle seconds; no continuous repaint"
 # Resume real native presentation at the default scale as well as 200% below.
 timeout 20s env -u WAYLAND_SOCKET XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY=tuna-drm-smoke \
     "$ARTIFACTS/frame-pacer/tuna-frame-pacer" >"$ARTIFACTS/presentation.json" \

@@ -342,6 +342,33 @@ cleanup() {
     if [ -n "$SYSBUS_PID" ]; then kill "$SYSBUS_PID" 2>/dev/null || true; fi
 }
 trap cleanup EXIT INT TERM
+# Wait up to $3 seconds (20) for the compositor state to match jq $1.
+cstate() {
+    end=$(($(date +%s) + ${3:-20}))
+    while [ "$(date +%s)" -le "$end" ]; do
+        [ -s "$CSTATE" ] && jq -e "$1" "$CSTATE" >/dev/null 2>&1 && return 0
+        sleep 0.3
+    done
+    echo "tuna-gtk-shell-proof: compositor state was:" >&2
+    cat "$CSTATE" >&2 2>/dev/null || true
+    return 1
+}
+# One transition family counter from the compositor state:
+# `tval <family> <started|animated_frames>`.
+tval() {
+    jq -r ".transitions.$1.$2" "$CSTATE"
+}
+# The family has settled with more starts than $2 and, when $3 is set,
+# more animated frames than it (animations on) or exactly as many (when
+# $4 is "same": the change was instant).
+tsettled() {
+    if [ "${4:-}" = same ]; then
+        frames=".transitions.$1.animated_frames == $3"
+    else
+        frames=".transitions.$1.animated_frames > $3"
+    fi
+    cstate ".transitions.$1.started > $2 and $frames and (.transitions.$1.active | not)" "$1 settled" "${5:-15}"
+}
 # RGB of one pixel of a PNG, as "r g b".
 px() {
     ffmpeg -loglevel error -i "$1" -vf "crop=1:1:$2:$3" -f rawvideo -pix_fmt rgb24 - |
@@ -945,32 +972,6 @@ xdotool key Escape
 sleep 1
 
 # App stages: three libadwaita windows (scripts/lib/tuna-test-window.py).
-# One transition family counter from the compositor state:
-# `tval <family> <started|animated_frames>`.
-tval() {
-    jq -r ".transitions.$1.$2" "$CSTATE"
-}
-# The family has settled with more starts than $2 and, when $3 is set,
-# more animated frames than it (animations on) or exactly as many (when
-# $4 is "same": the change was instant).
-tsettled() {
-    if [ "${4:-}" = same ]; then
-        frames=".transitions.$1.animated_frames == $3"
-    else
-        frames=".transitions.$1.animated_frames > $3"
-    fi
-    cstate ".transitions.$1.started > $2 and $frames and (.transitions.$1.active | not)" "$1 settled" "${5:-15}"
-}
-cstate() {
-    end=$(($(date +%s) + ${3:-20}))
-    while [ "$(date +%s)" -le "$end" ]; do
-        [ -s "$CSTATE" ] && jq -e "$1" "$CSTATE" >/dev/null 2>&1 && return 0
-        sleep 0.3
-    done
-    echo "tuna-gtk-shell-proof: compositor state was:" >&2
-    cat "$CSTATE" >&2 2>/dev/null || true
-    return 1
-}
 # Reserving an X11 display must not launch a compatibility process. The
 # panel/calendar are already real native Wayland clients at this point.
 if command -v Xwayland >/dev/null 2>&1; then
