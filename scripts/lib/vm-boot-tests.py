@@ -338,6 +338,101 @@ elif name=='vercmp':
         # Source ordering only; actual package graph/kernel proof remains CI/VM.
 
 
+class OrcaStagedDiagnostic(unittest.TestCase):
+    def agent_scope(self, *names):
+        source = Path(__file__).resolve().parent / "vm_guest_agent.py"
+        tree = ast.parse(source.read_text())
+        nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in set(names)]
+        consts = [n for n in tree.body if isinstance(n, ast.Assign)
+                  and any(isinstance(t, ast.Name) and t.id == "FOCUS_STAGES" for t in n.targets)]
+        scope = {"json": json, "base64": base64, "binascii": __import__("binascii")}
+        exec(compile(ast.Module(body=nodes + consts, type_ignores=[]), str(source), "exec"), scope)
+        return scope
+    def guest_scope(self, *names):
+        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
+        tree = ast.parse(source.read_text())
+        nodes = [n for n in tree.body if (isinstance(n, ast.FunctionDef) and n.name in set(names))
+                 or (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name)
+                     and t.id in {"FOCUS_ERROR_TYPES", "FOCUS_STAGES"} for t in n.targets))]
+        scope = {"json": json, "subprocess": subprocess}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"), scope)
+        return scope
+    def test_focus_failure_schema_accepts_fixed_stage_and_legacy_shape(self):
+        scope = self.agent_scope("valid_focus_error", "focus_failure_diagnostic")
+        decode = scope["focus_failure_diagnostic"]
+        def encode(value): return base64.b64encode(json.dumps(value).encode()).decode()
+        staged = {"focus_error_type": "RuntimeError", "focus_stage": "reader-principal"}
+        self.assertEqual(decode(encode(staged)), staged)
+        legacy = {"focus_error_type": "KeyError"}
+        self.assertEqual(decode(encode(legacy)), legacy)
+        for bad in [dict(staged, focus_stage="private-zone"), dict(staged, focus_stage="helper ",
+                    focus_error_type="private"), dict(staged, argv="private"),
+                    {"focus_stage": "helper"}, {"focus_error_type": "OtherError", "focus_stage": "helper"}]:
+            self.assertIsNone(decode(encode(bad)))
+        self.assertIsNone(decode("not-base64"))
+        # Fault injection verifies schema bounds; no live guest round trip.
+    def test_speech_failure_schema_accepts_observation_stage(self):
+        scope = self.agent_scope("speech_failure_diagnostic")
+        decode = scope["speech_failure_diagnostic"]
+        cleanup = {"unit_departed": True, "presenter_closed": True, "errors": []}
+        def encode(value): return base64.b64encode(json.dumps({"orca_speech_error": value}).encode()).decode()
+        staged = {"exception_type": "CalledProcessError", "cleanup": cleanup,
+                  "returncode": 1, "stage": "selection"}
+        self.assertEqual(decode(encode(staged)), staged)
+        unstaged = {"exception_type": "RuntimeError", "cleanup": cleanup}
+        self.assertEqual(decode(encode(unstaged)), unstaged)
+        for bad in [dict(staged, stage="private-probe"), dict(staged, stage="selection ",
+                    returncode=256), dict(staged, argv="private")]:
+            self.assertIsNone(decode(encode(bad)))
+        # Fault injection verifies schema bounds; no live audio capture.
+    def test_focus_reader_principal_failure_names_stage(self):
+        from contextlib import redirect_stdout
+        scope = self.guest_scope("shell_navigation_focus")
+        def unreadable(): raise RuntimeError("original genuine Orca 51 is required")
+        scope["orca_observation"] = unreadable
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            with self.assertRaises(SystemExit) as exited:
+                scope["shell_navigation_focus"]("shell", controlled=True)
+        self.assertEqual(exited.exception.code, 1)
+        self.assertEqual(json.loads(stream.getvalue()),
+                         {"focus_error_type": "RuntimeError", "focus_stage": "reader-principal"})
+        # Fault injection verifies the stage envelope; no genuine reader observation.
+    def test_focus_helper_failure_names_helper_stage(self):
+        from contextlib import redirect_stdout
+        scope = self.guest_scope("shell_navigation_focus")
+        scope["orca_observation"] = lambda: {"ready": True, "state": "active", "display": ["wayland-0"]}
+        scope["STATE"] = SimpleNamespace(read_text=lambda: '{"locked": false}')
+        scope["inventory"] = lambda: {"processes": [{"executable": "roost-shell-gtk", "uid": 1000,
+                                                     "pid": 1083, "start_ticks": 1187}]}
+        scope["OWNER"] = SimpleNamespace(pw_uid=1000)
+        def helper(*args, **kwargs):
+            raise subprocess.CalledProcessError(1, args,
+                output=json.dumps({"focus_error_type": "RuntimeError"}))
+        scope["call"] = helper
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            with self.assertRaises(SystemExit) as exited:
+                scope["shell_navigation_focus"]("shell", 1083, 1187, controlled=True)
+        self.assertEqual(exited.exception.code, 1)
+        self.assertEqual(json.loads(stream.getvalue()),
+                         {"focus_error_type": "RuntimeError", "focus_stage": "helper"})
+        # Fault injection verifies the helper stage; no genuine shell navigation.
+    def test_speech_end_failure_carries_observation_stage(self):
+        from contextlib import redirect_stdout
+        scope = self.guest_scope("fail_speech", "speech_error_type")
+        cleanup = {"unit_departed": True, "presenter_closed": True, "errors": []}
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            with self.assertRaises(SystemExit):
+                scope["fail_speech"](RuntimeError("original observation failed"), cleanup, "selection")
+        diagnostic = json.loads(stream.getvalue())["orca_speech_error"]
+        self.assertEqual((diagnostic["exception_type"], diagnostic["stage"]), ("RuntimeError", "selection"))
+        with self.assertRaises(ValueError):
+            scope["fail_speech"](RuntimeError("x"), cleanup, "private-probe")
+        # Fault injection verifies the stage envelope; no genuine recording lifecycle.
+
+
 class OrcaUnreadyDiagnostic(unittest.TestCase):
     def run_probe(self, *, locked=False, changed=False, executable="/usr/bin/python3.14",
                   uid=1000, package="python", oversized=False, replaced=False):
@@ -739,16 +834,27 @@ class ControlledOverviewDiagnostic(unittest.TestCase):
         with self.assertRaises(ValueError):self.catalog(replaced=True)
 
     def test_controlled_shell_replacement_or_lock_refuses_before_observer_rpc(self):
+        from contextlib import redirect_stdout
         path=Path(lane.__file__).parents[1]/"packaging/marlin/vm-lane/roost-vm-lifecycle"
-        fn=next(n for n in ast.parse(path.read_text()).body if isinstance(n,ast.FunctionDef) and n.name=="shell_navigation_focus")
+        tree=ast.parse(path.read_text())
+        fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=="shell_navigation_focus")
+        consts=[n for n in tree.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name)
+                and t.id in {"FOCUS_ERROR_TYPES","FOCUS_STAGES"} for t in n.targets)]
         calls=[]
         for locked in (True,False):
             scope={"orca_observation":lambda:{"ready":True,"state":"active"},"json":json,
                    "STATE":SimpleNamespace(read_text=lambda:json.dumps({"locked":locked})),
                    "inventory":lambda:{"processes":[{"executable":"roost-shell-gtk","uid":1000,"pid":35,"start_ticks":58}]},
-                   "OWNER":SimpleNamespace(pw_uid=1000),"call":lambda *args,**kw:calls.append(args)}
-            exec(compile(ast.Module(body=[fn],type_ignores=[]),str(path),"exec"),scope)
-            with self.assertRaises(RuntimeError):scope["shell_navigation_focus"]("shell",34,57,controlled=True)
+                   "OWNER":SimpleNamespace(pw_uid=1000),"call":lambda *args,**kw:calls.append(args),
+                   "subprocess":subprocess}
+            exec(compile(ast.Module(body=[fn]+consts,type_ignores=[]),str(path),"exec"),scope)
+            stream=io.StringIO()
+            with redirect_stdout(stream):
+                with self.assertRaises(SystemExit) as exited:
+                    scope["shell_navigation_focus"]("shell",34,57,controlled=True)
+            self.assertEqual(exited.exception.code,1)
+            self.assertEqual(json.loads(stream.getvalue()),
+                             {"focus_error_type":"RuntimeError","focus_stage":"reader-principal"})
             self.assertEqual(calls,[])
 
     def test_finite_host_summary_discards_private_or_oversized_values(self):

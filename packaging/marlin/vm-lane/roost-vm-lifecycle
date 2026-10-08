@@ -644,8 +644,12 @@ def cleanup_speech(recording, token, unit_started=True, presenter_started=True):
     return receipt
 
 
-def fail_speech(error, cleanup):
+def fail_speech(error, cleanup, stage=None):
     diagnostic = {"exception_type": speech_error_type(error), "cleanup": cleanup}
+    if stage is not None:
+        if stage not in {"token", "selection", "graph", "sink-link"}:
+            raise ValueError("fixed speech observation stage required")
+        diagnostic["stage"] = stage
     if isinstance(error, subprocess.CalledProcessError) and type(error.returncode) is int and -255 <= error.returncode <= 255:
         diagnostic["returncode"] = error.returncode
     print(json.dumps({"orca_speech_error": diagnostic}))
@@ -669,65 +673,85 @@ def mutate_orca_setting(action):
     return {"requested_enabled": requested, "readback_enabled": value == "true"}
 
 
+FOCUS_ERROR_TYPES = {"RuntimeError", "ValueError", "OSError", "FileNotFoundError",
+                     "ProcessLookupError", "PermissionError", "KeyError",
+                     "JSONDecodeError", "UnicodeDecodeError", "RecursionError"}
+FOCUS_STAGES = {"arguments", "reader-principal", "helper", "post-observation", "disks-evidence"}
+
+
 def shell_navigation_focus(kind, original_pid=None, original_ticks=None, controlled=False):
-    actual = orca_observation()
-    state = json.loads(STATE.read_text())
-    if state["locked"] or not actual["ready"] or actual["state"] != "active":
-        raise RuntimeError("public navigation requires an unlocked original genuine reader")
-    executable = "roost-shell-gtk" if kind == "shell" else "gnome-disks"
-    candidates = [p for p in inventory()["processes"] if p["executable"] == executable and p["uid"] == OWNER.pw_uid]
-    if kind == "disks" or controlled:
-        candidates = [p for p in candidates if p["pid"] == original_pid and p["start_ticks"] == original_ticks]
-    if len(candidates) != 1:
-        raise RuntimeError("one original navigation application principal is required")
-    process = candidates[0]
-    diagnostic_args = ("controlled-overview",) if controlled else ()
+    # Every zone names its fixed stage on failure; the host forwards the
+    # typed stage instead of an opaque exit code. The helper keeps its own
+    # shape and gains the stage like every other zone.
+    focus_stage = "reader-principal"
     try:
-        raw = call("/usr/libexec/roost-vm-shell-focus", str(process["pid"]), str(process["start_ticks"]),
-                   executable, actual["display"][0], *diagnostic_args, user=True)
-    except subprocess.CalledProcessError as error:
-        # Forward the helper's own fixed typed diagnostic; never argv/stderr.
-        # Without this the host sees only an opaque exit code.
+        actual = orca_observation()
+        state = json.loads(STATE.read_text())
+        if state["locked"] or not actual["ready"] or actual["state"] != "active":
+            raise RuntimeError("public navigation requires an unlocked original genuine reader")
+        executable = "roost-shell-gtk" if kind == "shell" else "gnome-disks"
+        candidates = [p for p in inventory()["processes"] if p["executable"] == executable and p["uid"] == OWNER.pw_uid]
+        if kind == "disks" or controlled:
+            candidates = [p for p in candidates if p["pid"] == original_pid and p["start_ticks"] == original_ticks]
+        if len(candidates) != 1:
+            raise RuntimeError("one original navigation application principal is required")
+        process = candidates[0]
+        diagnostic_args = ("controlled-overview",) if controlled else ()
+        focus_stage = "helper"
         try:
-            candidate = json.loads((error.stdout or "").strip())
-        except (ValueError, TypeError, AttributeError):
-            candidate = None
-        if (isinstance(candidate, dict) and set(candidate) == {"focus_error_type"}
-                and candidate["focus_error_type"] in {"RuntimeError", "ValueError", "OSError",
-                "FileNotFoundError", "ProcessLookupError", "PermissionError", "KeyError",
-                "JSONDecodeError", "UnicodeDecodeError", "RecursionError"}):
-            print(json.dumps(candidate))
+            raw = call("/usr/libexec/roost-vm-shell-focus", str(process["pid"]), str(process["start_ticks"]),
+                       executable, actual["display"][0], *diagnostic_args, user=True)
+        except subprocess.CalledProcessError as error:
+            # Forward the helper's own fixed typed diagnostic; never argv/stderr.
+            # Without this the host sees only an opaque exit code.
+            try:
+                candidate = json.loads((error.stdout or "").strip())
+            except (ValueError, TypeError, AttributeError):
+                candidate = None
+            if (isinstance(candidate, dict) and set(candidate) == {"focus_error_type"}
+                    and candidate["focus_error_type"] in FOCUS_ERROR_TYPES):
+                print(json.dumps({"focus_error_type": candidate["focus_error_type"],
+                                  "focus_stage": focus_stage}))
+            raise SystemExit(1) from None
+        focus_stage = "post-observation"
+        receipt = json.loads(raw)
+        after = orca_observation()
+        if any(actual[k] != after.get(k) for k in ("pid", "uid", "start_ticks", "owner", "bus_pid", "bus_uid", "version")) or not after["ready"]:
+            raise RuntimeError("original genuine reader changed during navigation observation")
+        state = json.loads(STATE.read_text())
+        if state["locked"]:
+            raise RuntimeError("public navigation observation crossed lock")
+        result = {"orca": after, "focus": receipt, "overview_open": state["overview_open"], "focused_window": state["focused"]}
+        if kind == "disks":
+            focus_stage = "disks-evidence"
+            desktop = pathlib.Path("/usr/share/applications/org.gnome.DiskUtility.desktop")
+            info = desktop.lstat()
+            metadata = read_evidence(desktop, file_identity(info), 65536)
+            if info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o022 or len(metadata) > 65536:
+                raise RuntimeError("installed Disks desktop entry lacks bounded distribution authority")
+            commands = [line[5:] for line in metadata.decode().splitlines() if line.startswith("Exec=")]
+            if not commands or pathlib.Path(shlex.split(commands[0])[0]).name != "gnome-disks":
+                raise RuntimeError("installed Disks desktop entry does not launch the actual frontend")
+            exe = os.readlink(f"/proc/{process['pid']}/exe")
+            package = call("pacman", "-Qqo", exe)
+            if package != "gnome-disk-utility" or call("pacman", "-Qqo", str(desktop)) != package:
+                raise RuntimeError("actual Disks frontend/desktop entry lack matching distribution package ownership")
+            window = next((w for w in state["windows"] if w["id"] == state["focused"]), None)
+            active = any(n["label"] == "Disks" and n["role"] == "frame" and n["active"] for n in receipt["public_controls"])
+            result["launch_focus_ready"] = (window is not None and window["app_id"] == "org.gnome.DiskUtility"
+                                             and active and not state["overview_open"])
+            remaining = [p for p in inventory()["processes"] if p == process]
+            if len(remaining) != 1 or json.loads(STATE.read_text())["locked"]:
+                raise RuntimeError("original Disks frontend changed or locked during package observation")
+            result["desktop"] = {"path": str(desktop), "uid": info.st_uid, "sha256": hashlib.sha256(metadata).hexdigest(), "package": package}
+        return result
+    except SystemExit:
+        raise
+    except Exception as error:
+        name = type(error).__name__
+        if name in FOCUS_ERROR_TYPES:
+            print(json.dumps({"focus_error_type": name, "focus_stage": focus_stage}))
         raise SystemExit(1) from None
-    receipt = json.loads(raw)
-    after = orca_observation()
-    if any(actual[k] != after.get(k) for k in ("pid", "uid", "start_ticks", "owner", "bus_pid", "bus_uid", "version")) or not after["ready"]:
-        raise RuntimeError("original genuine reader changed during navigation observation")
-    state = json.loads(STATE.read_text())
-    if state["locked"]:
-        raise RuntimeError("public navigation observation crossed lock")
-    result = {"orca": after, "focus": receipt, "overview_open": state["overview_open"], "focused_window": state["focused"]}
-    if kind == "disks":
-        desktop = pathlib.Path("/usr/share/applications/org.gnome.DiskUtility.desktop")
-        info = desktop.lstat()
-        metadata = read_evidence(desktop, file_identity(info), 65536)
-        if info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o022 or len(metadata) > 65536:
-            raise RuntimeError("installed Disks desktop entry lacks bounded distribution authority")
-        commands = [line[5:] for line in metadata.decode().splitlines() if line.startswith("Exec=")]
-        if not commands or pathlib.Path(shlex.split(commands[0])[0]).name != "gnome-disks":
-            raise RuntimeError("installed Disks desktop entry does not launch the actual frontend")
-        exe = os.readlink(f"/proc/{process['pid']}/exe")
-        package = call("pacman", "-Qqo", exe)
-        if package != "gnome-disk-utility" or call("pacman", "-Qqo", str(desktop)) != package:
-            raise RuntimeError("actual Disks frontend/desktop entry lack matching distribution package ownership")
-        window = next((w for w in state["windows"] if w["id"] == state["focused"]), None)
-        active = any(n["label"] == "Disks" and n["role"] == "frame" and n["active"] for n in receipt["public_controls"])
-        result["launch_focus_ready"] = (window is not None and window["app_id"] == "org.gnome.DiskUtility"
-                                         and active and not state["overview_open"])
-        remaining = [p for p in inventory()["processes"] if p == process]
-        if len(remaining) != 1 or json.loads(STATE.read_text())["locked"]:
-            raise RuntimeError("original Disks frontend changed or locked during package observation")
-        result["desktop"] = {"path": str(desktop), "uid": info.st_uid, "sha256": hashlib.sha256(metadata).hexdigest(), "package": package}
-    return result
 
 
 def speech_capture_profile(name):
@@ -904,13 +928,21 @@ print(json.dumps(result))
                   "actor": actor,
                   "manager_pid": compositor["pid"], "before": before["keyboard"], "after": after["keyboard"]}
     elif action in {"orca-shell-focus", "orca-disks-focus"}:
-        if action == "orca-shell-focus" and len(sys.argv) != 2:
-            if len(sys.argv) != 5 or sys.argv[2] != "controlled-overview":
-                raise ValueError("fixed controlled overview principal required")
-            result = shell_navigation_focus("shell", int(sys.argv[3]), int(sys.argv[4]), controlled=True)
-        else:
-            result = (shell_navigation_focus("shell") if action == "orca-shell-focus"
-                      else shell_navigation_focus("disks", int(sys.argv[2]), int(sys.argv[3])))
+        try:
+            if action == "orca-shell-focus" and len(sys.argv) != 2:
+                if len(sys.argv) != 5 or sys.argv[2] != "controlled-overview":
+                    raise ValueError("fixed controlled overview principal required")
+                result = shell_navigation_focus("shell", int(sys.argv[3]), int(sys.argv[4]), controlled=True)
+            else:
+                result = (shell_navigation_focus("shell") if action == "orca-shell-focus"
+                          else shell_navigation_focus("disks", int(sys.argv[2]), int(sys.argv[3])))
+        except SystemExit:
+            raise
+        except Exception as error:
+            name = type(error).__name__
+            if name in FOCUS_ERROR_TYPES:
+                print(json.dumps({"focus_error_type": name, "focus_stage": "arguments"}))
+            raise SystemExit(1) from None
     elif action == "orca-speech-start":
         if len(sys.argv) not in (2, 3):
             raise RuntimeError("fixed speech recording profile argument required")
@@ -1030,10 +1062,14 @@ print(json.dumps(result))
             raise RuntimeError("invalid recording unit")
         token = None
         primary = None
+        speech_stage = "token"
         try:
             token = pathlib.Path(RUNTIME, "roost-vm-orca-token").read_text()
+            speech_stage = "selection"
             selection = speech_selection(orca_observation())
+            speech_stage = "graph"
             graph_end = speech_graph()
+            speech_stage = "sink-link"
             require_sink_graph(graph_end, recording["sink_node"], recording["synth_node"])
             ended = time.monotonic()
         except Exception as error:
@@ -1041,7 +1077,8 @@ print(json.dumps(result))
         finally:
             cleanup = cleanup_speech(recording, token)
         if primary is not None or cleanup["errors"]:
-            fail_speech(primary or RuntimeError("speech recording cleanup failed"), cleanup)
+            fail_speech(primary or RuntimeError("speech recording cleanup failed"), cleanup,
+                        speech_stage if primary is not None else None)
         try:
             profile = recording_profile(recording)
             pcm = read_evidence(recording["pcm"], recording["pcm_identity"],

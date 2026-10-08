@@ -9,12 +9,23 @@ import socket
 import time
 
 
+FOCUS_STAGES = {"arguments", "reader-principal", "helper", "post-observation", "disks-evidence"}
+
+
 def valid_focus_error(value):
     types = {"RuntimeError", "ValueError", "OSError", "FileNotFoundError", "ProcessLookupError",
              "PermissionError", "KeyError", "JSONDecodeError", "UnicodeDecodeError", "RecursionError"}
-    if not isinstance(value, dict) or set(value) != {"focus_error_type"}:
+    if not isinstance(value, dict):
         return False
-    return isinstance(value["focus_error_type"], str) and value["focus_error_type"] in types
+    if set(value) == {"focus_error_type"}:
+        staged = False
+    elif set(value) == {"focus_error_type", "focus_stage"}:
+        staged = True
+    else:
+        return False
+    if not isinstance(value["focus_error_type"], str) or value["focus_error_type"] not in types:
+        return False
+    return not staged or value["focus_stage"] in FOCUS_STAGES
 
 
 def focus_failure_diagnostic(encoded):
@@ -73,7 +84,11 @@ def speech_failure_diagnostic(encoded):
         value = root["orca_speech_error"]
         types = {"RuntimeError", "CalledProcessError", "FileNotFoundError", "ProcessLookupError",
                  "PermissionError", "ValueError", "JSONDecodeError", "OSError", "TimeoutExpired", "OtherError"}
-        if not isinstance(value, dict) or set(value) not in ({"exception_type", "cleanup"}, {"exception_type", "cleanup", "returncode"}) or value["exception_type"] not in types:
+        allowed = ({"exception_type", "cleanup"}, {"exception_type", "cleanup", "returncode"},
+                   {"exception_type", "cleanup", "stage"}, {"exception_type", "cleanup", "returncode", "stage"})
+        if not isinstance(value, dict) or set(value) not in allowed or value["exception_type"] not in types:
+            return None
+        if "stage" in value and value["stage"] not in {"token", "selection", "graph", "sink-link"}:
             return None
         if "returncode" in value and (type(value["returncode"]) is not int or not -255 <= value["returncode"] <= 255):
             return None
