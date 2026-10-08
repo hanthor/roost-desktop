@@ -102,15 +102,34 @@ fn strip_layout(
     }
 }
 
-/// Ease-out-quad progress `elapsed_ms` into a 100 ms animation; done at
-/// once with animations off.
-fn fade_progress(elapsed_ms: f64, enabled: bool) -> f64 {
-    let p = if enabled {
-        (elapsed_ms / FADE_MS).clamp(0.0, 1.0)
+/// Ease-out-quad progress `elapsed_ms` into an animation lasting
+/// `duration_ms`; done at once when that is zero (motion policy off).
+fn ease_progress(elapsed_ms: f64, duration_ms: f64) -> f64 {
+    let p = if duration_ms > 0.0 {
+        (elapsed_ms / duration_ms).clamp(0.0, 1.0)
     } else {
         1.0
     };
     1.0 - (1.0 - p).powi(2)
+}
+
+/// A fade's length under the motion policy: GNOME's 100 ms times the
+/// slow-down factor, kept under Reduced Motion, zero with animations off.
+fn fade_ms(policy: roost_shell_control::MotionPolicy) -> f64 {
+    if policy.allows_fades() {
+        policy.adjust_ms(FADE_MS)
+    } else {
+        0.0
+    }
+}
+
+/// The strip's scroll is motion: Reduced Motion snaps it.
+fn scroll_ms(policy: roost_shell_control::MotionPolicy) -> f64 {
+    if policy.allows_motion() {
+        policy.adjust_ms(FADE_MS)
+    } else {
+        0.0
+    }
 }
 
 /// The first monitor's logical size (1280×800 before one is known).
@@ -129,11 +148,8 @@ fn clear(row: &gtk::Box) {
     }
 }
 
-fn animations_enabled() -> bool {
-    gtk::Settings::default().is_none_or(|s| s.is_gtk_enable_animations())
-}
-
-/// Ease `widget`'s opacity to `to` (instantly with animations off),
+/// Ease `widget`'s opacity to `to` (instantly when the motion policy
+/// drops fades),
 /// then run `done`. A newer fade or [`stop`] on the same `generation`
 /// cancels it. `name` labels the log lines the shell proof reads.
 fn fade(
@@ -147,7 +163,8 @@ fn fade(
     generation.set(current);
     let widget = widget.as_ref().clone();
     let from = widget.opacity();
-    let enabled = animations_enabled();
+    let duration = fade_ms(crate::motion::current());
+    let enabled = duration > 0.0;
     if from != to {
         eprintln!("roost-shell-gtk: switcher fade {name} start animated={enabled}");
     }
@@ -167,7 +184,7 @@ fn fade(
             return gtk::glib::ControlFlow::Break;
         }
         let elapsed = started.elapsed().as_secs_f64() * 1000.0;
-        let t = fade_progress(elapsed, animations_enabled());
+        let t = ease_progress(elapsed, duration.min(fade_ms(crate::motion::current())));
         widget.set_opacity(from + (to - from) * t);
         if t < 1.0 {
             return gtk::glib::ControlFlow::Continue;
@@ -583,7 +600,8 @@ impl SwitcherUi {
         let current = self.scroll_generation.get().wrapping_add(1);
         self.scroll_generation.set(current);
         let from = adjustment.value();
-        if !animations_enabled() {
+        let duration = scroll_ms(crate::motion::current());
+        if duration <= 0.0 {
             adjustment.set_value(target);
             return;
         }
@@ -594,7 +612,7 @@ impl SwitcherUi {
                 return gtk::glib::ControlFlow::Break;
             }
             let elapsed = started.elapsed().as_secs_f64() * 1000.0;
-            let t = fade_progress(elapsed, animations_enabled());
+            let t = ease_progress(elapsed, duration.min(scroll_ms(crate::motion::current())));
             adjustment.set_value(from + (target - from) * t);
             if t < 1.0 {
                 gtk::glib::ControlFlow::Continue
@@ -824,10 +842,27 @@ mod tests {
 
     #[test]
     fn fades_are_100_ms_ease_out_quad_or_instant() {
-        assert_eq!(fade_progress(0.0, true), 0.0);
-        assert_eq!(fade_progress(50.0, true), 0.75);
-        assert_eq!(fade_progress(100.0, true), 1.0);
-        assert_eq!(fade_progress(250.0, true), 1.0);
-        assert_eq!(fade_progress(0.0, false), 1.0);
+        assert_eq!(ease_progress(0.0, 100.0), 0.0);
+        assert_eq!(ease_progress(50.0, 100.0), 0.75);
+        assert_eq!(ease_progress(100.0, 100.0), 1.0);
+        assert_eq!(ease_progress(250.0, 100.0), 1.0);
+        assert_eq!(ease_progress(0.0, 0.0), 1.0);
+    }
+
+    #[test]
+    fn fades_follow_the_motion_policy() {
+        use roost_shell_control::{MotionLevel, MotionPolicy};
+        let full = MotionPolicy::new(MotionLevel::Full, 1.0);
+        assert_eq!(fade_ms(full), 100.0);
+        assert_eq!(scroll_ms(full), 100.0);
+        // Reduced Motion keeps the fades and snaps the scroll.
+        let reduced = MotionPolicy::new(MotionLevel::FadeOnly, 1.0);
+        assert_eq!(fade_ms(reduced), 100.0);
+        assert_eq!(scroll_ms(reduced), 0.0);
+        let off = MotionPolicy::new(MotionLevel::Off, 1.0);
+        assert_eq!(fade_ms(off), 0.0);
+        assert_eq!(scroll_ms(off), 0.0);
+        // GNOME_SHELL_SLOWDOWN_FACTOR stretches them.
+        assert_eq!(fade_ms(MotionPolicy::new(MotionLevel::Full, 2.0)), 200.0);
     }
 }

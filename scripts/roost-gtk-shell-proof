@@ -2677,6 +2677,17 @@ cp "$CSTATE" "$ARTIFACTS/reduced-motion-open.json"
 xdotool key Escape
 cstate '(.overview_open | not) and .overview_progress == 0' "reduced desktop" ||
     fail G-ANIMATIONS-OFF "Reduced Motion overview did not jump to its closed state"
+# The Alt+Tab popup's fade-out is a fade: Reduced Motion keeps it.
+fade_mark="$(wc -c <"$LOG")"
+xdotool keydown Alt_L key Tab
+cstate 'any(.layers[]; .namespace == "roost-shell-switcher")' "reduced switcher" 5 ||
+    { xdotool keyup Alt_L; fail G-ANIMATIONS-OFF "the Reduced Motion switcher did not open"; }
+sleep 0.3
+xdotool key Escape keyup Alt_L
+cstate 'all(.layers[]; .namespace != "roost-shell-switcher")' "reduced switcher closed" 5 ||
+    fail G-ANIMATIONS-OFF "the Reduced Motion switcher did not close"
+tail -c +"$((fade_mark + 1))" "$LOG" | grep -q 'switcher fade popup-out start animated=true' ||
+    fail G-ANIMATIONS-OFF "Reduced Motion dropped the switcher popup's fade"
 # The idle shield is a fade: Reduced Motion keeps it (GNOME's screenShield
 # uses adjustAnimationTime), while animations off removes it.
 gsettings set org.gnome.desktop.screensaver lock-enabled true
