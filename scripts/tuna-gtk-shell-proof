@@ -3620,10 +3620,11 @@ slide_settled "$gesture_home" "slow drag" || fail G-SWIPE-VELOCITY "a slow drag 
 slide_last >"$ARTIFACTS/swipe-velocity-drag.json"
 flick_ms="$(jq '.duration_ms' "$ARTIFACTS/swipe-velocity-flick.json")"
 drag_ms="$(jq '.duration_ms' "$ARTIFACTS/swipe-velocity-drag.json")"
-jq -e '.gesture and .velocity >= 0.6 and .duration_ms >= 100 and .duration_ms < 400' \
-    "$ARTIFACTS/swipe-velocity-flick.json" >/dev/null &&
-    jq -e '.gesture and .velocity == 0 and .duration_ms == 400' "$ARTIFACTS/swipe-velocity-drag.json" >/dev/null ||
+if ! jq -e '.gesture and .velocity >= 0.6 and .duration_ms >= 100 and .duration_ms < 400' \
+    "$ARTIFACTS/swipe-velocity-flick.json" >/dev/null ||
+    ! jq -e '.gesture and .velocity == 0 and .duration_ms == 400' "$ARTIFACTS/swipe-velocity-drag.json" >/dev/null; then
     fail G-SWIPE-VELOCITY "release durations ignore velocity (flick ${flick_ms}ms, drag ${drag_ms}ms)"
+fi
 pass G-SWIPE-VELOCITY "a fast flick lands in ${flick_ms}ms, a slow drag in ${drag_ms}ms"
 
 gsettings set org.gnome.desktop.interface enable-animations false
