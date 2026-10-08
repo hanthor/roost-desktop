@@ -682,8 +682,23 @@ def shell_navigation_focus(kind, original_pid=None, original_ticks=None, control
         raise RuntimeError("one original navigation application principal is required")
     process = candidates[0]
     diagnostic_args = ("controlled-overview",) if controlled else ()
-    receipt = json.loads(call("/usr/libexec/roost-vm-shell-focus", str(process["pid"]), str(process["start_ticks"]),
-                              executable, actual["display"][0], *diagnostic_args, user=True))
+    try:
+        raw = call("/usr/libexec/roost-vm-shell-focus", str(process["pid"]), str(process["start_ticks"]),
+                   executable, actual["display"][0], *diagnostic_args, user=True)
+    except subprocess.CalledProcessError as error:
+        # Forward the helper's own fixed typed diagnostic; never argv/stderr.
+        # Without this the host sees only an opaque exit code.
+        try:
+            candidate = json.loads((error.stdout or "").strip())
+        except (ValueError, TypeError, AttributeError):
+            candidate = None
+        if (isinstance(candidate, dict) and set(candidate) == {"focus_error_type"}
+                and candidate["focus_error_type"] in {"RuntimeError", "ValueError", "OSError",
+                "FileNotFoundError", "ProcessLookupError", "PermissionError", "KeyError",
+                "JSONDecodeError", "UnicodeDecodeError", "RecursionError"}):
+            print(json.dumps(candidate))
+        raise SystemExit(1) from None
+    receipt = json.loads(raw)
     after = orca_observation()
     if any(actual[k] != after.get(k) for k in ("pid", "uid", "start_ticks", "owner", "bus_pid", "bus_uid", "version")) or not after["ready"]:
         raise RuntimeError("original genuine reader changed during navigation observation")
