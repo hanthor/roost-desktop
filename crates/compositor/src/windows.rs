@@ -4557,7 +4557,24 @@ impl WindowManager {
                 sym == Some(k.keysym)
             };
             same && (k.mods == mods || k.mods | MOD_SHIFT == mods)
-        })?;
+        });
+        if key.is_none()
+            && keys.iter().any(|k| {
+                matches!(
+                    k.kind,
+                    K::CycleGroup
+                        | K::CycleGroupBackward
+                        | K::CycleWindows
+                        | K::CycleWindowsBackward
+                ) && Some(k.keysym) == sym
+            })
+        {
+            // Fixed-shape near-miss receipt for the CI journey: the
+            // direct-cycle key arrived with the rebound keysym but the
+            // modifiers did not match, so no Cycle action queued.
+            eprintln!("roost-compositor: cycle chord near-miss: sym={sym:?} mods={mods}");
+        }
+        let key = key?;
         let flip = mods & MOD_SHIFT != 0 && key.mods & MOD_SHIFT == 0;
         let kind = match (key.kind, flip) {
             (K::Applications, true) => K::ApplicationsBackward,
