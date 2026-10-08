@@ -25,7 +25,7 @@ def valid_focus_error(value):
         return False
     if not isinstance(value["focus_error_type"], str) or value["focus_error_type"] not in types:
         return False
-    return not staged or value["focus_stage"] in FOCUS_STAGES
+    return not staged or (type(value["focus_stage"]) is str and value["focus_stage"] in FOCUS_STAGES)
 
 
 def focus_failure_diagnostic(encoded):
@@ -88,7 +88,7 @@ def speech_failure_diagnostic(encoded):
                    {"exception_type", "cleanup", "stage"}, {"exception_type", "cleanup", "returncode", "stage"})
         if not isinstance(value, dict) or set(value) not in allowed or value["exception_type"] not in types:
             return None
-        if "stage" in value and value["stage"] not in {"token", "selection", "graph", "sink-link"}:
+        if "stage" in value and (type(value["stage"]) is not str or value["stage"] not in {"token", "selection", "graph", "sink-link"}):
             return None
         if "returncode" in value and (type(value["returncode"]) is not int or not -255 <= value["returncode"] <= 255):
             return None

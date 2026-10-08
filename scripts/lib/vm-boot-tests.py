@@ -367,7 +367,8 @@ class OrcaStagedDiagnostic(unittest.TestCase):
         self.assertEqual(decode(encode(legacy)), legacy)
         for bad in [dict(staged, focus_stage="private-zone"), dict(staged, focus_stage="helper ",
                     focus_error_type="private"), dict(staged, argv="private"),
-                    {"focus_stage": "helper"}, {"focus_error_type": "OtherError", "focus_stage": "helper"}]:
+                    {"focus_stage": "helper"}, {"focus_error_type": "OtherError", "focus_stage": "helper"},
+                    dict(staged, focus_stage=["helper"])]:
             self.assertIsNone(decode(encode(bad)))
         self.assertIsNone(decode("not-base64"))
         # Fault injection verifies schema bounds; no live guest round trip.
@@ -382,7 +383,7 @@ class OrcaStagedDiagnostic(unittest.TestCase):
         unstaged = {"exception_type": "RuntimeError", "cleanup": cleanup}
         self.assertEqual(decode(encode(unstaged)), unstaged)
         for bad in [dict(staged, stage="private-probe"), dict(staged, stage="selection ",
-                    returncode=256), dict(staged, argv="private")]:
+                    returncode=256), dict(staged, argv="private"), dict(staged, stage=["selection"])]:
             self.assertIsNone(decode(encode(bad)))
         # Fault injection verifies schema bounds; no live audio capture.
     def test_focus_reader_principal_failure_names_stage(self):
