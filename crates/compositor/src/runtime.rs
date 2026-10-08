@@ -3544,14 +3544,14 @@ impl Runtime {
                             &paper,
                             &elements,
                             Target {
-                                damage: &[damage],
+                                damage: &damage,
                                 scale: view.scale,
                                 blank_alpha,
                             },
                             &decor,
                             &previews,
                         )?;
-                        cost = FrameCost::new(&drew, &elements.owners, &[damage], size);
+                        cost = FrameCost::new(&drew, &elements.owners, &damage, size);
                         // Software pointer on top (no host cursor on
                         // bare hardware); hidden while locked.
                         if !locked && blank_alpha < 1.0 {
@@ -3560,7 +3560,9 @@ impl Runtime {
                             let clip = |rects: Vec<Rectangle<i32, smithay::utils::Physical>>| {
                                 rects
                                     .into_iter()
-                                    .filter_map(|r| r.intersection(damage))
+                                    .flat_map(|r| {
+                                        damage.iter().filter_map(move |d| r.intersection(*d))
+                                    })
                                     .collect::<Vec<_>>()
                             };
                             let (outline, fill) = (clip(outline), clip(fill));
@@ -3582,7 +3584,7 @@ impl Runtime {
                     let feedback = crate::frame_timing::take_feedback(&mine, &out.output);
                     if let Err(e) = out.surface.queue_buffer(
                         Some(sync),
-                        Some(crate::native_repaint::scanout_damage(damage)),
+                        Some(crate::native_repaint::scanout_damage(&damage)),
                         feedback,
                     ) {
                         eprintln!("tuna-compositor: drm: queue_buffer {}: {e}", out.name);
