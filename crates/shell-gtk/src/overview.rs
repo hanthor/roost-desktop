@@ -927,12 +927,18 @@ impl OverviewUi {
             f64::from(monitor.x()),
             f64::from(monitor.y() + monitor.height() - 12 - me.dash.height()),
         );
+        if me.dash.height() <= 0 {
+            return None;
+        }
         let tiles = me.dash_tiles.borrow();
         let mut out = Vec::new();
         for (tile, windows) in tiles.iter() {
-            let Some(bounds) = tile.compute_bounds(&me.dash) else {
-                continue;
-            };
+            // A freshly rebuilt dash lays its tiles out on the next frame:
+            // until then keep the last good positions rather than zeros.
+            let bounds = tile.compute_bounds(&me.dash)?;
+            if !tile.is_mapped() || bounds.width() < 1.0 || bounds.height() < 1.0 {
+                return None;
+            }
             for window in windows {
                 out.push(tuna_shell_control::IconGeometry {
                     window: *window,

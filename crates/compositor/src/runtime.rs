@@ -1893,7 +1893,11 @@ impl Runtime {
             Some(crate::minimize_animation::Start {
                 surface: manager.surface_of(id)?,
                 window,
-                icon: icons.get(&id).copied(),
+                // An empty rectangle is no icon: GNOME's corner instead.
+                icon: icons
+                    .get(&id)
+                    .copied()
+                    .filter(|r| r.size.w > 0 && r.size.h > 0),
                 monitor,
                 right_to_left,
             })
