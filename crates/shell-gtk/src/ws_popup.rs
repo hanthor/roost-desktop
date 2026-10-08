@@ -43,7 +43,7 @@ impl WorkspacePopup {
         window.set_title(Some("Workspace Switcher"));
         window.init_layer_shell();
         window.set_layer(Layer::Overlay);
-        window.set_namespace(Some("roost-workspace-popup"));
+        window.set_namespace(Some(roost_shell_control::WORKSPACE_POPUP_NAMESPACE));
         window.set_anchor(Edge::Bottom, true);
         // `margin-bottom: 4em` at the shell's 14.666px.
         window.set_margin(Edge::Bottom, 59);

@@ -53,7 +53,7 @@ jobs:
         run: scripts/roost-coverage-report coverage-artifacts/coverage.json --out coverage-artifacts/coverage-report.md
       - name: Require complete security evidence and executed boundary cases
         run: scripts/roost-security-artifacts coverage-artifacts
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: measured-test-coverage

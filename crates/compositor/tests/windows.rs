@@ -2958,7 +2958,7 @@ fn exclusive_overlay_receives_navigation_and_retains_popup_system_accelerators()
         &surface,
         None,
         Layer::Overlay,
-        "roost-screenshot-ui".into(),
+        roost_shell_control::SCREENSHOT_NAMESPACE.into(),
         &qh,
         (),
     );

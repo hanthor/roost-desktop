@@ -27,6 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: python3 scripts/lib/roost-perf-tests.py
+      - run: python3 scripts/lib/roost-perf-repeatability-tests.py
       - name: Select a successful trusted main package
         env:
           GH_TOKEN: ${{ github.token }}
@@ -117,25 +118,33 @@ jobs:
           for file in PKGBUILD release-trace-context.patch frame-source-evidence.patch drained-capture-start.patch sha256sums; do
             sudo podman run --rm localhost/marlin-roost-preview:perf cat "/usr/share/roost-perf-mutter-profiler/$file" > "perf-artifacts/mutter-profiler-$file"
           done
-      - name: Measure GNOME then Roost on this same host
+      - name: Measure three instrumented GNOME then Roost pairs on this same host
         run: |
           set -euo pipefail
           mkdir -p perf-artifacts
           cp base-digest shared-image-id gnome-version baseline-packages.txt perf-artifacts/
-          for desktop in gnome roost; do
-            image="localhost/marlin-$desktop-perf:ci"
-            sudo podman build -f packaging/marlin/perf/Containerfile --build-arg DESKTOP="$desktop" -t "$image" .
-            probe='if grep -A8 "^\[composefs\]" /usr/lib/ostree/prepare-root.conf 2>/dev/null | grep -qiE "enabled[[:space:]]*=[[:space:]]*(yes|true|1|signed)" || ls /usr/lib/systemd/boot/efi/systemd-boot*.efi >/dev/null 2>&1; then echo --composefs-backend; fi; grep -A8 "^\[composefs\]" /usr/lib/ostree/prepare-root.conf 2>/dev/null | grep -qiE "enabled[[:space:]]*=[[:space:]]*(yes|true|1|signed)" && echo "--filesystem ext4" || true'
-            args=$(sudo podman run --rm --entrypoint "" "$image" sh -c "$probe" | tr '\n' ' ')
-            truncate -s 20G /mnt/perf/disk.raw
-            # shellcheck disable=SC2086
-            sudo podman run --rm --privileged --pid=host --security-opt label=type:unconfined_t -v /dev:/dev -v /var/lib/containers:/var/lib/containers -v /mnt/perf:/output "$image" bootc install to-disk --via-loopback --generic-image --wipe $args /output/disk.raw
-            sudo chown "$(id -u):$(id -g)" /mnt/perf/disk.raw
-            scripts/roost-vm-perf --disk /mnt/perf/disk.raw --desktop "$desktop" --out "perf-artifacts/$desktop" --meta "base_digest=$(cat base-digest)" --meta "shared_image_id=$(cat shared-image-id)" --meta "observer_revision=$GITHUB_SHA"
-            rm /mnt/perf/disk.raw
-            sudo podman rmi "$image"
+          # Fixed order is retained as a documented confound, not randomized.
+          for repeat in 1 2 3; do
+            result_root=perf-artifacts
+            if [[ "$repeat" != 1 ]]; then
+              result_root="perf-artifacts/repeat-$repeat"
+            fi
+            mkdir -p "$result_root"
+            for desktop in gnome roost; do
+              image="localhost/marlin-$desktop-perf:ci"
+              sudo podman build -f packaging/marlin/perf/Containerfile --build-arg DESKTOP="$desktop" -t "$image" .
+              probe='if grep -A8 "^\[composefs\]" /usr/lib/ostree/prepare-root.conf 2>/dev/null | grep -qiE "enabled[[:space:]]*=[[:space:]]*(yes|true|1|signed)" || ls /usr/lib/systemd/boot/efi/systemd-boot*.efi >/dev/null 2>&1; then echo --composefs-backend; fi; grep -A8 "^\[composefs\]" /usr/lib/ostree/prepare-root.conf 2>/dev/null | grep -qiE "enabled[[:space:]]*=[[:space:]]*(yes|true|1|signed)" && echo "--filesystem ext4" || true'
+              args=$(sudo podman run --rm --entrypoint "" "$image" sh -c "$probe" | tr '\n' ' ')
+              truncate -s 20G /mnt/perf/disk.raw
+              # shellcheck disable=SC2086
+              sudo podman run --rm --privileged --pid=host --security-opt label=type:unconfined_t -v /dev:/dev -v /var/lib/containers:/var/lib/containers -v /mnt/perf:/output "$image" bootc install to-disk --via-loopback --generic-image --wipe $args /output/disk.raw
+              sudo chown "$(id -u):$(id -g)" /mnt/perf/disk.raw
+              scripts/roost-vm-perf --disk /mnt/perf/disk.raw --desktop "$desktop" --out "$result_root/$desktop" --meta "base_digest=$(cat base-digest)" --meta "shared_image_id=$(cat shared-image-id)" --meta "observer_revision=$GITHUB_SHA" --meta "acquisition_repeat=$repeat" --meta "acquisition_order=gnome-first-fixed" --meta "reference_kind=instrumented-gnome51"
+              rm /mnt/perf/disk.raw
+              sudo podman rmi "$image"
+            done
           done
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: marlin-performance

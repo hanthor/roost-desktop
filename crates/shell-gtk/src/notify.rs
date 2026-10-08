@@ -282,7 +282,7 @@ impl NotifyUi {
         banner_window.add_css_class("roost-banners");
         banner_window.init_layer_shell();
         banner_window.set_layer(Layer::Overlay);
-        banner_window.set_namespace(Some("roost-shell-banners"));
+        banner_window.set_namespace(Some(roost_shell_control::GTK_BANNERS_NAMESPACE));
         banner_window.set_anchor(Edge::Top, true);
         // The card's own 4px margin puts it 4px under the bar (GNOME).
         banner_window.set_margin(Edge::Top, 0);

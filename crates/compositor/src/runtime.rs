@@ -2848,7 +2848,8 @@ impl Runtime {
             let hardware = false;
             self.orca.set_enabled(enabled && hardware);
         }
-        let reader_changed = self.orca.poll().is_some();
+        let diagnostics_visible = !self.is_locked();
+        let reader_changed = self.orca.poll(diagnostics_visible).is_some();
         if reader_changed || outcome.screen_reader.is_some() {
             self.control
                 .queue_message(roost_shell_control::Message::ScreenReader {

@@ -3,7 +3,7 @@
 //! request can affect another display's reader.
 use roost_shell_control::ScreenReaderState as State;
 use std::io::Read;
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{
@@ -16,7 +16,7 @@ pub struct Reader {
     display: String,
     enabled: bool,
     child: Option<Child>,
-    observed: Option<Receiver<(u32, State)>>,
+    observed: Option<Receiver<(u32, State, &'static str)>>,
     observer: Option<std::thread::JoinHandle<()>>,
     observer_cancel: Arc<AtomicBool>,
     reaping: bool,
@@ -86,7 +86,8 @@ impl Reader {
             self.reaping = true;
         }
     }
-    pub fn poll(&mut self) -> Option<State> {
+    pub fn poll(&mut self, diagnostics_visible: bool) -> Option<State> {
+        let mut observed_running = false;
         if self
             .observer
             .as_ref()
@@ -107,6 +108,9 @@ impl Reader {
         if let Some(child) = self.child.as_mut() {
             match child.try_wait() {
                 Ok(Some(status)) => {
+                    if diagnostics_visible {
+                        eprintln!("ROOST_ORCA_DIAGNOSTIC stage=child-exit pid={} attempt={} code={} signal={}", child.id(), self.attempts, status.code().unwrap_or(-1), status.signal().unwrap_or(0));
+                    }
                     if let Some(keyboard) = &self.keyboard {
                         keyboard.revoke_reader();
                     }
@@ -127,20 +131,29 @@ impl Reader {
                         self.next_start = Instant::now() + Duration::from_secs(2);
                     }
                 }
-                Err(_) => {
+                Err(error) => {
+                    if diagnostics_visible {
+                        eprintln!("ROOST_ORCA_DIAGNOSTIC stage=child-wait-error pid={} attempt={} kind={}", child.id(), self.attempts, error_kind(error.kind()));
+                    }
                     self.stop();
                     self.state = State::Unavailable;
                     self.attempts = 3;
                 }
-                Ok(None) => {}
+                Ok(None) => observed_running = true,
             }
         }
         if let Some(receiver) = &self.observed {
-            if let Ok((pid, state)) = receiver.try_recv() {
+            if let Ok((pid, state, reason)) = receiver.try_recv() {
                 if self.pid() == Some(pid) {
                     if state == State::Active {
                         self.state = state;
                     } else {
+                        if diagnostics_visible {
+                            eprintln!(
+                                "ROOST_ORCA_DIAGNOSTIC stage={} pid={} attempt={} observed_running={}",
+                                reason, pid, self.attempts, observed_running
+                            );
+                        }
                         self.stop();
                         self.state = state;
                         self.attempts = 3;
@@ -206,11 +219,11 @@ impl Reader {
                     self.observer_cancel = Arc::new(AtomicBool::new(false));
                     let cancelled = self.observer_cancel.clone();
                     self.observer = Some(std::thread::spawn(move || loop {
-                        let state = observe_orca_name(pid, &cancelled);
+                        let (state, reason) = observe_orca_name(pid, &cancelled);
                         if cancelled.load(Ordering::SeqCst) {
                             break;
                         }
-                        if sender.send((pid, state)).is_err() || state != State::Active {
+                        if sender.send((pid, state, reason)).is_err() || state != State::Active {
                             break;
                         }
                         for _ in 0..50 {
@@ -221,7 +234,14 @@ impl Reader {
                         }
                     }));
                 }
-                Err(_) => {
+                Err(error) => {
+                    if diagnostics_visible {
+                        eprintln!(
+                            "ROOST_ORCA_DIAGNOSTIC stage=child-spawn pid=0 attempt={} kind={}",
+                            self.attempts,
+                            error_kind(error.kind())
+                        );
+                    }
                     self.state = State::Unavailable;
                     self.next_start = Instant::now() + Duration::from_secs(2);
                 }
@@ -271,7 +291,16 @@ fn parent_lifetime(command: &mut Command) {
 
 /// Bounded observation only. A competing owner can make us stop OUR Child,
 /// never another process; process ownership does not come from these snapshots.
-fn bus_call(method: &str, arg: &str, cancelled: &AtomicBool) -> Option<String> {
+fn error_kind(kind: std::io::ErrorKind) -> &'static str {
+    match kind {
+        std::io::ErrorKind::NotFound => "not-found",
+        std::io::ErrorKind::PermissionDenied => "permission-denied",
+        std::io::ErrorKind::Interrupted => "interrupted",
+        std::io::ErrorKind::InvalidData => "invalid-data",
+        _ => "other",
+    }
+}
+fn bus_call(method: &str, arg: &str, cancelled: &AtomicBool) -> Result<String, &'static str> {
     let mut command = Command::new("gdbus");
     command
         .args([
@@ -288,57 +317,74 @@ fn bus_call(method: &str, arg: &str, cancelled: &AtomicBool) -> Option<String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    bus_call_command(command, cancelled)
+}
+fn bus_call_command(mut command: Command, cancelled: &AtomicBool) -> Result<String, &'static str> {
     parent_lifetime(&mut command);
-    let mut child = command.spawn().ok()?;
+    let mut child = command.spawn().map_err(|_| "bus-spawn")?;
     let until = Instant::now() + Duration::from_secs(2);
     loop {
         if cancelled.load(Ordering::SeqCst) {
             let _ = child.kill();
             let _ = child.wait();
-            return None;
+            return Err("bus-cancelled");
         }
         match child.try_wait() {
             Ok(Some(status)) if status.success() => {
                 let mut data = Vec::new();
                 child
                     .stdout
-                    .take()?
+                    .take()
+                    .ok_or("bus-read")?
                     .take(1025)
                     .read_to_end(&mut data)
-                    .ok()?;
+                    .map_err(|_| "bus-read")?;
                 if data.len() > 1024 {
-                    return None;
+                    return Err("bus-oversize");
                 }
-                return String::from_utf8(data).ok();
+                return String::from_utf8(data).map_err(|_| "bus-malformed");
             }
             Ok(None) if Instant::now() < until => std::thread::sleep(Duration::from_millis(20)),
-            _ => {
+            result => {
+                let reason = match result {
+                    Ok(Some(_)) => "bus-nonzero",
+                    Ok(None) => "bus-timeout",
+                    Err(_) => "bus-wait-error",
+                };
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                return Err(reason);
             }
         }
     }
 }
-fn observe_orca_name(pid: u32, cancelled: &AtomicBool) -> State {
+fn observe_orca_name(pid: u32, cancelled: &AtomicBool) -> (State, &'static str) {
+    let mut last_reason = "observer-deadline";
     let until = Instant::now() + Duration::from_secs(10);
     while Instant::now() < until && !cancelled.load(Ordering::SeqCst) {
         let mut active = false;
         // Orca 50.3 and 51 expose different genuine remote-controller names.
         // A foreign owner of either contract is a conflict, never replacement.
         for name in ["org.gnome.Orca1.Service", "org.gnome.Orca.Service"] {
-            let Some(reply) = bus_call("org.freedesktop.DBus.GetNameOwner", name, cancelled) else {
-                continue;
+            let reply = match bus_call("org.freedesktop.DBus.GetNameOwner", name, cancelled) {
+                Ok(reply) => reply,
+                Err(reason) => {
+                    if reason == "bus-cancelled" {
+                        return (State::Unavailable, "observer-cancelled");
+                    }
+                    last_reason = reason;
+                    continue;
+                }
             };
             let Some(owner) = reply.split('\'').nth(1) else {
-                return State::Unavailable;
+                return (State::Unavailable, "owner-malformed");
             };
             if !owner.starts_with(':')
                 || !owner
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || b":.".contains(&byte))
             {
-                return State::Unavailable;
+                return (State::Unavailable, "owner-malformed");
             }
             for (method, expected) in [
                 ("org.freedesktop.DBus.GetConnectionUnixProcessID", pid),
@@ -347,32 +393,83 @@ fn observe_orca_name(pid: u32, cancelled: &AtomicBool) -> State {
                     rustix::process::geteuid().as_raw(),
                 ),
             ] {
-                let actual = bus_call(method, owner, cancelled).and_then(|reply| {
-                    reply
-                        .trim()
-                        .strip_prefix("(uint32 ")
-                        .and_then(|s| s.strip_suffix(",)"))
-                        .and_then(|s| s.parse::<u32>().ok())
-                });
+                let reply = match bus_call(method, owner, cancelled) {
+                    Ok(reply) => reply,
+                    Err(reason) => return (State::Unavailable, reason),
+                };
+                let actual = reply
+                    .trim()
+                    .strip_prefix("(uint32 ")
+                    .and_then(|s| s.strip_suffix(",)"))
+                    .and_then(|s| s.parse::<u32>().ok());
                 match actual {
                     Some(actual) if actual == expected => {}
-                    Some(_) => return State::Conflict,
-                    None => return State::Unavailable,
+                    Some(_) => return (State::Conflict, "credentials-conflict"),
+                    None => return (State::Unavailable, "credentials-malformed"),
                 }
             }
             active = true;
         }
         if active {
-            return State::Active;
+            return (State::Active, "active");
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    State::Unavailable
+    if cancelled.load(Ordering::SeqCst) {
+        return (State::Unavailable, "observer-cancelled");
+    }
+    (
+        State::Unavailable,
+        match last_reason {
+            "bus-spawn" => "deadline-bus-spawn",
+            "bus-timeout" => "deadline-bus-timeout",
+            "bus-nonzero" => "deadline-bus-nonzero",
+            "bus-oversize" => "deadline-bus-oversize",
+            "bus-malformed" => "deadline-bus-malformed",
+            "bus-read" => "deadline-bus-read",
+            "bus-wait-error" => "deadline-bus-wait-error",
+            _ => "observer-deadline",
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn finite_bus_failures_use_actual_production_command_path() {
+        for (script, expected) in [
+            ("exit 9", "bus-nonzero"),
+            ("printf '\\377'", "bus-malformed"),
+            ("head -c 1025 /dev/zero", "bus-oversize"),
+        ] {
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", script])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null());
+            assert_eq!(
+                bus_call_command(command, &AtomicBool::new(false)).unwrap_err(),
+                expected
+            );
+        }
+        assert_eq!(
+            bus_call_command(
+                Command::new("/nonexistent/roost-orca-test"),
+                &AtomicBool::new(false)
+            )
+            .unwrap_err(),
+            "bus-spawn"
+        );
+    }
+    #[test]
+    fn finite_error_kinds_never_emit_error_content() {
+        assert_eq!(
+            error_kind(std::io::ErrorKind::PermissionDenied),
+            "permission-denied"
+        );
+        assert_eq!(error_kind(std::io::ErrorKind::Other), "other");
+    }
     #[test]
     fn child_has_parent_death_signal_before_exec() {
         let mut command = Command::new("/usr/bin/python3");
@@ -392,7 +489,7 @@ mod tests {
         assert!(reader.pid().is_some());
         let deadline = Instant::now() + Duration::from_secs(1);
         while reader.pid().is_some() && Instant::now() < deadline {
-            reader.poll();
+            reader.poll(false);
             std::thread::sleep(Duration::from_millis(1));
         }
         assert!(reader.pid().is_none());

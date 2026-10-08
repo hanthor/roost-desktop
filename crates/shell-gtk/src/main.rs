@@ -1191,7 +1191,7 @@ fn build(app: &adw::Application) {
     window.set_title(Some("Top Bar"));
     window.init_layer_shell();
     window.set_layer(Layer::Top);
-    window.set_namespace(Some("roost-panel"));
+    window.set_namespace(Some(roost_shell_control::GTK_PANEL_NAMESPACE));
     window.set_anchor(Edge::Top, true);
     window.set_anchor(Edge::Left, true);
     window.set_anchor(Edge::Right, true);

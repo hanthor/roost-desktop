@@ -338,6 +338,74 @@ elif name=='vercmp':
         # Source ordering only; actual package graph/kernel proof remains CI/VM.
 
 
+class OrcaUnreadyDiagnostic(unittest.TestCase):
+    def run_probe(self, *, locked=False, changed=False, executable="/usr/bin/python3.14",
+                  uid=1000, package="python", oversized=False, replaced=False):
+        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
+        fn = next(n for n in ast.parse(source.read_text()).body
+                  if isinstance(n, ast.FunctionDef) and n.name == "orca_child_diagnostic")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for pid, parent, ticks in ((57, 87, 100), (87, 1, 90)):
+                path = root / str(pid)
+                path.mkdir()
+                fields = ["S", str(parent)] + ["0"] * 17 + [str(ticks)]
+                (path / "stat").write_text(f"{pid} (private process name) " + " ".join(fields))
+            (root / "57/environ").write_bytes(b"x" * (128 * 1024 + 1) if oversized else
+                b"WAYLAND_DISPLAY=roost-nested-87\0DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus\0SECRET=private-never-published\0")
+            state_path = root / "state"
+            state_path.write_text(json.dumps({"locked": changed, "screen_reader_pid": 57}))
+            executable_reads = iter([57, 58 if replaced else 57])
+            scope = {"pathlib": SimpleNamespace(Path=lambda path: root / str(path).split("/")[-1]),
+                     "OWNER": SimpleNamespace(pw_uid=1000), "RUNTIME": "/run/user/1000",
+                     "STATE": state_path, "os": SimpleNamespace(readlink=lambda path:
+                         "/usr/bin/roost-compositor" if path.parent.name == "87" else executable,
+                         stat=lambda path: SimpleNamespace(st_dev=1, st_ino=next(executable_reads), st_size=100)),
+                     "json": json, "subprocess": __import__("subprocess"),
+                     "call": lambda *args: package}
+            # Keep genuine file reads; only controlled /proc path/UID/exec fixtures substitute.
+            exec(compile(ast.Module(body=[fn], type_ignores=[]), str(source), "exec"), scope)
+            original_stat = Path.stat
+            def owned_stat(path, *args, **kwargs):
+                value = original_stat(path, *args, **kwargs)
+                if path.name in {"57", "87"}:
+                    return SimpleNamespace(st_uid=uid if path.name == "57" else 1000)
+                return value
+            with patch.object(Path, "stat", owned_stat):
+                result = scope["orca_child_diagnostic"]({"locked": locked}, 57)
+            self.assertNotIn("private", json.dumps(result))
+            return result
+
+    def test_original_unready_child_is_observed_without_claiming_ready(self):
+        result = self.run_probe()
+        self.assertEqual(result["status"], "observed")
+        self.assertEqual((result["pid"], result["parent_pid"], result["start_ticks"]), (57, 87, 100))
+        self.assertTrue(result["display_matches_parent"])
+        self.assertTrue(result["session_bus_matches"])
+        self.assertNotIn("ready", result)
+
+    def test_locked_does_not_read_process(self):
+        self.assertEqual(self.run_probe(locked=True), {"status": "locked"})
+
+    def test_lock_transition_discards_all_original_identity(self):
+        self.assertEqual(self.run_probe(changed=True), {"status": "changed"})
+
+    def test_arbitrary_executable_not_published(self):
+        self.assertEqual(self.run_probe(executable="/private/secret"), {"status": "executable-refused"})
+
+    def test_wrong_uid_refused(self):
+        self.assertEqual(self.run_probe(uid=0), {"status": "principal-refused"})
+
+    def test_wrong_package_refused(self):
+        self.assertEqual(self.run_probe(package="private-package"), {"status": "package-refused"})
+
+    def test_executed_inode_replacement_discards_identity(self):
+        self.assertEqual(self.run_probe(replaced=True), {"status": "changed"})
+
+    def test_oversized_environment_refused(self):
+        self.assertEqual(self.run_probe(oversized=True), {"status": "malformed"})
+
+
 class OrcaReadFailure(unittest.TestCase):
     def test_failed_observation_emits_safe_receipt_and_keeps_exit_one(self):
         source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
