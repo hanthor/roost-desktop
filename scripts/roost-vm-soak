@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Guest-only endurance observer; it does not measure frame pacing or GPU memory."""
+"""Guest endurance observer, with optional real native presentation workload."""
 import argparse
 import hashlib
 import json
@@ -10,7 +10,10 @@ import re
 import signal
 import tempfile
 import subprocess
+import sys
 import time
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / 'lib'))
 
 # The GTK shell is preferred; shell-host is the alternative legacy renderer.
 CRITICAL = ('roost-compositor', 'roost-shell-gtk')
@@ -124,9 +127,46 @@ def main(args):
                              'processes': 'baseline + 12'}}
     (out / 'provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
     start = time.monotonic()
+    probe = probe_output = presentation = None
+    if args.presentation:
+        import stat
+        from endurance_presentation import Reader
+        socket = Path(f'/run/user/{uid}', args.wayland_display)
+        metadata = socket.stat()
+        executable = Path('/usr/local/libexec/roost-frame-pacer')
+        binary = executable.stat()
+        if (metadata.st_uid != uid or not stat.S_ISSOCK(metadata.st_mode)
+                or binary.st_uid != 0 or binary.st_mode & 0o022
+                or not stat.S_ISREG(binary.st_mode) or executable.is_symlink()):
+            raise RuntimeError('invalid native workload binary/socket ownership')
+        provenance['presentation_workload'] = {
+            'binary': str(executable), 'sha256': hashlib.sha256(executable.read_bytes()).hexdigest(),
+            'wayland_display': args.wayland_display, 'size': [320, 180],
+            'idle_policy': 'Ordinary mapped client idle inhibitor; explicit lock is never bypassed.',
+            'duration_s': args.seconds, 'raw_output_budget_bytes': 4 * 1024**3}
+        (out / 'provenance.json').write_text(json.dumps(provenance, indent=2) + '\n')
+        probe_output = (out / 'presentation.jsonl').open('wb')
+        try:
+            with (out / 'presentation.stderr').open('wb') as errors:
+                probe = subprocess.Popen([
+                    'runuser', '-u', args.user, '--', 'env', '-i', 'PATH=/usr/bin:/bin',
+                    f'XDG_RUNTIME_DIR=/run/user/{uid}', f'WAYLAND_DISPLAY={args.wayland_display}',
+                    str(executable), '--endurance-seconds', str(args.seconds)],
+                    stdout=probe_output, stderr=errors, start_new_session=True)
+            presentation = Reader((out / 'presentation.jsonl').open('rb'), args.seconds)
+        except BaseException:
+            if probe is not None:
+                try:
+                    os.killpg(probe.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                probe.wait()
+            probe_output.close()
+            raise
     original = baseline = None
     report = {'complete': False, 'samples': 0, 'limitations': [
-        'No frame pacing, GPU memory or input latency measurement.',
+        ('Frame pacing is real native client feedback; no GPU memory or input latency measurement.'
+         if args.presentation else 'No frame pacing, GPU memory or input latency measurement.'),
         'PSS scope is the session UID; root services and kernel memory are excluded.',
         'This observes process stability and service responsiveness, without service fault injection.',
         'The source revision is supplied by the deployment record; binary hashes are measured.']}
@@ -137,6 +177,13 @@ def main(args):
                 if Path('/proc/sys/kernel/random/boot_id').read_text().strip() != boot:
                     raise RuntimeError('guest rebooted during the observation')
                 value = sample(uid)
+                if presentation is not None:
+                    if probe.poll() is not None and (probe.returncode != 0 or elapsed + 1 < args.seconds):
+                        raise RuntimeError('native presentation workload exited before completing')
+                    if os.fstat(probe_output.fileno()).st_size > 4 * 1024**3:
+                        raise RuntimeError('native presentation output exceeded 4 GiB budget')
+                    value['presentation'] = presentation.poll()
+                    report['presentation'] = value['presentation']
                 if original is None:
                     original = value['critical']
                 if value['critical'] != original:
@@ -176,6 +223,10 @@ def main(args):
                         if value[key] > limit:
                             raise RuntimeError(f'{key} grew to {value[key]} beyond {limit}')
                 if elapsed >= args.seconds:
+                    if probe is not None:
+                        if probe.wait(timeout=20) != 0:
+                            raise RuntimeError('native presentation workload failed at completion')
+                        report['presentation_final'] = presentation.finish()
                     report['complete'] = True
                     break
                 time.sleep(min(args.interval, max(0, args.seconds - (time.monotonic() - start))))
@@ -183,6 +234,14 @@ def main(args):
         report['failure'] = str(error)
         raise
     finally:
+        if probe is not None:
+            try:
+                os.killpg(probe.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            probe.wait()
+            probe_output.close()
+            presentation.stream.close()
         report['elapsed_s'] = time.monotonic() - start
         (out / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
 
@@ -195,9 +254,16 @@ if __name__ == '__main__':
     parser.add_argument('--seconds', type=int, default=86400)
     parser.add_argument('--interval', type=int, default=60)
     parser.add_argument('--warmup', type=int, default=600)
+    parser.add_argument('--presentation', action='store_true',
+                        help='run the fixed native frame workload and retain real feedback')
+    parser.add_argument('--wayland-display',
+                        help='ordinary session socket basename, required with --presentation')
     args = parser.parse_args()
     if not re.fullmatch('[0-9a-f]{40}', args.source_revision):
         parser.error('source revision must be the exact 40-digit hexadecimal commit')
     if args.seconds <= args.warmup or args.interval <= 0 or args.warmup < 0:
         parser.error('duration must exceed nonnegative warmup; interval must be positive')
+    if args.presentation and (args.seconds > 86400 or not args.wayland_display
+                             or not re.fullmatch(r'(?:wayland-|roost-)[A-Za-z0-9_.-]+', args.wayland_display)):
+        parser.error('presentation requires a session socket basename and duration at most 86400')
     main(args)
