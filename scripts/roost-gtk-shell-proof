@@ -135,7 +135,10 @@
 #   G-TRAY      an AppIndicator item shows in the panel and its menu
 #               row reaches the item (P-TR-01)
 #   G-SWITCHER-GROUP Alt+Above_Tab shows an app's windows as thumbnails
-#               and steps through them; W closes the focused one
+#               inside the output and steps through them; W closes the
+#               focused one
+#   G-SWITCHER-FADE the thumbnails fade in and the popup fades out over
+#               GNOME's 100 ms, animated and settled
 #   G-IME            IBus composes pinyin into hanzi in a GTK app
 #   G-SCROLL         niri's scrollable tiling: gaps, view follows focus, ring
 #   G-IME-SURROUNDING the engine sees the field's text around the
@@ -1224,14 +1227,32 @@ xdotool mousemove --window "$WID" "$ax" "$ay" click 1
 cstate ".overview_open == false and .focused == $new_alpha" "new Alpha restored" ||
     fail G-SWITCHER-GROUP "could not restore the second Alpha fixture through its overview preview"
 second="$new_alpha"
+fade_mark="$(wc -c <"$LOG")"
 xdotool keydown Alt_L key grave
 cstate '.switcher_thumbnails == 2' "thumbnails" 5 ||
     { xdotool keyup Alt_L; fail G-SWITCHER-GROUP "Alt+Above_Tab drew no window thumbnails"; }
 sleep 0.5
 scrot "$ARTIFACTS/08c-switcher-thumbnails.png" >/dev/null
+# GNOME keeps the strip on screen under the app row (#508): the
+# thumbnails' surface, shadow room included, lies inside the output.
+cstate "any(.layers[]; .namespace == \"roost-shell-switcher-thumbnails\" and .rect[0] >= 0 and .rect[1] >= 0 and .rect[0] + .rect[2] <= $WIDTH and .rect[1] + .rect[3] <= $HEIGHT)" \
+    "thumbnails on screen" 5 ||
+    { xdotool keyup Alt_L; fail G-SWITCHER-GROUP "the thumbnail strip runs off the output"; }
 xdotool keyup Alt_L
 cstate ".focused != $second and .focused_app_id == \"roost-test-alpha\" and .switcher_thumbnails == 0" \
     "other alpha" || fail G-SWITCHER-GROUP "Alt+Above_Tab did not move to Alpha's other window"
+# GNOME's fades (#501): the thumbnails ease in and the popup eases out
+# over 100 ms, each starting animated and settling.
+cstate 'all(.layers[]; .namespace != "roost-shell-switcher")' "switcher faded out" 5 ||
+    fail G-SWITCHER-FADE "the switcher never finished fading out"
+fades="$(tail -c +"$((fade_mark + 1))" "$LOG" | grep 'roost-shell-gtk: switcher fade' || true)"
+for fade in thumbnails-in popup-out; do
+    printf '%s\n' "$fades" | grep -q "fade $fade start animated=true" ||
+        fail G-SWITCHER-FADE "the $fade fade did not start animated"
+    printf '%s\n' "$fades" | grep -q "fade $fade settled" ||
+        fail G-SWITCHER-FADE "the $fade fade did not settle"
+done
+pass G-SWITCHER-FADE "the switcher's thumbnails fade in and its popup fades out, animated and settled"
 sleep 0.5
 xdotool keydown Alt_L key grave
 sleep 1
@@ -2628,6 +2649,18 @@ cstate '.strip_view == .strip_offset' "instant focus" ||
     fail G-ANIMATIONS-OFF "the disabled strip view lagged after a focus move"
 xdotool key super+shift+t
 cstate '.session_mode == "gnome"' "floating" || fail G-ANIMATIONS-OFF "could not restore floating mode"
+# The Alt+Tab popup closes without its fade (#501).
+fade_mark="$(wc -c <"$LOG")"
+xdotool keydown Alt_L key Tab
+cstate 'any(.layers[]; .namespace == "roost-shell-switcher")' "switcher without motion" 5 ||
+    { xdotool keyup Alt_L; fail G-ANIMATIONS-OFF "the switcher did not open"; }
+sleep 0.3
+# Escape cancels, leaving the focus where the later gates expect it.
+xdotool key Escape keyup Alt_L
+cstate 'all(.layers[]; .namespace != "roost-shell-switcher")' "switcher closed without motion" 5 ||
+    fail G-ANIMATIONS-OFF "the switcher did not close"
+tail -c +"$((fade_mark + 1))" "$LOG" | grep -q 'switcher fade popup-out start animated=false' ||
+    fail G-ANIMATIONS-OFF "the switcher popup still faded with animations off"
 gsettings set org.gnome.desktop.interface enable-animations true
 cstate '.animations_enabled' "animations enabled" ||
     fail G-ANIMATIONS-OFF "enable-animations true did not restore live animation"
@@ -2644,6 +2677,17 @@ cp "$CSTATE" "$ARTIFACTS/reduced-motion-open.json"
 xdotool key Escape
 cstate '(.overview_open | not) and .overview_progress == 0' "reduced desktop" ||
     fail G-ANIMATIONS-OFF "Reduced Motion overview did not jump to its closed state"
+# The Alt+Tab popup's fade-out is a fade: Reduced Motion keeps it.
+fade_mark="$(wc -c <"$LOG")"
+xdotool keydown Alt_L key Tab
+cstate 'any(.layers[]; .namespace == "roost-shell-switcher")' "reduced switcher" 5 ||
+    { xdotool keyup Alt_L; fail G-ANIMATIONS-OFF "the Reduced Motion switcher did not open"; }
+sleep 0.3
+xdotool key Escape keyup Alt_L
+cstate 'all(.layers[]; .namespace != "roost-shell-switcher")' "reduced switcher closed" 5 ||
+    fail G-ANIMATIONS-OFF "the Reduced Motion switcher did not close"
+tail -c +"$((fade_mark + 1))" "$LOG" | grep -q 'switcher fade popup-out start animated=true' ||
+    fail G-ANIMATIONS-OFF "Reduced Motion dropped the switcher popup's fade"
 # The idle shield is a fade: Reduced Motion keeps it (GNOME's screenShield
 # uses adjustAnimationTime), while animations off removes it.
 gsettings set org.gnome.desktop.screensaver lock-enabled true
