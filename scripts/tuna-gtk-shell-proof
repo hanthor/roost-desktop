@@ -113,6 +113,10 @@
 #                  password refused, the right one authorizing
 #   G-WINDOW-MENU  GNOME's window menu: Always on Top, Hide, and the
 #                  overview brings the hidden window back
+#   G-MINIMIZE-ANIM Super+H shrinks the window into its dash icon (the
+#                  rectangle the shell publishes) over GNOME's 400 ms,
+#                  restore grows it back; reduced motion only fades;
+#                  both snap with animations off
 #   G-WM-KEYS      Alt+Space, Alt+F10, Super+End/Home (wm keybindings)
 #   G-WM-REBIND    GNOME's maximize key rebinds through its settings:
 #                  the old chord stops, the new one maximizes
@@ -3016,6 +3020,85 @@ window_menu
 "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-window-menu-unpin.json" 20 \
     --press "Always on Top" || fail G-WINDOW-MENU "could not restore ordinary stacking"
 cstate "any(.above[]; . == $alpha_id) | not" "Alpha unpinned" || fail G-WINDOW-MENU "Alpha stayed above later test windows"
+
+# GNOME 51's minimize (windowManager.js _minimizeWindow): 400 ms
+# ease-out-expo into the app's dash icon, which the shell publishes over
+# the control channel; restore grows back out of it. With animations off
+# both snap. The icon is checked against the dash while the overview
+# shows it; it stays published after the overview closes.
+xdotool key Super_L
+cstate ".overview_open and any(.layers[]; .namespace == \"roost-shell-dash\") and any(.icon_geometries[]; .window == $alpha_id)" \
+    "alpha icon published" || fail G-MINIMIZE-ANIM "the shell never published Alpha's dash icon"
+sleep 1
+alpha_icon="$(jq -c "[.icon_geometries[] | select(.window == $alpha_id) | .rect][0]" "$CSTATE")"
+jq -e --argjson i "$alpha_icon" '[.layers[] | select(.namespace == "roost-shell-dash") | .rect][0] as $d
+    | $d != null and $i[2] > 0 and $i[3] > 0 and $i[0] >= $d[0] and $i[1] >= $d[1]
+    and $i[0] + $i[2] <= $d[0] + $d[2] and $i[1] + $i[3] <= $d[1] + $d[3]' "$CSTATE" >/dev/null ||
+    fail G-MINIMIZE-ANIM "Alpha's published icon $alpha_icon is not inside the dash"
+cp "$CSTATE" "$ARTIFACTS/minimize-anim-icon.json"
+xdotool key Escape
+cstate "(.overview_open | not) and .focused == $alpha_id" "alpha focused for minimize" ||
+    fail G-MINIMIZE-ANIM "Alpha was not focused after the overview closed"
+minimize_check() {
+    "$PY" "$ROOT/scripts/lib/roost-minimize-anim-check.py" "$CSTATE" "$alpha_id" "$@" \
+        >>"$ARTIFACTS/minimize-anim.log" 2>&1 &
+    MINIMIZE_CHECK_PID=$!
+    sleep 0.3
+}
+# Minimize on the proof-driven animation clock: frozen at the start,
+# exactly half way 200 ms in (ease-out-expo puts it 31/32 of the way to
+# the icon), settled on the icon at exactly 400 ms.
+alpha_rect="$(jq -c .focused_rect "$CSTATE")"
+anim_clock 0
+cstate '.animation_clock_manual' "frozen minimize clock" ||
+    fail G-MINIMIZE-ANIM "the animation clock did not freeze"
+xdotool key super+h
+cstate "any(.minimized[]; . == $alpha_id) and any(.minimize_animations[]; .window == $alpha_id and .direction == \"minimize\" and .progress == 0)" \
+    "minimize frozen at its start" || fail G-MINIMIZE-ANIM "Super+H started no minimize animation"
+anim_clock 200
+cstate "any(.minimize_animations[]; .window == $alpha_id and .progress == 0.5)" "minimize at 200 ms" ||
+    fail G-MINIMIZE-ANIM "the minimize was not half way 200 ms in"
+cp "$CSTATE" "$ARTIFACTS/minimize-anim-200ms.json"
+jq -e --argjson w "$alpha_rect" --argjson i "$alpha_icon" \
+    '[.minimize_animations[] | select(.window == '"$alpha_id"')][0] as $a
+    | [range(4)] | all(($a.rect[.] - ($w[.] + ($i[.] - $w[.]) * 0.96875) | fabs) < 0.01)
+    and (($a.alpha - 0.03125) | fabs) < 0.0001' "$CSTATE" >/dev/null ||
+    fail G-MINIMIZE-ANIM "200 ms in, the window was not where GNOME's ease-out-expo puts it on the way to $alpha_icon"
+anim_clock 400
+cstate "(.minimize_animations | length) == 0 and (.minimize_settled | last | .window == $alpha_id and .direction == \"minimize\" and .animated and (.elapsed_ms - 400 | fabs) < 0.5 and .to == $alpha_icon and .from == $alpha_rect)" \
+    "minimize settled at 400 ms" || fail G-MINIMIZE-ANIM "the minimize did not settle on the dash icon at 400 ms"
+rm -f "$ROOST_ANIMATION_CLOCK"
+cstate '.animation_clock_manual | not' "real clock after minimize" ||
+    fail G-MINIMIZE-ANIM "removing the clock file did not resume real time"
+minimize_check restore "$ARTIFACTS/minimize-anim-up.json" --animated "$alpha_icon"
+pick_alpha || fail G-MINIMIZE-ANIM "could not restore Alpha from the overview"
+wait "$MINIMIZE_CHECK_PID" || fail G-MINIMIZE-ANIM "restore did not grow out of the dash icon (see minimize-anim.log)"
+# Reduced motion (fade-only, #493): GNOME only fades the window.
+gsettings set org.gnome.desktop.a11y.interface reduced-motion 'reduce'
+cstate '.motion_policy == "fade-only"' "fade-only for minimize" ||
+    fail G-MINIMIZE-ANIM "reduced motion did not reach the compositor"
+minimize_check minimize "$ARTIFACTS/minimize-anim-fade-down.json" --fade
+xdotool key super+h
+wait "$MINIMIZE_CHECK_PID" || fail G-MINIMIZE-ANIM "fade-only minimize moved or did not fade (see minimize-anim.log)"
+minimize_check restore "$ARTIFACTS/minimize-anim-fade-up.json" --fade
+pick_alpha || fail G-MINIMIZE-ANIM "could not restore Alpha under reduced motion"
+wait "$MINIMIZE_CHECK_PID" || fail G-MINIMIZE-ANIM "fade-only restore moved or did not fade (see minimize-anim.log)"
+gsettings reset org.gnome.desktop.a11y.interface reduced-motion
+cstate '.motion_policy == "full"' "full motion again" ||
+    fail G-MINIMIZE-ANIM "resetting reduced motion did not restore full motion"
+gsettings set org.gnome.desktop.interface enable-animations false
+cstate '(.animations_enabled | not)' "animations off for minimize" ||
+    fail G-MINIMIZE-ANIM "enable-animations false did not reach the compositor"
+minimize_check minimize "$ARTIFACTS/minimize-anim-off-down.json" --instant
+xdotool key super+h
+wait "$MINIMIZE_CHECK_PID" || fail G-MINIMIZE-ANIM "minimize animated with animations off (see minimize-anim.log)"
+minimize_check restore "$ARTIFACTS/minimize-anim-off-up.json" --instant
+pick_alpha || fail G-MINIMIZE-ANIM "could not restore Alpha with animations off"
+wait "$MINIMIZE_CHECK_PID" || fail G-MINIMIZE-ANIM "restore animated with animations off (see minimize-anim.log)"
+gsettings set org.gnome.desktop.interface enable-animations true
+cstate '.animations_enabled' "animations back on" ||
+    fail G-MINIMIZE-ANIM "enable-animations true did not reach the compositor"
+pass G-MINIMIZE-ANIM "minimize shrinks into the dash icon and restore grows out of it in 400 ms; reduced motion only fades; both snap with animations off"
 
 # GNOME's window-manager keys (org.gnome.desktop.wm.keybindings).
 sleep 1
