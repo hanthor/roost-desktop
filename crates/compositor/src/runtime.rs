@@ -25,7 +25,6 @@ use smithay::{
                 Kind,
             },
             gles::GlesRenderer,
-            utils::draw_render_elements,
             Bind, Color32F, Frame, Renderer,
         },
         winit::{self, WinitEvent},
@@ -39,6 +38,7 @@ use smithay::{
 
 use crate::control::{ControlHub, PeerGate};
 use crate::lock::{content_visible, SessionLock, DEFAULT_IDLE_TIMEOUT_MS};
+use crate::occlusion::FrameCost;
 
 /// Idle timeout for the session lock: `TUNA_IDLE_TIMEOUT_MS` overrides
 /// the five-minute default. Testability seam for scripted lock capture
@@ -394,6 +394,37 @@ pub fn resolve_shell_bin_in(
 }
 
 #[cfg(test)]
+mod scene_slot_tests {
+    use super::{scene_slots, SceneSlot::*};
+
+    #[test]
+    fn snapshots_draw_in_front_of_the_elements_at_and_after_their_index() {
+        // Five elements split at 2: snapshot 0 sits at index 1 (over half),
+        // snapshot 1 at the boundary 2 (under half's end only), snapshots
+        // 2 and 3 both at 4 (the later in front), snapshot 4 past the end.
+        let at = [1, 2, 4, 4, 5];
+        assert_eq!(
+            scene_slots(2, 0, false, &at),
+            vec![Element(0), Snapshot(0), Element(1)]
+        );
+        assert_eq!(
+            scene_slots(3, 2, true, &at),
+            vec![
+                Snapshot(1),
+                Element(2),
+                Element(3),
+                Snapshot(3),
+                Snapshot(2),
+                Element(4),
+                Snapshot(4),
+            ]
+        );
+        assert_eq!(scene_slots(0, 0, false, &[0]), vec![]);
+        assert_eq!(scene_slots(0, 0, true, &[0]), vec![Snapshot(0)]);
+    }
+}
+
+#[cfg(test)]
 mod shell_bin_tests {
     use super::*;
 
@@ -597,6 +628,8 @@ pub struct Runtime {
     overview_drag: Option<(u64, Point<f64, Logical>, bool)>,
     /// The Alt+Tab switcher's window thumbnails (frames from the shell).
     switcher_thumbnails: Vec<tuna_shell_control::SwitcherThumbnail>,
+    /// What each output's last drawn frame cost, by output name (#503).
+    frame_costs: std::collections::BTreeMap<String, FrameCost>,
     /// Reserved X11 display, advertised before XWayland starts (#219).
     /// Actual window-manager readiness is independently state.xwm.is_some().
     x11_display: Option<u32>,
@@ -952,6 +985,7 @@ impl Runtime {
             overview_app_grid: false,
             overview_drag: None,
             switcher_thumbnails: Vec::new(),
+            frame_costs: std::collections::BTreeMap::new(),
             shell_swipe: None,
             overview_progress: 0.0,
             overview_progress_at: Duration::ZERO,
@@ -1612,6 +1646,13 @@ impl Runtime {
                 })
                 .collect::<Vec<_>>(),
         });
+        // Overdraw per output for the last drawn frame (#503).
+        doc["frame_cost"] = self
+            .frame_costs
+            .iter()
+            .map(|(name, cost)| (name.clone(), cost.to_json()))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
         doc["wallpaper_diagnostics"] = if self.is_locked() {
             serde_json::Value::Null
         } else {
@@ -2150,7 +2191,7 @@ impl Runtime {
                 &[],
                 &elements,
                 Target {
-                    damage: Rectangle::from_size(size),
+                    damage: &[Rectangle::from_size(size)],
                     scale,
                     blank_alpha: 0.0,
                 },
@@ -2323,7 +2364,7 @@ impl Runtime {
                 &paper,
                 &elements,
                 Target {
-                    damage,
+                    damage: &[damage],
                     scale: view.scale,
                     blank_alpha,
                 },
@@ -3226,6 +3267,7 @@ impl Runtime {
                 backend.window().set_cursor_visible(blank_alpha < 1.0);
                 let size = backend.window_size();
                 let damage = Rectangle::from_size(size);
+                let drawn;
                 {
                     let (renderer, mut framebuffer) = backend
                         .bind()
@@ -3288,23 +3330,25 @@ impl Runtime {
                     let mut frame = renderer
                         .render(&mut framebuffer, size, Transform::Flipped180)
                         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-                    draw_scene(
+                    let drew = draw_scene(
                         &mut frame,
                         background,
                         &paper,
                         &elements,
                         Target {
-                            damage,
+                            damage: &[damage],
                             scale: view.scale,
                             blank_alpha,
                         },
                         &decor,
                         &previews,
                     )?;
+                    drawn = FrameCost::new(&drew, &elements.owners, &[damage], size);
                     let _ = frame
                         .finish()
                         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
                 }
+                self.frame_costs.insert("winit".to_owned(), drawn);
                 send_surface_scales(&self.state, &self.manager);
                 send_frame_callbacks(&self.state, &self.manager);
                 backend
@@ -3486,6 +3530,7 @@ impl Runtime {
                         &signature,
                     )
                     .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+                    let cost;
                     let sync = {
                         let mut target = renderer
                             .bind(&mut dmabuf)
@@ -3493,19 +3538,20 @@ impl Runtime {
                         let mut frame = renderer
                             .render(&mut target, size, Transform::Normal)
                             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-                        draw_scene(
+                        let drew = draw_scene(
                             &mut frame,
                             background,
                             &paper,
                             &elements,
                             Target {
-                                damage,
+                                damage: &[damage],
                                 scale: view.scale,
                                 blank_alpha,
                             },
                             &decor,
                             &previews,
                         )?;
+                        cost = FrameCost::new(&drew, &elements.owners, &[damage], size);
                         // Software pointer on top (no host cursor on
                         // bare hardware); hidden while locked.
                         if !locked && blank_alpha < 1.0 {
@@ -3552,6 +3598,7 @@ impl Runtime {
                             .queued(Duration::from(self.state.presentation_now()));
                     }
                     out.last_frame = Some(signature);
+                    self.frame_costs.insert(out.name.clone(), cost);
                     queued = true;
                 }
                 send_surface_scales(&self.state, &self.manager);
@@ -3751,6 +3798,9 @@ struct Scene {
     /// Old-frame snapshots of size-change transitions (#496), each
     /// drawn in front of `elements[index..]`, in physical pixels.
     snapshots: Vec<(usize, SnapshotElement)>,
+    /// The window each of `elements` belongs to (popups included), for
+    /// reporting which windows occlusion hid; `None` for layers.
+    owners: Vec<Option<u64>>,
 }
 
 /// A size-change snapshot, drawn at scale 1.
@@ -3777,6 +3827,7 @@ impl Scene {
             tile: Vec::new(),
             top: Vec::new(),
             snapshots: Vec::new(),
+            owners: vec![None; above],
         }
     }
 }
@@ -3944,6 +3995,7 @@ fn scene_elements(
         return Scene::flat(crate::layer::front_to_back(elements));
     }
     let mut elements: Vec<PreviewElement> = Vec::new();
+    let mut owners: Vec<Option<u64>> = Vec::new();
     // Bottom-to-top index where the dragged window starts.
     let mut split_from = None;
     let tree = |renderer: &mut GlesRenderer,
@@ -4014,6 +4066,7 @@ fn scene_elements(
                     crate::size_change::snapshot_element(renderer, snapshot, &frame, view)
                         .map(|element| (elements.len(), element)),
                 );
+                owners.resize(elements.len(), Some(id));
                 continue;
             }
             let origin = crate::popup::surface_origin(&surface, geometry.loc);
@@ -4031,6 +4084,7 @@ fn scene_elements(
             for popup in crate::popup::placed_popups(&surface, origin, true) {
                 tree(renderer, &mut elements, &popup.surface, popup.origin, 1.0);
             }
+            owners.resize(elements.len(), Some(id));
         }
     }
     // Layer shell above windows: panel strip, then overview, each with
@@ -4046,6 +4100,7 @@ fn scene_elements(
     // element topmost.
     let above = elements.len() - split_from.unwrap_or(0);
     let total = elements.len();
+    owners.resize(total, None);
     let snapshots = snapshots
         .into_iter()
         .map(|(index, element)| (total - index, element))
@@ -4056,6 +4111,7 @@ fn scene_elements(
         tile: Vec::new(),
         top: Vec::new(),
         snapshots,
+        owners: crate::layer::front_to_back(owners),
     }
 }
 
@@ -4135,8 +4191,8 @@ fn backdrop(
 /// DMA import bounds this backend does not satisfy), then the scene.
 /// What one frame redraws, and at which scale.
 #[derive(Debug, Clone, Copy)]
-struct Target {
-    damage: Rectangle<i32, smithay::utils::Physical>,
+struct Target<'a> {
+    damage: &'a [Rectangle<i32, smithay::utils::Physical>],
     scale: f64,
     blank_alpha: f32,
 }
@@ -4148,112 +4204,170 @@ fn draw_scene(
         GlesRenderer,
     >],
     scene: &Scene,
-    target: Target,
+    target: Target<'_>,
     decor: &[(Color32F, Vec<Rectangle<i32, smithay::utils::Physical>>)],
     previews: &[PreviewElement],
-) -> Result<(), RuntimeError> {
+) -> Result<crate::occlusion::Drawn, RuntimeError> {
+    use crate::occlusion::{draw_planned, Drawn, Occlusion};
+    use smithay::backend::renderer::element::{solid::SolidColorRenderElement, Id, Kind};
     let Target {
         damage,
         scale,
         blank_alpha,
     } = target;
-    frame
-        .clear(background, &[damage])
-        .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-    if !paper.is_empty() {
-        draw_render_elements(frame, 1.0, paper, &[damage])
-            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-    }
+    let error =
+        |e: smithay::backend::renderer::gles::GlesError| RuntimeError::Dispatch(e.to_string());
+    // Plan top to bottom (#503): each element repaints only damage that
+    // no opaque element above it covers, so stacked windows and the
+    // wallpaper under an opaque window are skipped.
+    let mut occlusion = Occlusion::new(damage);
+    let bounds = damage.iter().copied().reduce(Rectangle::merge);
+    thread_local! { static SHIELD: Id = Id::new(); }
+    let shield = bounds.filter(|_| blank_alpha > 0.0).map(|bounds| {
+        SolidColorRenderElement::new(
+            SHIELD.with(Clone::clone),
+            bounds,
+            0usize,
+            Color32F::new(0.0, 0.0, 0.0, blank_alpha),
+            Kind::Unspecified,
+        )
+    });
+    let shield_plan = occlusion.plan(1.0, shield.as_slice());
+    let top_plan = occlusion.plan(scale, &scene.top);
+    // Beneath the tile preview, the preview (blended), then the
+    // dragged window and the layers over it, each half with the
+    // size-change snapshots among its elements (#496).
+    let split = scene.above.min(scene.elements.len());
+    let snapshot_at: Vec<usize> = scene.snapshots.iter().map(|(index, _)| *index).collect();
+    let over = scene_slots(split, 0, false, &snapshot_at);
+    let under = scene_slots(scene.elements.len() - split, split, true, &snapshot_at);
+    let over_plan = plan_slots(&mut occlusion, scale, scene, &over);
+    let tile_plan = occlusion.plan(1.0, &scene.tile);
+    let under_plan = plan_slots(&mut occlusion, scale, scene, &under);
+    let previews_plan = occlusion.plan(scale, previews);
     // Solid shapes under the surfaces (overview cards, hover ring).
-    for (color, rects) in decor {
-        let rects: Vec<_> = rects
-            .iter()
-            .filter_map(|r| r.intersection(damage))
-            .collect();
+    let decor_plan: Vec<_> = decor
+        .iter()
+        .rev()
+        .map(|(color, rects)| occlusion.visit_fill(rects, color.is_opaque()))
+        .collect();
+    let paper_plan = occlusion.plan(1.0, paper);
+    let clear = occlusion.uncovered();
+    if !clear.is_empty() {
+        frame.clear(background, &clear).map_err(error)?;
+    }
+    draw_planned::<GlesRenderer, _>(frame, 1.0, paper, &paper_plan).map_err(error)?;
+    for ((color, _), rects) in decor.iter().zip(decor_plan.iter().rev()) {
         if !rects.is_empty() {
-            frame
-                .clear(*color, &rects)
-                .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+            frame.clear(*color, rects).map_err(error)?;
         }
     }
     // Surfaces carry logical sizes: draw them at the output scale. The
     // wallpaper above is already sized in physical pixels.
-    if !previews.is_empty() {
-        draw_render_elements(frame, scale, previews, &[damage])
-            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    draw_planned::<GlesRenderer, _>(frame, scale, previews, &previews_plan).map_err(error)?;
+    draw_slots(frame, scale, scene, &under, &under_plan).map_err(error)?;
+    draw_planned::<GlesRenderer, _>(frame, 1.0, &scene.tile, &tile_plan).map_err(error)?;
+    draw_slots(frame, scale, scene, &over, &over_plan).map_err(error)?;
+    draw_planned::<GlesRenderer, _>(frame, scale, &scene.top, &top_plan).map_err(error)?;
+    draw_planned::<GlesRenderer, _>(frame, 1.0, shield.as_slice(), &shield_plan).map_err(error)?;
+    let mut scene_visible = vec![false; scene.elements.len()];
+    for (slot, visible) in over
+        .iter()
+        .zip(&over_plan)
+        .chain(under.iter().zip(&under_plan))
+    {
+        if let SceneSlot::Element(index) = slot {
+            scene_visible[*index] = !visible.is_empty();
+        }
     }
-    // Beneath the tile preview, the preview (blended), then the
-    // dragged window and the layers over it.
-    let split = scene.above.min(scene.elements.len());
-    let (over, under) = scene.elements.split_at(split);
-    draw_with_snapshots(frame, scale, under, split, true, &scene.snapshots, damage)?;
-    if !scene.tile.is_empty() {
-        draw_render_elements::<GlesRenderer, _, _>(frame, 1.0, &scene.tile, &[damage])
-            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-    }
-    draw_with_snapshots(frame, scale, over, 0, false, &scene.snapshots, damage)?;
-    if !scene.top.is_empty() {
-        draw_render_elements(frame, scale, &scene.top, &[damage])
-            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-    }
-    if blank_alpha > 0.0 {
-        use smithay::backend::renderer::element::{solid::SolidColorRenderElement, Id, Kind};
-        thread_local! { static SHIELD: Id = Id::new(); }
-        let shield = SolidColorRenderElement::new(
-            SHIELD.with(Clone::clone),
-            damage,
-            0usize,
-            Color32F::new(0.0, 0.0, 0.0, blank_alpha),
-            Kind::Unspecified,
-        );
-        draw_render_elements::<GlesRenderer, _, _>(frame, 1.0, &[shield], &[damage])
-            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-    }
-    Ok(())
+    Ok(Drawn {
+        rendered: occlusion.rendered(),
+        culled: occlusion.culled(),
+        scene_visible,
+    })
 }
 
-/// Draw the front-to-back `elements`, the scene's `[base..]` slice,
-/// back to front with the size-change snapshots that sit among them
-/// (#496). A snapshot at the slice's end belongs to it only when
-/// `through_end` (the two halves around the tile preview share that
-/// boundary).
-fn draw_with_snapshots(
-    frame: &mut smithay::backend::renderer::gles::GlesFrame<'_, '_>,
-    scale: f64,
-    elements: &[PreviewElement],
+/// One drawn item of the scene's window/layer pass: a surface element or
+/// a size-change snapshot (#496), by index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SceneSlot {
+    Element(usize),
+    Snapshot(usize),
+}
+
+/// The scene's `[base..base + len]` elements front to back, with the
+/// size-change snapshots that sit among them: a snapshot at index `i`
+/// draws in front of `elements[i..]`. One at the slice's end belongs to
+/// it only when `through_end` (the two halves around the tile preview
+/// share that boundary). Of snapshots at one index, the later is in front.
+fn scene_slots(
+    len: usize,
     base: usize,
     through_end: bool,
-    snapshots: &[(usize, SnapshotElement)],
-    damage: Rectangle<i32, smithay::utils::Physical>,
-) -> Result<(), RuntimeError> {
-    let mut cuts: Vec<_> = snapshots
-        .iter()
-        .filter(|(index, _)| {
-            *index >= base
-                && (*index < base + elements.len()
-                    || (through_end && *index == base + elements.len()))
-        })
-        .map(|(index, element)| (index - base, element))
-        .collect();
-    cuts.sort_by_key(|(index, _)| std::cmp::Reverse(*index));
-    let mut end = elements.len();
-    for (index, snapshot) in cuts {
-        if index < end {
-            draw_render_elements(frame, scale, &elements[index..end], &[damage])
-                .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-            end = index;
+    snapshot_at: &[usize],
+) -> Vec<SceneSlot> {
+    let mut slots = Vec::with_capacity(len + snapshot_at.len());
+    for at in 0..=len {
+        if at < len || through_end {
+            slots.extend(
+                snapshot_at
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .filter(|(_, index)| **index == base + at)
+                    .map(|(k, _)| SceneSlot::Snapshot(k)),
+            );
         }
-        draw_render_elements::<GlesRenderer, _, _>(
-            frame,
-            1.0,
-            std::slice::from_ref(snapshot),
-            &[damage],
-        )
-        .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+        if at < len {
+            slots.push(SceneSlot::Element(base + at));
+        }
     }
-    if end > 0 {
-        draw_render_elements(frame, scale, &elements[..end], &[damage])
-            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    slots
+}
+
+fn plan_slots(
+    occlusion: &mut crate::occlusion::Occlusion,
+    scale: f64,
+    scene: &Scene,
+    slots: &[SceneSlot],
+) -> Vec<Vec<Rectangle<i32, smithay::utils::Physical>>> {
+    slots
+        .iter()
+        .map(|slot| match *slot {
+            SceneSlot::Element(index) => occlusion
+                .plan(scale, std::slice::from_ref(&scene.elements[index]))
+                .remove(0),
+            SceneSlot::Snapshot(k) => occlusion
+                .plan(1.0, std::slice::from_ref(&scene.snapshots[k].1))
+                .remove(0),
+        })
+        .collect()
+}
+
+fn draw_slots(
+    frame: &mut smithay::backend::renderer::gles::GlesFrame<'_, '_>,
+    scale: f64,
+    scene: &Scene,
+    slots: &[SceneSlot],
+    plan: &[Vec<Rectangle<i32, smithay::utils::Physical>>],
+) -> Result<(), smithay::backend::renderer::gles::GlesError> {
+    use crate::occlusion::draw_planned;
+    for (slot, visible) in slots.iter().zip(plan).rev() {
+        let visible = std::slice::from_ref(visible);
+        match *slot {
+            SceneSlot::Element(index) => draw_planned::<GlesRenderer, _>(
+                frame,
+                scale,
+                std::slice::from_ref(&scene.elements[index]),
+                visible,
+            )?,
+            SceneSlot::Snapshot(k) => draw_planned::<GlesRenderer, _>(
+                frame,
+                1.0,
+                std::slice::from_ref(&scene.snapshots[k].1),
+                visible,
+            )?,
+        }
     }
     Ok(())
 }
