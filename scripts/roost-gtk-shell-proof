@@ -940,7 +940,15 @@ pass G-OV-PICK "clicking a preview focuses that window and closes the overview"
 sleep 1
 scrot "$ARTIFACTS/06-picked.png" >/dev/null
 
-menu="$(jq -r '.windows[] | select(.app_id == "roost-test-beta") | .rect | "\(.[0] + .[2] - 64) \(.[1] + 22)"' "$CSTATE")"
+# Aim the real menu button through its live accessibility bounds: a fixed
+# rect offset misses when the session maximizes the window and the header
+# layout puts the button elsewhere.
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-test-beta "$ARTIFACTS/a11y-beta-menu.json" 20 ||
+    fail G-APP-POPOVER "test window never registered on the accessibility bus"
+beta_origin="$(jq -r '.windows[] | select(.app_id == "roost-test-beta") | .rect | "\(.[0]) \(.[1])"' "$CSTATE")"
+[ -n "$beta_origin" ] && [ "$beta_origin" != "null null" ] || fail G-APP-POPOVER "beta window rect went missing"
+menu="$(jq -er --argjson ox "${beta_origin%% *}" --argjson oy "${beta_origin##* }" '[.[] | select(.showing and .name == "Main Menu" and ((.bounds[2] // 0) > 0) and ((.bounds[3] // 0) > 0))][0].bounds | "\((.[0] + $ox + .[2] / 2) | floor) \(.[1] + $oy + .[3] / 2 | floor)"' "$ARTIFACTS/a11y-beta-menu.json")" ||
+    fail G-APP-POPOVER "menu button has no showing accessibility bounds"
 # shellcheck disable=SC2086
 xdotool mousemove --window "$WID" $menu click 1
 sleep 2
