@@ -127,18 +127,8 @@ pub enum SwitcherEffect {
     QuitApp(Vec<u64>),
 }
 
-/// Keysyms the switcher acts on.
-pub mod switcher_keys {
-    pub const LEFT: u32 = 0xff51;
-    pub const UP: u32 = 0xff52;
-    pub const RIGHT: u32 = 0xff53;
-    pub const DOWN: u32 = 0xff54;
-    pub const F4: u32 = 0xffc1;
-    pub const Q: u32 = 0x71;
-    pub const Q_UPPER: u32 = 0x51;
-    pub const W: u32 = 0x77;
-    pub const W_UPPER: u32 = 0x57;
-}
+/// Keysyms the switcher acts on, shared with the compositor wire producer.
+pub use roost_shell_control::switcher_keys;
 
 impl ShellModel {
     /// Empty model: no windows, no workspaces, overview closed.
@@ -722,22 +712,23 @@ mod tests {
     fn switcher_keys_close_and_quit_like_gnome() {
         let mut model = editor_and_browser();
         model.switcher_step_window(true);
-        assert_eq!(
-            model.switcher_key(switcher_keys::W),
-            SwitcherEffect::CloseWindow(3)
-        );
-        assert_eq!(
-            model.switcher_key(switcher_keys::Q),
-            SwitcherEffect::QuitApp(vec![1, 3])
-        );
+        // Exercise the schema-owned values through the preserved public API.
+        for key in [switcher_keys::W, switcher_keys::W_UPPER, switcher_keys::F4] {
+            assert_eq!(model.switcher_key(key), SwitcherEffect::CloseWindow(3));
+        }
+        for key in [switcher_keys::Q, switcher_keys::Q_UPPER] {
+            assert_eq!(model.switcher_key(key), SwitcherEffect::QuitApp(vec![1, 3]));
+        }
         // Alt+Tab takes the focus back to the app icons.
         model.switcher_step(true);
         assert_eq!(model.switcher_window(), None);
-        assert_eq!(
-            model.switcher_key(switcher_keys::W),
-            SwitcherEffect::None,
-            "W only closes a focused thumbnail"
-        );
+        for key in [switcher_keys::W, switcher_keys::W_UPPER, switcher_keys::F4] {
+            assert_eq!(
+                model.switcher_key(key),
+                SwitcherEffect::None,
+                "close only applies to a focused thumbnail"
+            );
+        }
     }
 
     #[test]

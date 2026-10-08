@@ -9,6 +9,8 @@
 //! followed by a postcard body. Frames larger than [`MAX_FRAME_BYTES`] are
 //! rejected before any postcard decoding happens.
 
+pub mod background;
+
 use serde::{Deserialize, Serialize};
 
 /// Maximum accepted frame body size in bytes (1 MiB, per ADR 0002).
@@ -23,18 +25,14 @@ pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 /// [`decode_frame`] with [`DecodeError::TitleTooLong`].
 pub const MAX_TITLE_LEN: usize = 512;
 
-/// Layer-shell namespace for the overview surface (compositor ↔ shell contract).
-/// The compositor matches on this to identify the overview; the shell advertises it
-/// when creating the overview layer.
-pub const OVERVIEW_NAMESPACE: &str = "roost-shell-overview";
-
-/// Layer-shell namespace for the panel surface (compositor ↔ shell contract).
-/// The shell advertises this when creating the main panel layer.
-pub const PANEL_NAMESPACE: &str = "roost-shell-panel";
-
-/// Layer-shell namespace for the banner/notifications surface (compositor ↔ shell contract).
-/// The shell advertises this when creating the banner/notification layer.
-pub const BANNER_NAMESPACE: &str = "roost-shell-banner";
+pub mod layer_namespaces;
+pub use layer_namespaces::{
+    BANNER_NAMESPACE, DOCK_NAMESPACE, END_SESSION_NAMESPACE, FOLDER_DIALOG_NAMESPACE,
+    GTK_BANNERS_NAMESPACE, GTK_PANEL_NAMESPACE, IBUS_CANDIDATES_NAMESPACE, NETWORK_AGENT_NAMESPACE,
+    OSD_NAMESPACE, OVERVIEW_NAMESPACE, PANEL_NAMESPACE, POLKIT_NAMESPACE, PREVIEW_CHROME_NAMESPACE,
+    SCREENSHOT_NAMESPACE, SHORTCUT_CONSENT_NAMESPACE, SWITCHER_NAMESPACE,
+    SWITCHER_THUMBNAILS_NAMESPACE, WINDOW_MENU_NAMESPACE, WORKSPACE_POPUP_NAMESPACE,
+};
 
 /// Panel height in pixels (compositor ↔ shell contract).
 ///
@@ -388,6 +386,22 @@ pub const MAX_SWITCHER_THUMBNAILS: usize = 64;
 
 /// Switcher keys held at once.
 pub const MAX_SWITCHER_KEYS: usize = 64;
+
+/// Keysyms carried by [`SwitcherAction::Key`] and consumed by both shell
+/// switcher frontends. These are XKB keysyms, not evdev keycodes.
+///
+/// Preserve the numeric values and the legacy shell-host public re-export.
+pub mod switcher_keys {
+    pub const LEFT: u32 = 0xff51;
+    pub const UP: u32 = 0xff52;
+    pub const RIGHT: u32 = 0xff53;
+    pub const DOWN: u32 = 0xff54;
+    pub const F4: u32 = 0xffc1;
+    pub const Q: u32 = 0x71;
+    pub const Q_UPPER: u32 = 0x51;
+    pub const W: u32 = 0x77;
+    pub const W_UPPER: u32 = 0x57;
+}
 
 /// Mutter's `Above_Tab` in [`SwitcherKey::keysym`]: the key above Tab,
 /// whatever it types in the active layout.

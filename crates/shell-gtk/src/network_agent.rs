@@ -148,7 +148,7 @@ impl NetworkAgent {
         window.set_title(Some("Authentication required"));
         window.init_layer_shell();
         window.set_layer(Layer::Overlay);
-        window.set_namespace(Some("roost-network-agent"));
+        window.set_namespace(Some(roost_shell_control::NETWORK_AGENT_NAMESPACE));
         for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
             window.set_anchor(edge, true);
         }
