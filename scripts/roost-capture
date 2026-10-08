@@ -106,7 +106,7 @@ rm -f "$MARKER"
 mkdir -p "$PROBE_HOME/applications"
 cat >"$PROBE_HOME/applications/roostterm-probe.desktop" <<EOF
 [Desktop Entry]
-Name=Roostterm Probe
+Name=Tunaterm Probe
 Exec=touch "$MARKER"
 Type=Application
 EOF
@@ -301,7 +301,7 @@ sleep 1
 record_start "app-launch"
 xdotool key Super_L
 sleep 1
-xdotool type "roostterm"
+xdotool type "tunaterm"
 sleep 2
 xdotool key Return
 sleep 3
