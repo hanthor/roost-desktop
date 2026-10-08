@@ -72,6 +72,25 @@ fn parse_entry(path: &Path, text: &str) -> Option<SessionEntry> {
     })
 }
 
+/// True when the entry asks to stay out of session pickers
+/// (`NoDisplay=true` or `Hidden=true` in `[Desktop Entry]`), as GDM's
+/// picker does: compatibility entries such as the old session name's
+/// (#505) still launch when remembered but are never listed twice.
+fn hidden_entry(text: &str) -> bool {
+    let mut in_entry = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_entry = line == "[Desktop Entry]";
+            continue;
+        }
+        if in_entry && matches!(line, "NoDisplay=true" | "Hidden=true") {
+            return true;
+        }
+    }
+    false
+}
+
 /// Enumerate `dirs`, returning entries sorted by name with the Roost
 /// default first when present.
 pub fn enumerate_dirs(dirs: &[&Path]) -> Enumeration {
@@ -87,6 +106,7 @@ pub fn enumerate_dirs(dirs: &[&Path]) -> Enumeration {
                 continue;
             }
             match std::fs::read_to_string(&path) {
+                Ok(text) if hidden_entry(&text) => {}
                 Ok(text) => match parse_entry(&path, &text) {
                     Some(entry) => out.entries.push(entry),
                     None => out.skipped += 1,
@@ -148,6 +168,29 @@ mod tests {
         assert_eq!(out.entries[0].name, "RWD");
         assert!(out.entries[0].is_default);
         assert_eq!(out.entries[0].command, vec!["rwd-session"]);
+    }
+
+    #[test]
+    fn hidden_entries_are_not_listed() {
+        // The old session name's compatibility entry (#505).
+        const COMPAT: &str = include_str!("../../../share/compat/wayland-sessions/roost.desktop");
+        const GONE: &str = "[Desktop Entry]\nName=Gone\nExec=gone\nHidden=true\n";
+        const OTHER_GROUP: &str =
+            "[Desktop Entry]\nName=Kept\nExec=kept\n[Desktop Action x]\nNoDisplay=true\n";
+        let dir = fixture_dir(&[
+            ("sway.desktop", SWAY),
+            ("compat.desktop", COMPAT),
+            ("gone.desktop", GONE),
+            ("kept.desktop", OTHER_GROUP),
+        ]);
+        let out = enumerate_dirs(&[dir.path()]);
+        let names: Vec<&str> = out.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["Kept", "Sway"]);
+        assert_eq!(out.skipped, 0, "hidden is not malformed");
+        // Remembered by a display manager, it still starts the session.
+        let entry = parse_entry(Path::new("compat.desktop"), COMPAT).unwrap();
+        assert_eq!(entry.command, vec!["tuna-session"]);
+        assert!(entry.is_default);
     }
 
     #[test]

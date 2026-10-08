@@ -195,12 +195,19 @@ class PackagePolicy(unittest.TestCase):
         self.env = dict(os.environ, PATH=str(self.tools) + ':' + os.environ['PATH'], FIXTURE=str(self.stage))
         self.tool('dpkg-deb', '''case "$1" in
 -c) find "$FIXTURE" -type f | while read -r path; do echo "-rwxr-xr-x $path"; done ;;
--f) case "$3" in Version) echo 0.1.0 ;; Depends) echo 'libgtk4-layer-shell0 (>= 1.1), libgtk-4-1 (>= 4.12), libadwaita-1-0 (>= 1.0), libpam0g, gsettings-desktop-schemas' ;; esac ;;
+-f) case "$3" in Version) echo 0.1.0 ;; Depends) echo 'libgtk4-layer-shell0 (>= 1.1), libgtk-4-1 (>= 4.12), libadwaita-1-0 (>= 1.0), libpam0g, gsettings-desktop-schemas' ;; Replaces|Conflicts|Provides) echo roost ;; esac ;;  # tuna-rename: keep
 -x) cp -R "$FIXTURE/." "$3/" ;;
 --ctrl-tarfile) tar --owner=0 --group=0 -C "$FIXTURE" -cf - ./conffiles ;;
 --fsys-tarfile) tar --owner=0 --group=0 -C "$FIXTURE" -cf - ./usr ./etc ;;
 esac''')
-        (self.stage / 'conffiles').write_text('/etc/pam.d/roost-lock\n')
+        (self.stage / 'conffiles').write_text('/etc/pam.d/tuna-lock\n/etc/pam.d/roost-lock\n')  # tuna-rename: keep
+        # One release of compatibility with the former name (#505).
+        # tuna-rename: keep-begin
+        for name in ('compositor', 'session', 'shell-gtk', 'shell-host', 'ibus-bridge', 'greeter'):
+            (self.stage / 'usr/bin' / ('roost-' + name)).symlink_to('tuna-' + name)
+        for name in ('usr/share/wayland-sessions/roost.desktop', 'etc/pam.d/roost-lock'):
+            (self.stage / name).write_text((ROOT / 'share/compat' / '/'.join(name.split('/')[-2:])).read_text())
+        # tuna-rename: keep-end
         self.tool('ldd', 'echo "libc.so.6 => /lib/libc.so.6 (0)"')
         self.tool('desktop-file-validate', 'exit 0')
 
@@ -214,6 +221,16 @@ esac''')
 
     def test_positive_controlled_tool_policy(self):
         self.assertEqual(self.check(), 0)
+
+    def test_compatibility_names_required(self):
+        # tuna-rename: keep-begin
+        (self.stage / 'usr/bin/roost-greeter').unlink()
+        self.assertNotEqual(self.check(), 0)
+        (self.stage / 'usr/bin/roost-greeter').symlink_to('tuna-greeter')
+        compat = self.stage / 'usr/share/wayland-sessions/roost.desktop'
+        compat.write_text(compat.read_text().replace('NoDisplay=true\n', ''))
+        self.assertNotEqual(self.check(), 0, 'the compat session entry must stay hidden')
+        # tuna-rename: keep-end
 
     def test_missing_preferred_gtk(self):
         (self.stage / 'usr/bin/roost-shell-gtk').unlink()
@@ -282,6 +299,10 @@ class ReleaseDelegatePolicy(unittest.TestCase):
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('fixture\n')
+            for name in ('share/compat/wayland-sessions/roost.desktop', 'share/compat/pam.d/roost-lock'):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('fixture\n')
             output = root / 'control'
             result = subprocess.run(['sh', str(ROOT / 'scripts/roost-release'), '--allow-dirty', '--out', str(root/'out')], cwd=root, env=dict(os.environ, PATH=str(tools)+':'+os.environ['PATH'], OUTPUT=str(output)), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
             return result.returncode, output.read_text() if output.exists() else None
@@ -291,6 +312,8 @@ class ReleaseDelegatePolicy(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertIn('libc6 (>= 2.36)', control)
         self.assertIn('libgtk4-layer-shell0 (>= 1.1)', control)
+        for field in ('Replaces', 'Conflicts', 'Provides'):
+            self.assertIn(field + ': roost\n', control)  # tuna-rename: keep
         depends = next(line.removeprefix('Depends: ') for line in control.splitlines() if line.startswith('Depends: ')).split(', ')
         self.assertIn('libpam0g', depends)
         self.assertIn('gsettings-desktop-schemas', depends)

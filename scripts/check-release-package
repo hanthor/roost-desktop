@@ -66,7 +66,23 @@ DEPENDS="$(dpkg-deb -f "$PKG" Depends)"
 for required in 'libgtk4-layer-shell0 (>= 1.1)' 'libgtk-4-1 (>= 4.12)' 'libadwaita-1-0 (>= 1.0)' 'libpam0g' 'gsettings-desktop-schemas'; do
     printf '%s\n' "$DEPENDS" | tr ',' '\n' | sed 's/^ *//; s/ *$//' | grep -Fxq "$required" || fail "missing runtime floor $required"
 done
-[ "$(cat "$DIR/DEBIAN/conffiles" 2>/dev/null || dpkg-deb --ctrl-tarfile "$PKG" | tar -xOf - ./conffiles)" = /etc/pam.d/roost-lock ] || fail "PAM conffile missing"
+[ "$(cat "$DIR/DEBIAN/conffiles" 2>/dev/null || dpkg-deb --ctrl-tarfile "$PKG" | tar -xOf - ./conffiles)" = "$(printf '/etc/pam.d/tuna-lock\n/etc/pam.d/roost-lock')" ] || fail "PAM conffiles missing"  # tuna-rename: keep
+
+# One release of compatibility with the former name (#505).
+# tuna-rename: keep-begin
+for field in Replaces Conflicts Provides; do
+    [ "$(dpkg-deb -f "$PKG" "$field")" = roost ] || fail "$field must name the former package roost"
+done
+for bin in compositor session shell-gtk shell-host ibus-bridge greeter; do
+    [ -L "$DIR/usr/bin/roost-$bin" ] && [ "$(readlink "$DIR/usr/bin/roost-$bin")" = "tuna-$bin" ] \
+        || fail "compatibility link roost-$bin missing"
+done
+if ! grep -qx 'NoDisplay=true' "$DIR/usr/share/wayland-sessions/roost.desktop" \
+    || ! grep -qx 'Exec=tuna-session' "$DIR/usr/share/wayland-sessions/roost.desktop"; then
+    fail "compatibility session entry roost.desktop invalid"
+fi
+cmp -s "$DIR/etc/pam.d/roost-lock" "$ROOT/share/compat/pam.d/roost-lock" || fail "compatibility PAM service roost-lock missing"
+# tuna-rename: keep-end
 
 # Login entry must parse: run the validator when present, allowing only
 # the DesktopNames session-file convention (GNOME/KDE/Sway session

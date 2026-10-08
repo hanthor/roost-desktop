@@ -83,7 +83,8 @@ def owner(path):
 
 
 def preflight():
-    if os.getuid() == 0 or any(os.environ.get(k) for k in ('ROOST_SHELL_BIN', 'ROOST_PROOF_SHELL_BIN', 'WAYLAND_SOCKET', 'WAYLAND_DISPLAY')):
+    # The binaries still honour the former variable names for one release (#505).
+    if os.getuid() == 0 or any(os.environ.get(k) for k in ('TUNA_SHELL_BIN', 'TUNA_PROOF_SHELL_BIN', 'ROOST_SHELL_BIN', 'ROOST_PROOF_SHELL_BIN', 'WAYLAND_SOCKET', 'WAYLAND_DISPLAY')):  # tuna-rename: keep
         raise ValueError('installed-route-override')
     if 'ID=ubuntu' not in Path('/etc/os-release').read_text().splitlines() or 'VERSION_ID="26.04"' not in Path('/etc/os-release').read_text().splitlines():
         raise ValueError('selected-distro-required')

@@ -34,6 +34,8 @@ fn main() -> ExitCode {
         println!("roost-shell-host {}", release_version());
         return ExitCode::SUCCESS;
     }
+    // The old name's environment, for one release (#505).
+    roost_shell_control::legacy::import_env("roost-shell-host");
     // Set by the supervised compositor child recipe (ADR 0003); absent
     // when run by hand against any compositor.
     let control_path = std::env::var_os("ROOST_CONTROL_SOCKET").map(std::path::PathBuf::from);

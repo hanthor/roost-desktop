@@ -28,6 +28,9 @@ fn release_version() -> &'static str {
 }
 
 fn main() -> ExitCode {
+    // The old name's environment and per-user directories, for one release (#505).
+    roost_shell_control::legacy::import_env("roost-compositor");
+    roost_shell_control::legacy::adopt_dirs("roost-compositor");
     let mut session = NestedSession::default_for_pid();
     session.xwayland = roost_compositor::runtime::xwayland_wanted(
         std::env::var_os("ROOST_XWAYLAND"),

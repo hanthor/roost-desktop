@@ -113,6 +113,8 @@ fn main() {
         println!("roost-ibus-bridge {}", release_version());
         return;
     }
+    // The old name's environment, for one release (#505).
+    roost_shell_control::legacy::import_env("roost-ibus-bridge");
     if let Err(e) = run() {
         eprintln!("roost-ibus-bridge: {e}");
         std::process::exit(1);

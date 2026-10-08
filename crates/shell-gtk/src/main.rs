@@ -2241,6 +2241,8 @@ fn main() -> glib::ExitCode {
         println!("roost-shell-gtk {}", release_version());
         return glib::ExitCode::SUCCESS;
     }
+    // The old name's environment, for one release (#505).
+    roost_shell_control::legacy::import_env("roost-shell-gtk");
     glib::set_prgname(Some("roost-shell-gtk"));
     let app = adw::Application::builder()
         .application_id("org.roost.Shell")

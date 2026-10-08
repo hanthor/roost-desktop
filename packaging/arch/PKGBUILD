@@ -9,6 +9,10 @@
 # so every binary's --version matches pkgver.
 
 pkgname=roost
+# Upgrades the package's former name in place (#505).
+replaces=('roost')  # tuna-rename: keep
+conflicts=('roost')  # tuna-rename: keep
+provides=('roost')  # tuna-rename: keep
 pkgver=0.1.0
 pkgrel=1
 pkgdesc='Tuna Desktop: GNOME-style Wayland desktop session in Rust (nested developer preview)'
@@ -44,7 +48,7 @@ optdepends=(
     'gst-plugins-good: screen recording (VP8 and WebM)'
 )
 options=('!lto' '!debug')
-backup=('etc/pam.d/roost-lock')
+backup=('etc/pam.d/tuna-lock' 'etc/pam.d/roost-lock')  # tuna-rename: keep
 
 if [[ -n "${ROOST_LOCAL_SRC:-}" ]]; then
     source=()
@@ -102,6 +106,14 @@ package() {
         "$pkgdir/usr/lib/systemd/user/roost-session.target"
     # Lock-screen PAM service (#62): unlock under GDM, where no greetd runs.
     install -Dm0644 "$root/share/pam.d/roost-lock" "$pkgdir/etc/pam.d/roost-lock"
+    # One release of compatibility with the former name (#505): the old
+    # binary names, the session entry display managers remember, and the
+    # PAM service a session started before the upgrade still asks for.
+    for bin in compositor session shell-host shell-gtk ibus-bridge greeter; do
+        ln -s "tuna-$bin" "$pkgdir/usr/bin/roost-$bin"  # tuna-rename: keep
+    done
+    install -Dm0644 "$root/share/compat/wayland-sessions/roost.desktop" "$pkgdir/usr/share/wayland-sessions/roost.desktop"  # tuna-rename: keep
+    install -Dm0644 "$root/share/compat/pam.d/roost-lock" "$pkgdir/etc/pam.d/roost-lock"  # tuna-rename: keep
     install -Dm0644 "$root/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
     install -Dm0644 "$root/docs/nested-session.md" \
         "$pkgdir/usr/share/doc/$pkgname/nested-session.md"

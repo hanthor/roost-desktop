@@ -89,6 +89,18 @@ install -Dm0644 share/systemd/user/roost-session.target \
 # Lock-screen PAM service (#62); a conffile, so local edits survive.
 install -m0644 share/pam.d/roost-lock "$STAGE/etc/pam.d/roost-lock"
 echo /etc/pam.d/roost-lock >"$STAGE/DEBIAN/conffiles"
+# One release of compatibility with the former name (#505): the old
+# binary names, the session entry display managers remember, and the PAM
+# service a session started before the upgrade still asks for.
+# tuna-rename: keep-begin
+LEGACY_PACKAGE=roost
+for bin in compositor session shell-gtk shell-host ibus-bridge greeter; do
+    ln -s "tuna-$bin" "$STAGE/usr/bin/roost-$bin"
+done
+install -m0644 share/compat/wayland-sessions/roost.desktop "$STAGE/usr/share/wayland-sessions/roost.desktop"
+install -m0644 share/compat/pam.d/roost-lock "$STAGE/etc/pam.d/roost-lock"
+echo /etc/pam.d/roost-lock >>"$STAGE/DEBIAN/conffiles"
+# tuna-rename: keep-end
 
 # Agreement check: the stamped binaries must report the stamped version.
 for bin in roost-compositor roost-session roost-shell-gtk roost-shell-host roost-ibus-bridge roost-greeter; do
@@ -119,6 +131,9 @@ rm -r "$STAGE/debian"
 cat >"$STAGE/DEBIAN/control" <<EOF
 Package: roost
 Version: $VERSION
+Replaces: $LEGACY_PACKAGE
+Conflicts: $LEGACY_PACKAGE
+Provides: $LEGACY_PACKAGE
 Section: x11
 Priority: optional
 Architecture: amd64
