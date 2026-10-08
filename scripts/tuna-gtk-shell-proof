@@ -3549,22 +3549,30 @@ jq -e --argjson home "$slide_home" \
     '.motion == "slide" and .from == $home and .to == $home + 2 and .retargets == 1
      and (.reversed | not) and .elapsed_ms == 310' "$ARTIFACTS/workspace-slide-retarget.json" >/dev/null ||
     fail G-WORKSPACE-SLIDE "the second press did not retarget forwards: $(cat "$ARTIFACTS/workspace-slide-retarget.json")"
-xdotool key super+Page_Up
-anim_clock 11700
-slide_settled "$slide_home" "home again" || fail G-WORKSPACE-SLIDE "could not return home"
+# Page_Up steps back through the workspaces the double press passed.
+slide_clock=11400
+while [ "$(jq -r '.active_workspace' "$CSTATE")" != "$slide_home" ]; do
+    [ "$slide_clock" -lt 13000 ] || fail G-WORKSPACE-SLIDE "could not return home"
+    slide_from="$(jq -r '.active_workspace' "$CSTATE")"
+    xdotool key super+Page_Up
+    cstate ".active_workspace != $slide_from" "stepping home" || fail G-WORKSPACE-SLIDE "Super+Page_Up did not switch back"
+    slide_clock=$((slide_clock + 400))
+    anim_clock "$slide_clock"
+    cstate '.workspace_slide.in_flight == null' "stepped home" || fail G-WORKSPACE-SLIDE "the slide back did not settle"
+done
 # Reduced motion keeps fades: the workspaces crossfade in place.
 gsettings set org.gnome.desktop.a11y.interface reduced-motion 'reduce'
 cstate '.motion_policy == "fade-only"' "fade-only slide" ||
     fail G-WORKSPACE-SLIDE "reduced motion did not reach the compositor"
-anim_clock 12000
+anim_clock 14000
 xdotool key super+Page_Down
-anim_clock 12125
+anim_clock 14125
 cstate ".active_workspace == $slide_home + 1 and .workspace_slide.in_flight.record.motion == \"fade\"" "crossfading" ||
     fail G-WORKSPACE-SLIDE "fade-only motion did not crossfade"
-anim_clock 12250
+anim_clock 14250
 slide_settled $((slide_home + 1)) "crossfade settled" || fail G-WORKSPACE-SLIDE "the crossfade did not settle in 250 ms"
 xdotool key super+Page_Up
-anim_clock 12600
+anim_clock 14600
 slide_settled "$slide_home" "crossfade back" || fail G-WORKSPACE-SLIDE "could not crossfade back"
 gsettings reset org.gnome.desktop.a11y.interface reduced-motion
 gsettings set org.gnome.desktop.interface enable-animations false
