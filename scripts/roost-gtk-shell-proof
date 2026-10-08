@@ -1113,21 +1113,39 @@ sleep 0.5
         echo "xset not installed"
     fi
 } >&2
-cycle_press() {
-    xdotool key --clearmodifiers "$1"
-    if cstate "$2" "$3" 10; then return 0; fi
-    echo "roost-gtk-shell-proof: G-CYCLE-KEYS resync: '$1' missed, releasing all modifiers and pressing again" >&2
+# $1: space-separated modifiers to hold (e.g. "Super_L" or
+# "Super_L Shift_L"), $2: key to tap, $3: cstate jq, $4: cstate
+# label, $5: failure message.
+cycle_chord() {
+    # Hold the modifiers across separate xdotool invocations, like
+    # the working Alt+Tab stage does, instead of one rapid `key`
+    # chord: a harness-side modifier tap reacting to the opener
+    # press settles before the cycling key arrives, so it cannot
+    # ride along as extra mods.
+    # shellcheck disable=SC2086 # intentional word splitting of the modifier list
+    for _cmod in $1; do xdotool keydown "$_cmod"; done
+    sleep 0.3
+    xdotool key "$2"
+    # shellcheck disable=SC2086 # intentional word splitting of the modifier list
+    for _cmod in $1; do xdotool keyup "$_cmod"; done
+    if cstate "$3" "$4" 10; then return 0; fi
+    echo "roost-gtk-shell-proof: G-CYCLE-KEYS resync: '$1+$2' missed, releasing all modifiers and pressing again" >&2
     xdotool keyup Alt_L Super_L Shift_L Control_L
     sleep 0.5
-    xdotool key --clearmodifiers "$1"
-    cstate "$2" "$3" || fail G-CYCLE-KEYS "$4"
+    # shellcheck disable=SC2086 # intentional word splitting of the modifier list
+    for _cmod in $1; do xdotool keydown "$_cmod"; done
+    sleep 0.3
+    xdotool key "$2"
+    # shellcheck disable=SC2086 # intentional word splitting of the modifier list
+    for _cmod in $1; do xdotool keyup "$_cmod"; done
+    cstate "$3" "$4" || fail G-CYCLE-KEYS "$5"
 }
 original="$(jq -r .focused "$CSTATE")"
-cycle_press "super+F1" ".focused != $original and .focused_app_id == \"roost-test-alpha\"" "cycle group" "cycle-group did not move within Alpha"
-cycle_press "super+shift+F1" ".focused == $original" "cycle group backward" "cycle-group-backward did not return"
-cycle_press "super+F2" ".focused != $original" "cycle windows" "cycle-windows did not move"
+cycle_chord "Super_L" "F1" ".focused != $original and .focused_app_id == \"roost-test-alpha\"" "cycle group" "cycle-group did not move within Alpha"
+cycle_chord "Super_L Shift_L" "F1" ".focused == $original" "cycle group backward" "cycle-group-backward did not return"
+cycle_chord "Super_L" "F2" ".focused != $original" "cycle windows" "cycle-windows did not move"
 cycled="$(jq -r .focused "$CSTATE")"
-cycle_press "super+shift+F2" ".focused != $cycled" "cycle windows backward" "cycle-windows-backward did not move"
+cycle_chord "Super_L Shift_L" "F2" ".focused != $cycled" "cycle windows backward" "cycle-windows-backward did not move"
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-cycle-keys.json" 20 || fail G-CYCLE-KEYS "a11y dump failed"
 showing "$ARTIFACTS/a11y-cycle-keys.json" "Switch Windows" && fail G-CYCLE-KEYS "direct cycling opened a popup"
 pass G-CYCLE-KEYS "bound forward/backward window and app-group cycling activate immediately without a popup"
