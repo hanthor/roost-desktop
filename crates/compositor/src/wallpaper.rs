@@ -618,8 +618,19 @@ impl Wallpaper {
         if lock && !lock_uri.is_empty() {
             uri = lock_uri.to_owned();
         }
-        self.refresh_stage = Some("source-identity-pending");
-        let observation = self.poll_source(&uri)?;
+        let observation = if settings.placement
+            == roost_shell_control::background::Placement::None
+        {
+            // GNOME NONE has no source file. In particular, an ignored lock
+            // URI must not schedule a network/FUSE identity task or delay its
+            // pure color/gradient. Empty URI also makes every downstream cache
+            // and render worker independent of the unused file.
+            uri.clear();
+            std::sync::Arc::new(SourceObservation::default())
+        } else {
+            self.refresh_stage = Some("source-identity-pending");
+            self.poll_source(&uri)?
+        };
         let identity = observation.identity.clone();
         let epoch = observation.timeline.as_ref().map(|_| {
             format!(
