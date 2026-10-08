@@ -1,7 +1,9 @@
 //! GNOME 51's workspace switcher popup (workspaceSwitcherPopup.js): a
 //! row of workspace dots in an OSD pill near the bottom of the screen,
 //! the active one larger and white, shown for 600 ms after a workspace
-//! key switches outside the overview.
+//! key switches outside the overview. It fades in and out over 100 ms
+//! (`ANIMATION_TIME`, ease-out-quad); a key while it shows keeps it
+//! opaque.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -14,6 +16,22 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
 /// DISPLAY_TIMEOUT.
 const SHOW_FOR: Duration = Duration::from_millis(600);
+/// ANIMATION_TIME: the fade in and out.
+pub const FADE_MS: f64 = 100.0;
+
+/// The pill's opacity `elapsed_ms` into a fade from `from` to `to`.
+pub fn fade_at(from: f64, to: f64, elapsed_ms: f64, enabled: bool) -> f64 {
+    let p = if enabled {
+        (elapsed_ms / FADE_MS).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    from + (to - from) * (1.0 - (1.0 - p).powi(2))
+}
+
+fn animations_enabled() -> bool {
+    gtk::Settings::default().is_none_or(|s| s.is_gtk_enable_animations())
+}
 /// Each `.ws-switcher-indicator` slot: 32px (dot plus margins).
 const SLOT: f64 = 32.0;
 /// `.workspace-switcher { spacing: 12px; padding: 12px 18px }`.
@@ -30,7 +48,10 @@ pub fn content_width(count: u32) -> f64 {
 
 pub struct WorkspacePopup {
     window: gtk::Window,
+    pill: gtk::Box,
     dots: gtk::DrawingArea,
+    /// Bumped by every fade so a superseded one stops.
+    fade: Cell<u64>,
     state: Rc<Cell<(u32, u32)>>,
     hide: RefCell<Option<glib::SourceId>>,
 }
@@ -81,7 +102,9 @@ impl WorkspacePopup {
         window.set_child(Some(&pill));
         Rc::new(Self {
             window,
+            pill,
             dots,
+            fade: Cell::new(0),
             state,
             hide: RefCell::new(None),
         })
@@ -95,7 +118,15 @@ impl WorkspacePopup {
             .set_content_width(content_width(count).round() as i32);
         self.dots.queue_draw();
         self.window.set_default_size(1, 1);
-        self.window.present();
+        // GNOME fades in only when hidden; a repeat key keeps it opaque.
+        if self.window.is_visible() {
+            self.fade.set(self.fade.get().wrapping_add(1));
+            self.pill.set_opacity(1.0);
+        } else {
+            self.pill.set_opacity(0.0);
+            self.window.present();
+            self.fade_to(1.0);
+        }
         if let Some(id) = self.hide.borrow_mut().take() {
             id.remove();
         }
@@ -103,10 +134,49 @@ impl WorkspacePopup {
         let id = glib::timeout_add_local_once(SHOW_FOR, move || {
             if let Some(ui) = weak.upgrade() {
                 ui.hide.borrow_mut().take();
-                ui.window.set_visible(false);
+                ui.fade_to(0.0);
             }
         });
         *self.hide.borrow_mut() = Some(id);
+    }
+
+    /// Ease the pill's opacity to `to`, hiding the window at 0.
+    fn fade_to(self: &Rc<Self>, to: f64) {
+        let generation = self.fade.get().wrapping_add(1);
+        self.fade.set(generation);
+        let from = self.pill.opacity();
+        let finish = |ui: &Self| {
+            ui.pill.set_opacity(to);
+            if to == 0.0 {
+                ui.window.set_visible(false);
+            }
+        };
+        if !animations_enabled() {
+            finish(self);
+            return;
+        }
+        let weak = Rc::downgrade(self);
+        let started = Cell::new(None);
+        self.pill.add_tick_callback(move |_, clock| {
+            let Some(ui) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if ui.fade.get() != generation {
+                return glib::ControlFlow::Break;
+            }
+            let start = started.get().unwrap_or_else(|| {
+                started.set(Some(clock.frame_time()));
+                clock.frame_time()
+            });
+            let elapsed = (clock.frame_time() - start) as f64 / 1000.0;
+            let enabled = animations_enabled();
+            if !enabled || elapsed >= FADE_MS {
+                finish(&ui);
+                return glib::ControlFlow::Break;
+            }
+            ui.pill.set_opacity(fade_at(from, to, elapsed, enabled));
+            glib::ControlFlow::Continue
+        });
     }
 }
 
@@ -119,5 +189,14 @@ mod tests {
         assert_eq!(content_width(1), 32.0);
         assert_eq!(content_width(2), 76.0);
         assert_eq!(content_width(3), 120.0);
+    }
+
+    #[test]
+    fn the_pill_fades_over_100_ms_ease_out_quad() {
+        assert_eq!(fade_at(0.0, 1.0, 0.0, true), 0.0);
+        assert_eq!(fade_at(0.0, 1.0, 50.0, true), 0.75);
+        assert_eq!(fade_at(0.0, 1.0, 100.0, true), 1.0);
+        assert_eq!(fade_at(1.0, 0.0, 50.0, true), 0.25);
+        assert_eq!(fade_at(0.0, 1.0, 0.0, false), 1.0);
     }
 }

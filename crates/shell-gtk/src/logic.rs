@@ -223,18 +223,6 @@ pub fn workspace_pills(workspaces: &[u32], active: u32, occupied: &[u32]) -> Vec
     pills
 }
 
-/// Width of the active workspace pill, GNOME 51's `WorkspaceDot`: the
-/// 8px dot times 3.625 with up to two indicators, 3.25 up to five, 2.75
-/// beyond (`panel.js` `_updateExpansion`), rounded.
-pub fn active_pill_width(indicators: usize) -> i32 {
-    let multiplier = match indicators {
-        0..=2 => 3.625,
-        3..=5 => 3.25,
-        _ => 2.75,
-    };
-    (8.0_f64 * multiplier).round() as i32
-}
-
 /// GTK's font settings (`gtk-xft-hinting`, `-hintstyle`, `-antialias`,
 /// `-rgba`) for GNOME's `font-hinting` and `font-antialiasing` keys, the
 /// mapping gnome-settings-daemon's xsettings plugin uses.
@@ -479,13 +467,6 @@ mod tests {
         assert_eq!(switcher_icon_size(9, 1280), 96);
         assert_eq!(switcher_icon_size(10, 1280), 64);
         assert_eq!(switcher_icon_size(40, 1280), 22);
-    }
-
-    #[test]
-    fn active_pill_widths_follow_gnome() {
-        assert_eq!(active_pill_width(2), 29);
-        assert_eq!(active_pill_width(5), 26);
-        assert_eq!(active_pill_width(6), 22);
     }
 
     #[test]
