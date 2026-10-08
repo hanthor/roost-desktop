@@ -203,7 +203,7 @@ with open(os.environ['ENTRYPOINT_LOG'],'a') as output:output.write(entry+'\\n')
             env=dict(os.environ,PATH=str(tools)+os.pathsep+os.environ['PATH'],CONTROLLED_SOURCE_ROOT=str(root),ENTRYPOINT_LOG=str(log))
             result=subprocess.run([str(root/'scripts/roost-portal-security'),'--candidate',str(home/'candidate'),'--out',str(home/'out')],env=env,capture_output=True,timeout=10)
             self.assertEqual(result.returncode,0,result.stderr)
-            self.assertEqual(log.read_text().splitlines(),['/repo/tests/portal-reference/run.sh','/repo/tests/portal-reference/settings-run.sh','/repo/tests/portal-reference/global-shortcuts-run.sh'])
+            self.assertEqual(log.read_text().splitlines(),['/repo/tests/portal-reference/run.sh','/repo/tests/portal-reference/settings-run.sh','/repo/tests/portal-reference/global-shortcuts-run.sh','/repo/tests/portal-reference/backgrounds-run.sh'])
 
 
 if __name__=='__main__':unittest.main()
