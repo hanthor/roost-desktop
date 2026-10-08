@@ -513,7 +513,7 @@ impl ControlClient {
     /// Where each window's dash icon sits, so minimize heads there.
     pub fn set_icon_geometries(
         &mut self,
-        icons: Vec<roost_shell_control::IconGeometry>,
+        icons: Vec<tuna_shell_control::IconGeometry>,
     ) -> Result<u64, ControlError> {
         let id = self.alloc_request_id();
         self.write_message(&Message::Command {

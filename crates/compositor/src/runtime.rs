@@ -627,6 +627,8 @@ pub struct Runtime {
     switcher_thumbnails: Vec<tuna_shell_control::SwitcherThumbnail>,
     /// What each output's last drawn frame cost, by output name (#503).
     frame_costs: std::collections::BTreeMap<String, FrameCost>,
+    /// Each window's dash icon, where minimize heads (from the shell).
+    icon_geometries: std::collections::HashMap<u64, Rectangle<i32, Logical>>,
     /// Reserved X11 display, advertised before XWayland starts (#219).
     /// Actual window-manager readiness is independently state.xwm.is_some().
     x11_display: Option<u32>,
@@ -983,6 +985,7 @@ impl Runtime {
             overview_drag: None,
             switcher_thumbnails: Vec::new(),
             frame_costs: std::collections::BTreeMap::new(),
+            icon_geometries: std::collections::HashMap::new(),
             shell_swipe: None,
             overview_motion: Default::default(),
             overview_progress_at: Duration::ZERO,
@@ -1692,6 +1695,39 @@ impl Runtime {
         doc["animation_clock_ms"] =
             serde_json::json!(manual.then(|| self.animation_clock.now().as_millis() as u64));
         doc["overview_motion"] = self.overview_motion.diagnostics();
+        // GNOME's minimize and restore animations, and the dash icons
+        // they head to.
+        let pose = |p: crate::minimize_animation::Pose| [p.x, p.y, p.width, p.height];
+        let mut icons: Vec<_> = self.icon_geometries.iter().collect();
+        icons.sort_by_key(|(id, _)| **id);
+        doc["icon_geometries"] = icons
+            .into_iter()
+            .map(|(id, r)| serde_json::json!({"window": id, "rect": [r.loc.x, r.loc.y, r.size.w, r.size.h]}))
+            .collect();
+        doc["minimize_animations"] = self
+            .manager
+            .minimize_animations
+            .running()
+            .into_iter()
+            .map(|(id, direction, p, progress)| {
+                serde_json::json!({
+                    "window": id, "direction": direction, "rect": pose(p),
+                    "alpha": p.alpha, "progress": progress,
+                })
+            })
+            .collect();
+        doc["minimize_settled"] = self
+            .manager
+            .minimize_animations
+            .settled()
+            .map(|s| {
+                serde_json::json!({
+                    "window": s.window, "direction": s.direction_name(),
+                    "animated": s.animated, "elapsed_ms": s.elapsed_ms,
+                    "from": pose(s.from), "to": pose(s.to),
+                })
+            })
+            .collect();
         doc["screen_reader_pid"] = serde_json::json!(self.orca.pid());
         doc["screen_reader_state"] = serde_json::json!(self.orca.state());
         // Keep backend-specific observations outside the large scene macro so
@@ -1829,6 +1865,42 @@ impl Runtime {
                 motion.allows_motion(),
             ),
         ))
+    }
+
+    /// Start and settle GNOME's minimize and restore animations for this
+    /// frame: each heads to the window's dash icon, else its monitor's
+    /// corner.
+    fn step_minimize_animations(&mut self) {
+        let mut animations = std::mem::take(&mut self.manager.minimize_animations);
+        let manager = &self.manager;
+        let state = &self.state;
+        let icons = &self.icon_geometries;
+        let right_to_left = self.input_settings.right_to_left;
+        let start = |id: u64| {
+            let window = manager.geometry(id)?;
+            let center = window.loc + Point::from((window.size.w / 2, window.size.h / 2));
+            let monitors: Vec<Rectangle<i32, Logical>> = state
+                .outputs
+                .iter()
+                .map(|o| Rectangle::new(o.loc.into(), o.size))
+                .collect();
+            let monitor = monitors
+                .iter()
+                .copied()
+                .find(|m| m.contains(center))
+                .or_else(|| monitors.first().copied())
+                .unwrap_or_else(|| Rectangle::from_size(state.primary_size()));
+            Some(crate::minimize_animation::Start {
+                surface: manager.surface_of(id)?,
+                window,
+                icon: icons.get(&id).copied(),
+                monitor,
+                right_to_left,
+            })
+        };
+        let alive = |id: u64| manager.geometry(id).is_some();
+        animations.step(self.animation_clock.now(), start, alive);
+        self.manager.minimize_animations = animations;
     }
 
     /// Advance the scroll-mode strip view on its spring by the time
@@ -2798,6 +2870,7 @@ impl Runtime {
             .publish_animations_enabled(settings.motion.animations_enabled());
         self.manager
             .set_motion_allowed(settings.motion.allows_motion());
+        self.manager.minimize_animations.set_motion(settings.motion);
         if !settings.motion.allows_motion() {
             self.overview_motion.snap(self.control.overview_open());
         }
@@ -3061,6 +3134,17 @@ impl Runtime {
         }
         if let Some(thumbnails) = outcome.switcher_thumbnails {
             self.switcher_thumbnails = thumbnails;
+        }
+        if let Some(icons) = outcome.icon_geometries {
+            self.icon_geometries = icons
+                .into_iter()
+                .map(|i| {
+                    (
+                        i.window,
+                        Rectangle::new((i.x, i.y).into(), (i.width, i.height).into()),
+                    )
+                })
+                .collect();
         }
         if let Some(keys) = outcome.switcher_keys {
             self.manager.set_switcher_keys(keys);
@@ -3343,6 +3427,7 @@ impl Runtime {
         // The slide first: size changes read this frame's slide offsets.
         self.step_workspace_slide();
         self.step_size_changes();
+        self.step_minimize_animations();
         let overview = (show_content && !overlay_visible && drawn).then(|| self.overview_layout());
         // While search shows results, the workspace view steps aside.
         let cards = overview
@@ -4145,6 +4230,18 @@ fn scene_elements(
             if split_from.is_none() && split.is_some_and(|s| *s == *surface) {
                 split_from = Some(elements.len());
             }
+            // Restoring (GNOME's unminimize): grows out of its icon,
+            // carried along by a workspace switch like everything else.
+            if let Some(pose) = manager.minimize_animations.pose_of_surface(&surface) {
+                let pose = pose.slid(
+                    f64::from(manager.slide_dx(id)),
+                    f64::from(manager.render_alpha(&window)),
+                );
+                elements.extend(crate::minimize_animation::elements(
+                    renderer, view, &surface, geometry, pose,
+                ));
+                continue;
+            }
             if let Some((mut frame, snapshot)) = manager.size_changes().frame(id) {
                 // A workspace switch carries the transition along with its
                 // window: the live frame and the snapshot above it.
@@ -4216,6 +4313,10 @@ fn scene_elements(
             owners.resize(elements.len(), Some(id));
         }
     }
+    // Minimizing windows, already hidden, shrink into their icons.
+    elements.extend(crate::minimize_animation::minimizing_elements(
+        renderer, manager, view,
+    ));
     // Layer shell above windows: panel strip, then overview, each with
     // its popups (toolkit popovers hang off layer surfaces).
     for (surface, (x, y), _) in crate::layer::layer_layout(state) {

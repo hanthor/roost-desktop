@@ -273,6 +273,8 @@ pub struct Session<'a> {
     switcher_thumbnails: Option<Vec<tuna_shell_control::SwitcherThumbnail>>,
     /// The shell's switcher keys, until the runtime drains them.
     switcher_keys: Option<Vec<tuna_shell_control::SwitcherKey>>,
+    /// The dash's icon rectangles, when the shell sent new ones.
+    icon_geometries: Option<Vec<tuna_shell_control::IconGeometry>>,
 }
 
 impl std::fmt::Debug for Session<'_> {
@@ -343,6 +345,7 @@ impl<'a> Session<'a> {
             input_source_switches: Vec::new(),
             switcher_thumbnails: None,
             switcher_keys: None,
+            icon_geometries: None,
         };
         let msg = match session.conn.read_frame() {
             Ok(msg) => msg,
@@ -621,6 +624,17 @@ impl<'a> Session<'a> {
                 kind: CommandKind::SetSwitcherKeys { keys },
             } => {
                 self.switcher_keys = Some(keys);
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: CommandStatus::Applied,
+                })?;
+                Ok(Handled::CommandResult { id, applied: true })
+            }
+            Message::Command {
+                id,
+                kind: CommandKind::SetIconGeometries { icons },
+            } => {
+                self.icon_geometries = Some(icons);
                 self.conn.write_frame(&Message::CommandResult {
                     id,
                     status: CommandStatus::Applied,
@@ -960,6 +974,7 @@ fn apply_command(
         | CommandKind::SwitchInputSource { .. }
         | CommandKind::SetSwitcherThumbnails { .. }
         | CommandKind::SetSwitcherKeys { .. }
+        | CommandKind::SetIconGeometries { .. }
         | CommandKind::SetScreenReader { .. }
         | CommandKind::SetInputSettings(_) => (CommandStatus::Applied, None),
         CommandKind::Lock => {
@@ -1009,6 +1024,8 @@ pub struct PollOutcome {
     pub switcher_thumbnails: Option<Vec<tuna_shell_control::SwitcherThumbnail>>,
     /// The shell's switcher keys, if it sent new ones.
     pub switcher_keys: Option<Vec<tuna_shell_control::SwitcherKey>>,
+    /// The dash's icon rectangles, if the shell sent new ones.
+    pub icon_geometries: Option<Vec<tuna_shell_control::IconGeometry>>,
 }
 
 /// Peers accepted but not yet handshaken are capped so a same-user
@@ -1409,6 +1426,9 @@ impl ControlHub {
                     }
                     if let Some(keys) = session.switcher_keys.take() {
                         outcome.switcher_keys = Some(keys);
+                    }
+                    if let Some(icons) = session.icon_geometries.take() {
+                        outcome.icon_geometries = Some(icons);
                     }
                     if let Some(active) = session.overview_search.take() {
                         outcome.overview_search = Some(active);
