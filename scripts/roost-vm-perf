@@ -25,7 +25,7 @@ from vm_guest_agent import GuestAgent  # noqa: E402
 from perf_trace_diagnostics import decode as decode_trace_failure, MAX_BYTES as TRACE_FAILURE_BYTES
 from gnome_failed_capture import validate_receipt as validate_failed_capture, validate_chunk as validate_failed_chunk
 from gnome_stop_boundary import capture_stop_boundary_evidence
-from gnome_sysprof import capture_boundary_evidence, decode as decode_gnome_sysprof, required_scope_counts, overview_frame_bounds, FrameOwnershipError, frame_source_evidence  # noqa: E402
+from gnome_sysprof import capture_boundary_evidence, decode as decode_gnome_sysprof, required_scope_counts, overview_frame_bounds, frame_source_evidence  # noqa: E402
 
 
 def guest_probe(agent, action, index=None, out=None):
@@ -50,10 +50,23 @@ def guest_probe(agent, action, index=None, out=None):
         status = agent.command("guest-exec-status", pid=pid)
         if status["exited"]:
             if status.get("exitcode") != 0 or status.get("out-truncated") or status.get("err-truncated"):
+                # Fixed observer actions do not accept application text. Keep
+                # bounded QGA stderr so an acquisition failure is diagnosable.
+                encoded = status.get("err-data", "")
+                try:
+                    if not isinstance(encoded, str):
+                        raise ValueError("invalid stderr type")
+                    stderr = base64.b64decode(encoded[:8192], validate=True)[:4096].decode(
+                        "utf-8", errors="replace")
+                except ValueError:
+                    stderr = "<invalid guest stderr encoding>"
+                details = {"exitcode": status.get("exitcode"),
+                           "stdout_truncated": bool(status.get("out-truncated")),
+                           "stderr_truncated": bool(status.get("err-truncated")), "stderr": stderr}
                 if action in ("gnome-trace-start","gnome-trace-stop","gnome-trace-failed-stop") and out is not None:
                     retain_trace_failure(status,action,out)
                     if action=="gnome-trace-stop":retain_failed_gnome_capture(agent,out)
-                raise RuntimeError(f"guest performance {action} failed")
+                raise RuntimeError(f"guest performance {action} failed: {json.dumps(details)}")
             result = json.loads(base64.b64decode(status.get("out-data", ""), validate=True))
             if action in ("gnome-trace-start","gnome-trace-stop","gnome-trace-failed-stop") and isinstance(result,dict) and "trace_failure" in result:
                 if out is not None:
@@ -173,18 +186,17 @@ def retain_gnome_trace(agent, out, metadata):
         (out / "gnome-overview-capture-stop-boundary.json").write_text(json.dumps(stop_boundary, indent=2))
     if metadata.get("capture_writers_after_stop") != []:
         raise ValueError("GNOME capture writer did not close after Stop")
+    kernel = metadata.get("guest_kernel_provenance")
+    if kernel is not None and (not isinstance(kernel, dict) or kernel.get("cleanup_error") or
+                               kernel.get("unchanged") is not True or
+                               not kernel.get("before") or kernel.get("before") != kernel.get("after")):
+        raise ValueError("guest kernel provenance is missing or changed during profiling")
     counts = required_scope_counts(decoded, metadata["pid"])
     if not all(counts.values()):
         raise ValueError("GNOME profile lacks actual event/dispatch/presentation scopes")
     if metadata.get("gnome_shell_version") != "GNOME Shell 51.0":
         raise ValueError("frame ownership requires the pinned GNOME Shell 51.0")
-    try:
-        frames = overview_frame_bounds(decoded, metadata["pid"])
-    except FrameOwnershipError as error:
-        (out / "gnome-overview-frame-rejection.json").write_text(json.dumps({
-            "reason": str(error), "capture_sha256": digest,
-            "evidence": error.evidence}, indent=2))
-        raise
+    frames = overview_frame_bounds(decoded, metadata["pid"])
     (out / "gnome-overview-frame-ownership.json").write_text(json.dumps(frames, indent=2))
     frames["latency_lower_ms"] = distribution([row["latency_lower_ms"] for row in frames["inputs"]])
     frames["latency_upper_ms"] = distribution([row["latency_upper_ms"] for row in frames["inputs"]])

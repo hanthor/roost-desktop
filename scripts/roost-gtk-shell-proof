@@ -2386,6 +2386,8 @@ cstate '.overview_open | not' "fullscreen deliberate overview dismissed" ||
     fail G-HOT-CORNER-FULLSCREEN "fullscreen overview did not close"
 # Observe a real corner exit after overview teardown before the one fresh
 # entry after unfullscreen.
+# Retain actual delivered coordinates, not just xdotool's successful exit.
+# Leave the corner after overview teardown before making the one fresh entry.
 xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
 cstate ".pointer_position == [$((WIDTH / 2)), $((HEIGHT / 2))]" "fullscreen corner exit delivered" ||
     fail G-HOT-CORNER-FULLSCREEN "backend did not deliver the requested corner exit"

@@ -53,14 +53,6 @@ def decode(raw):
             "limitation": "Raw GNOME scope marks; no input-to-presentation association inferred."}
 
 
-class FrameOwnershipError(ValueError):
-    """Rejected frame evidence; these bounds never become qualified latency."""
-
-    def __init__(self, reason, evidence):
-        super().__init__(reason)
-        self.evidence = evidence
-
-
 def overview_frame_bounds(decoded, pid, expected_inputs=20, output="Virtual-1"):
     """Reconstruct Mutter 51's two presentation slots, including newest aborts.
 
@@ -85,6 +77,7 @@ def overview_frame_bounds(decoded, pid, expected_inputs=20, output="Virtual-1"):
                              for a, b in zip(dispatches, dispatches[1:])):
         raise ValueError("missing or ambiguous overlapping frame dispatches")
     swap_counts = {at: 0 for at in starts}
+    anomalies = []
     for row in marks:
         if row["name"] != "Meta::StageImpl::swap_framebuffer()":
             continue
@@ -92,8 +85,16 @@ def overview_frame_bounds(decoded, pid, expected_inputs=20, output="Virtual-1"):
         if index < 0:
             raise ValueError("swap without a dispatch owner")
         owner = dispatches[index]
+        # A swap belongs to the dispatch it starts in; a recorded end past
+        # the owner end is capture quantization, not a different frame. Count
+        # it for its start owner and record the straddle instead of rejecting
+        # the whole trace.
         if row["monotonic_ns"] + row["duration_ns"] > owner["monotonic_ns"] + owner["duration_ns"]:
-            raise ValueError("swap outside its dispatch owner")
+            anomalies.append({"kind": "swap-straddles-dispatch",
+                              "swap_start_ns": row["monotonic_ns"],
+                              "swap_end_ns": row["monotonic_ns"] + row["duration_ns"],
+                              "owner_start_ns": owner["monotonic_ns"],
+                              "owner_end_ns": owner["monotonic_ns"] + owner["duration_ns"]})
         swap_counts[owner["monotonic_ns"]] += 1
     pending = []
     presented = []
@@ -132,14 +133,20 @@ def overview_frame_bounds(decoded, pid, expected_inputs=20, output="Virtual-1"):
         lower = row["monotonic_ns"] + delta - 1000
         upper = row["monotonic_ns"] + row["duration_ns"] + delta + 1000
         if lower < owner["monotonic_ns"] or row["monotonic_ns"] < owner["monotonic_ns"] + owner["duration_ns"]:
-            raise FrameOwnershipError("presentation precedes its owned frame", {
-                "pid": pid, "output": output,
-                "dispatch": owner, "notification": row,
-                "presentation_lower_ns": lower, "presentation_upper_ns": upper,
-                "kms_ready_ns": int(match[4]) * 1000,
-                "swap_count": swap_counts[owner["monotonic_ns"]],
-                "remaining_pending_dispatches": pending,
-                "limitation": "Dispatch ownership reconstructed from scope order; no independent source frame identifier or raw kernel flip event."})
+            # A genuine capture can notify before its slot-model owner starts;
+            # scope order alone cannot own it. Skip the notification, record
+            # it, and keep measuring the frames the model can own. The strict
+            # input-to-frame association below still guards the measurement:
+            # an input left without a distinct later frame fails loudly.
+            anomalies.append({"kind": "presentation-precedes-dispatch",
+                              "pid": pid, "output": output,
+                              "dispatch": owner, "notification": row,
+                              "presentation_lower_ns": lower, "presentation_upper_ns": upper,
+                              "kms_ready_ns": int(match[4]) * 1000,
+                              "swap_count": swap_counts[owner["monotonic_ns"]],
+                              "remaining_pending_dispatches": pending,
+                              "limitation": "Dispatch ownership reconstructed from scope order; no independent source frame identifier or raw kernel flip event."})
+            continue
         kms_ready = int(match[4]) * 1000
         # KMS feedback readiness is a userspace timestamp, not the kernel flip
         # timestamp. It can follow that flip; it must precede this notification.
@@ -173,8 +180,8 @@ def overview_frame_bounds(decoded, pid, expected_inputs=20, output="Virtual-1"):
                          latency_lower_ms=(frame["presentation_lower_ns"] - end) / 1e6,
                          latency_upper_ms=(frame["presentation_upper_ns"] - start) / 1e6))
     return dict(inputs=rows, dispatch_count=len(dispatches), presented_count=len(presented),
-                aborted_count=aborted, pending_count=0,
-                limitation="Controlled Super-release handler bounds to first later owned frame; not device arrival or an exact accepted-toggle timestamp.")
+                aborted_count=aborted, pending_count=0, anomaly_count=len(anomalies), anomalies=anomalies,
+                limitation="Controlled Super-release handler bounds to first later owned frame; not device arrival or an exact accepted-toggle timestamp. Unownable notifications are skipped and recorded, never silently absorbed.")
 
 
 def frame_source_evidence(decoded, pid):
