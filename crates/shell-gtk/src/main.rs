@@ -14,6 +14,7 @@
 //! `ROOST_SHELL_BIN=roost-shell-gtk` while it grows to parity.
 
 mod audio_state;
+mod background_settings;
 mod bt_menu;
 mod calendar;
 mod events;
@@ -1833,7 +1834,7 @@ fn build(app: &adw::Application) {
                 let dark = interface
                     .as_ref()
                     .is_some_and(|i| i.string("color-scheme") == "prefer-dark");
-                let mut text = logic::wallpaper_drop(
+                let text = logic::wallpaper_drop(
                     &bg.string("picture-uri"),
                     &bg.string("picture-uri-dark"),
                     dark,
@@ -1870,8 +1871,30 @@ fn build(app: &adw::Application) {
                             .unwrap_or_default()
                     })
                     .unwrap_or_default();
-                text.push_str(&lock_uri);
-                text.push('\n');
+                let picture_settings = |s: &gio::Settings| {
+                    background_settings::picture_settings(
+                        s.string("picture-options").as_str(),
+                        s.string("color-shading-type").as_str(),
+                        s.string("primary-color").as_str(),
+                        s.string("secondary-color").as_str(),
+                    )
+                };
+                let Some(desktop) = picture_settings(bg) else {
+                    return;
+                };
+                let lock = if let Some(settings) = screensaver.as_ref() {
+                    let Some(lock) = picture_settings(settings) else {
+                        return;
+                    };
+                    lock
+                } else {
+                    desktop
+                };
+                let Ok(text) = background_settings::append_metadata(text, &lock_uri, desktop, lock)
+                else {
+                    return;
+                };
+
                 let dir = std::env::var_os("XDG_RUNTIME_DIR")
                     .map(std::path::PathBuf::from)
                     .unwrap_or_else(std::env::temp_dir);

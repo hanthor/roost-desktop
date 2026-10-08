@@ -163,8 +163,11 @@ DISPLAY_ARG=""
 ARTIFACTS="$ROOT/gtk-shell-artifacts"
 WIDTH=1280
 HEIGHT=800
+INSTALLED_PACKAGE=0
+COMPANIONS="$ROOT/target/debug/examples"
 while [ $# -gt 0 ]; do
     case "$1" in
+        --installed-package) INSTALLED_PACKAGE=1; shift ;;
         --display) DISPLAY_ARG="$2"; shift 2 ;;
         --artifacts) ARTIFACTS="$2"; shift 2 ;;
         --help|-h) sed -n '2,17p' "$0"; exit 0 ;;
@@ -173,6 +176,12 @@ while [ $# -gt 0 ]; do
 done
 mkdir -p "$ARTIFACTS"
 ARTIFACTS="$(cd "$ARTIFACTS" && pwd)"
+if [ "$INSTALLED_PACKAGE" = 1 ]; then
+    # The private bus has already been established. Do not allow an inherited
+    # display/explicit shell override to stand in for installed default selection.
+    python3 "$ROOT/scripts/lib/installed-deb-proof.py" preflight "$ARTIFACTS/installed-package.json"
+    COMPANIONS=/usr/libexec/roost-deb-proof
+fi
 LOG="$ARTIFACTS/nested.log"
 ASSERTIONS="$ARTIFACTS/assertions.txt"
 : >"$ASSERTIONS"
@@ -606,19 +615,19 @@ ROOST_GRID_TRACE=1
 export ROOST_GRID_TRACE
 ROOST_PROOF_SWIPE_INPUT="$ARTIFACTS/swipe-input.json"
 export ROOST_PROOF_SWIPE_INPUT
-cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk -p roost-shell-host
-cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor --example icon-probe
-cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor --example shortcut-inhibit-client
+if [ "$INSTALLED_PACKAGE" = 0 ]; then
+    cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor -p roost-shell-gtk -p roost-shell-host
+    cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor --example icon-probe
+    cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p roost-compositor --example shortcut-inhibit-client
+fi
 if [ -n "$PAM_ON" ]; then
     env IBUS_ADDRESS="unix:path=$ARTIFACTS/not-the-private-ibus" \
         LD_PRELOAD="$PAM_WRAPPER_LIB" PAM_WRAPPER=1 \
         PAM_WRAPPER_SERVICE_DIR="$ARTIFACTS/pam/services" \
-        "$ROOT/target/debug/roost-compositor" --backend winit --socket "roost-gtk-proof-$$" \
-        --shell-bin "${ROOST_PROOF_SHELL_BIN:-$ROOT/target/debug/roost-shell-gtk}" >"$LOG" 2>&1 &
+        "$ROOT/scripts/lib/roost-proof-session-launch" "$INSTALLED_PACKAGE" "$ROOT" "roost-gtk-proof-$$" >"$LOG" 2>&1 &
 else
     env IBUS_ADDRESS="unix:path=$ARTIFACTS/not-the-private-ibus" \
-        "$ROOT/target/debug/roost-compositor" --backend winit --socket "roost-gtk-proof-$$" \
-        --shell-bin "${ROOST_PROOF_SHELL_BIN:-$ROOT/target/debug/roost-shell-gtk}" >"$LOG" 2>&1 &
+        "$ROOT/scripts/lib/roost-proof-session-launch" "$INSTALLED_PACKAGE" "$ROOT" "roost-gtk-proof-$$" >"$LOG" 2>&1 &
 fi
 COMPOSITOR_PID=$!
 
@@ -630,10 +639,49 @@ for _ in $(seq 1 60); do
     sleep 1
 done
 [ -n "$WID" ] || fail G-PANEL "no nested window"
+if [ "$INSTALLED_PACKAGE" = 1 ]; then
+    # The installed launcher intentionally opens GNOME's startup overview.
+    # Authenticate the original installed session before any physical input.
+    "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-installed-startup.json" 60 ||
+        fail A11Y-PANEL "installed shell never registered on the accessibility bus"
+    python3 "$ROOT/scripts/lib/installed-deb-proof.py" start "$COMPOSITOR_PID" "roost-gtk-proof-$$" "$ARTIFACTS/installed-package.json" unused "$ARTIFACTS/installed-start.json"
+    installed_host="$(timeout 5 xdotool search --onlyvisible --name Smithay)"
+    if [ "$installed_host" != "$WID" ] || [ "$(timeout 5 xdotool getwindowpid "$WID")" != "$COMPOSITOR_PID" ]; then
+        fail G-INSTALLED-START "nested host is not the unique original installed compositor"
+    fi
+    pass G-INSTALLED-START "original installed compositor selects its package-owned preferred GTK shell"
+fi
 xdotool windowfocus --sync "$WID"
 # Park the pointer mid-screen: (0,0) is the hot corner, which opens the
 # overview (and the overview then claims Escape).
 xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
+
+if [ "$INSTALLED_PACKAGE" = 1 ]; then
+    end=$(($(date +%s) + 20))
+    until [ -s "$CSTATE" ] && jq -e '.overview_open == true and .overview_progress == 1 and .locked == false' "$CSTATE" >/dev/null; do
+        [ "$(date +%s)" -le "$end" ] || fail G-INSTALLED-START "installed startup overview never became ready"
+        sleep 0.3
+    done
+    cp "$CSTATE" "$ARTIFACTS/installed-startup-overview.json"
+    scrot "$ARTIFACTS/installed-startup-overview.png" >/dev/null
+    installed_focus="$(timeout 5 xdotool getwindowfocus)"
+    installed_host_pid="$(timeout 5 xdotool getwindowpid "$WID")"
+    if [ "$installed_focus" != "$WID" ] || [ "$installed_host_pid" != "$COMPOSITOR_PID" ]; then
+        fail G-INSTALLED-START "original installed host does not own genuine keyboard focus"
+    fi
+    jq -n --argjson window "$WID" --argjson focus "$installed_focus" --argjson pid "$installed_host_pid" \
+        '{window: $window, actual_focus: $focus, compositor_pid: $pid}' >"$ARTIFACTS/installed-host-input.json"
+    python3 "$ROOT/scripts/lib/installed-deb-proof.py" stable "$COMPOSITOR_PID" "roost-gtk-proof-$$" "$ARTIFACTS/installed-package.json" "$ARTIFACTS/installed-start.json" "$ARTIFACTS/installed-before-escape.json"
+    # Exactly one genuine Escape; the readiness loop never replays input.
+    timeout 5 xdotool key Escape
+    end=$(($(date +%s) + 20))
+    until [ -s "$CSTATE" ] && jq -e ".overview_open == false and .overview_progress == 0 and .locked == false and .pointer_position == [$((WIDTH / 2)), $((HEIGHT / 2))]" "$CSTATE" >/dev/null; do
+        [ "$(date +%s)" -le "$end" ] || fail G-INSTALLED-START "genuine Escape did not restore the installed desktop at center"
+        sleep 0.3
+    done
+    python3 "$ROOT/scripts/lib/installed-deb-proof.py" stable "$COMPOSITOR_PID" "roost-gtk-proof-$$" "$ARTIFACTS/installed-package.json" "$ARTIFACTS/installed-start.json" "$ARTIFACTS/installed-after-escape.json"
+    cp "$CSTATE" "$ARTIFACTS/installed-desktop-before-panel.json"
+fi
 
 # The panel is up once the shell registers on the a11y bus with its
 # controls; that also proves the accessible tree.
@@ -892,7 +940,17 @@ pass G-OV-PICK "clicking a preview focuses that window and closes the overview"
 sleep 1
 scrot "$ARTIFACTS/06-picked.png" >/dev/null
 
-menu="$(jq -r '.windows[] | select(.app_id == "roost-test-beta") | .rect | "\(.[0] + .[2] - 64) \(.[1] + 22)"' "$CSTATE")"
+# Aim the real menu button through its live accessibility bounds: a fixed
+# rect offset misses when the session maximizes the window and the header
+# layout puts the button elsewhere.
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-test-beta "$ARTIFACTS/a11y-beta-menu.json" 20 ||
+    fail G-APP-POPOVER "test window never registered on the accessibility bus"
+beta_origin="$(jq -r '.windows[] | select(.app_id == "roost-test-beta") | .rect | "\(.[0]) \(.[1])"' "$CSTATE")"
+if [ -z "$beta_origin" ] || [ "$beta_origin" = "null null" ]; then
+    fail G-APP-POPOVER "beta window rect went missing"
+fi
+menu="$(jq -er --argjson ox "${beta_origin%% *}" --argjson oy "${beta_origin##* }" '[.[] | select(.showing and .name == "Main Menu" and ((.bounds[2] // 0) > 0) and ((.bounds[3] // 0) > 0))][0].bounds | "\((.[0] + $ox + .[2] / 2) | floor) \(.[1] + $oy + .[3] / 2 | floor)"' "$ARTIFACTS/a11y-beta-menu.json")" ||
+    fail G-APP-POPOVER "menu button has no showing accessibility bounds"
 # shellcheck disable=SC2086
 xdotool mousemove --window "$WID" $menu click 1
 sleep 2
@@ -986,13 +1044,27 @@ sleep 1
 new_alpha="$(jq -r .focused "$CSTATE")"
 # Rebound window-only and direct-cycle keys (#216), with two windows
 # from Alpha proving that window switching does not group by app.
+grab_mark="$(wc -c <"$LOG")"
 gsettings set org.gnome.desktop.wm.keybindings cycle-group "['<Super>F1']"
 gsettings set org.gnome.desktop.wm.keybindings cycle-group-backward "['<Super><Shift>F1']"
 gsettings set org.gnome.desktop.wm.keybindings cycle-windows "['<Super>F2']"
 gsettings set org.gnome.desktop.wm.keybindings cycle-windows-backward "['<Super><Shift>F2']"
 gsettings set org.gnome.desktop.wm.keybindings switch-windows "['<Control>k']"
 gsettings set org.gnome.desktop.wm.keybindings switch-windows-backward "['<Control><Shift>k']"
-sleep 1.5
+# The session bus can deliver the settings change notifications late; wait
+# for the shell's actual re-grab line before sending the rebound keys.
+grab_end=$(($(date +%s) + 30))
+while [ "$(date +%s)" -le "$grab_end" ]; do
+    if [ "$(wc -c <"$LOG")" -gt "$grab_mark" ] && tail -c +"$((grab_mark + 1))" "$LOG" | grep -q "roost-shell-gtk: keybindings:"; then
+        break
+    fi
+    sleep 0.3
+done
+if tail -c +"$((grab_mark + 1))" "$LOG" | grep -q "roost-shell-gtk: keybindings:"; then
+    sleep 1
+else
+    fail G-CYCLE-KEYS "shell never re-grabbed the rebound cycle keys"
+fi
 original="$(jq -r .focused "$CSTATE")"
 xdotool key super+F1
 cstate ".focused != $original and .focused_app_id == \"roost-test-alpha\"" "cycle group" || fail G-CYCLE-KEYS "cycle-group did not move within Alpha"
@@ -2222,7 +2294,7 @@ EOF
         "X11 absent type is normal" || fail G-INTROSPECT-TYPES "absent type did not restore eligibility"
     cp "$CSTATE" "$ARTIFACTS/introspect-type-absent.json"
     pass G-INTROSPECT-TYPES "actual mapped X11 role changes follow all fourteen EWMH types and restore the absent-type default"
-    DISPLAY="$x11_display" "$ROOT/target/debug/examples/icon-probe" --x11-hints >"$ARTIFACTS/hints-probe.log" 2>&1 &
+    DISPLAY="$x11_display" "$COMPANIONS/icon-probe" --x11-hints >"$ARTIFACTS/hints-probe.log" 2>&1 &
     HINTS_PID=$!
     cstate '.windows[] | select(.app_id == "RoostHintsProbe") | .icon != null' "WM_HINTS icon" || fail G-WINDOW-ICONS "legacy pixmap icon never reached model"
     hints_icon="$(jq -r '.windows[] | select(.app_id == "RoostHintsProbe") | .icon' "$CSTATE")"
@@ -2233,7 +2305,7 @@ else
 fi
 
 # Raw Wayland SHM icon: GTK versions on the runner need not implement the new protocol.
-WAYLAND_DISPLAY="$SOCKET_NAME" "$ROOT/target/debug/examples/icon-probe" >"$ARTIFACTS/icon-probe.log" 2>&1 &
+WAYLAND_DISPLAY="$SOCKET_NAME" "$COMPANIONS/icon-probe" >"$ARTIFACTS/icon-probe.log" 2>&1 &
 ICON_PID=$!
 cstate '.windows[] | select(.app_id == "roost-window-icon-probe") | .icon != null' "Wayland icon" || fail G-WINDOW-ICONS "Wayland icon never reached model"
 native_icon="$(jq -r '.windows[] | select(.app_id == "roost-window-icon-probe") | .icon' "$CSTATE")"
@@ -2361,6 +2433,11 @@ WAYLAND_DISPLAY="$SOCKET_NAME" ROOST_TEST_REQUESTS="$corner_requests" "$PY" "$RO
 HOT_CORNER_PID=$!
 cstate ".windows | length == $((corner_count + 1))" "corner proof mapped" ||
     fail G-HOT-CORNER-FULLSCREEN "genuine GTK proof window did not map"
+cstate '([.windows[] | select(.app_id == "roost-test-fullscreen corner proof")] | length) == 1' "unique actual corner client identity" ||
+    fail G-HOT-CORNER-FULLSCREEN "actual corner client identity was not unique"
+corner_window_id="$(jq '.windows[] | select(.app_id == "roost-test-fullscreen corner proof") | .id' "$CSTATE")"
+corner_restored_rect="$(jq -c '.windows[] | select(.app_id == "roost-test-fullscreen corner proof") | .rect' "$CSTATE")"
+cp "$CSTATE" "$ARTIFACTS/hot-corner-client-before-fullscreen.json"
 printf '{"generation":1,"request":"fullscreen"}\n' >"$corner_requests"
 cstate ".focused_rect == [0, 0, $WIDTH, $HEIGHT]" "corner proof fullscreen" ||
     fail G-HOT-CORNER-FULLSCREEN "actual GTK fullscreen request did not cover the output"
@@ -2381,12 +2458,17 @@ cstate '.overview_open | not' "fullscreen deliberate overview dismissed" ||
     fail G-HOT-CORNER-FULLSCREEN "fullscreen overview did not close"
 # Observe a real corner exit after overview teardown before the one fresh
 # entry after unfullscreen.
+# Retain actual delivered coordinates, not just xdotool's successful exit.
+# Leave the corner after overview teardown before making the one fresh entry.
 xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
 cstate ".pointer_position == [$((WIDTH / 2)), $((HEIGHT / 2))]" "fullscreen corner exit delivered" ||
     fail G-HOT-CORNER-FULLSCREEN "backend did not deliver the requested corner exit"
 cp "$CSTATE" "$ARTIFACTS/hot-corner-fullscreen-before-unfullscreen.json"
 printf '{"generation":2,"request":"unfullscreen"}\n' >"$corner_requests"
-cstate ".focused_rect != [0, 0, $WIDTH, $HEIGHT]" "corner proof restored" ||
+# A null focus during overview teardown is not an unfullscreen completion.
+# Observe the original mapped client and its exact saved rectangle with the
+# real pointer still at the center, before the one genuine corner entry.
+cstate ".focused == $corner_window_id and .focused_rect == $corner_restored_rect and (.windows | any(.id == $corner_window_id and .rect == $corner_restored_rect)) and .pointer_position == [$((WIDTH / 2)), $((HEIGHT / 2))] and (.pointer_fullscreen_blocked | not)" "original corner proof restored at center" ||
     fail G-HOT-CORNER-FULLSCREEN "actual GTK unfullscreen request did not restore geometry"
 cp "$CSTATE" "$ARTIFACTS/hot-corner-unfullscreen-before-entry.json"
 xdotool mousemove --window "$WID" 1 1
@@ -3923,7 +4005,7 @@ for scenario in allow remembered-allow deny remembered-deny unknown; do
     trigger="$ARTIFACTS/consent-$scenario.request"
     consent_log="$ARTIFACTS/consent-$scenario.log"
     rm -f "$trigger"
-    WAYLAND_DISPLAY="$SOCKET_NAME" "$ROOT/target/debug/examples/shortcut-inhibit-client" "$consent_app" "$trigger" >"$consent_log" 2>&1 &
+    WAYLAND_DISPLAY="$SOCKET_NAME" "$COMPANIONS/shortcut-inhibit-client" "$consent_app" "$trigger" >"$consent_log" 2>&1 &
     INHIBITOR_PID=$!
     cstate ".focused_app_id == \"$consent_app\"" "consent client focused" || fail G-SHORTCUT-CONSENT "requester did not focus"
     touch "$trigger"
@@ -4017,6 +4099,11 @@ monitor_count=$(wc -l <"$ARTIFACTS/audio-monitor-pids")
 read -r monitor_pid audio_shell_pid <<EOF
 $(tail -n 1 "$ARTIFACTS/audio-monitor-pids")
 EOF
+if [ "$INSTALLED_PACKAGE" = 1 ]; then
+    python3 "$ROOT/scripts/lib/installed-deb-proof.py" stable "$COMPOSITOR_PID" "roost-gtk-proof-$$" "$ARTIFACTS/installed-package.json" "$ARTIFACTS/installed-start.json" "$ARTIFACTS/installed-stable.json"
+    [ "$audio_shell_pid" = "$(jq -r '.shell.pid' "$ARTIFACTS/installed-stable.json")" ] || fail G-INSTALLED-STABLE "crash target is not the authenticated original GTK child"
+    pass G-INSTALLED-STABLE "original installed compositor and GTK shell survived every original control assertion"
+fi
 kill -KILL "$audio_shell_pid"
 end=$(($(date +%s) + 15))
 while [ "$(date +%s)" -lt "$end" ]; do
@@ -4031,6 +4118,10 @@ monitor_state="$(ps -o stat= -p "$monitor_pid" 2>/dev/null || true)"
 [ "$(wc -l <"$ARTIFACTS/audio-monitor-pids")" -gt "$monitor_count" ] ||
     fail G-AUDIO-HELPER-EXIT "the supervised replacement shell did not start an audio monitor"
 pass G-AUDIO-HELPER-EXIT "a hard shell crash terminates its monitor; the replacement starts a fresh one"
+if [ "$INSTALLED_PACKAGE" = 1 ]; then
+    python3 "$ROOT/scripts/lib/installed-deb-proof.py" replacement "$COMPOSITOR_PID" "roost-gtk-proof-$$" "$ARTIFACTS/installed-package.json" "$ARTIFACTS/installed-stable.json" "$ARTIFACTS/installed-replacement.json"
+    pass G-INSTALLED-RECOVERY "original installed compositor recovers with a new package-owned GTK shell"
+fi
 
 if [ -n "${x11_display:-}" ]; then
     kill "$COMPOSITOR_PID"

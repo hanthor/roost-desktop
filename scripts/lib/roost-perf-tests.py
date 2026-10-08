@@ -5,10 +5,11 @@ import importlib.util
 import json
 import os
 import base64
+import hashlib
 import io
 import subprocess
 import sys
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from types import SimpleNamespace
 from pathlib import Path
 import tempfile
@@ -32,6 +33,32 @@ sysprof = load("sysprof", ROOT / "scripts/lib/gnome_sysprof.py")
 phase = load("phase", ROOT / "packaging/marlin/perf/roost-perf-phase")
 profiler = load("profiler", ROOT / "packaging/marlin/perf/roost-gnome-profiler")
 diag = load("diagnostics", ROOT / "scripts/lib/perf_trace_diagnostics.py")
+
+
+@contextmanager
+def isolated_kernel_marker(directory):
+    """Redirect the fixed /run kernel marker into a scratch directory."""
+    real_path = phase.Path
+    def redirect(path, *args, **kwargs):
+        if str(path) == "/run/roost-perf-kernel.json":
+            return real_path(directory) / "roost-perf-kernel.json"
+        return real_path(path, *args, **kwargs)
+    with patch.object(phase, "Path", side_effect=redirect):
+        yield
+
+
+@contextmanager
+def isolated_trace_start(directory, run_error=None, run_result=None):
+    """Drive gnome_trace start with the independent kernel observer isolated."""
+    run_mock = (patch.object(phase.subprocess, "run", side_effect=run_error)
+                if run_error is not None else
+                patch.object(phase.subprocess, "run", return_value=run_result))
+    with patch.object(phase.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=1000)), \
+         run_mock, \
+         patch.object(phase, "guest_kernel_provenance", return_value={}), \
+         patch.object(phase, "kernel_trace", return_value={}), \
+         isolated_kernel_marker(directory):
+        yield
 
 
 class TraceFailureDiagnostics(unittest.TestCase):
@@ -100,7 +127,7 @@ class TraceFailureDiagnostics(unittest.TestCase):
         raw=diag.encode(self.receipt(),'start').decode()
         error=subprocess.CalledProcessError(7,['fixed'],output=raw,stderr='PRIVATE STDERR')
         output=io.StringIO()
-        with patch.object(phase.pwd,'getpwnam',return_value=SimpleNamespace(pw_uid=1000)),patch.object(phase.subprocess,'run',side_effect=error),redirect_stdout(output):
+        with tempfile.TemporaryDirectory() as marker_dir,isolated_trace_start(marker_dir,run_error=error),redirect_stdout(output):
             with self.assertRaises(SystemExit) as failed:phase.gnome_trace('start',0)
         self.assertEqual(failed.exception.code,7)
         self.assertEqual(diag.decode(output.getvalue(),'start'),self.receipt())
@@ -129,7 +156,7 @@ class TraceFailureDiagnostics(unittest.TestCase):
             with self.subTest(raw=raw[:40]),self.assertRaises((ValueError,TypeError)):diag.decode(raw,'start')
             output=io.StringIO()
             error=subprocess.CalledProcessError(9,['fixed'],output=raw.decode(),stderr='PRIVATE STDERR')
-            with patch.object(phase.pwd,'getpwnam',return_value=SimpleNamespace(pw_uid=1000)),patch.object(phase.subprocess,'run',side_effect=error),redirect_stdout(output):
+            with tempfile.TemporaryDirectory() as marker_dir,isolated_trace_start(marker_dir,run_error=error),redirect_stdout(output):
                 with self.assertRaises(SystemExit) as phase_failure:phase.gnome_trace('start',0)
             self.assertEqual(phase_failure.exception.code,9)
             rejected=diag.decode(output.getvalue(),'start')['trace_failure']
@@ -156,7 +183,7 @@ class TraceFailureDiagnostics(unittest.TestCase):
             self.assertNotIn('PRIVATE',diag.encode(value,'start').decode())
     def test_zero_exit_cannot_turn_structured_failure_into_acquisition_success(self):
         raw=diag.encode(self.receipt(),'start').decode()
-        with patch.object(phase.pwd,'getpwnam',return_value=SimpleNamespace(pw_uid=1000)),patch.object(phase.subprocess,'run',return_value=SimpleNamespace(stdout=raw,returncode=0)):
+        with tempfile.TemporaryDirectory() as marker_dir,isolated_trace_start(marker_dir,run_result=SimpleNamespace(stdout=raw,returncode=0)):
             with self.assertRaisesRegex(ValueError,'cannot qualify'):phase.gnome_trace('start',0)
         row=dict(self.receipt(),boottime_s=100)
         class Agent:
@@ -171,7 +198,7 @@ class TraceFailureDiagnostics(unittest.TestCase):
     def test_malformed_inner_exit9_reaches_host_as_safe_rejection_not_success(self):
         output=io.StringIO()
         failure=subprocess.CalledProcessError(9,['fixed'],output='PRIVATE raw body',stderr='PRIVATE stderr')
-        with patch.object(phase.pwd,'getpwnam',return_value=SimpleNamespace(pw_uid=1000)),patch.object(phase.subprocess,'run',side_effect=failure),redirect_stdout(output):
+        with tempfile.TemporaryDirectory() as marker_dir,isolated_trace_start(marker_dir,run_error=failure),redirect_stdout(output):
             with self.assertRaises(SystemExit) as exit_status:phase.gnome_trace('start',0)
         raw=output.getvalue().encode()
         class Agent:
@@ -273,6 +300,76 @@ class MutterLibraryIdentity(unittest.TestCase):
                 profiler.mapped_library_digest(str(path), identity.st_dev, identity.st_ino)
 
 
+class KernelBuildEvidence(unittest.TestCase):
+    @staticmethod
+    def note(name=b"GNU\0", descriptor=b"12345678901234567890", kind=3):
+        import struct
+        return (struct.pack("<III", len(name), len(descriptor), kind) + name +
+                b"\0" * ((-len(name)) % 4) + descriptor + b"\0" * ((-len(descriptor)) % 4))
+
+    def test_reads_live_build_id_among_other_notes(self):
+        raw = self.note(b"Linux\0", b"other", 0) + self.note()
+        result = phase.gnu_build_id(raw)
+        self.assertEqual(result["build_id"], b"12345678901234567890".hex())
+        self.assertEqual(bytes.fromhex(result["gnu_note_hex"]), self.note())
+
+    def test_missing_duplicate_truncated_and_oversized_notes_are_denied(self):
+        for bad in (b"", self.note(b"Linux\0"), self.note() * 2,
+                    self.note()[:-1], self.note() + b"x", self.note(descriptor=b""),
+                    self.note(descriptor=b"x" * 65), b"\xff" * 12):
+            with self.subTest(raw=bad), self.assertRaises(ValueError):
+                phase.gnu_build_id(bad)
+
+    def test_kernel_file_final_symlink_and_nonregular_files_are_denied(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "target").write_bytes(b"kernel payload")
+            (root / "link").symlink_to(root / "target")
+            with self.assertRaises(OSError):
+                phase.kernel_file_digest(root / "link")
+            with self.assertRaises(RuntimeError):
+                phase.kernel_file_digest(root)
+
+    def test_hyphenated_module_filename_is_accepted_inside_running_kernel_tree(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tree = root / "kernel/drivers/gpu/drm/virtio"
+            tree.mkdir(parents=True)
+            for name in ("virtio-gpu.ko.zst", "virtio-gpu.ko", "virtio_gpu.ko.xz"):
+                path = tree / name
+                path.write_bytes(b"module path fixture")
+                self.assertEqual(phase.virtio_module_path(str(path), root), path)
+            outside = root / "virtio-gpu.ko.zst"
+            outside.write_bytes(b"wrong tree")
+            foreign = tree / "different-gpu.ko.zst"
+            foreign.write_bytes(b"wrong module")
+            (tree / "escape").symlink_to(outside)
+            for path in (outside, foreign, tree / "escape"):
+                with self.subTest(path=path), self.assertRaises(RuntimeError):
+                    phase.virtio_module_path(str(path), root)
+
+    def test_missing_and_changed_kernel_evidence_preserves_complete_capture(self):
+        import hashlib
+        fixture = ROOT / "scripts/lib/fixtures/gnome51-frame-ownership.syscap"
+        raw = fixture.read_bytes()
+        metadata = json.loads((fixture.with_suffix(".json")).read_text())
+        def chunk(_agent, _action, index):
+            return {"gnome_trace": {"index": index,
+                    "data": base64.b64encode(raw[index * 65536:(index + 1) * 65536]).decode()}}
+        for kernel in ([], {"error": "missing live GNU build ID"},
+                       {"before": {"release": "one"}, "after": {"release": "two"}, "unchanged": False}):
+            with self.subTest(kernel=kernel), tempfile.TemporaryDirectory() as directory:
+                out = Path(directory)
+                row = dict(metadata, bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest(),
+                           capture_writers_after_stop=[], guest_kernel_provenance=kernel)
+                with patch.object(host, "guest_probe", side_effect=chunk):
+                    with self.assertRaisesRegex(ValueError, "kernel provenance"):
+                        host.retain_gnome_trace(None, out, row)
+                self.assertEqual((out / "gnome-overview.syscap").read_bytes(), raw)
+                self.assertEqual(json.loads((out / "gnome-overview-source.json").read_text()), row)
+                self.assertTrue((out / "gnome-overview-marks.json").is_file())
+
+
 class CaptureClosure(unittest.TestCase):
     def test_writer_closure_required_without_discarding_rejected_capture(self):
         import hashlib
@@ -353,11 +450,12 @@ class RejectedPresentationCapture(unittest.TestCase):
         self.assertEqual(metadata["capture_writers_after_stop"], [])
         return raw, metadata
 
-    def test_complete_closed_actual_capture_still_rejects_early_presentation(self):
+    def test_complete_closed_actual_capture_skips_and_records_early_presentation(self):
         raw, metadata = self.capture()
-        with self.assertRaisesRegex(sysprof.FrameOwnershipError, "presentation precedes") as result:
-            sysprof.overview_frame_bounds(sysprof.decode(raw), metadata["pid"])
-        evidence = result.exception.evidence
+        bounds = sysprof.overview_frame_bounds(sysprof.decode(raw), metadata["pid"])
+        self.assertEqual(bounds["anomaly_count"], 1)
+        evidence = bounds["anomalies"][0]
+        self.assertEqual(evidence["kind"], "presentation-precedes-dispatch")
         self.assertEqual(evidence["dispatch"]["monotonic_ns"], 123682891000)
         self.assertEqual(evidence["presentation_lower_ns"], 123677782000)
         self.assertEqual(evidence["presentation_upper_ns"], 123677789000)
@@ -365,7 +463,7 @@ class RejectedPresentationCapture(unittest.TestCase):
         self.assertEqual(evidence["kms_ready_ns"], 123684532000)
         self.assertEqual(evidence["swap_count"], 1)
 
-    def test_rejection_retains_whole_capture_and_bounds_without_qualified_result(self):
+    def test_skip_retains_whole_capture_and_qualified_bounds_with_anomaly(self):
         raw, metadata = self.capture()
 
         def chunk(agent, action, index):
@@ -375,15 +473,14 @@ class RejectedPresentationCapture(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory, patch.object(host, "guest_probe", chunk):
             out = Path(directory)
-            with self.assertRaisesRegex(ValueError, "presentation precedes"):
-                host.retain_gnome_trace(None, out, metadata)
+            host.retain_gnome_trace(None, out, metadata)
             self.assertEqual((out / "gnome-overview.syscap").read_bytes(), raw)
             self.assertEqual(json.loads((out / "gnome-overview-source.json").read_text()), metadata)
             self.assertTrue((out / "gnome-overview-marks.json").exists())
-            rejected = json.loads((out / "gnome-overview-frame-rejection.json").read_text())
-            self.assertEqual(rejected["capture_sha256"], metadata["sha256"])
-            self.assertEqual(rejected["evidence"]["presentation_upper_ns"], 123677789000)
-            self.assertFalse((out / "gnome-overview-frame-ownership.json").exists())
+            owned = json.loads((out / "gnome-overview-frame-ownership.json").read_text())
+            self.assertEqual(owned["anomaly_count"], 1)
+            self.assertEqual(owned["anomalies"][0]["presentation_upper_ns"], 123677789000)
+            self.assertFalse((out / "gnome-overview-frame-rejection.json").exists())
 
 
 class SysprofCapture(unittest.TestCase):
@@ -731,6 +828,18 @@ class Accounting(unittest.TestCase):
         self.assertEqual(host.guest_probe(agent, "notify", 3)["notification_id"], 9)
         self.assertEqual(agent.commands[0][1]["path"], "/usr/libexec/roost-perf-phase")
         self.assertEqual(agent.commands[0][1]["arg"], ["notify", "--index", "3"])
+        error_agent = Agent({}, exitcode=1,
+                            **{"err-data": base64.b64encode(b"module filename rejected: virtio-gpu.ko.zst").decode()})
+        with self.assertRaisesRegex(RuntimeError, "virtio-gpu.ko.zst"):
+            host.guest_probe(error_agent, "gnome-trace-start")
+        oversized = Agent({}, exitcode=1,
+                          **{"err-data": base64.b64encode(b"x" * 100000).decode()})
+        with self.assertRaises(RuntimeError) as error:
+            host.guest_probe(oversized, "gnome-trace-start")
+        self.assertLess(len(str(error.exception)), 4500)
+        invalid = Agent({}, exitcode=1, **{"err-data": "not base64!"})
+        with self.assertRaisesRegex(RuntimeError, "invalid guest stderr encoding"):
+            host.guest_probe(invalid, "gnome-trace-start")
         for flags in ({"exitcode": 1}, {"out-truncated": True}, {"err-truncated": True}):
             with self.subTest(flags=flags), self.assertRaisesRegex(RuntimeError, "failed"):
                 host.guest_probe(Agent({"boottime_s": 100}, **flags), "clock")
@@ -760,6 +869,134 @@ class CaptureAcquisition(unittest.TestCase):
                 self.assertEqual([row["fd"] for row in observed], [writer.fileno()])
                 writer.close()
                 self.assertEqual(phase.capture_writers(os.getpid(), metadata), [])
+
+
+class PinnedBaselinePackageGuards(unittest.TestCase):
+    """Execute the actual Containerfile shell, including its AND-list context."""
+
+    def test_preflight_failure_prevents_any_package_install(self):
+        source = (ROOT / "packaging/marlin/Containerfile").read_text().replace("\\\n", "")
+        script = source.split("RUN set -eux;", 1)[1].split("&& pacman -U", 1)[0] + " && :"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "share").mkdir()
+            (root / "bin").mkdir()
+            inventory = root / "share/roost-perf-baseline-packages.txt"
+            manifest = root / "share/roost-perf-baseline-critical.sha256"
+            critical = root / "critical"
+            marker = root / "package-install-started"
+            original = b"immutable baseline fixture"
+            manifest.write_text(f"{hashlib.sha256(original).hexdigest()}  {critical}\n")
+            pacman = root / "bin/pacman"
+            pacman.write_text('#!/bin/sh\nif test "$1" = -Q; then printf "%s\\n" '
+                              '"$TEST_MUTTER_PIN"; else touch "$TEST_PACKAGE_MUTATION"; fi\n')
+            pacman.chmod(0o755)
+            package = root / "roost-pkg.tar.zst"
+            package.write_bytes(b"immutable roost package fixture")
+            script = script.replace("/usr/share", str(root / "share"))
+            script = script.replace("/tmp/roost-", str(root / "roost-"))
+            script = script.replace("/tmp/roost.pkg.tar.zst", str(package))
+            script = script.replace("/usr/libexec/roost-pinned-baseline",
+                                    "bash %s %s %s" % (ROOT / "packaging/marlin/roost-pinned-baseline",
+                                                       inventory, manifest))
+            for name, has_inventory, pin, corrupt, accepted in (
+                ("valid", True, "mutter 51.0-1.3", False, True),
+                ("missing-inventory", False, "mutter 51.0-1.3", False, False),
+                ("wrong-pin", True, "mutter 51.0-2", False, False),
+                ("changed-critical-file", True, "mutter 51.0-1.3", True, False),
+            ):
+                with self.subTest(name=name):
+                    inventory.unlink(missing_ok=True)
+                    marker.unlink(missing_ok=True)
+                    if has_inventory:
+                        inventory.write_text("mutter 51.0-1.3\n")
+                    critical.write_bytes(b"changed" if corrupt else original)
+                    environment = dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}",
+                                       PERF_PINNED_BASELINE="true", TEST_MUTTER_PIN=pin,
+                                       TEST_PACKAGE_MUTATION=str(marker),
+                                       ROOST_PKG_SHA256=hashlib.sha256(package.read_bytes()).hexdigest())
+                    result = subprocess.run(["bash", "-e", "-c", script], env=environment,
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                    self.assertEqual(marker.exists(), accepted)
+
+    def test_post_install_rejects_changed_missing_or_corrupt_baseline(self):
+        source = (ROOT / "packaging/marlin/Containerfile").read_text().replace("\\\n", "")
+        beginning = 'if test "$PERF_PINNED_BASELINE" = true; then'
+        script = beginning + source.split(beginning, 1)[1].split("\n\nLABEL", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "share").mkdir()
+            (root / "bin").mkdir()
+            (root / "share/roost-perf-baseline-packages.txt").write_text(
+                "linux 7.2.9.arch1-1\nmutter 51.0-1.3\n")
+            critical = root / "critical"
+            original = b"immutable baseline fixture"
+            (root / "share/roost-perf-baseline-critical.sha256").write_text(
+                f"{hashlib.sha256(original).hexdigest()}  {critical}\n")
+            pacman = root / "bin/pacman"
+            pacman.write_text('#!/bin/sh\ncat "$TEST_PACKAGE_INVENTORY"\n')
+            pacman.chmod(0o755)
+            script = script.replace("/usr/share", str(root / "share"))
+            script = script.replace("/tmp/roost-", str(root / "roost-"))
+            for name, body, corrupt, accepted in (
+                ("unchanged", "linux 7.2.9.arch1-1\nmutter 51.0-1.3\n", False, True),
+                ("new-roost", "linux 7.2.9.arch1-1\nmutter 51.0-1.3\nroost 1.0-1\n", False, True),
+                ("kernel-upgrade", "linux 7.2.10.arch1-1\nmutter 51.0-1.3\n", False, False),
+                ("mutter-replacement", "linux 7.2.9.arch1-1\nmutter 51.0-2\n", False, False),
+                ("missing", "linux 7.2.9.arch1-1\n", False, False),
+                ("critical-corruption", "linux 7.2.9.arch1-1\nmutter 51.0-1.3\n", True, False),
+            ):
+                with self.subTest(name=name):
+                    inventory = root / "inventory"
+                    inventory.write_text(body)
+                    critical.write_bytes(b"changed" if corrupt else original)
+                    environment = dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}",
+                                       PERF_PINNED_BASELINE="true", TEST_PACKAGE_INVENTORY=str(inventory))
+                    result = subprocess.run(["bash", "-e", "-c", script], env=environment,
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode == 0, accepted, result.stderr)
+
+    def test_all_baseline_containerfile_run_blocks_have_valid_shell_syntax(self):
+        for name in ("packaging/marlin/Containerfile", "packaging/marlin/perf/Containerfile",
+                     "packaging/marlin/perf/Containerfile.baseline"):
+            for line in (ROOT / name).read_text().replace("\\\n", "").splitlines():
+                if line.startswith("RUN "):
+                    with self.subTest(containerfile=name, run=line):
+                        result = subprocess.run(["bash", "-n"], input=line[4:], text=True,
+                                                capture_output=True)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+
+class KernelTraceDispatch(unittest.TestCase):
+    def run_main(self, *argv):
+        calls = []
+        def fake(action, index=0):
+            calls.append((action, index))
+            return {"index": index, "data": "AA=="}
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["roost-perf-phase", *argv]), \
+             patch.object(phase, "kernel_trace", side_effect=fake), \
+             redirect_stdout(output):
+            phase.main()
+        return calls, json.loads(output.getvalue())
+    def test_read_actions_map_to_observer_kinds(self):
+        for lane_action, observer_action in (("kernel-trace-read", "trace-read"),
+                                             ("kernel-formats-read", "formats-read"),
+                                             ("kernel-discovery-read", "discovery-read")):
+            calls, result = self.run_main(lane_action, "--index", "3")
+            self.assertEqual(calls, [(observer_action, 3)])
+            self.assertEqual(result["kernel_trace"], {"index": 3, "data": "AA=="})
+            self.assertIn("boottime_s", result)
+    def test_stop_maps_to_observer_stop(self):
+        calls, result = self.run_main("kernel-trace-stop")
+        self.assertEqual(calls, [("trace-stop", 0)])
+        self.assertIn("kernel_trace", result)
+    def test_observer_failure_propagates(self):
+        with patch.object(sys, "argv", ["roost-perf-phase", "kernel-trace-read"]), \
+             patch.object(phase, "kernel_trace", side_effect=RuntimeError("observer offline")), \
+             redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError, "observer offline"):
+                phase.main()
 
 if __name__ == "__main__":
     unittest.main()

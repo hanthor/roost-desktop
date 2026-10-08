@@ -22,10 +22,16 @@ fail() {
     exit 1
 }
 
+# Validate numeric metadata in BOTH original archives before extraction can
+# replace ownership with that of the checker process.
+ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+python3 "$ROOT/scripts/lib/release-deb-ownership.py" "$PKG" || fail "archive ownership rejected"
+
 CONTENTS="$(dpkg-deb -c "$PKG" 2>/dev/null)"
 for path in \
     usr/bin/roost-compositor \
     usr/bin/roost-session \
+    usr/bin/roost-shell-gtk \
     usr/bin/roost-shell-host \
     usr/bin/roost-ibus-bridge \
     usr/bin/roost-greeter \
@@ -44,10 +50,23 @@ VERSION="$(dpkg-deb -f "$PKG" Version)"
 DIR="$(mktemp -d)"
 trap 'rm -rf "$DIR"' EXIT INT TERM
 dpkg-deb -x "$PKG" "$DIR"
-for bin in roost-compositor roost-session roost-shell-host roost-ibus-bridge roost-greeter; do
-    REPORTED="$("$DIR/usr/bin/$bin" --version | awk '{print $NF}')"
-    [ "$REPORTED" = "$VERSION" ] || fail "$bin reports $REPORTED, package is $VERSION"
+for path in usr/share/wayland-sessions/roost.desktop usr/lib/systemd/user/roost-session.target etc/pam.d/roost-lock; do
+    [ -f "$DIR/$path" ] && [ ! -L "$DIR/$path" ] || fail "invalid required file $path"
 done
+for bin in roost-compositor roost-session roost-shell-gtk roost-shell-host roost-ibus-bridge roost-greeter; do
+    [ -f "$DIR/usr/bin/$bin" ] && [ ! -L "$DIR/usr/bin/$bin" ] && [ -x "$DIR/usr/bin/$bin" ] || fail "invalid executable $bin"
+    (ulimit -f 8; timeout 10 "$DIR/usr/bin/$bin" --version) >"$DIR/version-output" || fail "$bin version command failed"
+    printf '%s\n' "$bin $VERSION" >"$DIR/version-expected"
+    cmp -s "$DIR/version-output" "$DIR/version-expected" || fail "$bin version line differs from package"
+    ldd "$DIR/usr/bin/$bin" >"$DIR/ldd.txt" || fail "$bin ELF loader check failed"
+    if grep -q 'not found' "$DIR/ldd.txt"; then fail "$bin missing ELF library"; fi
+done
+
+DEPENDS="$(dpkg-deb -f "$PKG" Depends)"
+for required in 'libgtk4-layer-shell0 (>= 1.1)' 'libgtk-4-1 (>= 4.12)' 'libadwaita-1-0 (>= 1.0)' 'libpam0g' 'gsettings-desktop-schemas'; do
+    printf '%s\n' "$DEPENDS" | tr ',' '\n' | sed 's/^ *//; s/ *$//' | grep -Fxq "$required" || fail "missing runtime floor $required"
+done
+[ "$(cat "$DIR/DEBIAN/conffiles" 2>/dev/null || dpkg-deb --ctrl-tarfile "$PKG" | tar -xOf - ./conffiles)" = /etc/pam.d/roost-lock ] || fail "PAM conffile missing"
 
 # Login entry must parse: run the validator when present, allowing only
 # the DesktopNames session-file convention (GNOME/KDE/Sway session

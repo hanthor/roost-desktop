@@ -8,3 +8,4 @@ description = "Wallpaper decoding for Roost: any image format plus JPEG XL, cove
 [dependencies]
 image.workspace = true
 jxl-oxide.workspace = true
+roost-shell-control = { path = "../shell-control-schema", version = "0.1.0" }
