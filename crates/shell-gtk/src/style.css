@@ -856,6 +856,8 @@ window.roost-switcher {
    6px to the title; frames 256px wide with 8px corners. */
 .roost-switcher .thumbnail-switcher {
   padding: 12px;
+  /* The shell sets the room under it: none at the monitor's edge. */
+  margin-bottom: 0;
 }
 
 .roost-switcher .thumbnail-box {
