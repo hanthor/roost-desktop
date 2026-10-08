@@ -1353,9 +1353,9 @@ log_has() { tail -c +"$(($1 + 1))" "$LOG" | grep -q -- "$2"; }
 settle_ms() {
     tail -c +"$(($1 + 1))" "$LOG" | grep -o "grid-anim $2 settle ms=[0-9]*" | tail -1 | sed 's/.*ms=//'
 }
-# Set the motion policy and wait for the shell to apply it.
+# Set the motion policy and wait for the shell to apply it (it tells
+# the compositor after its own animations switch).
 motion_policy() {
-    policy_mark="$(log_mark)"
     case "$1" in
     Full)
         gsettings set org.gnome.desktop.interface enable-animations true
@@ -1370,7 +1370,12 @@ motion_policy() {
         gsettings set org.gnome.desktop.a11y.interface reduced-motion 'reduce'
         ;;
     esac
-    log_wait "$policy_mark" "grid-anim policy $1" 10 || sleep 1
+    case "$1" in
+    Full) want=full ;;
+    Off) want=off ;;
+    FadesOnly) want=fade-only ;;
+    esac
+    cstate ".motion_policy == \"$want\"" "motion policy $want" || fail G-FOLDER-ZOOM "motion policy $want never arrived"
 }
 
 # GNOME's paged app grid: thirty more apps make a second page, with the
@@ -1421,7 +1426,7 @@ pass G-APP-GRID-PAGES "thirty more apps page the grid; indicators and arrows sho
 
 # GNOME's page switch (iconGrid.js goToPage): 300 ms ease-out-cubic,
 # instead of a spring; the Previous Page arrow fades in over 200 ms.
-log_has "$page_mark" "grid-anim page-switch start ms=300 motion=Full" ||
+log_has "$page_mark" "grid-anim page-switch start ms=300 motion=full" ||
     fail G-GRID-PAGE-ANIM "the page switch did not start a 300 ms eased slide"
 page_ms="$(settle_ms "$page_mark" page-switch)"
 [ "${page_ms:-0}" -ge 290 ] || fail G-GRID-PAGE-ANIM "the page switch settled after ${page_ms:-?} ms, not 300"
@@ -1432,7 +1437,7 @@ motion_policy Off
 page_mark="$(log_mark)"
 "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-grid-prev-off.json" 20 \
     --press "Previous Page" || fail G-GRID-PAGE-ANIM "could not press Previous Page"
-log_wait "$page_mark" "grid-anim page-switch instant motion=Off" ||
+log_wait "$page_mark" "grid-anim page-switch instant motion=off" ||
     fail G-GRID-PAGE-ANIM "with animations off the page switch still animated"
 log_has "$page_mark" "grid-anim page-switch start" &&
     fail G-GRID-PAGE-ANIM "with animations off a page slide started"
@@ -1842,7 +1847,7 @@ pass G-APP-FOLDERS "GNOME's app folders group the grid and open to their apps"
 # GNOME's _zoomAndFadeIn/_zoomAndFadeOut: 200 ms out of the folder's
 # icon and back, the icon fading out over the first half and back over
 # the last half of the closing.
-log_has "$folder_mark" "grid-anim folder-zoom-in start ms=200 motion=Full" ||
+log_has "$folder_mark" "grid-anim folder-zoom-in start ms=200 motion=full" ||
     fail G-FOLDER-ZOOM "opening did not zoom out of the folder icon over 200 ms"
 log_has "$folder_mark" "grid-anim folder-icon start ms=100" ||
     fail G-FOLDER-ZOOM "the folder icon did not fade out over 100 ms"
@@ -1852,7 +1857,7 @@ folder_mark="$(log_mark)"
 xdotool key Escape
 log_wait "$folder_mark" "grid-anim folder-zoom-out settle" ||
     fail G-FOLDER-ZOOM "closing did not zoom back into the folder icon"
-log_has "$folder_mark" "grid-anim folder-zoom-out start ms=200 motion=Full" ||
+log_has "$folder_mark" "grid-anim folder-zoom-out start ms=200 motion=full" ||
     fail G-FOLDER-ZOOM "closing did not take 200 ms"
 log_has "$folder_mark" "grid-anim folder-icon start ms=200" ||
     fail G-FOLDER-ZOOM "the folder icon did not fade back over the closing's last 100 ms"
@@ -1868,13 +1873,13 @@ motion_policy Off
 folder_mark="$(log_mark)"
 "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-folder-open-off.json" 20 --press "Probe Tools" ||
     fail G-FOLDER-ZOOM "could not open the folder with animations off"
-log_wait "$folder_mark" "grid-anim folder-zoom-in instant motion=Off" ||
+log_wait "$folder_mark" "grid-anim folder-zoom-in instant motion=off" ||
     fail G-FOLDER-ZOOM "with animations off the dialog still zoomed open"
 showing "$ARTIFACTS/a11y-folder-open-off.json" "Tuna Desktop Probe" ||
     fail G-FOLDER-ZOOM "with animations off the dialog did not show its app"
 folder_mark="$(log_mark)"
 xdotool key Escape
-log_wait "$folder_mark" "grid-anim folder-zoom-out instant motion=Off" ||
+log_wait "$folder_mark" "grid-anim folder-zoom-out instant motion=off" ||
     fail G-FOLDER-ZOOM "with animations off the dialog still zoomed shut"
 # Reduced Motion: the shade, dialog and icon still fade over 200 ms, but
 # nothing zooms (the zoom part settles at once).
@@ -1882,7 +1887,7 @@ motion_policy FadesOnly
 folder_mark="$(log_mark)"
 "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-folder-open-reduced.json" 20 --press "Probe Tools" ||
     fail G-FOLDER-ZOOM "could not open the folder with Reduced Motion"
-log_wait "$folder_mark" "grid-anim folder-zoom-in start ms=200 motion=FadesOnly" ||
+log_wait "$folder_mark" "grid-anim folder-zoom-in start ms=200 motion=fade-only" ||
     fail G-FOLDER-ZOOM "Reduced Motion dropped the dialog's fade"
 log_wait "$folder_mark" "grid-anim folder-zoom-in settle" ||
     fail G-FOLDER-ZOOM "the Reduced Motion fade never settled"
@@ -1898,7 +1903,7 @@ launch_mark="$(log_mark)"
     fail G-LAUNCH-ZOOM "could not press the folder's app"
 log_wait "$launch_mark" "grid-anim launch-zoom settle" ||
     fail G-LAUNCH-ZOOM "the launch zoom never settled"
-log_has "$launch_mark" "grid-anim launch-zoom start ms=250 motion=Full" ||
+log_has "$launch_mark" "grid-anim launch-zoom start ms=250 motion=full" ||
     fail G-LAUNCH-ZOOM "the launch zoom did not run 250 ms"
 launch_ms="$(settle_ms "$launch_mark" launch-zoom)"
 [ "${launch_ms:-0}" -ge 240 ] || fail G-LAUNCH-ZOOM "the launch zoom settled after ${launch_ms:-?} ms, not 250"

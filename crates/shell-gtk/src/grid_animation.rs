@@ -15,33 +15,9 @@ use gtk4::glib;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-/// The shell's effective motion policy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Motion {
-    /// Everything animates.
-    Full,
-    /// Reduced Motion: fades only; zooms, slides and scales jump.
-    FadesOnly,
-    /// enable-animations off: nothing animates.
-    Off,
-}
-
-impl Motion {
-    pub fn from_settings(animations: bool, reduced: bool) -> Self {
-        match (animations, reduced) {
-            (false, _) => Motion::Off,
-            (true, true) => Motion::FadesOnly,
-            (true, false) => Motion::Full,
-        }
-    }
-
-    pub fn allows(self, part: Part) -> bool {
-        matches!(
-            (self, part),
-            (Motion::Full, _) | (Motion::FadesOnly, Part::Fade)
-        )
-    }
-}
+/// The shell's motion policy (#493): `allows_motion` for zooms, slides
+/// and scales, `allows_fades` for opacity, durations through `adjust_ms`.
+pub type Motion = roost_shell_control::MotionPolicy;
 
 /// What an animated property is: an opacity, or a movement/scale.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,23 +26,16 @@ pub enum Part {
     Motion,
 }
 
-thread_local! {
-    static POLICY: Cell<Option<Motion>> = const { Cell::new(None) };
-}
-
-/// Set from GNOME's enable-animations and Reduced Motion keys.
-pub fn set_policy(motion: Motion) {
-    if POLICY.with(|p| p.replace(Some(motion))) != Some(motion) {
-        trace("policy", format_args!("{motion:?}"));
+fn allows(motion: Motion, part: Part) -> bool {
+    match part {
+        Part::Fade => motion.allows_fades(),
+        Part::Motion => motion.allows_motion(),
     }
 }
 
-/// The current policy; before the settings arrive, GTK's own switch.
+/// The live policy.
 pub fn motion() -> Motion {
-    POLICY.with(|p| p.get()).unwrap_or_else(|| {
-        let on = gtk::Settings::default().is_none_or(|s| s.is_gtk_enable_animations());
-        Motion::from_settings(on, false)
-    })
+    crate::motion::current()
 }
 
 /// Clutter's easing modes the grid uses.
@@ -129,18 +98,20 @@ impl Timing {
     }
 
     /// Eased progress `elapsed_ms` in; 1 when its part is not animated.
+    /// Durations scale by GNOME's slow-down factor (`adjust_ms`).
     pub fn at(&self, elapsed_ms: f64, motion: Motion) -> f64 {
-        if !motion.allows(self.part) || self.duration_ms <= 0.0 {
+        let duration = motion.adjust_ms(self.duration_ms);
+        if !allows(motion, self.part) || duration <= 0.0 {
             return 1.0;
         }
         self.curve
-            .at((elapsed_ms - self.delay_ms) / self.duration_ms)
+            .at((elapsed_ms - motion.adjust_ms(self.delay_ms)) / duration)
     }
 
     /// When it settles, 0 when it does not animate.
     pub fn end_ms(&self, motion: Motion) -> f64 {
-        if motion.allows(self.part) {
-            self.delay_ms + self.duration_ms
+        if allows(motion, self.part) {
+            motion.adjust_ms(self.delay_ms + self.duration_ms)
         } else {
             0.0
         }
@@ -282,14 +253,17 @@ impl Slot {
         self.stop();
         if total_ms <= 0.0 {
             step(f64::INFINITY);
-            trace(name, format_args!("instant motion={:?}", motion()));
+            trace(
+                name,
+                format_args!("instant motion={}", motion().level.as_str()),
+            );
             done();
             return;
         }
         step(0.0);
         trace(
             name,
-            format_args!("start ms={total_ms:.0} motion={:?}", motion()),
+            format_args!("start ms={total_ms:.0} motion={}", motion().level.as_str()),
         );
         let started = Cell::new(None::<i64>);
         let done = RefCell::new(Some(done));
@@ -446,7 +420,10 @@ pub fn launch_zoom(tile: &impl IsA<gtk::Widget>) {
         return;
     };
     if total <= 0.0 {
-        trace("launch-zoom", format_args!("instant motion={policy:?}"));
+        trace(
+            "launch-zoom",
+            format_args!("instant motion={}", policy.level.as_str()),
+        );
         return;
     }
     let size = f64::from(source.pixel_size().max(16));
@@ -662,6 +639,12 @@ impl Zoom {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roost_shell_control::MotionLevel;
+
+    const FULL: Motion = Motion {
+        level: MotionLevel::Full,
+        slowdown_milli: 1000,
+    };
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9
@@ -692,8 +675,8 @@ mod tests {
         assert_eq!(FOLDER_ZOOM.duration_ms, 200.0);
         assert_eq!(FOLDER_ZOOM.curve, Curve::OutExpo);
         assert_eq!(FOLDER_SHADE.duration_ms, 200.0);
-        assert_eq!(FOLDER_ICON_HIDE.end_ms(Motion::Full), 100.0);
-        assert_eq!(FOLDER_ICON_SHOW.end_ms(Motion::Full), 200.0);
+        assert_eq!(FOLDER_ICON_HIDE.end_ms(FULL), 100.0);
+        assert_eq!(FOLDER_ICON_SHOW.end_ms(FULL), 200.0);
         assert_eq!(FOLDER_ICON_SHOW.curve, Curve::InQuad);
         assert_eq!(ICON_SCALE_IN.duration_ms, 500.0);
         assert_eq!(ICON_SCALE_IN.delay_ms, 700.0);
@@ -708,32 +691,40 @@ mod tests {
 
     #[test]
     fn reduced_motion_keeps_fades_and_off_keeps_nothing() {
-        assert_eq!(Motion::from_settings(true, false), Motion::Full);
-        assert_eq!(Motion::from_settings(true, true), Motion::FadesOnly);
-        assert_eq!(Motion::from_settings(false, true), Motion::Off);
-        assert_eq!(Motion::from_settings(false, false), Motion::Off);
+        let fades = Motion::from_gnome(true, true, 1.0);
+        let off = Motion::from_gnome(false, false, 1.0);
         // Halfway through, a fade is still moving under Reduced Motion
         // while the zoom has already landed; with animations off both
         // have.
-        assert!(FOLDER_SHADE.at(100.0, Motion::FadesOnly) < 1.0);
-        assert_eq!(FOLDER_ZOOM.at(100.0, Motion::FadesOnly), 1.0);
-        assert_eq!(FOLDER_SHADE.at(0.0, Motion::Off), 1.0);
-        assert_eq!(FOLDER_ZOOM.end_ms(Motion::FadesOnly), 0.0);
-        assert_eq!(FOLDER_SHADE.end_ms(Motion::Off), 0.0);
-        assert_eq!(PAGE_SWITCH.at(0.0, Motion::FadesOnly), 1.0);
+        assert!(FOLDER_SHADE.at(100.0, fades) < 1.0);
+        assert_eq!(FOLDER_ZOOM.at(100.0, fades), 1.0);
+        assert_eq!(FOLDER_SHADE.at(0.0, off), 1.0);
+        assert_eq!(FOLDER_ZOOM.end_ms(fades), 0.0);
+        assert_eq!(FOLDER_SHADE.end_ms(fades), 200.0);
+        assert_eq!(FOLDER_SHADE.end_ms(off), 0.0);
+        assert_eq!(PAGE_SWITCH.at(0.0, fades), 1.0);
+    }
+
+    #[test]
+    fn slow_down_factor_stretches_durations_and_delays() {
+        let slow = Motion::from_gnome(true, false, 2.0);
+        assert_eq!(PAGE_SWITCH.end_ms(slow), 600.0);
+        assert!(close(PAGE_SWITCH.at(300.0, slow), 0.875));
+        assert_eq!(ICON_SCALE_IN.end_ms(slow), 2400.0);
+        assert_eq!(ICON_SCALE_IN.at(1400.0, slow), 0.0);
     }
 
     #[test]
     fn delays_hold_the_start_value() {
-        assert_eq!(ICON_SCALE_IN.at(0.0, Motion::Full), 0.0);
-        assert_eq!(ICON_SCALE_IN.at(700.0, Motion::Full), 0.0);
+        assert_eq!(ICON_SCALE_IN.at(0.0, FULL), 0.0);
+        assert_eq!(ICON_SCALE_IN.at(700.0, FULL), 0.0);
         assert!(close(
-            ICON_SCALE_IN.at(950.0, Motion::Full),
+            ICON_SCALE_IN.at(950.0, FULL),
             Curve::OutQuint.at(0.5)
         ));
-        assert_eq!(ICON_SCALE_IN.at(1200.0, Motion::Full), 1.0);
-        assert_eq!(FOLDER_ICON_SHOW.at(50.0, Motion::Full), 0.0);
-        assert!(close(FOLDER_ICON_SHOW.at(150.0, Motion::Full), 0.25));
+        assert_eq!(ICON_SCALE_IN.at(1200.0, FULL), 1.0);
+        assert_eq!(FOLDER_ICON_SHOW.at(50.0, FULL), 0.0);
+        assert!(close(FOLDER_ICON_SHOW.at(150.0, FULL), 0.25));
     }
 
     #[test]
@@ -775,12 +766,18 @@ mod tests {
 
     #[test]
     fn page_switch_eases_out_cubic_over_300_ms() {
-        assert_eq!(page_position(0.0, 1.0, 0.0, Motion::Full), 0.0);
-        assert!(close(page_position(0.0, 1.0, 150.0, Motion::Full), 0.875));
-        assert_eq!(page_position(0.0, 1.0, 300.0, Motion::Full), 1.0);
-        assert_eq!(page_position(2.0, 1.0, 150.0, Motion::Full), 1.125);
-        assert_eq!(page_position(0.0, 1.0, 0.0, Motion::FadesOnly), 1.0);
-        assert_eq!(page_position(0.0, 1.0, 0.0, Motion::Off), 1.0);
+        assert_eq!(page_position(0.0, 1.0, 0.0, FULL), 0.0);
+        assert!(close(page_position(0.0, 1.0, 150.0, FULL), 0.875));
+        assert_eq!(page_position(0.0, 1.0, 300.0, FULL), 1.0);
+        assert_eq!(page_position(2.0, 1.0, 150.0, FULL), 1.125);
+        assert_eq!(
+            page_position(0.0, 1.0, 0.0, Motion::from_gnome(true, true, 1.0)),
+            1.0
+        );
+        assert_eq!(
+            page_position(0.0, 1.0, 0.0, Motion::from_gnome(false, false, 1.0)),
+            1.0
+        );
         assert_eq!(page_switch_ms(1.0), 300.0);
         assert_eq!(page_switch_ms(-0.5), 150.0);
         assert_eq!(page_switch_ms(0.01), 75.0);
@@ -792,8 +789,8 @@ mod tests {
         assert_eq!(reflow_shift(7, 8, 8), (7.0, -1.0));
         assert_eq!(reflow_shift(9, 2, 8), (-1.0, 1.0));
         let third = REFLOW.delayed(2.0 * REFLOW_STAGGER_MS);
-        assert_eq!(third.at(20.0, Motion::Full), 0.0);
-        assert!(close(third.at(145.0, Motion::Full), 0.75));
-        assert_eq!(third.end_ms(Motion::Full), 270.0);
+        assert_eq!(third.at(20.0, FULL), 0.0);
+        assert!(close(third.at(145.0, FULL), 0.75));
+        assert_eq!(third.end_ms(FULL), 270.0);
     }
 }
