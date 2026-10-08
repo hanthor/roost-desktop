@@ -6,6 +6,7 @@ members = [
     "crates/shell-control-schema",
     "crates/shell-host",
     "crates/greeter",
+    "crates/greeter-control-schema",
     "crates/shell-gtk",
     "crates/wallpaper",
 ]

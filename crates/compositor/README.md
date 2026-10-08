@@ -29,9 +29,9 @@ Features: `drm` and `xwayland`, both on by default.
 
 ## Depends on / dependents
 
-Uses `roost-shell-control`, `roost-greeter` (prompt model and greetd client
-only, without `gtk-ui`), and `roost-wallpaper`. `roost-shell-host` uses it
-as a dev-dependency for its live tests. Integration tests are in `tests/`.
+Uses `roost-shell-control`, `roost-greeter-control` (prompt model and greetd
+client), and `roost-wallpaper`. `roost-shell-host` uses it as a dev-dependency
+for its live tests. Integration tests are in `tests/`.
 
 ## Docs
 

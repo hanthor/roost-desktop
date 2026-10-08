@@ -12,21 +12,22 @@ in the crate; it follows whatever conversation greetd drives.
 
 ## Public API (`src/lib.rs`)
 
-- `model`: `GreeterModel`, the prompt state machine that turns greetd's
-  auth conversation into UI state.
+- `model`: `GreeterModel`, the prompt state machine (re-exported from
+  `roost-greeter-control`).
 - `session`: parse installed `.desktop` session files
   (`enumerate_system`).
-- `client`: blocking greetd conversation driver over a Unix socket.
+- `client`: blocking greetd conversation driver over a Unix socket
+  (re-exported from `roost-greeter-control`).
 - `ui`: the login window (feature `gtk-ui`).
 
-Feature `gtk-ui` (default) pulls in GTK4 and libadwaita. Consumers that
-need only the model and client build with `default-features = false` and
-need no GTK system libraries.
+Feature `gtk-ui` (default) pulls in GTK4 and libadwaita. `roost-greeter-control`
+holds the headless prompt state machine and IPC client with no GTK dependencies.
 
 ## Dependents
 
-`roost-compositor` uses `model` and `client` for its greetd unlock path,
-with `gtk-ui` off. Tests in `tests/` drive a fake greetd.
+`roost-greeter` provides the login window and binary; `roost-compositor`
+depends on `roost-greeter-control` directly for its unlock path. Tests in
+`tests/` drive a fake greetd.
 
 ## Docs
 

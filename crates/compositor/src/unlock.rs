@@ -17,14 +17,11 @@
 //! [`UnlockOutcome::Denied`], which carries no detail by construction.
 //! Secrets are never logged and daemon text never surfaces.
 //!
-//! [`GreeterClient`]: roost_greeter::client::GreeterClient
-//! [`GreeterModel`]: roost_greeter::model::GreeterModel
+//! [`GreeterClient`]: roost_greeter_control::GreeterClient
+//! [`GreeterModel`]: roost_greeter_control::GreeterModel
 
 use greetd_ipc::{codec::Error as CodecError, Response};
-use roost_greeter::{
-    client::GreeterClient,
-    model::{GreeterModel, ModelEvent},
-};
+use roost_greeter_control::{GreeterClient, GreeterModel, ModelEvent};
 
 use crate::control::ControlHub;
 use crate::lock::SessionLock;

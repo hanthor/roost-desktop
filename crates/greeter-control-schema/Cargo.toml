@@ -1,0 +1,12 @@
+[package]
+name = "roost-greeter-control"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+
+# The greeter IPC client, prompt state machine, and session types shared
+# between roost-greeter, roost-compositor (for unlock flows), and testing tools.
+# Does not pull in GTK or UI dependencies.
+
+[dependencies]
+greetd_ipc.workspace = true

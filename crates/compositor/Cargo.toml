@@ -27,10 +27,8 @@ wayland-protocols.workspace = true
 wayland-server.workspace = true
 wayland-scanner = "=0.31.11"
 roost-shell-control = { path = "../shell-control-schema", version = "0.1.0" }
-# The unlock path uses the greeter's prompt model and greetd client only; the
-# GTK window is never constructed here, so `gtk-ui` stays off and the
-# compositor's build needs no GTK system libraries.
-roost-greeter = { path = "../greeter", version = "0.1.0", default-features = false }
+# The unlock path uses the shared greeter prompt model and greetd client from roost-greeter-control.
+roost-greeter-control = { path = "../greeter-control-schema", version = "0.1.0" }
 greetd_ipc.workspace = true
 image.workspace = true
 tempfile = "3"

@@ -58,7 +58,7 @@ use crate::windows::{
     translate_input, ManagerInput, TriggerAction, TriggerState, WindowManager, ESCAPE_KEYCODE,
 };
 use crate::xwayland::XWaylandSupervisor;
-use roost_greeter::client::GreeterClient;
+use roost_greeter_control::GreeterClient;
 
 use crate::{ClientState, State};
 
