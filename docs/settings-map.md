@@ -32,10 +32,10 @@ This page records that decision for R9 (knowledge entry
 | clock-format | Honored | Panel clock |
 | clock-show-weekday, clock-show-date, clock-show-seconds | Honored | Panel clock, built as gnome-desktop's wall clock builds it |
 | enable-hot-corners | Honored | Live. Proof G-SETTINGS-INPUT |
-| enable-animations | Honored | Live idle fade, GTK transitions and compositor overview/strip motion; disabled transitions finish immediately. Proof G-ANIMATIONS-OFF |
+| enable-animations | Honored | Live idle fade, GTK transitions and compositor overview/strip motion; disabled transitions finish immediately. Proofs G-ANIMATIONS-OFF, G-INTROSPECT-MOTION |
 | show-battery-percentage | Honored | UPower DisplayDevice panel percentage; updates live |
 
-GNOME 51 `org.gnome.desktop.a11y.interface reduced-motion` is read live. `reduce` disables shell GTK transitions, compositor overview/strip motion and idle fade even when `enable-animations` is true. Resetting it respects an explicit `enable-animations=false`; older schema sets keep the existing animation policy. This controls the desktop shell; application toolkits remain responsible for their own transitions. Proof G-ANIMATIONS-OFF.
+GNOME 51 `org.gnome.desktop.a11y.interface reduced-motion` is read live and combines with `enable-animations` into one motion policy shared by the shell and compositor: `full`, `fade-only` or `off`. `enable-animations=false` is `off`: every transition finishes immediately. `reduce` with animations enabled is `fade-only`, as in GNOME 51: opacity fades (the idle shield) keep running, while translation and scale (compositor overview and strip motion, the shell's GTK transitions) finish immediately. `enable-animations` itself, and Introspect's `AnimationsEnabled`, stay true under Reduced Motion, as GNOME reports them. GNOME Shell's `GNOME_SHELL_SLOWDOWN_FACTOR` environment variable scales every duration as GNOME's `adjustAnimationTime` does. Older schema sets keep the existing animation policy. This controls the desktop shell; application toolkits remain responsible for their own transitions. Proofs G-ANIMATIONS-OFF, G-INTROSPECT-MOTION.
 
 ## Session, lock and notifications
 

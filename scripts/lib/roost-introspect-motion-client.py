@@ -37,44 +37,49 @@ def property_value():
     ).unpack()[0]
 
 
-def observe(label, expected, signal_count):
+def observe(label, expected, signal_count, policy):
     deadline = time.monotonic() + 10
     context = GLib.MainContext.default()
     while time.monotonic() < deadline:
         while context.pending():
             context.iteration(False)
         actual = property_value()
-        compositor = json.loads(state_path.read_text())["animations_enabled"]
-        if (actual == expected and compositor == expected
+        state = json.loads(state_path.read_text())
+        compositor = state["animations_enabled"]
+        level = state.get("motion_policy")
+        if (actual == expected and compositor == expected and level == policy
                 and len(signals) == signal_count):
             results.append({"step": label, "property": actual,
-                            "compositor": compositor, "signals": list(signals)})
+                            "compositor": compositor, "motion_policy": level,
+                            "signals": list(signals)})
             return
         time.sleep(0.02)
-    raise RuntimeError(f"{label}: property={actual}, compositor={compositor}, signals={signals}")
+    raise RuntimeError(f"{label}: property={actual}, compositor={compositor}, "
+                       f"motion_policy={level}, signals={signals}")
 
 
 interface = Gio.Settings.new("org.gnome.desktop.interface")
 a11y = Gio.Settings.new("org.gnome.desktop.a11y.interface")
 try:
-    observe("initial", True, 0)
+    observe("initial", True, 0, "full")
     if not interface.set_boolean("enable-animations", False):
         raise RuntimeError("animation setting is not writable")
-    observe("explicit disable", False, 1)
+    observe("explicit disable", False, 1, "off")
     interface.set_boolean("enable-animations", True)
-    observe("explicit enable", True, 2)
+    observe("explicit enable", True, 2, "full")
     if not a11y.set_string("reduced-motion", "reduce"):
         raise RuntimeError("reduced motion setting is not writable")
-    observe("reduced motion overrides enable", False, 3)
+    # GNOME 51: Reduced Motion keeps fades, so AnimationsEnabled stays true.
+    observe("reduced motion keeps animations enabled", True, 2, "fade-only")
     interface.set_boolean("enable-animations", False)
     a11y.reset("reduced-motion")
-    observe("reset preserves explicit disable", False, 3)
+    observe("reset preserves explicit disable", False, 3, "off")
     interface.set_boolean("enable-animations", True)
-    observe("motion restored", True, 4)
+    observe("motion restored", True, 4, "full")
     if signals != [False, True, False, True]:
         raise RuntimeError(f"unexpected motion notifications: {signals}")
     report_path.write_text(json.dumps(results, indent=2) + "\n")
-    print("Introspect motion: live property, four actual notifications and compositor agree")
+    print("Introspect motion: live property, four enable-animations notifications and compositor agree")
 finally:
     a11y.reset("reduced-motion")
     interface.set_boolean("enable-animations", True)
