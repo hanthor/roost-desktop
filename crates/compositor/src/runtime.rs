@@ -1628,6 +1628,11 @@ impl Runtime {
                 })
                 .collect::<Vec<_>>(),
         });
+        doc["wallpaper_diagnostics"] = if self.is_locked() {
+            serde_json::Value::Null
+        } else {
+            self.wallpaper.diagnostics()
+        };
         doc["screen_reader_pid"] = serde_json::json!(self.orca.pid());
         doc["screen_reader_state"] = serde_json::json!(self.orca.state());
         doc["a11y_keyboard"] = self
@@ -2149,6 +2154,42 @@ impl Runtime {
         Some((w, h, bytes))
     }
 
+    /// Logical union of the actual output layout, including gaps and negative
+    /// origins. Static spanning/tile phase must share it across all outputs.
+    fn background_desktop(&self) -> [i32; 4] {
+        match &self.backend {
+            Backend::Winit(backend) => {
+                let size = backend.window_size();
+                [
+                    0,
+                    0,
+                    (f64::from(size.w) / self.scale).round() as i32,
+                    (f64::from(size.h) / self.scale).round() as i32,
+                ]
+            }
+            #[cfg(feature = "drm")]
+            Backend::Drm(drm) => {
+                let mut left = i32::MAX;
+                let mut top = i32::MAX;
+                let mut right = i32::MIN;
+                let mut bottom = i32::MIN;
+                for out in &drm.outputs {
+                    let size = out.logical_size();
+                    left = left.min(out.loc.0);
+                    top = top.min(out.loc.1);
+                    right = right.max(out.loc.0.saturating_add(size.0));
+                    bottom = bottom.max(out.loc.1.saturating_add(size.1));
+                }
+                [
+                    left,
+                    top,
+                    right.saturating_sub(left),
+                    bottom.saturating_sub(top),
+                ]
+            }
+        }
+    }
+
     /// The desktop clear: GNOME's `primary-color` once the shell has
     /// published it, else a dark neutral.
     fn desktop_color(&self) -> Color32F {
@@ -2187,6 +2228,7 @@ impl Runtime {
         } else {
             self.desktop_color()
         };
+        let desktop = self.background_desktop();
         let (renderer, size, view) = match &mut self.backend {
             Backend::Winit(backend) => {
                 let size = backend.window_size();
@@ -2252,7 +2294,7 @@ impl Runtime {
         let paper = backdrop(
             &mut self.wallpaper,
             renderer,
-            size,
+            background_geometry(size, view, desktop),
             view,
             overview.is_none(),
             cards,
@@ -3165,6 +3207,7 @@ impl Runtime {
         let show_paper = show_content && !overlay_visible && overview.is_none();
         #[cfg(feature = "drm")]
         let timing_roots = crate::frame_timing::frame_roots(&self.state, &self.manager);
+        let desktop = self.background_desktop();
         match &mut self.backend {
             Backend::Winit(backend) => {
                 backend.window().set_cursor_visible(blank_alpha < 1.0);
@@ -3219,7 +3262,7 @@ impl Runtime {
                     let paper = backdrop(
                         &mut self.wallpaper,
                         renderer,
-                        size,
+                        background_geometry(size, view, desktop),
                         view,
                         show_paper,
                         cards,
@@ -3337,7 +3380,7 @@ impl Runtime {
                     let paper = backdrop(
                         &mut self.wallpaper,
                         renderer,
-                        size,
+                        background_geometry(size, view, desktop),
                         view,
                         show_paper,
                         cards,
@@ -3941,28 +3984,45 @@ fn scene_elements(
     }
 }
 
+fn background_geometry(
+    size: smithay::utils::Size<i32, smithay::utils::Physical>,
+    view: View,
+    desktop: [i32; 4],
+) -> roost_wallpaper::background::Geometry {
+    roost_wallpaper::background::Geometry {
+        physical: [size.w.max(0) as u32, size.h.max(0) as u32],
+        origin: [view.offset.0, view.offset.1],
+        desktop,
+        scale_bits: view.scale.to_bits(),
+    }
+}
+
 /// What lies under the windows on one output, in physical pixels: the
 /// wallpaper on the desktop, or in the overview GNOME's workspace cards
 /// (the wallpaper below the bar, rounded, over a shadow).
 fn backdrop(
     wallpaper: &mut Wallpaper,
     renderer: &mut GlesRenderer,
-    size: smithay::utils::Size<i32, smithay::utils::Physical>,
+    geometry: roost_wallpaper::background::Geometry,
     view: View,
     show_paper: bool,
     cards: Option<&crate::overview::OverviewLayout>,
     locked: bool,
 ) -> Vec<smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<GlesRenderer>>
 {
+    let size = smithay::utils::Size::<i32, smithay::utils::Physical>::from((
+        geometry.physical[0] as i32,
+        geometry.physical[1] as i32,
+    ));
     if locked {
         return wallpaper
-            .lock_element(renderer, size.w, size.h)
+            .lock_element(renderer, size.w, size.h, geometry)
             .into_iter()
             .collect();
     }
     if show_paper {
         return wallpaper
-            .element(renderer, size.w, size.h)
+            .element(renderer, size.w, size.h, geometry)
             .into_iter()
             .collect();
     }
@@ -3979,7 +4039,7 @@ fn backdrop(
             let loc = view.physical(f64::from(r.loc.x), f64::from(r.loc.y));
             let end = view.physical(f64::from(r.loc.x + r.size.w), f64::from(r.loc.y + r.size.h));
             let rect = Rectangle::new(loc, (end.x - loc.x, end.y - loc.y).into());
-            wallpaper.card_element(renderer, output, work_top, rect, card.alpha)
+            wallpaper.card_element(renderer, output, work_top, rect, card.alpha, geometry)
         })
         .collect()
 }

@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+"""Build-time receipt for one explicitly selected protected reference image."""
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+import sys
+from gnome_reference import validate_image
+
+profile = sys.argv[1]
+root = Path('/usr/share')
+receipt = {'schema': 1, 'profile': profile,
+           'mutter_package': subprocess.check_output(['pacman', '-Q', 'mutter'], text=True, timeout=5).strip(),
+           'shell_package': subprocess.check_output(['pacman', '-Q', 'gnome-shell'], text=True, timeout=5).strip()}
+for field, name in (('packages_sha256', 'roost-perf-baseline-packages.txt'), ('critical_sha256', 'roost-perf-baseline-critical.sha256')):
+    with (root / name).open('rb') as stream:
+        raw = stream.read(16 * 1024 * 1024 + 1)
+    if not raw or len(raw) > 16 * 1024 * 1024:
+        raise ValueError('reference manifest bound')
+    receipt[field] = hashlib.sha256(raw).hexdigest()
+validate_image(receipt, profile)
+path = root / 'roost-perf-reference.json'
+with path.open('x') as stream:
+    json.dump(receipt, stream, sort_keys=True)
+path.chmod(0o444)

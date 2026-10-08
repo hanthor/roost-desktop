@@ -33,6 +33,8 @@ jobs:
       - run: python3 scripts/lib/marlin-kernel-tests.py
       - run: python3 scripts/lib/gnome-drained-tests.py
       - run: python3 scripts/lib/roost-perf-payload-tests.py
+      - run: python3 scripts/lib/roost-perf-reference-tests.py
+      - run: python3 scripts/lib/roost-perf-repeatability-tests.py
       - run: python3 scripts/lib/native-constraint-tests.py
       - run: python3 scripts/lib/roost-pipewire-dump-tests.py
       - run: scripts/roost-settings-inventory-check
@@ -264,7 +266,7 @@ jobs:
           name: roost-arch
           path: ${{ runner.temp }}/portal-package
       - run: sudo apt-get -o Acquire::Retries=3 update -qq && sudo apt-get install -y --no-install-recommends podman zstd shellcheck
-      - run: shellcheck scripts/roost-portal-security tests/portal-reference/run.sh tests/portal-reference/settings-run.sh
+      - run: shellcheck scripts/roost-portal-security tests/portal-reference/run.sh tests/portal-reference/settings-run.sh tests/portal-reference/backgrounds-run.sh
       - run: python3 scripts/lib/roost-portal-artifact-tests.py
       - name: Test packaged compositor with actual GNOME 51 portal consent
         run: |

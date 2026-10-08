@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """CI-only root probes through QGA. Never print credentials or process argv."""
 import json
+import hashlib
+import stat as file_stat
 import os
 import pathlib
 import pwd
@@ -730,13 +732,88 @@ def recording_profile(recording):
             or profile != speech_capture_profile(profile["name"])):
         raise RuntimeError("original speech recording profile changed")
     return profile
+def background_user_diagnostics():
+    if os.geteuid() != OWNER.pw_uid or OWNER.pw_uid == 0:
+        raise RuntimeError("background reader must be the actual ordinary session owner")
+    from gi.repository import Gio
+    result = {"reader_uid": os.geteuid(), "runtime": os.environ.get("XDG_RUNTIME_DIR"),
+              "settings": {}, "drop": {}}
+    for schema in ("org.gnome.desktop.background", "org.gnome.desktop.screensaver"):
+        try:
+            source = Gio.SettingsSchemaSource.get_default().lookup(schema, True)
+            if source is None:
+                raise RuntimeError("actual schema missing")
+            settings = Gio.Settings.new_full(source, None, None)
+            result["settings"][schema] = {
+                key: settings.get_value(key).unpack() for key in
+                ("picture-uri", "picture-options", "primary-color", "secondary-color", "color-shading-type")}
+            if source.has_key("picture-uri-dark"):
+                result["settings"][schema]["picture-uri-dark"] = settings.get_string("picture-uri-dark")
+        except Exception as error:
+            result["settings"][schema] = {"error": str(error)}
+    interface = Gio.Settings.new("org.gnome.desktop.interface")
+    result["color_scheme"] = interface.get_string("color-scheme")
+    path = pathlib.Path(RUNTIME, "roost-wallpaper")
+    identity = lambda m: {"dev": m.st_dev, "ino": m.st_ino, "bytes": m.st_size,
+                          "uid": m.st_uid, "mode": m.st_mode,
+                          "mtime_ns": m.st_mtime_ns, "ctime_ns": m.st_ctime_ns}
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            before = os.fstat(fd)
+            result["drop"]["before"] = identity(before)
+            if not file_stat.S_ISREG(before.st_mode) or before.st_uid != OWNER.pw_uid or before.st_size > 16384:
+                raise RuntimeError("private drop type/owner/size bound failed")
+            data = bytearray()
+            while len(data) <= 16384:
+                chunk = os.read(fd, 16385 - len(data))
+                if not chunk:
+                    break
+                data.extend(chunk)
+            after = os.fstat(fd)
+            named = path.lstat()
+            result["drop"]["after"] = identity(after)
+            result["drop"]["named"] = identity(named)
+            if len(data) > 16384 or len(data) != before.st_size or identity(before) != identity(after) or identity(before) != identity(named):
+                raise RuntimeError("private drop changed or exceeded bound")
+            result["drop"].update(text=data.decode("utf-8"), sha256=hashlib.sha256(data).hexdigest())
+        finally:
+            os.close(fd)
+    except (OSError, RuntimeError, UnicodeError) as error:
+        result["drop"]["error"] = str(error)
+    # The existing snapshot already excludes lock credential values. Retain
+    # only the new in-memory wallpaper observations, and no window titles.
+    try:
+        fd = os.open(STATE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            before = os.fstat(fd)
+            if not file_stat.S_ISREG(before.st_mode) or before.st_uid != OWNER.pw_uid or before.st_size > 1024 * 1024:
+                raise RuntimeError("journey snapshot type/owner/size bound failed")
+            with os.fdopen(os.dup(fd), "rb") as stream:
+                data = stream.read(1024 * 1024 + 1)
+            if len(data) > 1024 * 1024 or len(data) != before.st_size or identity(before) != identity(os.fstat(fd)) or identity(before) != identity(STATE.lstat()):
+                raise RuntimeError("journey snapshot changed or exceeded bound")
+        finally:
+            os.close(fd)
+        state = json.loads(data)
+        result["compositor"] = {key: state.get(key) for key in
+                                ("locked", "rendered_frames", "wallpaper_diagnostics")}
+    except (OSError, RuntimeError, ValueError) as error:
+        result["compositor"] = {"error": str(error)}
+    return result
 
 
 def main():
+    if sys.argv[1] == "background-user-diagnostics":
+        print(json.dumps(background_user_diagnostics()))
+        return
     if os.geteuid() != 0 or OWNER.pw_uid == 0:
         raise RuntimeError("probe must be root and session owner must not be root")
     action = sys.argv[1]
-    if action == "inventory":
+    if action == "background-diagnostics":
+        inventory()  # Verify the original actual greetd owner before re-exec.
+        result = json.loads(call(sys.executable, __file__, "background-user-diagnostics", user=True))
+    elif action == "inventory":
         result = inventory()
     elif action == "orca-provenance":
         actual = orca_observation()

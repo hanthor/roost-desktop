@@ -1819,6 +1819,21 @@ def main():
                 time.sleep(5)
             else:
                 ok = False
+            # Retain real ordinary-user configuration/drop/worker observations
+            # before the unchanged body/panel gate, including startup failures.
+            diagnostic_agent = None
+            try:
+                diagnostic_agent = guest_agent.GuestAgent(agent_path)
+                background = diagnostic_agent.run("background-diagnostics")
+                with open(os.path.join(out, "startup-background-diagnostics.json"), "w") as stream:
+                    json.dump(background, stream, indent=2)
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                with open(os.path.join(out, "startup-background-diagnostics.json"), "w") as stream:
+                    json.dump({"error": str(error)}, stream)
+                log(f"bounded background diagnostics unavailable: {error}")
+            finally:
+                if diagnostic_agent is not None:
+                    diagnostic_agent.close()
             record("V-PANEL", ok, f"screendump: {panel_desc}")
             agent = None
             try:
