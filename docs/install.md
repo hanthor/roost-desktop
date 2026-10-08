@@ -8,13 +8,23 @@
 > and not yet qualified on real GPUs; the cursor is drawn in software and
 > client cursor images are not composited yet.
 
-## From the Debian package (recommended on Debian/Ubuntu)
+## From the Debian-format package
+
+The preferred GTK shell is required for Debian/Ubuntu production support.
+The first installed-package CI target is Ubuntu 26.04 amd64; actual package
+and control proof remains pending. Packages must be built against their target
+distribution's libraries. The required gtk4-layer-shell version is at least
+1.1; [Debian 13 stable provides 1.0.4](https://packages.debian.org/trixie/libgtk4-layer-shell0),
+so that target still needs a genuine packaged backport and separate installed
+session qualification. [Ubuntu 26.04 provides 1.3.0](https://packages.ubuntu.com/resolute/amd64/libgtk4-layer-shell0).
+A package built on Ubuntu does not establish Debian 13 ABI compatibility.
 
 ```sh
 sudo apt install ./roost_X.Y.Z_amd64.deb
 ```
 
-Dependencies resolve automatically. After installing, the Roost session is
+Dependencies resolve automatically on a target with the declared runtime
+packages available. After installing, the Roost session is
 selectable from the login screen. Upgrading installs the newer package over
 the older one with user configuration and application data preserved;
 removing the package drops the Roost-owned program files and session entry

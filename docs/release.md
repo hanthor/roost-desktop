@@ -1,6 +1,10 @@
 # Cutting a Roost release
 
-Target: TunaOS Marlin (Arch-based bootc, x86_64), with GNOME 51 as the comparison baseline ([ADR 0007](adr/0007-gnome51-marlin-baseline.md)). The project remains a developer preview until the roadmap release gates pass. Debian stable and Ubuntu LTS packages are developer-host artifacts, not evidence of Marlin or physical hardware readiness.
+Target: TunaOS Marlin (Arch-based bootc, x86_64), with GNOME 51 as the comparison baseline ([ADR 0007](adr/0007-gnome51-marlin-baseline.md)). The project remains a developer preview until the roadmap release gates pass. Debian/Ubuntu production support must include the preferred GTK shell and
+actual installed-session control qualification. The first package lane targets
+Ubuntu 26.04 amd64; Debian 13 still needs a packaged gtk4-layer-shell >=1.1
+backport and a separately built/qualified artifact. These package targets do
+not provide Marlin or physical hardware qualification.
 
 ## Checklist
 
@@ -15,7 +19,12 @@ Target: TunaOS Marlin (Arch-based bootc, x86_64), with GNOME 51 as the compariso
 5. From a clean checkout of the tag, build the package:
    `scripts/roost-release` — writes `dist/roost_X.Y.Z_amd64.deb`.
    Use `--allow-dirty` only for throwaway dev builds, never for a release.
-6. Verify the artifact: install it on a clean supported system without
+6. Run `scripts/check-release-package` on the artifact. Require all six
+   binaries, complete version agreement and the generated ELF dependency
+   closure plus explicit runtime floors. Install it on the selected target
+   with apt, retaining package/hash/distro dependency receipts and the
+   installed GTK control proof; an extracted/debug binary is insufficient.
+   Verify the artifact: install it on a clean supported system without
    dependencies pre-installed, confirm the login screen lists Roost, and
    confirm every binary's `--version` matches the tag.
 7. Capture the demo media from the same tag:
