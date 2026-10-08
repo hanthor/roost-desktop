@@ -3503,7 +3503,7 @@ dependencies = [
  "png",
  "rand 0.10.3",
  "reis",
- "roost-greeter",
+ "roost-greeter-control",
  "roost-shell-control",
  "roost-wallpaper",
  "roxmltree",
@@ -3529,7 +3529,15 @@ dependencies = [
  "greetd_ipc",
  "gtk4",
  "libadwaita",
+ "roost-greeter-control",
  "tempfile",
+]
+
+[[package]]
+name = "roost-greeter-control"
+version = "0.1.0"
+dependencies = [
+ "greetd_ipc",
 ]
 
 [[package]]
