@@ -20,6 +20,9 @@ const SCROLL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(150
 /// Smooth vertical scrolling turns a page per this many pixels.
 const SMOOTH_STEP_PX: f64 = 30.0;
 
+/// Hears the current page change.
+type PageChanged = Rc<dyn Fn(u32)>;
+
 mod imp {
     use super::*;
 
@@ -34,7 +37,7 @@ mod imp {
         pub smooth_dy: Cell<f64>,
         /// A swipe in progress: the position it started from.
         pub swipe: Cell<Option<f64>>,
-        pub page_changed: RefCell<Vec<Rc<dyn Fn(u32)>>>,
+        pub page_changed: RefCell<Vec<PageChanged>>,
     }
 
     #[glib::object_subclass]
