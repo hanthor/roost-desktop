@@ -1716,7 +1716,9 @@ showing "$ARTIFACTS/a11y-provider.json" "Quarterly Report.odt" ||
 pass G-SEARCH-PROVIDER "typing lists a D-Bus search provider's result"
 cstate '.overview_search' "search view" ||
     fail G-SEARCH-VIEW "the compositor kept the workspace view during search"
-pass G-SEARCH-VIEW "search results replace the workspace view"
+cstate '.overview_search and .overview_motion.search == 1' "search fade settled" ||
+    fail G-SEARCH-VIEW "the workspace view did not finish fading out for search"
+pass G-SEARCH-VIEW "search results fade the workspace view out"
 "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-provider-press.json" 20 \
     --press "Quarterly Report.odt" || fail G-SEARCH-ACTIVATE "could not press the result"
 end=$(($(date +%s) + 10))
@@ -1735,7 +1737,9 @@ sleep 1
     fail G-OV-APPGRID "could not press Show Apps"
 showing "$ARTIFACTS/a11y-grid.json" "Tuna Probe" ||
     fail G-OV-APPGRID "app grid does not list installed apps"
-pass G-OV-APPGRID "Show Apps opens the app grid"
+cstate '.overview_app_grid and .overview_motion.last_morph.cause == "app-grid" and .overview_motion.last_morph.curve == "ease-out-sine" and .overview_motion.last_morph.duration_ms == 250' "picker to grid morph" ||
+    fail G-OV-APPGRID "the window picker did not ease into the app grid (250 ms out-sine)"
+pass G-OV-APPGRID "Show Apps eases the window picker into the app grid"
 scrot "$ARTIFACTS/11-app-grid.png" >/dev/null
 xdotool key Escape
 
@@ -3740,6 +3744,57 @@ gsettings set org.gnome.desktop.interface enable-animations true
 cstate '.animations_enabled' "gesture animations restored" ||
     fail G-SWIPE-REDUCED-MOTION "could not restore animation setting"
 pass G-SWIPE-REDUCED-MOTION "up/down gestures snap while held and settle correctly with reduced motion"
+
+# GNOME 51 eases the overview open with EASE_OUT_SINE and closed with
+# EASE_OUT_QUAD over 250 ms (#499). The compositor records the progress
+# of every frame it drew; each must sit on its own direction's curve,
+# with at least one sample strictly mid-transition each way.
+xdotool key Super_L
+cstate '.overview_open and .overview_progress == 1' "eased open" ||
+    fail G-OVERVIEW-EASING "the overview did not open"
+xdotool key Escape
+cstate '(.overview_open | not) and .overview_progress == 0' "eased close" ||
+    fail G-OVERVIEW-EASING "the overview did not close"
+cp "$CSTATE" "$ARTIFACTS/overview-easing.json"
+jq -e '
+    def abs: if . < 0 then -. else . end;
+    def frac: (.[0] / 250) | if . > 1 then 1 else . end;
+    .overview_motion.open as $o | .overview_motion.close as $c |
+    $o.curve == "ease-out-sine" and $o.duration_ms == 250 and $o.from == 0 and $o.to == 1 and
+    $c.curve == "ease-out-quad" and $c.duration_ms == 250 and $c.from == 1 and $c.to == 0 and
+    ([$o.samples[] | select(.[0] > 0 and .[0] < 250 and .[1] > 0 and .[1] < 1)] | length) > 0 and
+    ([$c.samples[] | select(.[0] > 0 and .[0] < 250 and .[1] > 0 and .[1] < 1)] | length) > 0 and
+    all($o.samples[]; (.[1] - (frac * 1.5707963267948966 | sin)) | abs < 0.001) and
+    all($c.samples[]; (.[1] - (1 - (1 - (1 - frac) * (1 - frac)))) | abs < 0.001) and
+    all($c.samples[] | select(.[0] > 0 and .[0] < 250); .[1] < 1 - .[0] / 250)
+' "$CSTATE" >/dev/null ||
+    fail G-OVERVIEW-EASING "drawn progress did not follow out-sine opening and out-quad closing"
+pass G-OVERVIEW-EASING "opening follows EASE_OUT_SINE and closing EASE_OUT_QUAD over 250 ms, sampled mid-transition"
+
+# A quick upward flick opens the overview from a quarter of the way,
+# as GNOME's swipe tracker projects it, and the fingers' 3 px/ms set
+# an out-cubic finish of 225 ms rather than a fixed rate.
+swipe_timed() {
+    swipe_sequence=$((swipe_sequence + 1))
+    printf '{"phase":"%s","dy":%s,"time":%s,"sequence":%s}\n' \
+        "$1" "$2" "$3" "$swipe_sequence" >"$TUNA_PROOF_SWIPE_INPUT.tmp"
+    mv "$TUNA_PROOF_SWIPE_INPUT.tmp" "$TUNA_PROOF_SWIPE_INPUT"
+    sleep 0.2
+}
+swipe_timed begin 0 5000
+swipe_timed update -15 5010
+swipe_timed update -30 5020
+swipe_timed update -30 5030
+swipe_timed end 0 5040
+cstate '.overview_open and .overview_motion.release.target == 1 and .overview_motion.release.from == 0.25 and .overview_motion.release.curve == "ease-out-cubic" and (.overview_motion.release.duration_ms - 225 | if . < 0 then -. else . end) < 0.01' "flick release" ||
+    fail G-SWIPE-MOMENTUM "a quarter-way flick did not carry its velocity into the finish"
+cstate '.overview_progress == 1' "flick settled" ||
+    fail G-SWIPE-MOMENTUM "the flick did not settle open"
+cp "$CSTATE" "$ARTIFACTS/swipe-momentum.json"
+xdotool key Escape
+cstate '(.overview_open | not) and .overview_progress == 0' "flick closed" ||
+    fail G-SWIPE-MOMENTUM "the overview did not close after the flick"
+pass G-SWIPE-MOMENTUM "a released swipe keeps its momentum: projected target and velocity-derived out-cubic duration"
 
 # GNOME's workspace thumbnails: a window moved one workspace right makes
 # three (the trailing empty one included), so the overview shows the
