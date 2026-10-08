@@ -2341,7 +2341,7 @@ if command -v Xwayland >/dev/null 2>&1 && command -v xeyes >/dev/null 2>&1; then
     xdotool key Super_L
     cstate '.overview_open' "overview" || fail G-X11-APP "overview did not open"
     sleep 1
-    xdotool type --delay 40 "roost x probe"
+    xdotool type --delay 40 "tuna x probe"
     sleep 1
     xdotool key Return
     end=$(($(date +%s) + 15))
