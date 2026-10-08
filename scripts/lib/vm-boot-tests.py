@@ -523,5 +523,77 @@ class ShippedSnapshotInventory(unittest.TestCase):
             self.run_inventory(state, [("4", f"{uid} roost-test - -")])
 
 
+class PredatingGuestQualification(unittest.TestCase):
+    # Run 37700332957: the published roost 0.1.0-2 guest runs a healthy
+    # session whose snapshot reports every newer instrumentation key as
+    # None, and its shell moves no media-key volume. Newer-behavior gates
+    # qualify on such guests instead of failing the whole lifecycle; the
+    # current-build lane keeps proving them strictly.
+    SHIPPED_STATE = {"locked": False, "windows": [], "focused": None,
+                     "active_workspace": 0, "overview_open": False,
+                     "pointer_position": None, "native_relative_motion_count": None,
+                     "mouse_left_handed": None, "touchpad_left_handed": None,
+                     "hot_corners": None}
+    CURRENT_STATE = {"locked": False, "windows": [], "focused": None,
+                     "active_workspace": 0, "overview_open": False,
+                     "pointer_position": [0, 0], "native_relative_motion_count": 0,
+                     "mouse_left_handed": False, "touchpad_left_handed": False,
+                     "hot_corners": True}
+    STRICT_SERIAL = ("\n".join([
+        "roost-vm-health: audio-hda ready",
+        "roost-vm-health: volume=0.40",
+        "roost-vm-health: volume=0.46",
+        "roost-vm-health: volume=0.40",
+        "roost-vm-health: volume=0.40 [MUTED]",
+        "roost-vm-health: volume=0.40",
+    ]) + "\n")
+    BASELINE_SERIAL = ("roost-vm-health: audio-hda ready\n"
+                       "roost-vm-health: volume=0.40\n")
+
+    def verdict(self, text, state=None):
+        with tempfile.TemporaryDirectory() as directory:
+            lifecycle = Path(directory) / "lifecycle"
+            lifecycle.mkdir()
+            if state is not None:
+                (lifecycle / "before.json").write_text(json.dumps({"state": state}))
+            return lane.media_volume_ok(text, str(lifecycle))
+
+    def test_predating_snapshot_qualifies(self):
+        self.assertTrue(lane.predates_newer_snapshot(dict(self.SHIPPED_STATE)))
+
+    def test_current_snapshot_stays_strict(self):
+        self.assertFalse(lane.predates_newer_snapshot(dict(self.CURRENT_STATE)))
+
+    def test_partial_snapshot_stays_strict(self):
+        # Fail closed: a guest with only some newer keys still takes the
+        # strict path rather than silently qualifying.
+        state = {**self.SHIPPED_STATE, "mouse_left_handed": False}
+        self.assertFalse(lane.predates_newer_snapshot(state))
+
+    def test_media_volume_strict_sequence_passes(self):
+        ok, detail = self.verdict(self.STRICT_SERIAL, self.CURRENT_STATE)
+        self.assertTrue(ok)
+        self.assertNotIn("predates", detail)
+
+    def test_media_volume_qualifies_on_predating_guest(self):
+        ok, detail = self.verdict(self.BASELINE_SERIAL, self.SHIPPED_STATE)
+        self.assertTrue(ok)
+        self.assertIn("predates", detail)
+
+    def test_media_volume_stays_strict_on_current_guest(self):
+        ok, _ = self.verdict(self.BASELINE_SERIAL, self.CURRENT_STATE)
+        self.assertFalse(ok)
+
+    def test_media_volume_stays_strict_without_predation_evidence(self):
+        ok, _ = self.verdict(self.BASELINE_SERIAL, None)
+        self.assertFalse(ok)
+
+    def test_media_volume_requires_hda_and_baseline(self):
+        ok, _ = self.verdict("roost-vm-health: volume=0.40\n", self.SHIPPED_STATE)
+        self.assertFalse(ok)
+        ok, _ = self.verdict("roost-vm-health: audio-hda ready\n", self.SHIPPED_STATE)
+        self.assertFalse(ok)
+
+
 if __name__ == "__main__":
     unittest.main()
