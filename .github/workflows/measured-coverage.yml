@@ -10,7 +10,10 @@ permissions:
   contents: read
 concurrency:
   group: measured-coverage-${{ github.ref }}
-  cancel-in-progress: true
+  # Supersede stale PR runs, but let every main run finish: main merges land
+  # minutes apart, and cancelling meant no main run ever completed, which
+  # also starved performance-baseline.yml (it needs a successful main run).
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 jobs:
   coverage:
     runs-on: ubuntu-latest
