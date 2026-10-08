@@ -2074,6 +2074,7 @@ fn build(app: &adw::Application) {
         let shell_rc = shell.clone();
         let activities_button = activities.clone();
         let last_frames: RefCell<Vec<tuna_shell_control::SwitcherThumbnail>> = RefCell::default();
+        let last_icons: RefCell<Vec<tuna_shell_control::IconGeometry>> = RefCell::default();
         glib::timeout_add_local(Duration::from_millis(16), move || {
             let mut shell = shell.borrow_mut();
             let mut results = Vec::new();
@@ -2169,6 +2170,16 @@ fn build(app: &adw::Application) {
                 activities_button.remove_css_class("checked");
             }
             overview::OverviewUi::set_open(&overview_ui, open);
+            // Dash icon rectangles for minimize, sent only when they move.
+            if let Some(icons) = overview::OverviewUi::icon_geometries(&overview_ui) {
+                if *last_icons.borrow() != icons {
+                    if let Some(control) = shell_rc.borrow_mut().control.as_mut() {
+                        if control.set_icon_geometries(icons.clone()).is_ok() {
+                            *last_icons.borrow_mut() = icons;
+                        }
+                    }
+                }
+            }
             // GNOME's preview chrome over the compositor's previews.
             let shell = shell_rc.borrow();
             if let Some(control) = shell.control.as_ref() {
