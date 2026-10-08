@@ -244,6 +244,22 @@ def guest_kernel_provenance():
                           "no equality of loaded code and installed bytes or source attribution is inferred."}
 
 
+def kernel_trace(action, index=0):
+    command = ["/usr/libexec/roost-kernel-trace"]
+    if action in ("trace-read", "formats-read", "discovery-read"):
+        command += ["read", "--kind", action.removesuffix("-read"), "--index", str(index)]
+    else:
+        command.append("stop" if action == "trace-stop" else action)
+    process = subprocess.run(command, text=True, capture_output=True, timeout=15, check=False)
+    if process.returncode != 0:
+        raise RuntimeError("actual kernel observer failed: " + json.dumps({
+            "exitcode": process.returncode, "stderr": process.stderr[:4096],
+            "stderr_truncated": len(process.stderr) > 4096}))
+    if len(process.stdout) > 131072:
+        raise RuntimeError("kernel observer metadata exceeds bound")
+    return json.loads(process.stdout)
+
+
 def gnome_trace(action, index):
     uid = pwd.getpwnam("roost-test").pw_uid
     kernel_marker = Path("/run/roost-perf-kernel.json")
@@ -252,6 +268,11 @@ def gnome_trace(action, index):
         with kernel_marker.open("x") as stream:
             os.chmod(kernel_marker, 0o600)
             json.dump(kernel_before, stream)
+        try:
+            kernel_trace("start")
+        except BaseException:
+            kernel_marker.unlink()
+            raise
     if action in ("start", "stop", "failed-stop"):
         try:
             process = subprocess.run([
@@ -278,6 +299,10 @@ def gnome_trace(action, index):
         except BaseException:
             if action == "start":
                 kernel_marker.unlink()
+                try:
+                    kernel_trace("stop")
+                except Exception:
+                    pass  # Independent observer error is retained in its root artifact.
             raise
         payload=json.loads(process.stdout)
         if isinstance(payload,dict) and "trace_failure" in payload:
@@ -285,9 +310,13 @@ def gnome_trace(action, index):
         provenance = payload if action == "failed-stop" else dict(payload, guest_kernel=os.uname().release)
         if action == "start":
             return dict(provenance, guest_kernel_provenance=kernel_before)
-        # Failed-stop receipts keep their fixed schema: marker comparison
-        # runs only for actual stops.
+        # Failed-stop receipts keep their fixed schema: independent kernel
+        # acquisition and marker comparison run only for actual stops.
         if action == "stop":
+            try:
+                provenance["kernel_trace"] = kernel_trace("stop")
+            except Exception as error:
+                provenance["kernel_trace"] = {"error": str(error)[:2048], "qualified_acquisition": False}
             # The original profiler has stopped. Preserve its whole raw capture
             # even when further provenance is missing or changes.
             kernel_before = None
@@ -409,7 +438,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("clock", "notify", "frames", "reference-image", "stock-reference",
                                           "gnome-trace-start", "gnome-trace-stop", "gnome-trace-read",
-                                          "gnome-trace-failed-stop", "gnome-trace-failed-stop-read"))
+                                          "gnome-trace-failed-stop", "gnome-trace-failed-stop-read",
+                                           "kernel-trace-stop", "kernel-trace-read", "kernel-formats-read", "kernel-discovery-read"))
     parser.add_argument("--index", type=int, default=0)
     args = parser.parse_args()
     result = {}
@@ -430,6 +460,8 @@ def main():
             context=Context("stop");context.stage="failed-capture-acquisition"
             print(encode(context.failure(error),"stop").decode())
             raise SystemExit(1) from None
+    if args.action.startswith("kernel-"):
+        result["kernel_trace"] = kernel_trace(args.action.removeprefix("kernel-"), args.index)
     result["boottime_s"] = time.clock_gettime(time.CLOCK_BOOTTIME)
     print(json.dumps(result))
 

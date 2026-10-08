@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import base64
+import hashlib
 import io
 import subprocess
 import sys
@@ -48,13 +49,14 @@ def isolated_kernel_marker(directory):
 
 @contextmanager
 def isolated_trace_start(directory, run_error=None, run_result=None):
-    """Drive gnome_trace start with kernel provenance and marker isolated."""
+    """Drive gnome_trace start with the independent kernel observer isolated."""
     run_mock = (patch.object(phase.subprocess, "run", side_effect=run_error)
                 if run_error is not None else
                 patch.object(phase.subprocess, "run", return_value=run_result))
     with patch.object(phase.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=1000)), \
          run_mock, \
          patch.object(phase, "guest_kernel_provenance", return_value={}), \
+         patch.object(phase, "kernel_trace", return_value={}), \
          isolated_kernel_marker(directory):
         yield
 
@@ -867,6 +869,134 @@ class CaptureAcquisition(unittest.TestCase):
                 self.assertEqual([row["fd"] for row in observed], [writer.fileno()])
                 writer.close()
                 self.assertEqual(phase.capture_writers(os.getpid(), metadata), [])
+
+
+class PinnedBaselinePackageGuards(unittest.TestCase):
+    """Execute the actual Containerfile shell, including its AND-list context."""
+
+    def test_preflight_failure_prevents_any_package_install(self):
+        source = (ROOT / "packaging/marlin/Containerfile").read_text().replace("\\\n", "")
+        script = source.split("RUN set -eux;", 1)[1].split("&& pacman -U", 1)[0] + " && :"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "share").mkdir()
+            (root / "bin").mkdir()
+            inventory = root / "share/roost-perf-baseline-packages.txt"
+            manifest = root / "share/roost-perf-baseline-critical.sha256"
+            critical = root / "critical"
+            marker = root / "package-install-started"
+            original = b"immutable baseline fixture"
+            manifest.write_text(f"{hashlib.sha256(original).hexdigest()}  {critical}\n")
+            pacman = root / "bin/pacman"
+            pacman.write_text('#!/bin/sh\nif test "$1" = -Q; then printf "%s\\n" '
+                              '"$TEST_MUTTER_PIN"; else touch "$TEST_PACKAGE_MUTATION"; fi\n')
+            pacman.chmod(0o755)
+            package = root / "roost-pkg.tar.zst"
+            package.write_bytes(b"immutable roost package fixture")
+            script = script.replace("/usr/share", str(root / "share"))
+            script = script.replace("/tmp/roost-", str(root / "roost-"))
+            script = script.replace("/tmp/roost.pkg.tar.zst", str(package))
+            script = script.replace("/usr/libexec/roost-pinned-baseline",
+                                    "bash %s %s %s" % (ROOT / "packaging/marlin/roost-pinned-baseline",
+                                                       inventory, manifest))
+            for name, has_inventory, pin, corrupt, accepted in (
+                ("valid", True, "mutter 51.0-1.3", False, True),
+                ("missing-inventory", False, "mutter 51.0-1.3", False, False),
+                ("wrong-pin", True, "mutter 51.0-2", False, False),
+                ("changed-critical-file", True, "mutter 51.0-1.3", True, False),
+            ):
+                with self.subTest(name=name):
+                    inventory.unlink(missing_ok=True)
+                    marker.unlink(missing_ok=True)
+                    if has_inventory:
+                        inventory.write_text("mutter 51.0-1.3\n")
+                    critical.write_bytes(b"changed" if corrupt else original)
+                    environment = dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}",
+                                       PERF_PINNED_BASELINE="true", TEST_MUTTER_PIN=pin,
+                                       TEST_PACKAGE_MUTATION=str(marker),
+                                       ROOST_PKG_SHA256=hashlib.sha256(package.read_bytes()).hexdigest())
+                    result = subprocess.run(["bash", "-e", "-c", script], env=environment,
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                    self.assertEqual(marker.exists(), accepted)
+
+    def test_post_install_rejects_changed_missing_or_corrupt_baseline(self):
+        source = (ROOT / "packaging/marlin/Containerfile").read_text().replace("\\\n", "")
+        beginning = 'if test "$PERF_PINNED_BASELINE" = true; then'
+        script = beginning + source.split(beginning, 1)[1].split("\n\nLABEL", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "share").mkdir()
+            (root / "bin").mkdir()
+            (root / "share/roost-perf-baseline-packages.txt").write_text(
+                "linux 7.2.9.arch1-1\nmutter 51.0-1.3\n")
+            critical = root / "critical"
+            original = b"immutable baseline fixture"
+            (root / "share/roost-perf-baseline-critical.sha256").write_text(
+                f"{hashlib.sha256(original).hexdigest()}  {critical}\n")
+            pacman = root / "bin/pacman"
+            pacman.write_text('#!/bin/sh\ncat "$TEST_PACKAGE_INVENTORY"\n')
+            pacman.chmod(0o755)
+            script = script.replace("/usr/share", str(root / "share"))
+            script = script.replace("/tmp/roost-", str(root / "roost-"))
+            for name, body, corrupt, accepted in (
+                ("unchanged", "linux 7.2.9.arch1-1\nmutter 51.0-1.3\n", False, True),
+                ("new-roost", "linux 7.2.9.arch1-1\nmutter 51.0-1.3\nroost 1.0-1\n", False, True),
+                ("kernel-upgrade", "linux 7.2.10.arch1-1\nmutter 51.0-1.3\n", False, False),
+                ("mutter-replacement", "linux 7.2.9.arch1-1\nmutter 51.0-2\n", False, False),
+                ("missing", "linux 7.2.9.arch1-1\n", False, False),
+                ("critical-corruption", "linux 7.2.9.arch1-1\nmutter 51.0-1.3\n", True, False),
+            ):
+                with self.subTest(name=name):
+                    inventory = root / "inventory"
+                    inventory.write_text(body)
+                    critical.write_bytes(b"changed" if corrupt else original)
+                    environment = dict(os.environ, PATH=f"{root / 'bin'}:{os.environ['PATH']}",
+                                       PERF_PINNED_BASELINE="true", TEST_PACKAGE_INVENTORY=str(inventory))
+                    result = subprocess.run(["bash", "-e", "-c", script], env=environment,
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode == 0, accepted, result.stderr)
+
+    def test_all_baseline_containerfile_run_blocks_have_valid_shell_syntax(self):
+        for name in ("packaging/marlin/Containerfile", "packaging/marlin/perf/Containerfile",
+                     "packaging/marlin/perf/Containerfile.baseline"):
+            for line in (ROOT / name).read_text().replace("\\\n", "").splitlines():
+                if line.startswith("RUN "):
+                    with self.subTest(containerfile=name, run=line):
+                        result = subprocess.run(["bash", "-n"], input=line[4:], text=True,
+                                                capture_output=True)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+
+class KernelTraceDispatch(unittest.TestCase):
+    def run_main(self, *argv):
+        calls = []
+        def fake(action, index=0):
+            calls.append((action, index))
+            return {"index": index, "data": "AA=="}
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["roost-perf-phase", *argv]), \
+             patch.object(phase, "kernel_trace", side_effect=fake), \
+             redirect_stdout(output):
+            phase.main()
+        return calls, json.loads(output.getvalue())
+    def test_read_actions_map_to_observer_kinds(self):
+        for lane_action, observer_action in (("kernel-trace-read", "trace-read"),
+                                             ("kernel-formats-read", "formats-read"),
+                                             ("kernel-discovery-read", "discovery-read")):
+            calls, result = self.run_main(lane_action, "--index", "3")
+            self.assertEqual(calls, [(observer_action, 3)])
+            self.assertEqual(result["kernel_trace"], {"index": 3, "data": "AA=="})
+            self.assertIn("boottime_s", result)
+    def test_stop_maps_to_observer_stop(self):
+        calls, result = self.run_main("kernel-trace-stop")
+        self.assertEqual(calls, [("trace-stop", 0)])
+        self.assertIn("kernel_trace", result)
+    def test_observer_failure_propagates(self):
+        with patch.object(sys, "argv", ["roost-perf-phase", "kernel-trace-read"]), \
+             patch.object(phase, "kernel_trace", side_effect=RuntimeError("observer offline")), \
+             redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError, "observer offline"):
+                phase.main()
 
 if __name__ == "__main__":
     unittest.main()

@@ -188,6 +188,21 @@ timeout 20s env -u WAYLAND_SOCKET XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY=roo
     2>"$ARTIFACTS/presentation.stderr" || fail D-FRAMES "native presentation probe failed"
 validate_presentation "$ARTIFACTS/presentation.json" || fail D-FRAMES "invalid native presentation trace"
 pass D-FRAMES "240 changing client frames at default scale received real ordered page-flip feedback"
+env -u WAYLAND_SOCKET XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY=roost-drm-smoke \
+    timeout 20 "$ARTIFACTS/frame-pacer/roost-frame-pacer" --endurance-seconds 16 \
+    >"$ARTIFACTS/presentation-endurance.jsonl" \
+    2>"$ARTIFACTS/presentation-endurance.stderr" || fail D-ENDURANCE "native endurance workload failed"
+python3 - "$ROOT" "$ARTIFACTS/presentation-endurance.jsonl" <<'PYCODE' || fail D-ENDURANCE "invalid/incomplete native endurance trace"
+import sys
+sys.path.insert(0, sys.argv[1] + "/scripts/lib")
+from endurance_presentation import Reader
+with open(sys.argv[2], "rb") as stream:
+    result = Reader(stream, 16).finish()
+    if result["batches"] < 2:
+        raise ValueError("native control did not exercise batch rollover")
+    print(result)
+PYCODE
+pass D-ENDURANCE "real feedback, batch rollover and requested 16-second completion"
 if command -v ffmpeg >/dev/null 2>&1; then
     sudo ffmpeg -loglevel error -y -device "$CARD" -f kmsgrab -i - -frames:v 1 \
         -vf 'hwdownload,format=bgr0' "$ARTIFACTS/scanout.png" 2>"$ARTIFACTS/kmsgrab.log" &&

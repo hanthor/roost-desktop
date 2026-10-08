@@ -70,8 +70,9 @@ jobs:
           retention-days: 14
 
   journey:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: [check]
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
@@ -87,8 +88,12 @@ jobs:
       # check does not. Mesa swrast provides software GL on runners.
       # The shell's gio settings read needs glib dev files at build
       # time (check gets them transitively via GTK).
-      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck jq dbus gsettings-desktop-schemas libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev
-      - run: shellcheck -x scripts/roost-journey scripts/roost-nested scripts/roost-release scripts/check-release-package scripts/lib/roost-introspect.sh
+      # Genuine Ubuntu26.04 distro packages, not /usr/local source libraries.
+      - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y --no-install-recommends libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool scrot ffmpeg jq dbus libglib2.0-bin xwayland x11-apps x11-utils pipewire wireplumber gstreamer1.0-pipewire gstreamer1.0-tools gstreamer1.0-plugins-good at-spi2-core python3-pyatspi python3-pil libsecret-tools gnome-keyring fonts-cantarell shellcheck libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev meson ninja-build libwayland-dev wayland-protocols libpam-wrapper ibus ibus-gtk3 ibus-gtk4 gir1.2-ibus-1.0 gir1.2-gtk-3.0 wayland-utils xdg-desktop-portal xdg-desktop-portal-gnome xdg-desktop-portal-gtk libgtk4-layer-shell-dev dpkg-dev gsettings-desktop-schemas
+      - run: pkg-config --atleast-version=1.1 gtk4-layer-shell-0 && pkg-config --atleast-version=4.12 gtk4 && pkg-config --atleast-version=1.0 libadwaita-1
+      - run: shellcheck -x scripts/roost-journey scripts/roost-nested scripts/roost-release scripts/check-release-package scripts/lib/roost-introspect.sh scripts/lib/roost-proof-session-launch
+      - run: python3 scripts/lib/installed-deb-proof-tests.py
+      - run: python3 scripts/lib/release-deb-ownership-tests.py
       - run: scripts/roost-release --allow-dirty --out package-artifacts && scripts/check-release-package package-artifacts/*.deb
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
@@ -96,12 +101,50 @@ jobs:
           path: package-artifacts/
           retention-days: 14
       - run: scripts/roost-journey --artifacts journey-artifacts
+      - name: Install exact Debian-format candidate and isolated companion fixtures
+        run: |
+          sudo apt-get install -y --no-install-recommends ./package-artifacts/*.deb
+          cargo build --locked --release -p roost-compositor --example icon-probe --example shortcut-inhibit-client
+          mkdir -p package-artifacts/installed
+          cp /etc/os-release package-artifacts/installed/os-release
+          dpkg-query -W > package-artifacts/installed/dpkg-versions.txt
+          apt-cache policy libgtk4-layer-shell0 libgtk-4-1 libadwaita-1-0 > package-artifacts/installed/apt-policy.txt
+          sha256sum package-artifacts/*.deb > package-artifacts/installed/package.sha256
+          sudo install -d -m0755 /usr/libexec/roost-deb-proof
+          sudo install -m0755 target/release/examples/icon-probe target/release/examples/shortcut-inhibit-client /usr/libexec/roost-deb-proof/
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          root = Path('target/release/examples')
+          value = {'commit': os.environ['GITHUB_SHA'], 'files': {name: hashlib.sha256((root/name).read_bytes()).hexdigest() for name in ('icon-probe', 'shortcut-inhibit-client')}}
+          Path('package-artifacts/installed/companions.json').write_text(json.dumps(value) + '\n')
+          PY
+          sudo install -m0644 package-artifacts/installed/companions.json /usr/libexec/roost-deb-proof/provenance.json
+      - name: Qualify the actual installed preferred GTK session
+        run: |
+          export HOME="$RUNNER_TEMP/roost-deb-home"
+          mkdir -p "$HOME"
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/roost-deb-runtime"
+          mkdir -m0700 "$XDG_RUNTIME_DIR"
+          unset WAYLAND_DISPLAY WAYLAND_SOCKET ROOST_SHELL_BIN ROOST_PROOF_SHELL_BIN LD_LIBRARY_PATH
+          scripts/roost-gtk-shell-proof --installed-package --artifacts package-artifacts/installed/controls
+        env:
+          ROOST_REQUIRE_PAM_WRAPPER: "1"
+          ROOST_REQUIRE_IBUS: "1"
+          ROOST_REQUIRE_WAYLAND_INFO: "1"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: journey-shots
           path: journey-artifacts/
           retention-days: 14
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: roost-deb-installed-proof
+          path: package-artifacts/installed/
+          retention-days: 90
 
   app-content:
     runs-on: ubuntu-latest
@@ -157,9 +200,11 @@ jobs:
   drm-smoke:
     # Hardware session (#52) on vkms, the kernel's virtual KMS device:
     # libseat (seatd), GBM/EGL scanout, page-flip pacing, shell attach.
+    # Needs headroom: the DRM/apt install (incl. linux-modules-extra for
+    # vkms) alone can take ~20 min on a cold runner cache.
     runs-on: ubuntu-latest
     needs: [check]
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1

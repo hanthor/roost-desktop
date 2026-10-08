@@ -33,6 +33,7 @@ jobs:
       - run: python3 scripts/lib/roost-perf-repeatability-tests.py
       - run: python3 scripts/lib/roost-perf-vm-lifetime-tests.py
       - run: python3 scripts/lib/roost-perf-reference-tests.py
+      - run: python3 scripts/lib/roost-kernel-trace-tests.py
       - name: Select a successful trusted main package
         env:
           GH_TOKEN: ${{ github.token }}
@@ -144,6 +145,8 @@ jobs:
         # from its separately guarded immutable image on this original host.
         if: ${{ !cancelled() && steps.shared_payload.outcome == 'success' }}
         run: scripts/roost-perf-profile-pairs stock
+      - name: Upload performance artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: marlin-performance

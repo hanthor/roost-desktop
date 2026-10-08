@@ -2,7 +2,7 @@
 //! package tooling.
 //!
 //! `scripts/roost-release` must stay an executable fail-fast script that
-//! stamps `ROOST_VERSION`, stages the four binaries plus the session entry,
+//! stamps `ROOST_VERSION`, stages the six binaries plus the session entry,
 //! generates the control metadata from the stamp, and builds via
 //! `dpkg-deb`. `docs/release.md` must keep the checklist and the
 //! notes-template sections; `docs/install.md` must keep the package-install
@@ -55,6 +55,7 @@ fn release_script_stages_layout_and_metadata_from_the_stamp() {
         "ROOST_VERSION",
         "roost-compositor",
         "roost-session",
+        "roost-shell-gtk",
         "roost-shell-host",
         "roost-ibus-bridge",
         "roost-greeter",
