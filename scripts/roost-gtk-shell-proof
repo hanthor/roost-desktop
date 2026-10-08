@@ -1084,12 +1084,35 @@ fi
 # greppable so a systematic miss cannot hide behind it.
 xdotool keyup Alt_L Super_L Shift_L Control_L
 sleep 0.5
-# Temporary harness introspection for the stray-Alt fault: which X
-# window receives the chord, and how this server maps the chord's
-# keycodes (an F1 that resolves behind an Alt level would explain a
-# harness-side Alt tap around every press).
-echo "roost-gtk-shell-proof: active window: $(xdotool getactivewindow 2>&1)" >&2
-xmodmap -pke -display "$DISPLAY" 2>/dev/null | grep -E " (64|66|67|133|134) " >&2 || true
+# Temporary harness introspection for the stray-Alt fault: how this
+# server maps the chord's keycodes (an F1 that resolves behind an Alt
+# level would explain a harness-side Alt tap around every press).
+{
+    echo "roost-gtk-shell-proof: X keymap for Alt/Super/F1:"
+    if command -v xmodmap >/dev/null 2>&1; then
+        xmodmap -pke -display "$DISPLAY" 2>&1 | grep -E "keycode +(64|66|67|133|134) " || echo "no matching keycode lines"
+    else
+        echo "xmodmap not installed"
+    fi
+    if command -v setxkbmap >/dev/null 2>&1; then
+        setxkbmap -query -display "$DISPLAY" 2>&1 || true
+    else
+        echo "setxkbmap not installed"
+    fi
+    echo "roost-gtk-shell-proof: xdotool: $(xdotool --version 2>&1 | head -1)"
+    if command -v xlsclients >/dev/null 2>&1; then
+        echo "roost-gtk-shell-proof: X clients on $DISPLAY:"
+        xlsclients -display "$DISPLAY" 2>&1 || true
+    else
+        echo "xlsclients not installed"
+    fi
+    if command -v xset >/dev/null 2>&1; then
+        echo "roost-gtk-shell-proof: X bell/repeat/AccessX state:"
+        xset q -display "$DISPLAY" 2>&1 | grep -vE "^ *(Bell|Pointer|Screen|Font|DPMS|auto repeat|LED)" || true
+    else
+        echo "xset not installed"
+    fi
+} >&2
 cycle_press() {
     xdotool key --clearmodifiers "$1"
     if cstate "$2" "$3" 10; then return 0; fi
