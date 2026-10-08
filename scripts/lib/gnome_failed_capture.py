@@ -100,7 +100,7 @@ def failed_source(saved,uid,owner,pid,libraries,start):
             or source.get('drained_start_required') is not True
             or source.get('drained_stop_required') is not True
             or set(libraries)!={'cogl','clutter','core'}
-            or any(value.get('package')!='mutter 51.0-1.6' for value in libraries.values())
+            or any(value.get('package')!='mutter 51.0-1.7' for value in libraries.values())
             or source.get('mutter_mapped_libraries')!=libraries
             or source.get('mutter_cogl_library')!=libraries.get('cogl')
             or type(saved['stop_requested_monotonic_ns']) is not int
@@ -153,7 +153,7 @@ def validate_receipt(value):
         if (type(library) is not dict or set(library)!={'path','device','inode','uid','bytes','sha256','package'}
                 or any(type(library[key]) is not int or library[key]<0 for key in ('device','inode','uid','bytes'))
                 or library['uid']!=0 or not 0<library['bytes']<=16*1024*1024 or library['inode']==0
-                or library['package']!='mutter 51.0-1.6'
+                or library['package']!='mutter 51.0-1.7'
                 or type(library['sha256']) is not str or re.fullmatch(r'[0-9a-f]{64}',library['sha256']) is None
                 or type(library['path']) is not str or len(library['path'])>255
                 or re.fullmatch('/usr/lib/(?:mutter-51/)?'+re.escape(names[component])+r'\.so(?:\.[0-9]+)*',library['path']) is None):

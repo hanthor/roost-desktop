@@ -117,7 +117,7 @@ class FailedCapture(unittest.TestCase):
     def fixture(self):
         from gnome_failed_capture import failed_source
         self.validate=failed_source
-        modules={name:{'package':'mutter 51.0-1.6','sha256':'a'*64,'bytes':100,
+        modules={name:{'package':'mutter 51.0-1.7','sha256':'a'*64,'bytes':100,
                        'uid':0,'device':1,'inode':2,'path':'/usr/lib/'+{'cogl':'libmutter-cogl-51','clutter':'libmutter-clutter-51','core':'libmutter-51'}[name]+'.so.0.0.0'}
                  for name in ('cogl','clutter','core')}
         source={'uid':1000,'pid':42,'owner':':1.10','process_start':123,
