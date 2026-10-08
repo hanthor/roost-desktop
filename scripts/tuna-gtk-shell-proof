@@ -130,7 +130,7 @@
 #   G-UNLOCK       GNOME's lock screen: a wrong password is refused and
 #                  the right one unlocks through PAM (pam_wrapper)
 #   G-TRANSIENT-OFF with animations off the OSD, banners and panel menus
-#                  show at once (#501)
+#                  show at once; Reduced Motion keeps the fade (#501)
 #   G-TRANSIENT-SETTLE the transient animations ran over GNOME 51's
 #                  durations and settled (#501)
 #   A11Y-GOLDEN    the panel, calendar, quick settings and overview
@@ -4194,7 +4194,18 @@ for name in osd banner menu; do
 done
 gsettings set org.gnome.desktop.interface enable-animations true
 sleep 1
-pass G-TRANSIENT-OFF "with animations off the OSD, banners and panel menus show at once"
+# Reduced Motion keeps the fades (GNOME 51): the OSD still fades in.
+transient_reduced_start=$(($(wc -l < "$LOG") + 1))
+gsettings set org.gnome.desktop.a11y.interface reduced-motion 'reduce'
+sleep 1
+xdotool key XF86MonBrightnessUp
+sleep 0.5
+sed -n "${transient_reduced_start},\$p" "$LOG" > "$ARTIFACTS/transient-reduced.log"
+grep -q "roost-shell-gtk: transient osd settled after [0-9]* ms of 100 ms" "$ARTIFACTS/transient-reduced.log" ||
+    fail G-TRANSIENT-OFF "Reduced Motion dropped the OSD's fade"
+gsettings reset org.gnome.desktop.a11y.interface reduced-motion
+sleep 1
+pass G-TRANSIENT-OFF "with animations off the OSD, banners and panel menus show at once; Reduced Motion keeps the fade"
 
 # GNOME Shell as the polkit agent: polkit (the Authority stub, back on
 # the bus) asks the agent to authenticate; a wrong password says so and

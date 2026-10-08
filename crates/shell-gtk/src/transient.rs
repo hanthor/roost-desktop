@@ -29,18 +29,17 @@ pub const MENU_MS: f64 = 150.0;
 /// halves, height then fade (closing: fade then height).
 pub const SUBMENU_MS: f64 = 400.0;
 
-/// Whether GTK animations are on (the shell mirrors GNOME's
-/// enable-animations and Reduced Motion into this setting).
+/// Whether transient animations play at all: the motion policy (#493)
+/// allows fades unless animations are off. (GTK's enable-animations
+/// follows full motion only, so it is not the switch here.)
 pub fn animations() -> bool {
-    gtk::Settings::default().is_none_or(|s| s.is_gtk_enable_animations())
+    crate::motion::current().allows_fades()
 }
 
 /// Whether the motion part plays beside the fade. GNOME 51 keeps fades
-/// under Reduced Motion; the shell's shared motion policy (#493) is
-/// where that distinction will come from. Until then Reduced Motion
-/// turns all animation off, so motion simply follows it.
+/// under Reduced Motion and drops the slide, scale and height.
 pub fn motion_allowed() -> bool {
-    animations()
+    crate::motion::current().allows_motion()
 }
 
 /// Clutter's EASE_OUT_QUAD.
@@ -202,7 +201,8 @@ impl Player {
     }
 
     /// Call `step` with linear progress 0..=1 each frame for
-    /// `duration_ms`, then `done`. With animations off, or on a hidden
+    /// `duration_ms` (scaled by the slow-down factor), then `done`. With
+    /// animations off, or on a hidden
     /// widget (which gets no frames), `step(1.0)` and `done` run now.
     pub fn play(
         &self,
@@ -214,6 +214,9 @@ impl Player {
         self.stop();
         let generation = self.generation.get();
         let name = self.name;
+        // GNOME's slow-down factor stretches every duration.
+        let nominal_ms = duration_ms;
+        let duration_ms = crate::motion::current().adjust_ms(duration_ms);
         if !animations() || !widget.is_visible() {
             trace(name, format_args!("instant"));
             step(1.0);
@@ -238,7 +241,7 @@ impl Player {
             }
             trace(
                 name,
-                format_args!("settled after {elapsed_ms:.0} ms of {duration_ms:.0} ms"),
+                format_args!("settled after {elapsed_ms:.0} ms of {nominal_ms:.0} ms"),
             );
             if let Some(done) = done.borrow_mut().take() {
                 done();
@@ -638,6 +641,28 @@ mod tests {
         assert_eq!((faded.dy, faded.scale, faded.extent), (0.0, 1.0, 1.0));
         assert_eq!(message(0.5, true).gated(false).extent, 1.0);
         assert_eq!(message(0.5, true).gated(true), message(0.5, true));
+    }
+
+    #[test]
+    fn the_motion_policy_gates_fades_and_motion() {
+        // What Player and MotionBin::animate read from the policy.
+        let at = |enable, reduced| {
+            let policy = crate::motion::derive(Some(enable), Some(reduced), None);
+            let t = progress(50.0, policy.adjust_ms(BANNER_MS), policy.allows_fades());
+            (t, banner_enter(t, 80.0).gated(policy.allows_motion()))
+        };
+        let (t, full) = at(true, "no-preference");
+        assert_eq!(full, banner_enter(t, 80.0));
+        // Reduced Motion: the fade still runs, the slide and scale do not.
+        let (t, faded) = at(true, "reduce");
+        assert_eq!(t, 0.25);
+        assert_eq!(faded, banner_enter(0.25, 80.0).without_motion());
+        // Off: the last frame at once.
+        let (t, off) = at(false, "no-preference");
+        assert_eq!((t, off), (1.0, Frame::REST));
+        // The slow-down factor stretches durations.
+        let slow = crate::motion::derive(Some(true), None, Some("2"));
+        assert_eq!(progress(100.0, slow.adjust_ms(MODAL_MS), true), 0.5);
     }
 
     #[test]
