@@ -517,7 +517,11 @@ impl SwitcherUi {
         }
         let content = layout.width - 2 * LIST_PAD;
         if self.thumbs_scroller.max_content_width() != content {
+            // Both bounds: the surface is sized to its minimum, and a
+            // scroller's own minimum is nothing. Keep min <= max on the way.
+            self.thumbs_scroller.set_min_content_width(-1);
             self.thumbs_scroller.set_max_content_width(content);
+            self.thumbs_scroller.set_min_content_width(content);
             resized = true;
         }
         if self.thumbs_list.margin_bottom() != layout.shadow_bottom {
