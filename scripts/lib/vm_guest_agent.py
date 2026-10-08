@@ -43,7 +43,7 @@ def valid_native_files_error(value):
            "TimeoutExpired","TimeoutError","ImportError","ModuleNotFoundError","OtherError"}
     stages={"context","start","guard-fast","guard-principals","guard-session","guard-route",
             "guard-accessibility","guard-fixture","guard-final","closed-state","window","tree",
-            "tree-provider","tree-walk",
+            "tree-provider","provider-enumerate","provider-receipt","tree-walk",
             "cells","filesystem","cleanup","phase","final-guard","receipt","diagnostic-transport"}
     fields={"phase","stage","exception_type"}
     if type(value) is not dict or set(value) not in (fields,fields|{"query_context"}):return False

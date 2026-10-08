@@ -418,7 +418,7 @@ def background_user_diagnostics():
 def valid_native_files_error(value,phase):
     stages={"context","start","guard-fast","guard-principals","guard-session","guard-route",
             "guard-accessibility","guard-fixture","guard-final","closed-state","window","tree",
-            "tree-provider","tree-walk",
+            "tree-provider","provider-enumerate","provider-receipt","tree-walk",
             "cells","filesystem","cleanup","phase","final-guard","receipt"}
     allowed={"RuntimeError","ValueError","OSError","FileNotFoundError","PermissionError","CalledProcessError",
              "TimeoutExpired","TimeoutError","ImportError","ModuleNotFoundError","OtherError"}

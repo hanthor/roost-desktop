@@ -174,6 +174,34 @@ class Policy(unittest.TestCase):
             self.assertEqual(G.main(),0)
         self.assertEqual(len(calls),2)
         self.assertEqual(json.loads(stream.getvalue()),{'phase':'mapped'})
+    def test_provider_enumerate_transient_retried_then_succeeds(self):
+        calls=[]
+        def flaky(_original,_phase):
+            calls.append(True)
+            if len(calls)==1:
+                G.error_stage('provider-enumerate')
+                raise RuntimeError('transient provider lookup inconsistency')
+            return {'phase':'mapped'}
+        stream=io.StringIO()
+        with patch.object(G.sys,'argv',['fixed-probe','mapped']),patch.object(G,'context',return_value={}), \
+             patch.object(G,'inspect',side_effect=flaky),redirect_stdout(stream):
+            self.assertEqual(G.main(),0)
+        self.assertEqual(len(calls),2)
+        self.assertEqual(json.loads(stream.getvalue()),{'phase':'mapped'})
+    def test_provider_receipt_failure_never_retried(self):
+        calls=[]
+        def broken(_original,_phase):
+            calls.append(True)
+            G.error_stage('provider-receipt')
+            raise RuntimeError('private receipt body')
+        stream=io.StringIO()
+        with patch.object(G.sys,'argv',['fixed-probe','mapped']),patch.object(G,'context',return_value={}), \
+             patch.object(G,'inspect',side_effect=broken),redirect_stdout(stream):
+            self.assertEqual(G.main(),1)
+        self.assertEqual(len(calls),1)
+        diagnostic=json.loads(stream.getvalue())
+        self.assertEqual(diagnostic,{'native_files_error':{'phase':'mapped','stage':'provider-receipt','exception_type':'RuntimeError'}})
+        self.assertTrue(T.valid_native_files_error(diagnostic['native_files_error']))
     def test_tree_walk_persistent_failure_keeps_finite_diagnostic(self):
         calls=[]
         def broken(_original,_phase):
@@ -334,7 +362,7 @@ class Policy(unittest.TestCase):
         return output.getvalue().encode()
 
     def test_actual_wrapper_retains_finite_helper_stage_and_nonzero(self):
-        for stage in ('context','guard-route','window','tree','tree-provider','tree-walk','cells','final-guard'):
+        for stage in ('context','guard-route','window','tree','tree-provider','provider-enumerate','provider-receipt','tree-walk','cells','final-guard'):
             good={'phase':'mapped','stage':stage,'exception_type':'RuntimeError'}
             output=self.wrapper_failure(json.dumps({'native_files_error':good}).encode())
             self.assertEqual(json.loads(output),{'native_files_error':good})

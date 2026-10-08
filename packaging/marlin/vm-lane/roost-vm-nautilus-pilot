@@ -492,6 +492,7 @@ def provider_app(value,query):
     from gi.repository import Atspi
     import pyatspi
     Atspi.set_timeout(1000,1000)
+    error_stage('provider-enumerate')
     desktop=query(lambda:pyatspi.Registry.getDesktop(0))
     count=query(lambda:desktop.childCount)
     if type(count) is not int or not 0<=count<=256:raise RuntimeError('accessibility desktop bound')
@@ -505,9 +506,12 @@ def provider_app(value,query):
             if type(owner) is not str or re.fullmatch(r':[0-9]{1,10}\.[0-9]{1,10}',owner) is None:raise RuntimeError('accessible provider unique name bound')
             pid=query(lambda:query_connection(connection,'GetConnectionUnixProcessID',owner))
             if pid==value['nautilus']['pid']:
+                error_stage('provider-receipt')
                 receipt['provider']=provider_receipt(connection,owner,value['nautilus'])
+                error_stage('provider-enumerate')
                 apps.append(app)
         if len(apps)!=1:raise RuntimeError('original accessible Files provider ambiguous')
+        error_stage('provider-receipt')
         if 'accessibility' in value and receipt!=value['accessibility']:raise RuntimeError('original accessible Files provider changed')
     finally:connection.close_sync(None)
     return apps[0],pyatspi,receipt
@@ -729,7 +733,7 @@ def main():
                         break
                     except RuntimeError:
                         attempts+=1
-                        if ERROR_STAGE!='tree-walk' or attempts>=TREE_WALK_ATTEMPTS:
+                        if ERROR_STAGE not in ('tree-walk','provider-enumerate') or attempts>=TREE_WALK_ATTEMPTS:
                             raise
                         QUERY_CONTEXT=None
         except ReadyLater:
