@@ -2662,6 +2662,8 @@ cstate ".focused == $above_id and .focused_rect == [0, 0, $WIDTH, $HEIGHT]" "occ
 # The lower proof window sits wholly under the opaque fullscreen window.
 cstate "([.frame_cost[] | .culled_windows[]] | index($below_id) != null) and ([.frame_cost[] | .drawn_windows[]] | index($above_id) != null)" "lower window culled" ||
     fail G-OCCLUSION-CULL "the window under an opaque fullscreen window was still drawn"
+cstate ".throttled_windows | index($below_id) != null and index($above_id) == null" "lower window frame callbacks throttled" ||
+    fail G-OCCLUSION-CULL "the hidden window kept full-rate frame callbacks"
 cp "$CSTATE" "$ARTIFACTS/occlusion-fullscreen.json"
 scrot "$ARTIFACTS/occlusion-fullscreen.png" >/dev/null
 printf '{"generation":2,"request":"unfullscreen"}\n' >"$occlusion_requests"
@@ -2669,13 +2671,15 @@ cstate ".focused == $above_id and .focused_rect != [0, 0, $WIDTH, $HEIGHT]" "occ
     fail G-OCCLUSION-CULL "upper proof window did not unfullscreen"
 cstate "([.frame_cost[] | .drawn_windows[]] | index($below_id) != null) and ([.frame_cost[] | .culled_windows[]] | index($below_id) == null)" "lower window drawn again" ||
     fail G-OCCLUSION-CULL "the lower window stayed culled under a translucent-edged window"
+cstate ".throttled_windows | index($below_id) == null" "lower window frame callbacks restored" ||
+    fail G-OCCLUSION-CULL "the shown window stayed throttled"
 cp "$CSTATE" "$ARTIFACTS/occlusion-restored.json"
 # shellcheck disable=SC2086
 kill $OCCLUSION_PIDS 2>/dev/null || true
 OCCLUSION_PIDS=""
 cstate ".windows | length == $occlusion_count" "occlusion proof windows removed" ||
     fail G-OCCLUSION-CULL "occlusion proof windows did not unmap"
-pass G-OCCLUSION-CULL "an opaque fullscreen window culls the windows beneath it; translucent edges do not"
+pass G-OCCLUSION-CULL "an opaque fullscreen window culls and throttles the windows beneath it; translucent edges do not"
 gsettings set org.gnome.desktop.peripherals.keyboard repeat-interval 30
 gsettings set org.gnome.desktop.input-sources sources "[('xkb', 'us')]"
 cstate '.keyboard.layouts == ["English (US)"]' "one source" ||

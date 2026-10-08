@@ -176,9 +176,12 @@ The compositor state (`ROOST_COMPOSITOR_STATE`) carries `frame_cost`, one
 entry per output describing its last drawn frame: `rendered` and `culled`
 element counts, `damage_rects` and `damage_area` against `output_area`,
 and the window ids that were `drawn_windows` or wholly `culled_windows`
-(hidden behind opaque surfaces). Proof `G-OCCLUSION-CULL` fullscreens an
-opaque window over another and requires the lower one to be culled, then
-drawn again once the upper window's translucent shadow returns.
+(hidden behind opaque surfaces). `throttled_windows` lists the windows
+whose frame callbacks run at the hidden rate (about 1 Hz): off the scene
+or wholly culled, unless the overview, the switcher or a cast shows them.
+Proof `G-OCCLUSION-CULL` fullscreens an opaque window over another and
+requires the lower one to be culled and throttled, then drawn at full
+rate again once the upper window's translucent shadow returns.
 
 ## Parity ledger check
 

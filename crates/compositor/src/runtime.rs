@@ -1653,6 +1653,27 @@ impl Runtime {
             .map(|(name, cost)| (name.clone(), cost.to_json()))
             .collect::<serde_json::Map<_, _>>()
             .into();
+        // Windows whose frame callbacks run at the hidden rate.
+        doc["throttled_windows"] = if self.overview_progress > 0.0
+            || !self.switcher_thumbnails.is_empty()
+            || !self.casts.is_empty()
+        {
+            serde_json::json!([])
+        } else {
+            let scene: Vec<u64> = self
+                .manager
+                .render_entries()
+                .iter()
+                .map(|(id, _, _)| *id)
+                .collect();
+            let shown = crate::occlusion::shown_windows(&scene, self.frame_costs.values());
+            serde_json::json!(snapshot
+                .windows
+                .iter()
+                .map(|w| w.id)
+                .filter(|id| !shown.contains(id))
+                .collect::<Vec<_>>())
+        };
         doc["wallpaper_diagnostics"] = if self.is_locked() {
             serde_json::Value::Null
         } else {
@@ -3262,6 +3283,10 @@ impl Runtime {
         #[cfg(feature = "drm")]
         let timing_roots = crate::frame_timing::frame_roots(&self.state, &self.manager);
         let desktop = self.background_desktop();
+        // Window clones (overview, switcher) and casts show windows the
+        // scene hides: their frame callbacks keep full rate then.
+        let clones_shown =
+            overview.is_some() || !self.switcher_thumbnails.is_empty() || !self.casts.is_empty();
         match &mut self.backend {
             Backend::Winit(backend) => {
                 backend.window().set_cursor_visible(blank_alpha < 1.0);
@@ -3350,7 +3375,8 @@ impl Runtime {
                 }
                 self.frame_costs.insert("winit".to_owned(), drawn);
                 send_surface_scales(&self.state, &self.manager);
-                send_frame_callbacks(&self.state, &self.manager);
+                let hidden = hidden_surfaces(&self.manager, &self.frame_costs, clones_shown);
+                send_frame_callbacks(&self.state, &self.manager, &hidden);
                 backend
                     .submit(Some(&[damage]))
                     .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
@@ -3608,7 +3634,8 @@ impl Runtime {
                     // A pending page flip is not another rendered frame.
                     // Granting callbacks on every client dispatch here would
                     // let redraws outrun the display and keep the loop busy.
-                    send_frame_callbacks(&self.state, &self.manager);
+                    let hidden = hidden_surfaces(&self.manager, &self.frame_costs, clones_shown);
+                    send_frame_callbacks(&self.state, &self.manager, &hidden);
                     self.stats.frames += 1;
                 }
             }
@@ -4414,7 +4441,50 @@ fn send_surface_scales(state: &State, manager: &WindowManager) {
     }
 }
 
-fn send_frame_callbacks(state: &State, manager: &WindowManager) {
+/// Root surfaces of the managed windows nothing on screen shows (#503),
+/// whose frame callbacks drop to [`HIDDEN_FRAME_INTERVAL`](crate::occlusion::HIDDEN_FRAME_INTERVAL).
+/// Empty while window clones or casts show every window. A toplevel the
+/// window manager does not track (not yet mapped, or not a managed
+/// window) is never throttled.
+fn hidden_surfaces(
+    manager: &WindowManager,
+    costs: &std::collections::BTreeMap<String, FrameCost>,
+    clones_shown: bool,
+) -> Vec<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface> {
+    if clones_shown {
+        return Vec::new();
+    }
+    let scene: Vec<u64> = manager
+        .render_entries()
+        .iter()
+        .map(|(id, _, _)| *id)
+        .collect();
+    let shown = crate::occlusion::shown_windows(&scene, costs.values());
+    manager
+        .window_ids()
+        .filter(|id| !shown.contains(id))
+        .filter_map(|id| manager.surface_of(id))
+        .collect()
+}
+
+/// Whether a toplevel has configures it has not yet acknowledged. Clients
+/// may wait on a frame callback before drawing (and acking) the new
+/// state; like Mutter's flush after a configure, they keep full rate.
+fn awaiting_configure(toplevel: &smithay::wayland::shell::xdg::ToplevelSurface) -> bool {
+    smithay::wayland::compositor::with_states(toplevel.wl_surface(), |states| {
+        states
+            .data_map
+            .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+            .and_then(|data| data.lock().ok().map(|d| !d.pending_configures().is_empty()))
+            .unwrap_or(false)
+    })
+}
+
+fn send_frame_callbacks(
+    state: &State,
+    manager: &WindowManager,
+    hidden: &[smithay::reexports::wayland_server::protocol::wl_surface::WlSurface],
+) {
     // Frame callback time measures elapsed time, independently of refresh
     // rate, idle periods, or how many frames the backend has queued.
     let time = Duration::from(state.presentation_now());
@@ -4422,12 +4492,19 @@ fn send_frame_callbacks(state: &State, manager: &WindowManager) {
         return;
     };
     for surface in state.toplevels() {
+        // A hidden window has no scan-out output: Smithay then sends its
+        // callbacks only once the throttle interval has passed.
+        let shown = !hidden.contains(surface.wl_surface()) || awaiting_configure(&surface);
         send_frames_surface_tree(
             surface.wl_surface(),
             &output,
             time,
-            Some(Duration::ZERO),
-            |_, _| Some(output.clone()),
+            Some(if shown {
+                Duration::ZERO
+            } else {
+                crate::occlusion::HIDDEN_FRAME_INTERVAL
+            }),
+            |_, _| shown.then(|| output.clone()),
         );
     }
     for (surface, _, _) in crate::layer::layer_layout(state) {

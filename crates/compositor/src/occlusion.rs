@@ -224,6 +224,38 @@ impl FrameCost {
     }
 }
 
+/// How often a hidden window's surfaces get frame callbacks (#503).
+/// Mutter sends an obscured surface none until it shows again; a slow
+/// beat instead keeps clients that wait on a callback before acting on
+/// anything (a configure's commit, a hidden video's position) live.
+pub(crate) const HIDDEN_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(995);
+
+/// Windows something on screen shows: drawn on some output, or in the
+/// scene (`scene`: active workspace, not minimized) and not wholly culled
+/// on every output that drew it. Every other window is hidden: another
+/// workspace, minimized, or behind opaque windows. Callers exempt frames
+/// that show window clones (overview, switcher) or stream windows (casts).
+pub(crate) fn shown_windows<'a>(
+    scene: &[u64],
+    costs: impl IntoIterator<Item = &'a FrameCost>,
+) -> Vec<u64> {
+    let mut drawn = Vec::new();
+    let mut culled = Vec::new();
+    for cost in costs {
+        drawn.extend_from_slice(&cost.drawn_windows);
+        culled.extend_from_slice(&cost.culled_windows);
+    }
+    let mut shown: Vec<u64> = scene
+        .iter()
+        .copied()
+        .filter(|id| !culled.contains(id))
+        .chain(drawn)
+        .collect();
+    shown.sort_unstable();
+    shown.dedup();
+    shown
+}
+
 /// Total area of non-overlapping rectangles.
 pub(crate) fn area(rects: &[PhysicalRect]) -> i64 {
     rects
@@ -382,6 +414,24 @@ mod tests {
         let json = cost.to_json();
         assert_eq!(json["culled"], 3);
         assert_eq!(json["culled_windows"], serde_json::json!([5]));
+    }
+
+    #[test]
+    fn hidden_windows_are_off_scene_or_wholly_culled() {
+        let cost = |drawn: Vec<u64>, culled: Vec<u64>| FrameCost {
+            drawn_windows: drawn,
+            culled_windows: culled,
+            ..FrameCost::default()
+        };
+        // 1 drawn, 2 culled, 3 on another workspace (not in the scene),
+        // 4 in the scene but not yet drawn (no buffer, or no frame yet).
+        let costs = [cost(vec![1], vec![2])];
+        assert_eq!(shown_windows(&[1, 2, 4], &costs), vec![1, 4]);
+        // A window culled on one output but drawn on another shows.
+        let costs = [cost(vec![1], vec![2]), cost(vec![2], vec![])];
+        assert_eq!(shown_windows(&[1, 2], &costs), vec![1, 2]);
+        // Before any frame nothing is known to be culled.
+        assert_eq!(shown_windows(&[1], &[]), vec![1]);
     }
 
     #[test]
