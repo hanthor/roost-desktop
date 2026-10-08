@@ -1,6 +1,6 @@
 # Maintainer: Roost contributors <https://github.com/hanthor/roost-desktop>
 #
-# Arch Linux package for Roost, the target format for TunaOS Marlin (#69).
+# Arch Linux package for Tuna Desktop (formerly Roost), the target format for TunaOS Marlin (#69).
 #
 # Release builds fetch the tagged source. CI and local builds set
 # ROOST_LOCAL_SRC to a checkout instead:
@@ -11,7 +11,7 @@
 pkgname=roost
 pkgver=0.1.0
 pkgrel=1
-pkgdesc='GNOME-style Wayland desktop session in Rust (nested developer preview)'
+pkgdesc='Tuna Desktop: GNOME-style Wayland desktop session in Rust (nested developer preview)'
 arch=('x86_64')
 url='https://github.com/hanthor/roost-desktop'
 license=('GPL-3.0-or-later')

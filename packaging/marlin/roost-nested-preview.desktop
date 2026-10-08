@@ -1,6 +1,6 @@
 [Desktop Entry]
-Name=Roost (nested preview)
-Comment=Run the Roost desktop in a window inside this session
+Name=Tuna Desktop (nested preview)
+Comment=Run Tuna Desktop in a window inside this session
 Exec=roost-session
 Icon=preferences-desktop
 Terminal=false
