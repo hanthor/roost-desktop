@@ -66,6 +66,25 @@ def properties(obj):
     return obj.get('info', {}).get('props', {})
 
 
+def stream_owner_pid(objects, row):
+    """Protocol-authenticated owner PID of a stream node via its Client.
+
+    Stream nodes need not carry application.process.id; the owning Client
+    always carries the protocol-authenticated pipewire.sec.pid.
+    """
+    try:
+        client_id = int(row['props']['client.id'])
+    except (KeyError, TypeError, ValueError):
+        return 0
+    for obj in objects:
+        if obj.get('type') == 'PipeWire:Interface:Client' and obj['id'] == client_id:
+            try:
+                return int(properties(obj)['pipewire.sec.pid'])
+            except (KeyError, TypeError, ValueError):
+                return 0
+    return 0
+
+
 def secure_client(objects, node, expected_pid=None):
     client_id = int(node['props']['client.id'])
     clients = [obj for obj in objects if obj.get('type') == 'PipeWire:Interface:Client' and obj['id'] == client_id]
@@ -313,9 +332,13 @@ def capture_case(name, record):
                 seen = [(row.get('id'), (row.get('props') or {}).get('application.process.binary')) for row in outputs[:4]]
                 raise RuntimeError('output stream is not uniquely observed: ' + json.dumps(seen)[:256])
             for row in outputs:
-                if row['props'].get('application.process.binary') != 'canberra-gtk-play':
+                pid = stream_owner_pid(objects, row)
+                try:
+                    exe_name = Path(os.readlink(f'/proc/{pid}/exe')).name if pid else None
+                except OSError:
+                    exe_name = None
+                if exe_name != 'canberra-gtk-play':
                     raise RuntimeError('unrelated output audio stream contaminates bell capture')
-                pid = int(row['props']['application.process.id'])
                 actual = identity(pid)
                 secure = secure_client(objects, row)
                 route = graph_route(objects, row['id'], result['sink']['id'])
@@ -342,7 +365,7 @@ def capture_case(name, record):
                 actual['theme'] = result['before']['policy']['theme']
                 result['player_observations'].append(actual)
             inputs = [row for row in streams if row['props'].get('node.name') == node
-                      and int(row['props'].get('application.process.id', 0)) == recorder_pid]
+                      and stream_owner_pid(objects, row) == recorder_pid]
             if armed and len(inputs) == 1 and inputs[0]['state'] == 'running':
                 identity(recorder_pid, result['recorder'])
                 secure = secure_client(objects, inputs[0], recorder_pid)
