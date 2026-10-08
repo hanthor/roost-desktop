@@ -12,9 +12,35 @@ import stat
 import re
 import subprocess
 import sys
+from gnome_reference import validate_reference
 from gnome_failed_capture import read_marker, write_marker, read_raw, identity, process_start, checked_file, validate_receipt
 from perf_trace_diagnostics import decode, encode, Context
 import time
+
+
+def reference_image():
+    from importlib.machinery import SourceFileLoader
+    from importlib.util import spec_from_loader, module_from_spec
+    loader = SourceFileLoader('reference', '/usr/libexec/roost-gnome-reference')
+    spec = spec_from_loader(loader.name, loader)
+    module = module_from_spec(spec)
+    loader.exec_module(module)
+    # The caller explicitly checks the returned profile; no inferred fallback.
+    raw = module.protected('/usr/share/roost-perf-reference.json', 4096)
+    receipt = json.loads(raw)
+    return module.image(receipt['profile'])
+
+
+def stock_reference():
+    uid = pwd.getpwnam('roost-test').pw_uid
+    result = subprocess.run(['runuser', '-u', 'roost-test', '--', 'env', '-i', 'PATH=/usr/bin:/bin',
+                             f'XDG_RUNTIME_DIR=/run/user/{uid}',
+                             f'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/{uid}/bus',
+                             'python3', '/usr/libexec/roost-gnome-reference'],
+                            capture_output=True, text=True, timeout=90, check=True)
+    if len(result.stdout) > 32768:
+        raise ValueError('stock reference response exceeds bound')
+    return validate_reference(json.loads(result.stdout), 'stock')
 
 
 def notify(index):
@@ -228,12 +254,16 @@ def gnome_trace(action, index):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("clock", "notify", "frames",
+    parser.add_argument("action", choices=("clock", "notify", "frames", "reference-image", "stock-reference",
                                           "gnome-trace-start", "gnome-trace-stop", "gnome-trace-read",
                                           "gnome-trace-failed-stop", "gnome-trace-failed-stop-read"))
     parser.add_argument("--index", type=int, default=0)
     args = parser.parse_args()
     result = {}
+    if args.action == "reference-image":
+        result["reference_image"] = reference_image()
+    if args.action == "stock-reference":
+        result["stock_reference"] = stock_reference()
     if args.action == "notify":
         result["notification_id"] = notify(args.index)
     if args.action == "frames":
