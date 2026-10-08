@@ -39,3 +39,7 @@ records per desktop, guest clock boundaries, ten accepted notifications each,
 and raw resource samples. It identifies high Roost idle CPU and slower median
 presentation cadence in the older trusted package. It does not qualify later
 repaint changes or close the remaining input tracing and soak requirements.
+
+The [2026-10-08 CPU investigation](2026-10-08-cpu-investigation.md)
+attributes the measured CPU to processes and workload phases, records the
+overview-card and plane-damage fixes, and ranks the remaining work for #503.
