@@ -46,6 +46,7 @@ mod services;
 mod shell_dbus;
 mod shortcut_consent;
 mod switcher;
+mod transient;
 mod tray;
 mod wifi;
 mod window_menu;
@@ -260,6 +261,8 @@ fn panel_menu_button(
             window.set_focus_visible(false);
         }
     });
+    // GNOME's BoxPointer fades a panel menu in (150 ms).
+    transient::fade_in_popover(popover);
     button
 }
 
@@ -359,8 +362,8 @@ fn qs_menu_tile(icon: &str, title: &str, subtitle: Option<&str>, menu: &QsMenu) 
     arrow.update_property(&[gtk::accessible::Property::Label(&format!("{title} Menu"))]);
     outer.append(&arrow);
     {
-        let revealer = menu.revealer.clone();
-        arrow.connect_toggled(move |a| revealer.set_visible(a.is_active()));
+        let motion = menu.motion.clone();
+        arrow.connect_toggled(move |a| motion.set_open(a.is_active()));
     }
     {
         let arrow = arrow.clone();
@@ -391,7 +394,11 @@ fn qs_menu_tile(icon: &str, title: &str, subtitle: Option<&str>, menu: &QsMenu) 
 /// icon and title, then a section of items. Shown in place, spanning
 /// the grid under its toggle's row.
 struct QsMenu {
+    /// The menu's open state: visible while open (or closing).
     revealer: gtk::Box,
+    /// Grows and fades the menu open and closed (GNOME 51's
+    /// QuickToggleMenu).
+    motion: Rc<transient::Submenu>,
     header_icon: gtk::Image,
     section: gtk::Box,
 }
@@ -399,8 +406,12 @@ struct QsMenu {
 impl QsMenu {
     fn new(icon: &str, title: &str) -> Self {
         let revealer = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        revealer.add_css_class("qs-menu");
         revealer.set_visible(false);
+        let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        body.add_css_class("qs-menu");
+        let bin = transient::MotionBin::new(&body);
+        revealer.append(&bin);
+        let motion = transient::Submenu::new(&revealer, &bin);
         let header = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         header.add_css_class("qs-menu-header");
         let header_icon = gtk::Image::from_icon_name(icon);
@@ -410,11 +421,12 @@ impl QsMenu {
         let label = gtk::Label::new(Some(title));
         label.add_css_class("qs-menu-title");
         header.append(&label);
-        revealer.append(&header);
+        body.append(&header);
         let section = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        revealer.append(&section);
+        body.append(&section);
         Self {
             revealer,
+            motion,
             header_icon,
             section,
         }
@@ -622,8 +634,8 @@ fn quick_settings_popover(
     }
     let power_menu = power_menu_box.revealer.clone();
     {
-        let menu = power_menu.clone();
-        power.connect_clicked(move |_| menu.set_visible(!menu.is_visible()));
+        let motion = power_menu_box.motion.clone();
+        power.connect_clicked(move |_| motion.set_open(!motion.is_open()));
     }
     {
         let popover = popover.clone();
@@ -668,8 +680,8 @@ fn quick_settings_popover(
     sound_arrow.update_property(&[gtk::accessible::Property::Label("Open sound output menu")]);
     sound_arrow.set_visible(false);
     {
-        let revealer = sound_menu_ui.revealer.clone();
-        sound_arrow.connect_toggled(move |a| revealer.set_visible(a.is_active()));
+        let motion = sound_menu_ui.motion.clone();
+        sound_arrow.connect_toggled(move |a| motion.set_open(a.is_active()));
     }
     {
         let arrow = sound_arrow.clone();

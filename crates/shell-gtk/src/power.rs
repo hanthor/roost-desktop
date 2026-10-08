@@ -140,6 +140,8 @@ pub struct PowerUi {
     nested: bool,
     conn: Rc<RefCell<Option<gio::DBusConnection>>>,
     dialog: gtk::ApplicationWindow,
+    /// The modal fade in and out (`ModalDialog`, 100 ms).
+    fade: crate::transient::ModalFade,
     title: gtk::Label,
     body: gtk::Label,
     confirm: gtk::Button,
@@ -197,6 +199,7 @@ impl PowerUi {
         dialog.set_child(Some(&card));
 
         let ui = Rc::new(Self {
+            fade: crate::transient::ModalFade::new(&dialog),
             nested,
             conn: Rc::new(RefCell::new(None)),
             dialog,
@@ -293,7 +296,7 @@ impl PowerUi {
         self.title.set_text(action.title());
         self.confirm.set_label(action.title());
         self.body.set_text(&action.countdown_text(COUNTDOWN_S));
-        self.dialog.present();
+        self.fade.present();
         // Cancel holds the focus when the dialog opens, as in GNOME.
         if let Some(cancel) = self.confirm.prev_sibling().and_downcast::<gtk::Button>() {
             cancel.grab_focus();
@@ -324,12 +327,12 @@ impl PowerUi {
     fn cancel(&self) {
         self.stop_timer();
         self.pending.set(None);
-        self.dialog.set_visible(false);
+        self.fade.hide();
     }
 
     fn run_pending(&self) {
         self.stop_timer();
-        self.dialog.set_visible(false);
+        self.fade.hide();
         if let Some(action) = self.pending.take() {
             self.perform(action);
         }
