@@ -1,9 +1,21 @@
 #!/bin/bash
 set -eu
+# CI receipts use fixed allowlisted English labels. Keep this locale confined
+# to the fixture session; production sessions retain the user's locale.
+export LC_ALL=C.UTF-8
+export LANG=C.UTF-8
+export LANGUAGE=C
 export XDG_SESSION_TYPE=wayland
 # CI-only anonymous overview action-to-scanout trace, capped at 64 actions.
 export ROOST_PERF_TRACE=1
+# Fixed public-query/catalog diagnostics only in this controlled CI session.
+export ROOST_VM_PUBLIC_SEARCH_DIAGNOSTICS=1
 export ROOST_COMPOSITOR_STATE="$XDG_RUNTIME_DIR/roost-vm-state.json"
+# Enable only upstream token-gated presenter recording in this CI fixture.
+# This does not replace Speech Dispatcher or add any speech-consuming extension.
+export ORCA_TEST_RPC_SECRET="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+umask 077
+printf '%s' "$ORCA_TEST_RPC_SECRET" > "$XDG_RUNTIME_DIR/roost-vm-orca-token"
 # greetd attaches session output to its VT. Route only this CI fixture's
 # output to journald, whose existing fixture forwards it to the serial port.
 exec systemd-cat --identifier=roost-vm-session /usr/bin/roost-session
