@@ -128,6 +128,65 @@ def check_panel(path):
     return ok, f"{w}x{h}, y=5 row {black:.0%} black, {len(body)} body colors"
 
 
+def kernel_compositor_principal(inventory):
+    uid = inventory["session_uid"]
+    if type(uid) is not int or not 0 < uid <= (1 << 32)-1:
+        raise ValueError("actual nonroot native session UID unavailable")
+    processes = [p for p in inventory["processes"] if p["executable"] == "roost-compositor"]
+    if len(processes) != 1:
+        raise ValueError("unique original native compositor unavailable")
+    process = processes[0]
+    if type(process["uid"]) is not int or process["uid"] != uid or type(process["pid"]) is not int or not 0 < process["pid"] <= (1 << 31)-1 or type(process["start_ticks"]) is not int or not 0 < process["start_ticks"] <= (1 << 64)-1:
+        raise ValueError("original native compositor principal missing")
+    return {key: process[key] for key in ("pid", "uid", "executable", "start_ticks")}
+
+
+def kernel_commit_receipt(inventory, previous=None, new_epoch=False, expected_principal=None):
+    """Controlled genuine VM diagnostic admission, not physical-pixel evidence."""
+    integer = lambda value: type(value) is int and 0 < value <= (1 << 64)-1
+    principal = kernel_compositor_principal(inventory)
+    if expected_principal is not None and principal != expected_principal:
+        raise ValueError("kernel receipt replaced original lifecycle compositor")
+    observation = inventory["state"].get("native_kernel_commits")
+    if not isinstance(observation, dict) or set(observation) != {"commit_api", "current_native_generation", "current_layout_generation", "outputs"} or observation.get("commit_api") not in ("atomic", "legacy"):
+        raise ValueError("actual native kernel commit diagnostics missing")
+    generation = observation.get("current_native_generation")
+    layout = observation.get("current_layout_generation")
+    outputs = observation.get("outputs")
+    if not integer(generation) or type(layout) is not int or not 0 <= layout <= (1 << 64)-1 or not isinstance(outputs, list) or not 1 <= len(outputs) <= 64:
+        raise ValueError("current native commit authority unavailable")
+    crtcs, cookies, devices = set(), set(), set()
+    for output in outputs:
+        if not isinstance(output, dict) or set(output) != {"crtc", "last_completed", "completion_count", "rejected_cookie_count", "queue_error_count", "accepted_pending_cookie"}: raise ValueError("invalid native output receipt")
+        completed = output.get("last_completed")
+        if not isinstance(completed, dict) or set(completed) != {"cookie", "crtc", "device", "commit_epoch", "layout_generation", "sequence", "timestamp_clock", "timestamp_secs", "timestamp_subsec_ns"}: raise ValueError("no successful matched kernel completion")
+        crtc = output.get("crtc"); cookie = completed.get("cookie")
+        if not integer(crtc) or crtc > (1 << 32)-1 or crtc in crtcs or type(completed.get("crtc")) is not int or completed.get("crtc") != crtc or not integer(cookie) or cookie in cookies:
+            raise ValueError("kernel CRTC or scalar cookie receipt mismatch")
+        if type(completed.get("commit_epoch")) is not int or type(completed.get("layout_generation")) is not int or completed.get("commit_epoch") != generation or completed.get("layout_generation") != layout or not integer(completed.get("device")) or not integer(output.get("completion_count")):
+            raise ValueError("historical completion does not qualify current native authority")
+        if completed.get("timestamp_clock") not in ("monotonic", "realtime") or type(completed.get("timestamp_secs")) is not int or not 0 <= completed["timestamp_secs"] <= (1 << 64)-1 or type(completed.get("timestamp_subsec_ns")) is not int or not 0 <= completed["timestamp_subsec_ns"] < 1_000_000_000 or type(completed.get("sequence")) is not int or not 0 <= completed["sequence"] <= (1 << 32)-1:
+            raise ValueError("invalid actual kernel timestamp or sequence")
+        if any(type(output.get(key)) is not int or not 0 <= output[key] <= (1 << 64)-1 for key in ("queue_error_count", "rejected_cookie_count")):
+            raise ValueError("invalid bounded native diagnostic counters")
+        pending = output.get("accepted_pending_cookie")
+        if pending is not None and (not integer(pending) or pending == cookie):
+            raise ValueError("completed cookie still claims accepted pending authority")
+        crtcs.add(crtc); cookies.add(cookie); devices.add(completed["device"])
+    if len(devices) != 1: raise ValueError("original selected native device mismatch")
+    receipt = {"principal": principal, "observation": observation}
+    if previous:
+        old = previous["observation"]
+        old_outputs = {output["crtc"]: output for output in old["outputs"]}
+        if receipt["principal"] != previous["principal"] or observation["commit_api"] != old["commit_api"] or set(old_outputs) != crtcs or generation < old["current_native_generation"] or (new_epoch and generation <= old["current_native_generation"]):
+            raise ValueError("original native principal or new transition epoch mismatch")
+        for output in outputs:
+            prior = old_outputs[output["crtc"]]
+            if output["completion_count"] <= prior["completion_count"] or output["last_completed"]["cookie"] <= prior["last_completed"]["cookie"] or output["last_completed"]["device"] != prior["last_completed"]["device"]:
+                raise ValueError("no fresh original-device kernel completion after transition")
+    return receipt
+
+
 def run_lifecycle(qmp, agent, out, serial_path, record):
     """Actual DRM/logind lifecycle on the final boot, with unchanged app identities."""
     evidence = os.path.join(out, "lifecycle")
@@ -147,6 +206,38 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
                 return state
             time.sleep(0.2)
         raise RuntimeError("lifecycle state did not arrive within its deadline")
+
+    kernel_previous = None
+    def kernel_progress(label, new_epoch=False):
+        nonlocal kernel_previous
+        observations = []
+        # Poll admission window; an already running bounded GuestAgent call
+        # can finish later. Never admit new attempts after this deadline.
+        deadline = time.monotonic() + 15
+        admitted = None
+        attempts = 0
+        try:
+            while time.monotonic() < deadline and attempts < 80:
+                attempts += 1
+                state = agent.run("inventory")
+                try:
+                    # Retain ONLY fully validated fixed public diagnostic schema.
+                    current = kernel_commit_receipt(state, expected_principal=original_compositor)
+                    observations.append({"receipt": current})
+                    admitted = kernel_commit_receipt(state, kernel_previous, new_epoch, expected_principal=original_compositor)
+                    break
+                except ValueError:
+                    if not observations or "receipt" in observations[-1]:
+                        observations.append({"receipt_admitted": False})
+                    time.sleep(0.2)
+            if admitted is None:
+                raise RuntimeError("fresh original native kernel completion receipt did not arrive")
+            kernel_previous = admitted
+            record("V-KERNEL-COMMIT-"+label.upper(), True,
+                   "original UID/PID/start; actual "+admitted["observation"]["commit_api"]+" successful-cookie callback/true CRTC/current epoch+layout; fresh completion progress; pixels independently tested")
+        finally:
+            with open(os.path.join(evidence, "kernel-commit-"+label+".json"), "w") as stream:
+                json.dump({"admitted": admitted, "observations": observations}, stream, indent=2)
 
     def frame(label):
         qmp.frame(os.path.join(evidence, f"{label}.png"))
@@ -277,6 +368,16 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     record("V-LIFECYCLE-OWNER", nonroot and intact, "root probe, non-root greetd session and three real app processes/surfaces")
     if not nonroot or not intact or before["state"]["locked"]:
         raise RuntimeError("lifecycle preconditions failed")
+    original_compositor = kernel_compositor_principal(before)
+    kernel_progress("initial")
+    brightness_contract=agent.run("brightness-contract")
+    with open(os.path.join(evidence,"brightness-contract.json"),"w") as stream:
+        json.dump(brightness_contract,stream,indent=2)
+    if not brightness_contract.get("pass") or not brightness_contract.get("native") or brightness_contract.get("backlights"):
+        raise RuntimeError("actual unsupported native brightness contract not qualified")
+    record("V-BRIGHTNESS-CONTRACT",True,
+        "original shell brightness wire interface, actual empty kernel backlight inventory, false capability and harmless policy resets; no physical-control proof")
+
     # Real distribution Orca owns a credential-verified bus name under the ordinary
     # session user. Settings writes trigger Roost's consumer, not test start/stop.
     orca_observations = []
@@ -651,6 +752,8 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
            and same_apps(before, after_vt) and delta < 0.20 and repainted,
            f"actual VT away/back, exact app/process identities, body difference {delta:.2%}, fresh count/client repaint {repaint_pixels} pixels")
 
+    kernel_progress("vt", new_epoch=True)
+
     def suspend_and_check(label="", test_id="V-SUSPEND"):
         def gpu_snapshot(phase):
             # Retain device/console selection alongside guest DRM ownership.
@@ -740,6 +843,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
         if not fail_closed or not queues_alive:
             raise RuntimeError("resume exposed/replaced the session or fresh host GPU uploads are missing")
 
+        kernel_progress(label+"resume", new_epoch=True)
         return resumed
 
     # Preserve the authorized single-S3 contract for this performance lane.
@@ -833,6 +937,8 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
            and varied_mask(frame("locked-vt")),
            "VT away/back while locked repaints the mask and preserves app/process identities")
 
+    kernel_progress("locked-vt", new_epoch=True)
+
     agent.run("deny-unlock")
     try:
         qmp.keys("esc")
@@ -863,6 +969,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
            and agent.run("input-count") == delivered_input
            and varied_mask(frame("shell-recovered")),
            "portal stopped and lock UI killed; supervisor replacement stays locked/masked with original apps alive")
+    kernel_progress("shell-recovered")
     qmp.keys("ret")
     time.sleep(1)
     qmp.keys("ctrl", "a")

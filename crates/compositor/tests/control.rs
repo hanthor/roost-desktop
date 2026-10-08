@@ -522,6 +522,17 @@ fn hub_handshake(hub: &mut ControlHub, model: &mut StateModel, client: &mut Unix
     assert!(matches!(client_read(client), Message::Hello { .. }));
     assert!(matches!(client_read(client), Message::Snapshot { .. }));
     assert!(matches!(client_read(client), Message::Overview { .. }));
+    // Current-minor newcomers receive explicit authority revocation even
+    // before a native device or EDID identity has been discovered. Assert
+    // these real ordered frames so later checks observe their own event.
+    assert_eq!(
+        client_read(client),
+        Message::NativeOutputInventory { outputs: vec![] }
+    );
+    assert_eq!(
+        client_read(client),
+        Message::MonitorIdentityInventory { outputs: vec![] }
+    );
 }
 
 #[test]
@@ -589,4 +600,144 @@ fn private_tempdir() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     dir
+}
+
+#[test]
+fn native_owner_inventory_is_minor_gated_and_empty_revocation_is_real_wire() {
+    let owner = roost_shell_control::NativeOutputInfo {
+        name: "eDP-1".into(),
+        drm_device: libc::makedev(226, 0),
+        connector_id: 39,
+        connector_sysfs: "/sys/devices/drm/card0/card0-eDP-1".into(),
+        connector_device: 1,
+        connector_inode: 2,
+    };
+    for minor in [27, 28, 29] {
+        let (conn, mut client) = pair();
+        client_write(
+            &mut client,
+            &Message::Hello {
+                version: ProtocolVersion::new(CURRENT_VERSION.major, minor),
+            },
+        );
+        let mut session = Session::handshake(conn, &StateModel::new()).unwrap();
+        assert!(matches!(client_read(&mut client), Message::Hello { .. }));
+        assert!(matches!(client_read(&mut client), Message::Snapshot { .. }));
+        session
+            .send_native_outputs(std::slice::from_ref(&owner))
+            .unwrap();
+        session.send_native_outputs(&[]).unwrap();
+        session.send_overview(true).unwrap();
+        if minor >= 29 {
+            assert_eq!(
+                client_read(&mut client),
+                Message::NativeOutputInventory {
+                    outputs: vec![owner.clone()]
+                }
+            );
+            assert_eq!(
+                client_read(&mut client),
+                Message::NativeOutputInventory { outputs: vec![] }
+            );
+        }
+        assert_eq!(client_read(&mut client), Message::Overview { open: true });
+    }
+}
+
+#[test]
+fn optional_monitor_identity_is_minor30_gated_and_empty_revocation_is_real_wire() {
+    let info = roost_shell_control::MonitorIdentityInfo {
+        owner: roost_shell_control::NativeOutputInfo {
+            name: "eDP-1".into(),
+            drm_device: 226,
+            connector_id: 39,
+            connector_sysfs: "/sys/owned/connector".into(),
+            connector_device: 1,
+            connector_inode: 2,
+        },
+        edid: None,
+    };
+    for minor in [27, 28, 29, 30] {
+        let (conn, mut client) = pair();
+        client_write(
+            &mut client,
+            &Message::Hello {
+                version: ProtocolVersion::new(CURRENT_VERSION.major, minor),
+            },
+        );
+        let mut session = Session::handshake(conn, &StateModel::new()).unwrap();
+        assert!(matches!(client_read(&mut client), Message::Hello { .. }));
+        assert!(matches!(client_read(&mut client), Message::Snapshot { .. }));
+        session
+            .send_monitor_identities(std::slice::from_ref(&info))
+            .unwrap();
+        session.send_monitor_identities(&[]).unwrap();
+        session.send_overview(true).unwrap();
+        if minor >= 30 {
+            assert_eq!(
+                client_read(&mut client),
+                Message::MonitorIdentityInventory {
+                    outputs: vec![info.clone()]
+                }
+            );
+            assert_eq!(
+                client_read(&mut client),
+                Message::MonitorIdentityInventory { outputs: vec![] }
+            );
+        }
+        assert_eq!(client_read(&mut client), Message::Overview { open: true });
+    }
+}
+
+#[test]
+fn pending_accelerator_press_and_release_are_cancelled_before_locked_poll() {
+    use roost_shell_control::MODE_NORMAL;
+    let dir = private_tempdir();
+    let path = dir.path().join("control.sock");
+    let mut hub =
+        ControlHub::bind(path.clone(), std::rc::Rc::new(TokenStore::new()), SEAT_NAME).unwrap();
+    let mut model = StateModel::new();
+    let window = model.insert("private-window", None, 1);
+    let mut client = hub_client(&path);
+    hub_handshake(&mut hub, &mut model, &mut client);
+    hub.queue_accelerator(13, 5000, MODE_NORMAL);
+    hub.queue_accelerator_deactivated(13, 5001, MODE_NORMAL);
+    hub.cancel_pending_accelerators();
+    hub.set_locked(true);
+    hub.poll(&mut model);
+    let Message::Snapshot {
+        locked, windows, ..
+    } = client_read(&mut client)
+    else {
+        panic!("lock transition must send the legitimate privacy snapshot");
+    };
+    assert!(locked);
+    assert!(
+        windows.is_empty(),
+        "locked snapshot cannot disclose original window metadata"
+    );
+    client.set_nonblocking(true).unwrap();
+    let mut prefix = [0u8; 4];
+    assert_eq!(
+        client.read_exact(&mut prefix).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    // Unlock cannot resurrect a queued pre-lock event either.
+    hub.set_locked(false);
+    hub.poll(&mut model);
+    client.set_nonblocking(false).unwrap();
+    let Message::Snapshot {
+        locked, windows, ..
+    } = client_read(&mut client)
+    else {
+        panic!("unlock transition must send a fresh legitimate snapshot");
+    };
+    assert!(!locked);
+    assert_eq!(windows.len(), 1);
+    assert_eq!(windows[0].id, window);
+    client.set_nonblocking(true).unwrap();
+    assert_eq!(
+        client.read_exact(&mut prefix).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
 }

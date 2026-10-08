@@ -439,6 +439,36 @@ impl DrmSurface {
         }
     }
 
+    /// Commit a modeset with an independent nonzero completion cookie.
+    /// Cookie acceptance still requires successful ioctl and matching event.
+    pub fn commit_with_cookie<'a>(
+        &self,
+        planes: impl IntoIterator<Item = PlaneState<'a>>,
+        cookie: std::num::NonZeroU64,
+    ) -> Result<(), Error> {
+        match &*self.internal {
+            DrmSurfaceInternal::Atomic(surface) => surface.commit_with_cookie(planes, cookie),
+            DrmSurfaceInternal::Legacy(surface) => {
+                let framebuffer = ensure_legacy_planes(self, planes)?;
+                surface.commit_with_cookie(framebuffer, cookie)
+            }
+        }
+    }
+    /// Page-flip with an independent nonzero completion cookie.
+    pub fn page_flip_with_cookie<'a>(
+        &self,
+        planes: impl IntoIterator<Item = PlaneState<'a>>,
+        cookie: std::num::NonZeroU64,
+    ) -> Result<(), Error> {
+        match &*self.internal {
+            DrmSurfaceInternal::Atomic(surface) => surface.page_flip_with_cookie(planes, cookie),
+            DrmSurfaceInternal::Legacy(surface) => {
+                let framebuffer = ensure_legacy_planes(self, planes)?;
+                surface.page_flip_with_cookie(framebuffer, cookie)
+            }
+        }
+    }
+
     /// Returns a set of available planes for this surface
     pub fn planes(&self) -> &Planes {
         &self.planes

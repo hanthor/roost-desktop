@@ -129,6 +129,14 @@ fn handshake_shell(
         client_read(&mut client),
         Message::Overview { open: false }
     ));
+    assert_eq!(
+        client_read(&mut client),
+        Message::NativeOutputInventory { outputs: vec![] }
+    );
+    assert_eq!(
+        client_read(&mut client),
+        Message::MonitorIdentityInventory { outputs: vec![] }
+    );
     let Message::Snapshot { locked, .. } = &snapshot else {
         panic!("expected Snapshot, got {snapshot:?}");
     };

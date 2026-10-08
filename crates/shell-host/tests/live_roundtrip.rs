@@ -127,6 +127,18 @@ fn live_client(h: &mut Harness) -> ControlClient {
         Handled::Overview { open } => assert!(!open, "fresh hub starts closed"),
         other => panic!("expected newcomer Overview, got {other:?}"),
     }
+    // CURRENT_VERSION also receives the native owner and monitor identity
+    // inventories, in that order. This headless hub has neither inventory.
+    match drive(h, &mut client) {
+        Handled::Outputs { count } => assert_eq!(count, 0),
+        other => panic!("expected newcomer native output inventory, got {other:?}"),
+    }
+    assert!(client.native_outputs().is_empty());
+    match drive(h, &mut client) {
+        Handled::Outputs { count } => assert_eq!(count, 0),
+        other => panic!("expected newcomer monitor identity inventory, got {other:?}"),
+    }
+    assert!(client.monitor_identities().is_empty());
     client
 }
 

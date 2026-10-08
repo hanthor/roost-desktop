@@ -166,6 +166,8 @@ pub fn deny_all_tokens(_: &ActivationToken, _: Option<&str>) -> bool {
 /// Outcome of [`Session::handle_next`]: what one inbound frame produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Handled {
+    /// Accepted for asynchronous original-peer brightness validation; no write grant yet.
+    BrightnessQueued,
     /// A shell command was answered with `CommandResult`.
     CommandResult {
         /// Echo of the shell's request id.
@@ -226,6 +228,40 @@ pub type TokenMinter = std::rc::Rc<dyn Fn(Option<&str>) -> String>;
 /// or [`handshake_with`](Self::handshake_with) (live policy); the
 /// handshake sends our `Hello` plus a full snapshot, so every (re)connect
 /// starts from complete state.
+#[derive(Clone, Debug)]
+pub enum BrightnessRequest {
+    Init {
+        request: u64,
+        readings: Vec<roost_shell_control::BrightnessReading>,
+        idle: f64,
+    },
+    Begin {
+        request: u64,
+        source: roost_shell_control::BrightnessSource,
+        targets: Vec<roost_shell_control::BrightnessTarget>,
+    },
+    Complete {
+        request: u64,
+        grant: roost_shell_control::BrightnessGrant,
+        observations: Vec<roost_shell_control::BrightnessObservation>,
+    },
+}
+impl BrightnessRequest {
+    pub fn id(&self) -> u64 {
+        match self {
+            Self::Init { request, .. }
+            | Self::Begin { request, .. }
+            | Self::Complete { request, .. } => *request,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct OwnedBrightnessRequest {
+    pub authority: crate::brightness_journal::Authority,
+    pub request: BrightnessRequest,
+}
+
 pub struct Session<'a> {
     conn: ControlConn,
     validator: TokenValidator<'a>,
@@ -244,6 +280,7 @@ pub struct Session<'a> {
     /// snapshot (resnapshot rule for lock transitions): locking strips
     /// window content, unlocking restores it.
     locked_sent: bool,
+    peer_minor: u16,
     /// Window ids the shell asked to close this round (`CloseWindow`
     /// commands the mirror applied). Drained by [`ControlHub::poll`]
     /// so the runtime can send the polite client close.
@@ -251,7 +288,7 @@ pub struct Session<'a> {
     /// Latest `SetIdleTimeout` from the shell, drained by the hub.
     idle_timeout: Option<u64>,
     /// The latest SetAccelerators the shell sent, until drained.
-    accelerators: Option<Vec<roost_shell_control::Accelerator>>,
+    accelerators: Option<Vec<roost_shell_control::AcceleratorGrab>>,
     /// Window-menu actions the shell asked for, until drained.
     window_actions: Vec<(u64, roost_shell_control::WindowAction)>,
     shortcut_consent: Vec<(u64, bool)>,
@@ -267,6 +304,9 @@ pub struct Session<'a> {
     /// Latest `SetInputSettings` from the shell, drained by the hub.
     input_settings: Option<roost_shell_control::InputSettings>,
     screen_reader: Option<bool>,
+    connection_generation: u64,
+    brightness_authority: Option<crate::brightness_journal::Authority>,
+    brightness_request: Option<OwnedBrightnessRequest>,
     /// Input-source switches the shell asked for (`true` backward).
     input_source_switches: Vec<bool>,
     /// The switcher's thumbnail frames, when the shell sent new ones.
@@ -329,6 +369,7 @@ impl<'a> Session<'a> {
             overview,
             locked,
             locked_sent,
+            peer_minor: 0,
             closed: Vec::new(),
             idle_timeout: None,
             accelerators: None,
@@ -340,6 +381,9 @@ impl<'a> Session<'a> {
             unlock_pending: None,
             input_settings: None,
             screen_reader: None,
+            connection_generation: 0,
+            brightness_authority: None,
+            brightness_request: None,
             input_source_switches: Vec::new(),
             switcher_thumbnails: None,
             switcher_keys: None,
@@ -378,6 +422,7 @@ impl<'a> Session<'a> {
                 current: CURRENT_VERSION,
             }));
         }
+        session.peer_minor = version.minor;
         // Same major line: accept any minor (lenient reader on our side).
         session.conn.write_frame(&Message::Hello {
             version: CURRENT_VERSION,
@@ -416,6 +461,30 @@ impl<'a> Session<'a> {
     /// Send the current output inventory (multi-monitor). Best-effort
     /// like overview: the hub rebroadcasts until every live session
     /// holds it, and newcomers get it right after the handshake.
+    pub fn send_native_outputs(
+        &mut self,
+        outputs: &[roost_shell_control::NativeOutputInfo],
+    ) -> Result<(), ControlError> {
+        if self.peer_minor < 29 {
+            return Ok(());
+        }
+        self.conn.write_frame(&Message::NativeOutputInventory {
+            outputs: outputs.to_vec(),
+        })
+    }
+
+    pub fn send_monitor_identities(
+        &mut self,
+        outputs: &[roost_shell_control::MonitorIdentityInfo],
+    ) -> Result<(), ControlError> {
+        if self.peer_minor < 30 {
+            return Ok(());
+        }
+        self.conn.write_frame(&Message::MonitorIdentityInventory {
+            outputs: outputs.to_vec(),
+        })
+    }
+
     pub fn send_outputs(&mut self, outputs: &[OutputInfo]) -> Result<(), ControlError> {
         self.conn.write_frame(&Message::Outputs {
             outputs: outputs.to_vec(),
@@ -438,7 +507,7 @@ impl<'a> Session<'a> {
     }
 
     /// The latest `SetAccelerators` the shell sent, once.
-    pub fn take_accelerators(&mut self) -> Option<Vec<roost_shell_control::Accelerator>> {
+    pub fn take_accelerators(&mut self) -> Option<Vec<roost_shell_control::AcceleratorGrab>> {
         self.accelerators.take()
     }
 
@@ -451,6 +520,16 @@ impl<'a> Session<'a> {
     ) -> Result<(), ControlError> {
         self.conn
             .write_frame(&Message::AcceleratorActivated { action, time, mode })
+    }
+
+    pub fn send_accelerator_deactivated(
+        &mut self,
+        action: u32,
+        time: u32,
+        mode: u32,
+    ) -> Result<(), ControlError> {
+        self.conn
+            .write_frame(&Message::AcceleratorDeactivated { action, time, mode })
     }
 
     /// Send where the overview's window previews sit.
@@ -538,6 +617,35 @@ impl<'a> Session<'a> {
     /// - Decode failures → typed `Error` for the offending frame; oversize
     ///   and stale-version failures additionally close the session (an
     ///   `Err` is returned after the `Error` is sent).
+    fn queue_brightness(&mut self, request: BrightnessRequest) -> Result<Handled, ControlError> {
+        if self.peer_minor < 31 {
+            self.conn.write_frame(&Message::Error {
+                kind: ErrorKind::UnknownCommand,
+                message: "brightness journal requires negotiated minor 31".into(),
+            })?;
+            return Ok(Handled::ErrorSent {
+                kind: ErrorKind::UnknownCommand,
+            });
+        }
+        if self.peer_minor >= 31 {
+            if let Some(authority) = self.brightness_authority {
+                if self.brightness_request.is_none() {
+                    self.brightness_request = Some(OwnedBrightnessRequest { authority, request });
+                    return Ok(Handled::BrightnessQueued);
+                }
+            }
+        }
+        self.conn.write_frame(&Message::BrightnessJournalReply {
+            request: request.id(),
+            grant: None,
+            error: Some(roost_shell_control::BrightnessJournalError::Authority),
+            state: None,
+        })?;
+        Ok(Handled::ErrorSent {
+            kind: ErrorKind::UnknownCommand,
+        })
+    }
+
     pub fn handle_next(&mut self, model: &mut StateModel) -> Result<Handled, ControlError> {
         let msg = match self.conn.read_frame() {
             Ok(msg) => msg,
@@ -711,7 +819,26 @@ impl<'a> Session<'a> {
             } => {
                 // Session-level grabs, applied by the window manager's
                 // key filter (drained by the hub).
-                self.accelerators = Some(accelerators);
+                self.accelerators = Some(
+                    accelerators
+                        .into_iter()
+                        .map(|accelerator| roost_shell_control::AcceleratorGrab {
+                            accelerator,
+                            flags: 0,
+                        })
+                        .collect(),
+                );
+                self.conn.write_frame(&Message::CommandResult {
+                    id,
+                    status: CommandStatus::Applied,
+                })?;
+                Ok(Handled::CommandResult { id, applied: true })
+            }
+            Message::Command {
+                id,
+                kind: CommandKind::SetAcceleratorGrabs { grabs },
+            } => {
+                self.accelerators = Some(grabs);
                 self.conn.write_frame(&Message::CommandResult {
                     id,
                     status: CommandStatus::Applied,
@@ -742,14 +869,46 @@ impl<'a> Session<'a> {
                     .write_frame(&Message::CommandResult { id, status })?;
                 Ok(Handled::CommandResult { id, applied })
             }
-            Message::Snapshot { .. }
+            Message::BrightnessJournalInit {
+                request,
+                readings,
+                idle,
+            } => self.queue_brightness(BrightnessRequest::Init {
+                request,
+                readings,
+                idle,
+            }),
+            Message::BrightnessJournalBegin {
+                request,
+                source,
+                targets,
+            } => self.queue_brightness(BrightnessRequest::Begin {
+                request,
+                source,
+                targets,
+            }),
+            Message::BrightnessJournalComplete {
+                request,
+                grant,
+                observations,
+            } => self.queue_brightness(BrightnessRequest::Complete {
+                request,
+                grant,
+                observations,
+            }),
+            Message::MonitorIdentityInventory { .. }
+            | Message::BrightnessJournalState { .. }
+            | Message::BrightnessJournalReply { .. }
+            | Message::Snapshot { .. }
             | Message::Changes { .. }
             | Message::CommandResult { .. }
             | Message::Overview { .. }
             | Message::Switcher { .. }
+            | Message::NativeOutputInventory { .. }
             | Message::Outputs { .. }
             | Message::Environment { .. }
             | Message::OverviewPreviews { .. }
+            | Message::AcceleratorDeactivated { .. }
             | Message::AcceleratorActivated { .. }
             | Message::WindowMenu { .. }
             | Message::WorkspacePopup { .. }
@@ -776,6 +935,7 @@ fn decode_error_to_wire(e: &DecodeError) -> (ErrorKind, String) {
         DecodeError::IncompatibleVersion { .. } => (ErrorKind::IncompatibleVersion, e.to_string()),
         DecodeError::Truncated { .. }
         | DecodeError::Malformed(_)
+        | DecodeError::CollectionTooLong { .. }
         | DecodeError::TitleTooLong { .. } => (ErrorKind::MalformedFrame, e.to_string()),
     }
 }
@@ -791,9 +951,17 @@ fn message_kind(msg: &Message) -> &'static str {
         Message::Error { .. } => "Error",
         Message::Overview { .. } => "Overview",
         Message::Switcher { .. } => "Switcher",
+        Message::NativeOutputInventory { .. } => "NativeOutputInventory",
+        Message::MonitorIdentityInventory { .. } => "MonitorIdentityInventory",
+        Message::BrightnessJournalInit { .. } => "BrightnessJournalInit",
+        Message::BrightnessJournalBegin { .. } => "BrightnessJournalBegin",
+        Message::BrightnessJournalComplete { .. } => "BrightnessJournalComplete",
+        Message::BrightnessJournalState { .. } => "BrightnessJournalState",
+        Message::BrightnessJournalReply { .. } => "BrightnessJournalReply",
         Message::Outputs { .. } => "Outputs",
         Message::Environment { .. } => "Environment",
         Message::OverviewPreviews { .. } => "OverviewPreviews",
+        Message::AcceleratorDeactivated { .. } => "AcceleratorDeactivated",
         Message::AcceleratorActivated { .. } => "AcceleratorActivated",
         Message::WindowMenu { .. } => "WindowMenu",
         Message::WorkspacePopup { .. } => "WorkspacePopup",
@@ -954,6 +1122,7 @@ fn apply_command(
         | CommandKind::SetOverviewSearch { .. }
         | CommandKind::SetOverviewAppGrid { .. }
         | CommandKind::Unlock { .. }
+        | CommandKind::SetAcceleratorGrabs { .. }
         | CommandKind::SetAccelerators { .. }
         | CommandKind::WindowAction { .. }
         | CommandKind::ShortcutConsent { .. }
@@ -982,6 +1151,7 @@ pub fn our_version() -> ProtocolVersion {
 /// (runtime sends the polite client close).
 #[derive(Debug, Default)]
 pub struct PollOutcome {
+    pub brightness: Vec<OwnedBrightnessRequest>,
     /// Windows to focus and raise.
     pub activated: Vec<u64>,
     /// Windows to ask to close.
@@ -998,7 +1168,7 @@ pub struct PollOutcome {
     pub input_settings: Option<roost_shell_control::InputSettings>,
     pub screen_reader: Option<bool>,
     /// Accelerator grabs the shell sent, if they changed.
-    pub accelerators: Option<Vec<roost_shell_control::Accelerator>>,
+    pub accelerators: Option<Vec<roost_shell_control::AcceleratorGrab>>,
     /// Window-menu actions to carry out.
     pub window_actions: Vec<(u64, roost_shell_control::WindowAction)>,
     /// Trusted shell decisions for pending inhibitors.
@@ -1092,6 +1262,11 @@ pub fn is_private_dir(dir: &std::path::Path) -> bool {
 /// shell activated this round are returned for Wayland-side focus; the hub
 /// only mutates the model.
 pub struct ControlHub {
+    shell_generation: Option<u64>,
+    next_connection_generation: u64,
+    brightness_connection: Option<u64>,
+    brightness_state: Option<roost_shell_control::BrightnessJournalSnapshot>,
+    brightness_state_sent: Option<(u64, roost_shell_control::BrightnessJournalSnapshot)>,
     listener: UnixListener,
     socket_path: std::path::PathBuf,
     sessions: Vec<Session<'static>>,
@@ -1118,7 +1293,7 @@ pub struct ControlHub {
     /// every live session exactly once, retained until all sends land.
     switcher_queue: Vec<SwitcherAction>,
     /// Accelerator presses waiting for the next poll.
-    accelerator_queue: Vec<(u32, u32, u32)>,
+    accelerator_queue: Vec<(u32, u32, u32, bool)>,
     /// Window-menu requests waiting for the next poll.
     menu_queue: Vec<Message>,
     /// Output inventory last handed to [`set_outputs`](Self::set_outputs)
@@ -1126,10 +1301,14 @@ pub struct ControlHub {
     /// compositor's tracking, and [`poll`](Self::poll) broadcasts it
     /// whenever it differs from `outputs_sent`.
     outputs: Vec<OutputInfo>,
+    native_outputs: Vec<roost_shell_control::NativeOutputInfo>,
+    monitor_identities: Vec<roost_shell_control::MonitorIdentityInfo>,
     pointer_output: Option<String>,
     /// Inventory value every live session holds; a mismatch means a
     /// broadcast is still owed (or a newcomer joined mid-state).
     outputs_sent: Vec<OutputInfo>,
+    native_outputs_sent: Vec<roost_shell_control::NativeOutputInfo>,
+    monitor_identities_sent: Vec<roost_shell_control::MonitorIdentityInfo>,
     /// Session environment for launched apps (#59), and the last value
     /// every live session holds.
     environment: Vec<(String, String)>,
@@ -1180,6 +1359,11 @@ impl ControlHub {
         Ok(Self {
             listener,
             socket_path,
+            shell_generation: None,
+            next_connection_generation: 0,
+            brightness_connection: None,
+            brightness_state: None,
+            brightness_state_sent: None,
             sessions: Vec::new(),
             pending: Vec::new(),
             fresh: Vec::new(),
@@ -1190,8 +1374,12 @@ impl ControlHub {
             accelerator_queue: Vec::new(),
             menu_queue: Vec::new(),
             outputs: Vec::new(),
+            native_outputs: Vec::new(),
+            monitor_identities: Vec::new(),
             pointer_output: None,
             outputs_sent: Vec::new(),
+            native_outputs_sent: Vec::new(),
+            monitor_identities_sent: Vec::new(),
             environment: Vec::new(),
             environment_sent: Vec::new(),
             previews: (Vec::new(), None),
@@ -1210,6 +1398,64 @@ impl ControlHub {
     /// gate refuses are dropped on the next [`poll`](Self::poll).
     pub fn set_peer_gate(&mut self, gate: PeerGate) {
         self.gate = gate;
+    }
+
+    /// Supplied only from the compositor's original supervised Child handle.
+    pub fn set_shell_generation(&mut self, generation: Option<u64>) {
+        if self.shell_generation != generation {
+            self.brightness_connection = None;
+        }
+        self.shell_generation = generation.filter(|v| *v != 0);
+    }
+
+    pub fn brightness_authority(&self) -> Option<crate::brightness_journal::Authority> {
+        let child_generation = self.shell_generation?;
+        let connection_generation = self.brightness_connection?;
+        let PeerGate::Pid(pid) = self.gate else {
+            return None;
+        };
+        self.sessions
+            .iter()
+            .zip(&self.session_peers)
+            .any(|(session, peer)| {
+                session.connection_generation == connection_generation
+                    && session.peer_minor >= 31
+                    && peer.is_some_and(|v| v.pid == pid && v.uid == our_uid())
+            })
+            .then_some(crate::brightness_journal::Authority {
+                child_generation,
+                connection_generation,
+            })
+    }
+
+    pub fn set_brightness_state(&mut self, state: roost_shell_control::BrightnessJournalSnapshot) {
+        self.brightness_state = Some(state);
+    }
+
+    /// Replies never retarget a replacement shell. A partial nonblocking frame
+    /// drops its original connection; an issued pending grant stays uncertain.
+    pub fn finish_brightness(
+        &mut self,
+        authority: crate::brightness_journal::Authority,
+        message: &Message,
+    ) -> bool {
+        if self.brightness_authority() != Some(authority) {
+            return false;
+        }
+        let Some(index) = self
+            .sessions
+            .iter()
+            .position(|s| s.connection_generation == authority.connection_generation)
+        else {
+            return false;
+        };
+        if self.sessions[index].conn.write_frame(message).is_ok() {
+            return true;
+        }
+        self.sessions.swap_remove(index);
+        self.session_peers.swap_remove(index);
+        self.brightness_connection = None;
+        false
     }
 
     /// Current admission rule.
@@ -1255,6 +1501,17 @@ impl ControlHub {
     /// the current value sends nothing. The runtime calls this every
     /// tick from the compositor's tracking — the single inventory the
     /// spec requires, never a parallel database.
+    pub fn set_monitor_identities(
+        &mut self,
+        outputs: Vec<roost_shell_control::MonitorIdentityInfo>,
+    ) {
+        self.monitor_identities = outputs;
+    }
+
+    pub fn set_native_outputs(&mut self, outputs: Vec<roost_shell_control::NativeOutputInfo>) {
+        self.native_outputs = outputs;
+    }
+
     pub fn set_outputs(&mut self, outputs: Vec<OutputInfo>) {
         self.outputs = outputs;
     }
@@ -1326,8 +1583,17 @@ impl ControlHub {
     }
 
     /// Report a grabbed accelerator's press to the shell on the next poll.
+    /// Drop input events captured before a lock/security boundary.
+    pub fn cancel_pending_accelerators(&mut self) {
+        self.accelerator_queue.clear();
+    }
+
     pub fn queue_accelerator(&mut self, action: u32, time: u32, mode: u32) {
-        self.accelerator_queue.push((action, time, mode));
+        self.accelerator_queue.push((action, time, mode, false));
+    }
+
+    pub fn queue_accelerator_deactivated(&mut self, action: u32, time: u32, mode: u32) {
+        self.accelerator_queue.push((action, time, mode, true));
     }
 
     /// Queue one Alt-Tab drive event; the next [`poll`](Self::poll)
@@ -1371,7 +1637,15 @@ impl ControlHub {
                 self.session_peers.swap_remove(i);
             }
         }
+        if self.brightness_authority().is_none() {
+            self.brightness_connection = None;
+        }
         self.advance_pending(model);
+        let brightness_authority = self.brightness_authority();
+        for session in &mut self.sessions {
+            session.brightness_authority = brightness_authority
+                .filter(|a| a.connection_generation == session.connection_generation);
+        }
         self.pending = std::mem::take(&mut self.fresh);
         self.pending_peers = std::mem::take(&mut self.fresh_peers);
         let mut outcome = PollOutcome::default();
@@ -1422,6 +1696,7 @@ impl ControlHub {
                     if let Some(settings) = session.input_settings.take() {
                         outcome.input_settings = Some(settings);
                     }
+                    outcome.brightness.extend(session.brightness_request.take());
                     if let Some(enabled) = session.screen_reader.take() {
                         outcome.screen_reader = Some(enabled);
                     }
@@ -1479,6 +1754,31 @@ impl ControlHub {
                 self.previews_sent = self.previews.clone();
             }
         }
+        if self.monitor_identities != self.monitor_identities_sent {
+            let mut all_sent = true;
+            for session in &mut self.sessions {
+                if session
+                    .send_monitor_identities(&self.monitor_identities)
+                    .is_err()
+                {
+                    all_sent = false;
+                }
+            }
+            if all_sent {
+                self.monitor_identities_sent = self.monitor_identities.clone();
+            }
+        }
+        if self.native_outputs != self.native_outputs_sent {
+            let mut all_sent = true;
+            for session in &mut self.sessions {
+                if session.send_native_outputs(&self.native_outputs).is_err() {
+                    all_sent = false;
+                }
+            }
+            if all_sent {
+                self.native_outputs_sent = self.native_outputs.clone();
+            }
+        }
         if self.outputs != self.outputs_sent {
             let mut all_sent = true;
             for session in &mut self.sessions {
@@ -1511,14 +1811,30 @@ impl ControlHub {
         }
         // Accelerator presses go to every live session once (the shell
         // signals the grabbing D-Bus caller).
-        for (action, time, mode) in std::mem::take(&mut self.accelerator_queue) {
+        for (action, time, mode, released) in std::mem::take(&mut self.accelerator_queue) {
             for session in &mut self.sessions {
-                let _ = session.send_accelerator(action, time, mode);
+                let _ = if released {
+                    session.send_accelerator_deactivated(action, time, mode)
+                } else {
+                    session.send_accelerator(action, time, mode)
+                };
             }
         }
         for menu in std::mem::take(&mut self.menu_queue) {
             for session in &mut self.sessions {
                 let _ = session.send_window_menu(&menu);
+            }
+        }
+        // Native inventory was delivered earlier in this poll. The state is
+        // recovery metadata only; it contains no hardware helper grant.
+        if let (Some(authority), Some(state)) =
+            (self.brightness_authority(), self.brightness_state.clone())
+        {
+            let receipt = (authority.connection_generation, state.clone());
+            if self.brightness_state_sent.as_ref() != Some(&receipt)
+                && self.finish_brightness(authority, &Message::BrightnessJournalState { state })
+            {
+                self.brightness_state_sent = Some(receipt);
             }
         }
         outcome
@@ -1559,6 +1875,8 @@ impl ControlHub {
                 // send it; the shell keeps its legacy surfaces until a
                 // real one arrives.
                 let _ = session.send_overview(open);
+                let _ = session.send_native_outputs(&self.native_outputs);
+                let _ = session.send_monitor_identities(&self.monitor_identities);
                 if !self.outputs.is_empty() {
                     let _ = session.send_outputs(&self.outputs);
                 }
@@ -1570,6 +1888,18 @@ impl ControlHub {
                     let _ = session.send_window_menu(&Message::PointerOutput {
                         name: self.pointer_output.clone(),
                     });
+                }
+                let Some(generation) = self.next_connection_generation.checked_add(1) else {
+                    continue;
+                };
+                self.next_connection_generation = generation;
+                session.connection_generation = generation;
+                if self.brightness_connection.is_none()
+                    && session.peer_minor >= 31
+                    && self.shell_generation.is_some()
+                    && matches!(self.gate, PeerGate::Pid(_))
+                {
+                    self.brightness_connection = Some(generation);
                 }
                 self.sessions.push(session);
                 self.session_peers.push(peer);
@@ -1583,5 +1913,243 @@ impl Drop for ControlHub {
     /// (which also removes it first).
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.socket_path);
+    }
+}
+
+#[cfg(test)]
+mod brightness_connection_tests {
+    use super::*;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    fn setup() -> (tempfile::TempDir, ControlHub, StateModel) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let hub = ControlHub::bind(
+            dir.path().join("control"),
+            std::rc::Rc::new(TokenStore::new()),
+            "seat0",
+        )
+        .unwrap();
+        (dir, hub, StateModel::default())
+    }
+    fn join(dir: &tempfile::TempDir, hub: &mut ControlHub, model: &mut StateModel) -> UnixStream {
+        let mut client = UnixStream::connect(dir.path().join("control")).unwrap();
+        client
+            .write_all(&roost_shell_control::encode_frame(&Message::Hello {
+                version: CURRENT_VERSION,
+            }))
+            .unwrap();
+        hub.poll(model);
+        hub.poll(model);
+        client
+    }
+    #[test]
+    fn only_one_original_supervised_connection_can_receive_a_grant() {
+        let (dir, mut hub, mut model) = setup();
+        hub.set_peer_gate(PeerGate::Pid(std::process::id()));
+        hub.set_shell_generation(Some(1));
+        let _first = join(&dir, &mut hub, &mut model);
+        let original = hub.brightness_authority().unwrap();
+        let _other = join(&dir, &mut hub, &mut model);
+        assert_eq!(hub.brightness_authority(), Some(original));
+        assert_eq!(
+            hub.sessions
+                .iter()
+                .filter(|v| v.brightness_authority.is_some())
+                .count(),
+            1
+        );
+        hub.set_shell_generation(Some(2));
+        assert!(hub.brightness_authority().is_none());
+        let _replacement = join(&dir, &mut hub, &mut model);
+        let replacement = hub.brightness_authority().unwrap();
+        assert_ne!(replacement, original);
+        assert!(!hub.finish_brightness(
+            original,
+            &Message::BrightnessJournalState {
+                state: crate::brightness_journal::Journal::default()
+                    .snapshot()
+                    .into()
+            }
+        ));
+        assert_eq!(hub.brightness_authority(), Some(replacement));
+    }
+    #[test]
+    fn broken_original_reply_drops_connection_and_never_retargets_replacement() {
+        let (dir, mut hub, mut model) = setup();
+        hub.set_peer_gate(PeerGate::Pid(std::process::id()));
+        hub.set_shell_generation(Some(1));
+        let client = join(&dir, &mut hub, &mut model);
+        let original = hub.brightness_authority().unwrap();
+        client.shutdown(std::net::Shutdown::Both).unwrap();
+        drop(client);
+        let reply = Message::BrightnessJournalReply {
+            request: 1,
+            grant: Some(roost_shell_control::BrightnessGrant {
+                transaction: 1,
+                revision: 1,
+            }),
+            error: None,
+            state: None,
+        };
+        assert!(!hub.finish_brightness(original, &reply));
+        assert!(hub.brightness_authority().is_none());
+        let _replacement = join(&dir, &mut hub, &mut model);
+        assert!(!hub.finish_brightness(original, &reply));
+        assert_ne!(hub.brightness_authority(), Some(original));
+    }
+    #[test]
+    fn unsupervised_and_overflow_connections_never_acquire_journal_authority() {
+        let (dir, mut hub, mut model) = setup();
+        let _dev = join(&dir, &mut hub, &mut model);
+        assert!(hub.brightness_authority().is_none());
+        hub.set_peer_gate(PeerGate::Pid(std::process::id()));
+        hub.set_shell_generation(Some(1));
+        hub.next_connection_generation = u64::MAX;
+        let _overflow = join(&dir, &mut hub, &mut model);
+        assert!(hub.brightness_authority().is_none());
+    }
+    #[test]
+    fn partial_original_reply_drops_socket_without_replaying_to_replacement() {
+        use std::io::Read;
+        use std::os::fd::AsRawFd;
+        let (dir, mut hub, mut model) = setup();
+        hub.set_peer_gate(PeerGate::Pid(std::process::id()));
+        hub.set_shell_generation(Some(1));
+        let mut client = join(&dir, &mut hub, &mut model);
+        client.set_nonblocking(true).unwrap();
+        let mut scratch = [0u8; 8192];
+        while client.read(&mut scratch).is_ok_and(|n| n != 0) {}
+        let original = hub.brightness_authority().unwrap();
+        let server = &hub
+            .sessions
+            .iter()
+            .find(|s| s.brightness_authority == Some(original))
+            .unwrap()
+            .conn
+            .stream;
+        let size: libc::c_int = 4096;
+        // SAFETY: the original held UnixStream owns the fd; size is a valid int.
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    server.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_SNDBUF,
+                    (&size as *const libc::c_int).cast(),
+                    std::mem::size_of_val(&size) as libc::socklen_t,
+                )
+            },
+            0
+        );
+        let mut state: roost_shell_control::BrightnessJournalSnapshot =
+            crate::brightness_journal::Journal::default()
+                .snapshot()
+                .into();
+        state.readings = (1..=64)
+            .map(|id| roost_shell_control::BrightnessReading {
+                binding: roost_shell_control::BrightnessBinding {
+                    output: roost_shell_control::NativeOutputInfo {
+                        name: "n".repeat(512),
+                        drm_device: 226,
+                        connector_id: id,
+                        connector_sysfs: "s".repeat(512),
+                        connector_device: 1,
+                        connector_inode: 2,
+                    },
+                    ownership_generation: 1,
+                    backlight: "b".repeat(128),
+                    device: 1,
+                    inode: 4,
+                    minimum: 0,
+                    maximum: 1000,
+                },
+                user: 700,
+                user_known: true,
+                measured_candidate: None,
+                measured_restoration: None,
+                applied: 700,
+                ratio: 1.0,
+            })
+            .collect();
+        let message = Message::BrightnessJournalReply {
+            request: 1,
+            grant: Some(roost_shell_control::BrightnessGrant {
+                transaction: 1,
+                revision: 1,
+            }),
+            error: None,
+            state: Some(state),
+        };
+        let frame_len = roost_shell_control::encode_frame(&message).len();
+        assert!(!hub.finish_brightness(original, &message));
+        assert!(hub.brightness_authority().is_none());
+        let mut received = Vec::new();
+        loop {
+            match client.read(&mut scratch) {
+                Ok(0) => break,
+                Ok(n) => received.extend_from_slice(&scratch[..n]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("original partial socket read failed: {error}"),
+            }
+        }
+        assert!(!received.is_empty() && received.len() < frame_len);
+        let _replacement = join(&dir, &mut hub, &mut model);
+        let replacement = hub.brightness_authority().unwrap();
+        assert_ne!(original, replacement);
+        assert!(!hub.finish_brightness(original, &message));
+        assert_eq!(hub.brightness_authority(), Some(replacement));
+    }
+    #[test]
+    fn old_negotiated_peers_receive_compatible_error_without_journal_queue() {
+        for minor in [29, 30, 31] {
+            let (dir, mut hub, mut model) = setup();
+            let mut stream = UnixStream::connect(dir.path().join("control")).unwrap();
+            stream
+                .write_all(&roost_shell_control::encode_frame(&Message::Hello {
+                    version: ProtocolVersion {
+                        major: CURRENT_VERSION.major,
+                        minor,
+                    },
+                }))
+                .unwrap();
+            hub.poll(&mut model);
+            hub.poll(&mut model);
+            let mut conn = ControlConn::new(stream).unwrap();
+            while conn.read_frame().is_ok() {}
+            conn.write_frame(&Message::BrightnessJournalInit {
+                request: 1,
+                readings: Vec::new(),
+                idle: 0.3,
+            })
+            .unwrap();
+            hub.poll(&mut model);
+            let reply = conn.read_frame().unwrap();
+            if minor < 31 {
+                assert!(matches!(
+                    reply,
+                    Message::Error {
+                        kind: ErrorKind::UnknownCommand,
+                        ..
+                    }
+                ));
+            } else {
+                assert!(matches!(
+                    reply,
+                    Message::BrightnessJournalReply {
+                        grant: None,
+                        error: Some(roost_shell_control::BrightnessJournalError::Authority),
+                        state: None,
+                        ..
+                    }
+                ));
+            }
+            assert!(hub
+                .sessions
+                .iter()
+                .all(|session| session.brightness_request.is_none()));
+            assert!(hub.brightness_authority().is_none());
+            assert!(conn.read_frame().is_err());
+        }
     }
 }

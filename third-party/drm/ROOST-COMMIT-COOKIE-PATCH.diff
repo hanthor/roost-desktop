@@ -1,0 +1,163 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -86 +86 @@
+-version = "0.9.0"
++version = "=0.9.1"
+@@ -117,0 +118,3 @@
++
++[patch.crates-io]
++drm-ffi = { path = "../drm-ffi" }
+--- a/src/control/mod.rs
++++ b/src/control/mod.rs
+@@ -771,0 +772,10 @@
++        req: atomic::AtomicModeReq,
++    ) -> io::Result<()> {
++        self.atomic_commit_with_user_data(flags, req, 0)
++    }
++
++    /// Commit properties with an opaque full-width kernel event value.
++    /// TEST_ONLY commits do not generate completion events.
++    fn atomic_commit_with_user_data(
++        &self,
++        flags: AtomicCommitFlags,
+@@ -772,0 +783 @@
++        user_data: u64,
+@@ -774 +785 @@
+-        drm_ffi::mode::atomic_commit(
++        drm_ffi::mode::atomic_commit_with_user_data(
+@@ -780,0 +792 @@
++            user_data,
+@@ -802,0 +815,18 @@
++    ) -> io::Result<()> {
++        self.page_flip_with_user_data(
++            handle,
++            framebuffer,
++            flags,
++            target_sequence,
++            u64::from(u32::from(handle)),
++        )
++    }
++
++    /// Queue a page flip preserving actual CRTC and independent userdata.
++    fn page_flip_with_user_data(
++        &self,
++        handle: crtc::Handle,
++        framebuffer: framebuffer::Handle,
++        flags: PageFlipFlags,
++        target_sequence: Option<PageFlipTarget>,
++        user_data: u64,
+@@ -818 +848 @@
+-        ffi::mode::page_flip(
++        ffi::mode::page_flip_with_user_data(
+@@ -823,0 +854 @@
++            user_data,
+@@ -1002,0 +1034,9 @@
++    }
++    /// Read complete kernel events without discarding userdata or synthesizing CRTC IDs.
++    fn receive_events_with_user_data(&self) -> io::Result<EventsWithUserData>
++    where
++        Self: Sized,
++    {
++        let mut event_buf = [0u8; 1024];
++        let amount = rustix::io::read(self.as_fd(), &mut event_buf)?;
++        EventsWithUserData::with_event_buf(event_buf, amount)
+@@ -1185,0 +1226,99 @@
++    }
++}
++
++/// Actual fixed kernel fields, independent of any older-kernel userdata fallback.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct KernelVBlankEvent {
++    /// Kernel frame sequence (may wrap; never commit identity).
++    pub sequence: u32,
++    /// Kernel event timestamp, interpreted by the caller's device clock capability.
++    pub timestamp: Duration,
++    /// Actual kernel CRTC ID; zero remains zero.
++    pub crtc_id: u32,
++    /// Opaque full-width value supplied to the successful event-generating ioctl.
++    pub user_data: u64,
++}
++/// Cookie-preserving events; existing Event and public structs are unchanged.
++#[derive(Debug, PartialEq, Eq)]
++pub enum KernelEvent {
++    /// Vertical blank event.
++    Vblank(KernelVBlankEvent),
++    /// Page-flip completion event.
++    PageFlip(KernelVBlankEvent),
++    /// Complete unknown event bytes.
++    Unknown(Vec<u8>),
++}
++/// Bounded cookie-preserving iterator over one complete DRM read.
++pub struct EventsWithUserData {
++    event_buf: [u8; 1024],
++    amount: usize,
++    position: usize,
++}
++impl EventsWithUserData {
++    /// Accept a bounded read buffer; malformed records produce one error then stop.
++    pub fn with_event_buf(event_buf: [u8; 1024], amount: usize) -> io::Result<Self> {
++        if amount > event_buf.len() {
++            return Err(invalid_kernel_event());
++        }
++        Ok(Self {
++            event_buf,
++            amount,
++            position: 0,
++        })
++    }
++    fn parse_next(&mut self) -> io::Result<KernelEvent> {
++        let bytes = &self.event_buf[self.position..self.amount];
++        if bytes.len() < 8 {
++            return Err(invalid_kernel_event());
++        }
++        let kind = u32::from_ne_bytes(bytes[..4].try_into().unwrap());
++        let length = u32::from_ne_bytes(bytes[4..8].try_into().unwrap()) as usize;
++        if length < 8 || length > bytes.len() {
++            return Err(invalid_kernel_event());
++        }
++        let result = if kind == ffi::DRM_EVENT_VBLANK || kind == ffi::DRM_EVENT_FLIP_COMPLETE {
++            if length < 32 {
++                return Err(invalid_kernel_event());
++            }
++            let microseconds = u32::from_ne_bytes(bytes[20..24].try_into().unwrap());
++            if microseconds >= 1_000_000 {
++                return Err(invalid_kernel_event());
++            }
++            let event = KernelVBlankEvent {
++                user_data: u64::from_ne_bytes(bytes[8..16].try_into().unwrap()),
++                timestamp: Duration::new(
++                    u64::from(u32::from_ne_bytes(bytes[16..20].try_into().unwrap())),
++                    microseconds * 1000,
++                ),
++                sequence: u32::from_ne_bytes(bytes[24..28].try_into().unwrap()),
++                crtc_id: u32::from_ne_bytes(bytes[28..32].try_into().unwrap()),
++            };
++            if kind == ffi::DRM_EVENT_VBLANK {
++                KernelEvent::Vblank(event)
++            } else {
++                KernelEvent::PageFlip(event)
++            }
++        } else {
++            KernelEvent::Unknown(bytes[..length].to_vec())
++        };
++        self.position += length;
++        Ok(result)
++    }
++}
++fn invalid_kernel_event() -> io::Error {
++    io::Error::new(
++        io::ErrorKind::InvalidData,
++        "invalid bounded DRM kernel event",
++    )
++}
++impl Iterator for EventsWithUserData {
++    type Item = io::Result<KernelEvent>;
++    fn next(&mut self) -> Option<Self::Item> {
++        if self.position == self.amount {
++            return None;
++        }
++        let event = self.parse_next();
++        if event.is_err() {
++            self.position = self.amount;
++        }
++        Some(event)

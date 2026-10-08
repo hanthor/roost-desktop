@@ -1,0 +1,170 @@
+--- a/src/mode.rs
++++ b/src/mode.rs
+@@ -741 +741,30 @@
+-    let mut flip = drm_mode_crtc_page_flip {
++    page_flip_with_user_data(fd, crtc_id, fb_id, flags, sequence, u64::from(crtc_id))
++}
++
++/// Schedule a page flip carrying an opaque kernel event value.
++/// This value is never interpreted as a pointer.
++pub fn page_flip_with_user_data(
++    fd: BorrowedFd<'_>,
++    crtc_id: u32,
++    fb_id: u32,
++    flags: u32,
++    sequence: u32,
++    user_data: u64,
++) -> io::Result<()> {
++    let mut flip = page_flip_request(crtc_id, fb_id, flags, sequence, user_data);
++
++    unsafe {
++        ioctl::mode::crtc_page_flip(fd, &mut flip)?;
++    }
++
++    Ok(())
++}
++
++fn page_flip_request(
++    crtc_id: u32,
++    fb_id: u32,
++    flags: u32,
++    sequence: u32,
++    user_data: u64,
++) -> drm_mode_crtc_page_flip {
++    drm_mode_crtc_page_flip {
+@@ -747,8 +776,2 @@
+-        user_data: crtc_id as _,
+-    };
+-
+-    unsafe {
+-        ioctl::mode::crtc_page_flip(fd, &mut flip)?;
+-    }
+-
+-    Ok(())
++        user_data,
++    }
+@@ -766 +789,33 @@
+-    let mut atomic = drm_mode_atomic {
++    atomic_commit_with_user_data(fd, flags, objs, prop_counts, props, values, 0)
++}
++
++/// Atomically set properties carrying an opaque kernel event value.
++/// Slices retain their existing synchronous ioctl lifetime; userdata is a scalar.
++pub fn atomic_commit_with_user_data(
++    fd: BorrowedFd<'_>,
++    flags: u32,
++    objs: &mut [u32],
++    prop_counts: &mut [u32],
++    props: &mut [u32],
++    values: &mut [u64],
++    user_data: u64,
++) -> io::Result<()> {
++    let mut atomic = atomic_request(flags, objs, prop_counts, props, values, user_data);
++
++    unsafe {
++        ioctl::mode::atomic(fd, &mut atomic)?;
++    }
++
++    Ok(())
++}
++
++// Used only within the synchronous ioctl call while all original slices live.
++fn atomic_request(
++    flags: u32,
++    objs: &mut [u32],
++    prop_counts: &mut [u32],
++    props: &mut [u32],
++    values: &mut [u64],
++    user_data: u64,
++) -> drm_mode_atomic {
++    drm_mode_atomic {
+@@ -773,8 +828,3 @@
+-        ..Default::default()
+-    };
+-
+-    unsafe {
+-        ioctl::mode::atomic(fd, &mut atomic)?;
+-    }
+-
+-    Ok(())
++        user_data,
++        ..Default::default()
++    }
+@@ -932,0 +983,77 @@
++
++#[cfg(test)]
++mod roost_cookie_tests {
++    use super::*;
++    use std::os::fd::AsFd;
++    #[test]
++    fn scalar_cookie_preserves_actual_legacy_fields_without_pointer_truncation() {
++        let request = page_flip_request(39, 81, 0x4000001, u32::MAX, 0xfedcba9812345678);
++        assert_eq!(request.crtc_id, 39);
++        assert_eq!(request.fb_id, 81);
++        assert_eq!(request.flags, 0x4000001);
++        assert_eq!(request.reserved, u32::MAX);
++        assert_eq!(request.user_data, 0xfedcba9812345678);
++    }
++    #[test]
++    fn atomic_scalar_and_original_slice_addresses_survive_without_reconstruction() {
++        let mut objs = [39, 40];
++        let mut counts = [1, 1];
++        let mut props = [70, 71];
++        let mut values = [u64::MAX, 9];
++        let addresses = (
++            objs.as_mut_ptr() as u64,
++            counts.as_mut_ptr() as u64,
++            props.as_mut_ptr() as u64,
++            values.as_mut_ptr() as u64,
++        );
++        let request = atomic_request(
++            0x201,
++            &mut objs,
++            &mut counts,
++            &mut props,
++            &mut values,
++            0xfedcba9812345678,
++        );
++        assert_eq!(request.flags, 0x201);
++        assert_eq!(request.count_objs, 2);
++        assert_eq!(
++            (
++                request.objs_ptr,
++                request.count_props_ptr,
++                request.props_ptr,
++                request.prop_values_ptr
++            ),
++            addresses
++        );
++        assert_eq!(request.user_data, 0xfedcba9812345678);
++        assert_eq!(request.reserved, 0);
++        assert_eq!(values, [u64::MAX, 9]);
++    }
++    #[test]
++    fn actual_failed_ioctl_is_returned_by_both_old_and_additive_paths() {
++        // /dev/null is deliberately not DRM: this proves error propagation,
++        // never a successful kernel commit or physical presentation.
++        let file = std::fs::File::open("/dev/null").unwrap();
++        let fd = file.as_fd();
++        let old = page_flip(fd, 39, 81, 1, 0).unwrap_err();
++        let new = page_flip_with_user_data(fd, 39, 81, 1, 0, u64::MAX).unwrap_err();
++        assert_eq!(old.raw_os_error(), new.raw_os_error());
++        let mut objs = [39];
++        let mut counts = [1];
++        let mut props = [70];
++        let mut values = [9];
++        let old =
++            atomic_commit(fd, 1, &mut objs, &mut counts, &mut props, &mut values).unwrap_err();
++        let new = atomic_commit_with_user_data(
++            fd,
++            1,
++            &mut objs,
++            &mut counts,
++            &mut props,
++            &mut values,
++            u64::MAX,
++        )
++        .unwrap_err();
++        assert_eq!(old.raw_os_error(), new.raw_os_error());
++    }
++}

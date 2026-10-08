@@ -32,7 +32,7 @@ depends=(
     'systemd-libs'
     'wayland'
 )
-makedepends=('cargo' 'clang' 'git' 'pkgconf')
+makedepends=('cargo' 'clang' 'git' 'pkgconf' 'python')
 optdepends=(
     'orca: GNOME Screen Reader activation and speech'
     'gnome-keyring: user network secret storage'
@@ -65,6 +65,7 @@ _srcroot() {
 prepare() {
     cd "$(_srcroot)"
     export RUSTUP_TOOLCHAIN=stable
+    python3 scripts/roost-drm-cookie-source-check
     cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
@@ -102,7 +103,13 @@ package() {
         "$pkgdir/usr/lib/systemd/user/roost-session.target"
     # Lock-screen PAM service (#62): unlock under GDM, where no greetd runs.
     install -Dm0644 "$root/share/pam.d/roost-lock" "$pkgdir/etc/pam.d/roost-lock"
-    install -Dm0644 "$root/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm0644 "$root/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE" || return 1
+    for dependency in drm drm-ffi; do
+        install -Dm0644 "$root/third-party/$dependency/LICENSE" \
+            "$pkgdir/usr/share/licenses/$pkgname/$dependency/LICENSE" || return 1
+        cmp -s "$root/third-party/$dependency/LICENSE" \
+            "$pkgdir/usr/share/licenses/$pkgname/$dependency/LICENSE" || return 1
+    done
     install -Dm0644 "$root/docs/nested-session.md" \
         "$pkgdir/usr/share/doc/$pkgname/nested-session.md"
 }

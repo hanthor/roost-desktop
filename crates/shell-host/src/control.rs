@@ -52,6 +52,9 @@ pub const INITIAL_REQUEST_ID: u64 = 1;
 /// What one handled inbound message meant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Handled {
+    BrightnessJournal {
+        request: Option<u64>,
+    },
     ScreenReader(roost_shell_control::ScreenReaderState),
     /// Compositor greeted back (e.g. after a resnapshot re-hello); the
     /// awaited full snapshot still follows.
@@ -87,6 +90,12 @@ pub enum Handled {
         /// The key event's time in milliseconds.
         time: u32,
         /// The action mode it fired in.
+        mode: u32,
+    },
+    /// Release of a grabbed accelerator.
+    AcceleratorDeactivated {
+        action: u32,
+        time: u32,
         mode: u32,
     },
     /// Compositor answered one command; match `id` against the value
@@ -150,7 +159,19 @@ pub enum Handled {
 }
 
 /// Shell-side control client over a connected Unix socket.
+#[derive(Clone, Debug)]
+pub struct BrightnessReply {
+    pub request: u64,
+    pub grant: Option<roost_shell_control::BrightnessGrant>,
+    pub error: Option<roost_shell_control::BrightnessJournalError>,
+    pub state: Option<roost_shell_control::BrightnessJournalSnapshot>,
+}
+
 pub struct ControlClient {
+    brightness_request_id: u64,
+    brightness_state: Option<roost_shell_control::BrightnessJournalSnapshot>,
+    brightness_replies: std::collections::VecDeque<BrightnessReply>,
+    monitor_identities: Vec<roost_shell_control::MonitorIdentityInfo>,
     stream: UnixStream,
     read_buf: Vec<u8>,
     model: ShellModel,
@@ -168,6 +189,7 @@ pub struct ControlClient {
     /// Read-only here; the shell reconciles its surfaces against it
     /// and never edits it.
     outputs: Vec<OutputInfo>,
+    native_outputs: Vec<roost_shell_control::NativeOutputInfo>,
     pointer_output: Option<String>,
     /// Session environment from the compositor (#59).
     environment: Vec<(String, String)>,
@@ -191,6 +213,10 @@ impl ControlClient {
         stream.set_nonblocking(true)?;
         Ok(Self {
             stream,
+            brightness_request_id: 0,
+            brightness_state: None,
+            brightness_replies: std::collections::VecDeque::new(),
+            monitor_identities: Vec::new(),
             read_buf: Vec::new(),
             model: ShellModel::new(),
             revision: None,
@@ -200,6 +226,7 @@ impl ControlClient {
             shadow_workspaces: Vec::new(),
             locked: false,
             outputs: Vec::new(),
+            native_outputs: Vec::new(),
             pointer_output: None,
             environment: Vec::new(),
             overview_previews: (Vec::new(), None),
@@ -253,6 +280,14 @@ impl ControlClient {
     /// surfaces against this and never edits it.
     pub fn pointer_output(&self) -> Option<&str> {
         self.pointer_output.as_deref()
+    }
+
+    pub fn monitor_identities(&self) -> &[roost_shell_control::MonitorIdentityInfo] {
+        &self.monitor_identities
+    }
+
+    pub fn native_outputs(&self) -> &[roost_shell_control::NativeOutputInfo] {
+        &self.native_outputs
     }
 
     pub fn outputs(&self) -> &[OutputInfo] {
@@ -460,6 +495,18 @@ impl ControlClient {
         Ok(id)
     }
 
+    pub fn set_accelerator_grabs(
+        &mut self,
+        grabs: Vec<roost_shell_control::AcceleratorGrab>,
+    ) -> Result<u64, ControlError> {
+        let id = self.alloc_request_id();
+        self.write_message(&Message::Command {
+            id,
+            kind: CommandKind::SetAcceleratorGrabs { grabs },
+        })?;
+        Ok(id)
+    }
+
     /// Make `workspace` active (GNOME's workspace keys). Returns the
     /// request id.
     pub fn focus_workspace(&mut self, workspace: u32) -> Result<u64, ControlError> {
@@ -589,6 +636,61 @@ impl ControlClient {
 
     /// Read one frame and apply it, surfacing `WouldBlock` when no
     /// complete frame is available yet.
+    fn brightness_request(&mut self) -> Result<u64, ControlError> {
+        self.brightness_request_id =
+            self.brightness_request_id.checked_add(1).ok_or_else(|| {
+                ControlError::Unexpected("brightness request generation exhausted".into())
+            })?;
+        Ok(self.brightness_request_id)
+    }
+    pub fn brightness_state(&self) -> Option<&roost_shell_control::BrightnessJournalSnapshot> {
+        self.brightness_state.as_ref()
+    }
+    pub fn take_brightness_reply(&mut self) -> Option<BrightnessReply> {
+        self.brightness_replies.pop_front()
+    }
+    pub fn initialize_brightness(
+        &mut self,
+        readings: Vec<roost_shell_control::BrightnessReading>,
+        idle: f64,
+    ) -> Result<u64, ControlError> {
+        let request = self.brightness_request()?;
+        self.write_message(&Message::BrightnessJournalInit {
+            request,
+            readings,
+            idle,
+        })?;
+        Ok(request)
+    }
+    /// This submits intent only. Callers MUST wait for the original matching
+    /// successful grant reply before invoking a hardware helper.
+    pub fn begin_brightness(
+        &mut self,
+        source: roost_shell_control::BrightnessSource,
+        targets: Vec<roost_shell_control::BrightnessTarget>,
+    ) -> Result<u64, ControlError> {
+        let request = self.brightness_request()?;
+        self.write_message(&Message::BrightnessJournalBegin {
+            request,
+            source,
+            targets,
+        })?;
+        Ok(request)
+    }
+    pub fn complete_brightness(
+        &mut self,
+        grant: roost_shell_control::BrightnessGrant,
+        observations: Vec<roost_shell_control::BrightnessObservation>,
+    ) -> Result<u64, ControlError> {
+        let request = self.brightness_request()?;
+        self.write_message(&Message::BrightnessJournalComplete {
+            request,
+            grant,
+            observations,
+        })?;
+        Ok(request)
+    }
+
     pub fn poll(&mut self) -> Result<Handled, ControlError> {
         let msg = self.read_frame()?;
         self.handle_message(msg)
@@ -655,6 +757,46 @@ impl ControlClient {
                 Ok(Handled::Changes { to_revision })
             }
             Message::CommandResult { id, status } => Ok(Handled::CommandResult { id, status }),
+            Message::BrightnessJournalState { state } => {
+                self.brightness_state = Some(state);
+                Ok(Handled::BrightnessJournal { request: None })
+            }
+            Message::BrightnessJournalReply {
+                request,
+                grant,
+                error,
+                state,
+            } => {
+                if self.brightness_replies.len() >= 8 {
+                    return Err(ControlError::Unexpected(
+                        "brightness reply queue full".into(),
+                    ));
+                }
+                if let Some(state) = state.as_ref() {
+                    self.brightness_state = Some(state.clone());
+                }
+                self.brightness_replies.push_back(BrightnessReply {
+                    request,
+                    grant,
+                    error,
+                    state,
+                });
+                Ok(Handled::BrightnessJournal {
+                    request: Some(request),
+                })
+            }
+            Message::MonitorIdentityInventory { outputs } => {
+                self.monitor_identities = outputs;
+                Ok(Handled::Outputs {
+                    count: self.monitor_identities.len(),
+                })
+            }
+            Message::NativeOutputInventory { outputs } => {
+                self.native_outputs = outputs;
+                Ok(Handled::Outputs {
+                    count: self.native_outputs.len(),
+                })
+            }
             Message::Outputs { outputs } => {
                 // Structural state, not model truth — never touches
                 // revision, `needs_snapshot`, or the window list. The
@@ -708,6 +850,9 @@ impl ControlClient {
             Message::ScreenReader { state } => Ok(Handled::ScreenReader(state)),
             Message::WorkspacePopup { index, count } => {
                 Ok(Handled::WorkspacePopup { index, count })
+            }
+            Message::AcceleratorDeactivated { action, time, mode } => {
+                Ok(Handled::AcceleratorDeactivated { action, time, mode })
             }
             Message::AcceleratorActivated { action, time, mode } => {
                 // A grabbed key combination: the shell signals its D-Bus
@@ -779,6 +924,11 @@ impl ControlClient {
                     Ok(Handled::ServerError { kind, message })
                 }
             }
+            Message::BrightnessJournalInit { .. }
+            | Message::BrightnessJournalBegin { .. }
+            | Message::BrightnessJournalComplete { .. } => Err(ControlError::Unexpected(
+                "compositor sent shell-side brightness request".into(),
+            )),
             Message::Command { id, .. } => Err(ControlError::Unexpected(format!(
                 "compositor sent shell-side Command id {id}"
             ))),
@@ -863,9 +1013,17 @@ fn message_label(msg: &Message) -> &'static str {
         Message::Error { .. } => "Error",
         Message::Overview { .. } => "Overview",
         Message::Switcher { .. } => "Switcher",
+        Message::NativeOutputInventory { .. } => "NativeOutputInventory",
+        Message::MonitorIdentityInventory { .. } => "MonitorIdentityInventory",
+        Message::BrightnessJournalInit { .. } => "BrightnessJournalInit",
+        Message::BrightnessJournalBegin { .. } => "BrightnessJournalBegin",
+        Message::BrightnessJournalComplete { .. } => "BrightnessJournalComplete",
+        Message::BrightnessJournalState { .. } => "BrightnessJournalState",
+        Message::BrightnessJournalReply { .. } => "BrightnessJournalReply",
         Message::Outputs { .. } => "Outputs",
         Message::Environment { .. } => "Environment",
         Message::OverviewPreviews { .. } => "OverviewPreviews",
+        Message::AcceleratorDeactivated { .. } => "AcceleratorDeactivated",
         Message::AcceleratorActivated { .. } => "AcceleratorActivated",
         Message::WindowMenu { .. } => "WindowMenu",
         Message::WorkspacePopup { .. } => "WorkspacePopup",
@@ -1179,6 +1337,87 @@ mod tests {
         );
     }
 
+    #[test]
+    fn optional_identity_none_and_revocation_preserve_owner_outputs_and_revision() {
+        let (mut client, mut peer) = handshook();
+        server_write(&mut peer, &snapshot_rev7());
+        client.poll().unwrap();
+        let owner = roost_shell_control::NativeOutputInfo {
+            name: "eDP-1".into(),
+            drm_device: 226,
+            connector_id: 39,
+            connector_sysfs: "/sys/owned/connector".into(),
+            connector_device: 1,
+            connector_inode: 2,
+        };
+        server_write(
+            &mut peer,
+            &Message::NativeOutputInventory {
+                outputs: vec![owner.clone()],
+            },
+        );
+        client.poll().unwrap();
+        let info = roost_shell_control::MonitorIdentityInfo {
+            owner: owner.clone(),
+            edid: None,
+        };
+        server_write(
+            &mut peer,
+            &Message::MonitorIdentityInventory {
+                outputs: vec![info.clone()],
+            },
+        );
+        client.poll().unwrap();
+        assert_eq!(client.monitor_identities(), &[info]);
+        assert_eq!(client.native_outputs(), std::slice::from_ref(&owner));
+        server_write(
+            &mut peer,
+            &Message::MonitorIdentityInventory { outputs: vec![] },
+        );
+        client.poll().unwrap();
+        assert!(client.monitor_identities().is_empty());
+        assert_eq!(client.native_outputs(), &[owner]);
+        assert!(client.outputs().is_empty());
+        assert_eq!(client.revision(), Some(7));
+    }
+
+    #[test]
+    fn native_owner_inventory_revocation_never_rewrites_legacy_outputs_or_revision() {
+        let (mut client, mut peer) = handshook();
+        server_write(&mut peer, &snapshot_rev7());
+        client.poll().unwrap();
+        let owner = roost_shell_control::NativeOutputInfo {
+            name: "eDP-1".into(),
+            drm_device: 226,
+            connector_id: 39,
+            connector_sysfs: "/sys/owned/connector".into(),
+            connector_device: 1,
+            connector_inode: 2,
+        };
+        server_write(
+            &mut peer,
+            &Message::NativeOutputInventory {
+                outputs: vec![owner.clone()],
+            },
+        );
+        assert!(matches!(
+            client.poll().unwrap(),
+            Handled::Outputs { count: 1 }
+        ));
+        assert_eq!(client.native_outputs(), &[owner]);
+        assert!(client.outputs().is_empty());
+        assert_eq!(client.revision(), Some(7));
+        server_write(
+            &mut peer,
+            &Message::NativeOutputInventory { outputs: vec![] },
+        );
+        assert!(matches!(
+            client.poll().unwrap(),
+            Handled::Outputs { count: 0 }
+        ));
+        assert!(client.native_outputs().is_empty());
+        assert_eq!(client.revision(), Some(7));
+    }
     #[test]
     fn outputs_frame_stores_inventory_without_touching_revision() {
         let (mut client, mut peer) = handshook();

@@ -924,8 +924,6 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 [[package]]
 name = "drm"
 version = "0.14.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80bc8c5c6c2941f70a55c15f8d9f00f9710ebda3ffda98075f996a0e6c92756f"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -938,8 +936,6 @@ dependencies = [
 [[package]]
 name = "drm-ffi"
 version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51a91c9b32ac4e8105dec255e849e0d66e27d7c34d184364fb93e469db08f690"
 dependencies = [
  "drm-sys",
  "rustix 1.1.5",
@@ -3491,9 +3487,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "roost-backlight"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "roost-shell-control",
+ "tempfile",
+]
+
+[[package]]
 name = "roost-compositor"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
+ "async-io",
+ "futures-lite",
  "calloop 0.14.5",
  "greetd_ipc",
  "image",
@@ -3504,12 +3512,14 @@ dependencies = [
  "rand 0.10.3",
  "reis",
  "roost-greeter",
+ "roost-backlight",
  "roost-shell-control",
  "roost-wallpaper",
  "roxmltree",
  "rustix 1.1.5",
  "serde",
  "serde_json",
+ "sha2",
  "signal-hook",
  "smithay",
  "tempfile",
@@ -3553,6 +3563,7 @@ dependencies = [
  "jiff",
  "libadwaita",
  "libc",
+ "roost-backlight",
  "roost-shell-control",
  "roost-shell-host",
  "serde_json",

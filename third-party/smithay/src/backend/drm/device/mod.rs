@@ -605,3 +605,131 @@ impl EventSource for DrmDeviceNotifier {
         poll.unregister(self.internal.as_fd())
     }
 }
+
+/// Cookie-preserving metadata; existing EventMetadata remains source-compatible.
+#[derive(Debug, Clone, Copy)]
+pub struct CookieEventMetadata {
+    /// Original device-clock timing and sequence.
+    pub timing: EventMetadata,
+    /// Opaque full-width commit value; zero denotes a non-cookie caller.
+    pub user_data: u64,
+}
+/// Alternate event source using the same original FD/registration owner.
+#[derive(Debug)]
+pub struct DrmDeviceCookieNotifier(DrmDeviceNotifier);
+impl DrmDeviceNotifier {
+    /// Select cookie-preserving events before registering this source.
+    /// Requires actual CRTC fields (CRTCInVBlankEvent capability). A zero CRTC
+    /// is InvalidData, never reconstructed from userdata.
+    /// Do not concurrently read the same device through the old notifier API.
+    pub fn with_commit_cookies(self) -> DrmDeviceCookieNotifier {
+        DrmDeviceCookieNotifier(self)
+    }
+}
+impl EventSource for DrmDeviceCookieNotifier {
+    type Event = DrmEvent;
+    type Metadata = Option<CookieEventMetadata>;
+    type Ret = ();
+    type Error = io::Error;
+    fn process_events<F>(&mut self, _: Readiness, token: Token, mut callback: F) -> io::Result<PostAction>
+    where
+        F: FnMut(Self::Event, &mut Self::Metadata) -> Self::Ret,
+    {
+        let inner = &self.0;
+        let _guard = inner.internal.span().enter();
+        if Some(token) != inner.token {
+            return Ok(PostAction::Continue);
+        }
+        let fail = |source| {
+            DrmEvent::Error(Error::Access(AccessError {
+                errmsg: "Error processing cookie-preserving drm events",
+                dev: inner.internal.dev_path(),
+                source,
+            }))
+        };
+        match inner.internal.receive_events_with_user_data() {
+            Ok(events) => {
+                for event in events {
+                    match event {
+                        Ok(drm::control::KernelEvent::PageFlip(event)) => {
+                            // Actual kernel CRTC only: never derive it from cookie bits.
+                            let crtc = match actual_cookie_crtc(event.crtc_id) {
+                                Ok(crtc) => crtc,
+                                Err(error) => {
+                                    callback(fail(error), &mut None);
+                                    break;
+                                }
+                            };
+                            let metadata = CookieEventMetadata {
+                                timing: EventMetadata {
+                                    time: if inner.has_monotonic_timestamps {
+                                        Time::Monotonic(event.timestamp)
+                                    } else {
+                                        Time::Realtime(SystemTime::UNIX_EPOCH + event.timestamp)
+                                    },
+                                    sequence: event.sequence,
+                                },
+                                user_data: event.user_data,
+                            };
+                            callback(DrmEvent::VBlank(crtc), &mut Some(metadata));
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            callback(fail(error), &mut None);
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(error) if benign_cookie_read_error(&error) => {}
+            Err(error) => callback(fail(error), &mut None),
+        }
+        Ok(PostAction::Continue)
+    }
+    fn register(&mut self, poll: &mut Poll, factory: &mut TokenFactory) -> calloop::Result<()> {
+        self.0.register(poll, factory)
+    }
+    fn reregister(&mut self, poll: &mut Poll, factory: &mut TokenFactory) -> calloop::Result<()> {
+        self.0.reregister(poll, factory)
+    }
+    fn unregister(&mut self, poll: &mut Poll) -> calloop::Result<()> {
+        self.0.unregister(poll)
+    }
+}
+
+fn actual_cookie_crtc(raw: u32) -> io::Result<crtc::Handle> {
+    drm::control::from_u32(raw)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing actual kernel CRTC"))
+}
+fn benign_cookie_read_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+    )
+}
+#[cfg(test)]
+mod roost_notifier_cookie_tests {
+    use super::*;
+    #[test]
+    fn actual_crtc_required_and_no_cookie_fallback_possible() {
+        assert_eq!(u32::from(actual_cookie_crtc(39).unwrap()), 39);
+        assert_eq!(
+            actual_cookie_crtc(0).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+    #[test]
+    fn only_wouldblock_and_interrupted_are_benign_read_failures() {
+        for kind in [io::ErrorKind::WouldBlock, io::ErrorKind::Interrupted] {
+            assert!(benign_cookie_read_error(&io::Error::from(kind)));
+        }
+        for kind in [
+            io::ErrorKind::InvalidData,
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::UnexpectedEof,
+            io::ErrorKind::Other,
+        ] {
+            assert!(!benign_cookie_read_error(&io::Error::from(kind)));
+        }
+    }
+}

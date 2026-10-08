@@ -15,6 +15,9 @@
 
 mod audio_state;
 mod background_settings;
+mod brightness;
+mod brightness_journal_client;
+mod brightness_service;
 mod bt_menu;
 mod calendar;
 mod events;
@@ -242,9 +245,9 @@ impl shell_dbus::ShellActions for GnomeShellDbus {
             .is_some_and(|c| c.model().is_overview_open())
     }
 
-    fn set_accelerators(&self, accelerators: Vec<roost_shell_control::Accelerator>) {
+    fn set_accelerator_grabs(&self, grabs: Vec<roost_shell_control::AcceleratorGrab>) {
         if let Some(control) = self.shell.borrow_mut().control.as_mut() {
-            let _ = control.set_accelerators(accelerators);
+            let _ = control.set_accelerator_grabs(grabs);
         }
     }
 }
@@ -570,6 +573,7 @@ fn quick_settings_popover(
     shell: &Rc<RefCell<Shell>>,
     notify: &Rc<notify::NotifyUi>,
     power_ui: &Rc<power::PowerUi>,
+    brightness_controller: &Rc<brightness_service::Controller>,
     icons: PanelIcons,
 ) -> gtk::Popover {
     let popover = gtk::Popover::new();
@@ -931,6 +935,7 @@ fn quick_settings_popover(
         sound_list,
         sound_arrow,
         brightness,
+        brightness_controller: brightness_controller.clone(),
     }));
     // Do Not Disturb drives the shell's notification store (banners
     // held back) and mirrors GNOME's show-banners key.
@@ -1281,10 +1286,80 @@ fn build(app: &adw::Application) {
             }),
         )
     };
+    let brightness_policy_settings =
+        settings("org.gnome.settings-daemon.plugins.power").filter(|s| {
+            s.settings_schema()
+                .is_some_and(|schema| schema.has_key("idle-brightness"))
+        });
+    let brightness_bridge = brightness_journal_client::Bridge {
+        snapshot: {
+            let weak = Rc::downgrade(&shell);
+            Rc::new(move || {
+                let shell = weak.upgrade()?;
+                let shell = shell.try_borrow().ok()?;
+                shell.control.as_ref()?.brightness_state().cloned()
+            })
+        },
+        send: {
+            let weak = Rc::downgrade(&shell);
+            Rc::new(move |command| {
+                let shell = weak.upgrade().ok_or("brightness shell unavailable")?;
+                let mut shell = shell
+                    .try_borrow_mut()
+                    .map_err(|_| "brightness control busy")?;
+                let result = {
+                    let control = shell
+                        .control
+                        .as_mut()
+                        .ok_or("brightness control unavailable")?;
+                    match command {
+                        brightness_journal_client::Command::Initialize { readings, idle } => {
+                            control.initialize_brightness(readings, idle)
+                        }
+                        brightness_journal_client::Command::Begin { source, targets } => {
+                            control.begin_brightness(source, targets)
+                        }
+                        brightness_journal_client::Command::Complete {
+                            grant,
+                            observations,
+                        } => control.complete_brightness(grant, observations),
+                    }
+                };
+                if result.is_err() {
+                    // A nonblocking write may have emitted only a frame prefix;
+                    // never continue/replay that original connection as a grant.
+                    shell.control = None;
+                }
+                result.map_err(|_| "brightness original control send failed".into())
+            })
+        },
+    };
+    let brightness_controller = brightness_service::start(
+        brightness_bridge,
+        {
+            let weak = Rc::downgrade(&shell);
+            Rc::new(move || {
+                weak.upgrade()
+                    .and_then(|shell| {
+                        let shell = shell.try_borrow().ok()?;
+                        shell.control.as_ref().map(|c| c.native_outputs().to_vec())
+                    })
+                    .unwrap_or_default()
+            })
+        },
+        brightness_policy_settings
+            .as_ref()
+            .map(|s| f64::from(s.int("idle-brightness")) / 100.0)
+            .unwrap_or(0.3),
+    );
+    if let Some(settings) = brightness_policy_settings {
+        brightness_controller.settings(settings);
+    }
     let qs = quick_settings_popover(
         &shell,
         &notify,
         &power_ui,
+        &brightness_controller,
         PanelIcons {
             mic: panel_mic,
             network: panel_network,
@@ -1504,6 +1579,7 @@ fn build(app: &adw::Application) {
             );
             let (apps, notify, osd_ui) = (apps.clone(), notify.clone(), osd_ui.clone());
             let screenshot_ui = screenshot_ui.clone();
+            let brightness_controller = brightness_controller.clone();
             let workspace_popup_keys = workspace_popup.clone();
             Rc::new(move |action| {
                 use keybindings::Action;
@@ -1737,15 +1813,26 @@ fn build(app: &adw::Application) {
                             }
                             _ => services::BrightnessStep::Cycle,
                         };
-                        if let Some(level) = services::step_brightness_for(
-                            step,
-                            output.as_deref().filter(|_| monitor),
-                        ) {
-                            osd_ui.show(&osd::OsdRequest {
+                        let output = output.as_deref().filter(|_| monitor);
+                        let osd = osd_ui.clone();
+                        let show = move |result: Result<f64, String>| match result {
+                            Ok(level) => osd.show(&osd::OsdRequest {
                                 icon: Some("display-brightness-symbolic".into()),
                                 level: Some(level),
                                 ..Default::default()
-                            });
+                            }),
+                            Err(e) => eprintln!("roost-shell-gtk: brightness key: {e}"),
+                        };
+                        if brightness_controller.has_output(output) {
+                            brightness_controller.step(output, step, Box::new(show));
+                        } else if monitor {
+                            eprintln!(
+                                "roost-shell-gtk: no authoritative native pointer-output backlight"
+                            );
+                        } else {
+                            // Preserve explicitly global legacy access, but this
+                            // fallback cannot establish the new interface capability.
+                            services::step_brightness_for(step, output, Box::new(show));
                         }
                     }
                 }
@@ -2104,13 +2191,16 @@ fn build(app: &adw::Application) {
         let shell_rc = shell.clone();
         let activities_button = activities.clone();
         let last_frames: RefCell<Vec<roost_shell_control::SwitcherThumbnail>> = RefCell::default();
+        let brightness_journal = brightness_controller.clone();
         glib::timeout_add_local(Duration::from_millis(16), move || {
             let mut shell = shell.borrow_mut();
             let mut results = Vec::new();
+            let mut brightness_replies = Vec::new();
             let mut accelerators = Vec::new();
             let mut menus = Vec::new();
             let mut consent = None;
             let mut popups = Vec::new();
+            let mut control_failed = false;
             if let Some(control) = shell.control.as_mut() {
                 loop {
                     match control.poll() {
@@ -2119,6 +2209,11 @@ fn build(app: &adw::Application) {
                         }
                         Ok(Handled::WindowMenu(request)) => menus.push(request),
                         Ok(Handled::ShortcutConsent(request)) => consent = Some(request),
+                        Ok(Handled::BrightnessJournal { .. }) => {
+                            while let Some(reply) = control.take_brightness_reply() {
+                                brightness_replies.push(reply);
+                            }
+                        }
                         Ok(Handled::ScreenReader(state)) => {
                             if matches!(
                                 state,
@@ -2131,8 +2226,11 @@ fn build(app: &adw::Application) {
                         Ok(Handled::WorkspacePopup { index, count }) => {
                             popups.push((index, count));
                         }
+                        Ok(Handled::AcceleratorDeactivated { action, time, mode }) => {
+                            accelerators.push((action, time, mode, true));
+                        }
                         Ok(Handled::Accelerator { action, time, mode }) => {
-                            accelerators.push((action, time, mode));
+                            accelerators.push((action, time, mode, false));
                         }
                         Ok(Handled::CommandResult { id, status }) => results.push((
                             id,
@@ -2142,10 +2240,17 @@ fn build(app: &adw::Application) {
                         Err(e) if is_would_block(&e) => break,
                         Err(e) => {
                             eprintln!("roost-shell-gtk: control error: {e}");
+                            control_failed = true;
                             break;
                         }
                     }
                 }
+            }
+            if control_failed {
+                // Observed termination/protocol failure revokes cached grants;
+                // a replacement connection must acquire its own authority.
+                shell.control = None;
+                brightness_replies.clear();
             }
             let locked = shell.control.as_ref().is_some_and(|c| c.locked());
             render_pills(&mut shell);
@@ -2167,6 +2272,9 @@ fn build(app: &adw::Application) {
                 .as_ref()
                 .is_some_and(|c| c.model().is_overview_open());
             drop(shell);
+            for reply in brightness_replies {
+                brightness_journal.journal_reply(reply);
+            }
             if locked {
                 notify.release_focus();
             }
@@ -2177,8 +2285,12 @@ fn build(app: &adw::Application) {
             } else if let Some(request) = consent {
                 shortcut_consent.sync(request);
             }
-            for (action, time, mode) in accelerators {
-                gnome_shell.accelerator_activated(action, time, mode);
+            for (action, time, mode, released) in accelerators {
+                if released {
+                    gnome_shell.accelerator_deactivated(action, time, mode);
+                } else {
+                    gnome_shell.accelerator_activated(action, time, mode);
+                }
             }
             for request in menus {
                 window_menu.open(&request);

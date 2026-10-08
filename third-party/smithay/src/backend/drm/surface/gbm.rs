@@ -26,6 +26,31 @@ struct QueuedFb<U> {
     sync: Option<SyncPoint>,
     damage: Option<Vec<Rectangle<i32, Physical>>>,
     user_data: U,
+    cookie: Option<std::num::NonZeroU64>,
+}
+
+/// Actual submission acceptance, independent of software queued buffers.
+#[derive(Debug, Default)]
+struct CommitCookies {
+    accepted: Option<std::num::NonZeroU64>,
+}
+impl CommitCookies {
+    fn submitted(&mut self, cookie: Option<std::num::NonZeroU64>, succeeded: bool) {
+        self.accepted = if succeeded { cookie } else { None };
+    }
+    fn matches(&self, cookie: std::num::NonZeroU64) -> bool {
+        self.accepted == Some(cookie)
+    }
+    fn revoke(&mut self) {
+        self.accepted = None;
+    }
+    fn retire(&mut self, cookie: std::num::NonZeroU64) -> bool {
+        if !self.matches(cookie) {
+            return false;
+        }
+        self.revoke();
+        true
+    }
 }
 
 /// Simplified abstraction of a swapchain for gbm-buffers displayed on a [`DrmSurface`].
@@ -33,6 +58,7 @@ struct QueuedFb<U> {
 pub struct GbmBufferedSurface<A: Allocator<Buffer = GbmBuffer> + 'static, U> {
     current_fb: Slot<GbmBuffer>,
     pending_fb: Option<(Slot<GbmBuffer>, U)>,
+    commit_cookies: CommitCookies,
     queued_fb: Option<QueuedFb<U>>,
     next_fb: Option<Slot<GbmBuffer>>,
     swapchain: Swapchain<A>,
@@ -89,6 +115,7 @@ where
                     return Ok(GbmBufferedSurface {
                         current_fb,
                         pending_fb: None,
+                        commit_cookies: CommitCookies::default(),
                         queued_fb: None,
                         next_fb: None,
                         swapchain,
@@ -293,6 +320,26 @@ where
         damage: Option<Vec<Rectangle<i32, Physical>>>,
         user_data: U,
     ) -> Result<(), Error<A::Error>> {
+        self.queue_buffer_with_data(sync, damage, user_data, None)
+    }
+    /// Queue a buffer with a nonzero actual kernel-commit completion cookie.
+    /// A queued successor is not accepted until its actual ioctl succeeds.
+    pub fn queue_buffer_with_cookie(
+        &mut self,
+        sync: Option<SyncPoint>,
+        damage: Option<Vec<Rectangle<i32, Physical>>>,
+        user_data: U,
+        cookie: std::num::NonZeroU64,
+    ) -> Result<(), Error<A::Error>> {
+        self.queue_buffer_with_data(sync, damage, user_data, Some(cookie))
+    }
+    fn queue_buffer_with_data(
+        &mut self,
+        sync: Option<SyncPoint>,
+        damage: Option<Vec<Rectangle<i32, Physical>>>,
+        user_data: U,
+        cookie: Option<std::num::NonZeroU64>,
+    ) -> Result<(), Error<A::Error>> {
         if !self.drm.is_active() {
             return Err(Error::<A::Error>::DrmError(DrmError::DeviceInactive));
         }
@@ -306,6 +353,7 @@ where
             sync,
             damage,
             user_data,
+            cookie,
         });
         if self.pending_fb.is_none() {
             self.submit()?;
@@ -324,6 +372,7 @@ where
     pub fn discard_pending_frames(&mut self) -> Vec<U> {
         let mut discarded = Vec::with_capacity(2);
         self.next_fb = None;
+        self.commit_cookies.revoke();
         if let Some((_slot, user_data)) = self.pending_fb.take() {
             discarded.push(user_data);
         }
@@ -331,6 +380,19 @@ where
             discarded.push(queued.user_data);
         }
         discarded
+    }
+
+    /// Actual pending GBM framebuffer, only when completing it cannot submit
+    /// another queued buffer as a side effect. This is buffer identity for
+    /// independent KMS-state readback, not kernel event-userdata provenance.
+    pub fn pending_scanout_framebuffer(&self) -> Option<drm::control::framebuffer::Handle> {
+        if self.queued_fb.is_some() {
+            return None;
+        }
+        let (slot, _) = self.pending_fb.as_ref()?;
+        slot.userdata()
+            .get::<GbmFramebuffer>()
+            .map(|framebuffer| *framebuffer.as_ref())
     }
 
     /// Marks the current frame as submitted.
@@ -343,6 +405,7 @@ where
     /// `None` is returned.
     #[profiling::function]
     pub fn frame_submitted(&mut self) -> Result<Option<U>, Error<A::Error>> {
+        self.commit_cookies.revoke();
         if let Some((mut pending, user_data)) = self.pending_fb.take() {
             std::mem::swap(&mut pending, &mut self.current_fb);
             if self.queued_fb.is_some() {
@@ -354,6 +417,36 @@ where
         }
     }
 
+    /// Cookie from an actual successful event-generating kernel commit only.
+    pub fn pending_commit_cookie(&self) -> Option<std::num::NonZeroU64> {
+        self.pending_fb.as_ref()?;
+        self.commit_cookies.accepted
+    }
+    /// Complete only the exact pending kernel commit; mismatch never consumes
+    /// a buffer or submits any queued successor.
+    pub fn frame_submitted_with_cookie(
+        &mut self,
+        cookie: std::num::NonZeroU64,
+    ) -> Result<Option<U>, Error<A::Error>> {
+        if self.pending_fb.is_none() || !self.commit_cookies.matches(cookie) {
+            return Ok(None);
+        }
+        self.frame_submitted()
+    }
+
+    /// Retire only the exact completed pending buffer without submitting any
+    /// queued successor. Returns its original data for explicit discard when
+    /// the caller's current layout no longer qualifies presentation feedback.
+    /// The now-scanned-out buffer remains retained as current until replaced.
+    pub fn retire_pending_with_cookie(&mut self, cookie: std::num::NonZeroU64) -> Option<U> {
+        if self.pending_fb.is_none() || !self.commit_cookies.retire(cookie) {
+            return None;
+        }
+        let (mut pending, data) = self.pending_fb.take().unwrap();
+        std::mem::swap(&mut pending, &mut self.current_fb);
+        Some(data)
+    }
+
     #[profiling::function]
     fn submit(&mut self) -> Result<(), Error<A::Error>> {
         // yes it does not look like it, but both of these lines should be safe in all cases.
@@ -362,6 +455,7 @@ where
             sync,
             damage,
             user_data,
+            cookie,
         } = self.queued_fb.take().unwrap();
         let handle = slot.userdata().get::<GbmFramebuffer>().unwrap();
         let mode = self.drm.pending_mode();
@@ -408,11 +502,13 @@ where
             }),
         };
 
-        let flip = if self.drm.commit_pending() {
-            self.drm.commit([plane_state], true)
-        } else {
-            self.drm.page_flip([plane_state], true)
+        let flip = match (self.drm.commit_pending(), cookie) {
+            (true, Some(cookie)) => self.drm.commit_with_cookie([plane_state], cookie),
+            (false, Some(cookie)) => self.drm.page_flip_with_cookie([plane_state], cookie),
+            (true, None) => self.drm.commit([plane_state], true),
+            (false, None) => self.drm.page_flip([plane_state], true),
         };
+        self.commit_cookies.submitted(cookie, flip.is_ok());
         if flip.is_ok() {
             self.pending_fb = Some((slot, user_data));
         }
@@ -421,6 +517,7 @@ where
 
     /// Reset the underlying buffers
     pub fn reset_buffers(&mut self) {
+        self.commit_cookies.revoke();
         self.swapchain.reset_buffers()
     }
 
@@ -591,5 +688,57 @@ impl<E: std::error::Error + Send + Sync + 'static> From<Error<E>> for SwapBuffer
             Error::GbmError(err) => SwapBuffersError::ContextLost(Box::new(err)),
             Error::AsDmabufError(err) => SwapBuffersError::ContextLost(Box::new(err)),
         }
+    }
+}
+
+#[cfg(test)]
+mod roost_commit_cookie_tests {
+    use super::CommitCookies;
+    use std::num::NonZeroU64;
+    fn cookie(value: u64) -> NonZeroU64 {
+        NonZeroU64::new(value).unwrap()
+    }
+    #[test]
+    fn queued_or_failed_commit_is_not_accepted_and_mismatch_preserves_current() {
+        let mut state = CommitCookies::default();
+        let original = cookie(0x1_0000_0001);
+        let successor = cookie(0x2_0000_0001);
+        assert!(!state.matches(original)); // queued-only has no submitted receipt
+        state.submitted(Some(original), false);
+        assert!(!state.matches(original));
+        state.submitted(Some(original), true);
+        assert!(state.matches(original));
+        assert!(!state.matches(successor));
+        assert!(state.matches(original)); // mismatch cannot consume current
+        state.revoke(); // exact completion/discard/reset
+        assert!(!state.matches(original));
+        state.submitted(Some(successor), true);
+        assert!(!state.matches(original));
+        assert!(state.matches(successor));
+        state.revoke();
+        assert!(!state.matches(successor));
+        state.submitted(None, true); // existing non-cookie APIs retain behavior
+        assert!(!state.matches(original));
+    }
+}
+
+#[cfg(test)]
+mod roost_layout_cookie_tests {
+    use super::CommitCookies;
+    #[test]
+    fn rightful_old_layout_retirement_allows_new_cookie_and_late_old_is_inert() {
+        let old = std::num::NonZeroU64::new(90).unwrap();
+        let new = std::num::NonZeroU64::new(91).unwrap();
+        let mut state = CommitCookies::default();
+        state.submitted(Some(old), true);
+        assert!(!state.retire(new));
+        assert_eq!(state.accepted, Some(old));
+        assert!(state.retire(old));
+        assert_eq!(state.accepted, None);
+        state.submitted(Some(new), true);
+        assert!(!state.retire(old));
+        assert_eq!(state.accepted, Some(new));
+        assert!(state.retire(new));
+        assert_eq!(state.accepted, None);
     }
 }

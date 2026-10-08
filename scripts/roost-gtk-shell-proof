@@ -462,6 +462,10 @@ echo 1000 >"$BACKLIGHT/max_brightness"
 echo 500 >"$BACKLIGHT/brightness"
 ROOST_BACKLIGHT_ROOT="$ARTIFACTS/backlight"
 export ROOST_BACKLIGHT_ROOT
+ROOST_BACKLIGHT_TEST_CONNECTORS="$ARTIFACTS/controlled-brightness-connectors.json"
+export ROOST_BACKLIGHT_TEST_CONNECTORS
+printf '[]\n' >"$ROOST_BACKLIGHT_TEST_CONNECTORS"
+echo platform >"$BACKLIGHT/type"
 VOLUME_FILE="$ARTIFACTS/volume"
 echo 0.80 >"$VOLUME_FILE"
 VOLUME_MUTED_FILE="$ARTIFACTS/volume-muted"
@@ -858,6 +862,11 @@ if command -v Xwayland >/dev/null 2>&1; then
     pass G-X11-DEMAND "native GTK and IBus startup advertise sockets without an XWayland or XIM process"
 fi
 SOCKET_NAME="$(sed -n 's/.*nested session on \([^ ]*\) .*/\1/p' "$LOG" | head -1)"
+# Pin the original compositor before the long UI journey; no replacement may
+# acquire DisplayConfig authority for the later scale test.
+python3 "$ROOT/scripts/lib/roost-display-config-fixture.py" pin "$COMPOSITOR_PID" \
+    "$ROOT/target/debug/roost-compositor" "$SOCKET_NAME" "$ARTIFACTS/display-original.json" -- "$WIDTH" "$HEIGHT" \
+    >"$ARTIFACTS/display-settings.log" 2>&1 || fail G-DISPLAY-SETTINGS "original display principal could not be pinned"
 # One at a time, so window ids (and with them GNOME's running-app order
 # in the dash) follow Alpha, Beta, Gamma.
 n=0
@@ -3498,11 +3507,9 @@ fi
 
 # Display settings (#59): what GNOME Settings' Displays panel sends.
 apply_display() {
-    gdbus call --session --dest org.gnome.Mutter.DisplayConfig \
-        --object-path /org/gnome/Mutter/DisplayConfig \
-        --method org.gnome.Mutter.DisplayConfig.ApplyMonitorsConfig \
-        -- 0 "$1" "[(0, 0, $2, uint32 0, true, [('roost-0', '${WIDTH}x${HEIGHT}@60.000', @a{sv} {})])]" \
-        "@a{sv} {}" >>"$ARTIFACTS/display-settings.log" 2>&1
+    python3 "$ROOT/scripts/lib/roost-display-config-fixture.py" apply "$COMPOSITOR_PID" \
+        "$ROOT/target/debug/roost-compositor" "$SOCKET_NAME" "$ARTIFACTS/display-original.json" -- \
+        "$WIDTH" "$HEIGHT" "$1" "$2" >>"$ARTIFACTS/display-settings.log" 2>&1
 }
 # The observer must subscribe before the actual display configuration changes.
 python3 "$ROOT/scripts/lib/roost-introspect-size-client.py" \
@@ -3558,20 +3565,32 @@ ln -s "$ARTIFACTS/devices/card0-roost-0" "$BACKLIGHT/device"
 ln -s "$ARTIFACTS/devices/card0-other" "$ARTIFACTS/backlight/aaa-other/device"
 echo 1000 >"$ARTIFACTS/backlight/aaa-other/max_brightness"
 echo 700 >"$ARTIFACTS/backlight/aaa-other/brightness"
-echo 500 >"$BACKLIGHT/brightness"
+echo 1010 >"$BACKLIGHT/max_brightness"
+echo raw >"$BACKLIGHT/type"
+"$PY" - "$ARTIFACTS/devices/card0-roost-0" "$ROOST_BACKLIGHT_TEST_CONNECTORS" <<'PYFIXTURE'
+import json,os,pathlib,sys
+path=pathlib.Path(sys.argv[1]).resolve()
+for name,value in [('connector_id','1'),('status','connected'),('enabled','enabled')]:
+    (path/name).write_text(value+'\n')
+metadata=path.stat()
+pathlib.Path(sys.argv[2]).write_text(json.dumps([dict(name='roost-0',drm_device=0,connector_id=1,
+    connector_sysfs=str(path),connector_device=metadata.st_dev,connector_inode=metadata.st_ino)]))
+PYFIXTURE
+echo 510 >"$BACKLIGHT/brightness"
 gsettings set org.gnome.shell.keybindings screen-brightness-up-monitor "['<Super>F5']"
 gsettings set org.gnome.shell.keybindings screen-brightness-down-monitor "['<Super>F4']"
 gsettings set org.gnome.shell.keybindings screen-brightness-cycle-monitor "['<Super>F3']"
 sleep 1.5
 xdotool mousemove --window "$WID" 600 450
-for spec in 'F5:550' 'F4:500' 'F3:550'; do
+# Real GNOME floor..max normalization: 10..1010 gives twenty exact 50-unit steps.
+for spec in 'F5:560' 'F4:510' 'F3:560'; do
     xdotool key "super+${spec%%:*}"
     end=$(($(date +%s) + 10))
     until [ "$(cat "$BACKLIGHT/brightness")" = "${spec#*:}" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
     [ "$(cat "$BACKLIGHT/brightness")" = "${spec#*:}" ] || fail G-MONITOR-BRIGHTNESS-KEYS "${spec%%:*} did not set ${spec#*:} on the pointer's monitor"
     [ "$(cat "$ARTIFACTS/backlight/aaa-other/brightness")" = 700 ] || fail G-MONITOR-BRIGHTNESS-KEYS "a different monitor's backlight changed"
 done
-echo 1000 >"$BACKLIGHT/brightness"
+echo 1010 >"$BACKLIGHT/brightness"
 xdotool key super+F3
 end=$(($(date +%s) + 10))
 # GNOME normalized zero maps to the hardware minimum, not a powered-off
@@ -3581,6 +3600,20 @@ until [ "$(cat "$BACKLIGHT/brightness")" = 10 ] || [ "$(date +%s)" -gt "$end" ];
 for key in screen-brightness-up-monitor screen-brightness-down-monitor screen-brightness-cycle-monitor; do
     gsettings reset org.gnome.shell.keybindings "$key"
 done
+# Controlled backlight/logind policy test; no physical brightness claim.
+# The monitor-key sequence above closes quick settings; reopen it so the
+# Brightness slider is showing before setting it.
+open_qs
+"$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-brightness-policy.json" 20 \
+    --set Brightness 50 || fail G-BRIGHTNESS-CONTRACT "could not set associated user brightness"
+end=$(($(date +%s) + 10))
+until [ "$(cat "$BACKLIGHT/brightness")" = 510 ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+[ "$(cat "$BACKLIGHT/brightness")" = 510 ] || fail G-BRIGHTNESS-CONTRACT "actual associated user baseline missing"
+"$PY" "$ROOT/scripts/lib/gnome-brightness-proof.py" --out "$ARTIFACTS/brightness-controlled.json" \
+    --controlled-root "$ARTIFACTS/backlight" --device roost-bl \
+    --shell-executable "${ROOST_PROOF_SHELL_BIN:-$ROOT/target/debug/roost-shell-gtk}" >"$ARTIFACTS/brightness-controlled.log" 2>&1 ||
+    fail G-BRIGHTNESS-CONTRACT "controlled policy/readback contract rejected; see retained JSON/log"
+pass G-BRIGHTNESS-CONTRACT "actual original shell wire schema and controlled associated dim/restore/auto/reset readbacks; synthetic sysfs/logind only"
 rm -rf "$ARTIFACTS/backlight/aaa-other"
 pass G-MONITOR-BRIGHTNESS-KEYS "bound monitor up/down/cycle change only the connector under the pointer; cycle wraps"
 # A rebound notification key focuses the active banner's real button.

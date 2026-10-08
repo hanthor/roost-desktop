@@ -351,6 +351,17 @@ fn fixture() -> Fixture {
         panic!("expected Snapshot after Hello");
     };
     assert!(!locked);
+    // A current-minor hub newcomer receives these exact ordered frames.
+    // Consume them here; later result reads retain their strict event policy.
+    assert_eq!(client_read(&mut control), Message::Overview { open: false });
+    assert_eq!(
+        client_read(&mut control),
+        Message::NativeOutputInventory { outputs: vec![] }
+    );
+    assert_eq!(
+        client_read(&mut control),
+        Message::MonitorIdentityInventory { outputs: vec![] }
+    );
     assert_eq!(revision, manager.model().revision());
     assert_eq!(windows.len(), 2);
     let token_a = windows
