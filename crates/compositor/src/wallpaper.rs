@@ -139,8 +139,11 @@ pub struct Wallpaper {
     /// What each output size last showed, with the picture it is fading
     /// out of (GNOME's background crossfade).
     shown: Vec<Shown<MemoryRenderBuffer>>,
-    /// Crossfades animate; off means a swap is instant.
-    still: bool,
+    /// GNOME's motion policy: the crossfade is a fade, so it runs unless
+    /// animations are off, stretched by the slow-down factor.
+    policy: tuna_shell_control::motion::MotionPolicy,
+    /// Animation time of the frame being drawn.
+    now: std::time::Duration,
     /// Proof counters for the crossfade.
     fades: FadeStats,
 }
@@ -153,7 +156,7 @@ struct Shown<B> {
     size: Size<i32, Logical>,
     key: String,
     buffer: B,
-    fading: Option<(B, std::time::Instant)>,
+    fading: Option<(B, std::time::Duration)>,
 }
 
 /// Record that `output` now has `current` ready for `key` (`None`:
@@ -165,7 +168,7 @@ fn present<B>(
     output: Size<i32, Logical>,
     key: &str,
     current: Option<B>,
-    now: std::time::Instant,
+    now: std::time::Duration,
     still: bool,
 ) -> bool {
     let Some(buffer) = current else {
@@ -196,11 +199,16 @@ fn present<B>(
 
 /// The outgoing picture and its opacity at `now`, dropping it once the
 /// fade has ended so the steady state holds one texture.
-fn fading_at<B: Clone>(slot: &mut Shown<B>, now: std::time::Instant) -> Option<(B, f32)> {
+/// `slowdown` is GNOME's slow-down factor.
+fn fading_at<B: Clone>(
+    slot: &mut Shown<B>,
+    now: std::time::Duration,
+    slowdown: f64,
+) -> Option<(B, f32)> {
     let out = slot.fading.as_ref().and_then(|(old, start)| {
-        let elapsed =
-            u64::try_from(now.saturating_duration_since(*start).as_millis()).unwrap_or(u64::MAX);
-        roost_wallpaper::crossfade_old_alpha(elapsed).map(|alpha| (old.clone(), alpha))
+        let elapsed = now.saturating_sub(*start).as_secs_f64() * 1000.0 / slowdown;
+        let elapsed = elapsed.clamp(0.0, u64::MAX as f64) as u64;
+        tuna_wallpaper::crossfade_old_alpha(elapsed).map(|alpha| (old.clone(), alpha))
     });
     if out.is_none() {
         slot.fading = None;
@@ -440,16 +448,22 @@ impl Wallpaper {
         self.color
     }
 
-    /// Whether a picture swap crossfades (GNOME's 1000 ms ease-out-quad)
-    /// or happens at once. Turning animation off ends a running fade.
-    pub fn set_animations_enabled(&mut self, enabled: bool) {
-        self.still = !enabled;
-        if self.still {
+    /// Whether a picture swap crossfades (GNOME's 1000 ms ease-out-quad,
+    /// a fade, so reduced motion keeps it) or happens at once. Turning
+    /// animation off ends a running fade.
+    pub fn set_policy(&mut self, policy: tuna_shell_control::motion::MotionPolicy) {
+        self.policy = policy;
+        if !policy.allows_fades() {
             for shown in &mut self.shown {
                 shown.fading = None;
             }
             self.fades.active = false;
         }
+    }
+
+    /// The animation time of the frame about to be drawn.
+    pub fn set_time(&mut self, now: std::time::Duration) {
+        self.now = now;
     }
 
     /// Crossfade counters for the compositor state document.
@@ -492,14 +506,15 @@ impl Wallpaper {
             },
             None => None,
         };
-        let now = std::time::Instant::now();
-        if present(&mut self.shown, output, &uri, current, now, self.still) {
+        let now = self.now;
+        let still = !self.policy.allows_fades();
+        if present(&mut self.shown, output, &uri, current, now, still) {
             self.fades.started += 1;
         }
         let Some(shown) = self.shown.iter_mut().find(|s| s.size == output) else {
             return Vec::new();
         };
-        let fading = fading_at(shown, now);
+        let fading = fading_at(shown, now, self.policy.slowdown());
         let buffer = shown.buffer.clone();
         self.fades.active = self.shown.iter().any(|s| s.fading.is_some());
         let at = Point::<f64, Physical>::from((0.0, 0.0));
@@ -1511,13 +1526,13 @@ mod tests {
 
     #[test]
     fn a_new_picture_crossfades_from_the_old_and_then_holds_one_texture() {
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
         let size = Size::from((1280, 800));
-        let start = Instant::now();
+        let start = Duration::ZERO;
         let mut shown = Vec::new();
         // The first picture just appears: there is nothing to fade from.
         assert!(!present(&mut shown, size, "a", Some(1u32), start, false));
-        assert!(fading_at(&mut shown[0], start).is_none());
+        assert!(fading_at(&mut shown[0], start, 1.0).is_none());
         // The same picture again changes nothing.
         assert!(!present(&mut shown, size, "a", Some(1), start, false));
         // A new picture still decoding keeps the old one on screen.
@@ -1526,15 +1541,18 @@ mod tests {
         // Once decoded it swaps in, the old one fading over it.
         assert!(present(&mut shown, size, "b", Some(2), start, false));
         assert_eq!(shown[0].buffer, 2);
-        assert_eq!(fading_at(&mut shown[0], start), Some((1, 1.0)));
-        let (_, half) = fading_at(&mut shown[0], start + Duration::from_millis(500)).unwrap();
+        assert_eq!(fading_at(&mut shown[0], start, 1.0), Some((1, 1.0)));
+        let (_, half) = fading_at(&mut shown[0], start + Duration::from_millis(500), 1.0).unwrap();
         assert_eq!(half, 0.25);
+        // GNOME's slow-down factor stretches it: factor 2, half way at 1 s.
+        let (_, slow) = fading_at(&mut shown[0], start + Duration::from_millis(1000), 2.0).unwrap();
+        assert_eq!(slow, 0.25);
         // Over after 1000 ms: the old texture is released.
-        assert!(fading_at(&mut shown[0], start + Duration::from_millis(1000)).is_none());
+        assert!(fading_at(&mut shown[0], start + Duration::from_millis(1000), 1.0).is_none());
         assert!(shown[0].fading.is_none());
         // With animations off the swap is instant.
         assert!(present(&mut shown, size, "c", Some(3), start, true));
-        assert!(fading_at(&mut shown[0], start).is_none());
+        assert!(fading_at(&mut shown[0], start, 1.0).is_none());
         // Other output sizes are independent slots.
         assert!(!present(
             &mut shown,

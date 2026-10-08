@@ -26,6 +26,9 @@ pub enum Request {
         filename: PathBuf,
         /// The focused window alone (`ScreenshotWindow`), not the screen.
         window: bool,
+        /// Flash the captured area white once it is taken (GNOME's
+        /// `Flashspot`).
+        flash: bool,
         reply: mpsc::Sender<Option<PathBuf>>,
     },
     /// Every window of the screenshot UI's window selector, each saved
@@ -135,7 +138,7 @@ impl Service {
     async fn screenshot(
         &self,
         _include_cursor: bool,
-        _flash: bool,
+        flash: bool,
         filename: String,
         #[zbus(connection)] conn: &zbus::Connection,
         #[zbus(header)] header: zbus::message::Header<'_>,
@@ -144,7 +147,7 @@ impl Service {
         if self.authority.unlocked().is_err() {
             return Ok((false, String::new()));
         }
-        self.request(filename, false)
+        self.request(filename, false, flash)
     }
 
     /// `(include_frame, include_cursor, flash, filename)`: the focused
@@ -153,7 +156,7 @@ impl Service {
         &self,
         _include_frame: bool,
         _include_cursor: bool,
-        _flash: bool,
+        flash: bool,
         filename: String,
         #[zbus(connection)] conn: &zbus::Connection,
         #[zbus(header)] header: zbus::message::Header<'_>,
@@ -162,17 +165,23 @@ impl Service {
         if self.authority.unlocked().is_err() {
             return Ok((false, String::new()));
         }
-        self.request(filename, true)
+        self.request(filename, true, flash)
     }
 }
 
 impl Service {
-    fn request(&self, filename: String, window: bool) -> zbus::fdo::Result<(bool, String)> {
+    fn request(
+        &self,
+        filename: String,
+        window: bool,
+        flash: bool,
+    ) -> zbus::fdo::Result<(bool, String)> {
         let (reply, answer) = mpsc::channel();
         self.to_loop
             .send(Request::Shot {
                 filename: PathBuf::from(filename),
                 window,
+                flash,
                 reply,
             })
             .map_err(|_| zbus::fdo::Error::Failed("compositor gone".into()))?;

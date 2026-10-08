@@ -533,6 +533,9 @@ pub struct Runtime {
     /// snapshots; the shell never owns it.
     lock: SessionLock,
     blank: crate::lock::IdleBlank,
+    /// GNOME's desktop-level transitions (lock curtain, flash, ripples,
+    /// startup, monitor change), sampled once per frame.
+    transitions: crate::transitions::Transitions,
     /// On-demand XWayland server supervisor. Idle until the first X11
     /// need is recorded via [`Runtime::request_x11`]; the window-model
     /// join installs the real spawner, until then ticks are no-ops.
@@ -888,13 +891,31 @@ impl Runtime {
                         calloop::channel::Event::Msg(Request::Shot {
                             filename,
                             window,
+                            flash,
                             reply,
                         }) => {
+                            // What the flash covers: the window, or the
+                            // primary output, as captured.
+                            let area = if window {
+                                rt.manager
+                                    .model()
+                                    .focused()
+                                    .and_then(|id| rt.manager.geometry(id))
+                            } else {
+                                rt.state
+                                    .hot_corner_outputs()
+                                    .into_iter()
+                                    .find(|(_, primary)| *primary)
+                                    .map(|(rect, _)| rect)
+                            };
                             let saved = if window {
                                 rt.capture_window(&filename)
                             } else {
                                 rt.capture(&filename)
                             };
+                            if let (true, Some(_), Some(area)) = (flash, &saved, area) {
+                                rt.transitions.flash(area);
+                            }
                             let _ = reply.send(saved);
                         }
                         calloop::channel::Event::Msg(Request::Windows { directory, reply }) => {
@@ -931,6 +952,7 @@ impl Runtime {
             triggers: TriggerState::default(),
             lock: SessionLock::new(idle_timeout_ms()),
             blank: crate::lock::IdleBlank::default(),
+            transitions: crate::transitions::Transitions::new(Duration::ZERO),
             xwayland: XWaylandSupervisor::new(),
             loop_handle,
             #[cfg(feature = "xwayland")]
@@ -1055,6 +1077,28 @@ impl Runtime {
 
     fn blank_alpha(&self) -> f32 {
         self.blank.alpha(self.lock.idle_ms(self.lock_now_ms()))
+    }
+
+    /// GNOME's ripples out of the hot corner of the monitor under `pos`
+    /// (`layout.js` `HotCorner._toggleOverview`).
+    fn ripple_hot_corner(&mut self, pos: Point<f64, Logical>) {
+        let outputs = self.state.hot_corner_outputs();
+        let rtl = self.input_settings.right_to_left;
+        if let Some((corner, mirrored)) = crate::transitions::hot_corner(&outputs, pos, rtl) {
+            self.transitions.ripple(corner, mirrored);
+        }
+    }
+
+    /// Transition counters for the proofs, the wallpaper's included.
+    fn transitions_diagnostics(&self) -> serde_json::Value {
+        let mut doc = self.transitions.diagnostics();
+        let fade = self.wallpaper.fade_stats();
+        doc["wallpaper_crossfade"] = serde_json::json!({
+            "started": fade.started,
+            "animated_frames": fade.animated_frames,
+            "active": fade.active,
+        });
+        doc
     }
 
     /// Whether the session is locked (hub flag: what the snapshots say).
@@ -1260,6 +1304,9 @@ impl Runtime {
                         }
                     }
                     self.control.set_overview(!self.control.overview_open());
+                    if let ManagerInput::CornerPressure { pos, .. } = input {
+                        self.ripple_hot_corner(pos);
+                    }
                     #[cfg(feature = "drm")]
                     if matches!(self.backend, Backend::Drm(_)) {
                         self.performance_trace
@@ -1274,6 +1321,9 @@ impl Runtime {
                         if self.manager.fullscreen_at(*pos));
                     if !blocked {
                         self.control.set_overview(true);
+                        if let ManagerInput::Motion { pos, .. } = input {
+                            self.ripple_hot_corner(pos);
+                        }
                     }
                 }
             }
@@ -1522,6 +1572,7 @@ impl Runtime {
             "x11_ready": x11_ready,
             "idle_timeout_ms": self.lock.timeout_ms(),
             "idle_blank_alpha": self.blank_alpha(),
+            "transitions": self.transitions_diagnostics(),
             "overview_search": self.overview_search,
             "overview_app_grid": self.overview_app_grid,
             "keyboard": keyboard,
@@ -2378,7 +2429,7 @@ impl Runtime {
             view,
             overview.is_none(),
             cards,
-            false,
+            None,
         );
         let damage = Rectangle::from_size(size);
         let mut target = renderer.bind(&mut texture).ok()?;
@@ -2726,6 +2777,8 @@ impl Runtime {
             .publish_animations_enabled(settings.motion.animations_enabled());
         self.manager
             .set_motion_allowed(settings.motion.allows_motion());
+        self.transitions.set_policy(settings.motion);
+        self.wallpaper.set_policy(settings.motion);
         if !settings.motion.allows_motion() {
             self.overview_progress = if self.control.overview_open() {
                 1.0
@@ -2744,6 +2797,38 @@ impl Runtime {
     /// panel): each named output's scale and logical position. Layout,
     /// rendering and the per-window client scale follow on the next frame.
     fn apply_monitors(&mut self, configs: &[crate::monitors::MonitorConfig]) {
+        // GNOME's ScreenTransition: picture the old layout first.
+        let before = (self.state.hot_corner_outputs(), self.scale.to_bits());
+        let snapshots = if self.transitions.wants_screen_snapshot() {
+            self.screen_snapshots()
+        } else {
+            Vec::new()
+        };
+        self.arrange_monitors(configs);
+        if (self.state.hot_corner_outputs(), self.scale.to_bits()) != before {
+            self.transitions.screen_changed(snapshots);
+        }
+    }
+
+    /// Each output's current picture (`None`: the nested window), for
+    /// the monitor-change fade. Empty while locked.
+    fn screen_snapshots(&mut self) -> Vec<(Option<String>, i32, i32, Vec<u8>)> {
+        use smithay::backend::allocator::Fourcc;
+        let names: Vec<Option<String>> = match &self.backend {
+            Backend::Winit(_) => vec![None],
+            #[cfg(feature = "drm")]
+            Backend::Drm(drm) => drm.outputs.iter().map(|o| Some(o.name.clone())).collect(),
+        };
+        names
+            .into_iter()
+            .filter_map(|name| {
+                let (w, h, pixels) = self.render_pixels(name.as_deref(), Fourcc::Xrgb8888)?;
+                Some((name, w, h, pixels))
+            })
+            .collect()
+    }
+
+    fn arrange_monitors(&mut self, configs: &[crate::monitors::MonitorConfig]) {
         let scale_of = |s: f64| {
             if s == 1.0 {
                 Scale::Integer(1)
@@ -3252,6 +3337,21 @@ impl Runtime {
         }
         let blank_alpha = self.blank_alpha();
         let show_content = content_visible(locked);
+        let lock_ready = locked
+            && self
+                .state
+                .primary_output_name()
+                .and_then(|name| self.state.lock_surface_for(&name))
+                .is_some();
+        let shell_ready = !crate::layer::layer_layout(&self.state).is_empty();
+        // Animation time, so proofs can sample transitions at exact delays.
+        let now = self.animation_clock.now();
+        self.wallpaper.set_time(now);
+        self.transitions
+            .advance(now, locked, lock_ready, shell_ready);
+        // While locked the curtain carries the lock surface and its
+        // background; it never uncovers content (`show_content`).
+        let lock_curtain = self.transitions.curtain().filter(|_| locked);
         let overlay_visible = self.overlay.visible;
         let background = if locked {
             // GNOME's lock screen dims the desktop to 65%; without a
@@ -3314,7 +3414,10 @@ impl Runtime {
                         view,
                         show_content,
                         overview.as_ref(),
-                        lock_surface.as_ref(),
+                        lock_surface
+                            .as_ref()
+                            .zip(lock_curtain)
+                            .map(|(surface, curtain)| (surface, curtain, size.h)),
                         tile.as_ref()
                             .and_then(|(id, _)| self.manager.surface_of(*id))
                             .as_ref(),
@@ -3348,6 +3451,15 @@ impl Runtime {
                         view,
                         show_paper,
                         cards,
+                        lock_curtain,
+                    );
+                    elements.effects = self.transitions.overlay(
+                        renderer,
+                        &mut self.wallpaper,
+                        view,
+                        size,
+                        background_geometry(size, view, desktop),
+                        None,
                         locked,
                     );
                     // The winit EGL surface presents bottom-up (see the
@@ -3432,7 +3544,10 @@ impl Runtime {
                         view,
                         show_content,
                         overview.as_ref(),
-                        lock_surface.as_ref(),
+                        lock_surface
+                            .as_ref()
+                            .zip(lock_curtain)
+                            .map(|(surface, curtain)| (surface, curtain, size.h)),
                         tile.as_ref()
                             .and_then(|(id, _)| self.manager.surface_of(*id))
                             .as_ref(),
@@ -3466,6 +3581,15 @@ impl Runtime {
                         view,
                         show_paper,
                         cards,
+                        lock_curtain,
+                    );
+                    elements.effects = self.transitions.overlay(
+                        renderer,
+                        &mut self.wallpaper,
+                        view,
+                        size,
+                        background_geometry(size, view, desktop),
+                        Some(out.name.as_str()),
                         locked,
                     );
                     use crate::native_repaint::{ElementSignature, FrameSignature};
@@ -3508,6 +3632,18 @@ impl Runtime {
                                 .snapshots
                                 .iter()
                                 .map(|(_, e)| ElementSignature::capture(e, 1.0))
+                                .collect(),
+                            elements
+                                .effects
+                                .textures
+                                .iter()
+                                .map(|e| ElementSignature::capture(e, 1.0))
+                                .collect(),
+                            elements
+                                .effects
+                                .solids
+                                .iter()
+                                .map(|e| ElementSignature::capture(e, 1.0))
                                 .collect(),
                         ],
                     };
@@ -3820,6 +3956,8 @@ struct Scene {
     /// Old-frame snapshots of size-change transitions (#496), each
     /// drawn in front of `elements[index..]`, in physical pixels.
     snapshots: Vec<(usize, SnapshotElement)>,
+    /// Desktop transitions over all of it (`crate::transitions`).
+    effects: crate::transitions::Overlay,
 }
 
 /// A size-change snapshot, drawn at scale 1.
@@ -3846,6 +3984,7 @@ impl Scene {
             tile: Vec::new(),
             top: Vec::new(),
             snapshots: Vec::new(),
+            effects: Default::default(),
         }
     }
 }
@@ -3965,20 +4104,25 @@ fn scene_elements(
     view: View,
     show_content: bool,
     overview: Option<&crate::overview::OverviewLayout>,
-    lock: Option<&smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>,
+    lock: Option<(
+        &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+        crate::transitions::CurtainFrame,
+        i32,
+    )>,
     split: Option<&smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>,
 ) -> Scene {
     if !show_content {
         // Locked: only the shell's lock surface for this output, at its
-        // origin (ext-session-lock); nothing else may show.
+        // origin (ext-session-lock) less the curtain's lift; nothing
+        // else may show.
         return Scene::flat(
-            lock.map(|surface| {
+            lock.map(|(surface, curtain, height)| {
                 render_elements_from_surface_tree(
                     renderer,
                     surface,
-                    (0, 0),
+                    (0, -curtain.lift_px(height)),
                     view.scale,
-                    1.0,
+                    curtain.alpha,
                     Kind::Unspecified,
                 )
             })
@@ -4149,6 +4293,7 @@ fn scene_elements(
         tile: Vec::new(),
         top: Vec::new(),
         snapshots,
+        effects: Default::default(),
     }
 }
 
@@ -4175,24 +4320,29 @@ fn backdrop(
     view: View,
     show_paper: bool,
     cards: Option<&crate::overview::OverviewLayout>,
-    locked: bool,
+    curtain: Option<crate::transitions::CurtainFrame>,
 ) -> Vec<smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<GlesRenderer>>
 {
     let size = smithay::utils::Size::<i32, smithay::utils::Physical>::from((
         geometry.physical[0] as i32,
         geometry.physical[1] as i32,
     ));
-    if locked {
+    // Locked: the lock background, on the curtain.
+    if let Some(curtain) = curtain {
         return wallpaper
-            .lock_element(renderer, size.w, size.h, geometry)
+            .lock_element(
+                renderer,
+                size.w,
+                size.h,
+                geometry,
+                curtain.lift_px(size.h),
+                curtain.alpha,
+            )
             .into_iter()
             .collect();
     }
     if show_paper {
-        return wallpaper
-            .element(renderer, size.w, size.h, geometry)
-            .into_iter()
-            .collect();
+        return wallpaper.element(renderer, size.w, size.h, geometry);
     }
     let Some(layout) = cards else {
         return Vec::new();
@@ -4287,6 +4437,14 @@ fn draw_scene(
     draw_with_snapshots(frame, scale, over, 0, false, &scene.snapshots, damage)?;
     if !scene.top.is_empty() {
         draw_render_elements(frame, scale, &scene.top, &[damage])
+            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    }
+    if !scene.effects.textures.is_empty() {
+        draw_render_elements(frame, 1.0, &scene.effects.textures, &[damage])
+            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    }
+    if !scene.effects.solids.is_empty() {
+        draw_render_elements::<GlesRenderer, _, _>(frame, 1.0, &scene.effects.solids, &[damage])
             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
     }
     if blank_alpha > 0.0 {
