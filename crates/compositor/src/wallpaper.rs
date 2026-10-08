@@ -554,18 +554,31 @@ impl Wallpaper {
     /// screen) scaled into `card`, corners rounded to 30px and a
     /// `0 4px 16px 4px` shadow at 20%, both scaled with the card as GNOME
     /// scales them. Without a picture it shows `primary-color`.
+    ///
+    /// The card is rendered (in software) at its `settled` size only and
+    /// drawn scaled to `card`: overview transition frames resize the card
+    /// every frame, and re-rendering it per size cost a full crop, resize
+    /// and shadow blur on the compositor thread each frame while evicting
+    /// the settled cards from the cache.
+    #[allow(clippy::too_many_arguments)]
     pub fn card_element(
         &mut self,
         renderer: &mut GlesRenderer,
         output: Size<i32, Logical>,
         work_top: i32,
         card: Rectangle<i32, Physical>,
+        settled: Size<i32, Physical>,
         alpha: f32,
         geometry: Geometry,
     ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
         if card.size.w <= 0 || card.size.h <= 0 {
             return None;
         }
+        let rendered = if settled.w > 0 && settled.h > 0 {
+            settled
+        } else {
+            card.size
+        };
         let uri = self.refresh(output, geometry).unwrap_or_default();
         let color = self.color.map(|[r, g, b]| {
             [
@@ -574,7 +587,7 @@ impl Wallpaper {
                 (b * 255.0).round() as u8,
             ]
         });
-        let key = (uri.clone(), output, card.size.w, card.size.h, color);
+        let key = (uri.clone(), output, rendered.w, rendered.h, color);
         if !self.cards.iter().any(|c| c.key == key) {
             let full = self
                 .loaded
@@ -586,15 +599,15 @@ impl Wallpaper {
             if !uri.is_empty() && full.is_none() {
                 return None;
             }
-            let scale = f64::from(card.size.w) / f64::from(output.w.max(1));
+            let scale = f64::from(rendered.w) / f64::from(output.w.max(1));
             let s = scale as f32;
             let top = work_top.clamp(0, output.h - 1) as u32;
             let rendered = roost_wallpaper::card(
                 full.map(|p| (p, output.w as u32, output.h as u32)),
                 (0, top, output.w as u32, output.h as u32 - top),
                 color.unwrap_or([0x14, 0x17, 0x1c]),
-                card.size.w as u32,
-                card.size.h as u32,
+                rendered.w as u32,
+                rendered.h as u32,
                 30.0 * s,
                 roost_wallpaper::Shadow {
                     dy: 4.0 * s,
@@ -620,20 +633,48 @@ impl Wallpaper {
             });
         }
         let cached = self.cards.iter().find(|c| c.key == key)?;
+        let (location, size) = card_placement(card, rendered, cached.margin);
         MemoryRenderBufferRenderElement::from_buffer(
             renderer,
-            Point::<f64, Physical>::from((
-                f64::from(card.loc.x - cached.margin),
-                f64::from(card.loc.y - cached.margin),
-            )),
+            location,
             &cached.buffer,
             Some(alpha),
             None,
-            None,
+            size,
             Kind::Unspecified,
         )
         .ok()
     }
+}
+
+/// Where a card rendered at `rendered` (plus `margin` shadow pixels on
+/// each side) draws so that its rounded content exactly covers `card`,
+/// and the scaled size of the whole buffer. At the rendered size the
+/// buffer draws unscaled (`None`), pixel for pixel.
+fn card_placement(
+    card: Rectangle<i32, Physical>,
+    rendered: Size<i32, Physical>,
+    margin: i32,
+) -> (Point<f64, Physical>, Option<Size<i32, Logical>>) {
+    if card.size == rendered {
+        let at = (
+            f64::from(card.loc.x - margin),
+            f64::from(card.loc.y - margin),
+        );
+        return (at.into(), None);
+    }
+    let kx = f64::from(card.size.w) / f64::from(rendered.w.max(1));
+    let ky = f64::from(card.size.h) / f64::from(rendered.h.max(1));
+    let m = f64::from(margin);
+    let at = (
+        f64::from(card.loc.x) - m * kx,
+        f64::from(card.loc.y) - m * ky,
+    );
+    let size = (
+        (f64::from(rendered.w + 2 * margin) * kx).round() as i32,
+        (f64::from(rendered.h + 2 * margin) * ky).round() as i32,
+    );
+    (at.into(), Some(size.into()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -871,6 +912,26 @@ mod tests {
                 None => std::env::remove_var("XDG_RUNTIME_DIR"),
             }
         }
+    }
+
+    #[test]
+    fn settled_card_draws_unscaled_and_transition_frames_scale_it() {
+        let rendered = Size::from((922, 553));
+        let settled = Rectangle::new((179, 108).into(), rendered);
+        let (at, size) = card_placement(settled, rendered, 22);
+        assert_eq!((at.x, at.y), (157.0, 86.0));
+        assert_eq!(size, None, "the settled card stays pixel for pixel");
+        // A transition frame: the whole output, the content and its
+        // shadow margin scaled by the same factors.
+        let grown = Rectangle::from_size((1280, 800).into());
+        let (at, size) = card_placement(grown, rendered, 22);
+        let (kx, ky) = (1280.0 / 922.0, 800.0 / 553.0);
+        assert!((at.x + 22.0 * kx).abs() < 1e-9 && (at.y + 22.0 * ky).abs() < 1e-9);
+        let size = size.unwrap();
+        assert_eq!(
+            (size.w, size.h),
+            ((966.0 * kx).round() as i32, (597.0 * ky).round() as i32)
+        );
     }
 
     #[test]

@@ -3504,7 +3504,11 @@ impl Runtime {
                             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?
                     };
                     let feedback = crate::frame_timing::take_feedback(&mine, &out.output);
-                    if let Err(e) = out.surface.queue_buffer(Some(sync), None, feedback) {
+                    if let Err(e) = out.surface.queue_buffer(
+                        Some(sync),
+                        Some(crate::native_repaint::scanout_damage(damage)),
+                        feedback,
+                    ) {
                         eprintln!("roost-compositor: drm: queue_buffer {}: {e}", out.name);
                         // Never reuse history after an unsubmitted partial update.
                         out.last_frame = None;
@@ -4027,7 +4031,19 @@ fn backdrop(
             let loc = view.physical(f64::from(r.loc.x), f64::from(r.loc.y));
             let end = view.physical(f64::from(r.loc.x + r.size.w), f64::from(r.loc.y + r.size.h));
             let rect = Rectangle::new(loc, (end.x - loc.x, end.y - loc.y).into());
-            wallpaper.card_element(renderer, output, work_top, rect, card.alpha, geometry)
+            // Transition frames scale the card rendered at its settled size.
+            let settled = if r.size == card.settled {
+                rect.size
+            } else {
+                (
+                    (f64::from(card.settled.w) * view.scale).round() as i32,
+                    (f64::from(card.settled.h) * view.scale).round() as i32,
+                )
+                    .into()
+            };
+            wallpaper.card_element(
+                renderer, output, work_top, rect, settled, card.alpha, geometry,
+            )
         })
         .collect()
 }
