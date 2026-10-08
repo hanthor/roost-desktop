@@ -664,7 +664,7 @@ pub fn step_frame(
     for request in manager.size_changes_mut().take_requests() {
         let id = request.id;
         let surface = manager.surface_of(id);
-        let committed = surface.as_ref().and_then(|s| committed_size(s));
+        let committed = surface.as_ref().and_then(committed_size);
         let reason = if policy.motion == Motion::Off {
             Some("animations-off")
         } else if !allowed {
