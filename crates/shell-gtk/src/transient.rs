@@ -174,7 +174,7 @@ pub fn fade(from: f64, to: f64, t: f64) -> f64 {
 /// Drives one animation on a widget's frame clock. Starting another on
 /// the same player supersedes the running one, whose `done` never runs.
 ///
-/// With `ROOST_TRANSIENT_TRACE` set, each animation logs whether it ran
+/// With `TUNA_TRANSIENT_TRACE` set, each animation logs whether it ran
 /// instantly or when it settled (the GTK shell proof's G-TRANSIENT gates).
 #[derive(Clone)]
 pub struct Player {
@@ -183,8 +183,8 @@ pub struct Player {
 }
 
 fn trace(name: &str, what: std::fmt::Arguments) {
-    if std::env::var_os("ROOST_TRANSIENT_TRACE").is_some() {
-        eprintln!("roost-shell-gtk: transient {name} {what}");
+    if std::env::var_os("TUNA_TRANSIENT_TRACE").is_some() {
+        eprintln!("tuna-shell-gtk: transient {name} {what}");
     }
 }
 
@@ -269,7 +269,7 @@ mod imp {
 
     #[glib::object_subclass]
     impl ObjectSubclass for MotionBin {
-        const NAME: &'static str = "RoostMotionBin";
+        const NAME: &'static str = "TunaMotionBin";
         type Type = super::MotionBin;
         type ParentType = gtk::Widget;
     }
