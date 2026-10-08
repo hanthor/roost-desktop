@@ -11,7 +11,7 @@ still has unfilled placeholders (`TBD`).
 
 ## Inputs
 
-- Roost CI run id (proof frames): TBD
+- Tuna Desktop CI run id (proof frames): TBD
 - Baseline bundle (GNOME 51, `ghcr.io/tuna-os/marlin:gnome`, image digest): TBD
 
 ## Journeys
@@ -19,7 +19,7 @@ still has unfilled placeholders (`TBD`).
 One row per journey stage. Verdict is `match`, `deviation` (link the
 parity-ledger row), or `regression` (blocks the release).
 
-| Journey stage | Roost frame | Baseline frame | Verdict | Notes |
+| Journey stage | Tuna Desktop frame | Baseline frame | Verdict | Notes |
 |---|---|---|---|---|
 | Overview open | TBD | TBD | TBD | |
 | Search typed | TBD | TBD | TBD | |

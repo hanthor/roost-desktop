@@ -1,6 +1,6 @@
 # Pixel parity with GNOME 51
 
-Roost aims to look like GNOME 51 to the pixel, element by element and
+Tuna Desktop aims to look like GNOME 51 to the pixel, element by element and
 state by state. The harness below measures that against GNOME Shell 51.0
 itself, not against screenshots or memory.
 
@@ -9,7 +9,7 @@ itself, not against screenshots or memory.
 `scripts/roost-gnome-reference` builds `tests/gnome-reference/Containerfile`
 (Fedora 45, GNOME Shell 51.0) with podman. It runs `gnome-shell --headless`
 at 1280x800 with `capture.js` as its automation script, the way GNOME's own
-performance tests drive the shell. Roost's proof stubs stand in for
+performance tests drive the shell. Tuna Desktop's proof stubs stand in for
 NetworkManager, BlueZ, power-profiles-daemon and logind on a private
 system bus. Both sides use the same stubs, so quick settings show the same
 services.
@@ -19,11 +19,11 @@ styled actor. Each entry has its style class, name, rectangle, font and
 colours, so sizes and spacing can be read off exactly. The run also exports
 GNOME 51's default wallpapers (`adwaita-l.jxl`, `adwaita-d.jxl`).
 
-## Roost capture and comparison
+## Tuna Desktop capture and comparison
 
 `scripts/roost-parity-capture` drives the nested compositor and GTK shell
 through the same states with the same settings and wallpaper.
-`scripts/lib/roost-parity-compare.py` stacks GNOME, Roost and their
+`scripts/lib/roost-parity-compare.py` stacks GNOME, Tuna Desktop and their
 difference for each state, optionally cropped to one element. It prints
 the mean channel difference and the share of pixels that are visibly off.
 
@@ -79,13 +79,13 @@ example, defaults to Yaru and lacks `dark-mode-symbolic`.
 
 Both sides open the same three libadwaita test windows
 (`scripts/lib/roost-test-window.py`), one at a time, so window size,
-placement, stacking and decorations compare directly. Roost's capture
+placement, stacking and decorations compare directly. Tuna Desktop's capture
 sets GNOME 51's interface fonts, since the host's schema may still name
 Cantarell. Both sides switch apps the way releasing Alt does, and the
-Roost pointer rests in an empty corner, since GNOME's scripted run has
+Tuna Desktop pointer rests in an empty corner, since GNOME's scripted run has
 no pointer motion and so shows no hover.
 
-## Where Roost stands
+## Where Tuna Desktop stands
 
 Share of pixels visibly off (more than 24 levels) in each element crop:
 
@@ -126,7 +126,7 @@ Whole screens, with the same windows on both sides:
 | Tile preview at the left edge | not built | 0.5% |
 | An app's popover, on a fourth window | 23.0% (cascade slot) | 0.5% |
 
-Roost's capture shows GNOME's installed apps, not the host's: each host
+Tuna Desktop's capture shows GNOME's installed apps, not the host's: each host
 entry is hidden by a `Hidden` copy in the user's application directory
 (the desktop-entry spec's override), GNOME's entries and folder names
 are copied in, GNOME 51's schemas come first, and the session is named
@@ -134,7 +134,7 @@ GNOME so `OnlyShowIn` decides the same way.
 
 Both sides send the banner's notification over D-Bus. GNOME's message
 tray keeps a banner up while the user is away, so its scripted run tells
-the tray the user is back where Roost's capture moves the pointer.
+the tray the user is back where Tuna Desktop's capture moves the pointer.
 
 Getting there took two compositor changes. Windows now pick their own
 size and are placed on their first commit, as Mutter does: a new window
@@ -149,7 +149,7 @@ GTK and St differ in a few ways that matter when matching numbers:
   later directory.
 - GTK 4's search entry node is `entry.search`, not `searchentry`.
 - GNOME 51's Adwaita wallpapers are Display P3 JPEG XL; mutter converts
-  them to sRGB, so Roost does too.
+  them to sRGB, so Tuna Desktop does too.
 - GNOME's lock screen blurs the wallpaper with a Gaussian of about
   sigma 20 and dims it to 65%; fitted against GNOME's capture.
 
@@ -160,20 +160,20 @@ the overview with the three test windows. `scripts/roost-a11y-baseline
 update target/gnome-reference` keeps visible nodes, hierarchy, unnamed
 controls and state flags in `tests/a11y/gnome51/`, with the clock normalized.
 The committed [comparison](../tests/a11y/gnome51/comparison.md) catalogs
-these controls beside Roost's live proof goldens and explains the intended
+these controls beside Tuna Desktop's live proof goldens and explains the intended
 role, label and fixture differences. CI checks that this comparison still
 reflects the fixtures and goldens.
 
 The 2026-10-04 native capture asserts focus restoration and maximization,
 and records each window's rectangle, workspace and focused identity in
-`*.state.json`. Roost records equivalent compositor state alongside its
+`*.state.json`. Tuna Desktop records equivalent compositor state alongside its
 frames and asserts focus restoration and exact maximize/tile bounds.
-The paired 2026-10-04 captures use GNOME Shell 51.0 and Roost binaries from
+The paired 2026-10-04 captures use GNOME Shell 51.0 and Tuna Desktop binaries from
 [CI job 111350817693](https://github.com/hanthor/roost-desktop/actions/runs/37172493269/job/111350817693),
 commit `e101d566048986c3c8c78e193cd41a26b44947bd`, with the native fonts,
 icons and wallpaper. The GTK live proof passed; that job's later standalone
 ShellCheck failed on the old cleanup expression, which was corrected.
-The recorded native and Roost window states are committed in
+The recorded native and Tuna Desktop window states are committed in
 `tests/gnome-reference/baseline-state.json` and `roost-baseline-state.json`.
 
 | State | Pixels visibly off | Recorded behavior |
@@ -214,17 +214,17 @@ GNOME visual comparison.
 ## Workspace insertion comparison
 
 State `16b-workspace-insertion-placeholder` compares GNOME 51’s native
-insertion handler with an actual held Roost preview drag. Both place the
+insertion handler with an actual held Tuna Desktop preview drag. Both place the
 marker at `[619,102,18,26]` and shift later thumbnails to x=643 and x=692.
 The strip crop `530,96,220,30` has mean channel difference 2.41 and 3.6%
 of pixels above the usual 24-level threshold. The marker crop
 `619,102,18,24` has mean difference 0.69 and 0.0% above threshold; its
-bottom two pixels are excluded because the actual Roost drag ghost
+bottom two pixels are excluded because the actual Tuna Desktop drag ghost
 begins there, while the native synthetic handler has no ghost.
 
 [Recorded source and metrics](../tests/gnome-reference/workspace-insertion-comparison.json)
 and the [three-row comparison image](../tests/gnome-reference/workspace-insertion-strip.png)
-retain this evidence. Roost binaries came from GTK job `111359239198`,
+retain this evidence. Tuna Desktop binaries came from GTK job `111359239198`,
 run `37175952333`, checkout merge `49a70b0` (PR 240 head `ad87517` into
 PR 234 head `bd18c76`). The full GTK proof, including `G-WS-INSERT`,
 passed. Capture with `--workspace-insertion-only` isolates this state

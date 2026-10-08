@@ -1,6 +1,6 @@
 # roost-shell-gtk
 
-The Roost shell drawn with GTK4 and libadwaita (ADR 0006): GNOME 51's top
+The Tuna Desktop shell drawn with GTK4 and libadwaita (ADR 0006): GNOME 51's top
 panel as a layer-shell strip, the calendar and notification list, quick
 settings, the overview's dash, search and app grid, the Alt+Tab switcher,
 OSDs, the lock screen, and the window menu. Every control is a real GTK

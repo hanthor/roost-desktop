@@ -74,17 +74,17 @@ Run it in a VM or a disposable machine rather than your desktop session.
 
 ## Marlin VM lane
 
-The `marlin-vm` job (#68) boots the real TunaOS Marlin image with Roost
-installed and checks that the display manager logs into the Roost
+The `marlin-vm` job (#68) boots the real TunaOS Marlin image with Tuna Desktop
+installed and checks that the display manager logs into the Tuna Desktop
 hardware session. A CI-only guest service probes the calendar and portal
 on the test user bus; the runner reads the serial log and takes QMP
 screendumps from outside.
 
 1. It builds `packaging/marlin/Containerfile` (Marlin GNOME 51 plus the
-   Roost Arch package from `arch-package`) with rootful podman. On top of
+   Tuna Desktop Arch package from `arch-package`) with rootful podman. On top of
    that it builds the CI-only layer `packaging/marlin/vm-lane/Containerfile`.
    This layer adds a `roost-test` user and turns on GDM automatic login
-   into "Roost (preview)". It also sends the kernel console and the
+   into "Tuna Desktop (preview)". It also sends the kernel console and the
    journal to `ttyS0`. The shipped image does not get these changes.
 2. It runs `bootc install to-disk --via-loopback --generic-image` from
    that image to write a 20 GB raw disk.
@@ -99,7 +99,7 @@ screendumps from outside.
 | `V-PANEL` | The session opens on the overview, where the panel is transparent. After Escape, a screendump shows a pure black strip at y=5 across at least 90 percent of the width (the top panel) over a desktop that is not one flat color |
 | `V-NOPANIC` | No `panicked` anywhere in the serial log |
 
-The lane retains plymouth and makes five pristine snapshot boots. Roost
+The lane retains plymouth and makes five pristine snapshot boots. Tuna Desktop
 explicitly registers its ready session and display with GDM instead of
 relying on GDM's delayed fallback. Every boot must retain DRM ownership
 and show the panel. Earlier tests disabled plymouth after a greeter stole
@@ -116,7 +116,7 @@ root `assertions.txt` aggregates results for the parity ledger.
 The artifact (`marlin-vm`) holds `serial.log`, `roost-lines.log` (every
 `roost-*` line), the boot frames, `V-OVERVIEW.png` (the login overview),
 `V-SESSION.png` (the desktop), and `manifest.json`.
-The manifest records the base image digest, the test image ID, the Roost
+The manifest records the base image digest, the test image ID, the Tuna Desktop
 package, and the QEMU version. If the run fails or times out (15
 minutes), the script prints the relevant serial lines before exiting.
 
@@ -189,7 +189,7 @@ scripts/roost-ledger check --tests test-list.txt \
 `scripts/roost-ledger summary` prints status counts only.
 
 The rule, from [the parity ledger](parity-ledger.md): a row is `pass` only
-when a test or recorded review compares Roost against GNOME 51 baseline
+when a test or recorded review compares Tuna Desktop against GNOME 51 baseline
 evidence, and `untested` is not a pass. The check fails when a row whose
 status starts with `pass` cites no test, when a cited `cargo:` test does
 not exist in the test list, when a cited `journey:` or `proof:` assertion
@@ -205,7 +205,7 @@ The `docs-shots` job runs `scripts/roost-docs-shots collect` over the
 
 ## Pixel parity capture (not in CI)
 
-`scripts/roost-parity-capture` captures Roost in the states
+`scripts/roost-parity-capture` captures Tuna Desktop in the states
 `scripts/roost-gnome-reference` captures GNOME 51 in, for comparison with
 `scripts/lib/roost-parity-compare.py`. CI does not run it. The workflow and
 the states are in [pixel parity with GNOME 51](gnome-parity.md).

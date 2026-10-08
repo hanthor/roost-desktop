@@ -68,7 +68,7 @@ and [QEMU wake-up](https://www.qemu.org/docs/master/interop/qemu-qmp-ref.html#co
 The shared GPU profile `virtio-vga-pcie-pm-preserved-v1` keeps the same
 virtio-vga, resolution, CPU, RAM and workloads. It places that GPU behind
 one PCIe root port and advertises PM no-soft-reset. All native GNOME
-capture and Roost/performance boot callers use the same GPU arguments;
+capture and Tuna Desktop/performance boot callers use the same GPU arguments;
 manifest/report fields record them. Fresh GNOME comparison evidence must
 use this profile; old-profile latency or cadence does not qualify it.
 The actual guest PCI capability chain must include PCIe, PM and the

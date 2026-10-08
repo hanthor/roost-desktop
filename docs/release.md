@@ -1,4 +1,4 @@
-# Cutting a Roost release
+# Cutting a Tuna Desktop release
 
 Target: TunaOS Marlin (Arch-based bootc, x86_64), with GNOME 51 as the comparison baseline ([ADR 0007](adr/0007-gnome51-marlin-baseline.md)). The project remains a developer preview until the roadmap release gates pass. Debian/Ubuntu production support must include the preferred GTK shell and
 actual installed-session control qualification. The first package lane targets
@@ -25,7 +25,7 @@ not provide Marlin or physical hardware qualification.
    with apt, retaining package/hash/distro dependency receipts and the
    installed GTK control proof; an extracted/debug binary is insufficient.
    Verify the artifact: install it on a clean supported system without
-   dependencies pre-installed, confirm the login screen lists Roost, and
+   dependencies pre-installed, confirm the login screen lists Tuna Desktop, and
    confirm every binary's `--version` matches the tag.
 7. Capture the demo media from the same tag:
    `scripts/roost-capture --artifacts walkthrough-media` — records the
@@ -49,14 +49,14 @@ agree — the release script enforces the first two by construction.
 ## Upgrade and uninstall
 
 Upgrading installs the newer package over the older one; user configuration
-and application data are preserved. Uninstalling removes the Roost-owned
+and application data are preserved. Uninstalling removes the Tuna Desktop-owned
 program files and the session entry; user configuration and application data
 are preserved.
 
 ## Release notes template
 
 ```markdown
-# Roost X.Y.Z
+# Tuna Desktop X.Y.Z
 
 ## Changes
 - ...

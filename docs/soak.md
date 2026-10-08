@@ -1,6 +1,6 @@
 # Actual guest endurance evidence
 
-`scripts/roost-vm-soak` observes a running Roost session inside an isolated test VM for 24 hours by default. A newly booted GNOME base image is not a Roost soak. Install a qualified Roost payload, record its source revision and image digest, and establish the real session before starting this observer. It does not change the shipping image, display-manager configuration or user settings.
+`scripts/roost-vm-soak` observes a running Tuna Desktop session inside an isolated test VM for 24 hours by default. A newly booted GNOME base image is not a Tuna Desktop soak. Install a qualified Tuna Desktop payload, record its source revision and image digest, and establish the real session before starting this observer. It does not change the shipping image, display-manager configuration or user settings.
 
 The root observer reads complete PSS/RSS and fd counts for the session UID. It requires exactly one live compositor and GTK shell, records their PID/start-time identities (the legacy shell host is an alternative renderer, not a concurrent process), and fails if any exits or restarts. Each sample makes bounded calls on the user's real bus to the screen saver, calendar server, portal settings and GNOME portal backend. Missing counters and unreadable live processes fail instead of counting as zero. Departed noncritical processes and zombies are excluded; process identity changes during sampling fail.
 

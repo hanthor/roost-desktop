@@ -1,6 +1,6 @@
-# Contributing to Roost
+# Contributing to Tuna Desktop
 
-Roost is in design-and-planning stage: no compositor implementation has
+Tuna Desktop is in design-and-planning stage: no compositor implementation has
 started yet (see [README.md](README.md)). Most contributions right now are
 planning artifacts (specs, plans, ADRs) and documentation. This guide covers
 both that work and the code contribution process for when implementation

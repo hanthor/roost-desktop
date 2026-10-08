@@ -1,4 +1,4 @@
-# Roost overview action-to-scanout tracing
+# Tuna Desktop overview action-to-scanout tracing
 
 For an explicit performance fixture, set `ROOST_PERF_TRACE=1` before starting `roost-compositor --backend drm`. Normal sessions leave tracing disabled. The CI-only greetd VM wrapper enables it and forwards stderr through its existing journal/serial route. No key symbols, text, window titles or client IDs enter these records.
 

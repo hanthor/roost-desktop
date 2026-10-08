@@ -1,6 +1,6 @@
-# Marlin GNOME and Roost resource samples
+# Marlin GNOME and Tuna Desktop resource samples
 
-Issue #73 requires comparable measured evidence before any performance claim. The `Marlin performance samples` workflow (manual dispatch or a pull request changing its measurement code) uses one runner, one shared Marlin GNOME image plus Roost payload, and the same 6 GiB / four-vCPU / 1280×800 virtio QEMU/KVM profile for both sessions. GNOME runs first, then Roost; one boot per session does not establish cold/warm variance. The input package must come from a successful trusted main CI run. The workflow records package SHA256, package source/run, base digest, shared image ID, observer revision, host CPU/kernel and QEMU version.
+Issue #73 requires comparable measured evidence before any performance claim. The `Marlin performance samples` workflow (manual dispatch or a pull request changing its measurement code) uses one runner, one shared Marlin GNOME image plus Tuna Desktop payload, and the same 6 GiB / four-vCPU / 1280×800 virtio QEMU/KVM profile for both sessions. GNOME runs first, then Tuna Desktop; one boot per session does not establish cold/warm variance. The input package must come from a successful trusted main CI run. The workflow records package SHA256, package source/run, base digest, shared image ID, observer revision, host CPU/kernel and QEMU version.
 
 The published Marlin tag was measured as GNOME Shell 50.5 at digest `sha256:3311d7784a0b0e7cd5486d8b69d974f4a34c3436b9812599470d00f80f805f1b` in [run 37176268295](https://github.com/hanthor/roost-desktop/actions/runs/37176268295). It is not the GNOME 51 baseline claimed by older roadmap prose. This benchmark derives a CI-only baseline by enabling Arch core-testing and extra-testing together, performing a full system upgrade, and requiring GNOME Shell 51. Both sessions use that same derived payload; its package versions and shared image ID are retained. This does not change the shipping Marlin image. The first successful paired guest run is recorded in the dated report below.
 
@@ -16,7 +16,7 @@ Input timings bound the response observed through QMP captures. Each observation
 
 Run a fixture disk with `scripts/roost-vm-perf --disk disk.raw --desktop gnome --out /tmp/gnome-perf-fresh`, or select `roost` for the candidate. Each artifact directory must be new. Build `packaging/marlin/perf/Containerfile` with `DESKTOP=gnome` or `DESKTOP=roost` on the same shared preview image; it adds the test user, autologin, serial logging, observer and fixed guest probes. The fixture never ships in a desktop image.
 
-The [2026-10-04 paired report](2026-10-04-marlin-gnome51/README.md) records the first successful run, including the higher sampled Roost CPU and slower median observed overview response. Its package predates the latest roadmap work. Issue #73 remains open.
+The [2026-10-04 paired report](2026-10-04-marlin-gnome51/README.md) records the first successful run, including the higher sampled Tuna Desktop CPU and slower median observed overview response. Its package predates the latest roadmap work. Issue #73 remains open.
 
 The paired lane also captures `wayland-info` from each actual interactive
 Marlin session. The root observer invokes the tool as the fixture user and
@@ -34,9 +34,9 @@ credentials, capture timestamps and a verified digest. These are raw event,
 dispatch and presentation scopes; causal latency remains a separate analysis.
 
 The [native cadence and pure idle report](2026-10-04-native-cadence/README.md)
-retains a later actual paired GNOME 51/Roost run, including all 240 presentation
+retains a later actual paired GNOME 51/Tuna Desktop run, including all 240 presentation
 records per desktop, guest clock boundaries, ten accepted notifications each,
-and raw resource samples. It identifies high Roost idle CPU and slower median
+and raw resource samples. It identifies high Tuna Desktop idle CPU and slower median
 presentation cadence in the older trusted package. It does not qualify later
 repaint changes or close the remaining input tracing and soak requirements.
 

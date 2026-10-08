@@ -1,6 +1,6 @@
 # Wayland protocols
 
-What Roost advertises to clients, against what GNOME 51's Mutter
+What Tuna Desktop advertises to clients, against what GNOME 51's Mutter
 advertises. Ledger row P-SY-06 tracks the gaps.
 
 **Source of the Mutter column.** A `wayland-info` capture of GNOME
@@ -19,21 +19,21 @@ baseline on the shared four-vCPU, 6 GiB, 1280×800 QEMU/KVM profile.
 `tests/protocols/marlin-gnome-wayland-info.txt` retains its full output;
 `marlin-roost-wayland-info.txt` retains the same run's candidate capture.
 `marlin-gnome51-source.json` records capture digests, image/package identity,
-the trusted package source and the actual observer checkout. The Roost
+the trusted package source and the actual observer checkout. The Tuna Desktop
 package is source `7546647e5967825f522a352ee781e0908f889d1e`, so this retained
 candidate capture does not certify subsequent implementation changes.
 
 This native session exposes 41 globals. Its existing 40 match the headless
 capture's versions; `wp_drm_lease_device_v1` is additionally observed at v1.
 `tests/protocols/marlin-gnome51-globals.tsv` preserves the same explicit
-Roost version floors and deviations, marks the lease as captured, and
+Tuna Desktop version floors and deviations, marks the lease as captured, and
 keeps the two still-unobserved syncobj/Xwayland-private entries as
 source-derived floors. Bochs scanout still exposes dmabuf v3, so this
 VM does not establish the dmabuf feedback version of a GPU-capable Mutter
 backend. The headless reference remains a separate regression input.
 
 **Comparison.** The proof stage G-WAYLAND-INFO runs `wayland-info`
-against the nested Roost session (saved as the `wayland-info.txt`
+against the nested Tuna Desktop session (saved as the `wayland-info.txt`
 artifact) and `scripts/roost-wayland-info-compare` checks it against
 `tests/protocols/gnome51-globals.tsv`. Every global marked `match` must
 be present at GNOME's version or newer, and every `min:` global at least
@@ -48,7 +48,7 @@ source-only floor is never described as a measured native version.
 list and versions below. Adding or dropping a protocol updates the test
 and this page together.
 
-## Advertised by Roost
+## Advertised by Tuna Desktop
 
 | Global | Version | Notes |
 |---|---|---|
@@ -61,7 +61,7 @@ and this page together.
 | zwp_primary_selection_device_manager_v1 | 1 | |
 | xdg_wm_base | 6 | popups with positioner constraints and grabs |
 | zxdg_output_manager_v1 | 3 | |
-| zwlr_layer_shell_v1 | 4 | Roost's own shell draws through it |
+| zwlr_layer_shell_v1 | 4 | Tuna Desktop's own shell draws through it |
 | zwp_linux_dmabuf_v1 | 3 | only when the renderer reports formats |
 | xdg_activation_v1 | 1 | focus policy below |
 | wp_viewporter | 1 | |
@@ -113,7 +113,7 @@ presentation-time, fifo and commit-timing follow the frame path
 
 ### Keyboard shortcuts inhibit
 
-Roost asks before letting a focused, mapped app take shortcuts. The GTK
+Tuna Desktop asks before letting a focused, mapped app take shortcuts. The GTK
 shell shows a modal with Deny and Allow and explains Super+Escape.
 Only Allow activates the inhibitor; Deny cannot be undone by refocusing.
 Known desktop apps use GNOME's PermissionStore (`gnome` table,
@@ -130,10 +130,10 @@ emergency restore, stale focus and lock through a real Wayland test client.
 ## GNOME D-Bus interfaces
 
 GNOME's portal backend (xdg-desktop-portal-gnome) talks to GNOME Shell
-and Mutter over D-Bus, not Wayland. Roost serves those interfaces itself,
+and Mutter over D-Bus, not Wayland. Tuna Desktop serves those interfaces itself,
 as niri does, so the stock portal works.
 
-| Interface | Roost | Notes |
+| Interface | Tuna Desktop | Notes |
 |---|---|---|
 | org.gnome.Shell.Screenshot | Screenshot, ScreenshotWindow | saves a PNG of the screen or the focused window; the name is left to a real GNOME Shell when one runs (nested preview) |
 | org.gnome.Mutter.ScreenCast | CreateSession, RecordMonitor, RecordWindow, Start, Stop | monitor and window streams over PipeWire (BGRx, shared memory, up to 30 fps), adapted from niri; window streams follow resizes and end when the window closes |
@@ -148,7 +148,7 @@ as niri does, so the stock portal works.
 From the GNOME 51 capture. The globals not listed here are offered at
 GNOME's version.
 
-| Protocol | GNOME 51 | Roost | Why, and where tracked |
+| Protocol | GNOME 51 | Tuna Desktop | Why, and where tracked |
 |---|---|---|---|
 | xdg_wm_base | 7 | 6 | Smithay 0.7 creates the global at 6 and implements nothing newer; bumps with Smithay (#89) |
 | wl_seat | 10 | 9 | Smithay 0.7 creates the seat at 9 and implements nothing newer; bumps with Smithay (#89) |
@@ -162,7 +162,7 @@ GNOME's version.
 | wl_fixes | 1 | missing | not in wayland-server 0.31; its `destroy_registry` frees a registry object, which wayland-backend owns (#89) |
 | wp_drm_lease_device_v1 | 1 (native Marlin capture) | missing | lease needs connectors to hand out for VR headsets; recorded deviation, not exercised by the nested session (#68, #89) |
 | wp_linux_drm_syncobj_manager_v1 | source-derived floor 1; absent in this VM capture | missing | explicit sync needs the DRM backend's syncobj import; GPU-capable native acceptance remains open (#68, #89) |
-| zwp_xwayland_keyboard_grab_manager_v1 (Xwayland only; from source) | — | missing | only rootful Xwayland with `-host-grab` uses it, and Mutter allows grabs only per `xwayland-grab-access-rules`; Roost runs rootless Xwayland (#89) |
+| zwp_xwayland_keyboard_grab_manager_v1 (Xwayland only; from source) | — | missing | only rootful Xwayland with `-host-grab` uses it, and Mutter allows grabs only per `xwayland-grab-access-rules`; Tuna Desktop runs rootless Xwayland (#89) |
 | gtk_shell1 | 7 | missing | not planned: GTK4 needs none of it on a GNOME session |
 | zwp_linux_dmabuf_v1 feedback (v4+) | native backend only | version 3 | #89 |
 
@@ -170,7 +170,7 @@ GNOME's version.
 
 - **xdg-decoration is absent,** as in Mutter. GNOME is client-side
   decorations only, and the golden test asserts the absence.
-- **layer-shell is present,** unlike Mutter. Roost's shell is a separate
+- **layer-shell is present,** unlike Mutter. Tuna Desktop's shell is a separate
   process and draws its panel, overview and banners through it.
 
 `xdg_toplevel_icon_manager_v1` v1 accepts square SHM icons and sanitized theme names, applied on the next surface commit. PNGs live in a private, bounded compositor cache. X11 `_NET_WM_ICON` and legacy square TrueColor `WM_HINTS` pixmaps (24/32-bit color, optional 1-bit transparency mask) are read on a bounded worker for mapped window identities. Palette and unsupported visuals fall back to a generic app icon.

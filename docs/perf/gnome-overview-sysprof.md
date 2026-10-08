@@ -64,7 +64,7 @@ outputs, remove swaps, add inputs and create overlap; each must fail.
 
 This is controlled event-handler-to-first-later-frame timing, not device-arrival
 latency or a claim about the precise visible animation stage. Comparison with
-Roost's accepted-action point trace must preserve this difference and use the
+Tuna Desktop's accepted-action point trace must preserve this difference and use the
 GNOME intervals explicitly. No parity threshold is introduced here.
 
 Primary contracts:
@@ -148,8 +148,8 @@ patches. `diagnostic` installs the exact checksum-pinned `mutter 51.0-1.6`.
 The default profile and every original diagnostic Start/Stop, writer-closure,
 whole-capture, source and ownership gate remain required.
 
-Each profile installs the same authenticated trusted-main Roost payload into
-one shared preview image. Its GNOME and Roost sessions use that profile's image,
+Each profile installs the same authenticated trusted-main Tuna Desktop payload into
+one shared preview image. Its GNOME and Tuna Desktop sessions use that profile's image,
 package manifest and critical kernel/library hashes. Stock admission verifies
 original ordinary GNOME session UID, unique bus owner, PID, start ticks and
 installed executable, plus actual loaded Mutter/Clutter/Cogl inode identities,
@@ -163,8 +163,8 @@ not request diagnostic Sysprof options or substitute zero latency. A diagnostic
 failure never falls back to stock. Both profiles retain raw samples, guest-clock
 phase markers, captures and actual image/package receipts.
 
-Each profile performs three fresh-guest pairs on one host, ordered GNOME/Roost,
-Roost/GNOME, GNOME/Roost. Reports retain actual repeat and order; the order count
+Each profile performs three fresh-guest pairs on one host, ordered GNOME/Tuna Desktop,
+Tuna Desktop/GNOME, GNOME/Tuna Desktop. Reports retain actual repeat and order; the order count
 is 2:1, not fully balanced or randomized. First diagnostic paths are unchanged;
 later pairs use `repeat-2/` and `repeat-3/`, and stock pairs live beneath `stock/`.
 All twelve acquisitions are mandatory for whole-workflow success. Each profile
@@ -209,12 +209,12 @@ measurements remain open.
 ## Retained single-pair observations before the stock lane
 
 PR #461's successful comparison used instrumented GNOME 51, not stock. Its
-trusted-main measured Roost payload was `e970c7b12a66a2c338ee8e8c5ab01d2ccd748bfc`;
+trusted-main measured Tuna Desktop payload was `e970c7b12a66a2c338ee8e8c5ab01d2ccd748bfc`;
 the benchmark observer was the PR merge source. Linux was `7.2.9.arch1-1`, Mesa
 `1:26.2.4-1`, GNOME Shell `1:51.0-1`, and Mutter `51.0-1.6`.
 The original artifact is from run `37620809723`, job `112790314887`.
 
-| Observation | Instrumented GNOME | Roost |
+| Observation | Instrumented GNOME | Tuna Desktop |
 | --- | ---: | ---: |
 | Panel observed upper bound | 28.7368 s | 24.5626 s |
 | Whole-user PSS p50 | 927766 KiB | 929079 KiB |
