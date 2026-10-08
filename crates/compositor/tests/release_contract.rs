@@ -75,6 +75,31 @@ fn release_script_stages_layout_and_metadata_from_the_stamp() {
 }
 
 #[test]
+fn debian_archive_is_root_owned_and_ships_the_gtk_shell() {
+    // #476: system files must not keep the build user's uid/gid.
+    let release = read_workspace("scripts/tuna-release");
+    assert!(
+        release.contains("dpkg-deb --root-owner-group --build"),
+        "release script must normalize archive ownership to root"
+    );
+    // #468: the preferred GTK shell is listed, owned and installed cleanly.
+    let check = read_workspace("scripts/check-deb-clean-install");
+    for token in [
+        "dpkg-deb -c",
+        "root/root",
+        "./usr/bin/tuna-shell-gtk",
+        "apt-get install",
+    ] {
+        assert!(check.contains(token), "clean-install check keeps {token}");
+    }
+    let ci = read_workspace(".github/workflows/ci.yml");
+    assert!(
+        ci.contains("scripts/check-deb-clean-install package-artifacts/*.deb"),
+        "CI must install the built .deb on a clean image"
+    );
+}
+
+#[test]
 fn release_notes_template_keeps_the_required_sections() {
     let doc = read_workspace("docs/release.md");
     for token in [

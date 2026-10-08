@@ -137,7 +137,7 @@ Provides: $LEGACY_PACKAGE
 Section: x11
 Priority: optional
 Architecture: amd64
-Depends: $SHLIBS, libgtk4-layer-shell0 (>= 1.1), libgtk-4-1 (>= 4.12), libadwaita-1-0 (>= 1.0), libpam0g, gsettings-desktop-schemas, libsecret-tools, libxkbcommon0, libxkbcommon-x11-0, libegl1, libgl1, libgbm1, libseat1, libinput10, libudev1, libdrm2, libgtk-4-1, libadwaita-1-0, libpipewire-0.3-0t64 | libpipewire-0.3-0, libglib2.0-0t64 | libglib2.0-0
+Depends: $SHLIBS, libgtk4-layer-shell0 (>= 1.1), libgtk-4-1 (>= 4.12), libadwaita-1-0 (>= 1.0), libpam0g, gsettings-desktop-schemas, libsecret-tools, libxkbcommon0, libxkbcommon-x11-0, libegl1, libgl1, libgbm1, libseat1, libinput10, libudev1, libdrm2, libpipewire-0.3-0t64 | libpipewire-0.3-0, libglib2.0-0t64 | libglib2.0-0
 Recommends: ibus, gstreamer1.0-tools, gstreamer1.0-pipewire, gstreamer1.0-plugins-good
 Maintainer: Tuna Desktop Developers <tuna@example.invalid>
 Description: Tuna Desktop Wayland desktop session

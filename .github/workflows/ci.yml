@@ -98,10 +98,14 @@ jobs:
       # Genuine Ubuntu26.04 distro packages, not /usr/local source libraries.
       - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y --no-install-recommends libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool scrot ffmpeg jq dbus libglib2.0-bin xwayland x11-apps x11-utils pipewire wireplumber gstreamer1.0-pipewire gstreamer1.0-tools gstreamer1.0-plugins-good at-spi2-core python3-pyatspi python3-pil libsecret-tools gnome-keyring fonts-cantarell shellcheck libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev meson ninja-build libwayland-dev wayland-protocols libpam-wrapper ibus ibus-gtk3 ibus-gtk4 gir1.2-ibus-1.0 gir1.2-gtk-3.0 wayland-utils xdg-desktop-portal xdg-desktop-portal-gnome xdg-desktop-portal-gtk libgtk4-layer-shell-dev dpkg-dev gsettings-desktop-schemas
       - run: pkg-config --atleast-version=1.1 gtk4-layer-shell-0 && pkg-config --atleast-version=4.12 gtk4 && pkg-config --atleast-version=1.0 libadwaita-1
-      - run: shellcheck -x scripts/tuna-journey scripts/tuna-nested scripts/tuna-release scripts/check-release-package scripts/lib/tuna-introspect.sh scripts/lib/tuna-proof-session-launch scripts/ci-prepare-artifacts
+      - run: shellcheck -x scripts/tuna-journey scripts/tuna-nested scripts/tuna-release scripts/check-release-package scripts/check-deb-clean-install scripts/lib/tuna-introspect.sh scripts/lib/tuna-proof-session-launch scripts/ci-prepare-artifacts
       - run: python3 scripts/lib/installed-deb-proof-tests.py
       - run: python3 scripts/lib/release-deb-ownership-tests.py
       - run: scripts/tuna-release --allow-dirty --out package-artifacts && scripts/check-release-package package-artifacts/*.deb
+      # Root-owned archive with the preferred GTK shell (#468, #476), installed
+      # on a pristine Ubuntu 26.04 image where only the declared Depends can
+      # satisfy the binaries; this runner has every -dev package already.
+      - run: scripts/check-deb-clean-install package-artifacts/*.deb ubuntu:26.04
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: tuna-deb

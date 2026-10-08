@@ -1,0 +1,86 @@
+#!/bin/sh
+# check-deb-clean-install — install a Tuna Desktop .deb on a pristine Ubuntu image.
+#
+# Usage:
+#   scripts/check-deb-clean-install <package.deb> [image]
+#
+# Lists the original archive with dpkg-deb -c and requires root:root
+# ownership for every entry plus the preferred GTK shell, then installs the
+# package with apt in a clean container (default ubuntu:26.04, the first
+# package target) where only the declared Depends can satisfy the binaries.
+# Every installed binary must load its libraries and report the package
+# version, and the GTK shell must sit beside the compositor so the session
+# selects it ahead of the legacy shell.
+set -eu
+
+unset CDPATH
+
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+    echo "Usage: scripts/check-deb-clean-install <package.deb> [image]" >&2
+    exit 1
+fi
+
+PKG="$1"
+IMAGE="${2:-ubuntu:26.04}"
+fail() {
+    echo "check-deb-clean-install: $1" >&2
+    exit 1
+}
+
+[ -f "$PKG" ] || fail "no package $PKG"
+VERSION="$(dpkg-deb -f "$PKG" Version)"
+[ -n "$VERSION" ] || fail "empty Version field"
+
+# Original archive listing: owner/group is the second column.
+LISTING="$(dpkg-deb -c "$PKG")"
+printf '%s\n' "$LISTING"
+BAD_OWNER="$(printf '%s\n' "$LISTING" | awk '$2 != "root/root"')"
+[ -z "$BAD_OWNER" ] || fail "entries not owned by root/root:
+$BAD_OWNER"
+printf '%s\n' "$LISTING" | awk '$6 == "./" && $1 == "drwxr-xr-x" { found = 1 } END { exit !found }' \
+    || fail "archive root is not drwxr-xr-x"
+printf '%s\n' "$LISTING" | awk '$6 == "./usr/bin/tuna-shell-gtk" && $1 == "-rwxr-xr-x" { found = 1 } END { exit !found }' \
+    || fail "tuna-shell-gtk missing or not 0755"
+
+if command -v docker >/dev/null 2>&1; then
+    ENGINE=docker
+elif command -v podman >/dev/null 2>&1; then
+    ENGINE=podman
+else
+    fail "needs docker or podman"
+fi
+
+PKG_DIR="$(cd -- "$(dirname -- "$PKG")" && pwd)"
+PKG_NAME="$(basename -- "$PKG")"
+
+# shellcheck disable=SC2016 # expanded inside the container
+"$ENGINE" run --rm -e DEBIAN_FRONTEND=noninteractive -e VERSION="$VERSION" -e PKG_NAME="$PKG_NAME" \
+    -v "$PKG_DIR:/pkg:ro" "$IMAGE" sh -euc '
+fail() { echo "check-deb-clean-install (container): $1" >&2; exit 1; }
+apt-get -o Acquire::Retries=3 update >/dev/null
+apt-get install -y --no-install-recommends "/pkg/$PKG_NAME" >/dev/null
+. /etc/os-release
+echo "installed tuna-desktop $(dpkg-query -W -f "\${Version}" tuna-desktop) on $PRETTY_NAME"
+for bin in tuna-compositor tuna-session tuna-shell-gtk tuna-shell-host tuna-ibus-bridge tuna-greeter; do
+    path="/usr/bin/$bin"
+    [ "$(stat -c "%u:%g %a" "$path")" = "0:0 755" ] || fail "$path not root-owned 0755"
+    if ldd "$path" | grep "not found"; then fail "$bin missing a library on a clean install"; fi
+    [ "$("$path" --version)" = "$bin $VERSION" ] || fail "$bin version differs from package $VERSION"
+done
+# The compositor prefers tuna-shell-gtk beside itself over tuna-shell-host.
+[ "$(dirname "$(readlink -f "$(command -v tuna-compositor)")")" = "$(dirname "$(readlink -f "$(command -v tuna-shell-gtk)")")" ] \
+    || fail "tuna-shell-gtk is not beside tuna-compositor"
+# tuna-rename: keep-begin
+# One release of compatibility (#505): the old names resolve to the new binaries.
+for bin in compositor session shell-gtk shell-host ibus-bridge greeter; do
+    [ "$(readlink -f "/usr/bin/roost-$bin")" = "/usr/bin/tuna-$bin" ] || fail "roost-$bin compat link broken"
+done
+# tuna-rename: keep-end
+EXEC="$(sed -n "s/^Exec=\([^ ]*\).*/\1/p" /usr/share/wayland-sessions/tuna.desktop)"
+command -v "$EXEC" >/dev/null || fail "session Exec $EXEC not installed"
+for path in /usr/lib/systemd/user/tuna-session.target /etc/pam.d/tuna-lock; do
+    [ "$(stat -c "%u:%g" "$path")" = "0:0" ] || fail "$path not root-owned"
+done
+' || fail "clean install on $IMAGE failed"
+
+echo "check-deb-clean-install: $PKG OK on $IMAGE (version $VERSION)"
