@@ -1,4 +1,4 @@
-# Roost extensions
+# Tuna Desktop extensions
 
 Small Rhai scripts that extend the shell without rebuilding it: bar
 cells, dock badges, and user-visible notes.

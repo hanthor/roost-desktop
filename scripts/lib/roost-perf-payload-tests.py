@@ -35,7 +35,7 @@ class PayloadTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def archive(self, missing=None, duplicate=None, link=None, nonelf=None, noexec=None,
-                late_alias=None, leading_dot=False, directories=False):
+                late_alias=None, leading_dot=False, directories=False, session_name=b"Tuna Desktop"):
         output = io.BytesIO()
         with tarfile.open(fileobj=output, mode="w") as archive:
             if directories:
@@ -48,7 +48,7 @@ class PayloadTests(unittest.TestCase):
                     continue
                 data = (b"pkgname = roost\npkgver = 0.1.0-1\narch = x86_64\nsize = 100000\n"
                         if name == ".PKGINFO" else self.binary if name in payload.BINS else
-                        b"[Desktop Entry]\nName=Roost\n" if name.endswith("roost.desktop") else b"receipt\n")
+                        b"[Desktop Entry]\nName=" + session_name + b"\n" if name.endswith("roost.desktop") else b"receipt\n")
                 if name == nonelf:
                     data = b"not ELF"
                 info = tarfile.TarInfo("./" + name if leading_dot else name)
@@ -181,6 +181,16 @@ class PayloadTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(payload.Refusal):
                 self.inspect(**{key: payload.BINS[3]})
 
+    def test_preview_branding_accepts_pre_rename_session_name_only(self):
+        desktop = "usr/share/wayland-sessions/roost.desktop"
+        preview = hashlib.sha256(b"[Desktop Entry]\nName=Tuna Desktop (preview)\n").hexdigest()
+        for name in (b"Tuna Desktop", b"Roost"):
+            rule = self.inspect(session_name=name)["required_members"][desktop]["preview_install"]
+            self.assertEqual(rule["sha256"], preview)
+            self.assertEqual(rule["rule"], "Name=" + name.decode() + " -> Name=Tuna Desktop (preview)")
+        with self.assertRaises(payload.Refusal):
+            self.inspect(session_name=b"Something Else")
+
     def test_late_tar_alias_cannot_overwrite_validated_required_binary(self):
         for alias in ("usr//bin/roost-shell-gtk", "usr/./bin/roost-shell-gtk",
                       "usr/bin/../bin/roost-shell-gtk", "././usr/bin/roost-shell-gtk",
@@ -254,7 +264,7 @@ class PayloadTests(unittest.TestCase):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(self.binary if name in payload.BINS else
-                             b"[Desktop Entry]\nName=Roost (preview)\n" if name.endswith("roost.desktop") else b"receipt\n")
+                             b"[Desktop Entry]\nName=Tuna Desktop (preview)\n" if name.endswith("roost.desktop") else b"receipt\n")
             path.chmod(0o755 if name in payload.BINS else 0o644)
         inventory = "".join("roost /" + name + "\n" for name in payload.REQUIRED)
         self.assertEqual(len(payload.installed(self.root, report, "roost 0.1.0-1\n", inventory)), len(payload.REQUIRED))

@@ -305,7 +305,7 @@ impl DrmBackend {
                 PhysicalProperties {
                     size: (mm_w as i32, mm_h as i32).into(),
                     subpixel: Subpixel::Unknown,
-                    make: "Roost".to_owned(),
+                    make: "Tuna Desktop".to_owned(),
                     model: name.clone(),
                 },
             );

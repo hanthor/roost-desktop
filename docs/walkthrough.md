@@ -1,6 +1,6 @@
 # Walkthrough
 
-Roost's features as they look today. Every frame is taken by the GTK
+Tuna Desktop's features as they look today. Every frame is taken by the GTK
 shell proof (`scripts/roost-gtk-shell-proof`) in a nested session, the
 same run CI makes on every change, so the windows are the proof's test
 windows and the services are its stubs. Regenerate with

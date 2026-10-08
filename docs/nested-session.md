@@ -121,7 +121,7 @@ fallback ([ADR 0001](adr/0001-nested-backend-smithay-pin.md)). Check that:
 
 Under Xvfb, in a VM, or over a remote X connection, Mesa may print
 `libEGL warning:` lines (for example about DRI3) and fall back to software
-rendering. They come from Mesa, not Roost, and are harmless when no
+rendering. They come from Mesa, not Tuna Desktop, and are harmless when no
 `nested backend unavailable` line follows and the session runs. CI's
 proof jobs run under Xvfb this way on every change.
 

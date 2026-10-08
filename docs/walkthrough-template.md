@@ -1,4 +1,4 @@
-# Roost walkthrough
+# Tuna Desktop walkthrough
 
 What the desktop looks like in action. Each feature below has a short clip
 plus a still, captured automatically from scripted sessions of release

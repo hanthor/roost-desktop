@@ -534,7 +534,7 @@ fn real_output_global_removal_reaches_clients() {
         PhysicalProperties {
             size: (0, 0).into(),
             subpixel: Subpixel::Unknown,
-            make: "Roost".to_owned(),
+            make: "Tuna Desktop".to_owned(),
             model: "Test".to_owned(),
         },
     );

@@ -70,7 +70,7 @@ rm -f "$MARKER"
 mkdir -p "$PROBE_HOME/applications"
 cat >"$PROBE_HOME/applications/roostterm-probe.desktop" <<EOF
 [Desktop Entry]
-Name=Roostterm Probe
+Name=Tunaterm Probe
 Exec=touch "$MARKER"
 Type=Application
 EOF
@@ -218,9 +218,9 @@ shot "02-overview.png"
 
 # Typing filters; Enter picks; Escape returns. The query matches
 # only the probe app, so Enter must spawn it (marker below).
-xdotool type "roostterm"
+xdotool type "tunaterm"
 assert_state J-OV-SEARCH \
-    '.overview.query == "roostterm" and (.overview.results | length) >= 1 and (.overview.results[0].target | tostring | test("roostterm-probe"))' \
+    '.overview.query == "tunaterm" and (.overview.results | length) >= 1 and (.overview.results[0].target | tostring | test("roostterm-probe"))' \
     "typed query lists the probe app as the top hit"
 keep_state 03-search
 shot "03-search.png"

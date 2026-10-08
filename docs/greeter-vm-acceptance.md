@@ -7,7 +7,7 @@ credentials and stay manual.
 ## Cold boot to login screen
 
 1. Boot the VM with greetd configured to launch `roost-greeter`.
-2. Expect the login window with user list, session picker (Roost
+2. Expect the login window with user list, session picker (Tuna Desktop
    default), and no console visible.
 3. Sign in with valid credentials; expect the selected session's
    first window to take input.
@@ -20,7 +20,7 @@ credentials and stay manual.
 
 ## Dead session
 
-1. Point the Roost session entry at `false(1)`.
+1. Point the Tuna Desktop session entry at `false(1)`.
 2. Sign in; expect return to the login screen with a plain-language
    notice, greeter process still alive.
 

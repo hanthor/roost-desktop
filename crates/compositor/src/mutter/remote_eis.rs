@@ -53,7 +53,8 @@ impl Worker {
                     self.disconnected = true;
                     return calloop::PostAction::Remove;
                 }
-                self.seat = Some(connection.add_seat(Some("Roost remote seat"), self.capabilities));
+                self.seat =
+                    Some(connection.add_seat(Some("Tuna Desktop remote seat"), self.capabilities));
             }
             EisRequestSourceEvent::Request(EisRequest::Disconnect) => {
                 self.disconnected = true;
@@ -73,7 +74,7 @@ impl Worker {
                 let capabilities = request.capabilities & self.capabilities;
                 if !capabilities.is_empty() {
                     let device = request.seat.add_device(
-                        Some("Roost remote input"),
+                        Some("Tuna Desktop remote input"),
                         eis::device::DeviceType::Virtual,
                         capabilities,
                         |device| {

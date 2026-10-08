@@ -228,7 +228,7 @@ for t in alpha beta gamma delta; do
 done
 cat >"$XDG_DATA_HOME/applications/roost-probe.desktop" <<EOF
 [Desktop Entry]
-Name=Roost Probe
+Name=Tuna Probe
 Exec=touch $PROBE_MARKER
 Icon=applications-system
 Type=Application
@@ -241,7 +241,7 @@ EOF
 chmod +x "$ARTIFACTS/calendar-probe"
 cat >"$XDG_DATA_HOME/applications/roost-calendar-probe.desktop" <<EOF
 [Desktop Entry]
-Name=Roost Calendar Probe
+Name=Tuna Calendar Probe
 Exec=$ARTIFACTS/calendar-probe %u
 Type=Application
 MimeType=x-scheme-handler/calendar;
@@ -276,7 +276,7 @@ XPROBE
 chmod +x "$ARTIFACTS/bin/roost-x-probe"
 cat >"$XDG_DATA_HOME/applications/roost-x-probe.desktop" <<XDESK
 [Desktop Entry]
-Name=Roost X Probe
+Name=Tuna X Probe
 Exec=$ARTIFACTS/bin/roost-x-probe
 Type=Application
 XDESK
@@ -1279,11 +1279,11 @@ fi
 pass G-OV-SHELL-UI "overview shows the search entry and the dash"
 scrot "$ARTIFACTS/09-overview-shell.png" >/dev/null
 
-xdotool type --delay 40 "roost probe"
+xdotool type --delay 40 "tuna probe"
 sleep 1
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-search.json" 20 ||
     fail G-OV-SEARCH "accessibility dump failed"
-showing "$ARTIFACTS/a11y-search.json" "Roost Probe" ||
+showing "$ARTIFACTS/a11y-search.json" "Tuna Probe" ||
     fail G-OV-SEARCH "typing did not list the probe app"
 pass G-OV-SEARCH "typing in the overview lists matching apps"
 scrot "$ARTIFACTS/10-search.png" >/dev/null
@@ -1299,7 +1299,7 @@ pass G-OV-LAUNCH "Enter launches the top result and closes the overview"
 # watches the application directories too).
 cat >"$XDG_DATA_HOME/applications/roost-late-arrival.desktop" <<LATE
 [Desktop Entry]
-Name=Roost Late Arrival
+Name=Tuna Late Arrival
 Exec=true
 Type=Application
 LATE
@@ -1311,7 +1311,7 @@ xdotool type --delay 40 "late arrival"
 sleep 1
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-late-app.json" 20 ||
     fail G-APP-INSTALLED "accessibility dump failed"
-showing "$ARTIFACTS/a11y-late-app.json" "Roost Late Arrival" ||
+showing "$ARTIFACTS/a11y-late-app.json" "Tuna Late Arrival" ||
     fail G-APP-INSTALLED "an app installed mid-session did not show in search"
 pass G-APP-INSTALLED "an app installed mid-session shows in search"
 xdotool key Escape
@@ -1322,7 +1322,7 @@ cstate '.overview_open | not' "closed" || { xdotool key Escape; cstate '.overvie
 # so subsequent drag/folder fixtures start with the same catalog.
 grid_original_folders="$(gsettings get org.gnome.desktop.app-folders folder-children)"
 grid_long_folder=org.gnome.desktop.app-folders.folder:/org/gnome/desktop/app-folders/folders/ViewportProof/
-grid_long_name='Roost Extremely Long Folder Name For Viewport Regression'
+grid_long_name='Tuna Extremely Long Folder Name For Viewport Regression'
 gsettings set org.gnome.desktop.app-folders folder-children "['ViewportProof']"
 gsettings set "$grid_long_folder" name "$grid_long_name"
 gsettings set "$grid_long_folder" translate false
@@ -1331,7 +1331,7 @@ gsettings set "$grid_long_folder" apps "['roost-probe.desktop']"
 # GNOME's paged app grid: thirty more apps make a second page, with the
 # page indicators and the side arrows; Next Page turns to it.
 for i in $(seq -w 1 30); do
-    printf '[Desktop Entry]\nName=Roost Page App %s\nExec=true\nType=Application\n' "$i" \
+    printf '[Desktop Entry]\nName=Tuna Page App %s\nExec=true\nType=Application\n' "$i" \
         >"$XDG_DATA_HOME/applications/roost-page-$i.desktop"
 done
 sleep 1.5
@@ -1466,7 +1466,7 @@ sleep 0.25
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid-page-peek.json" 20 || fail G-GRID-PAGE-PEEK "preview dump failed"
 scrot "$ARTIFACTS/11h-grid-page-peek.png" >/dev/null
 showing "$ARTIFACTS/a11y-grid-page-peek.json" "Next page preview" || fail G-GRID-PAGE-PEEK "next page hint missing during drag"
-jq -e 'any(.[]; .showing and .role == "image" and (.name | startswith("Roost Page App")))' "$ARTIFACTS/a11y-grid-page-peek.json" >/dev/null || fail G-GRID-PAGE-PEEK "neighboring page icons did not enter the hint"
+jq -e 'any(.[]; .showing and .role == "image" and (.name | startswith("Tuna Page App")))' "$ARTIFACTS/a11y-grid-page-peek.json" >/dev/null || fail G-GRID-PAGE-PEEK "neighboring page icons did not enter the hint"
 peek_rect="$(jq -r --argjson ox "$grid_origin_x" --argjson oy "$grid_origin_y" '.[] | select(.showing and .name == "Next page preview") | .bounds | "\(.[0] + $ox) \(.[1] + $oy) \(.[2]) \(.[3])"' "$ARTIFACTS/a11y-grid-page-peek.json" | head -1)"
 # shellcheck disable=SC2086
 set -- $peek_rect
@@ -1726,7 +1726,7 @@ cstate '.overview_open' "overview" || fail G-OV-APPGRID "overview did not reopen
 sleep 1
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-grid.json" 20 --press "Show Apps" ||
     fail G-OV-APPGRID "could not press Show Apps"
-showing "$ARTIFACTS/a11y-grid.json" "Roost Probe" ||
+showing "$ARTIFACTS/a11y-grid.json" "Tuna Probe" ||
     fail G-OV-APPGRID "app grid does not list installed apps"
 pass G-OV-APPGRID "Show Apps opens the app grid"
 scrot "$ARTIFACTS/11-app-grid.png" >/dev/null
@@ -1749,13 +1749,13 @@ sleep 1
     fail G-APP-FOLDERS "could not press Show Apps"
 showing "$ARTIFACTS/a11y-folders.json" "Probe Tools" ||
     fail G-APP-FOLDERS "the grid has no Probe Tools folder"
-if showing "$ARTIFACTS/a11y-folders.json" "Roost Probe"; then
+if showing "$ARTIFACTS/a11y-folders.json" "Tuna Probe"; then
     fail G-APP-FOLDERS "a foldered app still shows loose in the grid"
 fi
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-folder-open.json" 20 --press "Probe Tools" ||
     fail G-APP-FOLDERS "could not open the folder"
 scrot "$ARTIFACTS/11b-app-folder.png" >/dev/null
-showing "$ARTIFACTS/a11y-folder-open.json" "Roost Probe" ||
+showing "$ARTIFACTS/a11y-folder-open.json" "Tuna Probe" ||
     fail G-APP-FOLDERS "the open folder does not show its app"
 pass G-APP-FOLDERS "GNOME's app folders group the grid and open to their apps"
 xdotool key Escape
@@ -2341,7 +2341,7 @@ if command -v Xwayland >/dev/null 2>&1 && command -v xeyes >/dev/null 2>&1; then
     xdotool key Super_L
     cstate '.overview_open' "overview" || fail G-X11-APP "overview did not open"
     sleep 1
-    xdotool type --delay 40 "roost x probe"
+    xdotool type --delay 40 "tuna x probe"
     sleep 1
     xdotool key Return
     end=$(($(date +%s) + 15))

@@ -736,7 +736,7 @@ impl Runtime {
             PhysicalProperties {
                 size: (0, 0).into(),
                 subpixel: Subpixel::Unknown,
-                make: "Roost".to_owned(),
+                make: "Tuna Desktop".to_owned(),
                 model: "Nested".to_owned(),
             },
         );

@@ -1,6 +1,6 @@
 # Development Guide
 
-Welcome to Roost. This guide covers everything you need to set up your development environment, understand the codebase structure, and contribute to the project.
+Welcome to Tuna Desktop. This guide covers everything you need to set up your development environment, understand the codebase structure, and contribute to the project.
 
 ## Prerequisites
 
@@ -53,7 +53,7 @@ sudo pacman -S --needed base-devel git rust pkgconf clang pipewire gtk4 \
 
 ### Spektacular CLI (planning work only)
 
-Building, testing and running Roost do not need Spektacular. You need it
+Building, testing and running Tuna Desktop do not need Spektacular. You need it
 only to read or change specs and plans, which are managed through the
 [Spektacular](https://github.com/hivecommons/spektacular) CLI rather than by
 editing `.spektacular/` by hand. It is a Go program; with a Go toolchain
@@ -108,12 +108,12 @@ roost-desktop/
 
 ## Running the Nested Compositor
 
-The nested compositor runs inside your current Wayland or X11 session for safe development and testing. It creates a Roost session as a client of your host display.
+The nested compositor runs inside your current Wayland or X11 session for safe development and testing. It creates a Tuna Desktop session as a client of your host display.
 
 ### First-time setup
 
 ```bash
-# Build and start a nested Roost session
+# Build and start a nested Tuna Desktop session
 ./scripts/roost-nested run
 ```
 
@@ -127,7 +127,7 @@ The session runs until you press Ctrl+C or terminate the process.
 
 ### Testing shell crashes and recovery
 
-Roost implements a supervised shell-host restart mechanism. Test it with:
+Tuna Desktop implements a supervised shell-host restart mechanism. Test it with:
 
 ```bash
 # In one terminal, start the nested session:
@@ -147,7 +147,7 @@ See `docs/nested-session.md` for details on the crash recovery design.
 
 ## Understanding Spektacular Workflows
 
-Roost uses Spektacular for planning and tracking implementation work. Each work item has:
+Tuna Desktop uses Spektacular for planning and tracking implementation work. Each work item has:
 
 - **Spec**: A specification document (in `.spektacular/specs/`)
 - **Plan**: Implementation roadmap and checklist (in `.spektacular/plans/`)
@@ -167,12 +167,12 @@ Run `spektacular <command> --help` for the rest. For more details, see the [Spek
 
 ## Architecture and Design
 
-For deeper understanding of Roost's design:
+For deeper understanding of Tuna Desktop's design:
 
 - **Architecture overview**: Read `docs/architecture.md` for the compositor/shell separation, nested recovery design, and long-term roadmap
 - **Design decisions**: Check `docs/adr/` (Architecture Decision Records) for rationale on key choices (e.g., Smithay pinning, backend selection)
 - **Verification strategy**: See `docs/test-strategy.md` for how we validate each layer (unit tests, protocol probes, integration tests, hardware qualification)
-- **Test strategy and matrix**: Roost targets multiple environments, GPU configurations, and client types; the test strategy document details the coverage plan
+- **Test strategy and matrix**: Tuna Desktop targets multiple environments, GPU configurations, and client types; the test strategy document details the coverage plan
 
 ## Workflow for contributors
 
@@ -220,7 +220,7 @@ If you find a bug or have a feature request:
    - Clear title and description
    - Steps to reproduce (for bugs)
    - Expected vs. actual behavior
-   - Environment (distro, GPU, Rust version, Roost commit); for nested-session bugs, see [filing a bug](nested-session.md#filing-a-bug)
+   - Environment (distro, GPU, Rust version, Tuna Desktop commit); for nested-session bugs, see [filing a bug](nested-session.md#filing-a-bug)
 3. Reference relevant specs in `.spektacular/specs/` if applicable
 
 ## Further reading

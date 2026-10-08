@@ -1,6 +1,6 @@
 # Remote desktop consent and input
 
-Roost exposes GNOME's Mutter RemoteDesktop interface to the installed,
+Tuna Desktop exposes GNOME's Mutter RemoteDesktop interface to the installed,
 root-owned portal backend. Creating a session requires the same authenticated
 portal/shell authority as capture. Every subsequent operation requires its
 original unique D-Bus owner. Creation, start, EIS connection and input are denied

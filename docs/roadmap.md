@@ -2,10 +2,10 @@
 
 The [public 12-month roadmap](../ROADMAP.md) records dated priorities, release status, adoption evidence and contribution opportunities.
 
-**Status:** Active. Tier 1 (nested developer preview) is implemented; tier 2 (daily-driver candidate) is open. Work items live as GitHub issues on the [Roost roadmap project board](https://github.com/users/hanthor/projects/4); this document keeps the program structure, gates, and traceability.
+**Status:** Active. Tier 1 (nested developer preview) is implemented; tier 2 (daily-driver candidate) is open. Work items live as GitHub issues on the [Tuna Desktop roadmap project board](https://github.com/users/hanthor/projects/4); this document keeps the program structure, gates, and traceability.
 **Architecture:** [Program architecture](architecture.md)  
 **Parity target:** GNOME 51 on the Marlin image family. Decided 2026-10-01. The published Marlin GNOME image measured on 2026-10-04 contains GNOME Shell 50.5, so GNOME 51 comparison evidence must identify its separately upgraded reference payload.
-**Target platform:** TunaOS Marlin (Arch Linux base, bootc image), as a Roost flavor alongside the GNOME flavor. Reference and candidate run on the same VM image family so comparisons are like for like.  
+**Target platform:** TunaOS Marlin (Arch Linux base, bootc image), as a Tuna Desktop flavor alongside the GNOME flavor. Reference and candidate run on the same VM image family so comparisons are like for like.  
 **Planning system:** Spektacular spec → plan → implement. Every delivery unit has a spek, a reviewed implementation plan, evidence, and an explicit gate.
 
 ## Delivery tiers
@@ -87,7 +87,7 @@ with their spek number (`001-R5`), per the register's naming rule.
 
 ## Research intake protocol
 
-GNOME issue reports are leads, not current-state facts. For every issue used to prioritize work, record exact project and issue ID, state, labels, last activity, affected release, reproduction, linked merge request/fix, verification against the pinned baseline, and the Roost spek/test that covers it. Do not call an issue unresolved from search snippets. The intake checklist lives in [research intake](research/README.md).
+GNOME issue reports are leads, not current-state facts. For every issue used to prioritize work, record exact project and issue ID, state, labels, last activity, affected release, reproduction, linked merge request/fix, verification against the pinned baseline, and the Tuna Desktop spek/test that covers it. Do not call an issue unresolved from search snippets. The intake checklist lives in [research intake](research/README.md).
 
 ## Change control
 

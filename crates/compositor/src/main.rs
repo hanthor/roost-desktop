@@ -86,7 +86,7 @@ fn main() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             "--help" | "-h" => {
-                println!("roost-compositor: nested Roost session (001 developer preview)");
+                println!("roost-compositor: nested Tuna Desktop session (001 developer preview)");
                 println!();
                 println!(
                     "Usage: roost-compositor [--backend auto|winit|drm] [--socket NAME] [--width W] [--height H] [--shell-bin PATH] [--xwayland] [--startup-overview]"

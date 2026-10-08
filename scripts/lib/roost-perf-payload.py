@@ -202,10 +202,15 @@ def inspect_tar(stream):
                 if name == "usr/share/wayland-sessions/roost.desktop":
                     # Existing preview branding intentionally edits this one
                     # installed member; preserve both hashes and exact rule.
-                    require(data.count(b"Name=Roost\n") == 1, "preview desktop branding input differs")
-                    preview = data.replace(b"Name=Roost\n", b"Name=Roost (preview)\n")
+                    # Packages built before the rename to Tuna Desktop (#504)
+                    # still say Roost; the image rewrites either name.
+                    names = [n for n in (b"Tuna Desktop", b"Roost")
+                             if data.count(b"Name=" + n + b"\n") == 1]
+                    require(len(names) == 1, "preview desktop branding input differs")
+                    source = b"Name=" + names[0] + b"\n"
+                    preview = data.replace(source, b"Name=Tuna Desktop (preview)\n")
                     files[name]["preview_install"] = {
-                        "rule": "Name=Roost -> Name=Roost (preview)",
+                        "rule": source.decode().strip() + " -> Name=Tuna Desktop (preview)",
                         "size": len(preview), "sha256": hashlib.sha256(preview).hexdigest()}
 
     require(set(files) == set(REQUIRED) and pkginfo is not None, "required package members missing")

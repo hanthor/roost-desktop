@@ -1,4 +1,4 @@
-# Installing Roost
+# Installing Tuna Desktop
 
 > **Backends.** `roost-compositor --backend auto` (the default) runs as a
 > DRM/KMS hardware session when started without a host display, for example
@@ -24,10 +24,10 @@ sudo apt install ./roost_X.Y.Z_amd64.deb
 ```
 
 Dependencies resolve automatically on a target with the declared runtime
-packages available. After installing, the Roost session is
+packages available. After installing, the Tuna Desktop session is
 selectable from the login screen. Upgrading installs the newer package over
 the older one with user configuration and application data preserved;
-removing the package drops the Roost-owned program files and session entry
+removing the package drops the Tuna Desktop-owned program files and session entry
 while preserving user data. See `docs/release.md` for the release process.
 
 ## From source
@@ -77,9 +77,9 @@ from `ROOST_SHELL_BIN` when set, then `roost-shell-gtk` and then
 
 ## Greetd wiring
 
-Any greetd greeter that lists `wayland-sessions` works. The Roost greeter
+Any greetd greeter that lists `wayland-sessions` works. The Tuna Desktop greeter
 enumerates `/usr/share/wayland-sessions` (then `xsessions`), marks the
-`Name=Roost` entry default, and launches its `Exec=` line — which must be
+`Name=Tuna Desktop` entry default, and launches its `Exec=` line — which must be
 `roost-session`, never the compositor directly, so shell supervision stays
 in the loop. A minimal `/etc/greetd/config.toml` session:
 

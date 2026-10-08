@@ -2,7 +2,7 @@
 
 **Status:** Proposed, for design review  
 **Date:** 27 September 2026  
-**Name:** Roost (Rust Wayland desktop session)
+**Name:** Tuna Desktop (Rust Wayland desktop session), formerly Roost. Crates, binaries, packages and environment variables still use the `roost` name until the internal rename ([#505](https://github.com/tuna-os/tuna-desktop/issues/505)).
 
 ## Product decision
 
