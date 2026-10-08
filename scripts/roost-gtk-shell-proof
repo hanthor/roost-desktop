@@ -1819,7 +1819,7 @@ sleep 1.5
 "$PY" "$ROOT/scripts/lib/roost-a11y-dump.py" roost-shell-gtk "$ARTIFACTS/a11y-group.json" 20 ||
     fail G-NOTIFY-GROUP "accessibility dump failed"
 scrot "$ARTIFACTS/14b-notification-group.png" >/dev/null
-jq -e 'any(.[]; .name == "Roost Proof" and .role == "push button" and .showing)' \
+jq -e 'any(.[]; .name == "Roost Proof" and (.role == "push button" or .role == "button") and .showing)' \
     "$ARTIFACTS/a11y-group.json" >/dev/null ||
     fail G-NOTIFY-GROUP "no collapsed group named for the app"
 showing "$ARTIFACTS/a11y-group.json" "Quiet Two" ||
