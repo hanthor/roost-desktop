@@ -188,6 +188,35 @@ class Policy(unittest.TestCase):
             self.assertEqual(G.main(),0)
         self.assertEqual(len(calls),2)
         self.assertEqual(json.loads(stream.getvalue()),{'phase':'mapped'})
+    def test_start_provider_enumerate_transient_retried_then_succeeds(self):
+        calls=[]
+        def flaky(_provisional,_query):
+            calls.append(True)
+            if len(calls)==1:
+                G.error_stage('provider-enumerate')
+                raise RuntimeError('transient provider lookup inconsistency')
+            return ({'app':1},{'api':1},{'receipt':1})
+        with patch.object(G,'provider_app',side_effect=flaky):
+            self.assertEqual(G.start_provider({}),(({'app':1}),({'api':1}),({'receipt':1})))
+        self.assertEqual(len(calls),2)
+    def test_start_provider_enumerate_persistent_failure_finite(self):
+        calls=[]
+        def broken(_provisional,_query):
+            calls.append(True)
+            G.error_stage('provider-enumerate')
+            raise RuntimeError('persistent provider lookup inconsistency')
+        with patch.object(G,'provider_app',side_effect=broken):
+            with self.assertRaises(RuntimeError):G.start_provider({})
+        self.assertEqual(len(calls),G.TREE_WALK_ATTEMPTS)
+    def test_start_provider_receipt_failure_never_retried(self):
+        calls=[]
+        def broken(_provisional,_query):
+            calls.append(True)
+            G.error_stage('provider-receipt')
+            raise RuntimeError('private receipt body')
+        with patch.object(G,'provider_app',side_effect=broken):
+            with self.assertRaises(RuntimeError):G.start_provider({})
+        self.assertEqual(len(calls),1)
     def test_provider_receipt_failure_never_retried(self):
         calls=[]
         def broken(_original,_phase):

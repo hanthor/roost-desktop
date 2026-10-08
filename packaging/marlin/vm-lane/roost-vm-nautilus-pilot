@@ -680,6 +680,22 @@ def inspect(value,phase):
     return result
 
 
+def start_provider(provisional):
+    # The start phase observes a just-launched Nautilus while the desktop
+    # settles, so a transient enumeration miss (e.g. a momentary extra
+    # accessible app) retries here exactly like the later phases do in
+    # main() instead of failing the whole pilot on the first attempt.
+    attempts=0
+    query=Queries(provisional).call
+    while True:
+        try:
+            return provider_app(provisional,query)
+        except RuntimeError:
+            attempts+=1
+            if ERROR_STAGE!='provider-enumerate' or attempts>=TREE_WALK_ATTEMPTS:
+                raise
+
+
 def start():
     if UID==0:raise RuntimeError('ordinary fixture user required')
     if CONTEXT.exists():raise RuntimeError('fresh pilot owner context required')
@@ -692,7 +708,7 @@ def start():
     service=principal(SERVICE,'/usr/bin/roost-compositor')
     display=bind_display(compositor,service)
     provisional={'nautilus':nautilus,'compositor':compositor,'display':display}
-    _app,_api,accessibility_receipt=provider_app(provisional,Queries(provisional).call)
+    _app,_api,accessibility_receipt=start_provider(provisional)
     packages={name:command(['/usr/bin/pacman','-Q',name]) for name in ('nautilus','python-atspi','roost')}
     directory=Path(tempfile.mkdtemp(prefix='roost-native-files-',dir=RUNTIME))
     info=directory.lstat()
