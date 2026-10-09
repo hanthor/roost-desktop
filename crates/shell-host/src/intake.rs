@@ -43,12 +43,25 @@ fn pair_actions(actions: &[String]) -> Vec<NotificationAction> {
         .collect()
 }
 
+/// A hint's value with D-Bus's variant layer removed. `a{sv}` wraps
+/// every value once, and converting the wrapper directly misreads it
+/// as a mistype — which silently dropped every desktop-entry, urgency
+/// and sound hint on real notifications.
+fn hint_value(
+    hints: &HashMap<String, zbus::zvariant::OwnedValue>,
+    key: &str,
+) -> Option<zbus::zvariant::Value<'static>> {
+    let value = zbus::zvariant::Value::from(hints.get(key)?.clone());
+    match value {
+        zbus::zvariant::Value::Value(inner) => Some(*inner),
+        value => Some(value),
+    }
+}
+
 /// Urgency from the `urgency` hint byte (0 low, 1 normal, 2
 /// critical). A missing or mistyped hint reads as normal.
 fn urgency_hint(hints: &HashMap<String, zbus::zvariant::OwnedValue>) -> Urgency {
-    let level: Option<u8> = hints
-        .get("urgency")
-        .and_then(|hint| u8::try_from(hint).ok());
+    let level: Option<u8> = hint_value(hints, "urgency").and_then(|v| u8::try_from(v).ok());
     match level {
         Some(0) => Urgency::Low,
         Some(2..=u8::MAX) => Urgency::Critical,
@@ -58,17 +71,15 @@ fn urgency_hint(hints: &HashMap<String, zbus::zvariant::OwnedValue>) -> Urgency 
 
 /// A string hint, empty when absent or mistyped.
 fn string_hint(hints: &HashMap<String, zbus::zvariant::OwnedValue>, key: &str) -> String {
-    hints
-        .get(key)
-        .and_then(|v| String::try_from(v.clone()).ok())
+    hint_value(hints, key)
+        .and_then(|v| String::try_from(v).ok())
         .unwrap_or_default()
 }
 
 /// The sound a notification asks for: `sound-name` or `sound-file`,
 /// nothing when `suppress-sound` is set.
 fn sound_hints(hints: &HashMap<String, zbus::zvariant::OwnedValue>) -> Sound {
-    let suppressed = hints
-        .get("suppress-sound")
+    let suppressed = hint_value(hints, "suppress-sound")
         .and_then(|v| bool::try_from(v).ok())
         .unwrap_or(false);
     if suppressed {
@@ -353,6 +364,48 @@ mod tests {
         let mut mistyped = HashMap::new();
         mistyped.insert("urgency".to_owned(), OwnedValue::from(true));
         assert_eq!(urgency_hint(&mistyped), Urgency::Normal);
+    }
+
+    /// Hints as D-Bus delivers them: every `a{sv}` value wrapped once
+    /// in a variant. The readers must see through the wrapper, or real
+    /// notifications lose urgency, app identity and sound.
+    fn wrapped_hints(
+        pairs: &[(&str, zbus::zvariant::Value<'static>)],
+    ) -> HashMap<String, zbus::zvariant::OwnedValue> {
+        use zbus::zvariant::Value;
+
+        pairs
+            .iter()
+            .map(|(key, value)| {
+                let wrapped = Value::Value(Box::new(value.clone()))
+                    .try_to_owned()
+                    .expect("hint value");
+                (key.to_string(), wrapped)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn hints_read_through_the_dbus_variant_layer() {
+        use zbus::zvariant::Value;
+
+        let hints = wrapped_hints(&[
+            ("urgency", Value::U8(2)),
+            ("desktop-entry", Value::from("tuna-proof-notes")),
+            ("sound-name", Value::from("message-new-instant")),
+            ("suppress-sound", Value::Bool(true)),
+        ]);
+        assert_eq!(urgency_hint(&hints), Urgency::Critical);
+        assert_eq!(string_hint(&hints, "desktop-entry"), "tuna-proof-notes");
+        // Suppressed wins over a named sound, as on the bus.
+        assert!(sound_hints(&hints).is_empty());
+
+        let hints = wrapped_hints(&[("sound-name", Value::from("message-new-instant"))]);
+        assert_eq!(sound_hints(&hints).name, "message-new-instant");
+
+        let hints = wrapped_hints(&[("urgency", Value::U8(0))]);
+        assert_eq!(urgency_hint(&hints), Urgency::Low);
+        assert_eq!(string_hint(&hints, "desktop-entry"), "");
     }
 
     /// Live stubs over a private session bus: a stub client speaks
