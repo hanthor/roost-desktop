@@ -35,6 +35,7 @@ mod notify;
 mod orca;
 mod osd;
 mod overview;
+mod pointer_a11y;
 mod polkit;
 mod power;
 mod preview_chrome;
@@ -1281,12 +1282,24 @@ fn build(app: &adw::Application) {
     };
     screencast::serve(recorder.clone());
 
+    // GNOME's hover-click chooser (dwellClick.js), before the system
+    // indicators.
+    let dwell_chooser = {
+        let shell = shell.clone();
+        pointer_a11y::DwellChooser::new(Rc::new(move |click| {
+            if let Some(control) = shell.borrow_mut().control.as_mut() {
+                let _ = control.set_dwell_click_type(click);
+            }
+        }))
+    };
+
     let bar = gtk::CenterBox::new();
     bar.set_start_widget(Some(&activities));
     bar.set_center_widget(Some(&clock));
     // AppIndicator items sit left of the system indicators.
     let end = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     end.append(&screencast::indicator(&recorder));
+    end.append(&dwell_chooser.button);
     end.append(&tray::tray());
     end.append(&system);
     bar.set_end_widget(Some(&end));
@@ -1898,6 +1911,7 @@ fn build(app: &adw::Application) {
             INTERFACE_SCHEMA,
             A11Y_INTERFACE_SCHEMA,
             kbd_a11y::SCHEMA,
+            pointer_a11y::SCHEMA,
         ];
         let all: Rc<Vec<Option<gio::Settings>>> =
             Rc::new(schemas.iter().map(|s| settings(s)).collect());
@@ -1949,6 +1963,7 @@ fn build(app: &adw::Application) {
                 out.motion = motion::from_settings(all[4].as_ref(), all[5].as_ref());
                 motion::set(out.motion);
                 out.keyboard_aids = kbd_a11y::read(all[6].as_ref());
+                out.pointer_aids = pointer_a11y::read(all[7].as_ref());
                 if let Some(control) = shell.borrow_mut().control.as_mut() {
                     let _ = control.set_input_settings(out);
                 }
@@ -2056,6 +2071,7 @@ fn build(app: &adw::Application) {
         )
     };
     let kbd_a11y_dialog = kbd_a11y::KbdA11yDialog::new(app.upcast_ref());
+    let pie_timer = pointer_a11y::PieTimer::new(app.upcast_ref());
     // Compositor state: drain the control socket every frame.
     {
         let shell = shell.clone();
@@ -2086,6 +2102,8 @@ fn build(app: &adw::Application) {
             let mut consent = None;
             let mut popups = Vec::new();
             let mut aid_switches = Vec::new();
+            let mut pointer_timeouts = Vec::new();
+            let mut dwell_click = None;
             if let Some(control) = shell.control.as_mut() {
                 loop {
                     match control.poll() {
@@ -2097,6 +2115,14 @@ fn build(app: &adw::Application) {
                         Ok(Handled::KeyboardAidToggled { aid, enabled }) => {
                             aid_switches.push((aid, enabled));
                         }
+                        Ok(Handled::DwellClickType(click)) => dwell_click = Some(click),
+                        Ok(Handled::PointerTimeout {
+                            kind,
+                            duration_ms,
+                            clicked,
+                            x,
+                            y,
+                        }) => pointer_timeouts.push((kind, duration_ms, clicked, x, y)),
                         Ok(Handled::ScreenReader(state)) => {
                             if matches!(
                                 state,
@@ -2166,6 +2192,12 @@ fn build(app: &adw::Application) {
             }
             for (aid, enabled) in aid_switches {
                 kbd_a11y_dialog.switched(aid, enabled, locked);
+            }
+            if let Some(click) = dwell_click {
+                dwell_chooser.set_click_type(click);
+            }
+            for (kind, duration_ms, clicked, x, y) in pointer_timeouts {
+                pointer_a11y::on_timeout(&pie_timer, kind, duration_ms, clicked, x, y);
             }
             if locked {
                 kbd_a11y_dialog.dismiss();
