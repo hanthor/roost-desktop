@@ -3327,6 +3327,26 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     # Restore the end caret explicitly so the candidate appends to the
     # surrounding-text fixture rather than replacing that selection.
     [ "$(cat "$IME_OUT")" = "你|你好|2" ] || fail G-IME-CANDIDATES "popover focus changed the surrounding-text fixture"
+    # In-client focus after the popover checks is not the entry: dumps show
+    # it parked on the menu toggle, so IM is inactive and the bridge would
+    # bypass typed keys past IBus (#566). Click the entry the way a user
+    # would, then sync on the bridge's own focus report.
+    "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-ime "$ARTIFACTS/a11y-ime-field.json" 20 ||
+        fail G-IME-CANDIDATES "entry dump failed"
+    # shellcheck disable=SC2086 # four numbers
+    set -- $(jq -r '.windows[] | select(.app_id == "tuna-ime") | .rect | "\(.[0]) \(.[1]) \(.[2]) \(.[3])"' "$CSTATE")
+    ime_x=$1 ime_y=$2
+    # shellcheck disable=SC2086 # four numbers
+    set -- $(jq -r '[.[] | select(.name == "IME Field") | .bounds] | .[0] | "\(.[0]) \(.[1]) \(.[2]) \(.[3])"' "$ARTIFACTS/a11y-ime-field.json")
+    { [ "$1" = null ] || [ -z "$1" ]; } && fail G-IME-CANDIDATES "no IME Field bounds to click"
+    xdotool mousemove --window "$WID" $((ime_x + $1 + $3 / 2)) $((ime_y + $2 + $4 / 2)) click 1
+    end=$(($(date +%s) + 10))
+    until [ "$(grep -c 'tuna-ibus-bridge: text field focused' "$LOG")" -gt \
+            "$(grep -c 'tuna-ibus-bridge: text field left' "$LOG")" ] || \
+          [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+    [ "$(grep -c 'tuna-ibus-bridge: text field focused' "$LOG")" -gt \
+      "$(grep -c 'tuna-ibus-bridge: text field left' "$LOG")" ] ||
+        fail G-IME-CANDIDATES "clicking the entry never made it IM-active"
     xdotool key End
     end=$(($(date +%s) + 5))
     until [ "$(grep '^tuna-ibus-test-engine: surrounding ' "$ENGINE_LOG" | tail -1)" = "tuna-ibus-test-engine: surrounding 你|你好|2 6 6" ] || [ "$(date +%s)" -gt "$end" ]; do sleep 0.1; done
