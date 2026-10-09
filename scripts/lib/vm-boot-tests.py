@@ -6,6 +6,7 @@ import io
 import ast
 import base64
 import json
+import shlex
 import tempfile
 from pathlib import Path
 import unittest
@@ -176,6 +177,69 @@ class OrcaReadFailure(unittest.TestCase):
             with patch.object(actor, "command", side_effect=[{"pid": 10}, {**failed, "out-data": output}]):
                 with self.assertRaisesRegex(RuntimeError, r"guest lifecycle orca-read failed \(exit=1\)"):
                     actor.run("orca-read")
+
+
+class OrcaReadChurn(unittest.TestCase):
+    """Transient guest churn during Orca start/stop is not a read failure (#543)."""
+    SOURCE = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/tuna-vm-lifecycle"
+
+    def load(self, name, scope):
+        fn = next(n for n in ast.parse(self.SOURCE.read_text()).body
+                  if isinstance(n, ast.FunctionDef) and n.name == name)
+        exec(compile(ast.Module(body=[fn], type_ignores=[]), str(self.SOURCE), "exec"), scope)
+        return scope[name]
+
+    def test_inventory_skips_runuser_session_that_closed_mid_listing(self):
+        def call(*args, check=True):
+            if args[1] == "list-sessions":
+                return "2 1000 tuna-test seat0 tty1\n73 1000 tuna-test - -"
+            if args[2] == "73":
+                if check:
+                    raise lane.subprocess.CalledProcessError(1, list(args))
+                return ""
+            return "Id=2\nVTNr=1\nUser=1000\nType=wayland\nService=greetd\nClass=user"
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory, "state")
+            state.write_text(json.dumps({k: None for k in (
+                "locked", "windows", "focused", "active_workspace", "overview_open",
+                "pointer_position", "native_relative_motion_count")}))
+            empty_proc = Path(directory, "proc")
+            empty_proc.mkdir()
+            scope = {"json": json, "STATE": state, "call": call, "os": lane.os,
+                     "OWNER": SimpleNamespace(pw_uid=1000),
+                     "pathlib": SimpleNamespace(Path=lambda path: empty_proc)}
+            result = self.load("inventory", scope)()
+        self.assertEqual(result["session"]["Id"], "2")
+
+    def observe(self, owner_after_failure):
+        def call(*args, user=False, check=True):
+            if "GetNameOwner" in args:
+                observe.lookups += 1
+                if args[-1] != "org.gnome.Orca1.Service":
+                    return ""
+                return 's ":1.9"' if observe.lookups <= 2 else owner_after_failure
+            if args[0] == "gsettings":
+                return "true"
+            return "orca 51.0-2"
+        def owned(*_):
+            raise lane.subprocess.CalledProcessError(1, ["busctl"])
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory, "state")
+            state.write_text(json.dumps({"screen_reader_pid": 41, "screen_reader_state": "starting"}))
+            scope = {"json": json, "STATE": state, "call": call, "shlex": shlex,
+                     "subprocess": lane.subprocess, "owned_orca_observation": owned,
+                     "orca_child_diagnostic": lambda *_: {"status": "observed"}}
+            observe = self.load("orca_observation", scope)
+            observe.lookups = 0
+            return observe()
+
+    def test_owner_vanishing_mid_read_is_an_unready_snapshot(self):
+        result = self.observe("")
+        self.assertEqual((result["ready"], result["owner"], result["owner_changed"]), (False, None, True))
+
+    def test_failure_against_unchanged_owner_still_errors(self):
+        with self.assertRaises(lane.subprocess.CalledProcessError):
+            self.observe('s ":1.9"')
 
 
 class ConstraintProofCleanup(unittest.TestCase):
