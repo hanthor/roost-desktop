@@ -18,7 +18,7 @@ CARDS = {
     "alt-tab": ("Windows and Alt+Tab", "Open a few apps, then switch with Alt+Tab"),
     "scroll": ("Scrollable tiling",
                "Super+Shift+T toggles scroll mode, Super+R resizes, Super+Left/Right moves"),
-    "lock": ("Lock screen", "Lock from quick settings, then unlock with the password"),
+    "lock": ("Lock screen", "Super+L locks the session; the password unlocks it"),
 }
 W, H = 1280, 800
 FONTS = "/usr/share/fonts/truetype/dejavu"
