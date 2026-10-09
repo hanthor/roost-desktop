@@ -1,0 +1,27 @@
+#!/bin/sh
+# ci-prepare-artifacts DIR... — make proof output zippable before
+# actions/upload-artifact runs (#484). The proofs leave live IPC entries
+# beside their logs (the audio fixture's FIFO, sockets under a private
+# HOME/XDG tree); the artifact zipper rejects those with ENTRYNOTSUPPORTED
+# and drops them, and a dangling symlink would abort the glob. Each such
+# entry is removed and named in DIR/ci-removed-entries.txt so the bundle
+# still says what was there. Missing directories are skipped: an earlier
+# step may have failed before creating them, and the upload must still run.
+set -u
+for dir in "$@"; do
+    [ -d "$dir" ] || { echo "ci-prepare-artifacts: $dir absent, skipping"; continue; }
+    list="$dir/ci-removed-entries.txt"
+    find "$dir" \( -type s -o -type p -o -type b -o -type c -o -xtype l \) -print >"$list.tmp" 2>/dev/null
+    if [ -s "$list.tmp" ]; then
+        while IFS= read -r entry; do
+            kind="$(stat -c %F "$entry" 2>/dev/null || echo unknown)"
+            printf '%s\t%s\n' "$kind" "${entry#"$dir"/}" >>"$list"
+            rm -f "$entry" 2>/dev/null || sudo -n rm -f "$entry" 2>/dev/null ||
+                echo "ci-prepare-artifacts: could not remove $entry" >&2
+        done <"$list.tmp"
+        echo "ci-prepare-artifacts: removed $(wc -l <"$list.tmp") non-regular entries from $dir:"
+        cat "$list"
+    fi
+    rm -f "$list.tmp"
+done
+exit 0
