@@ -7,13 +7,13 @@
 
 use std::process::ExitCode;
 
-use roost_compositor::runtime::{run, BackendChoice, NestedSession};
+use tuna_compositor::runtime::{run, BackendChoice, NestedSession};
 
-/// `roost-compositor [--socket NAME] [--width W] [--height H] [--shell-bin PATH] [--xwayland]`.
-/// X11 compatibility is on when `Xwayland` is installed (`ROOST_XWAYLAND=0`
-/// turns it off, `--xwayland` or `ROOST_XWAYLAND=1` forces it).
+/// `tuna-compositor [--socket NAME] [--width W] [--height H] [--shell-bin PATH] [--xwayland]`.
+/// X11 compatibility is on when `Xwayland` is installed (`TUNA_XWAYLAND=0`
+/// turns it off, `--xwayland` or `TUNA_XWAYLAND=1` forces it).
 ///
-/// Release version stamped at build time: `ROOST_VERSION` (a `vX.Y.Z` tag or
+/// Release version stamped at build time: `TUNA_VERSION` (a `vX.Y.Z` tag or
 /// plain `X.Y.Z`) wins, otherwise the crate version. Duplicated per binary on
 /// purpose — no shared dependency for a few lines.
 fn normalize_version<'a>(raw: Option<&'a str>, fallback: &'a str) -> &'a str {
@@ -24,17 +24,20 @@ fn normalize_version<'a>(raw: Option<&'a str>, fallback: &'a str) -> &'a str {
 }
 
 fn release_version() -> &'static str {
-    normalize_version(option_env!("ROOST_VERSION"), env!("CARGO_PKG_VERSION"))
+    normalize_version(option_env!("TUNA_VERSION"), env!("CARGO_PKG_VERSION"))
 }
 
 fn main() -> ExitCode {
+    // The old name's environment and per-user directories, for one release (#505).
+    tuna_shell_control::legacy::import_env("tuna-compositor");
+    tuna_shell_control::legacy::adopt_dirs("tuna-compositor");
     let mut session = NestedSession::default_for_pid();
-    session.xwayland = roost_compositor::runtime::xwayland_wanted(
-        std::env::var_os("ROOST_XWAYLAND"),
+    session.xwayland = tuna_compositor::runtime::xwayland_wanted(
+        std::env::var_os("TUNA_XWAYLAND"),
         std::env::var_os("PATH"),
     );
-    // Output scale (#59): ROOST_SCALE=1.5, or --scale.
-    if let Some(scale) = std::env::var("ROOST_SCALE")
+    // Output scale (#59): TUNA_SCALE=1.5, or --scale.
+    if let Some(scale) = std::env::var("TUNA_SCALE")
         .ok()
         .and_then(|v| v.parse().ok())
     {
@@ -77,55 +80,55 @@ fn main() -> ExitCode {
             "--backend" => match args.next().as_deref().and_then(BackendChoice::parse) {
                 Some(choice) => session.backend = choice,
                 None => {
-                    eprintln!("roost-compositor: --backend takes auto, winit, or drm");
+                    eprintln!("tuna-compositor: --backend takes auto, winit, or drm");
                     return ExitCode::FAILURE;
                 }
             },
             "--version" | "-V" => {
-                println!("roost-compositor {}", release_version());
+                println!("tuna-compositor {}", release_version());
                 return ExitCode::SUCCESS;
             }
             "--help" | "-h" => {
-                println!("roost-compositor: nested Roost session (001 developer preview)");
+                println!("tuna-compositor: nested Tuna Desktop session (001 developer preview)");
                 println!();
                 println!(
-                    "Usage: roost-compositor [--backend auto|winit|drm] [--socket NAME] [--width W] [--height H] [--shell-bin PATH] [--xwayland] [--startup-overview]"
+                    "Usage: tuna-compositor [--backend auto|winit|drm] [--socket NAME] [--width W] [--height H] [--shell-bin PATH] [--xwayland] [--startup-overview]"
                 );
                 println!();
                 println!("Starts one isolated nested Wayland session on a private");
-                println!("socket (default roost-nested-<pid>) and drives it until the");
+                println!("socket (default tuna-nested-<pid>) and drives it until the");
                 println!("window closes. --backend auto (default) runs nested when a");
                 println!("host Wayland/X display exists and as a DRM/KMS hardware");
                 println!("session otherwise (from a TTY via greetd; needs a seat");
                 println!("from logind or seatd). --width/--height apply to nested runs.");
-                println!("The shell binary (default: ROOST_SHELL_BIN, else the");
-                println!("roost-shell-host sibling) is spawned supervised with a");
+                println!("The shell binary (default: TUNA_SHELL_BIN, else the");
+                println!("tuna-shell-host sibling) is spawned supervised with a");
                 println!("finite restart budget; WAYLAND_DISPLAY is set for this");
                 println!("process only and restored on shutdown.");
                 println!("--startup-overview opens the overview at start, as GNOME");
-                println!("does at login (roost-session passes it).");
+                println!("does at login (tuna-session passes it).");
                 return ExitCode::SUCCESS;
             }
             other => {
-                eprintln!("roost-compositor: unknown argument {other}");
+                eprintln!("tuna-compositor: unknown argument {other}");
                 return ExitCode::FAILURE;
             }
         }
     }
     println!(
-        "roost-compositor: nested session on {} ({}x{})",
+        "tuna-compositor: nested session on {} ({}x{})",
         session.socket_name, session.width, session.height
     );
     match run(&session) {
         Ok(stats) => {
             println!(
-                "roost-compositor: shutdown after {} frames, {} clients, {} shell restarts",
+                "tuna-compositor: shutdown after {} frames, {} clients, {} shell restarts",
                 stats.frames, stats.clients, stats.shell_restarts
             );
             ExitCode::SUCCESS
         }
         Err(err) => {
-            eprintln!("roost-compositor: {err}");
+            eprintln!("tuna-compositor: {err}");
             ExitCode::FAILURE
         }
     }

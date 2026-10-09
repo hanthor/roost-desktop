@@ -11,7 +11,7 @@
 use std::os::unix::io::{AsFd, AsRawFd};
 use std::os::unix::net::UnixStream;
 
-use roost_compositor::TestCompositor;
+use tuna_compositor::TestCompositor;
 use wayland_client::{
     protocol::{
         wl_buffer::WlBuffer, wl_callback::WlCallback, wl_compositor::WlCompositor,
@@ -158,7 +158,7 @@ fn destroying_a_layer_role_then_committing_keeps_the_client_connected() {
         &surface,
         None,
         Layer::Top,
-        roost_shell_control::OVERVIEW_NAMESPACE.into(),
+        tuna_shell_control::OVERVIEW_NAMESPACE.into(),
         &qh,
         (),
     );
@@ -262,7 +262,7 @@ fn destroying_a_layer_role_releases_its_shm_backing() {
         &surface,
         None,
         Layer::Top,
-        roost_shell_control::GTK_BANNERS_NAMESPACE.into(),
+        tuna_shell_control::GTK_BANNERS_NAMESPACE.into(),
         &qh,
         (),
     );

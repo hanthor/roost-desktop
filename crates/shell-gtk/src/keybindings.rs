@@ -8,7 +8,7 @@
 use gtk4::gio;
 use gtk4::prelude::*;
 
-use roost_shell_control::{
+use tuna_shell_control::{
     SwitcherKey, SwitcherKeyKind, KEYSYM_ABOVE_TAB, MODE_LOCK_SCREEN, MODE_NORMAL, MODE_OVERVIEW,
     MODE_POPUP, MODE_UNLOCK_SCREEN,
 };
@@ -644,7 +644,7 @@ mod tests {
 
     #[test]
     fn switcher_keys_default_and_parse_like_mutter() {
-        use roost_shell_control::{MOD_ALT, MOD_LOGO, MOD_SHIFT};
+        use tuna_shell_control::{MOD_ALT, MOD_LOGO, MOD_SHIFT};
         let keys: Vec<SwitcherKey> = switcher_keys(None)
             .iter()
             .filter_map(|(a, kind)| parse_switcher_key(a, *kind))

@@ -2,7 +2,7 @@
   "candidate": "95f71c0dd1250c1e8a5756a0338d8fe56f1d46ca",
   "package_run": 37178711148,
   "artifact": 11295256952,
-  "proof": "scripts/roost-portal-security, local nested package proof",
+  "proof": "scripts/tuna-portal-security, local nested package proof",
   "gnome_portal": "51.0-1.fc45",
   "frontend": "1.22.1-2.fc45",
   "pipewire": "1.6.9-1.fc45",

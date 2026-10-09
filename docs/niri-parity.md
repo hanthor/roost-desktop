@@ -7,8 +7,8 @@ Endpoint client sizes remain 616×736 / 826×736, with **0.0% differing client
 content pixels**. Whole-work-area rest/preset/settled results remain
 6.7% / 5.3% / 5.5%; the nominal 100ms transient differs by 11.5% (mean 9.48).
 At that sample niri captures during 104–153ms with the right edge at 493px;
-Roost captures during 101–135ms with it still at 422px. Both first reach a
-one-pixel settle in the nominal 400ms sample: niri 401–446ms, Roost 415–467ms.
+Tuna Desktop captures during 101–135ms with it still at 422px. Both first reach a
+one-pixel settle in the nominal 400ms sample: niri 401–446ms, Tuna Desktop 415–467ms.
 The nominal 300ms niri capture took 300–537ms, illustrating why these are
 interval samples rather than precise animation-duration claims. Both are
 settled by 600ms. This records a visible transient difference after #238;
@@ -17,7 +17,7 @@ requires its independent CI recapture and full acceptance gate.
 
 The retained pre-animation baseline follows for comparison.
 
-The comparison uses niri **26.04** from Fedora 45 and the fully green Roost
+The comparison uses niri **26.04** from Fedora 45 and the fully green Tuna Desktop
 PR #233 package, before #238's column animation changes. It is a measured
 baseline, not evidence for the later animation implementation. The package
 came from [run 37169850678](https://github.com/hanthor/roost-desktop/actions/runs/37169850678),
@@ -27,21 +27,21 @@ frames are in [baseline-233](niri-parity/baseline-233/provenance.json).
 
 Both compositors run nested in the same Fedora container at 1280×800,
 scale 1, with the same GTK 4.24.1 / libadwaita 1.10 runtime and the same
-`roost-test-window.py` windows: Scroll One, Two and Three. Each uses the
+`tuna-test-window.py` windows: Scroll One, Two and Three. Each uses the
 same header, text and list content. Niri reserves 32px at the top to match
-Roost's shell panel, uses 16px gaps, half-width columns, a 4px #7fc8ff focus
+Tuna Desktop's shell panel, uses 16px gaps, half-width columns, a 4px #7fc8ff focus
 ring and `center-focused-column "never"`. Its default spring is retained.
 The [reference config](../tests/niri-reference/config.kdl) is validated by
 niri before captures.
 
 At rest, both configure columns to **616×736**. After the focused column's
 next preset, both configure it to **826×736**. Following focus back to the
-middle column leaves that widened column intact. Roost's state confirms
+middle column leaves that widened column intact. Tuna Desktop's state confirms
 16px top/bottom/side gaps and offsets 632 → 842 → 632; niri's IPC confirms
 matching client sizes, and the frames confirm the positions. No frame is
 resized to make this comparison.
 
-`scripts/lib/roost-parity-compare.py` measured the work area, excluding only
+`scripts/lib/tuna-parity-compare.py` measured the work area, excluding only
 the 32px shell panel:
 
 | State | Mean difference | Pixels off >24 |
@@ -52,7 +52,7 @@ the 32px shell panel:
 | Scroll settled | 1.58 | 5.5% |
 
 The main settled difference is the desktop visible through the gaps:
-niri's gray backdrop and Roost's GNOME blue backdrop. Roost also leaves a
+niri's gray backdrop and Tuna Desktop's GNOME blue backdrop. Tuna Desktop also leaves a
 GTK keyboard-focus outline on the header menu button. Inside the settled
 window content, excluding the header and gaps, the three measured crops
 have **0.00 mean difference / 0.0% off**. This confirms matching dimensions,
@@ -60,19 +60,19 @@ content layout and fonts in that runtime; it does not claim the complete
 desktops have identical pixels.
 
 The [difference frames](niri-parity/baseline-233/difference/02-strip-preset-0_32_1280_768.png)
-place niri above Roost and amplify their difference four times below.
+place niri above Tuna Desktop and amplify their difference four times below.
 The raw [niri frame](niri-parity/baseline-233/niri/02-strip-preset.png) and
-[Roost frame](niri-parity/baseline-233/roost/02-strip-preset.png) are also
+[Tuna Desktop frame](niri-parity/baseline-233/tuna/02-strip-preset.png) are also
 retained, with IPC/state JSON alongside each frame.
 
 Timing samples repeat a fresh right-to-left transition for each delay;
 PNG compression cannot push a later sample past its deadline. They retain
 both the capture start and completion timestamps. In this software-rendered
 baseline, the nominal 100ms captures span 100–153ms for niri and
-100–117ms for Roost. Their visible middle-column right edges are 536px
+100–117ms for Tuna Desktop. Their visible middle-column right edges are 536px
 and 494px respectively, starting at 422px and ending at 632px. A one-pixel
 settle is first observed in the nominal 300ms niri sample (300–383ms)
-and 400ms Roost sample (400–432ms); both settle by 600ms. These are empirical
+and 400ms Tuna Desktop sample (400–432ms); both settle by 600ms. These are empirical
 sampling intervals under load, not precise animation duration measurements.
 The transient pixel difference includes that input/render timing uncertainty.
 [Raw samples](niri-parity/baseline-233/niri/view-timing.json) remain available
@@ -97,12 +97,12 @@ output area, rather than niri's independent layout on every output.
 To reproduce without compiling a local GTK shell:
 
 ```sh
-scripts/roost-niri-reference --out /tmp/fresh-niri-reference
-scripts/roost-niri-compare --candidate /tmp/extracted-roost-package --out /tmp/fresh-niri-pair
+scripts/tuna-niri-reference --out /tmp/fresh-niri-reference
+scripts/tuna-niri-compare --candidate /tmp/extracted-tuna-package --out /tmp/fresh-niri-pair
 ```
 
-The candidate directory must contain `usr/bin/roost-compositor` and
-`usr/bin/roost-shell-gtk`. CI extracts its current Arch package, captures
+The candidate directory must contain `usr/bin/tuna-compositor` and
+`usr/bin/tuna-shell-gtk`. CI extracts its current Arch package, captures
 both compositors, checks endpoint geometry/content and records timing and
 pixel reports in the `niri-parity` artifact. The broader interactions remain
 in `gtk-shell`; both jobs must pass before the comparison change is merged.

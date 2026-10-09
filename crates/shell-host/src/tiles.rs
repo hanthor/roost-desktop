@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::prefs::{self, RoostPrefs};
+use crate::prefs::{self, TunaPrefs};
 use crate::settings::{self, ClockFormat, SettingsBackend, ShellSettings};
 
 /// NetworkManager bus identity for the radio toggle contract.
@@ -39,11 +39,11 @@ const RADIO_TIMEOUT: Duration = Duration::from_secs(1);
 /// against this stub contract — `Muted` (bool) and `Volume` (double,
 /// `0.0..=1.0`) properties — resolved at implement time against a
 /// stub on a private bus.
-pub const SND_NAME: &str = "org.roost.Sound";
+pub const SND_NAME: &str = "org.tuna.Sound";
 /// Sound-server control object path.
-pub const SND_PATH: &str = "/org/roost/Sound";
+pub const SND_PATH: &str = "/org/tuna/Sound";
 /// Sound-server control interface carrying mute and volume.
-pub const SND_IFACE: &str = "org.roost.Sound";
+pub const SND_IFACE: &str = "org.tuna.Sound";
 /// Bounded wait per mixer round trip so a hung service cannot stall
 /// the slow tick or a menu press.
 const SOUND_TIMEOUT: Duration = Duration::from_secs(1);
@@ -97,7 +97,7 @@ impl NetworkRadio {
         let builder = match builder {
             Ok(builder) => builder.method_timeout(RADIO_TIMEOUT),
             Err(e) => {
-                eprintln!("roost-shell-host: network radio bus unavailable: {e}");
+                eprintln!("tuna-shell-host: network radio bus unavailable: {e}");
                 return false;
             }
         };
@@ -107,7 +107,7 @@ impl NetworkRadio {
                 true
             }
             Err(e) => {
-                eprintln!("roost-shell-host: network radio connect failed: {e}");
+                eprintln!("tuna-shell-host: network radio connect failed: {e}");
                 false
             }
         }
@@ -217,7 +217,7 @@ impl SoundMixer {
         let builder = match builder {
             Ok(builder) => builder.method_timeout(SOUND_TIMEOUT),
             Err(e) => {
-                eprintln!("roost-shell-host: sound mixer bus unavailable: {e}");
+                eprintln!("tuna-shell-host: sound mixer bus unavailable: {e}");
                 return false;
             }
         };
@@ -227,7 +227,7 @@ impl SoundMixer {
                 true
             }
             Err(e) => {
-                eprintln!("roost-shell-host: sound mixer connect failed: {e}");
+                eprintln!("tuna-shell-host: sound mixer connect failed: {e}");
                 false
             }
         }
@@ -344,10 +344,10 @@ pub struct TileSet {
     pub clock: String,
     /// Snapshot of the shared desktop settings feeding the paint code.
     pub settings: ShellSettings,
-    /// Roost-owned prefs snapshot feeding the paint code (bar clock
+    /// Tuna-owned prefs snapshot feeding the paint code (bar clock
     /// extras the shared schema never covered). Loaded from the XDG
     /// state file at startup; the calendar surface writes it back.
-    pub prefs: RoostPrefs,
+    pub prefs: TunaPrefs,
     /// Prefs file behind this set; `None` keeps it memory-only. Set
     /// by [`TileSet::restore_prefs`], so a restored set keeps
     /// persisting to the file it came from.
@@ -408,7 +408,7 @@ impl TileSet {
             runtime_dir: runtime_dir.to_owned(),
             clock: String::new(),
             settings: ShellSettings::default(),
-            prefs: RoostPrefs::default(),
+            prefs: TunaPrefs::default(),
             prefs_path: None,
             radio: NetworkRadio::new(),
             radio_state: None,
@@ -484,7 +484,7 @@ impl TileSet {
         true
     }
 
-    /// Load Roost-owned prefs from `path` into the snapshot, replacing
+    /// Load Tuna-owned prefs from `path` into the snapshot, replacing
     /// whatever it holds. Missing, corrupt, or version-skewed files
     /// read as defaults. The loaded path sticks to the set, so later
     /// surface writes persist back to it. Recomputes the clock text at
@@ -499,7 +499,7 @@ impl TileSet {
         );
     }
 
-    /// Load Roost-owned prefs from the system state file at host
+    /// Load Tuna-owned prefs from the system state file at host
     /// start. Same fail-closed rule as
     /// [`TileSet::restore_prefs`]: a bad file never blocks the panel.
     pub fn load_prefs_system(&mut self) {
@@ -514,7 +514,7 @@ impl TileSet {
     fn persist_prefs(&self) {
         if let Some(path) = self.prefs_path.as_ref() {
             if let Err(e) = prefs::save(&self.prefs, path) {
-                eprintln!("roost-shell-host: roost prefs save failed: {e}");
+                eprintln!("tuna-shell-host: tuna prefs save failed: {e}");
             }
         }
     }
@@ -675,12 +675,12 @@ impl TileSet {
             };
             if self.sound_state.is_none() {
                 eprintln!(
-                    "roost-shell-host: sound {what} failed: \
+                    "tuna-shell-host: sound {what} failed: \
                      no sound server on the bus; tile keeps its socket probe"
                 );
             } else {
                 eprintln!(
-                    "roost-shell-host: sound {what} failed: \
+                    "tuna-shell-host: sound {what} failed: \
                      sound server refused the write; tile keeps its socket probe"
                 );
             }
@@ -753,12 +753,12 @@ impl TileSet {
             };
             if self.radio_state.is_none() {
                 eprintln!(
-                    "roost-shell-host: {what} toggle failed: \
+                    "tuna-shell-host: {what} toggle failed: \
                      no NetworkManager on the bus; tile keeps its sysfs probe"
                 );
             } else {
                 eprintln!(
-                    "roost-shell-host: {what} toggle failed: \
+                    "tuna-shell-host: {what} toggle failed: \
                      NetworkManager refused the write; tile keeps its sysfs probe"
                 );
             }
@@ -1145,7 +1145,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_roost_option_survives_a_restart() {
+    fn changed_tuna_option_survives_a_restart() {
         let (dir, net, power, run) = roots();
         let path = dir.path().join(crate::prefs::PREFS_FILE);
         let mut set = TileSet::with_roots("", &net, &power, &run);
@@ -1291,14 +1291,14 @@ mod tests {
             volume: f64,
         }
 
-        /// Stub `org.roost.Sound`: the mute flag plus output volume
+        /// Stub `org.tuna.Sound`: the mute flag plus output volume
         /// over the real bus identity.
         #[derive(Debug)]
         struct StubSound {
             output: Arc<Mutex<StubOutput>>,
         }
 
-        #[zbus::interface(name = "org.roost.Sound")]
+        #[zbus::interface(name = "org.tuna.Sound")]
         impl StubSound {
             #[zbus(property)]
             fn muted(&self) -> bool {

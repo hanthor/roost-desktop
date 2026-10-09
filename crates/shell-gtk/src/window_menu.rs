@@ -13,8 +13,8 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 
-use roost_shell_control::WindowAction;
-use roost_shell_host::control::WindowMenuRequest;
+use tuna_shell_control::WindowAction;
+use tuna_shell_host::control::WindowMenuRequest;
 
 /// What an item does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,11 +107,11 @@ impl WindowMenu {
     pub fn new(app: &gtk::Application, run: Run) -> Rc<Self> {
         let window = gtk::Window::new();
         window.set_application(Some(app));
-        window.add_css_class("roost-window-menu");
+        window.add_css_class("tuna-window-menu");
         window.set_title(Some("Window Menu"));
         window.init_layer_shell();
         window.set_layer(Layer::Overlay);
-        window.set_namespace(Some(roost_shell_control::WINDOW_MENU_NAMESPACE));
+        window.set_namespace(Some(tuna_shell_control::WINDOW_MENU_NAMESPACE));
         for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
             window.set_anchor(edge, true);
         }

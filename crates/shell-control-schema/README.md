@@ -1,4 +1,4 @@
-# roost-shell-control
+# tuna-shell-control
 
 The versioned private IPC protocol between the compositor (authoritative)
 and the shell: major/minor version negotiation, a full snapshot on every
@@ -27,8 +27,8 @@ Its only dependencies are `postcard` and `serde`. Tests are inline in
 
 ## Dependents
 
-`roost-compositor` (server side), `roost-shell-host` (client in `control`),
-and `roost-shell-gtk`.
+`tuna-compositor` (server side), `tuna-shell-host` (client in `control`),
+and `tuna-shell-gtk`.
 
 ## Docs
 

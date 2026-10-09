@@ -2,4 +2,4 @@ FROM quay.io/fedora/fedora:45
 RUN dnf -y --setopt=install_weak_deps=False install mesa-dri-drivers xorg-x11-server-Xvfb xorg-x11-server-Xwayland xdotool scrot python3-gobject python3-pyatspi gtk4 libadwaita gtk4-layer-shell adwaita-fonts-all adwaita-icon-theme jq dbus-daemon xdg-desktop-portal xdg-desktop-portal-gnome-51.0 gnome-control-center-51.0 mutter-common-51.0 gnome-shell-common-51.0 xdg-desktop-portal-gtk nautilus gvfs shadow-utils util-linux pipewire wireplumber pipewire-gstreamer gstreamer1 gstreamer1-plugins-base gstreamer1-plugins-good at-spi2-core && dnf clean all
 RUN dnf -y --setopt=install_weak_deps=False install libseat libinput libxkbcommon-x11 gobject-introspection libglvnd-gles pipewire-utils && dnf clean all
 
-RUN useradd --uid 1000 --create-home --user-group roost-proof
+RUN useradd --uid 1000 --create-home --user-group tuna-proof

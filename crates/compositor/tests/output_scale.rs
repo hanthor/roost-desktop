@@ -1,9 +1,9 @@
 //! Mixed-DPI (#59): a window gets the scale of the output it overlaps
 //! most, as niri sends it.
 
-use roost_compositor::TestCompositor;
 use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
 use smithay::utils::Rectangle;
+use tuna_compositor::TestCompositor;
 
 fn output(name: &str, scale: f64) -> Output {
     let out = Output::new(
@@ -54,7 +54,7 @@ fn windows_take_the_scale_of_the_output_they_overlap_most() {
 
 #[test]
 fn new_windows_start_at_the_scale_of_the_output_under_the_pointer() {
-    use roost_compositor::windows::WindowManager;
+    use tuna_compositor::windows::WindowManager;
     let mut comp = TestCompositor::new();
     comp.state
         .add_output("eDP-1", Some(output("eDP-1", 1.5)), 1280, 720);
@@ -142,7 +142,7 @@ mod first_event {
 
     #[test]
     fn first_fractional_scale_event_uses_the_target_output() {
-        use roost_compositor::windows::WindowManager;
+        use tuna_compositor::windows::WindowManager;
         let mut comp = TestCompositor::new();
         comp.state
             .add_output("left", Some(output("left", 1.0)), 1280, 720);
@@ -185,7 +185,7 @@ mod first_event {
 
 #[test]
 fn hot_corner_regions_use_logical_pixels_at_fractional_output_scales() {
-    use roost_compositor::windows::{ManagerInput, TriggerAction as A, TriggerState};
+    use tuna_compositor::windows::{ManagerInput, TriggerAction as A, TriggerState};
     let mut comp = TestCompositor::new();
     comp.state
         .add_output("laptop", Some(output("laptop", 1.5)), 1280, 720);
@@ -213,7 +213,7 @@ fn hot_corner_regions_use_logical_pixels_at_fractional_output_scales() {
 
 #[test]
 fn rtl_hot_corner_width_remains_logical_at_fractional_scale() {
-    use roost_compositor::windows::{ManagerInput, TriggerAction as A, TriggerState};
+    use tuna_compositor::windows::{ManagerInput, TriggerAction as A, TriggerState};
     let mut comp = TestCompositor::new();
     comp.state
         .add_output("laptop", Some(output("laptop", 1.5)), 1280, 720);
@@ -247,7 +247,7 @@ fn native_pressure_barrier_uses_live_logical_scale_geometry() {
     comp.state
         .add_output("laptop", Some(output("laptop", 2.0)), 640, 400);
     comp.state.set_output_location("laptop", (-640, -200));
-    let mut pressure = roost_compositor::corner_pressure::CornerPressure::default();
+    let mut pressure = tuna_compositor::corner_pressure::CornerPressure::default();
     let layout = comp.state.hot_corner_outputs();
     let (position, triggered) = pressure.motion(
         (-638.0, -190.0).into(),

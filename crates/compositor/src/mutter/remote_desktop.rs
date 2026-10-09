@@ -207,7 +207,7 @@ impl RemoteDesktop {
             pending: Arc::new(AtomicU32::new(0)),
             eis_opened: Arc::new(AtomicBool::new(false)),
         };
-        let session_id = format!("roost-remote-{id}");
+        let session_id = format!("tuna-remote-{id}");
         let path =
             OwnedObjectPath::try_from(format!("/org/gnome/Mutter/RemoteDesktop/Session/u{id}"))
                 .map_err(|e| fdo::Error::Failed(e.to_string()))?;
@@ -243,7 +243,7 @@ impl RemoteDesktop {
 impl RemoteSession {
     #[zbus(property)]
     fn session_id(&self) -> String {
-        format!("roost-remote-{}", self.grant.id)
+        format!("tuna-remote-{}", self.grant.id)
     }
     async fn start(&self, #[zbus(header)] header: zbus::message::Header<'_>) -> fdo::Result<()> {
         self.admitted(&header, false)?;

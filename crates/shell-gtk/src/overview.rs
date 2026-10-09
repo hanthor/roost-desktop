@@ -15,14 +15,14 @@ use std::rc::Rc;
 use gtk4 as gtk;
 use gtk4::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
-use roost_shell_host::apps::AppEntry;
+use tuna_shell_host::apps::AppEntry;
 
 use crate::live_apps::LiveApps;
 
 use crate::providers;
 
 /// Layer-shell namespace and contract constants shared with the compositor.
-pub use roost_shell_control::OVERVIEW_NAMESPACE;
+pub use tuna_shell_control::OVERVIEW_NAMESPACE;
 /// App results shown under the search entry (GNOME shows one row).
 pub const MAX_RESULTS: usize = 6;
 
@@ -166,7 +166,7 @@ impl OverviewUi {
         actions: Rc<dyn OverviewActions>,
     ) -> Rc<RefCell<Self>> {
         // Search: top center, below the panel.
-        let search = layer_window(app, OVERVIEW_NAMESPACE, "roost-overview-search");
+        let search = layer_window(app, OVERVIEW_NAMESPACE, "tuna-overview-search");
         search.set_anchor(Edge::Top, true);
         search.set_margin(Edge::Top, 12);
         search.set_title(Some("Search"));
@@ -215,7 +215,7 @@ impl OverviewUi {
                             providers::provider_app(&apps.get(), id).is_some()
                         });
                     eprintln!(
-                        "roost-shell-gtk: search providers: {}",
+                        "tuna-shell-gtk: search providers: {}",
                         chosen
                             .iter()
                             .map(|p| p.desktop_id.as_str())
@@ -236,7 +236,7 @@ impl OverviewUi {
         // them, so a content-sized dash leaks one server-side pool (fd
         // plus mapping) per window change while the overview is open
         // (S-GROWTH).
-        let dash = layer_window(app, "roost-shell-dash", "roost-overview-dash");
+        let dash = layer_window(app, "tuna-shell-dash", "tuna-overview-dash");
         dash.set_anchor(Edge::Bottom, true);
         dash.set_anchor(Edge::Left, true);
         dash.set_anchor(Edge::Right, true);
@@ -252,7 +252,7 @@ impl OverviewUi {
         dash.set_child(Some(&dash_scroll));
 
         // App grid: between search and dash, over the previews.
-        let grid = layer_window(app, "roost-shell-appgrid", "roost-overview-grid");
+        let grid = layer_window(app, "tuna-shell-appgrid", "tuna-overview-grid");
         for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
             grid.set_anchor(edge, true);
         }
@@ -340,8 +340,8 @@ impl OverviewUi {
     }
 
     fn launch(&self, entry: &AppEntry) {
-        if let Err(e) = roost_shell_host::apps::launch(entry) {
-            eprintln!("roost-shell-gtk: launch {}: {e}", entry.app_id);
+        if let Err(e) = tuna_shell_host::apps::launch(entry) {
+            eprintln!("tuna-shell-gtk: launch {}: {e}", entry.app_id);
             return;
         }
         self.actions.close_overview();
@@ -370,7 +370,7 @@ impl OverviewUi {
             let actions = self.actions.clone();
             button.connect_clicked(move |_| {
                 let _ = apps;
-                if roost_shell_host::apps::launch(&entry).is_ok() {
+                if tuna_shell_host::apps::launch(&entry).is_ok() {
                     actions.close_overview();
                 }
             });
@@ -484,7 +484,7 @@ impl OverviewUi {
                     actions.close_overview();
                 }
                 None => {
-                    if roost_shell_host::apps::launch(&entry).is_ok() {
+                    if tuna_shell_host::apps::launch(&entry).is_ok() {
                         actions.close_overview();
                     }
                 }
@@ -705,7 +705,7 @@ impl OverviewUi {
             }
             let entry = entry.clone();
             button.connect_clicked(move |_| {
-                if roost_shell_host::apps::launch(&entry).is_ok() {
+                if tuna_shell_host::apps::launch(&entry).is_ok() {
                     actions.close_overview();
                 }
             });
@@ -796,7 +796,7 @@ impl OverviewUi {
                                     let (entry, actions, dialog) =
                                         (entry.clone(), actions.clone(), dialog.clone());
                                     tile.connect_clicked(move |_| {
-                                        if roost_shell_host::apps::launch(&entry).is_ok() {
+                                        if tuna_shell_host::apps::launch(&entry).is_ok() {
                                             dialog.close();
                                             actions.close_overview();
                                         }
@@ -1150,8 +1150,8 @@ fn grid_hover(widget: &impl IsA<gtk::Widget>, target: String, reflow: Rc<GridRef
                     if let Some(hover) = weak.upgrade() {
                         hover.timer.borrow_mut().take();
                         hover.applied.set(true);
-                        if std::env::var_os("ROOST_GRID_TRACE").is_some() {
-                            eprintln!("roost-shell-gtk: grid hover timer fired edge={edge:?}");
+                        if std::env::var_os("TUNA_GRID_TRACE").is_some() {
+                            eprintln!("tuna-shell-gtk: grid hover timer fired edge={edge:?}");
                         }
                         hover.reflow.move_item(&source, &hover.target, edge);
                     }
@@ -1174,9 +1174,9 @@ fn grid_hover(widget: &impl IsA<gtk::Widget>, target: String, reflow: Rc<GridRef
         motion.connect_enter(move |motion, x, _| {
             hover.generation.set(hover.generation.get() + 1);
             let generation = hover.generation.get();
-            if std::env::var_os("ROOST_GRID_TRACE").is_some() {
+            if std::env::var_os("TUNA_GRID_TRACE").is_some() {
                 eprintln!(
-                    "roost-shell-gtk: grid hover entered x={x} width={}",
+                    "tuna-shell-gtk: grid hover entered x={x} width={}",
                     motion.widget().map_or(0, |w| w.width())
                 );
             }
@@ -1195,9 +1195,9 @@ fn grid_hover(widget: &impl IsA<gtk::Widget>, target: String, reflow: Rc<GridRef
                         }
                         *hover.text.borrow_mut() =
                             result.ok().and_then(|value| value.get::<String>().ok());
-                        if std::env::var_os("ROOST_GRID_TRACE").is_some() {
+                        if std::env::var_os("TUNA_GRID_TRACE").is_some() {
                             eprintln!(
-                                "roost-shell-gtk: grid hover data ready={} edge={:?}",
+                                "tuna-shell-gtk: grid hover data ready={} edge={:?}",
                                 hover.text.borrow().is_some(),
                                 hover.edge.get()
                             );
@@ -1239,7 +1239,7 @@ mod page_hint {
 
     #[glib::object_subclass]
     impl ObjectSubclass for PageHint {
-        const NAME: &'static str = "RoostPageHint";
+        const NAME: &'static str = "TunaPageHint";
         type Type = super::PageHint;
         type ParentType = gtk::Fixed;
     }
@@ -1539,8 +1539,8 @@ impl DragPager {
                 .unwrap_or(0.0)
         }
         .max(0.0);
-        let enabled =
-            gtk::Settings::default().is_none_or(|settings| settings.is_gtk_enable_animations());
+        // The hint slides in: pure motion, so fade-only snaps it too.
+        let enabled = crate::motion::current().allows_motion();
         let mut actors = Vec::new();
         for (widget, point) in tiles {
             let x = f64::from(point.x()) - crop;
@@ -1574,10 +1574,9 @@ impl DragPager {
             if !hint.is_visible() {
                 return glib::ControlFlow::Break;
             }
-            let enabled =
-                gtk::Settings::default().is_none_or(|settings| settings.is_gtk_enable_animations());
-            let progress = if enabled {
-                (started.elapsed().as_secs_f64() / 0.150).min(1.0)
+            let policy = crate::motion::current();
+            let progress = if policy.allows_motion() {
+                (started.elapsed().as_secs_f64() * 1000.0 / policy.adjust_ms(150.0)).min(1.0)
             } else {
                 1.0
             };
@@ -1597,8 +1596,8 @@ impl DragPager {
     }
 
     fn begin(&self, width: i32) {
-        if std::env::var_os("ROOST_GRID_TRACE").is_some() {
-            eprintln!("roost-shell-gtk: grid pager drag entered width={width}");
+        if std::env::var_os("TUNA_GRID_TRACE").is_some() {
+            eprintln!("tuna-shell-gtk: grid pager drag entered width={width}");
         }
         // A tenth of the grid each (PAGE_PREVIEW_RATIO / 2).
         let w = (f64::from(width) * 0.1) as i32;
@@ -1609,8 +1608,8 @@ impl DragPager {
     }
 
     fn end(&self) {
-        if std::env::var_os("ROOST_GRID_TRACE").is_some() {
-            eprintln!("roost-shell-gtk: grid pager drag left");
+        if std::env::var_os("TUNA_GRID_TRACE").is_some() {
+            eprintln!("tuna-shell-gtk: grid pager drag left");
         }
         self.reset();
         self.dragging.set(false);
@@ -1646,9 +1645,9 @@ impl DragPager {
     }
 
     fn motion(self: &Rc<Self>, x: f64, width: i32) {
-        if std::env::var_os("ROOST_GRID_TRACE").is_some() {
+        if std::env::var_os("TUNA_GRID_TRACE").is_some() {
             eprintln!(
-                "roost-grid: pager motion x={x:.0} width={width} page={}",
+                "tuna-grid: pager motion x={x:.0} width={width} page={}",
                 self.page()
             );
         }
@@ -1722,8 +1721,8 @@ fn drag_source(widget: &impl IsA<gtk::Widget>, text: String) -> gtk::DragSource 
     let w = widget.clone().upcast::<gtk::Widget>().downgrade();
     source.connect_drag_begin(move |source, _| {
         let Some(w) = w.upgrade() else { return };
-        if std::env::var_os("ROOST_GRID_TRACE").is_some() {
-            eprintln!("roost-shell-gtk: app tile drag started");
+        if std::env::var_os("TUNA_GRID_TRACE").is_some() {
+            eprintln!("tuna-shell-gtk: app tile drag started");
         }
         let paintable = gtk::WidgetPaintable::new(Some(&w));
         source.set_icon(Some(&paintable), w.width() / 2, w.height() / 2);

@@ -1,7 +1,7 @@
 # Reference repositories (read-only)
 
 Cloned 2026-09-28 into `/home/ubuntu/dev/references/` (outside this repo,
-never vendored). Study behavior and protocol handling there; all Roost code
+never vendored). Study behavior and protocol handling there; all Tuna Desktop code
 stays original — do not copy source from these checkouts.
 
 | Project | Path | Revision | License | Use for |

@@ -21,7 +21,7 @@ def fixture_tar(kind, uid=0, gid=0, root_mode=0o755):
         root.uid, root.gid, root.mode = uid, gid, root_mode
         root.uname = root.gname = 'root'  # Numeric fields alone decide ownership.
         archive.addfile(root)
-        member = tarfile.TarInfo('./control' if kind == 'control' else './usr/bin/roost-compositor')
+        member = tarfile.TarInfo('./control' if kind == 'control' else './usr/bin/tuna-compositor')
         member.uid, member.gid, member.mode = uid, gid, 0o644
         member.uname = member.gname = 'root'
         body = b'Package: metadata-fixture\nVersion: 1\nArchitecture: all\nDescription: metadata only\n' if kind == 'control' else b'NOT AN EXECUTABLE: METADATA FIXTURE ONLY\n'

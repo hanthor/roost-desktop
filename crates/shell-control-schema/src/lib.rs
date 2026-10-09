@@ -10,6 +10,9 @@
 //! rejected before any postcard decoding happens.
 
 pub mod background;
+pub mod legacy;
+pub mod motion;
+pub use motion::{MotionLevel, MotionPolicy};
 
 use serde::{Deserialize, Serialize};
 
@@ -151,9 +154,13 @@ impl ProtocolVersion {
     /// `0.26` appends the shell text direction to InputSettings.
     /// Both positional postcard peers ship together.
     /// `0.27` appends hardware Screen Reader preference/status messages.
+    ///
+    /// `0.28` replaces `InputSettings::enable_animations` with `motion`,
+    /// GNOME's three-state motion policy plus its slow-down factor.
+    /// The positional postcard body changes, so both peers ship together.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 27,
+        minor: 28,
     };
 
     /// Build a version explicitly (handy for `Hello` probes in tests).
@@ -213,7 +220,7 @@ pub struct WorkspaceInfo {
 /// stays compositor-internal, so no other wire types change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutputInfo {
-    /// Output name, e.g. `roost-0`.
+    /// Output name, e.g. `tuna-0`.
     pub name: String,
     /// Output width in physical pixels.
     pub width: i32,
@@ -756,9 +763,10 @@ pub struct InputSettings {
     pub mouse_speed_milli: i32,
     /// `org.gnome.desktop.interface enable-hot-corners`.
     pub hot_corners: bool,
-    /// `org.gnome.desktop.interface enable-animations` (default enabled).
-    #[serde(default = "animations_default")]
-    pub enable_animations: bool,
+    /// GNOME's motion policy: `enable-animations`, `reduced-motion` and
+    /// the slow-down factor, derived by the shell (default full motion).
+    #[serde(default)]
+    pub motion: MotionPolicy,
     /// GNOME mouse primary button and resolved touchpad orientation.
     #[serde(default)]
     pub mouse_left_handed: bool,
@@ -767,10 +775,6 @@ pub struct InputSettings {
     /// GTK shell default text direction; corners and Activities follow it.
     #[serde(default)]
     pub right_to_left: bool,
-}
-
-fn animations_default() -> bool {
-    true
 }
 
 impl Default for InputSettings {
@@ -790,7 +794,7 @@ impl Default for InputSettings {
             mouse_natural_scroll: false,
             mouse_speed_milli: 0,
             hot_corners: true,
-            enable_animations: true,
+            motion: MotionPolicy::default(),
             mouse_left_handed: false,
             touchpad_left_handed: false,
             right_to_left: false,
@@ -1230,8 +1234,8 @@ mod tests {
     }
 
     #[test]
-    fn current_version_is_0_27() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 27));
+    fn current_version_is_0_28() {
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 28));
     }
 
     #[test]
@@ -1263,6 +1267,22 @@ mod tests {
                     ..InputSettings::default()
                 }),
             });
+        }
+    }
+
+    #[test]
+    fn motion_policy_survives_the_positional_control_wire() {
+        for level in [MotionLevel::Full, MotionLevel::FadeOnly, MotionLevel::Off] {
+            for slowdown in [0.5, 1.0, 4.0] {
+                roundtrip(&Message::Command {
+                    id: 1,
+                    kind: CommandKind::SetInputSettings(InputSettings {
+                        motion: MotionPolicy::new(level, slowdown),
+                        right_to_left: true,
+                        ..InputSettings::default()
+                    }),
+                });
+            }
         }
     }
 
@@ -1314,7 +1334,8 @@ mod tests {
         assert!(ProtocolVersion::new(0, 25).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 26).is_compatible_with(&ours));
         assert!(ProtocolVersion::new(0, 27).is_compatible_with(&ours));
-        assert!(!ProtocolVersion::new(0, 28).is_compatible_with(&ours));
+        assert!(ProtocolVersion::new(0, 28).is_compatible_with(&ours));
+        assert!(!ProtocolVersion::new(0, 29).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 4).is_compatible_with(&ours));
         assert!(!ProtocolVersion::new(1, 0).is_compatible_with(&ours));
     }
