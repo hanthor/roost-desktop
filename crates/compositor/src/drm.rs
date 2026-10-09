@@ -826,53 +826,9 @@ fn apply_handedness(device: &smithay::reexports::input::Device, left_handed: boo
     }
 }
 
-/// Rectangles in an output's physical pixel space.
-pub type PixelRects = Vec<Rectangle<i32, Physical>>;
-
-/// Software pointer: an arrow drawn as stacked rectangles (outline
-/// first, fill second), relative to the hotspot at `pos` and offset by
-/// the output's location. Returns `(outline, fill)` damage-style rects.
-pub fn cursor_rects(
-    pos: Point<f64, Logical>,
-    output_loc: (i32, i32),
-    scale: f64,
-) -> (PixelRects, PixelRects) {
-    let x = ((pos.x - f64::from(output_loc.0)) * scale).round() as i32;
-    let y = ((pos.y - f64::from(output_loc.1)) * scale).round() as i32;
-    // The arrow grows by whole pixels with the scale, staying crisp.
-    let k = (scale.round() as i32).max(1);
-    let rect = |dx: i32, dy: i32, w: i32| -> Rectangle<i32, Physical> {
-        Rectangle::new((x + dx * k, y + dy * k).into(), (w * k, k).into())
-    };
-    let mut outline = Vec::new();
-    let mut fill = Vec::new();
-    // Left-aligned triangle, 12 rows tall, plus a short tail.
-    for row in 0..12 {
-        outline.push(rect(0, row, row + 2));
-        if row > 0 && row < 11 {
-            fill.push(rect(1, row, row));
-        }
-    }
-    for row in 12..17 {
-        outline.push(rect(4, row, 4));
-        fill.push(rect(5, row, 2));
-    }
-    (outline, fill)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn cursor_scales_with_the_output() {
-        // At scale 2 the arrow sits at the scaled position, twice as big.
-        let (outline, _) = cursor_rects((110.0, 20.0).into(), (100, 0), 2.0);
-        assert_eq!(outline[0].loc, (20, 40).into());
-        assert_eq!(outline[0].size, (4, 2).into());
-        let (outline, _) = cursor_rects((110.0, 20.0).into(), (100, 0), 1.0);
-        assert_eq!(outline[0].size, (2, 1).into());
-    }
 
     #[test]
     fn function_keys_map_to_vts() {
@@ -897,12 +853,5 @@ mod tests {
         // Far left: onto the left edge of the first output.
         let left = clamp_to_outputs((-50.0, 10.0).into(), &outputs);
         assert_eq!(left, (0.0, 10.0).into());
-    }
-
-    #[test]
-    fn cursor_is_offset_by_output_location() {
-        let (outline, fill) = cursor_rects((1930.0, 5.0).into(), (1920, 0), 1.0);
-        assert_eq!(outline[0].loc, (10, 5).into());
-        assert!(!fill.is_empty());
     }
 }

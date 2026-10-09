@@ -1820,6 +1820,15 @@ impl WindowManager {
         self.grab.is_some()
     }
 
+    /// The pointer cursor of an interactive grab (#342): move, or
+    /// resize from these xdg edges.
+    pub fn grab_cursor(&self) -> Option<smithay::input::pointer::CursorIcon> {
+        match self.grab? {
+            PointerGrab::Move { .. } => Some(crate::cursor::grab_icon(None)),
+            PointerGrab::Resize { edges, .. } => Some(crate::cursor::grab_icon(Some(edges))),
+        }
+    }
+
     /// Follow the pointer during a grab. Returns whether a grab ate it.
     fn grab_motion(&mut self, pos: Point<f64, Logical>) -> bool {
         let Some(grab) = self.grab else {

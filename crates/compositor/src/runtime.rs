@@ -558,6 +558,8 @@ pub struct Runtime {
     ime: Option<crate::ime::ImeBridge>,
     overlay: Overlay,
     wallpaper: Wallpaper,
+    /// The compositor-drawn pointer and locate-pointer (#342).
+    cursor: crate::cursor::Cursor,
     triggers: TriggerState,
     /// Compositor-owned session lock: flag plus idle accumulator fed
     /// from input timestamps. The hub mirror carries the flag to shell
@@ -958,6 +960,7 @@ impl Runtime {
             ime: crate::ime::ImeBridge::configured(&session.socket_name),
             overlay,
             wallpaper: Wallpaper::new(),
+            cursor: crate::cursor::Cursor::new(),
             triggers: TriggerState::default(),
             lock: SessionLock::new(idle_timeout_ms()),
             blank: crate::lock::IdleBlank::default(),
@@ -1196,6 +1199,16 @@ impl Runtime {
         self.lock.note_input(input_time(&input));
         self.idle_since = Instant::now();
         self.idle_monitor.activity();
+        if self.is_locked() {
+            self.cursor.locate.reset_keys();
+        } else {
+            // GNOME's locate-pointer: a lone Ctrl tap; the key still
+            // reaches the client (#342).
+            let now = self.animation_clock.now();
+            self.cursor
+                .locate
+                .feed(&input, self.manager.pointer_pos(), now);
+        }
         if self.is_locked() {
             // Only the lock screen hears input; with none up (shell
             // gone), nothing does.
@@ -1692,6 +1705,7 @@ impl Runtime {
         doc["animation_clock_ms"] =
             serde_json::json!(manual.then(|| self.animation_clock.now().as_millis() as u64));
         doc["overview_motion"] = self.overview_motion.diagnostics();
+        doc["cursor"] = self.cursor.snapshot(self.animation_clock.now());
         doc["screen_reader_pid"] = serde_json::json!(self.orca.pid());
         doc["screen_reader_state"] = serde_json::json!(self.orca.state());
         // Keep backend-specific observations outside the large scene macro so
@@ -2792,6 +2806,9 @@ impl Runtime {
             .apply_keyboard_settings(&mut self.state, &settings);
         self.triggers.set_hot_corner(settings.hot_corners);
         self.triggers.set_right_to_left(settings.right_to_left);
+        self.cursor
+            .set_theme(&settings.cursor_theme, settings.cursor_size);
+        self.cursor.set_locate_pointer(settings.locate_pointer);
         // Introspect's AnimationsEnabled is GNOME's enable-animations
         // (St): reduced motion keeps it true, as in GNOME 51.
         self.introspect
@@ -3370,9 +3387,22 @@ impl Runtime {
         // scene hides: their frame callbacks keep full rate then.
         let clones_shown =
             overview.is_some() || !self.switcher_thumbnails.is_empty() || !self.casts.is_empty();
+        // The pointer is the compositor's to draw (#342): hidden while
+        // locked or blanked, as the software pointer always was.
+        let cursor_shown = !locked && blank_alpha < 1.0;
+        let cursor_what = if cursor_shown {
+            crate::cursor::Pointer::resolve(
+                &self.state.cursor_image,
+                self.manager.grab_cursor(),
+                self.state.pointer_focused(),
+            )
+        } else {
+            crate::cursor::Pointer::Hidden
+        };
+        let cursor_now = self.animation_clock.now();
         match &mut self.backend {
             Backend::Winit(backend) => {
-                backend.window().set_cursor_visible(blank_alpha < 1.0);
+                backend.window().set_cursor_visible(false);
                 let size = backend.window_size();
                 let damage = Rectangle::from_size(size);
                 let drawn;
@@ -3431,6 +3461,15 @@ impl Runtime {
                         cards,
                         locked,
                     );
+                    let cursor = self.cursor.elements(
+                        renderer,
+                        &cursor_what,
+                        self.manager.pointer_pos(),
+                        Rectangle::from_size(size.to_f64().to_logical(view.scale).to_i32_round()),
+                        view.scale,
+                        cursor_now,
+                        accent,
+                    );
                     // The winit EGL surface presents bottom-up (see the
                     // Y-flip in the backend's own damage path), so the
                     // output transform mirrors vertically; placements
@@ -3452,6 +3491,8 @@ impl Runtime {
                         &previews,
                     )?;
                     drawn = FrameCost::new(&drew, &elements.owners, &[damage], size);
+                    crate::cursor::draw(&mut frame, &cursor, view.scale, &[damage])
+                        .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
                     let _ = frame
                         .finish()
                         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
@@ -3460,6 +3501,7 @@ impl Runtime {
                 send_surface_scales(&self.state, &self.manager);
                 let hidden = hidden_surfaces(&self.manager, &self.frame_costs, clones_shown);
                 send_frame_callbacks(&self.state, &self.manager, &hidden);
+                crate::cursor::Cursor::frame_done(&cursor_what, cursor_now);
                 backend
                     .submit(Some(&[damage]))
                     .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
@@ -3552,8 +3594,17 @@ impl Runtime {
                         cards,
                         locked,
                     );
+                    let cursor = self.cursor.elements(
+                        renderer,
+                        &cursor_what,
+                        pointer,
+                        Rectangle::new(out.loc.into(), out.logical_size().into()),
+                        out.scale,
+                        cursor_now,
+                        accent,
+                    );
                     use crate::native_repaint::{ElementSignature, FrameSignature};
-                    let signature = FrameSignature {
+                    let mut signature = FrameSignature {
                         size: (size.w, size.h),
                         location: out.loc,
                         scale: out.scale,
@@ -3595,6 +3646,9 @@ impl Runtime {
                                 .collect(),
                         ],
                     };
+                    signature
+                        .groups
+                        .extend(crate::cursor::signatures(&cursor, view.scale));
                     let mine: Vec<_> = drawn
                         .iter()
                         .filter(|(_, at)| owner(at) == index)
@@ -3661,31 +3715,10 @@ impl Runtime {
                             &previews,
                         )?;
                         cost = FrameCost::new(&drew, &elements.owners, &damage, size);
-                        // Software pointer on top (no host cursor on
-                        // bare hardware); hidden while locked.
-                        if !locked && blank_alpha < 1.0 {
-                            let (outline, fill) =
-                                crate::drm::cursor_rects(pointer, out.loc, out.scale);
-                            let clip = |rects: Vec<Rectangle<i32, smithay::utils::Physical>>| {
-                                rects
-                                    .into_iter()
-                                    .flat_map(|r| {
-                                        damage.iter().filter_map(move |d| r.intersection(*d))
-                                    })
-                                    .collect::<Vec<_>>()
-                            };
-                            let (outline, fill) = (clip(outline), clip(fill));
-                            if !outline.is_empty() {
-                                frame
-                                    .clear(Color32F::new(0.0, 0.0, 0.0, 1.0), &outline)
-                                    .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-                            }
-                            if !fill.is_empty() {
-                                frame
-                                    .clear(Color32F::new(1.0, 1.0, 1.0, 1.0), &fill)
-                                    .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-                            }
-                        }
+                        // The pointer on top (no host cursor on bare
+                        // hardware); hidden while locked (#342).
+                        crate::cursor::draw(&mut frame, &cursor, view.scale, &damage)
+                            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
                         frame
                             .finish()
                             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?
@@ -3719,6 +3752,7 @@ impl Runtime {
                     // let redraws outrun the display and keep the loop busy.
                     let hidden = hidden_surfaces(&self.manager, &self.frame_costs, clones_shown);
                     send_frame_callbacks(&self.state, &self.manager, &hidden);
+                    crate::cursor::Cursor::frame_done(&cursor_what, cursor_now);
                     self.stats.frames += 1;
                 }
             }
