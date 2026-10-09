@@ -2910,10 +2910,10 @@ cstate ".pointer_position == [$((a11y_cx + 1)), $a11y_cy]" "pointer back on reco
     fail G-A11Y-MOUSEKEYS "the pointer did not return to the recording window"
 buttons="$(jq '.buttons | length' "$A11Y_KEYS")"
 xdotool key KP_Begin
-a11y_wait ".buttons | length == $((buttons + 1)) and .buttons[-1].button == 1" "keypad click" ||
+a11y_wait "(.buttons | length) == $((buttons + 1)) and .buttons[-1].button == 1" "keypad click" ||
     fail G-A11Y-MOUSEKEYS "keypad 5 did not click the primary button"
 xdotool key KP_Subtract KP_Begin
-a11y_wait ".buttons | length == $((buttons + 2)) and .buttons[-1].button == 3" "keypad secondary" ||
+a11y_wait "(.buttons | length) == $((buttons + 2)) and .buttons[-1].button == 3" "keypad secondary" ||
     fail G-A11Y-MOUSEKEYS "keypad - then 5 did not click the secondary button"
 cp "$A11Y_KEYS" "$ARTIFACTS/a11y-mousekeys.json"
 gsettings set "$A11Y_KBD" mousekeys-enable false
