@@ -334,6 +334,32 @@ px() {
     ffmpeg -loglevel error -i "$1" -vf "crop=1:1:$2:$3" -f rawvideo -pix_fmt rgb24 - |
         od -An -tu1 | tr -s ' ' | sed 's/^ //; s/ $//'
 }
+# The session's GNOME accent as "R G B" (libadwaita's AdwAccentColor
+# backgrounds). GNOME 47+ schemas carry accent-color, whose default
+# a distribution may override (Ubuntu 26.04's is orange); older ones
+# have none, which is blue.
+accent_rgb() {
+    case "$(gsettings get org.gnome.desktop.interface accent-color 2>/dev/null | tr -d "'")" in
+    teal) echo "33 144 164" ;;
+    green) echo "58 148 74" ;;
+    yellow) echo "200 136 0" ;;
+    orange) echo "237 91 0" ;;
+    red) echo "230 45 66" ;;
+    pink) echo "213 97 153" ;;
+    purple) echo "145 65 172" ;;
+    slate) echo "111 131 150" ;;
+    *) echo "53 132 228" ;;
+    esac
+}
+# Whether pixel "R G B" ($1-$3) is within $4 of the accent on every channel.
+near_accent() {
+    # shellcheck disable=SC2046
+    set -- "${1:-0}" "${2:-0}" "${3:-0}" "$4" $(accent_rgb)
+    awk -v r="$1" -v g="$2" -v b="$3" -v t="$4" -v ar="$5" -v ag="$6" -v ab="$7" 'BEGIN {
+        d = r - ar; if (d < 0) d = -d; if (d > t) exit 1
+        d = g - ag; if (d < 0) d = -d; if (d > t) exit 1
+        d = b - ab; if (d < 0) d = -d; if (d > t) exit 1 }'
+}
 pass() { echo "$1 pass $2" >>"$ASSERTIONS"; echo "tuna-gtk-shell-proof: $1 pass: $2"; }
 fail() {
     echo "$1 fail $2" >>"$ASSERTIONS"
@@ -3306,7 +3332,7 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     [ "$near" = yes ] ||
         fail G-IME-CANDIDATES "the candidate window ($popup) is not under the text cursor ($cursor)"
     # GNOME's popup surface (#36363a) in its top padding, and the
-    # highlighted first row in the accent (#3584e4).
+    # highlighted first row in the accent (#3584e4 unless set otherwise).
     # shellcheck disable=SC2046
     set -- $(px "$ARTIFACTS/24j-ime-candidates.png" $(($5 + 30)) $(($6 + 9))) "$5" "$6"
     if [ "${1:-0}" -lt 46 ] || [ "${1:-0}" -gt 62 ] || [ "${3:-0}" -lt 50 ] || [ "${3:-0}" -gt 66 ]; then
@@ -3318,8 +3344,8 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     set -- $row0
     # shellcheck disable=SC2046
     set -- $(px "$ARTIFACTS/24j-ime-candidates.png" $(($1 + 3)) $(($2 + $4 / 2)))
-    [ "${3:-0}" -gt $((${1:-255} + 60)) ] ||
-        fail G-IME-CANDIDATES "the first candidate is not highlighted (pixel ${1:-?} ${2:-?} ${3:-?})"
+    near_accent "$1" "$2" "$3" 40 ||
+        fail G-IME-CANDIDATES "the first candidate is not highlighted in the accent $(accent_rgb) (pixel ${1:-?} ${2:-?} ${3:-?})"
     row1="$(grep 'ibus candidate 1 尼 at' "$LOG" | tail -1 | sed 's/.* at //')"
     # shellcheck disable=SC2086 # four numbers
     set -- $row1
@@ -3730,8 +3756,8 @@ scrot "$ARTIFACTS/24g-workspace-thumbnails.png" >/dev/null
 ring="$(jq -r '.thumbnails[] | select(.active) | .rect | "\(.[0] - 2) \(.[1] + .[3] / 2)"' "$CSTATE")"
 # shellcheck disable=SC2046,SC2086
 set -- $(px "$ARTIFACTS/24g-workspace-thumbnails.png" $ring)
-if [ "${3:-0}" -le 180 ] || [ "${1:-255}" -ge 100 ]; then
-    fail G-WS-THUMBS "no accent indicator around the active thumbnail (pixel ${1:-?} ${2:-?} ${3:-?})"
+if ! near_accent "$1" "$2" "$3" 60; then
+    fail G-WS-THUMBS "no accent $(accent_rgb) indicator around the active thumbnail (pixel ${1:-?} ${2:-?} ${3:-?})"
 fi
 target="$(jq -r ".thumbnails[] | select(.workspace == $home_ws + 1) | .rect | \"\(.[0] + .[2] / 2) \(.[1] + .[3] / 2)\"" "$CSTATE")"
 # shellcheck disable=SC2086
