@@ -1853,6 +1853,11 @@ showing "$ARTIFACTS/a11y-folder-open.json" "Tuna Probe" ||
     fail G-APP-FOLDERS "the open folder does not show its app"
 pass G-APP-FOLDERS "GNOME's app folders group the grid and open to their apps"
 
+# A click on the shade beside the dialog closes it (Escape may reach
+# the overview first when the dialog has not taken keyboard focus yet).
+folder_shade_click() {
+    xdotool mousemove --window "$WID" 40 $((HEIGHT / 2)) click 1
+}
 # GNOME's _zoomAndFadeIn/_zoomAndFadeOut: 200 ms out of the folder's
 # icon and back, the icon fading out over the first half and back over
 # the last half of the closing.
@@ -1863,7 +1868,7 @@ log_has "$folder_mark" "grid-anim folder-icon start ms=100" ||
 folder_ms="$(settle_ms "$folder_mark" folder-zoom-in)"
 [ "${folder_ms:-0}" -ge 190 ] || fail G-FOLDER-ZOOM "the zoom settled after ${folder_ms:-?} ms, not 200"
 folder_mark="$(log_mark)"
-xdotool key Escape
+folder_shade_click
 log_wait "$folder_mark" "grid-anim folder-zoom-out settle" ||
     fail G-FOLDER-ZOOM "closing did not zoom back into the folder icon"
 log_has "$folder_mark" "grid-anim folder-zoom-out start ms=200 motion=full" ||
@@ -1887,7 +1892,7 @@ log_wait "$folder_mark" "grid-anim folder-zoom-in instant motion=off" ||
 showing "$ARTIFACTS/a11y-folder-open-off.json" "Tuna Desktop Probe" ||
     fail G-FOLDER-ZOOM "with animations off the dialog did not show its app"
 folder_mark="$(log_mark)"
-xdotool key Escape
+folder_shade_click
 log_wait "$folder_mark" "grid-anim folder-zoom-out instant motion=off" ||
     fail G-FOLDER-ZOOM "with animations off the dialog still zoomed shut"
 # Reduced Motion: the shade, dialog and icon still fade over 200 ms, but
