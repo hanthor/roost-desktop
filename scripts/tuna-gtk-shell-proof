@@ -473,6 +473,12 @@ fi
 gsettings reset org.gnome.desktop.calendar week-start-day
 gsettings reset org.gnome.desktop.calendar show-weekdate
 gsettings set org.gnome.settings-daemon.plugins.color night-light-enabled false
+# Candidate and thumbnail pixel gates assume GNOME's blue accent; pin it so
+# a vendor default (orange on Ubuntu) cannot move the highlight (#566).
+# Hosts without the key fall back to libadwaita's built-in blue.
+if gsettings range org.gnome.desktop.interface accent-color >/dev/null 2>&1; then
+    gsettings set org.gnome.desktop.interface accent-color 'blue'
+fi
 # Quick-settings daemons: stubs on a private "system" bus (#55), a fake
 # backlight, and a fake wpctl that records the sink volume.
 BACKLIGHT="$ARTIFACTS/backlight/tuna-bl"
