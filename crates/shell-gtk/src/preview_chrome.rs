@@ -25,7 +25,7 @@ const OVERLAY_FADE_MS: f64 = 200.0;
 
 /// Overlay opacity `elapsed_ms` into the fade under `policy`: a fade,
 /// so fade-only keeps it; the slow-down factor stretches it.
-pub fn overlay_opacity(elapsed_ms: f64, policy: roost_shell_control::MotionPolicy) -> f64 {
+pub fn overlay_opacity(elapsed_ms: f64, policy: tuna_shell_control::MotionPolicy) -> f64 {
     let duration = policy.adjust_ms(OVERLAY_FADE_MS);
     let t = if policy.allows_fades() && duration > 0.0 {
         (elapsed_ms / duration).clamp(0.0, 1.0)
@@ -196,7 +196,7 @@ impl PreviewChrome {
 #[cfg(test)]
 mod tests {
     use super::overlay_opacity;
-    use roost_shell_control::{MotionLevel, MotionPolicy};
+    use tuna_shell_control::{MotionLevel, MotionPolicy};
 
     #[test]
     fn the_hover_overlay_fades_in_over_200_ms_ease_out_quad() {
