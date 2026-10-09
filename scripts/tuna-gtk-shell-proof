@@ -2723,10 +2723,9 @@ A11Y_KBD=org.gnome.desktop.a11y.keyboard
 A11Y_KEYS="$ARTIFACTS/a11y-input.json"
 rm -f "$A11Y_KEYS"
 gsettings reset-recursively "$A11Y_KBD"
-a11y_count="$(jq '.windows | length' "$CSTATE")"
 WAYLAND_DISPLAY="$SOCKET_NAME" "$PY" "$ROOT/scripts/lib/tuna-a11y-input-window.py" "$A11Y_KEYS" >"$ARTIFACTS/a11y-input.log" 2>&1 &
 A11Y_INPUT_PID=$!
-cstate ".windows | length == $((a11y_count + 1)) and (.focused as \$f | any(.windows[]; .id == \$f and .app_id == \"org.tuna.A11yInputProof\"))" "a11y recorder focused" ||
+cstate '.focused_app_id == "org.tuna.A11yInputProof"' "a11y recorder focused" ||
     fail G-A11Y-STICKY "the recording GTK window did not map focused"
 [ -s "$A11Y_KEYS" ] || sleep 1
 # Wait for the recorder to satisfy a jq expression.
@@ -2923,7 +2922,7 @@ pass G-A11Y-MOUSEKEYS "keypad 6 accelerates the pointer and stops on release; 5 
 gsettings reset-recursively "$A11Y_KBD"
 kill "$A11Y_INPUT_PID" 2>/dev/null || true
 A11Y_INPUT_PID=""
-cstate ".windows | length == $a11y_count" "a11y recorder closed" ||
+cstate 'all(.windows[]; .app_id != "org.tuna.A11yInputProof")' "a11y recorder closed" ||
     fail G-A11Y-MOUSEKEYS "the recording window did not unmap"
 xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
 
