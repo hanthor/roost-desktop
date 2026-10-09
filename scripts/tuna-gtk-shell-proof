@@ -3340,6 +3340,18 @@ if command -v ibus-daemon >/dev/null 2>&1 &&
     for _ in $(seq 1 20); do grep -q "IBus panel: owns org.freedesktop.IBus.Panel" "$LOG" && break; sleep 0.5; done
     grep -q "IBus panel: owns org.freedesktop.IBus.Panel" "$LOG" ||
         fail G-IME-CANDIDATES "the shell never became IBus's panel"
+    # The popover, quick-settings, and drag checks above park and restore
+    # focus around the field: the window being focused again does not imply
+    # the field is IM-active yet, and typing while it is not reaches the
+    # bridge as plain keys that bypass IBus (#566). Re-sync on the bridge's
+    # own focus report, like the first composition above does.
+    end=$(($(date +%s) + 10))
+    until [ "$(grep -c 'tuna-ibus-bridge: text field focused' "$LOG")" -gt \
+            "$(grep -c 'tuna-ibus-bridge: text field left' "$LOG")" ] || \
+          [ "$(date +%s)" -gt "$end" ]; do sleep 0.2; done
+    [ "$(grep -c 'tuna-ibus-bridge: text field focused' "$LOG")" -gt \
+      "$(grep -c 'tuna-ibus-bridge: text field left' "$LOG")" ] ||
+        fail G-IME-CANDIDATES "the field never became IM-active after the popover checks"
     shown_before="$(grep -c 'ibus candidate 1 尼 at' "$LOG" || true)"
     xdotool type --delay 100 ni
     cstate '.layers | any(.namespace == "tuna-ibus-candidates")' "candidate window" 10 ||
