@@ -339,7 +339,11 @@ struct PolicySlot(Option<Arc<dyn PolicyStore>>);
 
 impl std::fmt::Debug for PolicySlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(if self.0.is_some() { "PolicySlot(set)" } else { "PolicySlot(none)" })
+        f.write_str(if self.0.is_some() {
+            "PolicySlot(set)"
+        } else {
+            "PolicySlot(none)"
+        })
     }
 }
 
@@ -685,7 +689,10 @@ impl NotificationCenter {
             .and_then(|store| store.app_for(&n.desktop_entry, &n.app));
         let policy = self.policy_for(app_id.as_deref());
         let Some(delivery) = notification_policy::deliver(&policy, n.urgency, self.dnd) else {
-            return match n.replaces_id.filter(|id| self.history.iter().any(|e| e.id == *id)) {
+            return match n
+                .replaces_id
+                .filter(|id| self.history.iter().any(|e| e.id == *id))
+            {
                 // Replacing a filed one from a since-disabled app: it goes.
                 Some(id) => {
                     self.remove(id);
@@ -865,7 +872,12 @@ mod tests {
             *self.global.lock().unwrap()
         }
         fn app(&self, app_id: &str) -> notification_policy::AppPrefs {
-            self.apps.lock().unwrap().get(app_id).copied().unwrap_or_default()
+            self.apps
+                .lock()
+                .unwrap()
+                .get(app_id)
+                .copied()
+                .unwrap_or_default()
         }
         fn register(&self, app_id: &str) {
             let mut seen = self.registered.lock().unwrap();
@@ -903,7 +915,11 @@ mod tests {
     fn disabled_apps_are_dropped_and_others_register() {
         let (mut c, store) = policed();
         store.set("org.example.Chat", |a| a.enable = false);
-        let mail = c.deliver(incoming("org.example.Mail.desktop", "Mail", Urgency::Normal));
+        let mail = c.deliver(incoming(
+            "org.example.Mail.desktop",
+            "Mail",
+            Urgency::Normal,
+        ));
         let chat = c.deliver(incoming("org.example.Chat", "Chat", Urgency::Critical));
         // The sender still gets an id, but nothing is filed or shown.
         assert_ne!(chat, 0);

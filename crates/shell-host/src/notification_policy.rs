@@ -566,7 +566,10 @@ mod tests {
             )
         };
         let view = lock_screen(c.history().iter().rev(), hide_chat);
-        assert_eq!(view.iter().map(|s| s.key.as_str()).collect::<Vec<_>>(), ["mail"]);
+        assert_eq!(
+            view.iter().map(|s| s.key.as_str()).collect::<Vec<_>>(),
+            ["mail"]
+        );
         // The global switch hides every source, generic ones included.
         let off = GlobalPrefs {
             show_banners: true,
