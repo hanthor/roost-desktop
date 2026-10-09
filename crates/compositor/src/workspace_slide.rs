@@ -126,6 +126,26 @@ pub fn swipe_release(
     velocity: f64,
     cancelled: bool,
 ) -> (f64, f64) {
+    swipe_release_over(
+        progress,
+        initial,
+        slots,
+        velocity,
+        cancelled,
+        TOUCHPAD_BASE_WIDTH,
+    )
+}
+
+/// [`swipe_release`] for a gesture whose whole step is `distance`
+/// touchpad units (the overview's vertical `TOUCHPAD_BASE_HEIGHT`).
+pub fn swipe_release_over(
+    progress: f64,
+    initial: f64,
+    slots: usize,
+    velocity: f64,
+    cancelled: bool,
+    distance: f64,
+) -> (f64, f64) {
     let last = slots.saturating_sub(1) as f64;
     let closest = |p: f64| p.round().clamp(0.0, last);
     let (low, high) = ((initial - 1.0).max(0.0), (initial + 1.0).min(last));
@@ -156,7 +176,7 @@ pub fn swipe_release(
             closest(pos)
         }
     };
-    let mut speed = velocity / TOUCHPAD_BASE_WIDTH;
+    let mut speed = velocity / distance.max(1.0);
     if (end - progress) * speed <= 0.0 {
         speed = ANIMATION_BASE_VELOCITY;
     }

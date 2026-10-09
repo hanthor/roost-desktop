@@ -14,7 +14,10 @@
 pub mod apps;
 pub mod control;
 pub mod dock;
+pub mod error;
 pub mod extensions;
+
+pub use error::ShellHostError;
 pub mod favorites;
 pub mod ibus;
 pub mod icons;
