@@ -2941,7 +2941,7 @@ xdotool mousemove --window "$WID" $((a11y_cx - 30)) "$a11y_cy"
 cstate 'any(.layers[]; .namespace == "tuna-pointer-a11y")' "pie timer" 5 ||
     fail G-A11Y-DWELL "the pie timer did not show while the pointer dwelled"
 scrot "$ARTIFACTS/a11y-dwell-pie.png" >/dev/null
-a11y_wait ".buttons | length == $((buttons + 1)) and .buttons[-1].button == 1" "dwell click" ||
+a11y_wait "(.buttons | length) == $((buttons + 1)) and .buttons[-1].button == 1" "dwell click" ||
     fail G-A11Y-DWELL "resting the pointer did not make one primary click"
 sleep 2
 [ "$(a11y_buttons)" = "$((buttons + 1))" ] || fail G-A11Y-DWELL "a still pointer clicked more than once"
@@ -2956,7 +2956,7 @@ xdotool mousemove --window "$WID" "$gesture_x" "$a11y_cy"
 cstate '.input_aids.pointer.gesture' "gesture open" 6 ||
     fail G-A11Y-DWELL "the dwell did not open the direction gesture"
 xdotool mousemove --window "$WID" $((gesture_x + 40)) "$a11y_cy"
-a11y_wait ".buttons | length == $((buttons + 2)) and .buttons[-1].button == 3" "gesture secondary" ||
+a11y_wait "(.buttons | length) == $((buttons + 2)) and .buttons[-1].button == 3" "gesture secondary" ||
     fail G-A11Y-DWELL "moving right after the dwell did not make a secondary click"
 cstate ".pointer_position == [$gesture_x, $a11y_cy]" "click where it dwelled" ||
     fail G-A11Y-DWELL "the gesture click was not made where the pointer dwelled"
@@ -2972,7 +2972,7 @@ buttons="$(a11y_buttons)"
 xdotool mousedown 1
 sleep 1.2
 xdotool mouseup 1
-a11y_wait ".buttons | length == $((buttons + 1)) and .buttons[-1].button == 1" "held without the aid" ||
+a11y_wait "(.buttons | length) == $((buttons + 1)) and .buttons[-1].button == 1" "held without the aid" ||
     fail G-A11Y-SECONDARY "without the aid a held press should stay a primary click"
 gsettings set "$A11Y_MOUSE" secondary-click-time 0.6
 gsettings set "$A11Y_MOUSE" secondary-click-enabled true
@@ -2981,12 +2981,12 @@ cstate '.input_aids.pointer.secondary_click' "secondary on" ||
 xdotool mousedown 1
 sleep 0.1
 xdotool mouseup 1
-a11y_wait ".buttons | length == $((buttons + 2)) and .buttons[-1].button == 1" "quick click" ||
+a11y_wait "(.buttons | length) == $((buttons + 2)) and .buttons[-1].button == 1" "quick click" ||
     fail G-A11Y-SECONDARY "a quick click did not stay a primary click"
 xdotool mousedown 1
 sleep 1.2
 xdotool mouseup 1
-a11y_wait ".buttons | length == $((buttons + 4)) and .buttons[-2].button == 1 and .buttons[-1].button == 3" "held click" ||
+a11y_wait "(.buttons | length) == $((buttons + 4)) and .buttons[-2].button == 1 and .buttons[-1].button == 3" "held click" ||
     fail G-A11Y-SECONDARY "holding the primary button did not make a secondary click"
 sleep 0.5
 [ "$(a11y_buttons)" = "$((buttons + 4))" ] || fail G-A11Y-SECONDARY "the held click made extra clicks"
