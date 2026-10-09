@@ -188,11 +188,11 @@ def frame_source_evidence(decoded, pid):
     """Validate recorded source identifiers without replacing timing ownership."""
     import re
     formats = {
-        "Roost::FrameClock::dispatch-id": ("dispatches",
+        "Tuna::FrameClock::dispatch-id": ("dispatches",
             r"output=(\S+) frame=(\d+) dispatch_us=(\d+)"),
-        "Roost::FrameClock::presented-id": ("presentations",
+        "Tuna::FrameClock::presented-id": ("presentations",
             r"output=(\S+) view_frame=(\d+) global_frame=(\d+) presentation_us=(\d+) sequence=(\d+) flags=(\d+) kms_ready_us=(\d+)"),
-        "Roost::KMS::raw-page-flip": ("kernel_events",
+        "Tuna::KMS::raw-page-flip": ("kernel_events",
             r"crtc=(\d+) sequence=(\d+) seconds=(\d+) microseconds=(\d+) device=(/dev/dri/card\d+)"),
     }
     result = {kind: [] for kind, _ in formats.values()}
@@ -236,9 +236,9 @@ def frame_source_evidence(decoded, pid):
     pointer = r"(0x[0-9a-f]+|\(nil\))"
     commit_pattern = rf"impl_device={pointer} update={pointer} req={pointer} fd=(\d+) flags=(\d+)"
     observation_formats = {
-        "Roost::KMS::atomic-commit-begin": commit_pattern,
-        "Roost::KMS::atomic-commit-end": commit_pattern + r" ret=(-?\d+)",
-        "Roost::KMS::page-flip-listener-identity": rf"crtc=(\d+) impl_device={pointer} update={pointer} page_flip_data={pointer} listener_user_data={pointer}",
+        "Tuna::KMS::atomic-commit-begin": commit_pattern,
+        "Tuna::KMS::atomic-commit-end": commit_pattern + r" ret=(-?\d+)",
+        "Tuna::KMS::page-flip-listener-identity": rf"crtc=(\d+) impl_device={pointer} update={pointer} page_flip_data={pointer} listener_user_data={pointer}",
     }
     observations = []
     for row in decoded["marks"]:
@@ -251,7 +251,7 @@ def frame_source_evidence(decoded, pid):
         result["kernel_commit_listener_observations"] = observations
     identities = []
     for row in decoded["marks"]:
-        if row["pid"] != pid or row["name"] != "Roost::KMS::raw-page-flip-identity":
+        if row["pid"] != pid or row["name"] != "Tuna::KMS::raw-page-flip-identity":
             continue
         match = re.fullmatch(r"crtc=(\d+) sequence=(\d+) user_data=(0x[0-9a-f]+|\(nil\)) page_flip_data=(0x[0-9a-f]+|\(nil\))", row["message"])
         if not match:
@@ -275,7 +275,7 @@ def capture_boundary_evidence(decoded, metadata, output="Virtual-1"):
     import re
     pid = metadata["pid"]
     marks = [row for row in decoded["marks"] if row["pid"] == pid]
-    rows = [row for row in marks if row["name"] == "Roost::CaptureBoundary"]
+    rows = [row for row in marks if row["name"] == "Tuna::CaptureBoundary"]
     if len(rows) != 1 or metadata.get("drained_start_required") is not True:
         raise ValueError("missing or ambiguous actual drained capture boundary")
     row = rows[0]

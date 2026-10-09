@@ -44,7 +44,7 @@ use crate::{
     state::{StateModel, WindowUpdate},
     State, WindowRequest,
 };
-use roost_shell_control::{switcher_keys, SwitcherAction, PANEL_HEIGHT};
+use tuna_shell_control::{switcher_keys, SwitcherAction, PANEL_HEIGHT};
 
 /// Default floating size for a newly mapped window.
 const DEFAULT_WIDTH: i32 = 800;
@@ -234,7 +234,7 @@ pub struct WindowManager {
     pointer: Option<PointerHandle<State>>,
     pointer_pos: Point<f64, Logical>,
     /// org.gnome.Shell accelerator grabs (GrabAccelerators).
-    accelerators: Vec<roost_shell_control::Accelerator>,
+    accelerators: Vec<tuna_shell_control::Accelerator>,
     /// Keycodes whose press fired an accelerator: their release is
     /// swallowed too.
     accel_held: Vec<u32>,
@@ -253,7 +253,7 @@ pub struct WindowManager {
     /// The shell's switcher chords (GNOME's `switch-applications` and
     /// `switch-group` keys); `None` until it sends them, and then the
     /// built-in Alt/Super+Tab and Above_Tab stand aside.
-    switcher_keys: Option<Vec<roost_shell_control::SwitcherKey>>,
+    switcher_keys: Option<Vec<tuna_shell_control::SwitcherKey>>,
     /// Control held (either side), for switcher chords.
     ctrl_held: bool,
     /// Workspace-switcher popups `(index, count)` for the shell.
@@ -309,6 +309,9 @@ pub struct WindowManager {
     /// An exclusive-keyboard layer surface holding the keyboard (a
     /// modal dialog), released back to the focused window on unmap.
     exclusive_held: Option<WlSurface>,
+    /// Maximize/tile/fullscreen transitions (#496): layout changes
+    /// queue here and the runtime draws them.
+    size_changes: crate::size_change::SizeChanges<crate::size_change::Snapshot>,
 }
 
 impl WindowManager {
@@ -368,6 +371,7 @@ impl WindowManager {
             activated: None,
             overview_held: None,
             exclusive_held: None,
+            size_changes: Default::default(),
         }
     }
 
@@ -613,10 +617,50 @@ impl WindowManager {
     /// shifted by how far the animated view still trails its target. Every other use (input, configure,
     /// output scale) keeps the target geometry.
     pub fn render_windows(&self) -> Vec<(Window, Rectangle<i32, Logical>)> {
+        self.render_entries()
+            .into_iter()
+            .map(|(_, window, geometry)| (window, geometry))
+            .collect()
+    }
+
+    /// [`render_windows`](Self::render_windows) with their ids.
+    pub fn render_entries(&self) -> Vec<(u64, Window, Rectangle<i32, Logical>)> {
         self.visible_entries()
             .into_iter()
-            .map(|(id, window, geometry)| (window, self.shifted(id, geometry)))
+            .map(|(id, window, geometry)| (id, window, self.shifted(id, geometry)))
             .collect()
+    }
+
+    /// Size-change transitions in flight and queued (#496).
+    pub fn size_changes(&self) -> &crate::size_change::SizeChanges<crate::size_change::Snapshot> {
+        &self.size_changes
+    }
+
+    pub fn size_changes_mut(
+        &mut self,
+    ) -> &mut crate::size_change::SizeChanges<crate::size_change::Snapshot> {
+        &mut self.size_changes
+    }
+
+    /// Queue GNOME's size-change transition for a layout change that
+    /// moved `id` off `old`: only for a placed, shown, ordinary window
+    /// (GNOME animates `NORMAL` windows only) outside the strip.
+    fn note_size_change(&mut self, id: u64, old: Rectangle<i32, Logical>) {
+        if self.mode == SessionMode::Scroll || self.transient_parent(id).is_some() {
+            return;
+        }
+        let Some(window) = self.windows.get(&id) else {
+            return;
+        };
+        let shown = self
+            .visible_entries()
+            .iter()
+            .any(|(other, _, _)| *other == id);
+        if window.unplaced || !shown || window.geometry == old {
+            return;
+        }
+        let new = window.geometry;
+        self.size_changes.request(id, old, new);
     }
 
     /// Where `id` is drawn this frame (see
@@ -819,7 +863,7 @@ impl WindowManager {
                         keyboard.set_focus(state, Some(target.clone()), serial);
                     }
                     state.sync_selection_focus(Some(&target));
-                    eprintln!("roost-compositor: overview focus parked");
+                    eprintln!("tuna-compositor: overview focus parked");
                     self.overview_held = Some(target);
                 }
                 (None, Some(_)) => {
@@ -875,7 +919,7 @@ impl WindowManager {
             }
         }
         self.apply_focus(state, restore);
-        eprintln!("roost-compositor: overview focus restored");
+        eprintln!("tuna-compositor: overview focus restored");
     }
 
     /// Register one toplevel: model insert with cascaded geometry,
@@ -1104,7 +1148,7 @@ impl WindowManager {
         let window = Window::new_x11_window(surface.clone());
         let id = self.insert_managed(&title, app_id.as_deref());
         self.x11_index.insert(surface.window_id(), id);
-        eprintln!("roost-compositor: X11 window {id} mapped ({title})");
+        eprintln!("tuna-compositor: X11 window {id} mapped ({title})");
         // GNOME placement at the size the client asked for.
         let asked = surface.geometry().size;
         let wanted = (asked.w > 0 && asked.h > 0).then_some(asked);
@@ -1176,7 +1220,7 @@ impl WindowManager {
                         let mut geometry = surface.geometry();
                         geometry.size = requested_x11_size(geometry.size, width, height);
                         if surface.configure(Some(geometry)).is_err() {
-                            eprintln!("roost-compositor: pre-map X11 configure refused id={id}");
+                            eprintln!("tuna-compositor: pre-map X11 configure refused id={id}");
                         }
                         continue;
                     };
@@ -1313,7 +1357,7 @@ impl WindowManager {
                         .is_some_and(|window| window.surface.alive())
             });
         if let Some(window) = self.windows.remove(&id) {
-            eprintln!("roost-compositor: window {id} unmapped");
+            eprintln!("tuna-compositor: window {id} unmapped");
             match window.surface.underlying_surface() {
                 WindowSurface::Wayland(toplevel) => {
                     self.surface_index.remove(toplevel.wl_surface());
@@ -1572,7 +1616,7 @@ impl WindowManager {
                 if surface.set_activated(activated).is_err()
                     || surface.configure(Some(window.geometry)).is_err()
                 {
-                    eprintln!("roost-compositor: window {id} X11 configure refused");
+                    eprintln!("tuna-compositor: window {id} X11 configure refused");
                 }
             }
         }
@@ -1955,10 +1999,10 @@ impl WindowManager {
     /// IBus's candidate window does) so panel menus take keys; the
     /// button itself follows pointer focus from the last motion.
     pub fn pointer_button(&mut self, state: &mut State, button: u32, pressed: bool, time: u32) {
-        let trace = std::env::var_os("ROOST_POINTER_TRACE").is_some();
+        let trace = std::env::var_os("TUNA_POINTER_TRACE").is_some();
         if trace {
             eprintln!(
-                "roost-compositor: pointer trace: manager button received popup_grab={} move_modifier={}",
+                "tuna-compositor: pointer trace: manager button received popup_grab={} move_modifier={}",
                 state.popup_grab_active(), self.super_held
             );
         }
@@ -2063,7 +2107,7 @@ impl WindowManager {
         if let Some(pointer) = self.pointer.clone() {
             if trace {
                 eprintln!(
-                    "roost-compositor: pointer trace: client button dispatched focused={}",
+                    "tuna-compositor: pointer trace: client button dispatched focused={}",
                     pointer.current_focus().is_some()
                 );
             }
@@ -2221,23 +2265,23 @@ impl WindowManager {
             }
         }
         let mode = if self.lock_input_active {
-            roost_shell_control::MODE_LOCK_SCREEN
+            tuna_shell_control::MODE_LOCK_SCREEN
         } else if crate::layer::exclusive_popup_keyboard_layer(state).is_some() {
-            roost_shell_control::MODE_POPUP
+            tuna_shell_control::MODE_POPUP
         } else if self.overview_open {
-            roost_shell_control::MODE_OVERVIEW
+            tuna_shell_control::MODE_OVERVIEW
         } else {
-            roost_shell_control::MODE_NORMAL
+            tuna_shell_control::MODE_NORMAL
         };
         let mode_mask = if self.lock_input_active {
-            roost_shell_control::MODE_LOCK_SCREEN | roost_shell_control::MODE_UNLOCK_SCREEN
+            tuna_shell_control::MODE_LOCK_SCREEN | tuna_shell_control::MODE_UNLOCK_SCREEN
         } else {
             mode
         };
         // A window with approved shortcut inhibition receives the shell's
         // grabbed accelerators too. Lock input always remains compositor-owned.
         let inhibited = !self.lock_input_active && state.shortcuts_inhibited();
-        let grabs: Vec<roost_shell_control::Accelerator> = if pressed && !inhibited {
+        let grabs: Vec<tuna_shell_control::Accelerator> = if pressed && !inhibited {
             self.accelerators
                 .iter()
                 .filter(|a| a.modes & mode_mask != 0)
@@ -2343,9 +2387,9 @@ impl WindowManager {
         &mut self,
         state: &mut State,
         id: u64,
-        action: roost_shell_control::WindowAction,
+        action: tuna_shell_control::WindowAction,
     ) -> bool {
-        use roost_shell_control::WindowAction;
+        use tuna_shell_control::WindowAction;
         if !self.windows.contains_key(&id) {
             return false;
         }
@@ -2425,7 +2469,7 @@ impl WindowManager {
         let occupied = self.model.windows().map(|w| w.workspace).max();
         (
             active,
-            roost_shell_control::dynamic_workspace_count(occupied, active),
+            tuna_shell_control::dynamic_workspace_count(occupied, active),
         )
     }
 
@@ -2440,22 +2484,22 @@ impl WindowManager {
     }
 
     /// Replace the accelerator grabs (org.gnome.Shell GrabAccelerators).
-    pub fn set_accelerators(&mut self, accelerators: Vec<roost_shell_control::Accelerator>) {
+    pub fn set_accelerators(&mut self, accelerators: Vec<tuna_shell_control::Accelerator>) {
         self.accelerators = accelerators;
     }
 
     /// Replace the switcher's chords (the shell's GNOME keybindings).
-    pub fn set_switcher_keys(&mut self, keys: Vec<roost_shell_control::SwitcherKey>) {
+    pub fn set_switcher_keys(&mut self, keys: Vec<tuna_shell_control::SwitcherKey>) {
         // Fixed-shape receipt for the CI journey: count plus the
         // direct-cycle chords, so a rebound key that never arrives
         // names the applied list instead of failing silently.
         eprintln!(
-            "roost-compositor: switcher keys: {} chords, cycle-group {:?}, cycle-windows {:?}",
+            "tuna-compositor: switcher keys: {} chords, cycle-group {:?}, cycle-windows {:?}",
             keys.len(),
             keys.iter()
-                .find(|k| k.kind == roost_shell_control::SwitcherKeyKind::CycleGroup),
+                .find(|k| k.kind == tuna_shell_control::SwitcherKeyKind::CycleGroup),
             keys.iter()
-                .find(|k| k.kind == roost_shell_control::SwitcherKeyKind::CycleWindows)
+                .find(|k| k.kind == tuna_shell_control::SwitcherKeyKind::CycleWindows)
         );
         self.switcher_keys = Some(keys);
     }
@@ -2536,12 +2580,12 @@ impl WindowManager {
             #[cfg(feature = "xwayland")]
             WindowSurface::X11(surface) => {
                 if surface.close().is_err() {
-                    eprintln!("roost-compositor: window {id} X11 close refused");
+                    eprintln!("tuna-compositor: window {id} X11 close refused");
                     return false;
                 }
             }
         }
-        eprintln!("roost-compositor: window {id} close requested");
+        eprintln!("tuna-compositor: window {id} close requested");
         true
     }
 
@@ -2749,8 +2793,9 @@ impl WindowManager {
         self.strip_anim = None;
     }
 
-    /// Apply the live animation preference and finish motion already in flight.
-    pub fn set_animations_enabled(&mut self, enabled: bool) {
+    /// Apply the live motion policy (whether translation animates) and
+    /// finish motion already in flight when it no longer may.
+    pub fn set_motion_allowed(&mut self, enabled: bool) {
         self.animations_enabled = enabled;
         if !enabled {
             self.snap_strip_view();
@@ -3016,7 +3061,7 @@ impl WindowManager {
         // flipped (strip and floating can look alike with one narrow
         // window, so pixels alone cannot prove it).
         eprintln!(
-            "roost-compositor: session mode now {}",
+            "tuna-compositor: session mode now {}",
             if scroll { "scroll" } else { "gnome" }
         );
         true
@@ -3071,12 +3116,16 @@ impl WindowManager {
         let changed = self
             .window_layout(id)
             .is_some_and(|layout| layout != WindowLayout::Floating);
+        let old = self.geometry(id);
         if !self.restore_layout(id) {
             return false;
         }
         self.configure(id, self.model.focused() == Some(id));
         if changed {
-            eprintln!("roost-compositor: window {id} Floating");
+            eprintln!("tuna-compositor: window {id} Floating");
+            if let Some(old) = old {
+                self.note_size_change(id, old);
+            }
         }
         true
     }
@@ -3099,10 +3148,14 @@ impl WindowManager {
         if window.layout == WindowLayout::Floating {
             window.restore = Some(window.geometry);
         }
+        let old = window.geometry;
         window.layout = layout;
         window.geometry = area;
         self.configure(id, self.model.focused() == Some(id));
-        eprintln!("roost-compositor: window {id} {layout:?}");
+        eprintln!("tuna-compositor: window {id} {layout:?}");
+        if layout != WindowLayout::Strip {
+            self.note_size_change(id, old);
+        }
         true
     }
 
@@ -3377,10 +3430,10 @@ impl WindowManager {
     /// release it never delivered) shows up here first.
     fn track_workspace_modifiers(&mut self, keycode: u32, pressed: bool) {
         if keycode == SUPER_LEFT_KEYCODE || keycode == SUPER_RIGHT_KEYCODE {
-            eprintln!("roost-compositor: modifier super keycode={keycode} pressed={pressed}");
+            eprintln!("tuna-compositor: modifier super keycode={keycode} pressed={pressed}");
             self.super_held = pressed;
         } else if keycode == SHIFT_LEFT_KEYCODE || keycode == SHIFT_RIGHT_KEYCODE {
-            eprintln!("roost-compositor: modifier shift keycode={keycode} pressed={pressed}");
+            eprintln!("tuna-compositor: modifier shift keycode={keycode} pressed={pressed}");
             self.shift_held = pressed;
         }
     }
@@ -3827,7 +3880,7 @@ impl WindowManager {
     pub fn apply_keyboard_settings(
         &mut self,
         state: &mut State,
-        settings: &roost_shell_control::InputSettings,
+        settings: &tuna_shell_control::InputSettings,
     ) {
         let Some(keyboard) = self.keyboard.clone() else {
             return;
@@ -3840,7 +3893,7 @@ impl WindowManager {
         };
         if let Err(e) = keyboard.set_xkb_config(state, config) {
             eprintln!(
-                "roost-compositor: keymap {}({}) refused: {e:?}",
+                "tuna-compositor: keymap {}({}) refused: {e:?}",
                 settings.xkb_layout, settings.xkb_variant
             );
         }
@@ -3952,7 +4005,7 @@ impl WindowManager {
                     // One of the shell's switcher chords. The press and
                     // its release stay invisible to apps.
                     self.switcher_swallowed.push(keycode);
-                    use roost_shell_control::SwitcherKeyKind as K;
+                    use tuna_shell_control::SwitcherKeyKind as K;
                     if matches!(
                         kind,
                         K::CycleWindows
@@ -4142,7 +4195,7 @@ impl WindowManager {
             return;
         }
         if pressed && keycode == ESCAPE_KEYCODE && self.super_held && state.restore_shortcuts() {
-            eprintln!("roost-compositor: shortcuts restored");
+            eprintln!("tuna-compositor: shortcuts restored");
             self.switcher_swallowed.push(keycode);
             return;
         }
@@ -4151,7 +4204,7 @@ impl WindowManager {
 
     /// Pointer warps clients asked for (pointer-warp): honoured when
     /// the surface still has pointer focus from the enter they name,
-    /// and lands inside a window or layer surface Roost placed.
+    /// and lands inside a window or layer surface Tuna Desktop placed.
     fn drain_pointer_warps(&mut self, state: &mut State) {
         for (surface, local, serial) in state.take_pointer_warps() {
             let Some(pointer) = self.pointer.clone() else {
@@ -4427,7 +4480,7 @@ impl WindowManager {
             // screen, so pixels alone cannot prove it).
             if switched {
                 eprintln!(
-                    "roost-compositor: workspace now {}",
+                    "tuna-compositor: workspace now {}",
                     self.model.active_workspace()
                 );
                 // GNOME's switcher popup, outside the overview.
@@ -4510,10 +4563,10 @@ impl WindowManager {
     /// delivered) shows up here first.
     fn track_switcher_modifiers(&mut self, keycode: u32, pressed: bool) {
         if self.is_alt(keycode) {
-            eprintln!("roost-compositor: modifier alt keycode={keycode} pressed={pressed}");
+            eprintln!("tuna-compositor: modifier alt keycode={keycode} pressed={pressed}");
             self.alt_held = pressed;
         } else if keycode == CTRL_LEFT_KEYCODE || keycode == CTRL_RIGHT_KEYCODE {
-            eprintln!("roost-compositor: modifier ctrl keycode={keycode} pressed={pressed}");
+            eprintln!("tuna-compositor: modifier ctrl keycode={keycode} pressed={pressed}");
             self.ctrl_held = pressed;
         }
     }
@@ -4552,7 +4605,7 @@ impl WindowManager {
         logo: bool,
         seat: Option<ModifiersState>,
     ) -> u32 {
-        use roost_shell_control::{MOD_ALT, MOD_CTRL, MOD_LOGO, MOD_SHIFT};
+        use tuna_shell_control::{MOD_ALT, MOD_CTRL, MOD_LOGO, MOD_SHIFT};
         let (shift, ctrl, alt, logo) = match seat {
             None => (shift, ctrl, alt, logo),
             Some(state) => (
@@ -4576,9 +4629,9 @@ impl WindowManager {
     /// The built-in chords' opener: Alt when held, else Super.
     fn builtin_opener(&self) -> u32 {
         if self.alt_held {
-            roost_shell_control::MOD_ALT
+            tuna_shell_control::MOD_ALT
         } else {
-            roost_shell_control::MOD_LOGO
+            tuna_shell_control::MOD_LOGO
         }
     }
 
@@ -4591,8 +4644,8 @@ impl WindowManager {
         state: &mut State,
         keycode: u32,
         pressed: bool,
-    ) -> Option<(roost_shell_control::SwitcherKeyKind, u32)> {
-        use roost_shell_control::{SwitcherKeyKind as K, KEYSYM_ABOVE_TAB, MOD_SHIFT};
+    ) -> Option<(tuna_shell_control::SwitcherKeyKind, u32)> {
+        use tuna_shell_control::{SwitcherKeyKind as K, KEYSYM_ABOVE_TAB, MOD_SHIFT};
         let keys = self
             .switcher_keys
             .as_ref()
@@ -4621,7 +4674,7 @@ impl WindowManager {
             // Fixed-shape near-miss receipt for the CI journey: the
             // direct-cycle key arrived with the rebound keysym but the
             // modifiers did not match, so no Cycle action queued.
-            eprintln!("roost-compositor: cycle chord near-miss: sym={sym:?} mods={mods}");
+            eprintln!("tuna-compositor: cycle chord near-miss: sym={sym:?} mods={mods}");
         }
         let key = key?;
         let flip = mods & MOD_SHIFT != 0 && key.mods & MOD_SHIFT == 0;
@@ -4660,7 +4713,7 @@ impl WindowManager {
     /// CI journey (an empty switcher renders nothing, so pixels alone
     /// cannot prove the drive arrived).
     fn push_switcher(&mut self, action: SwitcherAction) {
-        eprintln!("roost-compositor: switcher {action:?}");
+        eprintln!("tuna-compositor: switcher {action:?}");
         self.switcher_queue.push(action);
     }
 }
@@ -4843,7 +4896,7 @@ mod tests {
 
     #[test]
     fn stale_latch_bits_clear_against_the_seat_while_genuine_holds_match() {
-        use roost_shell_control::{MOD_ALT, MOD_CTRL, MOD_LOGO, MOD_SHIFT};
+        use tuna_shell_control::{MOD_ALT, MOD_CTRL, MOD_LOGO, MOD_SHIFT};
         // No seat yet: the latch stands alone.
         assert_eq!(
             WindowManager::combine_mods(false, false, true, true, None),
@@ -5176,7 +5229,7 @@ mod resize_tests {
 
 /// The size a client committed for its window: its xdg window geometry,
 /// else its buffer's size. `None` before the first buffer.
-fn committed_size(
+pub(crate) fn committed_size(
     surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
 ) -> Option<Size<i32, Logical>> {
     let buffer = smithay::backend::renderer::utils::with_renderer_surface_state(surface, |s| {
@@ -5197,16 +5250,16 @@ fn committed_size(
 fn accelerator_mods(m: &smithay::input::keyboard::ModifiersState) -> u32 {
     let mut bits = 0;
     if m.shift {
-        bits |= roost_shell_control::MOD_SHIFT;
+        bits |= tuna_shell_control::MOD_SHIFT;
     }
     if m.ctrl {
-        bits |= roost_shell_control::MOD_CTRL;
+        bits |= tuna_shell_control::MOD_CTRL;
     }
     if m.alt {
-        bits |= roost_shell_control::MOD_ALT;
+        bits |= tuna_shell_control::MOD_ALT;
     }
     if m.logo {
-        bits |= roost_shell_control::MOD_LOGO;
+        bits |= tuna_shell_control::MOD_LOGO;
     }
     bits
 }

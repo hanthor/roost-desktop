@@ -493,7 +493,7 @@ impl WatcherBus {
         let conn = match zbus::blocking::connection::Builder::session() {
             Ok(builder) => builder,
             Err(e) => {
-                eprintln!("roost-shell-host: indicator bus unavailable: {e}");
+                eprintln!("tuna-shell-host: indicator bus unavailable: {e}");
                 return false;
             }
         };
@@ -503,14 +503,14 @@ impl WatcherBus {
         let conn = match conn.serve_at(WATCHER_PATH, watcher) {
             Ok(conn) => conn,
             Err(e) => {
-                eprintln!("roost-shell-host: indicator serve failed: {e}");
+                eprintln!("tuna-shell-host: indicator serve failed: {e}");
                 return false;
             }
         };
         let conn = match conn.build() {
             Ok(conn) => conn,
             Err(e) => {
-                eprintln!("roost-shell-host: indicator connect failed: {e}");
+                eprintln!("tuna-shell-host: indicator connect failed: {e}");
                 return false;
             }
         };
@@ -521,16 +521,16 @@ impl WatcherBus {
                 self.conn = Some(conn);
                 // Our own host registration, in-process.
                 if let Ok(mut state) = self.state.lock() {
-                    state.hosts.push("roost-shell-host".to_owned());
+                    state.hosts.push("tuna-shell-host".to_owned());
                 }
                 true
             }
             Ok(other) => {
-                eprintln!("roost-shell-host: watcher name taken ({other:?}), indicators off");
+                eprintln!("tuna-shell-host: watcher name taken ({other:?}), indicators off");
                 false
             }
             Err(e) => {
-                eprintln!("roost-shell-host: watcher name request failed: {e}");
+                eprintln!("tuna-shell-host: watcher name request failed: {e}");
                 false
             }
         }
@@ -1130,7 +1130,7 @@ mod tests {
             argb_to_shm, IndicatorIcon, IndicatorItem, MenuEntry, WatcherBus, FALLBACK_ITEM_PATH,
         };
 
-        const STUB_NAME: &str = "org.test.RoostIndicatorStub";
+        const STUB_NAME: &str = "org.test.TunaIndicatorStub";
         const ITEM_PATH: &str = "/StatusNotifierItem";
         const MENU_PATH: &str = "/Menu";
 
@@ -1418,7 +1418,7 @@ mod tests {
 
             // Our stub owns its name; the ghost never existed.
             assert_eq!(
-                bus.prune_vanished(&[service, "org.test.RoostGhost/Item".to_owned()]),
+                bus.prune_vanished(&[service, "org.test.TunaGhost/Item".to_owned()]),
                 vec![format!("{STUB_NAME}{ITEM_PATH}")]
             );
 

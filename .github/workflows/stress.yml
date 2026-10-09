@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
-      - 'scripts/roost-stress'
-      - 'scripts/roost-wayland-adversary-build'
-      - 'scripts/lib/roost-wayland-adversary.c'
+      - 'scripts/tuna-stress'
+      - 'scripts/tuna-wayland-adversary-build'
+      - 'scripts/lib/tuna-wayland-adversary.c'
       - '.github/workflows/stress.yml'
 
 permissions:
@@ -24,17 +24,17 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool scrot ffmpeg jq dbus libglib2.0-bin xwayland x11-apps pipewire wireplumber gstreamer1.0-pipewire gstreamer1.0-tools gstreamer1.0-plugins-good at-spi2-core python3-pyatspi fonts-cantarell shellcheck libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev meson ninja-build libwayland-dev wayland-protocols libpam-wrapper ibus gir1.2-ibus-1.0 wayland-utils
       - run: scripts/ci-install-gtk4-layer-shell
-      - run: cargo build -p roost-compositor -p roost-shell-gtk
+      - run: cargo build -p tuna-compositor -p tuna-shell-gtk
       - name: Churn windows and notifications; gate input and growth
         env:
           ROUNDS: ${{ github.event_name == 'schedule' && '300' || '10' }}
-        run: scripts/roost-stress --rounds "$ROUNDS" --out stress-artifacts
+        run: scripts/tuna-stress --rounds "$ROUNDS" --out stress-artifacts
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:

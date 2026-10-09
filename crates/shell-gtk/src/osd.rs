@@ -46,11 +46,11 @@ impl OsdUi {
     pub fn new(app: &gtk::Application) -> Rc<Self> {
         let window = gtk::Window::new();
         window.set_application(Some(app));
-        window.add_css_class("roost-osd");
+        window.add_css_class("tuna-osd");
         window.set_title(Some("On-Screen Display"));
         window.init_layer_shell();
         window.set_layer(Layer::Overlay);
-        window.set_namespace(Some(roost_shell_control::OSD_NAMESPACE));
+        window.set_namespace(Some(tuna_shell_control::OSD_NAMESPACE));
         window.set_anchor(Edge::Bottom, true);
         window.set_margin(Edge::Bottom, BOTTOM_MARGIN);
         window.set_exclusive_zone(-1);
@@ -98,7 +98,7 @@ impl OsdUi {
         })
     }
 
-    /// Show `request` on every monitor's OSD (Roost draws one), as
+    /// Show `request` on every monitor's OSD (Tuna Desktop draws one), as
     /// GNOME's `showAll`. Without an icon nothing shows, as in GNOME.
     pub fn show(self: &Rc<Self>, request: &OsdRequest) {
         let Some(icon) = request

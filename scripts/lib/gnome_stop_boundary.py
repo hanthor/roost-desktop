@@ -7,7 +7,7 @@ def capture_stop_boundary_evidence(decoded, metadata, output="Virtual-1"):
     start = capture_boundary_evidence(decoded, metadata, output)
     pid = metadata["pid"]
     marks = [row for row in decoded["marks"] if row["pid"] == pid]
-    rows = [row for row in marks if row["name"] == "Roost::CaptureStopBoundary"]
+    rows = [row for row in marks if row["name"] == "Tuna::CaptureStopBoundary"]
     if len(rows) != 1 or metadata.get("drained_stop_required") is not True:
         raise ValueError("missing or ambiguous actual drained Stop boundary")
     requested_ns = metadata.get("stop_requested_monotonic_ns")

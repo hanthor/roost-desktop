@@ -1,6 +1,6 @@
 //! T1 nested runtime loop + launch tests.
 //!
-//! Covers `roost_compositor::runtime` without window mapping or input
+//! Covers `tuna_compositor::runtime` without window mapping or input
 //! (T2 scope): env hygiene, default session identity, and a live launch
 //! smoke test that skips cleanly when no host display/EGL exists.
 //!
@@ -12,12 +12,12 @@ use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use roost_compositor::runtime::{apply_nested_env, restore_env, NestedSession};
+use tuna_compositor::runtime::{apply_nested_env, restore_env, NestedSession};
 
 const RETRY_ROUNDS: usize = 500;
 const RETRY_SLEEP: Duration = Duration::from_millis(5);
 
-/// Path of the sibling `roost-compositor` binary: the test executable lives
+/// Path of the sibling `tuna-compositor` binary: the test executable lives
 /// in `target/<profile>/deps/`, the binary in `target/<profile>/`.
 fn compositor_bin() -> std::path::PathBuf {
     let mut dir = std::env::current_exe().expect("test executable path");
@@ -25,7 +25,7 @@ fn compositor_bin() -> std::path::PathBuf {
     if dir.file_name().is_some_and(|n| n == "deps") {
         dir.pop();
     }
-    dir.join("roost-compositor")
+    dir.join("tuna-compositor")
 }
 
 /// Env hygiene in ONE test, run sequentially: process env is global, so
@@ -41,14 +41,14 @@ fn nested_env_apply_returns_previous_and_restore_reverts() {
 
     // Case 1: a previous value exists.
     std::env::set_var("WAYLAND_DISPLAY", "host-display-0");
-    let prev = apply_nested_env("roost-nested-test");
+    let prev = apply_nested_env("tuna-nested-test");
     assert_eq!(
         prev.as_deref(),
         Some(std::ffi::OsStr::new("host-display-0"))
     );
     assert_eq!(
         std::env::var_os("WAYLAND_DISPLAY").as_deref(),
-        Some(std::ffi::OsStr::new("roost-nested-test"))
+        Some(std::ffi::OsStr::new("tuna-nested-test"))
     );
     restore_env(prev);
     assert_eq!(
@@ -58,11 +58,11 @@ fn nested_env_apply_returns_previous_and_restore_reverts() {
 
     // Case 2: no previous value.
     std::env::remove_var("WAYLAND_DISPLAY");
-    let prev = apply_nested_env("roost-nested-test");
+    let prev = apply_nested_env("tuna-nested-test");
     assert_eq!(prev, None);
     assert_eq!(
         std::env::var_os("WAYLAND_DISPLAY").as_deref(),
-        Some(std::ffi::OsStr::new("roost-nested-test"))
+        Some(std::ffi::OsStr::new("tuna-nested-test"))
     );
     restore_env(prev);
     assert_eq!(std::env::var_os("WAYLAND_DISPLAY"), None);
@@ -103,11 +103,11 @@ fn launch_smoke_binds_private_socket_or_skips_without_backend() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let socket_name = format!("roost-test-{}-{nanos}", std::process::id());
+    let socket_name = format!("tuna-test-{}-{nanos}", std::process::id());
     let bin = compositor_bin();
     assert!(
         bin.is_file(),
-        "missing sibling binary {}; run `cargo build -p roost-compositor --bins` first",
+        "missing sibling binary {}; run `cargo build -p tuna-compositor --bins` first",
         bin.display()
     );
     let mut child = Command::new(bin)
@@ -180,7 +180,7 @@ fn launch_smoke_binds_private_socket_or_skips_without_backend() {
 
 #[test]
 fn backend_choice_parses_and_auto_resolves_by_host_display() {
-    use roost_compositor::runtime::BackendChoice;
+    use tuna_compositor::runtime::BackendChoice;
     assert_eq!(BackendChoice::parse("auto"), Some(BackendChoice::Auto));
     assert_eq!(BackendChoice::parse("nested"), Some(BackendChoice::Winit));
     assert_eq!(BackendChoice::parse("kms"), Some(BackendChoice::Drm));

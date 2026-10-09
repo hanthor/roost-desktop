@@ -380,14 +380,14 @@ fn launch_calendar(day: Date) -> bool {
         .as_ref()
         .and_then(|info| info.id())
         .unwrap_or_else(|| "org.gnome.Calendar.desktop".into());
-    let Some(path) = roost_shell_host::apps::default_app_dirs()
+    let Some(path) = tuna_shell_host::apps::default_app_dirs()
         .iter()
         .map(|dir| dir.join(id.as_str()))
         .find(|path| path.is_file())
     else {
         return false;
     };
-    let Some(mut entry) = roost_shell_host::apps::handler_entry_from_file(&path) else {
+    let Some(mut entry) = tuna_shell_host::apps::handler_entry_from_file(&path) else {
         return false;
     };
     if entry.app_id == "org.gnome.Calendar.desktop" {
@@ -396,5 +396,5 @@ fn launch_calendar(day: Date) -> bool {
     } else if info.is_some() {
         entry.argv.push(format!("calendar:///{}", day).into());
     }
-    roost_shell_host::apps::launch(&entry).is_ok()
+    tuna_shell_host::apps::launch(&entry).is_ok()
 }

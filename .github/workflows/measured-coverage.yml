@@ -1,23 +1,26 @@
 name: Measured test coverage
 on:
   pull_request:
-    paths: ['crates/**', 'Cargo.*', 'tests/coverage-floors.json', 'scripts/roost-coverage-report', 'scripts/roost-security-artifacts', 'scripts/roost-test-strategy', 'scripts/lib/roost-coverage-tests.py', 'scripts/lib/roost-security-artifact-tests.py', '.github/workflows/measured-coverage.yml']
+    paths: ['crates/**', 'Cargo.*', 'tests/coverage-floors.json', 'scripts/tuna-coverage-report', 'scripts/tuna-security-artifacts', 'scripts/tuna-test-strategy', 'scripts/lib/tuna-coverage-tests.py', 'scripts/lib/tuna-security-artifact-tests.py', '.github/workflows/measured-coverage.yml']
   push:
     branches: [main]
-    paths: ['crates/**', 'Cargo.*', 'tests/coverage-floors.json', 'scripts/roost-coverage-report', 'scripts/roost-security-artifacts', 'scripts/roost-test-strategy', 'scripts/lib/roost-coverage-tests.py', 'scripts/lib/roost-security-artifact-tests.py', '.github/workflows/measured-coverage.yml']
+    paths: ['crates/**', 'Cargo.*', 'tests/coverage-floors.json', 'scripts/tuna-coverage-report', 'scripts/tuna-security-artifacts', 'scripts/tuna-test-strategy', 'scripts/lib/tuna-coverage-tests.py', 'scripts/lib/tuna-security-artifact-tests.py', '.github/workflows/measured-coverage.yml']
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
   group: measured-coverage-${{ github.ref }}
-  cancel-in-progress: true
+  # Supersede stale PR runs, but let every main run finish: main merges land
+  # minutes apart, and cancelling meant no main run ever completed, which
+  # also starved performance-baseline.yml (it needs a successful main run).
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 jobs:
   coverage:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: 1.99.0
           components: llvm-tools-preview
@@ -29,8 +32,8 @@ jobs:
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
           sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev pkg-config libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev libpam-wrapper meson ninja-build libwayland-dev wayland-protocols
           scripts/ci-install-gtk4-layer-shell
-      - run: python3 scripts/lib/roost-coverage-tests.py
-      - run: python3 scripts/lib/roost-security-artifact-tests.py
+      - run: python3 scripts/lib/tuna-coverage-tests.py
+      - run: python3 scripts/lib/tuna-security-artifact-tests.py
       - run: cargo install cargo-llvm-cov --version 0.9.1 --locked
       - name: Record environment and exact reproduction command
         run: |
@@ -40,19 +43,19 @@ jobs:
           cargo llvm-cov --version > coverage-artifacts/observer-version.txt
           uname -a > coverage-artifacts/kernel.txt
           dpkg-query -W > coverage-artifacts/packages.txt
-          printf '%s\n' 'set -o pipefail' 'ROOST_REQUIRE_PAM_WRAPPER=1 cargo llvm-cov --workspace --locked --json --skip-functions --output-path coverage-artifacts/coverage.json 2> coverage-artifacts/test-stderr.log | tee coverage-artifacts/test.log' > coverage-artifacts/reproduce.txt
+          printf '%s\n' 'set -o pipefail' 'TUNA_REQUIRE_PAM_WRAPPER=1 cargo llvm-cov --workspace --locked --json --skip-functions --output-path coverage-artifacts/coverage.json 2> coverage-artifacts/test-stderr.log | tee coverage-artifacts/test.log' > coverage-artifacts/reproduce.txt
       - name: Execute instrumented workspace tests
         env:
-          ROOST_REQUIRE_PAM_WRAPPER: '1'
+          TUNA_REQUIRE_PAM_WRAPPER: '1'
         run: |
           set -o pipefail
           # libwayland writes protocol diagnostics directly to stderr. Keep
           # them separate from libtest result lines, retaining both streams.
           cargo llvm-cov --workspace --locked --json --skip-functions --output-path coverage-artifacts/coverage.json 2> coverage-artifacts/test-stderr.log | tee coverage-artifacts/test.log
       - name: Report measured crate and security-module coverage
-        run: scripts/roost-coverage-report coverage-artifacts/coverage.json --out coverage-artifacts/coverage-report.md
+        run: scripts/tuna-coverage-report coverage-artifacts/coverage.json --out coverage-artifacts/coverage-report.md
       - name: Require complete security evidence and executed boundary cases
-        run: scripts/roost-security-artifacts coverage-artifacts
+        run: scripts/tuna-security-artifacts coverage-artifacts
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:

@@ -1,6 +1,6 @@
 # Reporting security vulnerabilities
 
-Report vulnerabilities privately through [GitHub private vulnerability reporting](https://github.com/hanthor/roost-desktop/security/advisories/new). It is enabled for this repository. Include the affected commit or package version, reproduction steps, expected and observed behavior, and whether the issue exposes application data or bypasses a lock or capture permission.
+Report vulnerabilities privately through [GitHub private vulnerability reporting](https://github.com/tuna-os/tuna-desktop/security/advisories/new). It is enabled for this repository. Include the affected commit or package version, reproduction steps, expected and observed behavior, and whether the issue exposes application data or bypasses a lock or capture permission.
 
 Keep passwords, access tokens, private window contents and personal data out of attachments. Provide a minimal reproduction where possible. Ordinary bugs belong in public issues; undisclosed vulnerabilities belong in the private reporting channel.
 

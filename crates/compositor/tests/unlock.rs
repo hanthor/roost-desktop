@@ -2,7 +2,7 @@
 //!
 //! Both acceptance criteria, with auth stubbed at the client seam (no
 //! live greetd in CI). A password-checking stub stands in for the
-//! daemon behind [`UnlockClient`](roost_compositor::unlock::UnlockClient):
+//! daemon behind [`UnlockClient`](tuna_compositor::unlock::UnlockClient):
 //! it answers `Success` only when the conversation carries the right
 //! secret, exactly what the real daemon decides. First, the correct
 //! password dismisses the lock and restores the session intact
@@ -17,13 +17,13 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use greetd_ipc::{codec::Error as CodecError, AuthMessageType, ErrorType, Response};
-use roost_compositor::control::ControlHub;
-use roost_compositor::lock::SessionLock;
-use roost_compositor::overlay::Overlay;
-use roost_compositor::state::{StateModel, TokenStore};
-use roost_compositor::unlock::{unlock_session, UnlockClient};
-use roost_compositor::SEAT_NAME;
-use roost_shell_control::{decode_frame, encode_frame, Message, CURRENT_VERSION};
+use tuna_compositor::control::ControlHub;
+use tuna_compositor::lock::SessionLock;
+use tuna_compositor::overlay::Overlay;
+use tuna_compositor::state::{StateModel, TokenStore};
+use tuna_compositor::unlock::{unlock_session, UnlockClient};
+use tuna_compositor::SEAT_NAME;
+use tuna_shell_control::{decode_frame, encode_frame, Message, CURRENT_VERSION};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 const PROBE: Duration = Duration::from_millis(200);

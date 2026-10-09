@@ -430,7 +430,7 @@ mod tests {
     fn memfd_with(bytes: &[u8]) -> std::os::fd::OwnedFd {
         use rustix::fs::{memfd_create, MemfdFlags};
         use std::io::{Seek, SeekFrom, Write};
-        let fd = memfd_create("roost-keymap-test", MemfdFlags::CLOEXEC)
+        let fd = memfd_create("tuna-keymap-test", MemfdFlags::CLOEXEC)
             .expect("memfd_create succeeds in test env");
         let mut file = std::fs::File::from(fd);
         file.write_all(bytes).expect("write to memfd");

@@ -1,6 +1,6 @@
 # NetworkManager secret agent
 
-Roost registers `org.gnome.Shell.NetworkAgent` on the system bus. Requests
+Tuna Desktop registers `org.gnome.Shell.NetworkAgent` on the system bus. Requests
 are accepted only from NetworkManager's current unique bus owner. A newer
 request or CancelGetSecrets dismisses the old prompt and invalidates its
 pending asynchronous helper work.
@@ -13,7 +13,7 @@ enterprise connection's initial configuration stay in Settings, as in
 GNOME 51's [network agent](https://github.com/GNOME/gnome-shell/blob/51.0/js/ui/components/networkAgent.js).
 
 VPN prompts use the installed NetworkManager plugin's GNOME authentication
-helper with `--external-ui-mode`. Roost sends connection data and secrets
+helper with `--external-ui-mode`. Tuna Desktop sends connection data and secrets
 through stdin, reads the plugin's version 2 keyfile, and displays its title,
 description and requested fields. It returns the nested VPN secrets
 dictionary including supplied noninteractive values. Plugins without this

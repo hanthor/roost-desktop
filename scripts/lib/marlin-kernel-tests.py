@@ -8,7 +8,7 @@ import shlex
 import tempfile
 import unittest
 
-HELPER = Path(__file__).resolve().parents[2] / 'packaging/marlin/roost-image-kernels'
+HELPER = Path(__file__).resolve().parents[2] / 'packaging/marlin/tuna-image-kernels'
 COMMAND = '''#!/usr/bin/env python3
 import json, os, pathlib, sys
 name = pathlib.Path(sys.argv[0]).name
@@ -117,7 +117,7 @@ class PinnedBaseline(unittest.TestCase):
         import hashlib
         self.critical = self.root / 'critical.sha256'
         self.critical.write_text(hashlib.sha256(self.critical_file.read_bytes()).hexdigest()+'  '+str(self.critical_file)+'\n')
-        self.guard = HELPER.with_name('roost-pinned-baseline')
+        self.guard = HELPER.with_name('tuna-pinned-baseline')
 
     def run_guard(self, packages=None):
         return subprocess.run(['bash', str(self.guard), str(self.baseline), str(self.critical)],
@@ -125,7 +125,7 @@ class PinnedBaseline(unittest.TestCase):
                               capture_output=True, timeout=10)
 
     def test_candidate_extra_package_allowed_with_original_baseline_intact(self):
-        self.assertEqual(self.run_guard(self.packages+'roost 0.1.0-1\n').returncode, 0)
+        self.assertEqual(self.run_guard(self.packages+'tuna-desktop 0.1.0-1\n').returncode, 0)
 
     def test_missing_or_upgraded_baseline_package_refused(self):
         for current in ['linux 7.2.9-arch1-1\n', self.packages.replace('51.0-1.2', '51.0-1.3')]:
@@ -149,16 +149,16 @@ class PinnedBaseline(unittest.TestCase):
         body = container.split('RUN set -eux;', 1)[1].split('&& pacman -U', 1)[0].replace('\\\n', ' ')
         # Admit actual controlled package bytes through the preceding hash
         # guard so this negative still reaches the original baseline guard.
-        # These bytes are never installed or claimed as a Roost package.
+        # These bytes are never installed or claimed as a Tuna Desktop package.
         package = self.root / 'candidate.pkg.tar.zst'
         package.write_bytes(b'controlled package hash fixture')
-        body = body.replace('/tmp/roost.pkg.tar.zst', shlex.quote(str(package)))
+        body = body.replace('/tmp/tuna.pkg.tar.zst', shlex.quote(str(package)))
         guard = 'bash '+shlex.quote(str(self.guard))+' '+shlex.quote(str(self.baseline))+' '+shlex.quote(str(self.critical))
-        body = body.replace('/usr/libexec/roost-pinned-baseline', guard)
+        body = body.replace('/usr/libexec/tuna-pinned-baseline', guard)
         self.critical_file.write_bytes(b'changed')
         result = subprocess.run(['bash', '-c', 'set -e; '+body+'\n'],
                                 env={**self.env, 'CURRENT_PACKAGES': self.packages,
-                                     'ROOST_PKG_SHA256': hashlib.sha256(package.read_bytes()).hexdigest(),
+                                     'TUNA_PKG_SHA256': hashlib.sha256(package.read_bytes()).hexdigest(),
                                      'PERF_PINNED_BASELINE': 'true'}, capture_output=True)
         self.assertNotEqual(result.returncode, 0)
         calls = [json.loads(line) for line in self.log.read_text().splitlines()]

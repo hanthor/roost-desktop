@@ -7,8 +7,8 @@
 //! `TestCompositor` fixture, plain asserts, no sleeps. All code here
 //! is original.
 
-use roost_compositor::TestCompositor;
 use smithay::utils::Size;
+use tuna_compositor::TestCompositor;
 
 #[test]
 fn two_virtual_outputs_report_own_sizes_and_primary_flags() {
@@ -217,7 +217,7 @@ fn unknown_or_unbound_output_falls_back_to_primary() {
 #[test]
 fn set_output_size_updates_primary_in_place_without_adding_entry() {
     let mut comp = TestCompositor::new();
-    comp.state.add_output("roost-0", None, 800, 600);
+    comp.state.add_output("tuna-0", None, 800, 600);
 
     comp.state.set_output_size(1280, 800);
     assert_eq!(
@@ -228,14 +228,14 @@ fn set_output_size_updates_primary_in_place_without_adding_entry() {
 
     // Still one entry: removing the name empties the inventory, so no
     // second entry was pushed beside it.
-    assert!(comp.state.remove_output("roost-0"));
+    assert!(comp.state.remove_output("tuna-0"));
     assert_eq!(comp.state.primary_size(), Size::from((0, 0)));
-    assert!(!comp.state.set_primary("roost-0"));
+    assert!(!comp.state.set_primary("tuna-0"));
 }
 
 #[test]
 fn activities_follow_live_primary_geometry_and_output_disconnect() {
-    use roost_compositor::windows::{ManagerInput, TriggerAction as A, TriggerState};
+    use tuna_compositor::windows::{ManagerInput, TriggerAction as A, TriggerState};
     let mut comp = TestCompositor::new();
     comp.state.add_output("left", None, 1280, 720);
     comp.state.add_output("right", None, 1280, 720);
@@ -276,7 +276,7 @@ fn activities_follow_live_primary_geometry_and_output_disconnect() {
 
 #[test]
 fn hot_corners_use_exposed_secondary_corners_and_live_gnome_policy() {
-    use roost_compositor::windows::{ManagerInput, TriggerAction as A, TriggerState};
+    use tuna_compositor::windows::{ManagerInput, TriggerAction as A, TriggerState};
     let mut comp = TestCompositor::new();
     comp.state.add_output("primary", None, 1280, 720);
     comp.state.add_output("secondary", None, 1280, 720);
@@ -378,7 +378,7 @@ fn desktop_size_bounds_extreme_coordinates_and_ignores_empty_outputs() {
 
 #[test]
 fn rtl_corners_and_activities_follow_live_direction_and_output_bounds() {
-    use roost_compositor::windows::{ManagerInput, TriggerAction as A, TriggerState};
+    use tuna_compositor::windows::{ManagerInput, TriggerAction as A, TriggerState};
     let mut comp = TestCompositor::new();
     comp.state.add_output("primary", None, 1280, 720);
     comp.state.set_output_location("primary", (-1280, -200));
@@ -436,7 +436,7 @@ fn rtl_corners_and_activities_follow_live_direction_and_output_bounds() {
 
 #[test]
 fn rtl_secondary_corner_uses_gnome51_approach_probes_and_primary_override() {
-    use roost_compositor::windows::{ManagerInput, TriggerAction as A, TriggerState};
+    use tuna_compositor::windows::{ManagerInput, TriggerAction as A, TriggerState};
     let mut comp = TestCompositor::new();
     comp.state.add_output("primary", None, 1280, 720);
     comp.state.add_output("secondary", None, 1280, 720);

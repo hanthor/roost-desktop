@@ -118,6 +118,17 @@ pub(crate) fn damage_region(
         .unwrap_or_else(|| Rectangle::new((0, 0).into(), (1, 1).into())))
 }
 
+/// The plane damage (KMS `FB_DAMAGE_CLIPS`) submitted with a repainted
+/// buffer: exactly the region repainted into it. That is the buffer-age
+/// damage since this buffer was last scanned out, so it covers both the
+/// change from the previous frame (drivers copying into one shadow
+/// scanout) and everything stale in this buffer (drivers uploading each
+/// buffer separately, such as virtio-gpu). Without it the kernel treats
+/// the whole plane as damaged and copies or uploads every pixel.
+pub(crate) fn scanout_damage(repainted: Rectangle<i32, Physical>) -> Vec<Rectangle<i32, Physical>> {
+    vec![repainted]
+}
+
 /// Timing requests need an actual submitted frame even without pixel damage.
 pub(crate) fn needs_repaint(
     previous: Option<&FrameSignature>,
@@ -302,6 +313,24 @@ mod tests {
         assert!(damage_region(&mut tracker, 1, &next)
             .unwrap()
             .contains((7, 7)));
+    }
+
+    #[test]
+    fn scanout_damage_is_the_repainted_buffer_age_region() {
+        let id = Id::new();
+        let mut tracker = OutputDamageTracker::new((32, 32), 1.0, Transform::Normal);
+        let full = damage_region(&mut tracker, 0, &moving_scene(&id, 0, 0)).unwrap();
+        assert_eq!(
+            scanout_damage(full),
+            vec![Rectangle::from_size((32, 32).into())]
+        );
+        damage_region(&mut tracker, 1, &moving_scene(&id, 8, 1)).unwrap();
+        // Two frames back: covers both moves, not the whole plane.
+        let aged = damage_region(&mut tracker, 2, &moving_scene(&id, 16, 2)).unwrap();
+        let clips = scanout_damage(aged);
+        assert_eq!(clips, vec![aged]);
+        assert!(clips[0].contains((1, 1)) && clips[0].contains((23, 7)));
+        assert!(clips[0].size.w < 32);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-# roost-compositor
+# tuna-compositor
 
 The long-lived Smithay compositor: owns the Wayland display, windows,
 workspaces, input, outputs, the session lock, and the supervised shell
@@ -6,11 +6,11 @@ child. Runs nested (winit, GLES over EGL) or as a DRM/KMS hardware session.
 
 ## Binaries
 
-- `roost-compositor` (`src/main.rs`): one session on a private socket;
+- `tuna-compositor` (`src/main.rs`): one session on a private socket;
   `--help` lists the flags (`--backend auto|winit|drm`, `--socket`,
   `--shell-bin`, `--xwayland`, `--startup-overview`).
-- `roost-session` (`src/bin/roost-session.rs`): what greeters and
-  `wayland-sessions/roost.desktop` run; execs the sibling compositor.
+- `tuna-session` (`src/bin/tuna-session.rs`): what greeters and
+  `wayland-sessions/tuna.desktop` run; execs the sibling compositor.
 
 ## Public API (`src/lib.rs`)
 
@@ -29,8 +29,8 @@ Features: `drm` and `xwayland`, both on by default.
 
 ## Depends on / dependents
 
-Uses `roost-shell-control`, `roost-greeter` (prompt model and greetd client
-only, without `gtk-ui`), and `roost-wallpaper`. `roost-shell-host` uses it
+Uses `tuna-shell-control`, `tuna-greeter` (prompt model and greetd client
+only, without `gtk-ui`), and `tuna-wallpaper`. `tuna-shell-host` uses it
 as a dev-dependency for its live tests. Integration tests are in `tests/`.
 
 ## Docs

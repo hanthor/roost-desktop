@@ -515,15 +515,15 @@ mod tests {
 /// on name, generic name, keywords, or id; ties keep discovery order.
 /// Case-insensitive; a blank query matches nothing.
 pub fn rank_apps<'a>(
-    apps: &'a [roost_shell_host::apps::AppEntry],
+    apps: &'a [tuna_shell_host::apps::AppEntry],
     query: &str,
     limit: usize,
-) -> Vec<&'a roost_shell_host::apps::AppEntry> {
+) -> Vec<&'a tuna_shell_host::apps::AppEntry> {
     let needle = query.trim().to_lowercase();
     if needle.is_empty() {
         return Vec::new();
     }
-    let mut scored: Vec<(u8, usize, &roost_shell_host::apps::AppEntry)> = apps
+    let mut scored: Vec<(u8, usize, &tuna_shell_host::apps::AppEntry)> = apps
         .iter()
         .enumerate()
         .filter_map(|(i, app)| {
@@ -577,7 +577,7 @@ pub const DEFAULT_FAVORITES: &[&str] = &[
 #[cfg(test)]
 mod search_tests {
     use super::*;
-    use roost_shell_host::apps::AppEntry;
+    use tuna_shell_host::apps::AppEntry;
 
     fn app(id: &str, name: &str, generic: Option<&str>, keywords: &[&str]) -> AppEntry {
         AppEntry {
@@ -839,18 +839,15 @@ mod service_tests {
 
 /// Idle lock follows the screen shield: fade for ten seconds, then lock,
 /// or a longer configured lock-delay. Disabled animations remove that minimum.
-pub fn idle_lock_ms(
-    idle_delay_s: u32,
-    lock_enabled: bool,
-    lock_delay_s: u32,
-    animations: bool,
-) -> u64 {
+pub fn idle_lock_ms(idle_delay_s: u32, lock_enabled: bool, lock_delay_s: u32, fade_ms: u64) -> u64 {
     if idle_delay_s == 0 || !lock_enabled {
         return 0;
     }
-    u64::from(idle_delay_s) * 1000
-        + (u64::from(lock_delay_s) * 1000).max(if animations { 10_000 } else { 0 })
+    u64::from(idle_delay_s) * 1000 + (u64::from(lock_delay_s) * 1000).max(fade_ms)
 }
+
+/// GNOME's idle shield fade (`STANDARD_FADE_TIME`) before motion policy.
+pub const IDLE_FADE_MS: u64 = 10_000;
 
 #[cfg(test)]
 mod idle_tests {
@@ -859,15 +856,25 @@ mod idle_tests {
     #[test]
     fn idle_lock_follows_gnome_keys() {
         assert_eq!(
-            idle_lock_ms(300, true, 0, true),
+            idle_lock_ms(300, true, 0, IDLE_FADE_MS),
             310_000,
             "GNOME 51 default"
         );
-        assert_eq!(idle_lock_ms(300, true, 30, true), 330_000);
-        assert_eq!(idle_lock_ms(2, true, 0, false), 2000);
-        assert_eq!(idle_lock_ms(2, true, 20, false), 22000);
-        assert_eq!(idle_lock_ms(0, true, 0, true), 0, "idle-delay 0 is never");
-        assert_eq!(idle_lock_ms(300, false, 0, true), 0, "lock disabled");
+        assert_eq!(idle_lock_ms(300, true, 30, IDLE_FADE_MS), 330_000);
+        assert_eq!(idle_lock_ms(2, true, 0, 0), 2000);
+        assert_eq!(idle_lock_ms(2, true, 20, 0), 22000);
+        assert_eq!(
+            idle_lock_ms(0, true, 0, IDLE_FADE_MS),
+            0,
+            "idle-delay 0 is never"
+        );
+        assert_eq!(
+            idle_lock_ms(300, false, 0, IDLE_FADE_MS),
+            0,
+            "lock disabled"
+        );
+        // A slowed fade (factor 4) outlasts a short lock delay, as in GNOME.
+        assert_eq!(idle_lock_ms(300, true, 30, 4 * IDLE_FADE_MS), 340_000);
     }
 }
 

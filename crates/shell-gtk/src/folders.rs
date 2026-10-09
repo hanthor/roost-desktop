@@ -5,12 +5,12 @@
 //! `/org/gnome/desktop/app-folders/folders/<id>/`) names its apps
 //! explicitly, by desktop category, or both, minus excluded apps. A name
 //! with `translate` set is a `.directory` file whose Name is shown.
-//! Reading the same keys makes Roost's grid match the user's GNOME grid.
+//! Reading the same keys makes Tuna Desktop's grid match the user's GNOME grid.
 
 use std::path::PathBuf;
 
 use gio::prelude::*;
-use roost_shell_host::apps::AppEntry;
+use tuna_shell_host::apps::AppEntry;
 
 const SCHEMA: &str = "org.gnome.desktop.app-folders";
 const FOLDER_SCHEMA: &str = "org.gnome.desktop.app-folders.folder";

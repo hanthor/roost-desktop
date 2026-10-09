@@ -1,6 +1,6 @@
 //! T2 window mapping, input routing, and focus-policy tests.
 //!
-//! Headless end-to-end coverage for `roost_compositor::windows` with no
+//! Headless end-to-end coverage for `tuna_compositor::windows` with no
 //! backend: real protocol clients over a socketpair map xdg_toplevels,
 //! then the test drives [`WindowManager`] directly (reconcile, focus,
 //! pointer/keyboard delivery, move/resize/workspace) and observes the
@@ -14,19 +14,19 @@
 
 use std::os::unix::net::UnixStream;
 
-use roost_compositor::layer::OVERVIEW_NAMESPACE;
-use roost_compositor::windows::{
+use smithay::desktop::WindowSurface;
+use smithay::reexports::wayland_server::Resource;
+use smithay::utils::{IsAlive, Logical, Point};
+use smithay::wayland::seat::WaylandFocus;
+use tuna_compositor::layer::OVERVIEW_NAMESPACE;
+use tuna_compositor::windows::{
     ManagerInput, SessionMode, TileSide, WindowLayout, WindowManager, ALT_LEFT_KEYCODE,
     ARROW_DOWN_KEYCODE, ARROW_LEFT_KEYCODE, ARROW_RIGHT_KEYCODE, ARROW_UP_KEYCODE,
     CTRL_LEFT_KEYCODE, ESCAPE_KEYCODE, F4_KEYCODE, GRAVE_KEYCODE, PAGE_DOWN_KEYCODE,
     PAGE_UP_KEYCODE, R_KEYCODE, SHIFT_LEFT_KEYCODE, SUPER_LEFT_KEYCODE, TAB_KEYCODE, T_KEYCODE,
 };
-use roost_compositor::TestCompositor;
-use roost_shell_control::SwitcherAction;
-use smithay::desktop::WindowSurface;
-use smithay::reexports::wayland_server::Resource;
-use smithay::utils::{IsAlive, Logical, Point};
-use smithay::wayland::seat::WaylandFocus;
+use tuna_compositor::TestCompositor;
+use tuna_shell_control::SwitcherAction;
 use wayland_client::{
     protocol::{
         wl_callback::WlCallback,
@@ -647,7 +647,7 @@ fn move_to_workspace_updates_model() {
 
 #[test]
 fn window_menu_actions_follow_gnome() {
-    use roost_shell_control::WindowAction;
+    use tuna_shell_control::WindowAction;
     let mut f = two_windows();
     // Always on Visible Workspace: shown on the next workspace too.
     assert!(f
@@ -852,7 +852,7 @@ fn rebound_switcher_keys_replace_the_builtin_chords() {
     // GNOME's switch-applications rebound to Ctrl+J: the chord steps,
     // Shift steps back, Control's release commits, and Alt+Tab is
     // ordinary input again. Super+Above_Tab stays a group step.
-    use roost_shell_control::{SwitcherKey, SwitcherKeyKind, KEYSYM_ABOVE_TAB, MOD_CTRL, MOD_LOGO};
+    use tuna_shell_control::{SwitcherKey, SwitcherKeyKind, KEYSYM_ABOVE_TAB, MOD_CTRL, MOD_LOGO};
     const J_KEYCODE: u32 = 36;
     let mut f = two_windows();
     f.manager.set_switcher_keys(vec![
@@ -2936,7 +2936,7 @@ fn strip_columns_resize_on_primary_output_failover_without_losing_focus() {
     f.manager.set_scroll(&mut f.comp.state, true);
     let focused = f.manager.model().focused();
     let workspace = f.manager.model().active_workspace();
-    assert!(f.comp.state.remove_output("roost-0"));
+    assert!(f.comp.state.remove_output("tuna-0"));
     f.manager.reapply_derived_layouts(&mut f.comp.state);
     for id in [f.id_a, f.id_b] {
         let geometry = f.manager.geometry(id).unwrap();
@@ -2949,7 +2949,7 @@ fn strip_columns_resize_on_primary_output_failover_without_losing_focus() {
 
 #[test]
 fn exclusive_overlay_receives_navigation_and_retains_popup_system_accelerators() {
-    use roost_shell_control::{Accelerator, MODE_NORMAL, MODE_POPUP, MOD_ALT, MOD_CTRL};
+    use tuna_shell_control::{Accelerator, MODE_NORMAL, MODE_POPUP, MOD_ALT, MOD_CTRL};
     let mut f = two_windows();
     let (conn, mut queue, mut client) = connect(&mut f.comp);
     let qh = queue.handle();
@@ -2958,7 +2958,7 @@ fn exclusive_overlay_receives_navigation_and_retains_popup_system_accelerators()
         &surface,
         None,
         Layer::Overlay,
-        roost_shell_control::SCREENSHOT_NAMESPACE.into(),
+        tuna_shell_control::SCREENSHOT_NAMESPACE.into(),
         &qh,
         (),
     );
@@ -2977,7 +2977,7 @@ fn exclusive_overlay_receives_navigation_and_retains_popup_system_accelerators()
     pump(&mut f.comp, &mut queue, &mut client, |c| c.synced);
     f.manager.set_overview_open(true);
     f.manager.reconcile(&mut f.comp.state);
-    assert!(roost_compositor::layer::exclusive_keyboard_layer(&f.comp.state).is_some());
+    assert!(tuna_compositor::layer::exclusive_keyboard_layer(&f.comp.state).is_some());
     f.manager.set_accelerators(vec![
         Accelerator {
             action: 1,
@@ -3049,7 +3049,7 @@ fn exclusive_overlay_receives_navigation_and_retains_popup_system_accelerators()
 
 #[test]
 fn exclusive_overview_keeps_overview_accelerators() {
-    use roost_shell_control::{Accelerator, MODE_OVERVIEW, MOD_LOGO, OVERVIEW_NAMESPACE};
+    use tuna_shell_control::{Accelerator, MODE_OVERVIEW, MOD_LOGO, OVERVIEW_NAMESPACE};
     let mut f = two_windows();
     let (conn, mut queue, mut client) = connect(&mut f.comp);
     let qh = queue.handle();
@@ -3073,8 +3073,8 @@ fn exclusive_overview_keeps_overview_accelerators() {
     }
     f.manager.set_overview_open(true);
     f.manager.reconcile(&mut f.comp.state);
-    assert!(roost_compositor::layer::exclusive_keyboard_layer(&f.comp.state).is_some());
-    assert!(roost_compositor::layer::exclusive_popup_keyboard_layer(&f.comp.state).is_none());
+    assert!(tuna_compositor::layer::exclusive_keyboard_layer(&f.comp.state).is_some());
+    assert!(tuna_compositor::layer::exclusive_popup_keyboard_layer(&f.comp.state).is_none());
     f.manager.set_accelerators(vec![Accelerator {
         action: 17,
         keysym: u32::from(b'a'),
@@ -3129,7 +3129,7 @@ fn modifier_releases_during_lock_do_not_turn_unlocked_clicks_into_moves() {
 
 #[test]
 fn swallowed_accelerator_release_clears_physical_pressed_state() {
-    use roost_shell_control::{Accelerator, MODE_NORMAL};
+    use tuna_shell_control::{Accelerator, MODE_NORMAL};
     let mut f = two_windows();
     f.manager.set_accelerators(vec![Accelerator {
         action: 23,

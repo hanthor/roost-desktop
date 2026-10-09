@@ -17,11 +17,11 @@
 //! [`UnlockOutcome::Denied`], which carries no detail by construction.
 //! Secrets are never logged and daemon text never surfaces.
 //!
-//! [`GreeterClient`]: roost_greeter::client::GreeterClient
-//! [`GreeterModel`]: roost_greeter::model::GreeterModel
+//! [`GreeterClient`]: tuna_greeter::client::GreeterClient
+//! [`GreeterModel`]: tuna_greeter::model::GreeterModel
 
 use greetd_ipc::{codec::Error as CodecError, Response};
-use roost_greeter::{
+use tuna_greeter::{
     client::GreeterClient,
     model::{GreeterModel, ModelEvent},
 };
@@ -136,7 +136,7 @@ pub fn attempt_unlock(client: &mut impl UnlockClient, user: &str, password: &str
 
 /// Verify `password` for `user` the way [`unlock_session`] does, without
 /// touching any lock state: greetd's daemon when one runs, else PAM's
-/// `roost-lock` service (GDM sessions). Blocking (PAM may delay a
+/// `tuna-lock` service (GDM sessions). Blocking (PAM may delay a
 /// failure for seconds), so the runtime calls it on a worker thread.
 pub fn verify(user: &str, password: &str) -> bool {
     if let Some(path) = greetd_socket_path() {

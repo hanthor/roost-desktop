@@ -3,7 +3,7 @@
 //! The `version_tests` unit mods pin the stamp rule; this pins the wiring
 //! the plan's first acceptance criterion requires: each built binary prints
 //! `<name> <stamped version>` for `--version`/`-V` and exits successfully,
-//! and the two side-by-side binaries agree. The stamp is `ROOST_VERSION`
+//! and the two side-by-side binaries agree. The stamp is `TUNA_VERSION`
 //! (a `vX.Y.Z` tag or plain `X.Y.Z`) with the `v` stripped, else this
 //! crate's version — the same rule the binaries bake in at compile time,
 //! so build and test must share the environment (a plain `cargo test`
@@ -13,10 +13,7 @@
 use std::process::Command;
 
 fn stamped_version() -> String {
-    match std::env::var("ROOST_VERSION")
-        .ok()
-        .filter(|v| !v.is_empty())
-    {
+    match std::env::var("TUNA_VERSION").ok().filter(|v| !v.is_empty()) {
         Some(tag) => tag.strip_prefix('v').unwrap_or(&tag).to_owned(),
         None => env!("CARGO_PKG_VERSION").to_owned(),
     }
@@ -39,21 +36,21 @@ fn assert_reports_stamp(exe: &str, name: &str, expected: &str) {
 
 #[test]
 fn compositor_version_matches_stamp() {
-    let exe = env!("CARGO_BIN_EXE_roost-compositor");
-    let expected = format!("roost-compositor {}", stamped_version());
-    assert_reports_stamp(exe, "roost-compositor", &expected);
+    let exe = env!("CARGO_BIN_EXE_tuna-compositor");
+    let expected = format!("tuna-compositor {}", stamped_version());
+    assert_reports_stamp(exe, "tuna-compositor", &expected);
 }
 
 #[test]
 fn session_launcher_version_matches_stamp() {
-    let exe = env!("CARGO_BIN_EXE_roost-session");
-    let expected = format!("roost-session {}", stamped_version());
-    assert_reports_stamp(exe, "roost-session", &expected);
+    let exe = env!("CARGO_BIN_EXE_tuna-session");
+    let expected = format!("tuna-session {}", stamped_version());
+    assert_reports_stamp(exe, "tuna-session", &expected);
 }
 
 #[test]
 fn side_by_side_binaries_agree_on_version() {
-    let reported = ["roost-compositor", "roost-session"]
+    let reported = ["tuna-compositor", "tuna-session"]
         .into_iter()
         .map(|name| {
             let var = format!("CARGO_BIN_EXE_{name}");

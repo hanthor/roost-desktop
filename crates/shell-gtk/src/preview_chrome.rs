@@ -11,7 +11,7 @@ use std::rc::Rc;
 use gtk::prelude::*;
 use gtk4 as gtk;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
-use roost_shell_control::PreviewInfo;
+use tuna_shell_control::PreviewInfo;
 
 /// `ICON_SIZE`, `ICON_OVERLAP` and `ICON_TITLE_SPACING`.
 const ICON_SIZE: i32 = 64;
@@ -36,10 +36,10 @@ pub struct PreviewChrome {
 impl PreviewChrome {
     pub fn new(app: &gtk::Application, close: Rc<dyn Fn(u64)>) -> Rc<Self> {
         let window = gtk::ApplicationWindow::new(app);
-        window.add_css_class("roost-overview-chrome");
+        window.add_css_class("tuna-overview-chrome");
         window.init_layer_shell();
         window.set_layer(Layer::Top);
-        window.set_namespace(Some(roost_shell_control::PREVIEW_CHROME_NAMESPACE));
+        window.set_namespace(Some(tuna_shell_control::PREVIEW_CHROME_NAMESPACE));
         for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
             window.set_anchor(edge, true);
         }

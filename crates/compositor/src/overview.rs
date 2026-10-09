@@ -18,7 +18,7 @@
 //! (`WORKSPACE_INACTIVE_SCALE`); and, as GNOME's dynamic workspaces
 //! always keep one, an empty workspace follows the last occupied one.
 
-use smithay::utils::{Logical, Point, Rectangle};
+use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// Card size as a fraction of the work area (GNOME 51: 922x553 on a
 /// 1280x768 work area).
@@ -57,6 +57,10 @@ pub struct WorkspaceCard {
     pub active: bool,
     /// Opacity while the card joins the overview transition.
     pub alpha: f32,
+    /// The card's size once the transition settles. Transition frames
+    /// resize `rect`; the drawn wallpaper card is rendered once at this
+    /// size and scaled, rather than re-rendered for every frame's size.
+    pub settled: Size<i32, Logical>,
 }
 
 /// One window preview: where to draw the window's surface and at what
@@ -731,6 +735,7 @@ pub fn layout(
             rect,
             active: false,
             alpha: 1.0,
+            settled: rect.size,
         });
         for w in windows.iter().filter(|w| w.workspace == workspace) {
             let x =
@@ -757,6 +762,7 @@ pub fn layout(
             rect: active_card,
             active: true,
             alpha: 1.0,
+            settled: active_card.size,
         },
     );
     // GNOME lays the windows out in the window picker: the card plus
@@ -782,7 +788,7 @@ pub fn layout(
         .filter(|w| w.workspace == active)
         .map(|w| (w.id, w.geometry))
         .collect();
-    // GNOME sorts by stable sequence: creation order (Roost ids rise).
+    // GNOME sorts by stable sequence: creation order (Tuna Desktop ids rise).
     mine.sort_by_key(|(id, _)| *id);
     for (id, rect, scale) in window_slots(workarea, output.size.h, picker, &mine) {
         out.previews.push(Preview {
@@ -826,6 +832,7 @@ fn thumbnails(
             rect,
             active: workspace == active,
             alpha: 1.0,
+            settled: rect.size,
         });
         for win in windows.iter().filter(|w| w.workspace == workspace) {
             let x =
@@ -1004,6 +1011,7 @@ pub fn app_grid_layout(
             rect,
             active: is_active,
             alpha: 1.0,
+            settled: rect.size,
         };
         if is_active {
             out.cards.insert(0, card);
@@ -1282,6 +1290,33 @@ mod tests {
         assert_eq!(transition(&open, 1.0, output(), &windows), open);
         assert!((ease_out_quad(0.5) - 0.75).abs() < 1e-9);
         assert_eq!(ease_out_quad(2.0), 1.0);
+    }
+
+    #[test]
+    fn transition_frames_keep_each_cards_settled_size() {
+        let windows = [win(1, 0, 320, 182, 640, 420), win(2, 1, 320, 182, 640, 420)];
+        let open = layout(output(), 32, &[0, 1, 2], 0, &windows);
+        for card in open.cards.iter().chain(&open.thumbnails) {
+            assert_eq!(card.settled, card.rect.size);
+        }
+        for p in [0.0, 0.3, 0.7] {
+            let frame = transition(&open, p, output(), &windows);
+            for (drawn, settled) in [
+                (&frame.cards, &open.cards),
+                (&frame.thumbnails, &open.thumbnails),
+            ] {
+                for card in drawn {
+                    let settled = settled
+                        .iter()
+                        .find(|c| c.workspace == card.workspace)
+                        .unwrap();
+                    assert_eq!(card.settled, settled.rect.size);
+                }
+            }
+        }
+        // The growing active card changes size; only its settled size is cached.
+        let closed = transition(&open, 0.0, output(), &windows);
+        assert_ne!(closed.cards[0].rect.size, closed.cards[0].settled);
     }
 
     #[test]

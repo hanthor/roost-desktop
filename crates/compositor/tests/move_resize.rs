@@ -8,11 +8,11 @@
 
 use std::os::unix::net::UnixStream;
 
-use roost_compositor::windows::{
+use smithay::utils::{Logical, Point};
+use tuna_compositor::windows::{
     ManagerInput, WindowLayout, WindowManager, MIN_WINDOW_SIZE, SUPER_LEFT_KEYCODE,
 };
-use roost_compositor::TestCompositor;
-use smithay::utils::{Logical, Point};
+use tuna_compositor::TestCompositor;
 use wayland_client::{
     protocol::{
         wl_callback::WlCallback,
@@ -485,7 +485,7 @@ fn new_windows_never_open_under_the_top_bar() {
     let f = fixture();
     let g = geometry(&f);
     assert!(
-        g.loc.y >= roost_compositor::windows::WORK_AREA_TOP,
+        g.loc.y >= tuna_compositor::windows::WORK_AREA_TOP,
         "first window at {g:?} must start inside the work area"
     );
     // First window on an empty workspace: centered horizontally.
@@ -506,7 +506,7 @@ fn dragging_to_an_edge_shows_gnomes_tile_preview() {
         .pointer_motion(&mut f.comp.state, Point::from((1.0, at.y + 100.0)), 3);
     let (dragged, rect) = f.manager.tile_preview(&f.comp.state).expect("left preview");
     assert_eq!(dragged, window);
-    let top = roost_compositor::windows::WORK_AREA_TOP;
+    let top = tuna_compositor::windows::WORK_AREA_TOP;
     assert_eq!(
         (rect.loc.x, rect.loc.y, rect.size.w, rect.size.h),
         (0, top, 640, 800 - top)

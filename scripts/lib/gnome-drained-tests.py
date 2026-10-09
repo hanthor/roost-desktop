@@ -14,13 +14,13 @@ class Boundary(unittest.TestCase):
     def fixture(self):
         def mark(name,stamp,message):
             return {'pid':42,'monotonic_ns':stamp,'duration_ns':0,'name':name,'message':message}
-        rows=[mark('Roost::CaptureBoundary',20_000_000,
+        rows=[mark('Tuna::CaptureBoundary',20_000_000,
                    'output=Virtual-1 clock=0xabcd next=5 pending=0 depth=0 dispatched=0 state=scheduled requested_us=10000 enabled_us=20000 samples=2'),
               mark('Clutter::FrameClock::dispatch()',21_000_000,'Virtual-1'),
-              mark('Roost::FrameClock::dispatch-id',21_000_100,'output=Virtual-1 frame=5 dispatch_us=21000'),
+              mark('Tuna::FrameClock::dispatch-id',21_000_100,'output=Virtual-1 frame=5 dispatch_us=21000'),
               mark('Clutter::FrameClock::presented()',22_000_000,'Virtual-1'),
-              mark('Roost::FrameClock::presented-id',22_000_100,'output=Virtual-1 view_frame=5 global_frame=100 presentation_us=21900 sequence=22 flags=5 kms_ready_us=21500'),
-              mark('Roost::KMS::raw-page-flip',22_000_200,'crtc=39 sequence=22 seconds=0 microseconds=21900 device=/dev/dri/card1')]
+              mark('Tuna::FrameClock::presented-id',22_000_100,'output=Virtual-1 view_frame=5 global_frame=100 presentation_us=21900 sequence=22 flags=5 kms_ready_us=21500'),
+              mark('Tuna::KMS::raw-page-flip',22_000_200,'crtc=39 sequence=22 seconds=0 microseconds=21900 device=/dev/dri/card1')]
         return {'marks':rows},{'pid':42,'drained_start_required':True,'start_requested_monotonic_ns':10_000_000,'started_monotonic_ns':20_500_000}
     def test_real_boundary_source_counter_and_first_dispatch_accepted(self):
         d,m=self.fixture();r=decoder.capture_boundary_evidence(d,m)
@@ -72,7 +72,7 @@ class StopBoundary(unittest.TestCase):
         metadata.update(drained_stop_required=True, stop_requested_monotonic_ns=23_000_000,
                         stopped_monotonic_ns=25_500_000)
         decoded['marks'].append({'pid':42,'monotonic_ns':25_000_000,'duration_ns':0,
-                                'name':'Roost::CaptureStopBoundary',
+                                'name':'Tuna::CaptureStopBoundary',
                                 'message':'output=Virtual-1 clock=0xabcd next=6 pending=0 depth=0 dispatched=0 state=idle requested_us=23000 closing_us=25000 samples=2'})
         return decoded, metadata
     def test_actual_original_closed_clock_accepted_without_frame_changes(self):
@@ -106,7 +106,7 @@ class StopBoundary(unittest.TestCase):
         d,m=self.fixture();d['marks'][3]['duration_ns']=4_000_000
         with self.assertRaises(ValueError):self.validate(d,m)
         d,m=self.fixture();d['marks']=[row for row in d['marks'] if row['name'] not in
-            ('Clutter::FrameClock::presented()','Roost::FrameClock::presented-id')]
+            ('Clutter::FrameClock::presented()','Tuna::FrameClock::presented-id')]
         with self.assertRaises(ValueError):self.validate(d,m)
     def test_stop_boundary_does_not_relax_owned_frame_decoder(self):
         d,m=self.fixture();self.validate(d,m)
@@ -254,7 +254,7 @@ class WriterClosure(unittest.TestCase):
         from types import SimpleNamespace
         from unittest import mock
         import gnome_failed_capture as capture
-        parsed=ast.parse((ROOT/'packaging/marlin/perf/roost-perf-phase').read_text())
+        parsed=ast.parse((ROOT/'packaging/marlin/perf/tuna-perf-phase').read_text())
         function=next(node for node in parsed.body if isinstance(node,ast.FunctionDef) and node.name=='gnome_trace')
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'capture';path.write_bytes(b'x'*256);path.chmod(0o600)
@@ -288,7 +288,7 @@ class FailureTransport(unittest.TestCase):
         saved['source']['uid']=uid;saved['failure']['trace_failure']['principal']['uid']=uid
         saved['source']['pid']=os.getpid();saved['failure']['trace_failure']['principal']['pid']=os.getpid()
         saved['source']['process_start']=capture.process_start(os.getpid())
-        parsed=ast.parse((ROOT/'packaging/marlin/perf/roost-perf-phase').read_text())
+        parsed=ast.parse((ROOT/'packaging/marlin/perf/tuna-perf-phase').read_text())
         function=next(n for n in parsed.body if isinstance(n,ast.FunctionDef) and n.name=='gnome_trace')
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'capture';path.write_bytes(raw);path.chmod(0o600)
@@ -318,7 +318,7 @@ class FailureTransport(unittest.TestCase):
     def test_original_actual_exit9_survives_independent_raw_retention_or_refusal(self):
         import ast,base64,hashlib,json,math,subprocess,sys,tempfile,time
         from perf_trace_diagnostics import Context,encode,decode,MAX_BYTES
-        parsed=ast.parse((ROOT/'scripts/roost-vm-perf').read_text())
+        parsed=ast.parse((ROOT/'scripts/tuna-vm-perf').read_text())
         context=Context('stop');context.stage='stop-call'
         payload=encode(context.failure(RuntimeError('PRIVATE')),'stop').decode()
         child=subprocess.run([sys.executable,'-c','import sys;print(sys.argv[1]);sys.exit(9)',payload],capture_output=True)
@@ -400,7 +400,7 @@ def diagnostic_package_policy(recipe, container, receiver, host):
 class PackagePolicy(unittest.TestCase):
     def actual(self):
         return [(ROOT/n).read_text() for n in ['packaging/marlin/perf/mutter-profiler/PKGBUILD',
-                'packaging/marlin/perf/Containerfile.baseline','packaging/marlin/perf/roost-gnome-profiler','scripts/roost-vm-perf']]
+                'packaging/marlin/perf/Containerfile.baseline','packaging/marlin/perf/tuna-gnome-profiler','scripts/tuna-vm-perf']]
     def test_actual_recipe_and_all_acquisition_pins_agree(self):
         self.assertEqual(diagnostic_package_policy(*self.actual()),'mutter 51.0-1.7')
     def test_original_invalid_three_component_release_rejected(self):

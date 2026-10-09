@@ -292,9 +292,9 @@ fn timestamp() -> u32 {
 /// The installed app behind a provider's `DesktopId` (app ids are
 /// stored without the `.desktop` suffix).
 pub fn provider_app<'a>(
-    apps: &'a roost_shell_host::apps::AppProvider,
+    apps: &'a tuna_shell_host::apps::AppProvider,
     desktop_id: &str,
-) -> Option<&'a roost_shell_host::apps::AppEntry> {
+) -> Option<&'a tuna_shell_host::apps::AppEntry> {
     apps.entry(desktop_id.trim_end_matches(".desktop"))
         .or_else(|| apps.entry(desktop_id))
 }
@@ -383,7 +383,7 @@ mod tests {
 
     #[test]
     fn desktop_ids_match_with_or_without_the_suffix() {
-        let entry = roost_shell_host::apps::AppEntry {
+        let entry = tuna_shell_host::apps::AppEntry {
             app_id: "org.gnome.Nautilus".to_owned(),
             name: "Files".to_owned(),
             generic_name: None,
@@ -392,7 +392,7 @@ mod tests {
             icon: None,
             categories: Vec::new(),
         };
-        let apps = roost_shell_host::apps::AppProvider::new(vec![entry]);
+        let apps = tuna_shell_host::apps::AppProvider::new(vec![entry]);
         // GNOME's favorite-apps and DesktopId keys carry ".desktop".
         assert!(provider_app(&apps, "org.gnome.Nautilus.desktop").is_some());
         assert!(provider_app(&apps, "org.gnome.Nautilus").is_some());

@@ -10,16 +10,16 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
-loader = importlib.machinery.SourceFileLoader('native_constraint_lifecycle', str(ROOT/'packaging/marlin/vm-lane/roost-vm-lifecycle'))
+loader = importlib.machinery.SourceFileLoader('native_constraint_lifecycle', str(ROOT/'packaging/marlin/vm-lane/tuna-vm-lifecycle'))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 fixture = importlib.util.module_from_spec(spec)
-with patch('pwd.getpwnam', return_value=SimpleNamespace(pw_uid=1000,pw_name='roost-test')):
+with patch('pwd.getpwnam', return_value=SimpleNamespace(pw_uid=1000,pw_name='tuna-test')):
     loader.exec_module(fixture)
 
 
 class Principal(unittest.TestCase):
     def identity(self):
-        return {'pid':100,'uid':1000,'start_ticks':1234,'executable':'/usr/libexec/roost-vm-constraints',
+        return {'pid':100,'uid':1000,'start_ticks':1234,'executable':'/usr/libexec/tuna-vm-constraints',
                 'exe_inode':55,'exe_device':2049,'exe_sha256':'actual'}
     def snapshot(self):
         return {'pid':100,'uid':1000,'surface_id':8,'pointer_id':9,'relative_id':10}
@@ -28,7 +28,7 @@ class Principal(unittest.TestCase):
         owner.write_text(json.dumps({'identity':self.identity(),'surface_id':8,'pointer_id':9,'relative_id':10}))
         with patch.object(fixture,'CONSTRAINT_OWNER',owner), patch.object(fixture,'constraint_process',return_value=identity or self.identity()), patch.object(fixture,'call',return_value=json.dumps(response or self.snapshot())) as call:
             value = fixture.constraint_client(action)
-            self.assertEqual(call.call_args.args, ('/usr/libexec/roost-vm-constraints','--command',action))
+            self.assertEqual(call.call_args.args, ('/usr/libexec/tuna-vm-constraints','--command',action))
             self.assertEqual(call.call_args.kwargs, {'user':True})
             return value
     def test_same_principal_and_protocol_ids_are_retained(self):
