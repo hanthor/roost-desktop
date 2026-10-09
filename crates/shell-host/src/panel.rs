@@ -70,6 +70,7 @@ use crate::icons::Artwork;
 use crate::intake::NotificationBus;
 use crate::keyboard::{KeyAction, XkbFeed};
 use crate::model::ShellModel;
+use crate::notification_policy::GioPolicyStore;
 use crate::notifications::{NotificationAction, NotificationCenter, Urgency};
 use crate::overview::{
     banner_hit, banner_strip_height, blit_glyph, glyph_index, overview_press, paint_panel,
@@ -911,6 +912,11 @@ impl ShellHost {
             apps.clone() as Arc<dyn crate::search::SearchProvider>,
         ]);
         let center = Arc::new(Mutex::new(NotificationCenter::new()));
+        // GNOME Settings' notification policy, read live on every
+        // arrival (#348).
+        if let Ok(mut filed) = center.lock() {
+            filed.set_policy(Arc::new(GioPolicyStore::new()));
+        }
         let notifications = NotificationBus::new(center.clone());
         Self {
             model: ShellModel::new(),
