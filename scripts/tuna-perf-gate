@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""Tuna Desktop vs GNOME 51 performance budget gate (#315, #503).
+
+  check    compare a performance-baseline artifact tree with the budgets
+  propose  print budgets tightened to the measured ratios plus the margin
+  ratchet  refuse a budget change that loosens or lacks evidence
+  validate check the budget file's shape
+
+See docs/perf/README.md.
+"""
+import argparse
+import json
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts/lib"))
+import perf_budget  # noqa: E402
+
+DEFAULT_BUDGETS = ROOT / "docs/perf/budgets.json"
+
+
+def load(path):
+    return json.loads(Path(path).read_text())
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="command", required=True)
+    check = sub.add_parser("check")
+    check.add_argument("--artifacts", required=True, help="perf-artifacts directory of one paired run")
+    check.add_argument("--budgets", default=str(DEFAULT_BUDGETS))
+    check.add_argument("--out", help="write the full JSON result here")
+    check.add_argument("--markdown", help="append the summary table here (for example $GITHUB_STEP_SUMMARY)")
+    check.add_argument("--report-only", action="store_true", help="never exit nonzero on a budget failure")
+    propose = sub.add_parser("propose")
+    propose.add_argument("--artifacts", required=True)
+    propose.add_argument("--budgets", default=str(DEFAULT_BUDGETS))
+    propose.add_argument("--evidence", help="performance-baseline run URL recorded on tightened budgets")
+    propose.add_argument("--margin", type=float)
+    ratchet = sub.add_parser("ratchet")
+    ratchet.add_argument("--base", required=True, help="budgets file on the target branch")
+    ratchet.add_argument("--head", default=str(DEFAULT_BUDGETS))
+    validate = sub.add_parser("validate")
+    validate.add_argument("--budgets", default=str(DEFAULT_BUDGETS))
+    args = ap.parse_args(argv)
+
+    if args.command == "validate":
+        problems = perf_budget.validate(load(args.budgets))
+    elif args.command == "ratchet":
+        head = load(args.head)
+        problems = perf_budget.validate(head) + perf_budget.ratchet_violations(load(args.base), head, ROOT)
+    else:
+        budgets = load(args.budgets)
+        problems = perf_budget.validate(budgets)
+        if problems:
+            print("\n".join(problems), file=sys.stderr)
+            return 2
+        pairs = perf_budget.discover_pairs(args.artifacts)
+        comparison = perf_budget.compare(pairs)
+        rows = perf_budget.evaluate(budgets, comparison, budgets.get("min_pairs", 3))
+        if args.command == "propose":
+            print(json.dumps(perf_budget.propose(budgets, rows, args.margin, args.evidence), indent=2))
+            return 0
+        summary = perf_budget.markdown(rows, pairs, budgets, comparison)
+        print(summary)
+        if args.markdown:
+            with open(args.markdown, "a") as stream:
+                stream.write(summary)
+        if args.out:
+            Path(args.out).write_text(json.dumps({"pairs": [{k: str(v) for k, v in p.items()} for p in pairs],
+                                                  "results": rows, "comparison": comparison,
+                                                  "attribution": perf_budget.attribution(comparison)}, indent=2))
+        problems = [f"{row['metric']}: {row['status']} ({row.get('reason', '')})"
+                    for row in perf_budget.failed(rows)]
+        if problems and args.report_only:
+            print("\n".join(problems), file=sys.stderr)
+            return 0
+    if problems:
+        print("\n".join(problems), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
