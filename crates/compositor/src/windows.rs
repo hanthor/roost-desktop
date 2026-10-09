@@ -423,6 +423,11 @@ impl WindowManager {
             .collect()
     }
 
+    /// Every managed window's id, in no particular order.
+    pub fn window_ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.windows.keys().copied()
+    }
+
     /// The Wayland surface of window `id`, if it has one.
     pub fn surface_of(&self, id: u64) -> Option<WlSurface> {
         self.windows
