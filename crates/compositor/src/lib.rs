@@ -57,6 +57,7 @@ pub mod drm;
 pub mod frame_timing;
 pub mod idle_monitor;
 pub mod ime;
+pub mod input_aids;
 pub mod introspect;
 pub mod layer;
 pub mod lock;
