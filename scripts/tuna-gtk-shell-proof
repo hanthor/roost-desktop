@@ -2600,6 +2600,11 @@ cstate ".windows | length == $((corner_count + 1))" "corner proof mapped" ||
     fail G-HOT-CORNER-FULLSCREEN "genuine GTK proof window did not map"
 cstate '([.windows[] | select(.app_id == "tuna-test-fullscreen corner proof")] | length) == 1' "unique actual corner client identity" ||
     fail G-HOT-CORNER-FULLSCREEN "actual corner client identity was not unique"
+# Save the restore target only once the client has committed its own
+# 640x420 default size: GTK 4.22 can first map at the compositor's
+# initial configure size and resize a moment later.
+cstate '.windows | any(.app_id == "tuna-test-fullscreen corner proof" and .rect[2] == 640 and .rect[3] == 420)' "corner proof at its own size" ||
+    fail G-HOT-CORNER-FULLSCREEN "the GTK proof window never settled at its 640x420 default size"
 corner_window_id="$(jq '.windows[] | select(.app_id == "tuna-test-fullscreen corner proof") | .id' "$CSTATE")"
 corner_restored_rect="$(jq -c '.windows[] | select(.app_id == "tuna-test-fullscreen corner proof") | .rect' "$CSTATE")"
 cp "$CSTATE" "$ARTIFACTS/hot-corner-client-before-fullscreen.json"
