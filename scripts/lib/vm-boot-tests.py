@@ -541,5 +541,58 @@ class HeroSet(unittest.TestCase):
             self.assertEqual(result, {"stills": {}, "video": None})
 
 
+def synthetic(fill, boxes=()):
+    """A WIDTH x HEIGHT RGB frame: fill, then (x0, y0, x1, y1, rgb) boxes."""
+    w, h = lane.WIDTH, lane.HEIGHT
+    px = bytearray(bytes(fill) * (w * h))
+    for x0, y0, x1, y1, rgb in boxes:
+        row = bytes(rgb) * (x1 - x0)
+        for y in range(y0, y1):
+            px[(y * w + x0) * 3:(y * w + x1) * 3] = row
+    return w, h, bytes(px)
+
+
+class HeroViewPredicates(unittest.TestCase):
+    GREY, NAVY, WHITE = (36, 36, 38), (8, 24, 52), (250, 250, 250)
+
+    def views(self, frame):
+        return [name for name in ("overview_shown", "app_grid_shown", "desktop_shown", "switcher_shown")
+                if getattr(lane, name)(*frame)]
+
+    def test_overview_with_window_previews(self):
+        frame = synthetic(self.GREY, [(300, 200, 980, 600, self.WHITE)])
+        self.assertEqual(self.views(frame), ["overview_shown"])
+
+    def test_app_grid_icons_on_the_backdrop(self):
+        icons = [(x, y, x + 24, y + 24, (200, 60, 40)) for x in range(340, 940, 60) for y in range(250, 550, 60)]
+        self.assertEqual(self.views(synthetic(self.GREY, icons)), ["app_grid_shown"])
+
+    def test_empty_grid_while_loading_is_neither(self):
+        self.assertEqual(self.views(synthetic(self.GREY)), [])
+
+    def test_desktop_wallpaper_is_not_grey(self):
+        self.assertEqual(self.views(synthetic(self.NAVY)), ["desktop_shown"])
+
+    def test_switcher_island_over_windows(self):
+        frame = synthetic(self.NAVY, [(100, 60, 1100, 760, self.WHITE), (520, 340, 760, 460, self.GREY)])
+        self.assertEqual(self.views(frame), ["desktop_shown", "switcher_shown"])
+
+    def test_await_still_keeps_the_frame_on_screen(self):
+        with tempfile.TemporaryDirectory() as directory:
+            frames = []
+            for index, fill in enumerate((self.NAVY, self.GREY)):
+                path = Path(directory) / f"b{index}.ppm"
+                w, h, px = synthetic(fill, [(300, 200, 980, 600, self.WHITE)] if index else [])
+                path.write_bytes(f"P6 {w} {h} 255\n".encode() + px)
+                frames.append((float(index), str(path)))
+            rec = SimpleNamespace(burst_frames=frames, stills={})
+            self.assertTrue(lane.Recorder.await_still(rec, "hero-overview", lane.overview_shown,
+                                                      timeout=2, settle=0))
+            self.assertEqual(rec.stills["hero-overview"], frames[1][1])
+            self.assertFalse(lane.Recorder.await_still(rec, "hero-app-grid", lane.app_grid_shown,
+                                                       timeout=0.3, settle=0))
+            self.assertEqual(rec.stills["hero-app-grid"], frames[1][1])
+
+
 if __name__ == "__main__":
     unittest.main()

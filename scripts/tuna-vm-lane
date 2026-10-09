@@ -969,6 +969,25 @@ class Recorder:
         while self.n <= target and time.monotonic() < deadline:
             time.sleep(0.05)
 
+    def await_still(self, card, predicate, timeout=25.0, settle=1.0):
+        """During a burst, keep the first frame for which predicate(w, h, px)
+        holds and still holds settle seconds later. The VM's display can
+        trail input by several seconds under llvmpipe, so fixed waits miss;
+        this waits for what is actually on screen. Returns whether it did."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.burst_frames and predicate(*read_ppm(self.burst_frames[-1][1])):
+                time.sleep(settle)
+                path = self.burst_frames[-1][1]
+                if predicate(*read_ppm(path)):
+                    self.stills[card] = path
+                    return True
+            time.sleep(0.2)
+        log(f"tour: {card} never appeared on screen; keeping the latest frame")
+        if self.burst_frames:
+            self.stills[card] = self.burst_frames[-1][1]
+        return False
+
     def start_burst(self, path):
         os.makedirs(path, exist_ok=True)
         self.burst_frames = []
@@ -977,6 +996,43 @@ class Recorder:
     def end_burst(self):
         self.burst_dir = None
         return list(self.burst_frames)
+
+
+def grey_share(w, px, rect):
+    """Share of sampled pixels in rect that are the overview's dark neutral
+    grey (the wallpaper's dark areas are saturated navy, not grey)."""
+    x0, y0, x1, y1 = rect
+    total = grey = 0
+    for y in range(y0, y1, 6):
+        for x in range(x0, x1, 6):
+            i = (y * w + x) * 3
+            r, g, b = px[i], px[i + 1], px[i + 2]
+            total += 1
+            grey += max(r, g, b) - min(r, g, b) < 14 and 45 < r + g + b < 225
+    return grey / total if total else 0.0
+
+
+# Calibrated on Marlin VM frames: the overview's backdrop fills the bottom
+# left corner; window previews keep the centre light, the app grid's icons
+# leave it mostly grey (an empty, still-loading grid is all grey); the
+# Alt+Tab popup is a dark island over light windows.
+CORNER, CENTRE, POPUP = (0, 640, 300, 780), (340, 250, 940, 550), (440, 330, 840, 470)
+
+
+def overview_shown(w, h, px):
+    return grey_share(w, px, CORNER) > 0.85 and grey_share(w, px, CENTRE) < 0.6
+
+
+def app_grid_shown(w, h, px):
+    return grey_share(w, px, CORNER) > 0.85 and 0.6 <= grey_share(w, px, CENTRE) < 0.95
+
+
+def desktop_shown(w, h, px):
+    return grey_share(w, px, CORNER) < 0.2
+
+
+def switcher_shown(w, h, px):
+    return desktop_shown(w, h, px) and 0.12 <= grey_share(w, px, POPUP) <= 0.6
 
 
 # README hero set: published name -> tour still it comes from.
@@ -1125,32 +1181,35 @@ def run_tour(qmp, out, serial_path, agent=None):
         rec.mark("alt-tab")
         for query in ("disks", "system monitor", "files"):
             launch(query)
-        # The switcher popup can take over a second to paint its live
-        # thumbnails in the VM; hold the chord well past the still.
-        keys("alt", "tab", hold_ms=4000)
-        rec.still("alt-tab", delay=2.5)
-        wait(3)
-        keys("alt", "tab", hold_ms=1500)
-        wait(4)
-        # Hero clip: the overview with the three real apps, back to the
-        # desktop, then the app grid, captured as fast as QMP allows.
+        # The burst also yields the hero clip: Alt+Tab, the overview with
+        # the three real apps, back to the desktop, then the app grid.
+        # Each shot waits for its view to be on screen, since the VM's
+        # display trails input by seconds while System Monitor draws.
         rec.start_burst(os.path.join(scratch, "hero"))
-        wait(1.5)
+        rec.await_still("desktop", desktop_shown, timeout=10, settle=0.5)
+        # Hold Alt long enough for a late popup; it closes on release.
+        pressed = time.monotonic()
+        keys("alt", "tab", hold_ms=12000)
+        rec.await_still("alt-tab", switcher_shown, timeout=11)
+        # Alt stays down until QEMU releases it; then the popup must go.
+        wait(max(0.0, 12.5 - (time.monotonic() - pressed)))
+        rec.await_still("desktop", lambda *f: desktop_shown(*f) and not switcher_shown(*f),
+                        timeout=20, settle=1.0)
         keys("meta_l")
-        wait(4)
-        rec.still("hero-overview")
-        wait(1.5)
+        rec.await_still("hero-overview", overview_shown, settle=1.5)
+        wait(1)
         keys("esc")
-        wait(2.5)
+        rec.await_still("desktop", desktop_shown, timeout=20)
         keys("meta_l", "a")
-        wait(5)
-        rec.still("hero-app-grid")
+        rec.await_still("hero-app-grid", app_grid_shown, settle=1.5)
         wait(1)
         keys("esc")
         wait(1)
         keys("esc")
-        wait(2.5)
+        rec.await_still("desktop", desktop_shown, timeout=20)
+        wait(1)
         clip = rec.end_burst()
+        rec.stills.pop("desktop", None)
         rec.mark("scroll")
         keys("meta_l", "shift", "t")
         wait(3)
@@ -1250,7 +1309,12 @@ def run_tour(qmp, out, serial_path, agent=None):
                     os.path.join(tour, "preview.webp")], check=False)
     stills = {}
     for card, idx in rec.stills.items():
-        frame = frame_png(min(idx, rec.n - 1))
+        if isinstance(idx, str):  # a burst frame kept by await_still
+            frame = os.path.join(scratch, f"still-{card}.png")
+            subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", idx,
+                            "-pix_fmt", "rgb24", frame], check=True)
+        else:
+            frame = frame_png(min(idx, rec.n - 1))
         if os.path.exists(frame):
             stills[card] = frame
             if not card.startswith("hero-"):
