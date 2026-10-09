@@ -172,7 +172,7 @@ live motion policy: animations off snaps everything, Reduced Motion
 
 ## Frame cost
 
-The compositor state (`ROOST_COMPOSITOR_STATE`) carries `frame_cost`, one
+The compositor state (`TUNA_COMPOSITOR_STATE`) carries `frame_cost`, one
 entry per output describing its last drawn frame: `rendered` and `culled`
 element counts, `damage_rects` and `damage_area` against `output_area`,
 and the window ids that were `drawn_windows` or wholly `culled_windows`

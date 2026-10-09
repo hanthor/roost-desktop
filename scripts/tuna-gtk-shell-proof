@@ -2644,18 +2644,18 @@ pass G-HOT-CORNER-FULLSCREEN "genuine fullscreen blocks corner opening, Super re
 occlusion_requests="$ARTIFACTS/occlusion-requests.json"
 rm -f "$occlusion_requests" "$occlusion_requests.ack"
 occlusion_count="$(jq '.windows | length' "$CSTATE")"
-WAYLAND_DISPLAY="$SOCKET_NAME" "$PY" "$ROOT/scripts/lib/roost-test-window.py" "Occlusion Below" '#204080' >"$ARTIFACTS/occlusion-below.log" 2>&1 &
+WAYLAND_DISPLAY="$SOCKET_NAME" "$PY" "$ROOT/scripts/lib/tuna-test-window.py" "Occlusion Below" '#204080' >"$ARTIFACTS/occlusion-below.log" 2>&1 &
 OCCLUSION_PIDS="$!"
-cstate '.windows | any(.app_id == "roost-test-occlusion below")' "occlusion lower window mapped" ||
+cstate '.windows | any(.app_id == "tuna-test-occlusion below")' "occlusion lower window mapped" ||
     fail G-OCCLUSION-CULL "lower proof window did not map"
-below_id="$(jq '.windows[] | select(.app_id == "roost-test-occlusion below") | .id' "$CSTATE")"
+below_id="$(jq '.windows[] | select(.app_id == "tuna-test-occlusion below") | .id' "$CSTATE")"
 cstate "[.frame_cost[] | .drawn_windows[]] | index($below_id) != null" "lower window drawn" ||
     fail G-OCCLUSION-CULL "frame_cost did not report the visible lower window as drawn"
-WAYLAND_DISPLAY="$SOCKET_NAME" ROOST_TEST_REQUESTS="$occlusion_requests" "$PY" "$ROOT/scripts/lib/roost-test-window.py" "Occlusion Above" '#408020' >"$ARTIFACTS/occlusion-above.log" 2>&1 &
+WAYLAND_DISPLAY="$SOCKET_NAME" TUNA_TEST_REQUESTS="$occlusion_requests" "$PY" "$ROOT/scripts/lib/tuna-test-window.py" "Occlusion Above" '#408020' >"$ARTIFACTS/occlusion-above.log" 2>&1 &
 OCCLUSION_PIDS="$OCCLUSION_PIDS $!"
-cstate '.windows | any(.app_id == "roost-test-occlusion above")' "occlusion upper window mapped" ||
+cstate '.windows | any(.app_id == "tuna-test-occlusion above")' "occlusion upper window mapped" ||
     fail G-OCCLUSION-CULL "upper proof window did not map"
-above_id="$(jq '.windows[] | select(.app_id == "roost-test-occlusion above") | .id' "$CSTATE")"
+above_id="$(jq '.windows[] | select(.app_id == "tuna-test-occlusion above") | .id' "$CSTATE")"
 printf '{"generation":1,"request":"fullscreen"}\n' >"$occlusion_requests"
 cstate ".focused == $above_id and .focused_rect == [0, 0, $WIDTH, $HEIGHT]" "occlusion upper fullscreen" ||
     fail G-OCCLUSION-CULL "upper proof window did not fullscreen"
