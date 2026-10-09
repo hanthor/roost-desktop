@@ -1,6 +1,6 @@
 # Initial coverage baseline, before the session-lock wire cases
 
-[Instrumented run 37188464108](https://github.com/hanthor/roost-desktop/actions/runs/37188464108) passed on the exact source below, using Rust1.94.1 and cargo-llvm-cov0.9.1. The `measured-test-coverage` artifact contains the original LLVM JSON, test log, environment and reproduction command. The JSON SHA256 is `3a724447eb3fa60d4370fb24de7ad1f85c96785683ca9dc3c6c020c75826add9`.
+[Instrumented run 37188464108](https://github.com/tuna-os/tuna-desktop/actions/runs/37188464108) passed on the exact source below, using Rust1.94.1 and cargo-llvm-cov0.9.1. The `measured-test-coverage` artifact contains the original LLVM JSON, test log, environment and reproduction command. The JSON SHA256 is `3a724447eb3fa60d4370fb24de7ad1f85c96785683ca9dc3c6c020c75826add9`.
 
 This dated baseline predates the four new session-lock wire cases and percentage gates. The measured low session-lock result deliberately does not satisfy the subsequent60% floor. Source-file totals include inline unit-test code; the coverage scope and its limitations remain explicit.
 

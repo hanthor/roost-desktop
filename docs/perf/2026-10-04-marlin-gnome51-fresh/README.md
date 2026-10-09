@@ -1,6 +1,6 @@
 # Fresh paired GNOME 51 and Roost observations
 
-Run [37188800170, attempt 2](https://github.com/hanthor/roost-desktop/actions/runs/37188800170/attempts/2) passed on 2026-10-04. The observer is PR #251 at `3fd269a5e2df682ffd77db84e56f0918144b34b8`. Its package came from successful whole main-push CI [37189354041](https://github.com/hanthor/roost-desktop/actions/runs/37189354041), source `7546647e5967825f522a352ee781e0908f889d1e`, SHA256 `58cfb1792e028aff6d511156e9292a83296934d550ae223538113d6c6056bcb6`.
+Run [37188800170, attempt 2](https://github.com/tuna-os/tuna-desktop/actions/runs/37188800170/attempts/2) passed on 2026-10-04. The observer is PR #251 at `3fd269a5e2df682ffd77db84e56f0918144b34b8`. Its package came from successful whole main-push CI [37189354041](https://github.com/tuna-os/tuna-desktop/actions/runs/37189354041), source `7546647e5967825f522a352ee781e0908f889d1e`, SHA256 `58cfb1792e028aff6d511156e9292a83296934d550ae223538113d6c6056bcb6`.
 
 Both sessions ran sequentially on the same AMD EPYC 7763 host with QEMU 8.2.2 and KVM, four CPUs, 6 GiB RAM and 1280×800 output. Shared payload and base image identifiers, GNOME version, installed reference packages and package provenance are retained alongside this report. The complete run artifact also contains serial logs and all screenshots.
 

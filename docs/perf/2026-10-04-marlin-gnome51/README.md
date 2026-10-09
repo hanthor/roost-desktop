@@ -1,8 +1,8 @@
 # First paired Marlin GNOME 51 / Roost samples — 2026-10-04
 
-[Measurement run 37178851584](https://github.com/hanthor/roost-desktop/actions/runs/37178851584) completed both actual guests on one runner. Each had 6 GiB, four vCPUs and a 1280×800 virtio display. GNOME Shell 51.0 ran first; Roost ran second, using the same CI-only full-system-upgraded Marlin payload. This is one boot per desktop.
+[Measurement run 37178851584](https://github.com/tuna-os/tuna-desktop/actions/runs/37178851584) completed both actual guests on one runner. Each had 6 GiB, four vCPUs and a 1280×800 virtio display. GNOME Shell 51.0 ran first; Roost ran second, using the same CI-only full-system-upgraded Marlin payload. This is one boot per desktop.
 
-The Roost package came from [trusted main run 37151532275](https://github.com/hanthor/roost-desktop/actions/runs/37151532275), source `c2efc2ac12b1919db24e6ddcd1440e8f23eab9c4`. It predates the current roadmap changes. Its SHA256, source record, shared image ID, base digest and installed package versions are retained beside this report. The measurement observer revision recorded by both reports is `1d0e4db298eca73e4fb87b337240205b0fdfaad3` (the pull-request test merge).
+The Roost package came from [trusted main run 37151532275](https://github.com/tuna-os/tuna-desktop/actions/runs/37151532275), source `c2efc2ac12b1919db24e6ddcd1440e8f23eab9c4`. It predates the current roadmap changes. Its SHA256, source record, shared image ID, base digest and installed package versions are retained beside this report. The measurement observer revision recorded by both reports is `1d0e4db298eca73e4fb87b337240205b0fdfaad3` (the pull-request test merge).
 
 | Whole-run sampled metric | GNOME 51 | Roost |
 | --- | ---: | ---: |
