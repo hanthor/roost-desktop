@@ -44,6 +44,9 @@ windows and the services are its stubs. Regenerate with
 `scripts/tuna-walkthrough regen`; the list of features lives in
 `docs/walkthrough.tsv`. How each feature compares with GNOME 51 is in
 the [parity ledger](parity-ledger.md).
+For the session on the real Marlin image, with real GNOME apps on the
+default wallpaper, see the README's hero set and its
+[provenance](walkthrough/README-media.md).
 HEAD
         rows | awk -F '\t' '
             {
