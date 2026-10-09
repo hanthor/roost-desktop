@@ -2903,8 +2903,10 @@ moved="$(jq -c '.pointer_position' "$CSTATE")"
 sleep 0.5
 cstate ".pointer_position == $moved" "pointer stopped" ||
     fail G-A11Y-MOUSEKEYS "the pointer kept moving after the key was released"
-xdotool mousemove --window "$WID" "$a11y_cx" "$a11y_cy"
-cstate ".pointer_position == [$a11y_cx, $a11y_cy]" "pointer back on recorder" ||
+# The host pointer never left the center, so return one pixel aside:
+# a move to where it already is sends no motion.
+xdotool mousemove --window "$WID" $((a11y_cx + 1)) "$a11y_cy"
+cstate ".pointer_position == [$((a11y_cx + 1)), $a11y_cy]" "pointer back on recorder" ||
     fail G-A11Y-MOUSEKEYS "the pointer did not return to the recording window"
 buttons="$(jq '.buttons | length' "$A11Y_KEYS")"
 xdotool key KP_Begin
