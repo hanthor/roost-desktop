@@ -614,6 +614,8 @@ pub struct Runtime {
     strip_view_at: Duration,
     /// Time base for the animations above: real, or manual for proofs.
     animation_clock: crate::animation_clock::AnimationClock,
+    /// When window effects (window_effects.rs) last stepped.
+    window_effects_at: Duration,
     /// Overview search is showing results: the workspace card and
     /// previews hide (GNOME). Reset whenever the overview closes.
     overview_search: bool,
@@ -989,6 +991,7 @@ impl Runtime {
             tile_animation: None,
             strip_view_at: Duration::ZERO,
             animation_clock: crate::animation_clock::AnimationClock::real(),
+            window_effects_at: Duration::ZERO,
             scale: clamp_scale(session.scale),
             input_settings: Default::default(),
             orca: crate::orca::Reader::new(&session.socket_name),
@@ -1684,6 +1687,7 @@ impl Runtime {
             .snapshot(self.animation_clock.now());
         let motion = self.input_settings.motion;
         doc["motion_policy"] = serde_json::json!(motion.level.as_str());
+        doc["window_effects"] = self.manager.window_effects().state_json();
         doc["animation_slowdown"] = serde_json::json!(motion.slowdown());
         // Only a frozen clock is reported: real time would rewrite the
         // state file every frame.
@@ -1879,6 +1883,26 @@ impl Runtime {
         let slide = self.manager.workspace_slide_mut();
         slide.observe(active, &workspaces, width, policy, suspended, now);
         slide.step(now);
+    }
+
+    /// Advance window open/close and dim effects. GNOME skips them
+    /// while the overview is open or a workspace swipe runs, and holds
+    /// a window's map effect until a closing overview has gone.
+    fn step_window_effects(&mut self, overview_drawn: bool) {
+        let now = self.animation_clock.now();
+        let dt = now.saturating_sub(self.window_effects_at).as_secs_f64();
+        self.window_effects_at = now;
+        // GNOME's `overviewOpen`: shown and not closing. A swipe that
+        // drives the overview counts as open until it is released.
+        let open = self.control.overview_open() || self.overview_motion.swiping();
+        let animate = !open && self.shell_swipe.is_none();
+        self.manager
+            .window_effects_mut()
+            .set_policy(self.input_settings.motion, animate);
+        // `overview_drawn` is the drawn progress above zero: a closing
+        // overview holds new maps until it has gone.
+        self.manager
+            .step_window_effects(dt, overview_drawn && !open);
     }
 
     /// A press while the overview is open that no shell surface took:
@@ -3343,6 +3367,7 @@ impl Runtime {
         // The slide first: size changes read this frame's slide offsets.
         self.step_workspace_slide();
         self.step_size_changes();
+        self.step_window_effects(drawn);
         let overview = (show_content && !overlay_visible && drawn).then(|| self.overview_layout());
         // While search shows results, the workspace view steps aside.
         let cards = overview
@@ -3384,6 +3409,9 @@ impl Runtime {
                         offset: (0, 0),
                         scale: self.scale,
                     };
+                    self.state
+                        .closing_snapshots
+                        .set_context(renderer.context_id());
                     let lock_surface = locked
                         .then(|| self.state.primary_output_name())
                         .flatten()
@@ -3483,6 +3511,9 @@ impl Runtime {
                 let crate::drm::DrmBackend {
                     renderer, outputs, ..
                 } = &mut **drm;
+                self.state
+                    .closing_snapshots
+                    .set_context(renderer.context_id());
                 // What each output's frame draws, for presentation
                 // feedback at its page flip (#89): a surface belongs to
                 // the output under its center, else the primary.
@@ -3902,7 +3933,7 @@ fn switcher_previews(
 /// slotted in: `elements[..above]` draw over the preview (the dragged
 /// window, its popups and the shell's layers), the rest beneath it.
 struct Scene {
-    elements: Vec<PreviewElement>,
+    elements: Vec<crate::window_effects::SceneElement>,
     above: usize,
     tile: Vec<smithay::backend::renderer::element::solid::SolidColorRenderElement>,
     /// Window thumbnails over everything (the Alt+Tab switcher's).
@@ -3930,8 +3961,10 @@ impl Scene {
                 .map(|element| {
                     use smithay::backend::renderer::element::Element;
                     let origin = element.geometry(1.0.into()).loc;
-                    smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
-                        element, origin, 1.0,
+                    crate::window_effects::SceneElement::Surface(
+                        smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
+                            element, origin, 1.0,
+                        ),
                     )
                 })
                 .collect(),
@@ -4106,42 +4139,92 @@ fn scene_elements(
         }
         return Scene::flat(crate::layer::front_to_back(elements));
     }
-    let mut elements: Vec<PreviewElement> = Vec::new();
+    use crate::window_effects::{Affine, SceneElement};
+    let mut elements: Vec<SceneElement> = Vec::new();
     let mut owners: Vec<Option<u64>> = Vec::new();
     // Bottom-to-top index where the dragged window starts.
     let mut split_from = None;
+    // A surface tree at `at` under the logical map `map` (window
+    // effects and strip-column scaling), faded by `alpha` and, for a
+    // parent behind a modal dialog, dimmed.
     let tree = |renderer: &mut GlesRenderer,
-                elements: &mut Vec<PreviewElement>,
+                elements: &mut Vec<SceneElement>,
                 surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
                 at: Point<i32, Logical>,
-                sx: f64,
-                alpha: f32| {
+                map: Affine,
+                alpha: f32,
+                dim: Option<crate::window_effects::Brightness>| {
         let origin = view.physical(f64::from(at.x), f64::from(at.y));
-        elements.extend(
-            render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(
-                renderer,
-                surface,
-                origin,
-                view.scale,
-                alpha,
-                Kind::Unspecified,
-            )
-            .into_iter()
-            .map(|element| {
+        let map = map.to_physical(
+            (f64::from(view.offset.0), f64::from(view.offset.1)),
+            view.scale,
+        );
+        let Some(drawn_at) = map.placement((origin.x, origin.y)) else {
+            return;
+        };
+        let surfaces = render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(
+            renderer,
+            surface,
+            Point::<i32, smithay::utils::Physical>::from(drawn_at),
+            view.scale,
+            alpha,
+            Kind::Unspecified,
+        );
+        for element in surfaces {
+            let element =
                 smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
                     element,
                     origin,
-                    (sx, 1.0),
-                )
-            }),
-        );
+                    smithay::utils::Scale::from(map.k),
+                );
+            elements.push(match dim {
+                Some(dim) => crate::window_effects::DimElement::wrap(renderer, element, dim),
+                None => SceneElement::Surface(element),
+            });
+        }
     };
     // Size-change snapshots with the bottom-to-top index they sit at.
     let mut snapshots = Vec::new();
-    for (id, window, geometry) in manager.render_entries() {
+    let effects = manager.window_effects();
+    let entries = manager.render_entries();
+    // Closing windows keep their stacking slot: above the window they
+    // were over, at the bottom, or (that window gone) over the rest;
+    // a workspace switch carries them with their workspace.
+    let closing: Vec<_> = effects
+        .closing()
+        .iter()
+        .filter_map(|c| Some((c, manager.workspace_placement(c.workspace, c.sticky)?)))
+        .collect();
+    let output = crate::window_effects::OutputView {
+        offset: view.offset,
+        scale: view.scale,
+    };
+    let closing_over = |renderer: &mut GlesRenderer,
+                        elements: &mut Vec<SceneElement>,
+                        over: Option<Option<u64>>| {
+        for &(c, (dx, alpha)) in &closing {
+            let placed = match over {
+                Some(slot) => c.above == slot,
+                None => c
+                    .above
+                    .is_some_and(|w| !entries.iter().any(|(id, _, _)| *id == w)),
+            };
+            if placed {
+                elements.extend(crate::window_effects::closing_elements(
+                    renderer, c, output, dx, alpha,
+                ));
+            }
+        }
+    };
+    closing_over(renderer, &mut elements, Some(None));
+    // Closing windows have no client left to pace.
+    owners.resize(elements.len(), None);
+    for (id, window, geometry) in &entries {
+        let (id, geometry) = (*id, *geometry);
         // Unassociated X11 windows contribute no surface yet and
-        // render nothing this frame.
-        if let Some(surface) = window.wl_surface() {
+        // render nothing this frame; a window waiting for its map
+        // effect stays hidden until it starts.
+        if let Some(surface) = window.wl_surface().filter(|_| !effects.is_pending(id)) {
             if split_from.is_none() && split.is_some_and(|s| *s == *surface) {
                 split_from = Some(elements.len());
             }
@@ -4151,7 +4234,7 @@ fn scene_elements(
                 let dx = f64::from(manager.slide_dx(id));
                 frame.live.loc.x += dx;
                 frame.snapshot.loc.x += dx;
-                let alpha = manager.render_alpha(&window);
+                let alpha = manager.render_alpha(window);
                 frame.snapshot_alpha *= alpha;
                 // GNOME's size-change transition (#496): the live window
                 // eased (never scaled past its size), the old frame
@@ -4174,10 +4257,12 @@ fn scene_elements(
                         )
                         .into_iter()
                         .map(|element| {
-                            smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
-                                element,
-                                origin,
-                                (sx, sy),
+                            SceneElement::Surface(
+                                smithay::backend::renderer::element::utils::RescaleRenderElement::from_element(
+                                    element,
+                                    origin,
+                                    (sx, sy),
+                                ),
                             )
                         }),
                     );
@@ -4187,6 +4272,8 @@ fn scene_elements(
                         .map(|element| (elements.len(), element)),
                 );
                 owners.resize(elements.len(), Some(id));
+                closing_over(renderer, &mut elements, Some(Some(id)));
+                owners.resize(elements.len(), None);
                 continue;
             }
             let origin = crate::popup::surface_origin(&surface, geometry.loc);
@@ -4199,9 +4286,23 @@ fn scene_elements(
                 // An unmapped tree has no committed bounds to scale yet.
                 1.0
             };
-            // Below 1 only while a fade-only workspace switch crossfades.
-            let alpha = manager.render_alpha(&window);
-            tree(renderer, &mut elements, &surface, origin, sx, alpha);
+            let visual = effects
+                .visual(id)
+                .unwrap_or(crate::window_effects::Visual::IDENTITY);
+            let effect = visual.affine(geometry);
+            // Below 1 also while a fade-only workspace switch crossfades.
+            let alpha = visual.opacity as f32 * manager.render_alpha(window);
+            let dim = effects.brightness(id);
+            let strip = Affine::about((f64::from(origin.x), f64::from(origin.y)), (sx, 1.0));
+            tree(
+                renderer,
+                &mut elements,
+                &surface,
+                origin,
+                effect.then(strip),
+                alpha,
+                dim,
+            );
             // Popups (#88) right above their window.
             for popup in crate::popup::placed_popups(&surface, origin, true) {
                 tree(
@@ -4209,25 +4310,39 @@ fn scene_elements(
                     &mut elements,
                     &popup.surface,
                     popup.origin,
-                    1.0,
+                    effect,
                     alpha,
+                    None,
                 );
             }
             owners.resize(elements.len(), Some(id));
         }
+        closing_over(renderer, &mut elements, Some(Some(id)));
+        owners.resize(elements.len(), None);
     }
+    closing_over(renderer, &mut elements, None);
+    owners.resize(elements.len(), None);
     // Layer shell above windows: panel strip, then overview, each with
     // its popups (toolkit popovers hang off layer surfaces).
     for (surface, (x, y), _) in crate::layer::layer_layout(state) {
-        tree(renderer, &mut elements, &surface, (x, y).into(), 1.0, 1.0);
+        tree(
+            renderer,
+            &mut elements,
+            &surface,
+            (x, y).into(),
+            Affine::IDENTITY,
+            1.0,
+            None,
+        );
         for popup in crate::popup::placed_popups(&surface, (x, y).into(), false) {
             tree(
                 renderer,
                 &mut elements,
                 &popup.surface,
                 popup.origin,
+                Affine::IDENTITY,
                 1.0,
-                1.0,
+                None,
             );
         }
     }
