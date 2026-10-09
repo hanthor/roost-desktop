@@ -1672,6 +1672,7 @@ impl Runtime {
                 .iter()
                 .map(|w| w.id)
                 .filter(|id| !shown.contains(id))
+                .filter(|id| !self.manager.minimize_animations.is_animating(*id))
                 .collect::<Vec<_>>())
         };
         doc["wallpaper_diagnostics"] = if self.is_locked() {
@@ -4675,6 +4676,9 @@ fn hidden_surfaces(
     manager
         .window_ids()
         .filter(|id| !shown.contains(id))
+        // Mid minimize or restore the window is on screen, though the
+        // manager already counts it hidden (or not yet shown).
+        .filter(|id| !manager.minimize_animations.is_animating(*id))
         .filter_map(|id| manager.surface_of(id))
         .collect()
 }

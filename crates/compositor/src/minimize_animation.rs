@@ -29,6 +29,13 @@ use smithay::utils::{Logical, Point, Rectangle};
 /// GNOME's `MINIMIZE_WINDOW_ANIMATION_TIME`.
 pub const DURATION_MS: f64 = 400.0;
 
+/// Highest opacity an animating window is drawn at. Smithay reports no
+/// opaque region for a surface drawn below full opacity, so the occlusion
+/// pass (#503) never culls what lies beneath a window that is shrinking,
+/// moving or fading through the frame; the difference is under a tenth
+/// of one 8-bit step.
+const ANIMATING_ALPHA_MAX: f64 = 0.999;
+
 /// Settled animations kept for introspection (journeys only).
 const SETTLED_KEPT: usize = 8;
 
@@ -432,7 +439,7 @@ pub fn elements(
                 &tree,
                 location,
                 view.scale,
-                pose.alpha as f32,
+                pose.alpha.min(ANIMATING_ALPHA_MAX) as f32,
                 Kind::Unspecified,
             )
             .into_iter()
