@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Watch one minimize or restore animation through the compositor state file.
 
-Usage: roost-minimize-anim-check.py STATE WINDOW DIRECTION OUT
+Usage: tuna-minimize-anim-check.py STATE WINDOW DIRECTION OUT
            (--animated ICON_JSON | --fade | --instant) [--timeout S]
 
 Start it before the key or click that minimizes (or restores) WINDOW. It
-samples ROOST_COMPOSITOR_STATE (rewritten every frame that changes it)
+samples TUNA_COMPOSITOR_STATE (rewritten every frame that changes it)
 until a new `minimize_settled` entry for WINDOW and DIRECTION appears,
 writes every sample plus the settled entry to OUT, and checks GNOME 51's
 shape (windowManager.js `_minimizeWindow`/`_unminimizeWindow`):

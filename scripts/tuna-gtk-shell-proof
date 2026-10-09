@@ -3027,11 +3027,11 @@ cstate "any(.above[]; . == $alpha_id) | not" "Alpha unpinned" || fail G-WINDOW-M
 # both snap. The icon is checked against the dash while the overview
 # shows it; it stays published after the overview closes.
 xdotool key Super_L
-cstate ".overview_open and any(.layers[]; .namespace == \"roost-shell-dash\") and any(.icon_geometries[]; .window == $alpha_id)" \
+cstate ".overview_open and any(.layers[]; .namespace == \"tuna-shell-dash\") and any(.icon_geometries[]; .window == $alpha_id)" \
     "alpha icon published" || fail G-MINIMIZE-ANIM "the shell never published Alpha's dash icon"
 sleep 1
 alpha_icon="$(jq -c "[.icon_geometries[] | select(.window == $alpha_id) | .rect][0]" "$CSTATE")"
-jq -e --argjson i "$alpha_icon" '[.layers[] | select(.namespace == "roost-shell-dash") | .rect][0] as $d
+jq -e --argjson i "$alpha_icon" '[.layers[] | select(.namespace == "tuna-shell-dash") | .rect][0] as $d
     | $d != null and $i[2] > 0 and $i[3] > 0 and $i[0] >= $d[0] and $i[1] >= $d[1]
     and $i[0] + $i[2] <= $d[0] + $d[2] and $i[1] + $i[3] <= $d[1] + $d[3]' "$CSTATE" >/dev/null ||
     fail G-MINIMIZE-ANIM "Alpha's published icon $alpha_icon is not inside the dash"
@@ -3040,7 +3040,7 @@ xdotool key Escape
 cstate "(.overview_open | not) and .focused == $alpha_id" "alpha focused for minimize" ||
     fail G-MINIMIZE-ANIM "Alpha was not focused after the overview closed"
 minimize_check() {
-    "$PY" "$ROOT/scripts/lib/roost-minimize-anim-check.py" "$CSTATE" "$alpha_id" "$@" \
+    "$PY" "$ROOT/scripts/lib/tuna-minimize-anim-check.py" "$CSTATE" "$alpha_id" "$@" \
         >>"$ARTIFACTS/minimize-anim.log" 2>&1 &
     MINIMIZE_CHECK_PID=$!
     sleep 0.3
@@ -3067,7 +3067,7 @@ jq -e --argjson w "$alpha_rect" --argjson i "$alpha_icon" \
 anim_clock 400
 cstate "(.minimize_animations | length) == 0 and (.minimize_settled | last | .window == $alpha_id and .direction == \"minimize\" and .animated and (.elapsed_ms - 400 | fabs) < 0.5 and .to == $alpha_icon and .from == $alpha_rect)" \
     "minimize settled at 400 ms" || fail G-MINIMIZE-ANIM "the minimize did not settle on the dash icon at 400 ms"
-rm -f "$ROOST_ANIMATION_CLOCK"
+rm -f "$TUNA_ANIMATION_CLOCK"
 cstate '.animation_clock_manual | not' "real clock after minimize" ||
     fail G-MINIMIZE-ANIM "removing the clock file did not resume real time"
 minimize_check restore "$ARTIFACTS/minimize-anim-up.json" --animated "$alpha_icon"
