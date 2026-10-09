@@ -1625,7 +1625,7 @@ pub fn layout_shown(
     let strip = workspaces.len() >= THUMBNAILS_MIN_WORKSPACES;
     let shift = if strip { thumbnails_offset(work_h) } else { 0 };
     if strip {
-        thumbnails(&mut out, output, work_top, &workspaces, active, windows);
+        thumbnails(&mut out, output, work_top, workspaces, active, windows);
     }
     let active_card = card_rect(output, work_top, 0, shift);
     for (slot, offset) in neighbors {
