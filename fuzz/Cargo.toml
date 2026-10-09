@@ -1,5 +1,5 @@
 [package]
-name = "roost-control-fuzz"
+name = "tuna-control-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "=0.4.13"
-roost-shell-control = { path = "../crates/shell-control-schema" }
+tuna-shell-control = { path = "../crates/shell-control-schema" }
 
 [workspace]
 members = ["."]

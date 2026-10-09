@@ -19,27 +19,27 @@ RUN sed -i '/^\[core\]/i [core-testing]\nInclude = /etc/pacman.d/mirrorlist\n\n[
     done && \
     test "$kernel_count" -eq 1 && \
     gnome-shell --version | grep -Eq '^GNOME Shell 51([. ]|$)' && \
-    pacman -Q > /tmp/roost-baseline-packages.txt && \
-    LC_ALL=C sort /tmp/roost-baseline-packages.txt > /usr/share/roost-perf-baseline-packages.txt && \
-    rm /tmp/roost-baseline-packages.txt
+    pacman -Q > /tmp/tuna-baseline-packages.txt && \
+    LC_ALL=C sort /tmp/tuna-baseline-packages.txt > /usr/share/tuna-perf-baseline-packages.txt && \
+    rm /tmp/tuna-baseline-packages.txt
 
 # Unmodified distribution GNOME target; no diagnostic package is installed.
 FROM ${COHERENT_BASE} AS stock-reference
 COPY scripts/lib/gnome_reference.py /usr/libexec/gnome_reference.py
-COPY packaging/marlin/perf/roost-perf-reference-image /usr/libexec/roost-perf-reference-image
-RUN pacman -Qlq linux mutter gnome-shell > /tmp/roost-baseline-critical-files.txt && \
+COPY packaging/marlin/perf/tuna-perf-reference-image /usr/libexec/tuna-perf-reference-image
+RUN pacman -Qlq linux mutter gnome-shell > /tmp/tuna-baseline-critical-files.txt && \
     for module_dir in /usr/lib/modules/*; do \
         if test -f "$module_dir/vmlinuz"; then \
             test -s "$module_dir/vmlinuz" && test -s "$module_dir/initramfs.img" && test -s "$module_dir/modules.dep" && \
                 printf '%s\n' "$module_dir/vmlinuz" "$module_dir/initramfs.img" "$module_dir/modules.dep" || exit 1; \
         fi; \
-    done >> /tmp/roost-baseline-critical-files.txt && \
+    done >> /tmp/tuna-baseline-critical-files.txt && \
     while IFS= read -r path; do \
         test ! -f "$path" || sha256sum "$path" || exit 1; \
-    done < /tmp/roost-baseline-critical-files.txt > /usr/share/roost-perf-baseline-critical.sha256 && \
-    test -s /usr/share/roost-perf-baseline-critical.sha256 && \
-    rm /tmp/roost-baseline-critical-files.txt && \
-    python3 /usr/libexec/roost-perf-reference-image stock
+    done < /tmp/tuna-baseline-critical-files.txt > /usr/share/tuna-perf-baseline-critical.sha256 && \
+    test -s /usr/share/tuna-perf-baseline-critical.sha256 && \
+    rm /tmp/tuna-baseline-critical-files.txt && \
+    python3 /usr/libexec/tuna-perf-reference-image stock
 
 # Build the pinned Arch 51.0 diagnostic variant with closed writer and source IDs.
 # Toolchain and source files remain in this build stage, outside the measured image.
@@ -60,23 +60,23 @@ RUN pacman -S --needed --noconfirm base-devel git sudo && \
 
 FROM ${COHERENT_BASE} AS diagnostic-reference
 COPY scripts/lib/gnome_reference.py /usr/libexec/gnome_reference.py
-COPY packaging/marlin/perf/roost-perf-reference-image /usr/libexec/roost-perf-reference-image
-COPY --from=mutter-profiler-build /profiler-package /usr/share/roost-perf-mutter-profiler
-RUN cd /usr/share/roost-perf-mutter-profiler && sha256sum -c sha256sums && \
+COPY packaging/marlin/perf/tuna-perf-reference-image /usr/libexec/tuna-perf-reference-image
+COPY --from=mutter-profiler-build /profiler-package /usr/share/tuna-perf-mutter-profiler
+RUN cd /usr/share/tuna-perf-mutter-profiler && sha256sum -c sha256sums && \
     pacman -U --noconfirm mutter-51.0-1.7-x86_64.pkg.tar.zst && \
     pacman -Q mutter | grep -qx 'mutter 51.0-1.7' && \
-    pacman -Q > /tmp/roost-baseline-packages.txt && \
-    LC_ALL=C sort /tmp/roost-baseline-packages.txt > /usr/share/roost-perf-baseline-packages.txt && \
-    pacman -Qlq linux mutter > /tmp/roost-baseline-critical-files.txt && \
+    pacman -Q > /tmp/tuna-baseline-packages.txt && \
+    LC_ALL=C sort /tmp/tuna-baseline-packages.txt > /usr/share/tuna-perf-baseline-packages.txt && \
+    pacman -Qlq linux mutter > /tmp/tuna-baseline-critical-files.txt && \
     for module_dir in /usr/lib/modules/*; do \
         if test -f "$module_dir/vmlinuz"; then \
             test -s "$module_dir/vmlinuz" && test -s "$module_dir/initramfs.img" && test -s "$module_dir/modules.dep" && \
                 printf '%s\n' "$module_dir/vmlinuz" "$module_dir/initramfs.img" "$module_dir/modules.dep" || exit 1; \
         fi; \
-    done >> /tmp/roost-baseline-critical-files.txt && \
+    done >> /tmp/tuna-baseline-critical-files.txt && \
     while IFS= read -r path; do \
         test ! -f "$path" || sha256sum "$path" || exit 1; \
-    done < /tmp/roost-baseline-critical-files.txt > /usr/share/roost-perf-baseline-critical.sha256 && \
-    test -s /usr/share/roost-perf-baseline-critical.sha256 && \
-    rm /tmp/roost-baseline-packages.txt /tmp/roost-baseline-critical-files.txt && \
-    python3 /usr/libexec/roost-perf-reference-image diagnostic
+    done < /tmp/tuna-baseline-critical-files.txt > /usr/share/tuna-perf-baseline-critical.sha256 && \
+    test -s /usr/share/tuna-perf-baseline-critical.sha256 && \
+    rm /tmp/tuna-baseline-packages.txt /tmp/tuna-baseline-critical-files.txt && \
+    python3 /usr/libexec/tuna-perf-reference-image diagnostic

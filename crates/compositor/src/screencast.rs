@@ -1,5 +1,5 @@
 //! PipeWire screen-cast streams (#61), adapted from niri's
-//! `src/screencasting/pw_utils.rs` (GPL-3.0-or-later, like Roost).
+//! `src/screencasting/pw_utils.rs` (GPL-3.0-or-later, like Tuna Desktop).
 //!
 //! Monitor and window streams in BGRx over shared memory (PipeWire
 //! allocates and maps the memfd buffers), full frames at most every
@@ -84,8 +84,8 @@ impl PipeWire {
         let session_signal = signal.clone();
         let stream = StreamRc::new(
             self.core.clone(),
-            "roost-screen-cast",
-            PropertiesBox::from_iter([("node.name", "roost-screen-cast")]),
+            "tuna-screen-cast",
+            PropertiesBox::from_iter([("node.name", "tuna-screen-cast")]),
         )
         .ok()?;
         let inner = Rc::new(RefCell::new(Inner::default()));
@@ -94,7 +94,7 @@ impl PipeWire {
             .state_changed({
                 let inner = inner.clone();
                 move |stream, (), old, new| {
-                    eprintln!("roost-compositor: screen cast {session_id}: {old:?} -> {new:?}");
+                    eprintln!("tuna-compositor: screen cast {session_id}: {old:?} -> {new:?}");
                     let mut inner = inner.borrow_mut();
                     match new {
                         StreamState::Paused => {

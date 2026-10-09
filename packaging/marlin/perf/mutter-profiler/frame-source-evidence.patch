@@ -5,7 +5,7 @@
    int64_t last_presentation_time_us = 0;
    int64_t dispatch_time_us;
 +
-+  COGL_TRACE_MESSAGE ("Roost::FrameClock::presented-id",
++  COGL_TRACE_MESSAGE ("Tuna::FrameClock::presented-id",
 +                      "output=%s view_frame=%" G_GINT64_FORMAT
 +                      " global_frame=%" G_GINT64_FORMAT
 +                      " presentation_us=%" G_GINT64_FORMAT
@@ -23,7 +23,7 @@
  
    frame_count = frame_clock->frame_count++;
  
-+  COGL_TRACE_MESSAGE ("Roost::FrameClock::dispatch-id",
++  COGL_TRACE_MESSAGE ("Tuna::FrameClock::dispatch-id",
 +                      "output=%s frame=%" G_GINT64_FORMAT
 +                      " dispatch_us=%" G_GINT64_FORMAT,
 +                      frame_clock->output_name, frame_count, time_us);
@@ -37,7 +37,7 @@
                                 NULL,
                                 (gpointer *) &page_flip_data);
  
-+  COGL_TRACE_MESSAGE ("Roost::KMS::raw-page-flip",
++  COGL_TRACE_MESSAGE ("Tuna::KMS::raw-page-flip",
 +                      "crtc=%u sequence=%u seconds=%u microseconds=%u device=%s",
 +                      crtc_id, sequence, tv_sec, tv_usec,
 +                      meta_kms_impl_device_get_path (impl_device));

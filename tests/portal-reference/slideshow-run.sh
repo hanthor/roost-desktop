@@ -4,13 +4,13 @@ if [ "$(id -u)" -eq 0 ]; then
     # A real isolated system bus, without fabricated service implementations.
     mkdir -p /run/dbus
     dbus-daemon --system --fork --nopidfile
-    chown -R --no-dereference roost-proof:roost-proof /out
+    chown -R --no-dereference tuna-proof:tuna-proof /out
     status=0
-    env -u DBUS_SESSION_BUS_ADDRESS -u ROOST_SLIDESHOW_BUS runuser -u roost-proof -- "$0" || status=$?
+    env -u DBUS_SESSION_BUS_ADDRESS -u TUNA_SLIDESHOW_BUS runuser -u tuna-proof -- "$0" || status=$?
     chown -R --no-dereference 0:0 /out
     exit "$status"
 fi
-if [ -z "${ROOST_SLIDESHOW_BUS:-}" ]; then ROOST_SLIDESHOW_BUS=1 exec dbus-run-session -- "$0"; fi
+if [ -z "${TUNA_SLIDESHOW_BUS:-}" ]; then TUNA_SLIDESHOW_BUS=1 exec dbus-run-session -- "$0"; fi
 [ "$(id -u)" -eq 1000 ]
 export DISPLAY=:99 XDG_RUNTIME_DIR=/out/runtime XDG_CONFIG_HOME=/out/config XDG_DATA_HOME=/out/data XDG_STATE_HOME=/out/state
 export XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=GNOME GSETTINGS_BACKEND=keyfile LIBGL_ALWAYS_SOFTWARE=1 GTK_A11Y=atspi LC_ALL=C.UTF-8
@@ -47,12 +47,12 @@ trap cleanup EXIT
 Xvfb :99 -screen 0 1280x800x24 -ac -nolisten tcp >/out/xvfb.log 2>&1 & pids="$pids $!"
 sleep 1
 export WAYLAND_DISPLAY=slideshow-proof GDK_BACKEND=wayland
-export ROOST_COMPOSITOR_STATE=/out/compositor-state.json
+export TUNA_COMPOSITOR_STATE=/out/compositor-state.json
 dbus-update-activation-environment DISPLAY WAYLAND_DISPLAY GDK_BACKEND GTK_A11Y GSETTINGS_BACKEND XDG_SESSION_TYPE XDG_CURRENT_DESKTOP XDG_RUNTIME_DIR XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME LC_ALL
-env -u WAYLAND_DISPLAY /candidate/usr/bin/roost-compositor --backend winit --socket slideshow-proof --width 1280 --height 800 --shell-bin /candidate/usr/bin/roost-shell-gtk >/out/compositor.log 2>&1 & compositor_pid=$!; pids="$pids $compositor_pid"
+env -u WAYLAND_DISPLAY /candidate/usr/bin/tuna-compositor --backend winit --socket slideshow-proof --width 1280 --height 800 --shell-bin /candidate/usr/bin/tuna-shell-gtk >/out/compositor.log 2>&1 & compositor_pid=$!; pids="$pids $compositor_pid"
 end=$((SECONDS + 30))
-until [ -S "$XDG_RUNTIME_DIR/slideshow-proof" ] && [ -s "$ROOST_COMPOSITOR_STATE" ]; do [ "$SECONDS" -lt "$end" ] || exit 1; sleep .1; done
-python3 /repo/scripts/lib/roost-stock-slideshow-proof.py initial > /out/journey-initial.log 2>&1
+until [ -S "$XDG_RUNTIME_DIR/slideshow-proof" ] && [ -s "$TUNA_COMPOSITOR_STATE" ]; do [ "$SECONDS" -lt "$end" ] || exit 1; sleep .1; done
+python3 /repo/scripts/lib/tuna-stock-slideshow-proof.py initial > /out/journey-initial.log 2>&1
 shell_pid=$(jq -r '.pid' /out/initial-session.json)
 kill "$compositor_pid"
 kill "$shell_pid" 2>/dev/null || true
@@ -60,9 +60,9 @@ wait "$compositor_pid" || true
 # Once both actual owners are gone, remove their private stale socket/lock.
 end=$((SECONDS + 15))
 until gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.NameHasOwner org.gnome.Shell | grep -q false; do [ "$SECONDS" -lt "$end" ] || exit 1; sleep .1; done
-rm -f "$XDG_RUNTIME_DIR/slideshow-proof" "$XDG_RUNTIME_DIR/slideshow-proof.lock" "$ROOST_COMPOSITOR_STATE"
-env -u WAYLAND_DISPLAY /candidate/usr/bin/roost-compositor --backend winit --socket slideshow-proof --width 1280 --height 800 --shell-bin /candidate/usr/bin/roost-shell-gtk >/out/compositor-restarted.log 2>&1 & pids="$pids $!"
+rm -f "$XDG_RUNTIME_DIR/slideshow-proof" "$XDG_RUNTIME_DIR/slideshow-proof.lock" "$TUNA_COMPOSITOR_STATE"
+env -u WAYLAND_DISPLAY /candidate/usr/bin/tuna-compositor --backend winit --socket slideshow-proof --width 1280 --height 800 --shell-bin /candidate/usr/bin/tuna-shell-gtk >/out/compositor-restarted.log 2>&1 & pids="$pids $!"
 end=$((SECONDS + 30))
-until [ -S "$XDG_RUNTIME_DIR/slideshow-proof" ] && [ -s "$ROOST_COMPOSITOR_STATE" ]; do [ "$SECONDS" -lt "$end" ] || exit 1; sleep .1; done
-python3 /repo/scripts/lib/roost-stock-slideshow-proof.py restarted > /out/journey-restarted.log 2>&1
+until [ -S "$XDG_RUNTIME_DIR/slideshow-proof" ] && [ -s "$TUNA_COMPOSITOR_STATE" ]; do [ "$SECONDS" -lt "$end" ] || exit 1; sleep .1; done
+python3 /repo/scripts/lib/tuna-stock-slideshow-proof.py restarted > /out/journey-restarted.log 2>&1
 printf '%s\n' 'GNOME51 stock Background chooser: actual XML light/dark UI, natural clock/reference static and blended pixels, actual same-URI image/XML replacement and genuine persisted session restart' > /out/assertions.txt

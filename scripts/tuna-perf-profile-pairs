@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# One fixed profile, three fresh pairs; the original strict failure remains fatal.
+set -euo pipefail
+[[ $# == 1 ]] || exit 2
+profile=$1
+case "$profile" in diagnostic|stock) ;; *) exit 2 ;; esac
+if [[ "$profile" == stock ]]; then
+  # Read only the original diagnostic finite status and every reached child
+  # departure receipt before ANY stock image/disk operation. No orphan guesses.
+  python3 - <<'HANDOFF'
+import sys
+sys.path.insert(0, 'scripts/lib')
+from perf_vm_lifetime import require_stock_handoff
+require_stock_handoff('perf-artifacts')
+HANDOFF
+fi
+mkdir -p perf-artifacts
+profile_root=perf-artifacts
+if [[ "$profile" == stock ]]; then profile_root=perf-artifacts/stock; fi
+mkdir -p "$profile_root"
+case_index=0
+repeat=0
+desktop=none
+stage="setup"
+finish() {
+  local original=$? receipt_status=0
+  trap - EXIT
+  # Only finite original exit/stage/index fields; no exception or raw error text.
+  python3 - "$profile_root/acquisition-status.json" "$profile" "$original" "$case_index" "$repeat" "$desktop" "$stage" <<'RECEIPT' || receipt_status=$?
+import json, os, stat, sys
+path, profile, status, index, repeat, desktop, stage = sys.argv[1:]
+status, index, repeat = map(int, (status, index, repeat))
+if profile not in {"diagnostic", "stock"} or desktop not in {"none", "gnome", "tuna"} or stage not in {"setup", "image-build", "image-probe", "disk-create", "disk-install", "disk-owner", "measurement", "disk-remove", "image-remove", "complete"} or not 0 <= status <= 255 or not 0 <= index <= 6 or not 0 <= repeat <= 3:
+    raise SystemExit(2)
+raw = json.dumps({"schema": 1, "profile": profile, "exit_status": status, "case_index": index, "repeat": repeat, "desktop": desktop, "stage": stage, "all_six_commands_succeeded": status == 0 and index == 6 and stage == "complete"}).encode()
+if len(raw) > 4096:
+    raise SystemExit(2)
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+with os.fdopen(fd, "wb") as stream:
+    original = os.fstat(stream.fileno())
+    key = lambda value: (value.st_dev, value.st_ino, value.st_uid, value.st_mode, value.st_nlink)
+    if not stat.S_ISREG(original.st_mode) or original.st_uid != os.getuid() or original.st_nlink != 1 or stat.S_IMODE(original.st_mode) != 0o600:
+        raise SystemExit(2)
+    stream.write(raw)
+    stream.flush()
+    os.fsync(stream.fileno())
+    if key(original) != key(os.fstat(stream.fileno())) or key(original) != key(os.stat(path, follow_symlinks=False)):
+        raise SystemExit(2)
+RECEIPT
+  if [[ "$original" != 0 ]]; then exit "$original"; fi
+  exit "$receipt_status"
+}
+trap finish EXIT
+cp base-digest perf-artifacts/
+profile_root=perf-artifacts
+reference_kind=instrumented-gnome51
+if [[ "$profile" == stock ]]; then profile_root=perf-artifacts/stock; reference_kind=distribution-stock-gnome51; fi
+# Three pairs alternate G/R, R/G, G/R; order counts remain 2:1.
+
+for repeat in 1 2 3; do
+  result_root="$profile_root"
+  if [[ "$repeat" != 1 ]]; then
+    result_root="$profile_root/repeat-$repeat"
+  fi
+  mkdir -p "$result_root"
+  desktops="gnome tuna"
+  order=gnome-tuna
+  if [[ "$repeat" == 2 ]]; then desktops="tuna gnome"; order=tuna-gnome; fi
+  for desktop in $desktops; do
+    case_index=$((case_index + 1))
+    image="localhost/marlin-$desktop-perf:ci"
+    stage="image-build"
+    sudo podman build -f packaging/marlin/perf/Containerfile --build-arg "BASE_IMAGE=localhost/marlin-tuna-preview:$profile" --build-arg DESKTOP="$desktop" -t "$image" .
+    probe='if grep -A8 "^\[composefs\]" /usr/lib/ostree/prepare-root.conf 2>/dev/null | grep -qiE "enabled[[:space:]]*=[[:space:]]*(yes|true|1|signed)" || ls /usr/lib/systemd/boot/efi/systemd-boot*.efi >/dev/null 2>&1; then echo --composefs-backend; fi; grep -A8 "^\[composefs\]" /usr/lib/ostree/prepare-root.conf 2>/dev/null | grep -qiE "enabled[[:space:]]*=[[:space:]]*(yes|true|1|signed)" && echo "--filesystem ext4" || true'
+    stage="image-probe"
+    args=$(sudo podman run --rm --entrypoint "" "$image" sh -c "$probe" | tr '\n' ' ')
+    stage="disk-create"
+    truncate -s 20G /mnt/perf/disk.raw
+    stage="disk-install"
+    # shellcheck disable=SC2086
+    sudo podman run --rm --privileged --pid=host --security-opt label=type:unconfined_t -v /dev:/dev -v /var/lib/containers:/var/lib/containers -v /mnt/perf:/output "$image" bootc install to-disk --via-loopback --generic-image --wipe $args /output/disk.raw
+    stage="disk-owner"
+    sudo chown "$(id -u):$(id -g)" /mnt/perf/disk.raw
+    stage="measurement"
+    scripts/tuna-vm-perf --owned-vm-handoff --disk /mnt/perf/disk.raw --desktop "$desktop" --gnome-profile "$profile" --reference-image "$profile_root/reference-image.json" --out "$result_root/$desktop" --meta "base_digest=$(cat base-digest)" --meta "shared_image_id=$(cat "shared-image-id-$profile")" --meta "observer_revision=$GITHUB_SHA" --meta "acquisition_repeat=$repeat" --meta "acquisition_order=$order" --meta "reference_kind=$reference_kind" --meta "gnome_profile=$profile"
+    stage="disk-remove"
+    rm /mnt/perf/disk.raw
+    stage="image-remove"
+    sudo podman rmi "$image"
+  done
+done
+stage="complete"

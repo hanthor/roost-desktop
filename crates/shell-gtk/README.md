@@ -1,6 +1,6 @@
-# roost-shell-gtk
+# tuna-shell-gtk
 
-The Roost shell drawn with GTK4 and libadwaita (ADR 0006): GNOME 51's top
+The Tuna Desktop shell drawn with GTK4 and libadwaita (ADR 0006): GNOME 51's top
 panel as a layer-shell strip, the calendar and notification list, quick
 settings, the overview's dash, search and app grid, the Alt+Tab switcher,
 OSDs, the lock screen, and the window menu. Every control is a real GTK
@@ -8,12 +8,12 @@ widget, so it uses the system interface font and is reachable over AT-SPI.
 
 ## Binary
 
-`roost-shell-gtk` (`src/main.rs`). This crate has no library target and no
+`tuna-shell-gtk` (`src/main.rs`). This crate has no library target and no
 public Rust API. The compositor runs it as its supervised shell when it is
-installed beside it, otherwise falls back to `roost-shell-host`; select it
-explicitly with `ROOST_SHELL_BIN=roost-shell-gtk` or
-`roost-compositor --shell-bin`. Compositor state arrives over the shell
-control socket (`ROOST_CONTROL_SOCKET`).
+installed beside it, otherwise falls back to `tuna-shell-host`; select it
+explicitly with `TUNA_SHELL_BIN=tuna-shell-gtk` or
+`tuna-compositor --shell-bin`. Compositor state arrives over the shell
+control socket (`TUNA_CONTROL_SOCKET`).
 
 Modules in `src/` map to GNOME surfaces and services, for example
 `calendar`, `events`, `notify`, `services` (NetworkManager, BlueZ, power
@@ -24,11 +24,11 @@ Shell's icons from `icons/` into a GResource.
 
 ## Depends on
 
-`roost-shell-host` (app discovery, control client, notifications store,
-tray watcher), `roost-shell-control`, GTK4, libadwaita, gtk4-layer-shell
+`tuna-shell-host` (app discovery, control client, notifications store,
+tray watcher), `tuna-shell-control`, GTK4, libadwaita, gtk4-layer-shell
 (not packaged on Ubuntu 24.04; see `scripts/ci-install-gtk4-layer-shell`)
-and gtk4-session-lock. Proven end to end by `scripts/roost-gtk-shell-proof`
-and `scripts/roost-scale-proof`.
+and gtk4-session-lock. Proven end to end by `scripts/tuna-gtk-shell-proof`
+and `scripts/tuna-scale-proof`.
 
 ## Docs
 

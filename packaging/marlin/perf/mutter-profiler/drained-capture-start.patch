@@ -246,7 +246,7 @@
 +                                  state.output, gate->clock, state.next_counter,
 +                                  state.pending, state.depth, state.dispatched, state.state,
 +                                  gate->requested_us, g_get_monotonic_time (), gate->samples);
-+  COGL_TRACE_MESSAGE ("Roost::CaptureBoundary", "%s", description);
++  COGL_TRACE_MESSAGE ("Tuna::CaptureBoundary", "%s", description);
 +}
 +
 +static gboolean
@@ -304,7 +304,7 @@
 +              GVariant *fd_variant)
 +{
 +  MetaProfiler *profiler = META_PROFILER (dbus_profiler);
-+  g_autoptr (GVariant) option = g_variant_lookup_value (options, "roost-require-drained", NULL);
++  g_autoptr (GVariant) option = g_variant_lookup_value (options, "tuna-require-drained", NULL);
 +  g_autoptr (MetaContext) context = NULL;
 +  MetaBackend *backend;
 +  ClutterActor *actor;
@@ -453,7 +453,7 @@
 +    }
 +  /* The final owned clock observation and disable share one main callback;
 +   * no dispatch can intervene. Normal scheduling is never inhibited/reset. */
-+  COGL_TRACE_MESSAGE ("Roost::CaptureStopBoundary",
++  COGL_TRACE_MESSAGE ("Tuna::CaptureStopBoundary",
 +                      "output=%s clock=%p next=%" G_GINT64_FORMAT
 +                      " pending=%u depth=%u dispatched=%d state=%s"
 +                      " requested_us=%" G_GINT64_FORMAT " closing_us=%" G_GINT64_FORMAT

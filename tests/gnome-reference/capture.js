@@ -1,4 +1,4 @@
-// GNOME 51 reference capture for Roost's pixel-parity work.
+// GNOME 51 reference capture for Tuna Desktop's pixel-parity work.
 // Run as: gnome-shell --headless --virtual-monitor WxH --automation-script capture.js
 // Writes OUT/<state>.png and OUT/<state>.json (visible styled actors).
 import Clutter from 'gi://Clutter';
@@ -115,7 +115,7 @@ function windowState(state) {
 async function a11y(state) {
     // Await the subprocess without blocking GNOME's main loop: it must
     // answer the AT-SPI client's requests while the tree is being read.
-    const child = Gio.Subprocess.new(['/usr/bin/python3', '/proof-lib/roost-a11y-dump.py',
+    const child = Gio.Subprocess.new(['/usr/bin/python3', '/proof-lib/tuna-a11y-dump.py',
         'gnome-shell', `${OUT}/a11y-${state}.json`, '20'],
         Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
     const result = await child.communicate_utf8_async(null, null);
@@ -205,14 +205,14 @@ export async function run() {
     Main.overview.hide();
     await Scripting.sleep(1500);
 
-    // The same libadwaita windows Roost's capture opens, so window
+    // The same libadwaita windows Tuna Desktop's capture opens, so window
     // placement, stacking and decorations compare pixel for pixel.
     const testWindows = [];
     for (const [title, color] of [['Alpha', '#3584e4'], ['Beta', '#2ec27e'], ['Gamma', '#e66100']]) {
         testWindows.push(Gio.Subprocess.new(
-            ['/usr/bin/python3', '/proof-lib/roost-test-window.py', title, color],
+            ['/usr/bin/python3', '/proof-lib/tuna-test-window.py', title, color],
             Gio.SubprocessFlags.NONE));
-        // One at a time, as Roost's capture maps them in order.
+        // One at a time, as Tuna Desktop's capture maps them in order.
         for (let t = 0; t < 100 && global.get_window_actors().length < testWindows.length; t++)
             await Scripting.sleep(100);
     }
@@ -268,11 +268,11 @@ export async function run() {
     await shot('22b-tiled-right');
     await chord([Clutter.KEY_Super_L, Clutter.KEY_Down]);
 
-    // The same D-Bus notification Roost's capture sends.
+    // The same D-Bus notification Tuna Desktop's capture sends.
     Gio.DBus.session.call('org.freedesktop.Notifications',
         '/org/freedesktop/Notifications', 'org.freedesktop.Notifications', 'Notify',
         new GLib.Variant('(susssasa{sv}i)', ['System', 0, 'cog-wheel-symbolic',
-            'Roost reference', 'A notification banner, as GNOME 51 draws it',
+            'Tuna Desktop reference', 'A notification banner, as GNOME 51 draws it',
             [], {}, 5000]),
         null, Gio.DBusCallFlags.NONE, -1, null, null);
     await Scripting.sleep(1000);
@@ -318,7 +318,7 @@ export async function run() {
     await Scripting.sleep(2000);
 
     // The window menu, as a right click on the focused window's header
-    // bar at (500, 280) opens it (Roost's capture right-clicks there).
+    // bar at (500, 280) opens it (Tuna Desktop's capture right-clicks there).
     const focused = global.display.focus_window;
     if (focused) {
         const frame = focused.get_frame_rect();
@@ -416,12 +416,12 @@ export async function run() {
     }
 
     // An app's popover (an xdg popup): a fourth test window opens its
-    // header-bar menu by itself, as Roost's capture does.
+    // header-bar menu by itself, as Tuna Desktop's capture does.
     {
         const launcher = new Gio.SubprocessLauncher({flags: Gio.SubprocessFlags.NONE});
-        launcher.setenv('ROOST_TEST_POPOVER', '1', true);
+        launcher.setenv('TUNA_TEST_POPOVER', '1', true);
         const before = global.get_window_actors().length;
-        const delta = launcher.spawnv(['/usr/bin/python3', '/proof-lib/roost-test-window.py', 'Delta', '#c01c28']);
+        const delta = launcher.spawnv(['/usr/bin/python3', '/proof-lib/tuna-test-window.py', 'Delta', '#c01c28']);
         for (let t = 0; t < 100 && global.get_window_actors().length <= before; t++)
             await Scripting.sleep(100);
         await Scripting.sleep(3000);

@@ -308,7 +308,7 @@ pub fn attach(w: &Rc<Widgets>) {
                 brightness(&conn, &w2);
                 battery(&conn, &w2);
             }
-            Err(e) => eprintln!("roost-shell-gtk: no system bus, service tiles hidden: {e}"),
+            Err(e) => eprintln!("tuna-shell-gtk: no system bus, service tiles hidden: {e}"),
         },
     );
     audio(w);
@@ -556,10 +556,10 @@ fn power_profiles(conn: &gio::DBusConnection, w: &Rc<Widgets>, which: usize) {
     }
 }
 
-/// First sysfs backlight (`ROOST_BACKLIGHT_ROOT` overrides the root
+/// First sysfs backlight (`TUNA_BACKLIGHT_ROOT` overrides the root
 /// for tests).
 fn backlight() -> Option<(String, PathBuf)> {
-    let root = std::env::var_os("ROOST_BACKLIGHT_ROOT")
+    let root = std::env::var_os("TUNA_BACKLIGHT_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/sys/class/backlight"));
     backlight_for(&root, None)
@@ -608,7 +608,7 @@ pub enum BrightnessStep {
 /// by a twentieth through logind and return the new level (0..1) for
 /// the OSD, or `None` without a backlight.
 pub fn step_brightness_for(step: BrightnessStep, output: Option<&str>) -> Option<f64> {
-    let root = std::env::var_os("ROOST_BACKLIGHT_ROOT")
+    let root = std::env::var_os("TUNA_BACKLIGHT_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/sys/class/backlight"));
     let (name, dir) = backlight_for(&root, output)?;
@@ -797,10 +797,10 @@ impl AudioUi {
         }
         self.syncing.set(false);
         if snapshot.recording != self.last.borrow().recording {
-            eprintln!("roost-shell-gtk: audio recording event {recording}");
+            eprintln!("tuna-shell-gtk: audio recording event {recording}");
             if let Some(panel) = w.panel_mic.ancestor(gtk::Window::static_type()) {
                 panel.add_tick_callback(move |_, _| {
-                    eprintln!("roost-shell-gtk: audio recording frame {recording}");
+                    eprintln!("tuna-shell-gtk: audio recording frame {recording}");
                     glib::ControlFlow::Break
                 });
             }
@@ -938,7 +938,7 @@ impl AudioUi {
                     }
                     Ok(false) => {}
                     Err(e) => {
-                        eprintln!("roost-shell-gtk: {e}");
+                        eprintln!("tuna-shell-gtk: {e}");
                         ui.retry();
                         return;
                     }

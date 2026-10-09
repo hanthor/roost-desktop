@@ -1,9 +1,9 @@
 //! GNOME's display configuration (`~/.config/monitors.xml`, #59).
 //!
 //! GNOME Settings writes each monitor arrangement the user has chosen:
-//! per connector, a logical position and a scale. Roost reads the
+//! per connector, a logical position and a scale. Tuna Desktop reads the
 //! arrangement matching the connectors that are lit, so a laptop set to
-//! 150 percent in GNOME opens Roost at 150 percent too. Logical layout
+//! 150 percent in GNOME opens Tuna Desktop at 150 percent too. Logical layout
 //! mode (GNOME's default) is assumed: positions are logical pixels.
 
 use std::collections::HashMap;
@@ -110,18 +110,18 @@ pub fn path() -> Option<PathBuf> {
         .map(|dir| dir.join("monitors.xml"))
 }
 
-/// Roost's own saved arrangements (`$XDG_CONFIG_HOME/roost/monitors.xml`):
-/// what GNOME Settings applied in a Roost session. Kept apart from
+/// Tuna Desktop's own saved arrangements (`$XDG_CONFIG_HOME/tuna/monitors.xml`):
+/// what GNOME Settings applied in a Tuna Desktop session. Kept apart from
 /// GNOME's file, whose full monitor specs (EDID vendor, product, serial)
-/// Roost cannot write yet, so a GNOME session's settings stay intact.
-pub fn roost_path() -> Option<PathBuf> {
-    path().and_then(|p| p.parent().map(|dir| dir.join("roost").join("monitors.xml")))
+/// Tuna Desktop cannot write yet, so a GNOME session's settings stay intact.
+pub fn tuna_path() -> Option<PathBuf> {
+    path().and_then(|p| p.parent().map(|dir| dir.join("tuna").join("monitors.xml")))
 }
 
-/// The user's arrangement for these connectors: Roost's own saved one
+/// The user's arrangement for these connectors: Tuna Desktop's own saved one
 /// first, then GNOME's (empty when there is none).
 pub fn load(connected: &[String]) -> HashMap<String, MonitorConfig> {
-    for file in [roost_path(), path()].into_iter().flatten() {
+    for file in [tuna_path(), path()].into_iter().flatten() {
         if let Ok(xml) = std::fs::read_to_string(&file) {
             let chosen = choose(&parse(&xml), connected);
             if !chosen.is_empty() {
@@ -154,9 +154,9 @@ pub fn to_xml(configs: &[MonitorConfig]) -> String {
     out
 }
 
-/// Save an arrangement as Roost's own monitors.xml (atomic replace).
+/// Save an arrangement as Tuna Desktop's own monitors.xml (atomic replace).
 pub fn save(configs: &[MonitorConfig]) -> std::io::Result<PathBuf> {
-    let file = roost_path().ok_or_else(|| std::io::Error::other("no config dir"))?;
+    let file = tuna_path().ok_or_else(|| std::io::Error::other("no config dir"))?;
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir)?;
     }

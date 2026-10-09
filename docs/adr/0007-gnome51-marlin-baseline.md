@@ -14,9 +14,9 @@ The user selected GNOME 51 as the parity baseline and TunaOS Marlin as the first
 
 Use GNOME 51 from `ghcr.io/tuna-os/marlin:gnome` as the reference. Capture each comparison bundle with the resolved image digest and the VM profile. A mutable image tag alone does not identify a repeatable baseline.
 
-Build Roost as a Marlin desktop variant on the same Arch-based bootc image family, initially on x86_64. Build Arch packages in `tuna-os/tunaos-packages`; keep the Debian package for developer hosts and package-layout verification. Debian/Ubuntu packages do not establish the Marlin release gate.
+Build Tuna Desktop as a Marlin desktop variant on the same Arch-based bootc image family, initially on x86_64. Build Arch packages in `tuna-os/tunaos-packages`; keep the Debian package for developer hosts and package-layout verification. Debian/Ubuntu packages do not establish the Marlin release gate.
 
-Use GNOME for shell appearance and behavior. Niri is the reference for Roost's optional scrollable tiling mode, and COSMIC can inform alternatives without redefining GNOME parity. Record accepted deviations and unverified claims in the parity ledger.
+Use GNOME for shell appearance and behavior. Niri is the reference for Tuna Desktop's optional scrollable tiling mode, and COSMIC can inform alternatives without redefining GNOME parity. Record accepted deviations and unverified claims in the parity ledger.
 
 ## Alternatives
 

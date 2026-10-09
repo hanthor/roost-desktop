@@ -1,5 +1,5 @@
-# GNOME 51 reference session for Roost's pixel-parity harness
-# (scripts/roost-gnome-reference). Fedora 45 ships GNOME 51.0.
+# GNOME 51 reference session for Tuna Desktop's pixel-parity harness
+# (scripts/tuna-gnome-reference). Fedora 45 ships GNOME 51.0.
 FROM quay.io/fedora/fedora:45
 RUN dnf -y --enablerepo=updates-testing install gnome-shell mesa-dri-drivers dbus-daemon dbus-tools \
       adwaita-fonts-all adwaita-icon-theme glib2 python3-gobject python3-pyatspi \

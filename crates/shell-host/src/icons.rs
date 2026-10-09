@@ -267,9 +267,9 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
     /// Unlikely stems so `/usr/share/pixmaps` (always on the lookup
     /// path) can never shadow the fixture.
-    const TOOL: &str = "roost-icontool";
-    const VEC: &str = "roost-iconvec";
-    const OTHER: &str = "roost-iconother";
+    const TOOL: &str = "tuna-icontool";
+    const VEC: &str = "tuna-iconvec";
+    const OTHER: &str = "tuna-iconother";
     const SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="#ff0000"/></svg>"##;
 
     struct EnvRestore {
@@ -425,7 +425,7 @@ mod tests {
         let _env = EnvRestore::install(&tmp);
         assert_eq!(find_icon("Test", "apps/tool", 16), None);
         assert_eq!(find_icon("Test", "tool\0x", 16), None);
-        assert_eq!(find_icon("Test", "no-such-roost-icon", 16), None);
+        assert_eq!(find_icon("Test", "no-such-tuna-icon", 16), None);
     }
 
     #[test]
@@ -487,7 +487,7 @@ mod tests {
         assert_eq!(other.size, 48);
         assert_eq!(other.argb.len(), 48 * 48 * 4);
         assert_eq!(&other.argb[..4], &[255, 0, 0, 255]);
-        assert_eq!(resolve("Test", "no-such-roost-icon", 16), None);
+        assert_eq!(resolve("Test", "no-such-tuna-icon", 16), None);
     }
 
     #[test]

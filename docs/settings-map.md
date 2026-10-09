@@ -1,6 +1,6 @@
 # GNOME settings compatibility map
 
-Roost reads GNOME 51's own GSettings schemas. It ships no shim schemas
+Tuna Desktop reads GNOME 51's own GSettings schemas. It ships no shim schemas
 and runs no translating daemon.
 
 The [exhaustive desktop inventory](settings-desktop-inventory.md) lists
@@ -14,9 +14,9 @@ This page records that decision for R9 (knowledge entry
 `learnings/dconf-settings-interop.md`).
 
 **Status words.**
-- **Honored**: Roost reads the key and reacts while it runs.
+- **Honored**: Tuna Desktop reads the key and reacts while it runs.
 - **Via GTK**: GTK or libadwaita reads the key for every app and for the
-  shell, so nothing in Roost has to.
+  shell, so nothing in Tuna Desktop has to.
 - **Ignored**: the key has no effect yet. The reason and owner are given.
 
 ## org.gnome.desktop.interface
@@ -26,16 +26,16 @@ This page records that decision for R9 (knowledge entry
 | color-scheme | Honored | The Dark Style tile writes it. The shell and apps follow it through libadwaita. Proof G-QS-DARK |
 | accent-color | Via GTK | libadwaita applies it |
 | font-name | Honored | Live shell CSS family, base size, weight, style and stretch (with semantic emphasis preserved) and GTK client font settings; proof G-SETTINGS-FONT |
-| document-font-name, monospace-font-name | Ignored by shell | Applications may choose to read these; Roost chrome uses font-name |
+| document-font-name, monospace-font-name | Ignored by shell | Applications may choose to read these; Tuna Desktop chrome uses font-name |
 | text-scaling-factor | Via GTK | Live GTK Wayland DPI translation; proof G-SETTINGS-FONT |
 | gtk-theme, icon-theme, cursor-theme, cursor-size | Via GTK | Inside apps. The compositor's own cursor ignores them (#89) |
 | clock-format | Honored | Panel clock |
 | clock-show-weekday, clock-show-date, clock-show-seconds | Honored | Panel clock, built as gnome-desktop's wall clock builds it |
 | enable-hot-corners | Honored | Live. Proof G-SETTINGS-INPUT |
-| enable-animations | Honored | Live idle fade, GTK transitions and compositor overview/strip motion; disabled transitions finish immediately. Proof G-ANIMATIONS-OFF |
+| enable-animations | Honored | Live idle fade, GTK transitions and compositor overview/strip motion; disabled transitions finish immediately. Proofs G-ANIMATIONS-OFF, G-INTROSPECT-MOTION |
 | show-battery-percentage | Honored | UPower DisplayDevice panel percentage; updates live |
 
-GNOME 51 `org.gnome.desktop.a11y.interface reduced-motion` is read live. `reduce` disables shell GTK transitions, compositor overview/strip motion and idle fade even when `enable-animations` is true. Resetting it respects an explicit `enable-animations=false`; older schema sets keep the existing animation policy. This controls the desktop shell; application toolkits remain responsible for their own transitions. Proof G-ANIMATIONS-OFF.
+GNOME 51 `org.gnome.desktop.a11y.interface reduced-motion` is read live and combines with `enable-animations` into one motion policy shared by the shell and compositor: `full`, `fade-only` or `off`. `enable-animations=false` is `off`: every transition finishes immediately. `reduce` with animations enabled is `fade-only`, as in GNOME 51: opacity fades (the idle shield) keep running, while translation and scale (compositor overview and strip motion, the shell's GTK transitions) finish immediately. `enable-animations` itself, and Introspect's `AnimationsEnabled`, stay true under Reduced Motion, as GNOME reports them. GNOME Shell's `GNOME_SHELL_SLOWDOWN_FACTOR` environment variable scales every duration as GNOME's `adjustAnimationTime` does. Older schema sets keep the existing animation policy. This controls the desktop shell; application toolkits remain responsible for their own transitions. Proofs G-ANIMATIONS-OFF, G-INTROSPECT-MOTION.
 
 ## Session, lock and notifications
 
@@ -47,17 +47,17 @@ GNOME 51 `org.gnome.desktop.a11y.interface reduced-motion` is read live. `reduce
 | org.gnome.desktop.notifications show-banners | Honored | Mirrors Do Not Disturb live in both directions. Proof G-NOTIFY-DND and G-SETTINGS-NOTIFICATIONS (external writes and banner policy) |
 | org.gnome.desktop.search-providers (all keys) | Honored | disable-external, disabled, enabled and sort-order. Proof G-SEARCH-PROVIDER |
 | org.gnome.desktop.background picture-uri, picture-uri-dark | Honored | Wallpaper |
-| org.gnome.shell favorite-apps | Honored | Used for the dash when Roost has no pins of its own |
+| org.gnome.shell favorite-apps | Honored | Used for the dash when Tuna Desktop has no pins of its own |
 | org.gnome.desktop.app-folders (folder-children and each folder's name, apps, categories, excluded-apps, translate) | Honored | App-grid folders, read on each grid open. Proof G-APP-FOLDERS |
-| org.gnome.shell enabled-extensions | Ignored | GNOME Shell extensions are JavaScript. Roost has its own extension point |
-| org.gnome.settings-daemon.plugins.color night-light-enabled | Honored (write only) | The Night Light tile writes it, but Roost applies no colour temperature yet (#89 gamma control) |
+| org.gnome.shell enabled-extensions | Ignored | GNOME Shell extensions are JavaScript. Tuna Desktop has its own extension point |
+| org.gnome.settings-daemon.plugins.color night-light-enabled | Honored (write only) | The Night Light tile writes it, but Tuna Desktop applies no colour temperature yet (#89 gamma control) |
 
 ## Displays
 
 | File | Status | Notes |
 |---|---|---|
 | ~/.config/monitors.xml | Honored | The arrangement for the lit connectors sets each output's scale, position and primary monitor (hardware sessions). Proof D-SCALE |
-| GNOME Settings' Displays panel | Partial | ApplyMonitorsConfig over org.gnome.Mutter.DisplayConfig changes scale and position live; "keep changes" saves to ~/.config/roost/monitors.xml, which Roost reads before GNOME's file (GNOME's own file is never rewritten). Proof G-DISPLAY-SETTINGS |
+| GNOME Settings' Displays panel | Partial | ApplyMonitorsConfig over org.gnome.Mutter.DisplayConfig changes scale and position live; "keep changes" saves to ~/.config/tuna/monitors.xml, which Tuna Desktop reads before GNOME's file (GNOME's own file is never rewritten). Proof G-DISPLAY-SETTINGS |
 
 ## Window management and input
 

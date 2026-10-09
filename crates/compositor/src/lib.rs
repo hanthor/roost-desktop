@@ -47,6 +47,7 @@ use smithay::{
 };
 
 pub mod animation;
+pub mod animation_clock;
 pub mod capture_security;
 mod constraint_motion;
 pub mod control;
@@ -78,6 +79,7 @@ pub mod screencast;
 pub mod screenshot;
 pub mod session_lock;
 pub mod session_services;
+pub mod size_change;
 #[cfg(feature = "drm")]
 pub mod sleep;
 pub mod slideshow;
@@ -105,7 +107,7 @@ pub(crate) struct OutputEntry {
     /// Registry global id from `create_global`; `None` for virtual
     /// entries. Removal un-advertises it so clients see the hotplug.
     pub global: Option<GlobalId>,
-    /// Output name, e.g. `roost-0`.
+    /// Output name, e.g. `tuna-0`.
     pub name: String,
     /// Output geometry layer surfaces and windows arrange against.
     pub size: smithay::utils::Size<i32, smithay::utils::Logical>,
@@ -669,7 +671,7 @@ impl SeatHandler for State {
 
 /// Wayland seat name shared by the protocol state, the token store's
 /// seat binding, and the control hub.
-pub const SEAT_NAME: &str = "roost-seat";
+pub const SEAT_NAME: &str = "tuna-seat";
 
 impl State {
     /// Fit a popup onto the output under its parent using the client's
@@ -868,7 +870,7 @@ impl State {
             None => self.outputs.push(OutputEntry {
                 output: None,
                 global: None,
-                name: "roost-0".to_owned(),
+                name: "tuna-0".to_owned(),
                 size,
                 loc: (0, 0),
                 primary: true,
@@ -1147,12 +1149,12 @@ impl State {
     }
 
     /// Shell-facing output inventory.
-    pub fn output_infos(&self) -> Vec<roost_shell_control::OutputInfo> {
+    pub fn output_infos(&self) -> Vec<tuna_shell_control::OutputInfo> {
         let mut entries: Vec<&OutputEntry> = self.outputs.iter().collect();
         entries.sort_by_key(|entry| (!entry.primary, entry.loc.0));
         entries
             .into_iter()
-            .map(|entry| roost_shell_control::OutputInfo {
+            .map(|entry| tuna_shell_control::OutputInfo {
                 name: entry.name.clone(),
                 width: entry.size.w,
                 height: entry.size.h,

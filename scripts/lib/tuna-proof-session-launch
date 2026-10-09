@@ -1,0 +1,16 @@
+#!/bin/sh
+# Fixed launch seam shared by the original source proof and installed mode.
+set -eu
+[ "$#" = 3 ] || exit 1
+mode="$1"; root="$2"; socket="$3"
+case "$mode" in
+    1)
+        [ -z "${TUNA_SHELL_BIN:-}" ] && [ -z "${TUNA_PROOF_SHELL_BIN:-}" ] || exit 1
+        exec /usr/bin/tuna-session --backend winit --socket "$socket"
+        ;;
+    0)
+        exec "$root/target/debug/tuna-compositor" --backend winit --socket "$socket" \
+            --shell-bin "${TUNA_PROOF_SHELL_BIN:-$root/target/debug/tuna-shell-gtk}"
+        ;;
+    *) exit 1 ;;
+esac

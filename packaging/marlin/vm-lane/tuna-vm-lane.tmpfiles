@@ -1,0 +1,4 @@
+# CI-only (VM lane): home directory and session choice for tuna-test.
+d /var/home/tuna-test 0700 tuna-test tuna-test -
+d /var/lib/AccountsService/users 0700 root root -
+f+ /var/lib/AccountsService/users/tuna-test 0600 root root - [User]\nSession=tuna\nSystemAccount=false\n

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Re-render the Roost VM tour title cards (needs Pillow and DejaVu Sans).
+"""Re-render the Tuna Desktop VM tour title cards (needs Pillow and DejaVu Sans).
 
 The PNGs beside this file are committed; CI never runs this. Run it after
 changing a card's text:  python3 scripts/lib/vm-tour-cards/render.py
@@ -9,7 +9,7 @@ import os
 from PIL import Image, ImageDraw, ImageFont
 
 CARDS = {
-    "intro": ("Roost on TunaOS Marlin",
+    "intro": ("Tuna Desktop on TunaOS Marlin",
               "GNOME 51-style desktop in Rust, booted in QEMU from the bootc image"),
     "overview": ("Activities overview", "Super opens the overview; typing searches apps"),
     "app-grid": ("App grid", "Super+A shows every installed application"),

@@ -13,7 +13,7 @@ import subprocess
 
 LIMIT = 4096
 PROFILES = {'diagnostic', 'stock'}
-ORDER = (('gnome', 1), ('roost', 1), ('roost', 2), ('gnome', 2), ('gnome', 3), ('roost', 3))
+ORDER = (('gnome', 1), ('tuna', 1), ('tuna', 2), ('gnome', 2), ('gnome', 3), ('tuna', 3))
 STAGES = {'setup', 'image-build', 'image-probe', 'disk-create', 'disk-install', 'disk-owner',
           'measurement', 'disk-remove', 'image-remove', 'complete'}
 
@@ -78,7 +78,7 @@ def read_receipt(path, private=False):
 
 class Handoff:
     def __init__(self, out, profile, desktop, repeat):
-        if profile not in PROFILES or desktop not in {'gnome', 'roost'} or type(repeat) is not int or repeat not in (1, 2, 3):
+        if profile not in PROFILES or desktop not in {'gnome', 'tuna'} or type(repeat) is not int or repeat not in (1, 2, 3):
             raise RuntimeError('fixed acquisition identity required')
         self.path = Path(out) / 'host-vm-lifecycle.json'
         self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -193,7 +193,7 @@ def require_stock_handoff(root):
             or status['profile'] != 'diagnostic' or type(status['exit_status']) is not int or not 0 <= status['exit_status'] <= 255
             or type(status['case_index']) is not int or not 0 <= status['case_index'] <= 6
             or type(status['repeat']) is not int or not 0 <= status['repeat'] <= 3
-            or type(status['desktop']) is not str or status['desktop'] not in {'none', 'gnome', 'roost'}
+            or type(status['desktop']) is not str or status['desktop'] not in {'none', 'gnome', 'tuna'}
             or type(status['stage']) is not str or status['stage'] not in STAGES
             or type(status['all_six_commands_succeeded']) is not bool):
         raise RuntimeError('fixed original diagnostic acquisition status required')

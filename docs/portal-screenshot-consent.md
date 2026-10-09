@@ -1,6 +1,6 @@
 # Installed-backend Screenshot consent
 
-Roost uses the installed GNOME 51 Screenshot backend and the installed GTK Access backend. The shipping portal preference explicitly selects `Access=gtk`: GNOME's Access backend delegates its consent dialog to GNOME Shell's Access interface, which Roost does not provide. With the old preference, the real frontend returned response 2 before a dialog could appear. GTK supplies this UI-only dialog; it gains no compositor capture authority.
+Tuna Desktop uses the installed GNOME 51 Screenshot backend and the installed GTK Access backend. The shipping portal preference explicitly selects `Access=gtk`: GNOME's Access backend delegates its consent dialog to GNOME Shell's Access interface, which Tuna Desktop does not provide. With the old preference, the real frontend returned response 2 before a dialog could appear. GTK supplies this UI-only dialog; it gains no compositor capture authority.
 
 The reference journey requires a real Deny, no screenshot URI, then a real Allow and a readable 1280×800 PNG with varied desktop pixels. There is no frontend result before the decision. The isolated PermissionStore remembers Deny for the host fixture's empty app ID. The driver records that `no` permission, removes only that fixture permission through the real API, and verifies its removal before a fresh Allow journey. Production permission state is untouched.
 

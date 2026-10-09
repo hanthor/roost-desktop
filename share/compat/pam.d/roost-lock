@@ -1,0 +1,11 @@
+#%PAM-1.0
+# tuna-rename: keep-file
+# One-release compatibility copy of tuna-lock under the old service name
+# (#505), installed as /etc/pam.d/roost-lock. A session started before
+# an in-place upgrade keeps running the old lock screen, which asks PAM
+# for "roost-lock"; without this file PAM falls back to "other" (deny on
+# most distributions) and that session could never be unlocked. It also
+# keeps an administrator's edits to the old conffile meaningful until
+# they are moved to tuna-lock.
+auth      include   login
+account   include   login

@@ -115,11 +115,11 @@ pub fn start(lock: Lock, active: Active) -> Rc<Service> {
                 })
                 .build();
             if let Err(error) = result {
-                eprintln!("roost-shell-gtk: screen-saver interface: {error}");
+                eprintln!("tuna-shell-gtk: screen-saver interface: {error}");
             }
         },
         |_, _| {},
-        |_, _| eprintln!("roost-shell-gtk: screen-saver name owned elsewhere"),
+        |_, _| eprintln!("tuna-shell-gtk: screen-saver name owned elsewhere"),
     );
     service
 }

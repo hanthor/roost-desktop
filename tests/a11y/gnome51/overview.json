@@ -316,7 +316,7 @@
   },
   {
    "role": "button",
-   "name": "roost-test-beta",
+   "name": "tuna-test-beta",
    "depth": 10,
    "showing": true,
    "checked": false,
@@ -388,7 +388,7 @@
   },
   {
    "role": "button",
-   "name": "roost-test-gamma",
+   "name": "tuna-test-gamma",
    "depth": 10,
    "showing": true,
    "checked": false,
@@ -460,7 +460,7 @@
   },
   {
    "role": "button",
-   "name": "roost-test-alpha",
+   "name": "tuna-test-alpha",
    "depth": 10,
    "showing": true,
    "checked": false,

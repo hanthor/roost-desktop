@@ -95,7 +95,9 @@ impl XWaylandSupervisor {
             };
             if !self.absent_logged {
                 self.absent_logged = true;
-                eprintln!("roost-compositor: xwayland: restart budget exhausted; native session continues");
+                eprintln!(
+                    "tuna-compositor: xwayland: restart budget exhausted; native session continues"
+                );
             }
         } else {
             self.readiness = Readiness::Pending;
@@ -143,7 +145,7 @@ impl XWaylandSupervisor {
                 self.readiness = Readiness::Ready { display };
                 if !self.start_logged {
                     self.start_logged = true;
-                    eprintln!("roost-compositor: xwayland: server started on :{display}");
+                    eprintln!("tuna-compositor: xwayland: server started on :{display}");
                 }
             }
             Err(reason) => {
@@ -152,7 +154,7 @@ impl XWaylandSupervisor {
                     if !self.absent_logged {
                         self.absent_logged = true;
                         eprintln!(
-                            "roost-compositor: xwayland: unavailable ({reason:?}); native session continues"
+                            "tuna-compositor: xwayland: unavailable ({reason:?}); native session continues"
                         );
                     }
                 } else {
@@ -247,10 +249,10 @@ pub fn spawn_xwayland(
 ) -> Result<u32, AbsentReason> {
     use smithay::xwayland::XWayland;
 
-    // `ROOST_XWAYLAND_DEBUG=1` inherits the server's stdio for
+    // `TUNA_XWAYLAND_DEBUG=1` inherits the server's stdio for
     // troubleshooting (focus routing, startup failures); default
     // stays silent.
-    let debug = std::env::var("ROOST_XWAYLAND_DEBUG").is_ok_and(|value| value == "1");
+    let debug = std::env::var("TUNA_XWAYLAND_DEBUG").is_ok_and(|value| value == "1");
     let stdio = || {
         if debug {
             std::process::Stdio::inherit()
@@ -307,7 +309,7 @@ pub fn on_xwayland_event(
             display_number,
         } => {
             let Some(client) = runtime.take_pending_x11_client() else {
-                eprintln!("roost-compositor: xwayland: ready with no pending client; ignoring");
+                eprintln!("tuna-compositor: xwayland: ready with no pending client; ignoring");
                 return;
             };
             match X11Wm::start_wm(runtime.loop_handle(), x11_socket, client) {
@@ -315,12 +317,12 @@ pub fn on_xwayland_event(
                     runtime.state_mut().xwm = Some(xwm);
                     runtime.set_x11_display(display_number);
                     eprintln!(
-                        "roost-compositor: xwayland: window manager started on :{display_number}"
+                        "tuna-compositor: xwayland: window manager started on :{display_number}"
                     );
                 }
                 Err(error) => {
                     runtime.x11_startup_failed();
-                    eprintln!("roost-compositor: xwayland: window manager failed: {error}");
+                    eprintln!("tuna-compositor: xwayland: window manager failed: {error}");
                 }
             }
         }
@@ -328,7 +330,7 @@ pub fn on_xwayland_event(
             runtime.take_pending_x11_client();
             runtime.x11_startup_failed();
             eprintln!(
-                "roost-compositor: xwayland: server exited during startup; X11 windows unavailable"
+                "tuna-compositor: xwayland: server exited during startup; X11 windows unavailable"
             );
         }
     }
@@ -355,14 +357,14 @@ mod handlers {
     fn on_map_request(state: &mut State, window: X11Surface) {
         let id = window.window_id();
         if window.is_override_redirect() {
-            eprintln!("roost-compositor: xwayland: map refused (override-redirect) id={id}");
+            eprintln!("tuna-compositor: xwayland: map refused (override-redirect) id={id}");
             return;
         }
         if window.set_mapped(true).is_err() {
-            eprintln!("roost-compositor: xwayland: map refused (grant failed) id={id}");
+            eprintln!("tuna-compositor: xwayland: map refused (grant failed) id={id}");
             return;
         }
-        eprintln!("roost-compositor: xwayland: map granted id={id}");
+        eprintln!("tuna-compositor: xwayland: map granted id={id}");
         push(state, X11ManagerEvent::MapRequest(Box::new(window)));
     }
 

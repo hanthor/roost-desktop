@@ -1,6 +1,6 @@
-# Marlin GNOME and Roost resource samples
+# Marlin GNOME and Tuna Desktop resource samples
 
-Issue #73 requires comparable measured evidence before any performance claim. The `Marlin performance samples` workflow (manual dispatch or a pull request changing its measurement code) uses one runner, one shared Marlin GNOME image plus Roost payload, and the same 6 GiB / four-vCPU / 1280×800 virtio QEMU/KVM profile for both sessions. GNOME runs first, then Roost; one boot per session does not establish cold/warm variance. The input package must come from a successful trusted main CI run. The workflow records package SHA256, package source/run, base digest, shared image ID, observer revision, host CPU/kernel and QEMU version.
+Issue #73 requires comparable measured evidence before any performance claim. The `Marlin performance samples` workflow (manual dispatch or a pull request changing its measurement code) uses one runner, one shared Marlin GNOME image plus Tuna Desktop payload, and the same 6 GiB / four-vCPU / 1280×800 virtio QEMU/KVM profile for both sessions. GNOME runs first, then Tuna Desktop; one boot per session does not establish cold/warm variance. The input package must come from a successful trusted main CI run. The workflow records package SHA256, package source/run, base digest, shared image ID, observer revision, host CPU/kernel and QEMU version.
 
 The published Marlin tag was measured as GNOME Shell 50.5 at digest `sha256:3311d7784a0b0e7cd5486d8b69d974f4a34c3436b9812599470d00f80f805f1b` in [run 37176268295](https://github.com/hanthor/roost-desktop/actions/runs/37176268295). It is not the GNOME 51 baseline claimed by older roadmap prose. This benchmark derives a CI-only baseline by enabling Arch core-testing and extra-testing together, performing a full system upgrade, and requiring GNOME Shell 51. Both sessions use that same derived payload; its package versions and shared image ID are retained. This does not change the shipping Marlin image. The first successful paired guest run is recorded in the dated report below.
 
@@ -10,13 +10,13 @@ DRM memory observations follow the [kernel's client usage format](https://www.ke
 
 The host waits for an actual rendered black panel, allows an equal 30-second post-panel settle, measures 30 seconds without input, opens Disks, System Monitor and Files, toggles the overview ten times, switches workspaces ten times, sends ten notifications one second apart, then keeps a final 30-second settle. Raw serial, resource samples, input observations, notification IDs, screenshots and per-session reports are retained for 14 days. The p50/p95/p99 summaries state sample counts; whole-run CPU summaries include startup and workload.
 
-The CI-only guest agent runs only the fixed `/usr/libexec/roost-perf-phase` helper. It marks the idle boundaries with the guest's CLOCK_BOOTTIME, matching the observer's own clock. Idle CPU excludes any interval crossing either boundary, and fewer than 20 complete intervals fail the measurement. Host phase timestamps remain separate provenance. The fixture sends notifications to the actual interactive user's Notifications service and requires ten distinct nonzero uint32 IDs; the service's acceptance and first frame are retained. Acceptance is a workload record, not a claim of notification input-to-frame latency. Guest-agent packages, helper and service are fixture-only and installed identically in both sessions.
+The CI-only guest agent runs only the fixed `/usr/libexec/tuna-perf-phase` helper. It marks the idle boundaries with the guest's CLOCK_BOOTTIME, matching the observer's own clock. Idle CPU excludes any interval crossing either boundary, and fewer than 20 complete intervals fail the measurement. Host phase timestamps remain separate provenance. The fixture sends notifications to the actual interactive user's Notifications service and requires ten distinct nonzero uint32 IDs; the service's acceptance and first frame are retained. Acceptance is a workload record, not a claim of notification input-to-frame latency. Guest-agent packages, helper and service are fixture-only and installed identically in both sessions.
 
 Input timings bound the response observed through QMP captures. Each observation records a conservative lower bound, upper bound and capture duration. QMP key injection, capture/poll overhead and host scheduling affect these measurements; they are **not** compositor input-to-frame tracing or a frame-pacing measurement. The software/guest path, only one boot, potentially unavailable DRM memory counters, and missing 24-hour soak remain limitations. No 10-percent release gate is introduced here; that requires the ADR/change-control process and the complete benchmark evidence described in [research/README.md](../research/README.md).
 
-Run a fixture disk with `scripts/roost-vm-perf --disk disk.raw --desktop gnome --out /tmp/gnome-perf-fresh`, or select `roost` for the candidate. Each artifact directory must be new. Build `packaging/marlin/perf/Containerfile` with `DESKTOP=gnome` or `DESKTOP=roost` on the same shared preview image; it adds the test user, autologin, serial logging, observer and fixed guest probes. The fixture never ships in a desktop image.
+Run a fixture disk with `scripts/tuna-vm-perf --disk disk.raw --desktop gnome --out /tmp/gnome-perf-fresh`, or select `tuna` for the candidate. Each artifact directory must be new. Build `packaging/marlin/perf/Containerfile` with `DESKTOP=gnome` or `DESKTOP=tuna` on the same shared preview image; it adds the test user, autologin, serial logging, observer and fixed guest probes. The fixture never ships in a desktop image.
 
-The [2026-10-04 paired report](2026-10-04-marlin-gnome51/README.md) records the first successful run, including the higher sampled Roost CPU and slower median observed overview response. Its package predates the latest roadmap work. Issue #73 remains open.
+The [2026-10-04 paired report](2026-10-04-marlin-gnome51/README.md) records the first successful run, including the higher sampled Tuna Desktop CPU and slower median observed overview response. Its package predates the latest roadmap work. Issue #73 remains open.
 
 The paired lane also captures `wayland-info` from each actual interactive
 Marlin session. The root observer invokes the tool as the fixture user and
@@ -34,8 +34,12 @@ credentials, capture timestamps and a verified digest. These are raw event,
 dispatch and presentation scopes; causal latency remains a separate analysis.
 
 The [native cadence and pure idle report](2026-10-04-native-cadence/README.md)
-retains a later actual paired GNOME 51/Roost run, including all 240 presentation
+retains a later actual paired GNOME 51/Tuna Desktop run, including all 240 presentation
 records per desktop, guest clock boundaries, ten accepted notifications each,
-and raw resource samples. It identifies high Roost idle CPU and slower median
+and raw resource samples. It identifies high Tuna Desktop idle CPU and slower median
 presentation cadence in the older trusted package. It does not qualify later
 repaint changes or close the remaining input tracing and soak requirements.
+
+The [2026-10-08 CPU investigation](2026-10-08-cpu-investigation.md)
+attributes the measured CPU to processes and workload phases, records the
+overview-card and plane-damage fixes, and ranks the remaining work for #503.

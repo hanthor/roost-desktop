@@ -1,4 +1,4 @@
-// Match Roost's nested output and reserve its 32px shell panel area.
+// Match Tuna Desktop's nested output and reserve its 32px shell panel area.
 layout {
     gaps 16
     center-focused-column "never"

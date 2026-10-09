@@ -1,0 +1,84 @@
+#!/bin/sh
+# tuna-nested — one-command nested Tuna Desktop session plus crash/reconnect journey.
+#
+# Usage:
+#   scripts/tuna-nested run [--socket NAME] [--shell-bin PATH] [--artifacts DIR]
+#   scripts/tuna-nested shell-pid --socket NAME
+#   scripts/tuna-nested kill-shell --socket NAME
+#   scripts/tuna-nested --help
+#
+# `run` builds both binaries, starts tuna-compositor on a private socket,
+# and writes logs plus pid files under the artifacts dir. The compositor
+# supervises tuna-shell-host itself (finite restart budget, overlay while
+# the shell is absent). `kill-shell` / `shell-pid` drive the documented
+# crash journey in docs/nested-session.md.
+#
+# Environment hygiene: only the compositor process and its shell child
+# see the nested WAYLAND_DISPLAY; this script never exports it.
+set -eu
+
+unset CDPATH
+ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+ARTIFACTS=""
+SOCKET="tuna-nested-$$"
+SHELL_BIN=""
+CMD="run"
+
+usage() {
+    sed -n '2,16p' "$0"
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        run|shell-pid|kill-shell) CMD="$1"; shift ;;
+        --socket) SOCKET="$2"; shift 2 ;;
+        --shell-bin) SHELL_BIN="$2"; shift 2 ;;
+        --artifacts) ARTIFACTS="$2"; shift 2 ;;
+        --help|-h) usage; exit 0 ;;
+        *) echo "tuna-nested: unknown argument $1" >&2; usage >&2; exit 1 ;;
+    esac
+done
+
+if [ -z "$ARTIFACTS" ]; then
+    ARTIFACTS="${XDG_STATE_HOME:-$HOME/.local/state}/tuna-nested/$SOCKET"
+fi
+mkdir -p "$ARTIFACTS"
+
+compositor_pid_file="$ARTIFACTS/compositor.pid"
+
+case "$CMD" in
+    run)
+        cargo build --quiet --manifest-path "$ROOT/Cargo.toml" \
+            -p tuna-compositor -p tuna-shell-host
+        COMPOSITOR="$ROOT/target/debug/tuna-compositor"
+        if [ -z "$SHELL_BIN" ]; then
+            SHELL_BIN="$ROOT/target/debug/tuna-shell-host"
+        fi
+        echo "tuna-nested: socket $SOCKET, artifacts $ARTIFACTS"
+        echo "tuna-nested: shell $SHELL_BIN"
+        # shellcheck disable=SC2086
+        exec "$COMPOSITOR" --socket "$SOCKET" --shell-bin "$SHELL_BIN" \
+            >"$ARTIFACTS/nested.log" 2>&1 &
+        echo $! >"$compositor_pid_file"
+        echo "tuna-nested: compositor pid $(cat "$compositor_pid_file")"
+        echo "tuna-nested: log $ARTIFACTS/nested.log"
+        echo "tuna-nested: kill the shell with: scripts/tuna-nested kill-shell --socket $SOCKET"
+        wait
+        ;;
+    shell-pid)
+        if [ ! -f "$compositor_pid_file" ]; then
+            echo "tuna-nested: no run for socket $SOCKET ($compositor_pid_file missing)" >&2
+            exit 1
+        fi
+        pgrep -P "$(cat "$compositor_pid_file")" 'tuna-shell-(host|gtk)' || {
+            echo "tuna-nested: shell not running (overlay covers the session)" >&2
+            exit 1
+        }
+        ;;
+    kill-shell)
+        # shellcheck disable=SC2046
+        pid=$(sh "$0" shell-pid --socket "$SOCKET") || exit 1
+        echo "tuna-nested: killing shell pid $pid"
+        kill "$pid"
+        ;;
+esac

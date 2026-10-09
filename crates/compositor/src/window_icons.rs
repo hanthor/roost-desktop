@@ -44,7 +44,7 @@ impl WindowIcons {
         dh.create_global::<State, XdgToplevelIconManagerV1, _>(1, ());
         Self {
             directory: tempfile::Builder::new()
-                .prefix("roost-icons-")
+                .prefix("tuna-icons-")
                 .tempdir()
                 .expect("private icon cache"),
             pending: HashMap::new(),

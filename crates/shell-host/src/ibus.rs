@@ -50,7 +50,7 @@ pub fn address() -> Option<String> {
 
 /// Enable the existing opt-in IBus diagnostics in either process.
 pub fn debug() -> bool {
-    std::env::var_os("ROOST_IBUS_DEBUG").is_some()
+    std::env::var_os("TUNA_IBUS_DEBUG").is_some()
 }
 
 #[cfg(test)]
