@@ -299,6 +299,7 @@ PERMISSIONS_PID=""
 INHIBITOR_PID=""
 SCROLL_PROBE_PID=""
 HOT_CORNER_PID=""
+OCCLUSION_PIDS=""
 IME_PIDS=""
 cleanup() {
     if [ -n "$ICON_PID" ]; then kill "$ICON_PID" 2>/dev/null || true; fi
@@ -307,6 +308,8 @@ cleanup() {
     if [ -n "$PERMISSIONS_PID" ]; then kill "$PERMISSIONS_PID" 2>/dev/null || true; fi
     if [ -n "$SCROLL_PROBE_PID" ]; then kill "$SCROLL_PROBE_PID" 2>/dev/null || true; fi
     if [ -n "$HOT_CORNER_PID" ]; then kill "$HOT_CORNER_PID" 2>/dev/null || true; fi
+    # shellcheck disable=SC2086
+    if [ -n "$OCCLUSION_PIDS" ]; then kill $OCCLUSION_PIDS 2>/dev/null || true; fi
     # shellcheck disable=SC2086
     if [ -n "$IME_PIDS" ]; then kill $IME_PIDS 2>/dev/null || true; fi
     # The bridge daemonized ibus-daemon for this session's display.
@@ -1713,7 +1716,9 @@ showing "$ARTIFACTS/a11y-provider.json" "Quarterly Report.odt" ||
 pass G-SEARCH-PROVIDER "typing lists a D-Bus search provider's result"
 cstate '.overview_search' "search view" ||
     fail G-SEARCH-VIEW "the compositor kept the workspace view during search"
-pass G-SEARCH-VIEW "search results replace the workspace view"
+cstate '.overview_search and .overview_motion.search == 1' "search fade settled" ||
+    fail G-SEARCH-VIEW "the workspace view did not finish fading out for search"
+pass G-SEARCH-VIEW "search results fade the workspace view out"
 "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-provider-press.json" 20 \
     --press "Quarterly Report.odt" || fail G-SEARCH-ACTIVATE "could not press the result"
 end=$(($(date +%s) + 10))
@@ -1732,7 +1737,9 @@ sleep 1
     fail G-OV-APPGRID "could not press Show Apps"
 showing "$ARTIFACTS/a11y-grid.json" "Tuna Probe" ||
     fail G-OV-APPGRID "app grid does not list installed apps"
-pass G-OV-APPGRID "Show Apps opens the app grid"
+cstate '.overview_app_grid and .overview_motion.last_morph.cause == "app-grid" and .overview_motion.last_morph.curve == "ease-out-sine" and .overview_motion.last_morph.duration_ms == 250' "picker to grid morph" ||
+    fail G-OV-APPGRID "the window picker did not ease into the app grid (250 ms out-sine)"
+pass G-OV-APPGRID "Show Apps eases the window picker into the app grid"
 scrot "$ARTIFACTS/11-app-grid.png" >/dev/null
 xdotool key Escape
 
@@ -2575,7 +2582,23 @@ cstate ".windows | length == $((corner_count + 1))" "corner proof mapped" ||
 cstate '([.windows[] | select(.app_id == "tuna-test-fullscreen corner proof")] | length) == 1' "unique actual corner client identity" ||
     fail G-HOT-CORNER-FULLSCREEN "actual corner client identity was not unique"
 corner_window_id="$(jq '.windows[] | select(.app_id == "tuna-test-fullscreen corner proof") | .id' "$CSTATE")"
-corner_restored_rect="$(jq -c '.windows[] | select(.app_id == "tuna-test-fullscreen corner proof") | .rect' "$CSTATE")"
+# The toplevel enters the model before its first buffer, in a provisional
+# cascade slot; that commit places it. Read the restore rect only once it
+# holds still (and no size change is in flight), not the pre-commit slot.
+corner_rect_query=".windows[] | select(.id == $corner_window_id) | .rect"
+corner_restored_rect=""
+corner_end=$(($(date +%s) + 20))
+while [ "$(date +%s)" -le "$corner_end" ]; do
+    corner_rect_now="$(jq -c "if ((.size_changes.in_flight // []) | any(.window == $corner_window_id)) then null else ($corner_rect_query) end" "$CSTATE" 2>/dev/null || true)"
+    if [ -n "$corner_rect_now" ] && [ "$corner_rect_now" != null ] && [ "$corner_rect_now" = "$corner_restored_rect" ]; then
+        break
+    fi
+    corner_restored_rect="$corner_rect_now"
+    sleep 0.5
+done
+if [ -z "$corner_restored_rect" ] || [ "$corner_restored_rect" = null ]; then
+    fail G-HOT-CORNER-FULLSCREEN "genuine GTK proof window never settled in place"
+fi
 cp "$CSTATE" "$ARTIFACTS/hot-corner-client-before-fullscreen.json"
 printf '{"generation":1,"request":"fullscreen"}\n' >"$corner_requests"
 cstate ".focused_rect == [0, 0, $WIDTH, $HEIGHT]" "corner proof fullscreen" ||
@@ -2632,6 +2655,51 @@ HOT_CORNER_PID=""
 cstate ".windows | length == $corner_count" "corner proof removed" ||
     fail G-HOT-CORNER-FULLSCREEN "corner proof window did not unmap"
 pass G-HOT-CORNER-FULLSCREEN "genuine fullscreen blocks corner opening, Super remains available, and unfullscreen restores it"
+
+# Occlusion culling (#503): an opaque fullscreen window hides the windows
+# beneath it, so the compositor skips drawing them (frame_cost, published
+# per output for the last drawn frame). Unfullscreened, the top window's
+# client shadow and rounded corners are translucent, so the window under
+# it is drawn again.
+occlusion_requests="$ARTIFACTS/occlusion-requests.json"
+rm -f "$occlusion_requests" "$occlusion_requests.ack"
+occlusion_count="$(jq '.windows | length' "$CSTATE")"
+WAYLAND_DISPLAY="$SOCKET_NAME" "$PY" "$ROOT/scripts/lib/tuna-test-window.py" "Occlusion Below" '#204080' >"$ARTIFACTS/occlusion-below.log" 2>&1 &
+OCCLUSION_PIDS="$!"
+cstate '.windows | any(.app_id == "tuna-test-occlusion below")' "occlusion lower window mapped" ||
+    fail G-OCCLUSION-CULL "lower proof window did not map"
+below_id="$(jq '.windows[] | select(.app_id == "tuna-test-occlusion below") | .id' "$CSTATE")"
+cstate "[.frame_cost[] | .drawn_windows[]] | index($below_id) != null" "lower window drawn" ||
+    fail G-OCCLUSION-CULL "frame_cost did not report the visible lower window as drawn"
+WAYLAND_DISPLAY="$SOCKET_NAME" TUNA_TEST_REQUESTS="$occlusion_requests" "$PY" "$ROOT/scripts/lib/tuna-test-window.py" "Occlusion Above" '#408020' >"$ARTIFACTS/occlusion-above.log" 2>&1 &
+OCCLUSION_PIDS="$OCCLUSION_PIDS $!"
+cstate '.windows | any(.app_id == "tuna-test-occlusion above")' "occlusion upper window mapped" ||
+    fail G-OCCLUSION-CULL "upper proof window did not map"
+above_id="$(jq '.windows[] | select(.app_id == "tuna-test-occlusion above") | .id' "$CSTATE")"
+printf '{"generation":1,"request":"fullscreen"}\n' >"$occlusion_requests"
+cstate ".focused == $above_id and .focused_rect == [0, 0, $WIDTH, $HEIGHT]" "occlusion upper fullscreen" ||
+    fail G-OCCLUSION-CULL "upper proof window did not fullscreen"
+# The lower proof window sits wholly under the opaque fullscreen window.
+cstate "([.frame_cost[] | .culled_windows[]] | index($below_id) != null) and ([.frame_cost[] | .drawn_windows[]] | index($above_id) != null)" "lower window culled" ||
+    fail G-OCCLUSION-CULL "the window under an opaque fullscreen window was still drawn"
+cstate ".throttled_windows | index($below_id) != null and index($above_id) == null" "lower window frame callbacks throttled" ||
+    fail G-OCCLUSION-CULL "the hidden window kept full-rate frame callbacks"
+cp "$CSTATE" "$ARTIFACTS/occlusion-fullscreen.json"
+scrot "$ARTIFACTS/occlusion-fullscreen.png" >/dev/null
+printf '{"generation":2,"request":"unfullscreen"}\n' >"$occlusion_requests"
+cstate ".focused == $above_id and .focused_rect != [0, 0, $WIDTH, $HEIGHT]" "occlusion upper restored" ||
+    fail G-OCCLUSION-CULL "upper proof window did not unfullscreen"
+cstate "([.frame_cost[] | .drawn_windows[]] | index($below_id) != null) and ([.frame_cost[] | .culled_windows[]] | index($below_id) == null)" "lower window drawn again" ||
+    fail G-OCCLUSION-CULL "the lower window stayed culled under a translucent-edged window"
+cstate ".throttled_windows | index($below_id) == null" "lower window frame callbacks restored" ||
+    fail G-OCCLUSION-CULL "the shown window stayed throttled"
+cp "$CSTATE" "$ARTIFACTS/occlusion-restored.json"
+# shellcheck disable=SC2086
+kill $OCCLUSION_PIDS 2>/dev/null || true
+OCCLUSION_PIDS=""
+cstate ".windows | length == $occlusion_count" "occlusion proof windows removed" ||
+    fail G-OCCLUSION-CULL "occlusion proof windows did not unmap"
+pass G-OCCLUSION-CULL "an opaque fullscreen window culls and throttles the windows beneath it; translucent edges do not"
 gsettings set org.gnome.desktop.peripherals.keyboard repeat-interval 30
 gsettings set org.gnome.desktop.input-sources sources "[('xkb', 'us')]"
 cstate '.keyboard.layouts == ["English (US)"]' "one source" ||
@@ -2735,8 +2803,9 @@ xdotool key Super_L
 cstate '.overview_open and .overview_progress == 0' "frozen overview" ||
     fail G-ANIMATION-CLOCK "the overview moved while animation time was frozen"
 anim_clock 125
-cstate '.overview_progress == 0.5' "overview at 125 ms" ||
-    fail G-ANIMATION-CLOCK "the overview was not exactly half open 125 ms in"
+# Opening eases out-sine (#499): sin(pi/4) of the way at half time.
+cstate '(.overview_progress - 0.7071067811865476 | if . < 0 then -. else . end) < 1e-9' "overview at 125 ms" ||
+    fail G-ANIMATION-CLOCK "the overview was not sin(pi/4) open 125 ms in (EASE_OUT_SINE)"
 cp "$CSTATE" "$ARTIFACTS/animation-clock-125ms.json"
 anim_clock 250
 cstate '.overview_progress == 1' "overview at 250 ms" ||
@@ -2745,15 +2814,16 @@ xdotool key Escape
 cstate '(.overview_open | not) and .overview_progress == 1' "frozen close" ||
     fail G-ANIMATION-CLOCK "the closing overview moved while animation time was frozen"
 anim_clock 375
-cstate '.overview_progress == 0.5' "close at 125 ms" ||
-    fail G-ANIMATION-CLOCK "the closing overview was not exactly half way 125 ms in"
+# Closing eases out-quad: three quarters of the way gone at half time.
+cstate '(.overview_progress - 0.25 | if . < 0 then -. else . end) < 1e-9' "close at 125 ms" ||
+    fail G-ANIMATION-CLOCK "the closing overview was not a quarter open 125 ms in (EASE_OUT_QUAD)"
 anim_clock 500
 cstate '.overview_progress == 0' "close at 250 ms" ||
     fail G-ANIMATION-CLOCK "the closing overview had not settled 250 ms in"
 rm -f "$TUNA_ANIMATION_CLOCK"
 cstate '.animation_clock_manual | not' "real clock" ||
     fail G-ANIMATION-CLOCK "removing the clock file did not resume real time"
-pass G-ANIMATION-CLOCK "a proof-driven clock freezes compositor animation time and samples the overview at exact 125/250 ms delays both ways"
+pass G-ANIMATION-CLOCK "a proof-driven clock freezes compositor animation time and samples the overview's out-sine opening and out-quad closing at exact 125/250 ms delays"
 
 # GNOME settings (#63): the idle lock follows idle-delay and
 # lock-enabled as they change.
@@ -3492,6 +3562,107 @@ fi
 pass G-WS-POPUP "a workspace key shows GNOME's workspace switcher popup"
 sleep 1
 
+# GNOME's keyboard workspace switch (workspaceAnimation.js): both
+# workspaces slide 250 ms ease-out-cubic as a render offset, a second
+# press retargets from where the strip is drawn, fade-only motion
+# crossfades in place and with animations off the switch is instant. The
+# animation clock freezes time so each frame is sampled exactly; the
+# compositor records each switch's timing.
+slide_last() { jq -c '.workspace_slide.history[-1]' "$CSTATE"; }
+slide_settled() {
+    cstate ".active_workspace == $1 and .workspace_slide.in_flight == null and (.workspace_slide.history | length) > 0 and .workspace_slide.history[-1].to == $1" "$2"
+}
+slide_home="$(jq -r '.active_workspace' "$CSTATE")"
+anim_clock 10000
+cstate '.animation_clock_manual and .motion_policy == "full"' "slide clock frozen" ||
+    fail G-WORKSPACE-SLIDE "the animation clock did not freeze"
+xdotool key super+Page_Down
+# Frozen at the start: the model switched, the old workspace still fills the screen.
+cstate ".active_workspace == $slide_home + 1 and (.workspace_slide.in_flight | .position == .from_slot and .to_slot == .from_slot + 1 and .record.motion == \"slide\")" "slide started" ||
+    fail G-WORKSPACE-SLIDE "Super+Page_Down did not start a slide from the current workspace"
+anim_clock 10125
+# Ease-out-cubic is 87.5% of the way at half time.
+cstate '.workspace_slide.in_flight | ((.position - .from_slot) - 0.875 | . < 0.001 and . > -0.001)' "slide half way" ||
+    fail G-WORKSPACE-SLIDE "the slide was not 87.5% across at 125 ms"
+cp "$CSTATE" "$ARTIFACTS/workspace-slide-in-flight.json"
+scrot "$ARTIFACTS/24g-workspace-slide-mid.png" >/dev/null 2>&1 || true
+anim_clock 10250
+slide_settled $((slide_home + 1)) "slide settled" || fail G-WORKSPACE-SLIDE "the slide had not settled at 250 ms"
+slide_last >"$ARTIFACTS/workspace-slide-key.json"
+jq -e --argjson home "$slide_home" \
+    '.motion == "slide" and (.gesture | not) and .from == $home and .to == $home + 1
+     and .duration_ms == 250 and .elapsed_ms == 250 and .frames >= 2 and (.reversed | not)' \
+    "$ARTIFACTS/workspace-slide-key.json" >/dev/null ||
+    fail G-WORKSPACE-SLIDE "the key switch did not slide 250 ms: $(cat "$ARTIFACTS/workspace-slide-key.json")"
+xdotool key super+Page_Up
+anim_clock 10600
+slide_settled "$slide_home" "slid back" || fail G-WORKSPACE-SLIDE "Super+Page_Up did not slide back"
+# Twice in quick succession: the second press carries on from the drawn
+# offset and ends two workspaces over, never moving backwards.
+anim_clock 11000
+xdotool key super+Page_Down
+cstate ".active_workspace == $slide_home + 1 and .workspace_slide.in_flight != null" "first press" ||
+    fail G-WORKSPACE-SLIDE "the first press did not start a slide"
+anim_clock 11060
+cstate '.workspace_slide.in_flight.position > .workspace_slide.in_flight.from_slot' "first press moving" ||
+    fail G-WORKSPACE-SLIDE "the first slide did not move"
+first_position="$(jq '.workspace_slide.in_flight.position' "$CSTATE")"
+xdotool key super+Page_Down
+cstate ".active_workspace == $slide_home + 2 and (.workspace_slide.in_flight | .record.retargets == 1 and ((.position - $first_position) | . < 0.001 and . > -0.001))" "retargeted" ||
+    fail G-WORKSPACE-SLIDE "the second press jumped instead of retargeting from the drawn offset"
+cp "$CSTATE" "$ARTIFACTS/workspace-slide-retarget-in-flight.json"
+anim_clock 11310
+slide_settled $((slide_home + 2)) "double press settled" ||
+    fail G-WORKSPACE-SLIDE "two rapid Super+Page_Down did not end two workspaces over"
+slide_last >"$ARTIFACTS/workspace-slide-retarget.json"
+jq -e --argjson home "$slide_home" \
+    '.motion == "slide" and .from == $home and .to == $home + 2 and .retargets == 1
+     and (.reversed | not) and .elapsed_ms == 310' "$ARTIFACTS/workspace-slide-retarget.json" >/dev/null ||
+    fail G-WORKSPACE-SLIDE "the second press did not retarget forwards: $(cat "$ARTIFACTS/workspace-slide-retarget.json")"
+# Page_Up steps back through the workspaces the double press passed.
+slide_clock=11400
+while [ "$(jq -r '.active_workspace' "$CSTATE")" != "$slide_home" ]; do
+    [ "$slide_clock" -lt 13000 ] || fail G-WORKSPACE-SLIDE "could not return home"
+    slide_from="$(jq -r '.active_workspace' "$CSTATE")"
+    xdotool key super+Page_Up
+    cstate ".active_workspace != $slide_from" "stepping home" || fail G-WORKSPACE-SLIDE "Super+Page_Up did not switch back"
+    slide_clock=$((slide_clock + 400))
+    anim_clock "$slide_clock"
+    cstate '.workspace_slide.in_flight == null' "stepped home" || fail G-WORKSPACE-SLIDE "the slide back did not settle"
+done
+# Reduced motion keeps fades: the workspaces crossfade in place.
+gsettings set org.gnome.desktop.a11y.interface reduced-motion 'reduce'
+cstate '.motion_policy == "fade-only"' "fade-only slide" ||
+    fail G-WORKSPACE-SLIDE "reduced motion did not reach the compositor"
+anim_clock 14000
+xdotool key super+Page_Down
+anim_clock 14125
+cstate ".active_workspace == $slide_home + 1 and .workspace_slide.in_flight.record.motion == \"fade\"" "crossfading" ||
+    fail G-WORKSPACE-SLIDE "fade-only motion did not crossfade"
+anim_clock 14250
+slide_settled $((slide_home + 1)) "crossfade settled" || fail G-WORKSPACE-SLIDE "the crossfade did not settle in 250 ms"
+xdotool key super+Page_Up
+anim_clock 14600
+slide_settled "$slide_home" "crossfade back" || fail G-WORKSPACE-SLIDE "could not crossfade back"
+gsettings reset org.gnome.desktop.a11y.interface reduced-motion
+gsettings set org.gnome.desktop.interface enable-animations false
+cstate '(.animations_enabled | not)' "slide animations off" ||
+    fail G-WORKSPACE-SLIDE "enable-animations false did not reach the compositor"
+xdotool key super+Page_Down
+slide_settled $((slide_home + 1)) "instant switch" || fail G-WORKSPACE-SLIDE "the switch failed with animations off"
+slide_last >"$ARTIFACTS/workspace-slide-off.json"
+jq -e '.motion == "off" and .frames == 0 and .elapsed_ms == 0' "$ARTIFACTS/workspace-slide-off.json" >/dev/null ||
+    fail G-WORKSPACE-SLIDE "the switch animated with animations off: $(cat "$ARTIFACTS/workspace-slide-off.json")"
+xdotool key super+Page_Up
+slide_settled "$slide_home" "instant back" || fail G-WORKSPACE-SLIDE "could not return home with animations off"
+gsettings set org.gnome.desktop.interface enable-animations true
+cstate '.animations_enabled and .motion_policy == "full"' "slide animations restored" ||
+    fail G-WORKSPACE-SLIDE "could not restore animations"
+rm -f "$TUNA_ANIMATION_CLOCK"
+cstate '(.animation_clock_manual | not)' "slide clock resumed" || fail G-WORKSPACE-SLIDE "the animation clock did not resume"
+pass G-WORKSPACE-SLIDE "Super+Page_Down slides 250 ms (87.5% at 125 ms), a second press retargets from the drawn offset, fade-only crossfades and animations off switches instantly"
+sleep 1
+
 # Exercise the normal three-finger handler with nested synthetic phases.
 # Physical touchpad/libinput qualification remains a separate hardware gate.
 swipe_sequence=100
@@ -3503,19 +3674,70 @@ swipe_phase() {
     sleep 0.2
 }
 gesture_home="$(jq -r '.active_workspace' "$CSTATE")"
+# GNOME commits a slow release past half a workspace (400px of travel).
 swipe_phase begin 0 0
-swipe_phase update -180 0
+swipe_phase update -240 0
 swipe_phase end 0 0
 cstate ".active_workspace == $gesture_home + 1 and (.overview_open | not)" "left swipe" ||
     fail G-SWIPE-DIRECTIONS "three-finger left did not select the next workspace"
 cp "$CSTATE" "$ARTIFACTS/swipe-next-workspace.json"
 swipe_phase begin 0 0
-swipe_phase update 180 0
+swipe_phase update 240 0
 swipe_phase end 0 0
 cstate ".active_workspace == $gesture_home and (.overview_open | not)" "right swipe" ||
     fail G-SWIPE-DIRECTIONS "three-finger right did not restore the previous workspace"
 cp "$CSTATE" "$ARTIFACTS/swipe-previous-workspace.json"
 pass G-SWIPE-DIRECTIONS "nested three-finger left/right switch and restore the exact workspace"
+
+# The strip follows the fingers while they are down (1 workspace per
+# 400px), and a slow release short of half way goes back.
+slide_settled "$gesture_home" "swipe start" || fail G-SWIPE-FOLLOW "the restore swipe did not settle"
+held_at() {
+    cstate "(.workspace_slide.in_flight | .following and ((.position - (.strip | index($gesture_home)) - $1) | . < 0.001 and . > -0.001)) and .active_workspace == $gesture_home" "$2"
+}
+swipe_phase begin 0 0
+swipe_phase update -100 0
+held_at 0.25 "a quarter over" || fail G-SWIPE-FOLLOW "100px of travel did not hold the strip a quarter over"
+cp "$CSTATE" "$ARTIFACTS/swipe-follow-quarter.json"
+swipe_phase update -60 0
+held_at 0.4 "0.4 over" || fail G-SWIPE-FOLLOW "the strip did not keep following the fingers"
+swipe_phase update 0 0
+sleep 0.3
+swipe_phase end 0 0
+slide_settled "$gesture_home" "cancelled swipe" || fail G-SWIPE-FOLLOW "a slow release under half way did not go back"
+jq -e '.workspace_slide.history[-1] | .gesture and .motion == "slide"' "$CSTATE" >/dev/null ||
+    fail G-SWIPE-FOLLOW "the cancelled swipe was not animated back"
+pass G-SWIPE-FOLLOW "a held three-finger swipe drags the workspace strip and a slow short release slides back"
+
+# Release velocity decides the landing and the duration (swipeTracker.js):
+# a fast short flick still switches, sooner than a slow drag finishes.
+# Phases carry event times so the velocity is deterministic.
+swipe_at() {
+    swipe_sequence=$((swipe_sequence + 1))
+    printf '{"phase":"%s","dx":%s,"dy":0,"time":%s,"sequence":%s}\n' \
+        "$1" "$2" "$3" "$swipe_sequence" >"$TUNA_PROOF_SWIPE_INPUT.tmp"
+    mv "$TUNA_PROOF_SWIPE_INPUT.tmp" "$TUNA_PROOF_SWIPE_INPUT"
+    sleep 0.2
+}
+swipe_at begin 0 10000
+swipe_at update -40 10008
+swipe_at update -40 10016
+swipe_at end 0 10024
+slide_settled $((gesture_home + 1)) "flick" || fail G-SWIPE-VELOCITY "a fast 80px flick did not switch"
+slide_last >"$ARTIFACTS/swipe-velocity-flick.json"
+swipe_at begin 0 20000
+swipe_at update 240 20010
+swipe_at end 0 20500
+slide_settled "$gesture_home" "slow drag" || fail G-SWIPE-VELOCITY "a slow drag past half way did not switch back"
+slide_last >"$ARTIFACTS/swipe-velocity-drag.json"
+flick_ms="$(jq '.duration_ms' "$ARTIFACTS/swipe-velocity-flick.json")"
+drag_ms="$(jq '.duration_ms' "$ARTIFACTS/swipe-velocity-drag.json")"
+if ! jq -e '.gesture and .velocity >= 0.6 and .duration_ms >= 100 and .duration_ms < 400' \
+    "$ARTIFACTS/swipe-velocity-flick.json" >/dev/null ||
+    ! jq -e '.gesture and .velocity == 0 and .duration_ms == 400' "$ARTIFACTS/swipe-velocity-drag.json" >/dev/null; then
+    fail G-SWIPE-VELOCITY "release durations ignore velocity (flick ${flick_ms}ms, drag ${drag_ms}ms)"
+fi
+pass G-SWIPE-VELOCITY "a fast flick lands in ${flick_ms}ms, a slow drag in ${drag_ms}ms"
 
 gsettings set org.gnome.desktop.interface enable-animations false
 cstate '(.animations_enabled | not) and .overview_progress == 0' "reduced-motion swipe ready" ||
@@ -3540,6 +3762,57 @@ gsettings set org.gnome.desktop.interface enable-animations true
 cstate '.animations_enabled' "gesture animations restored" ||
     fail G-SWIPE-REDUCED-MOTION "could not restore animation setting"
 pass G-SWIPE-REDUCED-MOTION "up/down gestures snap while held and settle correctly with reduced motion"
+
+# GNOME 51 eases the overview open with EASE_OUT_SINE and closed with
+# EASE_OUT_QUAD over 250 ms (#499). The compositor records the progress
+# of every frame it drew; each must sit on its own direction's curve,
+# with at least one sample strictly mid-transition each way.
+xdotool key Super_L
+cstate '.overview_open and .overview_progress == 1' "eased open" ||
+    fail G-OVERVIEW-EASING "the overview did not open"
+xdotool key Escape
+cstate '(.overview_open | not) and .overview_progress == 0' "eased close" ||
+    fail G-OVERVIEW-EASING "the overview did not close"
+cp "$CSTATE" "$ARTIFACTS/overview-easing.json"
+jq -e '
+    def abs: if . < 0 then -. else . end;
+    def frac: (.[0] / 250) | if . > 1 then 1 else . end;
+    .overview_motion.open as $o | .overview_motion.close as $c |
+    $o.curve == "ease-out-sine" and $o.duration_ms == 250 and $o.from == 0 and $o.to == 1 and
+    $c.curve == "ease-out-quad" and $c.duration_ms == 250 and $c.from == 1 and $c.to == 0 and
+    ([$o.samples[] | select(.[0] > 0 and .[0] < 250 and .[1] > 0 and .[1] < 1)] | length) > 0 and
+    ([$c.samples[] | select(.[0] > 0 and .[0] < 250 and .[1] > 0 and .[1] < 1)] | length) > 0 and
+    all($o.samples[]; (.[1] - (frac * 1.5707963267948966 | sin)) | abs < 0.001) and
+    all($c.samples[]; (.[1] - (1 - (1 - (1 - frac) * (1 - frac)))) | abs < 0.001) and
+    all($c.samples[] | select(.[0] > 0 and .[0] < 250); .[1] < 1 - .[0] / 250)
+' "$CSTATE" >/dev/null ||
+    fail G-OVERVIEW-EASING "drawn progress did not follow out-sine opening and out-quad closing"
+pass G-OVERVIEW-EASING "opening follows EASE_OUT_SINE and closing EASE_OUT_QUAD over 250 ms, sampled mid-transition"
+
+# A quick upward flick opens the overview from a quarter of the way,
+# as GNOME's swipe tracker projects it, and the fingers' 3 px/ms set
+# an out-cubic finish of 225 ms rather than a fixed rate.
+swipe_timed() {
+    swipe_sequence=$((swipe_sequence + 1))
+    printf '{"phase":"%s","dy":%s,"time":%s,"sequence":%s}\n' \
+        "$1" "$2" "$3" "$swipe_sequence" >"$TUNA_PROOF_SWIPE_INPUT.tmp"
+    mv "$TUNA_PROOF_SWIPE_INPUT.tmp" "$TUNA_PROOF_SWIPE_INPUT"
+    sleep 0.2
+}
+swipe_timed begin 0 5000
+swipe_timed update -15 5010
+swipe_timed update -30 5020
+swipe_timed update -30 5030
+swipe_timed end 0 5040
+cstate '.overview_open and .overview_motion.release.target == 1 and .overview_motion.release.from == 0.25 and .overview_motion.release.curve == "ease-out-cubic" and (.overview_motion.release.duration_ms - 225 | if . < 0 then -. else . end) < 0.01' "flick release" ||
+    fail G-SWIPE-MOMENTUM "a quarter-way flick did not carry its velocity into the finish"
+cstate '.overview_progress == 1' "flick settled" ||
+    fail G-SWIPE-MOMENTUM "the flick did not settle open"
+cp "$CSTATE" "$ARTIFACTS/swipe-momentum.json"
+xdotool key Escape
+cstate '(.overview_open | not) and .overview_progress == 0' "flick closed" ||
+    fail G-SWIPE-MOMENTUM "the overview did not close after the flick"
+pass G-SWIPE-MOMENTUM "a released swipe keeps its momentum: projected target and velocity-derived out-cubic duration"
 
 # GNOME's workspace thumbnails: a window moved one workspace right makes
 # three (the trailing empty one included), so the overview shows the

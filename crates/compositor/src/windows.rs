@@ -293,6 +293,9 @@ pub struct WindowManager {
     /// The running view spring and its elapsed seconds, while the drawn
     /// view has not settled on the target.
     strip_anim: Option<(crate::spring::Spring, f64)>,
+    /// GNOME's workspace switch motion, stepped by the runtime once a
+    /// frame. Only render positions use it.
+    workspace_slide: crate::workspace_slide::WorkspaceSlide,
     /// Last hub overview flag seen (set by the runtime each tick).
     overview_open: bool,
     /// Window focused before the overview parked keyboard focus.
@@ -357,6 +360,7 @@ impl WindowManager {
             animations_enabled: true,
             column_animations: HashMap::new(),
             strip_anim: None,
+            workspace_slide: Default::default(),
             super_held: false,
             // add_keyboard below: 200 ms delay, 200 keys/s.
             repeat: (200, 200),
@@ -417,6 +421,11 @@ impl WindowManager {
                 })
             })
             .collect()
+    }
+
+    /// Every managed window's id, in no particular order.
+    pub fn window_ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.windows.keys().copied()
     }
 
     /// The Wayland surface of window `id`, if it has one.
@@ -616,6 +625,9 @@ impl WindowManager {
     /// this frame: column widths and positions spring to their targets,
     /// shifted by how far the animated view still trails its target. Every other use (input, configure,
     /// output scale) keeps the target geometry.
+    ///
+    /// During a workspace switch both workspaces draw, offset along the
+    /// strip (see [`crate::workspace_slide`]).
     pub fn render_windows(&self) -> Vec<(Window, Rectangle<i32, Logical>)> {
         self.render_entries()
             .into_iter()
@@ -625,6 +637,9 @@ impl WindowManager {
 
     /// [`render_windows`](Self::render_windows) with their ids.
     pub fn render_entries(&self) -> Vec<(u64, Window, Rectangle<i32, Logical>)> {
+        if self.workspace_slide.running() {
+            return self.sliding_entries();
+        }
         self.visible_entries()
             .into_iter()
             .map(|(id, window, geometry)| (id, window, self.shifted(id, geometry)))
@@ -661,6 +676,56 @@ impl WindowManager {
         }
         let new = window.geometry;
         self.size_changes.request(id, old, new);
+    }
+
+    fn sliding_entries(&self) -> Vec<(u64, Window, Rectangle<i32, Logical>)> {
+        self.stacking
+            .iter()
+            .filter_map(|id| {
+                let window = self.windows.get(id).filter(|w| !w.minimized)?;
+                let mut geometry = self.shifted(*id, window.geometry);
+                if !window.sticky {
+                    let workspace = self.model.window(*id)?.workspace;
+                    geometry.loc.x += self.workspace_slide.frame_placement(workspace)?.dx;
+                }
+                Some((*id, window.surface.clone(), geometry))
+            })
+            .collect()
+    }
+
+    /// Opacity of `window` this frame: below 1 only while a fade-only
+    /// workspace switch crossfades.
+    pub fn render_alpha(&self, window: &Window) -> f32 {
+        if !self.workspace_slide.running() {
+            return 1.0;
+        }
+        self.windows
+            .iter()
+            .find(|(_, w)| w.surface == *window && !w.sticky)
+            .and_then(|(id, _)| self.model.window(*id))
+            .and_then(|entry| self.workspace_slide.frame_placement(entry.workspace))
+            .map_or(1.0, |placement| placement.alpha)
+    }
+
+    /// The workspace switch motion (stepped by the runtime).
+    pub fn workspace_slide(&self) -> &crate::workspace_slide::WorkspaceSlide {
+        &self.workspace_slide
+    }
+
+    pub fn workspace_slide_mut(&mut self) -> &mut crate::workspace_slide::WorkspaceSlide {
+        &mut self.workspace_slide
+    }
+
+    /// How far the workspace switch shifts `id` this frame (0 when no
+    /// switch is drawn or the window is on every workspace).
+    pub fn slide_dx(&self, id: u64) -> i32 {
+        if !self.workspace_slide.running() || self.windows.get(&id).is_none_or(|w| w.sticky) {
+            return 0;
+        }
+        self.model
+            .window(id)
+            .and_then(|entry| self.workspace_slide.frame_placement(entry.workspace))
+            .map_or(0, |placement| placement.dx)
     }
 
     /// Where `id` is drawn this frame (see

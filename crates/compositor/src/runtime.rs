@@ -25,7 +25,6 @@ use smithay::{
                 Kind,
             },
             gles::GlesRenderer,
-            utils::draw_render_elements,
             Bind, Color32F, Frame, Renderer,
         },
         winit::{self, WinitEvent},
@@ -39,6 +38,7 @@ use smithay::{
 
 use crate::control::{ControlHub, PeerGate};
 use crate::lock::{content_visible, SessionLock, DEFAULT_IDLE_TIMEOUT_MS};
+use crate::occlusion::FrameCost;
 
 /// Idle timeout for the session lock: `TUNA_IDLE_TIMEOUT_MS` overrides
 /// the five-minute default. Testability seam for scripted lock capture
@@ -394,6 +394,37 @@ pub fn resolve_shell_bin_in(
 }
 
 #[cfg(test)]
+mod scene_slot_tests {
+    use super::{scene_slots, SceneSlot::*};
+
+    #[test]
+    fn snapshots_draw_in_front_of_the_elements_at_and_after_their_index() {
+        // Five elements split at 2: snapshot 0 sits at index 1 (over half),
+        // snapshot 1 at the boundary 2 (under half's end only), snapshots
+        // 2 and 3 both at 4 (the later in front), snapshot 4 past the end.
+        let at = [1, 2, 4, 4, 5];
+        assert_eq!(
+            scene_slots(2, 0, false, &at),
+            vec![Element(0), Snapshot(0), Element(1)]
+        );
+        assert_eq!(
+            scene_slots(3, 2, true, &at),
+            vec![
+                Snapshot(1),
+                Element(2),
+                Element(3),
+                Snapshot(3),
+                Snapshot(2),
+                Element(4),
+                Snapshot(4),
+            ]
+        );
+        assert_eq!(scene_slots(0, 0, false, &[0]), vec![]);
+        assert_eq!(scene_slots(0, 0, true, &[0]), vec![Snapshot(0)]);
+    }
+}
+
+#[cfg(test)]
 mod shell_bin_tests {
     use super::*;
 
@@ -574,18 +605,15 @@ pub struct Runtime {
     introspect: crate::introspect::Handle,
     /// A three-finger swipe in progress: its travel so far (#60).
     shell_swipe: Option<Point<f64, Logical>>,
-    /// The overview transition: 0 the desktop, 1 the overview (linear
-    /// time; drawn eased), moving toward the open state each frame.
-    overview_progress: f64,
+    /// The overview's animations (#499): the open/close transition,
+    /// the swipe driving it, and the settled scene's own motion.
+    overview_motion: crate::overview::OverviewMotion,
     overview_progress_at: Duration,
     tile_animation: Option<(u64, crate::animation::EaseRect, Duration)>,
     /// Last strip-view spring step, for the per-frame time delta.
     strip_view_at: Duration,
     /// Time base for the animations above: real, or manual for proofs.
     animation_clock: crate::animation_clock::AnimationClock,
-    /// A three-finger vertical swipe driving the transition: the
-    /// progress it started from.
-    overview_swipe_from: Option<f64>,
     /// Overview search is showing results: the workspace card and
     /// previews hide (GNOME). Reset whenever the overview closes.
     overview_search: bool,
@@ -597,6 +625,8 @@ pub struct Runtime {
     overview_drag: Option<(u64, Point<f64, Logical>, bool)>,
     /// The Alt+Tab switcher's window thumbnails (frames from the shell).
     switcher_thumbnails: Vec<tuna_shell_control::SwitcherThumbnail>,
+    /// What each output's last drawn frame cost, by output name (#503).
+    frame_costs: std::collections::BTreeMap<String, FrameCost>,
     /// Reserved X11 display, advertised before XWayland starts (#219).
     /// Actual window-manager readiness is independently state.xwm.is_some().
     x11_display: Option<u32>,
@@ -952,13 +982,13 @@ impl Runtime {
             overview_app_grid: false,
             overview_drag: None,
             switcher_thumbnails: Vec::new(),
+            frame_costs: std::collections::BTreeMap::new(),
             shell_swipe: None,
-            overview_progress: 0.0,
+            overview_motion: Default::default(),
             overview_progress_at: Duration::ZERO,
             tile_animation: None,
             strip_view_at: Duration::ZERO,
             animation_clock: crate::animation_clock::AnimationClock::real(),
-            overview_swipe_from: None,
             scale: clamp_scale(session.scale),
             input_settings: Default::default(),
             orca: crate::orca::Reader::new(&session.socket_name),
@@ -1227,8 +1257,9 @@ impl Runtime {
                     ManagerInput::Motion { pos, .. } => {
                         if let Some((_, start, dragging)) = &mut self.overview_drag {
                             let (dx, dy) = (pos.x - start.x, pos.y - start.y);
-                            if dx.hypot(dy) > crate::overview::DRAG_THRESHOLD {
+                            if !*dragging && dx.hypot(dy) > crate::overview::DRAG_THRESHOLD {
                                 *dragging = true;
+                                self.overview_motion.drag_begin(self.input_settings.motion);
                             }
                         }
                     }
@@ -1463,10 +1494,10 @@ impl Runtime {
         let overview_open = self.control.overview_open();
         // Previews only once the transition settles: harnesses click
         // where they say.
-        let scene =
-            (overview_open && self.overview_progress >= 1.0).then(|| self.overview_layout());
+        let progress = self.overview_motion.progress();
+        let scene = (overview_open && progress >= 1.0).then(|| self.overview_layout());
         // Record the drawn transition separately from settled click targets.
-        let transition_scene = (self.overview_progress > 0.0).then(|| self.overview_layout());
+        let transition_scene = (progress > 0.0).then(|| self.overview_layout());
         let workspace_cards: Vec<serde_json::Value> = transition_scene
             .iter()
             .flat_map(|l| l.cards.iter())
@@ -1579,7 +1610,7 @@ impl Runtime {
             "workspace_placeholder": scene.as_ref().and_then(|s| s.placeholder).map(|(at, r)| serde_json::json!({
                 "workspace": at, "rect": [r.loc.x, r.loc.y, r.size.w, r.size.h],
             })),
-            "overview_progress": self.overview_progress,
+            "overview_progress": progress,
             "workspace_cards": workspace_cards,
 
             // The Alt+Tab switcher's window thumbnails being drawn.
@@ -1613,11 +1644,45 @@ impl Runtime {
                 })
                 .collect::<Vec<_>>(),
         });
+        // Overdraw per output for the last drawn frame (#503).
+        doc["frame_cost"] = self
+            .frame_costs
+            .iter()
+            .map(|(name, cost)| (name.clone(), cost.to_json()))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+        // Windows whose frame callbacks run at the hidden rate.
+        doc["throttled_windows"] = if self.overview_motion.progress() > 0.0
+            || !self.switcher_thumbnails.is_empty()
+            || !self.casts.is_empty()
+        {
+            serde_json::json!([])
+        } else {
+            let scene: Vec<u64> = self
+                .manager
+                .render_entries()
+                .iter()
+                .map(|(id, _, _)| *id)
+                .collect();
+            let shown = crate::occlusion::shown_windows(&scene, self.frame_costs.values());
+            serde_json::json!(snapshot
+                .windows
+                .iter()
+                .map(|w| w.id)
+                .filter(|id| !shown.contains(id))
+                .collect::<Vec<_>>())
+        };
         doc["wallpaper_diagnostics"] = if self.is_locked() {
             serde_json::Value::Null
         } else {
             self.wallpaper.diagnostics()
         };
+        // GNOME's workspace switch: the drawn strip while it moves, and
+        // the last finished switches with their timing.
+        doc["workspace_slide"] = self
+            .manager
+            .workspace_slide()
+            .snapshot(self.animation_clock.now());
         let motion = self.input_settings.motion;
         doc["motion_policy"] = serde_json::json!(motion.level.as_str());
         doc["animation_slowdown"] = serde_json::json!(motion.slowdown());
@@ -1627,6 +1692,7 @@ impl Runtime {
         doc["animation_clock_manual"] = serde_json::json!(manual);
         doc["animation_clock_ms"] =
             serde_json::json!(manual.then(|| self.animation_clock.now().as_millis() as u64));
+        doc["overview_motion"] = self.overview_motion.diagnostics();
         doc["screen_reader_pid"] = serde_json::json!(self.orca.pid());
         doc["screen_reader_state"] = serde_json::json!(self.orca.state());
         // Keep backend-specific observations outside the large scene macro so
@@ -1656,8 +1722,9 @@ impl Runtime {
         }
     }
 
-    /// Overview scene on the primary output (#54).
-    fn overview_layout(&self) -> crate::overview::OverviewLayout {
+    /// The overview at rest on the primary output (#54): the window
+    /// picker or the app grid, before any animation.
+    fn overview_base(&self) -> crate::overview::OverviewLayout {
         let size = self.state.primary_size();
         let output = Rectangle::new((0, 0).into(), size);
         let model = self.manager.model();
@@ -1666,61 +1733,64 @@ impl Runtime {
         } else {
             crate::overview::layout
         };
-        let mut scene = layout(
+        layout(
             output,
             crate::windows::WORK_AREA_TOP,
             model.workspaces(),
             model.active_workspace(),
             &self.manager.overview_windows(),
-        );
-        if self.overview_progress < 1.0 {
-            // Part-way through GNOME's transition.
-            return crate::overview::transition(
-                &scene,
-                crate::overview::ease_out_quad(self.overview_progress),
-                output,
-                &self.manager.overview_windows(),
-            );
-        }
-        match self.overview_drag {
-            Some((id, start, true)) => {
-                if let Some(at) =
-                    crate::overview::insertion_target(&scene, self.manager.pointer_pos())
-                {
-                    crate::overview::show_placeholder(&mut scene, at);
-                }
-                crate::overview::drag_preview(&mut scene, id, start, self.manager.pointer_pos());
-            }
-            // GNOME grows the preview under the pointer by 5px a side.
-            _ => crate::overview::grow_hovered(&mut scene, self.manager.pointer_pos()),
-        }
-        scene
+        )
     }
 
-    /// Move the overview transition toward the open state (250 ms each
-    /// way, as GNOME's, times the slow-down factor), unless a swipe holds
-    /// it. The transition is motion, so fade-only snaps it like off.
-    /// Returns whether the overview is drawn at all.
+    /// The preview being dragged and where it was grabbed.
+    fn overview_dragged(&self) -> Option<(u64, Point<f64, Logical>)> {
+        match self.overview_drag {
+            Some((id, start, true)) => Some((id, start)),
+            _ => None,
+        }
+    }
+
+    /// Overview scene on the primary output as drawn this frame.
+    fn overview_layout(&self) -> crate::overview::OverviewLayout {
+        let output = Rectangle::new((0, 0).into(), self.state.primary_size());
+        self.overview_motion.scene(
+            &self.overview_base(),
+            self.overview_dragged(),
+            self.manager.pointer_pos(),
+            output,
+            &self.manager.overview_windows(),
+        )
+    }
+
+    /// Advance the overview's animations (GNOME 51 timings, times the
+    /// slow-down factor) unless a swipe holds the transition. Fade-only
+    /// keeps fades and snaps motion. Returns whether the overview is
+    /// drawn at all.
     fn step_overview_transition(&mut self) -> bool {
         let now = self.animation_clock.now();
         let dt = now.saturating_sub(self.overview_progress_at).as_secs_f64() * 1000.0;
         self.overview_progress_at = now;
-        let motion = self.input_settings.motion;
-        if self.overview_swipe_from.is_none() {
-            let target = if self.control.overview_open() {
-                1.0
-            } else {
-                0.0
-            };
-            self.overview_progress = crate::animation::step_transition(
-                self.overview_progress,
-                target,
+        let cues = crate::overview::OverviewCues {
+            open: self.control.overview_open(),
+            app_grid: self.overview_app_grid,
+            search: self.overview_search,
+            motion: self.input_settings.motion,
+        };
+        self.overview_motion
+            .step_progress(dt, cues.open, cues.motion);
+        if self.overview_motion.progress() > 0.0 {
+            let base = self.overview_base();
+            self.overview_motion.step_scene(
                 dt,
-                crate::overview::TRANSITION_MS,
-                motion,
+                &base,
+                cues,
+                self.overview_dragged(),
+                self.manager.pointer_pos(),
             );
+        } else {
+            self.overview_motion.reset_scene();
         }
-        self.overview_progress > 0.0
+        self.overview_motion.progress() > 0.0
     }
 
     fn animated_tile_preview(
@@ -1795,6 +1865,23 @@ impl Runtime {
         );
     }
 
+    /// Follow the active workspace with GNOME's switch animation; the
+    /// overview (and the lock) settle it at once.
+    fn step_workspace_slide(&mut self) {
+        let now = self.animation_clock.now();
+        let policy = self.input_settings.motion;
+        let suspended = self.overview_motion.progress() > 0.0
+            || self.control.overview_open()
+            || self.is_locked();
+        let width = self.state.primary_size().w;
+        let model = self.manager.model();
+        let active = model.active_workspace();
+        let workspaces = model.workspaces().to_vec();
+        let slide = self.manager.workspace_slide_mut();
+        slide.observe(active, &workspaces, width, policy, suspended, now);
+        slide.step(now);
+    }
+
     /// A press while the overview is open that no shell surface took:
     /// focus the preview's window, switch to a neighbor card's
     /// workspace, or close the overview (GNOME shape). Returns whether
@@ -1849,17 +1936,25 @@ impl Runtime {
         }
         let pos = self.manager.pointer_pos();
         let layout = self.overview_layout();
+        let motion = self.input_settings.motion;
         if let Some(at) = crate::overview::insertion_target(&layout, pos) {
+            self.overview_motion.drag_released();
             self.manager
                 .insert_workspace_and_move(&mut self.state, id, at);
             return;
         }
+        // GNOME's drag ends: nowhere glides home, an accepted drop that
+        // changes nothing fades back in place.
         let Some(target) = crate::overview::drop_target(&layout, pos) else {
+            self.overview_motion.drag_snap_back(motion);
             return;
         };
         let here = self.manager.model().window(id).map(|w| w.workspace);
         if here != Some(target) {
+            self.overview_motion.drag_released();
             self.manager.move_to_workspace(&mut self.state, id, target);
+        } else {
+            self.overview_motion.drag_revert(id, motion);
         }
     }
 
@@ -1886,7 +1981,10 @@ impl Runtime {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
             return;
         };
-        let time = crate::state::system_millis() as u32;
+        // Proofs may stamp phases to shape the release velocity.
+        let time = value["time"]
+            .as_u64()
+            .map_or(crate::state::system_millis() as u32, |t| t as u32);
         let input = match value["phase"].as_str() {
             Some("begin") => ManagerInput::SwipeBegin { fingers: 3, time },
             Some("update") => ManagerInput::SwipeUpdate {
@@ -1917,41 +2015,80 @@ impl Runtime {
                 }
                 false
             }
-            ManagerInput::SwipeUpdate { delta, .. } => match self.shell_swipe.as_mut() {
+            ManagerInput::SwipeUpdate { delta, time } => match self.shell_swipe.as_mut() {
                 Some(travel) => {
                     *travel += delta;
                     let travel = *travel;
+                    // On the desktop a horizontal swipe drags the
+                    // workspace strip with the fingers (GNOME).
+                    let desktop =
+                        !self.control.overview_open() && self.overview_motion.progress() == 0.0;
+                    if self.manager.workspace_slide().following() {
+                        self.manager
+                            .workspace_slide_mut()
+                            .update_swipe(delta.x, time);
+                    } else if desktop
+                        && !self.overview_motion.swiping()
+                        && travel.x.abs() > travel.y.abs()
+                    {
+                        let policy = self.input_settings.motion;
+                        let now = self.animation_clock.now();
+                        let width = self.state.primary_size().w;
+                        let model = self.manager.model();
+                        let active = model.active_workspace();
+                        let workspaces = model.workspaces().to_vec();
+                        let slide = self.manager.workspace_slide_mut();
+                        slide.begin_swipe(active, &workspaces, width, policy, now);
+                        slide.update_swipe(travel.x, time);
+                    }
                     // GNOME's overview follows the fingers: a vertical
                     // swipe moves the transition (up opens) as it goes.
-                    if travel.y.abs() > travel.x.abs() {
-                        let from = *self
-                            .overview_swipe_from
-                            .get_or_insert(self.overview_progress);
-                        let progress = (from - travel.y / OVERVIEW_SWIPE_DISTANCE).clamp(0.0, 1.0);
-                        self.overview_progress = if self.input_settings.motion.allows_motion() {
-                            progress
-                        } else if progress >= 0.5 {
-                            1.0
-                        } else {
-                            0.0
-                        };
+                    if travel.y.abs() > travel.x.abs()
+                        && !self.manager.workspace_slide().following()
+                    {
+                        self.overview_motion.swipe_update(
+                            time,
+                            -travel.y,
+                            OVERVIEW_SWIPE_DISTANCE,
+                            self.input_settings.motion,
+                        );
                     }
                     true
                 }
                 None => false,
             },
-            ManagerInput::SwipeEnd { cancelled, .. } => {
+            ManagerInput::SwipeEnd { cancelled, time } => {
                 let Some(travel) = self.shell_swipe.take() else {
                     return false;
                 };
-                if let Some(from) = self.overview_swipe_from.take() {
-                    // Released: finish toward whichever side is nearer
-                    // (back where it began when cancelled).
-                    let open = if cancelled {
-                        from >= 0.5
-                    } else {
-                        self.overview_progress >= 0.5
-                    };
+                if self.manager.workspace_slide().following() {
+                    // Released: the slide finishes on the fingers'
+                    // velocity; the model switches now so focus and
+                    // input never wait for it.
+                    let now = self.animation_clock.now();
+                    let target = self
+                        .manager
+                        .workspace_slide_mut()
+                        .end_swipe(cancelled, time, now);
+                    if let Some(target) = target {
+                        if target != self.manager.model().active_workspace()
+                            && !self.manager.switch_to_workspace(&mut self.state, target)
+                        {
+                            // GNOME's trailing empty workspace: create it.
+                            self.manager.switch_relative(&mut self.state, 1);
+                        }
+                    }
+                    return true;
+                }
+                // Released: finish where GNOME's swipe tracker would,
+                // keeping the fingers' momentum (back where it began
+                // when cancelled).
+                if let Some(open) = self.overview_motion.swipe_end(
+                    time,
+                    cancelled,
+                    OVERVIEW_SWIPE_DISTANCE,
+                    self.input_settings.motion,
+                ) {
                     self.control.set_overview(open);
                     return true;
                 }
@@ -2151,7 +2288,7 @@ impl Runtime {
                 &[],
                 &elements,
                 Target {
-                    damage: Rectangle::from_size(size),
+                    damage: &[Rectangle::from_size(size)],
                     scale,
                     blank_alpha: 0.0,
                 },
@@ -2226,8 +2363,10 @@ impl Runtime {
             return None;
         }
         let blank_alpha = self.blank_alpha();
-        let overview = (self.overview_progress > 0.0).then(|| self.overview_layout());
-        let cards = overview.as_ref().filter(|_| !self.overview_search);
+        let overview = (self.overview_motion.progress() > 0.0).then(|| self.overview_layout());
+        let cards = overview
+            .as_ref()
+            .filter(|_| !self.overview_motion.search_covers());
         let tile = overview
             .is_none()
             .then(|| self.manager.tile_preview(&self.state))
@@ -2324,7 +2463,7 @@ impl Runtime {
                 &paper,
                 &elements,
                 Target {
-                    damage,
+                    damage: &[damage],
                     scale: view.scale,
                     blank_alpha,
                 },
@@ -2661,11 +2800,7 @@ impl Runtime {
         self.manager
             .set_motion_allowed(settings.motion.allows_motion());
         if !settings.motion.allows_motion() {
-            self.overview_progress = if self.control.overview_open() {
-                1.0
-            } else {
-                0.0
-            };
+            self.overview_motion.snap(self.control.overview_open());
         }
         #[cfg(feature = "drm")]
         if let Backend::Drm(drm) = &mut self.backend {
@@ -2732,11 +2867,17 @@ impl Runtime {
     /// search or the app grid covers it).
     fn publish_overview_previews(&mut self) {
         let (previews, hovered) = if self.control.overview_open()
-            && self.overview_progress >= 1.0
+            && self.overview_motion.progress() >= 1.0
             && !self.overview_search
             && !self.overview_app_grid
         {
-            let scene = self.overview_layout();
+            // The resting geometry, so the chrome moves once per change
+            // rather than every frame of a hover or layout tween.
+            let mut scene = self.overview_base();
+            match self.overview_dragged() {
+                Some((id, _)) => scene.previews.retain(|p| p.id != id),
+                None => crate::overview::grow_hovered(&mut scene, self.manager.pointer_pos()),
+            }
             let list: Vec<tuna_shell_control::PreviewInfo> = scene
                 .previews
                 .iter()
@@ -3200,10 +3341,14 @@ impl Runtime {
         };
         let drawn = self.step_overview_transition();
         self.step_strip_view();
+        // The slide first: size changes read this frame's slide offsets.
+        self.step_workspace_slide();
         self.step_size_changes();
         let overview = (show_content && !overlay_visible && drawn).then(|| self.overview_layout());
         // While search shows results, the workspace view steps aside.
-        let cards = overview.as_ref().filter(|_| !self.overview_search);
+        let cards = overview
+            .as_ref()
+            .filter(|_| !self.overview_motion.search_covers());
         // GNOME's tile preview while a dragged window is over a snap edge.
         let tile = (show_content && overview.is_none())
             .then(|| self.manager.tile_preview(&self.state))
@@ -3222,11 +3367,16 @@ impl Runtime {
         #[cfg(feature = "drm")]
         let timing_roots = crate::frame_timing::frame_roots(&self.state, &self.manager);
         let desktop = self.background_desktop();
+        // Window clones (overview, switcher) and casts show windows the
+        // scene hides: their frame callbacks keep full rate then.
+        let clones_shown =
+            overview.is_some() || !self.switcher_thumbnails.is_empty() || !self.casts.is_empty();
         match &mut self.backend {
             Backend::Winit(backend) => {
                 backend.window().set_cursor_visible(blank_alpha < 1.0);
                 let size = backend.window_size();
                 let damage = Rectangle::from_size(size);
+                let drawn;
                 {
                     let (renderer, mut framebuffer) = backend
                         .bind()
@@ -3289,25 +3439,28 @@ impl Runtime {
                     let mut frame = renderer
                         .render(&mut framebuffer, size, Transform::Flipped180)
                         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-                    draw_scene(
+                    let drew = draw_scene(
                         &mut frame,
                         background,
                         &paper,
                         &elements,
                         Target {
-                            damage,
+                            damage: &[damage],
                             scale: view.scale,
                             blank_alpha,
                         },
                         &decor,
                         &previews,
                     )?;
+                    drawn = FrameCost::new(&drew, &elements.owners, &[damage], size);
                     let _ = frame
                         .finish()
                         .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
                 }
+                self.frame_costs.insert("winit".to_owned(), drawn);
                 send_surface_scales(&self.state, &self.manager);
-                send_frame_callbacks(&self.state, &self.manager);
+                let hidden = hidden_surfaces(&self.manager, &self.frame_costs, clones_shown);
+                send_frame_callbacks(&self.state, &self.manager, &hidden);
                 backend
                     .submit(Some(&[damage]))
                     .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
@@ -3487,6 +3640,7 @@ impl Runtime {
                         &signature,
                     )
                     .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+                    let cost;
                     let sync = {
                         let mut target = renderer
                             .bind(&mut dmabuf)
@@ -3494,19 +3648,20 @@ impl Runtime {
                         let mut frame = renderer
                             .render(&mut target, size, Transform::Normal)
                             .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-                        draw_scene(
+                        let drew = draw_scene(
                             &mut frame,
                             background,
                             &paper,
                             &elements,
                             Target {
-                                damage,
+                                damage: &damage,
                                 scale: view.scale,
                                 blank_alpha,
                             },
                             &decor,
                             &previews,
                         )?;
+                        cost = FrameCost::new(&drew, &elements.owners, &damage, size);
                         // Software pointer on top (no host cursor on
                         // bare hardware); hidden while locked.
                         if !locked && blank_alpha < 1.0 {
@@ -3515,7 +3670,9 @@ impl Runtime {
                             let clip = |rects: Vec<Rectangle<i32, smithay::utils::Physical>>| {
                                 rects
                                     .into_iter()
-                                    .filter_map(|r| r.intersection(damage))
+                                    .flat_map(|r| {
+                                        damage.iter().filter_map(move |d| r.intersection(*d))
+                                    })
                                     .collect::<Vec<_>>()
                             };
                             let (outline, fill) = (clip(outline), clip(fill));
@@ -3537,7 +3694,7 @@ impl Runtime {
                     let feedback = crate::frame_timing::take_feedback(&mine, &out.output);
                     if let Err(e) = out.surface.queue_buffer(
                         Some(sync),
-                        Some(crate::native_repaint::scanout_damage(damage)),
+                        Some(crate::native_repaint::scanout_damage(&damage)),
                         feedback,
                     ) {
                         eprintln!("tuna-compositor: drm: queue_buffer {}: {e}", out.name);
@@ -3553,6 +3710,7 @@ impl Runtime {
                             .queued(Duration::from(self.state.presentation_now()));
                     }
                     out.last_frame = Some(signature);
+                    self.frame_costs.insert(out.name.clone(), cost);
                     queued = true;
                 }
                 send_surface_scales(&self.state, &self.manager);
@@ -3560,7 +3718,8 @@ impl Runtime {
                     // A pending page flip is not another rendered frame.
                     // Granting callbacks on every client dispatch here would
                     // let redraws outrun the display and keep the loop busy.
-                    send_frame_callbacks(&self.state, &self.manager);
+                    let hidden = hidden_surfaces(&self.manager, &self.frame_costs, clones_shown);
+                    send_frame_callbacks(&self.state, &self.manager, &hidden);
                     self.stats.frames += 1;
                 }
             }
@@ -3752,6 +3911,9 @@ struct Scene {
     /// Old-frame snapshots of size-change transitions (#496), each
     /// drawn in front of `elements[index..]`, in physical pixels.
     snapshots: Vec<(usize, SnapshotElement)>,
+    /// The window each of `elements` belongs to (popups included), for
+    /// reporting which windows occlusion hid; `None` for layers.
+    owners: Vec<Option<u64>>,
 }
 
 /// A size-change snapshot, drawn at scale 1.
@@ -3778,6 +3940,7 @@ impl Scene {
             tile: Vec::new(),
             top: Vec::new(),
             snapshots: Vec::new(),
+            owners: vec![None; above],
         }
     }
 }
@@ -3945,13 +4108,15 @@ fn scene_elements(
         return Scene::flat(crate::layer::front_to_back(elements));
     }
     let mut elements: Vec<PreviewElement> = Vec::new();
+    let mut owners: Vec<Option<u64>> = Vec::new();
     // Bottom-to-top index where the dragged window starts.
     let mut split_from = None;
     let tree = |renderer: &mut GlesRenderer,
                 elements: &mut Vec<PreviewElement>,
                 surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
                 at: Point<i32, Logical>,
-                sx: f64| {
+                sx: f64,
+                alpha: f32| {
         let origin = view.physical(f64::from(at.x), f64::from(at.y));
         elements.extend(
             render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(
@@ -3959,7 +4124,7 @@ fn scene_elements(
                 surface,
                 origin,
                 view.scale,
-                1.0,
+                alpha,
                 Kind::Unspecified,
             )
             .into_iter()
@@ -3981,7 +4146,14 @@ fn scene_elements(
             if split_from.is_none() && split.is_some_and(|s| *s == *surface) {
                 split_from = Some(elements.len());
             }
-            if let Some((frame, snapshot)) = manager.size_changes().frame(id) {
+            if let Some((mut frame, snapshot)) = manager.size_changes().frame(id) {
+                // A workspace switch carries the transition along with its
+                // window: the live frame and the snapshot above it.
+                let dx = f64::from(manager.slide_dx(id));
+                frame.live.loc.x += dx;
+                frame.snapshot.loc.x += dx;
+                let alpha = manager.render_alpha(&window);
+                frame.snapshot_alpha *= alpha;
                 // GNOME's size-change transition (#496): the live window
                 // eased (never scaled past its size), the old frame
                 // fading over it. Popups wait for the window to land.
@@ -3998,7 +4170,7 @@ fn scene_elements(
                             &surface,
                             origin,
                             view.scale,
-                            1.0,
+                            alpha,
                             Kind::Unspecified,
                         )
                         .into_iter()
@@ -4015,6 +4187,7 @@ fn scene_elements(
                     crate::size_change::snapshot_element(renderer, snapshot, &frame, view)
                         .map(|element| (elements.len(), element)),
                 );
+                owners.resize(elements.len(), Some(id));
                 continue;
             }
             let origin = crate::popup::surface_origin(&surface, geometry.loc);
@@ -4027,19 +4200,36 @@ fn scene_elements(
                 // An unmapped tree has no committed bounds to scale yet.
                 1.0
             };
-            tree(renderer, &mut elements, &surface, origin, sx);
+            // Below 1 only while a fade-only workspace switch crossfades.
+            let alpha = manager.render_alpha(&window);
+            tree(renderer, &mut elements, &surface, origin, sx, alpha);
             // Popups (#88) right above their window.
             for popup in crate::popup::placed_popups(&surface, origin, true) {
-                tree(renderer, &mut elements, &popup.surface, popup.origin, 1.0);
+                tree(
+                    renderer,
+                    &mut elements,
+                    &popup.surface,
+                    popup.origin,
+                    1.0,
+                    alpha,
+                );
             }
+            owners.resize(elements.len(), Some(id));
         }
     }
     // Layer shell above windows: panel strip, then overview, each with
     // its popups (toolkit popovers hang off layer surfaces).
     for (surface, (x, y), _) in crate::layer::layer_layout(state) {
-        tree(renderer, &mut elements, &surface, (x, y).into(), 1.0);
+        tree(renderer, &mut elements, &surface, (x, y).into(), 1.0, 1.0);
         for popup in crate::popup::placed_popups(&surface, (x, y).into(), false) {
-            tree(renderer, &mut elements, &popup.surface, popup.origin, 1.0);
+            tree(
+                renderer,
+                &mut elements,
+                &popup.surface,
+                popup.origin,
+                1.0,
+                1.0,
+            );
         }
     }
     // `elements` accumulates bottom-to-top (windows, then
@@ -4047,6 +4237,7 @@ fn scene_elements(
     // element topmost.
     let above = elements.len() - split_from.unwrap_or(0);
     let total = elements.len();
+    owners.resize(total, None);
     let snapshots = snapshots
         .into_iter()
         .map(|(index, element)| (total - index, element))
@@ -4057,6 +4248,7 @@ fn scene_elements(
         tile: Vec::new(),
         top: Vec::new(),
         snapshots,
+        owners: crate::layer::front_to_back(owners),
     }
 }
 
@@ -4136,8 +4328,8 @@ fn backdrop(
 /// DMA import bounds this backend does not satisfy), then the scene.
 /// What one frame redraws, and at which scale.
 #[derive(Debug, Clone, Copy)]
-struct Target {
-    damage: Rectangle<i32, smithay::utils::Physical>,
+struct Target<'a> {
+    damage: &'a [Rectangle<i32, smithay::utils::Physical>],
     scale: f64,
     blank_alpha: f32,
 }
@@ -4149,112 +4341,170 @@ fn draw_scene(
         GlesRenderer,
     >],
     scene: &Scene,
-    target: Target,
+    target: Target<'_>,
     decor: &[(Color32F, Vec<Rectangle<i32, smithay::utils::Physical>>)],
     previews: &[PreviewElement],
-) -> Result<(), RuntimeError> {
+) -> Result<crate::occlusion::Drawn, RuntimeError> {
+    use crate::occlusion::{draw_planned, Drawn, Occlusion};
+    use smithay::backend::renderer::element::{solid::SolidColorRenderElement, Id, Kind};
     let Target {
         damage,
         scale,
         blank_alpha,
     } = target;
-    frame
-        .clear(background, &[damage])
-        .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-    if !paper.is_empty() {
-        draw_render_elements(frame, 1.0, paper, &[damage])
-            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-    }
+    let error =
+        |e: smithay::backend::renderer::gles::GlesError| RuntimeError::Dispatch(e.to_string());
+    // Plan top to bottom (#503): each element repaints only damage that
+    // no opaque element above it covers, so stacked windows and the
+    // wallpaper under an opaque window are skipped.
+    let mut occlusion = Occlusion::new(damage);
+    let bounds = damage.iter().copied().reduce(Rectangle::merge);
+    thread_local! { static SHIELD: Id = Id::new(); }
+    let shield = bounds.filter(|_| blank_alpha > 0.0).map(|bounds| {
+        SolidColorRenderElement::new(
+            SHIELD.with(Clone::clone),
+            bounds,
+            0usize,
+            Color32F::new(0.0, 0.0, 0.0, blank_alpha),
+            Kind::Unspecified,
+        )
+    });
+    let shield_plan = occlusion.plan(1.0, shield.as_slice());
+    let top_plan = occlusion.plan(scale, &scene.top);
+    // Beneath the tile preview, the preview (blended), then the
+    // dragged window and the layers over it, each half with the
+    // size-change snapshots among its elements (#496).
+    let split = scene.above.min(scene.elements.len());
+    let snapshot_at: Vec<usize> = scene.snapshots.iter().map(|(index, _)| *index).collect();
+    let over = scene_slots(split, 0, false, &snapshot_at);
+    let under = scene_slots(scene.elements.len() - split, split, true, &snapshot_at);
+    let over_plan = plan_slots(&mut occlusion, scale, scene, &over);
+    let tile_plan = occlusion.plan(1.0, &scene.tile);
+    let under_plan = plan_slots(&mut occlusion, scale, scene, &under);
+    let previews_plan = occlusion.plan(scale, previews);
     // Solid shapes under the surfaces (overview cards, hover ring).
-    for (color, rects) in decor {
-        let rects: Vec<_> = rects
-            .iter()
-            .filter_map(|r| r.intersection(damage))
-            .collect();
+    let decor_plan: Vec<_> = decor
+        .iter()
+        .rev()
+        .map(|(color, rects)| occlusion.visit_fill(rects, color.is_opaque()))
+        .collect();
+    let paper_plan = occlusion.plan(1.0, paper);
+    let clear = occlusion.uncovered();
+    if !clear.is_empty() {
+        frame.clear(background, &clear).map_err(error)?;
+    }
+    draw_planned::<GlesRenderer, _>(frame, 1.0, paper, &paper_plan).map_err(error)?;
+    for ((color, _), rects) in decor.iter().zip(decor_plan.iter().rev()) {
         if !rects.is_empty() {
-            frame
-                .clear(*color, &rects)
-                .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+            frame.clear(*color, rects).map_err(error)?;
         }
     }
     // Surfaces carry logical sizes: draw them at the output scale. The
     // wallpaper above is already sized in physical pixels.
-    if !previews.is_empty() {
-        draw_render_elements(frame, scale, previews, &[damage])
-            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    draw_planned::<GlesRenderer, _>(frame, scale, previews, &previews_plan).map_err(error)?;
+    draw_slots(frame, scale, scene, &under, &under_plan).map_err(error)?;
+    draw_planned::<GlesRenderer, _>(frame, 1.0, &scene.tile, &tile_plan).map_err(error)?;
+    draw_slots(frame, scale, scene, &over, &over_plan).map_err(error)?;
+    draw_planned::<GlesRenderer, _>(frame, scale, &scene.top, &top_plan).map_err(error)?;
+    draw_planned::<GlesRenderer, _>(frame, 1.0, shield.as_slice(), &shield_plan).map_err(error)?;
+    let mut scene_visible = vec![false; scene.elements.len()];
+    for (slot, visible) in over
+        .iter()
+        .zip(&over_plan)
+        .chain(under.iter().zip(&under_plan))
+    {
+        if let SceneSlot::Element(index) = slot {
+            scene_visible[*index] = !visible.is_empty();
+        }
     }
-    // Beneath the tile preview, the preview (blended), then the
-    // dragged window and the layers over it.
-    let split = scene.above.min(scene.elements.len());
-    let (over, under) = scene.elements.split_at(split);
-    draw_with_snapshots(frame, scale, under, split, true, &scene.snapshots, damage)?;
-    if !scene.tile.is_empty() {
-        draw_render_elements::<GlesRenderer, _, _>(frame, 1.0, &scene.tile, &[damage])
-            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-    }
-    draw_with_snapshots(frame, scale, over, 0, false, &scene.snapshots, damage)?;
-    if !scene.top.is_empty() {
-        draw_render_elements(frame, scale, &scene.top, &[damage])
-            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-    }
-    if blank_alpha > 0.0 {
-        use smithay::backend::renderer::element::{solid::SolidColorRenderElement, Id, Kind};
-        thread_local! { static SHIELD: Id = Id::new(); }
-        let shield = SolidColorRenderElement::new(
-            SHIELD.with(Clone::clone),
-            damage,
-            0usize,
-            Color32F::new(0.0, 0.0, 0.0, blank_alpha),
-            Kind::Unspecified,
-        );
-        draw_render_elements::<GlesRenderer, _, _>(frame, 1.0, &[shield], &[damage])
-            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-    }
-    Ok(())
+    Ok(Drawn {
+        rendered: occlusion.rendered(),
+        culled: occlusion.culled(),
+        scene_visible,
+    })
 }
 
-/// Draw the front-to-back `elements`, the scene's `[base..]` slice,
-/// back to front with the size-change snapshots that sit among them
-/// (#496). A snapshot at the slice's end belongs to it only when
-/// `through_end` (the two halves around the tile preview share that
-/// boundary).
-fn draw_with_snapshots(
-    frame: &mut smithay::backend::renderer::gles::GlesFrame<'_, '_>,
-    scale: f64,
-    elements: &[PreviewElement],
+/// One drawn item of the scene's window/layer pass: a surface element or
+/// a size-change snapshot (#496), by index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SceneSlot {
+    Element(usize),
+    Snapshot(usize),
+}
+
+/// The scene's `[base..base + len]` elements front to back, with the
+/// size-change snapshots that sit among them: a snapshot at index `i`
+/// draws in front of `elements[i..]`. One at the slice's end belongs to
+/// it only when `through_end` (the two halves around the tile preview
+/// share that boundary). Of snapshots at one index, the later is in front.
+fn scene_slots(
+    len: usize,
     base: usize,
     through_end: bool,
-    snapshots: &[(usize, SnapshotElement)],
-    damage: Rectangle<i32, smithay::utils::Physical>,
-) -> Result<(), RuntimeError> {
-    let mut cuts: Vec<_> = snapshots
-        .iter()
-        .filter(|(index, _)| {
-            *index >= base
-                && (*index < base + elements.len()
-                    || (through_end && *index == base + elements.len()))
-        })
-        .map(|(index, element)| (index - base, element))
-        .collect();
-    cuts.sort_by_key(|(index, _)| std::cmp::Reverse(*index));
-    let mut end = elements.len();
-    for (index, snapshot) in cuts {
-        if index < end {
-            draw_render_elements(frame, scale, &elements[index..end], &[damage])
-                .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
-            end = index;
+    snapshot_at: &[usize],
+) -> Vec<SceneSlot> {
+    let mut slots = Vec::with_capacity(len + snapshot_at.len());
+    for at in 0..=len {
+        if at < len || through_end {
+            slots.extend(
+                snapshot_at
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .filter(|(_, index)| **index == base + at)
+                    .map(|(k, _)| SceneSlot::Snapshot(k)),
+            );
         }
-        draw_render_elements::<GlesRenderer, _, _>(
-            frame,
-            1.0,
-            std::slice::from_ref(snapshot),
-            &[damage],
-        )
-        .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+        if at < len {
+            slots.push(SceneSlot::Element(base + at));
+        }
     }
-    if end > 0 {
-        draw_render_elements(frame, scale, &elements[..end], &[damage])
-            .map_err(|e| RuntimeError::Dispatch(e.to_string()))?;
+    slots
+}
+
+fn plan_slots(
+    occlusion: &mut crate::occlusion::Occlusion,
+    scale: f64,
+    scene: &Scene,
+    slots: &[SceneSlot],
+) -> Vec<Vec<Rectangle<i32, smithay::utils::Physical>>> {
+    slots
+        .iter()
+        .map(|slot| match *slot {
+            SceneSlot::Element(index) => occlusion
+                .plan(scale, std::slice::from_ref(&scene.elements[index]))
+                .remove(0),
+            SceneSlot::Snapshot(k) => occlusion
+                .plan(1.0, std::slice::from_ref(&scene.snapshots[k].1))
+                .remove(0),
+        })
+        .collect()
+}
+
+fn draw_slots(
+    frame: &mut smithay::backend::renderer::gles::GlesFrame<'_, '_>,
+    scale: f64,
+    scene: &Scene,
+    slots: &[SceneSlot],
+    plan: &[Vec<Rectangle<i32, smithay::utils::Physical>>],
+) -> Result<(), smithay::backend::renderer::gles::GlesError> {
+    use crate::occlusion::draw_planned;
+    for (slot, visible) in slots.iter().zip(plan).rev() {
+        let visible = std::slice::from_ref(visible);
+        match *slot {
+            SceneSlot::Element(index) => draw_planned::<GlesRenderer, _>(
+                frame,
+                scale,
+                std::slice::from_ref(&scene.elements[index]),
+                visible,
+            )?,
+            SceneSlot::Snapshot(k) => draw_planned::<GlesRenderer, _>(
+                frame,
+                1.0,
+                std::slice::from_ref(&scene.snapshots[k].1),
+                visible,
+            )?,
+        }
     }
     Ok(())
 }
@@ -4299,7 +4549,50 @@ fn send_surface_scales(state: &State, manager: &WindowManager) {
     }
 }
 
-fn send_frame_callbacks(state: &State, manager: &WindowManager) {
+/// Root surfaces of the managed windows nothing on screen shows (#503),
+/// whose frame callbacks drop to [`HIDDEN_FRAME_INTERVAL`](crate::occlusion::HIDDEN_FRAME_INTERVAL).
+/// Empty while window clones or casts show every window. A toplevel the
+/// window manager does not track (not yet mapped, or not a managed
+/// window) is never throttled.
+fn hidden_surfaces(
+    manager: &WindowManager,
+    costs: &std::collections::BTreeMap<String, FrameCost>,
+    clones_shown: bool,
+) -> Vec<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface> {
+    if clones_shown {
+        return Vec::new();
+    }
+    let scene: Vec<u64> = manager
+        .render_entries()
+        .iter()
+        .map(|(id, _, _)| *id)
+        .collect();
+    let shown = crate::occlusion::shown_windows(&scene, costs.values());
+    manager
+        .window_ids()
+        .filter(|id| !shown.contains(id))
+        .filter_map(|id| manager.surface_of(id))
+        .collect()
+}
+
+/// Whether a toplevel has configures it has not yet acknowledged. Clients
+/// may wait on a frame callback before drawing (and acking) the new
+/// state; like Mutter's flush after a configure, they keep full rate.
+fn awaiting_configure(toplevel: &smithay::wayland::shell::xdg::ToplevelSurface) -> bool {
+    smithay::wayland::compositor::with_states(toplevel.wl_surface(), |states| {
+        states
+            .data_map
+            .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+            .and_then(|data| data.lock().ok().map(|d| !d.pending_configures().is_empty()))
+            .unwrap_or(false)
+    })
+}
+
+fn send_frame_callbacks(
+    state: &State,
+    manager: &WindowManager,
+    hidden: &[smithay::reexports::wayland_server::protocol::wl_surface::WlSurface],
+) {
     // Frame callback time measures elapsed time, independently of refresh
     // rate, idle periods, or how many frames the backend has queued.
     let time = Duration::from(state.presentation_now());
@@ -4307,12 +4600,19 @@ fn send_frame_callbacks(state: &State, manager: &WindowManager) {
         return;
     };
     for surface in state.toplevels() {
+        // A hidden window has no scan-out output: Smithay then sends its
+        // callbacks only once the throttle interval has passed.
+        let shown = !hidden.contains(surface.wl_surface()) || awaiting_configure(&surface);
         send_frames_surface_tree(
             surface.wl_surface(),
             &output,
             time,
-            Some(Duration::ZERO),
-            |_, _| Some(output.clone()),
+            Some(if shown {
+                Duration::ZERO
+            } else {
+                crate::occlusion::HIDDEN_FRAME_INTERVAL
+            }),
+            |_, _| shown.then(|| output.clone()),
         );
     }
     for (surface, _, _) in crate::layer::layer_layout(state) {
