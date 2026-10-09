@@ -19,7 +19,7 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use roost_shell_control::MotionPolicy;
+use tuna_shell_control::MotionPolicy;
 
 /// `WINDOW_ANIMATION_TIME`: the keyboard switch.
 pub const SWITCH_MS: f64 = 250.0;
@@ -635,7 +635,7 @@ impl WorkspaceSlide {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roost_shell_control::MotionLevel;
+    use tuna_shell_control::MotionLevel;
 
     fn policy(level: MotionLevel, slowdown: f64) -> MotionPolicy {
         MotionPolicy::new(level, slowdown)

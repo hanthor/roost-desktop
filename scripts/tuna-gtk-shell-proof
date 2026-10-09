@@ -3588,7 +3588,7 @@ slide_settled "$slide_home" "instant back" || fail G-WORKSPACE-SLIDE "could not 
 gsettings set org.gnome.desktop.interface enable-animations true
 cstate '.animations_enabled and .motion_policy == "full"' "slide animations restored" ||
     fail G-WORKSPACE-SLIDE "could not restore animations"
-rm -f "$ROOST_ANIMATION_CLOCK"
+rm -f "$TUNA_ANIMATION_CLOCK"
 cstate '(.animation_clock_manual | not)' "slide clock resumed" || fail G-WORKSPACE-SLIDE "the animation clock did not resume"
 pass G-WORKSPACE-SLIDE "Super+Page_Down slides 250 ms (87.5% at 125 ms), a second press retargets from the drawn offset, fade-only crossfades and animations off switches instantly"
 sleep 1
