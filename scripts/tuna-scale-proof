@@ -131,6 +131,8 @@ WAYLAND_DISPLAY="$SOCKET_NAME" "$PY" "$ROOT/scripts/lib/tuna-test-window.py" Alp
 NATIVE_PID=$!
 cstate '.windows | any(.app_id == "tuna-test-alpha")' "window" ||
     fail S-WINDOW "the test window never mapped"
+# The compositor draws the pointer (#342): park it off the probed body.
+xdotool mousemove --window "$WID" $((WIDTH - 2)) $((HEIGHT - 2))
 sleep 2
 scrot "$ARTIFACTS/02-window.png" >/dev/null
 rect="$(jq -r '.windows[] | select(.app_id == "tuna-test-alpha") | .rect | "\(.[0]) \(.[1]) \(.[2]) \(.[3])"' "$CSTATE")"

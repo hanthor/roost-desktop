@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Build scripts/lib/tuna-cursor-client.c (#342) into OUTPUT_DIRECTORY.
+set -euo pipefail
+if [[ $# != 1 ]]; then
+    echo 'usage: tuna-cursor-client-build OUTPUT_DIRECTORY' >&2
+    exit 2
+fi
+script_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+protocol_root=$(pkg-config --variable=pkgdatadir wayland-protocols)
+mkdir -p -- "$1"
+output_root=$(cd -- "$1" && pwd)
+# cursor-shape-v1 names zwp_tablet_tool_v2, so its code links tablet's.
+tablet="$protocol_root/stable/tablet/tablet-v2.xml"
+[[ -f $tablet ]] || tablet="$protocol_root/unstable/tablet/tablet-unstable-v2.xml"
+sources=()
+for xml in "$protocol_root/stable/xdg-shell/xdg-shell.xml" \
+    "$protocol_root/staging/cursor-shape/cursor-shape-v1.xml" "$tablet"; do
+    name=$(basename "$xml" .xml)
+    wayland-scanner client-header "$xml" "$output_root/$name-client-protocol.h"
+    wayland-scanner private-code "$xml" "$output_root/$name-protocol.c"
+    sources+=("$output_root/$name-protocol.c")
+done
+read -r -a compile_flags <<< "$(pkg-config --cflags wayland-client)"
+read -r -a link_flags <<< "$(pkg-config --libs wayland-client)"
+cc -std=c11 -O2 -Wall -Wextra -Werror "${compile_flags[@]}" -I "$output_root" \
+    "$script_root/lib/tuna-cursor-client.c" "${sources[@]}" \
+    "${link_flags[@]}" -lrt -o "$output_root/tuna-cursor-client"
