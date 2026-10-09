@@ -2582,7 +2582,23 @@ cstate ".windows | length == $((corner_count + 1))" "corner proof mapped" ||
 cstate '([.windows[] | select(.app_id == "tuna-test-fullscreen corner proof")] | length) == 1' "unique actual corner client identity" ||
     fail G-HOT-CORNER-FULLSCREEN "actual corner client identity was not unique"
 corner_window_id="$(jq '.windows[] | select(.app_id == "tuna-test-fullscreen corner proof") | .id' "$CSTATE")"
-corner_restored_rect="$(jq -c '.windows[] | select(.app_id == "tuna-test-fullscreen corner proof") | .rect' "$CSTATE")"
+# The toplevel enters the model before its first buffer, in a provisional
+# cascade slot; that commit places it. Read the restore rect only once it
+# holds still (and no size change is in flight), not the pre-commit slot.
+corner_rect_query=".windows[] | select(.id == $corner_window_id) | .rect"
+corner_restored_rect=""
+corner_end=$(($(date +%s) + 20))
+while [ "$(date +%s)" -le "$corner_end" ]; do
+    corner_rect_now="$(jq -c "if ((.size_changes.in_flight // []) | any(.window == $corner_window_id)) then null else ($corner_rect_query) end" "$CSTATE" 2>/dev/null || true)"
+    if [ -n "$corner_rect_now" ] && [ "$corner_rect_now" != null ] && [ "$corner_rect_now" = "$corner_restored_rect" ]; then
+        break
+    fi
+    corner_restored_rect="$corner_rect_now"
+    sleep 0.5
+done
+if [ -z "$corner_restored_rect" ] || [ "$corner_restored_rect" = null ]; then
+    fail G-HOT-CORNER-FULLSCREEN "genuine GTK proof window never settled in place"
+fi
 cp "$CSTATE" "$ARTIFACTS/hot-corner-client-before-fullscreen.json"
 printf '{"generation":1,"request":"fullscreen"}\n' >"$corner_requests"
 cstate ".focused_rect == [0, 0, $WIDTH, $HEIGHT]" "corner proof fullscreen" ||
