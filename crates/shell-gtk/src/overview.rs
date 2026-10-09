@@ -159,6 +159,10 @@ pub struct OverviewUi {
     folder_dialog: Rc<crate::folder_dialog::FolderDialog>,
     /// The grid's items as last built: one new since scales in.
     grid_keys: RefCell<std::collections::HashSet<String>>,
+    /// Whether the grid is shown (it may still be fading out).
+    apps_shown: Cell<bool>,
+    /// The grid's fade in and out (animateSwitch).
+    grid_fade: Rc<crate::grid_animation::Slot>,
 }
 
 impl OverviewUi {
@@ -290,6 +294,8 @@ impl OverviewUi {
                 Rc::new(crate::folders::rename),
             ),
             grid_keys: RefCell::new(std::collections::HashSet::new()),
+            apps_shown: Cell::new(false),
+            grid_fade: Rc::new(crate::grid_animation::Slot::default()),
         }));
         // An app dragged out of a folder's dialog leaves the folder.
         {
@@ -540,7 +546,7 @@ impl OverviewUi {
             let ui = ui.clone();
             show_apps.connect_toggled(move |t| {
                 let me = ui.borrow();
-                me.grid.set_visible(t.is_active());
+                me.fade_grid(t.is_active());
                 me.actions.set_app_grid(t.is_active());
             });
         }
@@ -862,7 +868,7 @@ impl OverviewUi {
     pub fn toggle_apps(ui: &Rc<RefCell<Self>>) {
         let showing = {
             let me = ui.borrow();
-            me.open && me.grid.is_visible()
+            me.open && me.apps_shown.get()
         };
         if showing {
             ui.borrow().actions.close_overview();
@@ -893,7 +899,7 @@ impl OverviewUi {
     pub fn shift(ui: &Rc<RefCell<Self>>, up: bool) {
         let (open, apps) = {
             let me = ui.borrow();
-            (me.open, me.grid.is_visible())
+            (me.open, me.apps_shown.get())
         };
         match (open, apps, up) {
             (false, _, true) | (true, true, false) => Self::focus_search(ui),
@@ -943,8 +949,71 @@ impl OverviewUi {
             me.search.set_keyboard_mode(KeyboardMode::None);
             me.search.set_visible(false);
             me.dash.set_visible(false);
+            me.grid_fade.stop();
+            me.apps_shown.set(false);
             me.grid.set_visible(false);
         }
+    }
+
+    /// GNOME's AppDisplay animateSwitch: the grid fades in over 400 ms,
+    /// ease-out-quad, 100 ms after the switch starts, and out over 400 ms
+    /// before it hides. A fade, so Reduced Motion keeps it.
+    fn fade_grid(&self, shown: bool) {
+        use crate::grid_animation as anim;
+        self.apps_shown.set(shown);
+        let Some(content) = self.grid.child() else {
+            self.grid.set_visible(shown);
+            return;
+        };
+        let policy = anim::motion();
+        let timing = if shown {
+            anim::GRID_FADE_IN
+        } else {
+            anim::GRID_FADE_OUT
+        };
+        let from = if self.grid.is_visible() {
+            content.opacity()
+        } else {
+            0.0
+        };
+        let to = if shown { 1.0 } else { 0.0 };
+        let total = if shown || self.grid.is_mapped() {
+            timing.end_ms(policy)
+        } else {
+            0.0
+        };
+        if shown {
+            self.grid.set_visible(true);
+        }
+        content.set_can_target(shown);
+        let step = {
+            let content = content.downgrade();
+            move |elapsed: f64| {
+                if let Some(content) = content.upgrade() {
+                    content.set_opacity(anim::lerp(from, to, timing.at(elapsed, policy)));
+                }
+            }
+        };
+        let (grid, content) = (self.grid.downgrade(), content.downgrade());
+        self.grid_fade.start(
+            &self.grid,
+            if shown {
+                "grid-fade-in"
+            } else {
+                "grid-fade-out"
+            },
+            total,
+            step,
+            move || {
+                if let (false, Some(grid)) = (shown, grid.upgrade()) {
+                    grid.set_visible(false);
+                    if let Some(content) = content.upgrade() {
+                        content.set_opacity(1.0);
+                        content.set_can_target(true);
+                    }
+                }
+            },
+        );
     }
 }
 

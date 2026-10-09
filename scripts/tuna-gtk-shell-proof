@@ -36,6 +36,7 @@
 #                  over 200 ms while the icon fades; with animations off
 #                  it jumps, and Reduced Motion keeps only the fades
 #   G-LAUNCH-ZOOM  launching from the grid zooms the icon out over 250 ms
+#   G-GRID-FADE    Show Apps fades the grid in over 400 ms after 100 ms
 #   G-APP-FOLDERS  GNOME's app-folders settings group the app grid: the
 #                  folder replaces its apps and opens to show them
 #   G-NOTIFY-BANNER  a D-Bus notification shows a banner (#56)
@@ -1805,11 +1806,19 @@ pass G-SEARCH-ACTIVATE "clicking a provider result activates it and closes the o
 xdotool key Super_L
 cstate '.overview_open' "overview" || fail G-OV-APPGRID "overview did not reopen"
 sleep 1
+grid_fade_mark="$(log_mark)"
 "$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-shell-gtk "$ARTIFACTS/a11y-grid.json" 20 --press "Show Apps" ||
     fail G-OV-APPGRID "could not press Show Apps"
 showing "$ARTIFACTS/a11y-grid.json" "Tuna Probe" ||
     fail G-OV-APPGRID "app grid does not list installed apps"
 pass G-OV-APPGRID "Show Apps opens the app grid"
+# GNOME's animateSwitch: the grid fades in over 400 ms after 100 ms.
+log_wait "$grid_fade_mark" "grid-anim grid-fade-in settle" || fail G-GRID-FADE "the grid's fade-in never settled"
+log_has "$grid_fade_mark" "grid-anim grid-fade-in start ms=500 motion=full" ||
+    fail G-GRID-FADE "the grid did not fade in over 400 ms after 100 ms"
+grid_fade_ms="$(settle_ms "$grid_fade_mark" grid-fade-in)"
+[ "${grid_fade_ms:-0}" -ge 490 ] || fail G-GRID-FADE "the grid fade settled after ${grid_fade_ms:-?} ms, not 500"
+pass G-GRID-FADE "Show Apps fades the grid in over GNOME's 400 ms after a 100 ms delay"
 scrot "$ARTIFACTS/11-app-grid.png" >/dev/null
 xdotool key Escape
 

@@ -17,7 +17,7 @@ use std::rc::Rc;
 
 /// The shell's motion policy (#493): `allows_motion` for zooms, slides
 /// and scales, `allows_fades` for opacity, durations through `adjust_ms`.
-pub type Motion = roost_shell_control::MotionPolicy;
+pub type Motion = tuna_shell_control::MotionPolicy;
 
 /// What an animated property is: an opacity, or a movement/scale.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,6 +141,10 @@ pub const ICON_FADE: Timing = Timing::new(250.0, Curve::OutCubic, Part::Fade);
 pub const LAUNCH_ZOOM: Timing = Timing::new(250.0, Curve::OutQuad, Part::Motion);
 pub const LAUNCH_FADE: Timing = Timing::new(250.0, Curve::OutQuad, Part::Fade);
 pub const LAUNCH_SCALE: f64 = 3.0;
+/// `VIEWS_SWITCH_TIME` after `VIEWS_SWITCH_ANIMATION_DELAY`: the grid
+/// fading in on the switch from the window picker, and out on the way back.
+pub const GRID_FADE_IN: Timing = Timing::new(400.0, Curve::OutQuad, Part::Fade).delayed(100.0);
+pub const GRID_FADE_OUT: Timing = Timing::new(400.0, Curve::OutQuad, Part::Fade);
 /// `PAGE_SWITCH_TIME`.
 pub const PAGE_SWITCH: Timing = Timing::new(300.0, Curve::OutCubic, Part::Motion);
 /// `PAGE_INDICATOR_FADE_TIME`, Clutter's implicit ease-out-cubic.
@@ -639,7 +643,7 @@ impl Zoom {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roost_shell_control::MotionLevel;
+    use tuna_shell_control::MotionLevel;
 
     const FULL: Motion = Motion {
         level: MotionLevel::Full,
@@ -687,6 +691,13 @@ mod tests {
         assert_eq!(PAGE_SWITCH.curve, Curve::OutCubic);
         assert_eq!(PAGE_ARROW_FADE.duration_ms, 200.0);
         assert_eq!(REFLOW.curve, Curve::OutQuad);
+        assert_eq!(GRID_FADE_IN.end_ms(FULL), 500.0);
+        assert_eq!(GRID_FADE_IN.at(100.0, FULL), 0.0);
+        assert_eq!(GRID_FADE_OUT.end_ms(FULL), 400.0);
+        assert_eq!(
+            GRID_FADE_OUT.at(200.0, Motion::from_gnome(true, true, 1.0)),
+            0.75
+        );
     }
 
     #[test]
