@@ -1532,9 +1532,6 @@ impl Runtime {
             "touchpad_left_handed": self.input_settings.touchpad_left_handed,
             "locked": self.is_locked(),
             "active_workspace": model.active_workspace(),
-            // GNOME's workspace switch: the drawn strip while it moves,
-            // and the last finished switches with their timing.
-            "workspace_slide": self.manager.workspace_slide().snapshot(self.animation_clock.now()),
             "focused": focused,
             "focused_app_id": focused.and_then(app_of),
             "focused_rect": focused
@@ -1620,6 +1617,12 @@ impl Runtime {
         } else {
             self.wallpaper.diagnostics()
         };
+        // GNOME's workspace switch: the drawn strip while it moves, and
+        // the last finished switches with their timing.
+        doc["workspace_slide"] = self
+            .manager
+            .workspace_slide()
+            .snapshot(self.animation_clock.now());
         let motion = self.input_settings.motion;
         doc["motion_policy"] = serde_json::json!(motion.level.as_str());
         doc["animation_slowdown"] = serde_json::json!(motion.slowdown());
