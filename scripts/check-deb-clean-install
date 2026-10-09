@@ -54,18 +54,17 @@ PKG_DIR="$(cd -- "$(dirname -- "$PKG")" && pwd)"
 PKG_NAME="$(basename -- "$PKG")"
 
 # shellcheck disable=SC2016 # expanded inside the container
-"$ENGINE" run --rm -e DEBIAN_FRONTEND=noninteractive -e VERSION="$VERSION" -e PKG_NAME="$PKG_NAME" \
+"$ENGINE" run --rm -e DEBIAN_FRONTEND=noninteractive -e PKG_VERSION="$VERSION" -e PKG_NAME="$PKG_NAME" \
     -v "$PKG_DIR:/pkg:ro" "$IMAGE" sh -euc '
 fail() { echo "check-deb-clean-install (container): $1" >&2; exit 1; }
 apt-get -o Acquire::Retries=3 update >/dev/null
 apt-get install -y --no-install-recommends "/pkg/$PKG_NAME" >/dev/null
-. /etc/os-release
-echo "installed tuna-desktop $(dpkg-query -W -f "\${Version}" tuna-desktop) on $PRETTY_NAME"
+echo "installed tuna-desktop $(dpkg-query -W -f "\${Version}" tuna-desktop) on $(sed -n "s/^PRETTY_NAME=//p" /etc/os-release)"
 for bin in tuna-compositor tuna-session tuna-shell-gtk tuna-shell-host tuna-ibus-bridge tuna-greeter; do
     path="/usr/bin/$bin"
     [ "$(stat -c "%u:%g %a" "$path")" = "0:0 755" ] || fail "$path not root-owned 0755"
     if ldd "$path" | grep "not found"; then fail "$bin missing a library on a clean install"; fi
-    [ "$("$path" --version)" = "$bin $VERSION" ] || fail "$bin version differs from package $VERSION"
+    [ "$("$path" --version)" = "$bin $PKG_VERSION" ] || fail "$bin version differs from package $PKG_VERSION"
 done
 # The compositor prefers tuna-shell-gtk beside itself over tuna-shell-host.
 [ "$(dirname "$(readlink -f "$(command -v tuna-compositor)")")" = "$(dirname "$(readlink -f "$(command -v tuna-shell-gtk)")")" ] \
