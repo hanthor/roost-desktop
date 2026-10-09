@@ -1573,7 +1573,6 @@ impl Runtime {
             "x11_ready": x11_ready,
             "idle_timeout_ms": self.lock.timeout_ms(),
             "idle_blank_alpha": self.blank_alpha(),
-            "transitions": self.transitions_diagnostics(),
             "overview_search": self.overview_search,
             "overview_app_grid": self.overview_app_grid,
             "keyboard": keyboard,
@@ -1675,6 +1674,7 @@ impl Runtime {
             .manager
             .workspace_slide()
             .snapshot(self.animation_clock.now());
+        doc["transitions"] = self.transitions_diagnostics();
         let motion = self.input_settings.motion;
         doc["motion_policy"] = serde_json::json!(motion.level.as_str());
         doc["animation_slowdown"] = serde_json::json!(motion.slowdown());
