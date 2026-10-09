@@ -1,6 +1,6 @@
 # Tuna Desktop roadmap: October 2026–October 2027
 
-Updated 2026-10-08. Tuna Desktop was previously named Roost; code, packages and older evidence still use that name until the rename lands ([#504](https://github.com/tuna-os/tuna-desktop/issues/504), [#505](https://github.com/tuna-os/tuna-desktop/issues/505)). This is the public contribution roadmap; [program gates and requirement traceability](docs/roadmap.md) describe the acceptance process. Work and evidence live on the [roadmap board](https://github.com/users/hanthor/projects/4). Dates are planning windows, and release qualification depends on evidence.
+Updated 2026-10-08. Tuna Desktop was previously named Roost; the code and packages were renamed in [#505](https://github.com/tuna-os/tuna-desktop/issues/505), while dated evidence keeps the old name ([#504](https://github.com/tuna-os/tuna-desktop/issues/504)). This is the public contribution roadmap; [program gates and requirement traceability](docs/roadmap.md) describe the acceptance process. Work and evidence live on the [roadmap board](https://github.com/users/hanthor/projects/4). Dates are planning windows, and release qualification depends on evidence.
 
 ## Current status
 
