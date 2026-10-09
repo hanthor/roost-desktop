@@ -1,6 +1,6 @@
 # Visual review: vX.Y.Z
 
-Copy to `docs/reviews/vX.Y.Z.md` before tagging. `scripts/roost-release`
+Copy to `docs/reviews/vX.Y.Z.md` before tagging. `scripts/tuna-release`
 refuses a release build for a tag without this file, and refuses one that
 still has unfilled placeholders (`TBD`).
 

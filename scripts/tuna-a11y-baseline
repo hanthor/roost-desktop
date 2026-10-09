@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+"""Commit GNOME 51's visible AT-SPI trees and compare named controls with Tuna Desktop.
+
+Usage: scripts/tuna-a11y-baseline update GNOME_CAPTURE_DIR
+       scripts/tuna-a11y-baseline check
+
+Hidden nodes are omitted from the committed fixtures. Visible containers,
+labels, unnamed controls, hierarchy depths and state flags are retained.
+The changing panel clock is normalized to <clock>.
+"""
+import json
+from pathlib import Path
+import re
+import sys
+
+ROOT = Path(__file__).resolve().parent.parent
+FIXTURES = ROOT / 'tests/a11y/gnome51'
+STAGES = ('panel', 'overview', 'quick-settings')
+CLOCK = re.compile(r'^[A-Z][a-z]{2} \d{1,2}\s+\d{1,2}:\d{2}(?:\s*[AP]M)?$')
+
+
+def controls(nodes):
+    return [f"{'push button' if n['role'] == 'button' else n['role']}: {n['name']}"
+            for n in nodes if n['name'] and n['role'] not in ('label', 'text', 'panel', 'window')]
+
+
+def comparison():
+    lines = ['# GNOME 51 and Tuna Desktop accessibility comparison', '',
+             'Captured from GNOME Shell 51.0 through AT-SPI on 2026-10-04. '
+             'These fixtures preserve every visible node, including labels and unnamed controls. '
+             'The clock text is normalized. GNOME’s `button` role name is shown as '
+             '`push button` below to match the older AT-SPI role names used by the Tuna Desktop runner.', '',
+             'Tuna Desktop columns come from its live proof goldens. Native scenes use power profiles '
+             'and logind; the Tuna Desktop proof also supplies network, Bluetooth, audio and backlight services. '
+             'The native overview has the reference image’s favorites alongside three test windows, '
+             'while Tuna Desktop’s proof pins no favorites. The two columns are independent ordered catalogs; '
+             'controls on the same row are not asserted to be equivalent.', '']
+    for stage in STAGES:
+        data = json.loads((FIXTURES / f'{stage}.json').read_text())
+        native = controls(data['nodes'])
+        tuna = (ROOT / 'tests/a11y' / f'{stage}.txt').read_text().splitlines()
+        lines += [f'## {stage}', '', f"GNOME: {len(data['nodes'])} visible nodes; {len(native)} named controls. "
+                  f'Tuna Desktop: {len(tuna)} named nodes in the proof golden.', '',
+                  '| GNOME named control | Tuna Desktop named node |', '| --- | --- |']
+        for i in range(max(len(native), len(tuna))):
+            lines.append(f"| {native[i] if i < len(native) else '—'} | {tuna[i] if i < len(tuna) else '—'} |")
+        lines += ['']
+    lines += ['## Intended differences', '',
+              '- GNOME has one compositor stage with many `panel` containers. Tuna Desktop exposes the GTK layer windows as named frames: Top Bar, Search, Dash and Window Previews.',
+              '- Activities is a native toggle button and a GTK push button in Tuna Desktop; both open the overview.',
+              '- GNOME’s date control is an unnamed menu with a clock label child. Tuna Desktop names its menu controls Date and Time. GNOME’s System menu maps to Tuna Desktop’s named GTK menu button and its internal toggle.',
+              '- GNOME’s search field is an unnamed text node. Tuna Desktop exposes a named Search entry. Both scenes retain their search field in the visible tree.',
+              '- Dash app names depend on the installed favorites and window fixtures. Show Apps is a toggle button on both sides. GNOME’s preview buttons are unnamed in the native tree; Tuna Desktop’s hovered-preview golden names the Close action.',
+              '- Lock Screen in GNOME maps to Lock in Tuna Desktop. Open power profiles menu maps to Power Mode Menu. The shared screenshot, settings and power menu actions remain named.',
+              '- GNOME’s Power Mode, Dark Style and Do Not Disturb toggles use visible label children instead of a name on the toggle. Tuna Desktop names the toggles directly. The native fixture retains those label children.',
+              '- Tuna Desktop’s network, Bluetooth, volume and brightness controls are present because its live proof supplies those services. The GNOME headless reference has no usable network adapter, audio server or hardware backlight.', '',
+              'This comparison describes visible accessible structure and labels. '
+              'The live Tuna Desktop proof checks actions, focus and slider operation; it does not claim '
+              'a spoken Orca end-to-end test.', '']
+    return '\n'.join(lines)
+
+
+def main():
+    if len(sys.argv) < 2 or sys.argv[1] not in ('update', 'check'):
+        print(__doc__, file=sys.stderr)
+        return 2
+    if sys.argv[1] == 'update':
+        if len(sys.argv) != 3:
+            return 2
+        source = Path(sys.argv[2])
+        FIXTURES.mkdir(parents=True, exist_ok=True)
+        for stage in STAGES:
+            nodes = json.loads((source / f'a11y-{stage}.json').read_text())
+            visible = [dict(node) for node in nodes if node.get('showing')]
+            if not visible or not controls(visible):
+                raise ValueError(f'{stage}: native AT-SPI tree has no visible named controls')
+            for node in visible:
+                if CLOCK.fullmatch(node['name']):
+                    node['name'] = '<clock>'
+            data = {'source': 'GNOME Shell 51.0 AT-SPI', 'state': stage, 'nodes': visible}
+            (FIXTURES / f'{stage}.json').write_text(json.dumps(data, indent=1) + '\n')
+        (FIXTURES / 'comparison.md').write_text(comparison())
+        return 0
+    expected = comparison()
+    if (FIXTURES / 'comparison.md').read_text() != expected:
+        print('tuna-a11y-baseline: comparison differs; regenerate from a GNOME capture', file=sys.stderr)
+        return 1
+    print('tuna-a11y-baseline: committed GNOME trees and Tuna Desktop goldens match the comparison')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

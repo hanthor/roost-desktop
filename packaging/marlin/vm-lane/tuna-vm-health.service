@@ -1,0 +1,12 @@
+[Unit]
+Description=CI-only Tuna Desktop guest service health probes
+After=display-manager.service
+
+[Service]
+User=tuna-test
+ExecStart=/usr/libexec/tuna-vm-health
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

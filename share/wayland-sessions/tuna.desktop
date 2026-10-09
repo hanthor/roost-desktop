@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Tuna Desktop
+Comment=Tuna Desktop (GNOME-style shell with optional scrollable tiling)
+Exec=tuna-session
+TryExec=tuna-session
+Type=Application
+DesktopNames=Tuna;GNOME;
+X-GDM-SessionRegisters=true

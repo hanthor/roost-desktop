@@ -1,19 +1,23 @@
-# Maintainer: Roost contributors <https://github.com/hanthor/roost-desktop>
+# Maintainer: Tuna Desktop contributors <https://github.com/tuna-os/tuna-desktop>
 #
 # Arch Linux package for Tuna Desktop (formerly Roost), the target format for TunaOS Marlin (#69).
 #
 # Release builds fetch the tagged source. CI and local builds set
-# ROOST_LOCAL_SRC to a checkout instead:
-#   ROOST_LOCAL_SRC="$PWD" makepkg -f --dir packaging/arch   (or cd there)
-# The version is stamped from the tag exactly like scripts/roost-release,
+# TUNA_LOCAL_SRC to a checkout instead:
+#   TUNA_LOCAL_SRC="$PWD" makepkg -f --dir packaging/arch   (or cd there)
+# The version is stamped from the tag exactly like scripts/tuna-release,
 # so every binary's --version matches pkgver.
 
-pkgname=roost
+pkgname=tuna-desktop
+# Upgrades the package's former name in place (#505).
+replaces=('roost')  # tuna-rename: keep
+conflicts=('roost')  # tuna-rename: keep
+provides=('roost')  # tuna-rename: keep
 pkgver=0.1.0
 pkgrel=1
 pkgdesc='Tuna Desktop: GNOME-style Wayland desktop session in Rust (nested developer preview)'
 arch=('x86_64')
-url='https://github.com/hanthor/roost-desktop'
+url='https://github.com/tuna-os/tuna-desktop'
 license=('GPL-3.0-or-later')
 depends=(
     'dbus'
@@ -37,28 +41,28 @@ optdepends=(
     'orca: GNOME Screen Reader activation and speech'
     'gnome-keyring: user network secret storage'
     'xdg-desktop-portal-gnome: screenshots and screen sharing for apps'
-    'greetd: login manager driving roost-greeter'
+    'greetd: login manager driving tuna-greeter'
     'xorg-xwayland: X11 application support'
-    'ibus: input methods (roost-ibus-bridge, as GNOME uses IBus)'
+    'ibus: input methods (tuna-ibus-bridge, as GNOME uses IBus)'
     'gst-plugin-pipewire: screen recording from the screenshot UI'
     'gst-plugins-good: screen recording (VP8 and WebM)'
 )
 options=('!lto' '!debug')
-backup=('etc/pam.d/roost-lock')
+backup=('etc/pam.d/tuna-lock' 'etc/pam.d/roost-lock')  # tuna-rename: keep
 
-if [[ -n "${ROOST_LOCAL_SRC:-}" ]]; then
+if [[ -n "${TUNA_LOCAL_SRC:-}" ]]; then
     source=()
     sha256sums=()
 else
-    source=("roost::git+${url}.git#tag=v${pkgver}")
+    source=("tuna::git+${url}.git#tag=v${pkgver}")
     sha256sums=('SKIP')
 fi
 
 _srcroot() {
-    if [[ -n "${ROOST_LOCAL_SRC:-}" ]]; then
-        printf '%s' "$ROOST_LOCAL_SRC"
+    if [[ -n "${TUNA_LOCAL_SRC:-}" ]]; then
+        printf '%s' "$TUNA_LOCAL_SRC"
     else
-        printf '%s' "$srcdir/roost"
+        printf '%s' "$srcdir/tuna"
     fi
 }
 
@@ -72,14 +76,14 @@ build() {
     cd "$(_srcroot)"
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$srcdir/target}"
-    export ROOST_VERSION="v${pkgver}"
+    export TUNA_VERSION="v${pkgver}"
     cargo build --frozen --release \
-        -p roost-compositor -p roost-shell-host -p roost-shell-gtk -p roost-greeter
+        -p tuna-compositor -p tuna-shell-host -p tuna-shell-gtk -p tuna-greeter
 }
 
 check() {
     local bin
-    for bin in roost-compositor roost-session roost-shell-host roost-shell-gtk roost-ibus-bridge roost-greeter; do
+    for bin in tuna-compositor tuna-session tuna-shell-host tuna-shell-gtk tuna-ibus-bridge tuna-greeter; do
         local reported
         reported="$("${CARGO_TARGET_DIR:-$srcdir/target}/release/$bin" --version | awk '{print $NF}')"
         if [[ "$reported" != "$pkgver" ]]; then
@@ -93,15 +97,23 @@ package() {
     local root target bin
     root="$(_srcroot)"
     target="${CARGO_TARGET_DIR:-$srcdir/target}/release"
-    for bin in roost-compositor roost-session roost-shell-host roost-shell-gtk roost-ibus-bridge roost-greeter; do
+    for bin in tuna-compositor tuna-session tuna-shell-host tuna-shell-gtk tuna-ibus-bridge tuna-greeter; do
         install -Dm0755 "$target/$bin" "$pkgdir/usr/bin/$bin"
     done
-    install -Dm0644 "$root/share/wayland-sessions/roost.desktop" \
-        "$pkgdir/usr/share/wayland-sessions/roost.desktop"
-    install -Dm0644 "$root/share/systemd/user/roost-session.target" \
-        "$pkgdir/usr/lib/systemd/user/roost-session.target"
+    install -Dm0644 "$root/share/wayland-sessions/tuna.desktop" \
+        "$pkgdir/usr/share/wayland-sessions/tuna.desktop"
+    install -Dm0644 "$root/share/systemd/user/tuna-session.target" \
+        "$pkgdir/usr/lib/systemd/user/tuna-session.target"
     # Lock-screen PAM service (#62): unlock under GDM, where no greetd runs.
-    install -Dm0644 "$root/share/pam.d/roost-lock" "$pkgdir/etc/pam.d/roost-lock"
+    install -Dm0644 "$root/share/pam.d/tuna-lock" "$pkgdir/etc/pam.d/tuna-lock"
+    # One release of compatibility with the former name (#505): the old
+    # binary names, the session entry display managers remember, and the
+    # PAM service a session started before the upgrade still asks for.
+    for bin in compositor session shell-host shell-gtk ibus-bridge greeter; do
+        ln -s "tuna-$bin" "$pkgdir/usr/bin/roost-$bin"  # tuna-rename: keep
+    done
+    install -Dm0644 "$root/share/compat/wayland-sessions/roost.desktop" "$pkgdir/usr/share/wayland-sessions/roost.desktop"  # tuna-rename: keep
+    install -Dm0644 "$root/share/compat/pam.d/roost-lock" "$pkgdir/etc/pam.d/roost-lock"  # tuna-rename: keep
     install -Dm0644 "$root/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
     install -Dm0644 "$root/docs/nested-session.md" \
         "$pkgdir/usr/share/doc/$pkgname/nested-session.md"

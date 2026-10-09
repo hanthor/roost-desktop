@@ -40,11 +40,11 @@ use smithay::{
 use crate::control::{ControlHub, PeerGate};
 use crate::lock::{content_visible, SessionLock, DEFAULT_IDLE_TIMEOUT_MS};
 
-/// Idle timeout for the session lock: `ROOST_IDLE_TIMEOUT_MS` overrides
+/// Idle timeout for the session lock: `TUNA_IDLE_TIMEOUT_MS` overrides
 /// the five-minute default. Testability seam for scripted lock capture
 /// (and lock journey tests); production runs leave it unset.
 fn idle_timeout_ms() -> u64 {
-    std::env::var("ROOST_IDLE_TIMEOUT_MS")
+    std::env::var("TUNA_IDLE_TIMEOUT_MS")
         .ok()
         .and_then(|raw| raw.parse().ok())
         .filter(|ms| *ms > 0)
@@ -58,7 +58,7 @@ use crate::windows::{
     translate_input, ManagerInput, TriggerAction, TriggerState, WindowManager, ESCAPE_KEYCODE,
 };
 use crate::xwayland::XWaylandSupervisor;
-use roost_greeter::client::GreeterClient;
+use tuna_greeter::client::GreeterClient;
 
 use crate::{ClientState, State};
 
@@ -149,7 +149,7 @@ const DEFAULT_HEIGHT: i32 = 800;
 /// Nested session configuration: socket identity plus output geometry.
 #[derive(Debug, Clone)]
 pub struct NestedSession {
-    /// Private Wayland socket name, e.g. `roost-nested-<pid>`.
+    /// Private Wayland socket name, e.g. `tuna-nested-<pid>`.
     pub socket_name: String,
     /// Output width in physical pixels.
     pub width: i32,
@@ -160,8 +160,8 @@ pub struct NestedSession {
     /// divided by this); clients render at it.
     pub scale: f64,
     /// Shell binary to supervise. `None` selects
-    /// [`resolve_shell_bin`]: `ROOST_SHELL_BIN`, then the
-    /// `roost-shell-host` sibling of this binary, then `PATH`.
+    /// [`resolve_shell_bin`]: `TUNA_SHELL_BIN`, then the
+    /// `tuna-shell-host` sibling of this binary, then `PATH`.
     pub shell_bin: Option<std::path::PathBuf>,
     /// Opt in to X11 compatibility: records the first X11 need at
     /// launch so the supervisor may spawn the server on demand.
@@ -171,7 +171,7 @@ pub struct NestedSession {
     /// Display backend (#52): nested window or hardware session.
     pub backend: BackendChoice,
     /// Open the overview when the session starts, as GNOME Shell does at
-    /// login. `roost-session` (real logins) sets it; developer and proof
+    /// login. `tuna-session` (real logins) sets it; developer and proof
     /// runs start on the desktop.
     pub startup_overview: bool,
 }
@@ -242,7 +242,7 @@ impl NestedSession {
     /// Default session: unique socket name from our pid, default size.
     pub fn default_for_pid() -> Self {
         Self::new(
-            format!("roost-nested-{}", std::process::id()),
+            format!("tuna-nested-{}", std::process::id()),
             DEFAULT_WIDTH,
             DEFAULT_HEIGHT,
         )
@@ -264,8 +264,8 @@ pub fn current_exe_dir() -> Option<std::path::PathBuf> {
         .and_then(|exe| exe.parent().map(|dir| dir.to_owned()))
 }
 
-/// Whether a session runs X11 apps (#59): `ROOST_XWAYLAND=1` forces it,
-/// `ROOST_XWAYLAND=0` turns it off, and otherwise it is on whenever an
+/// Whether a session runs X11 apps (#59): `TUNA_XWAYLAND=1` forces it,
+/// `TUNA_XWAYLAND=0` turns it off, and otherwise it is on whenever an
 /// `Xwayland` binary is on `PATH`, as GNOME 51 runs X11 apps
 /// transparently. Builds without the `xwayland` feature never ask.
 pub fn xwayland_wanted(
@@ -346,19 +346,19 @@ impl View {
 
 /// Tells the shell whether it runs nested (`nested`) or as the hardware
 /// session (`hardware`).
-pub const SESSION_KIND_ENV: &str = "ROOST_SESSION_KIND";
+pub const SESSION_KIND_ENV: &str = "TUNA_SESSION_KIND";
 
 /// Shell binaries in preference order: the GTK4/libadwaita shell
 /// (ADR 0006, the default), then the legacy software-drawn shell.
-pub const SHELL_BINARIES: [&str; 2] = ["roost-shell-gtk", "roost-shell-host"];
+pub const SHELL_BINARIES: [&str; 2] = ["tuna-shell-gtk", "tuna-shell-host"];
 
-/// Shell binary for a session: explicit config, then `ROOST_SHELL_BIN`,
+/// Shell binary for a session: explicit config, then `TUNA_SHELL_BIN`,
 /// then the first of [`SHELL_BINARIES`] beside this binary, then on
 /// `PATH`, else the legacy name for a spawn-time lookup.
 pub fn resolve_shell_bin(configured: Option<&std::path::Path>) -> std::path::PathBuf {
     resolve_shell_bin_in(
         configured,
-        std::env::var_os("ROOST_SHELL_BIN"),
+        std::env::var_os("TUNA_SHELL_BIN"),
         current_exe_dir(),
         std::env::var_os("PATH"),
     )
@@ -410,28 +410,28 @@ mod shell_bin_tests {
         let resolve = || resolve_shell_bin_in(None, None, exe_dir.clone(), path_var.clone());
 
         // Nothing installed: the legacy name, looked up at spawn.
-        assert_eq!(resolve(), std::path::PathBuf::from("roost-shell-host"));
+        assert_eq!(resolve(), std::path::PathBuf::from("tuna-shell-host"));
         // Only the legacy shell on PATH.
-        touch(path.path(), "roost-shell-host");
-        assert_eq!(resolve(), path.path().join("roost-shell-host"));
+        touch(path.path(), "tuna-shell-host");
+        assert_eq!(resolve(), path.path().join("tuna-shell-host"));
         // The GTK shell on PATH wins over the legacy one there.
-        touch(path.path(), "roost-shell-gtk");
-        assert_eq!(resolve(), path.path().join("roost-shell-gtk"));
+        touch(path.path(), "tuna-shell-gtk");
+        assert_eq!(resolve(), path.path().join("tuna-shell-gtk"));
         // Siblings of the compositor win over PATH, GTK first.
-        touch(exe.path(), "roost-shell-host");
-        assert_eq!(resolve(), exe.path().join("roost-shell-host"));
-        touch(exe.path(), "roost-shell-gtk");
-        assert_eq!(resolve(), exe.path().join("roost-shell-gtk"));
+        touch(exe.path(), "tuna-shell-host");
+        assert_eq!(resolve(), exe.path().join("tuna-shell-host"));
+        touch(exe.path(), "tuna-shell-gtk");
+        assert_eq!(resolve(), exe.path().join("tuna-shell-gtk"));
     }
 
     #[test]
     fn explicit_choices_win() {
         let exe = tempfile::tempdir().unwrap();
-        touch(exe.path(), "roost-shell-gtk");
+        touch(exe.path(), "tuna-shell-gtk");
         let exe_dir = Some(exe.path().to_owned());
         assert_eq!(
-            resolve_shell_bin_in(None, Some("roost-shell-host".into()), exe_dir.clone(), None),
-            std::path::PathBuf::from("roost-shell-host")
+            resolve_shell_bin_in(None, Some("tuna-shell-host".into()), exe_dir.clone(), None),
+            std::path::PathBuf::from("tuna-shell-host")
         );
         assert_eq!(
             resolve_shell_bin_in(
@@ -442,10 +442,10 @@ mod shell_bin_tests {
             ),
             std::path::PathBuf::from("/x/shell")
         );
-        // An empty ROOST_SHELL_BIN means unset.
+        // An empty TUNA_SHELL_BIN means unset.
         assert_eq!(
             resolve_shell_bin_in(None, Some("".into()), exe_dir, None),
-            exe.path().join("roost-shell-gtk")
+            exe.path().join("tuna-shell-gtk")
         );
     }
 }
@@ -560,7 +560,7 @@ pub struct Runtime {
     /// Output scale (#59), see [`NestedSession::scale`].
     scale: f64,
     /// GNOME's input settings as last applied (#60).
-    input_settings: roost_shell_control::InputSettings,
+    input_settings: tuna_shell_control::InputSettings,
     /// PipeWire, connected on the first screen cast (#61).
     pipewire: Option<crate::screencast::PipeWire>,
     /// Running screen casts.
@@ -596,7 +596,7 @@ pub struct Runtime {
     /// grabbed, and whether it has become a drag (GNOME DnD).
     overview_drag: Option<(u64, Point<f64, Logical>, bool)>,
     /// The Alt+Tab switcher's window thumbnails (frames from the shell).
-    switcher_thumbnails: Vec<roost_shell_control::SwitcherThumbnail>,
+    switcher_thumbnails: Vec<tuna_shell_control::SwitcherThumbnail>,
     /// Reserved X11 display, advertised before XWayland starts (#219).
     /// Actual window-manager readiness is independently state.xwm.is_some().
     x11_display: Option<u32>,
@@ -616,7 +616,7 @@ pub struct Runtime {
     idle_monitor: crate::idle_monitor::IdleMonitor,
     exit: bool,
     stats: RunStats,
-    /// `ROOST_COMPOSITOR_STATE` snapshot path (journeys only).
+    /// `TUNA_COMPOSITOR_STATE` snapshot path (journeys only).
     state_path: Option<std::path::PathBuf>,
     state_last: String,
     /// Opt-in synthetic touchpad phases for the nested proof harness.
@@ -626,7 +626,7 @@ pub struct Runtime {
 }
 
 /// Control socket path for a session: alongside the Wayland socket in the
-/// runtime dir, so one session owns both (`roost-<name>.control`).
+/// runtime dir, so one session owns both (`tuna-<name>.control`).
 /// `None` when `XDG_RUNTIME_DIR` is unset: the privileged socket never
 /// falls back to a shared temp dir (#30). [`ControlHub::bind`] further
 /// refuses a runtime dir that is not private to this user.
@@ -634,7 +634,7 @@ pub fn control_socket_path(socket_name: &str) -> Option<std::path::PathBuf> {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(std::path::PathBuf::from)
         .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join(format!("roost-{socket_name}.control")))
+        .map(|dir| dir.join(format!("tuna-{socket_name}.control")))
 }
 
 impl Drop for Runtime {
@@ -732,7 +732,7 @@ impl Runtime {
             _ => None,
         };
         let output = Output::new(
-            "roost-0".to_owned(),
+            "tuna-0".to_owned(),
             PhysicalProperties {
                 size: (0, 0).into(),
                 subpixel: Subpixel::Unknown,
@@ -768,8 +768,8 @@ impl Runtime {
         if backend.is_none() {
             let global = output.create_global::<State>(&dh);
             let (lw, lh) = logical_size(session.width, session.height, scale);
-            state.add_output("roost-0", Some(output), lw, lh);
-            state.note_output_global("roost-0", global);
+            state.add_output("tuna-0", Some(output), lw, lh);
+            state.note_output_global("tuna-0", global);
         }
         let manager = WindowManager::new(&mut state);
         let tokens = std::rc::Rc::new(TokenStore::new());
@@ -831,7 +831,7 @@ impl Runtime {
         // The shell offers power actions only on a hardware session: in
         // the nested preview, logind's session is the host's, so Log Out
         // must end only this compositor and Power Off must not exist.
-        // An explicit ROOST_SESSION_KIND wins (proofs, debugging).
+        // An explicit TUNA_SESSION_KIND wins (proofs, debugging).
         if std::env::var_os(SESSION_KIND_ENV).is_none() {
             shell.set_env(
                 SESSION_KIND_ENV,
@@ -976,7 +976,7 @@ impl Runtime {
             idle_monitor: crate::idle_monitor::start(),
             exit: false,
             stats: RunStats::default(),
-            state_path: std::env::var_os("ROOST_COMPOSITOR_STATE")
+            state_path: std::env::var_os("TUNA_COMPOSITOR_STATE")
                 .map(std::path::PathBuf::from)
                 .filter(|p| p.is_absolute()),
             state_last: String::new(),
@@ -994,7 +994,7 @@ impl Runtime {
         #[cfg(feature = "xwayland")]
         if session.xwayland {
             if let Err(error) = runtime.prepare_x11(None) {
-                eprintln!("roost-compositor: xwayland: socket preparation failed: {error}; native session continues");
+                eprintln!("tuna-compositor: xwayland: socket preparation failed: {error}; native session continues");
             }
         }
         // GNOME Shell greets a login with the overview.
@@ -1126,9 +1126,9 @@ impl Runtime {
                 == self
                     .unlock_generation
                     .load(std::sync::atomic::Ordering::Acquire);
-        if std::env::var_os("ROOST_LOCK_TRACE").is_some() {
+        if std::env::var_os("TUNA_LOCK_TRACE").is_some() {
             eprintln!(
-                "roost-compositor: lock authentication finished accepted={ok} applied={applied}"
+                "tuna-compositor: lock authentication finished accepted={ok} applied={applied}"
             );
         }
         if applied && self.is_locked() {
@@ -1156,9 +1156,9 @@ impl Runtime {
         // recording button codes, key values or credential input.
         if !self.is_locked()
             && matches!(input, ManagerInput::Button { .. })
-            && std::env::var_os("ROOST_POINTER_TRACE").is_some()
+            && std::env::var_os("TUNA_POINTER_TRACE").is_some()
         {
-            eprintln!("roost-compositor: pointer trace: backend button received");
+            eprintln!("tuna-compositor: pointer trace: backend button received");
         }
         // Every timestamped event feeds the idle accumulator first,
         // including events consumed below: activity is activity.
@@ -1285,8 +1285,8 @@ impl Runtime {
                 // A closing switcher takes its thumbnails with it.
                 if matches!(
                     action,
-                    roost_shell_control::SwitcherAction::Commit
-                        | roost_shell_control::SwitcherAction::Cancel
+                    tuna_shell_control::SwitcherAction::Commit
+                        | tuna_shell_control::SwitcherAction::Cancel
                 ) {
                     self.switcher_thumbnails.clear();
                 }
@@ -1297,7 +1297,7 @@ impl Runtime {
             }
             for (index, count) in self.manager.take_workspace_popups() {
                 self.control
-                    .queue_message(roost_shell_control::Message::WorkspacePopup { index, count });
+                    .queue_message(tuna_shell_control::Message::WorkspacePopup { index, count });
             }
             return;
         }
@@ -1441,7 +1441,7 @@ impl Runtime {
     }
 
     /// Write the compositor-side state snapshot when it changed
-    /// (`ROOST_COMPOSITOR_STATE`, journeys only; #65). App ids and ids,
+    /// (`TUNA_COMPOSITOR_STATE`, journeys only; #65). App ids and ids,
     /// never titles.
     fn publish_state(&mut self) {
         if self.state_path.is_none() {
@@ -1869,7 +1869,7 @@ impl Runtime {
         if self.state_path.is_none() {
             return;
         }
-        let Some(path) = std::env::var_os("ROOST_PROOF_SWIPE_INPUT")
+        let Some(path) = std::env::var_os("TUNA_PROOF_SWIPE_INPUT")
             .map(std::path::PathBuf::from)
             .filter(|p| p.is_absolute())
         else {
@@ -1986,7 +1986,7 @@ impl Runtime {
         let (w, h, rgba) =
             self.render_pixels(None, smithay::backend::allocator::Fourcc::Abgr8888)?;
         crate::screenshot::save_png(&path, w as u32, h as u32, &rgba).ok()?;
-        eprintln!("roost-compositor: screenshot saved to {}", path.display());
+        eprintln!("tuna-compositor: screenshot saved to {}", path.display());
         Some(path)
     }
 
@@ -2004,7 +2004,7 @@ impl Runtime {
             self.render_window_pixels(id, None, smithay::backend::allocator::Fourcc::Abgr8888)?;
         crate::screenshot::save_png(&path, w as u32, h as u32, &rgba).ok()?;
         eprintln!(
-            "roost-compositor: window screenshot saved to {}",
+            "tuna-compositor: window screenshot saved to {}",
             path.display()
         );
         Some(path)
@@ -2033,7 +2033,7 @@ impl Runtime {
             .filter(|w| w.workspace == active && !self.manager.is_minimized(w.id))
             .map(|w| (w.id, w.geometry))
             .collect();
-        // GNOME sorts by stable sequence: creation order (Roost ids rise).
+        // GNOME sorts by stable sequence: creation order (Tuna Desktop ids rise).
         windows.sort_by_key(|(id, _)| *id);
         let top = crate::windows::WORK_AREA_TOP;
         let workarea = Rectangle::new((0, top).into(), (size.w, (size.h - top).max(1)).into());
@@ -2414,7 +2414,7 @@ impl Runtime {
                         let cropped = crate::screencast::crop(&pixels, (w, h), *area);
                         if cropped.is_none() {
                             eprintln!(
-                                "roost-compositor: screen cast area {area:?} is not inside the {w}x{h} frame ({} bytes)",
+                                "tuna-compositor: screen cast area {area:?} is not inside the {w}x{h} frame ({} bytes)",
                                 pixels.len()
                             );
                         }
@@ -2595,7 +2595,7 @@ impl Runtime {
                 if self.pipewire.is_none() {
                     self.pipewire = crate::screencast::PipeWire::new(&self.loop_handle);
                     if self.pipewire.is_none() {
-                        eprintln!("roost-compositor: screen cast: PipeWire is not running");
+                        eprintln!("tuna-compositor: screen cast: PipeWire is not running");
                         crate::mutter::session_closed(&signal, session_id);
                         return;
                     }
@@ -2621,7 +2621,7 @@ impl Runtime {
                 };
                 match pw.start_cast(session_id, target, width, height, signal) {
                     Some(cast) => self.casts.push(cast),
-                    None => eprintln!("roost-compositor: screen cast: stream failed to start"),
+                    None => eprintln!("tuna-compositor: screen cast: stream failed to start"),
                 }
             }
             crate::mutter::ToLoop::StopCast { session_id } => {
@@ -2636,10 +2636,10 @@ impl Runtime {
                 if persistent {
                     match crate::monitors::save(&configs) {
                         Ok(path) => eprintln!(
-                            "roost-compositor: display settings saved to {}",
+                            "tuna-compositor: display settings saved to {}",
                             path.display()
                         ),
-                        Err(e) => eprintln!("roost-compositor: display settings not saved: {e}"),
+                        Err(e) => eprintln!("tuna-compositor: display settings not saved: {e}"),
                     }
                 }
             }
@@ -2648,7 +2648,7 @@ impl Runtime {
 
     /// Apply GNOME's input settings (#60): the seat's keymap and key
     /// repeat, libinput pointer devices (hardware), the hot corner.
-    fn apply_input_settings(&mut self, settings: roost_shell_control::InputSettings) {
+    fn apply_input_settings(&mut self, settings: tuna_shell_control::InputSettings) {
         self.manager
             .apply_keyboard_settings(&mut self.state, &settings);
         self.triggers.set_hot_corner(settings.hot_corners);
@@ -2736,11 +2736,11 @@ impl Runtime {
             && !self.overview_app_grid
         {
             let scene = self.overview_layout();
-            let list: Vec<roost_shell_control::PreviewInfo> = scene
+            let list: Vec<tuna_shell_control::PreviewInfo> = scene
                 .previews
                 .iter()
                 .filter(|p| p.active)
-                .map(|p| roost_shell_control::PreviewInfo {
+                .map(|p| tuna_shell_control::PreviewInfo {
                     window: p.id,
                     x: p.rect.loc.x,
                     y: p.rect.loc.y,
@@ -2823,10 +2823,9 @@ impl Runtime {
 
     fn tick(&mut self) -> Result<bool, RuntimeError> {
         if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
-            let text = crate::runtime_signal::read(
-                &std::path::PathBuf::from(dir).join("roost-idle-blank"),
-            )
-            .unwrap_or_default();
+            let text =
+                crate::runtime_signal::read(&std::path::PathBuf::from(dir).join("tuna-idle-blank"))
+                    .unwrap_or_default();
             self.blank = crate::lock::IdleBlank::parse(&text);
         }
         self.display
@@ -2884,7 +2883,7 @@ impl Runtime {
         }
         if let Some(request) = self.state.take_shortcut_consent_update() {
             self.control
-                .queue_message(roost_shell_control::Message::ShortcutConsent { request });
+                .queue_message(tuna_shell_control::Message::ShortcutConsent { request });
         }
         for id in outcome.closed {
             self.manager.close_window(id);
@@ -2909,7 +2908,7 @@ impl Runtime {
         let reader_changed = self.orca.poll(diagnostics_visible).is_some();
         if reader_changed || outcome.screen_reader.is_some() {
             self.control
-                .queue_message(roost_shell_control::Message::ScreenReader {
+                .queue_message(tuna_shell_control::Message::ScreenReader {
                     state: self.orca.status(),
                 });
         }
@@ -2931,7 +2930,7 @@ impl Runtime {
         // Header-bar right clicks: GNOME's window menu, drawn by the shell.
         for (window, x, y) in self.manager.take_menu_requests() {
             self.control
-                .queue_message(roost_shell_control::Message::WindowMenu {
+                .queue_message(tuna_shell_control::Message::WindowMenu {
                     window,
                     x,
                     y,
@@ -2972,14 +2971,14 @@ impl Runtime {
                     self.engage_lock();
                 }
             } else {
-                eprintln!("roost-compositor: session lock refused for pid {pid:?}");
+                eprintln!("tuna-compositor: session lock refused for pid {pid:?}");
             }
             self.state.resolve_lock_request(locker, ours);
         }
         // A lock client's unlock_and_destroy never unlocks by itself:
         // only a verified password clears the flag.
         if self.state.take_client_unlock() && self.is_locked() {
-            eprintln!("roost-compositor: lock client left while locked; staying locked");
+            eprintln!("tuna-compositor: lock client left while locked; staying locked");
         }
         // A lock-screen password: verified off the loop (PAM may stall
         // for seconds on a failure), one attempt at a time.
@@ -2989,8 +2988,8 @@ impl Runtime {
                 self.control.finish_unlock(request, unlocked);
             } else {
                 self.unlock_inflight = true;
-                if std::env::var_os("ROOST_LOCK_TRACE").is_some() {
-                    eprintln!("roost-compositor: lock authentication started");
+                if std::env::var_os("TUNA_LOCK_TRACE").is_some() {
+                    eprintln!("tuna-compositor: lock authentication started");
                 }
                 let reply = self.unlock_results.clone();
                 let generation = self
@@ -3061,7 +3060,7 @@ impl Runtime {
             None => PeerGate::Closed,
         });
         for event in self.shell.drain_events() {
-            eprintln!("roost-compositor: shell supervision: {event:?}");
+            eprintln!("tuna-compositor: shell supervision: {event:?}");
         }
         // XWayland supervision rides the same tick. Without the
         // feature there is no spawner and this stays a no-op;
@@ -3191,7 +3190,7 @@ impl Runtime {
             // GNOME's lock screen dims the desktop to 65%; without a
             // picture that is the dimmed primary-color.
             let c = self.desktop_color();
-            let k = roost_wallpaper::LOCK_BRIGHTNESS;
+            let k = tuna_wallpaper::LOCK_BRIGHTNESS;
             Color32F::new(c.r() * k, c.g() * k, c.b() * k, 1.0)
         } else if overlay_visible {
             Color32F::new(0.20, 0.08, 0.10, 1.0)
@@ -3463,7 +3462,7 @@ impl Runtime {
                     let (mut dmabuf, age) = match out.surface.next_buffer() {
                         Ok(buffer) => buffer,
                         Err(e) => {
-                            eprintln!("roost-compositor: drm: next_buffer {}: {e}", out.name);
+                            eprintln!("tuna-compositor: drm: next_buffer {}: {e}", out.name);
                             continue;
                         }
                     };
@@ -3540,7 +3539,7 @@ impl Runtime {
                         Some(crate::native_repaint::scanout_damage(damage)),
                         feedback,
                     ) {
-                        eprintln!("roost-compositor: drm: queue_buffer {}: {e}", out.name);
+                        eprintln!("tuna-compositor: drm: queue_buffer {}: {e}", out.name);
                         // Never reuse history after an unsubmitted partial update.
                         out.last_frame = None;
                         out.damage_tracker = None;
@@ -3715,7 +3714,7 @@ fn dnd_icon_elements(
 /// window scaled down (never up) to fit its frame, centred in it.
 fn switcher_previews(
     manager: &WindowManager,
-    thumbnails: &[roost_shell_control::SwitcherThumbnail],
+    thumbnails: &[tuna_shell_control::SwitcherThumbnail],
 ) -> Vec<crate::overview::Preview> {
     thumbnails
         .iter()
@@ -4064,8 +4063,8 @@ fn background_geometry(
     size: smithay::utils::Size<i32, smithay::utils::Physical>,
     view: View,
     desktop: [i32; 4],
-) -> roost_wallpaper::background::Geometry {
-    roost_wallpaper::background::Geometry {
+) -> tuna_wallpaper::background::Geometry {
+    tuna_wallpaper::background::Geometry {
         physical: [size.w.max(0) as u32, size.h.max(0) as u32],
         origin: [view.offset.0, view.offset.1],
         desktop,
@@ -4079,7 +4078,7 @@ fn background_geometry(
 fn backdrop(
     wallpaper: &mut Wallpaper,
     renderer: &mut GlesRenderer,
-    geometry: roost_wallpaper::background::Geometry,
+    geometry: tuna_wallpaper::background::Geometry,
     view: View,
     show_paper: bool,
     cards: Option<&crate::overview::OverviewLayout>,
@@ -4388,7 +4387,7 @@ pub fn run(session: &NestedSession) -> Result<RunStats, RuntimeError> {
         match crate::sleep::Monitor::start(runtime.unlock_generation.clone()) {
             Ok(monitor) => Some(monitor),
             Err(error) => {
-                eprintln!("roost-compositor: logind sleep monitor unavailable: {error}");
+                eprintln!("tuna-compositor: logind sleep monitor unavailable: {error}");
                 None
             }
         }

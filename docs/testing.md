@@ -26,15 +26,15 @@ Clippy runs with `-D warnings`, so any warning fails CI.
 The lock-screen PAM test (`crates/compositor/tests/pam_unlock.rs`) needs
 `pam_wrapper` (`libpam-wrapper` on Ubuntu). Without it the test prints
 `pam_unlock: pam_wrapper not installed, skipped` and passes. CI sets
-`ROOST_REQUIRE_PAM_WRAPPER=1`, which turns that skip into a failure; set it
+`TUNA_REQUIRE_PAM_WRAPPER=1`, which turns that skip into a failure; set it
 locally to be sure the test really ran:
 
 ```sh
-ROOST_REQUIRE_PAM_WRAPPER=1 cargo test --workspace
+TUNA_REQUIRE_PAM_WRAPPER=1 cargo test --workspace
 ```
 
 Run one crate with `cargo test -p <package>` (package names are in each
-crate's `README.md`, for example `cargo test -p roost-compositor`).
+crate's `README.md`, for example `cargo test -p tuna-compositor`).
 
 ## Nested proofs
 
@@ -46,30 +46,30 @@ review. CI shellchecks each script before running it.
 
 | CI job | Command | Extra packages | What it asserts |
 |---|---|---|---|
-| `journey` | `scripts/roost-journey --artifacts journey-artifacts` | `xvfb xdotool x11-apps scrot jq dbus`, Mesa EGL (`libegl1 libgl1-mesa-dri`) | Overview, search, launch from search, Escape, workspace switch, Alt+Tab; writes `assertions.txt` |
-| `journey` | `scripts/roost-release --allow-dirty --out package-artifacts && scripts/check-release-package package-artifacts/*.deb` | as above | The Debian package builds and passes its checks |
-| `app-content` | `scripts/roost-app-content --artifacts app-content-artifacts` | `python3-venv`; the script installs Playwright and Chromium itself | Chromium maps as a Wayland client, tiles with Super+Left, closes with Alt+F4 |
-| `scroll-proof` | `scripts/roost-scroll-proof --artifacts scroll-proof-artifacts` | `python3-venv` | Scroll-mode strip: Super+Shift+T, Super+R, wheel scrolling, gap geometry |
-| `gtk-shell` | `ROOST_REQUIRE_PAM_WRAPPER=1 scripts/roost-gtk-shell-proof --artifacts gtk-shell-artifacts` | gtk4-layer-shell (`scripts/ci-install-gtk4-layer-shell`), `xwayland pipewire wireplumber at-spi2-core python3-pyatspi fonts-cantarell ffmpeg libpam-wrapper` and the GStreamer PipeWire plugins; see the job for the full list | GTK shell panel, calendar, quick settings, overview, notifications, lock and unlock, AT-SPI trees; writes `assertions.txt` |
-| `gtk-shell` | `scripts/roost-scale-proof --artifacts gtk-shell-artifacts/scale` | as above | The same session at 150 percent scale; writes `assertions.txt` |
-| `drm-smoke` | `scripts/roost-drm-smoke --artifacts drm-smoke-artifacts` | `seatd jq ffmpeg`, `linux-modules-extra-$(uname -r)` for vkms | Hardware backend on the vkms virtual KMS device; needs `sudo` for `modprobe` and seatd |
+| `journey` | `scripts/tuna-journey --artifacts journey-artifacts` | `xvfb xdotool x11-apps scrot jq dbus`, Mesa EGL (`libegl1 libgl1-mesa-dri`) | Overview, search, launch from search, Escape, workspace switch, Alt+Tab; writes `assertions.txt` |
+| `journey` | `scripts/tuna-release --allow-dirty --out package-artifacts && scripts/check-release-package package-artifacts/*.deb` | as above | The Debian package builds and passes its checks |
+| `app-content` | `scripts/tuna-app-content --artifacts app-content-artifacts` | `python3-venv`; the script installs Playwright and Chromium itself | Chromium maps as a Wayland client, tiles with Super+Left, closes with Alt+F4 |
+| `scroll-proof` | `scripts/tuna-scroll-proof --artifacts scroll-proof-artifacts` | `python3-venv` | Scroll-mode strip: Super+Shift+T, Super+R, wheel scrolling, gap geometry |
+| `gtk-shell` | `TUNA_REQUIRE_PAM_WRAPPER=1 scripts/tuna-gtk-shell-proof --artifacts gtk-shell-artifacts` | gtk4-layer-shell (`scripts/ci-install-gtk4-layer-shell`), `xwayland pipewire wireplumber at-spi2-core python3-pyatspi fonts-cantarell ffmpeg libpam-wrapper` and the GStreamer PipeWire plugins; see the job for the full list | GTK shell panel, calendar, quick settings, overview, notifications, lock and unlock, AT-SPI trees; writes `assertions.txt` |
+| `gtk-shell` | `scripts/tuna-scale-proof --artifacts gtk-shell-artifacts/scale` | as above | The same session at 150 percent scale; writes `assertions.txt` |
+| `drm-smoke` | `scripts/tuna-drm-smoke --artifacts drm-smoke-artifacts` | `seatd jq ffmpeg`, `linux-modules-extra-$(uname -r)` for vkms | Hardware backend on the vkms virtual KMS device; needs `sudo` for `modprobe` and seatd |
 
 `app-content` and `scroll-proof` download Playwright and Chromium into a
 temporary venv on every run, so they need network access.
 
-**Start `roost-gtk-shell-proof` from a fresh artifacts directory.** The
+**Start `tuna-gtk-shell-proof` from a fresh artifacts directory.** The
 script points `XDG_STATE_HOME` at `gtk-shell-artifacts/state`, and the
 shell keeps its state, notification history included, under
-`$XDG_STATE_HOME/roost-shell`. A reused directory carries the previous
+`$XDG_STATE_HOME/tuna-shell`. A reused directory carries the previous
 run's history into the next one, so the notification stages no longer
 start from an empty list. Remove it first:
 
 ```sh
 rm -rf gtk-shell-artifacts
-ROOST_REQUIRE_PAM_WRAPPER=1 scripts/roost-gtk-shell-proof --artifacts gtk-shell-artifacts
+TUNA_REQUIRE_PAM_WRAPPER=1 scripts/tuna-gtk-shell-proof --artifacts gtk-shell-artifacts
 ```
 
-`scripts/roost-drm-smoke` loads a kernel module and starts seatd as root.
+`scripts/tuna-drm-smoke` loads a kernel module and starts seatd as root.
 Run it in a VM or a disposable machine rather than your desktop session.
 
 ## Marlin VM lane
@@ -83,19 +83,19 @@ screendumps from outside.
 1. It builds `packaging/marlin/Containerfile` (Marlin GNOME 51 plus the
    Tuna Desktop Arch package from `arch-package`) with rootful podman. On top of
    that it builds the CI-only layer `packaging/marlin/vm-lane/Containerfile`.
-   This layer adds a `roost-test` user and turns on GDM automatic login
+   This layer adds a `tuna-test` user and turns on GDM automatic login
    into "Tuna Desktop (preview)". It also sends the kernel console and the
    journal to `ttyS0`. The shipped image does not get these changes.
 2. It runs `bootc install to-disk --via-loopback --generic-image` from
    that image to write a 20 GB raw disk.
-3. `scripts/roost-vm-lane --disk disk.raw --out vm-lane-artifacts --boots 5` boots
+3. `scripts/tuna-vm-lane --disk disk.raw --out vm-lane-artifacts --boots 5` boots
    the disk in QEMU/KVM with OVMF firmware and virtio-vga at 1280x800.
    It writes these assertions to `assertions.txt`:
 
 | ID | What it asserts |
 |---|---|
-| `V-DRM` | The serial journal has `roost-compositor: drm: output ...`, so the compositor lit an output on the DRM/KMS backend |
-| `V-SHELL` | `roost-shell-gtk: keybindings:` appears and shell supervision never logs `BudgetExhausted` |
+| `V-DRM` | The serial journal has `tuna-compositor: drm: output ...`, so the compositor lit an output on the DRM/KMS backend |
+| `V-SHELL` | `tuna-shell-gtk: keybindings:` appears and shell supervision never logs `BudgetExhausted` |
 | `V-PANEL` | The session opens on the overview, where the panel is transparent. After Escape, a screendump shows a pure black strip at y=5 across at least 90 percent of the width (the top panel) over a desktop that is not one flat color |
 | `V-NOPANIC` | No `panicked` anywhere in the serial log |
 
@@ -113,8 +113,8 @@ Additional gates are `V-GDM` (explicit registration, no session pause),
 under `repeat-NN/`; `repeat-manifest.json` records every boot, while the
 root `assertions.txt` aggregates results for the parity ledger.
 
-The artifact (`marlin-vm`) holds `serial.log`, `roost-lines.log` (every
-`roost-*` line), the boot frames, `V-OVERVIEW.png` (the login overview),
+The artifact (`marlin-vm`) holds `serial.log`, `tuna-lines.log` (every
+`tuna-*` line), the boot frames, `V-OVERVIEW.png` (the login overview),
 `V-SESSION.png` (the desktop), and `manifest.json`.
 The manifest records the base image digest, the test image ID, the Tuna Desktop
 package, and the QEMU version. If the run fails or times out (15
@@ -125,12 +125,12 @@ sends keys and pointer clicks through QMP to open the overview and search,
 the app grid, quick settings, and the calendar. It then opens Disks,
 System Monitor, and Files, switches between them with Alt+Tab, and turns
 scroll mode on and off (Super+Shift+T, Super+R, Super+Left/Right). Last,
-it locks the screen with Super+L and unlocks it with the `roost-test`
+it locks the screen with Super+L and unlocks it with the `tuna-test`
 password through PAM. Only the last repeated boot records the tour. The
 script takes a screendump twice a second and plays the result back at
 double speed. Before each section it inserts a title card, a committed
 PNG in `scripts/lib/vm-tour-cards/` (`render.py` there redraws them). The
-`roost-tour` artifact, kept for 30 days, holds `roost-tour.webm`,
+`tuna-tour` artifact, kept for 30 days, holds `tuna-tour.webm`,
 `preview.webp`, and one `T-<section>.png` still per section. The tour
 asserts nothing; only a missing video fails the job.
 
@@ -147,11 +147,11 @@ make their timing reproducible on slow CI renderers such as llvmpipe:
 
 | Variable | Read by | Effect |
 |---|---|---|
-| `ROOST_ANIMATION_CLOCK` | compositor, only when `ROOST_COMPOSITOR_STATE` is also set | Absolute path of a clock file. While the file is absent, animations run on real time. When it first holds a whole number of milliseconds `N`, animation time freezes at that moment plus `N`. Rewriting it with `M` moves time to that moment plus `M`. Removing it resumes real time. Time never runs backwards across these switches. |
+| `TUNA_ANIMATION_CLOCK` | compositor, only when `TUNA_COMPOSITOR_STATE` is also set | Absolute path of a clock file. While the file is absent, animations run on real time. When it first holds a whole number of milliseconds `N`, animation time freezes at that moment plus `N`. Rewriting it with `M` moves time to that moment plus `M`. Removing it resumes real time. Time never runs backwards across these switches. |
 | `GNOME_SHELL_SLOWDOWN_FACTOR` | shell (sent to the compositor in `InputSettings`) | GNOME Shell's own slow-down factor: a positive number multiplies every animation duration, as GNOME's `adjustAnimationTime` does. Anything else keeps 1. Read at shell start. |
 
 Write the clock file atomically (write a temporary file, then `mv`), as
-`anim_clock` in `scripts/roost-gtk-shell-proof` does. The compositor state
+`anim_clock` in `scripts/tuna-gtk-shell-proof` does. The compositor state
 file reports `animation_clock_manual` and, while the clock is frozen, `animation_clock_ms`, plus the
 effective `motion_policy` (`full`, `fade-only` or `off`),
 `animation_slowdown` and `animations_enabled` (GNOME's
@@ -159,10 +159,10 @@ effective `motion_policy` (`full`, `fade-only` or `off`),
 overview transition takes 250 ms each way, so after Super:
 
 ```sh
-echo 0 > clock.tmp && mv clock.tmp "$ROOST_ANIMATION_CLOCK"    # freeze
+echo 0 > clock.tmp && mv clock.tmp "$TUNA_ANIMATION_CLOCK"    # freeze
 xdotool key Super_L                                            # progress 0
-echo 125 > clock.tmp && mv clock.tmp "$ROOST_ANIMATION_CLOCK"  # progress 0.5
-rm "$ROOST_ANIMATION_CLOCK"                                    # real time again
+echo 125 > clock.tmp && mv clock.tmp "$TUNA_ANIMATION_CLOCK"  # progress 0.5
+rm "$TUNA_ANIMATION_CLOCK"                                    # real time again
 ```
 
 Proof `G-ANIMATION-CLOCK` samples the overview this way at 125 and 250 ms
@@ -172,13 +172,13 @@ live motion policy: animations off snaps everything, Reduced Motion
 
 ## Parity ledger check
 
-The `parity-ledger` job runs `scripts/roost-ledger` against the test list
+The `parity-ledger` job runs `scripts/tuna-ledger` against the test list
 from `check` and the `assertions.txt` files from the proofs. Reproduce it
 after running the proofs above:
 
 ```sh
 cargo test --workspace -q -- --list --format terse > test-list.txt
-scripts/roost-ledger check --tests test-list.txt \
+scripts/tuna-ledger check --tests test-list.txt \
   --assertions journey-artifacts/assertions.txt \
   --assertions gtk-shell-artifacts/assertions.txt \
   --assertions gtk-shell-artifacts/scale/assertions.txt \
@@ -186,7 +186,7 @@ scripts/roost-ledger check --tests test-list.txt \
   --assertions vm-lane-artifacts/assertions.txt
 ```
 
-`scripts/roost-ledger summary` prints status counts only.
+`scripts/tuna-ledger summary` prints status counts only.
 
 The rule, from [the parity ledger](parity-ledger.md): a row is `pass` only
 when a test or recorded review compares Tuna Desktop against GNOME 51 baseline
@@ -199,7 +199,7 @@ cites it in the same PR.
 
 ## Release screenshots
 
-The `docs-shots` job runs `scripts/roost-docs-shots collect` over the
+The `docs-shots` job runs `scripts/tuna-docs-shots collect` over the
 `journey`, `app-content` and `scroll-proof` artifacts and uploads the
 curated frames as the `docs-shots` artifact. Nothing in the repository is
 refreshed from it. The docs show the GTK shell through the
@@ -207,15 +207,15 @@ refreshed from it. The docs show the GTK shell through the
 
 ## Pixel parity capture (not in CI)
 
-`scripts/roost-parity-capture` captures Tuna Desktop in the states
-`scripts/roost-gnome-reference` captures GNOME 51 in, for comparison with
-`scripts/lib/roost-parity-compare.py`. CI does not run it. The workflow and
+`scripts/tuna-parity-capture` captures Tuna Desktop in the states
+`scripts/tuna-gnome-reference` captures GNOME 51 in, for comparison with
+`scripts/lib/tuna-parity-compare.py`. CI does not run it. The workflow and
 the states are in [pixel parity with GNOME 51](gnome-parity.md).
 
 ## When a run fails
 
 Read `nested.log` in the artifacts directory first (`compositor.log` for
-`roost-drm-smoke`); see
+`tuna-drm-smoke`); see
 [nested session troubleshooting](nested-session.md#troubleshooting). Do not
 retry a deterministic test until it passes: the timing rule in the
 [development guide](development.md#writing-a-test) applies.
@@ -240,7 +240,7 @@ metrics, final state, assertions and the exact source revision are kept.
 Run it on a development host after building the compositor and GTK shell:
 
 ```sh
-scripts/roost-stress --rounds 10 --out /tmp/roost-stress-fresh
+scripts/tuna-stress --rounds 10 --out /tmp/tuna-stress-fresh
 ```
 
 Use a fresh empty artifact directory for each run. The harness starts its

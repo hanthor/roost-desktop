@@ -1,0 +1,401 @@
+#!/usr/bin/env python3
+"""rename-to-tuna: rename Roost to Tuna Desktop across a checkout (#505).
+
+Reproducible and idempotent, so any branch can rename itself instead of
+resolving conflicts by hand: rebase onto the renamed main, run
+
+    scripts/rename-to-tuna
+    git add -A
+
+and continue. A second run changes nothing.
+
+What it does, in order:
+
+1. Rewrites file contents (crate and package names, Rust paths, binary
+   names, ROOST_* environment variables, script, share and packaging
+   identifiers, D-Bus and app IDs, layer-shell namespaces, CSS names,
+   XDG_CURRENT_DESKTOP, and prose "Roost" -> "Tuna Desktop").
+2. Renames files and directories whose names contain "roost"
+   (`git mv` for tracked files).
+3. Runs rustfmt on the renamed Rust files (`use tuna_*` sorts
+   differently from `use roost_*`).
+4. Re-locks Cargo.lock (and fuzz/Cargo.lock) offline when a manifest or
+   lock file changed, so `--locked` builds keep working.
+
+Never touched (the keep list):
+
+- historical evidence: dated docs/perf/20*, docs/niri-parity/, docs/marlin/,
+  the recorded Marlin wayland-info capture and its digest record, and the
+  dated initial coverage baseline. (tests/a11y/gnome51/ is renamed: its
+  comparison.md is generated from those trees by tuna-a11y-baseline,
+  which CI checks, and nothing records their hashes);
+- third-party/ (vendored patches) and .spektacular/;
+- share/compat/ (the one-release compatibility files);
+- links to historical GitHub Actions runs, and identifiers that live in
+  third-party code (`roost_transport_bounds`, `ROOST-PATCH.md`);
+- any file carrying the marker `tuna-rename: keep-file` in its first
+  lines, any line carrying `tuna-rename: keep`, and any block between
+  `tuna-rename: keep-begin` and `tuna-rename: keep-end`;
+- this script and its self-test.
+
+Options:
+    --check      change nothing; list what would change, exit 1 if anything would
+    --no-cargo   skip re-locking Cargo.lock with cargo
+    --root DIR   checkout to rename (default: the git top level of the cwd)
+    -q, --quiet  only report errors
+"""
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+# ---------------------------------------------------------------- keep list
+
+KEEP_PREFIXES = (
+    ".git/",
+    ".spektacular/",
+    "third-party/",
+    "docs/niri-parity/",
+    "docs/marlin/",
+    "share/compat/",
+    "scripts/rename-to-tuna",
+    "scripts/lib/rename-to-tuna-tests.py",
+)
+# Dated evidence under docs/perf (directories and reports); the living
+# docs beside them (README, how-tos) are renamed.
+KEEP_PATTERN = re.compile(r"docs/perf/20[0-9]{2}-")
+KEEP_FILES = {
+    # Recorded capture: tests/protocols/marlin-gnome51-source.json holds
+    # its sha256, and both describe one historical run.
+    "tests/protocols/marlin-roost-wayland-info.txt",
+    "tests/protocols/marlin-gnome51-source.json",
+    # Dated measurement baseline (historical evidence).
+    "docs/test-coverage/2026-10-04-initial-baseline.md",
+}
+KEEP_FILE_MARKER = "tuna-rename: keep-file"
+KEEP_LINE_MARKER = "tuna-rename: keep"
+KEEP_BEGIN = "tuna-rename: keep-begin"
+KEEP_END = "tuna-rename: keep-end"
+
+# Spans copied verbatim wherever they appear.
+PROTECTED = re.compile(
+    "|".join(
+        (
+            # Historical CI runs (html and API links, any owner).
+            r"https?://[^\s\"'<>()\[\]]*/actions/runs/[^\s\"'<>()\[\]]*",
+            # Paths into kept trees and files.
+            r"(?:docs/(?:perf/20[0-9]{2}-|niri-parity/|marlin/)|third-party/)[^\s\"'`<>()\[\],;]*",
+            r"share/compat/[^\s\"'`<>()\[\],;]*",
+            r"marlin-roost-wayland-info\.txt",
+            # Identifiers defined in third-party code.
+            r"roost_transport_bounds",
+            r"ROOST-PATCH(?:\.md)?",
+            # Prose about the old name itself.
+            r"(?:[Pp]reviously|[Ff]ormerly)(?: named| called| known as)? [\"“`'*]*Roost[\"”`'*]*",
+            r"still say Roost",
+            # Code that deliberately accepts packages built under either
+            # name (the Marlin preview rewrite and the perf payload check).
+            r"Tuna Desktop\|Roost",
+            r"b?[\"']Tuna Desktop[\"'],\s*b?[\"']Roost[\"']",
+        )
+    )
+)
+
+# ---------------------------------------------------------------- rules
+
+PACKAGE = "tuna-desktop"
+
+# (pattern, replacement), applied in order to text outside protected spans.
+RULES = [
+    # Repository links (historical run links are protected above).
+    (re.compile(r"hanthor/roost-desktop"), "tuna-os/tuna-desktop"),
+    # Distribution package name: tuna-desktop, not tuna (Fedora ships an
+    # unrelated `tuna`).
+    (re.compile(r"(pkgname\s*=\s*)roost\b(?![-_.])"), r"\1" + PACKAGE),
+    (re.compile(r"(pkgname[\"']\)\s*[!=]=\s*[\"'])roost(?=[\"'])"), r"\1" + PACKAGE),
+    (re.compile(r"\b((?:Source|Package): )roost\b(?![-_.])"), r"\1" + PACKAGE),
+    (re.compile(r"(\bpackage\s*[!=]=\s*[\"'])roost(?=[\"'])"), r"\1" + PACKAGE),
+    (re.compile(r"(\[[\"']name[\"']\]\s*[!=]=\s*[\"'])roost(?=[\"'])"), r"\1" + PACKAGE),
+    (re.compile(r"([\"']name[\"']:\s*[\"'])roost(?=[\"'])"), r"\1" + PACKAGE),
+    (re.compile(r"(pacman -[A-Za-z]+ )roost\b(?![-_.])"), r"\1" + PACKAGE),
+    (re.compile(r"(\bdpkg(?:-query)?\b.*?[\"'])roost(?=[\"']\])"), r"\1" + PACKAGE),
+    (re.compile(r"(\bdpkg(?:-query)?\b[^\"'\n]* )roost\b(?![-_./])"), r"\1" + PACKAGE),
+    # .deb file names: roost_<version>_amd64.deb.
+    (re.compile(r"\broost_(?=\$|<|X\.|[0-9]|\*)"), PACKAGE + "_"),
+    # Arch package files: roost-<version>-<rel>-<arch>.pkg.tar.zst.
+    (re.compile(r"\broost-(?=(?:\[0-9\]|[0-9]|\*)[^\s\"'`]*?\\?\.pkg\\?\.tar)"), PACKAGE + "-"),
+    # pacman -Q / -Ql output lines: "roost 0.1.0-1", "roost /usr/...".
+    (re.compile(r"(?<![\w./-])roost (?=[0-9]+\.[0-9]|/)"), PACKAGE + " "),
+    (re.compile(r"([\"'])roost (?=[\"'] \+)"), r"\1" + PACKAGE + " "),
+    # XDG_CURRENT_DESKTOP / DesktopNames component and trace mark names.
+    (re.compile(r"\bRoost(?=:GNOME|;GNOME|::)"), "Tuna"),
+    (re.compile(r"(vec!\[\s*)\"Roost\""), r'\1"Tuna"'),
+    (re.compile(r"\"Roost\"(\.to_owned\(\)|\.to_string\(\)|\.into\(\))?(?=,\s*\"GNOME\")"), r'"Tuna"\1'),
+    # Prose that already says "desktop".
+    (re.compile(r"\bRoost [Dd]esktop\b"), "Tuna Desktop"),
+    # Identifiers and hyphenated words: RoostPrefs, Roost-owned.
+    (re.compile(r"Roost(?=[A-Za-z0-9_-])"), "Tuna"),
+    # The product name in prose and user-visible strings.
+    (re.compile(r"Roost"), "Tuna Desktop"),
+    # Everything else: environment variables, crates, binaries, paths,
+    # D-Bus names, app IDs, namespaces, CSS classes, log prefixes.
+    (re.compile(r"ROOST"), "TUNA"),
+    (re.compile(r"roost"), "tuna"),
+]
+
+ANY_OLD = re.compile(r"roost", re.IGNORECASE)
+
+
+def rename_text(text):
+    """Rename one run of text with no keep markers in it."""
+    out = []
+    pos = 0
+    for match in PROTECTED.finditer(text):
+        out.append(_apply_rules(text[pos:match.start()]))
+        out.append(match.group(0))
+        pos = match.end()
+    out.append(_apply_rules(text[pos:]))
+    return "".join(out)
+
+
+def _apply_rules(chunk):
+    if not ANY_OLD.search(chunk):
+        return chunk
+    for pattern, replacement in RULES:
+        chunk = pattern.sub(replacement, chunk)
+    return chunk
+
+
+def rename_content(text):
+    """Rename a whole file's text, honouring line and block markers."""
+    if KEEP_FILE_MARKER in "\n".join(text.splitlines()[:8]):
+        return text
+    if not ANY_OLD.search(text):
+        return text
+    out = []
+    keeping = False
+    for line in text.splitlines(keepends=True):
+        if KEEP_BEGIN in line:
+            keeping = True
+        if keeping or KEEP_LINE_MARKER in line:
+            out.append(line)
+        else:
+            out.append(rename_text(line))
+        if KEEP_END in line:
+            keeping = False
+    return "".join(out)
+
+
+def rename_path_component(name):
+    return name.replace("roost", "tuna").replace("Roost", "Tuna").replace("ROOST", "TUNA")
+
+
+def rename_path(rel):
+    return "/".join(rename_path_component(part) for part in rel.split("/"))
+
+
+def kept_path(rel):
+    if KEEP_PATTERN.match(rel):
+        return True
+    return rel in KEEP_FILES or any(rel == p.rstrip("/") or rel.startswith(p) for p in KEEP_PREFIXES)
+
+
+# ---------------------------------------------------------------- driver
+
+
+class Renamer:
+    def __init__(self, root, check=False, cargo=True, quiet=False):
+        self.root = Path(root).resolve()
+        self.check = check
+        self.cargo = cargo
+        self.quiet = quiet
+        self.changed = []
+        self.moved = []
+        self.errors = []
+
+    def log(self, message):
+        if not self.quiet:
+            print(message)
+
+    def git(self, *args, check=True):
+        return subprocess.run(
+            ["git", "-C", str(self.root), *args],
+            check=check,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def files(self):
+        listed = self.git("ls-files", "-z", "--cached", "--others", "--exclude-standard").stdout
+        tracked = set(self.git("ls-files", "-z", "--cached").stdout.decode().split("\0"))
+        seen = []
+        for rel in sorted(set(listed.decode().split("\0"))):
+            if rel and os.path.lexists(self.root / rel):
+                seen.append((rel, rel in tracked))
+        return seen
+
+    def run(self):
+        files = self.files()
+        for rel, _ in files:
+            if not kept_path(rel):
+                self.rewrite(rel)
+        for rel, tracked in files:
+            if not kept_path(rel):
+                self.move(rel, tracked)
+        if not self.check:
+            self.reformat()
+        if self.cargo and not self.check:
+            self.relock()
+        return 0 if not self.errors else 2
+
+    def rewrite(self, rel):
+        path = self.root / rel
+        if path.is_symlink():
+            target = os.readlink(path)
+            new_target = rename_path(target)
+            if new_target != target:
+                self.changed.append(rel)
+                if not self.check:
+                    path.unlink()
+                    os.symlink(new_target, path)
+            return
+        data = path.read_bytes()
+        if b"\0" in data:
+            return
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return
+        if KEEP_FILE_MARKER in "\n".join(text.splitlines()[:8]):
+            return
+        new = rename_content(text)
+        if new != text:
+            self.changed.append(rel)
+            if not self.check:
+                mode = path.stat().st_mode
+                path.write_bytes(new.encode("utf-8"))
+                os.chmod(path, mode)
+
+    def move(self, rel, tracked):
+        new_rel = rename_path(rel)
+        if new_rel == rel:
+            return
+        path = self.root / rel
+        if not path.is_symlink() and path.is_file():
+            try:
+                head = path.read_bytes()[:4096].decode("utf-8", "ignore")
+            except OSError:
+                head = ""
+            if KEEP_FILE_MARKER in "\n".join(head.splitlines()[:8]):
+                return
+        dest = self.root / new_rel
+        if os.path.lexists(dest):
+            self.errors.append(f"{rel}: cannot rename, {new_rel} already exists")
+            print(f"rename-to-tuna: {rel}: {new_rel} already exists; merge them by hand", file=sys.stderr)
+            return
+        self.moved.append((rel, new_rel))
+        if self.check:
+            return
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if tracked:
+            self.git("mv", "-k", "--", rel, new_rel)
+            if os.path.lexists(path):
+                os.rename(path, dest)
+        else:
+            os.rename(path, dest)
+        parent = path.parent
+        while parent != self.root and parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+            parent = parent.parent
+
+    def reformat(self):
+        """rustfmt the renamed Rust files: `use tuna_*` sorts differently
+        from `use roost_*`, and CI runs `cargo fmt --check`."""
+        moved = dict(self.moved)
+        rust = sorted(
+            {moved.get(rel, rel) for rel in self.changed if rel.endswith(".rs")}
+            | {new for _, new in self.moved if new.endswith(".rs")}
+        )
+        rust = [rel for rel in rust if (self.root / rel).is_file() and not kept_path(rel)]
+        if not rust:
+            return
+        try:
+            result = subprocess.run(
+                ["rustfmt", "--edition", "2021", *rust],
+                cwd=self.root,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            print("rename-to-tuna: warning: rustfmt not found; run `cargo fmt --all`", file=sys.stderr)
+            return
+        if result.returncode != 0:
+            print(
+                "rename-to-tuna: warning: rustfmt failed; run `cargo fmt --all`:\n"
+                + result.stderr.decode(errors="replace"),
+                file=sys.stderr,
+            )
+        else:
+            self.log(f"formatted {len(rust)} Rust file(s)")
+
+    def relock(self):
+        touched = {p for p in self.changed} | {new for _, new in self.moved}
+        for manifest in ("Cargo.toml", "fuzz/Cargo.toml"):
+            base = os.path.dirname(manifest)
+            lock = os.path.join(base, "Cargo.lock") if base else "Cargo.lock"
+            if not (self.root / manifest).exists() or not (self.root / lock).exists():
+                continue
+            if not any(t == lock or t.endswith("Cargo.toml") for t in touched):
+                continue
+            result = subprocess.run(
+                ["cargo", "update", "--workspace", "--offline", "--manifest-path", str(self.root / manifest)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if result.returncode != 0:
+                print(
+                    f"rename-to-tuna: warning: could not re-lock {lock} offline; run "
+                    f"`cargo update --workspace --manifest-path {manifest}`:\n"
+                    + result.stderr.decode(errors="replace"),
+                    file=sys.stderr,
+                )
+            else:
+                self.log(f"re-locked {lock}")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Rename Roost to Tuna Desktop (#505).")
+    parser.add_argument("--check", action="store_true")
+    parser.add_argument("--no-cargo", action="store_true")
+    parser.add_argument("--root")
+    parser.add_argument("-q", "--quiet", action="store_true")
+    args = parser.parse_args(argv)
+    root = args.root
+    if root is None:
+        root = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], check=True, stdout=subprocess.PIPE
+        ).stdout.decode().strip()
+    renamer = Renamer(root, check=args.check, cargo=not args.no_cargo, quiet=args.quiet)
+    status = renamer.run()
+    verb = "would rewrite" if args.check else "rewrote"
+    for rel in renamer.changed:
+        renamer.log(f"{verb} {rel}")
+    for old, new in renamer.moved:
+        renamer.log(f"{'would move' if args.check else 'moved'} {old} -> {new}")
+    if status:
+        return status
+    if args.check and (renamer.changed or renamer.moved):
+        print(
+            f"rename-to-tuna: {len(renamer.changed)} file(s) still use the old name and "
+            f"{len(renamer.moved)} path(s) need renaming; run scripts/rename-to-tuna",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

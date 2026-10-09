@@ -167,22 +167,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
-name = "roost-control-fuzz"
-version = "0.0.0"
-dependencies = [
- "libfuzzer-sys",
- "roost-shell-control",
-]
-
-[[package]]
-name = "roost-shell-control"
-version = "0.1.0"
-dependencies = [
- "postcard",
- "serde",
-]
-
-[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -283,6 +267,22 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "tuna-control-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "tuna-shell-control",
+]
+
+[[package]]
+name = "tuna-shell-control"
+version = "0.1.0"
+dependencies = [
+ "postcard",
+ "serde",
 ]
 
 [[package]]

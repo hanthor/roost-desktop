@@ -23,7 +23,7 @@ pub struct LoginView {
     pub prompt_secret: bool,
     /// Whether the answer field + login button are sensitive.
     pub input_sensitive: bool,
-    /// Session picker rows (names), Roost default first.
+    /// Session picker rows (names), Tuna Desktop default first.
     pub sessions: Vec<String>,
     /// Selected session index.
     pub selected_session: usize,
@@ -123,7 +123,7 @@ mod tests {
             },
             SessionEntry {
                 name: "Tuna Desktop".to_string(),
-                command: vec!["roost-session".into()],
+                command: vec!["tuna-session".into()],
                 source: Default::default(),
                 is_default: true,
             },

@@ -8,7 +8,7 @@ use std::cell::{Cell, Ref, RefCell};
 use std::rc::Rc;
 
 use gio::prelude::*;
-use roost_shell_host::apps::{default_app_dirs, AppProvider};
+use tuna_shell_host::apps::{default_app_dirs, AppProvider};
 
 pub struct LiveApps {
     inner: RefCell<AppProvider>,

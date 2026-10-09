@@ -788,7 +788,7 @@ pub fn layout(
         .filter(|w| w.workspace == active)
         .map(|w| (w.id, w.geometry))
         .collect();
-    // GNOME sorts by stable sequence: creation order (Roost ids rise).
+    // GNOME sorts by stable sequence: creation order (Tuna Desktop ids rise).
     mine.sort_by_key(|(id, _)| *id);
     for (id, rect, scale) in window_slots(workarea, output.size.h, picker, &mine) {
         out.previews.push(Preview {

@@ -1,4 +1,4 @@
-# GNOME 51 Wayland globals, captured by scripts/roost-gnome-wayland-info
+# GNOME 51 Wayland globals, captured by scripts/tuna-gnome-wayland-info
 # image: quay.io/fedora/fedora:45@sha256:dbb22055c0c19f4eba2afbbb717667b0c76aa956c4283700041980ad3710bb73 (tests/gnome-reference/Containerfile)
 # packages: gnome-shell-51.0-1.fc45.x86_64 mutter-51.0-1.fc45.x86_64 wayland-utils-1.3.0-4.fc45.x86_64 
 # session: gnome-shell --headless --wayland --virtual-monitor 1280x800

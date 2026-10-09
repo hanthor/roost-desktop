@@ -1,7 +1,7 @@
 //! Deterministic geometry motion shared by tile previews and strip columns.
 use crate::spring::Spring;
-use roost_shell_control::MotionPolicy;
 use smithay::utils::{Logical, Rectangle};
+use tuna_shell_control::MotionPolicy;
 
 pub type Rect = Rectangle<i32, Logical>;
 
@@ -127,8 +127,8 @@ mod tests {
     #[test]
     fn transitions_sample_exactly_on_a_manual_clock() {
         use crate::animation_clock::AnimationClock;
-        use roost_shell_control::MotionLevel;
         use std::time::Duration;
+        use tuna_shell_control::MotionLevel;
         // Drive the overview's 250 ms transition the way the runtime
         // does: frame deltas from a manual clock.
         let run = |motion: MotionPolicy, samples: &[u64]| {

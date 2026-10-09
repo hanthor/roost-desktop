@@ -1,4 +1,4 @@
-# roost-shell-host
+# tuna-shell-host
 
 The original Tuna Desktop shell, a supervised Wayland client that draws its own
 pixels (panel, overview, dock, tray, notification banners), plus the
@@ -6,11 +6,11 @@ toolkit-free shell logic the GTK shell reuses.
 
 ## Binary
 
-`roost-shell-host` (`src/main.rs`): the compositor spawns it as a
-supervised child with `WAYLAND_DISPLAY` and `ROOST_CONTROL_SOCKET` set
+`tuna-shell-host` (`src/main.rs`): the compositor spawns it as a
+supervised child with `WAYLAND_DISPLAY` and `TUNA_CONTROL_SOCKET` set
 for the child only. It attaches to `zwlr_layer_shell_v1` and exits with an
-error if the compositor does not offer it. `scripts/roost-nested run` starts
-this shell; packaged sessions prefer `roost-shell-gtk` when it is installed
+error if the compositor does not offer it. `scripts/tuna-nested run` starts
+this shell; packaged sessions prefer `tuna-shell-gtk` when it is installed
 (`SHELL_BINARIES` in `crates/compositor/src/runtime.rs`).
 
 ## Public API (`src/lib.rs`)
@@ -30,9 +30,9 @@ this shell; packaged sessions prefer `roost-shell-gtk` when it is installed
 
 ## Dependents
 
-`roost-shell-gtk` uses `apps`, `control`, `favorites`, `intake`, `model`,
+`tuna-shell-gtk` uses `apps`, `control`, `favorites`, `intake`, `model`,
 `notifications` and `watcher`. Live tests in `tests/` run against
-`roost-compositor`.
+`tuna-compositor`.
 
 ## Docs
 

@@ -1,6 +1,6 @@
 # Actual guest endurance evidence
 
-`scripts/roost-vm-soak` observes a running Tuna Desktop session inside an isolated test VM for 24 hours by default. A newly booted GNOME base image is not a Tuna Desktop soak. Install a qualified Tuna Desktop payload, record its source revision and image digest, and establish the real session before starting this observer. It does not change the shipping image, display-manager configuration or user settings.
+`scripts/tuna-vm-soak` observes a running Tuna Desktop session inside an isolated test VM for 24 hours by default. A newly booted GNOME base image is not a Tuna Desktop soak. Install a qualified Tuna Desktop payload, record its source revision and image digest, and establish the real session before starting this observer. It does not change the shipping image, display-manager configuration or user settings.
 
 The root observer reads complete PSS/RSS and fd counts for the session UID. It requires exactly one live compositor and GTK shell, records their PID/start-time identities (the legacy shell host is an alternative renderer, not a concurrent process), and fails if any exits or restarts. Each sample makes bounded calls on the user's real bus to the screen saver, calendar server, portal settings and GNOME portal backend. Missing counters and unreadable live processes fail instead of counting as zero. Departed noncritical processes and zombies are excluded; process identity changes during sampling fail.
 
@@ -9,30 +9,30 @@ After a ten-minute warmup, every sample must remain below the baseline PSS multi
 Copy the script to the VM and run it as a root transient service, supplying the UID's account and the exact source revision from the deployment record:
 
 ```sh
-sudo systemd-run --unit=roost-soak --property=Type=exec \
-  /usr/local/libexec/roost-vm-soak --user roost-test \
-  --source-revision EXACT_INSTALLED_REVISION --out /var/tmp/roost-soak-NEW_RUN
+sudo systemd-run --unit=tuna-soak --property=Type=exec \
+  /usr/local/libexec/tuna-vm-soak --user tuna-test \
+  --source-revision EXACT_INSTALLED_REVISION --out /var/tmp/tuna-soak-NEW_RUN
 ```
 
 Each output directory must be fresh. `provenance.json` contains bootc status, boot ID, actual installed binary hashes, supplied source revision, requested duration and growth limits. `samples.jsonl` grows after each successful sample. `report.json` is written on normal completion or a handled failure. A successful report requires `complete: true` and the full requested elapsed duration. For qualification require `requested_duration_s: 86400`; shorter rehearsal runs are not 24-hour evidence. Interrupting the observer or rebooting the VM cannot qualify a run.
 
 The observer must remain outside the session UID so its memory and helper processes are excluded. Root/GDM services, kernel allocations and GPU buffers are outside the reported scope. It performs health calls; the optional native workload adds one controlled mapped window, without input or window churn; pair its report with the separate nested stress evidence. Changing the installed payload, restarting a critical process or switching images requires a fresh run and output directory. Collect the completed report, provenance, raw samples and scoped session journal together; review journal crashes and the separately measured frame pacing before calling the roadmap release gate complete.
 
-The pure failure fixtures in `scripts/lib/roost-soak-tests.py` verify zombie rejection, critical-process loss, missing counters, PID reuse, unreadable live processes and parenthesized process names. They validate the observer, and do not establish a guest endurance result.
+The pure failure fixtures in `scripts/lib/tuna-soak-tests.py` verify zombie rejection, critical-process loss, missing counters, PID reuse, unreadable live processes and parenthesized process names. They validate the observer, and do not establish a guest endurance result.
 
 ## Native frame pacing during endurance
 
 For a memory-and-frame-pacing run, build the small fixture with
-`scripts/roost-frame-pacer-build`, install its binary as the root-owned
-`/usr/local/libexec/roost-frame-pacer`, and copy
+`scripts/tuna-frame-pacer-build`, install its binary as the root-owned
+`/usr/local/libexec/tuna-frame-pacer`, and copy
 `scripts/lib/endurance_presentation.py` to
 `/usr/local/libexec/lib/endurance_presentation.py` alongside the observer.
 Use the running user's actual ordinary Wayland socket, for example:
 
 ```sh
-sudo systemd-run --unit=roost-soak --property=Type=exec \
-  /usr/local/libexec/roost-vm-soak --user roost-soak \
-  --source-revision EXACT_INSTALLED_REVISION --out /var/tmp/roost-soak-NEW_RUN \
+sudo systemd-run --unit=tuna-soak --property=Type=exec \
+  /usr/local/libexec/tuna-vm-soak --user tuna-soak \
+  --source-revision EXACT_INSTALLED_REVISION --out /var/tmp/tuna-soak-NEW_RUN \
   --presentation --wayland-display wayland-0
 ```
 

@@ -1,8 +1,0 @@
-[Desktop Entry]
-Name=Tuna Desktop (nested preview)
-Comment=Run Tuna Desktop in a window inside this session
-Exec=roost-session
-Icon=preferences-desktop
-Terminal=false
-Type=Application
-Categories=System;

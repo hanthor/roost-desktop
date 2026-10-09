@@ -9,47 +9,47 @@ is hosted as release assets, not in this repo.
 
 `Super` opens the overview; typing filters the app list.
 
-<video src="https://github.com/hanthor/roost-desktop/releases/download/@VERSION@/overview.mp4" controls preload="none"></video>
+<video src="https://github.com/tuna-os/tuna-desktop/releases/download/@VERSION@/overview.mp4" controls preload="none"></video>
 
-![Overview](https://github.com/hanthor/roost-desktop/releases/download/@VERSION@/overview.png)
+![Overview](https://github.com/tuna-os/tuna-desktop/releases/download/@VERSION@/overview.png)
 
 ## App launch
 
 Typing a query and pressing `Enter` launches the match.
 
-<video src="https://github.com/hanthor/roost-desktop/releases/download/@VERSION@/app-launch.mp4" controls preload="none"></video>
+<video src="https://github.com/tuna-os/tuna-desktop/releases/download/@VERSION@/app-launch.mp4" controls preload="none"></video>
 
-![App launch](https://github.com/hanthor/roost-desktop/releases/download/@VERSION@/app-launch.png)
+![App launch](https://github.com/tuna-os/tuna-desktop/releases/download/@VERSION@/app-launch.png)
 
 ## Tiling and scroll mode
 
 `Super+Shift+T` flips floating / strip session mode; `Super+R` steps the
 focused column through width presets.
 
-<video src="https://github.com/hanthor/roost-desktop/releases/download/@VERSION@/tiling-scroll.mp4" controls preload="none"></video>
+<video src="https://github.com/tuna-os/tuna-desktop/releases/download/@VERSION@/tiling-scroll.mp4" controls preload="none"></video>
 
-![Tiling and scroll mode](https://github.com/hanthor/roost-desktop/releases/download/@VERSION@/tiling-scroll.png)
+![Tiling and scroll mode](https://github.com/tuna-os/tuna-desktop/releases/download/@VERSION@/tiling-scroll.png)
 
 ## Quick settings
 
 @QUICK_SETTINGS_BLURB@
 
-<video src="https://github.com/hanthor/roost-desktop/releases/download/@VERSION@/quick-settings.mp4" controls preload="none"></video>
+<video src="https://github.com/tuna-os/tuna-desktop/releases/download/@VERSION@/quick-settings.mp4" controls preload="none"></video>
 
-![Quick settings](https://github.com/hanthor/roost-desktop/releases/download/@VERSION@/quick-settings.png)
+![Quick settings](https://github.com/tuna-os/tuna-desktop/releases/download/@VERSION@/quick-settings.png)
 
 ## Notifications
 
 @NOTIFICATIONS_BLURB@
 
-<video src="https://github.com/hanthor/roost-desktop/releases/download/@VERSION@/notifications.mp4" controls preload="none"></video>
+<video src="https://github.com/tuna-os/tuna-desktop/releases/download/@VERSION@/notifications.mp4" controls preload="none"></video>
 
-![Notifications](https://github.com/hanthor/roost-desktop/releases/download/@VERSION@/notifications.png)
+![Notifications](https://github.com/tuna-os/tuna-desktop/releases/download/@VERSION@/notifications.png)
 
 ## Lock screen
 
 @LOCK_BLURB@
 
-<video src="https://github.com/hanthor/roost-desktop/releases/download/@VERSION@/lock-screen.mp4" controls preload="none"></video>
+<video src="https://github.com/tuna-os/tuna-desktop/releases/download/@VERSION@/lock-screen.mp4" controls preload="none"></video>
 
-![Lock screen](https://github.com/hanthor/roost-desktop/releases/download/@VERSION@/lock-screen.png)
+![Lock screen](https://github.com/tuna-os/tuna-desktop/releases/download/@VERSION@/lock-screen.png)

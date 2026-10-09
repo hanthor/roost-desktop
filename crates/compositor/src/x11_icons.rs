@@ -21,7 +21,7 @@ impl Reader {
         let (requests, rx) = mpsc::sync_channel::<Request>(1);
         let (tx, replies) = mpsc::sync_channel(1);
         std::thread::Builder::new()
-            .name("roost-x11-icons".into())
+            .name("tuna-x11-icons".into())
             .spawn(move || {
                 let mut connection = None;
                 while let Ok((display, windows)) = rx.recv() {

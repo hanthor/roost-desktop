@@ -128,7 +128,7 @@ pub enum SwitcherEffect {
 }
 
 /// Keysyms the switcher acts on, shared with the compositor wire producer.
-pub use roost_shell_control::switcher_keys;
+pub use tuna_shell_control::switcher_keys;
 
 impl ShellModel {
     /// Empty model: no windows, no workspaces, overview closed.
@@ -579,7 +579,7 @@ impl ShellModel {
 /// { windows, workspaces }` into this view (`WindowInfo.focused` maps to
 /// [`WindowEntry::active`]; workspace ids narrow from the schema's `u64`
 /// to the `u32` ids this model keeps). This file never imports
-/// `roost-shell-control`, so the wire format can evolve without churning
+/// `tuna-shell-control`, so the wire format can evolve without churning
 /// the view model.
 #[derive(Debug, Clone, Default)]
 pub struct SnapshotView {

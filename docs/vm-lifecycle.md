@@ -1,7 +1,7 @@
 # Marlin VM lifecycle proof
 
 The existing `marlin-vm` CI job installs the ordinary Marlin preview image,
-then a CI-only fixture layer. The fixture starts `roost-test` once through
+then a CI-only fixture layer. The fixture starts `tuna-test` once through
 greetd's initial session. Its default greeter is Cage with normal-window
 gtkgreet, matching the measured TunaOS launcher; logout must reach that
 actual greeter. This changes neither the shipped preview image nor the

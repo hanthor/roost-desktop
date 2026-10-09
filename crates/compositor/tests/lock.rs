@@ -19,14 +19,14 @@ use std::os::unix::net::UnixStream;
 use std::rc::Rc;
 use std::time::Duration;
 
-use roost_compositor::control::{
+use tuna_compositor::control::{
     deny_all_tokens, ControlConn, ControlHub, Emitted, Handled, Session,
 };
-use roost_compositor::lock::{content_visible, SessionLock};
-use roost_compositor::overlay::Overlay;
-use roost_compositor::state::{StateModel, TokenStore};
-use roost_compositor::SEAT_NAME;
-use roost_shell_control::{
+use tuna_compositor::lock::{content_visible, SessionLock};
+use tuna_compositor::overlay::Overlay;
+use tuna_compositor::state::{StateModel, TokenStore};
+use tuna_compositor::SEAT_NAME;
+use tuna_shell_control::{
     decode_frame, encode_frame, CommandKind, CommandStatus, Message, CURRENT_VERSION,
 };
 
@@ -351,7 +351,7 @@ fn lock_surface_carries_no_titles() {
 #[test]
 fn three_wrong_passwords_stay_locked_without_leak() {
     use greetd_ipc::{codec::Error as CodecError, AuthMessageType, ErrorType, Response};
-    use roost_compositor::unlock::{unlock_session, UnlockClient};
+    use tuna_compositor::unlock::{unlock_session, UnlockClient};
 
     struct DenyAll;
     impl UnlockClient for DenyAll {

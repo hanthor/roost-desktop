@@ -1,4 +1,4 @@
-//! roost-shell-gtk: the Roost shell drawn with GTK4 and libadwaita
+//! tuna-shell-gtk: the Tuna Desktop shell drawn with GTK4 and libadwaita
 //! (ADR 0006, #53).
 //!
 //! The first surface is the GNOME 51 top panel as a layer-shell strip:
@@ -8,10 +8,10 @@
 //! the user sees is a real GTK widget, so text uses the system interface
 //! font and every control is reachable through AT-SPI for screen
 //! readers. Compositor state arrives over the same versioned control
-//! socket the current shell uses (`ROOST_CONTROL_SOCKET`).
+//! socket the current shell uses (`TUNA_CONTROL_SOCKET`).
 //!
 //! The compositor runs one supervised shell; select this one with
-//! `ROOST_SHELL_BIN=roost-shell-gtk` while it grows to parity.
+//! `TUNA_SHELL_BIN=tuna-shell-gtk` while it grows to parity.
 
 mod audio_state;
 mod background_settings;
@@ -60,7 +60,7 @@ use gtk4 as gtk;
 use gtk4::prelude::*;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use libadwaita as adw;
-use roost_shell_host::control::{ControlClient, ControlError, Handled};
+use tuna_shell_host::control::{ControlClient, ControlError, Handled};
 
 use logic::ClockFormat;
 
@@ -73,7 +73,7 @@ const SHELL_SCHEMA: &str = "org.gnome.shell";
 const SCREENSAVER_SCHEMA: &str = "org.gnome.desktop.screensaver";
 
 fn release_version() -> &'static str {
-    match option_env!("ROOST_VERSION") {
+    match option_env!("TUNA_VERSION") {
         Some(v) if !v.is_empty() => v.strip_prefix('v').unwrap_or(v),
         _ => env!("CARGO_PKG_VERSION"),
     }
@@ -93,7 +93,7 @@ fn is_would_block(e: &ControlError) -> bool {
 
 /// Connect, greet, and wait (bounded) for the first snapshot.
 fn attach_control() -> Option<ControlClient> {
-    let path = std::env::var_os("ROOST_CONTROL_SOCKET")?;
+    let path = std::env::var_os("TUNA_CONTROL_SOCKET")?;
     let mut control = ControlClient::connect(std::path::Path::new(&path)).ok()?;
     control.send_hello().ok()?;
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -114,12 +114,12 @@ fn attach_control() -> Option<ControlClient> {
             Ok(false) => {}
             Err(e) if is_would_block(&e) => std::thread::sleep(Duration::from_millis(2)),
             Err(e) => {
-                eprintln!("roost-shell-gtk: control handshake failed: {e}");
+                eprintln!("tuna-shell-gtk: control handshake failed: {e}");
                 return None;
             }
         }
     }
-    eprintln!("roost-shell-gtk: control handshake timed out");
+    eprintln!("tuna-shell-gtk: control handshake timed out");
     None
 }
 
@@ -225,7 +225,7 @@ impl shell_dbus::ShellActions for GnomeShellDbus {
             .is_some_and(|c| c.model().is_overview_open())
     }
 
-    fn set_accelerators(&self, accelerators: Vec<roost_shell_control::Accelerator>) {
+    fn set_accelerators(&self, accelerators: Vec<tuna_shell_control::Accelerator>) {
         if let Some(control) = self.shell.borrow_mut().control.as_mut() {
             let _ = control.set_accelerators(accelerators);
         }
@@ -294,8 +294,8 @@ fn render_pills(shell: &mut Shell) {
 /// column, back on today each time it opens (dateMenu.js).
 fn calendar_popover(notes: &gtk::Box) -> (gtk::Popover, Rc<calendar::CalendarUi>) {
     let popover = gtk::Popover::new();
-    popover.add_css_class("roost-shell-popover");
-    popover.add_css_class("roost-cal");
+    popover.add_css_class("tuna-shell-popover");
+    popover.add_css_class("tuna-cal");
     popover.set_has_arrow(false);
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     row.add_css_class("calendar-area");
@@ -556,8 +556,8 @@ fn quick_settings_popover(
     icons: PanelIcons,
 ) -> gtk::Popover {
     let popover = gtk::Popover::new();
-    popover.add_css_class("roost-shell-popover");
-    popover.add_css_class("roost-qs");
+    popover.add_css_class("tuna-shell-popover");
+    popover.add_css_class("tuna-qs");
     popover.set_has_arrow(false);
     let col = gtk::Box::new(gtk::Orientation::Vertical, 12);
 
@@ -603,7 +603,7 @@ fn quick_settings_popover(
             popover.popdown();
             if let Some(control) = shell.borrow_mut().control.as_mut() {
                 if let Err(e) = control.lock() {
-                    eprintln!("roost-shell-gtk: lock failed: {e}");
+                    eprintln!("tuna-shell-gtk: lock failed: {e}");
                 }
             }
         });
@@ -1030,7 +1030,7 @@ fn take_screenshot(window: bool, notify: Rc<notify::NotifyUi>) {
                                 &name,
                             );
                         }
-                        Err(e) => eprintln!("roost-shell-gtk: screenshot failed: {e}"),
+                        Err(e) => eprintln!("tuna-shell-gtk: screenshot failed: {e}"),
                     },
                 );
             },
@@ -1109,7 +1109,7 @@ fn build(app: &adw::Application) {
         );
         // GNOME Shell's bundled icons (dark-mode, screenshooter...).
         gio::resources_register_include!("icons.gresource").ok();
-        gtk::IconTheme::for_display(&display).add_resource_path("/org/roost/Shell/icons");
+        gtk::IconTheme::for_display(&display).add_resource_path("/org/tuna/Shell/icons");
     }
     // GNOME's icon theme key, applied the way gnome-settings-daemon's
     // xsettings plugin applies it to GTK.
@@ -1161,11 +1161,11 @@ fn build(app: &adw::Application) {
     adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
 
     let window = gtk::ApplicationWindow::new(app);
-    window.add_css_class("roost-panel");
+    window.add_css_class("tuna-panel");
     window.set_title(Some("Top Bar"));
     window.init_layer_shell();
     window.set_layer(Layer::Top);
-    window.set_namespace(Some(roost_shell_control::GTK_PANEL_NAMESPACE));
+    window.set_namespace(Some(tuna_shell_control::GTK_PANEL_NAMESPACE));
     window.set_anchor(Edge::Top, true);
     window.set_anchor(Edge::Left, true);
     window.set_anchor(Edge::Right, true);
@@ -1332,10 +1332,10 @@ fn build(app: &adw::Application) {
 
     // Overview search, dash, and app grid (#54, #57).
     let favorites = {
-        let pinned = roost_shell_host::favorites::Favorites::system()
+        let pinned = tuna_shell_host::favorites::Favorites::system()
             .ids()
             .to_vec();
-        // Roost's own pins first, then the user's GNOME dash
+        // Tuna Desktop's own pins first, then the user's GNOME dash
         // (org.gnome.shell favorite-apps, #63), then GNOME's defaults.
         let gnome: Vec<String> = settings(SHELL_SCHEMA)
             .map(|s| {
@@ -1384,7 +1384,7 @@ fn build(app: &adw::Application) {
             let found = *on_disk
                 .borrow_mut()
                 .entry(id.to_owned())
-                .or_insert_with(|| roost_shell_host::apps::desktop_file_exists(id));
+                .or_insert_with(|| tuna_shell_host::apps::desktop_file_exists(id));
             found.then(|| id.to_owned())
         });
     }
@@ -1511,7 +1511,7 @@ fn build(app: &adw::Application) {
                     Action::LockScreen => {
                         if let Some(control) = shell.borrow_mut().control.as_mut() {
                             if let Err(e) = control.lock() {
-                                eprintln!("roost-shell-gtk: lock failed: {e}");
+                                eprintln!("tuna-shell-gtk: lock failed: {e}");
                             }
                         }
                     }
@@ -1551,7 +1551,7 @@ fn build(app: &adw::Application) {
                                     let _ = control.activate_window(id);
                                 }
                                 None => {
-                                    let _ = roost_shell_host::apps::launch(&entry);
+                                    let _ = tuna_shell_host::apps::launch(&entry);
                                 }
                             }
                             if control.model().is_overview_open() {
@@ -1561,7 +1561,7 @@ fn build(app: &adw::Application) {
                     }
                     Action::OpenNewWindow(n) => {
                         if let Some(entry) = dash_entry(n) {
-                            let _ = roost_shell_host::apps::launch(&entry);
+                            let _ = tuna_shell_host::apps::launch(&entry);
                         }
                     }
                     Action::ShowScreenshotUi => screenshot_ui.open(),
@@ -1597,7 +1597,7 @@ fn build(app: &adw::Application) {
                     | Action::TileRight
                     | Action::BeginMove
                     | Action::BeginResize => {
-                        use roost_shell_control::WindowAction as W;
+                        use tuna_shell_control::WindowAction as W;
                         let what = match action {
                             Action::WindowMenu => W::ShowMenu,
                             Action::ToggleMaximized => W::ToggleMaximize,
@@ -1641,7 +1641,7 @@ fn build(app: &adw::Application) {
                             let Some(id) = focused else { return };
                             let _ = control.window_action(
                                 id,
-                                roost_shell_control::WindowAction::MoveToWorkspace { workspace },
+                                tuna_shell_control::WindowAction::MoveToWorkspace { workspace },
                             );
                         }
                         let _ = control.focus_workspace(workspace);
@@ -1662,7 +1662,7 @@ fn build(app: &adw::Application) {
                                 .max();
                             workspace_popup_keys.display(
                                 workspace,
-                                roost_shell_control::dynamic_workspace_count(occupied, workspace),
+                                tuna_shell_control::dynamic_workspace_count(occupied, workspace),
                             );
                         }
                     }
@@ -1750,11 +1750,11 @@ fn build(app: &adw::Application) {
             Rc::new(move || {
                 // The switcher's chords go to the compositor, which holds
                 // the popup open while their modifiers are held.
-                let switcher: Vec<roost_shell_control::SwitcherKey> =
+                let switcher: Vec<tuna_shell_control::SwitcherKey> =
                     keybindings::switcher_keys(wm_settings.as_ref())
                         .iter()
                         .filter_map(|(a, kind)| keybindings::parse_switcher_key(a, *kind))
-                        .take(roost_shell_control::MAX_SWITCHER_KEYS)
+                        .take(tuna_shell_control::MAX_SWITCHER_KEYS)
                         .collect();
                 if let Some(control) = shell.borrow_mut().control.as_mut() {
                     let _ = control.set_switcher_keys(switcher);
@@ -1770,7 +1770,7 @@ fn build(app: &adw::Application) {
                     .map(|b| (b.accelerator.clone(), b.modes))
                     .collect();
                 eprintln!(
-                    "roost-shell-gtk: keybindings: {} grabs, maximize on {:?}",
+                    "tuna-shell-gtk: keybindings: {} grabs, maximize on {:?}",
                     accels.len(),
                     list.iter()
                         .filter(|b| b.action == keybindings::Action::Maximize)
@@ -1881,8 +1881,8 @@ fn build(app: &adw::Application) {
                 let dir = std::env::var_os("XDG_RUNTIME_DIR")
                     .map(std::path::PathBuf::from)
                     .unwrap_or_else(std::env::temp_dir);
-                let path = dir.join("roost-wallpaper");
-                let tmp = dir.join(".roost-wallpaper.tmp");
+                let path = dir.join("tuna-wallpaper");
+                let tmp = dir.join(".tuna-wallpaper.tmp");
                 if std::fs::write(&tmp, text).is_ok() {
                     let _ = std::fs::rename(&tmp, &path);
                 }
@@ -1913,7 +1913,7 @@ fn build(app: &adw::Application) {
         let send: Rc<dyn Fn()> = {
             let (shell, all) = (shell.clone(), all.clone());
             Rc::new(move || {
-                let mut out = roost_shell_control::InputSettings::default();
+                let mut out = tuna_shell_control::InputSettings::default();
                 if let Some(sources) = all[0].as_ref() {
                     let list: Vec<(String, String)> =
                         sources.value("sources").get().unwrap_or_default();
@@ -2002,10 +2002,10 @@ fn build(app: &adw::Application) {
                 let ms = logic::idle_lock_ms(idle, enabled, delay, fade_ms);
                 if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
                     let dir = std::path::PathBuf::from(dir);
-                    let temporary = dir.join(".roost-idle-blank.tmp");
+                    let temporary = dir.join(".tuna-idle-blank.tmp");
                     let policy = format!("{}\n{}\n", u64::from(idle) * 1000, fade_ms);
                     if std::fs::write(&temporary, policy).is_ok() {
-                        let _ = std::fs::rename(temporary, dir.join("roost-idle-blank"));
+                        let _ = std::fs::rename(temporary, dir.join("tuna-idle-blank"));
                     }
                 }
                 if let Some(control) = shell.borrow_mut().control.as_mut() {
@@ -2084,7 +2084,7 @@ fn build(app: &adw::Application) {
         let chrome_apps = apps.clone();
         let shell_rc = shell.clone();
         let activities_button = activities.clone();
-        let last_frames: RefCell<Vec<roost_shell_control::SwitcherThumbnail>> = RefCell::default();
+        let last_frames: RefCell<Vec<tuna_shell_control::SwitcherThumbnail>> = RefCell::default();
         glib::timeout_add_local(Duration::from_millis(16), move || {
             let mut shell = shell.borrow_mut();
             let mut results = Vec::new();
@@ -2103,8 +2103,8 @@ fn build(app: &adw::Application) {
                         Ok(Handled::ScreenReader(state)) => {
                             if matches!(
                                 state,
-                                roost_shell_control::ScreenReaderState::Unavailable
-                                    | roost_shell_control::ScreenReaderState::Conflict
+                                tuna_shell_control::ScreenReaderState::Unavailable
+                                    | tuna_shell_control::ScreenReaderState::Conflict
                             ) {
                                 notify.post("Screen Reader", "preferences-desktop-accessibility-symbolic", "Screen Reader unavailable", "Orca could not start for this session. Check its installation and other active sessions.");
                             }
@@ -2117,12 +2117,12 @@ fn build(app: &adw::Application) {
                         }
                         Ok(Handled::CommandResult { id, status }) => results.push((
                             id,
-                            matches!(status, roost_shell_control::CommandStatus::Applied),
+                            matches!(status, tuna_shell_control::CommandStatus::Applied),
                         )),
                         Ok(_) => {}
                         Err(e) if is_would_block(&e) => break,
                         Err(e) => {
-                            eprintln!("roost-shell-gtk: control error: {e}");
+                            eprintln!("tuna-shell-gtk: control error: {e}");
                             break;
                         }
                     }
@@ -2238,12 +2238,14 @@ fn usable_window_icon(icon: &str) -> bool {
 
 fn main() -> glib::ExitCode {
     if std::env::args().any(|a| a == "--version" || a == "-V") {
-        println!("roost-shell-gtk {}", release_version());
+        println!("tuna-shell-gtk {}", release_version());
         return glib::ExitCode::SUCCESS;
     }
-    glib::set_prgname(Some("roost-shell-gtk"));
+    // The old name's environment, for one release (#505).
+    tuna_shell_control::legacy::import_env("tuna-shell-gtk");
+    glib::set_prgname(Some("tuna-shell-gtk"));
     let app = adw::Application::builder()
-        .application_id("org.roost.Shell")
+        .application_id("org.tuna.Shell")
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
     app.connect_activate(build);

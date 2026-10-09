@@ -6,7 +6,7 @@ advertises. Ledger row P-SY-06 tracks the gaps.
 **Source of the Mutter column.** A `wayland-info` capture of GNOME
 Shell 51.0 / Mutter 51.0 (Fedora 45, headless, 1280x800):
 `tests/protocols/gnome51-wayland-info.txt`, made by
-`scripts/roost-gnome-wayland-info`. Three globals do not appear headless
+`scripts/tuna-gnome-wayland-info`. Three globals do not appear headless
 (the DRM lease and syncobj managers need the native KMS backend; the
 Xwayland keyboard grab is offered to Xwayland only). They are listed from
 the interfaces built into the same `libmutter-51.so`, marked `source` in
@@ -34,7 +34,7 @@ backend. The headless reference remains a separate regression input.
 
 **Comparison.** The proof stage G-WAYLAND-INFO runs `wayland-info`
 against the nested Tuna Desktop session (saved as the `wayland-info.txt`
-artifact) and `scripts/roost-wayland-info-compare` checks it against
+artifact) and `scripts/tuna-wayland-info-compare` checks it against
 `tests/protocols/gnome51-globals.tsv`. Every global marked `match` must
 be present at GNOME's version or newer, and every `min:` global at least
 at the version given. Known gaps are reported and do not fail the stage.
@@ -124,7 +124,7 @@ and requests outstanding at lock or a switch to another app fail closed.
 The non-GTK fallback shell has no consent UI and keeps requests inactive.
 Super+Escape always takes granted shortcuts back until the window is
 focused again. GNOME's configurable Xwayland exemption rules are not
-implemented. `scripts/roost-shortcut-proof` exercises Allow, Deny, refocus,
+implemented. `scripts/tuna-shortcut-proof` exercises Allow, Deny, refocus,
 emergency restore, stale focus and lock through a real Wayland test client.
 
 ## GNOME D-Bus interfaces

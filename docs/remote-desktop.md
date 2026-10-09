@@ -37,7 +37,7 @@ storage exceeds 64; FD-clone failure closes the connection; its upstream
 rejected. No physical input device, GPU or VT acceptance follows from nested
 software-rendered proof.
 
-`scripts/roost-remote-security --candidate DIR --out DIR` tests a packaged
+`scripts/tuna-remote-security --candidate DIR --out DIR` tests a packaged
 compositor and GTK shell with the installed Fedora GNOME 51 portal backend,
 a real Wayland GTK input client and the independently installed libei client.
 It requires actual Cancel/Allow, a linked PipeWire frame, foreign input denial,

@@ -10,6 +10,7 @@
 //! rejected before any postcard decoding happens.
 
 pub mod background;
+pub mod legacy;
 pub mod motion;
 pub use motion::{MotionLevel, MotionPolicy};
 
@@ -219,7 +220,7 @@ pub struct WorkspaceInfo {
 /// stays compositor-internal, so no other wire types change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutputInfo {
-    /// Output name, e.g. `roost-0`.
+    /// Output name, e.g. `tuna-0`.
     pub name: String,
     /// Output width in physical pixels.
     pub width: i32,

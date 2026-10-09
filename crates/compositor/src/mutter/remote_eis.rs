@@ -208,7 +208,7 @@ pub(crate) fn start(
         ));
     }
     let fd = rustix::fs::memfd_create(
-        "roost-remote-keymap",
+        "tuna-remote-keymap",
         rustix::fs::MemfdFlags::CLOEXEC | rustix::fs::MemfdFlags::ALLOW_SEALING,
     )?;
     let mut file = std::fs::File::from(fd);
@@ -262,7 +262,7 @@ pub(crate) fn start(
     let context = eis::Context::new(socket)?;
     let thread_grant = grant.clone();
     std::thread::Builder::new()
-        .name(format!("roost-eis-{}", grant.id))
+        .name(format!("tuna-eis-{}", grant.id))
         .stack_size(256 * 1024)
         .spawn(move || {
             let mut worker = Worker {

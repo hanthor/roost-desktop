@@ -1,0 +1,199 @@
+#!/bin/sh
+# tuna-scale-proof — fractional output scaling (#59) in the nested session.
+#
+# Usage:
+#   scripts/tuna-scale-proof [--display :N] [--artifacts DIR] [--scale S]
+#
+# Runs the compositor at TUNA_SCALE (default 1.5, GNOME's 150 percent)
+# with the GTK shell and one libadwaita window, then:
+#   S-LOGICAL  layout is logical: the top bar spans width / scale
+#   S-PANEL    the top bar is drawn 32 logical = 32 * scale physical tall
+#   S-WINDOW   the window paints at its scaled physical position
+#   S-INPUT    a click at a control's physical position reaches it (the
+#              window's menu opens): input maps physical to logical
+# Writes assertions.txt for the parity ledger.
+set -eu
+
+if [ -z "${TUNA_PROOF_PRIVATE_BUS:-}" ] && command -v dbus-run-session >/dev/null 2>&1; then
+    TUNA_PROOF_PRIVATE_BUS=1 exec dbus-run-session -- "$0" "$@"
+fi
+unset CDPATH
+ROOT="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+DISPLAY_ARG=""
+ARTIFACTS="$ROOT/scale-artifacts"
+SCALE=1.5
+WIDTH=1280
+HEIGHT=800
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --display) DISPLAY_ARG="$2"; shift 2 ;;
+        --artifacts) ARTIFACTS="$2"; shift 2 ;;
+        --scale) SCALE="$2"; shift 2 ;;
+        --help|-h) sed -n '2,14p' "$0"; exit 0 ;;
+        *) echo "tuna-scale-proof: unknown argument $1" >&2; exit 1 ;;
+    esac
+done
+mkdir -p "$ARTIFACTS"
+ARTIFACTS="$(cd "$ARTIFACTS" && pwd)"
+LOG="$ARTIFACTS/nested.log"
+ASSERTIONS="$ARTIFACTS/assertions.txt"
+: >"$ASSERTIONS"
+CSTATE="$ARTIFACTS/compositor-state.json"
+TUNA_COMPOSITOR_STATE="$CSTATE"
+TUNA_SCALE="$SCALE"
+export TUNA_COMPOSITOR_STATE TUNA_SCALE
+PY=/usr/bin/python3
+[ -x "$PY" ] || PY=python3
+
+OWNED_XVFB=""
+COMPOSITOR_PID=""
+NATIVE_PID=""
+X11_PID=""
+cleanup() {
+    if [ -n "$X11_PID" ]; then kill "$X11_PID" 2>/dev/null || true; fi
+    if [ -n "$NATIVE_PID" ]; then kill "$NATIVE_PID" 2>/dev/null || true; fi
+    if [ -n "$COMPOSITOR_PID" ]; then kill "$COMPOSITOR_PID" 2>/dev/null || true; fi
+    if [ -n "$OWNED_XVFB" ]; then kill "$OWNED_XVFB" 2>/dev/null || true; fi
+}
+trap cleanup EXIT INT TERM
+pass() { echo "$1 pass $2" >>"$ASSERTIONS"; echo "tuna-scale-proof: $1 pass: $2"; }
+fail() {
+    echo "$1 fail $2" >>"$ASSERTIONS"
+    echo "tuna-scale-proof: $1 FAIL: $2" >&2
+    tail -20 "$LOG" >&2 || true
+    exit 1
+}
+px() {
+    ffmpeg -loglevel error -i "$1" -vf "crop=1:1:$2:$3" -f rawvideo -pix_fmt rgb24 - |
+        od -An -tu1 | tr -s ' ' | sed 's/^ //; s/ $//'
+}
+cstate() {
+    end=$(($(date +%s) + ${3:-20}))
+    while [ "$(date +%s)" -le "$end" ]; do
+        [ -s "$CSTATE" ] && jq -e "$1" "$CSTATE" >/dev/null 2>&1 && return 0
+        sleep 0.3
+    done
+    cat "$CSTATE" >&2 2>/dev/null || true
+    return 1
+}
+# Logical value * scale, rounded, as the compositor does.
+phys() {
+    awk -v v="$1" -v s="$SCALE" 'BEGIN { printf "%d", (v * s >= 0) ? int(v * s + 0.5) : int(v * s - 0.5) }'
+}
+
+if [ -x /usr/libexec/at-spi-bus-launcher ]; then
+    /usr/libexec/at-spi-bus-launcher --launch-immediately >"$ARTIFACTS/atspi.log" 2>&1 &
+fi
+[ -n "$DISPLAY_ARG" ] && DISPLAY="$DISPLAY_ARG" && export DISPLAY
+if ! xdotool getdisplaygeometry >/dev/null 2>&1; then
+    Xvfb -displayfd 3 -screen 0 "${WIDTH}x${HEIGHT}x24" \
+        3>"$ARTIFACTS/xvfb-display" >"$ARTIFACTS/xvfb.log" 2>&1 &
+    OWNED_XVFB=$!
+    for _ in $(seq 1 30); do [ -s "$ARTIFACTS/xvfb-display" ] && break; sleep 1; done
+    [ -s "$ARTIFACTS/xvfb-display" ] || fail S-LOGICAL "Xvfb did not allocate a display"
+    DISPLAY=":$(cat "$ARTIFACTS/xvfb-display")"
+    export DISPLAY
+    for _ in $(seq 1 30); do xdotool getdisplaygeometry >/dev/null 2>&1 && break; sleep 1; done
+fi
+
+cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p tuna-compositor -p tuna-shell-gtk
+"$ROOT/target/debug/tuna-compositor" --backend winit --socket "tuna-scale-proof-$$" \
+    --shell-bin "$ROOT/target/debug/tuna-shell-gtk" >"$LOG" 2>&1 &
+COMPOSITOR_PID=$!
+WID=""
+for _ in $(seq 1 60); do
+    kill -0 "$COMPOSITOR_PID" 2>/dev/null || fail S-LOGICAL "compositor exited during startup"
+    WID="$(xdotool search --name Smithay 2>/dev/null | head -1 || true)"
+    [ -n "$WID" ] && break
+    sleep 1
+done
+[ -n "$WID" ] || fail S-LOGICAL "no nested window"
+xdotool windowfocus --sync "$WID"
+xdotool mousemove --window "$WID" $((WIDTH / 2)) $((HEIGHT / 2))
+
+logical_w="$(awk -v w="$WIDTH" -v s="$SCALE" 'BEGIN { printf "%d", int(w / s + 0.5) }')"
+cstate ".layers | any(.namespace == \"tuna-panel\" and .rect == [0, 0, $logical_w, 32])" "panel" 60 ||
+    fail S-LOGICAL "the top bar is not $logical_w logical pixels wide"
+pass S-LOGICAL "layout is logical: the top bar spans $logical_w = $WIDTH / $SCALE"
+
+sleep 2
+scrot "$ARTIFACTS/01-panel.png" >/dev/null
+bar="$(phys 32)"
+inside="$(px "$ARTIFACTS/01-panel.png" 300 $((bar - 4)))"
+below="$(px "$ARTIFACTS/01-panel.png" 300 $((bar + 6)))"
+[ "$inside" = "0 0 0" ] || fail S-PANEL "pixel inside the scaled bar is $inside, not black"
+[ "$below" != "0 0 0" ] || fail S-PANEL "the bar is taller than $bar physical pixels"
+pass S-PANEL "the top bar is $bar physical pixels tall at scale $SCALE"
+
+SOCKET_NAME="$(sed -n 's/.*nested session on \([^ ]*\) .*/\1/p' "$LOG" | head -1)"
+WAYLAND_DISPLAY="$SOCKET_NAME" "$PY" "$ROOT/scripts/lib/tuna-test-window.py" Alpha "#3584e4" \
+    >"$ARTIFACTS/window-Alpha.log" 2>&1 &
+NATIVE_PID=$!
+cstate '.windows | any(.app_id == "tuna-test-alpha")' "window" ||
+    fail S-WINDOW "the test window never mapped"
+sleep 2
+scrot "$ARTIFACTS/02-window.png" >/dev/null
+rect="$(jq -r '.windows[] | select(.app_id == "tuna-test-alpha") | .rect | "\(.[0]) \(.[1]) \(.[2]) \(.[3])"' "$CSTATE")"
+# shellcheck disable=SC2086
+set -- $rect
+wx=$1 wy=$2 ww=$3 wh=$4
+cx="$(phys "$((wx + ww / 2))")"
+cy="$(phys "$((wy + wh / 3))")"
+rgb="$(px "$ARTIFACTS/02-window.png" "$cx" "$cy")"
+# shellcheck disable=SC2086
+set -- $rgb
+if [ "$1" -gt 90 ] || [ "$3" -lt 180 ]; then
+    fail S-WINDOW "pixel at the scaled window body ($cx,$cy) is $rgb, not its blue"
+fi
+pass S-WINDOW "the window paints at its scaled position ($cx,$cy)"
+
+mx="$(phys "$((wx + ww - 64))")"
+my="$(phys "$((wy + 22))")"
+xdotool mousemove --window "$WID" "$mx" "$my" click 1
+sleep 2
+scrot "$ARTIFACTS/03-menu.png" >/dev/null
+"$PY" "$ROOT/scripts/lib/tuna-a11y-dump.py" tuna-test-alpha "$ARTIFACTS/a11y-alpha.json" 20 ||
+    fail S-INPUT "test window never registered on the accessibility bus"
+jq -e 'any(.[]; .name == "Popover content" and .showing)' "$ARTIFACTS/a11y-alpha.json" >/dev/null ||
+    fail S-INPUT "a click at the menu button's physical position did not open it"
+pass S-INPUT "a click at a control's physical position reaches it"
+
+# The same output must map an actual X11 buffer and its pointer coordinates.
+# A delivered GTK button click, rather than a synthetic accessibility action,
+# is the only path that increments the private count file.
+xdotool key Escape
+xdisplay="$(jq -r '.x11_display // empty' "$CSTATE")"
+[ -n "$xdisplay" ] || fail S-X11-WINDOW "default build did not advertise XWayland"
+DISPLAY="$xdisplay" "$PY" "$ROOT/scripts/lib/tuna-scale-x11-window.py" \
+    "$ARTIFACTS/x11-clicks.txt" >"$ARTIFACTS/window-X11.log" 2>&1 &
+X11_PID=$!
+cstate '.x11_ready and any(.windows[]; .app_id == "tuna-scale-x11")' "X11 mapped" ||
+    fail S-X11-WINDOW "the genuine X11 client did not map"
+sleep 2
+scrot "$ARTIFACTS/04-x11.png" >/dev/null
+rect="$(jq -r '.windows[] | select(.app_id == "tuna-scale-x11") | .rect | "\(.[0]) \(.[1]) \(.[2]) \(.[3])"' "$CSTATE")"
+# shellcheck disable=SC2086
+set -- $rect
+wx=$1 wy=$2 ww=$3 wh=$4
+cx="$(phys "$((wx + ww / 3))")"
+cy="$(phys "$((wy + wh / 3))")"
+rgb="$(px "$ARTIFACTS/04-x11.png" "$cx" "$cy")"
+# shellcheck disable=SC2086
+set -- $rgb
+if [ "$1" -lt 150 ] || [ "$2" -gt 130 ] || [ "$3" -lt 150 ]; then
+    fail S-X11-WINDOW "X11 body at scaled position ($cx,$cy) is $rgb, not magenta"
+fi
+pass S-X11-WINDOW "genuine X11 buffer paints at scale $SCALE"
+xdotool mousemove --window "$WID" "$cx" "$cy" click 1
+end=$(($(date +%s) + 10))
+while [ "$(cat "$ARTIFACTS/x11-clicks.txt" 2>/dev/null || true)" != 1 ]; do
+    [ "$(date +%s)" -le "$end" ] || fail S-X11-INPUT "physical click missed the X11 control"
+    sleep 0.2
+done
+sleep 0.5
+scrot "$ARTIFACTS/05-x11-click.png" >/dev/null
+cp "$CSTATE" "$ARTIFACTS/scaled-native-x11-state.json"
+pass S-X11-INPUT "physical pointer coordinates reached the X11 button at scale $SCALE"
+
+grep -q panicked "$LOG" && fail S-NOPANIC "panic in nested log"
+echo "tuna-scale-proof: OK, artifacts in $ARTIFACTS"

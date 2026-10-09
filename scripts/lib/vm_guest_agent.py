@@ -71,7 +71,7 @@ class GuestAgent:
         return result["return"]
 
     def run(self, action, *arguments, timeout=30):
-        pid = self.command("guest-exec", path="/usr/libexec/roost-vm-lifecycle",
+        pid = self.command("guest-exec", path="/usr/libexec/tuna-vm-lifecycle",
                            arg=[action, *map(str, arguments)], **{"capture-output": True})["pid"]
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:

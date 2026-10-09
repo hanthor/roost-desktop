@@ -228,11 +228,11 @@ impl ScreenshotUi {
     ) -> Rc<Self> {
         let window = gtk::Window::new();
         window.set_application(Some(app));
-        window.add_css_class("roost-screenshot-ui");
+        window.add_css_class("tuna-screenshot-ui");
         window.set_title(Some("Screenshot"));
         window.init_layer_shell();
         window.set_layer(Layer::Overlay);
-        window.set_namespace(Some(roost_shell_control::SCREENSHOT_NAMESPACE));
+        window.set_namespace(Some(tuna_shell_control::SCREENSHOT_NAMESPACE));
         for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
             window.set_anchor(edge, true);
         }
@@ -598,8 +598,8 @@ impl ScreenshotUi {
             return;
         }
         let dir = glib::user_runtime_dir();
-        let path = dir.join("roost-screenshot-ui.png");
-        let windows_dir = dir.join("roost-screenshot-windows");
+        let path = dir.join("tuna-screenshot-ui.png");
+        let windows_dir = dir.join("tuna-screenshot-windows");
         let weak = Rc::downgrade(self);
         gio::bus_get(gio::BusType::Session, gio::Cancellable::NONE, move |conn| {
             let Ok(conn) = conn else { return };
@@ -618,7 +618,7 @@ impl ScreenshotUi {
                 move |reply| {
                     let Some(ui) = weak.upgrade() else { return };
                     if reply.is_err() {
-                        eprintln!("roost-shell-gtk: screenshot UI could not freeze the screen");
+                        eprintln!("tuna-shell-gtk: screenshot UI could not freeze the screen");
                         return;
                     }
                     let texture = gdk::Texture::from_filename(&path2).ok();
@@ -631,7 +631,7 @@ impl ScreenshotUi {
                     conn2.call(
                         Some("org.gnome.Shell.Screenshot"),
                         "/org/gnome/Shell/Screenshot",
-                        "org.roost.Screenshot",
+                        "org.tuna.Screenshot",
                         "ScreenshotWindows",
                         Some(&(windows_dir.to_string_lossy().as_ref(),).to_variant()),
                         glib::VariantTy::new("(a(tsbiiiis))").ok(),
@@ -643,7 +643,7 @@ impl ScreenshotUi {
                             let windows = match reply {
                                 Ok(reply) => parse_windows(&reply),
                                 Err(e) => {
-                                    eprintln!("roost-shell-gtk: no window selector: {e}");
+                                    eprintln!("tuna-shell-gtk: no window selector: {e}");
                                     Vec::new()
                                 }
                             };
@@ -876,7 +876,7 @@ impl ScreenshotUi {
             glib::timeout_add_local_once(std::time::Duration::from_millis(150), move || {
                 recorder.start(Some(area), crate::screencast::TEMPLATE, None, |result| {
                     if let Err(e) = result {
-                        eprintln!("roost-shell-gtk: screencast did not start: {e}");
+                        eprintln!("tuna-shell-gtk: screencast did not start: {e}");
                     }
                 });
             });
@@ -938,7 +938,7 @@ impl ScreenshotUi {
                     "You can paste the image from the clipboard.",
                 );
             }
-            None => eprintln!("roost-shell-gtk: screenshot UI could not save"),
+            None => eprintln!("tuna-shell-gtk: screenshot UI could not save"),
         }
     }
 }

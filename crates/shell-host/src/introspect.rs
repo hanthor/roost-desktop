@@ -2,7 +2,7 @@
 //!
 //! Proof harnesses used to assert "pixels changed". That cannot tell
 //! "the overview opened" from "something repainted". When
-//! `ROOST_INTROSPECT_FILE` names a path, the shell writes a small JSON
+//! `TUNA_INTROSPECT_FILE` names a path, the shell writes a small JSON
 //! document there every time its state changes, so a journey can
 //! assert *what* happened: overview open, result list, focused window,
 //! active workspace, open popup, banner count, lock.
@@ -18,7 +18,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
 /// Environment variable naming the snapshot path.
-pub const ENV: &str = "ROOST_INTROSPECT_FILE";
+pub const ENV: &str = "TUNA_INTROSPECT_FILE";
 
 /// Snapshot schema version; bump on any breaking field change.
 pub const VERSION: u64 = 1;

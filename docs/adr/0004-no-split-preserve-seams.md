@@ -8,7 +8,7 @@
 ## Context
 
 Raised 2026-09-28: with four crates incoming across waves 1–3
-(`roost-compositor`, `roost-shell-control`, `roost-shell-host`, plus the
+(`tuna-compositor`, `tuna-shell-control`, `tuna-shell-host`, plus the
 planned supervisor/overlay growth), should any part spin off into its
 own project? The Spektacular registry holds a single member repo, so a
 split would also mean new repo registration, CI, and versioning.
@@ -20,8 +20,8 @@ release cadence, or a separate trust boundary that would justify
 split-off overhead. Instead, preserve three extraction seams so a
 future split stays a file move, not a rewrite:
 
-1. **Framing vs messages** in `roost-shell-control`: length-prefix,
-   negotiation, and caps must not import Roost-specific message types.
+1. **Framing vs messages** in `tuna-shell-control`: length-prefix,
+   negotiation, and caps must not import Tuna-specific message types.
    (Today the crate mixes both; separate them before any split.)
 2. **Supervisor stays std-only**: `supervise.rs` takes no compositor
    types and gains none. It remains portable by construction.
@@ -36,7 +36,7 @@ future split stays a file move, not a rewrite:
 - **Split the supervisor now**: rejected — ~150 lines of policy the
   ecosystem (systemd, existing crates) covers better; we would be
   maintaining a worse systemd for no user.
-- **Split compositor policy or shell-host**: rejected — Roost-specific
+- **Split compositor policy or shell-host**: rejected — Tuna-specific
   by definition, never split candidates.
 
 ## Consequences
@@ -51,5 +51,5 @@ future split stays a file move, not a rewrite:
 ## Evidence
 
 - Workspace layout at decision time: `cargo metadata --no-deps`
-  (`roost-compositor`, `roost-shell-control`, `roost-shell-host`).
+  (`tuna-compositor`, `tuna-shell-control`, `tuna-shell-host`).
 - Single-member registry: `spektacular repo list`.

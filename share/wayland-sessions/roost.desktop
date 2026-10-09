@@ -1,8 +1,0 @@
-[Desktop Entry]
-Name=Tuna Desktop
-Comment=Tuna Desktop (GNOME-style shell with optional scrollable tiling)
-Exec=roost-session
-TryExec=roost-session
-Type=Application
-DesktopNames=Roost;GNOME;
-X-GDM-SessionRegisters=true

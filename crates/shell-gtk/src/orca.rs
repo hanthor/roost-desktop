@@ -20,7 +20,7 @@ pub fn start(shell: Rc<RefCell<crate::Shell>>) {
             if enabled {
                 if let Some(interface) = crate::settings("org.gnome.desktop.interface") {
                     if let Err(error) = interface.set_boolean("toolkit-accessibility", true) {
-                        eprintln!("roost-shell-gtk: toolkit accessibility unavailable: {error}");
+                        eprintln!("tuna-shell-gtk: toolkit accessibility unavailable: {error}");
                     }
                 }
             }

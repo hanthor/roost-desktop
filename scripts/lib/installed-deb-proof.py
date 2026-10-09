@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixed installed Roost session provenance; no commands supplied by callers."""
+"""Fixed installed Tuna Desktop session provenance; no commands supplied by callers."""
 import hashlib
 import json
 import os
@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 
-BINS = ('roost-compositor', 'roost-session', 'roost-shell-gtk', 'roost-shell-host', 'roost-ibus-bridge', 'roost-greeter')
+BINS = ('tuna-compositor', 'tuna-session', 'tuna-shell-gtk', 'tuna-shell-host', 'tuna-ibus-bridge', 'tuna-greeter')
 # Distro LLVM exceeds 128 MiB (libLLVM.so.20.1 is 143,545,784 bytes and is
 # mapped by the GTK shell via Mesa); hashing streams in 64 KiB blocks so the
 # cap bounds proof time, not memory.
@@ -83,24 +83,25 @@ def owner(path):
 
 
 def preflight():
-    if os.getuid() == 0 or any(os.environ.get(k) for k in ('ROOST_SHELL_BIN', 'ROOST_PROOF_SHELL_BIN', 'WAYLAND_SOCKET', 'WAYLAND_DISPLAY')):
+    # The binaries still honour the former variable names for one release (#505).
+    if os.getuid() == 0 or any(os.environ.get(k) for k in ('TUNA_SHELL_BIN', 'TUNA_PROOF_SHELL_BIN', 'ROOST_SHELL_BIN', 'ROOST_PROOF_SHELL_BIN', 'WAYLAND_SOCKET', 'WAYLAND_DISPLAY')):  # tuna-rename: keep
         raise ValueError('installed-route-override')
     if 'ID=ubuntu' not in Path('/etc/os-release').read_text().splitlines() or 'VERSION_ID="26.04"' not in Path('/etc/os-release').read_text().splitlines():
         raise ValueError('selected-distro-required')
-    version = run(['dpkg-query', '-W', '-f=${Version}', 'roost'])
-    if run(['dpkg', '--verify', 'roost']):
+    version = run(['dpkg-query', '-W', '-f=${Version}', 'tuna-desktop'])
+    if run(['dpkg', '--verify', 'tuna-desktop']):
         raise ValueError('installed-package-modified')
     files = {}
     for name in BINS:
         path = '/usr/bin/' + name
         package = owner(path)
-        if package['name'] != 'roost' or package['version'] != version or run([path, '--version']) != name + ' ' + version:
+        if package['name'] != 'tuna-desktop' or package['version'] != version or run([path, '--version']) != name + ' ' + version:
             raise ValueError('installed-binary-contract')
         files[name] = digest(path)
     for package, floor in (('libgtk4-layer-shell0', '1.1'), ('libgtk-4-1', '4.12'), ('libadwaita-1-0', '1.0')):
         actual = run(['dpkg-query', '-W', '-f=${Version}', package])
         run(['dpkg', '--compare-versions', actual, 'ge', floor])
-    fixture_root = Path('/usr/libexec/roost-deb-proof')
+    fixture_root = Path('/usr/libexec/tuna-deb-proof')
     manifest_path = fixture_root / 'provenance.json'
     digest(manifest_path)
     companion = bounded_json(manifest_path)
@@ -199,29 +200,29 @@ def peer(path, pid):
 
 
 def observe(pid, socket_name, base, previous=None, replacement=False):
-    compositor = process(pid, 'roost-compositor', base['files'])
+    compositor = process(pid, 'tuna-compositor', base['files'])
     children = Path('/proc/' + str(pid) + '/task/' + str(pid) + '/children').read_text().split()
     if len(children) > 64:
         raise ValueError('child-limit')
     candidates = []
     for child in children:
         try:
-            if os.readlink('/proc/' + child + '/exe') == '/usr/bin/roost-shell-gtk':
-                candidates.append(process(int(child), 'roost-shell-gtk', base['files']))
+            if os.readlink('/proc/' + child + '/exe') == '/usr/bin/tuna-shell-gtk':
+                candidates.append(process(int(child), 'tuna-shell-gtk', base['files']))
         except FileNotFoundError:
             continue
     if len(candidates) != 1 or candidates[0]['parent'] != pid:
         raise ValueError('preferred-supervised-shell-required')
     shell = candidates[0]
     runtime = Path(os.environ['XDG_RUNTIME_DIR'])
-    sockets = {name: peer(runtime / name, pid) for name in (socket_name, 'roost-' + socket_name + '.control')}
+    sockets = {name: peer(runtime / name, pid) for name in (socket_name, 'tuna-' + socket_name + '.control')}
     if previous:
         if compositor != previous['compositor'] or sockets != previous['sockets']:
             raise ValueError('original-session-replaced')
         if (shell == previous['shell']) == replacement:
             raise ValueError('shell-replacement-contract')
     loaded = libraries(shell['pid'])
-    if process(shell['pid'], 'roost-shell-gtk', base['files']) != shell or process(pid, 'roost-compositor', base['files']) != compositor:
+    if process(shell['pid'], 'tuna-shell-gtk', base['files']) != shell or process(pid, 'tuna-compositor', base['files']) != compositor:
         raise ValueError('observation-race')
     return {'compositor': compositor, 'shell': shell, 'sockets': sockets, 'libraries': loaded}
 

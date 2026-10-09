@@ -1,4 +1,4 @@
-use roost_shell_control::{decode_frame, encode_frame};
+use tuna_shell_control::{decode_frame, encode_frame};
 
 /// Successful decodes must remain representable as a valid protocol frame.
 pub fn check_frame(data: &[u8]) {

@@ -71,17 +71,17 @@ The project is a Cargo workspace with six crates. Each crate's `README.md`
 lists its purpose, public API, and dependents.
 
 ```
-roost-desktop/
+tuna-desktop/
 ├── crates/
-│   ├── compositor/           # roost-compositor and roost-session binaries (Smithay)
-│   ├── shell-control-schema/ # roost-shell-control: compositor/shell IPC protocol
-│   ├── shell-host/           # roost-shell-host: original shell binary and shared shell logic
-│   ├── shell-gtk/            # roost-shell-gtk: GTK4/libadwaita shell (ADR 0006)
-│   ├── greeter/              # roost-greeter: greetd login greeter
-│   └── wallpaper/            # roost-wallpaper: wallpaper decoding
+│   ├── compositor/           # tuna-compositor and tuna-session binaries (Smithay)
+│   ├── shell-control-schema/ # tuna-shell-control: compositor/shell IPC protocol
+│   ├── shell-host/           # tuna-shell-host: original shell binary and shared shell logic
+│   ├── shell-gtk/            # tuna-shell-gtk: GTK4/libadwaita shell (ADR 0006)
+│   ├── greeter/              # tuna-greeter: greetd login greeter
+│   └── wallpaper/            # tuna-wallpaper: wallpaper decoding
 │
 ├── docs/                     # architecture, roadmap, test strategy, ADRs, guides
-├── packaging/                # Arch package and Marlin image (scripts/roost-release builds the .deb)
+├── packaging/                # Arch package and Marlin image (scripts/tuna-release builds the .deb)
 ├── scripts/                  # nested launcher, proof scripts, release and ledger tools
 ├── tests/                    # a11y golden trees, GNOME 51 reference container
 └── Cargo.toml                # workspace configuration and pinned dependencies
@@ -91,8 +91,8 @@ roost-desktop/
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/hanthor/roost-desktop.git
-   cd roost-desktop
+   git clone https://github.com/tuna-os/tuna-desktop.git
+   cd tuna-desktop
    ```
 
 2. **Build all crates:**
@@ -114,13 +114,13 @@ The nested compositor runs inside your current Wayland or X11 session for safe d
 
 ```bash
 # Build and start a nested Tuna Desktop session
-./scripts/roost-nested run
+./scripts/tuna-nested run
 ```
 
 This command:
-- Builds `roost-compositor` and `roost-shell-host` (debug build)
-- Starts the compositor on a private socket (named `roost-nested-<pid>` by default)
-- Logs output to `~/.local/state/roost-nested/roost-nested-<pid>/nested.log`
+- Builds `tuna-compositor` and `tuna-shell-host` (debug build)
+- Starts the compositor on a private socket (named `tuna-nested-<pid>` by default)
+- Logs output to `~/.local/state/tuna-nested/tuna-nested-<pid>/nested.log`
 - Displays the socket name and log path for reference
 
 The session runs until you press Ctrl+C or terminate the process.
@@ -131,10 +131,10 @@ Tuna Desktop implements a supervised shell-host restart mechanism. Test it with:
 
 ```bash
 # In one terminal, start the nested session:
-./scripts/roost-nested run
+./scripts/tuna-nested run
 
 # In another terminal, simulate a shell crash:
-./scripts/roost-nested kill-shell --socket roost-nested-<pid>
+./scripts/tuna-nested kill-shell --socket tuna-nested-<pid>
 ```
 
 The compositor will:
@@ -200,7 +200,7 @@ For deeper understanding of Tuna Desktop's design:
 1. **Choose a spec**: Find an open spec in `.spektacular/specs/` or create one
 2. **Review the plan**: Check the associated plan in `.spektacular/plans/` for implementation guidance
 3. **Implement**: Edit crates as needed, using the test strategy guide to add tests
-4. **Test locally**: Follow [running tests locally](testing.md) and use `./scripts/roost-nested run` to validate
+4. **Test locally**: Follow [running tests locally](testing.md) and use `./scripts/tuna-nested run` to validate
 5. **Create a PR**: Reference the spec number and plan state in your PR body
 6. **Update spec/plan state**: Once merged, update the spec and plan in Spektacular to reflect completion
 
@@ -216,7 +216,7 @@ For deeper understanding of Tuna Desktop's design:
 ### Writing a test
 - Unit tests: Add inline tests in the crate (follow `#[cfg(test)]` patterns)
 - Protocol probes: Add scripts under `scripts/`
-- Nested integration: Use `./scripts/roost-journey` as a base or add a new harness
+- Nested integration: Use `./scripts/tuna-journey` as a base or add a new harness
 
 **Timing rule (#72).** Never gate a test on a fixed iteration budget or a
 sleep length: a loaded CI runner exhausts both. Wait on a wall-clock
@@ -228,9 +228,9 @@ is no retry policy for deterministic tests: `gh run rerun --failed` is a
 diagnostic, not a fix.
 
 ### Debugging
-- Compositor logs: Check the output of `./scripts/roost-nested run` or tail the log file; [nested session troubleshooting](nested-session.md#troubleshooting) explains the common lines
+- Compositor logs: Check the output of `./scripts/tuna-nested run` or tail the log file; [nested session troubleshooting](nested-session.md#troubleshooting) explains the common lines
 - Shell-host logs: Printed to the same log file as the compositor
-- Nested shell interaction: Use `./scripts/roost-nested shell-pid` to identify the shell process for attaching a debugger
+- Nested shell interaction: Use `./scripts/tuna-nested shell-pid` to identify the shell process for attaching a debugger
 
 ## Reporting issues
 

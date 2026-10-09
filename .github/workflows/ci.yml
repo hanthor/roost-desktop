@@ -30,17 +30,21 @@ jobs:
       # The GTK shell (ADR 0006) links gtk4-layer-shell, which Ubuntu
       # 24.04 does not package.
       - run: sudo apt-get install -y meson ninja-build libwayland-dev wayland-protocols && scripts/ci-install-gtk4-layer-shell
-      - run: scripts/roost-a11y-baseline check
-      - run: python3 scripts/lib/roost-soak-tests.py
+      - run: scripts/tuna-a11y-baseline check
+      # The rename to Tuna Desktop (#505): the script's self-test, and
+      # a guard that no branch brings the old name back.
+      - run: python3 scripts/lib/rename-to-tuna-tests.py
+      - run: scripts/rename-to-tuna --check --no-cargo
+      - run: python3 scripts/lib/tuna-soak-tests.py
       - run: python3 scripts/lib/vm-boot-tests.py
       - run: python3 scripts/lib/marlin-kernel-tests.py
       - run: python3 scripts/lib/gnome-drained-tests.py
-      - run: python3 scripts/lib/roost-perf-payload-tests.py
-      - run: python3 scripts/lib/roost-perf-reference-tests.py
-      - run: python3 scripts/lib/roost-perf-repeatability-tests.py
+      - run: python3 scripts/lib/tuna-perf-payload-tests.py
+      - run: python3 scripts/lib/tuna-perf-reference-tests.py
+      - run: python3 scripts/lib/tuna-perf-repeatability-tests.py
       - run: python3 scripts/lib/native-constraint-tests.py
-      - run: python3 scripts/lib/roost-pipewire-dump-tests.py
-      - run: scripts/roost-settings-inventory-check
+      - run: python3 scripts/lib/tuna-pipewire-dump-tests.py
+      - run: scripts/tuna-settings-inventory-check
       - run: cargo fmt --all -- --check
       - name: Check bounded EIS transport regression tests
         run: |
@@ -53,13 +57,13 @@ jobs:
       # required here so the test can never silently skip.
       - run: cargo test --workspace
         env:
-          ROOST_REQUIRE_PAM_WRAPPER: "1"
+          TUNA_REQUIRE_PAM_WRAPPER: "1"
       - name: Shortcut inhibition consent proof
-        run: scripts/roost-shortcut-proof
+        run: scripts/tuna-shortcut-proof
       # Every listed test just passed: the parity-ledger job resolves
       # the ledger's cargo:<name> references against this list.
       - run: cargo test --workspace -q -- --list --format terse > test-list.txt
-      - run: scripts/roost-test-strategy --test-list test-list.txt --report test-strategy-report.md
+      - run: scripts/tuna-test-strategy --test-list test-list.txt --report test-strategy-report.md
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
@@ -94,27 +98,27 @@ jobs:
       # Genuine Ubuntu26.04 distro packages, not /usr/local source libraries.
       - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y --no-install-recommends libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool scrot ffmpeg jq dbus libglib2.0-bin xwayland x11-apps x11-utils pipewire wireplumber gstreamer1.0-pipewire gstreamer1.0-tools gstreamer1.0-plugins-good at-spi2-core python3-pyatspi python3-pil libsecret-tools gnome-keyring fonts-cantarell shellcheck libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev meson ninja-build libwayland-dev wayland-protocols libpam-wrapper ibus ibus-gtk3 ibus-gtk4 gir1.2-ibus-1.0 gir1.2-gtk-3.0 wayland-utils xdg-desktop-portal xdg-desktop-portal-gnome xdg-desktop-portal-gtk libgtk4-layer-shell-dev dpkg-dev gsettings-desktop-schemas
       - run: pkg-config --atleast-version=1.1 gtk4-layer-shell-0 && pkg-config --atleast-version=4.12 gtk4 && pkg-config --atleast-version=1.0 libadwaita-1
-      - run: shellcheck -x scripts/roost-journey scripts/roost-nested scripts/roost-release scripts/check-release-package scripts/lib/roost-introspect.sh scripts/lib/roost-proof-session-launch
+      - run: shellcheck -x scripts/tuna-journey scripts/tuna-nested scripts/tuna-release scripts/check-release-package scripts/lib/tuna-introspect.sh scripts/lib/tuna-proof-session-launch
       - run: python3 scripts/lib/installed-deb-proof-tests.py
       - run: python3 scripts/lib/release-deb-ownership-tests.py
-      - run: scripts/roost-release --allow-dirty --out package-artifacts && scripts/check-release-package package-artifacts/*.deb
+      - run: scripts/tuna-release --allow-dirty --out package-artifacts && scripts/check-release-package package-artifacts/*.deb
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: roost-deb
+          name: tuna-deb
           path: package-artifacts/
           retention-days: 14
-      - run: scripts/roost-journey --artifacts journey-artifacts
+      - run: scripts/tuna-journey --artifacts journey-artifacts
       - name: Install exact Debian-format candidate and isolated companion fixtures
         run: |
           sudo apt-get install -y --no-install-recommends ./package-artifacts/*.deb
-          cargo build --locked --release -p roost-compositor --example icon-probe --example shortcut-inhibit-client
+          cargo build --locked --release -p tuna-compositor --example icon-probe --example shortcut-inhibit-client
           mkdir -p package-artifacts/installed
           cp /etc/os-release package-artifacts/installed/os-release
           dpkg-query -W > package-artifacts/installed/dpkg-versions.txt
           apt-cache policy libgtk4-layer-shell0 libgtk-4-1 libadwaita-1-0 > package-artifacts/installed/apt-policy.txt
           sha256sum package-artifacts/*.deb > package-artifacts/installed/package.sha256
-          sudo install -d -m0755 /usr/libexec/roost-deb-proof
-          sudo install -m0755 target/release/examples/icon-probe target/release/examples/shortcut-inhibit-client /usr/libexec/roost-deb-proof/
+          sudo install -d -m0755 /usr/libexec/tuna-deb-proof
+          sudo install -m0755 target/release/examples/icon-probe target/release/examples/shortcut-inhibit-client /usr/libexec/tuna-deb-proof/
           python3 - <<'PY'
           import hashlib, json, os
           from pathlib import Path
@@ -122,19 +126,19 @@ jobs:
           value = {'commit': os.environ['GITHUB_SHA'], 'files': {name: hashlib.sha256((root/name).read_bytes()).hexdigest() for name in ('icon-probe', 'shortcut-inhibit-client')}}
           Path('package-artifacts/installed/companions.json').write_text(json.dumps(value) + '\n')
           PY
-          sudo install -m0644 package-artifacts/installed/companions.json /usr/libexec/roost-deb-proof/provenance.json
+          sudo install -m0644 package-artifacts/installed/companions.json /usr/libexec/tuna-deb-proof/provenance.json
       - name: Qualify the actual installed preferred GTK session
         run: |
-          export HOME="$RUNNER_TEMP/roost-deb-home"
+          export HOME="$RUNNER_TEMP/tuna-deb-home"
           mkdir -p "$HOME"
-          export XDG_RUNTIME_DIR="$RUNNER_TEMP/roost-deb-runtime"
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/tuna-deb-runtime"
           mkdir -m0700 "$XDG_RUNTIME_DIR"
-          unset WAYLAND_DISPLAY WAYLAND_SOCKET ROOST_SHELL_BIN ROOST_PROOF_SHELL_BIN LD_LIBRARY_PATH
-          scripts/roost-gtk-shell-proof --installed-package --artifacts package-artifacts/installed/controls
+          unset WAYLAND_DISPLAY WAYLAND_SOCKET TUNA_SHELL_BIN TUNA_PROOF_SHELL_BIN LD_LIBRARY_PATH
+          scripts/tuna-gtk-shell-proof --installed-package --artifacts package-artifacts/installed/controls
         env:
-          ROOST_REQUIRE_PAM_WRAPPER: "1"
-          ROOST_REQUIRE_IBUS: "1"
-          ROOST_REQUIRE_WAYLAND_INFO: "1"
+          TUNA_REQUIRE_PAM_WRAPPER: "1"
+          TUNA_REQUIRE_IBUS: "1"
+          TUNA_REQUIRE_WAYLAND_INFO: "1"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
@@ -145,7 +149,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: roost-deb-installed-proof
+          name: tuna-deb-installed-proof
           path: package-artifacts/installed/
           retention-days: 90
 
@@ -166,8 +170,8 @@ jobs:
       # the uploaded frames. Playwright installs its own venv, browser,
       # and browser system libraries on the runner.
       - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck python3-venv libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev
-      - run: shellcheck scripts/roost-app-content scripts/roost-nested
-      - run: scripts/roost-app-content --artifacts app-content-artifacts
+      - run: shellcheck scripts/tuna-app-content scripts/tuna-nested
+      - run: scripts/tuna-app-content --artifacts app-content-artifacts
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
@@ -191,8 +195,8 @@ jobs:
       # wheel scrolling, with gap-geometry pixel asserts. Humans review
       # the uploaded frames.
       - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool x11-apps scrot shellcheck python3-venv libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev
-      - run: shellcheck scripts/roost-scroll-proof scripts/roost-nested
-      - run: scripts/roost-scroll-proof --artifacts scroll-proof-artifacts
+      - run: shellcheck scripts/tuna-scroll-proof scripts/tuna-nested
+      - run: scripts/tuna-scroll-proof --artifacts scroll-proof-artifacts
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
@@ -223,8 +227,8 @@ jobs:
             fi
           done
       - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config libwayland-dev wayland-protocols seatd jq ffmpeg shellcheck libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev "linux-modules-extra-$(uname -r)"
-      - run: shellcheck scripts/roost-drm-smoke scripts/roost-frame-pacer-build
-      - run: scripts/roost-drm-smoke --artifacts drm-smoke-artifacts
+      - run: shellcheck scripts/tuna-drm-smoke scripts/tuna-frame-pacer-build
+      - run: scripts/tuna-drm-smoke --artifacts drm-smoke-artifacts
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
@@ -259,20 +263,20 @@ jobs:
           done
       - run: sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update && sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y --no-install-recommends libseat-dev libinput-dev libudev-dev libgbm-dev libdrm-dev libxkbcommon-dev libxkbcommon-x11-dev libegl1 libgl1-mesa-dri libgbm1 pkg-config xvfb xdotool scrot ffmpeg jq dbus libglib2.0-bin xwayland x11-apps x11-utils pipewire wireplumber gstreamer1.0-pipewire gstreamer1.0-tools gstreamer1.0-plugins-good at-spi2-core python3-pyatspi python3-pil libsecret-tools gnome-keyring fonts-cantarell shellcheck libglib2.0-dev libgtk-4-dev libpipewire-0.3-dev libadwaita-1-dev meson ninja-build libwayland-dev wayland-protocols libpam-wrapper ibus ibus-gtk3 ibus-gtk4 gir1.2-ibus-1.0 gir1.2-gtk-3.0 wayland-utils xdg-desktop-portal xdg-desktop-portal-gnome xdg-desktop-portal-gtk
       - run: scripts/ci-install-gtk4-layer-shell
-      - run: shellcheck scripts/roost-gtk-shell-proof scripts/roost-walkthrough
+      - run: shellcheck scripts/tuna-gtk-shell-proof scripts/tuna-walkthrough
       # docs/walkthrough.md must match its manifest (docs/walkthrough.tsv).
-      - run: scripts/roost-walkthrough check
+      - run: scripts/tuna-walkthrough check
       # pam_wrapper backs G-UNLOCK, IBus G-IME and wayland-utils
       # G-WAYLAND-INFO; all required so no stage can silently skip.
-      - run: scripts/roost-gtk-shell-proof --artifacts gtk-shell-artifacts
+      - run: scripts/tuna-gtk-shell-proof --artifacts gtk-shell-artifacts
         env:
-          ROOST_REQUIRE_PAM_WRAPPER: "1"
-          ROOST_REQUIRE_IBUS: "1"
-          ROOST_REQUIRE_WAYLAND_INFO: "1"
+          TUNA_REQUIRE_PAM_WRAPPER: "1"
+          TUNA_REQUIRE_IBUS: "1"
+          TUNA_REQUIRE_WAYLAND_INFO: "1"
       # Native/X11 geometry and physical input at all required virtual scales.
       - run: |
           for scale in 1 1.25 1.5 2; do
-            scripts/roost-scale-proof --scale "$scale" --artifacts "gtk-shell-artifacts/scale-$scale"
+            scripts/tuna-scale-proof --scale "$scale" --artifacts "gtk-shell-artifacts/scale-$scale"
           done
           mkdir -p gtk-shell-artifacts/scale
           cat gtk-shell-artifacts/scale-*/assertions.txt > gtk-shell-artifacts/scale/assertions.txt
@@ -280,7 +284,7 @@ jobs:
       - if: always()
         run: |
           mkdir -p gtk-shell-artifacts/bin
-          cp target/debug/roost-compositor target/debug/roost-shell-gtk gtk-shell-artifacts/bin/
+          cp target/debug/tuna-compositor target/debug/tuna-shell-gtk gtk-shell-artifacts/bin/
           cp /usr/local/lib/*/libgtk4-layer-shell.so* gtk-shell-artifacts/bin/ 2>/dev/null || cp /usr/local/lib/libgtk4-layer-shell.so* gtk-shell-artifacts/bin/
       # G-WS-INSERT publishes the targeted insertion frame/state. Full
       # parity captures need native fonts, wallpapers and installed apps;
@@ -288,8 +292,8 @@ jobs:
 
       # The feature walkthrough from this run's frames: every frame the
       # manifest names must still be taken, and the bundle is what a
-      # docs refresh commits (scripts/roost-walkthrough).
-      - run: scripts/roost-walkthrough build gtk-shell-artifacts --dest walkthrough
+      # docs refresh commits (scripts/tuna-walkthrough).
+      - run: scripts/tuna-walkthrough build gtk-shell-artifacts --dest walkthrough
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: walkthrough
@@ -311,11 +315,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          name: roost-arch
+          name: tuna-arch
           path: ${{ runner.temp }}/portal-package
       - run: sudo apt-get -o Acquire::Retries=3 update -qq && sudo apt-get install -y --no-install-recommends podman zstd shellcheck
-      - run: shellcheck scripts/roost-portal-security tests/portal-reference/run.sh tests/portal-reference/settings-run.sh tests/portal-reference/backgrounds-run.sh
-      - run: python3 scripts/lib/roost-portal-artifact-tests.py
+      - run: shellcheck scripts/tuna-portal-security tests/portal-reference/run.sh tests/portal-reference/settings-run.sh tests/portal-reference/backgrounds-run.sh
+      - run: python3 scripts/lib/tuna-portal-artifact-tests.py
       - name: Test packaged compositor with actual GNOME 51 portal consent
         run: |
           mkdir -p "$RUNNER_TEMP/portal-candidate"
@@ -324,7 +328,7 @@ jobs:
           tar --zstd -xf "$package" -C "$RUNNER_TEMP/portal-candidate"
           mkdir -p "$RUNNER_TEMP/portal-security"
           printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/portal-security/candidate-commit.txt"
-          scripts/roost-portal-security --candidate "$RUNNER_TEMP/portal-candidate" --out "$RUNNER_TEMP/portal-security"
+          scripts/tuna-portal-security --candidate "$RUNNER_TEMP/portal-candidate" --out "$RUNNER_TEMP/portal-security"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
@@ -340,10 +344,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          name: roost-arch
+          name: tuna-arch
           path: ${{ runner.temp }}/remote-package
       - run: sudo apt-get -o Acquire::Retries=3 update -qq && sudo apt-get install -y --no-install-recommends podman zstd shellcheck
-      - run: shellcheck scripts/roost-remote-security tests/remote-desktop-reference/run.sh
+      - run: shellcheck scripts/tuna-remote-security tests/remote-desktop-reference/run.sh
       - name: Test packaged compositor with actual GNOME 51 RemoteDesktop consent and libei input
         run: |
           mkdir -p "$RUNNER_TEMP/remote-candidate"
@@ -352,7 +356,7 @@ jobs:
           tar --zstd -xf "$package" -C "$RUNNER_TEMP/remote-candidate"
           mkdir -p "$RUNNER_TEMP/remote-security"
           printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/remote-security/candidate-commit.txt"
-          scripts/roost-remote-security --candidate "$RUNNER_TEMP/remote-candidate" --out "$RUNNER_TEMP/remote-security"
+          scripts/tuna-remote-security --candidate "$RUNNER_TEMP/remote-candidate" --out "$RUNNER_TEMP/remote-security"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
@@ -368,14 +372,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          name: roost-arch
+          name: tuna-arch
           path: niri-package
       - run: sudo apt-get -o Acquire::Retries=3 update -qq && sudo apt-get install -y podman python3-pil zstd shellcheck
-      - run: shellcheck scripts/roost-niri-reference scripts/roost-niri-compare tests/niri-reference/run.sh tests/niri-reference/run-roost.sh
+      - run: shellcheck scripts/tuna-niri-reference scripts/tuna-niri-compare tests/niri-reference/run.sh tests/niri-reference/run-tuna.sh
       - run: |
           mkdir -p niri-candidate
-          tar --zstd -xf niri-package/roost-*.pkg.tar.zst -C niri-candidate
-          scripts/roost-niri-compare --candidate niri-candidate --out niri-parity-artifacts
+          tar --zstd -xf niri-package/tuna-desktop-*.pkg.tar.zst -C niri-candidate
+          scripts/tuna-niri-compare --candidate niri-candidate --out niri-parity-artifacts
           printf '%s\n' "$GITHUB_SHA" >niri-parity-artifacts/candidate-revision.txt
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
@@ -397,22 +401,22 @@ jobs:
       - run: |
           useradd -m builder
           chown -R builder "$GITHUB_WORKSPACE"
-          su builder -c "cd '$GITHUB_WORKSPACE/packaging/arch' && ROOST_LOCAL_SRC='$GITHUB_WORKSPACE' makepkg -f --noconfirm"
+          su builder -c "cd '$GITHUB_WORKSPACE/packaging/arch' && TUNA_LOCAL_SRC='$GITHUB_WORKSPACE' makepkg -f --noconfirm"
       - run: |
-          pkg=$(ls packaging/arch/roost-[0-9]*.pkg.tar.zst)
+          pkg=$(ls packaging/arch/tuna-desktop-[0-9]*.pkg.tar.zst)
           namcap "$pkg" || true
           pacman -U --noconfirm "$pkg"
-          for bin in roost-compositor roost-session roost-shell-host roost-greeter; do "$bin" --version; done
-          test -f /usr/share/wayland-sessions/roost.desktop
+          for bin in tuna-compositor tuna-session tuna-shell-host tuna-greeter; do "$bin" --version; done
+          test -f /usr/share/wayland-sessions/tuna.desktop
           mkdir -p arch-artifacts && cp "$pkg" arch-artifacts/
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: roost-arch
+          name: tuna-arch
           path: arch-artifacts/
           retention-days: 14
 
   marlin-image:
-    # Roost layered on ghcr.io/tuna-os/marlin:gnome (GNOME 51 baseline
+    # Tuna Desktop layered on ghcr.io/tuna-os/marlin:gnome (GNOME 51 baseline
     # image) as a nested preview. Built on every PR, pushed from main.
     runs-on: ubuntu-latest
     needs: [arch-package]
@@ -424,22 +428,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          name: roost-arch
+          name: tuna-arch
           path: arch-artifacts
       - name: Free disk for the Marlin base image
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
       - run: |
-          pkg=$(ls arch-artifacts/roost-[0-9]*.pkg.tar.zst)
-          cp "$pkg" ./roost.pkg.tar.zst
+          pkg=$(ls arch-artifacts/tuna-desktop-[0-9]*.pkg.tar.zst)
+          cp "$pkg" ./tuna.pkg.tar.zst
           podman build -f packaging/marlin/Containerfile \
-            --build-arg ROOST_PKG=roost.pkg.tar.zst \
-            -t marlin-roost-preview:ci .
-          podman run --rm marlin-roost-preview:ci roost-compositor --version
-          podman run --rm marlin-roost-preview:ci test -f /usr/share/applications/roost-nested-preview.desktop
+            --build-arg TUNA_PKG=tuna.pkg.tar.zst \
+            -t marlin-tuna-preview:ci .
+          podman run --rm marlin-tuna-preview:ci tuna-compositor --version
+          podman run --rm marlin-tuna-preview:ci test -f /usr/share/applications/tuna-nested-preview.desktop
           mkdir -p marlin-image-kernels
-          kernel_container=$(podman create marlin-roost-preview:ci /usr/bin/true)
+          kernel_container=$(podman create marlin-tuna-preview:ci /usr/bin/true)
           trap 'podman rm "$kernel_container"' EXIT
-          podman cp "$kernel_container:/usr/share/roost-image-kernels/." marlin-image-kernels/
+          podman cp "$kernel_container:/usr/share/tuna-image-kernels/." marlin-image-kernels/
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
@@ -449,17 +453,17 @@ jobs:
       - if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin
-          img=ghcr.io/tuna-os/tuna-desktop/marlin-roost-preview
-          podman tag marlin-roost-preview:ci "$img:latest"
-          podman tag marlin-roost-preview:ci "$img:${{ github.sha }}"
+          img=ghcr.io/tuna-os/tuna-desktop/marlin-tuna-preview
+          podman tag marlin-tuna-preview:ci "$img:latest"
+          podman tag marlin-tuna-preview:ci "$img:${{ github.sha }}"
           podman push "$img:latest"
           podman push "$img:${{ github.sha }}"
 
   marlin-vm:
-    # Real-VM lane (#68): install the Marlin Roost image (plus the CI-only
+    # Real-VM lane (#68): install the Marlin Tuna Desktop image (plus the CI-only
     # autologin/serial-journal layer in packaging/marlin/vm-lane) to a
     # raw disk with bootc, boot it in QEMU/KVM, and prove greetd starts
-    # the Roost hardware session on the DRM/KMS backend. The image is
+    # the Tuna Desktop hardware session on the DRM/KMS backend. The image is
     # rebuilt rootful here (bootc install reads it from root's storage),
     # in parallel with marlin-image rather than after it.
     runs-on: ubuntu-26.04
@@ -469,7 +473,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          name: roost-arch
+          name: tuna-arch
           path: arch-artifacts
       - name: Enable KVM
         run: |
@@ -483,21 +487,21 @@ jobs:
           sudo mkdir -p /mnt/vm && sudo chown "$(id -u):$(id -g)" /mnt/vm
           df -h / /mnt
       - run: sudo apt-get -o Acquire::Retries=3 update -qq && sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf ffmpeg
-      - name: Build the Marlin Roost image and the VM test layer
+      - name: Build the Marlin Tuna Desktop image and the VM test layer
         run: |
-          cp arch-artifacts/roost-[0-9]*.pkg.tar.zst ./roost.pkg.tar.zst
+          cp arch-artifacts/tuna-desktop-[0-9]*.pkg.tar.zst ./tuna.pkg.tar.zst
           sudo podman build -f packaging/marlin/Containerfile \
-            --build-arg ROOST_PKG=roost.pkg.tar.zst -t localhost/marlin-roost-preview:ci .
+            --build-arg TUNA_PKG=tuna.pkg.tar.zst -t localhost/marlin-tuna-preview:ci .
           sudo podman build -f packaging/marlin/vm-lane/Containerfile \
-            -t localhost/marlin-roost-vm:ci .
+            -t localhost/marlin-tuna-vm:ci .
           sudo podman image inspect ghcr.io/tuna-os/marlin:gnome --format '{{.Digest}}' | tee /mnt/vm/base-digest
-          sudo podman image inspect localhost/marlin-roost-vm:ci --format '{{.Id}}' | tee /mnt/vm/image-id
+          sudo podman image inspect localhost/marlin-tuna-vm:ci --format '{{.Id}}' | tee /mnt/vm/image-id
           mkdir -p vm-lane-artifacts/image-kernels
-          kernel_container=$(sudo podman create localhost/marlin-roost-vm:ci /usr/bin/true)
+          kernel_container=$(sudo podman create localhost/marlin-tuna-vm:ci /usr/bin/true)
           trap 'sudo podman rm "$kernel_container"' EXIT
-          sudo podman cp "$kernel_container:/usr/share/roost-image-kernels/." vm-lane-artifacts/image-kernels/
+          sudo podman cp "$kernel_container:/usr/share/tuna-image-kernels/." vm-lane-artifacts/image-kernels/
           sudo chown -R "$(id -u):$(id -g)" vm-lane-artifacts/image-kernels
-          sudo podman run --rm localhost/marlin-roost-vm:ci sh -c 'bootc --version; ls -ld /home; ls /usr/lib/bootc/install/ && cat /usr/lib/bootc/install/*' || true
+          sudo podman run --rm localhost/marlin-tuna-vm:ci sh -c 'bootc --version; ls -ld /home; ls /usr/lib/bootc/install/ && cat /usr/lib/bootc/install/*' || true
           df -h / /mnt
       - name: Install the image to a raw disk with bootc
         run: |
@@ -511,26 +515,26 @@ jobs:
             elif grep -A8 "^\[composefs\]" /usr/lib/ostree/prepare-root.conf 2>/dev/null | grep -qiE "enabled[[:space:]]*=[[:space:]]*(yes|true|1|signed)" \
               || find /usr/lib/systemd/boot/efi -name "systemd-boot*.efi" 2>/dev/null | grep -q .; then echo --composefs-backend; fi
             grep -A8 "^\[composefs\]" /usr/lib/ostree/prepare-root.conf 2>/dev/null | grep -qiE "enabled[[:space:]]*=[[:space:]]*(yes|true|1|signed)" && echo "--filesystem ext4" || true'
-          args=$(sudo podman run --rm --entrypoint "" localhost/marlin-roost-vm:ci sh -c "$probe" | tr '\n' ' ')
+          args=$(sudo podman run --rm --entrypoint "" localhost/marlin-tuna-vm:ci sh -c "$probe" | tr '\n' ' ')
           echo "bootc install extra args: $args"
           truncate -s 20G /mnt/vm/disk.raw
           # shellcheck disable=SC2086 # $args is a word list on purpose
           sudo podman run --rm --privileged --pid=host \
             --security-opt label=type:unconfined_t \
             -v /dev:/dev -v /var/lib/containers:/var/lib/containers -v /mnt/vm:/output \
-            localhost/marlin-roost-vm:ci \
+            localhost/marlin-tuna-vm:ci \
             bootc install to-disk --via-loopback --generic-image --wipe $args /output/disk.raw
           sudo chown "$(id -u):$(id -g)" /mnt/vm/disk.raw
           sudo podman rmi -a -f >/dev/null 2>&1 || true
           df -h / /mnt
       # After the assertions, --tour drives a scripted feature tour
-      # through QMP input and records it to tour/roost-tour.webm.
-      - name: Boot the disk, assert the Roost hardware session, record the tour
+      # through QMP input and records it to tour/tuna-tour.webm.
+      - name: Boot the disk, assert the Tuna Desktop hardware session, record the tour
         run: >-
-          scripts/roost-vm-lane --disk /mnt/vm/disk.raw --out vm-lane-artifacts --boots 5 --tour
+          scripts/tuna-vm-lane --disk /mnt/vm/disk.raw --out vm-lane-artifacts --boots 5 --tour
           --meta "base_image=ghcr.io/tuna-os/marlin:gnome@$(cat /mnt/vm/base-digest)"
           --meta "test_image_id=$(cat /mnt/vm/image-id)"
-          --meta "roost_package=$(basename arch-artifacts/roost-[0-9]*.pkg.tar.zst)"
+          --meta "tuna_package=$(basename arch-artifacts/tuna-desktop-[0-9]*.pkg.tar.zst)"
           --meta "commit=${{ github.sha }}"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
@@ -543,7 +547,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
-          name: roost-tour
+          name: tuna-tour
           path: vm-lane-artifacts/tour/
           if-no-files-found: ignore
           retention-days: 30
@@ -581,7 +585,7 @@ jobs:
           name: marlin-vm
           path: ledger-in/marlin-vm
       - run: >-
-          scripts/roost-ledger check --tests ledger-in/test-list.txt
+          scripts/tuna-ledger check --tests ledger-in/test-list.txt
           --assertions ledger-in/journey/assertions.txt
           --assertions ledger-in/gtk-shell/assertions.txt
           --assertions ledger-in/gtk-shell/scale/assertions.txt
@@ -600,19 +604,19 @@ jobs:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: journey-shots
-          path: /tmp/roost-docs/journey
+          path: /tmp/tuna-docs/journey
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: app-content-shots
-          path: /tmp/roost-docs/app
+          path: /tmp/tuna-docs/app
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: scroll-proof-shots
-          path: /tmp/roost-docs/scroll
-      - run: shellcheck scripts/roost-docs-shots
-      - run: scripts/roost-docs-shots collect /tmp/roost-docs/journey /tmp/roost-docs/app /tmp/roost-docs/scroll --dest /tmp/roost-docs/shots && ls /tmp/roost-docs/shots | wc -l | grep -q 7
+          path: /tmp/tuna-docs/scroll
+      - run: shellcheck scripts/tuna-docs-shots
+      - run: scripts/tuna-docs-shots collect /tmp/tuna-docs/journey /tmp/tuna-docs/app /tmp/tuna-docs/scroll --dest /tmp/tuna-docs/shots && ls /tmp/tuna-docs/shots | wc -l | grep -q 7
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: docs-shots
-          path: /tmp/roost-docs/shots/
+          path: /tmp/tuna-docs/shots/
           retention-days: 90

@@ -55,7 +55,7 @@ pub struct SessionServices {
 impl Drop for SessionServices {
     fn drop(&mut self) {
         self.alive.store(false, Ordering::Release);
-        let args = ["--user", "--no-block", "stop", "roost-session.target"]
+        let args = ["--user", "--no-block", "stop", "tuna-session.target"]
             .into_iter()
             .map(str::to_owned)
             .collect::<Vec<_>>();
@@ -72,18 +72,18 @@ pub fn publish(socket: &str) -> SessionServices {
     let desktop = std::env::var("XDG_CURRENT_DESKTOP")
         .ok()
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "Roost:GNOME".into());
+        .unwrap_or_else(|| "Tuna:GNOME".into());
     if !run(
         "dbus-update-activation-environment",
         &activation_args(socket, &desktop),
     ) {
-        eprintln!("roost-compositor: session services: display environment import failed");
+        eprintln!("tuna-compositor: session services: display environment import failed");
         return guard;
     }
-    eprintln!("roost-compositor: session services: display environment imported");
+    eprintln!("tuna-compositor: session services: display environment imported");
     // GTK can activate portals before the display is ready. After the shell
     // owns its bus name, clear any start-limit failure and refresh the portal
-    // frontend so it chooses Roost's backends using the imported desktop.
+    // frontend so it chooses Tuna Desktop's backends using the imported desktop.
     std::thread::spawn(move || {
         let args: Vec<String> = [
             "call",
@@ -121,10 +121,12 @@ pub fn publish(socket: &str) -> SessionServices {
                     *registration.last_mut().unwrap() =
                         "org.gnome.DisplayManager.Manager.RegisterDisplay".into();
                     if run("gdbus", &registration) {
-                        eprintln!("roost-compositor: session services: GDM session and display registered");
+                        eprintln!(
+                            "tuna-compositor: session services: GDM session and display registered"
+                        );
                     } else {
                         eprintln!(
-                            "roost-compositor: session services: GDM display registration failed"
+                            "tuna-compositor: session services: GDM display registration failed"
                         );
                     }
                 }
@@ -134,25 +136,25 @@ pub fn publish(socket: &str) -> SessionServices {
                 }
                 // systemd refuses a manual start of graphical-session.target.
                 // Our packaged target pulls it in through BindsTo instead.
-                let start_graphical = ["--user", "start", "roost-session.target"]
+                let start_graphical = ["--user", "start", "tuna-session.target"]
                     .into_iter()
                     .map(str::to_owned)
                     .collect::<Vec<_>>();
                 if !run("systemctl", &start_graphical) {
-                    eprintln!("roost-compositor: session services: graphical target failed");
+                    eprintln!("tuna-compositor: session services: graphical target failed");
                     return;
                 }
                 // Drop may race the worker's start. Stop again if shutdown
                 // occurred before systemd acknowledged the target.
                 if !alive.load(Ordering::Acquire) {
-                    let stop = ["--user", "--no-block", "stop", "roost-session.target"]
+                    let stop = ["--user", "--no-block", "stop", "tuna-session.target"]
                         .into_iter()
                         .map(str::to_owned)
                         .collect::<Vec<_>>();
                     let _ = run("systemctl", &stop);
                     return;
                 }
-                eprintln!("roost-compositor: session services: graphical target active");
+                eprintln!("tuna-compositor: session services: graphical target active");
 
                 let reset = [
                     "--user",
@@ -174,13 +176,13 @@ pub fn publish(socket: &str) -> SessionServices {
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
                 if run("systemctl", &restart) {
-                    eprintln!("roost-compositor: session services: portals refreshed");
+                    eprintln!("tuna-compositor: session services: portals refreshed");
                 }
                 return;
             }
             std::thread::sleep(Duration::from_millis(200));
         }
-        eprintln!("roost-compositor: session services: shell bus name not ready");
+        eprintln!("tuna-compositor: session services: shell bus name not ready");
     });
     guard
 }
@@ -191,13 +193,13 @@ mod tests {
 
     #[test]
     fn activation_import_names_only_the_hardware_display() {
-        let args = activation_args("wayland-roost", "Roost:GNOME");
+        let args = activation_args("wayland-tuna", "Tuna:GNOME");
         assert_eq!(
             args,
             [
                 "--systemd",
-                "WAYLAND_DISPLAY=wayland-roost",
-                "XDG_CURRENT_DESKTOP=Roost:GNOME",
+                "WAYLAND_DISPLAY=wayland-tuna",
+                "XDG_CURRENT_DESKTOP=Tuna:GNOME",
                 "XDG_SESSION_TYPE=wayland",
                 "DISPLAY="
             ]
@@ -207,7 +209,7 @@ mod tests {
 
     #[test]
     fn session_utility_failures_are_reported() {
-        assert!(!run("/definitely/missing/roost-session-tool", &[]));
+        assert!(!run("/definitely/missing/tuna-session-tool", &[]));
         assert!(!run("/bin/false", &[]));
         assert!(run("/bin/true", &[]));
     }

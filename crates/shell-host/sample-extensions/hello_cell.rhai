@@ -1,7 +1,7 @@
-// Roost sample extension: a greeting bar cell.
+// Tuna Desktop sample extension: a greeting bar cell.
 //
 // Install: copy this file into the extension directory
-// (`~/.local/share/roost/extensions/hello.rhai` by default).
+// (`~/.local/share/tuna/extensions/hello.rhai` by default).
 // The shell picks it up without a restart.
 //
 // API used here:

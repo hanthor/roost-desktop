@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 
-loader = importlib.machinery.SourceFileLoader("vm_boot_lane", str(Path(__file__).resolve().parents[1] / "roost-vm-lane"))
+loader = importlib.machinery.SourceFileLoader("vm_boot_lane", str(Path(__file__).resolve().parents[1] / "tuna-vm-lane"))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 lane = importlib.util.module_from_spec(spec)
 loader.exec_module(lane)
@@ -21,7 +21,7 @@ loader.exec_module(lane)
 class OrcaUnreadyDiagnostic(unittest.TestCase):
     def run_probe(self, *, locked=False, changed=False, executable="/usr/bin/python3.14",
                   uid=1000, package="python", oversized=False, replaced=False):
-        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
+        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/tuna-vm-lifecycle"
         fn = next(n for n in ast.parse(source.read_text()).body
                   if isinstance(n, ast.FunctionDef) and n.name == "orca_child_diagnostic")
         with tempfile.TemporaryDirectory() as directory:
@@ -32,14 +32,14 @@ class OrcaUnreadyDiagnostic(unittest.TestCase):
                 fields = ["S", str(parent)] + ["0"] * 17 + [str(ticks)]
                 (path / "stat").write_text(f"{pid} (private process name) " + " ".join(fields))
             (root / "57/environ").write_bytes(b"x" * (128 * 1024 + 1) if oversized else
-                b"WAYLAND_DISPLAY=roost-nested-87\0DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus\0SECRET=private-never-published\0")
+                b"WAYLAND_DISPLAY=tuna-nested-87\0DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus\0SECRET=private-never-published\0")
             state_path = root / "state"
             state_path.write_text(json.dumps({"locked": changed, "screen_reader_pid": 57}))
             executable_reads = iter([57, 58 if replaced else 57])
             scope = {"pathlib": SimpleNamespace(Path=lambda path: root / str(path).split("/")[-1]),
                      "OWNER": SimpleNamespace(pw_uid=1000), "RUNTIME": "/run/user/1000",
                      "STATE": state_path, "os": SimpleNamespace(readlink=lambda path:
-                         "/usr/bin/roost-compositor" if path.parent.name == "87" else executable,
+                         "/usr/bin/tuna-compositor" if path.parent.name == "87" else executable,
                          stat=lambda path: SimpleNamespace(st_dev=1, st_ino=next(executable_reads), st_size=100)),
                      "json": json, "subprocess": __import__("subprocess"),
                      "call": lambda *args: package}
@@ -88,7 +88,7 @@ class OrcaUnreadyDiagnostic(unittest.TestCase):
 
 class OrcaReadFailure(unittest.TestCase):
     def test_failed_observation_emits_safe_receipt_and_keeps_exit_one(self):
-        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
+        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/tuna-vm-lifecycle"
         tree = ast.parse(source.read_text())
         main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
         branch = next(n for n in ast.walk(main) if isinstance(n, ast.If)
@@ -128,14 +128,14 @@ class OrcaReadFailure(unittest.TestCase):
         # Schema/privacy policy only; the retained real VM failure remains unexplained.
 
     def test_read_diagnostics_preserve_only_fixed_public_dbus_failure(self):
-        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
+        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/tuna-vm-lifecycle"
         tree = ast.parse(source.read_text())
         helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
                       and node.name == "orca_read_error")
         scope = {"subprocess": lane.subprocess}
         exec(compile(ast.Module(body=[helper], type_ignores=[]), str(source), "exec"), scope)
         diagnose = scope["orca_read_error"]
-        command = ["runuser", "-u", "roost-test", "--", "env", "PRIVATE_ENV=do-not-copy",
+        command = ["runuser", "-u", "tuna-test", "--", "env", "PRIVATE_ENV=do-not-copy",
                    "busctl", "--user", "call", "org.freedesktop.DBus", "/org/freedesktop/DBus",
                    "org.freedesktop.DBus", "GetConnectionUnixProcessID", "s", ":1.527"]
         error = lane.subprocess.CalledProcessError(1, command, stderr="Call failed: owner vanished\n" + "x" * 1024)
@@ -261,8 +261,8 @@ class BootApi(unittest.TestCase):
             self.assertIn("-enable-kvm", command)
             self.assertEqual(command[command.index("-m") + 1], "6144")
             self.assertEqual(command[command.index("-smp") + 1], "4")
-            self.assertIn("pcie-root-port,id=roost-gpu-port,chassis=1,slot=1", command)
-            self.assertIn("virtio-vga,bus=roost-gpu-port,x-pcie-pm-no-soft-reset=on,xres=1280,yres=800", command)
+            self.assertIn("pcie-root-port,id=tuna-gpu-port,chassis=1,slot=1", command)
+            self.assertIn("virtio-vga,bus=tuna-gpu-port,x-pcie-pm-no-soft-reset=on,xres=1280,yres=800", command)
             shared = lane.baseline.gpu_devices()
             offset = command.index(shared[1]) - 1
             self.assertEqual(command[offset:offset + len(shared)], shared)
@@ -276,7 +276,7 @@ class BootApi(unittest.TestCase):
             self.assertEqual(agent, "/scratch/qga.sock")
             command = spawn.call_args.args[0]
             self.assertIn("virtio-serial-pci", command)
-            self.assertIn("virtserialport,chardev=roost-qga,name=org.qemu.guest_agent.0", command)
+            self.assertIn("virtserialport,chardev=tuna-qga,name=org.qemu.guest_agent.0", command)
 
 
 class NativeMouseSelection(unittest.TestCase):
@@ -285,9 +285,9 @@ class NativeMouseSelection(unittest.TestCase):
     def test_native_device_is_opt_in_and_preserves_performance_default(self):
         with patch.object(lane.os.path,"exists",return_value=True), patch.object(lane.os,"access",return_value=True), patch.object(lane.subprocess,"Popen") as spawn:
             lane.boot("disk.raw","/out","/scratch",30,guest_agent=True)
-            self.assertNotIn("virtio-mouse-pci,id=roost-relative-mouse",spawn.call_args.args[0])
+            self.assertNotIn("virtio-mouse-pci,id=tuna-relative-mouse",spawn.call_args.args[0])
             lane.boot("disk.raw","/out","/scratch",30,guest_agent=True,native_relative_mouse=True)
-            self.assertIn("virtio-mouse-pci,id=roost-relative-mouse",spawn.call_args.args[0])
+            self.assertIn("virtio-mouse-pci,id=tuna-relative-mouse",spawn.call_args.args[0])
     def test_actual_selected_name_index_and_mode_are_observed(self):
         class Qmp:
             def __init__(self):self.calls=[]
@@ -329,9 +329,9 @@ class InputProbePlacement(unittest.TestCase):
         clicks = []
         inventory_calls = []
         provisional = {"state": {"windows": [
-            {"app_id": "org.roost.VmInput", "rect": [0, 0, 800, 600]}]}}
+            {"app_id": "org.tuna.VmInput", "rect": [0, 0, 800, 600]}]}}
         placed = {"state": {"windows": [
-            {"app_id": "org.roost.VmInput", "rect": [500, 250, 400, 240]}]}}
+            {"app_id": "org.tuna.VmInput", "rect": [500, 250, 400, 240]}]}}
 
         def run(action):
             if action == "inventory":
@@ -408,7 +408,7 @@ class RepeatedCoverage(unittest.TestCase):
 
 class PciCapabilities(unittest.TestCase):
     def probe(self, pm_control, pcie=True, cycle=False):
-        helper = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
+        helper = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/tuna-vm-lifecycle"
         tree = ast.parse(helper.read_text())
         function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
                         and node.name == "gpu_pci_caps")

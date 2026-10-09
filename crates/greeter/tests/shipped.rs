@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use roost_greeter::session::enumerate_dirs;
+use tuna_greeter::session::enumerate_dirs;
 
 fn share_sessions() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -14,7 +14,7 @@ fn share_sessions() -> std::path::PathBuf {
 }
 
 #[test]
-fn shipped_roost_desktop_parses_to_session_launcher() {
+fn shipped_tuna_desktop_parses_to_session_launcher() {
     let dir = share_sessions();
     assert!(dir.is_dir(), "missing {}", dir.display());
     let found = enumerate_dirs(std::slice::from_ref(&dir.as_path()));
@@ -24,10 +24,10 @@ fn shipped_roost_desktop_parses_to_session_launcher() {
         .entries
         .iter()
         .find(|entry| entry.name == "Tuna Desktop")
-        .expect("shipped roost.desktop must enumerate as Tuna Desktop");
+        .expect("shipped tuna.desktop must enumerate as Tuna Desktop");
     assert_eq!(
         entry.command,
-        vec!["roost-session".to_string()],
+        vec!["tuna-session".to_string()],
         "greeter must launch the session binary, not the compositor directly"
     );
 }

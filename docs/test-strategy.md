@@ -69,7 +69,7 @@ The nested proof jobs today assert liveness: the session lived, pixels changed, 
 
 1. **Pinned baseline capture.** Boot `ghcr.io/tuna-os/marlin:gnome` in a VM once per baseline bump and record the reference journeys (overview, search and launch, workspaces, Alt-Tab, quick settings, notifications, lock, calendar) as frames, recordings, and AT-SPI tree dumps. Store them as versioned artifacts named by GNOME release and image digest.
 2. **Semantic assertions.** Journeys assert the GNOME behavior, not a pixel delta: after Super the overview lists N window previews and the workspace strip; after typing, the top result is the expected app; after Escape, focus returns to the previous window. Shell state is read through an introspection channel so scripts assert state, not screenshots.
-3. **Parity ledger.** [`docs/parity-ledger.md`](parity-ledger.md) holds one row per GNOME 51 behavior: baseline evidence, Roost status, test ID, deviation, owner, disposition. CI fails when a row regresses from pass. Undocumented gaps are not parity (roadmap change control).
+3. **Parity ledger.** [`docs/parity-ledger.md`](parity-ledger.md) holds one row per GNOME 51 behavior: baseline evidence, Tuna Desktop status, test ID, deviation, owner, disposition. CI fails when a row regresses from pass. Undocumented gaps are not parity (roadmap change control).
 4. **Recorded human review.** Frame review stays human but leaves an artifact: per release, a checklist naming reviewer, Tuna Desktop frames, and the baseline frames they were compared against.
 5. **Same-image comparison.** Reference (Marlin GNOME flavor) and candidate (Marlin Tuna Desktop flavor) run on the same VM image family and hardware profile, so performance and behavior comparisons are like for like.
 
@@ -77,7 +77,7 @@ Timing rule: any test that depends on scheduler latency waits on a wall-clock de
 
 ## 4. Test design and traceability
 
-- Assign stable IDs `Roost-<spek>-<requirement>-<case>` and link each spec requirement to unit, protocol, integration, manual, security, or performance cases. The `<requirement>` field is the named spek's own requirement, so `Roost-001-R5-01` is a case for `001-R5`, never parent requirement `R5`; see the naming rule in the [parent requirement register](requirements.md#naming-rule).
+- Assign stable IDs `Tuna-<spek>-<requirement>-<case>` and link each spec requirement to unit, protocol, integration, manual, security, or performance cases. The `<requirement>` field is the named spek's own requirement, so `Tuna-001-R5-01` is a case for `001-R5`, never parent requirement `R5`; see the naming rule in the [parent requirement register](requirements.md#naming-rule).
 - Every security boundary gets positive, negative, spoofing/replay, resource exhaustion, and process-failure cases.
 - Every workflow gets normal, cancellation, timeout/unavailable-service, and recovery behavior where applicable.
 - Property tests cover invariants rather than implementation details: no invisible/orphaned windows after output changes; no focus to unauthorized surfaces; monotonic state revisions; quota bounds; lock remains latched until valid unlock.
@@ -105,7 +105,7 @@ No implementation or test is considered complete because a test command exits su
 
 ## 7. Automated structural compliance
 
-`validate-test-strategy.yml` runs `scripts/roost-test-strategy` for crate,
+`validate-test-strategy.yml` runs `scripts/tuna-test-strategy` for crate,
 strategy and validator changes. It rejects crates with no named executable
 test functions, invalid or duplicated stable test IDs, and removal of the
 registered control, supervised-shell identity and locked-session cases. The main CI check supplies its test
@@ -139,7 +139,7 @@ cases. Those remaining gates stay tracked by #8.
 The measured coverage lane requires complete security evidence before a green
 run: exact source revision, compiler and observer versions, kernel and installed
 packages, a reproduction command requiring PAM wrapper support, executed test
-logs, LLVM coverage JSON and its measured report. `roost-security-artifacts`
+logs, LLVM coverage JSON and its measured report. `tuna-security-artifacts`
 checks these files and requires successful execution of the registered positive,
 negative, spoof/replay, exhaustion and process-failure cases for the control,
 supervised-shell identity and locked-session boundaries. Failed, ignored or merely listed tests do not satisfy
