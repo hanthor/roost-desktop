@@ -77,10 +77,11 @@ GNOME 51 `org.gnome.desktop.a11y.interface reduced-motion` is read live and comb
 | org.gnome.mutter dynamic-workspaces, edge-tiling | Ignored | Always on, as GNOME's defaults |
 | org.gnome.desktop.peripherals.keyboard repeat, delay, repeat-interval | Honored | Seat key repeat, live. Proof G-SETTINGS-INPUT |
 | org.gnome.desktop.a11y.keyboard (Sticky, Slow, Bounce, Toggle and Mouse Keys, their beeps and delays, `enable`) | Honored | Live; applied in the compositor's input pipeline before keybindings, the lock screen and every client, XWayland included. The keyboard shortcuts' switches are saved by the shell, which shows GNOME's confirmation. `timeout-enable` and `disable-timeout` are ignored, as in Mutter. Proofs G-A11Y-STICKY, G-A11Y-SHORTCUTS, G-A11Y-SLOW, G-A11Y-BOUNCE, G-A11Y-MOUSEKEYS |
+| org.gnome.desktop.a11y.mouse (secondary click, hover click: time, threshold, mode, gesture directions) | Honored | Live; applied in the compositor's input pipeline ahead of every client. Window mode shows GNOME's click-type chooser in the panel; the shell draws GNOME's pie timer during each timeout. `click-type-window-visible` is ignored, as in GNOME Shell 51. Proofs G-A11Y-DWELL, G-A11Y-SECONDARY |
 | org.gnome.desktop.peripherals.touchpad tap-to-click, natural-scroll, speed, disable-while-typing | Honored | libinput on hardware sessions, live and on hotplug |
 | org.gnome.desktop.peripherals.mouse natural-scroll, speed | Honored | libinput on hardware sessions |
 | org.gnome.desktop.input-sources sources, xkb-options | Honored | xkb sources become one keymap in order; Super+Space switches; IBus sources use the supervised bridge (#60). Proof G-SETTINGS-INPUT |
-| org.gnome.desktop.a11y.* | Partial / missing | Some keys reach GTK and the keyboard aids are honored (above); zoom, screen keyboard, the pointer aids (`a11y.mouse`) and several modern preferences lack consumers. Spoken screen-reader acceptance remains unqualified; see the control-center audit |
+| org.gnome.desktop.a11y.* | Partial / missing | Some keys reach GTK and the keyboard and pointer aids are honored (above); zoom, screen keyboard and several modern preferences lack consumers. Spoken screen-reader acceptance remains unqualified; see the control-center audit |
 
 `J-SETTINGS-LIVE` changes `clock-format` with `gsettings set` during the
 nested journey and asserts the shell’s consumed settings snapshot before

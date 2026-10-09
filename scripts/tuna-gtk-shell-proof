@@ -79,6 +79,9 @@
 #   G-A11Y-SLOW    Slow Keys drop short taps and deliver held keys once
 #   G-A11Y-BOUNCE  Bounce Keys drop a repeat within the delay
 #   G-A11Y-MOUSEKEYS the keypad moves (accelerating) and clicks the pointer
+#   G-A11Y-DWELL   hover click: a resting pointer clicks once with GNOME's
+#                  pie timer; gesture mode picks the click by direction
+#   G-A11Y-SECONDARY a held primary button makes a secondary click
 #   G-SETTINGS-IDLE GNOME's idle-delay and lock-enabled keys set the
 #                  compositor's idle lock live (#63)
 #   G-SCREENSHOT   org.gnome.Shell.Screenshot saves the screen as a PNG
@@ -2920,6 +2923,76 @@ gsettings set "$A11Y_KBD" mousekeys-enable false
 cstate '(.input_aids.mouse | not) and .input_aids.mouse_buttons_down == 0' "mouse keys off" ||
     fail G-A11Y-MOUSEKEYS "mousekeys-enable false did not apply"
 pass G-A11Y-MOUSEKEYS "keypad 6 accelerates the pointer and stops on release; 5 clicks, - picks the secondary button"
+
+# Pointer aids (org.gnome.desktop.a11y.mouse) on the same recorder: real
+# host pointer motion and buttons through the compositor.
+A11Y_MOUSE=org.gnome.desktop.a11y.mouse
+gsettings reset-recursively "$A11Y_MOUSE"
+a11y_buttons() { jq '.buttons | length' "$A11Y_KEYS"; }
+# Hover click: without it a resting pointer clicks nothing.
+xdotool mousemove --window "$WID" "$a11y_cx" "$a11y_cy"
+buttons="$(a11y_buttons)"
+sleep 2
+[ "$(a11y_buttons)" = "$buttons" ] || fail G-A11Y-DWELL "a resting pointer clicked without hover click"
+gsettings set "$A11Y_MOUSE" dwell-time 0.8
+gsettings set "$A11Y_MOUSE" dwell-click-enabled true
+cstate '.input_aids.pointer.dwell_click' "dwell on" || fail G-A11Y-DWELL "dwell-click-enabled did not reach the compositor"
+xdotool mousemove --window "$WID" $((a11y_cx - 30)) "$a11y_cy"
+cstate 'any(.layers[]; .namespace == "tuna-pointer-a11y")' "pie timer" 5 ||
+    fail G-A11Y-DWELL "the pie timer did not show while the pointer dwelled"
+scrot "$ARTIFACTS/a11y-dwell-pie.png" >/dev/null
+a11y_wait ".buttons | length == $((buttons + 1)) and .buttons[-1].button == 1" "dwell click" ||
+    fail G-A11Y-DWELL "resting the pointer did not make one primary click"
+sleep 2
+[ "$(a11y_buttons)" = "$((buttons + 1))" ] || fail G-A11Y-DWELL "a still pointer clicked more than once"
+cstate 'all(.layers[]; .namespace != "tuna-pointer-a11y")' "pie gone" ||
+    fail G-A11Y-DWELL "the pie timer stayed after the click"
+# Gesture mode: after the dwell, moving right picks GNOME's default
+# secondary click, made back where the pointer dwelled.
+gsettings set "$A11Y_MOUSE" dwell-mode gesture
+cstate '.input_aids.pointer.dwell_gesture' "gesture mode" || fail G-A11Y-DWELL "dwell-mode gesture did not apply"
+gesture_x=$((a11y_cx - 80))
+xdotool mousemove --window "$WID" "$gesture_x" "$a11y_cy"
+cstate '.input_aids.pointer.gesture' "gesture open" 6 ||
+    fail G-A11Y-DWELL "the dwell did not open the direction gesture"
+xdotool mousemove --window "$WID" $((gesture_x + 40)) "$a11y_cy"
+a11y_wait ".buttons | length == $((buttons + 2)) and .buttons[-1].button == 3" "gesture secondary" ||
+    fail G-A11Y-DWELL "moving right after the dwell did not make a secondary click"
+cstate ".pointer_position == [$gesture_x, $a11y_cy]" "click where it dwelled" ||
+    fail G-A11Y-DWELL "the gesture click was not made where the pointer dwelled"
+cp "$A11Y_KEYS" "$ARTIFACTS/a11y-dwell.json"
+gsettings set "$A11Y_MOUSE" dwell-click-enabled false
+cstate '(.input_aids.pointer.dwell_click | not)' "dwell off" || fail G-A11Y-DWELL "dwell-click-enabled false did not apply"
+pass G-A11Y-DWELL "a resting pointer clicks once after dwell-time with GNOME's pie timer; a gesture picks the click by direction"
+
+# Simulated secondary click: a held primary button becomes a secondary
+# click on release; a quick click stays a plain click.
+xdotool mousemove --window "$WID" "$a11y_cx" "$a11y_cy"
+buttons="$(a11y_buttons)"
+xdotool mousedown 1
+sleep 1.2
+xdotool mouseup 1
+a11y_wait ".buttons | length == $((buttons + 1)) and .buttons[-1].button == 1" "held without the aid" ||
+    fail G-A11Y-SECONDARY "without the aid a held press should stay a primary click"
+gsettings set "$A11Y_MOUSE" secondary-click-time 0.6
+gsettings set "$A11Y_MOUSE" secondary-click-enabled true
+cstate '.input_aids.pointer.secondary_click' "secondary on" ||
+    fail G-A11Y-SECONDARY "secondary-click-enabled did not reach the compositor"
+xdotool mousedown 1
+sleep 0.1
+xdotool mouseup 1
+a11y_wait ".buttons | length == $((buttons + 2)) and .buttons[-1].button == 1" "quick click" ||
+    fail G-A11Y-SECONDARY "a quick click did not stay a primary click"
+xdotool mousedown 1
+sleep 1.2
+xdotool mouseup 1
+a11y_wait ".buttons | length == $((buttons + 4)) and .buttons[-2].button == 1 and .buttons[-1].button == 3" "held click" ||
+    fail G-A11Y-SECONDARY "holding the primary button did not make a secondary click"
+sleep 0.5
+[ "$(a11y_buttons)" = "$((buttons + 4))" ] || fail G-A11Y-SECONDARY "the held click made extra clicks"
+gsettings set "$A11Y_MOUSE" secondary-click-enabled false
+pass G-A11Y-SECONDARY "holding the primary button for secondary-click-time makes a secondary click"
+gsettings reset-recursively "$A11Y_MOUSE"
 
 gsettings reset-recursively "$A11Y_KBD"
 kill "$A11Y_INPUT_PID" 2>/dev/null || true
