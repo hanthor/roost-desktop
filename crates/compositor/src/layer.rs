@@ -37,9 +37,7 @@ pub use smithay::wayland::shell::wlr_layer::Layer;
 ///
 /// Shared with the shell-host: both the compositor and shell read these
 /// from the same source to prevent drift.
-pub use roost_shell_control::{
-    BANNER_NAMESPACE, OVERVIEW_NAMESPACE, PANEL_HEIGHT, PANEL_NAMESPACE,
-};
+pub use tuna_shell_control::{BANNER_NAMESPACE, OVERVIEW_NAMESPACE, PANEL_HEIGHT, PANEL_NAMESPACE};
 
 /// One layer surface's placement request, as committed.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -248,7 +246,7 @@ pub fn arrange_after_commit(state: &State) {
 #[derive(Debug, Clone)]
 pub struct PanelSurface {
     /// Namespace the client advertised (the shell panel uses
-    /// `roost-shell-panel`).
+    /// `tuna-shell-panel`).
     pub namespace: String,
     /// Layer the surface was created on (the panel uses top).
     pub layer: Layer,

@@ -47,11 +47,11 @@ impl FolderDialog {
     pub fn new(app: &gtk::Application, rename: Rename) -> Rc<Self> {
         let window = gtk::Window::new();
         window.set_application(Some(app));
-        window.add_css_class("roost-folder-dialog");
+        window.add_css_class("tuna-folder-dialog");
         window.set_title(Some("App Folder"));
         window.init_layer_shell();
         window.set_layer(Layer::Overlay);
-        window.set_namespace(Some(roost_shell_control::FOLDER_DIALOG_NAMESPACE));
+        window.set_namespace(Some(tuna_shell_control::FOLDER_DIALOG_NAMESPACE));
         for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
             window.set_anchor(edge, true);
         }

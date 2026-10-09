@@ -2,15 +2,17 @@
 
 #[cfg(test)]
 mod protocol_version_tests {
-    use roost_shell_control::{ProtocolVersion, CURRENT_VERSION};
+    use tuna_shell_control::{ProtocolVersion, CURRENT_VERSION};
 
     #[test]
     fn shipped_input_minor_accepts_current_and_rejects_future() {
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 27));
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 28));
         assert!(ProtocolVersion::new(0, 24).is_compatible_with(&CURRENT_VERSION));
         assert!(ProtocolVersion::new(0, 25).is_compatible_with(&CURRENT_VERSION));
         assert!(ProtocolVersion::new(0, 26).is_compatible_with(&CURRENT_VERSION));
-        assert!(!ProtocolVersion::new(0, 28).is_compatible_with(&CURRENT_VERSION));
+        assert!(ProtocolVersion::new(0, 27).is_compatible_with(&CURRENT_VERSION));
+        assert!(ProtocolVersion::new(0, 28).is_compatible_with(&CURRENT_VERSION));
+        assert!(!ProtocolVersion::new(0, 29).is_compatible_with(&CURRENT_VERSION));
     }
 
     #[test]
@@ -46,8 +48,8 @@ mod protocol_version_tests {
         let major = CURRENT_VERSION.major;
         let minor = CURRENT_VERSION.minor;
         assert!(major > 0 || minor > 0); // At least one should be non-zero
-        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 27));
-        assert!(!ProtocolVersion::new(0, 28).is_compatible_with(&CURRENT_VERSION));
+        assert_eq!(CURRENT_VERSION, ProtocolVersion::new(0, 28));
+        assert!(!ProtocolVersion::new(0, 29).is_compatible_with(&CURRENT_VERSION));
     }
 
     #[test]
@@ -70,7 +72,7 @@ mod protocol_version_tests {
 
 #[cfg(test)]
 mod dynamic_workspace_count_tests {
-    use roost_shell_control::dynamic_workspace_count;
+    use tuna_shell_control::dynamic_workspace_count;
 
     #[test]
     fn returns_one_when_no_occupied_and_active_is_zero() {
@@ -124,7 +126,7 @@ mod dynamic_workspace_count_tests {
 
 #[cfg(test)]
 mod frame_encoding_decoding_tests {
-    use roost_shell_control::{
+    use tuna_shell_control::{
         decode_frame, encode_frame, DecodeError, Message, ProtocolVersion, CURRENT_VERSION,
     };
 
@@ -273,13 +275,13 @@ mod frame_encoding_decoding_tests {
             version: CURRENT_VERSION,
         };
         let frame = encode_frame(&msg);
-        assert!(frame.len() < roost_shell_control::MAX_FRAME_BYTES);
+        assert!(frame.len() < tuna_shell_control::MAX_FRAME_BYTES);
     }
 }
 
 #[cfg(test)]
 mod constants_tests {
-    use roost_shell_control::{MAX_FRAME_BYTES, MAX_TITLE_LEN};
+    use tuna_shell_control::{MAX_FRAME_BYTES, MAX_TITLE_LEN};
 
     #[test]
     fn max_frame_bytes_is_one_mib() {

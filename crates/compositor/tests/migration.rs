@@ -11,9 +11,9 @@
 
 use std::os::unix::net::UnixStream;
 
-use roost_compositor::windows::{WindowLayout, WindowManager};
-use roost_compositor::{State, TestCompositor};
 use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
+use tuna_compositor::windows::{WindowLayout, WindowManager};
+use tuna_compositor::{State, TestCompositor};
 use wayland_client::{
     protocol::{
         wl_callback::WlCallback, wl_compositor::WlCompositor, wl_output::WlOutput,
@@ -534,7 +534,7 @@ fn real_output_global_removal_reaches_clients() {
         PhysicalProperties {
             size: (0, 0).into(),
             subpixel: Subpixel::Unknown,
-            make: "Roost".to_owned(),
+            make: "Tuna Desktop".to_owned(),
             model: "Test".to_owned(),
         },
     );

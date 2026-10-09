@@ -66,7 +66,7 @@ def same_reference(before, after, profile):
 
 
 def trace_required(desktop, profile):
-    if desktop not in ('gnome', 'roost') or profile not in PROFILES:
+    if desktop not in ('gnome', 'tuna') or profile not in PROFILES:
         raise ValueError('unknown benchmark profile')
     return desktop == 'gnome' and profile == 'diagnostic'
 

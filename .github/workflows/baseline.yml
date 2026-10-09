@@ -9,7 +9,7 @@ on:
     - cron: "0 4 * * 1"
   pull_request:
     paths:
-      - scripts/roost-baseline
+      - scripts/tuna-baseline
       - .github/workflows/baseline.yml
 
 permissions:
@@ -34,7 +34,7 @@ jobs:
       - name: Free disk for the 5.7 GB ISO
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
       - run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf ffmpeg
-      - run: scripts/roost-baseline --out baseline-artifacts
+      - run: scripts/tuna-baseline --out baseline-artifacts
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:

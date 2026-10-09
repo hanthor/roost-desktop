@@ -135,7 +135,7 @@ fn main() {
     let surface = s.compositor.as_ref().unwrap().create_surface(&q, ());
     let xdg = s.wm.as_ref().unwrap().get_xdg_surface(&surface, &q, ());
     let top = xdg.get_toplevel(&q, ());
-    top.set_app_id("roost-window-icon-probe".into());
+    top.set_app_id("tuna-window-icon-probe".into());
     top.set_title("Window Icon Probe".into());
     let icons = s.icons.as_ref().unwrap();
     let icon = icons.create_icon(&q, ());
@@ -182,7 +182,7 @@ fn x11_hints() {
         window,
         AtomEnum::WM_CLASS,
         AtomEnum::STRING,
-        b"roost-hints-probe\0RoostHintsProbe\0",
+        b"tuna-hints-probe\0TunaHintsProbe\0",
     )
     .unwrap();
     conn.change_property8(

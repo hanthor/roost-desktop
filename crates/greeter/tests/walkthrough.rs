@@ -1,5 +1,5 @@
 //! End-to-end walkthrough (headless): enumerate fixture sessions,
-// pick Roost, run the full auth conversation against the scripted fake
+// pick Tuna Desktop, run the full auth conversation against the scripted fake
 //! daemon, and hand off to session start. The GTK window is excluded
 //! by design (needs a display); it renders from the same model proven
 //! here. Cold boot and real PAM stay manual per docs/greeter-vm-acceptance.md.
@@ -11,7 +11,7 @@ use std::thread;
 
 use fake_greetd::{run_script, secret_prompt, Step};
 use greetd_ipc::Response;
-use roost_greeter::{
+use tuna_greeter::{
     client::GreeterClient,
     model::{GreeterModel, ModelEvent},
     session::enumerate_dirs,
@@ -20,7 +20,7 @@ use roost_greeter::{
 
 #[test]
 fn full_sign_in_walkthrough() {
-    // 1. Sessions enumerate from fixtures with Roost default.
+    // 1. Sessions enumerate from fixtures with Tuna Desktop default.
     let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let listing = enumerate_dirs(&[&dir]);
     assert!(!listing.entries.is_empty());
@@ -57,7 +57,7 @@ fn full_sign_in_walkthrough() {
     let mut client = GreeterClient::from_stream(b);
     let mut model = GreeterModel::new();
     model.begin_user("ada");
-    model.session = Some(roost_greeter::model::SessionRef {
+    model.session = Some(tuna_greeter::model::SessionRef {
         name: chosen.name.clone(),
         command: chosen.command.clone(),
     });

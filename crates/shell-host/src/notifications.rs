@@ -30,7 +30,7 @@ pub const MAX_BANNERS: usize = 3;
 /// How many notifications history retains (oldest drop first).
 pub const MAX_HISTORY: usize = 50;
 /// Shell state dir name under `$XDG_STATE_HOME`.
-pub const STATE_DIR_NAME: &str = "roost-shell";
+pub const STATE_DIR_NAME: &str = "tuna-shell";
 /// Versioned notification queue file name.
 pub const QUEUE_FILE: &str = "notifications.json";
 /// Queue file schema version (a mismatch loads as empty).
@@ -259,7 +259,7 @@ fn decode_notification(item: &serde_json::Value) -> Option<Notification> {
     })
 }
 
-/// `$XDG_STATE_HOME/roost-shell` (default `~/.local/state/roost-shell`),
+/// `$XDG_STATE_HOME/tuna-shell` (default `~/.local/state/tuna-shell`),
 /// or `None` when neither resolves (#49: never `/tmp`).
 pub fn state_dir() -> Option<PathBuf> {
     crate::xdg::state_home().map(|base| base.join(STATE_DIR_NAME))
@@ -425,7 +425,7 @@ impl NotificationCenter {
     fn persist(&self) {
         if let Some(path) = self.queue_path.as_ref() {
             if let Err(e) = self.save(path) {
-                eprintln!("roost-shell-host: notification queue save failed: {e}");
+                eprintln!("tuna-shell-host: notification queue save failed: {e}");
             }
         }
     }

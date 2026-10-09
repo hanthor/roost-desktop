@@ -23,7 +23,7 @@ pub struct LoginView {
     pub prompt_secret: bool,
     /// Whether the answer field + login button are sensitive.
     pub input_sensitive: bool,
-    /// Session picker rows (names), Roost default first.
+    /// Session picker rows (names), Tuna Desktop default first.
     pub sessions: Vec<String>,
     /// Selected session index.
     pub selected_session: usize,
@@ -38,7 +38,7 @@ pub fn render_snapshot(
     let _ = users;
     let current = model.current_prompt();
     LoginView {
-        title: "Sign in to Roost".to_string(),
+        title: "Sign in to Tuna Desktop".to_string(),
         notice: model.notice.clone(),
         prompt: current.map(|p| p.text.clone()),
         prompt_secret: current.is_some_and(|p| p.secret),
@@ -122,8 +122,8 @@ mod tests {
                 is_default: false,
             },
             SessionEntry {
-                name: "Roost".to_string(),
-                command: vec!["roost-session".into()],
+                name: "Tuna Desktop".to_string(),
+                command: vec!["tuna-session".into()],
                 source: Default::default(),
                 is_default: true,
             },
@@ -133,11 +133,11 @@ mod tests {
     #[test]
     fn empty_model_renders_idle_window() {
         let view = render_snapshot(&GreeterModel::new(), &sessions(), &[]);
-        assert_eq!(view.title, "Sign in to Roost");
+        assert_eq!(view.title, "Sign in to Tuna Desktop");
         assert!(view.notice.is_none());
         assert!(view.prompt.is_none());
         assert!(view.input_sensitive);
-        assert_eq!(view.sessions, vec!["Sway", "Roost"]);
+        assert_eq!(view.sessions, vec!["Sway", "Tuna Desktop"]);
         assert_eq!(view.selected_session, 1);
     }
 

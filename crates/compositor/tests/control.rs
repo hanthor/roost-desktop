@@ -4,12 +4,12 @@ use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::time::Duration;
 
-use roost_compositor::control::{
+use tuna_compositor::control::{
     ControlConn, ControlError, ControlHub, ControlServer, Emitted, Handled, Session,
 };
-use roost_compositor::state::{system_millis, StateModel, TokenStore, MAX_CHANGE_LOG};
-use roost_compositor::SEAT_NAME;
-use roost_shell_control::{
+use tuna_compositor::state::{system_millis, StateModel, TokenStore, MAX_CHANGE_LOG};
+use tuna_compositor::SEAT_NAME;
+use tuna_shell_control::{
     decode_frame, encode_frame, ActivationToken, CommandKind, CommandStatus, DecodeError,
     ErrorKind, Message, OutputInfo, ProtocolVersion, StateOp, CURRENT_VERSION,
 };
@@ -225,7 +225,7 @@ fn unknown_message_kind_gets_typed_error() {
 
 #[test]
 fn oversize_frame_gets_typed_error_and_drop() {
-    use roost_shell_control::MAX_FRAME_BYTES;
+    use tuna_shell_control::MAX_FRAME_BYTES;
     let mut model = StateModel::new();
     let (conn, mut client) = pair();
     let mut session = handshake(conn, &mut client, &model);

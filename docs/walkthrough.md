@@ -1,10 +1,10 @@
 # Walkthrough
 
-Roost's features as they look today. Every frame is taken by the GTK
-shell proof (`scripts/roost-gtk-shell-proof`) in a nested session, the
+Tuna Desktop's features as they look today. Every frame is taken by the GTK
+shell proof (`scripts/tuna-gtk-shell-proof`) in a nested session, the
 same run CI makes on every change, so the windows are the proof's test
 windows and the services are its stubs. Regenerate with
-`scripts/roost-walkthrough regen`; the list of features lives in
+`scripts/tuna-walkthrough regen`; the list of features lives in
 `docs/walkthrough.tsv`. How each feature compares with GNOME 51 is in
 the [parity ledger](parity-ledger.md).
 
@@ -256,7 +256,7 @@ Pressing a group expands it to every card, under the app's name and a Collapse b
 
 ### Input methods
 
-IBus composes as in GNOME: pinyin waits in the preedit and Space commits the hanzi (a test engine; roost-ibus-bridge is IBus's client). (`P-IN-01`)
+IBus composes as in GNOME: pinyin waits in the preedit and Space commits the hanzi (a test engine; tuna-ibus-bridge is IBus's client). (`P-IN-01`)
 
 ![Input methods](walkthrough/ime.png)
 

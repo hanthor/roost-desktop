@@ -1,38 +1,38 @@
-# CI fixtures on the published flavor; no Roost or greeter payload replacement.
+# CI fixtures on the published flavor; no Tuna Desktop or greeter payload replacement.
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-COPY packaging/marlin/vm-lane/roost-vm-lifecycle /usr/libexec/roost-vm-lifecycle
-COPY packaging/marlin/vm-lane/roost-vm-input /usr/libexec/roost-vm-input
-COPY packaging/marlin/vm-lane/roost-vm-profile /usr/libexec/roost-vm-profile
-COPY packaging/marlin/vm-lane/roost-vm-lane.tmpfiles /usr/lib/tmpfiles.d/roost-vm-lane.conf
-COPY packaging/marlin/vm-lane/journald.conf /usr/lib/systemd/journald.conf.d/90-roost-vm-lane.conf
-COPY packaging/marlin/vm-lane/kargs.toml /usr/lib/bootc/kargs.d/90-roost-vm-lane.toml
-COPY packaging/marlin/vm-lane/roost-vm-health /usr/libexec/roost-vm-health
-COPY packaging/marlin/vm-lane/roost-vm-health.service /usr/lib/systemd/system/roost-vm-health.service
+COPY packaging/marlin/vm-lane/tuna-vm-lifecycle /usr/libexec/tuna-vm-lifecycle
+COPY packaging/marlin/vm-lane/tuna-vm-input /usr/libexec/tuna-vm-input
+COPY packaging/marlin/vm-lane/tuna-vm-profile /usr/libexec/tuna-vm-profile
+COPY packaging/marlin/vm-lane/tuna-vm-lane.tmpfiles /usr/lib/tmpfiles.d/tuna-vm-lane.conf
+COPY packaging/marlin/vm-lane/journald.conf /usr/lib/systemd/journald.conf.d/90-tuna-vm-lane.conf
+COPY packaging/marlin/vm-lane/kargs.toml /usr/lib/bootc/kargs.d/90-tuna-vm-lane.toml
+COPY packaging/marlin/vm-lane/tuna-vm-health /usr/libexec/tuna-vm-health
+COPY packaging/marlin/vm-lane/tuna-vm-health.service /usr/lib/systemd/system/tuna-vm-health.service
 
-RUN mkdir -p /usr/share/roost-vm \
-    && pacman -Q roost > /usr/share/roost-vm/shipped-package.txt \
-    && pacman -Q > /usr/share/roost-vm/shipped-packages.txt \
-    && sha256sum /usr/bin/roost-session /usr/bin/roost-compositor \
-         /usr/bin/roost-shell-host /usr/bin/roost-shell-gtk \
-         /usr/bin/roost-ibus-bridge /usr/bin/roost-greeter \
+RUN mkdir -p /usr/share/tuna-vm \
+    && pacman -Q tuna-desktop > /usr/share/tuna-vm/shipped-package.txt \
+    && pacman -Q > /usr/share/tuna-vm/shipped-packages.txt \
+    && sha256sum /usr/bin/tuna-session /usr/bin/tuna-compositor \
+         /usr/bin/tuna-shell-host /usr/bin/tuna-shell-gtk \
+         /usr/bin/tuna-ibus-bridge /usr/bin/tuna-greeter \
          /usr/libexec/tunaos/greetd-session /etc/greetd/config.toml /etc/greetd/gtkgreet.css \
-         /etc/greetd/environments > /usr/share/roost-vm/shipped-payload.sha256 \
+         /etc/greetd/environments > /usr/share/tuna-vm/shipped-payload.sha256 \
     && test "$(readlink -f /bin/sh)" = /usr/bin/bash \
-    && grep -qx 'roost-session' /etc/greetd/environments \
+    && grep -qx 'tuna-session' /etc/greetd/environments \
     && grep -q '/usr/libexec/tunaos/greetd-session' /etc/greetd/config.toml \
     && ! grep -q '\[initial_session\]' /etc/greetd/config.toml \
     && pacman -Sy --noconfirm \
     && pacman -S --needed --noconfirm qemu-guest-agent python python-gobject grim wtype wayland-utils gnome-disk-utility gnome-system-monitor \
-    && useradd -M -d /home/roost-test -s /bin/bash -U roost-test \
-    && echo 'roost-test:roost' | chpasswd \
-    && chmod 0755 /usr/libexec/roost-vm-lifecycle /usr/libexec/roost-vm-input \
-    && printf 'L+ /var/home/roost-test/.profile - roost-test roost-test - /usr/libexec/roost-vm-profile\n' >> /usr/lib/tmpfiles.d/roost-vm-lane.conf \
-    && systemctl enable roost-vm-health.service \
+    && useradd -M -d /home/tuna-test -s /bin/bash -U tuna-test \
+    && echo 'tuna-test:tuna' | chpasswd \
+    && chmod 0755 /usr/libexec/tuna-vm-lifecycle /usr/libexec/tuna-vm-input \
+    && printf 'L+ /var/home/tuna-test/.profile - tuna-test tuna-test - /usr/libexec/tuna-vm-profile\n' >> /usr/lib/tmpfiles.d/tuna-vm-lane.conf \
+    && systemctl enable tuna-vm-health.service \
     && systemctl add-wants multi-user.target qemu-guest-agent.service \
-    && sha256sum --check /usr/share/roost-vm/shipped-payload.sha256 \
-    && pacman -Q > /usr/share/roost-vm/fixture-packages.txt \
-    && python3 -c 'from pathlib import Path; p=Path("/usr/share/roost-vm"); before=set((p/"shipped-packages.txt").read_text().splitlines()); after=set((p/"fixture-packages.txt").read_text().splitlines()); assert before <= after, "fixture installation changed shipped package versions"'
+    && sha256sum --check /usr/share/tuna-vm/shipped-payload.sha256 \
+    && pacman -Q > /usr/share/tuna-vm/fixture-packages.txt \
+    && python3 -c 'from pathlib import Path; p=Path("/usr/share/tuna-vm"); before=set((p/"shipped-packages.txt").read_text().splitlines()); after=set((p/"fixture-packages.txt").read_text().splitlines()); assert before <= after, "fixture installation changed shipped package versions"'
 
-LABEL org.opencontainers.image.title="marlin-roost-published-vm-fixtures"
+LABEL org.opencontainers.image.title="marlin-tuna-published-vm-fixtures"

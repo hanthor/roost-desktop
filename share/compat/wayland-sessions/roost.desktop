@@ -1,0 +1,17 @@
+# tuna-rename: keep-file
+# One-release compatibility entry for the old session name (#505),
+# installed as /usr/share/wayland-sessions/roost.desktop. Display
+# managers that remember the "roost" session (GDM keeps it in
+# AccountsService) still start Tuna Desktop after an upgrade instead of
+# falling back to another desktop. NoDisplay keeps it out of session
+# pickers (GDM's list and Tuna's greeter skip it), while GDM still
+# launches a remembered session that has it; only Hidden would remove it.
+[Desktop Entry]
+Name=Tuna Desktop
+Comment=Tuna Desktop under its old session name (compatibility)
+Exec=tuna-session
+TryExec=tuna-session
+Type=Application
+DesktopNames=Tuna;GNOME;
+NoDisplay=true
+X-GDM-SessionRegisters=true

@@ -22,7 +22,7 @@ actions stay safe without the normal shell.
   on compositor exit. A systemd user unit is deferred to production
   work (004/006) and explicitly out of slice 1.
 - Env hygiene for nested-session safety: unique socket name
-  (e.g. `roost-nested-<pid>`), `WAYLAND_DISPLAY` set for the child only,
+  (e.g. `tuna-nested-<pid>`), `WAYLAND_DISPLAY` set for the child only,
   parent host environment never mutated; nested window carries an
   identifying title; host grab/ungrab escape key documented.
 - Recovery affordance for slice 1: compositor-owned emergency overlay
@@ -57,5 +57,5 @@ actions stay safe without the normal shell.
   compositor-owned overlay (model-served list, relaunch, input shield)
   wired into the nested loop; proven by the 100-run fault harness
   (kill/disconnect/stall/crash-loop/malformed/gap) with redacted
-  per-run artifacts, and reproducible via `scripts/roost-nested`
+  per-run artifacts, and reproducible via `scripts/tuna-nested`
   (`docs/nested-session.md`).

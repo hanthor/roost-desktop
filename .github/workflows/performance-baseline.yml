@@ -3,11 +3,11 @@ on:
   pull_request:
     paths:
       - .github/workflows/performance-baseline.yml
-      - scripts/roost-vm-perf
-      - scripts/roost-perf-profile-pairs
-      - scripts/roost-frame-pacer-build
-      - scripts/lib/roost-frame-pacer.c
-      - scripts/lib/roost-perf-*.py
+      - scripts/tuna-vm-perf
+      - scripts/tuna-perf-profile-pairs
+      - scripts/tuna-frame-pacer-build
+      - scripts/lib/tuna-frame-pacer.c
+      - scripts/lib/tuna-perf-*.py
       - scripts/lib/perf_vm_lifetime.py
       - scripts/lib/gnome_sysprof.py
       - scripts/lib/gnome_reference.py
@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       package_run:
-        description: Successful main ci run containing roost-arch (empty selects latest)
+        description: Successful main ci run containing tuna-arch (empty selects latest)
         required: false
         type: string
 permissions:
@@ -29,11 +29,11 @@ jobs:
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - run: python3 scripts/lib/roost-perf-tests.py
-      - run: python3 scripts/lib/roost-perf-repeatability-tests.py
-      - run: python3 scripts/lib/roost-perf-vm-lifetime-tests.py
-      - run: python3 scripts/lib/roost-perf-reference-tests.py
-      - run: python3 scripts/lib/roost-kernel-trace-tests.py
+      - run: python3 scripts/lib/tuna-perf-tests.py
+      - run: python3 scripts/lib/tuna-perf-repeatability-tests.py
+      - run: python3 scripts/lib/tuna-perf-vm-lifetime-tests.py
+      - run: python3 scripts/lib/tuna-perf-reference-tests.py
+      - run: python3 scripts/lib/tuna-kernel-trace-tests.py
       - name: Select a successful trusted main package
         env:
           GH_TOKEN: ${{ github.token }}
@@ -44,17 +44,17 @@ jobs:
           run="$PACKAGE_RUN"
           if [[ -z "$run" ]]; then
             gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&event=push&status=success&per_page=20" > perf-artifacts/package-candidates-api.json
-            run=$(python3 scripts/lib/roost-perf-payload.py latest-run --runs perf-artifacts/package-candidates-api.json --repository "$GITHUB_REPOSITORY" --out perf-artifacts/package-candidate-selection.json)
+            run=$(python3 scripts/lib/tuna-perf-payload.py latest-run --runs perf-artifacts/package-candidates-api.json --repository "$GITHUB_REPOSITORY" --out perf-artifacts/package-candidate-selection.json)
           fi
           [[ "$run" =~ ^[0-9]+$ ]]
           printf '%s\n' "$run" > perf-artifacts/selected-package-run
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run" > perf-artifacts/package-run.json
           jq -e '.head_branch == "main" and .event == "push" and .conclusion == "success"' perf-artifacts/package-run.json
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/artifacts?name=roost-arch&per_page=100" > perf-artifacts/package-artifacts-api.json
-          jq -e '.total_count <= 100 and (.artifacts | length) == .total_count and ([.artifacts[] | select(.name == "roost-arch" and .expired == false)] | length) == 1' perf-artifacts/package-artifacts-api.json
-          artifact=$(jq -r '.artifacts[] | select(.name == "roost-arch" and .expired == false) | .id' perf-artifacts/package-artifacts-api.json)
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/artifacts?name=tuna-arch&per_page=100" > perf-artifacts/package-artifacts-api.json
+          jq -e '.total_count <= 100 and (.artifacts | length) == .total_count and ([.artifacts[] | select(.name == "tuna-arch" and .expired == false)] | length) == 1' perf-artifacts/package-artifacts-api.json
+          artifact=$(jq -r '.artifacts[] | select(.name == "tuna-arch" and .expired == false) | .id' perf-artifacts/package-artifacts-api.json)
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact" > perf-artifacts/package-artifact-api.json
-          python3 scripts/lib/roost-perf-payload.py select --run-id "$run" --run perf-artifacts/package-run.json --artifact perf-artifacts/package-artifact-api.json --out perf-artifacts/package-selection.json
+          python3 scripts/lib/tuna-perf-payload.py select --run-id "$run" --run perf-artifacts/package-run.json --artifact perf-artifacts/package-artifact-api.json --out perf-artifacts/package-selection.json
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact/zip" > perf-artifacts/package-artifact.zip
       - name: Prepare KVM and disk space
         run: |
@@ -69,8 +69,8 @@ jobs:
           sudo mkdir -p /mnt/perf && sudo chown "$(id -u):$(id -g)" /mnt/perf
           sudo apt-get -o Acquire::Retries=3 update -qq
           sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf shellcheck zstd
-          shellcheck scripts/roost-frame-pacer-build
-          python3 scripts/lib/roost-perf-payload-tests.py
+          shellcheck scripts/tuna-frame-pacer-build
+          python3 scripts/lib/tuna-perf-payload-tests.py
       - name: Build one shared preview payload
         id: shared_payload
         run: |
@@ -78,11 +78,11 @@ jobs:
           # shellcheck disable=SC2024
           set -euo pipefail
           mkdir -p arch-artifacts
-          python3 scripts/lib/roost-perf-payload.py archive --zip perf-artifacts/package-artifact.zip --report perf-artifacts/package-selection.json --package arch-artifacts/selected.pkg.tar.zst --out perf-artifacts/package-payload.json
-          cp arch-artifacts/selected.pkg.tar.zst roost.pkg.tar.zst
-          python3 scripts/lib/roost-perf-payload.py copy --package roost.pkg.tar.zst --report perf-artifacts/package-payload.json --out perf-artifacts/package-copy.json
+          python3 scripts/lib/tuna-perf-payload.py archive --zip perf-artifacts/package-artifact.zip --report perf-artifacts/package-selection.json --package arch-artifacts/selected.pkg.tar.zst --out perf-artifacts/package-payload.json
+          cp arch-artifacts/selected.pkg.tar.zst tuna.pkg.tar.zst
+          python3 scripts/lib/tuna-perf-payload.py copy --package tuna.pkg.tar.zst --report perf-artifacts/package-payload.json --out perf-artifacts/package-copy.json
           package_sha=$(jq -r '.package.sha256' perf-artifacts/package-payload.json)
-          sha256sum roost.pkg.tar.zst > perf-artifacts/package.sha256
+          sha256sum tuna.pkg.tar.zst > perf-artifacts/package.sha256
           # One coherent distribution upgrade supplies BOTH explicit profiles.
           sudo podman build -f packaging/marlin/perf/Containerfile.baseline --target gnome-baseline -t localhost/marlin-gnome51-coherent:base . 2>&1 | tee perf-artifacts/coherent-build.log
           coherent_image=$(sudo podman inspect localhost/marlin-gnome51-coherent:base --format '{{.Id}}')
@@ -92,28 +92,28 @@ jobs:
             if [[ "$profile" == stock ]]; then profile_artifacts=perf-artifacts/stock; fi
             mkdir -p "$profile_artifacts"
             sudo podman build -f packaging/marlin/perf/Containerfile.baseline --build-arg "COHERENT_BASE=$coherent_image" --target "$profile-reference" -t localhost/marlin-gnome51-perf:base . 2>&1 | tee "$profile_artifacts/baseline-build.log"
-            sudo podman build -f packaging/marlin/Containerfile --build-arg BASE_IMAGE=localhost/marlin-gnome51-perf:base --build-arg PERF_PINNED_BASELINE=true --build-arg ROOST_PKG=roost.pkg.tar.zst --build-arg ROOST_PKG_SHA256="$package_sha" -t "localhost/marlin-roost-preview:$profile" . 2>&1 | tee "$profile_artifacts/shared-preview-build.log"
-            sudo podman inspect "localhost/marlin-roost-preview:$profile" --format '{{.Id}}' | tee "shared-image-id-$profile"
+            sudo podman build -f packaging/marlin/Containerfile --build-arg BASE_IMAGE=localhost/marlin-gnome51-perf:base --build-arg PERF_PINNED_BASELINE=true --build-arg TUNA_PKG=tuna.pkg.tar.zst --build-arg TUNA_PKG_SHA256="$package_sha" -t "localhost/marlin-tuna-preview:$profile" . 2>&1 | tee "$profile_artifacts/shared-preview-build.log"
+            sudo podman inspect "localhost/marlin-tuna-preview:$profile" --format '{{.Id}}' | tee "shared-image-id-$profile"
             cp "shared-image-id-$profile" "$profile_artifacts/shared-image-id"
-            python3 scripts/lib/roost-perf-payload.py copy --package roost.pkg.tar.zst --report perf-artifacts/package-payload.json --out "$profile_artifacts/package-copy-after-build.json"
-            sudo podman run --rm "localhost/marlin-roost-preview:$profile" pacman -Q roost > "$profile_artifacts/installed-roost-version"
-            sudo podman run --rm "localhost/marlin-roost-preview:$profile" pacman -Ql roost > "$profile_artifacts/installed-roost-files"
+            python3 scripts/lib/tuna-perf-payload.py copy --package tuna.pkg.tar.zst --report perf-artifacts/package-payload.json --out "$profile_artifacts/package-copy-after-build.json"
+            sudo podman run --rm "localhost/marlin-tuna-preview:$profile" pacman -Q tuna-desktop > "$profile_artifacts/installed-tuna-version"
+            sudo podman run --rm "localhost/marlin-tuna-preview:$profile" pacman -Ql tuna-desktop > "$profile_artifacts/installed-tuna-files"
             # Copy actual installed critical bytes without executing the container.
-            container=$(sudo podman create "localhost/marlin-roost-preview:$profile" /usr/bin/true)
+            container=$(sudo podman create "localhost/marlin-tuna-preview:$profile" /usr/bin/true)
             trap 'sudo podman rm "$container"' EXIT
             while IFS= read -r member; do
             mkdir -p "$profile_artifacts/installed-payload/$(dirname "$member")"
             sudo podman cp "$container:/$member" "$profile_artifacts/installed-payload/$member"
             done < <(jq -r '.required_members | keys[]' perf-artifacts/package-payload.json)
             sudo chown -R "$(id -u):$(id -g)" "$profile_artifacts/installed-payload"
-            python3 scripts/lib/roost-perf-payload.py installed --installed "$profile_artifacts/installed-payload" --pacman-version "$profile_artifacts/installed-roost-version" --pacman-files "$profile_artifacts/installed-roost-files" --report perf-artifacts/package-payload.json --out "$profile_artifacts/installed-payload.json"
+            python3 scripts/lib/tuna-perf-payload.py installed --installed "$profile_artifacts/installed-payload" --pacman-version "$profile_artifacts/installed-tuna-version" --pacman-files "$profile_artifacts/installed-tuna-files" --report perf-artifacts/package-payload.json --out "$profile_artifacts/installed-payload.json"
             mkdir -p "$profile_artifacts/runtime-versions"
             while IFS= read -r loader; do
-            sudo podman run --rm "localhost/marlin-roost-preview:$profile" sh -eu -c 'test -f "$1" && test -x "$1" && sha256sum "$1"' sh "$loader"
+            sudo podman run --rm "localhost/marlin-tuna-preview:$profile" sh -eu -c 'test -f "$1" && test -x "$1" && sha256sum "$1"' sh "$loader"
             done < <(jq -r '.required_members[] | select(.elf) | .elf.interpreter' perf-artifacts/package-payload.json | sort -u) | tee "$profile_artifacts/installed-interpreters.log"
-            for bin in roost-compositor roost-session roost-shell-host roost-shell-gtk roost-ibus-bridge roost-greeter; do
-            sudo podman run --rm "localhost/marlin-roost-preview:$profile" sh -eu -c 'command -v "$1" && ldd "/usr/bin/$1"' sh "$bin" > "$profile_artifacts/runtime-versions/$bin.ldd" 2>&1
-            if sudo podman run --rm "localhost/marlin-roost-preview:$profile" "$bin" --version > "$profile_artifacts/runtime-versions/$bin.version" 2>&1; then
+            for bin in tuna-compositor tuna-session tuna-shell-host tuna-shell-gtk tuna-ibus-bridge tuna-greeter; do
+            sudo podman run --rm "localhost/marlin-tuna-preview:$profile" sh -eu -c 'command -v "$1" && ldd "/usr/bin/$1"' sh "$bin" > "$profile_artifacts/runtime-versions/$bin.ldd" 2>&1
+            if sudo podman run --rm "localhost/marlin-tuna-preview:$profile" "$bin" --version > "$profile_artifacts/runtime-versions/$bin.version" 2>&1; then
               printf '0\n' > "$profile_artifacts/runtime-versions/$bin.status"
             else
               status=$?
@@ -122,29 +122,29 @@ jobs:
               exit "$status"
             fi
             done
-            python3 scripts/lib/roost-perf-payload.py runtime --runtime "$profile_artifacts/runtime-versions" --report perf-artifacts/package-payload.json --out "$profile_artifacts/installed-runtime.json"
+            python3 scripts/lib/tuna-perf-payload.py runtime --runtime "$profile_artifacts/runtime-versions" --report perf-artifacts/package-payload.json --out "$profile_artifacts/installed-runtime.json"
             sudo podman rm "$container"
             trap - EXIT
             sudo podman inspect ghcr.io/tuna-os/marlin:gnome --format '{{.Digest}}' | tee base-digest
-            sudo podman run --rm "localhost/marlin-roost-preview:$profile" gnome-shell --version | tee "$profile_artifacts/gnome-version"
+            sudo podman run --rm "localhost/marlin-tuna-preview:$profile" gnome-shell --version | tee "$profile_artifacts/gnome-version"
             grep -Eq '^GNOME Shell 51([. ]|$)' "$profile_artifacts/gnome-version"
-            sudo podman run --rm "localhost/marlin-roost-preview:$profile" pacman -Q | tee "$profile_artifacts/baseline-packages.txt"
-            sudo podman run --rm "localhost/marlin-roost-preview:$profile" cat /usr/share/roost-perf-baseline-critical.sha256 > "$profile_artifacts/baseline-critical.sha256"
+            sudo podman run --rm "localhost/marlin-tuna-preview:$profile" pacman -Q | tee "$profile_artifacts/baseline-packages.txt"
+            sudo podman run --rm "localhost/marlin-tuna-preview:$profile" cat /usr/share/tuna-perf-baseline-critical.sha256 > "$profile_artifacts/baseline-critical.sha256"
             if [[ "$profile" == diagnostic ]]; then
             for file in PKGBUILD release-trace-context.patch frame-source-evidence.patch drained-capture-start.patch sha256sums; do
-            sudo podman run --rm "localhost/marlin-roost-preview:$profile" cat "/usr/share/roost-perf-mutter-profiler/$file" > "$profile_artifacts/mutter-profiler-$file"
+            sudo podman run --rm "localhost/marlin-tuna-preview:$profile" cat "/usr/share/tuna-perf-mutter-profiler/$file" > "$profile_artifacts/mutter-profiler-$file"
             done
             fi
-            sudo podman run --rm "localhost/marlin-roost-preview:$profile" cat /usr/share/roost-perf-reference.json > "$profile_artifacts/reference-image.json"
+            sudo podman run --rm "localhost/marlin-tuna-preview:$profile" cat /usr/share/tuna-perf-reference.json > "$profile_artifacts/reference-image.json"
             chmod 0444 "$profile_artifacts/reference-image.json"
           done
       - name: Measure three alternating diagnostic pairs
-        run: scripts/roost-perf-profile-pairs diagnostic
+        run: scripts/tuna-perf-profile-pairs diagnostic
       - name: Measure three alternating stock pairs
         # A rejected diagnostic capture stays a failed step. Stock still runs
         # from its separately guarded immutable image on this original host.
         if: ${{ !cancelled() && steps.shared_payload.outcome == 'success' }}
-        run: scripts/roost-perf-profile-pairs stock
+        run: scripts/tuna-perf-profile-pairs stock
       - name: Upload performance artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()

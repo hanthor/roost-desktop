@@ -180,7 +180,7 @@ pub fn start() -> IdleMonitor {
         inner: inner.clone(),
     };
     let _ = std::thread::Builder::new()
-        .name("roost-idle-monitor".into())
+        .name("tuna-idle-monitor".into())
         .spawn(move || {
             let conn = match zbus::blocking::connection::Builder::session()
                 .and_then(|b| b.serve_at(ROOT, zbus::fdo::ObjectManager))
@@ -189,17 +189,17 @@ pub fn start() -> IdleMonitor {
             {
                 Ok(conn) => conn,
                 Err(e) => {
-                    eprintln!("roost-compositor: idle monitor: no session bus: {e}");
+                    eprintln!("tuna-compositor: idle monitor: no session bus: {e}");
                     return;
                 }
             };
             let flags = zbus::fdo::RequestNameFlags::DoNotQueue.into();
             match conn.request_name_with_flags(NAME, flags) {
                 Ok(zbus::fdo::RequestNameReply::PrimaryOwner) => {
-                    eprintln!("roost-compositor: serving {NAME}");
+                    eprintln!("tuna-compositor: serving {NAME}");
                 }
                 _ => {
-                    eprintln!("roost-compositor: {NAME} is taken");
+                    eprintln!("tuna-compositor: {NAME} is taken");
                     return;
                 }
             }

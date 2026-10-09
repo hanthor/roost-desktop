@@ -1,12 +1,12 @@
 [package]
-name = "roost-shell-gtk"
+name = "tuna-shell-gtk"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
-description = "Roost shell drawn with GTK4/libadwaita (ADR 0006): GNOME 51 panel, calendar, quick settings"
+description = "Tuna Desktop shell drawn with GTK4/libadwaita (ADR 0006): GNOME 51 panel, calendar, quick settings"
 
 [[bin]]
-name = "roost-shell-gtk"
+name = "tuna-shell-gtk"
 path = "src/main.rs"
 
 [dependencies]
@@ -20,8 +20,8 @@ gio.workspace = true
 jiff.workspace = true
 libc = "0.2"
 serde_json.workspace = true
-roost-shell-host = { path = "../shell-host", version = "0.1.0" }
-roost-shell-control = { path = "../shell-control-schema", version = "0.1.0" }
+tuna-shell-host = { path = "../shell-host", version = "0.1.0" }
+tuna-shell-control = { path = "../shell-control-schema", version = "0.1.0" }
 
 [build-dependencies]
 # GNOME Shell's own icons, compiled in as a GResource (build.rs).

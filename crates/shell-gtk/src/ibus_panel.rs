@@ -5,7 +5,7 @@
 //! disable` (so no `ibus-ui-gtk3` runs) and owns
 //! `org.freedesktop.IBus.Panel` on IBus's own bus through
 //! `IBus.PanelService`. The daemon then routes to that name what an
-//! input context cannot show itself: `roost-ibus-bridge`, like GNOME
+//! input context cannot show itself: `tuna-ibus-bridge`, like GNOME
 //! Shell's input method, declares preedit but not lookup-table or
 //! auxiliary-text capabilities, so the engine's candidates arrive here
 //! (`UpdateLookupTable`, `ShowLookupTable`, `HideLookupTable`,
@@ -30,8 +30,8 @@ use gtk4 as gtk;
 use gtk4::prelude::*;
 use gtk4::{gdk, gio, glib};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
-pub use roost_shell_host::ibus::text as ibus_text;
-use roost_shell_host::ibus::{address as ibus_address, debug};
+pub use tuna_shell_host::ibus::text as ibus_text;
+use tuna_shell_host::ibus::{address as ibus_address, debug};
 
 const PANEL_NAME: &str = "org.freedesktop.IBus.Panel";
 const PANEL_PATH: &str = "/org/freedesktop/IBus/Panel";
@@ -253,11 +253,11 @@ impl CandidatePopup {
     fn new(app: &gtk::Application) -> Rc<Self> {
         let window = gtk::Window::new();
         window.set_application(Some(app));
-        window.add_css_class("roost-ibus-candidates");
+        window.add_css_class("tuna-ibus-candidates");
         window.set_title(Some("Input Method Candidates"));
         window.init_layer_shell();
         window.set_layer(Layer::Overlay);
-        window.set_namespace(Some(roost_shell_control::IBUS_CANDIDATES_NAMESPACE));
+        window.set_namespace(Some(tuna_shell_control::IBUS_CANDIDATES_NAMESPACE));
         window.set_anchor(Edge::Top, true);
         window.set_anchor(Edge::Left, true);
         window.set_exclusive_zone(-1);
@@ -345,7 +345,7 @@ impl CandidatePopup {
                     let button = gesture.current_button();
                     let state = gesture.current_event_state().bits();
                     if debug() {
-                        eprintln!("roost-shell-gtk: ibus candidate {i} clicked (button {button})");
+                        eprintln!("tuna-shell-gtk: ibus candidate {i} clicked (button {button})");
                     }
                     ui.emit(
                         "CandidateClicked",
@@ -391,7 +391,7 @@ impl CandidatePopup {
             return;
         };
         if let Err(e) = conn.emit_signal(None, PANEL_PATH, PANEL_NAME, signal, args.as_ref()) {
-            eprintln!("roost-shell-gtk: IBus panel: {signal}: {e}");
+            eprintln!("tuna-shell-gtk: IBus panel: {signal}: {e}");
         }
     }
 
@@ -583,7 +583,7 @@ impl CandidatePopup {
             }
             previous_end = Some(start + length);
             lines.push(format!(
-                "roost-shell-gtk: ibus candidate {i} {} at {} {} {} {}",
+                "tuna-shell-gtk: ibus candidate {i} {} at {} {} {} {}",
                 row.label.label(),
                 ox + (sx + f64::from(b.x())).round() as i32,
                 oy + (sy + f64::from(b.y())).round() as i32,
@@ -610,7 +610,7 @@ impl CandidatePopup {
             if !conn.is_closed() {
                 return;
             }
-            eprintln!("roost-shell-gtk: IBus panel: the IBus bus closed");
+            eprintln!("tuna-shell-gtk: IBus panel: the IBus bus closed");
             self.conn.replace(None);
             self.reset();
         }
@@ -644,7 +644,7 @@ impl CandidatePopup {
         let info = match gio::DBusNodeInfo::for_xml(XML) {
             Ok(node) => node.lookup_interface(PANEL_NAME),
             Err(e) => {
-                eprintln!("roost-shell-gtk: IBus panel interface: {e}");
+                eprintln!("tuna-shell-gtk: IBus panel interface: {e}");
                 return;
             }
         };
@@ -665,7 +665,7 @@ impl CandidatePopup {
             })
             .build();
         if let Err(e) = registered {
-            eprintln!("roost-shell-gtk: IBus panel object: {e}");
+            eprintln!("tuna-shell-gtk: IBus panel object: {e}");
             return;
         }
         conn.call(
@@ -681,12 +681,12 @@ impl CandidatePopup {
             |reply| match reply.map(|r| r.child_value(0).get::<u32>()) {
                 // DBUS_REQUEST_NAME_REPLY_PRIMARY_OWNER / ALREADY_OWNER.
                 Ok(Some(1 | 4)) => {
-                    eprintln!("roost-shell-gtk: IBus panel: owns {PANEL_NAME} on the IBus bus");
+                    eprintln!("tuna-shell-gtk: IBus panel: owns {PANEL_NAME} on the IBus bus");
                 }
                 Ok(code) => {
-                    eprintln!("roost-shell-gtk: IBus panel: {PANEL_NAME} not owned ({code:?})")
+                    eprintln!("tuna-shell-gtk: IBus panel: {PANEL_NAME} not owned ({code:?})")
                 }
-                Err(e) => eprintln!("roost-shell-gtk: IBus panel: RequestName: {e}"),
+                Err(e) => eprintln!("tuna-shell-gtk: IBus panel: RequestName: {e}"),
             },
         );
         self.conn.replace(Some(conn));
@@ -694,7 +694,7 @@ impl CandidatePopup {
 }
 
 /// Become IBus's panel when IBus is installed: look for its bus every
-/// few seconds (roost-ibus-bridge starts the daemon), and again after
+/// few seconds (tuna-ibus-bridge starts the daemon), and again after
 /// it goes away. The poll keeps the popup for the shell's life.
 pub fn start(app: &gtk::Application) {
     if !ibus_installed() {
@@ -711,7 +711,7 @@ pub fn start(app: &gtk::Application) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roost_shell_host::ibus::text_variant as text;
+    use tuna_shell_host::ibus::text_variant as text;
 
     fn texts(items: &[&str]) -> glib::Variant {
         glib::Variant::array_from_iter_with_type(

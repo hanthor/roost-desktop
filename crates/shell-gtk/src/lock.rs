@@ -66,7 +66,7 @@ impl LockUi {
         {
             let weak = Rc::downgrade(&ui);
             ui.instance.connect_failed(move |_| {
-                eprintln!("roost-shell-gtk: the compositor refused the session lock");
+                eprintln!("tuna-shell-gtk: the compositor refused the session lock");
                 if let Some(ui) = weak.upgrade() {
                     ui.screens.borrow_mut().clear();
                 }
@@ -100,7 +100,7 @@ impl LockUi {
         if locked && !self.requested.get() {
             self.requested.set(true);
             if !self.instance.lock() {
-                eprintln!("roost-shell-gtk: session lock unavailable");
+                eprintln!("tuna-shell-gtk: session lock unavailable");
                 return;
             }
             // One lock window per monitor, assigned right after lock()
@@ -134,8 +134,8 @@ impl LockUi {
             return;
         }
         self.pending.set(None);
-        if std::env::var_os("ROOST_LOCK_TRACE").is_some() {
-            eprintln!("roost-shell-gtk: lock command result applied={applied}");
+        if std::env::var_os("TUNA_LOCK_TRACE").is_some() {
+            eprintln!("tuna-shell-gtk: lock command result applied={applied}");
         }
         for screen in self.screens.borrow().iter() {
             screen.entry.set_sensitive(true);
@@ -164,7 +164,7 @@ impl LockUi {
     fn screen(self: &Rc<Self>, app: &gtk::Application) -> gtk::Window {
         let window = gtk::Window::new();
         window.set_application(Some(app));
-        window.add_css_class("roost-lock");
+        window.add_css_class("tuna-lock");
         window.set_title(Some("Lock Screen"));
 
         // The clock page (unlock-dialog-clock).
@@ -349,10 +349,10 @@ impl LockUi {
                     if matches!(
                         key,
                         gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter | gtk::gdk::Key::ISO_Enter
-                    ) && std::env::var_os("ROOST_LOCK_TRACE").is_some()
+                    ) && std::env::var_os("TUNA_LOCK_TRACE").is_some()
                     {
                         eprintln!(
-                            "roost-shell-gtk: lock Return received sensitive={}",
+                            "tuna-shell-gtk: lock Return received sensitive={}",
                             entry.is_sensitive()
                         );
                     }
@@ -413,8 +413,8 @@ impl LockUi {
                 if ui.pending.get().is_some() {
                     return;
                 }
-                if std::env::var_os("ROOST_LOCK_TRACE").is_some() {
-                    eprintln!("roost-shell-gtk: lock password submitted");
+                if std::env::var_os("TUNA_LOCK_TRACE").is_some() {
+                    eprintln!("tuna-shell-gtk: lock password submitted");
                 }
                 let password = entry.text().to_string();
                 message.set_label("");

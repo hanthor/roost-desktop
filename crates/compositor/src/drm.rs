@@ -1,13 +1,13 @@
 //! DRM/KMS hardware session backend (#52).
 //!
 //! The nested winit backend draws into a window of a host session; this
-//! backend owns the display hardware itself, so Roost can start from a
+//! backend owns the display hardware itself, so Tuna Desktop can start from a
 //! TTY through greetd:
 //!
 //! - **Session**: libseat (logind or seatd) grants device access and
 //!   reports VT pause/activate. Ctrl+Alt+F1..F12 switches VTs.
 //! - **Device**: udev's primary GPU for the seat (or
-//!   `ROOST_DRM_DEVICE`), opened through the session; GBM allocates
+//!   `TUNA_DRM_DEVICE`), opened through the session; GBM allocates
 //!   scanout buffers and EGL/GLES renders into them.
 //! - **Outputs**: every connected connector with its preferred mode and
 //!   a free CRTC, tiled left to right in the same order the output
@@ -76,7 +76,7 @@ pub struct DrmOutput {
     /// Top-left in the global logical space: GNOME's arrangement from
     /// monitors.xml, else left-to-right.
     pub loc: (i32, i32),
-    /// Output scale from monitors.xml (`ROOST_SCALE` without one), #59.
+    /// Output scale from monitors.xml (`TUNA_SCALE` without one), #59.
     pub scale: f64,
     /// A frame is queued and its page flip has not completed yet.
     pub pending: bool,
@@ -92,7 +92,7 @@ impl DrmOutput {
         }
         let state = self.surface.surface().get_crtc(self.crtc);
         eprintln!(
-            "roost-compositor: drm: wake frame queued {} commit_pending={} crtc={state:?}",
+            "tuna-compositor: drm: wake frame queued {} commit_pending={} crtc={state:?}",
             self.name,
             self.surface.surface().commit_pending(),
         );
@@ -129,7 +129,7 @@ pub struct DrmBackend {
     alt: bool,
     /// libinput devices, for GNOME's touchpad and mouse settings (#60).
     devices: Vec<smithay::reexports::input::Device>,
-    input_settings: roost_shell_control::InputSettings,
+    input_settings: tuna_shell_control::InputSettings,
 }
 
 /// Event sources the runtime installs on its loop.
@@ -209,7 +209,7 @@ impl DrmBackend {
         let (mut session, session_notifier) =
             LibSeatSession::new().map_err(|e| err("libseat session")(e.to_string()))?;
         let seat = session.seat();
-        let path = match std::env::var_os("ROOST_DRM_DEVICE") {
+        let path = match std::env::var_os("TUNA_DRM_DEVICE") {
             Some(path) => std::path::PathBuf::from(path),
             None => smithay::backend::udev::primary_gpu(&seat)
                 .ok()
@@ -275,7 +275,7 @@ impl DrmBackend {
             let surface = match drm.create_surface(crtc, mode, &[*handle]) {
                 Ok(surface) => surface,
                 Err(e) => {
-                    eprintln!("roost-compositor: drm: skip connector: {e}");
+                    eprintln!("tuna-compositor: drm: skip connector: {e}");
                     continue;
                 }
             };
@@ -291,7 +291,7 @@ impl DrmBackend {
             ) {
                 Ok(surface) => surface,
                 Err(e) => {
-                    eprintln!("roost-compositor: drm: skip connector: {e}");
+                    eprintln!("tuna-compositor: drm: skip connector: {e}");
                     continue;
                 }
             };
@@ -305,7 +305,7 @@ impl DrmBackend {
                 PhysicalProperties {
                     size: (mm_w as i32, mm_h as i32).into(),
                     subpixel: Subpixel::Unknown,
-                    make: "Roost".to_owned(),
+                    make: "Tuna Desktop".to_owned(),
                     model: name.clone(),
                 },
             );
@@ -327,11 +327,11 @@ impl DrmBackend {
             });
         }
         // GNOME's arrangement for exactly these connectors (#59): scale
-        // and logical position per output; without one, ROOST_SCALE (or
+        // and logical position per output; without one, TUNA_SCALE (or
         // 1) and left-to-right logical placement.
         let names: Vec<String> = outputs.iter().map(|o| o.name.clone()).collect();
         let arrangement = crate::monitors::load(&names);
-        let fallback_scale = std::env::var("ROOST_SCALE")
+        let fallback_scale = std::env::var("TUNA_SCALE")
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
             .map(crate::runtime::clamp_scale)
@@ -359,7 +359,7 @@ impl DrmBackend {
                 Some(out.loc.into()),
             );
             eprintln!(
-                "roost-compositor: drm: output {} {}x{} at {},{} scale {}",
+                "tuna-compositor: drm: output {} {}x{} at {},{} scale {}",
                 out.name, out.size.w, out.size.h, out.loc.0, out.loc.1, out.scale
             );
         }
@@ -435,18 +435,18 @@ impl DrmBackend {
         self.corner_pressure.reset();
         match event {
             SessionEvent::PauseSession => {
-                eprintln!("roost-compositor: drm: session paused");
+                eprintln!("tuna-compositor: drm: session paused");
                 self.active = false;
                 self.libinput.suspend();
                 self.drm.pause();
             }
             SessionEvent::ActivateSession => {
-                eprintln!("roost-compositor: drm: session activated");
+                eprintln!("tuna-compositor: drm: session activated");
                 if self.libinput.resume().is_err() {
-                    eprintln!("roost-compositor: drm: libinput resume failed");
+                    eprintln!("tuna-compositor: drm: libinput resume failed");
                 }
                 if let Err(e) = self.drm.activate(false) {
-                    eprintln!("roost-compositor: drm: activate failed: {e}");
+                    eprintln!("tuna-compositor: drm: activate failed: {e}");
                 }
                 for out in &mut self.outputs {
                     out.surface.reset_buffers();
@@ -471,8 +471,8 @@ impl DrmBackend {
             return;
         }
         self.sleep_reset_pending = false;
-        eprintln!("roost-compositor: drm: system wake scanout reset");
-        let trace = std::env::var_os("ROOST_LOCK_TRACE").is_some();
+        eprintln!("tuna-compositor: drm: system wake scanout reset");
+        let trace = std::env::var_os("TUNA_LOCK_TRACE").is_some();
         self.wake_event_traces = if trace { 2 } else { 0 };
         // Pending and queued flips can be lost across S3. Drop both without
         // submitting an old queued scene or claiming presentation. Ordinary
@@ -491,7 +491,7 @@ impl DrmBackend {
         // that the kernel restored its framebuffer. The next locked frame
         // commits the retained modes and surfaces again.
         if let Err(error) = self.drm.reset_state() {
-            eprintln!("roost-compositor: drm: wake KMS reset failed: {error}");
+            eprintln!("tuna-compositor: drm: wake KMS reset failed: {error}");
             // An unsuccessful reset cannot retire old kernel completions.
             // Stay masked without submitting a frame whose feedback could
             // be attached to an abandoned flip. VT activation can recover.
@@ -504,11 +504,11 @@ impl DrmBackend {
         // so its timestamp cannot identify an abandoned pre-sleep frame.
         match drain_reset_events(|| self.drm.receive_events().map(|events| events.count())) {
             Ok(count) if trace => {
-                eprintln!("roost-compositor: drm: wake obsolete events drained={count}");
+                eprintln!("tuna-compositor: drm: wake obsolete events drained={count}");
             }
             Ok(_) => {}
             Err(error) => {
-                eprintln!("roost-compositor: drm: wake event drain failed: {error}");
+                eprintln!("tuna-compositor: drm: wake event drain failed: {error}");
                 self.sleep_reset_pending = true;
                 return;
             }
@@ -517,7 +517,7 @@ impl DrmBackend {
         if trace {
             for out in &self.outputs {
                 eprintln!(
-                    "roost-compositor: drm: wake reset {} atomic={} commit_pending={} crtc={:?}",
+                    "tuna-compositor: drm: wake reset {} atomic={} commit_pending={} crtc={:?}",
                     out.name,
                     self.drm.is_atomic(),
                     out.surface.surface().commit_pending(),
@@ -544,7 +544,7 @@ impl DrmBackend {
                 if self.wake_event_traces != 0 {
                     self.wake_event_traces -= 1;
                     eprintln!(
-                        "roost-compositor: drm: wake pageflip crtc={crtc:?} metadata={metadata:?}",
+                        "tuna-compositor: drm: wake pageflip crtc={crtc:?} metadata={metadata:?}",
                     );
                 }
                 let index = self.outputs.iter().position(|o| o.crtc == crtc)?;
@@ -552,7 +552,7 @@ impl DrmBackend {
                 let feedback = match out.surface.frame_submitted() {
                     Ok(feedback) => feedback,
                     Err(e) => {
-                        eprintln!("roost-compositor: drm: frame_submitted: {e}");
+                        eprintln!("tuna-compositor: drm: frame_submitted: {e}");
                         None
                     }
                 };
@@ -576,7 +576,7 @@ impl DrmBackend {
                 })
             }
             DrmEvent::Error(e) => {
-                eprintln!("roost-compositor: drm: device error: {e}");
+                eprintln!("tuna-compositor: drm: device error: {e}");
                 None
             }
         }
@@ -667,7 +667,7 @@ impl DrmBackend {
                 if pressed && self.ctrl && self.alt {
                     if let Some(vt) = vt_for_key(code) {
                         if let Err(e) = self.session.change_vt(vt) {
-                            eprintln!("roost-compositor: drm: change_vt({vt}): {e}");
+                            eprintln!("tuna-compositor: drm: change_vt({vt}): {e}");
                         }
                         return Vec::new();
                     }
@@ -704,7 +704,7 @@ impl DrmBackend {
         }
     }
 
-    pub fn apply_input_settings(&mut self, settings: &roost_shell_control::InputSettings) {
+    pub fn apply_input_settings(&mut self, settings: &tuna_shell_control::InputSettings) {
         if self.input_settings.hot_corners != settings.hot_corners
             || self.input_settings.right_to_left != settings.right_to_left
         {
@@ -793,7 +793,7 @@ mod wake_event_tests {
 /// tap-to-click, natural scroll, disable-while-typing and their speed;
 /// other pointers their natural scroll and speed.
 fn apply_libinput(
-    settings: &roost_shell_control::InputSettings,
+    settings: &tuna_shell_control::InputSettings,
     device: &mut smithay::reexports::input::Device,
 ) {
     let speed = |milli: i32| f64::from(milli.clamp(-1000, 1000)) / 1000.0;
@@ -814,13 +814,13 @@ fn apply_handedness(device: &smithay::reexports::input::Device, left_handed: boo
     if device.config_left_handed_is_available() {
         if let Err(error) = device.config_left_handed_set(left_handed) {
             eprintln!(
-                "roost-compositor: libinput: primary button setting rejected for {}: {error:?}",
+                "tuna-compositor: libinput: primary button setting rejected for {}: {error:?}",
                 device.name()
             );
         }
     } else if left_handed {
         eprintln!(
-            "roost-compositor: libinput: primary button swapping unsupported for {}",
+            "tuna-compositor: libinput: primary button swapping unsupported for {}",
             device.name()
         );
     }

@@ -1,6 +1,6 @@
 # Development Guide
 
-Welcome to Roost. This guide covers everything you need to set up your development environment, understand the codebase structure, and contribute to the project.
+Welcome to Tuna Desktop. This guide covers everything you need to set up your development environment, understand the codebase structure, and contribute to the project.
 
 ## Prerequisites
 
@@ -53,7 +53,7 @@ sudo pacman -S --needed base-devel git rust pkgconf clang pipewire gtk4 \
 
 ### Spektacular CLI (planning work only)
 
-Building, testing and running Roost do not need Spektacular. You need it
+Building, testing and running Tuna Desktop do not need Spektacular. You need it
 only to read or change specs and plans, which are managed through the
 [Spektacular](https://github.com/hivecommons/spektacular) CLI rather than by
 editing `.spektacular/` by hand. It is a Go program; with a Go toolchain
@@ -71,17 +71,17 @@ The project is a Cargo workspace with six crates. Each crate's `README.md`
 lists its purpose, public API, and dependents.
 
 ```
-roost-desktop/
+tuna-desktop/
 ├── crates/
-│   ├── compositor/           # roost-compositor and roost-session binaries (Smithay)
-│   ├── shell-control-schema/ # roost-shell-control: compositor/shell IPC protocol
-│   ├── shell-host/           # roost-shell-host: original shell binary and shared shell logic
-│   ├── shell-gtk/            # roost-shell-gtk: GTK4/libadwaita shell (ADR 0006)
-│   ├── greeter/              # roost-greeter: greetd login greeter
-│   └── wallpaper/            # roost-wallpaper: wallpaper decoding
+│   ├── compositor/           # tuna-compositor and tuna-session binaries (Smithay)
+│   ├── shell-control-schema/ # tuna-shell-control: compositor/shell IPC protocol
+│   ├── shell-host/           # tuna-shell-host: original shell binary and shared shell logic
+│   ├── shell-gtk/            # tuna-shell-gtk: GTK4/libadwaita shell (ADR 0006)
+│   ├── greeter/              # tuna-greeter: greetd login greeter
+│   └── wallpaper/            # tuna-wallpaper: wallpaper decoding
 │
 ├── docs/                     # architecture, roadmap, test strategy, ADRs, guides
-├── packaging/                # Arch package and Marlin image (scripts/roost-release builds the .deb)
+├── packaging/                # Arch package and Marlin image (scripts/tuna-release builds the .deb)
 ├── scripts/                  # nested launcher, proof scripts, release and ledger tools
 ├── tests/                    # a11y golden trees, GNOME 51 reference container
 └── Cargo.toml                # workspace configuration and pinned dependencies
@@ -91,8 +91,8 @@ roost-desktop/
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/hanthor/roost-desktop.git
-   cd roost-desktop
+   git clone https://github.com/tuna-os/tuna-desktop.git
+   cd tuna-desktop
    ```
 
 2. **Build all crates:**
@@ -108,33 +108,33 @@ roost-desktop/
 
 ## Running the Nested Compositor
 
-The nested compositor runs inside your current Wayland or X11 session for safe development and testing. It creates a Roost session as a client of your host display.
+The nested compositor runs inside your current Wayland or X11 session for safe development and testing. It creates a Tuna Desktop session as a client of your host display.
 
 ### First-time setup
 
 ```bash
-# Build and start a nested Roost session
-./scripts/roost-nested run
+# Build and start a nested Tuna Desktop session
+./scripts/tuna-nested run
 ```
 
 This command:
-- Builds `roost-compositor` and `roost-shell-host` (debug build)
-- Starts the compositor on a private socket (named `roost-nested-<pid>` by default)
-- Logs output to `~/.local/state/roost-nested/roost-nested-<pid>/nested.log`
+- Builds `tuna-compositor` and `tuna-shell-host` (debug build)
+- Starts the compositor on a private socket (named `tuna-nested-<pid>` by default)
+- Logs output to `~/.local/state/tuna-nested/tuna-nested-<pid>/nested.log`
 - Displays the socket name and log path for reference
 
 The session runs until you press Ctrl+C or terminate the process.
 
 ### Testing shell crashes and recovery
 
-Roost implements a supervised shell-host restart mechanism. Test it with:
+Tuna Desktop implements a supervised shell-host restart mechanism. Test it with:
 
 ```bash
 # In one terminal, start the nested session:
-./scripts/roost-nested run
+./scripts/tuna-nested run
 
 # In another terminal, simulate a shell crash:
-./scripts/roost-nested kill-shell --socket roost-nested-<pid>
+./scripts/tuna-nested kill-shell --socket tuna-nested-<pid>
 ```
 
 The compositor will:
@@ -147,7 +147,7 @@ See `docs/nested-session.md` for details on the crash recovery design.
 
 ## Understanding Spektacular Workflows
 
-Roost uses Spektacular for planning and tracking implementation work. Each work item has:
+Tuna Desktop uses Spektacular for planning and tracking implementation work. Each work item has:
 
 - **Spec**: A specification document (in `.spektacular/specs/`)
 - **Plan**: Implementation roadmap and checklist (in `.spektacular/plans/`)
@@ -165,21 +165,42 @@ spektacular plan new --data '{"name":"<full spec name>"}'
 
 Run `spektacular <command> --help` for the rest. For more details, see the [Spektacular repository](https://github.com/hivecommons/spektacular) and [CONTRIBUTING.md](../CONTRIBUTING.md).
 
+Spektacular is initialized for Codex. Each program unit has a spek plus a
+draft plan, context and research artifacts. Review a draft plan against the
+current implementation and open decision gates before its implementation
+workflow starts.
+
+### Continuing from the first spek
+
+The first spek is
+[nested compositor and shell recovery](../.spektacular/specs/20260927170317-a01f0011-001-nested-compositor-shell-recovery.md).
+Use a spek's full timestamp-prefixed name from `spektacular spec file list`:
+
+```sh
+spektacular version check
+spektacular plan new --data '{"name":"20260927170317-a01f0011-001-nested-compositor-shell-recovery"}'
+```
+
+The plan workflow refreshes its draft from the current source and the
+linked spek. Complete its walkthrough and review before starting
+implementation; the implementation workflow then starts with the full plan
+name.
+
 ## Architecture and Design
 
-For deeper understanding of Roost's design:
+For deeper understanding of Tuna Desktop's design:
 
 - **Architecture overview**: Read `docs/architecture.md` for the compositor/shell separation, nested recovery design, and long-term roadmap
 - **Design decisions**: Check `docs/adr/` (Architecture Decision Records) for rationale on key choices (e.g., Smithay pinning, backend selection)
 - **Verification strategy**: See `docs/test-strategy.md` for how we validate each layer (unit tests, protocol probes, integration tests, hardware qualification)
-- **Test strategy and matrix**: Roost targets multiple environments, GPU configurations, and client types; the test strategy document details the coverage plan
+- **Test strategy and matrix**: Tuna Desktop targets multiple environments, GPU configurations, and client types; the test strategy document details the coverage plan
 
 ## Workflow for contributors
 
 1. **Choose a spec**: Find an open spec in `.spektacular/specs/` or create one
 2. **Review the plan**: Check the associated plan in `.spektacular/plans/` for implementation guidance
 3. **Implement**: Edit crates as needed, using the test strategy guide to add tests
-4. **Test locally**: Follow [running tests locally](testing.md) and use `./scripts/roost-nested run` to validate
+4. **Test locally**: Follow [running tests locally](testing.md) and use `./scripts/tuna-nested run` to validate
 5. **Create a PR**: Reference the spec number and plan state in your PR body
 6. **Update spec/plan state**: Once merged, update the spec and plan in Spektacular to reflect completion
 
@@ -195,7 +216,7 @@ For deeper understanding of Roost's design:
 ### Writing a test
 - Unit tests: Add inline tests in the crate (follow `#[cfg(test)]` patterns)
 - Protocol probes: Add scripts under `scripts/`
-- Nested integration: Use `./scripts/roost-journey` as a base or add a new harness
+- Nested integration: Use `./scripts/tuna-journey` as a base or add a new harness
 
 **Timing rule (#72).** Never gate a test on a fixed iteration budget or a
 sleep length: a loaded CI runner exhausts both. Wait on a wall-clock
@@ -207,9 +228,9 @@ is no retry policy for deterministic tests: `gh run rerun --failed` is a
 diagnostic, not a fix.
 
 ### Debugging
-- Compositor logs: Check the output of `./scripts/roost-nested run` or tail the log file; [nested session troubleshooting](nested-session.md#troubleshooting) explains the common lines
+- Compositor logs: Check the output of `./scripts/tuna-nested run` or tail the log file; [nested session troubleshooting](nested-session.md#troubleshooting) explains the common lines
 - Shell-host logs: Printed to the same log file as the compositor
-- Nested shell interaction: Use `./scripts/roost-nested shell-pid` to identify the shell process for attaching a debugger
+- Nested shell interaction: Use `./scripts/tuna-nested shell-pid` to identify the shell process for attaching a debugger
 
 ## Reporting issues
 
@@ -220,7 +241,7 @@ If you find a bug or have a feature request:
    - Clear title and description
    - Steps to reproduce (for bugs)
    - Expected vs. actual behavior
-   - Environment (distro, GPU, Rust version, Roost commit); for nested-session bugs, see [filing a bug](nested-session.md#filing-a-bug)
+   - Environment (distro, GPU, Rust version, Tuna Desktop commit); for nested-session bugs, see [filing a bug](nested-session.md#filing-a-bug)
 3. Reference relevant specs in `.spektacular/specs/` if applicable
 
 ## Further reading

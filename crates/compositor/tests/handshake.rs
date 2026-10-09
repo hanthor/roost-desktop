@@ -4,9 +4,9 @@
 
 use std::os::unix::{io::AsFd, net::UnixStream};
 
-use roost_compositor::TestCompositor;
 use smithay::backend::renderer::utils::RendererSurfaceStateUserData;
 use smithay::wayland::compositor;
+use tuna_compositor::TestCompositor;
 use wayland_client::{
     protocol::{
         wl_buffer::WlBuffer, wl_callback::WlCallback, wl_compositor::WlCompositor,

@@ -1,5 +1,5 @@
 [package]
-name = "roost-greeter"
+name = "tuna-greeter"
 version = "0.1.0"
 edition = "2021"
 license.workspace = true
@@ -18,7 +18,7 @@ gtk4 = { workspace = true, optional = true }
 libadwaita = { workspace = true, optional = true }
 
 [[bin]]
-name = "roost-greeter"
+name = "tuna-greeter"
 path = "src/main.rs"
 required-features = ["gtk-ui"]
 

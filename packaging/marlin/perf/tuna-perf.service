@@ -1,0 +1,11 @@
+[Unit]
+Description=CI-only interactive-user resource samples
+After=display-manager.service
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/libexec/tuna-perf-guest --user tuna-test
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

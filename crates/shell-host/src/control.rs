@@ -2,7 +2,7 @@
 //!
 //! 001 spec R3 + ADR 0002: the shell host talks to the compositor over a
 //! dedicated Unix socket whose frames are `u32-LE length + postcard body`
-//! (see `roost-shell-control`). This client owns the shell side of that
+//! (see `tuna-shell-control`). This client owns the shell side of that
 //! conversation: the `Hello` handshake, full-`Snapshot` application into
 //! [`ShellModel`], ordered `Changes` application with revision-gap
 //! resnapshot, and activation commands carrying compositor-minted tokens.
@@ -32,17 +32,17 @@
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 
-use roost_shell_control::{
+use tuna_shell_control::{
     ActivationToken, CommandKind, CommandStatus, DecodeError, ErrorKind, Message, OutputInfo,
     SwitcherAction, WindowInfo, WorkspaceInfo, CURRENT_VERSION, MAX_FRAME_BYTES,
 };
 
 /// Transport and protocol failures, shared with the compositor endpoint.
 ///
-/// Defined in [`roost_shell_control`] so both endpoints name the same type;
+/// Defined in [`tuna_shell_control`] so both endpoints name the same type;
 /// re-exported here because `crate::control::ControlError` is the path the
 /// rest of this crate (and its tests) use.
-pub use roost_shell_control::ControlError;
+pub use tuna_shell_control::ControlError;
 
 use crate::model::{ShellModel, SnapshotView, WindowEntry};
 
@@ -52,7 +52,7 @@ pub const INITIAL_REQUEST_ID: u64 = 1;
 /// What one handled inbound message meant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Handled {
-    ScreenReader(roost_shell_control::ScreenReaderState),
+    ScreenReader(tuna_shell_control::ScreenReaderState),
     /// Compositor greeted back (e.g. after a resnapshot re-hello); the
     /// awaited full snapshot still follows.
     Hello,
@@ -172,7 +172,7 @@ pub struct ControlClient {
     /// Session environment from the compositor (#59).
     environment: Vec<(String, String)>,
     /// Overview previews and the hovered one, from the compositor.
-    overview_previews: (Vec<roost_shell_control::PreviewInfo>, Option<u64>),
+    overview_previews: (Vec<tuna_shell_control::PreviewInfo>, Option<u64>),
 }
 
 impl ControlClient {
@@ -244,7 +244,7 @@ impl ControlClient {
     }
 
     /// The overview's window previews and the hovered one.
-    pub fn overview_previews(&self) -> (&[roost_shell_control::PreviewInfo], Option<u64>) {
+    pub fn overview_previews(&self) -> (&[tuna_shell_control::PreviewInfo], Option<u64>) {
         (&self.overview_previews.0, self.overview_previews.1)
     }
 
@@ -383,7 +383,7 @@ impl ControlClient {
     /// Send GNOME's input settings (#60). Returns the request id.
     pub fn set_input_settings(
         &mut self,
-        settings: roost_shell_control::InputSettings,
+        settings: tuna_shell_control::InputSettings,
     ) -> Result<u64, ControlError> {
         let id = self.alloc_request_id();
         self.write_message(&Message::Command {
@@ -450,7 +450,7 @@ impl ControlClient {
     /// GrabAccelerators), the full set each time. Returns the request id.
     pub fn set_accelerators(
         &mut self,
-        accelerators: Vec<roost_shell_control::Accelerator>,
+        accelerators: Vec<tuna_shell_control::Accelerator>,
     ) -> Result<u64, ControlError> {
         let id = self.alloc_request_id();
         self.write_message(&Message::Command {
@@ -487,7 +487,7 @@ impl ControlClient {
     pub fn window_action(
         &mut self,
         window: u64,
-        action: roost_shell_control::WindowAction,
+        action: tuna_shell_control::WindowAction,
     ) -> Result<u64, ControlError> {
         let id = self.alloc_request_id();
         self.write_message(&Message::Command {
@@ -500,7 +500,7 @@ impl ControlClient {
     /// Where the switcher's window thumbnails sit (empty: none).
     pub fn set_switcher_thumbnails(
         &mut self,
-        thumbnails: Vec<roost_shell_control::SwitcherThumbnail>,
+        thumbnails: Vec<tuna_shell_control::SwitcherThumbnail>,
     ) -> Result<u64, ControlError> {
         let id = self.alloc_request_id();
         self.write_message(&Message::Command {
@@ -513,7 +513,7 @@ impl ControlClient {
     /// The switcher's chords (GNOME's rebindable switcher keys).
     pub fn set_switcher_keys(
         &mut self,
-        keys: Vec<roost_shell_control::SwitcherKey>,
+        keys: Vec<tuna_shell_control::SwitcherKey>,
     ) -> Result<u64, ControlError> {
         let id = self.alloc_request_id();
         self.write_message(&Message::Command {
@@ -545,7 +545,7 @@ impl ControlClient {
         self.write_message(&Message::Command {
             id,
             kind: CommandKind::Unlock {
-                password: roost_shell_control::Secret(password),
+                password: tuna_shell_control::Secret(password),
             },
         })?;
         Ok(id)
@@ -787,7 +787,7 @@ impl ControlClient {
 
     /// Encode and write one frame. `WouldBlock` propagates to the caller.
     fn write_message(&mut self, msg: &Message) -> Result<(), ControlError> {
-        let frame = roost_shell_control::encode_frame(msg);
+        let frame = tuna_shell_control::encode_frame(msg);
         self.stream.write_all(&frame)?;
         Ok(())
     }
@@ -809,7 +809,7 @@ impl ControlClient {
                     }));
                 }
                 if self.read_buf.len() >= 4 + len {
-                    let msg = roost_shell_control::decode_frame(&self.read_buf[..4 + len])?;
+                    let msg = tuna_shell_control::decode_frame(&self.read_buf[..4 + len])?;
                     self.read_buf.drain(..4 + len);
                     return Ok(msg);
                 }
@@ -916,9 +916,9 @@ fn snapshot_view(windows: &[WindowInfo], workspaces: &[WorkspaceInfo]) -> Snapsh
 fn apply_ops(
     shadow_windows: &mut Vec<WindowInfo>,
     shadow_workspaces: &mut Vec<WorkspaceInfo>,
-    ops: &[roost_shell_control::StateOp],
+    ops: &[tuna_shell_control::StateOp],
 ) {
-    use roost_shell_control::StateOp;
+    use tuna_shell_control::StateOp;
     for op in ops {
         match op {
             StateOp::WindowOpened(info) => {
@@ -963,7 +963,7 @@ fn apply_ops(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roost_shell_control::{decode_frame, encode_frame, ProtocolVersion, WindowId, WorkspaceId};
+    use tuna_shell_control::{decode_frame, encode_frame, ProtocolVersion, WindowId, WorkspaceId};
 
     fn pair() -> (ControlClient, UnixStream) {
         let (ours, peer) = UnixStream::pair().expect("socketpair");
@@ -1192,13 +1192,13 @@ mod tests {
             Handled::Snapshot { .. }
         ));
         let inventory = vec![
-            roost_shell_control::OutputInfo {
+            tuna_shell_control::OutputInfo {
                 name: "left".to_owned(),
                 width: 1280,
                 height: 800,
                 primary: true,
             },
-            roost_shell_control::OutputInfo {
+            tuna_shell_control::OutputInfo {
                 name: "right".to_owned(),
                 width: 1920,
                 height: 1080,
@@ -1242,9 +1242,9 @@ mod tests {
                 from_revision: 7,
                 to_revision: 9,
                 ops: vec![
-                    roost_shell_control::StateOp::WindowOpened(window(9, "Editor", 2, false)),
-                    roost_shell_control::StateOp::WindowFocused { id: 9 },
-                    roost_shell_control::StateOp::WindowClosed { id: 7 },
+                    tuna_shell_control::StateOp::WindowOpened(window(9, "Editor", 2, false)),
+                    tuna_shell_control::StateOp::WindowFocused { id: 9 },
+                    tuna_shell_control::StateOp::WindowClosed { id: 7 },
                 ],
             },
         );
@@ -1278,7 +1278,7 @@ mod tests {
             &Message::Changes {
                 from_revision: 3,
                 to_revision: 4,
-                ops: vec![roost_shell_control::StateOp::WindowClosed { id: 8 }],
+                ops: vec![tuna_shell_control::StateOp::WindowClosed { id: 8 }],
             },
         );
         match client.poll().expect("poll gap") {

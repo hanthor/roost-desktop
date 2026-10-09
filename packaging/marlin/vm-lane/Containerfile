@@ -1,59 +1,59 @@
 # CI-only test layer for the Marlin VM lane (#68). NOT shipped.
 #
-# Derives from the marlin-roost-preview image (packaging/marlin/
+# Derives from the marlin-tuna-preview image (packaging/marlin/
 # Containerfile) and changes only what a hands-off boot test needs; the
 # shipped preview image keeps GDM's normal login screen and kernel arguments.
 #
-#   - a test user, roost-test (password "roost"), whose AccountsService
-#     record selects the Roost session;
-#   - a CI-only greetd initial session of that user straight into Roost,
+#   - a test user, tuna-test (password "tuna"), whose AccountsService
+#     record selects the Tuna Desktop session;
+#   - a CI-only greetd initial session of that user straight into Tuna Desktop,
 #     then the qualified Cage/gtkgreet login screen after logout;
 #   - kernel console on ttyS0 and journald forwarded to it, so the
-#     session's stderr (roost-compositor:, roost-shell-gtk:) reaches the
+#     session's stderr (tuna-compositor:, tuna-shell-gtk:) reaches the
 #     QEMU serial log the lane asserts on. The serial login prompt is
 #     masked in this test layer so it cannot overwrite journal evidence.
 #
 # Built and installed to a raw disk by the marlin-vm job in
-# .github/workflows/ci.yml; booted by scripts/roost-vm-lane.
+# .github/workflows/ci.yml; booted by scripts/tuna-vm-lane.
 
-ARG BASE_IMAGE=localhost/marlin-roost-preview:ci
+ARG BASE_IMAGE=localhost/marlin-tuna-preview:ci
 FROM ${BASE_IMAGE} AS constraint-builder
-COPY packaging/marlin/vm-lane/roost-vm-constraints.c /build/roost-vm-constraints.c
-COPY packaging/marlin/vm-lane/roost-vm-constraints-build /build/roost-vm-constraints-build
+COPY packaging/marlin/vm-lane/tuna-vm-constraints.c /build/tuna-vm-constraints.c
+COPY packaging/marlin/vm-lane/tuna-vm-constraints-build /build/tuna-vm-constraints-build
 RUN pacman -S --needed --noconfirm gcc pkgconf wayland wayland-protocols wlr-protocols \
-    && ROOST_CI_ONLY=1 /build/roost-vm-constraints-build
+    && TUNA_CI_ONLY=1 /build/tuna-vm-constraints-build
 
 FROM ${BASE_IMAGE}
-COPY --from=constraint-builder /usr/libexec/roost-vm-constraints /usr/libexec/roost-vm-constraints
-COPY --from=constraint-builder /usr/share/roost-vm-constraints /usr/share/roost-vm-constraints
+COPY --from=constraint-builder /usr/libexec/tuna-vm-constraints /usr/libexec/tuna-vm-constraints
+COPY --from=constraint-builder /usr/share/tuna-vm-constraints /usr/share/tuna-vm-constraints
 
 COPY packaging/marlin/vm-lane/greetd.toml /etc/greetd/config.toml
 COPY packaging/marlin/vm-lane/gtkgreet.css /etc/greetd/gtkgreet.css
-COPY packaging/marlin/vm-lane/roost-vm-session /usr/libexec/roost-vm-session
-COPY packaging/marlin/vm-lane/roost-vm-lifecycle /usr/libexec/roost-vm-lifecycle
-COPY packaging/marlin/vm-lane/roost-vm-input /usr/libexec/roost-vm-input
-COPY packaging/marlin/vm-lane/roost-vm-lane.tmpfiles /usr/lib/tmpfiles.d/roost-vm-lane.conf
-COPY packaging/marlin/vm-lane/journald.conf /usr/lib/systemd/journald.conf.d/90-roost-vm-lane.conf
-COPY packaging/marlin/vm-lane/kargs.toml /usr/lib/bootc/kargs.d/90-roost-vm-lane.toml
+COPY packaging/marlin/vm-lane/tuna-vm-session /usr/libexec/tuna-vm-session
+COPY packaging/marlin/vm-lane/tuna-vm-lifecycle /usr/libexec/tuna-vm-lifecycle
+COPY packaging/marlin/vm-lane/tuna-vm-input /usr/libexec/tuna-vm-input
+COPY packaging/marlin/vm-lane/tuna-vm-lane.tmpfiles /usr/lib/tmpfiles.d/tuna-vm-lane.conf
+COPY packaging/marlin/vm-lane/journald.conf /usr/lib/systemd/journald.conf.d/90-tuna-vm-lane.conf
+COPY packaging/marlin/vm-lane/kargs.toml /usr/lib/bootc/kargs.d/90-tuna-vm-lane.toml
 
-COPY packaging/marlin/vm-lane/roost-vm-health /usr/libexec/roost-vm-health
-COPY packaging/marlin/vm-lane/roost-vm-health.service /usr/lib/systemd/system/roost-vm-health.service
+COPY packaging/marlin/vm-lane/tuna-vm-health /usr/libexec/tuna-vm-health
+COPY packaging/marlin/vm-lane/tuna-vm-health.service /usr/lib/systemd/system/tuna-vm-health.service
 
 # /home is a symlink to /var/home on bootc systems and /var is only
 # seeded at install time, so the home directory and the AccountsService
 # record come from tmpfiles.d on every boot rather than from this layer.
 RUN pacman -Syu --needed --noconfirm greetd greetd-gtkgreet cage qemu-guest-agent python python-gobject grim wtype wayland-utils \
-    && /usr/libexec/roost-image-kernels vm \
-    && useradd -M -d /home/roost-test -s /bin/bash -U roost-test \
-    && echo 'roost-test:roost' | chpasswd \
-    && test -f /usr/share/wayland-sessions/roost.desktop \
-    && chmod 0755 /usr/libexec/roost-vm-session /usr/libexec/roost-vm-lifecycle /usr/libexec/roost-vm-input \
-    && printf 'roost-session\n' > /etc/greetd/environments \
+    && /usr/libexec/tuna-image-kernels vm \
+    && useradd -M -d /home/tuna-test -s /bin/bash -U tuna-test \
+    && echo 'tuna-test:tuna' | chpasswd \
+    && test -f /usr/share/wayland-sessions/tuna.desktop \
+    && chmod 0755 /usr/libexec/tuna-vm-session /usr/libexec/tuna-vm-lifecycle /usr/libexec/tuna-vm-input \
+    && printf 'tuna-session\n' > /etc/greetd/environments \
     && systemctl disable gdm.service \
     && systemctl mask serial-getty@ttyS0.service \
-    && systemctl enable greetd.service roost-vm-health.service \
+    && systemctl enable greetd.service tuna-vm-health.service \
     && systemctl add-wants multi-user.target qemu-guest-agent.service \
-    && printf '\nROOST_LOCK_TRACE=1\nROOST_POINTER_TRACE=1\n' >> /etc/environment
+    && printf '\nTUNA_LOCK_TRACE=1\nTUNA_POINTER_TRACE=1\n' >> /etc/environment
 
-LABEL org.opencontainers.image.title="marlin-roost-vm-lane" \
-      org.opencontainers.image.description="CI-only Marlin Roost test layer: greetd initial session, real lifecycle probes, journal on serial"
+LABEL org.opencontainers.image.title="marlin-tuna-vm-lane" \
+      org.opencontainers.image.description="CI-only Marlin Tuna Desktop test layer: greetd initial session, real lifecycle probes, journal on serial"

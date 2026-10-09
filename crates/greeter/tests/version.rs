@@ -2,8 +2,8 @@
 //!
 //! The `version_tests` unit mod pins the stamp rule; this pins the wiring
 //! the plan's first acceptance criterion requires: the built binary prints
-//! `roost-greeter <stamped version>` for `--version`/`-V` and exits
-//! successfully without touching GTK. The stamp is `ROOST_VERSION` (a
+//! `tuna-greeter <stamped version>` for `--version`/`-V` and exits
+//! successfully without touching GTK. The stamp is `TUNA_VERSION` (a
 //! `vX.Y.Z` tag or plain `X.Y.Z`) with the `v` stripped, else this
 //! crate's version — the same rule the binary bakes in at compile time,
 //! so build and test must share the environment (a plain `cargo test`
@@ -13,10 +13,7 @@
 use std::process::Command;
 
 fn stamped_version() -> String {
-    match std::env::var("ROOST_VERSION")
-        .ok()
-        .filter(|v| !v.is_empty())
-    {
+    match std::env::var("TUNA_VERSION").ok().filter(|v| !v.is_empty()) {
         Some(tag) => tag.strip_prefix('v').unwrap_or(&tag).to_owned(),
         None => env!("CARGO_PKG_VERSION").to_owned(),
     }
@@ -24,21 +21,21 @@ fn stamped_version() -> String {
 
 #[test]
 fn greeter_version_matches_stamp() {
-    let exe = env!("CARGO_BIN_EXE_roost-greeter");
-    let expected = format!("roost-greeter {}", stamped_version());
+    let exe = env!("CARGO_BIN_EXE_tuna-greeter");
+    let expected = format!("tuna-greeter {}", stamped_version());
     for flag in ["--version", "-V"] {
         let out = Command::new(exe)
             .arg(flag)
             .output()
-            .unwrap_or_else(|err| panic!("roost-greeter {flag} runs: {err}"));
+            .unwrap_or_else(|err| panic!("tuna-greeter {flag} runs: {err}"));
         assert!(
             out.status.success(),
-            "roost-greeter {flag} must exit successfully"
+            "tuna-greeter {flag} must exit successfully"
         );
         assert_eq!(
             String::from_utf8_lossy(&out.stdout).trim_end(),
             expected,
-            "roost-greeter {flag} must print the stamped version"
+            "tuna-greeter {flag} must print the stamped version"
         );
     }
 }

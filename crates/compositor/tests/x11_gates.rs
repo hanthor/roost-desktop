@@ -3,7 +3,7 @@
 //! Acceptance: unauthorized capture and layer-shell probes against a
 //! legacy window fail exactly as for native windows. The gates
 //! themselves are kind-agnostic by construction
-//! ([`deny_all_tokens`](roost_compositor::control::deny_all_tokens)
+//! ([`deny_all_tokens`](tuna_compositor::control::deny_all_tokens)
 //! ignores both arguments; no screencopy or foreign-toplevel globals
 //! exist), so these tests pin that property: the gate never branches
 //! on window kind or identity source, `ActivateWindow` against an
@@ -20,10 +20,10 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-use roost_compositor::control::{deny_all_tokens, ControlConn, Handled, Session};
-use roost_compositor::state::StateModel;
-use roost_compositor::TestCompositor;
-use roost_shell_control::{
+use tuna_compositor::control::{deny_all_tokens, ControlConn, Handled, Session};
+use tuna_compositor::state::StateModel;
+use tuna_compositor::TestCompositor;
+use tuna_shell_control::{
     decode_frame, encode_frame, ActivationToken, CommandKind, CommandStatus, Message,
     CURRENT_VERSION,
 };

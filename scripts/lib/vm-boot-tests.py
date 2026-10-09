@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 
-loader = importlib.machinery.SourceFileLoader("vm_boot_lane", str(Path(__file__).resolve().parents[1] / "roost-vm-lane"))
+loader = importlib.machinery.SourceFileLoader("vm_boot_lane", str(Path(__file__).resolve().parents[1] / "tuna-vm-lane"))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 lane = importlib.util.module_from_spec(spec)
 loader.exec_module(lane)
@@ -22,7 +22,7 @@ loader.exec_module(lane)
 class OrcaUnreadyDiagnostic(unittest.TestCase):
     def run_probe(self, *, locked=False, changed=False, executable="/usr/bin/python3.14",
                   uid=1000, package="python", oversized=False, replaced=False):
-        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
+        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/tuna-vm-lifecycle"
         fn = next(n for n in ast.parse(source.read_text()).body
                   if isinstance(n, ast.FunctionDef) and n.name == "orca_child_diagnostic")
         with tempfile.TemporaryDirectory() as directory:
@@ -33,14 +33,14 @@ class OrcaUnreadyDiagnostic(unittest.TestCase):
                 fields = ["S", str(parent)] + ["0"] * 17 + [str(ticks)]
                 (path / "stat").write_text(f"{pid} (private process name) " + " ".join(fields))
             (root / "57/environ").write_bytes(b"x" * (128 * 1024 + 1) if oversized else
-                b"WAYLAND_DISPLAY=roost-nested-87\0DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus\0SECRET=private-never-published\0")
+                b"WAYLAND_DISPLAY=tuna-nested-87\0DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus\0SECRET=private-never-published\0")
             state_path = root / "state"
             state_path.write_text(json.dumps({"locked": changed, "screen_reader_pid": 57}))
             executable_reads = iter([57, 58 if replaced else 57])
             scope = {"pathlib": SimpleNamespace(Path=lambda path: root / str(path).split("/")[-1]),
                      "OWNER": SimpleNamespace(pw_uid=1000), "RUNTIME": "/run/user/1000",
                      "STATE": state_path, "os": SimpleNamespace(readlink=lambda path:
-                         "/usr/bin/roost-compositor" if path.parent.name == "87" else executable,
+                         "/usr/bin/tuna-compositor" if path.parent.name == "87" else executable,
                          stat=lambda path: SimpleNamespace(st_dev=1, st_ino=next(executable_reads), st_size=100)),
                      "json": json, "subprocess": __import__("subprocess"),
                      "call": lambda *args: package}
@@ -89,7 +89,7 @@ class OrcaUnreadyDiagnostic(unittest.TestCase):
 
 class OrcaReadFailure(unittest.TestCase):
     def test_failed_observation_emits_safe_receipt_and_keeps_exit_one(self):
-        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
+        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/tuna-vm-lifecycle"
         tree = ast.parse(source.read_text())
         main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
         branch = next(n for n in ast.walk(main) if isinstance(n, ast.If)
@@ -129,14 +129,14 @@ class OrcaReadFailure(unittest.TestCase):
         # Schema/privacy policy only; the retained real VM failure remains unexplained.
 
     def test_read_diagnostics_preserve_only_fixed_public_dbus_failure(self):
-        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
+        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/tuna-vm-lifecycle"
         tree = ast.parse(source.read_text())
         helper = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
                       and node.name == "orca_read_error")
         scope = {"subprocess": lane.subprocess}
         exec(compile(ast.Module(body=[helper], type_ignores=[]), str(source), "exec"), scope)
         diagnose = scope["orca_read_error"]
-        command = ["runuser", "-u", "roost-test", "--", "env", "PRIVATE_ENV=do-not-copy",
+        command = ["runuser", "-u", "tuna-test", "--", "env", "PRIVATE_ENV=do-not-copy",
                    "busctl", "--user", "call", "org.freedesktop.DBus", "/org/freedesktop/DBus",
                    "org.freedesktop.DBus", "GetConnectionUnixProcessID", "s", ":1.527"]
         error = lane.subprocess.CalledProcessError(1, command, stderr="Call failed: owner vanished\n" + "x" * 1024)
@@ -262,8 +262,8 @@ class BootApi(unittest.TestCase):
             self.assertIn("-enable-kvm", command)
             self.assertEqual(command[command.index("-m") + 1], "6144")
             self.assertEqual(command[command.index("-smp") + 1], "4")
-            self.assertIn("pcie-root-port,id=roost-gpu-port,chassis=1,slot=1", command)
-            self.assertIn("virtio-vga,bus=roost-gpu-port,x-pcie-pm-no-soft-reset=on,xres=1280,yres=800", command)
+            self.assertIn("pcie-root-port,id=tuna-gpu-port,chassis=1,slot=1", command)
+            self.assertIn("virtio-vga,bus=tuna-gpu-port,x-pcie-pm-no-soft-reset=on,xres=1280,yres=800", command)
             shared = lane.baseline.gpu_devices()
             offset = command.index(shared[1]) - 1
             self.assertEqual(command[offset:offset + len(shared)], shared)
@@ -277,7 +277,7 @@ class BootApi(unittest.TestCase):
             self.assertEqual(agent, "/scratch/qga.sock")
             command = spawn.call_args.args[0]
             self.assertIn("virtio-serial-pci", command)
-            self.assertIn("virtserialport,chardev=roost-qga,name=org.qemu.guest_agent.0", command)
+            self.assertIn("virtserialport,chardev=tuna-qga,name=org.qemu.guest_agent.0", command)
 
 
 class NativeMouseSelection(unittest.TestCase):
@@ -286,9 +286,9 @@ class NativeMouseSelection(unittest.TestCase):
     def test_native_device_is_opt_in_and_preserves_performance_default(self):
         with patch.object(lane.os.path,"exists",return_value=True), patch.object(lane.os,"access",return_value=True), patch.object(lane.subprocess,"Popen") as spawn:
             lane.boot("disk.raw","/out","/scratch",30,guest_agent=True)
-            self.assertNotIn("virtio-mouse-pci,id=roost-relative-mouse",spawn.call_args.args[0])
+            self.assertNotIn("virtio-mouse-pci,id=tuna-relative-mouse",spawn.call_args.args[0])
             lane.boot("disk.raw","/out","/scratch",30,guest_agent=True,native_relative_mouse=True)
-            self.assertIn("virtio-mouse-pci,id=roost-relative-mouse",spawn.call_args.args[0])
+            self.assertIn("virtio-mouse-pci,id=tuna-relative-mouse",spawn.call_args.args[0])
     def test_actual_selected_name_index_and_mode_are_observed(self):
         class Qmp:
             def __init__(self):self.calls=[]
@@ -330,9 +330,9 @@ class InputProbePlacement(unittest.TestCase):
         clicks = []
         inventory_calls = []
         provisional = {"state": {"windows": [
-            {"app_id": "org.roost.VmInput", "rect": [0, 0, 800, 600]}]}}
+            {"app_id": "org.tuna.VmInput", "rect": [0, 0, 800, 600]}]}}
         placed = {"state": {"windows": [
-            {"app_id": "org.roost.VmInput", "rect": [500, 250, 400, 240]}]}}
+            {"app_id": "org.tuna.VmInput", "rect": [500, 250, 400, 240]}]}}
 
         def run(action):
             if action == "inventory":
@@ -410,7 +410,7 @@ class RepeatedCoverage(unittest.TestCase):
 
 class PciCapabilities(unittest.TestCase):
     def probe(self, pm_control, pcie=True, cycle=False):
-        helper = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
+        helper = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/tuna-vm-lifecycle"
         tree = ast.parse(helper.read_text())
         function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
                         and node.name == "gpu_pci_caps")
@@ -456,14 +456,14 @@ class PciCapabilities(unittest.TestCase):
 class ShippedSnapshotInventory(unittest.TestCase):
     # Run 37696030597: the graphical PAM login produced a real greetd
     # session, yet every inventory() probe failed because the published
-    # roost 0.1.0-2 snapshot predates the newer instrumentation keys.
+    # tuna-desktop 0.1.0-2 snapshot predates the newer instrumentation keys.
     # Session detection must not hard-require keys the shipped binary
     # never emits.
     SHIPPED_STATE = {"locked": False, "windows": [], "focused": None,
                      "active_workspace": 0, "overview_open": True}
 
     def run_inventory(self, state, sessions):
-        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/roost-vm-lifecycle"
+        source = Path(__file__).resolve().parents[2] / "packaging/marlin/vm-lane/tuna-vm-lifecycle"
         function = next(node for node in ast.parse(source.read_text()).body
                         if isinstance(node, ast.FunctionDef) and node.name == "inventory")
         uid = os.getuid()
@@ -471,11 +471,11 @@ class ShippedSnapshotInventory(unittest.TestCase):
             root = Path(directory)
             proc = root / "proc"
             (proc / "1234").mkdir(parents=True)
-            (root / "roost-compositor").touch()
-            (proc / "1234/exe").symlink_to(root / "roost-compositor")
+            (root / "tuna-compositor").touch()
+            (proc / "1234/exe").symlink_to(root / "tuna-compositor")
             fields = ["S", "1"] + ["0"] * 17 + ["4242"]
-            (proc / "1234/stat").write_text("1234 (roost-composito) " + " ".join(fields))
-            state_path = root / "roost-vm-state.json"
+            (proc / "1234/stat").write_text("1234 (tuna-composito) " + " ".join(fields))
+            state_path = root / "tuna-vm-state.json"
             state_path.write_text(json.dumps(state))
             descriptions = {
                 "1": "Id=1\nVTNr=1\nUser=959\nType=tty\nService=greetd\nClass=greeter",
@@ -494,7 +494,7 @@ class ShippedSnapshotInventory(unittest.TestCase):
             scope = {"json": json, "os": os,
                      "pathlib": SimpleNamespace(
                          Path=lambda path: proc if str(path) == "/proc" else real_pathlib.Path(path)),
-                     "OWNER": SimpleNamespace(pw_uid=uid, pw_name="roost-test"),
+                     "OWNER": SimpleNamespace(pw_uid=uid, pw_name="tuna-test"),
                      "RUNTIME": f"/run/user/{uid}", "STATE": state_path,
                      "call": fake_call}
             exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), scope)
@@ -504,13 +504,13 @@ class ShippedSnapshotInventory(unittest.TestCase):
         uid = os.getuid()
         result = self.run_inventory(dict(self.SHIPPED_STATE), [
             ("1", "959 greeter seat0 tty1"),
-            ("3", f"{uid} roost-test seat0 tty1"),
-            ("4", f"{uid} roost-test - -"),
+            ("3", f"{uid} tuna-test seat0 tty1"),
+            ("4", f"{uid} tuna-test - -"),
         ])
         self.assertEqual(result["session"]["Id"], "3")
         self.assertEqual(result["session"]["Service"], "greetd")
         self.assertEqual(result["session_uid"], uid)
-        self.assertTrue(any(p["executable"] == "roost-compositor" for p in result["processes"]))
+        self.assertTrue(any(p["executable"] == "tuna-compositor" for p in result["processes"]))
         self.assertTrue(result["state"]["overview_open"])
         self.assertIsNone(result["state"]["pointer_position"])
         self.assertIsNone(result["state"]["native_relative_motion_count"])
@@ -520,11 +520,11 @@ class ShippedSnapshotInventory(unittest.TestCase):
         state = {**self.SHIPPED_STATE, "pointer_position": [0, 0],
                  "native_relative_motion_count": 0}
         with self.assertRaisesRegex(RuntimeError, "expected exactly one greetd user session"):
-            self.run_inventory(state, [("4", f"{uid} roost-test - -")])
+            self.run_inventory(state, [("4", f"{uid} tuna-test - -")])
 
 
 class PredatingGuestQualification(unittest.TestCase):
-    # Run 37700332957: the published roost 0.1.0-2 guest runs a healthy
+    # Run 37700332957: the published tuna-desktop 0.1.0-2 guest runs a healthy
     # session whose snapshot reports every newer instrumentation key as
     # None, and its shell moves no media-key volume. Newer-behavior gates
     # qualify on such guests instead of failing the whole lifecycle; the
@@ -540,15 +540,15 @@ class PredatingGuestQualification(unittest.TestCase):
                      "mouse_left_handed": False, "touchpad_left_handed": False,
                      "hot_corners": True}
     STRICT_SERIAL = ("\n".join([
-        "roost-vm-health: audio-hda ready",
-        "roost-vm-health: volume=0.40",
-        "roost-vm-health: volume=0.46",
-        "roost-vm-health: volume=0.40",
-        "roost-vm-health: volume=0.40 [MUTED]",
-        "roost-vm-health: volume=0.40",
+        "tuna-vm-health: audio-hda ready",
+        "tuna-vm-health: volume=0.40",
+        "tuna-vm-health: volume=0.46",
+        "tuna-vm-health: volume=0.40",
+        "tuna-vm-health: volume=0.40 [MUTED]",
+        "tuna-vm-health: volume=0.40",
     ]) + "\n")
-    BASELINE_SERIAL = ("roost-vm-health: audio-hda ready\n"
-                       "roost-vm-health: volume=0.40\n")
+    BASELINE_SERIAL = ("tuna-vm-health: audio-hda ready\n"
+                       "tuna-vm-health: volume=0.40\n")
 
     def verdict(self, text, state=None):
         with tempfile.TemporaryDirectory() as directory:
@@ -599,9 +599,9 @@ class PredatingGuestQualification(unittest.TestCase):
         self.assertEqual(lane.lock_chord_hold_ms(False), 80)
 
     def test_media_volume_requires_hda_and_baseline(self):
-        ok, _ = self.verdict("roost-vm-health: volume=0.40\n", self.SHIPPED_STATE)
+        ok, _ = self.verdict("tuna-vm-health: volume=0.40\n", self.SHIPPED_STATE)
         self.assertFalse(ok)
-        ok, _ = self.verdict("roost-vm-health: audio-hda ready\n", self.SHIPPED_STATE)
+        ok, _ = self.verdict("tuna-vm-health: audio-hda ready\n", self.SHIPPED_STATE)
         self.assertFalse(ok)
 
 

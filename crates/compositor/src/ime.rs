@@ -1,5 +1,5 @@
-//! The IBus bridge (`roost-ibus-bridge`): GNOME Shell is IBus's client
-//! for text input, and Roost's bridge plays that part. It joins the
+//! The IBus bridge (`tuna-ibus-bridge`): GNOME Shell is IBus's client
+//! for text input, and Tuna Desktop's bridge plays that part. It joins the
 //! session as the input method (input-method-v2), sends the keys typed
 //! into a focused text field to IBus, and hands IBus's preedit and
 //! commits to the app; keys IBus does not take go back through a
@@ -39,12 +39,12 @@ pub struct ImeBridge {
 }
 
 impl ImeBridge {
-    /// The bridge to run for this session, if any: `ROOST_IBUS=0` turns
+    /// The bridge to run for this session, if any: `TUNA_IBUS=0` turns
     /// it off; otherwise it runs when IBus is installed (`ibus-daemon`
-    /// on `PATH`) and the bridge binary is found (`ROOST_IBUS_BRIDGE_BIN`,
+    /// on `PATH`) and the bridge binary is found (`TUNA_IBUS_BRIDGE_BIN`,
     /// then next to this executable, then `PATH`).
     pub fn configured(wayland_display: &str) -> Option<Self> {
-        if std::env::var_os("ROOST_IBUS").is_some_and(|v| v == "0") {
+        if std::env::var_os("TUNA_IBUS").is_some_and(|v| v == "0") {
             return None;
         }
         let path = std::env::var_os("PATH")?;
@@ -54,15 +54,15 @@ impl ImeBridge {
                 .find(|p| p.is_file())
         };
         on_path("ibus-daemon")?;
-        let bin = std::env::var_os("ROOST_IBUS_BRIDGE_BIN")
+        let bin = std::env::var_os("TUNA_IBUS_BRIDGE_BIN")
             .map(PathBuf::from)
             .or_else(|| {
                 std::env::current_exe()
                     .ok()
-                    .and_then(|exe| exe.parent().map(|d| d.join("roost-ibus-bridge")))
+                    .and_then(|exe| exe.parent().map(|d| d.join("tuna-ibus-bridge")))
                     .filter(|p| p.is_file())
             })
-            .or_else(|| on_path("roost-ibus-bridge"))?;
+            .or_else(|| on_path("tuna-ibus-bridge"))?;
         Some(Self {
             bin,
             wayland_display: wayland_display.to_owned(),
@@ -85,7 +85,7 @@ impl ImeBridge {
             match child.try_wait() {
                 Ok(None) => return,
                 Ok(Some(status)) => {
-                    eprintln!("roost-compositor: ime: bridge exited ({status})");
+                    eprintln!("tuna-compositor: ime: bridge exited ({status})");
                     self.child = None;
                     self.next_ms = now_ms + RESTART_DELAY_MS;
                 }
@@ -98,11 +98,11 @@ impl ImeBridge {
         self.starts += 1;
         match spawn(&self.bin, &self.wayland_display, dh) {
             Ok(child) => {
-                eprintln!("roost-compositor: ime: IBus bridge started");
+                eprintln!("tuna-compositor: ime: IBus bridge started");
                 self.child = Some(child);
             }
             Err(e) => {
-                eprintln!("roost-compositor: ime: bridge failed to start: {e}");
+                eprintln!("tuna-compositor: ime: bridge failed to start: {e}");
                 self.next_ms = now_ms + RESTART_DELAY_MS;
             }
         }
@@ -180,7 +180,7 @@ impl ImeBridge {
             self.xim_starts += 1;
             self.xim_next_ms = now_ms + RESTART_DELAY_MS;
             if std::thread::Builder::new()
-                .name("roost-xim-address".into())
+                .name("tuna-xim-address".into())
                 .stack_size(256 * 1024)
                 .spawn(move || {
                     let _ = send.send(bounded_address_probe(command));
@@ -207,9 +207,9 @@ impl ImeBridge {
         {
             Ok(child) => {
                 self.xim = Some(child);
-                eprintln!("roost-compositor: ime: XIM started on :{display}");
+                eprintln!("tuna-compositor: ime: XIM started on :{display}");
             }
-            Err(error) => eprintln!("roost-compositor: ime: XIM failed: {error}"),
+            Err(error) => eprintln!("tuna-compositor: ime: XIM failed: {error}"),
         }
     }
 }
@@ -356,16 +356,16 @@ mod tests {
 
     #[test]
     fn address_probe_owner_fixture() {
-        let Some(path) = std::env::var_os("ROOST_XIM_PROBE_OWNER_FIXTURE") else {
+        let Some(path) = std::env::var_os("TUNA_XIM_PROBE_OWNER_FIXTURE") else {
             return;
         };
         let mut command = Command::new("sh");
         command
             .args([
                 "-c",
-                r#"printf '%s' "$$" > "$ROOST_XIM_PROBE_PID_FILE"; exec sleep 30"#,
+                r#"printf '%s' "$$" > "$TUNA_XIM_PROBE_PID_FILE"; exec sleep 30"#,
             ])
-            .env("ROOST_XIM_PROBE_PID_FILE", path);
+            .env("TUNA_XIM_PROBE_PID_FILE", path);
         let _ = bounded_address_probe(command);
     }
 
@@ -373,7 +373,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn owner_exit_terminates_an_in_flight_address_probe() {
         let path = std::env::temp_dir().join(format!(
-            "roost-xim-owner-{}-{}",
+            "tuna-xim-owner-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -382,7 +382,7 @@ mod tests {
         ));
         let mut owner = Command::new(std::env::current_exe().unwrap())
             .args(["address_probe_owner_fixture", "--nocapture"])
-            .env("ROOST_XIM_PROBE_OWNER_FIXTURE", &path)
+            .env("TUNA_XIM_PROBE_OWNER_FIXTURE", &path)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
