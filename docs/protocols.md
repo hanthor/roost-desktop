@@ -67,7 +67,7 @@ and this page together.
 | wp_viewporter | 1 | |
 | wp_fractional_scale_manager_v1 | 1 | preferred scale 1 until #59 |
 | wp_single_pixel_buffer_manager_v1 | 1 | |
-| wp_cursor_shape_manager_v1 | 2 | shapes accepted; the compositor cursor is still the default arrow |
+| wp_cursor_shape_manager_v1 | 2 | as GNOME 51 (Mutter offers v2): requested shapes are drawn from GNOME's cursor theme at its size (#342); tablet-tool shapes are not drawn (no tablet seat) |
 | zwp_idle_inhibit_manager_v1 | 1 | a live inhibitor holds off the idle lock |
 | zwp_text_input_manager_v3 | 1 | text fields reach the input method (#60) |
 | zwp_input_method_manager_v2 | 1 | IMEs such as fcitx5; candidate popups are tracked like any popup |

@@ -28,7 +28,9 @@ This page records that decision for R9 (knowledge entry
 | font-name | Honored | Live shell CSS family, base size, weight, style and stretch (with semantic emphasis preserved) and GTK client font settings; proof G-SETTINGS-FONT |
 | document-font-name, monospace-font-name | Ignored by shell | Applications may choose to read these; Tuna Desktop chrome uses font-name |
 | text-scaling-factor | Via GTK | Live GTK Wayland DPI translation; proof G-SETTINGS-FONT |
-| gtk-theme, icon-theme, cursor-theme, cursor-size | Via GTK | Inside apps. The compositor's own cursor ignores them (#89) |
+| gtk-theme, icon-theme | Via GTK | Inside apps |
+| cursor-theme, cursor-size | Honored | Live: the compositor draws its own, grab and `wp_cursor_shape_v1` cursors from the Xcursor theme at the size, crisp per output scale; apps follow through GTK. Proofs G-CURSOR-SIZE, G-CURSOR-SHAPE (#342) |
+| locate-pointer | Honored | A lone Left Ctrl tap ripples at the pointer. Proof G-LOCATE-POINTER |
 | clock-format | Honored | Panel clock |
 | clock-show-weekday, clock-show-date, clock-show-seconds | Honored | Panel clock, built as gnome-desktop's wall clock builds it |
 | enable-hot-corners | Honored | Live. Proof G-SETTINGS-INPUT |
