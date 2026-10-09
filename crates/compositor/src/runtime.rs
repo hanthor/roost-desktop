@@ -605,18 +605,15 @@ pub struct Runtime {
     introspect: crate::introspect::Handle,
     /// A three-finger swipe in progress: its travel so far (#60).
     shell_swipe: Option<Point<f64, Logical>>,
-    /// The overview transition: 0 the desktop, 1 the overview (linear
-    /// time; drawn eased), moving toward the open state each frame.
-    overview_progress: f64,
+    /// The overview's animations (#499): the open/close transition,
+    /// the swipe driving it, and the settled scene's own motion.
+    overview_motion: crate::overview::OverviewMotion,
     overview_progress_at: Duration,
     tile_animation: Option<(u64, crate::animation::EaseRect, Duration)>,
     /// Last strip-view spring step, for the per-frame time delta.
     strip_view_at: Duration,
     /// Time base for the animations above: real, or manual for proofs.
     animation_clock: crate::animation_clock::AnimationClock,
-    /// A three-finger vertical swipe driving the transition: the
-    /// progress it started from.
-    overview_swipe_from: Option<f64>,
     /// Overview search is showing results: the workspace card and
     /// previews hide (GNOME). Reset whenever the overview closes.
     overview_search: bool,
@@ -987,12 +984,11 @@ impl Runtime {
             switcher_thumbnails: Vec::new(),
             frame_costs: std::collections::BTreeMap::new(),
             shell_swipe: None,
-            overview_progress: 0.0,
+            overview_motion: Default::default(),
             overview_progress_at: Duration::ZERO,
             tile_animation: None,
             strip_view_at: Duration::ZERO,
             animation_clock: crate::animation_clock::AnimationClock::real(),
-            overview_swipe_from: None,
             scale: clamp_scale(session.scale),
             input_settings: Default::default(),
             orca: crate::orca::Reader::new(&session.socket_name),
@@ -1261,8 +1257,9 @@ impl Runtime {
                     ManagerInput::Motion { pos, .. } => {
                         if let Some((_, start, dragging)) = &mut self.overview_drag {
                             let (dx, dy) = (pos.x - start.x, pos.y - start.y);
-                            if dx.hypot(dy) > crate::overview::DRAG_THRESHOLD {
+                            if !*dragging && dx.hypot(dy) > crate::overview::DRAG_THRESHOLD {
                                 *dragging = true;
+                                self.overview_motion.drag_begin(self.input_settings.motion);
                             }
                         }
                     }
@@ -1497,10 +1494,10 @@ impl Runtime {
         let overview_open = self.control.overview_open();
         // Previews only once the transition settles: harnesses click
         // where they say.
-        let scene =
-            (overview_open && self.overview_progress >= 1.0).then(|| self.overview_layout());
+        let progress = self.overview_motion.progress();
+        let scene = (overview_open && progress >= 1.0).then(|| self.overview_layout());
         // Record the drawn transition separately from settled click targets.
-        let transition_scene = (self.overview_progress > 0.0).then(|| self.overview_layout());
+        let transition_scene = (progress > 0.0).then(|| self.overview_layout());
         let workspace_cards: Vec<serde_json::Value> = transition_scene
             .iter()
             .flat_map(|l| l.cards.iter())
@@ -1612,7 +1609,7 @@ impl Runtime {
             "workspace_placeholder": scene.as_ref().and_then(|s| s.placeholder).map(|(at, r)| serde_json::json!({
                 "workspace": at, "rect": [r.loc.x, r.loc.y, r.size.w, r.size.h],
             })),
-            "overview_progress": self.overview_progress,
+            "overview_progress": progress,
             "workspace_cards": workspace_cards,
 
             // The Alt+Tab switcher's window thumbnails being drawn.
@@ -1654,7 +1651,7 @@ impl Runtime {
             .collect::<serde_json::Map<_, _>>()
             .into();
         // Windows whose frame callbacks run at the hidden rate.
-        doc["throttled_windows"] = if self.overview_progress > 0.0
+        doc["throttled_windows"] = if self.overview_motion.progress() > 0.0
             || !self.switcher_thumbnails.is_empty()
             || !self.casts.is_empty()
         {
@@ -1694,6 +1691,7 @@ impl Runtime {
         doc["animation_clock_manual"] = serde_json::json!(manual);
         doc["animation_clock_ms"] =
             serde_json::json!(manual.then(|| self.animation_clock.now().as_millis() as u64));
+        doc["overview_motion"] = self.overview_motion.diagnostics();
         doc["screen_reader_pid"] = serde_json::json!(self.orca.pid());
         doc["screen_reader_state"] = serde_json::json!(self.orca.state());
         // Keep backend-specific observations outside the large scene macro so
@@ -1723,8 +1721,9 @@ impl Runtime {
         }
     }
 
-    /// Overview scene on the primary output (#54).
-    fn overview_layout(&self) -> crate::overview::OverviewLayout {
+    /// The overview at rest on the primary output (#54): the window
+    /// picker or the app grid, before any animation.
+    fn overview_base(&self) -> crate::overview::OverviewLayout {
         let size = self.state.primary_size();
         let output = Rectangle::new((0, 0).into(), size);
         let model = self.manager.model();
@@ -1733,61 +1732,64 @@ impl Runtime {
         } else {
             crate::overview::layout
         };
-        let mut scene = layout(
+        layout(
             output,
             crate::windows::WORK_AREA_TOP,
             model.workspaces(),
             model.active_workspace(),
             &self.manager.overview_windows(),
-        );
-        if self.overview_progress < 1.0 {
-            // Part-way through GNOME's transition.
-            return crate::overview::transition(
-                &scene,
-                crate::overview::ease_out_quad(self.overview_progress),
-                output,
-                &self.manager.overview_windows(),
-            );
-        }
-        match self.overview_drag {
-            Some((id, start, true)) => {
-                if let Some(at) =
-                    crate::overview::insertion_target(&scene, self.manager.pointer_pos())
-                {
-                    crate::overview::show_placeholder(&mut scene, at);
-                }
-                crate::overview::drag_preview(&mut scene, id, start, self.manager.pointer_pos());
-            }
-            // GNOME grows the preview under the pointer by 5px a side.
-            _ => crate::overview::grow_hovered(&mut scene, self.manager.pointer_pos()),
-        }
-        scene
+        )
     }
 
-    /// Move the overview transition toward the open state (250 ms each
-    /// way, as GNOME's, times the slow-down factor), unless a swipe holds
-    /// it. The transition is motion, so fade-only snaps it like off.
-    /// Returns whether the overview is drawn at all.
+    /// The preview being dragged and where it was grabbed.
+    fn overview_dragged(&self) -> Option<(u64, Point<f64, Logical>)> {
+        match self.overview_drag {
+            Some((id, start, true)) => Some((id, start)),
+            _ => None,
+        }
+    }
+
+    /// Overview scene on the primary output as drawn this frame.
+    fn overview_layout(&self) -> crate::overview::OverviewLayout {
+        let output = Rectangle::new((0, 0).into(), self.state.primary_size());
+        self.overview_motion.scene(
+            &self.overview_base(),
+            self.overview_dragged(),
+            self.manager.pointer_pos(),
+            output,
+            &self.manager.overview_windows(),
+        )
+    }
+
+    /// Advance the overview's animations (GNOME 51 timings, times the
+    /// slow-down factor) unless a swipe holds the transition. Fade-only
+    /// keeps fades and snaps motion. Returns whether the overview is
+    /// drawn at all.
     fn step_overview_transition(&mut self) -> bool {
         let now = self.animation_clock.now();
         let dt = now.saturating_sub(self.overview_progress_at).as_secs_f64() * 1000.0;
         self.overview_progress_at = now;
-        let motion = self.input_settings.motion;
-        if self.overview_swipe_from.is_none() {
-            let target = if self.control.overview_open() {
-                1.0
-            } else {
-                0.0
-            };
-            self.overview_progress = crate::animation::step_transition(
-                self.overview_progress,
-                target,
+        let cues = crate::overview::OverviewCues {
+            open: self.control.overview_open(),
+            app_grid: self.overview_app_grid,
+            search: self.overview_search,
+            motion: self.input_settings.motion,
+        };
+        self.overview_motion
+            .step_progress(dt, cues.open, cues.motion);
+        if self.overview_motion.progress() > 0.0 {
+            let base = self.overview_base();
+            self.overview_motion.step_scene(
                 dt,
-                crate::overview::TRANSITION_MS,
-                motion,
+                &base,
+                cues,
+                self.overview_dragged(),
+                self.manager.pointer_pos(),
             );
+        } else {
+            self.overview_motion.reset_scene();
         }
-        self.overview_progress > 0.0
+        self.overview_motion.progress() > 0.0
     }
 
     fn animated_tile_preview(
@@ -1867,8 +1869,9 @@ impl Runtime {
     fn step_workspace_slide(&mut self) {
         let now = self.animation_clock.now();
         let policy = self.input_settings.motion;
-        let suspended =
-            self.overview_progress > 0.0 || self.control.overview_open() || self.is_locked();
+        let suspended = self.overview_motion.progress() > 0.0
+            || self.control.overview_open()
+            || self.is_locked();
         let width = self.state.primary_size().w;
         let model = self.manager.model();
         let active = model.active_workspace();
@@ -1932,17 +1935,25 @@ impl Runtime {
         }
         let pos = self.manager.pointer_pos();
         let layout = self.overview_layout();
+        let motion = self.input_settings.motion;
         if let Some(at) = crate::overview::insertion_target(&layout, pos) {
+            self.overview_motion.drag_released();
             self.manager
                 .insert_workspace_and_move(&mut self.state, id, at);
             return;
         }
+        // GNOME's drag ends: nowhere glides home, an accepted drop that
+        // changes nothing fades back in place.
         let Some(target) = crate::overview::drop_target(&layout, pos) else {
+            self.overview_motion.drag_snap_back(motion);
             return;
         };
         let here = self.manager.model().window(id).map(|w| w.workspace);
         if here != Some(target) {
+            self.overview_motion.drag_released();
             self.manager.move_to_workspace(&mut self.state, id, target);
+        } else {
+            self.overview_motion.drag_revert(id, motion);
         }
     }
 
@@ -2009,13 +2020,14 @@ impl Runtime {
                     let travel = *travel;
                     // On the desktop a horizontal swipe drags the
                     // workspace strip with the fingers (GNOME).
-                    let desktop = !self.control.overview_open() && self.overview_progress == 0.0;
+                    let desktop =
+                        !self.control.overview_open() && self.overview_motion.progress() == 0.0;
                     if self.manager.workspace_slide().following() {
                         self.manager
                             .workspace_slide_mut()
                             .update_swipe(delta.x, time);
                     } else if desktop
-                        && self.overview_swipe_from.is_none()
+                        && !self.overview_motion.swiping()
                         && travel.x.abs() > travel.y.abs()
                     {
                         let policy = self.input_settings.motion;
@@ -2033,17 +2045,12 @@ impl Runtime {
                     if travel.y.abs() > travel.x.abs()
                         && !self.manager.workspace_slide().following()
                     {
-                        let from = *self
-                            .overview_swipe_from
-                            .get_or_insert(self.overview_progress);
-                        let progress = (from - travel.y / OVERVIEW_SWIPE_DISTANCE).clamp(0.0, 1.0);
-                        self.overview_progress = if self.input_settings.motion.allows_motion() {
-                            progress
-                        } else if progress >= 0.5 {
-                            1.0
-                        } else {
-                            0.0
-                        };
+                        self.overview_motion.swipe_update(
+                            time,
+                            -travel.y,
+                            OVERVIEW_SWIPE_DISTANCE,
+                            self.input_settings.motion,
+                        );
                     }
                     true
                 }
@@ -2072,14 +2079,15 @@ impl Runtime {
                     }
                     return true;
                 }
-                if let Some(from) = self.overview_swipe_from.take() {
-                    // Released: finish toward whichever side is nearer
-                    // (back where it began when cancelled).
-                    let open = if cancelled {
-                        from >= 0.5
-                    } else {
-                        self.overview_progress >= 0.5
-                    };
+                // Released: finish where GNOME's swipe tracker would,
+                // keeping the fingers' momentum (back where it began
+                // when cancelled).
+                if let Some(open) = self.overview_motion.swipe_end(
+                    time,
+                    cancelled,
+                    OVERVIEW_SWIPE_DISTANCE,
+                    self.input_settings.motion,
+                ) {
                     self.control.set_overview(open);
                     return true;
                 }
@@ -2354,8 +2362,10 @@ impl Runtime {
             return None;
         }
         let blank_alpha = self.blank_alpha();
-        let overview = (self.overview_progress > 0.0).then(|| self.overview_layout());
-        let cards = overview.as_ref().filter(|_| !self.overview_search);
+        let overview = (self.overview_motion.progress() > 0.0).then(|| self.overview_layout());
+        let cards = overview
+            .as_ref()
+            .filter(|_| !self.overview_motion.search_covers());
         let tile = overview
             .is_none()
             .then(|| self.manager.tile_preview(&self.state))
@@ -2789,11 +2799,7 @@ impl Runtime {
         self.manager
             .set_motion_allowed(settings.motion.allows_motion());
         if !settings.motion.allows_motion() {
-            self.overview_progress = if self.control.overview_open() {
-                1.0
-            } else {
-                0.0
-            };
+            self.overview_motion.snap(self.control.overview_open());
         }
         #[cfg(feature = "drm")]
         if let Backend::Drm(drm) = &mut self.backend {
@@ -2860,11 +2866,17 @@ impl Runtime {
     /// search or the app grid covers it).
     fn publish_overview_previews(&mut self) {
         let (previews, hovered) = if self.control.overview_open()
-            && self.overview_progress >= 1.0
+            && self.overview_motion.progress() >= 1.0
             && !self.overview_search
             && !self.overview_app_grid
         {
-            let scene = self.overview_layout();
+            // The resting geometry, so the chrome moves once per change
+            // rather than every frame of a hover or layout tween.
+            let mut scene = self.overview_base();
+            match self.overview_dragged() {
+                Some((id, _)) => scene.previews.retain(|p| p.id != id),
+                None => crate::overview::grow_hovered(&mut scene, self.manager.pointer_pos()),
+            }
             let list: Vec<tuna_shell_control::PreviewInfo> = scene
                 .previews
                 .iter()
@@ -3333,7 +3345,9 @@ impl Runtime {
         self.step_size_changes();
         let overview = (show_content && !overlay_visible && drawn).then(|| self.overview_layout());
         // While search shows results, the workspace view steps aside.
-        let cards = overview.as_ref().filter(|_| !self.overview_search);
+        let cards = overview
+            .as_ref()
+            .filter(|_| !self.overview_motion.search_covers());
         // GNOME's tile preview while a dragged window is over a snap edge.
         let tile = (show_content && overview.is_none())
             .then(|| self.manager.tile_preview(&self.state))
