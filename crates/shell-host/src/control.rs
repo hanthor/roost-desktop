@@ -80,6 +80,11 @@ pub enum Handled {
     PointerOutput,
     /// Show or dismiss the shortcut consent dialog.
     ShortcutConsent(Option<(u64, String)>),
+    /// The keyboard switched Sticky or Slow Keys: save and confirm.
+    KeyboardAidToggled {
+        aid: tuna_shell_control::KeyboardAid,
+        enabled: bool,
+    },
     /// A grabbed accelerator was pressed (org.gnome.Shell).
     Accelerator {
         /// The grab's action id.
@@ -705,6 +710,9 @@ impl ControlClient {
                 Ok(Handled::PointerOutput)
             }
             Message::ShortcutConsent { request } => Ok(Handled::ShortcutConsent(request)),
+            Message::KeyboardAidToggled { aid, enabled } => {
+                Ok(Handled::KeyboardAidToggled { aid, enabled })
+            }
             Message::ScreenReader { state } => Ok(Handled::ScreenReader(state)),
             Message::WorkspacePopup { index, count } => {
                 Ok(Handled::WorkspacePopup { index, count })
@@ -872,6 +880,7 @@ fn message_label(msg: &Message) -> &'static str {
         Message::ScreenReader { .. } => "ScreenReader",
         Message::PointerOutput { .. } => "PointerOutput",
         Message::ShortcutConsent { .. } => "ShortcutConsent",
+        Message::KeyboardAidToggled { .. } => "KeyboardAidToggled",
     }
 }
 
