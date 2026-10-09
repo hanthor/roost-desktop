@@ -88,26 +88,19 @@ window.tuna-panel.overview.shaded {
   color: #ff7800;
 }
 
-/* Workspace indicator (#panelActivities .workspace-dot): the active
-   workspace is an 8px-tall pill (its width set in code, by count), the
-   others 8px dots drawn at 6px (GNOME scales them to 0.75) in white at
-   50%, 5px apart. */
+/* Workspace indicator (#panelActivities .workspace-dot): 8px dots 5px
+   apart. ws_dots.rs sizes each one from its expansion: the active
+   workspace is a wide, opaque 8px pill, the others drawn at 6px (GNOME
+   scales them to 0.75) at 50% opacity. */
 .tuna-panel .ws-pills {
   margin: 0 3px;
 }
 
 .tuna-panel .ws-pill {
-  background-color: alpha(#ffffff, 0.5);
-  border-radius: 999px;
-  min-width: 6px;
-  min-height: 6px;
-  margin: 1px;
-}
-
-.tuna-panel .ws-pill.active {
   background-color: #ffffff;
-  min-height: 8px;
-  margin: 0;
+  border-radius: 999px;
+  min-width: 0;
+  min-height: 0;
 }
 
 /* Panel menus (.popup-menu-content): GNOME 51's dark surface. */

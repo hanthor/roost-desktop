@@ -1617,6 +1617,12 @@ impl Runtime {
         } else {
             self.wallpaper.diagnostics()
         };
+        // GNOME's workspace switch: the drawn strip while it moves, and
+        // the last finished switches with their timing.
+        doc["workspace_slide"] = self
+            .manager
+            .workspace_slide()
+            .snapshot(self.animation_clock.now());
         let motion = self.input_settings.motion;
         doc["motion_policy"] = serde_json::json!(motion.level.as_str());
         doc["animation_slowdown"] = serde_json::json!(motion.slowdown());
@@ -1794,6 +1800,22 @@ impl Runtime {
         );
     }
 
+    /// Follow the active workspace with GNOME's switch animation; the
+    /// overview (and the lock) settle it at once.
+    fn step_workspace_slide(&mut self) {
+        let now = self.animation_clock.now();
+        let policy = self.input_settings.motion;
+        let suspended =
+            self.overview_progress > 0.0 || self.control.overview_open() || self.is_locked();
+        let width = self.state.primary_size().w;
+        let model = self.manager.model();
+        let active = model.active_workspace();
+        let workspaces = model.workspaces().to_vec();
+        let slide = self.manager.workspace_slide_mut();
+        slide.observe(active, &workspaces, width, policy, suspended, now);
+        slide.step(now);
+    }
+
     /// A press while the overview is open that no shell surface took:
     /// focus the preview's window, switch to a neighbor card's
     /// workspace, or close the overview (GNOME shape). Returns whether
@@ -1885,7 +1907,10 @@ impl Runtime {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
             return;
         };
-        let time = crate::state::system_millis() as u32;
+        // Proofs may stamp phases to shape the release velocity.
+        let time = value["time"]
+            .as_u64()
+            .map_or(crate::state::system_millis() as u32, |t| t as u32);
         let input = match value["phase"].as_str() {
             Some("begin") => ManagerInput::SwipeBegin { fingers: 3, time },
             Some("update") => ManagerInput::SwipeUpdate {
@@ -1916,13 +1941,36 @@ impl Runtime {
                 }
                 false
             }
-            ManagerInput::SwipeUpdate { delta, .. } => match self.shell_swipe.as_mut() {
+            ManagerInput::SwipeUpdate { delta, time } => match self.shell_swipe.as_mut() {
                 Some(travel) => {
                     *travel += delta;
                     let travel = *travel;
+                    // On the desktop a horizontal swipe drags the
+                    // workspace strip with the fingers (GNOME).
+                    let desktop = !self.control.overview_open() && self.overview_progress == 0.0;
+                    if self.manager.workspace_slide().following() {
+                        self.manager
+                            .workspace_slide_mut()
+                            .update_swipe(delta.x, time);
+                    } else if desktop
+                        && self.overview_swipe_from.is_none()
+                        && travel.x.abs() > travel.y.abs()
+                    {
+                        let policy = self.input_settings.motion;
+                        let now = self.animation_clock.now();
+                        let width = self.state.primary_size().w;
+                        let model = self.manager.model();
+                        let active = model.active_workspace();
+                        let workspaces = model.workspaces().to_vec();
+                        let slide = self.manager.workspace_slide_mut();
+                        slide.begin_swipe(active, &workspaces, width, policy, now);
+                        slide.update_swipe(travel.x, time);
+                    }
                     // GNOME's overview follows the fingers: a vertical
                     // swipe moves the transition (up opens) as it goes.
-                    if travel.y.abs() > travel.x.abs() {
+                    if travel.y.abs() > travel.x.abs()
+                        && !self.manager.workspace_slide().following()
+                    {
                         let from = *self
                             .overview_swipe_from
                             .get_or_insert(self.overview_progress);
@@ -1939,10 +1987,29 @@ impl Runtime {
                 }
                 None => false,
             },
-            ManagerInput::SwipeEnd { cancelled, .. } => {
+            ManagerInput::SwipeEnd { cancelled, time } => {
                 let Some(travel) = self.shell_swipe.take() else {
                     return false;
                 };
+                if self.manager.workspace_slide().following() {
+                    // Released: the slide finishes on the fingers'
+                    // velocity; the model switches now so focus and
+                    // input never wait for it.
+                    let now = self.animation_clock.now();
+                    let target = self
+                        .manager
+                        .workspace_slide_mut()
+                        .end_swipe(cancelled, time, now);
+                    if let Some(target) = target {
+                        if target != self.manager.model().active_workspace()
+                            && !self.manager.switch_to_workspace(&mut self.state, target)
+                        {
+                            // GNOME's trailing empty workspace: create it.
+                            self.manager.switch_relative(&mut self.state, 1);
+                        }
+                    }
+                    return true;
+                }
                 if let Some(from) = self.overview_swipe_from.take() {
                     // Released: finish toward whichever side is nearer
                     // (back where it began when cancelled).
@@ -3199,6 +3266,8 @@ impl Runtime {
         };
         let drawn = self.step_overview_transition();
         self.step_strip_view();
+        // The slide first: size changes read this frame's slide offsets.
+        self.step_workspace_slide();
         self.step_size_changes();
         let overview = (show_content && !overlay_visible && drawn).then(|| self.overview_layout());
         // While search shows results, the workspace view steps aside.
@@ -3950,7 +4019,8 @@ fn scene_elements(
                 elements: &mut Vec<PreviewElement>,
                 surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
                 at: Point<i32, Logical>,
-                sx: f64| {
+                sx: f64,
+                alpha: f32| {
         let origin = view.physical(f64::from(at.x), f64::from(at.y));
         elements.extend(
             render_elements_from_surface_tree::<_, WaylandSurfaceRenderElement<_>>(
@@ -3958,7 +4028,7 @@ fn scene_elements(
                 surface,
                 origin,
                 view.scale,
-                1.0,
+                alpha,
                 Kind::Unspecified,
             )
             .into_iter()
@@ -3980,7 +4050,14 @@ fn scene_elements(
             if split_from.is_none() && split.is_some_and(|s| *s == *surface) {
                 split_from = Some(elements.len());
             }
-            if let Some((frame, snapshot)) = manager.size_changes().frame(id) {
+            if let Some((mut frame, snapshot)) = manager.size_changes().frame(id) {
+                // A workspace switch carries the transition along with its
+                // window: the live frame and the snapshot above it.
+                let dx = f64::from(manager.slide_dx(id));
+                frame.live.loc.x += dx;
+                frame.snapshot.loc.x += dx;
+                let alpha = manager.render_alpha(&window);
+                frame.snapshot_alpha *= alpha;
                 // GNOME's size-change transition (#496): the live window
                 // eased (never scaled past its size), the old frame
                 // fading over it. Popups wait for the window to land.
@@ -3997,7 +4074,7 @@ fn scene_elements(
                             &surface,
                             origin,
                             view.scale,
-                            1.0,
+                            alpha,
                             Kind::Unspecified,
                         )
                         .into_iter()
@@ -4026,19 +4103,35 @@ fn scene_elements(
                 // An unmapped tree has no committed bounds to scale yet.
                 1.0
             };
-            tree(renderer, &mut elements, &surface, origin, sx);
+            // Below 1 only while a fade-only workspace switch crossfades.
+            let alpha = manager.render_alpha(&window);
+            tree(renderer, &mut elements, &surface, origin, sx, alpha);
             // Popups (#88) right above their window.
             for popup in crate::popup::placed_popups(&surface, origin, true) {
-                tree(renderer, &mut elements, &popup.surface, popup.origin, 1.0);
+                tree(
+                    renderer,
+                    &mut elements,
+                    &popup.surface,
+                    popup.origin,
+                    1.0,
+                    alpha,
+                );
             }
         }
     }
     // Layer shell above windows: panel strip, then overview, each with
     // its popups (toolkit popovers hang off layer surfaces).
     for (surface, (x, y), _) in crate::layer::layer_layout(state) {
-        tree(renderer, &mut elements, &surface, (x, y).into(), 1.0);
+        tree(renderer, &mut elements, &surface, (x, y).into(), 1.0, 1.0);
         for popup in crate::popup::placed_popups(&surface, (x, y).into(), false) {
-            tree(renderer, &mut elements, &popup.surface, popup.origin, 1.0);
+            tree(
+                renderer,
+                &mut elements,
+                &popup.surface,
+                popup.origin,
+                1.0,
+                1.0,
+            );
         }
     }
     // `elements` accumulates bottom-to-top (windows, then
