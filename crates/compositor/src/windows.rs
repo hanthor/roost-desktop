@@ -309,6 +309,9 @@ pub struct WindowManager {
     /// An exclusive-keyboard layer surface holding the keyboard (a
     /// modal dialog), released back to the focused window on unmap.
     exclusive_held: Option<WlSurface>,
+    /// Maximize/tile/fullscreen transitions (#496): layout changes
+    /// queue here and the runtime draws them.
+    size_changes: crate::size_change::SizeChanges<crate::size_change::Snapshot>,
 }
 
 impl WindowManager {
@@ -368,6 +371,7 @@ impl WindowManager {
             activated: None,
             overview_held: None,
             exclusive_held: None,
+            size_changes: Default::default(),
         }
     }
 
@@ -613,10 +617,50 @@ impl WindowManager {
     /// shifted by how far the animated view still trails its target. Every other use (input, configure,
     /// output scale) keeps the target geometry.
     pub fn render_windows(&self) -> Vec<(Window, Rectangle<i32, Logical>)> {
+        self.render_entries()
+            .into_iter()
+            .map(|(_, window, geometry)| (window, geometry))
+            .collect()
+    }
+
+    /// [`render_windows`](Self::render_windows) with their ids.
+    pub fn render_entries(&self) -> Vec<(u64, Window, Rectangle<i32, Logical>)> {
         self.visible_entries()
             .into_iter()
-            .map(|(id, window, geometry)| (window, self.shifted(id, geometry)))
+            .map(|(id, window, geometry)| (id, window, self.shifted(id, geometry)))
             .collect()
+    }
+
+    /// Size-change transitions in flight and queued (#496).
+    pub fn size_changes(&self) -> &crate::size_change::SizeChanges<crate::size_change::Snapshot> {
+        &self.size_changes
+    }
+
+    pub fn size_changes_mut(
+        &mut self,
+    ) -> &mut crate::size_change::SizeChanges<crate::size_change::Snapshot> {
+        &mut self.size_changes
+    }
+
+    /// Queue GNOME's size-change transition for a layout change that
+    /// moved `id` off `old`: only for a placed, shown, ordinary window
+    /// (GNOME animates `NORMAL` windows only) outside the strip.
+    fn note_size_change(&mut self, id: u64, old: Rectangle<i32, Logical>) {
+        if self.mode == SessionMode::Scroll || self.transient_parent(id).is_some() {
+            return;
+        }
+        let Some(window) = self.windows.get(&id) else {
+            return;
+        };
+        let shown = self
+            .visible_entries()
+            .iter()
+            .any(|(other, _, _)| *other == id);
+        if window.unplaced || !shown || window.geometry == old {
+            return;
+        }
+        let new = window.geometry;
+        self.size_changes.request(id, old, new);
     }
 
     /// Where `id` is drawn this frame (see
@@ -3072,12 +3116,16 @@ impl WindowManager {
         let changed = self
             .window_layout(id)
             .is_some_and(|layout| layout != WindowLayout::Floating);
+        let old = self.geometry(id);
         if !self.restore_layout(id) {
             return false;
         }
         self.configure(id, self.model.focused() == Some(id));
         if changed {
             eprintln!("roost-compositor: window {id} Floating");
+            if let Some(old) = old {
+                self.note_size_change(id, old);
+            }
         }
         true
     }
@@ -3100,10 +3148,14 @@ impl WindowManager {
         if window.layout == WindowLayout::Floating {
             window.restore = Some(window.geometry);
         }
+        let old = window.geometry;
         window.layout = layout;
         window.geometry = area;
         self.configure(id, self.model.focused() == Some(id));
         eprintln!("roost-compositor: window {id} {layout:?}");
+        if layout != WindowLayout::Strip {
+            self.note_size_change(id, old);
+        }
         true
     }
 
@@ -5177,7 +5229,7 @@ mod resize_tests {
 
 /// The size a client committed for its window: its xdg window geometry,
 /// else its buffer's size. `None` before the first buffer.
-fn committed_size(
+pub(crate) fn committed_size(
     surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
 ) -> Option<Size<i32, Logical>> {
     let buffer = smithay::backend::renderer::utils::with_renderer_surface_state(surface, |s| {

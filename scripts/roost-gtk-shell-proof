@@ -116,6 +116,10 @@
 #   G-WM-KEYS      Alt+Space, Alt+F10, Super+End/Home (wm keybindings)
 #   G-WM-REBIND    GNOME's maximize key rebinds through its settings:
 #                  the old chord stops, the new one maximizes
+#   G-SIZE-CHANGE-ANIM maximize, unmaximize, half-tiling and a client's
+#                  fullscreen ease 250 ms from the old frame (#496), never
+#                  stretching new content; fade-only under Reduced Motion,
+#                  instant with animations off
 #   G-WS-POPUP     a workspace key shows the workspace switcher popup
 #   G-WS-THUMBS    three workspaces put GNOME's thumbnails strip in the
 #                  overview, and a thumbnail click switches workspace
@@ -2576,6 +2580,10 @@ cp "$CSTATE" "$ARTIFACTS/hot-corner-client-before-fullscreen.json"
 printf '{"generation":1,"request":"fullscreen"}\n' >"$corner_requests"
 cstate ".focused_rect == [0, 0, $WIDTH, $HEIGHT]" "corner proof fullscreen" ||
     fail G-HOT-CORNER-FULLSCREEN "actual GTK fullscreen request did not cover the output"
+# The client's own fullscreen request runs GNOME's size-change
+# transition too (#496).
+cstate "(.size_changes.in_flight | length) == 0 and any(.size_changes.history[]; .window == $corner_window_id and .last == [0, 0, $WIDTH, $HEIGHT] and .outcome == \"completed\" and (.samples | length) >= 2)" "fullscreen transition" 10 ||
+    fail G-SIZE-CHANGE-ANIM "the GTK fullscreen request did not ease to the output"
 xdotool mousemove --window "$WID" 1 1
 sleep 1
 cstate '.pointer_position == [1, 1] and .pointer_fullscreen_blocked' "fullscreen corner motion delivered" ||
@@ -2994,6 +3002,128 @@ cstate ".focused_rect[2] != $WIDTH" "restored" || fail G-WM-REBIND "Super+Down d
 gsettings reset org.gnome.desktop.wm.keybindings maximize
 sleep 1
 pass G-WM-REBIND "GNOME's maximize key rebinds: the old chord stops and the new one maximizes"
+
+# GNOME's size-change transition (#496, windowManager.js
+# _sizeChangeWindow): the window stays on its old frame until the client
+# draws the new size, then eases 250 ms (ease-out-quad) to it while a
+# snapshot of the old frame fades over it. The compositor records every
+# frame it draws; each key's record must show intermediate geometry,
+# never new content larger than its final size, and settle in 250 ms
+# plus a frame-timing tolerance. With animations off it is instant.
+SIZE_CHANGE_TOLERANCE_MS=150
+size_change() {
+    # $1 key, $2 label. Leaves the finished record in size-change-$2.json.
+    sc_seq="$(jq -r '.size_changes.last_seq' "$CSTATE")"
+    sc_window="$(jq -r '.focused' "$CSTATE")"
+    xdotool key "$1"
+    cstate "(.size_changes.in_flight | length) == 0 and any(.size_changes.history[]; .seq > $sc_seq and .window == $sc_window)" "$2 settled" 10 ||
+        return 1
+    jq -e "[.size_changes.history[] | select(.seq > $sc_seq and .window == $sc_window)] | last" \
+        "$CSTATE" >"$ARTIFACTS/size-change-$2.json"
+}
+size_change_animated() {
+    # $1 label: the record completed, moved through intermediate
+    # geometry, never stretched past the final size, and settled in time.
+    jq -e --argjson tol "$SIZE_CHANGE_TOLERANCE_MS" '
+        def between(a; b; v): v > ([a, b] | min) and v < ([a, b] | max);
+        . as $r
+        | .outcome == "completed"
+        and (.samples | length) >= 2
+        and any(.samples[]; . as $s | any(range(0; 4); between($r.from[.]; $r.last[.]; $s.live[.])))
+        and all(.samples[]; .live[2] <= $r.last[2] and .live[3] <= $r.last[3])
+        and .samples[0].alpha > .samples[-1].alpha
+        and .settle_ms >= 200 and .settle_ms <= 250 + $tol
+        and .waited_ms <= 500
+    ' "$ARTIFACTS/size-change-$1.json" >/dev/null
+}
+size_change super+Up maximize || fail G-SIZE-CHANGE-ANIM "Super+Up left no settled size-change record"
+size_change_animated maximize ||
+    fail G-SIZE-CHANGE-ANIM "maximize did not ease from the old frame to the new size in 250 ms: $(cat "$ARTIFACTS/size-change-maximize.json")"
+cstate ".focused_rect[2] == $WIDTH" "maximized" || fail G-SIZE-CHANGE-ANIM "Super+Up did not maximize"
+size_change super+Down unmaximize || fail G-SIZE-CHANGE-ANIM "Super+Down left no settled size-change record"
+size_change_animated unmaximize ||
+    fail G-SIZE-CHANGE-ANIM "unmaximize did not ease back to the floating frame: $(cat "$ARTIFACTS/size-change-unmaximize.json")"
+size_change super+Left tile-left || fail G-SIZE-CHANGE-ANIM "Super+Left left no settled size-change record"
+size_change_animated tile-left ||
+    fail G-SIZE-CHANGE-ANIM "half-tiling left did not ease into the left half: $(cat "$ARTIFACTS/size-change-tile-left.json")"
+cstate ".focused_rect == [0, 32, $((WIDTH / 2)), $((HEIGHT - 32))]" "tiled left" ||
+    fail G-SIZE-CHANGE-ANIM "Super+Left did not tile the left half"
+# Exact frames on the proof clock (G-ANIMATION-CLOCK): frozen at 0 ms
+# the transition sits on its first frame, the old-frame snapshot fully
+# over the window, so the screen must still show the old frame upright;
+# 125 ms is exactly half way (ease-out-quad 0.75, snapshot alpha 0.25).
+scrot "$ARTIFACTS/size-change-before.png" >/dev/null
+anim_clock 0
+cstate '.animation_clock_manual' "size change clock frozen" ||
+    fail G-SIZE-CHANGE-ANIM "the proof clock did not freeze"
+seq_mid="$(jq -r '.size_changes.last_seq' "$CSTATE")"
+xdotool key super+Left
+cstate ".size_changes.in_flight | any(.seq > $seq_mid and .phase == \"animating\" and .snapshot_alpha == 1)" "first frame" 10 ||
+    fail G-SIZE-CHANGE-ANIM "untiling did not start on the frozen clock"
+sleep 0.3
+scrot "$ARTIFACTS/size-change-0ms.png" >/dev/null
+cp "$CSTATE" "$ARTIFACTS/size-change-0ms.json"
+"$PY" - "$ARTIFACTS/size-change-before.png" "$ARTIFACTS/size-change-0ms.png" "$((WIDTH / 2))" "$HEIGHT" <<'PYSNAP' ||
+from PIL import Image, ImageChops
+import sys
+before, first = (Image.open(p).convert("RGB") for p in sys.argv[1:3])
+w, h = int(sys.argv[3]), int(sys.argv[4])
+# The tiled frame, inside its edges: the snapshot must reproduce it.
+box = (8, 40, w - 8, h - 8)
+diff = ImageChops.difference(before.crop(box), first.crop(box)).convert("L")
+mean = sum(diff.getdata()) / (diff.width * diff.height)
+print(f"size-change snapshot mean difference {mean:.2f}")
+raise SystemExit(0 if mean < 6 else 1)
+PYSNAP
+    fail G-SIZE-CHANGE-ANIM "the first frame does not show the old frame as it was (snapshot misdrawn)"
+anim_clock 125
+cstate ".size_changes.in_flight | any(.seq > $seq_mid and .snapshot_alpha == 0.25 and .live_visible)" "125 ms" ||
+    fail G-SIZE-CHANGE-ANIM "the transition was not exactly half way 125 ms in"
+sleep 0.3
+scrot "$ARTIFACTS/size-change-mid-flight.png" >/dev/null
+cp "$CSTATE" "$ARTIFACTS/size-change-125ms.json"
+anim_clock 250
+cstate "(.size_changes.in_flight | length) == 0 and any(.size_changes.history[]; .seq > $seq_mid and .outcome == \"completed\" and .settle_ms == 250)" "250 ms" ||
+    fail G-SIZE-CHANGE-ANIM "the transition had not settled exactly 250 ms in"
+rm -f "$ROOST_ANIMATION_CLOCK"
+cstate '.animation_clock_manual | not' "size change clock released" ||
+    fail G-SIZE-CHANGE-ANIM "removing the clock file did not resume real time"
+# Reduced motion (fade-only): the window is in place at once and only
+# the old frame fades, still 250 ms.
+gsettings set org.gnome.desktop.a11y.interface reduced-motion 'reduce'
+cstate '.motion_policy == "fade-only"' "size change fade-only" ||
+    fail G-SIZE-CHANGE-ANIM "Reduced Motion did not reach the compositor"
+size_change_faded() {
+    jq -e '. as $r | .outcome == "completed" and (.samples | length) >= 2
+        and all(.samples[]; .live == $r.last)
+        and .samples[0].alpha > .samples[-1].alpha' "$ARTIFACTS/size-change-$1.json" >/dev/null
+}
+size_change super+Up maximize-fade || fail G-SIZE-CHANGE-ANIM "Super+Up under Reduced Motion left no record"
+size_change_faded maximize-fade ||
+    fail G-SIZE-CHANGE-ANIM "Reduced Motion maximize moved instead of fading: $(cat "$ARTIFACTS/size-change-maximize-fade.json")"
+size_change super+Down unmaximize-fade || fail G-SIZE-CHANGE-ANIM "Super+Down under Reduced Motion left no record"
+size_change_faded unmaximize-fade ||
+    fail G-SIZE-CHANGE-ANIM "Reduced Motion unmaximize moved instead of fading: $(cat "$ARTIFACTS/size-change-unmaximize-fade.json")"
+gsettings reset org.gnome.desktop.a11y.interface reduced-motion
+cstate '.motion_policy == "full"' "size change full motion" ||
+    fail G-SIZE-CHANGE-ANIM "resetting Reduced Motion did not restore full motion"
+# Animations off: the layout lands at once and the change is skipped.
+gsettings set org.gnome.desktop.interface enable-animations false
+cstate '(.animations_enabled | not)' "size change animations off" ||
+    fail G-SIZE-CHANGE-ANIM "enable-animations false did not reach the compositor"
+size_change super+Up maximize-off || fail G-SIZE-CHANGE-ANIM "Super+Up with animations off left no record"
+jq -e '.outcome == "skipped" and .reason == "animations-off" and (.samples | length) == 0' \
+    "$ARTIFACTS/size-change-maximize-off.json" >/dev/null ||
+    fail G-SIZE-CHANGE-ANIM "with animations off the maximize was not instant: $(cat "$ARTIFACTS/size-change-maximize-off.json")"
+size_change super+Down unmaximize-off || fail G-SIZE-CHANGE-ANIM "Super+Down with animations off left no record"
+jq -e '.outcome == "skipped" and .reason == "animations-off"' \
+    "$ARTIFACTS/size-change-unmaximize-off.json" >/dev/null ||
+    fail G-SIZE-CHANGE-ANIM "with animations off the unmaximize was not instant"
+gsettings set org.gnome.desktop.interface enable-animations true
+cstate '.animations_enabled' "size change animations on" ||
+    fail G-SIZE-CHANGE-ANIM "enable-animations true did not reach the compositor"
+cp "$CSTATE" "$ARTIFACTS/size-change.json"
+pass G-SIZE-CHANGE-ANIM "maximize, unmaximize and half-tiling ease 250 ms from the old frame (exact on the proof clock), never stretch new content, only fade under Reduced Motion, and are instant with animations off"
 
 # The switcher's keys rebind too: switch-applications on Ctrl+J steps
 # and commits on Control's release, and Alt+Tab is left to apps.
