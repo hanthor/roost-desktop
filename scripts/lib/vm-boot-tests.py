@@ -543,6 +543,25 @@ class ShippedSnapshotInventory(unittest.TestCase):
             self.run_inventory(state, [("4", f"{uid} tuna-test - -")])
 
 
+class PreRenameGuestLog(unittest.TestCase):
+    # tuna-rename: keep-begin
+    # The published flavor can still ship binaries from before #505.
+    def test_pre_rename_binary_lines_read_as_current_names(self):
+        text = lane.normalize_guest_log(
+            "session[9]: roost-compositor: drm: output Virtual-1 1280x800\n"
+            "session[9]: roost-shell-gtk: keybindings: 64 grabs\n"
+            "tuna-vm-health: roost-test ready\n")
+        self.assertRegex(text, lane.DRM_RE)
+        self.assertRegex(text, lane.SHELL_RE)
+        self.assertIn("tuna-vm-health: roost-test ready", text)
+
+    def test_pre_rename_executables_compare_by_role(self):
+        self.assertEqual(lane.guest_role("roost-compositor"), "tuna-compositor")
+        self.assertEqual(lane.guest_role("tuna-shell-gtk"), "tuna-shell-gtk")
+        self.assertEqual(lane.guest_role("nautilus"), "nautilus")
+    # tuna-rename: keep-end
+
+
 class PredatingGuestQualification(unittest.TestCase):
     # Run 37700332957: the published tuna-desktop 0.1.0-2 guest runs a healthy
     # session whose snapshot reports every newer instrumentation key as

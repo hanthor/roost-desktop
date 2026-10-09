@@ -75,9 +75,10 @@ def log(msg):
 
 
 def read_text(path):
+    """The serial journal, with pre-rename guest log prefixes normalized."""
     try:
         with open(path, "rb") as fh:
-            return fh.read().decode("utf-8", "replace")
+            return normalize_guest_log(fh.read().decode("utf-8", "replace"))
     except FileNotFoundError:
         return ""
 
@@ -134,6 +135,16 @@ def check_panel(path):
 # prefix. Guest process checks compare roles, not the shipped prefix.
 LEGACY_GUEST_PREFIXES = ("roost-",)
 # tuna-rename: keep-end
+
+
+LEGACY_LOG_RE = re.compile(
+    "(?:" + "|".join(re.escape(prefix) for prefix in LEGACY_GUEST_PREFIXES) + ")"
+    r"(compositor|session|shell-host|shell-gtk|ibus-bridge|greeter)\b")
+
+
+def normalize_guest_log(text):
+    """Guest binaries' log prefixes, with pre-rename ones read as tuna-."""
+    return LEGACY_LOG_RE.sub(r"tuna-\1", text)
 
 
 def guest_role(executable):
@@ -984,7 +995,7 @@ def run_lifecycle(qmp, agent, out, serial_path, record):
     agent.run("kill-shell")
     killed_mask = varied_mask(frame("shell-killed"))
     recovered = await_state(lambda state: state["state"]["locked"] and
-                            any(p["executable"] == "tuna-shell-gtk" and p not in resumed["processes"]
+                            any(guest_role(p["executable"]) == "tuna-shell-gtk" and p not in resumed["processes"]
                                 for p in state["processes"]), timeout=30, label="shell-recovering")
     time.sleep(2)
     recovered = inventory("shell-recovered")
