@@ -84,6 +84,21 @@ pub fn cover_crop(image: &image::RgbaImage, w: u32, h: u32) -> Option<image::Rgb
     Some(scaled.view(x, y, w, h).to_image())
 }
 
+/// GNOME 51's background swap (`background.js` `FADE_ANIMATION_TIME`):
+/// the old picture fades out over the new one for 1000 ms.
+pub const CROSSFADE_MS: u64 = 1000;
+
+/// Opacity of the outgoing picture `elapsed_ms` into a crossfade
+/// (GNOME eases it to zero with ease-out-quad), or `None` once the fade
+/// is over and the old picture can be dropped.
+pub fn crossfade_old_alpha(elapsed_ms: u64) -> Option<f32> {
+    if elapsed_ms >= CROSSFADE_MS {
+        return None;
+    }
+    let t = elapsed_ms as f32 / CROSSFADE_MS as f32;
+    Some((1.0 - t) * (1.0 - t))
+}
+
 /// GNOME 51's lock-screen background (`unlockDialog.js`): the desktop
 /// blurred and dimmed. Fitted against GNOME's own capture: a Gaussian
 /// of sigma 20 logical pixels and brightness 0.65.
@@ -414,5 +429,16 @@ mod tests {
     fn garbage_is_none() {
         assert!(decode_cover_argb(b"not an image", 8, 8).is_none());
         assert!(decode_cover_argb(&[0xff, 0x0a, 1, 2, 3], 8, 8).is_none());
+    }
+
+    #[test]
+    fn crossfade_eases_the_old_picture_out_over_one_second() {
+        assert_eq!(super::crossfade_old_alpha(0), Some(1.0));
+        // ease-out-quad: 1 - (1 - (1 - t)^2) at t = 0.5 is 0.25.
+        assert_eq!(super::crossfade_old_alpha(500), Some(0.25));
+        let late = super::crossfade_old_alpha(900).unwrap();
+        assert!(late > 0.0 && late < 0.02);
+        assert_eq!(super::crossfade_old_alpha(super::CROSSFADE_MS), None);
+        assert_eq!(super::crossfade_old_alpha(u64::MAX), None);
     }
 }

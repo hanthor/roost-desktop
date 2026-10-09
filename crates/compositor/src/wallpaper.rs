@@ -136,6 +136,95 @@ pub struct Wallpaper {
     cards: Vec<CardCache>,
     /// The lock screen's blurred, dimmed copy, by URI and output size.
     locked: Vec<(String, Size<i32, Logical>, MemoryRenderBuffer)>,
+    /// What each output size last showed, with the picture it is fading
+    /// out of (GNOME's background crossfade).
+    shown: Vec<Shown<MemoryRenderBuffer>>,
+    /// GNOME's motion policy: the crossfade is a fade, so it runs unless
+    /// animations are off, stretched by the slow-down factor.
+    policy: tuna_shell_control::motion::MotionPolicy,
+    /// Animation time of the frame being drawn.
+    now: std::time::Duration,
+    /// Proof counters for the crossfade.
+    fades: FadeStats,
+}
+
+/// The picture one output size shows, and the one it replaced while
+/// that fades out over it. Both textures stay alive until the fade
+/// ends; afterwards only the current one is kept.
+#[derive(Debug)]
+struct Shown<B> {
+    size: Size<i32, Logical>,
+    key: String,
+    buffer: B,
+    fading: Option<(B, std::time::Duration)>,
+}
+
+/// Record that `output` now has `current` ready for `key` (`None`:
+/// still decoding). A different picture replacing a shown one starts a
+/// crossfade unless `still`; returns whether a swap happened. A picture
+/// still decoding leaves the old one on screen.
+fn present<B>(
+    shown: &mut Vec<Shown<B>>,
+    output: Size<i32, Logical>,
+    key: &str,
+    current: Option<B>,
+    now: std::time::Duration,
+    still: bool,
+) -> bool {
+    let Some(buffer) = current else {
+        return false;
+    };
+    match shown.iter_mut().find(|s| s.size == output) {
+        Some(slot) if slot.key == key => false,
+        Some(slot) => {
+            let old = std::mem::replace(&mut slot.buffer, buffer);
+            key.clone_into(&mut slot.key);
+            slot.fading = (!still).then_some((old, now));
+            true
+        }
+        None => {
+            if shown.len() >= MAX_WALLPAPER_SLOTS {
+                shown.remove(0);
+            }
+            shown.push(Shown {
+                size: output,
+                key: key.to_owned(),
+                buffer,
+                fading: None,
+            });
+            false
+        }
+    }
+}
+
+/// The outgoing picture and its opacity at `now`, dropping it once the
+/// fade has ended so the steady state holds one texture.
+/// `slowdown` is GNOME's slow-down factor.
+fn fading_at<B: Clone>(
+    slot: &mut Shown<B>,
+    now: std::time::Duration,
+    slowdown: f64,
+) -> Option<(B, f32)> {
+    let out = slot.fading.as_ref().and_then(|(old, start)| {
+        let elapsed = now.saturating_sub(*start).as_secs_f64() * 1000.0 / slowdown;
+        let elapsed = elapsed.clamp(0.0, u64::MAX as f64) as u64;
+        tuna_wallpaper::crossfade_old_alpha(elapsed).map(|alpha| (old.clone(), alpha))
+    });
+    if out.is_none() {
+        slot.fading = None;
+    }
+    out
+}
+
+/// Crossfade observations for the proofs: swaps seen, frames drawn
+/// mid-fade, and whether one is running now.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct FadeStats {
+    pub started: u64,
+    pub animated_frames: u64,
+    pub active: bool,
+    /// The outgoing picture's opacity while it fades.
+    pub value: Option<f32>,
 }
 
 impl std::fmt::Debug for CardCache {
@@ -361,36 +450,137 @@ impl Wallpaper {
         self.color
     }
 
-    /// Render element stretching the current image over a `w` x `h`
-    /// output, or `None` when no usable image is loaded. The caller
-    /// still clears first: the image covers the output exactly, but
-    /// the clear stays the honest fallback underneath. Call once per
-    /// output with that output's size; crops are cached per size.
+    /// Whether a picture swap crossfades (GNOME's 1000 ms ease-out-quad,
+    /// a fade, so reduced motion keeps it) or happens at once. Turning
+    /// animation off ends a running fade.
+    pub fn set_policy(&mut self, policy: tuna_shell_control::motion::MotionPolicy) {
+        self.policy = policy;
+        if !policy.allows_fades() {
+            for shown in &mut self.shown {
+                shown.fading = None;
+            }
+            self.fades.active = false;
+            self.fades.value = None;
+        }
+    }
+
+    /// The animation time of the frame about to be drawn.
+    pub fn set_time(&mut self, now: std::time::Duration) {
+        self.now = now;
+    }
+
+    /// Crossfade counters for the compositor state document.
+    pub fn fade_stats(&self) -> FadeStats {
+        self.fades
+    }
+
+    /// Render elements stretching the current image over a `w` x `h`
+    /// output, topmost first: while a new picture replaces the old one,
+    /// the old one over it at its fading opacity. Empty when no usable
+    /// image is loaded. The caller still clears first: the image covers
+    /// the output exactly, but the clear stays the honest fallback
+    /// underneath. Call once per output with that output's size; crops
+    /// are cached per size.
     pub fn element(
         &mut self,
         renderer: &mut GlesRenderer,
         w: i32,
         h: i32,
         geometry: Geometry,
-    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+    ) -> Vec<MemoryRenderBufferRenderElement<GlesRenderer>> {
         let output = Size::<i32, Logical>::from((w, h));
-        let uri = self.refresh(output, geometry)?;
-        let loaded = self
+        let Some(uri) = self.refresh(output, geometry) else {
+            if self.refresh_stage == Some("source-identity-pending") {
+                // A new source is still being looked at: keep showing the
+                // old picture, which the new one will fade in over.
+                return self.hold(renderer, output);
+            }
+            // No picture to show at all: nothing to fade from later.
+            self.shown.retain(|shown| shown.size != output);
+            return Vec::new();
+        };
+        let current = match self
             .loaded
             .iter()
-            .find(|loaded| loaded.uri == uri && loaded.size == Some(output))?;
-        let buffer = loaded.buffer.as_ref()?;
-        let size = loaded.size?;
-        MemoryRenderBufferRenderElement::from_buffer(
-            renderer,
-            Point::<f64, Physical>::from((0.0, 0.0)),
-            buffer,
-            None,
-            None,
-            Some(size),
-            Kind::Unspecified,
-        )
-        .ok()
+            .find(|loaded| loaded.uri == uri && loaded.size == Some(output))
+        {
+            Some(loaded) => match loaded.buffer.clone() {
+                Some(buffer) => Some(buffer),
+                // Unreadable: the clear shows, as before any picture.
+                None => {
+                    self.shown.retain(|shown| shown.size != output);
+                    return Vec::new();
+                }
+            },
+            None => None,
+        };
+        let now = self.now;
+        let still = !self.policy.allows_fades();
+        if present(&mut self.shown, output, &uri, current, now, still) {
+            self.fades.started += 1;
+        }
+        let Some(shown) = self.shown.iter_mut().find(|s| s.size == output) else {
+            return Vec::new();
+        };
+        let fading = fading_at(shown, now, self.policy.slowdown());
+        let buffer = shown.buffer.clone();
+        self.fades.active = self.shown.iter().any(|s| s.fading.is_some());
+        let at = Point::<f64, Physical>::from((0.0, 0.0));
+        let mut elements = Vec::with_capacity(2);
+        self.fades.value = fading.as_ref().map(|(_, alpha)| *alpha);
+        if let Some((old, alpha)) = fading {
+            self.fades.animated_frames += 1;
+            elements.extend(
+                MemoryRenderBufferRenderElement::from_buffer(
+                    renderer,
+                    at,
+                    &old,
+                    Some(alpha),
+                    None,
+                    Some(output),
+                    Kind::Unspecified,
+                )
+                .ok(),
+            );
+        }
+        elements.extend(
+            MemoryRenderBufferRenderElement::from_buffer(
+                renderer,
+                at,
+                &buffer,
+                None,
+                None,
+                Some(output),
+                Kind::Unspecified,
+            )
+            .ok(),
+        );
+        elements
+    }
+
+    /// The picture `output` already shows, unchanged.
+    fn hold(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        output: Size<i32, Logical>,
+    ) -> Vec<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        self.shown
+            .iter()
+            .find(|s| s.size == output)
+            .and_then(|shown| {
+                MemoryRenderBufferRenderElement::from_buffer(
+                    renderer,
+                    Point::<f64, Physical>::from((0.0, 0.0)),
+                    &shown.buffer,
+                    None,
+                    None,
+                    Some(output),
+                    Kind::Unspecified,
+                )
+                .ok()
+            })
+            .into_iter()
+            .collect()
     }
 
     /// GNOME's lock-screen background over a `w` x `h` output: the
@@ -398,12 +588,17 @@ impl Wallpaper {
     /// per URI and size. `None` while the picture is still decoding or
     /// when there is none (the caller clears to the dimmed
     /// primary-color).
+    ///
+    /// `lift` raises it by that many physical pixels and `alpha` fades
+    /// it: the lock curtain's slide (or, under reduced motion, fade).
     pub fn lock_element(
         &mut self,
         renderer: &mut GlesRenderer,
         w: i32,
         h: i32,
         geometry: Geometry,
+        lift: i32,
+        alpha: f32,
     ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
         let output = Size::<i32, Logical>::from((w, h));
         let uri = self.refresh_picture(output, true, geometry)?;
@@ -446,9 +641,9 @@ impl Wallpaper {
             .find(|(u, s, _)| *u == uri && *s == output)?;
         MemoryRenderBufferRenderElement::from_buffer(
             renderer,
-            Point::<f64, Physical>::from((0.0, 0.0)),
+            Point::<f64, Physical>::from((0.0, -f64::from(lift))),
             buffer,
-            None,
+            (alpha < 1.0).then_some(alpha),
             None,
             Some(*size),
             Kind::Unspecified,
@@ -1361,5 +1556,46 @@ mod tests {
         assert!(start.elapsed() < std::time::Duration::from_millis(100));
         assert_eq!(wallpaper.identity_pending.len(), MAX_WALLPAPER_SLOTS);
         assert_eq!(senders.len(), MAX_WALLPAPER_SLOTS);
+    }
+
+    #[test]
+    fn a_new_picture_crossfades_from_the_old_and_then_holds_one_texture() {
+        use std::time::Duration;
+        let size = Size::from((1280, 800));
+        let start = Duration::ZERO;
+        let mut shown = Vec::new();
+        // The first picture just appears: there is nothing to fade from.
+        assert!(!present(&mut shown, size, "a", Some(1u32), start, false));
+        assert!(fading_at(&mut shown[0], start, 1.0).is_none());
+        // The same picture again changes nothing.
+        assert!(!present(&mut shown, size, "a", Some(1), start, false));
+        // A new picture still decoding keeps the old one on screen.
+        assert!(!present(&mut shown, size, "b", None, start, false));
+        assert_eq!(shown[0].buffer, 1);
+        // Once decoded it swaps in, the old one fading over it.
+        assert!(present(&mut shown, size, "b", Some(2), start, false));
+        assert_eq!(shown[0].buffer, 2);
+        assert_eq!(fading_at(&mut shown[0], start, 1.0), Some((1, 1.0)));
+        let (_, half) = fading_at(&mut shown[0], start + Duration::from_millis(500), 1.0).unwrap();
+        assert_eq!(half, 0.25);
+        // GNOME's slow-down factor stretches it: factor 2, half way at 1 s.
+        let (_, slow) = fading_at(&mut shown[0], start + Duration::from_millis(1000), 2.0).unwrap();
+        assert_eq!(slow, 0.25);
+        // Over after 1000 ms: the old texture is released.
+        assert!(fading_at(&mut shown[0], start + Duration::from_millis(1000), 1.0).is_none());
+        assert!(shown[0].fading.is_none());
+        // With animations off the swap is instant.
+        assert!(present(&mut shown, size, "c", Some(3), start, true));
+        assert!(fading_at(&mut shown[0], start, 1.0).is_none());
+        // Other output sizes are independent slots.
+        assert!(!present(
+            &mut shown,
+            Size::from((800, 600)),
+            "c",
+            Some(3),
+            start,
+            false
+        ));
+        assert_eq!(shown.len(), 2);
     }
 }
