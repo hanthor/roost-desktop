@@ -50,6 +50,7 @@ mod tray;
 mod wifi;
 mod window_menu;
 mod wired;
+mod ws_dots;
 mod ws_popup;
 
 use std::cell::RefCell;
@@ -125,7 +126,7 @@ fn attach_control() -> Option<ControlClient> {
 
 struct Shell {
     control: Option<ControlClient>,
-    pills: gtk::Box,
+    pills: Rc<ws_dots::Indicator>,
     pill_state: Vec<bool>,
 }
 
@@ -274,19 +275,7 @@ fn render_pills(shell: &mut Shell) {
     if wanted == shell.pill_state {
         return;
     }
-    while let Some(child) = shell.pills.first_child() {
-        shell.pills.remove(&child);
-    }
-    for active in &wanted {
-        let pill = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        pill.add_css_class("ws-pill");
-        if *active {
-            pill.add_css_class("active");
-            pill.set_size_request(logic::active_pill_width(wanted.len()), -1);
-        }
-        pill.set_valign(gtk::Align::Center);
-        shell.pills.append(&pill);
-    }
+    shell.pills.show(&wanted);
     shell.pill_state = wanted;
 }
 
@@ -1177,7 +1166,7 @@ fn build(app: &adw::Application) {
     pills.add_css_class("ws-pills");
     let shell = Rc::new(RefCell::new(Shell {
         control: attach_control(),
-        pills: pills.clone(),
+        pills: ws_dots::Indicator::new(pills.clone()),
         pill_state: Vec::new(),
     }));
     render_pills(&mut shell.borrow_mut());

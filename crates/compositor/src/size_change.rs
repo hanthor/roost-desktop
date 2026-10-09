@@ -713,8 +713,11 @@ pub fn step_frame(
     let shown: HashMap<u64, Live> = manager
         .render_entries()
         .into_iter()
-        .filter_map(|(id, window, target)| {
+        .filter_map(|(id, window, mut target)| {
             let committed = committed_size(window.wl_surface()?.as_ref())?;
+            // Transitions run in workspace coordinates; a switch's slide
+            // offset is added only when drawing.
+            target.loc.x -= manager.slide_dx(id);
             Some((id, Live { target, committed }))
         })
         .collect();

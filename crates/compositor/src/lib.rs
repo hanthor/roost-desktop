@@ -64,6 +64,7 @@ pub mod monitors;
 pub mod mutter;
 #[cfg(feature = "drm")]
 mod native_repaint;
+mod occlusion;
 pub mod orca;
 pub mod overlay;
 pub mod overview;
@@ -89,6 +90,7 @@ pub mod unlock;
 pub mod wallpaper;
 pub mod window_icons;
 pub mod windows;
+pub mod workspace_slide;
 #[cfg(feature = "xwayland")]
 mod x11_icons;
 #[cfg(feature = "xwayland")]

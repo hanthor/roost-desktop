@@ -104,18 +104,49 @@ impl FrameSignature {
     }
 }
 
+/// More separate rectangles than this cost more in per-rect setup than
+/// they save in fill; past it the damage collapses to its bounds.
+pub(crate) const MAX_DAMAGE_RECTS: usize = 16;
+
+/// The buffer-age damage as a set of rectangles (#503): a clock tick in
+/// the bar and a progress bar in a window repaint two small areas, not
+/// the bounding box spanning the output.
 pub(crate) fn damage_region(
     tracker: &mut OutputDamageTracker,
     age: usize,
     signature: &FrameSignature,
-) -> Result<Rectangle<i32, Physical>, OutputNoMode> {
+) -> Result<Vec<Rectangle<i32, Physical>>, OutputNoMode> {
     let elements: Vec<_> = signature.groups.iter().flatten().collect();
     let (damage, _) = tracker.damage_output(age, &elements)?;
     // A timing-only request still needs an actual page flip. A minimal repaint
     // submits that real frame rather than manufacturing presentation feedback.
-    Ok(damage
-        .and_then(|rects| rects.iter().copied().reduce(Rectangle::merge))
-        .unwrap_or_else(|| Rectangle::new((0, 0).into(), (1, 1).into())))
+    let rects = coalesce(damage.map(|rects| rects.to_vec()).unwrap_or_default());
+    Ok(if rects.is_empty() {
+        vec![Rectangle::new((0, 0).into(), (1, 1).into())]
+    } else {
+        rects
+    })
+}
+
+/// Drop empty rectangles and merge overlapping ones, so every pixel is
+/// painted once; too many left collapse to their bounding box.
+pub(crate) fn coalesce(rects: Vec<Rectangle<i32, Physical>>) -> Vec<Rectangle<i32, Physical>> {
+    let mut out: Vec<Rectangle<i32, Physical>> = Vec::with_capacity(rects.len());
+    for mut rect in rects.into_iter().filter(|r| !r.is_empty()) {
+        // Merging can make a rectangle overlap ones already kept.
+        while let Some(at) = out.iter().position(|o| o.overlaps(rect)) {
+            rect = rect.merge(out.swap_remove(at));
+        }
+        out.push(rect);
+    }
+    if out.len() > MAX_DAMAGE_RECTS {
+        out = out
+            .into_iter()
+            .reduce(Rectangle::merge)
+            .into_iter()
+            .collect();
+    }
+    out
 }
 
 /// The plane damage (KMS `FB_DAMAGE_CLIPS`) submitted with a repainted
@@ -125,8 +156,10 @@ pub(crate) fn damage_region(
 /// scanout) and everything stale in this buffer (drivers uploading each
 /// buffer separately, such as virtio-gpu). Without it the kernel treats
 /// the whole plane as damaged and copies or uploads every pixel.
-pub(crate) fn scanout_damage(repainted: Rectangle<i32, Physical>) -> Vec<Rectangle<i32, Physical>> {
-    vec![repainted]
+pub(crate) fn scanout_damage(
+    repainted: &[Rectangle<i32, Physical>],
+) -> Vec<Rectangle<i32, Physical>> {
+    repainted.to_vec()
 }
 
 /// Timing requests need an actual submitted frame even without pixel damage.
@@ -279,20 +312,24 @@ mod tests {
         next
     }
 
+    fn contains(rects: &[Rectangle<i32, Physical>], x: i32, y: i32) -> bool {
+        rects.iter().any(|r| r.contains((x, y)))
+    }
+
     #[test]
     fn recycled_buffer_repaints_damage_from_intervening_frames() {
         let id = Id::new();
         let mut tracker = OutputDamageTracker::new((32, 32), 1.0, Transform::Normal);
-        let full = Rectangle::from_size((32, 32).into());
+        let full = vec![Rectangle::from_size((32, 32).into())];
         assert_eq!(
             damage_region(&mut tracker, 0, &moving_scene(&id, 0, 0)).unwrap(),
             full
         );
         damage_region(&mut tracker, 1, &moving_scene(&id, 8, 1)).unwrap();
         let damage = damage_region(&mut tracker, 2, &moving_scene(&id, 16, 2)).unwrap();
-        assert!(damage.contains((1, 1)));
-        assert!(damage.contains((23, 7)));
-        assert!(damage.size.w < 32 && damage.size.h < 32);
+        assert!(contains(&damage, 1, 1));
+        assert!(contains(&damage, 23, 7));
+        assert!(damage.iter().all(|r| r.size.w < 32 && r.size.h < 32));
         assert_eq!(
             damage_region(&mut tracker, 100, &moving_scene(&id, 16, 2)).unwrap(),
             full
@@ -307,12 +344,14 @@ mod tests {
         damage_region(&mut tracker, 0, &next).unwrap();
         assert_eq!(
             damage_region(&mut tracker, 1, &next).unwrap(),
-            Rectangle::new((0, 0).into(), (1, 1).into())
+            vec![Rectangle::new((0, 0).into(), (1, 1).into())]
         );
         next.groups.iter_mut().for_each(Vec::clear);
-        assert!(damage_region(&mut tracker, 1, &next)
-            .unwrap()
-            .contains((7, 7)));
+        assert!(contains(
+            &damage_region(&mut tracker, 1, &next).unwrap(),
+            7,
+            7
+        ));
     }
 
     #[test]
@@ -321,16 +360,78 @@ mod tests {
         let mut tracker = OutputDamageTracker::new((32, 32), 1.0, Transform::Normal);
         let full = damage_region(&mut tracker, 0, &moving_scene(&id, 0, 0)).unwrap();
         assert_eq!(
-            scanout_damage(full),
+            scanout_damage(&full),
             vec![Rectangle::from_size((32, 32).into())]
         );
         damage_region(&mut tracker, 1, &moving_scene(&id, 8, 1)).unwrap();
         // Two frames back: covers both moves, not the whole plane.
         let aged = damage_region(&mut tracker, 2, &moving_scene(&id, 16, 2)).unwrap();
-        let clips = scanout_damage(aged);
-        assert_eq!(clips, vec![aged]);
-        assert!(clips[0].contains((1, 1)) && clips[0].contains((23, 7)));
-        assert!(clips[0].size.w < 32);
+        let clips = scanout_damage(&aged);
+        assert_eq!(clips, aged);
+        assert!(contains(&clips, 1, 1) && contains(&clips, 23, 7));
+        assert!(clips.iter().all(|r| r.size.w < 32));
+    }
+
+    /// Two small elements far apart: a clock in the bar and a progress
+    /// bar near the bottom.
+    fn scattered_scene(clock: &Id, bar: &Id, commit: usize) -> FrameSignature {
+        let mut next = scene();
+        next.size = (1280, 800);
+        let element = |id: &Id, geo| {
+            ElementSignature::capture(
+                &SolidColorRenderElement::new(
+                    id.clone(),
+                    geo,
+                    commit,
+                    Color32F::new(1.0, 0.0, 0.0, 1.0),
+                    Kind::Unspecified,
+                ),
+                1.0,
+            )
+        };
+        next.groups = vec![vec![
+            element(clock, Rectangle::new((600, 0).into(), (80, 32).into())),
+            element(bar, Rectangle::new((200, 700).into(), (300, 8).into())),
+        ]];
+        next
+    }
+
+    #[test]
+    fn scattered_damage_stays_a_set_of_small_rects() {
+        let (clock, bar) = (Id::new(), Id::new());
+        let mut tracker = OutputDamageTracker::new((1280, 800), 1.0, Transform::Normal);
+        damage_region(&mut tracker, 0, &scattered_scene(&clock, &bar, 0)).unwrap();
+        let damage = damage_region(&mut tracker, 1, &scattered_scene(&clock, &bar, 1)).unwrap();
+        assert_eq!(damage.len(), 2, "{damage:?}");
+        let area: i32 = damage.iter().map(|r| r.size.w * r.size.h).sum();
+        assert_eq!(
+            area,
+            80 * 32 + 300 * 8,
+            "not the bounding box spanning the output"
+        );
+    }
+
+    #[test]
+    fn coalesce_merges_overlaps_and_caps_the_rect_count() {
+        let r = |x, y, w, h| Rectangle::<i32, Physical>::new((x, y).into(), (w, h).into());
+        // Overlapping rects merge (each pixel painted once); a merge that
+        // creates a new overlap merges again; empties drop.
+        let merged = coalesce(vec![
+            r(0, 0, 10, 10),
+            r(20, 0, 10, 10),
+            r(5, 0, 20, 5),
+            r(50, 50, 0, 4),
+        ]);
+        assert_eq!(merged, vec![r(0, 0, 30, 10)]);
+        let disjoint = coalesce(vec![r(0, 0, 4, 4), r(100, 100, 4, 4)]);
+        assert_eq!(disjoint.len(), 2);
+        let many: Vec<_> = (0..=MAX_DAMAGE_RECTS as i32)
+            .map(|i| r(i * 10, 0, 4, 4))
+            .collect();
+        assert_eq!(
+            coalesce(many),
+            vec![r(0, 0, MAX_DAMAGE_RECTS as i32 * 10 + 4, 4)]
+        );
     }
 
     #[test]
