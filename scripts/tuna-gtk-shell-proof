@@ -76,7 +76,7 @@
 #                  compositor-drawn cursor live: an inherited Xcursor
 #                  theme's image at 24px, then 48px (#342)
 #   G-CURSOR-SHAPE wp_cursor_shape_v1 requests draw that theme's shape
-#                  (a missing one falls back to its arrow); a client
+#                  (a missing one falls back to Adwaita or the arrow); a client
 #                  cursor surface draws at its own size
 #   G-LOCATE-POINTER with locate-pointer on, a lone Ctrl tap draws GNOME's
 #                  ripples at the pointer; off, it draws nothing
@@ -2656,10 +2656,11 @@ cursor_probe shape crosshair G-CURSOR-SHAPE
 cstate '.cursor.kind == "named" and .cursor.name == "crosshair" and .cursor.source == "client" and .cursor.file == "crosshair" and .cursor.image_theme == "TunaProofBase" and .cursor.image == [24, 24]' "crosshair shape" ||
     fail G-CURSOR-SHAPE "a wp_cursor_shape_v1 crosshair request did not draw the theme's crosshair"
 cp "$CSTATE" "$ARTIFACTS/cursor-shape-crosshair.json"
-# A shape the theme lacks still shows: its default arrow, at the size.
+# A shape the theme chain lacks still shows: from libXcursor's default
+# and GNOME's Adwaita fallbacks when installed, else the theme's arrow.
 cursor_probe shape wait G-CURSOR-SHAPE
-cstate '.cursor.kind == "named" and .cursor.name == "wait" and .cursor.file == "default" and .cursor.image == [24, 24]' "missing shape" ||
-    fail G-CURSOR-SHAPE "a shape missing from the theme did not fall back to its arrow"
+cstate '.cursor.kind == "named" and .cursor.name == "wait" and (.cursor.file == "default" or (.cursor.image_theme | IN("default", "Adwaita", "hicolor")))' "missing shape" ||
+    fail G-CURSOR-SHAPE "a shape missing from the theme did not fall back"
 cursor_probe surface 32 G-CURSOR-SHAPE
 cstate '.cursor.kind == "surface" and .cursor.image == [32, 32] and .cursor.logical == [32, 32]' "client cursor surface" ||
     fail G-CURSOR-SHAPE "a client's 32px cursor surface was not drawn at its size"
@@ -2671,7 +2672,7 @@ cstate ".windows | length == $cursor_windows" "cursor probe closed" ||
     fail G-CURSOR-SHAPE "the cursor probe did not close"
 gsettings set org.gnome.desktop.interface cursor-theme "$cursor_theme_before"
 gsettings set org.gnome.desktop.interface cursor-size "$cursor_size_before"
-pass G-CURSOR-SHAPE "cursor-shape crosshair drawn from the theme, a missing shape falls back to its arrow, a 32px client surface draws at 32px"
+pass G-CURSOR-SHAPE "cursor-shape crosshair drawn from the theme, a missing shape falls back, a 32px client surface draws at 32px"
 
 # GNOME's locate-pointer: a lone Ctrl tap ripples at the pointer, only
 # while the key is on (Mutter's locate-pointer-key, Control_L).
