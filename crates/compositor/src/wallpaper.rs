@@ -490,6 +490,11 @@ impl Wallpaper {
     ) -> Vec<MemoryRenderBufferRenderElement<GlesRenderer>> {
         let output = Size::<i32, Logical>::from((w, h));
         let Some(uri) = self.refresh(output, geometry) else {
+            if self.refresh_stage == Some("source-identity-pending") {
+                // A new source is still being looked at: keep showing the
+                // old picture, which the new one will fade in over.
+                return self.hold(renderer, output);
+            }
             // No picture to show at all: nothing to fade from later.
             self.shown.retain(|shown| shown.size != output);
             return Vec::new();
@@ -551,6 +556,31 @@ impl Wallpaper {
             .ok(),
         );
         elements
+    }
+
+    /// The picture `output` already shows, unchanged.
+    fn hold(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        output: Size<i32, Logical>,
+    ) -> Vec<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        self.shown
+            .iter()
+            .find(|s| s.size == output)
+            .and_then(|shown| {
+                MemoryRenderBufferRenderElement::from_buffer(
+                    renderer,
+                    Point::<f64, Physical>::from((0.0, 0.0)),
+                    &shown.buffer,
+                    None,
+                    None,
+                    Some(output),
+                    Kind::Unspecified,
+                )
+                .ok()
+            })
+            .into_iter()
+            .collect()
     }
 
     /// GNOME's lock-screen background over a `w` x `h` output: the
