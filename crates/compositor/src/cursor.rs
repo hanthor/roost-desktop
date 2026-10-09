@@ -638,13 +638,13 @@ impl Cursor {
             (),
             |_, _, _| TraversalAction::DoChildren(()),
             |_, states, _| {
-                let callbacks: Vec<_> = states
-                    .cached_state
-                    .get::<SurfaceAttributes>()
-                    .current()
-                    .frame_callbacks
-                    .drain(..)
-                    .collect();
+                let callbacks = std::mem::take(
+                    &mut states
+                        .cached_state
+                        .get::<SurfaceAttributes>()
+                        .current()
+                        .frame_callbacks,
+                );
                 for callback in callbacks {
                     callback.done(ms);
                 }
