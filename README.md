@@ -6,6 +6,23 @@ A new, independent Wayland desktop session with a GNOME-inspired everyday workfl
 
 The compositor is a long-lived Rust process built with Smithay. The shell UI runs as a supervised Wayland client. The first delivery target is a nested developer preview that can map ordinary applications and recover its shell UI after a shell crash.
 
+## Quickstart
+
+- **Install:** [docs/install.md](docs/install.md) covers the Debian-format
+  package, building from source and greetd wiring. The experimental TunaOS
+  Marlin image is in [packaging/README.md](packaging/README.md).
+- **Try it in a window** inside your current GNOME, Wayland or X11 session,
+  from a checkout with the [build prerequisites](docs/development.md#prerequisites):
+
+  ```sh
+  git clone https://github.com/tuna-os/tuna-desktop.git
+  cd tuna-desktop
+  ./scripts/roost-nested run
+  ```
+
+  See [the nested session guide](docs/nested-session.md) for options and
+  troubleshooting.
+
 See the [walkthrough](docs/walkthrough.md) for every feature as it looks
 today, in frames the GTK shell proof takes on each change.
 
@@ -57,10 +74,9 @@ requirement traceability.
   development files, plus EGL (Mesa llvmpipe is enough) to run a nested
   session. The [development guide](docs/development.md#prerequisites)
   has the exact Ubuntu and Arch package lists CI uses.
-- **Spektacular CLI**, only for spec and plan work, not for building or
-  running Tuna Desktop:
-  `go install github.com/hivecommons/spektacular@latest`, then
-  `spektacular version check` (see [Continue with Spektacular](#continue-with-spektacular)).
+- **Spektacular CLI** is needed only for spec and plan work, not for
+  building or running Tuna Desktop; see the
+  [development guide](docs/development.md#spektacular-cli-planning-work-only).
 
 ## Contributing and Development
 
@@ -69,33 +85,18 @@ requirement traceability.
 - Understanding the project structure
 - Running a nested Tuna Desktop session locally ([troubleshooting](docs/nested-session.md#troubleshooting))
 - [Running tests locally](docs/testing.md), the same checks CI runs
-- Spektacular workflows for planning and tracking
+- [Spektacular workflows](docs/development.md#understanding-spektacular-workflows) for planning and tracking
 
-## Planning
+## Documentation
 
 - [Program architecture](docs/architecture.md)
 - [Program roadmap and requirement traceability](docs/roadmap.md)
 - [Parent requirement register](docs/requirements.md)
 - [Verification and test strategy](docs/test-strategy.md)
+- [Parity ledger](docs/parity-ledger.md)
 - [Research intake rules](docs/research/README.md)
-- [First spek: nested compositor and shell recovery](.spektacular/specs/20260927170317-a01f0011-001-nested-compositor-shell-recovery.md)
 - [Architecture decisions](docs/adr/README.md)
 - [Contributing](CONTRIBUTING.md)
-
-Spektacular is initialized for Codex. Specs and plans are managed through its CLI; each program unit has a spek plus draft plan, context, and research artifacts. Draft plans must be reviewed against current implementation and open decision gates before their implementation workflow starts.
-
-## Continue with Spektacular
-
-Install the CLI if needed (`go install github.com/hivecommons/spektacular@latest`), then ensure `$(go env GOPATH)/bin` is on `PATH`.
-
-Use the spek's full timestamp-prefixed name from `spektacular spec file list`:
-
-```sh
-spektacular version check
-spektacular plan new --data '{"name":"20260927170317-a01f0011-001-nested-compositor-shell-recovery"}'
-```
-
-The plan workflow should refresh its draft from the current source and the linked spek. Complete its walkthrough and review before starting implementation. The implementation workflow starts with the corresponding full plan name after approval. See [Spektacular](https://github.com/hivecommons/spektacular) for the current workflow and CLI details.
 
 ## License
 

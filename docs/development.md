@@ -165,6 +165,27 @@ spektacular plan new --data '{"name":"<full spec name>"}'
 
 Run `spektacular <command> --help` for the rest. For more details, see the [Spektacular repository](https://github.com/hivecommons/spektacular) and [CONTRIBUTING.md](../CONTRIBUTING.md).
 
+Spektacular is initialized for Codex. Each program unit has a spek plus a
+draft plan, context and research artifacts. Review a draft plan against the
+current implementation and open decision gates before its implementation
+workflow starts.
+
+### Continuing from the first spek
+
+The first spek is
+[nested compositor and shell recovery](../.spektacular/specs/20260927170317-a01f0011-001-nested-compositor-shell-recovery.md).
+Use a spek's full timestamp-prefixed name from `spektacular spec file list`:
+
+```sh
+spektacular version check
+spektacular plan new --data '{"name":"20260927170317-a01f0011-001-nested-compositor-shell-recovery"}'
+```
+
+The plan workflow refreshes its draft from the current source and the
+linked spek. Complete its walkthrough and review before starting
+implementation; the implementation workflow then starts with the full plan
+name.
+
 ## Architecture and Design
 
 For deeper understanding of Tuna Desktop's design:

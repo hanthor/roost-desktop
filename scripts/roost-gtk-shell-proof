@@ -3264,6 +3264,8 @@ before_id="$(jq -r '.focused' "$CSTATE")"
 xdotool key super+r
 cstate ".focused_rect[2] != $before_w" "preset" || fail G-SCROLL "Super+R did not change the column width"
 strip_whole "widened column whole" || fail G-SCROLL "the widened column is not whole on screen"
+# The walkthrough's column-widths frame: the widened column, before focus moves.
+scrot "$ARTIFACTS/24k-scroll-preset.png" >/dev/null
 xdotool key super+Left
 cstate ".focused != $before_id" "focus moved" || fail G-SCROLL "Super+Left did not move focus along the strip"
 strip_whole "newly focused column whole" || fail G-SCROLL "the view did not follow focus"
